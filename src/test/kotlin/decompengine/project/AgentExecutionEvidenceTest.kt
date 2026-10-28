@@ -362,7 +362,7 @@ class AgentExecutionEvidenceTest {
         )
         assertEquals(4, evidence.getValue("events").jsonObject.getValue("records").jsonArray.size)
         val turn = evidence.getValue("request").jsonObject
-        assertEquals(digest("exact wire prompt bytes"), turn.getValue("wirePromptSha256").jsonPrimitive.content)
+        assertEquals(harness.wirePromptSha256, turn.getValue("wirePromptSha256").jsonPrimitive.content)
         assertEquals(harness.requestBinding.requestSha256, turn.getValue("requestSha256").jsonPrimitive.content)
         assertEquals(
             harness.requestBinding.accessPolicySha256,
@@ -869,6 +869,8 @@ class AgentExecutionEvidenceTest {
         private var evidence: AcpExecutionEvidenceSnapshot? = null
         lateinit var requestBinding: AgentExecutionRequestBinding
             private set
+        lateinit var wirePromptSha256: String
+            private set
         val factoryProvenance = AcpHarnessProvenance(
             harness = "acp",
             implementationId = IMPLEMENTATION_ID,
@@ -920,6 +922,7 @@ class AgentExecutionEvidenceTest {
                 ),
             )
             changes.singleOrNull()?.let { change -> onEvent(AgentFileChangeEvent(3, change)) }
+            wirePromptSha256 = digest(decompengine.agent.renderAgentPrompt(request.objective, request.contextInputs))
             evidence = snapshot(target)
             beforeReturn(request)
             return AgentExecutionResult(
@@ -941,6 +944,7 @@ class AgentExecutionEvidenceTest {
                     decompengine.agent.AgentOperation.WRITE_FILE in rule.operations
                 }.path
                 onEvent(AgentMessageEvent(0, "failed-message", AgentMessageRole.ASSISTANT, message))
+                wirePromptSha256 = digest(decompengine.agent.renderAgentPrompt(request.objective, request.contextInputs))
                 evidence = snapshot(target)
                 beforeReturn(request)
                 return AgentExecutionReceipt(
@@ -997,7 +1001,7 @@ class AgentExecutionEvidenceTest {
                         sessionAdditionalDirectories = false,
                     ),
                 ),
-                wirePromptSha256 = digest("exact wire prompt bytes"),
+                wirePromptSha256 = wirePromptSha256,
                 diagnostics = AcpProcessDiagnostics(
                     pid = 123,
                     exitCode = 0,

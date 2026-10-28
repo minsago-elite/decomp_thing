@@ -760,6 +760,21 @@ class WebJobService(
         return content
     }
 
+    /** Bounded literal search over the persisted candidate's canonical inputs; no index or body is retained. */
+    internal fun searchRevisionSources(jobId: String, runId: String, revisionId: String,
+        scan: (WebRevisionSourceSnapshot, (WebRevisionSourceFile) -> ByteArray?) -> kotlinx.serialization.json.JsonObject,
+    ): kotlinx.serialization.json.JsonObject {
+        val reference = revisionSourceReference(jobId, runId, revisionId)
+        val result = try { sourceCatalogEvidence.search(reference, ::readSourceInput, scan) }
+            catch (changed: WebAccessDenied) { throw changed }
+            catch (failure: Exception) {
+                if (failure is java.util.concurrent.CancellationException || failure is InterruptedException) throw failure
+                throw WebAccessDenied(503, "SOURCE_SEARCH_UNAVAILABLE", "The revision sources could not be searched within their limits.")
+            }
+        if (revisionSourceReference(jobId, runId, revisionId) != reference) revisionSourceChanged()
+        return result
+    }
+
     @Synchronized
     private fun readSourceInput(jobId: String, runId: String, path: String, maximumBytes: Long): decompengine.repair.StableRegularFile {
         requireInitializedRead()
@@ -848,18 +863,6 @@ class WebJobService(
             if (failure !is Exception) throw failure
             throw unavailable
         }
-    }
-
-    @Synchronized
-    fun resolveArtifact(jobId: String, relativePath: String): Path {
-        requireInitializedRead()
-        val segments = canonicalReportSegments(relativePath)
-        if (segments[1] == "runs") {
-            getAttempt(jobId, segments[2])
-            return store.resolveRunArtifact(jobId, segments[2], segments.drop(3).joinToString("/"))
-        }
-        presentation(jobId) // Validate the record before resolving an explicitly legacy artifact.
-        return store.resolveArtifact(jobId, relativePath)
     }
 
     /** Validate the report namespace and attempt ownership before a bounded retained-descriptor read. */

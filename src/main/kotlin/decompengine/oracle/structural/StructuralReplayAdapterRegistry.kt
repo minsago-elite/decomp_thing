@@ -43,14 +43,19 @@ internal class StructuralReplayAdapterRegistry private constructor(
         val programModelBytes: Long = replay.export.programModelBytes
         private val binding = replay.export.binding.canonicalBytes
         private val score = captureReport(replay)
+        private val assessment = StructuralSelectedFunctionAssessmentV1.derive(
+            replay.export.canonicalProgramModelBytes, score, checkpoint = { replay.requireCurrent() },
+        )
         val fullExportBindingBytes: ByteArray get() = binding.copyOf()
         val reportBytes: ByteArray get() = score.copyOf()
+        val assessmentBytes: ByteArray get() = assessment.copyOf()
 
         companion object {
             fun capture(replay: GccBundledStructuralReplayOperation): SelectedBoundaryAdmission =
                 SelectedBoundaryAdmission(replay)
 
             private fun captureReport(replay: GccBundledStructuralReplayOperation): ByteArray {
+                replay.requireCurrent()
                 val profile = replay.profile
                 val export = replay.export
                 val request = replay.request

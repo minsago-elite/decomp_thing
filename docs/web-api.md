@@ -169,7 +169,7 @@ internal storage optimization and must not merge identity, permissions or histor
 | `GET`, `HEAD R/revisions/{revisionId}/source-files/{fileId}/content` | `200 application/octet-stream` | Complete authorized input download, at most 8 MiB; #491, #545 |
 | `GET J/revisions`, `GET V` | `200 revisions`, `200 revision` | Immutable source/acceptance bindings; #165/#199 |
 | `GET V/sources`, `GET V/sources/{fileId}` | `200 files`, `200 file` | Bounded tree/page/read; #165/#188/#189 |
-| `GET V/search` | `200 matches` | Explicit revision and query/byte/result/deadline bounds; #190 |
+| `GET`, `HEAD R/revisions/{revisionId}/source-search` | `200 sourceSearch` | Explicit revision and query/byte/result/deadline bounds over canonical inputs; replaces the reserved `V/search`; #547, #548 |
 | `GET J/artifacts`, `GET J/artifacts/{artifactId}` | `200 artifacts`, `200 artifact` | Optional run/revision filters validated together; #165/#192 |
 | `GET`/`HEAD J/artifacts/{artifactId}/content` | `200` or `206` bytes | Immutable digest binding, contained stream; #164/#192 |
 | `POST V/archive-verifications` | `202 operation` | Explicit bounded integrity verification, no binary execution; #193 |
@@ -739,7 +739,7 @@ manifest bytes. File hashes and the `declaredUtf8Text`/`declaredViewable` flags 
 manifest declarations; this read does not verify source bodies, text encoding or
 acceptance. It creates no immutable project revision or release relationship.
 The planned revision-scoped source routes above remain separate work. Bootstrap's
-source chunk limit remains zero until a source text producer is implemented.
+source chunk limit reports the revision chunk reader's enforced 131,072-byte range ceiling.
 
 In-memory controls exercise the 25,000-record capture/page workload, scoped cursor
 refusal, byte-limited continuation and changed capture refusal. They do not qualify
@@ -788,7 +788,7 @@ malformed, unsupported or oversized metadata has a fixed unavailable response.
 This endpoint lists only the canonical build input set. The observed catalog above
 continues to describe other manifest entries. Reads outside that committed input set,
 UI/HTTP/performance qualification and accepted publication remain open;
-bootstrap source chunk advertising stays zero. In-memory controls cover canonical
+bootstrap advertises the chunk reader's range ceiling. In-memory controls cover canonical
 identity, conflicts, exact large sizes/Unicode, 25,000 commitments, paging and capture
 admission. They do not establish the D0 physical source workload or delivery budgets.
 
@@ -874,7 +874,8 @@ Each chunk currently verifies a complete bounded file before returning its range
 No timing, RSS, physical deep-path or actual HTTP/browser qualification is inferred
 from captured-byte controls. General viewer qualification, all-manifest/log/report
 families, local highlighting and full D0 physical budgets remain open. Bootstrap
-source chunk advertising remains zero pending those gates.
+source chunk advertising reports the enforced 131,072-byte range ceiling; it does not
+qualify those gates.
 
 ### Explicit source download digest observation
 
@@ -899,8 +900,8 @@ and preserves it for the existing generation-bound session invalidation observer
 Other statuses or missing, combined and unknown error codes grant no session signal.
 Navigation, metadata refresh and session removal discard the observation and
 cancel its read. Metadata reads still report `contentVerification: not-performed`;
-they do not start this check. The actual source-chunk bootstrap permission stays
-zero. A matching file digest is separate from compilation, behavioral validation,
+they do not start this check. Bootstrap source-chunk advertising reports the
+reader's range ceiling. A matching file digest is separate from compilation, behavioral validation,
 archive verification and accepted reconstruction. The general snapshot artifact
 catalog and its full family/verification requirements remain outstanding.
 
@@ -908,6 +909,82 @@ The new controls use only captured byte arrays, synthetic identities, DTOs and
 injected string lookups. Actual source HTTP/browser qualification and physical
 D0 time/memory/workload evidence remain unproved; no new actual context trial is
 introduced by those controls.
+
+### Bounded revision source search
+
+`GET`/`HEAD jobs/J/runs/R/revisions/V/source-search` searches the canonical input set of
+the same persisted candidate used by the revision source routes, through the same private
+read policy and descriptor-pinned source reader. It never reads a path outside that input
+set, another job or run, or a host location: candidates come only from the captured
+manifest/build-contract snapshot, and display labels never select files.
+
+The closed query grammar accepts `q` (required; 1–128 code points, nonblank, one line,
+no C0/C1 controls), `match=text|symbol` (default `text`), `case=sensitive|insensitive`
+(default `sensitive`), `directory` (an opaque directory ID from the directory listing,
+default `root`), `path` (an optional literal substring of the recorded relative path, at
+most 256 code points), `limit` (1–100 results, default 50) and `cursor`. Unknown,
+repeated, malformed percent escapes or invalid UTF-8 values return `422`; an unknown
+directory returns `SOURCE_DIRECTORY_NOT_FOUND`. `text` finds non-overlapping literal
+occurrences within one line. `symbol` requires one C identifier and reports only
+occurrences bounded by non-identifier ASCII characters. Insensitive comparison folds each
+code point independently (`toLowerCase(toUpperCase(c))`), so matched text keeps the
+query's code point count; the path filter uses the same case rule. Matches never span
+an LF; a CR before LF is excluded from context.
+
+Only inputs declared `VIEWABLE` and `UTF8_TEXT` within the 8 MiB reader ceiling are
+read. `scope` partitions the files in the selected directory/path scope into searchable,
+not-viewable, declared-binary and too-large counts. Each read body must match its
+committed size and SHA-256; a mismatch refuses the page with `409
+SOURCE_REVISION_CHANGED`. Bodies that fail the preview reader's UTF-8/256 KiB line rule
+count as `progress.unsearchableText`; unreadable bodies count as
+`progress.unavailableFiles`. Both counts describe the current page only;
+`coverageGaps` carries the same two counts cumulatively from the first page through
+signed continuations, so a final continued page cannot report complete coverage after an
+earlier page skipped a file.
+
+Each page reads at most 32 MiB of bodies (failed reads are charged their committed size; at least one file is always read), stops after
+2,000 ms of elapsed work (checked between files, before every 256 lines or 64 KiB of
+lines, and within matching after at most 256 candidate starts, each comparing at most
+128 code points) and returns at most `limit` matches below a 900,000-byte item ceiling.
+Matcher checks also observe thread interruption without clearing the interrupt flag.
+A deadline continuation resumes at the first untested UTF-8 candidate boundary within
+the line, rather than replaying its already searched prefix. `status: "partial"` with `stopReason` `result-limit`, `byte-limit` or
+`deadline` always has a signed `nextCursor`; `status: "complete"` has neither and
+`remainingFiles` is zero. `remainingFiles` counts searchable files not completely
+checked, including a file the page stopped inside. No total match count is computed.
+The cursor binds the session, job, run, revision, exact normalized query and limit,
+captured metadata version, file position, byte offset and cumulative coverage gaps.
+Encoded document queries are limited to 4,096 characters; the SPA refuses a search whose
+encoded text and path filter exceed 3,200 characters, leaving room for any cursor, the limit
+and the API path within the 4,096-character URL ceilings. Another session or query
+returns `400 INVALID_CURSOR`; a changed metadata observation returns `410 CURSOR_EXPIRED`.
+Every page performs a full revision source capture before and after its scan and
+compares their metadata versions, then rechecks the persisted candidate.
+
+Results include the opaque file ID, recorded label and SHA-256, 1-based LF line and
+code point column, exact byte offset of the match and of its line, and at most 80 code
+points of context on each side with explicit truncation flags. There is no persistent
+or cached index (`index: "none"`): offsets always come from bytes verified against the
+selected revision's commitments, so a replaced file cannot yield stale offsets. One
+search is admitted at a time (`429 SOURCE_SEARCH_BUSY`), separately from metadata
+capture admission. Client cancellation abandons the response; it does not guarantee
+interruption of the server thread. The server's elapsed deadline and byte budget bound
+the work it can continue after a disconnect; these are cooperative checkpoints, not a
+hard wall-clock timeout on capture or I/O.
+
+The SPA route `jobs/J/runs/R/revisions/V/source-search` keeps the query in its closed
+document URL. Directory pages link to a search scoped to that directory. A search runs
+only on explicit submission or continuation, and results link to
+`source-files/F?sourceSha256=…&metadataVersion=…&byte=<line offset>&line=<line>`, so the
+file view checks the same source and metadata commitments and opens that line. The
+status area distinguishes complete matches, complete searches without matches, coverage
+gaps from skipped or unreadable files, and incomplete pages (including incomplete pages
+without matches) with their stop reason and a continuation control. Navigation,
+refinement and session changes abort the current request and withhold late results.
+Pure Kotlin controls compare results to independent byte-offset truth over Unicode,
+CRLF and markup text, multi-megabyte files and paged continuations, and exercise the
+deadline, byte budget, cursor binding and digest refusal; they do not measure physical
+latency or memory on the D0 workload.
 
 ## SPA recorded source navigation
 
@@ -935,8 +1012,8 @@ binding, metadata version and opaque parent ID. It neither requires body permiss
 to explain an excluded entry nor requests the selected file's body. The UI labels
 these as commitments, explains unsupported preview/download declarations and the
 8 MiB reader limit, and offers an explicit authorized attachment link when applicable.
-Bootstrap source-chunk advertising stays zero; the UI does not enable text reads
-under that report. A capability from 1 to 3 bytes is also too small for the reader's
+Bootstrap advertises the chunk reader's enforced 131,072-byte range ceiling, so the
+explicit preview below is available; a zero report keeps text reads disabled. A capability from 1 to 3 bytes is also too small for the reader's
 minimum UTF-8 range and remains disabled.
 
 Source reads clear the previous selection before a different request can render,
@@ -1087,6 +1164,37 @@ Provider reasoning (`agent_thought_chunk`, role `thought`) is private. The journ
 its position, role, completion and `textOmitted: true`; it never buffers, stores, measures or
 commits to its text. Public projection also withholds `contentSha256`/`chunkCharacters` from
 older thought records. The ACP client never requests reasoning and no workflow depends on it.
+
+## Artifact identity normalization and snapshot containment
+
+Versioned routes accept only opaque, closed-syntax identities (`jobId`, `runId`, `artifactId`, `fileId`,
+`directoryId`) and never a host path. Legacy routes that still name report files by URL path decode the raw path
+exactly once, per segment, through `WebPublicIdentity`: RFC 3986 percent-decoding (`+` is a literal plus), strict
+UTF-8, and the result must already be the canonical spelling. Empty, `.`/`..`, encoded or literal `/` and `\`, `:`
+(drive and stream separators), NUL and other controls, Unicode format characters (including supplementary code points), non-NFC spellings, a `%` that
+survives decoding (double encoding), Windows device names (`CON`, `NUL`, `COM1`...), trailing dots or spaces,
+segments over 255 bytes and paths over 32 segments are refused with `400 INVALID_REQUEST`; an encoded separator that
+changes the segment count is refused too.
+
+Validation grants nothing by itself. Every report, input, source and archive read opens files through the
+descriptor-pinned `JobStore` containment boundary (`readStableRegularFile`/`hashStableRegularFile`), which opens each
+component without following links, reads only through the pinned descriptor and revalidates every binding after the
+read. It has exactly three outcomes: the bytes of an unchanged admitted file; unavailable (missing, symbolic link,
+special file or outside the namespace), served as a sanitized `404`; or changed during the read (concurrent
+publication, replacement or deletion), served as `409 ARTIFACT_CHANGED`. Every descriptor is closed before either
+refusal is returned. `JobStore.artifactReceipt` streams one file to a size/digest receipt scoped `observed-digest`
+(the digest of the bytes observed now, not a committed digest); `sourceArchiveReceipts` requires two complete bounded
+receipt passes with identical sizes, digests and identities, then revalidates the whole source-tree inventory. This
+also detects persistent in-place writes to files whose first receipt has already completed, not just inode replacement.
+Detected content, publication or deletion changes are conflicts, including growth beyond the per-file or aggregate
+allowance during the second receipt pass; initially oversized input retains its budget refusal. These are observed
+receipts, not an atomic filesystem snapshot or committed-revision proof. Archive verification consumes these streamed
+receipts, so the source tree is no longer read into memory twice. Later rereads of admitted archive inputs (manifest,
+build contract, executable, uploaded input and ZIP) also return `409 ARTIFACT_CHANGED` for unavailability, over-budget
+growth or identity/digest mismatch, rather than treating a detected change as an initial missing/invalid request.
+The v1 exploration report route preserves change conflicts as `409 ARTIFACT_CHANGED`;
+an ordinary missing report still returns the unavailable-report projection.
+The lexical path-returning `WebJobService.resolveArtifact` was removed.
 
 ## Agent preflight and harness readiness
 
@@ -1338,8 +1446,8 @@ the application URL. Directory pages, breadcrumbs, file links, refreshes and lin
 range navigation preserve this pair. Both first-page and continued directory/file
 responses must match it; changed observations clear the displayed source metadata.
 Incomplete, repeated, malformed and foreign query fields are refused before reads.
-A pin by itself does not request source text or enable the preview control. Actual
-bootstrap source-chunk advertising remains zero.
+A pin by itself does not request source text or enable the preview control. Bootstrap
+source-chunk advertising reports the reader's range ceiling.
 
 Metadata requests retain their existing API selectors and authorization. Explicit
 source downloads and digest HEAD observations carry the captured `metadataVersion`
