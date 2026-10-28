@@ -58,7 +58,8 @@ internal class WebEventStream(
                         write(": connected\n\n".toByteArray())
                     }
                     for (item in page.getValue("items").jsonArray) {
-                        val event = item.jsonObject
+                        // The same listener policy as the polling page, so live and replayed frames match.
+                        val event = WebRedactionPolicy.of(exchange).json(item.jsonObject).jsonObject
                         write(webSseFrame(event))
                         cursor = event.getValue("cursor").jsonPrimitive.content
                     }

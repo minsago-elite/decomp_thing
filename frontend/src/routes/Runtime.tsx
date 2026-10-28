@@ -7,8 +7,11 @@ import { SchedulerSummary } from '../jobs/SchedulerSummary';
 import { ProgressRetentionSummary } from '../jobs/ProgressRetentionSummary';
 import { MetadataReceipt } from '../shared/MetadataReceipt';
 import type { BuildIdentity } from '../app/buildIdentity';
+import { SupportExport } from '../jobs/SupportExport';
+import { usePrivateTransport } from '../session/PrivateTransport';
 
-export default function Runtime({ identity, session = null }: { identity: BuildIdentity; session?: BrowserSession | null }) {
+export default function Runtime({ identity, session = null, basePath = '/' }: { identity: BuildIdentity; session?: BrowserSession | null; basePath?: string }) {
+  const { client } = usePrivateTransport(basePath);
   const [state, setState] = useState(() => session?.snapshot());
   useLayoutEffect(() => {
     setState(session?.snapshot());
@@ -53,6 +56,7 @@ export default function Runtime({ identity, session = null }: { identity: BuildI
             {capability.reasonCode && <p>{displayMessage(copy.reason, { reason: <code>{capability.reasonCode}</code> })}</p>}
           </li>)}
         </ul>}
+        <SupportExport key={state?.status === 'authenticated' ? state.generation : 'disconnected'} client={client} />
       </section> : <div class="notice" aria-labelledby="runtime-availability-title">
         <h2 id="runtime-availability-title">{copy.runtimeInformationIsNotConnected}</h2>
         <p>{copy.connectALocalSessionToSeeReportedToolAvailabilityAnd}</p>

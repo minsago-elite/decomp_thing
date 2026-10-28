@@ -771,7 +771,12 @@ internal class ProgressRedactor(values: Collection<String>, additionalValues: Co
     }
 
     private companion object {
+        private const val CREDENTIAL_KEYS = "api[_-]?key|access[_-]?key|secret[_-]?key|access[_-]?token|refresh[_-]?token|" +
+            "auth[_-]?token|client[_-]?secret|password|passwd|passphrase|secret|token|authorization"
         val FORMATS = listOf(
+            // Mark full quoted spans alongside literals before rendering either replacement. This also
+            // protects ACP inventory previews, which reach the web layer after this redactor has run.
+            Regex("""(?i)\b((?:$CREDENTIAL_KEYS)["']?\s*[:=]\s*)(?:"(?:[^"\\\r\n]|\\[^\r\n]?)*+(?:"|(?=[\r\n]|$))|'(?:[^'\\\r\n]|\\[^\r\n]?)*+(?:'|(?=[\r\n]|$)))""") to true,
             Regex("(?i)(\\b(?:proxy-)?authorization\\s*[:=]\\s*)basic\\s+[^\\s,;]+") to true,
             Regex("(?i)(bearer\\s+)[^\\s,;]+") to true,
             Regex("(?i)((?:api[_-]?key|access[_-]?token|password|secret|authorization)\\s*[:=]\\s*)[^\\s,;]+") to true,

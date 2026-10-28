@@ -141,6 +141,7 @@ internal storage optimization and must not merge identity, permissions or histor
 | `GET /api/v1/bootstrap` | `200 bootstrap` | Sanitized capabilities/readiness/build IDs/limits; #166 |
 | `GET /api/v1/jobs` | `200 jobs` | Bounded cursor/filter query; #162 |
 | `GET`, `HEAD /api/v1/recovery` | `200 recovery` | Private, bounded, display-only recovery-file summary; no query parameters |
+| `GET /api/v1/support-export?scope=server` or `?scope=job&jobId={jobId}` | `200 supportExport` | Explicitly scoped redacted diagnostic export; no default scope; audited; #177/#522 |
 | `GET /api/v1/uploads/{uploadId}` | `200 uploadProgress` | Ephemeral session-bound transfer bytes and publication phase; #169 |
 | `POST /api/v1/jobs` | `201 job`, `Location: J` | Multipart, upload limits, idempotency; #162 |
 | `GET J` | `200 job`, ETag | Snapshot read; #159/#160 |
@@ -1393,6 +1394,75 @@ Activity uses SSE after bounded polling catch-up, with bounded reconnect and pol
 Run state now stays locked during bounded journal capture, with locks released before HTTP delivery.
 Controlled authenticated HTTP snapshot/replay and SSE eviction/resume checks now cover concurrent
 cutover. Slow-socket qualification and timed retention remain outstanding under #174.
+
+## Shared redaction, audit and support export
+
+**Redaction (`web-redaction-v1`).** One policy (`WebRedactionPolicy`) is installed on the listener and applied
+where bytes leave the server: every versioned JSON document (success and error envelopes), each live SSE frame
+and polling page (so live and replayed events are identical), legacy JSON, the server-generated exploration
+download and support exports. Legacy HTML receives redacted filename display metadata before rendering;
+HTML, trusted scripts and committed source are not rewritten. Persisted failure prose is passed through the
+same policy before it is stored, masking complete credential spans before subsystem redaction and truncation. It
+replaces values of credential-named environment variables and long opaque configured values with `[redacted]`
+(short generic environment values such as `1` or `development` are deliberately not treated as secrets, because
+substituting them would corrupt public vocabulary). Nonempty credential-named environment values outside
+8–4096 characters are an unsupported configuration: listener policy construction fails with a fixed, secret-free
+error rather than silently excluding a known credential. This includes short passwords/tokens (1–7 characters);
+empty optional values remain allowed. Redacted names and common bounded prose fields that expand beyond their
+public field bound are withheld as a whole (`[redacted]`), never returned as over-limit DTO values.
+The policy also replaces credential syntax (authorization headers, bearer tokens,
+`password=`/`token=`-style assignments, URL user information and well-known token prefixes) and private host
+paths (the storage root, home, temporary, working and Java directories plus the generic per-user and temporary
+directory families) with `[private-path]`. Closed-syntax protocol fields (`*Id`, `*Cursor`, `*Token`, `*Sha256`,
+`version` and similar) keep their exact bytes unless they contain a configured literal, so cursors and ETags stay
+valid in fixed-contract DTOs only. Arbitrary JSON report downloads instead redact decoded property names and
+credential-valued properties recursively, without routing, opaque-token or byte-preview field-name exemptions.
+If property names collapse to the same redacted name, the containing object is withheld as `[redacted]` rather
+than silently losing one property. A configured literal still present in JSON serialization punctuation causes
+the whole download to be withheld as JSON `null`. A download is byte-identical when nothing needs redaction,
+and the exploration artifact digest is computed
+over the same projection the download serves. Committed job content (`sourceChunk`, the committed source-tree names in `revisionDirectory`, `revisionSources`, `revisionFile` and `sourceCatalog`, source-file downloads and the exact-byte
+validation output previews in fixed-contract DTOs) is digest-bound user data, not server configuration, and is served verbatim under job authorization. Progress events
+remain allowlisted projections: journal prose, paths, usage that was not reported and any agent reasoning are never
+requested or displayed (the activity view shows "Not reported").
+
+**Audit.** Every sensitive action is recorded durably in `<store>/.web-audit/` before the request thread
+finishes, including refused and failed requests: `session.start`, `session.end`, `job.upload`, `job.update`,
+`job.delete`, `run.start`, `run.cancel`, `run.recover`, `run.progress-pin`, `agent.preflight`,
+`operator.auth-inspection` and `operator.auth-inspection-cancel` (legacy), `support.export`, and
+`git.repository-mutate` for managed repository creation/attachment. This Git mutation entry is
+scoped to the validated job ID from `POST /api/v1/jobs/{jobId}/repositories`. An entry records a
+sequence, time, the response request ID, the actor (`browser_session` with a domain-separated SHA-256 digest of the authorization-owned session
+identity, or `unauthenticated`), the action, the target job/run, an `ifmatch_`-prefixed, domain-separated SHA-256
+commitment to a bounded strong `If-Match` value (never the caller's header bytes), and the server version the
+response reported, the outcome (`accepted`, `replayed`, `rejected` for 4xx, `failed` for 5xx) with its
+status and public error code. Canonical server run IDs (`run_` plus 32 lowercase hexadecimal digits) keep their
+identity; other requested run IDs become `requested_run_`-prefixed domain-separated commitments. Configured-sensitive
+job IDs and result versions are omitted, and configured-sensitive run IDs are committed before append. Closed syntax
+is not treated as proof that caller input is credential-free; raw cookies, CSRF tokens, filenames, request bodies
+and host paths are never intentionally collected. Retention is two fsync'd segments of 2048 entries. Server-wide
+`omittedEntries` counts the rotated prefix plus the returned-window omissions; for a job scope it counts only
+known matching window omissions (rotated job membership is unknown). Rotation or window truncation sets
+`complete:false`, including an empty job scope whose earlier membership is unknown. A torn final append is
+discarded on reopen. Each append is preceded by an fsync'd intent flag; failed/interrupted appends leave sticky
+loss evidence, so restart and later successful appends cannot strengthen the history to complete. The live
+`unrecordedEntries` count is exact for observed failures; after reopening, sticky loss/uncertainty reports a
+lower bound of one, not an invented exact count. This state file remains alongside the segments. Failures before
+even the intent can be made durable (e.g. storage inaccessible) can only be reported by the live process.
+Segment, recovery, rotation and intent operations use no-follow secure directory handles and reject parent
+replacement; filesystem providers without secure handles report incomplete auditing instead of falling back to
+unsafe path opens. Recording failures never throw into the request. Auditing never creates job storage: entries made before the store root exists (session exchanges and refused requests) are held in a bounded 256-entry buffer and written first, in order, once storage appears. Entries are sequenced in recording order, as each handler exits just after its response, so a client that reads the audit immediately after a response may not see that entry yet. New mutation routes are audited by adding their method and
+route to `WebAuditRecorder.versionedAction`.
+
+**Support export.** `GET /api/v1/support-export` requires an explicit scope: `scope=server` (runtime, limits,
+capabilities, recovery inventory and the latest 100 audit entries) or `scope=job&jobId=…` (the job, its latest 50
+attempts and that job's latest 100 audit entries). Any other parameter, a missing scope or a malformed job ID is
+`400 VALIDATION_FAILED`; an unknown job is `404 NOT_FOUND`. The `supportExport` document records `redactionVersion`
+and lists every `omittedSections` entry with a reason: `not-in-scope`, `unavailable` (a section that could not be
+read; its state is unknown), or the sections never exported (`input-binary`, `source-content`, `artifact-content`,
+`progress-events` as `job-content`; `environment`, `host-paths` as `private-configuration`; `credentials`,
+`session-material` as `secret`; `agent-reasoning` as `not-recorded`). The Runtime view previews the document only on
+an explicit request and downloads exactly the previewed bytes; it never issues a second request for the download.
 
 ### Activity stages, correlation and private reasoning
 

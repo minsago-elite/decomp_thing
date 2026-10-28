@@ -5239,6 +5239,685 @@
         }
       ]
     },
+    "auditEntry": {
+      "type": "object",
+      "description": "One durable sensitive-action record. Every field is closed syntax; no request text, credential, filename or host path is recorded.",
+      "properties": {
+        "sequence": {
+          "$ref": "#/definitions/uint64"
+        },
+        "recordedAt": {
+          "$ref": "#/definitions/instant"
+        },
+        "requestId": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "actor": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": [
+                "browser_session",
+                "unauthenticated",
+                "operator"
+              ]
+            },
+            "sessionDigest": {
+              "oneOf": [
+                {
+                  "$ref": "#/definitions/sha256"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "sessionDigest"
+          ],
+          "additionalProperties": false,
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "kind": {
+                    "const": "browser_session"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "sessionDigest": {
+                    "$ref": "#/definitions/sha256"
+                  }
+                }
+              },
+              "else": {
+                "properties": {
+                  "sessionDigest": {
+                    "type": "null"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "action": {
+          "enum": [
+            "session.start",
+            "session.end",
+            "job.upload",
+            "job.update",
+            "job.delete",
+            "run.start",
+            "run.cancel",
+            "run.recover",
+            "run.progress-pin",
+            "agent.preflight",
+            "operator.auth-inspection",
+            "operator.auth-inspection-cancel",
+            "support.export",
+            "git.repository-mutate"
+          ]
+        },
+        "target": {
+          "type": "object",
+          "properties": {
+            "jobId": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{32}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "runId": {
+              "oneOf": [
+                {
+                  "$ref": "#/definitions/id"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "expectedVersion": {
+              "oneOf": [
+                {
+                  "$ref": "#/definitions/version"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "resultVersion": {
+              "oneOf": [
+                {
+                  "$ref": "#/definitions/version"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "jobId",
+            "runId",
+            "expectedVersion",
+            "resultVersion"
+          ],
+          "additionalProperties": false
+        },
+        "outcome": {
+          "enum": [
+            "accepted",
+            "replayed",
+            "rejected",
+            "failed"
+          ]
+        },
+        "status": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 599
+        },
+        "reasonCode": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Z][A-Z0-9_]{0,63}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "sequence",
+        "recordedAt",
+        "requestId",
+        "actor",
+        "action",
+        "target",
+        "outcome",
+        "status",
+        "reasonCode"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "outcome": {
+                "enum": [
+                  "accepted",
+                  "replayed"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "status": {
+                "maximum": 399
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "outcome": {
+                "const": "rejected"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "status": {
+                "minimum": 400,
+                "maximum": 499
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "outcome": {
+                "const": "failed"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reasonCode": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "auditPage": {
+      "type": "object",
+      "properties": {
+        "entries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/auditEntry"
+          },
+          "maxItems": 500
+        },
+        "omittedEntries": {
+          "$ref": "#/definitions/uint64"
+        },
+        "unrecordedEntries": {
+          "$ref": "#/definitions/uint64"
+        },
+        "complete": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "entries",
+        "omittedEntries",
+        "unrecordedEntries",
+        "complete"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "complete": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "unrecordedEntries": {
+                "const": "0"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "supportExportSection": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "const": "runtime"
+            },
+            "content": {
+              "$ref": "#/definitions/runtime"
+            }
+          },
+          "required": [
+            "id",
+            "content"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "const": "limits"
+            },
+            "content": {
+              "$ref": "#/definitions/limits"
+            }
+          },
+          "required": [
+            "id",
+            "content"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "const": "capabilities"
+            },
+            "content": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/capability"
+              },
+              "maxItems": 128
+            }
+          },
+          "required": [
+            "id",
+            "content"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "const": "recovery"
+            },
+            "content": {
+              "$ref": "#/definitions/recovery"
+            }
+          },
+          "required": [
+            "id",
+            "content"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "const": "job"
+            },
+            "content": {
+              "$ref": "#/definitions/job"
+            }
+          },
+          "required": [
+            "id",
+            "content"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "const": "runs"
+            },
+            "content": {
+              "type": "object",
+              "properties": {
+                "items": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/run"
+                  },
+                  "maxItems": 50
+                },
+                "omittedRuns": {
+                  "$ref": "#/definitions/uint64"
+                }
+              },
+              "required": [
+                "items",
+                "omittedRuns"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "id",
+            "content"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "const": "audit"
+            },
+            "content": {
+              "$ref": "#/definitions/auditPage"
+            }
+          },
+          "required": [
+            "id",
+            "content"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "supportExport": {
+      "type": "object",
+      "description": "An explicitly scoped, redacted diagnostic export. The browser previews and downloads this exact document.",
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "exportId": {
+          "$ref": "#/definitions/id"
+        },
+        "generatedAt": {
+          "$ref": "#/definitions/instant"
+        },
+        "redactionVersion": {
+          "const": "web-redaction-v1"
+        },
+        "scope": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": [
+                "server",
+                "job"
+              ]
+            },
+            "jobId": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{32}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "jobId"
+          ],
+          "additionalProperties": false,
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "kind": {
+                    "const": "job"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "jobId": {
+                    "type": "string"
+                  }
+                }
+              },
+              "else": {
+                "properties": {
+                  "jobId": {
+                    "type": "null"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "sections": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/supportExportSection"
+          },
+          "maxItems": 7
+        },
+        "omittedSections": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "enum": [
+                  "runtime",
+                  "limits",
+                  "capabilities",
+                  "recovery",
+                  "job",
+                  "runs",
+                  "audit",
+                  "input-binary",
+                  "source-content",
+                  "artifact-content",
+                  "progress-events",
+                  "environment",
+                  "host-paths",
+                  "credentials",
+                  "session-material",
+                  "agent-reasoning"
+                ]
+              },
+              "reason": {
+                "enum": [
+                  "not-in-scope",
+                  "unavailable",
+                  "job-content",
+                  "private-configuration",
+                  "secret",
+                  "not-recorded"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "reason"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "exportId",
+        "generatedAt",
+        "redactionVersion",
+        "scope",
+        "sections",
+        "omittedSections"
+      ],
+      "additionalProperties": false
+    },
+    "queuePosition": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "jobId": {
+              "$ref": "#/definitions/id"
+            },
+            "runId": {
+              "$ref": "#/definitions/id"
+            },
+            "sampledAt": {
+              "$ref": "#/definitions/instant"
+            },
+            "state": {
+              "const": "queued"
+            },
+            "source": {
+              "const": "web-workflow-executor"
+            },
+            "approximate": {
+              "const": true
+            },
+            "position": {
+              "type": "string",
+              "pattern": "^([1-9]|[12][0-9]|3[0-2])$"
+            },
+            "ahead": {
+              "type": "string",
+              "pattern": "^([0-9]|[12][0-9]|3[01])$"
+            },
+            "queuedTasks": {
+              "type": "string",
+              "pattern": "^([1-9]|[12][0-9]|3[0-2])$"
+            },
+            "activeWorkers": {
+              "type": "string",
+              "pattern": "^[0-2]$"
+            },
+            "workerLimit": {
+              "type": "string",
+              "pattern": "^[1-2]$"
+            }
+          },
+          "required": [
+            "jobId",
+            "runId",
+            "sampledAt",
+            "state",
+            "source",
+            "approximate",
+            "position",
+            "ahead",
+            "queuedTasks",
+            "activeWorkers",
+            "workerLimit"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "jobId": {
+              "$ref": "#/definitions/id"
+            },
+            "runId": {
+              "$ref": "#/definitions/id"
+            },
+            "sampledAt": {
+              "$ref": "#/definitions/instant"
+            },
+            "state": {
+              "const": "not-queued"
+            },
+            "runState": {
+              "type": "string",
+              "enum": [
+                "running",
+                "cancelling",
+                "completed",
+                "failed",
+                "cancelled",
+                "interrupted"
+              ]
+            }
+          },
+          "required": [
+            "jobId",
+            "runId",
+            "sampledAt",
+            "state",
+            "runState"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "jobId": {
+              "$ref": "#/definitions/id"
+            },
+            "runId": {
+              "$ref": "#/definitions/id"
+            },
+            "sampledAt": {
+              "$ref": "#/definitions/instant"
+            },
+            "state": {
+              "const": "unavailable"
+            },
+            "reasonCode": {
+              "type": "string",
+              "enum": [
+                "EXTERNAL_EXECUTOR",
+                "NOT_IN_LOCAL_QUEUE"
+              ]
+            }
+          },
+          "required": [
+            "jobId",
+            "runId",
+            "sampledAt",
+            "state",
+            "reasonCode"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
     "gitRepositoryInit": {
       "type": "object",
       "properties": {
@@ -5388,135 +6067,6 @@
         "sha1",
         "sha256",
         "unknown"
-      ]
-    },
-    "queuePosition": {
-      "oneOf": [
-        {
-          "type": "object",
-          "properties": {
-            "jobId": {
-              "$ref": "#/definitions/id"
-            },
-            "runId": {
-              "$ref": "#/definitions/id"
-            },
-            "sampledAt": {
-              "$ref": "#/definitions/instant"
-            },
-            "state": {
-              "const": "queued"
-            },
-            "source": {
-              "const": "web-workflow-executor"
-            },
-            "approximate": {
-              "const": true
-            },
-            "position": {
-              "type": "string",
-              "pattern": "^([1-9]|[12][0-9]|3[0-2])$"
-            },
-            "ahead": {
-              "type": "string",
-              "pattern": "^([0-9]|[12][0-9]|3[01])$"
-            },
-            "queuedTasks": {
-              "type": "string",
-              "pattern": "^([1-9]|[12][0-9]|3[0-2])$"
-            },
-            "activeWorkers": {
-              "type": "string",
-              "pattern": "^[0-2]$"
-            },
-            "workerLimit": {
-              "type": "string",
-              "pattern": "^[1-2]$"
-            }
-          },
-          "required": [
-            "jobId",
-            "runId",
-            "sampledAt",
-            "state",
-            "source",
-            "approximate",
-            "position",
-            "ahead",
-            "queuedTasks",
-            "activeWorkers",
-            "workerLimit"
-          ],
-          "additionalProperties": false
-        },
-        {
-          "type": "object",
-          "properties": {
-            "jobId": {
-              "$ref": "#/definitions/id"
-            },
-            "runId": {
-              "$ref": "#/definitions/id"
-            },
-            "sampledAt": {
-              "$ref": "#/definitions/instant"
-            },
-            "state": {
-              "const": "not-queued"
-            },
-            "runState": {
-              "type": "string",
-              "enum": [
-                "running",
-                "cancelling",
-                "completed",
-                "failed",
-                "cancelled",
-                "interrupted"
-              ]
-            }
-          },
-          "required": [
-            "jobId",
-            "runId",
-            "sampledAt",
-            "state",
-            "runState"
-          ],
-          "additionalProperties": false
-        },
-        {
-          "type": "object",
-          "properties": {
-            "jobId": {
-              "$ref": "#/definitions/id"
-            },
-            "runId": {
-              "$ref": "#/definitions/id"
-            },
-            "sampledAt": {
-              "$ref": "#/definitions/instant"
-            },
-            "state": {
-              "const": "unavailable"
-            },
-            "reasonCode": {
-              "type": "string",
-              "enum": [
-                "EXTERNAL_EXECUTOR",
-                "NOT_IN_LOCAL_QUEUE"
-              ]
-            }
-          },
-          "required": [
-            "jobId",
-            "runId",
-            "sampledAt",
-            "state",
-            "reasonCode"
-          ],
-          "additionalProperties": false
-        }
       ]
     }
   },
@@ -6035,30 +6585,6 @@
           "const": 1
         },
         "kind": {
-          "const": "queuePosition"
-        },
-        "requestId": {
-          "$ref": "#/definitions/requestId"
-        },
-        "data": {
-          "$ref": "#/definitions/queuePosition"
-        }
-      },
-      "required": [
-        "apiVersion",
-        "kind",
-        "requestId",
-        "data"
-      ],
-      "additionalProperties": false
-    },
-    {
-      "type": "object",
-      "properties": {
-        "apiVersion": {
-          "const": 1
-        },
-        "kind": {
           "const": "progressPinRequest"
         },
         "data": {
@@ -6322,6 +6848,54 @@
         },
         "data": {
           "$ref": "#/definitions/attemptControls"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "supportExport"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/supportExport"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "queuePosition"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/queuePosition"
         }
       },
       "required": [

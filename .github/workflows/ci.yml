@@ -81,6 +81,8 @@ jobs:
             | tee "$RUNNER_TEMP/frontend-ci/api-drift-tests.txt"
       - name: Verify generated large web fixtures
         run: node --test scripts/web-scale-fixtures.test.mjs | tee "$RUNNER_TEMP/frontend-ci/scale-fixtures-tests.txt"
+      - name: Verify live dashboard audit preservation controls
+        run: node --test scripts/packaged-browser-live.test.mjs | tee "$RUNNER_TEMP/frontend-ci/live-audit-tests.txt"
       - name: Check frontend freshness diagnostic controls
         timeout-minutes: 1
         run: python3 -B scripts/test-frontend-freshness.py --verbose

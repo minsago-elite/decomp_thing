@@ -233,6 +233,29 @@ class LocalWebAccess(
         return describe(authenticate(exchange, policy.mutation), clock.instant())
     }
 
+    /**
+     * Audit attribution only: the identity of a live session named by the request cookie, or null.
+     * It never authorizes, never extends idle lifetime and never reports why a cookie was refused.
+     */
+    @Synchronized
+    fun auditSessionId(exchange: HttpExchange): String? = try {
+        if (closed) null else {
+            val hash = tokenDigest("session", sessionCookieToken(exchange))
+            sessions.firstOrNull { MessageDigest.isEqual(it.digest, hash) && !expired(it, clock.nanoTime()) }?.digest?.hex()
+        }
+    } catch (_: Exception) { null }
+
+    /** Audit attribution for a session this response just issued in its Set-Cookie header. */
+    @Synchronized
+    fun auditIssuedSessionId(exchange: HttpExchange): String? {
+        if (closed) return null
+        val token = exchange.responseHeaders["Set-Cookie"].orEmpty().map { it.substringBefore(';').trim() }
+            .singleOrNull { it.substringBefore('=') == configuration.cookieName }?.substringAfter('=', "")
+            ?.takeIf(::validToken) ?: return null
+        val hash = tokenDigest("session", token)
+        return sessions.firstOrNull { MessageDigest.isEqual(it.digest, hash) }?.digest?.hex()
+    }
+
     /** Authenticated bootstrap GET restores the same CSRF token without invalidating other tabs. */
     @Synchronized
     fun csrfForSession(exchange: HttpExchange): WebSessionCredentials {
@@ -271,6 +294,7 @@ class LocalWebAccess(
 
     /** All denial bodies are fixed safe text, including navigation, SSE and download failures. */
     fun sendDenied(exchange: HttpExchange, failure: WebAccessDenied) {
+        WebDeniedResponseTrace.note(failure.code)
         val requestId = UUID.randomUUID().toString()
         val body = buildJsonObject {
             put("apiVersion", 1)
@@ -278,8 +302,8 @@ class LocalWebAccess(
             put("requestId", requestId)
             put("error", buildJsonObject {
                 put("code", failure.code)
-                put("message", failure.message)
-                failure.eventGap?.let { put("recovery", it) }
+                put("message", WebRedactionPolicy.of(exchange).text(failure.message ?: ""))
+                failure.eventGap?.let { put("recovery", WebRedactionPolicy.of(exchange).json(it)) }
                 put("retryable", failure.status == 429)
                 put("details", JsonArray(emptyList()))
                 put("retryAfterMs", if (failure.status == 429) JsonPrimitiveRetry else JsonNull)
