@@ -13,6 +13,8 @@ import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.LinkOption
+import java.nio.file.StandardCopyOption
 import java.nio.file.StandardOpenOption
 import java.util.zip.CRC32
 import java.util.zip.ZipEntry
@@ -26,6 +28,7 @@ import kotlin.io.path.readText
 import kotlin.io.path.writeText
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertContentEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNotEquals
@@ -41,6 +44,229 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
 
 class SourceTreeTest {
+    @Test
+    fun `inactive unowned build definitions survive both profile selections`(): Unit {
+        for (profile in ReconstructionProfiles.builtIn) {
+            val previous = ReconstructionProfiles.builtIn.single { it.id != profile.id }
+            val project = createTempDirectory(
+                Path.of("build").toAbsolutePath().normalize().createDirectories(), "inactive-unowned-build-",
+            )
+            val inactive = project.resolve(previous.layout.declaration("build-definition").materialize())
+            val sentinel = "# user-owned ${previous.id} build definition\n".toByteArray()
+            Files.write(inactive, sentinel)
+
+            val manifest = SourceTreeGenerator.generate(oneModuleModel(), project, profile = profile)
+
+            assertTrue(inactive.exists(), "${profile.id} must preserve the unowned inactive definition")
+            assertContentEquals(sentinel, inactive.readBytes())
+            assertTrue(project.resolve(profile.layout.declaration("build-definition").materialize()).exists())
+            assertEquals(profile.sha256, manifest.profileSha256)
+        }
+    }
+
+    @Test
+    fun `inactive edited build definitions survive both profile switches`(): Unit {
+        for (previous in ReconstructionProfiles.builtIn) {
+            val selected = ReconstructionProfiles.builtIn.single { it.id != previous.id }
+            val project = inactiveBuildProject()
+            SourceTreeGenerator.generate(oneModuleModel(), project, profile = previous)
+            val inactive = project.resolve(previous.layout.declaration("build-definition").materialize())
+            val edited = inactive.readBytes() + "\n# retained user edit\n".toByteArray()
+            Files.write(inactive, edited)
+
+            val manifest = SourceTreeGenerator.generate(oneModuleModel(), project, profile = selected)
+
+            assertContentEquals(edited, inactive.readBytes())
+            assertEquals(selected.sha256, manifest.profileSha256)
+        }
+    }
+
+    @Test
+    fun `inactive cleanup rejects inconsistent manifest policy and record claims`(): Unit {
+        val previous = GeneratedCMakeReconstructionProfile.descriptor
+        val selected = GeneratedCNinjaReconstructionProfile.descriptor
+        val mutations = linkedMapOf<String, (String) -> String>(
+            "malformed" to { "{" },
+            "duplicate key" to { it.replaceFirst("{\n", "{\n  \"\\u0073chemaVersion\": 3,\n") },
+            "unknown field" to { it.replaceFirst("{\n", "{\n  \"unexpected\": true,\n") },
+            "legacy schema" to { it.replaceFirst("\"schemaVersion\": 3", "\"schemaVersion\": 2") },
+            "profile id" to { it.replace(previous.id, "unregistered-profile") },
+            "profile digest" to { it.replace(previous.sha256, "0".repeat(64)) },
+            "role mismatch" to { alterInactiveBuildRecord(it, "roles", JsonArray(listOf(JsonPrimitive("build-definition")))) },
+            "content kind" to { alterInactiveBuildRecord(it, "contentKind", JsonPrimitive("binary")) },
+            "different path" to { alterInactiveBuildRecord(it, "path", JsonPrimitive("notes.txt")) },
+            "digest mismatch" to { alterInactiveBuildRecord(it, "sha256", JsonPrimitive("0".repeat(64))) },
+            "different generator" to { alterInactiveBuildRecord(it, "generator", JsonPrimitive("user-authored")) },
+            "prompt claim" to { alterInactiveBuildRecord(it, "promptSha256", JsonPrimitive("a".repeat(64))) },
+            "acceptance claim" to { alterInactiveBuildRecord(it, "acceptedImplementation", JsonPrimitive(true)) },
+            "entity claim" to { alterInactiveBuildRecord(it, "entityIds", JsonArray(listOf(JsonPrimitive("fn_extra")))) },
+        )
+        for ((label, mutate) in mutations) {
+            val project = inactiveBuildProject()
+            SourceTreeGenerator.generate(oneModuleModel(), project, profile = previous)
+            val inactive = project.resolve("Makefile")
+            val before = inactive.readBytes()
+            val notes = project.resolve("notes.txt")
+            notes.writeText("unrelated retained bytes\n")
+            val manifestPath = project.resolve("source_tree_manifest.json")
+            val original = manifestPath.readText()
+            val changed = mutate(original)
+            assertNotEquals(original, changed, label)
+            manifestPath.writeText(changed)
+
+            try {
+                SourceTreeGenerator.generate(oneModuleModel(), project, profile = selected)
+            } catch (_: IllegalArgumentException) {
+                // Existing admission may reject malformed state before cleanup; that grants no deletion.
+            }
+
+            assertTrue(inactive.exists(), label)
+            assertContentEquals(before, inactive.readBytes(), label)
+            assertEquals("unrelated retained bytes\n", notes.readText(), label)
+        }
+    }
+
+    @Test
+    fun `inactive custom profile manifest does not authorize built in cleanup`(): Unit {
+        val base = GeneratedCMakeReconstructionProfile.descriptor
+        val previous = ReconstructionProfile(base.schemaVersion, base.id, base.layout,
+            base.budgets.copy(reconstructionMaximumContextCharacters = base.budgets.reconstructionMaximumContextCharacters - 1),
+            base.adapterConfiguration)
+        val project = inactiveBuildProject()
+        SourceTreeGenerator.generate(oneModuleModel(), project, profile = previous)
+        val inactive = project.resolve("Makefile")
+        val before = inactive.readBytes()
+
+        val manifest = SourceTreeGenerator.generate(oneModuleModel(), project, profile = GeneratedCNinjaReconstructionProfile.descriptor)
+
+        assertContentEquals(before, inactive.readBytes())
+        assertEquals(GeneratedCNinjaReconstructionProfile.descriptor.sha256, manifest.profileSha256)
+    }
+
+    @Test
+    fun `inactive cleanup preserves nonregular replacements after ownership capture`(): Unit {
+        for (kind in listOf("symlink", "dangling symlink", "directory")) {
+            val project = inactiveBuildProject()
+            SourceTreeGenerator.generate(oneModuleModel(), project, profile = GeneratedCMakeReconstructionProfile.descriptor)
+            val inactive = project.resolve("Makefile")
+            val referent = project.resolve("user-build.txt")
+            val before = inactive.readBytes()
+            val identity = Files.readAttributes(inactive, java.nio.file.attribute.BasicFileAttributes::class.java).fileKey()
+            var replaced = false
+
+            val manifest = SourceTreeGenerator.generate(oneModuleModel(), project,
+                profile = GeneratedCNinjaReconstructionProfile.descriptor, onModuleProgress = { _, _, _ ->
+                    replaced = true
+                    if (kind == "symlink") {
+                        // A following reader would see the exact captured inode and digest.
+                        Files.move(inactive, referent, StandardCopyOption.ATOMIC_MOVE)
+                        assertEquals(identity, Files.readAttributes(referent,
+                            java.nio.file.attribute.BasicFileAttributes::class.java).fileKey())
+                    } else Files.delete(inactive)
+                    if (kind == "directory") Files.createDirectory(inactive)
+                    else Files.createSymbolicLink(inactive, referent.fileName)
+                })
+
+            assertTrue(replaced)
+            assertTrue(Files.exists(inactive, LinkOption.NOFOLLOW_LINKS), kind)
+            if (kind == "directory") assertTrue(Files.isDirectory(inactive, LinkOption.NOFOLLOW_LINKS))
+            else assertEquals(referent.fileName, Files.readSymbolicLink(inactive))
+            if (kind == "symlink") assertContentEquals(before, referent.readBytes())
+            else assertFalse(referent.exists())
+            assertEquals(GeneratedCNinjaReconstructionProfile.descriptor.sha256, manifest.profileSha256)
+        }
+    }
+
+    @Test
+    fun `inactive cleanup rechecks bytes and identity after reconstruction`(): Unit {
+        for (replacement in listOf(false, true)) {
+            val project = inactiveBuildProject()
+            SourceTreeGenerator.generate(oneModuleModel(), project, profile = GeneratedCMakeReconstructionProfile.descriptor)
+            val inactive = project.resolve("Makefile")
+            val before = inactive.readBytes()
+            val identity = Files.readAttributes(inactive, java.nio.file.attribute.BasicFileAttributes::class.java).fileKey()
+            val expected = if (replacement) before else before + "\n# intervening edit\n".toByteArray()
+            var called = false
+            val reconstructor = validReconstructor {
+                called = true
+                if (replacement) {
+                    val changed = project.resolve("replacement-build")
+                    Files.write(changed, expected)
+                    Files.move(changed, inactive, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+                    assertNotEquals(identity, Files.readAttributes(inactive,
+                        java.nio.file.attribute.BasicFileAttributes::class.java).fileKey())
+                } else Files.write(inactive, expected)
+            }
+
+            SourceTreeGenerator.generate(oneModuleModel(), project, reconstructor = reconstructor,
+                profile = GeneratedCNinjaReconstructionProfile.descriptor)
+
+            assertTrue(called, "the mutation must occur after ownership capture")
+            assertContentEquals(expected, inactive.readBytes())
+        }
+    }
+
+    @Test
+    fun `inactive cleanup preserves a path claimed by the admitted current profile`(): Unit {
+        val project = inactiveBuildProject()
+        SourceTreeGenerator.generate(oneModuleModel(), project, profile = GeneratedCMakeReconstructionProfile.descriptor)
+        val inactive = project.resolve("Makefile")
+        val before = inactive.readBytes()
+        val base = GeneratedCNinjaReconstructionProfile.descriptor
+        val selected = ReconstructionProfile(base.schemaVersion, base.id,
+            ProjectLayoutProfile(base.layout.schemaVersion, base.layout.declarations + ProjectFileDeclaration(
+                "retained-user-build", "Makefile", setOf(ProjectFileRole.VIEWABLE, ProjectFileRole.EVIDENCE),
+                ProjectContentKind.UTF8_TEXT)), base.budgets, base.adapterConfiguration)
+
+        val manifest = SourceTreeGenerator.generate(oneModuleModel(), project, profile = selected)
+
+        assertEquals(selected.sha256, manifest.profileSha256, "the current descriptor must be admitted successfully")
+        assertTrue(project.resolve("build.ninja").exists())
+        assertContentEquals(before, inactive.readBytes())
+    }
+
+    @Test
+    fun `inactive cleanup propagates interruption after module publication`(): Unit {
+        val project = inactiveBuildProject()
+        SourceTreeGenerator.generate(oneModuleModel(), project, profile = GeneratedCMakeReconstructionProfile.descriptor)
+        val inactive = project.resolve("Makefile")
+        val before = inactive.readBytes()
+        var called = false
+
+        try {
+            val failure = assertFailsWith<InterruptedException> {
+                SourceTreeGenerator.generate(oneModuleModel(), project,
+                    profile = GeneratedCNinjaReconstructionProfile.descriptor, onModuleProgress = { _, _, _ ->
+                        called = true
+                        Thread.currentThread().interrupt()
+                    })
+            }
+            assertTrue(called)
+            assertEquals("build definition cleanup interrupted", failure.message)
+            assertTrue(Thread.currentThread().isInterrupted, "cleanup must not clear the interrupt flag")
+        } finally {
+            Thread.interrupted()
+        }
+        assertContentEquals(before, inactive.readBytes())
+    }
+
+    private fun inactiveBuildProject(): Path = createTempDirectory(
+        Path.of("build").toAbsolutePath().normalize().createDirectories(), "inactive-build-ownership-",
+    )
+
+    private fun alterInactiveBuildRecord(
+        text: String,
+        key: String,
+        value: kotlinx.serialization.json.JsonElement,
+    ): String {
+        val root = Json.parseToJsonElement(text).jsonObject
+        val files = root.getValue("files").jsonArray.map { item ->
+            val record = item.jsonObject
+            if (record.getValue("path").jsonPrimitive.content == "Makefile") JsonObject(record + (key to value)) else record
+        }
+        return JsonObject(root + ("files" to JsonArray(files))).toString()
+    }
+
     @Test
     fun `reconstruction cannot claim the reserved repair generator`() {
         val project = createTempDirectory("source-tree-reserved-repair-generator-")
@@ -58,14 +284,15 @@ class SourceTreeTest {
     }
 
     @Test
-    fun `rerun with the other profile removes the stale build definition`() {
+    fun `rerun with the other profile removes the stale build definition`(): Unit {
         val project = createTempDirectory("source-tree-profile-rerun-")
         val model = oneModuleModel()
         val makeProfile = GeneratedCMakeReconstructionProfile.descriptor
         val ninjaProfile = GeneratedCNinjaReconstructionProfile.descriptor
         SourceTreeGenerator.generate(model, project, reconstructor = validReconstructor(), profile = makeProfile)
         assertTrue(project.resolve("Makefile").exists())
-        SourceTreeGenerator.generate(model, project, reconstructor = validReconstructor(), profile = ninjaProfile)
+        SourceTreeGenerator.generate(model.copy(inputSha256 = "b".repeat(64)), project,
+            reconstructor = validReconstructor(), profile = ninjaProfile)
         assertTrue(project.resolve("build.ninja").exists())
         assertFalse(project.resolve("Makefile").exists(), "make-to-ninja rerun must not retain a stale Makefile")
         SourceTreeGenerator.generate(model, project, reconstructor = validReconstructor(), profile = makeProfile)
