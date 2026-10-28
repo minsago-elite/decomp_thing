@@ -223,7 +223,7 @@ internal class WebRedactionPolicy private constructor(
             // redact through its matching boundary; for raw header text, redact the whole line value.
             Regex("""(?i)\b((?:proxy-)?authorization["']?\s*[:=]\s*")(?:(?:[^"\\\r\n]|\\[^\r\n]?))*+""") to true,
             Regex("""(?i)\b((?:proxy-)?authorization["']?\s*[:=]\s*')(?:(?:[^'\\\r\n]|\\[^\r\n]?))*+""") to true,
-            Regex("(?i)\\b((?:proxy-)?authorization[\"']?\\s*[:=]\\s*+)(?![\"']|\\[redacted\\])[^\\r\\n<>]+") to true,
+            Regex("(?i)\\b((?:proxy-)?authorization[\"']?\\s*[:=]\\s*+)(?![\"'])[^\\r\\n<>]+") to true,
             // Digest is a comma-separated parameter list and quoted values may contain spaces;
             // redact to the line boundary rather than stopping at the first comma or quote.
             Regex("(?i)\\b((?:proxy-)?authorization[\"']?\\s*[:=]\\s*)digest\\s+[^\\r\\n<>]+") to true,

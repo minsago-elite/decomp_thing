@@ -126,6 +126,22 @@ class WebRedactionPolicyTest {
         assertTrue(secondHeader.contains("Content-Type: application/json"), secondHeader)
     }
 
+    @Test fun `web projection removes authorization tails left by progress redaction`() {
+        val secret = "YIIFexampleCredential0123456789=="
+        val partial = decompengine.jobs.ProgressRedactor(emptyList()).text("Authorization: Negotiate $secret")
+        assertEquals("Authorization: [redacted] $secret", partial)
+
+        val safe = policy.text(partial)
+        assertEquals("Authorization: [redacted]", safe)
+        assertFalse(safe.contains(secret), safe)
+        assertEquals(safe, policy.text(safe))
+        assertEquals(safe, policy.diagnostic(partial))
+
+        val report = buildJsonObject { put("note", partial) }.toString().toByteArray()
+        val downloaded = Json.parseToJsonElement(policy.document(report).decodeToString()).jsonObject
+        assertEquals(safe, downloaded.getValue("note").jsonPrimitive.content)
+    }
+
     @Test fun `redaction is stable when reapplied and never leaves a configured literal`() {
         val inputs = listOf("Authorization: Bearer $canary", "x${canary}y /home/a/b token=$canary", "[redacted]X")
         for (input in inputs) {
