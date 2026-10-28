@@ -178,6 +178,11 @@ export function sourceFilePath(basePath: string, selected: SourceSelection, file
   return pin === undefined ? path : `${path}?${sourceSnapshotQuery(pin)}`;
 }
 
+/** Search document (with a base path) or relative API route (with ''); search.ts owns the query grammar. */
+export function sourceSearchBase(basePath: string, selected: SourceSelection): string {
+  return `${sourceRevisionPath(basePath, selected)}/source-search`;
+}
+
 export function sourceDownloadRoute(selected: SourceSelection, fileId: string, metadataVersion: string): string {
   if (!/^[a-f0-9]{64}$/.test(metadataVersion)) return invalidUrl();
   return `${sourceReadRoute(selected, 'download', fileId)}?metadataVersion=${metadataVersion}`;

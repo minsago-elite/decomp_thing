@@ -214,7 +214,7 @@ def check_run(run: dict) -> None:
     reasons = {
         "queued": (None,), "running": (None,), "cancelling": (None,),
         "completed": ("COMPLETED", "NO_CHANGES"),
-        "failed": ("FAILED", "REFUSED", "LIMIT_EXHAUSTED"),
+        "failed": ("FAILED", "REFUSED", "LIMIT_EXHAUSTED", "TIMED_OUT", "INFRASTRUCTURE_FAILED"),
         "cancelled": ("CANCELLED",), "interrupted": ("PROCESS_INTERRUPTED",),
     }
     if run["terminalReason"] not in reasons[run["state"]]:
@@ -223,6 +223,42 @@ def check_run(run: dict) -> None:
         raise ValueError("queued attempt has already started")
     if run["state"] in ("running", "completed") and run["startedAt"] is None:
         raise ValueError("running or completed attempt has no start timestamp")
+    recovery = run.get("recovery")
+    if recovery is not None:
+        if run["previousRunId"] is None:
+            raise ValueError("recovery attempt has no predecessor")
+        if (recovery["mode"] == "retry") != (recovery["restores"] is None and recovery["checkpointSha256"] is None) \
+                or (recovery["restores"] is None) != (recovery["checkpointSha256"] is None):
+            raise ValueError("retry restores nothing; resume names its verified checkpoint and scope")
+
+
+RECOVERY_REASONS = ("RECOVERY_REQUIRED", "SERVICE_STOPPED", "ATTEMPT_ACTIVE", "ATTEMPT_COMPLETED", "ATTEMPT_SUPERSEDED",
+                    "ACTIVE_RUN", "WORKFLOW_UNAVAILABLE", "INPUT_UNVERIFIED", "UPLOAD_CAPACITY", "CAPACITY_UNAVAILABLE")
+ATTEMPT_CONTROL_REASONS = {
+    "cancel": ("RECOVERY_REQUIRED", "ATTEMPT_TERMINAL", "CANCEL_PENDING", "SERVICE_STOPPED", "NO_OWNED_WORKER", "RECEIPT_CAPACITY"),
+    "retry": RECOVERY_REASONS,
+    "resume": RECOVERY_REASONS + ("RESUME_UNSUPPORTED", "HARNESS_CHANGED", "CHECKPOINT_MISSING", "CHECKPOINT_MISMATCH",
+                                  "CHECKPOINT_UNVERIFIED", "WORKSPACE_UNVERIFIED", "SESSION_QUARANTINED", "CLEANUP_UNVERIFIED"),
+}
+
+
+def check_attempt_controls(data: dict) -> None:
+    """Eligibility is explicit per command; it never implies a reservation or a result."""
+    for name in ("cancel", "retry", "resume"):
+        if data[name]["available"] != (data[name]["reason"] is None):
+            raise ValueError("attempt control availability and reason disagree")
+        if data[name]["reason"] not in (None, *ATTEMPT_CONTROL_REASONS[name]):
+            raise ValueError("attempt control reason belongs to another command")
+    if (data["resumeRestores"] is None) == data["resume"]["available"]:
+        raise ValueError("resume restoration scope requires an available resume")
+    if data["cancel"]["available"] and data["state"] not in ("queued", "running"):
+        raise ValueError("only queued or running attempts can be cancelled")
+    recoverable = data["state"] in ("failed", "cancelled", "interrupted")
+    for name in ("retry", "resume"):
+        if data[name]["available"] and (not recoverable or data["successorRunId"] is not None):
+            raise ValueError("only the latest unsuccessful attempt can be recovered")
+    if data["successorRunId"] == data["runId"]:
+        raise ValueError("an attempt cannot succeed itself")
 
 
 def check_source_page(data: dict, version: str) -> None:
@@ -306,6 +342,56 @@ def check_source_chunk(data: dict) -> None:
             raise ValueError("UTF-8 source end line is inconsistent")
 
 
+def check_source_search(data: dict) -> None:
+    page, limits, scope, progress, query = data["page"], data["limits"], data["scope"], data["progress"], data["query"]
+    items = data["items"]
+    if page["snapshotVersion"] != data["metadataVersion"] or page["limit"] != limits["maxResults"] or len(items) > page["limit"]:
+        raise ValueError("source search page does not match its captured metadata or result bound")
+    complete = data["status"] == "complete"
+    if complete != (data["stopReason"] is None) or complete != (page["nextCursor"] is None):
+        raise ValueError("source search completeness, stop reason and continuation disagree")
+    if (progress["remainingFiles"] == 0) != complete or progress["remainingFiles"] > scope["searchableFiles"]:
+        raise ValueError("source search remaining file count disagrees with completeness")
+    if scope["searchableFiles"] + scope["notViewable"] + scope["declaredBinary"] + scope["tooLarge"] != scope["filesInScope"]:
+        raise ValueError("source search scope counts do not partition the files in scope")
+    # A page that stops inside a file counts that file as both scanned and remaining.
+    if progress["unsearchableText"] > progress["scannedFiles"] or \
+            progress["scannedFiles"] + progress["unavailableFiles"] + progress["remainingFiles"] > scope["searchableFiles"] + (0 if complete else 1) or \
+            int(progress["scannedBytes"]) > int(limits["maxScannedBytes"]):
+        raise ValueError("source search progress exceeds its scope or byte bound")
+    gaps = data["coverageGaps"]
+    if gaps["unsearchableText"] < progress["unsearchableText"] or gaps["unavailableFiles"] < progress["unavailableFiles"] or \
+            gaps["unsearchableText"] + gaps["unavailableFiles"] > scope["searchableFiles"]:
+        raise ValueError("source search cumulative coverage gaps disagree with this page or scope")
+    identifier = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+    if query["match"] == "symbol" and identifier.fullmatch(query["text"]) is None:
+        raise ValueError("symbol search requires an identifier query")
+    seen, previous = set(), None
+    for item in items:
+        line, column = int(item["line"]), int(item["column"])
+        offset, line_offset = int(item["offsetBytes"]), int(item["lineOffsetBytes"])
+        if line < 1 or column < 1 or line_offset > offset or (line == 1) != (line_offset == 0):
+            raise ValueError("source search position is inconsistent")
+        if any("\n" in item[key] for key in ("before", "match", "after")):
+            raise ValueError("source search context crosses a line")
+        before, after = len(item["before"]), len(item["after"])
+        if before > 80 or after > 80 or (item["truncatedBefore"] and before != 80) or (item["truncatedAfter"] and after != 80) or \
+                (column - 1 < before) or (not item["truncatedBefore"] and column - 1 != before):
+            raise ValueError("source search context bounds are inconsistent")
+        if (query["caseSensitive"] and item["match"] != query["text"]) or len(item["match"]) != len(query["text"]):
+            raise ValueError("source search match does not represent its query")
+        if query["match"] == "symbol" and (re.search(r"[A-Za-z0-9_]$", item["before"]) or re.match(r"[A-Za-z0-9_]", item["after"])):
+            raise ValueError("symbol match is not bounded by non-identifier characters")
+        key = item["displayName"].encode("utf-16-be", "surrogatepass")
+        if previous is not None and previous["fileId"] == item["fileId"]:
+            if previous["displayName"] != item["displayName"] or offset < int(previous["offsetBytes"]) + len(previous["match"].encode("utf-8")):
+                raise ValueError("source search matches in one file overlap or are out of order")
+        elif item["fileId"] in seen or (previous is not None and previous["displayName"].encode("utf-16-be", "surrogatepass") >= key):
+            raise ValueError("source search files are repeated or out of canonical order")
+        seen.add(item["fileId"])
+        previous = item
+
+
 def check_semantics(document: dict) -> None:
     """Check relationships JSON Schema cannot express with portable draft-07."""
     kind = document["kind"]
@@ -358,6 +444,8 @@ def check_semantics(document: dict) -> None:
         check_directory(data)
     elif kind == "sourceChunk":
         check_source_chunk(data)
+    elif kind == "sourceSearch":
+        check_source_search(data)
     elif kind == "revisionFile":
         path = data["item"]["displayName"]
         for part in path.split("/"):
@@ -371,6 +459,8 @@ def check_semantics(document: dict) -> None:
             raise ValueError("recovery inventory exceeds its bounded inspection")
     elif kind == "run":
         check_run(data)
+    elif kind == "attemptControls":
+        check_attempt_controls(data)
     elif kind == "runs":
         items = data["items"]
         if len(items) > data["page"]["limit"] or len({item["runId"] for item in items}) != len(items):
@@ -385,6 +475,10 @@ def check_semantics(document: dict) -> None:
         identities = [item["jobId"] for item in data["items"]]
         if len(identities) != len(set(identities)):
             raise ValueError("a job appears more than once in a page")
+    elif kind == "queuePosition":
+        if data["state"] == "queued" and (int(data["ahead"]) != int(data["position"]) - 1
+                or int(data["position"]) > int(data["queuedTasks"]) or int(data["activeWorkers"]) > int(data["workerLimit"])):
+            raise ValueError("queue position sample is inconsistent")
     elif kind == "bootstrap":
         retention = data["runtime"].get("progressRetention")
         if retention is not None:
@@ -487,11 +581,11 @@ def check_run_lifecycle_controls(validate) -> int:
     expected = {
         "queued": {None}, "running": {None}, "cancelling": {None},
         "completed": {"COMPLETED", "NO_CHANGES"},
-        "failed": {"FAILED", "REFUSED", "LIMIT_EXHAUSTED"},
+        "failed": {"FAILED", "REFUSED", "LIMIT_EXHAUSTED", "TIMED_OUT", "INFRASTRUCTURE_FAILED"},
         "cancelled": {"CANCELLED"}, "interrupted": {"PROCESS_INTERRUPTED"},
     }
-    all_reasons = [None, "COMPLETED", "NO_CHANGES", "REFUSED", "CANCELLED",
-                   "LIMIT_EXHAUSTED", "FAILED", "PROCESS_INTERRUPTED"]
+    all_reasons = [None, "COMPLETED", "NO_CHANGES", "REFUSED", "CANCELLED", "LIMIT_EXHAUSTED",
+                   "TIMED_OUT", "FAILED", "INFRASTRUCTURE_FAILED", "PROCESS_INTERRUPTED"]
     checked = 0
 
     def check(run, valid):

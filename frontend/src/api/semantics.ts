@@ -1,4 +1,4 @@
-import type { ContractDocument, Page, RevisionDirectory, Run, SourceChunk, ValidationBytePreview, ValidationCases, ValidationFailure, ValidationHistory, ValidationSummary } from './generated';
+import type { AttemptControls, ContractDocument, Page, RevisionDirectory, Run, SourceChunk, SourceSearch, ValidationBytePreview, ValidationCases, ValidationFailure, ValidationHistory, ValidationSummary } from './generated';
 import { ApiClientError } from './errors';
 import { normalizeBasePath, validateResourceHref } from '../app/paths';
 import type { ApiResource } from '../app/paths';
@@ -164,12 +164,28 @@ function checkRun(run: Run): void {
   const reasons: Record<Run['state'], readonly Run['terminalReason'][]> = {
     queued: [null], running: [null], cancelling: [null],
     completed: ['COMPLETED', 'NO_CHANGES'],
-    failed: ['FAILED', 'REFUSED', 'LIMIT_EXHAUSTED'],
+    failed: ['FAILED', 'REFUSED', 'LIMIT_EXHAUSTED', 'TIMED_OUT', 'INFRASTRUCTURE_FAILED'],
     cancelled: ['CANCELLED'], interrupted: ['PROCESS_INTERRUPTED'],
   };
   requireValue(reasons[run.state].includes(run.terminalReason));
   if (run.state === 'queued') requireValue(run.startedAt === null);
   if (run.state === 'running' || run.state === 'completed') requireValue(run.startedAt !== null);
+  const recovery = run.recovery;
+  if (recovery) {
+    requireValue(run.previousRunId !== null && (recovery.restores === null) === (recovery.checkpointSha256 === null));
+    requireValue((recovery.mode === 'retry') === (recovery.restores === null));
+  }
+}
+
+/** Eligibility per command; never a reservation, result or authorization. */
+function checkAttemptControls(value: AttemptControls): void {
+  const { cancel, retry, resume } = value;
+  for (const control of [cancel, retry, resume]) requireValue(control.available === (control.reason === null));
+  requireValue((value.resumeRestores !== null) === value.resume.available);
+  if (value.cancel.available) requireValue(value.state === 'queued' || value.state === 'running');
+  const recoverable = ['failed', 'cancelled', 'interrupted'].includes(value.state);
+  if (value.retry.available || value.resume.available) requireValue(recoverable && value.successorRunId === null);
+  requireValue(value.successorRunId !== value.runId);
 }
 
 function checkSourcePage(items: ReadonlyArray<{ fileId: string; displayName: string }>, totalFiles: number, page: Page, version: string): void {
@@ -236,6 +252,43 @@ export function checkSourceChunk(data: SourceChunk): void {
   }
 }
 
+const codePoints = (value: string): number => Array.from(value).length;
+
+export function checkSourceSearch(data: SourceSearch): void {
+  const { page, limits, scope, progress, query, items } = data;
+  requireValue(page.snapshotVersion === data.metadataVersion && page.limit === limits.maxResults && items.length <= page.limit);
+  const complete = data.status === 'complete';
+  requireValue(complete === (data.stopReason === null) && complete === (page.nextCursor === null));
+  requireValue((progress.remainingFiles === 0) === complete && progress.remainingFiles <= scope.searchableFiles);
+  requireValue(scope.searchableFiles + scope.notViewable + scope.declaredBinary + scope.tooLarge === scope.filesInScope);
+  // A page that stops inside a file counts that file as both scanned and remaining.
+  requireValue(progress.unsearchableText <= progress.scannedFiles
+    && progress.scannedFiles + progress.unavailableFiles + progress.remainingFiles <= scope.searchableFiles + (complete ? 0 : 1)
+    && BigInt(progress.scannedBytes) <= BigInt(limits.maxScannedBytes));
+  const gaps = data.coverageGaps;
+  requireValue(gaps.unsearchableText >= progress.unsearchableText && gaps.unavailableFiles >= progress.unavailableFiles
+    && gaps.unsearchableText + gaps.unavailableFiles <= scope.searchableFiles);
+  if (query.match === 'symbol') requireValue(/^[A-Za-z_][A-Za-z0-9_]*$/u.test(query.text));
+  const seen = new Set<string>(); let previous: SourceSearch['items'][number] | undefined;
+  for (const item of items) {
+    const line = BigInt(item.line), column = BigInt(item.column), offset = BigInt(item.offsetBytes), lineOffset = BigInt(item.lineOffsetBytes);
+    requireValue(line >= 1n && column >= 1n && lineOffset <= offset && (line === 1n) === (lineOffset === 0n));
+    requireValue(![item.before, item.match, item.after].some(text => text.includes('\n')));
+    const before = codePoints(item.before), after = codePoints(item.after);
+    requireValue(before <= 80 && after <= 80 && (!item.truncatedBefore || before === 80) && (!item.truncatedAfter || after === 80)
+      && column - 1n >= BigInt(before) && (item.truncatedBefore || column - 1n === BigInt(before)));
+    requireValue((!query.caseSensitive || item.match === query.text) && codePoints(item.match) === codePoints(query.text));
+    if (query.match === 'symbol') requireValue(!/[A-Za-z0-9_]$/u.test(item.before) && !/^[A-Za-z0-9_]/u.test(item.after));
+    if (previous?.fileId === item.fileId) {
+      requireValue(previous.displayName === item.displayName
+        && offset >= BigInt(previous.offsetBytes) + BigInt(new TextEncoder().encode(previous.match).length));
+    } else {
+      requireValue(!seen.has(item.fileId) && (previous === undefined || previous.displayName < item.displayName));
+    }
+    seen.add(item.fileId); previous = item;
+  }
+}
+
 /** Mirrors the shared verifier's cross-field rules; fixtures exercise both implementations. */
 export function checkSemantics(document: ContractDocument, basePath = '/'): void {
   function checkHref(href: string, resource: ApiResource) {
@@ -265,6 +318,9 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
     case 'run':
       checkRun(document.data);
       break;
+    case 'attemptControls':
+      checkAttemptControls(document.data);
+      break;
     case 'runs': {
       const { items, page, jobId } = document.data;
       requireValue(items.length <= page.limit && new Set(items.map(item => item.runId)).size === items.length);
@@ -287,6 +343,9 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
       break;
     case 'sourceChunk':
       checkSourceChunk(document.data);
+      break;
+    case 'sourceSearch':
+      checkSourceSearch(document.data);
       break;
     case 'revisionFile': {
       const { item, parentDirectoryId } = document.data;
@@ -326,6 +385,15 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
         requireValue(page.previousCursor === null || page.previousCursor !== page.currentCursor);
         requireValue(page.previousCursor === null || page.previousCursor !== page.nextCursor);
         requireValue(page.pageNumber === 1 || items.length > 0);
+      }
+      break;
+    }
+    case 'queuePosition': {
+      const sample = document.data;
+      if (sample.state === 'queued') {
+        requireValue(BigInt(sample.ahead) === BigInt(sample.position) - 1n);
+        requireValue(BigInt(sample.position) <= BigInt(sample.queuedTasks));
+        requireValue(BigInt(sample.activeWorkers) <= BigInt(sample.workerLimit));
       }
       break;
     }

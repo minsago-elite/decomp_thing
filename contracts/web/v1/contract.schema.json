@@ -700,9 +700,21 @@
                 "REFUSED",
                 "CANCELLED",
                 "LIMIT_EXHAUSTED",
+                "TIMED_OUT",
                 "FAILED",
+                "INFRASTRUCTURE_FAILED",
                 "PROCESS_INTERRUPTED"
               ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "recovery": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/runRecovery"
             },
             {
               "type": "null"
@@ -3585,6 +3597,311 @@
       ],
       "additionalProperties": false
     },
+    "sourceSearchMatch": {
+      "type": "object",
+      "properties": {
+        "fileId": {
+          "$ref": "#/definitions/id"
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "^(?!/)[^\\\\\\u0000-\\u001f\\u007f:]+$"
+        },
+        "sha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "line": {
+          "$ref": "#/definitions/uint64"
+        },
+        "column": {
+          "$ref": "#/definitions/uint64"
+        },
+        "offsetBytes": {
+          "$ref": "#/definitions/uint64"
+        },
+        "lineOffsetBytes": {
+          "$ref": "#/definitions/uint64"
+        },
+        "before": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "match": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "after": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "truncatedBefore": {
+          "type": "boolean"
+        },
+        "truncatedAfter": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "fileId",
+        "displayName",
+        "sha256",
+        "line",
+        "column",
+        "offsetBytes",
+        "lineOffsetBytes",
+        "before",
+        "match",
+        "after",
+        "truncatedBefore",
+        "truncatedAfter"
+      ],
+      "additionalProperties": false
+    },
+    "sourceSearch": {
+      "type": "object",
+      "properties": {
+        "binding": {
+          "type": "object",
+          "properties": {
+            "jobId": {
+              "$ref": "#/definitions/id"
+            },
+            "runId": {
+              "$ref": "#/definitions/id"
+            },
+            "revisionId": {
+              "$ref": "#/definitions/id"
+            }
+          },
+          "required": [
+            "jobId",
+            "runId",
+            "revisionId"
+          ],
+          "additionalProperties": false
+        },
+        "authority": {
+          "const": "source-input-commitments"
+        },
+        "sourceSha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "metadataVersion": {
+          "$ref": "#/definitions/sha256"
+        },
+        "query": {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "match": {
+              "enum": [
+                "text",
+                "symbol"
+              ]
+            },
+            "caseSensitive": {
+              "type": "boolean"
+            },
+            "directoryId": {
+              "$ref": "#/definitions/id"
+            },
+            "path": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 512
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "text",
+            "match",
+            "caseSensitive",
+            "directoryId",
+            "path"
+          ],
+          "additionalProperties": false
+        },
+        "index": {
+          "const": "none"
+        },
+        "status": {
+          "enum": [
+            "complete",
+            "partial"
+          ]
+        },
+        "stopReason": {
+          "anyOf": [
+            {
+              "enum": [
+                "result-limit",
+                "byte-limit",
+                "deadline"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "scope": {
+          "type": "object",
+          "properties": {
+            "filesInScope": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            },
+            "searchableFiles": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            },
+            "notViewable": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            },
+            "declaredBinary": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            },
+            "tooLarge": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            }
+          },
+          "required": [
+            "filesInScope",
+            "searchableFiles",
+            "notViewable",
+            "declaredBinary",
+            "tooLarge"
+          ],
+          "additionalProperties": false
+        },
+        "progress": {
+          "type": "object",
+          "properties": {
+            "scannedFiles": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            },
+            "scannedBytes": {
+              "$ref": "#/definitions/uint64"
+            },
+            "unsearchableText": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            },
+            "unavailableFiles": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            },
+            "remainingFiles": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            }
+          },
+          "required": [
+            "scannedFiles",
+            "scannedBytes",
+            "unsearchableText",
+            "unavailableFiles",
+            "remainingFiles"
+          ],
+          "additionalProperties": false
+        },
+        "coverageGaps": {
+          "type": "object",
+          "properties": {
+            "unsearchableText": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            },
+            "unavailableFiles": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            }
+          },
+          "required": [
+            "unsearchableText",
+            "unavailableFiles"
+          ],
+          "additionalProperties": false
+        },
+        "limits": {
+          "type": "object",
+          "properties": {
+            "maxResults": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            },
+            "maxScannedBytes": {
+              "$ref": "#/definitions/uint64"
+            },
+            "deadlineMs": {
+              "$ref": "#/definitions/uint64"
+            }
+          },
+          "required": [
+            "maxResults",
+            "maxScannedBytes",
+            "deadlineMs"
+          ],
+          "additionalProperties": false
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/sourceSearchMatch"
+          },
+          "maxItems": 100
+        },
+        "page": {
+          "$ref": "#/definitions/page"
+        }
+      },
+      "required": [
+        "binding",
+        "authority",
+        "sourceSha256",
+        "metadataVersion",
+        "query",
+        "index",
+        "status",
+        "stopReason",
+        "scope",
+        "progress",
+        "coverageGaps",
+        "limits",
+        "items",
+        "page"
+      ],
+      "additionalProperties": false
+    },
     "revisionFileDetail": {
       "type": "object",
       "properties": {
@@ -4676,6 +4993,355 @@
         "action"
       ],
       "additionalProperties": false
+    },
+    "resumeRestoration": {
+      "type": "string",
+      "enum": [
+        "agent-session",
+        "project-evidence"
+      ]
+    },
+    "runRecovery": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "retry",
+            "resume"
+          ]
+        },
+        "restores": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/resumeRestoration"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "checkpointSha256": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "mode",
+        "restores",
+        "checkpointSha256"
+      ],
+      "additionalProperties": false
+    },
+    "attemptControls": {
+      "type": "object",
+      "properties": {
+        "jobId": {
+          "$ref": "#/definitions/id"
+        },
+        "runId": {
+          "$ref": "#/definitions/id"
+        },
+        "runVersion": {
+          "$ref": "#/definitions/version"
+        },
+        "state": {
+          "$ref": "#/definitions/runState"
+        },
+        "inputRevisionId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cancel": {
+          "type": "object",
+          "properties": {
+            "available": {
+              "type": "boolean"
+            },
+            "reason": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/cancelReason"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "available",
+            "reason"
+          ],
+          "additionalProperties": false
+        },
+        "retry": {
+          "type": "object",
+          "properties": {
+            "available": {
+              "type": "boolean"
+            },
+            "reason": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/recoveryReason"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "available",
+            "reason"
+          ],
+          "additionalProperties": false
+        },
+        "resume": {
+          "type": "object",
+          "properties": {
+            "available": {
+              "type": "boolean"
+            },
+            "reason": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/resumeReason"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "available",
+            "reason"
+          ],
+          "additionalProperties": false
+        },
+        "resumeRestores": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/resumeRestoration"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "successorRunId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "jobId",
+        "runId",
+        "runVersion",
+        "state",
+        "inputRevisionId",
+        "cancel",
+        "retry",
+        "resume",
+        "resumeRestores",
+        "successorRunId"
+      ],
+      "additionalProperties": false
+    },
+    "cancelReason": {
+      "type": "string",
+      "enum": [
+        "RECOVERY_REQUIRED",
+        "ATTEMPT_TERMINAL",
+        "CANCEL_PENDING",
+        "SERVICE_STOPPED",
+        "NO_OWNED_WORKER",
+        "RECEIPT_CAPACITY"
+      ]
+    },
+    "recoveryReason": {
+      "type": "string",
+      "enum": [
+        "RECOVERY_REQUIRED",
+        "SERVICE_STOPPED",
+        "ATTEMPT_ACTIVE",
+        "ATTEMPT_COMPLETED",
+        "ATTEMPT_SUPERSEDED",
+        "ACTIVE_RUN",
+        "WORKFLOW_UNAVAILABLE",
+        "INPUT_UNVERIFIED",
+        "UPLOAD_CAPACITY",
+        "CAPACITY_UNAVAILABLE"
+      ]
+    },
+    "resumeReason": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/recoveryReason"
+        },
+        {
+          "type": "string",
+          "enum": [
+            "RESUME_UNSUPPORTED",
+            "HARNESS_CHANGED",
+            "CHECKPOINT_MISSING",
+            "CHECKPOINT_MISMATCH",
+            "CHECKPOINT_UNVERIFIED",
+            "WORKSPACE_UNVERIFIED",
+            "SESSION_QUARANTINED",
+            "CLEANUP_UNVERIFIED"
+          ]
+        }
+      ]
+    },
+    "queuePosition": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "jobId": {
+              "$ref": "#/definitions/id"
+            },
+            "runId": {
+              "$ref": "#/definitions/id"
+            },
+            "sampledAt": {
+              "$ref": "#/definitions/instant"
+            },
+            "state": {
+              "const": "queued"
+            },
+            "source": {
+              "const": "web-workflow-executor"
+            },
+            "approximate": {
+              "const": true
+            },
+            "position": {
+              "type": "string",
+              "pattern": "^([1-9]|[12][0-9]|3[0-2])$"
+            },
+            "ahead": {
+              "type": "string",
+              "pattern": "^([0-9]|[12][0-9]|3[01])$"
+            },
+            "queuedTasks": {
+              "type": "string",
+              "pattern": "^([1-9]|[12][0-9]|3[0-2])$"
+            },
+            "activeWorkers": {
+              "type": "string",
+              "pattern": "^[0-2]$"
+            },
+            "workerLimit": {
+              "type": "string",
+              "pattern": "^[1-2]$"
+            }
+          },
+          "required": [
+            "jobId",
+            "runId",
+            "sampledAt",
+            "state",
+            "source",
+            "approximate",
+            "position",
+            "ahead",
+            "queuedTasks",
+            "activeWorkers",
+            "workerLimit"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "jobId": {
+              "$ref": "#/definitions/id"
+            },
+            "runId": {
+              "$ref": "#/definitions/id"
+            },
+            "sampledAt": {
+              "$ref": "#/definitions/instant"
+            },
+            "state": {
+              "const": "not-queued"
+            },
+            "runState": {
+              "type": "string",
+              "enum": [
+                "running",
+                "cancelling",
+                "completed",
+                "failed",
+                "cancelled",
+                "interrupted"
+              ]
+            }
+          },
+          "required": [
+            "jobId",
+            "runId",
+            "sampledAt",
+            "state",
+            "runState"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "jobId": {
+              "$ref": "#/definitions/id"
+            },
+            "runId": {
+              "$ref": "#/definitions/id"
+            },
+            "sampledAt": {
+              "$ref": "#/definitions/instant"
+            },
+            "state": {
+              "const": "unavailable"
+            },
+            "reasonCode": {
+              "type": "string",
+              "enum": [
+                "EXTERNAL_EXECUTOR",
+                "NOT_IN_LOCAL_QUEUE"
+              ]
+            }
+          },
+          "required": [
+            "jobId",
+            "runId",
+            "sampledAt",
+            "state",
+            "reasonCode"
+          ],
+          "additionalProperties": false
+        }
+      ]
     }
   },
   "oneOf": [
@@ -5193,6 +5859,30 @@
           "const": 1
         },
         "kind": {
+          "const": "queuePosition"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/queuePosition"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
           "const": "progressPinRequest"
         },
         "data": {
@@ -5377,6 +6067,30 @@
           "const": 1
         },
         "kind": {
+          "const": "sourceSearch"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/sourceSearch"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
           "const": "revisionFile"
         },
         "requestId": {
@@ -5408,6 +6122,30 @@
         },
         "data": {
           "$ref": "#/definitions/validationHistory"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "attemptControls"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/attemptControls"
         }
       },
       "required": [
