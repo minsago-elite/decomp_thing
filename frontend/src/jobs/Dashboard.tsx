@@ -8,6 +8,8 @@ import type { Jobs } from '../api/generated';
 import { jobPath } from '../app/paths';
 import { DEFAULT_FILTERS, JOB_STATUSES, JobFilterError, filterSearch, jobFilters, jobLocation, jobPageSearch } from './query';
 import type { JobFilters } from './query';
+import { rememberFilterDraft, restoreFilterDraft } from './filterDraft';
+import type { DraftOwner } from './filterDraft';
 import { JobSummary } from './JobSummary';
 import { receive } from '../shared/receiptTime';
 import type { Received } from '../shared/receiptTime';
@@ -28,9 +30,10 @@ function snapshotPagination(page: Jobs['page'] | undefined): page is Jobs['page'
     typeof page.pageNumber === 'number' && Number.isSafeInteger(page.pageNumber) && page.pageNumber >= 1 && page.pageNumber <= 10000;
 }
 
-export function Dashboard({ basePath }: { basePath: string }) {
+export function Dashboard({ basePath, draftOwner = null }: { basePath: string; draftOwner?: DraftOwner | null }) {
   const [selection, setSelection] = useState(currentFilters);
-  const [draft, setDraft] = useState(selection.filters);
+  const [retainedDraft] = useState(() => restoreFilterDraft(draftOwner, basePath, filterSearch(selection.filters)));
+  const [draft, setDraft] = useState(retainedDraft?.draft ?? selection.filters);
   const [cursors, setCursors] = useState<(string | null)[]>([null]);
   const [pageIndex, setPageIndex] = useState(0);
   const [displayedPageIndex, setDisplayedPageIndex] = useState<number | null>(null);
@@ -39,7 +42,10 @@ export function Dashboard({ basePath }: { basePath: string }) {
   const data = observation?.value;
   const [phase, setPhase] = useState<'loading' | 'ready' | 'error'>('loading');
   const [error, setError] = useState('');
-  const [validationError, setValidationError] = useState<JobFilterError | null>(null);
+  const [validationError, setValidationError] = useState<JobFilterError | null>(retainedDraft?.validationError ?? null);
+  useEffect(() => {
+    rememberFilterDraft(draftOwner, basePath, filterSearch(selection.filters), draft, validationError);
+  }, [draftOwner, basePath, selection, draft, validationError]);
   const [pageNotice, setPageNotice] = useState('');
   const [livePaused, setLivePaused] = useState(false);
   const [liveDeferred, setLiveDeferred] = useState(false);
