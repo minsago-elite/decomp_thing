@@ -4306,6 +4306,7 @@ internal data class PinnedFileIdentity(
     val uid: Int,
     val size: Long,
     val modifiedMillis: Long,
+    val changedTime: FileTime,
     val metadataSha256: String,
 )
 
@@ -4372,6 +4373,7 @@ private class PinnedReadOnlyMount private constructor(
     private val descriptorSha256: String?,
 ) {
     private var mountedSnapshotUnlinked = false
+    @Volatile private var sealedSnapshotIdentity: PinnedFileIdentity? = null
     val expectedIdentity: PinnedFileIdentity get() = manifest.rootIdentity
     fun evidence(): AcpSandboxMountEvidence = AcpSandboxMountEvidence(
         sourcePathSha256 = sha256(mount.source.toString()),
@@ -4417,8 +4419,29 @@ private class PinnedReadOnlyMount private constructor(
         if (mountedSnapshotUnlinked) {
             val expectedDigest = descriptorSha256
                 ?: throw IOException("sealed runtime snapshot lacks a pinned content digest")
-            if (sha256(sourceDescriptor, limits.maximumUserOwnedFileBytes, cancellationCheck, statistics) != expectedDigest) {
-                throw IOException("sealed runtime snapshot bytes changed")
+            // Unlinking changes ctime. Verify bytes once against the pre-unlink identity, then
+            // compare the post-unlink identity (including kernel-owned ctime) on later checks.
+            var sealedIdentity = sealedSnapshotIdentity
+            if (sealedIdentity == null) synchronized(this) {
+                sealedIdentity = sealedSnapshotIdentity
+                if (sealedIdentity == null) {
+                    val beforeHash = readPinnedDescriptorIdentity(sourceDescriptor, cancellationCheck)
+                    if (beforeHash.copy(changedTime = manifest.rootIdentity.changedTime) != manifest.rootIdentity) {
+                        throw IOException("sealed runtime snapshot metadata changed")
+                    }
+                    if (sha256(sourceDescriptor, limits.maximumUserOwnedFileBytes, cancellationCheck, statistics) != expectedDigest) {
+                        throw IOException("sealed runtime snapshot bytes changed")
+                    }
+                    val afterHash = readPinnedDescriptorIdentity(sourceDescriptor, cancellationCheck)
+                    if (afterHash.copy(changedTime = manifest.rootIdentity.changedTime) != manifest.rootIdentity) {
+                        throw IOException("sealed runtime snapshot metadata changed while verifying its bytes")
+                    }
+                    sealedSnapshotIdentity = afterHash
+                    sealedIdentity = afterHash
+                }
+            }
+            if (readPinnedDescriptorIdentity(sourceDescriptor, cancellationCheck) != sealedIdentity) {
+                throw IOException("sealed runtime snapshot metadata changed")
             }
             return
         }
@@ -5475,7 +5498,7 @@ private fun readIdentity(
     cancellationCheck()
     val unix = Files.readAttributes(
         path,
-        "unix:dev,ino,mode,uid,size,lastModifiedTime",
+        "unix:dev,ino,mode,uid,size,lastModifiedTime,ctime",
         LinkOption.NOFOLLOW_LINKS,
     )
     val descriptor = LinuxFilesystemSyscalls.openAbsolutePathOrNull(path)
@@ -5493,9 +5516,38 @@ private fun readIdentity(
             uid = (unix.getValue("uid") as Number).toInt(),
             size = (unix.getValue("size") as Number).toLong(),
             modifiedMillis = (unix.getValue("lastModifiedTime") as FileTime).toMillis(),
+            changedTime = unix.getValue("ctime") as FileTime,
             metadataSha256 = sandboxMetadataSha256(descriptor, cancellationCheck),
         )
     }
+}
+
+internal fun readPinnedDescriptorIdentity(
+    descriptor: LinuxDescriptor,
+    cancellationCheck: () -> Unit = NO_SANDBOX_CHECKPOINT,
+): PinnedFileIdentity = descriptor.whileOpen { fd ->
+    cancellationCheck()
+    val unix = Files.readAttributes(
+        Path.of("/proc/self/fd/$fd"),
+        "unix:dev,ino,mode,uid,size,lastModifiedTime,ctime",
+    )
+    val device = (unix.getValue("dev") as Number).toLong()
+    val inode = (unix.getValue("ino") as Number).toLong()
+    val identity = LinuxFilesystemSyscalls.identity(fd)
+    if (identity.key.device != device || identity.key.inode != inode) {
+        throw IOException("pinned sandbox descriptor changed while reading its metadata")
+    }
+    PinnedFileIdentity(
+        device = device,
+        inode = inode,
+        mountId = identity.mountId,
+        mode = (unix.getValue("mode") as Number).toInt(),
+        uid = (unix.getValue("uid") as Number).toInt(),
+        size = (unix.getValue("size") as Number).toLong(),
+        modifiedMillis = (unix.getValue("lastModifiedTime") as FileTime).toMillis(),
+        changedTime = unix.getValue("ctime") as FileTime,
+        metadataSha256 = sandboxMetadataSha256(descriptor, cancellationCheck),
+    )
 }
 
 private fun sandboxMetadataSha256(
