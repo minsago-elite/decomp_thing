@@ -5,6 +5,7 @@ import decompengine.git.GitAvailability
 import decompengine.git.GitRuntime
 import decompengine.git.ManagedGitRepositories
 import decompengine.jobs.*
+import org.junit.jupiter.api.Test
 import kotlinx.serialization.json.*
 import java.net.InetSocketAddress
 import java.net.URI

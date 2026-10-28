@@ -336,7 +336,7 @@ class ManagedGitRepositories(
             val format = located.record.objectFormat
             val parent = commit?.let {
                 if (!commitExists(runner, located.gitDir, it)) throw ManagedGitException("NOT_FOUND", "The commit is not in this repository.")
-                GitReads.history(runner, located.gitDir, format, it, 0, 1).entries.single().parentObjectIds.firstOrNull()
+                GitReads.firstParent(runner, located.gitDir, format, it)
             }
             val listing = GitReads.diff(runner, located.gitDir, located.workTree, format, scope, commit, parent)
             val selected = fileId?.let { id ->

@@ -200,6 +200,26 @@ class ManagedGitRepositoriesTest {
         }.code)
     }
 
+    @Test fun `commit diff resolves a bounded parent without materializing history subjects`(): Unit = Fixture().use { f ->
+        val service = f.open()
+        val admission = service.request(jobId, GitRepositoryRequest.Init("run_1", "revision_1", null), "diff_parent_request_0001")
+        val completed = service.settle(admission)
+        assertEquals(GitOperationState.COMPLETED, completed.state, completed.message)
+        val directory = f.repositoryDirectory(completed.repositoryId)
+        val gitDir = directory.resolve("repository.git")
+        val workTree = directory.resolve("worktree")
+        val base = f.repositories.commitAll(gitDir, workTree, "base")
+        val tree = f.repositories.git("--git-dir=$gitDir", "rev-parse", "$base^{tree}").trim()
+        val message = f.repositories.root.resolve("large-subject")
+        Files.writeString(message, "x".repeat(GitReads.MAX_HISTORY_BYTES + 1))
+        val large = f.repositories.git("--git-dir=$gitDir", "commit-tree", tree, "-F", message.toString()).trim()
+        val child = f.repositories.git("--git-dir=$gitDir", "commit-tree", tree, "-p", large, "-m", "small child").trim()
+
+        val diff = service.diff(jobId, completed.repositoryId, GitDiffScope.COMMIT, child, null)
+        assertTrue(diff.listing.complete)
+        assertTrue(diff.listing.files.isEmpty())
+    }
+
     @Test fun `a retained snapshot that no longer matches its commitments is never published`(): Unit {
         for (change in listOf("modify", "delete")) Fixture().use { f ->
             if (change == "modify") f.write("src/main file.c", "int main(void) { return 1; }\r\n")
