@@ -155,10 +155,13 @@ data class GitExecutionLimits(
     val timeout: Duration = Duration.ofSeconds(30),
     val maxStdoutBytes: Int = 1024 * 1024,
     val maxStderrBytes: Int = 64 * 1024,
+    /** Hard and soft RLIMIT_AS, including mappings; null only for calls not requiring this bound. */
+    val maxAddressSpaceBytes: Long? = null,
 ) {
     init {
         require(!timeout.isNegative && !timeout.isZero && timeout <= Duration.ofMinutes(10))
         require(maxStdoutBytes in 1..64 * 1024 * 1024 && maxStderrBytes in 1..1024 * 1024)
+        require(maxAddressSpaceBytes == null || maxAddressSpaceBytes in 16L * 1024 * 1024..4L * 1024 * 1024 * 1024)
     }
 }
 
@@ -201,13 +204,18 @@ data class GitInvocation(
     companion object {
         val SUBCOMMANDS = setOf(
             "version", "init", "config", "check-ref-format", "rev-parse", "symbolic-ref", "for-each-ref",
-            "status", "read-tree", "fsck", "cat-file", "ls-files", "check-ignore", "update-ref",
+            "status", "read-tree", "fsck", "cat-file", "ls-files", "ls-tree", "check-ignore", "update-ref",
         )
     }
 }
 
 /** Runs the one trusted executable without a shell, a TTY, inherited environment or inherited config. */
-class GitCommandRunner internal constructor(val executable: Path, val environment: GitEnvironment) {
+class GitCommandRunner internal constructor(
+    val executable: Path,
+    val environment: GitEnvironment,
+    private val memoryLimiter: Path? = listOf(Path.of("/usr/bin/prlimit"), Path.of("/bin/prlimit"))
+        .firstOrNull { Files.isRegularFile(it) && Files.isExecutable(it) }?.toRealPath(),
+) {
     fun argv(invocation: GitInvocation): List<String> = buildList {
         add(executable.toString())
         add("--no-pager"); add("--no-replace-objects")
@@ -221,8 +229,16 @@ class GitCommandRunner internal constructor(val executable: Path, val environmen
     }
 
     fun run(invocation: GitInvocation): GitCommandResult {
+        val command = argv(invocation)
+        val boundedCommand = invocation.limits.maxAddressSpaceBytes?.let { bytes ->
+            // Use only the fixed server utility, never repository data or request/PATH lookup.
+            // prlimit execs Git under the bound; failure never falls back to unbounded Git.
+            val launcher = memoryLimiter ?: throw GitCommandException(GitCommandException.Kind.START_FAILED,
+                "The server cannot enforce the required Git memory bound.")
+            listOf(launcher.toString(), "--as=$bytes:$bytes", "--core=0:0", "--") + command
+        } ?: command
         val result = try {
-            GitSessionProcess(argv(invocation), environment.variables(executable),
+            GitSessionProcess(boundedCommand, environment.variables(executable),
                 invocation.workTree ?: invocation.gitDir ?: environment.root, invocation).execute()
         } catch (failure: LinkageError) {
             // Native containment is mandatory, never fall back to unowned ProcessBuilder children.

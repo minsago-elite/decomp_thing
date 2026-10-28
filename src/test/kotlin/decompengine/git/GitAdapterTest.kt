@@ -46,6 +46,16 @@ class GitAdapterTest {
         assertFalse(garbage.message.contains("PRIVATE_CANARY"))
     }
 
+    @Test fun `a required process memory ceiling is hard and soft and never falls back when unavailable`(): Unit = GitTestRepositories().use { f ->
+        val echo = fakeGit(f.root.resolve("memory-bound"), "ulimit -Sv; ulimit -Hv; ulimit -c")
+        val invocation = GitInvocation("version", limits = GitExecutionLimits(maxAddressSpaceBytes = 48L * 1024 * 1024))
+        assertEquals(listOf("49152", "49152", "0"), GitCommandRunner(echo, f.environment).run(invocation).text.trim().lines())
+        val unavailable = GitCommandRunner(echo, f.environment, memoryLimiter = null)
+        assertEquals(GitCommandException.Kind.START_FAILED, assertFailsWith<GitCommandException> { unavailable.run(invocation) }.kind)
+        // Ordinary non-import calls do not depend on the optional resource launcher.
+        assertTrue(unavailable.run(GitInvocation("version")).text.isNotBlank())
+    }
+
     @Test fun `argv is passed without a shell and the child environment is fixed`(): Unit = GitTestRepositories().use { f ->
         val marker = f.root.resolve("shell-ran")
         val echo = fakeGit(f.root.resolve("echo"), "for argument in \"\$@\"; do printf '[%s]\\n' \"\$argument\"; done; env | LC_ALL=C sort")
@@ -198,11 +208,14 @@ class GitAdapterTest {
     }
 
     @Test fun `branch names are validated by local syntax and check-ref-format`(): Unit = GitTestRepositories().use { f ->
-        listOf("main", "trunk", "feature/one", "release-1.2", "功能", "x_y").forEach {
+        // JSON Schema's character bounds count Unicode code points, not UTF-16 code units.
+        val supplementaryBranch = List(4) { "🚀".repeat(49) }.joinToString("/") + "x"
+        assertEquals(200, supplementaryBranch.codePointCount(0, supplementaryBranch.length))
+        listOf("main", "trunk", "feature/one", "release-1.2", "功能", "x_y", supplementaryBranch).forEach {
             assertEquals(it, GitRefNames.requireBranchName(f.runner, it))
         }
         listOf("", "-x", "--upload-pack=touch", "a..b", "a b", "x.lock", "a/.hidden", "@{u}", "HEAD", "@", "a\u0001", "a~1", "a^",
-            "a:b", "a?", "a*", "a[", "a\\b", "/a", "a/", "a//b", "a.", "x".repeat(201)).forEach { name ->
+            "a:b", "a?", "a*", "a[", "a\\b", "/a", "a/", "a//b", "a.", "x".repeat(201), supplementaryBranch + "x").forEach { name ->
             assertFailsWith<IllegalArgumentException>(name) { GitRefNames.requireBranchName(f.runner, name) }
         }
     }
