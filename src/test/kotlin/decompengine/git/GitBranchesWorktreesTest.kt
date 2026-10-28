@@ -322,6 +322,67 @@ class GitBranchesWorktreesTest {
         assertEquals(base, service.workspace(jobId, repositoryId, linked).observation.head.objectId)
     }
 
+    @Test fun `linked staging locks the common branch ref through index publication`(): Unit = Fixture().use { f ->
+        val base = f.prepare()
+        val primary = service.workspace(jobId, repositoryId).worktreeId
+        val branch = "linked-stage-lock"
+        val linked = run(GitRefRequest(GitOperationAction.WORKTREE_ADD, primary, guards().second,
+            objectId = base, name = branch)).worktreeId
+        val linkedPath = f.store.resolve("$jobId/git/repositories/$repositoryId/worktrees/$linked")
+        Files.writeString(linkedPath.resolve("src/linked.c"), "int linked_stage;\n")
+        val (view, stageGuards) = guards(linked)
+        val external = f.repositories.git("--git-dir=${f.gitDir()}", "commit-tree", "-p", base,
+            "-m", "external branch update", "$base^{tree}").trim()
+        var attempted = false
+        f.hook = { point ->
+            if (point == GitOperationCrashPoint.AFTER_WORKSPACE_VALIDATION) {
+                attempted = true
+                val output = f.repositories.git("--git-dir=${f.gitDir()}", "update-ref", "refs/heads/$branch", external, expect = 128)
+                assertTrue(output.contains("cannot lock ref", ignoreCase = true), output)
+            }
+        }
+        val staged = run(GitStageRequest(linked, stageGuards,
+            view.observation.status.entries.filter { it.untracked }.map { it.path.fileId(linked) }, true))
+        assertTrue(attempted)
+        assertEquals(GitOperationState.COMPLETED, staged.state, staged.message)
+        assertEquals(base, f.repositories.git("--git-dir=${f.gitDir()}", "rev-parse", "refs/heads/$branch").trim())
+    }
+
+    @Test fun `restart reclaims linked staging index and HEAD locks before an explicit retry`(): Unit = Fixture().use { f ->
+        val base = f.prepare()
+        val primary = service.workspace(jobId, repositoryId).worktreeId
+        val linked = run(GitRefRequest(GitOperationAction.WORKTREE_ADD, primary, guards().second, objectId = base)).worktreeId
+        val linkedPath = f.store.resolve("$jobId/git/repositories/$repositoryId/worktrees/$linked")
+        Files.writeString(linkedPath.resolve("src/retry.c"), "int linked_stage_retry;\n")
+        val (view, stageGuards) = guards(linked)
+        f.hook = { if (it == GitOperationCrashPoint.AFTER_RUNNING) throw SimulatedGitCrash() }
+        val admission = service.requestWorkspace(jobId, repositoryId, GitStageRequest(linked, stageGuards,
+            view.observation.status.entries.filter { it.untracked }.map { it.path.fileId(linked) }, true), "linked_stage_crash_01")
+        assertTrue(service.awaitIdle(60_000))
+        assertEquals(GitOperationState.RUNNING, service.operation(jobId, repositoryId, admission.operation.operationId).state)
+        service.close()
+        f.hook = {}
+
+        val operationId = admission.operation.operationId
+        val staging = f.store.resolve("$jobId/git/staging/$operationId")
+        val linkedGitDir = f.gitDir().resolve("worktrees").resolve(linked)
+        Files.createDirectories(staging)
+        for (name in listOf("index.lock", "HEAD.lock")) {
+            val marker = "decomp-operation:$operationId\n"
+            Files.writeString(staging.resolve(name), marker)
+            Files.createLink(linkedGitDir.resolve(name), staging.resolve(name))
+        }
+
+        service = f.open()
+        assertEquals(GitOperationState.INTERRUPTED, service.operation(jobId, repositoryId, operationId).state)
+        assertFalse(Files.exists(linkedGitDir.resolve("index.lock")))
+        assertFalse(Files.exists(linkedGitDir.resolve("HEAD.lock")))
+        val (current, currentGuards) = guards(linked)
+        val retried = run(GitStageRequest(linked, currentGuards,
+            current.observation.status.entries.filter { it.untracked }.map { it.path.fileId(linked) }, true))
+        assertEquals(GitOperationState.COMPLETED, retried.state, retried.message)
+    }
+
     @Test fun `switches keep ignored files, refuse option-like names and provenance sees every ref`(): Unit = Fixture().use { f ->
         val base = f.prepare()
         val worktree = service.workspace(jobId, repositoryId).worktreeId

@@ -328,14 +328,14 @@ internal object GitWorkspaceMutations {
 
     /** Also pin the symbolic HEAD's branch while a stage/unstage transaction publishes its index. */
     fun <T> withWorkspaceLocks(runner: GitCommandRunner, gitDir: Path, staging: Path, operationId: String,
-        format: GitObjectFormat, block: () -> T): T = withCommitLocks(gitDir, staging, operationId) {
+        format: GitObjectFormat, commonDir: Path = gitDir, block: () -> T): T = withCommitLocks(gitDir, staging, operationId) {
         val ref = GitRepositoryInspector.head(runner, gitDir, format).refName
         if (ref == null) block() else {
-            GitStorage.directories(gitDir, *ref.split('/').dropLast(1).toTypedArray())
+            GitStorage.directories(commonDir, *ref.split('/').dropLast(1).toTypedArray())
             Files.writeString(staging.resolve("ref-name"), ref)
             val witness = Files.createFile(staging.resolve("ref-lock"))
             GitStorage.forceDirectory(staging)
-            val file = gitDir.resolve("$ref.lock")
+            val file = commonDir.resolve("$ref.lock")
             try { Files.createLink(file, witness) } catch (_: FileAlreadyExistsException) {
                 refuse("WORKTREE_BUSY", "Another Git writer holds the reviewed branch lock. Nothing was staged.")
             }

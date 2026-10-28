@@ -889,7 +889,8 @@ class ManagedGitRepositories(
                     GitStorage.directories(directory, "staging", queued.operationId)
                     GitStorage.forceDirectory(staging.parent)
                     GitStorage.forceDirectory(directory)
-                    GitWorkspaceMutations.withWorkspaceLocks(runner, located.gitDir, staging, queued.operationId, located.record.objectFormat) {
+                    GitWorkspaceMutations.withWorkspaceLocks(runner, located.gitDir, staging, queued.operationId, located.record.objectFormat,
+                        located.commonDir) {
                         // External Git writers obey index.lock, not our JVM lease. Validation,
                         // private mutation and atomic publication all live inside that lock.
                         val reviewed = synchronized(lock) { validate(runner, located, request) }
@@ -1121,9 +1122,11 @@ class ManagedGitRepositories(
             // proven to belong to this operation; never replay an interrupted index publication.
             val record = repositories(jobId).singleOrNull { it.repositoryId == operation.repositoryId }
             if (record != null) {
-                val gitDir = root.resolve(jobId).resolve("git/repositories").resolve(record.repositoryId).resolve(GIT_DIR)
+                val commonDir = root.resolve(jobId).resolve("git/repositories").resolve(record.repositoryId).resolve(GIT_DIR)
+                val gitDir = if (operation.worktreeId == record.worktreeId) commonDir
+                    else commonDir.resolve("worktrees").resolve(operation.worktreeId)
                 GitWorkspaceMutations.reclaimCommitLocks(gitDir,
-                    root.resolve(jobId).resolve("git/staging").resolve(operation.operationId), operation.operationId)
+                    root.resolve(jobId).resolve("git/staging").resolve(operation.operationId), operation.operationId, commonDir)
             }
             return finish(operation, GitOperationState.INTERRUPTED, "INTERRUPTED",
                 "Interrupted by a server restart. Review the current index before a new request.")
