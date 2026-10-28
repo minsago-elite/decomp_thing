@@ -9,7 +9,10 @@ public final class RunBundledExports extends GhidraScript {
         BundledGhidraWorker.diagnosticsGuard();
         String[] arguments = getScriptArgs();
         if (arguments.length == 0) throw new IllegalArgumentException("No bundled exporters requested");
-        Set<String> exporters = Set.of("ExportProgramModel.java", "ExportRecoveredCallSites.java", "ExportDecompiledC.java", "ExportNativeCallsV1.class");
+        // The ordinary owned analyzer has a separate versioned candidate-writing entry point.
+        // Keep admission exact-name only; the retained GCC exporter remains a distinct protocol.
+        Set<String> exporters = Set.of("ExportProgramModel.java", "ExportProgramModelOwned.java",
+            "ExportRecoveredCallSites.java", "ExportDecompiledC.java", "ExportNativeCallsV1.class");
         for (int index = 0; index < arguments.length;) {
             String name = arguments[index++];
             if (!exporters.contains(name) || index == arguments.length) {
