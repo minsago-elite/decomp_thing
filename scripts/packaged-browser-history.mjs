@@ -61,7 +61,8 @@ export async function seedHistory(root) {
 export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready, browserOrigin }) {
   const tab = await makeTarget();
   const path = `/nested/jobs/${fixture.jobId}/runs`;
-  const rows = `Array.from(document.querySelectorAll('ul[aria-label="Recorded attempts"] a')).map(a => a.textContent)`;
+  // The first link of each row names the attempt; the row's view and source links follow it.
+  const rows = `Array.from(document.querySelectorAll('ul[aria-label="Recorded attempts"] > li > a:first-child')).map(a => a.textContent)`;
   await cdp.call('Page.navigate', { url: browserOrigin + path }, tab.sessionId);
   await ready(tab, `(${rows}).length === 50`, 'first populated attempt page');
   assert.deepEqual(await evaluate(tab, rows), Array.from({ length: 50 }, (_, i) => `reconstruct: run_fixture_${54 - i}`));
@@ -74,6 +75,22 @@ export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready
   await ready(tab, `document.querySelector('h1')?.textContent === 'Workflow attempt' && document.body.innerText.includes('18446744073709551615')`, 'earlier populated attempt');
   assert.ok(await evaluate(tab, `document.body.innerText.includes('not-evaluated') && document.body.innerText.includes('revision_fixture_3') && document.body.innerText.includes('Not reported')`));
   assert.equal(await evaluate(tab, 'location.pathname'), `${path}/run_fixture_3`);
+  // Browser history restores the saved history page and the earlier attempt's named evidence view.
+  const secondPage = Array.from({ length: 5 }, (_, i) => `reconstruct: run_fixture_${4 - i}`);
+  await evaluate(tab, 'history.back()');
+  await ready(tab, `location.pathname === '${path}' && location.search.startsWith('?cursor=') && (${rows}).length === 5`, 'Back restores the saved attempt-history page');
+  assert.deepEqual(await evaluate(tab, rows), secondPage);
+  assert.equal(await evaluate(tab, `document.querySelector('a[aria-label="Sources of revision revision_fixture_3 from attempt run_fixture_3"]')?.getAttribute('href')`),
+    `${path}/run_fixture_3/revisions/revision_fixture_3/sources/root`);
+  await evaluate(tab, `document.querySelector('a[href="${path}/run_fixture_3/evidence"]').click()`);
+  await ready(tab, `location.pathname === '${path}/run_fixture_3/evidence' && document.querySelector('h1')?.textContent === 'Attempt evidence' && document.body.innerText.includes('revision_fixture_3')`, 'earlier attempt evidence view from history');
+  await evaluate(tab, 'history.back()');
+  await ready(tab, `location.pathname === '${path}' && (${rows}).length === 5`, 'Back from evidence restores the saved attempt-history page');
+  assert.deepEqual(await evaluate(tab, rows), secondPage);
+  await evaluate(tab, 'history.forward()');
+  await ready(tab, `location.pathname === '${path}/run_fixture_3/evidence' && document.querySelector('h1')?.textContent === 'Attempt evidence'`, 'Forward restores the earlier attempt evidence view');
+  await evaluate(tab, `document.querySelector('nav[aria-label="Attempt views"] a[href="${path}/run_fixture_3"]').click()`);
+  await ready(tab, `location.pathname === '${path}/run_fixture_3' && document.querySelector('h1')?.textContent === 'Workflow attempt' && document.body.innerText.includes('revision_fixture_3')`, 'earlier attempt overview view');
   await cdp.call('Page.reload', {}, tab.sessionId);
   await ready(tab, `document.body.innerText.includes('revision_fixture_3')`, 'pinned earlier attempt reload');
   const progressEndpoint = `/nested/api/v1/jobs/${fixture.jobId}/runs/run_fixture_3`;
@@ -376,7 +393,7 @@ export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready
   });
   for (const name of ['input.elf', 'job.json']) assert.deepEqual(await fs.readFile(join(fixture.directory, name)), Buffer.from(fixture.retained[name]));
   assert.deepEqual(tab.exceptions, []);
-  return { activityUi: { emptyCutoverSnapshotAndSseResume: true, emptyCutoverFixtureRestored: true, expiredCursorShowsGap: true, explicitGapRecovery: true, appendedObservationViaSseWithoutPolling: true, appendedFixtureRestored: true, pausedReceiptAgeAdvances: true, receiptAgeIsNotSourceAge: true, exactObservedUsage: true, explicitUsageUnitsAndProvenance: true, durationWithoutRounding: true, missingPricingBasis: true, backgroundSuspendsReads: true, offlineSuspendsReads: true, recoveryReconcilesSnapshot: true, recoveryPreservesRows: true, lastReceivedTime: true, categoryAndTaskFilters: true, filtersPreserveCursor: true, exactAttemptLinks: true, correlationReferences: true, narrowViewport: 320, firstPage: 200, continuationPage: 5, keyboardStart: true, focusPreserved: true, pauseStopsPolling: true, resumeWithoutDuplicates: true, navigationStopsPolling: true, privateTextWithheld: true, politeStatusOnly: true }, progressPolling: true, nativeEventSourceMatchesPolling: true, targetPollingQuery: true, cursorAliasPreservesPage: true, privateProseAbsentFromResponses: true, privatePathsAbsentFromResponses: true, presentationOmissionsCounted: true, progressBytesRestoredAfterControlledAppend: true, fixtureAttempts: 55, firstPage: 50, secondPage: 5, exactOrder: true, cursorReload: true,
+  return { activityUi: { emptyCutoverSnapshotAndSseResume: true, emptyCutoverFixtureRestored: true, expiredCursorShowsGap: true, explicitGapRecovery: true, appendedObservationViaSseWithoutPolling: true, appendedFixtureRestored: true, pausedReceiptAgeAdvances: true, receiptAgeIsNotSourceAge: true, exactObservedUsage: true, explicitUsageUnitsAndProvenance: true, durationWithoutRounding: true, missingPricingBasis: true, backgroundSuspendsReads: true, offlineSuspendsReads: true, recoveryReconcilesSnapshot: true, recoveryPreservesRows: true, lastReceivedTime: true, categoryAndTaskFilters: true, filtersPreserveCursor: true, exactAttemptLinks: true, correlationReferences: true, narrowViewport: 320, firstPage: 200, continuationPage: 5, keyboardStart: true, focusPreserved: true, pauseStopsPolling: true, resumeWithoutDuplicates: true, navigationStopsPolling: true, privateTextWithheld: true, politeStatusOnly: true }, progressPolling: true, nativeEventSourceMatchesPolling: true, targetPollingQuery: true, cursorAliasPreservesPage: true, privateProseAbsentFromResponses: true, privatePathsAbsentFromResponses: true, presentationOmissionsCounted: true, progressBytesRestoredAfterControlledAppend: true, fixtureAttempts: 55, firstPage: 50, secondPage: 5, exactOrder: true, cursorReload: true, historyPageAndAttemptViewBackForward: true,
     earlierAttemptReload: true, previousInterruptedAttempt: true, exactUnsignedUsage: true,
     unacceptedCandidate: true, explorationSummary: true, nativeReportDownload: true, downloadedBytesMatch: true, reportBytesUnchanged: true, readPhaseRetainedBytesUnchanged: true, pinUi: { readBeforeChange: true, pinAndUnpinReconciled: true, auditedBrowserActor: true, otherAttemptDataPreserved: true }, mutationRequests: 2, executionStarted: false };
 }

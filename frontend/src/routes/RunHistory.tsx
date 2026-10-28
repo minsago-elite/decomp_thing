@@ -1,12 +1,12 @@
 import { runHistoryCopy as copy } from '../copy/history';
-import { message as displayMessage } from '../shared/messages';
+import { message as displayMessage, textMessage } from '../shared/messages';
 import { formatExactTimestamp } from '../jobs/metadataFormat';
 import { usePrivateTransport } from '../session/PrivateTransport';
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { useLocation } from 'preact-iso/router';
 import { ApiClientError, withApiFailureReference } from '../api/client';
 import type { Runs } from '../api/generated';
-import { jobPath, runPath } from '../app/paths';
+import { jobPath, runPath, runViewPath, sourceDirectoryPath } from '../app/paths';
 import type { BrowserSession } from '../session/session';
 import { useSession } from '../session/useSession';
 import { receive } from '../shared/receiptTime';
@@ -89,6 +89,13 @@ function History({ jobId, basePath, session }: { jobId: string; basePath: string
       <a href={runPath(basePath, jobId, run.runId)}>{run.workflow}: {run.runId}</a>
       <p>{displayMessage(copy.state, { state: run.state, acceptance: run.acceptance })}</p>
       <time dateTime={run.createdAt} title={run.createdAt}>{formatExactTimestamp(run.createdAt)}</time>
+      <p class="job-actions">
+        <a href={runViewPath(basePath, jobId, run.runId, 'activity')} aria-label={textMessage(copy.activityFor, { runId: run.runId })}>{copy.activity}</a>
+        <a href={runViewPath(basePath, jobId, run.runId, 'evidence')} aria-label={textMessage(copy.evidenceFor, { runId: run.runId })}>{copy.evidence}</a>
+        {run.resultRevisionId === null ? <span>{copy.noResultRevision}</span>
+          : <a href={sourceDirectoryPath(basePath, { jobId, runId: run.runId, revisionId: run.resultRevisionId })}
+            aria-label={textMessage(copy.sourcesFor, { runId: run.runId, revisionId: run.resultRevisionId })}>{copy.sources}</a>}
+      </p>
     </li>)}</ul>}
     <nav aria-label={copy.attemptHistoryPages}>
       <button type="button" disabled={loading || !cursor} onClick={first}>{copy.firstPage}</button>
