@@ -797,11 +797,46 @@ class WebJobService(
         return content
     }
 
+    /** Bounded literal search over the persisted candidate's canonical inputs; no index or body is retained. */
+    internal fun searchRevisionSources(jobId: String, runId: String, revisionId: String,
+        scan: (WebRevisionSourceSnapshot, (WebRevisionSourceFile) -> ByteArray?) -> kotlinx.serialization.json.JsonObject,
+    ): kotlinx.serialization.json.JsonObject {
+        val reference = revisionSourceReference(jobId, runId, revisionId)
+        val result = try { sourceCatalogEvidence.search(reference, ::readSourceInput, scan) }
+            catch (changed: WebAccessDenied) { throw changed }
+            catch (failure: Exception) {
+                if (failure is java.util.concurrent.CancellationException || failure is InterruptedException) throw failure
+                throw WebAccessDenied(503, "SOURCE_SEARCH_UNAVAILABLE", "The revision sources could not be searched within their limits.")
+            }
+        if (revisionSourceReference(jobId, runId, revisionId) != reference) revisionSourceChanged()
+        return result
+    }
+
     @Synchronized
     private fun readSourceInput(jobId: String, runId: String, path: String, maximumBytes: Long): decompengine.repair.StableRegularFile {
         requireInitializedRead()
         getAttempt(jobId, runId)
         return store.readSourceInput(jobId, runId, path, maximumBytes)
+    }
+
+    /**
+     * The recorded source snapshot of one ended attempt's persisted candidate, for managed
+     * repository initialization. The directory is only ever read by the Git service.
+     */
+    @Synchronized
+    internal fun gitSourceSnapshot(jobId: String, runId: String, revisionId: String): decompengine.git.GitSourceSnapshot {
+        fun unavailable(): Nothing = throw decompengine.git.ManagedGitException("SOURCE_REVISION_UNAVAILABLE",
+            "The selected attempt has no recorded source snapshot for that revision.")
+        requireInitializedRead()
+        val attempt = try { getAttempt(jobId, runId) } catch (_: WebJobServiceException) { unavailable() }
+        val candidate = attempt.candidate?.takeIf { it.revisionId == revisionId && attempt.endedAt != null } ?: unavailable()
+        val directory = try { store.runReportsDirectory(jobId, runId).resolve("source-tree") } catch (_: Exception) { unavailable() }
+        if (!java.nio.file.Files.isDirectory(directory, java.nio.file.LinkOption.NOFOLLOW_LINKS)) unavailable()
+        // Canonical build-input commitments, cross-checked with the manifest and build contract digest.
+        val sources = try { readRevisionSources(jobId, runId, revisionId) } catch (_: Exception) { unavailable() }
+        if (sources.reference.sourceSha256 != candidate.sourceSha256) unavailable()
+        val commitments = sources.files.associate { it.evidence.path to decompengine.git.GitSourceCommitment(it.evidence.sha256, it.sizeBytes) }
+        return decompengine.git.GitSourceSnapshot(directory, runId, revisionId, candidate.sourceSha256, commitments)
     }
 
     /** Shared fixed-path journal read for both HTTP adapters; absence is not empty history. */

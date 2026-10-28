@@ -41,6 +41,7 @@ const responses: Record<string, () => unknown> = {
   events: () => fixture('events-poll'),
   revisionDirectory: () => bound('revision-directory-root', selected),
   revisionFile: () => bound('revision-file-root', selected),
+  sourceSearch: () => bound('source-search-complete', selected),
   sourceCatalog: () => bound('source-catalog', { jobId, runId, revisionId: null }),
   validationHistory: () => bound('validation-history', { jobId, runId, revisionId: null }),
   recovery: () => fixture('recovery-empty'),
@@ -98,6 +99,8 @@ const privateRoutes: [name: string, path: string, rendered: string | RegExp][] =
   ['attempt evidence', `/nested/jobs/${jobId}/runs/${runId}/evidence`, 'Attempt identity'],
   ['source directory', `/nested/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/sources/root`, 'é space'],
   ['source file', `/nested/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-files/${fileId}`, 'Makefile'],
+  ['source search form', `/nested/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-search`, 'Enter text to search the recorded inputs of this revision.'],
+  ['source search results', `/nested/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-search?q=needle`, /Showing 4 matches on this page/],
   ['unknown page', '/nested/not-a-route', 'Page unavailable'],
 ];
 
