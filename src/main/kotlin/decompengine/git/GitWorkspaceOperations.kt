@@ -131,24 +131,29 @@ internal object GitWorkspaceMutations {
      * Pathspecs match descendants, and both add and reset resolve index file/directory conflicts
      * by removing ancestors. Neither direction may silently act on an unselected index entry.
      */
+    private fun GitPath.isDescendantOf(parent: GitPath): Boolean {
+        val parentBytes = parent.bytes
+        if (bytes.size <= parentBytes.size + 1) return false
+        for (index in parentBytes.indices) if (bytes[index] != parentBytes[index]) return false
+        return bytes[parentBytes.size] == '/'.code.toByte()
+    }
+
     private fun refuseOverlap(observation: GitWorkspaceObservation, selected: List<GitStatusEntry>, stage: Boolean) {
         val chosen = selected.toSet()
         // Reset also restores rename sources, so protect ancestors of every expanded path.
-        val paths = selected.flatMap { listOfNotNull(it.path.exact, it.originalPath?.exact.takeUnless { stage }) }
-        val prefixes = selected.flatMap { listOfNotNull(it.path.exact, it.originalPath?.exact) }.map { "$it/" }
+        val paths = selected.flatMap { listOfNotNull(it.path, it.originalPath.takeUnless { stage }) }
+        val prefixes = selected.flatMap { listOfNotNull(it.path, it.originalPath) }
         val overlapping = observation.status.entries.any { entry ->
             val purelyUntracked = entry.untracked && entry.staged == GitIndexChange.NONE && entry.unstaged == GitIndexChange.NONE
             if (entry in chosen || entry.ignored || purelyUntracked) false
             else {
-                val descendant = listOfNotNull(entry.path.exact, entry.originalPath?.exact).any { path ->
-                    prefixes.any { path.startsWith(it) }
+                val descendant = listOfNotNull(entry.path, entry.originalPath).any { path ->
+                    prefixes.any { path.isDescendantOf(it) }
                 }
                 // A staged deletion has no remaining index entry. Reset must also protect
                 // unselected staged ancestors that it would remove while restoring a child.
                 val ancestor = (stage || entry.staged != GitIndexChange.NONE) &&
-                    entry.staged != GitIndexChange.DELETED && entry.path.exact?.let { path ->
-                    paths.any { it.startsWith("$path/") }
-                } == true
+                    entry.staged != GitIndexChange.DELETED && paths.any { it.isDescendantOf(entry.path) }
                 descendant || ancestor
             }
         }

@@ -688,6 +688,36 @@ class GitWorkspaceMutationsTest {
         assertEquals(GitIndexChange.MODIFIED, service.workspace(jobId, repositoryId).observation.status.entries.single { it.path.exact == "src/util.c" }.staged)
     }
 
+    @Test fun `unstaging a rename refuses invalid native descendants beneath its original path`() {
+        for (format in listOf(GitObjectFormat.SHA1, GitObjectFormat.SHA256)) Fixture().use { f ->
+            val service = f.open(GitRepositoryPolicy(defaultBranch = "trunk", objectFormat = format))
+            val repositoryId = service.initialized()
+            val gitDir = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
+            val workTree = gitDir.parent.resolve("worktree")
+            fun raw(vararg args: String) = f.repositories.git("--git-dir=$gitDir", "--work-tree=$workTree", *args, cwd = workTree)
+            Files.writeString(workTree.resolve("a.c"), "int rename_source;\n")
+            f.repositories.commitAll(gitDir, workTree, "baseline")
+            raw("mv", "a.c", "b.c")
+            val invalidChild = Path.of(java.net.URI(workTree.toUri().toASCIIString() + "a.c/%FF.c"))
+            Files.createDirectories(invalidChild.parent)
+            Files.writeString(invalidChild, "int unselected;\n")
+            raw("add", "-A")
+
+            val (view, guards) = service.guards(repositoryId)
+            val invalidEntry = view.observation.status.entries.single { it.path.display == "a.c/\\xff.c" }
+            assertNull(invalidEntry.path.exact)
+            assertTrue(invalidEntry.path.bytes.contentEquals(byteArrayOf(97, 46, 99, 47, 0xff.toByte(), 46, 99)))
+            val rename = view.ids { it.path.exact == "b.c" && it.staged == GitIndexChange.RENAMED }
+            assertEquals(1, rename.size)
+            val indexBefore = raw("ls-files", "--stage")
+            assertEquals("SELECTION_OVERLAP", assertFailsWith<ManagedGitException> {
+                service.requestWorkspace(jobId, repositoryId,
+                    GitStageRequest(view.record.worktreeId, guards, rename, false), "native_overlap_${format.name}")
+            }.code)
+            assertEquals(indexBefore, raw("ls-files", "--stage"))
+        }
+    }
+
     @Test fun `unstaging a rename never touches staged entries beneath its original path`(): Unit = Fixture().use { f ->
         val service = f.open()
         val repositoryId = service.initialized()
