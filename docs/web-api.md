@@ -945,9 +945,12 @@ earlier page skipped a file.
 Each page reserves at most 32 MiB for body reads, including failures. Each read is bounded to its committed size
 (with a one-byte minimum for empty files), plus one reserved overflow-detection byte. `progress.scannedBytes`
 reports these reservations, not just successfully returned bytes. At least one eligible file fits each page. A page stops after
-2,000 ms of elapsed work (checked between files and before every 256 lines or 64 KiB of
-lines, so one line of at most 256 KiB is the largest unit between checks) and returns at most `limit` matches below a 900,000-byte item
-ceiling. `status: "partial"` with `stopReason` `result-limit`, `byte-limit` or
+2,000 ms of elapsed work (checked between files, before every 256 lines or 64 KiB of
+lines, and within matching after at most 256 candidate starts, each comparing at most
+128 code points) and returns at most `limit` matches below a 900,000-byte item ceiling.
+Matcher checks also observe thread interruption without clearing the interrupt flag.
+A deadline continuation resumes at the first untested UTF-8 candidate boundary within
+the line, rather than replaying its already searched prefix. `status: "partial"` with `stopReason` `result-limit`, `byte-limit` or
 `deadline` always has a signed `nextCursor`; `status: "complete"` has neither and
 `remainingFiles` is zero. `remainingFiles` counts searchable files not completely
 checked, including a file the page stopped inside. No total match count is computed.
@@ -966,8 +969,10 @@ points of context on each side with explicit truncation flags. There is no persi
 or cached index (`index: "none"`): offsets always come from bytes verified against the
 selected revision's commitments, so a replaced file cannot yield stale offsets. One
 search is admitted at a time (`429 SOURCE_SEARCH_BUSY`), separately from metadata
-capture admission. Client cancellation abandons the response; the server's elapsed
-deadline and byte budget bound the work it can continue after a disconnect.
+capture admission. Client cancellation abandons the response; it does not guarantee
+interruption of the server thread. The server's elapsed deadline and byte budget bound
+the work it can continue after a disconnect; these are cooperative checkpoints, not a
+hard wall-clock timeout on capture or I/O.
 
 The SPA route `jobs/J/runs/R/revisions/V/source-search` keeps the query in its closed
 document URL. Directory pages link to a search scoped to that directory. A search runs

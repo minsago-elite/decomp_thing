@@ -197,12 +197,18 @@ it.each(['root', directory])('refuses oversized bookmarked searches in %s and le
 });
 
 it('keeps coverage gaps from earlier pages on a final continued page', async () => {
-  vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockResolvedValueOnce(response(fixture('source-search-continued-gaps'))));
+  const continued = fixture('source-search-continued-gaps');
+  expect(continued.data.progress.unavailableFiles).toBe(0);
+  expect(continued.data.progress.unsearchableText).toBe(0);
+  vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockResolvedValueOnce(response(continued)));
   mount(`?q=needle&cursor=${cursor}`);
   const status = await screen.findByText(/Search finished, but 2 of the 3 searchable files could not be read as text/u);
   expect(status.closest('.source-search-status')?.classList.contains('source-search-status-incomplete')).toBe(true);
   expect(screen.queryByText(/All 3 searchable files in scope were checked/u)).toBeNull();
   expect(screen.getByText(/Coverage is incomplete: 2 files in scope were not searched\./u)).toBeTruthy();
+  const reasons = screen.getByText(/1 unavailable for reading/u).closest('ul')!;
+  expect(reasons.textContent).toContain('1 not valid UTF-8 text or with a line over 256 KiB');
+  expect(reasons.textContent).not.toContain('(this page)');
   expect(screen.getByText('This is a continued search page. Earlier matches are on previous pages.')).toBeTruthy();
 });
 

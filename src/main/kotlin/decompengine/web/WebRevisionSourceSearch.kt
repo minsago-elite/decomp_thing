@@ -138,6 +138,7 @@ internal class WebRevisionSourceSearch(
     }
 
     private class Stop(val reason: String, val fileIndex: Int, val offset: Int)
+    private class MatchDeadline(val nextStart: Int) : RuntimeException(null, null, false, false)
     private data class Continuation(val version: String, val fileIndex: Int, val offset: Int, val unsearchableText: Int, val unavailable: Int)
 
     private fun scan(owner: String, snapshot: WebRevisionSourceSnapshot, query: WebSourceSearchQuery,
@@ -176,7 +177,7 @@ internal class WebRevisionSourceSearch(
         var itemBytes = 0; var scannedFiles = 0; var scannedBytes = 0L; var unsearchableText = 0; var unavailable = 0
         var progressed = false
         var stop: Stop? = null
-        fun expired() = progressed && nanoTime() - started >= deadlineNanos
+        fun expired() = progressed && (Thread.currentThread().isInterrupted || nanoTime() - started >= deadlineNanos)
         files@ while (position < searchable.size) {
             val fileIndex = searchable[position]
             val file = snapshot.files[fileIndex]
@@ -198,7 +199,7 @@ internal class WebRevisionSourceSearch(
             var line = 1L + (0 until lineStart).count { bytes[it] == 10.toByte() }
             var linesSinceCheck = 0; var bytesSinceCheck = 0L
             while (lineStart < bytes.size) {
-                // Check before every 256 lines or 64 KiB, so even long lines cannot defer the deadline by more than one line.
+                // Bound inter-line work too; the matcher below checkpoints within long lines.
                 if (++linesSinceCheck >= 256 || bytesSinceCheck >= DEADLINE_CHECK_BYTES) {
                     linesSinceCheck = 0; bytesSinceCheck = 0
                     if (expired()) { stop = Stop("deadline", fileIndex, lineStart); position--; break@files }
@@ -207,9 +208,19 @@ internal class WebRevisionSourceSearch(
                 while (lineEnd < bytes.size && bytes[lineEnd] != 10.toByte()) lineEnd++
                 val text = String(bytes, lineStart, lineEnd - lineStart, Charsets.UTF_8)
                 val content = if (text.endsWith('\r')) text.dropLast(1) else text
-                var searchFrom = 0; var bytePosition = lineStart; var charPosition = 0
+                // Resume at the first untested candidate, not the start of this line: restarting a
+                // repetitive long line would time out forever or repeat matches from earlier pages.
+                var searchFrom = if (lineStart < from) String(bytes, lineStart, from - lineStart, Charsets.UTF_8).length else 0
+                var bytePosition = maxOf(lineStart, from); var charPosition = searchFrom
                 while (true) {
-                    val start = find(content, query, folded, searchFrom)
+                    val start = try {
+                        find(content, query, folded, searchFrom) { nextStart ->
+                            if (expired()) throw MatchDeadline(nextStart)
+                        }
+                    } catch (deadline: MatchDeadline) {
+                        val offset = bytePosition + utf8Length(content, charPosition, deadline.nextStart)
+                        stop = Stop("deadline", fileIndex, offset); position--; break@files
+                    }
                     if (start < 0) break
                     val end = content.offsetByCodePoints(start, width)
                     bytePosition += utf8Length(content, charPosition, start); charPosition = start
@@ -221,6 +232,12 @@ internal class WebRevisionSourceSearch(
                         stop = Stop("result-limit", fileIndex, bytePosition); position--; break@files
                     }
                     items += item; itemBytes += size
+                    // find's candidate counter restarts after a match. Check between calls too,
+                    // continuing after this emitted match so even dense results make progress.
+                    if (expired()) {
+                        val offset = bytePosition + utf8Length(content, charPosition, end)
+                        stop = Stop("deadline", fileIndex, offset); position--; break@files
+                    }
                 }
                 bytesSinceCheck += lineEnd + 1 - lineStart
                 lineStart = lineEnd + 1; line++
@@ -305,35 +322,36 @@ internal class WebRevisionSourceSearch(
 
         private fun identifier(character: Char) = character == '_' || character in 'a'..'z' || character in 'A'..'Z' || character in '0'..'9'
 
-        /** Next match start at or after [from], compared one code point at a time so indices stay in the original line. */
-        internal fun find(line: String, query: WebSourceSearchQuery, folded: String?, from: Int): Int {
-            var index = from
-            while (index <= line.length) {
-                val start = if (folded == null) line.indexOf(query.text, index).also { if (it < 0) return -1 }
-                    else foldedStart(line, folded, index) ?: return -1
-                val end = line.offsetByCodePoints(start, query.text.codePointCount(0, query.text.length))
-                if (query.match == WebSourceSearchMatch.TEXT ||
-                    ((start == 0 || !identifier(line[start - 1])) && (end == line.length || !identifier(line[end])))) return start
-                index = start + Character.charCount(line.codePointAt(start))
-            }
-            return -1
-        }
-
-        private fun foldedStart(line: String, folded: String, from: Int): Int? {
-            val needle = folded.codePoints().toArray()
+        /**
+         * Next match in original-line coordinates. At most 256 candidate starts (each comparing at
+         * most 128 code points) separate deadline/interruption checks, including rejected symbols
+         * and case-sensitive searches. [checkpoint] receives the first untested code-point boundary.
+         */
+        internal fun find(line: String, query: WebSourceSearchQuery, folded: String?, from: Int,
+            checkpoint: (Int) -> Unit = {}): Int {
+            val needle = folded?.codePoints()?.toArray()
             var start = from
+            var candidates = 0
             while (start < line.length) {
-                var position = start; var matched = true
-                for (expected in needle) {
-                    if (position >= line.length) return null
-                    val actual = line.codePointAt(position)
-                    if (Character.toLowerCase(Character.toUpperCase(actual)) != expected) { matched = false; break }
-                    position += Character.charCount(actual)
+                if (candidates++ == 256) { checkpoint(start); candidates = 1 }
+                var end = start
+                val matched = if (needle == null) {
+                    line.startsWith(query.text, start).also { if (it) end = start + query.text.length }
+                } else {
+                    var matches = true
+                    for (expected in needle) {
+                        if (end >= line.length) return -1
+                        val actual = line.codePointAt(end)
+                        if (Character.toLowerCase(Character.toUpperCase(actual)) != expected) { matches = false; break }
+                        end += Character.charCount(actual)
+                    }
+                    matches
                 }
-                if (matched) return start
+                if (matched && (query.match == WebSourceSearchMatch.TEXT ||
+                    ((start == 0 || !identifier(line[start - 1])) && (end == line.length || !identifier(line[end]))))) return start
                 start += Character.charCount(line.codePointAt(start))
             }
-            return null
+            return -1
         }
 
         private fun utf8Length(text: String, from: Int, to: Int): Int {
