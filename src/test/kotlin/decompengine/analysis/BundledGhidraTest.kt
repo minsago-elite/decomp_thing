@@ -564,8 +564,13 @@ class BundledGhidraTest {
                 }, TimeUnit.MILLISECONDS.toNanos(2));
                 await(sampled);
                 sampler.phase(JvmMxBeanDiagnostics.Phase.EXPORTER, "ExportProgramModel.java");
+                sampler.phase(JvmMxBeanDiagnostics.Phase.EXPORTER, "ExportProgramModelOwned.java");
+                sampler.phase(JvmMxBeanDiagnostics.Phase.EXPORTER, "ExportNativeCallsV1.class");
                 sampler.finish(true);
                 await(frames.terminal); frames.validate();
+                require(frames.all().contains("\"exporter\":\"ExportProgramModelOwned.java\""), "owned program-model exporter phase missing");
+                require(frames.all().contains("\"exporter\":\"ExportNativeCallsV1.class\""), "native-call exporter phase missing");
+                require(!frames.all().contains("internal_failure"), "known exporter rejected by diagnostics phase validation");
                 require(frames.all().contains("\"jvmCpuNanos\":null"), "unavailable CPU not explicit");
                 require(frames.all().contains("VM \\\"雪\\\"\\nname"), "UTF-8/JSON escaping");
                 require(frames.all().contains("\"outcome\":\"success\""), "success changed");
