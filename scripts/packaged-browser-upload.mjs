@@ -4,10 +4,28 @@ import { join } from 'node:path';
 
 async function readyForUpload(tab, ready) {
   // The authenticated shell can render before the lazy workspace and its picker.
+  // Keep session, route, and the enabled control in the actual upload panel under one deadline.
   await ready(tab, `location.pathname === '/nested/' &&
     document.body.innerText.includes('Local session connected.') &&
-    document.querySelector('section[aria-labelledby="upload-title"] input#binary-file[type="file"]:not(:disabled)') !== null`,
+    document.querySelector('section[aria-labelledby=\"upload-title\"] input#binary-file[type=\"file\"]:not(:disabled)') !== null`,
   'workspace upload control');
+}
+
+/** Wait for the lazy route, not just the independently rendered session header. */
+export async function selectUploadFixture({ tab, evaluate, ready, pickerReady = false }) {
+  if (!pickerReady) {
+    await ready(tab, `document.querySelector('#binary-file') !== null && !document.querySelector('#binary-file').disabled`, 'upload file picker');
+  }
+  await evaluate(tab, `(() => {
+    const bytes = new Uint8Array(64); bytes.set([127, 69, 76, 70, 2, 1, 1]);
+    const view = new DataView(bytes.buffer); view.setUint16(16, 2, true); view.setUint16(18, 62, true);
+    view.setUint32(20, 1, true); view.setUint16(52, 64, true);
+    view.setBigUint64(24, 0xffffffffffffffffn, true);
+    const transfer = new DataTransfer(); transfer.items.add(new File([bytes], 'inert-browser-fixture.elf'));
+    const picker = document.querySelector('#binary-file'); picker.focus(); picker.files = transfer.files;
+    picker.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+  await ready(tab, `document.body.innerText.includes('Selected: inert-browser-fixture.elf') && document.querySelector('button[type="submit"]')?.disabled === false`, 'upload selection rendered');
 }
 
 /** Isolated packaged-browser fixture: valid header only, never executable behavior. */
@@ -40,16 +58,10 @@ export async function qualifyUpload({ makeTarget, cdp, evaluate, ready, browserO
     };
   })();` }, tab.sessionId);
   await cdp.call('Page.navigate', { url: browserOrigin + '/nested/' }, tab.sessionId);
-  await readyForUpload(tab, ready);
-  const selectFixture = () => evaluate(tab, `(() => {
-    const bytes = new Uint8Array(64); bytes.set([127, 69, 76, 70, 2, 1, 1]);
-    const view = new DataView(bytes.buffer); view.setUint16(16, 2, true); view.setUint16(18, 62, true);
-    view.setUint32(20, 1, true); view.setUint16(52, 64, true);
-    view.setBigUint64(24, 0xffffffffffffffffn, true);
-    const transfer = new DataTransfer(); transfer.items.add(new File([bytes], 'inert-browser-fixture.elf'));
-    const picker = document.querySelector('#binary-file'); picker.focus(); picker.files = transfer.files;
-    picker.dispatchEvent(new Event('change', { bubbles: true }));
-  })()`);
+  const selectFixture = async () => {
+    await readyForUpload(tab, ready);
+    await selectUploadFixture({ tab, evaluate, ready, pickerReady: true });
+  };
   await selectFixture();
   assert.equal(await evaluate(tab, `document.activeElement.id`), 'binary-file');
   await evaluate(tab, `[...document.querySelectorAll('button')].find(button => button.textContent === 'Upload binary').focus()`);
@@ -152,12 +164,18 @@ export async function qualifyUploadFailures({ makeTarget, cdp, evaluate, ready, 
   await cdp.call('Page.navigate', { url: browserOrigin + '/nested/' }, tab.sessionId);
   await readyForUpload(tab, ready);
   const ids = (await fs.readdir(data)).filter(name => /^[a-f0-9]{32}$/.test(name));
+  let initialPickerReady = true;
   async function select(size, name) {
+    if (!initialPickerReady) {
+      await ready(tab, `document.querySelector('#binary-file') !== null && !document.querySelector('#binary-file').disabled`, 'upload file picker');
+    }
+    initialPickerReady = false;
     await evaluate(tab, `(() => {
       const transfer = new DataTransfer(); transfer.items.add(new File([new Uint8Array(${size})], ${JSON.stringify(name)}));
       const picker = document.querySelector('#binary-file'); picker.files = transfer.files;
       picker.dispatchEvent(new Event('change', { bubbles: true }));
     })()`);
+    await ready(tab, `document.body.innerText.includes(${JSON.stringify('Selected: ' + name)}) && document.querySelector('button[type="submit"]')?.disabled === false`, 'upload selection rendered');
   }
   async function button(label) {
     await evaluate(tab, `[...document.querySelectorAll('button')].find(button => button.textContent === ${JSON.stringify(label)}).click()`);
@@ -210,6 +228,7 @@ export async function qualifyMeasuredUpload({ makeTarget, cdp, evaluate, ready, 
     const picker = document.querySelector('#binary-file'); picker.files = files.files;
     picker.dispatchEvent(new Event('change', { bubbles: true }));
   })()`);
+  await ready(tab, `document.body.innerText.includes('Selected: measured-inert.elf') && document.querySelector('button[type="submit"]')?.disabled === false`, 'upload selection rendered');
   await cdp.call('Network.emulateNetworkConditions', {
     offline: false, latency: 20, downloadThroughput: 1048576, uploadThroughput: 32768,
   }, tab.sessionId);
