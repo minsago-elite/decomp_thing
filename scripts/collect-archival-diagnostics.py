@@ -60,7 +60,9 @@ def admitted_root(root, expected):
 
 
 def selected_path(parts):
-    return (parts[-2:] in (("reports", "build.log"), ("src", "main.c"))
+    return (parts[-2:] in (("reports", "build.log"), ("reports", "ghidra_stdout.log"),
+                           ("reports", "ghidra_stderr.log"), ("reports", "ghidra_resource_usage.json"),
+                           ("src", "main.c"))
             or (parts[-1].endswith(".log") and any(
                 parts[i:i + 3] == ("reports", "build", "modules") for i in range(len(parts) - 3))))
 
