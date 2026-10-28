@@ -38,29 +38,6 @@ import org.junit.jupiter.api.Tag
 @Tag("ci-live")
 class FullTreeFunctionObservationIsolatedFixtureRunnerTest {
     @Test
-    fun `frozen cgroup accounting failure names bounded differing counters and runtime context`() {
-        val diagnostic = frozenCgroupSampleDiagnostic(
-            eventsBefore = mapOf("max" to 0L, "oom" to 0L),
-            peakBefore = 4096L,
-            cpuBefore = mapOf("usage_usec" to 11L),
-            eventsAfter = mapOf("max" to 1L, "oom" to 0L),
-            peakAfter = 4096L,
-            cpuAfter = mapOf("usage_usec" to 12L),
-            frozen = 1L,
-            populated = 1L,
-            topology = "SINGLE_KOTLIN_COMMAND_KEEPER",
-            cgroupType = "domain",
-            kernelRelease = "6.8.0-example/secret",
-        )
-
-        assertTrue(diagnostic.contains("memory.events.max=0->1"))
-        assertTrue(diagnostic.contains("cpu.stat.usage_usec=11->12"))
-        assertTrue(diagnostic.contains("topology=SINGLE_KOTLIN_COMMAND_KEEPER"))
-        assertTrue(diagnostic.contains("cgroupType=domain"))
-        assertTrue(diagnostic.contains("kernel=6.8.0-examplesecret"))
-        assertTrue(!diagnostic.contains("/"), "diagnostic must not expose a filesystem path")
-    }
-    @Test
     fun `bounded BOOT fixture closure preserves exact worker native and policy resources without test dependencies`() {
         withDiskScratch { root ->
             val sources = boundedBootFixtureClassPathSources()

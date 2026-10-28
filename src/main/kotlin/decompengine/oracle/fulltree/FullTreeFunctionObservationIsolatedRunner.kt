@@ -6123,44 +6123,6 @@ private fun observationSystemdCleanupCommands(unitName: String): List<List<Strin
     )
 }
 
-internal fun frozenCgroupSampleDiagnostic(
-    eventsBefore: Map<String, Long>,
-    peakBefore: Long,
-    cpuBefore: Map<String, Long>,
-    eventsAfter: Map<String, Long>,
-    peakAfter: Long,
-    cpuAfter: Map<String, Long>,
-    frozen: Long?,
-    populated: Long?,
-    topology: String,
-    cgroupType: String?,
-    kernelRelease: String,
-): String {
-    fun changes(label: String, before: Map<String, Long>, after: Map<String, Long>): List<String> =
-        (before.keys + after.keys).toSortedSet().mapNotNull { key ->
-            val old = before[key]
-            val new = after[key]
-            if (old == new) null else "$label.$key=${old ?: "missing"}->${new ?: "missing"}"
-        }
-
-    val differences = buildList {
-        addAll(changes("memory.events", eventsBefore, eventsAfter))
-        if (peakBefore != peakAfter) add("memory.peak=$peakBefore->$peakAfter")
-        addAll(changes("cpu.stat", cpuBefore, cpuAfter))
-    }.take(16).joinToString(",").ifEmpty { "none" }
-    val safeKernel = kernelRelease
-        .filter { it.isLetterOrDigit() || it in ".-_+" }
-        .take(96)
-        .ifEmpty { "unknown" }
-    val safeType = cgroupType
-        ?.filter { it.isLetterOrDigit() || it in "-_" }
-        ?.take(32)
-        ?.ifEmpty { "unknown" }
-        ?: "unavailable"
-    return "isolated cgroup frozen sample mismatch: changed=[$differences], frozen=${frozen ?: "missing"}, " +
-        "populated=${populated ?: "missing"}, topology=$topology, cgroupType=$safeType, kernel=$safeKernel"
-}
-
 private data class RawObservationCgroupSample(
     val peakResidentBytes: Long,
     val cpuNanos: Long,
@@ -7129,26 +7091,7 @@ private class ManagedObservationUnit(
         if (
             eventsBefore != eventsAfter || peakBefore != peakAfter || cpuBefore != cpuAfter ||
             cgroupEvents["frozen"] != 1L || cgroupEvents["populated"] != 1L
-        ) {
-            val cgroupType = runCatching {
-                readBoundedText(cgroup.resolve("cgroup.type"), CGROUP_TEXT_BYTES).trim()
-            }.getOrNull()
-            isolationFail(
-                frozenCgroupSampleDiagnostic(
-                    eventsBefore = eventsBefore,
-                    peakBefore = peakBefore,
-                    cpuBefore = cpuBefore,
-                    eventsAfter = eventsAfter,
-                    peakAfter = peakAfter,
-                    cpuAfter = cpuAfter,
-                    frozen = cgroupEvents["frozen"],
-                    populated = cgroupEvents["populated"],
-                    topology = bootTopology.name,
-                    cgroupType = cgroupType,
-                    kernelRelease = System.getProperty("os.version", "unknown"),
-                ),
-            )
-        }
+        ) isolationFail("isolated cgroup accounting changed across its frozen sample")
 
         val peak = peakAfter
         val cpuUsec = cpuAfter["usage_usec"] ?: isolationFail("isolated cpu.stat lacks usage_usec")
