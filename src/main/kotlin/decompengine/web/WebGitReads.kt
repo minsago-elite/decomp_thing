@@ -16,6 +16,8 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import java.net.URLDecoder
 
+private const val MAX_GIT_PATH_DISPLAY_CODE_POINTS = 16_384
+
 /**
  * Bounded Git reads (#574, #575): `GET G/status`, `G/history`, `G/diff` and `G/refs`. Pages are
  * anchored to an exact object or work-tree version, so a moving ref cannot shift a later page;
@@ -160,7 +162,8 @@ internal class WebGitReads(private val repositories: () -> ManagedGitRepositorie
         val cursor = query["cursor"]
         if (cursor != null && query["start"] != null) throw WebAccessDenied(400, "INVALID_CURSOR", "Use start for a first page or cursor for a later one, not both.")
         val (start, offset) = if (cursor != null) {
-            val match = Regex("([0-9a-f]{40}|[0-9a-f]{64})~(0|[1-9][0-9]{0,6})").matchEntire(cursor)
+            // Match the reader's inclusive skip bound before any repository work, not a later 500.
+            val match = Regex("([0-9a-f]{40}|[0-9a-f]{64})~(0|[1-9][0-9]{0,5}|1000000)").matchEntire(cursor)
                 ?: throw WebAccessDenied(400, "INVALID_CURSOR", "The history cursor is invalid.")
             match.groupValues[1] to match.groupValues[2].toInt()
         } else (query["start"]?.also { requireObjectIdText(it) }) to 0
@@ -233,7 +236,7 @@ internal class WebGitReads(private val repositories: () -> ManagedGitRepositorie
         // A continuation names the listing it read through; any ref created, deleted or moved
         // before its offset changes that anchor, so the page cannot repeat or skip an entry.
         val (anchor, offset) = cursor?.let { value ->
-            Regex("refs~([0-9a-f]{32})~(0|[1-9][0-9]{0,5})").matchEntire(value)?.destructured?.let { (anchor, offset) -> anchor to offset.toInt() }
+            Regex("refs~([0-9a-f]{32})~(0|[1-9][0-9]{0,4}|100000)").matchEntire(value)?.destructured?.let { (anchor, offset) -> anchor to offset.toInt() }
                 ?: throw WebAccessDenied(400, "INVALID_CURSOR", "The refs cursor is invalid.")
         } ?: (null to 0)
         val service = repositories()
@@ -259,25 +262,40 @@ internal class WebGitReads(private val repositories: () -> ManagedGitRepositorie
         }
     }
 
-    private fun statusEntry(entry: GitStatusEntry, worktreeId: String) = buildJsonObject {
-        put("fileId", entry.path.fileId(worktreeId))
-        path(entry.path, entry.originalPath)
-        put("staged", entry.staged.wireName); put("unstaged", entry.unstaged.wireName)
-        put("untracked", entry.untracked); put("ignored", entry.ignored)
-        put("conflict", entry.conflict?.wireName?.let(::JsonPrimitive) ?: JsonNull)
-        put("submodule", entry.submodule)
+    private fun statusEntry(entry: GitStatusEntry, worktreeId: String): JsonObject {
+        requireGitPathDisplay(entry.path, "status")
+        entry.originalPath?.let { requireGitPathDisplay(it, "status") }
+        return buildJsonObject {
+            put("fileId", entry.path.fileId(worktreeId))
+            path(entry.path, entry.originalPath)
+            put("staged", entry.staged.wireName); put("unstaged", entry.unstaged.wireName)
+            put("untracked", entry.untracked); put("ignored", entry.ignored)
+            put("conflict", entry.conflict?.wireName?.let(::JsonPrimitive) ?: JsonNull)
+            put("submodule", entry.submodule)
+        }
     }
 
-    private fun diffFile(file: GitDiffFile, worktreeId: String) = buildJsonObject {
-        put("fileId", file.path.fileId(worktreeId))
-        path(file.path, file.originalPath)
-        put("change", file.change.wireName)
-        put("oldObjectId", file.oldObjectId?.let(::JsonPrimitive) ?: JsonNull)
-        put("newObjectId", file.newObjectId?.let(::JsonPrimitive) ?: JsonNull)
-        put("oldMode", file.oldMode); put("newMode", file.newMode); put("binary", file.binary)
-        put("additions", file.additions?.toString()?.let(::JsonPrimitive) ?: JsonNull)
-        put("deletions", file.deletions?.toString()?.let(::JsonPrimitive) ?: JsonNull)
-        put("newSizeBytes", file.newSizeBytes?.toString()?.let(::JsonPrimitive) ?: JsonNull)
+    private fun diffFile(file: GitDiffFile, worktreeId: String): JsonObject {
+        requireGitPathDisplay(file.path, "diff")
+        file.originalPath?.let { requireGitPathDisplay(it, "diff") }
+        return buildJsonObject {
+            put("fileId", file.path.fileId(worktreeId))
+            path(file.path, file.originalPath)
+            put("change", file.change.wireName)
+            put("oldObjectId", file.oldObjectId?.let(::JsonPrimitive) ?: JsonNull)
+            put("newObjectId", file.newObjectId?.let(::JsonPrimitive) ?: JsonNull)
+            put("oldMode", file.oldMode); put("newMode", file.newMode); put("binary", file.binary)
+            put("additions", file.additions?.toString()?.let(::JsonPrimitive) ?: JsonNull)
+            put("deletions", file.deletions?.toString()?.let(::JsonPrimitive) ?: JsonNull)
+            put("newSizeBytes", file.newSizeBytes?.toString()?.let(::JsonPrimitive) ?: JsonNull)
+        }
+    }
+
+    private fun requireGitPathDisplay(path: GitPath, resource: String) {
+        val display = path.display
+        if (display.codePointCount(0, display.length) > MAX_GIT_PATH_DISPLAY_CODE_POINTS) {
+            throw WebAccessDenied(422, "VALIDATION_FAILED", "A Git path exceeds the bounded $resource display limit.")
+        }
     }
 
     private fun kotlinx.serialization.json.JsonObjectBuilder.path(path: GitPath, original: GitPath?) {

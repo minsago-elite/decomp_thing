@@ -169,7 +169,7 @@ internal storage optimization and must not merge identity, permissions or histor
 | `GET`, `HEAD R/revisions/{revisionId}/source-files/{fileId}/content` | `200 application/octet-stream` | Complete authorized input download, at most 8 MiB; #491, #545 |
 | `GET J/revisions`, `GET V` | `200 revisions`, `200 revision` | Immutable source/acceptance bindings; #165/#199 |
 | `GET V/sources`, `GET V/sources/{fileId}` | `200 files`, `200 file` | Bounded tree/page/read; #165/#188/#189 |
-| `GET V/search` | `200 matches` | Explicit revision and query/byte/result/deadline bounds; #190 |
+| `GET`, `HEAD R/revisions/{revisionId}/source-search` | `200 sourceSearch` | Explicit revision and query/byte/result/deadline bounds over canonical inputs; replaces the reserved `V/search`; #547, #548 |
 | `GET J/artifacts`, `GET J/artifacts/{artifactId}` | `200 artifacts`, `200 artifact` | Optional run/revision filters validated together; #165/#192 |
 | `GET`/`HEAD J/artifacts/{artifactId}/content` | `200` or `206` bytes | Immutable digest binding, contained stream; #164/#192 |
 | `POST V/archive-verifications` | `202 operation` | Explicit bounded integrity verification, no binary execution; #193 |
@@ -607,7 +607,7 @@ of a snapshot is not copied into the work tree, which matches the archive transp
 | --- | --- |
 | Original binaries | `/input.elf`, `*.elf`, `*.bin`, `*.exe`, `*.dll`, `*.so`, `*.so.*`, `*.dylib`, `*.a`, `*.lib`, `*.o`, `*.obj`, `*.out` |
 | Credentials | `.env`, `.env.*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `id_rsa*`, `id_ecdsa*`, `id_ed25519*`, `.netrc`, `.git-credentials`, `.npmrc`, `.pypirc`, `*.token`, `credentials.json` |
-| Job databases and runtime state | `job.json`, `workflow-state.json`, `*.sqlite`, `*.sqlite3`, `*.db`, `*.db-journal`, `*.db-wal`, `.upload-*/`, `.job-metadata-*`, `.git-runtime/` |
+| Job databases and runtime state | `job.json`, `workflow-state.json`, `workflow-state.pending.json`, `*.sqlite`, `*.sqlite-journal`, `*.sqlite-wal`, `*.sqlite-shm`, `*.sqlite3`, `*.sqlite3-journal`, `*.sqlite3-wal`, `*.sqlite3-shm`, `*.db`, `*.db-journal`, `*.db-wal`, `*.db-shm`, `.upload-*/`, `.job-metadata-*`, `.git-runtime/` |
 | Private transcripts | `/transcripts/`, `/sessions/`, `*.transcript`, `*.jsonl`, `*.ndjson` |
 | Native build output | `/build/`, `/out/`, `cmake-build-*/`, `CMakeFiles/`, `CMakeCache.txt`, `cmake_install.cmake`, `build.ninja`, `.ninja_deps`, `.ninja_log`, `compile_commands.json`, `*.d`, `*.gcda`, `*.gcno` |
 | Transient evidence | `/reports/`, `/evidence/`, `*.log`, `*.tmp`, `*.swp`, `/tmp/`, `/.tmp/` |
@@ -631,17 +631,27 @@ is resolved to its real path and probed with `git version`. Versions older than 
 Bootstrap reports `runtime.gitVersion` as the bare numeric version, or `null` when none is
 detected, plus `git` and `git-import` capabilities. `git` is `unavailable` with `GIT_NOT_FOUND`,
 `GIT_VERSION_UNSUPPORTED` or `GIT_PROBE_FAILED`, and `supported` when the managed repository
-routes below are served. Every Git endpoint answers `503 CAPABILITY_UNAVAILABLE` with that reason's message when
-Git is unusable. The executable path never leaves the server.
+routes below are served. The `git-import` capability is unavailable when no operator-configured
+import root is present. Every Git endpoint answers `503 CAPABILITY_UNAVAILABLE` with that reason's message when
+Git is unusable. The executable path never leaves the server. Process containment requires the
+Linux x86-64/aarch64 LP64 runtime and glibc spawn extensions already used by the application;
+if native containment is unavailable, the startup probe fails closed (`GIT_PROBE_FAILED`).
 
-- **Argument safety.** `ProcessBuilder` receives a separate argv; no shell is involved. Callers
+- **Argument safety.** Native `posix_spawn` receives a separate argv; no shell is involved. Callers
   name one allowlisted subcommand and its arguments. Only the runner adds global options
   (`--no-pager`, `--no-replace-objects`, `--literal-pathspecs` except for `check-ignore`, which
   takes plain names, `-c` overrides, `--git-dir`, `--work-tree`). Arguments are bounded and contain no NUL. Branch names pass a local syntax check
   and then `git check-ref-format refs/heads/<name>`, so a value can never be parsed as an option.
 - **Bounds.** Each call has its own wall-clock limit (30 s by default) and stdout/stderr byte
-  limits (1 MiB and 64 KiB). Exceeding either kills the process and its descendants. Stdin is
-  closed. Captured stderr stays server-side; public errors use fixed messages.
+  limits (1 MiB and 64 KiB). A fresh session/process group is established atomically at spawn.
+  The adapter owns reaping and retains the unreaped leader until group cleanup, so descendants
+  cannot become unowned merely by outliving their direct parent. Normal exit, timeout, overflow,
+  truncation and interruption all kill the owned group **before** reaping; even children with
+  closed output pipes are covered. Nonblocking capture uses no reader threads and shares the
+  command deadline; failures get one additional five-second emergency cleanup budget. Stdin is
+  `/dev/null`. Captured stderr stays server-side; public errors use fixed messages. This is
+  control-plane cleanup for a trusted executable, not a hostile-code sandbox: a process deliberately
+  escaping with `setsid`/`setpgid` needs separate cgroup containment. Imported helpers remain refused.
 - **Environment.** The child receives a fresh environment: `PATH` (the executable's directory,
   `/usr/bin`, `/bin`), a server-owned `HOME` and `XDG_CONFIG_HOME`, `GIT_CONFIG_NOSYSTEM=1`,
   `GIT_CONFIG_GLOBAL` pointing to an empty server-owned file, `GIT_ATTR_NOSYSTEM=1`,
@@ -773,8 +783,12 @@ Each operation works in a private staging tree under the job's `git/staging/<ope
 registration record is written inside that tree before one atomic rename publishes it as
 `git/repositories/<repositoryId>`, and an existing name is never replaced. Readers therefore see
 either no repository or a complete one. Nothing is written under `reports/`, so a recorded or
-accepted source snapshot cannot be overwritten. On restart, and before an instance first uses a
-job, non-terminal records are reconciled. A published repository makes its operation
+accepted source snapshot cannot be overwritten. Startup prepares the private Git runtime and
+reconciles retained jobs; explicit mutation admission can also reconcile a job before use.
+GET routes never prepare runtime/storage or retry reconciliation. If startup recovery failed for
+a retained job, reads return `503 STORAGE_UNAVAILABLE` without changing its records or staging;
+only an explicit lifecycle recovery sweep or mutation admission may retry. Non-terminal records
+are reconciled under those authorities. A published repository makes its operation
 `completed`. Otherwise the staging tree is removed and the operation becomes `interrupted` with
 `recoveryRequired: false`. If removal fails, it becomes `recovery-required` and the tree is kept
 for inspection. Reconciliation never repeats work. Replaying the original key reports the
@@ -810,6 +824,10 @@ single initialization action from the latest attempt's candidate. The full Git U
 They accept only their listed query parameters, each at most once. `limit` is 1-200 and defaults
 to 50, and pages also stop early at a 256 KiB rendering budget. No read runs a hook, filter,
 textconv, external diff tool or submodule command, and no read refreshes the index with a lock.
+Every GitReads child also has a hard and soft 512 MiB address-space ceiling, including raw/numstat
+comparisons, selected patches and object-size reads. Enforcement is fail-closed; a missing limiter
+or an allocation failure returns an explicit repository-unavailable/corrupt error, never an
+unbounded retry.
 
 - `status` (`gitStatus`) parses `git status --porcelain=v2 -z --untracked-files=all
   --ignored=matching --find-renames` byte by byte. Each entry reports its `staged` and `unstaged`
@@ -819,13 +837,15 @@ textconv, external diff tool or submodule command, and no read refreshes the ind
   `notices` explain the current state and its available next steps: clean, dirty, unborn,
   detached, conflicted, busy (a queued or running operation) and incomplete (status output
   exceeded 4 MiB). The read itself stays usable in every one of those states. The cursor is bound to
-  `worktreeVersion`; once anything observable changes, a later page answers `409 REF_CHANGED`.
+  `worktreeVersion` plus all listed paths/states, including ignored entries; observable listing
+  changes cause a later page to answer `409 REF_CHANGED`.
 - `worktreeVersion` now digests HEAD plus every non-ignored status entry. That includes the
   entry's index blob and the work-tree file's size and modification time, so re-editing an
   already modified file or re-staging different content changes it. Native invalid-UTF-8 names
   are observed using their exact filesystem bytes, not their escaped display names. Observation
   errors other than a missing file fail explicitly rather than supplying a stable placeholder.
-  Ignored files never change this version.
+  Ignored files never change this version. This is a bounded read fingerprint, not a source-content
+  identity: edits preserving size/mtime or beyond the status output bound may leave it unchanged.
 - `history` (`gitHistory`) lists commits from an exact `start` object (default HEAD; an unborn
   branch has none). The output is NUL-delimited `git log` with full object IDs, all parents (merges
   included), author, timestamps and a 200-character subject with an explicit truncation flag.
@@ -844,7 +864,10 @@ textconv, external diff tool or submodule command, and no read refreshes the ind
   modes, line counts and a binary flag (`-` counts mean binary). The new blob's size comes from
   `cat-file --batch-check` without reading the content. `file=<fileId>` returns that file alone
   with a unified patch of at most 128 KiB, flagged `truncated` when cut. Binary files never
-  render content. Managed `info/attributes` restores automatic binary detection with `!diff`,
+  render content. Text patches whose current or original path is invalid UTF-8 or exceeds the
+  runner's 4,096 UTF-16-code-unit argument bound return `422 PATCH_UNAVAILABLE`; the exact listing
+  identity and display entry remain available, including for trees never checked out at HEAD.
+  Managed `info/attributes` restores automatic binary detection with `!diff`,
   overriding source-controlled forced-text/binary/driver attributes. The exact previous managed
   attributes layout is atomically upgraded on audit; unrecognized layouts are rejected without
   rewriting them. No source or index bytes change during that upgrade. Abbreviated object IDs
@@ -898,10 +921,18 @@ Selecting that entry for `git.unstage` unstages the deletion, and selecting it f
 stages the replacement. Its staged deletion remains protected by overlap checks: an untracked
 replacement does not allow another selected path to silently unstage the deletion.
 
-The server checks guards and selection at admission under the job lock and again by the single
-operation executor immediately before Git runs. Commits additionally acquire Git's `index.lock`
-and `HEAD.lock`, revalidate, and capture the reviewed index into a private immutable tree. The
-commit uses that tree and the reviewed parent, never the later live index. Publication locks the
+The server checks guards and selection at admission under the job lock. Mutation worktree
+versions additionally bind bounded exact content/mode commitments for non-ignored status paths;
+the metadata-only pagination fingerprint is not staging authorization. Status must be complete.
+Stage/unstage acquire Git's `index.lock`, `HEAD.lock` and the symbolic HEAD's branch lock before
+final validation. They mutate a private index and atomically publish it under those locks, so an
+external Git writer cannot invalidate overlap checks between validation and mutation. Unstage
+resets against the guarded parent object ID, not mutable `HEAD`. Stage captures selected file/link
+bytes, verifies their reviewed commitments, and writes exact blob/index entries from the capture;
+later worktree edits never supply unreviewed bytes to Git. Content reads share a 512 MiB bound and
+fail closed on drift, unsupported entries or overflow; partial private mutations are not published.
+Commits acquire `index.lock` and `HEAD.lock`, revalidate, and capture the reviewed index into a
+private immutable tree. The commit uses that tree and the reviewed parent, never the later live index. Publication locks the
 target ref, compares the reviewed HEAD under that lock, and atomically replaces the ref. Busy
 writers or a changed parent are refused; no unreviewed index entries can enter the commit.
 Because read-only status suppresses submodules, commit validation separately reads a bounded,
@@ -947,8 +978,8 @@ never turns that commit into an apparently uncommitted failure. Other post-publi
 report `recovery-required`, retaining the exact published `resultObjectId` when known, rather
 than reading a possibly later writer's HEAD as this operation's result.
 
-After a restart, stage and unstage operations become `interrupted`, since the index may have been
-partly updated and status must be re-read. Commit locks have private inode witnesses persisted
+After a restart, stage and unstage operations become `interrupted`: their index publication may
+have completed, so status must be re-read; they are never replayed. All mutation locks have private inode witnesses persisted
 before the public lock names are linked, so owned locks can be reclaimed even with empty or
 partial contents. A replacement inode is never reclaimed on the basis of matching contents when
 a witness exists. Complete operation markers from older versions remain recoverable; legacy
@@ -1251,7 +1282,7 @@ manifest bytes. File hashes and the `declaredUtf8Text`/`declaredViewable` flags 
 manifest declarations; this read does not verify source bodies, text encoding or
 acceptance. It creates no immutable project revision or release relationship.
 The planned revision-scoped source routes above remain separate work. Bootstrap's
-source chunk limit remains zero until a source text producer is implemented.
+source chunk limit reports the revision chunk reader's enforced 131,072-byte range ceiling.
 
 In-memory controls exercise the 25,000-record capture/page workload, scoped cursor
 refusal, byte-limited continuation and changed capture refusal. They do not qualify
@@ -1300,7 +1331,7 @@ malformed, unsupported or oversized metadata has a fixed unavailable response.
 This endpoint lists only the canonical build input set. The observed catalog above
 continues to describe other manifest entries. Reads outside that committed input set,
 UI/HTTP/performance qualification and accepted publication remain open;
-bootstrap source chunk advertising stays zero. In-memory controls cover canonical
+bootstrap advertises the chunk reader's range ceiling. In-memory controls cover canonical
 identity, conflicts, exact large sizes/Unicode, 25,000 commitments, paging and capture
 admission. They do not establish the D0 physical source workload or delivery budgets.
 
@@ -1386,7 +1417,8 @@ Each chunk currently verifies a complete bounded file before returning its range
 No timing, RSS, physical deep-path or actual HTTP/browser qualification is inferred
 from captured-byte controls. General viewer qualification, all-manifest/log/report
 families, local highlighting and full D0 physical budgets remain open. Bootstrap
-source chunk advertising remains zero pending those gates.
+source chunk advertising reports the enforced 131,072-byte range ceiling; it does not
+qualify those gates.
 
 ### Explicit source download digest observation
 
@@ -1411,8 +1443,8 @@ and preserves it for the existing generation-bound session invalidation observer
 Other statuses or missing, combined and unknown error codes grant no session signal.
 Navigation, metadata refresh and session removal discard the observation and
 cancel its read. Metadata reads still report `contentVerification: not-performed`;
-they do not start this check. The actual source-chunk bootstrap permission stays
-zero. A matching file digest is separate from compilation, behavioral validation,
+they do not start this check. Bootstrap source-chunk advertising reports the
+reader's range ceiling. A matching file digest is separate from compilation, behavioral validation,
 archive verification and accepted reconstruction. The general snapshot artifact
 catalog and its full family/verification requirements remain outstanding.
 
@@ -1420,6 +1452,82 @@ The new controls use only captured byte arrays, synthetic identities, DTOs and
 injected string lookups. Actual source HTTP/browser qualification and physical
 D0 time/memory/workload evidence remain unproved; no new actual context trial is
 introduced by those controls.
+
+### Bounded revision source search
+
+`GET`/`HEAD jobs/J/runs/R/revisions/V/source-search` searches the canonical input set of
+the same persisted candidate used by the revision source routes, through the same private
+read policy and descriptor-pinned source reader. It never reads a path outside that input
+set, another job or run, or a host location: candidates come only from the captured
+manifest/build-contract snapshot, and display labels never select files.
+
+The closed query grammar accepts `q` (required; 1–128 code points, nonblank, one line,
+no C0/C1 controls), `match=text|symbol` (default `text`), `case=sensitive|insensitive`
+(default `sensitive`), `directory` (an opaque directory ID from the directory listing,
+default `root`), `path` (an optional literal substring of the recorded relative path, at
+most 256 code points), `limit` (1–100 results, default 50) and `cursor`. Unknown,
+repeated, malformed percent escapes or invalid UTF-8 values return `422`; an unknown
+directory returns `SOURCE_DIRECTORY_NOT_FOUND`. `text` finds non-overlapping literal
+occurrences within one line. `symbol` requires one C identifier and reports only
+occurrences bounded by non-identifier ASCII characters. Insensitive comparison folds each
+code point independently (`toLowerCase(toUpperCase(c))`), so matched text keeps the
+query's code point count; the path filter uses the same case rule. Matches never span
+an LF; a CR before LF is excluded from context.
+
+Only inputs declared `VIEWABLE` and `UTF8_TEXT` within the 8 MiB reader ceiling are
+read. `scope` partitions the files in the selected directory/path scope into searchable,
+not-viewable, declared-binary and too-large counts. Each read body must match its
+committed size and SHA-256; a mismatch refuses the page with `409
+SOURCE_REVISION_CHANGED`. Bodies that fail the preview reader's UTF-8/256 KiB line rule
+count as `progress.unsearchableText`; unreadable bodies count as
+`progress.unavailableFiles`. Both counts describe the current page only;
+`coverageGaps` carries the same two counts cumulatively from the first page through
+signed continuations, so a final continued page cannot report complete coverage after an
+earlier page skipped a file.
+
+Each page reads at most 32 MiB of bodies (failed reads are charged their committed size; at least one file is always read), stops after
+2,000 ms of elapsed work (checked between files, before every 256 lines or 64 KiB of
+lines, and within matching after at most 256 candidate starts, each comparing at most
+128 code points) and returns at most `limit` matches below a 900,000-byte item ceiling.
+Matcher checks also observe thread interruption without clearing the interrupt flag.
+A deadline continuation resumes at the first untested UTF-8 candidate boundary within
+the line, rather than replaying its already searched prefix. `status: "partial"` with `stopReason` `result-limit`, `byte-limit` or
+`deadline` always has a signed `nextCursor`; `status: "complete"` has neither and
+`remainingFiles` is zero. `remainingFiles` counts searchable files not completely
+checked, including a file the page stopped inside. No total match count is computed.
+The cursor binds the session, job, run, revision, exact normalized query and limit,
+captured metadata version, file position, byte offset and cumulative coverage gaps.
+Encoded document queries are limited to 4,096 characters; the SPA refuses a search whose
+encoded text and path filter exceed 3,200 characters, leaving room for any cursor, the limit
+and the API path within the 4,096-character URL ceilings. Another session or query
+returns `400 INVALID_CURSOR`; a changed metadata observation returns `410 CURSOR_EXPIRED`.
+Every page performs a full revision source capture before and after its scan and
+compares their metadata versions, then rechecks the persisted candidate.
+
+Results include the opaque file ID, recorded label and SHA-256, 1-based LF line and
+code point column, exact byte offset of the match and of its line, and at most 80 code
+points of context on each side with explicit truncation flags. There is no persistent
+or cached index (`index: "none"`): offsets always come from bytes verified against the
+selected revision's commitments, so a replaced file cannot yield stale offsets. One
+search is admitted at a time (`429 SOURCE_SEARCH_BUSY`), separately from metadata
+capture admission. Client cancellation abandons the response; it does not guarantee
+interruption of the server thread. The server's elapsed deadline and byte budget bound
+the work it can continue after a disconnect; these are cooperative checkpoints, not a
+hard wall-clock timeout on capture or I/O.
+
+The SPA route `jobs/J/runs/R/revisions/V/source-search` keeps the query in its closed
+document URL. Directory pages link to a search scoped to that directory. A search runs
+only on explicit submission or continuation, and results link to
+`source-files/F?sourceSha256=…&metadataVersion=…&byte=<line offset>&line=<line>`, so the
+file view checks the same source and metadata commitments and opens that line. The
+status area distinguishes complete matches, complete searches without matches, coverage
+gaps from skipped or unreadable files, and incomplete pages (including incomplete pages
+without matches) with their stop reason and a continuation control. Navigation,
+refinement and session changes abort the current request and withhold late results.
+Pure Kotlin controls compare results to independent byte-offset truth over Unicode,
+CRLF and markup text, multi-megabyte files and paged continuations, and exercise the
+deadline, byte budget, cursor binding and digest refusal; they do not measure physical
+latency or memory on the D0 workload.
 
 ## SPA recorded source navigation
 
@@ -1447,8 +1555,8 @@ binding, metadata version and opaque parent ID. It neither requires body permiss
 to explain an excluded entry nor requests the selected file's body. The UI labels
 these as commitments, explains unsupported preview/download declarations and the
 8 MiB reader limit, and offers an explicit authorized attachment link when applicable.
-Bootstrap source-chunk advertising stays zero; the UI does not enable text reads
-under that report. A capability from 1 to 3 bytes is also too small for the reader's
+Bootstrap advertises the chunk reader's enforced 131,072-byte range ceiling, so the
+explicit preview below is available; a zero report keeps text reads disabled. A capability from 1 to 3 bytes is also too small for the reader's
 minimum UTF-8 range and remains disabled.
 
 Source reads clear the previous selection before a different request can render,
@@ -1599,6 +1707,37 @@ Provider reasoning (`agent_thought_chunk`, role `thought`) is private. The journ
 its position, role, completion and `textOmitted: true`; it never buffers, stores, measures or
 commits to its text. Public projection also withholds `contentSha256`/`chunkCharacters` from
 older thought records. The ACP client never requests reasoning and no workflow depends on it.
+
+## Artifact identity normalization and snapshot containment
+
+Versioned routes accept only opaque, closed-syntax identities (`jobId`, `runId`, `artifactId`, `fileId`,
+`directoryId`) and never a host path. Legacy routes that still name report files by URL path decode the raw path
+exactly once, per segment, through `WebPublicIdentity`: RFC 3986 percent-decoding (`+` is a literal plus), strict
+UTF-8, and the result must already be the canonical spelling. Empty, `.`/`..`, encoded or literal `/` and `\`, `:`
+(drive and stream separators), NUL and other controls, Unicode format characters (including supplementary code points), non-NFC spellings, a `%` that
+survives decoding (double encoding), Windows device names (`CON`, `NUL`, `COM1`...), trailing dots or spaces,
+segments over 255 bytes and paths over 32 segments are refused with `400 INVALID_REQUEST`; an encoded separator that
+changes the segment count is refused too.
+
+Validation grants nothing by itself. Every report, input, source and archive read opens files through the
+descriptor-pinned `JobStore` containment boundary (`readStableRegularFile`/`hashStableRegularFile`), which opens each
+component without following links, reads only through the pinned descriptor and revalidates every binding after the
+read. It has exactly three outcomes: the bytes of an unchanged admitted file; unavailable (missing, symbolic link,
+special file or outside the namespace), served as a sanitized `404`; or changed during the read (concurrent
+publication, replacement or deletion), served as `409 ARTIFACT_CHANGED`. Every descriptor is closed before either
+refusal is returned. `JobStore.artifactReceipt` streams one file to a size/digest receipt scoped `observed-digest`
+(the digest of the bytes observed now, not a committed digest); `sourceArchiveReceipts` requires two complete bounded
+receipt passes with identical sizes, digests and identities, then revalidates the whole source-tree inventory. This
+also detects persistent in-place writes to files whose first receipt has already completed, not just inode replacement.
+Detected content, publication or deletion changes are conflicts, including growth beyond the per-file or aggregate
+allowance during the second receipt pass; initially oversized input retains its budget refusal. These are observed
+receipts, not an atomic filesystem snapshot or committed-revision proof. Archive verification consumes these streamed
+receipts, so the source tree is no longer read into memory twice. Later rereads of admitted archive inputs (manifest,
+build contract, executable, uploaded input and ZIP) also return `409 ARTIFACT_CHANGED` for unavailability, over-budget
+growth or identity/digest mismatch, rather than treating a detected change as an initial missing/invalid request.
+The v1 exploration report route preserves change conflicts as `409 ARTIFACT_CHANGED`;
+an ordinary missing report still returns the unavailable-report projection.
+The lexical path-returning `WebJobService.resolveArtifact` was removed.
 
 ## Agent preflight and harness readiness
 
@@ -1850,8 +1989,8 @@ the application URL. Directory pages, breadcrumbs, file links, refreshes and lin
 range navigation preserve this pair. Both first-page and continued directory/file
 responses must match it; changed observations clear the displayed source metadata.
 Incomplete, repeated, malformed and foreign query fields are refused before reads.
-A pin by itself does not request source text or enable the preview control. Actual
-bootstrap source-chunk advertising remains zero.
+A pin by itself does not request source text or enable the preview control. Bootstrap
+source-chunk advertising reports the reader's range ceiling.
 
 Metadata requests retain their existing API selectors and authorization. Explicit
 source downloads and digest HEAD observations carry the captured `metadataVersion`

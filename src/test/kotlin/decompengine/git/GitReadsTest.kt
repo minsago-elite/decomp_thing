@@ -6,12 +6,76 @@ import kotlin.io.path.exists
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class GitReadsTest {
+    @Test fun `every read invocation enforces hard and soft child memory limits and fails closed without a limiter`(): Unit = GitTestRepositories().use { f ->
+        val (gitDir, workTree) = f.managed("read-memory")
+        f.write(workTree, "main.c", "int base;\n")
+        val base = f.commitAll(gitDir, workTree, "base")
+        f.write(workTree, "main.c", "int changed;\n")
+        f.raw(gitDir, workTree, "add", "--", "main.c")
+        // Test-only wrapper observes the actual exec-time limits, then delegates to trusted Git.
+        // No large allocation is needed to prove every read path uses the resource launcher.
+        val limits = f.root.resolve("observed-memory-limits")
+        val executable = f.root.resolve("bounded-read-git")
+        Files.writeString(executable, "#!/bin/sh\n{ ulimit -Sv; ulimit -Hv; } >> '$limits'\nexec '${f.runner.executable}' \"\$@\"\n")
+        Files.setPosixFilePermissions(executable, java.nio.file.attribute.PosixFilePermissions.fromString("rwx------"))
+        val runner = GitCommandRunner(executable, f.environment)
+        GitReads.status(runner, gitDir, workTree)
+        GitReads.history(runner, gitDir, GitObjectFormat.SHA1, base, 0, 1)
+        val diff = GitReads.diff(runner, gitDir, workTree, GitObjectFormat.SHA1, GitDiffScope.STAGED, null, null)
+        val file = diff.files.single()
+        assertTrue(GitReads.patch(runner, gitDir, workTree, GitDiffScope.STAGED, null, null, file).text.contains("+int changed;"))
+        GitReads.refsPage(runner, gitDir, GitObjectFormat.SHA1, 0, 1)
+        // status, history, raw diff, numstat, object sizes, selected patch and refs: seven children.
+        assertEquals(List(14) { "524288" }, Files.readAllLines(limits))
+        val unavailable = GitCommandRunner(executable, f.environment, memoryLimiter = null)
+        val reads: List<() -> Unit> = listOf(
+            { GitReads.status(unavailable, gitDir, workTree); Unit },
+            { GitReads.history(unavailable, gitDir, GitObjectFormat.SHA1, base, 0, 1); Unit },
+            { GitReads.diff(unavailable, gitDir, workTree, GitObjectFormat.SHA1, GitDiffScope.STAGED, null, null); Unit },
+            { GitReads.objectSizes(unavailable, gitDir, listOf(file.newObjectId!!)); Unit },
+            { GitReads.patch(unavailable, gitDir, workTree, GitDiffScope.STAGED, null, null, file); Unit },
+            { GitReads.refsPage(unavailable, gitDir, GitObjectFormat.SHA1, 0, 1); Unit },
+        )
+        for (read in reads) {
+            assertEquals(GitCommandException.Kind.START_FAILED, kotlin.test.assertFailsWith<GitCommandException> { read() }.kind)
+        }
+        assertEquals(14, Files.readAllLines(limits).size, "No unbounded child may run when enforcement is unavailable")
+    }
+
+    @Test fun `historical patch paths respect the runner argument boundary for current and original names`(): Unit = GitTestRepositories().use { f ->
+        val (gitDir, workTree) = f.managed("historical-path-bound")
+        f.write(workTree, "short.c", "int historical;\n")
+        f.commitAll(gitDir, workTree, "ordinary HEAD")
+        val blob = f.raw(gitDir, workTree, "rev-parse", "HEAD:short.c").trim()
+        val prefix = List(16) { "d".repeat(240) }.joinToString("/", postfix = "/")
+        for (length in listOf(4096, 4097)) {
+            val path = prefix + "f".repeat(length - prefix.length)
+            val tree = f.treeWithFile(gitDir, path, blob)
+            val commit = f.raw(gitDir, workTree, "commit-tree", tree, "-m", "historical $length").trim()
+            val file = GitReads.diff(f.runner, gitDir, null, GitObjectFormat.SHA1, GitDiffScope.COMMIT, commit, null).files.single()
+            assertEquals(path, file.path.exact)
+            if (length == 4096) {
+                assertTrue(GitReads.patch(f.runner, gitDir, null, GitDiffScope.COMMIT, commit, null, file).text.contains("+int historical;"))
+                GitInvocation("diff", listOf(path)) // The unchanged inclusive runner limit accepts this name.
+            } else {
+                for (selected in listOf(file, file.copy(path = GitPath.of("short.c".toByteArray()), originalPath = file.path))) {
+                    val failure = kotlin.test.assertFailsWith<ManagedGitException> {
+                        GitReads.patch(f.runner, gitDir, null, GitDiffScope.COMMIT, commit, null, selected)
+                    }
+                    assertEquals("PATCH_UNAVAILABLE", failure.code)
+                }
+                kotlin.test.assertFailsWith<IllegalArgumentException> { GitInvocation("diff", listOf(path)) }
+            }
+        }
+    }
+
     private fun GitTestRepositories.write(workTree: Path, name: String, text: String) {
         val file = workTree.resolve(name)
         Files.createDirectories(file.parent)
@@ -219,6 +283,38 @@ class GitReadsTest {
         }.code)
     }
 
+    @Test fun `selected rename patches preserve whole-tree pairing when a source becomes a directory`(): Unit = GitTestRepositories().use { f ->
+        val (gitDir, workTree) = f.managed("rename-pairing")
+        val source = (0 until 100).joinToString("") { "int source_$it = $it;\n" }
+        val other = (0 until 100).joinToString("") { "int other_$it = $it;\n" }
+        f.write(workTree, "A.c", source)
+        f.write(workTree, "B.c", other)
+        f.commitAll(gitDir, workTree, "base")
+        Files.delete(workTree.resolve("A.c"))
+        val child = workTree.resolve("A.c/child.c")
+        Files.createDirectories(child.parent)
+        Files.move(workTree.resolve("B.c"), child)
+        val changed = (0 until 100).joinToString("") { index ->
+            if (index < 20) "int replacement_$index;\n" else "int source_$index = $index;\n"
+        }
+        f.write(workTree, "C.c", changed)
+        f.raw(gitDir, workTree, "add", "-A")
+
+        val listing = GitReads.diff(f.runner, gitDir, workTree, GitObjectFormat.SHA1, GitDiffScope.STAGED, null, null)
+        val nestedRename = listing.files.single { it.path.exact == "A.c/child.c" }
+        assertEquals(GitIndexChange.RENAMED, nestedRename.change)
+        assertEquals("B.c", nestedRename.originalPath?.exact)
+        val selected = listing.files.single { it.path.exact == "C.c" }
+        assertEquals(GitIndexChange.RENAMED, selected.change)
+        assertEquals("A.c", selected.originalPath?.exact)
+
+        val patch = GitReads.patch(f.runner, gitDir, workTree, GitDiffScope.STAGED, null, null, selected)
+        assertTrue(patch.text.startsWith("diff --git a/A.c b/C.c\n"), patch.text)
+        assertTrue(patch.text.contains("rename from A.c"), patch.text)
+        assertTrue(patch.text.contains("rename to C.c"), patch.text)
+        assertFalse(patch.text.contains("A.c/child.c"), patch.text)
+    }
+
     @Test fun `a selected patch holds only its exact record and modes are part of the version`(): Unit = GitTestRepositories().use { f ->
         val (gitDir, workTree) = f.managed("exact")
         f.write(workTree, "old.c", (1..20).joinToString("") { "int line_$it = $it;\n" })
@@ -298,6 +394,12 @@ class GitReadsTest {
         f.raw(gitDir, workTree, "switch", "-q", "trunk")
         f.write(workTree, "shared.c", "int shared = 1;\n"); f.raw(gitDir, workTree, "commit", "-q", "-am", "ours")
         f.raw(gitDir, workTree, "merge", "-q", "other", expect = 1)
+        val staged = GitReads.diff(f.runner, gitDir, workTree, GitObjectFormat.SHA1, GitDiffScope.STAGED, null, null)
+        val stagedConflict = staged.files.single { it.path.exact == "shared.c" }
+        assertTrue(stagedConflict.unmerged)
+        assertEquals("PATCH_UNAVAILABLE", assertFailsWith<ManagedGitException> {
+            GitReads.patch(f.runner, gitDir, workTree, GitDiffScope.STAGED, null, null, stagedConflict)
+        }.code)
         val unstaged = GitReads.diff(f.runner, gitDir, workTree, GitObjectFormat.SHA1, GitDiffScope.UNSTAGED, null, null)
         val conflicted = unstaged.files.single { it.path.exact == "shared.c" }
         val patch = GitReads.patch(f.runner, gitDir, workTree, GitDiffScope.UNSTAGED, null, null, conflicted)
@@ -404,6 +506,48 @@ class GitReadsTest {
         assertEquals(GitCommandException.Kind.OUTPUT_LIMIT, kotlin.test.assertFailsWith<GitCommandException> {
             GitReads.history(f.runner, gitDir, GitObjectFormat.SHA1, large, 0, 1)
         }.kind)
+        val child = f.git("--git-dir=$gitDir", "commit-tree", tree, "-p", large, "-m", "small child").trim()
+        assertEquals(GitCommandException.Kind.OUTPUT_LIMIT, kotlin.test.assertFailsWith<GitCommandException> {
+            GitReads.history(f.runner, gitDir, GitObjectFormat.SHA1, child, 0, 1)
+        }.kind)
+        assertNull(GitReads.firstParent(f.runner, gitDir, GitObjectFormat.SHA1, base))
+        val parent = GitReads.firstParent(f.runner, gitDir, GitObjectFormat.SHA1, child)
+        assertEquals(large, parent)
+        assertTrue(GitReads.diff(f.runner, gitDir, null, GitObjectFormat.SHA1, GitDiffScope.COMMIT, child, parent).complete)
+    }
+
+    @Test fun `history rejects timestamps outside the public four digit date range`() = GitTestRepositories().use { f ->
+        val (gitDir, workTree) = f.managed("history-date-range")
+        f.write(workTree, "a.c", "int a;\n")
+        val base = f.commitAll(gitDir, workTree, "base")
+        val tree = f.git("--git-dir=$gitDir", "rev-parse", "$base^{tree}").trim()
+        fun commitAt(name: String, authored: Long, committed: Long): String {
+            val objectFile = f.root.resolve(name)
+            Files.writeString(objectFile, buildString {
+                append("tree $tree\n")
+                append("parent $base\n")
+                append("author Fixture Author <fixture@example.invalid> $authored +0000\n")
+                append("committer Fixture Committer <fixture@example.invalid> $committed +0000\n\n")
+                append("test commit\n")
+            })
+            return f.git("--git-dir=$gitDir", "hash-object", "--literally", "-t", "commit", "-w", objectFile.toString()).trim()
+        }
+        val unsupportedCommits = listOf(
+            commitAt("author-after-range", 253_402_300_800L, 1_767_225_600L),
+            commitAt("committer-after-range", 1_767_225_600L, 253_402_300_800L),
+            commitAt("author-before-range", -1L, 1_767_225_600L),
+            commitAt("committer-before-range", 1_767_225_600L, -1L),
+        )
+        for (commit in unsupportedCommits) {
+            val failure = assertFailsWith<GitRepositoryException> {
+                GitReads.history(f.runner, gitDir, GitObjectFormat.SHA1, commit, 0, 1)
+            }
+            assertEquals("REPOSITORY_UNSUPPORTED", failure.code, failure.message)
+        }
+        val boundaryCommit = commitAt("date-boundaries", 0L, 253_402_300_799L)
+        val boundary = GitReads.history(f.runner, gitDir, GitObjectFormat.SHA1, boundaryCommit, 0, 1).entries.single()
+        assertEquals("1970-01-01T00:00:00Z", boundary.authoredAt.toString())
+        assertEquals("9999-12-31T23:59:59Z", boundary.committedAt.toString())
     }
 
     @Test fun `staged diff works on an unborn branch`(): Unit = GitTestRepositories().use { f ->

@@ -80,6 +80,17 @@ class GitAdapterTest {
         assertFailsWith<IllegalArgumentException> { GitInvocation("status", workTree = f.root) }
     }
 
+    @Test fun `native session forwards bounded stdin and invocation environment`(): Unit = GitTestRepositories().use { f ->
+        val echo = fakeGit(f.root.resolve("stdin"), "printf '%s\\n' \"\$GIT_AUTHOR_NAME\"; cat")
+        val payload = ByteArray(256 * 1024) { it.toByte() }
+        val result = GitCommandRunner(echo, f.environment).run(
+            GitInvocation("status", input = payload, variables = mapOf("GIT_AUTHOR_NAME" to "test-identity")),
+        )
+        assertContentEquals("test-identity\n".toByteArray() + payload, result.stdout)
+        val earlyExit = GitCommandRunner(fakeGit(f.root.resolve("early-exit"), "exit 0"), f.environment)
+        assertEquals(0, earlyExit.run(GitInvocation("status", input = payload)).exitCode)
+    }
+
     @Test fun `time and output bounds terminate the child`(): Unit = GitTestRepositories().use { f ->
         val slow = GitCommandRunner(fakeGit(f.root.resolve("slow"), "sleep 30"), f.environment)
         val started = System.nanoTime()
@@ -105,18 +116,117 @@ class GitAdapterTest {
         assertEquals(GitCommandException.Kind.OUTPUT_LIMIT, assertFailsWith<GitCommandException> {
             noisy.run(GitInvocation("status", limits = GitExecutionLimits(maxStderrBytes = 4096)))
         }.kind)
+        assertEquals(GitCommandException.Kind.OUTPUT_LIMIT, assertFailsWith<GitCommandException> {
+            noisy.run(GitInvocation("status", truncateStdout = true, limits = GitExecutionLimits(maxStderrBytes = 4096)))
+        }.kind)
         val failing = GitCommandRunner(fakeGit(f.root.resolve("failing"), "echo PRIVATE_CANARY >&2; exit 3"), f.environment)
         val failure = assertFailsWith<GitCommandException> { failing.run(GitInvocation("status")) }
         assertEquals(GitCommandException.Kind.FAILED, failure.kind); assertEquals(3, failure.exitCode)
         assertFalse(failure.message!!.contains("PRIVATE_CANARY"))
     }
 
+    private fun childStopped(pid: Long): Boolean {
+        val stat = Path.of("/proc", pid.toString(), "stat")
+        return try {
+            val text = Files.readString(stat)
+            text[text.lastIndexOf(") ") + 2] in setOf('Z', 'X', 'x')
+        } catch (_: java.io.IOException) {
+            // /proc can vanish after open, yielding ESRCH from read rather than ENOENT.
+            !ProcessHandle.of(pid).map { it.isAlive }.orElse(false)
+        }
+    }
+
+    private fun requireChildStopped(pidFile: Path) {
+        val pid = Files.readString(pidFile).trim().toLong()
+        try {
+            val deadline = System.nanoTime() + Duration.ofSeconds(2).toNanos()
+            while (!childStopped(pid) && System.nanoTime() < deadline) Thread.sleep(5)
+            assertTrue(childStopped(pid), "descendant $pid is still executing after runner returned")
+        } finally {
+            // A regression must not leave the test's own 30-second sleeper behind.
+            if (!childStopped(pid)) ProcessHandle.of(pid).ifPresent { it.destroyForcibly() }
+        }
+    }
+
+    @Test fun `parent exits first with inherited or closed output pipes leaves no executing child`(): Unit = GitTestRepositories().use { f ->
+        for (redirect in listOf("", ">/dev/null 2>&1")) repeat(10) { index ->
+            val pid = f.root.resolve("orphan-${redirect.length}-$index.pid")
+            val runner = GitCommandRunner(fakeGit(f.root.resolve("orphan-${redirect.length}-$index"),
+                "sleep 30 $redirect &\necho \$! > '$pid'\nexit 0"), f.environment)
+            val started = System.nanoTime()
+            try {
+                assertEquals(0, runner.run(GitInvocation("status", limits = GitExecutionLimits(Duration.ofMillis(500)))).exitCode)
+                assertTrue(Duration.ofNanos(System.nanoTime() - started) < Duration.ofSeconds(2))
+            } finally {
+                requireChildStopped(pid)
+            }
+        }
+    }
+
+    @Test fun `timeout output failure and interruption clean the owned group`(): Unit = GitTestRepositories().use { f ->
+        data class Case(val name: String, val body: String, val limits: GitExecutionLimits, val kind: GitCommandException.Kind)
+        for ((name, body, limits, kind) in listOf(
+            Case("timeout", "wait", GitExecutionLimits(Duration.ofMillis(500)), GitCommandException.Kind.TIMED_OUT),
+            Case("output", "head -c 4000000 /dev/zero; wait", GitExecutionLimits(maxStdoutBytes = 4096), GitCommandException.Kind.OUTPUT_LIMIT),
+            Case("stderr", "head -c 4000000 /dev/zero >&2; wait", GitExecutionLimits(maxStderrBytes = 4096), GitCommandException.Kind.OUTPUT_LIMIT),
+        )) {
+            val pid = f.root.resolve("$name.pid")
+            val runner = GitCommandRunner(fakeGit(f.root.resolve(name), "sleep 30 &\necho \$! > '$pid'\n$body"), f.environment)
+            try {
+                assertEquals(kind, assertFailsWith<GitCommandException> {
+                    runner.run(GitInvocation("status", limits = limits))
+                }.kind)
+            } finally { requireChildStopped(pid) }
+        }
+        for (truncate in listOf(false, true)) {
+            val pid = f.root.resolve("terminal-$truncate.pid")
+            val body = if (truncate) "head -c 4000000 /dev/zero; wait" else "exit 3"
+            val runner = GitCommandRunner(fakeGit(f.root.resolve("terminal-$truncate"),
+                "sleep 30 &\necho \$! > '$pid'\n$body"), f.environment)
+            try {
+                if (truncate) {
+                    val result = runner.run(GitInvocation("status", truncateStdout = true,
+                        limits = GitExecutionLimits(maxStdoutBytes = 4096)))
+                    assertTrue(result.stdoutTruncated)
+                    assertEquals(4096, result.stdout.size)
+                } else {
+                    val failure = assertFailsWith<GitCommandException> { runner.run(GitInvocation("status")) }
+                    assertEquals(GitCommandException.Kind.FAILED, failure.kind)
+                    assertEquals(3, failure.exitCode)
+                }
+            } finally { requireChildStopped(pid) }
+        }
+        val pid = f.root.resolve("interrupted.pid")
+        val runner = GitCommandRunner(fakeGit(f.root.resolve("interrupted"), "sleep 30 &\necho \$! > '$pid'\nwait"), f.environment)
+        val failure = java.util.concurrent.atomic.AtomicReference<Throwable?>()
+        val interrupted = java.util.concurrent.atomic.AtomicBoolean()
+        val thread = Thread.ofPlatform().start {
+            try { runner.run(GitInvocation("status")) } catch (caught: Throwable) { failure.set(caught) }
+            interrupted.set(Thread.currentThread().isInterrupted)
+        }
+        try {
+            val deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos()
+            while ((!Files.exists(pid) || Files.size(pid) == 0L) && System.nanoTime() < deadline) Thread.sleep(5)
+            thread.interrupt()
+            thread.join(7000)
+            assertFalse(thread.isAlive)
+            assertEquals(GitCommandException.Kind.INTERRUPTED, (failure.get() as GitCommandException).kind)
+            assertTrue(interrupted.get())
+        } finally {
+            thread.interrupt()
+            requireChildStopped(pid)
+        }
+    }
+
     @Test fun `branch names are validated by local syntax and check-ref-format`(): Unit = GitTestRepositories().use { f ->
-        listOf("main", "trunk", "feature/one", "release-1.2", "功能", "x_y").forEach {
+        // JSON Schema's character bounds count Unicode code points, not UTF-16 code units.
+        val supplementaryBranch = List(4) { "🚀".repeat(49) }.joinToString("/") + "x"
+        assertEquals(200, supplementaryBranch.codePointCount(0, supplementaryBranch.length))
+        listOf("main", "trunk", "feature/one", "release-1.2", "功能", "x_y", supplementaryBranch).forEach {
             assertEquals(it, GitRefNames.requireBranchName(f.runner, it))
         }
         listOf("", "-x", "--upload-pack=touch", "a..b", "a b", "x.lock", "a/.hidden", "@{u}", "HEAD", "@", "a\u0001", "a~1", "a^",
-            "a:b", "a?", "a*", "a[", "a\\b", "/a", "a/", "a//b", "a.", "x".repeat(201)).forEach { name ->
+            "a:b", "a?", "a*", "a[", "a\\b", "/a", "a/", "a//b", "a.", "x".repeat(201), supplementaryBranch + "x").forEach { name ->
             assertFailsWith<IllegalArgumentException>(name) { GitRefNames.requireBranchName(f.runner, name) }
         }
     }
@@ -152,6 +262,29 @@ class GitAdapterTest {
         assertEquals(excluded.toSet(), ignored)
         assertTrue(GitTrackingPolicy.CATEGORIES.map { it.id }.containsAll(listOf("original-binaries", "credentials",
             "job-runtime-state", "private-transcripts", "native-build-output", "transient-evidence")))
+    }
+
+    @Test fun `pending workflow state and all database sidecars remain excluded despite negations`(): Unit = GitTestRepositories().use { f ->
+        val (gitDir, workTree) = f.managed("runtime-sidecars")
+        val excluded = listOf("workflow-state.pending.json", "state/workflow-state.pending.json") +
+            listOf("sqlite", "sqlite3", "db").flatMap { extension ->
+                listOf("", "-journal", "-wal", "-shm").map { sidecar -> "state/calls.$extension$sidecar" }
+            }
+        val retained = listOf("src/workflow-state.pending.json.c", "src/calls.sqlite-wal.c", "include/calls.db-shm.h",
+            "source_tree_manifest.json", "CMakeLists.txt", "docs/database.md")
+        Files.writeString(workTree.resolve(".gitignore"), excluded.joinToString("") { "!/$it\n" })
+        (excluded + retained).forEach { path ->
+            Files.createDirectories(workTree.resolve(path).parent)
+            Files.writeString(workTree.resolve(path), "fixture\n")
+        }
+        // Demonstrate that the managed repository's ignore result is not the admission decision.
+        assertEquals(1, f.runner.run(GitInvocation("check-ignore", listOf("--no-index", "--") + excluded,
+            gitDir = gitDir, workTree = workTree, allowedExitCodes = setOf(0, 1))).exitCode)
+        assertEquals(excluded.toSet(), GitTrackingPolicy.excluded(f.runner, excluded + retained))
+        // The presentation rules still cover the same categories when not overridden in-tree.
+        Files.delete(workTree.resolve(".gitignore"))
+        assertEquals(excluded.toSet(), f.runner.run(GitInvocation("check-ignore", listOf("--") + excluded + retained,
+            gitDir = gitDir, workTree = workTree)).text.lineSequence().filter { it.isNotEmpty() }.toSet())
     }
 
     @Test fun `repository ignore files cannot re-include policy exclusions`(): Unit = GitTestRepositories().use { f ->

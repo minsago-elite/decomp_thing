@@ -5,6 +5,7 @@ import decompengine.git.GitAvailability
 import decompengine.git.GitRuntime
 import decompengine.git.ManagedGitRepositories
 import decompengine.jobs.*
+import org.junit.jupiter.api.Test
 import kotlinx.serialization.json.*
 import java.net.InetSocketAddress
 import java.net.URI
@@ -240,6 +241,10 @@ class WebGitControllerTest {
             raw("branch", "-D", "a")
             error(f.read("$base/refs?limit=1&cursor=$restarted"), 409, "REF_CHANGED")
             error(f.read("$base/refs?cursor=refs~1"), 400, "INVALID_CURSOR")
+            // Syntactically plausible cursors must not reach the reader's require(skip) as 500s.
+            for (offset in listOf("100001", "999999")) {
+                error(f.read("$base/refs?cursor=refs~${"a".repeat(32)}~$offset"), 400, "INVALID_CURSOR")
+            }
             raw("branch", "-D", "b"); raw("branch", "-D", "c")
             // A status page cursor is bound to the work-tree version it was taken from.
             val statusCursor = data(f.read("$base/status?limit=1"), 200, "gitStatus").getValue("nextCursor")
@@ -251,6 +256,9 @@ class WebGitControllerTest {
             error(f.read("$base/status?cursor=$ignoredCursor"), 409, "REF_CHANGED")
             error(f.read("$base/history?start=${head.take(12)}"), 422, "VALIDATION_FAILED")
             error(f.read("$base/history?start=$head&cursor=$cursor"), 400, "INVALID_CURSOR")
+            for (offset in listOf("1000001", "9999999")) {
+                error(f.read("$base/history?cursor=$head~$offset"), 400, "INVALID_CURSOR")
+            }
             error(f.read("$base/history?start=${"0".repeat(40)}"), 404, "NOT_FOUND")
             error(f.read("$base/diff?scope=commit"), 422, "VALIDATION_FAILED")
             error(f.read("$base/diff?scope=staged&commit=$head"), 422, "VALIDATION_FAILED")
@@ -347,6 +355,63 @@ class WebGitControllerTest {
         error(f.read("$base/provenance/${head.take(10)}"), 422, "VALIDATION_FAILED")
     }
 
+    @Test fun `status rejects escaped paths over the schema display bound for current and original paths`(): Unit = Fixture().use { f ->
+        val (base, directory) = f.initialized()
+        decompengine.git.GitTestRepositories().use { g ->
+            val gitDir = directory.resolve("repository.git"); val workTree = directory.resolve("worktree")
+            fun raw(vararg args: String) = g.git("--git-dir=$gitDir", "--work-tree=$workTree", *args, cwd = workTree)
+            val longPath = List(12) { "\u0001".repeat(250) }.joinToString("/") + "/overflow.c"
+            val display = decompengine.git.GitPath.of(longPath.toByteArray()).display
+            assertTrue(display.codePointCount(0, display.length) > 16_384)
+            val file = workTree.resolve(longPath)
+            Files.createDirectories(file.parent)
+            Files.writeString(file, "int overflow;\n")
+            error(f.read("$base/status"), 422, "VALIDATION_FAILED")
+
+            raw("add", "-A"); raw("commit", "-q", "-m", "long path base")
+            raw("mv", "--", longPath, "short.c")
+            raw("add", "-A")
+            error(f.read("$base/status"), 422, "VALIDATION_FAILED")
+        }
+    }
+
+    @Test fun `selected rename patches match the whole-tree listing after a source becomes a directory`(): Unit = Fixture().use { f ->
+        val (base, directory) = f.initialized()
+        decompengine.git.GitTestRepositories().use { g ->
+            val gitDir = directory.resolve("repository.git"); val workTree = directory.resolve("worktree")
+            fun raw(vararg args: String) = g.git("--git-dir=$gitDir", "--work-tree=$workTree", *args, cwd = workTree)
+            val source = (0 until 100).joinToString("") { "int source_$it = $it;\n" }
+            val other = (0 until 100).joinToString("") { "int other_$it = $it;\n" }
+            Files.writeString(workTree.resolve("A.c"), source)
+            Files.writeString(workTree.resolve("B.c"), other)
+            raw("add", "-A"); raw("commit", "-q", "-m", "rename pairing base")
+            Files.delete(workTree.resolve("A.c"))
+            val child = workTree.resolve("A.c/child.c")
+            Files.createDirectories(child.parent)
+            Files.move(workTree.resolve("B.c"), child)
+            val changed = (0 until 100).joinToString("") { index ->
+                if (index < 20) "int replacement_$index;\n" else "int source_$index = $index;\n"
+            }
+            Files.writeString(workTree.resolve("C.c"), changed)
+            raw("add", "-A")
+
+            val listing = data(f.read("$base/diff?scope=staged"), 200, "gitDiff")
+            val entries = listing.getValue("files").jsonArray.map { it.jsonObject }
+            val nestedRename = entries.single { it.getValue("path").jsonPrimitive.content == "A.c/child.c" }
+            assertEquals("B.c", nestedRename.getValue("originalPath").jsonPrimitive.content)
+            val selected = entries.single { it.getValue("path").jsonPrimitive.content == "C.c" }
+            assertEquals("A.c", selected.getValue("originalPath").jsonPrimitive.content)
+            val patch = data(f.read("$base/diff?scope=staged&file=${selected.getValue("fileId").jsonPrimitive.content}"), 200, "gitDiff")
+                .getValue("patch").jsonObject
+            val text = patch.getValue("text").jsonPrimitive.content
+            assertTrue(text.startsWith("diff --git a/A.c b/C.c\n"), text)
+            assertTrue(text.contains("rename from A.c"), text)
+            assertTrue(text.contains("rename to C.c"), text)
+            assertFalse(text.contains("A.c/child.c"), text)
+            assertEquals(JsonPrimitive(false), patch.getValue("truncated"))
+        }
+    }
+
     @Test fun `directory replacements keep workspace status and diff pages usable`(): Unit = Fixture().use { f ->
         val (base, directory) = f.initialized()
         decompengine.git.GitTestRepositories().use { g ->
@@ -383,6 +448,78 @@ class WebGitControllerTest {
                 error(f.read("$base/diff?scope=$scope&limit=1&cursor=$diffCursor"), 409, "REF_CHANGED")
                 assertNotEquals(workspace.getValue("worktreeVersion"), data(f.read(base), 200, "gitWorkspace").getValue("worktreeVersion"))
             }
+        }
+    }
+
+    @Test fun `staged conflict patches are unavailable while unstaged conflicts retain combined patches`(): Unit = Fixture().use { f ->
+        val (base, directory) = f.initialized()
+        decompengine.git.GitTestRepositories().use { g ->
+            val gitDir = directory.resolve("repository.git"); val workTree = directory.resolve("worktree")
+            fun raw(vararg args: String) = g.git("--git-dir=$gitDir", "--work-tree=$workTree", *args, cwd = workTree).trim()
+            raw("add", "-A"); raw("commit", "-q", "-m", "base")
+            val baseBranch = raw("branch", "--show-current")
+            raw("switch", "-q", "-c", "other")
+            Files.writeString(workTree.resolve("src/modules/unit.c"), "int conflict_value = 2;\n")
+            raw("commit", "-q", "-am", "other")
+            raw("switch", "-q", baseBranch)
+            Files.writeString(workTree.resolve("src/modules/unit.c"), "int conflict_value = 1;\n")
+            raw("commit", "-q", "-am", "ours")
+            g.git("--git-dir=$gitDir", "--work-tree=$workTree", "merge", "-q", "other", cwd = workTree, expect = 1)
+
+            val listing = data(f.read("$base/diff?scope=staged"), 200, "gitDiff")
+            val conflict = listing.getValue("files").jsonArray.map { it.jsonObject }
+                .single { it.getValue("path").jsonPrimitive.content == "src/modules/unit.c" }
+            val fileId = conflict.getValue("fileId").jsonPrimitive.content
+            error(f.read("$base/diff?scope=staged&file=$fileId"), 422, "PATCH_UNAVAILABLE")
+            val combined = data(f.read("$base/diff?scope=unstaged&file=$fileId"), 200, "gitDiff")
+                .getValue("patch").jsonObject.getValue("text").jsonPrimitive.content
+            assertTrue(combined.startsWith("diff --cc"), combined)
+        }
+    }
+
+    @Test fun `historical paths beyond the argument bound stay listed but patches are explicitly unavailable`(): Unit = Fixture().use { f ->
+        val (base, directory) = f.initialized()
+        decompengine.git.GitTestRepositories().use { g ->
+            val gitDir = directory.resolve("repository.git"); val workTree = directory.resolve("worktree")
+            fun raw(vararg args: String) = g.git("--git-dir=$gitDir", "--work-tree=$workTree", *args, cwd = workTree).trim()
+            raw("add", "-A"); raw("commit", "-q", "-m", "ordinary HEAD")
+            val head = raw("rev-parse", "HEAD")
+            val blob = raw("rev-parse", "HEAD:src/modules/unit.c")
+            val path = List(17) { "d".repeat(250) }.joinToString("/") + "/f.c"
+            assertTrue(path.length > 4096 && path.length < 16384)
+            val tree = g.treeWithFile(gitDir, path, blob)
+            val historical = raw("commit-tree", tree, "-m", "long historical path")
+            val renamedTree = g.treeWithFile(gitDir, "short.c", blob)
+            val renamed = raw("commit-tree", renamedTree, "-p", historical, "-m", "rename historical path")
+            raw("update-ref", "refs/heads/historical", renamed)
+            for (commit in listOf(historical, renamed)) {
+                val query = "$base/diff?scope=commit&commit=$commit"
+                val listing = data(f.read(query), 200, "gitDiff")
+                val file = listing.getValue("files").jsonArray.single().jsonObject
+                assertEquals(JsonPrimitive(true), listing["complete"])
+                assertEquals(JsonNull, listing["patch"])
+                assertEquals(if (commit == historical) path else "short.c", file.getValue("path").jsonPrimitive.content)
+                assertEquals(if (commit == historical) JsonNull else JsonPrimitive(path), file["originalPath"])
+                assertEquals(if (commit == historical) "added" else "renamed", file.getValue("change").jsonPrimitive.content)
+                val response = f.read("$query&file=${file.getValue("fileId").jsonPrimitive.content}")
+                error(response, 422, "PATCH_UNAVAILABLE")
+                assertFalse(response.body().contains(directory.toString()))
+                assertEquals(file, data(f.read(query), 200, "gitDiff").getValue("files").jsonArray.single().jsonObject)
+            }
+            // Ordinary HEAD and its positive patch still work; the oversized tree was never checked out.
+            val ordinary = data(f.read("$base/diff?scope=commit&commit=$head"), 200, "gitDiff")
+                .getValue("files").jsonArray.map { it.jsonObject }.single { it.getValue("path").jsonPrimitive.content == "src/modules/unit.c" }
+            val patch = data(f.read("$base/diff?scope=commit&commit=$head&file=${ordinary.getValue("fileId").jsonPrimitive.content}"), 200, "gitDiff")
+                .getValue("patch").jsonObject
+            assertTrue(patch.getValue("text").jsonPrimitive.content.contains("+int main(void)"))
+            val oversizedDisplayPath = List(70) { "d".repeat(240) }.joinToString("/") + "/too-long.c"
+            assertTrue(oversizedDisplayPath.length > 16_384)
+            val oversizedTree = g.treeWithFile(gitDir, oversizedDisplayPath, blob)
+            val oversizedCommit = raw("commit-tree", oversizedTree, "-m", "path exceeds diff display bound")
+            raw("update-ref", "refs/heads/oversized-display", oversizedCommit)
+            error(f.read("$base/diff?scope=commit&commit=$oversizedCommit"), 422, "VALIDATION_FAILED")
+            assertEquals(head, raw("rev-parse", "HEAD"))
+            assertFalse(Files.exists(workTree.resolve("short.c")))
         }
     }
 
@@ -427,6 +564,70 @@ class WebGitControllerTest {
             assertEquals(status.getValue("entries").jsonArray.single().jsonObject.getValue("fileId"),
                 refreshed.getValue("entries").jsonArray.single().jsonObject.getValue("fileId"))
         }
+    }
+
+    /** Track directories too: empty runtime/staging directory changes are still writes. */
+    private fun storageTree(root: Path): Map<String, List<Byte>?> = Files.walk(root).use { paths ->
+        paths.toList().associate { path -> root.relativize(path).toString() to
+            if (Files.isDirectory(path, java.nio.file.LinkOption.NOFOLLOW_LINKS)) null else Files.readAllBytes(path).toList() }
+    }
+
+    @Test fun `Git GET routes leave fresh and published storage unchanged`(): Unit = Fixture().use { f ->
+        val fresh = storageTree(f.root)
+        data(f.read(), 200, "gitRepositories")
+        error(f.read("${f.collection}/repository_missing"), 404, "NOT_FOUND")
+        error(f.read("${f.collection}/repository_missing/operations/operation_missing"), 404, "NOT_FOUND")
+        for (resource in listOf("status", "history", "diff?scope=unstaged", "refs")) {
+            error(f.read("${f.collection}/repository_missing/$resource"), 404, "NOT_FOUND")
+        }
+        assertEquals(fresh, storageTree(f.root))
+        assertFalse(Files.exists(f.root.resolve(".git-runtime")))
+        val admitted = f.send("POST", f.init(), f.headers())
+        val operation = data(admitted, 202, "operation")
+        val location = admitted.headers().firstValue("Location").orElseThrow()
+        assertEquals("completed", f.awaitOperation(location).getValue("state").jsonPrimitive.content)
+        assertTrue(f.repositories.awaitIdle(5_000))
+        val published = storageTree(f.root)
+        repeat(2) {
+            data(f.read(), 200, "gitRepositories")
+            data(f.read("${f.collection}/${operation.getValue("repositoryId").jsonPrimitive.content}"), 200, "gitWorkspace")
+            data(f.read(location), 200, "operation")
+            val base = "${f.collection}/${operation.getValue("repositoryId").jsonPrimitive.content}"
+            for ((resource, kind) in listOf("status" to "gitStatus", "history" to "gitHistory", "diff?scope=unstaged" to "gitDiff", "refs" to "gitRefs")) {
+                data(f.read("$base/$resource"), 200, kind)
+            }
+        }
+        assertEquals(published, storageTree(f.root))
+    }
+
+    @Test fun `Git GET routes refuse failed startup recovery without changing retained storage`(): Unit = Fixture().use { f ->
+        val operations = Files.createDirectories(f.root.resolve("${f.job.id}/git/operations"))
+        Files.writeString(operations.resolve("operation_${"0".repeat(32)}.json"), "unreadable record")
+        Files.createDirectories(f.root.resolve("${f.job.id}/git/staging/retained/empty/leaf"))
+        f.repositories.recover(listOf(f.job.id))
+        val before = storageTree(f.root)
+        for (target in listOf(f.collection, "${f.collection}/repository_missing",
+            "${f.collection}/repository_missing/operations/operation_missing") +
+            listOf("status", "history", "diff?scope=unstaged", "refs").map { "${f.collection}/repository_missing/$it" }) {
+            val response = f.read(target)
+            error(response, 503, "STORAGE_UNAVAILABLE")
+            assertFalse(response.body().contains(f.root.toString()))
+        }
+        assertEquals(before, storageTree(f.root))
+    }
+
+    @Test fun `initial branch bounds count Unicode code points through HTTP`(): Unit = Fixture().use { f ->
+        val branch = List(4) { "🚀".repeat(49) }.joinToString("/") + "x"
+        assertEquals(200, branch.codePointCount(0, branch.length))
+        assertTrue(branch.length > 200)
+        error(f.send("POST", f.init(branch + "x"), f.headers()), 422, "VALIDATION_FAILED")
+        assertEquals(JsonArray(emptyList()), data(f.read(), 200, "gitRepositories")["operations"])
+        val admitted = f.send("POST", f.init(branch), f.headers())
+        val operation = data(admitted, 202, "operation")
+        val completed = f.awaitOperation(admitted.headers().firstValue("Location").orElseThrow())
+        assertEquals("completed", completed.getValue("state").jsonPrimitive.content, completed.toString())
+        val workspace = data(f.read("${f.collection}/${operation.getValue("repositoryId").jsonPrimitive.content}"), 200, "gitWorkspace")
+        assertEquals("refs/heads/$branch", workspace.getValue("headRefName").jsonPrimitive.content)
     }
 
     @Test fun `authorization guards and strict bodies precede any repository operation`(): Unit = Fixture().use { f ->
