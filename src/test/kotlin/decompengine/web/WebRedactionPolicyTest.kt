@@ -103,6 +103,29 @@ class WebRedactionPolicyTest {
         }
     }
 
+    @Test fun `unknown authorization schemes conceal complete credentials in prose`() {
+        val secret = "dGhpcy1pc19hX3NlY3JldA=="
+        val cases = listOf(
+            "Authorization: Negotiate $secret" to secret,
+            "\"Authorization\": \"Negotiate $secret\"" to secret,
+            "Proxy-Authorization: Custom proof with spaces" to "Custom proof with spaces",
+        )
+        for ((header, credential) in cases) {
+            val report = "request headers: {$header}"
+            val safe = policy.text(report)
+            assertFalse(safe.contains(credential), safe)
+            assertTrue(safe.contains("[redacted]"), safe)
+            assertEquals(safe, policy.text(safe))
+            assertEquals(safe, policy.json(buildJsonObject { put("note", report) }).jsonObject.getValue("note").jsonPrimitive.content)
+            val document = buildJsonObject { put("note", report) }.toString().toByteArray()
+            val downloaded = Json.parseToJsonElement(policy.document(document).decodeToString()).jsonObject
+            assertEquals(safe, downloaded.getValue("note").jsonPrimitive.content)
+        }
+        val secondHeader = policy.text("Authorization: Negotiate $secret\r\nContent-Type: application/json")
+        assertFalse(secondHeader.contains(secret), secondHeader)
+        assertTrue(secondHeader.contains("Content-Type: application/json"), secondHeader)
+    }
+
     @Test fun `redaction is stable when reapplied and never leaves a configured literal`() {
         val inputs = listOf("Authorization: Bearer $canary", "x${canary}y /home/a/b token=$canary", "[redacted]X")
         for (input in inputs) {

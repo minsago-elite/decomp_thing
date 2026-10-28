@@ -219,6 +219,11 @@ internal class WebRedactionPolicy private constructor(
         private val DOCUMENT_CREDENTIAL_KEY = Regex("(?i)(?:$CREDENTIAL_KEYS|cookie|set-cookie)")
         private val URL_USER_INFO =Regex("(?i)\\b([a-z][a-z0-9+.-]{1,31}://)[^/\\s:@\"'<>]{1,256}:[^/\\s@\"'<>]{1,512}@")
         private val CREDENTIAL_PATTERNS = listOf(
+            // Authorization schemes are extensible. For quoted values, keep the opening quote and
+            // redact through its matching boundary; for raw header text, redact the whole line value.
+            Regex("""(?i)\b((?:proxy-)?authorization["']?\s*[:=]\s*")(?:(?:[^"\\\r\n]|\\[^\r\n]?))*+""") to true,
+            Regex("""(?i)\b((?:proxy-)?authorization["']?\s*[:=]\s*')(?:(?:[^'\\\r\n]|\\[^\r\n]?))*+""") to true,
+            Regex("(?i)\\b((?:proxy-)?authorization[\"']?\\s*[:=]\\s*+)(?![\"']|\\[redacted\\])[^\\r\\n<>]+") to true,
             // Digest is a comma-separated parameter list and quoted values may contain spaces;
             // redact to the line boundary rather than stopping at the first comma or quote.
             Regex("(?i)\\b((?:proxy-)?authorization[\"']?\\s*[:=]\\s*)digest\\s+[^\\r\\n<>]+") to true,
