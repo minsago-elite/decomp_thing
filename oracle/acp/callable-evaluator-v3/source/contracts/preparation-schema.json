@@ -1,0 +1,106 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "schemaVersion": {
+      "const": 3
+    },
+    "status": {
+      "const": "prepared-no-model-call"
+    },
+    "modelCallCount": {
+      "const": 0
+    },
+    "authenticationReleased": {
+      "const": false
+    },
+    "trialAuthorized": {
+      "const": false
+    },
+    "sourceCheckpointSha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "preflightMatrixSha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "reviewedPreflightInventorySha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "independentReviewSha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "independentAcceptanceSha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "toolchainEnvironmentPinSha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "artifacts": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 10000,
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096
+      },
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{64}$"
+      }
+    },
+    "historicalPreservationVerified": {
+      "const": true
+    },
+    "preservationScope": {
+      "const": "locked-template-inputs-only"
+    },
+    "externalDependenciesRequireReverification": {
+      "const": true
+    },
+    "abiAccuracy": {
+      "const": "unassessed"
+    },
+    "formalStructuralScore": {
+      "const": null
+    },
+    "productionFactoryQualified": {
+      "const": false
+    },
+    "productionProviderQualified": {
+      "const": false
+    },
+    "productionFilesystemQualified": {
+      "const": false
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "status",
+    "modelCallCount",
+    "authenticationReleased",
+    "trialAuthorized",
+    "sourceCheckpointSha256",
+    "preflightMatrixSha256",
+    "reviewedPreflightInventorySha256",
+    "independentReviewSha256",
+    "independentAcceptanceSha256",
+    "toolchainEnvironmentPinSha256",
+    "artifacts",
+    "historicalPreservationVerified",
+    "preservationScope",
+    "externalDependenciesRequireReverification",
+    "abiAccuracy",
+    "formalStructuralScore",
+    "productionFactoryQualified",
+    "productionProviderQualified",
+    "productionFilesystemQualified"
+  ],
+  "additionalProperties": false
+}

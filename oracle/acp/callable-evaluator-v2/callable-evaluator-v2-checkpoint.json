@@ -1,0 +1,236 @@
+{
+  "schemaVersion": 2,
+  "issue": 1507,
+  "status": "prepared-no-model-call-isolated-probe-independent-integrity-clear",
+  "scope": "evaluator controls and preparation only",
+  "gitWritesPerformed": false,
+  "githubWritesPerformed": false,
+  "modelCallCount": 0,
+  "authenticationReleased": false,
+  "historicalCandidateExecuted": false,
+  "productionAuthority": false,
+  "qualifiedTrialAuthorized": false,
+  "issue1506ByteEvidence": "not-bound",
+  "acceptedLocalEvidence": {
+    "preflight": "build/acp-decomp-effectiveness/callable-library-v2/preflight-009",
+    "matrixSha256": "2100c5d13175d2187d4a86ed334165db79bef42490bc115ac1822d39a77d823e",
+    "executionBindingsSha256": "07f06a297abd480a6f33b015e20b9db7e265099568d078ab9f3b77a4c169d66f",
+    "preflightInventorySha256": "d63752d0de1d103677c1b2fa76a6bdf06227320ffdd520bf6c004fdbf662debd",
+    "independentReviewSha256": "0119b01cdc63e2f0fbcb65f54add2b45c07b8ea5af44838120c4c96eb0a84915",
+    "distinctPreFreezeAcceptanceSha256": "12eb1d6ebc1b511e10b20e1289d05cc0e43a32c055b042b598fdb3e758d72188",
+    "environmentPinSha256": "df06d577d23d2f147671412434577eaa560ec6edeac91158a6e6d62c076ba0a6",
+    "helperPinSha256": "ad2992b948b7e4b9cd5f23fe1f6266714cabbbc4baae20d8f46f24d572114008",
+    "preparation": "build/acp-decomp-effectiveness/callable-library-v2/preparation-002",
+    "freezeSha256": "87be4f2e2c82a9ef6ca65a270f313b02924413245b693c40a4bc92ddd0977309",
+    "freezeAuditSha256": "89387ae993ea5fb20580a64f054e1281e29904f9327819c42900a851a0f19d0d"
+  },
+  "verification": {
+    "preflight": {
+      "controls": 30,
+      "passed": 30,
+      "executionDependenciesUnchanged": true,
+      "boundDependencies": 276,
+      "managedExecutionRecordsIndependentlyAudited": 523,
+      "runtimeScenarioRecordsIndependentlyAudited": 264,
+      "localCommand": "PYTHONDONTWRITEBYTECODE=1 python3 build/acp-decomp-effectiveness/callable-library-v2/prepare_v2.py --output build/acp-decomp-effectiveness/callable-library-v2/preflight-009 --helper build/acp-decomp-effectiveness/callable-library-v2/toolchain-001/record_identity_probe",
+      "reuseRule": "Existing output directories are refused; use a new reviewed namespace for any later run.",
+      "isolatedHelperReceipts": 56,
+      "executionCountMethod": "523 unique scopes:28 top-level+495 control/descriptor records; overlapping reference-observations selection is counted once."
+    },
+    "controlsSummary": {
+      "compatibleControls": 5,
+      "matchedScenariosPerCompatibleControl": 24,
+      "callerLaunchesPerCompatibleControl": 24,
+      "recordedCallsPerCompatibleControl": 32,
+      "behaviorMutantMismatches": 8,
+      "overinvokeMismatches": 4,
+      "abnormalRuntimeFailures": 8,
+      "timeoutRuntimeFailures": 8,
+      "outputOverflowRuntimeFailures": 8,
+      "constructorLoadFailures": 24,
+      "constructorRecordedCalls": 0,
+      "refusedInterfaceControls": 16,
+      "privateIncludeRefusalControls": 3,
+      "launchesPerRefusedControl": 0,
+      "callsPerRefusedControl": 0,
+      "macroEmittedHostInclude": {
+        "preprocess": "passed",
+        "compile": "failed",
+        "isolatedProbeAttempted": true,
+        "probe": "refused-file-not-found",
+        "callerLaunches": 0,
+        "recordedCalls": 0
+      }
+    },
+    "tests": {
+      "tests": 20,
+      "exitCode": 0,
+      "localCommand": "PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s build/acp-decomp-effectiveness/callable-library-v2/tests -v",
+      "log": "python-focused-unit-tests-008.log",
+      "receipt": "tests/isolation-test-result-008.json",
+      "freshIdentityEvidence": "tests/probe-evidence-005",
+      "freshBoundaryEvidence": "tests/probe-isolation-002",
+      "scope": "8 contract,8 isolated identity/resolver and4 probe boundary tests; all controls remain repository-authored."
+    }
+  },
+  "historicalPreservation": {
+    "files": 3637,
+    "allContentHashesUnchanged": true,
+    "originalScenarios": 24,
+    "admissionRefused": 24,
+    "executed": 0,
+    "matched": 0,
+    "mismatched": 0,
+    "behaviorRate": null,
+    "abiAccuracy": "unassessed",
+    "formalStructuralScore": null
+  },
+  "publicCheckpointProposal": {
+    "proposalOnly": true,
+    "safeSources": [
+      {
+        "originalPath": "build/acp-decomp-effectiveness/callable-library-v2/record_identity_probe.cpp",
+        "archivePath": "oracle/acp/callable-evaluator-v2/source/record_identity_probe.cpp",
+        "sha256": "d3e9e57991933f4a629422816fd9ead9a651303eb8d858d76f4ec5755cc93447",
+        "frozenPath": "build/acp-decomp-effectiveness/callable-library-v2/preparation-002/artifacts/execution/record_identity_probe.cpp"
+      },
+      {
+        "originalPath": "build/acp-decomp-effectiveness/callable-library-v2/bounded_runtime.py",
+        "archivePath": "oracle/acp/callable-evaluator-v2/source/bounded_runtime.py",
+        "sha256": "428c8670fdc4581a613df84a7e0475cea5c8bba34b816749d50122c37887e92a",
+        "frozenPath": "build/acp-decomp-effectiveness/callable-library-v2/preparation-002/artifacts/execution/bounded_runtime.py"
+      },
+      {
+        "originalPath": "build/acp-decomp-effectiveness/callable-library-v2/scope_gate.py",
+        "archivePath": "oracle/acp/callable-evaluator-v2/source/scope_gate.py",
+        "sha256": "5f096f24096dbe33f4c0b5f1bc9836a95d762738ad4dec8b5a67c353ac83b7ed",
+        "frozenPath": "build/acp-decomp-effectiveness/callable-library-v2/preparation-002/artifacts/execution/scope_gate.py"
+      },
+      {
+        "originalPath": "build/acp-decomp-effectiveness/callable-library-v2/build_contract.py",
+        "archivePath": "oracle/acp/callable-evaluator-v2/source/build_contract.py",
+        "sha256": "f01353fd58771ed006c85081519ad97378d7b52e2fbdd458c3120fe6ff6eb8c5",
+        "frozenPath": "build/acp-decomp-effectiveness/callable-library-v2/preparation-002/artifacts/execution/build_contract.py"
+      },
+      {
+        "originalPath": "build/acp-decomp-effectiveness/callable-library-v2/interface_gate_v2.py",
+        "archivePath": "oracle/acp/callable-evaluator-v2/source/interface_gate_v2.py",
+        "sha256": "ec4441ecdc29d9e47b0bf5a73869d5ed890dcc48f4c4e66cd803b6c0514b31a9",
+        "frozenPath": "build/acp-decomp-effectiveness/callable-library-v2/preparation-002/artifacts/execution/interface_gate_v2.py"
+      },
+      {
+        "originalPath": "build/acp-decomp-effectiveness/callable-library-v2/evaluate_candidate_v2.py",
+        "archivePath": "oracle/acp/callable-evaluator-v2/source/evaluate_candidate_v2.py",
+        "sha256": "d7a06b9f519838676b3f76db8396b33260fcde684d1c0322cb22986d896115af",
+        "frozenPath": "build/acp-decomp-effectiveness/callable-library-v2/preparation-002/artifacts/execution/evaluate_candidate_v2.py"
+      },
+      {
+        "originalPath": "build/acp-decomp-effectiveness/callable-library-v2/freeze_v2.py",
+        "archivePath": "oracle/acp/callable-evaluator-v2/source/freeze_v2.py",
+        "sha256": "c4fdaf28e47cbd0adc55348889d6f406ff0f77704c64ee915c37bd5a111456c1",
+        "frozenPath": "build/acp-decomp-effectiveness/callable-library-v2/preparation-002/artifacts/execution/freeze_v2.py"
+      },
+      {
+        "originalPath": "build/acp-decomp-effectiveness/callable-library-v2/contracts/candidate-build-profile.json",
+        "archivePath": "oracle/acp/callable-evaluator-v2/source/contracts/candidate-build-profile.json",
+        "sha256": "3aace398485f3d4f07d6edaa30c4d7604c85ef8585727657c0ebdd34ce1c1d13",
+        "frozenPath": "build/acp-decomp-effectiveness/callable-library-v2/preparation-002/artifacts/execution/contracts/candidate-build-profile.json"
+      },
+      {
+        "originalPath": "build/acp-decomp-effectiveness/callable-library-v2/contracts/report-schema.json",
+        "archivePath": "oracle/acp/callable-evaluator-v2/source/contracts/report-schema.json",
+        "sha256": "86b670ace28e03b20a2ea452b4c0d60f3a0171ecc5611f4b5e077808f897d6c7",
+        "frozenPath": "build/acp-decomp-effectiveness/callable-library-v2/preparation-002/artifacts/execution/contracts/report-schema.json"
+      },
+      {
+        "originalPath": "build/acp-decomp-effectiveness/callable-library-v2/tests/test_contracts.py",
+        "archivePath": "oracle/acp/callable-evaluator-v2/source/tests/test_contracts.py",
+        "sha256": "f71d8d6825c383e25055888b3cc9c17ecc2f8ed9b905d680a6fa136111a1b489",
+        "frozenPath": "build/acp-decomp-effectiveness/callable-library-v2/preparation-002/artifacts/preflight/execution-snapshot/tests__test_contracts.py"
+      },
+      {
+        "originalPath": "build/acp-decomp-effectiveness/callable-library-v2/toolchain-001/build_helper.py",
+        "archivePath": "oracle/acp/callable-evaluator-v2/source/toolchain-001/build_helper.py",
+        "sha256": "33042dc89d42332676a8bfe1305e7ec55a93afd22273d0777a3013b0c0906b5d",
+        "frozenPath": "build/acp-decomp-effectiveness/callable-library-v2/preparation-002/artifacts/preflight/execution-snapshot/toolchain-001__build_helper.py"
+      },
+      {
+        "originalPath": "build/acp-decomp-effectiveness/callable-library-v2/toolchain-001/pin_helper.py",
+        "archivePath": "oracle/acp/callable-evaluator-v2/source/toolchain-001/pin_helper.py",
+        "sha256": "88fbd7c6bc8c45377c6472d19f24e3adbf4ff21a51bc700a7bd83aa8a82d32c7",
+        "frozenPath": "build/acp-decomp-effectiveness/callable-library-v2/preparation-002/artifacts/preflight/execution-snapshot/toolchain-001__pin_helper.py"
+      },
+      {
+        "originalPath": "build/acp-decomp-effectiveness/callable-library-v2/toolchain-001/pin_environment.py",
+        "archivePath": "oracle/acp/callable-evaluator-v2/source/toolchain-001/pin_environment.py",
+        "sha256": "5016428822cd5a910395a01da118eecf558db17d03e352fcb63f3b8d260ab6ff",
+        "frozenPath": "build/acp-decomp-effectiveness/callable-library-v2/preparation-002/artifacts/preflight/execution-snapshot/toolchain-001__pin_environment.py"
+      },
+      {
+        "originalPath": "build/acp-decomp-effectiveness/callable-library-v2/tests/test_probe_isolation.py",
+        "archivePath": "oracle/acp/callable-evaluator-v2/source/tests/test_probe_isolation.py",
+        "sha256": "f818e27d8a1f8b0efae6c0e91aa2f63cdc41a00b65116ae582fdb9c492c1fc22",
+        "frozenPath": "build/acp-decomp-effectiveness/callable-library-v2/preparation-002/artifacts/preflight/execution-snapshot/tests__test_probe_isolation.py"
+      }
+    ],
+    "safeEvidence": [
+      ".omo/evidence/callable-evaluator-v2-checkpoint.json",
+      ".omo/evidence/callable-evaluator-v2-preparation-002-audit.md"
+    ],
+    "publicTestLimitation": "test_contracts.py and test_probe_isolation.py contain synthetic sentinels only but some cases read uncommitted local fixture inputs. Full private matrix is not a public CI gate.",
+    "runnerProvenance": "Unused CLI literals retained in bounded_runtime.py originate from already tracked src/test/fixtures/c/stdin_branching.c; no callable oracle values are embedded.",
+    "keepLocalUncommitted": [
+      "private/",
+      "preflight-*/",
+      "preparation-*/",
+      "python-focused-*/",
+      "all raw driver/unit logs",
+      "toolchain binaries, inventories, dependency manifests and raw receipts",
+      "tests/probe-evidence-*/",
+      "tests/test_record_identity_probe.py",
+      "generate_controls_v2.py",
+      "prepare_v2.py",
+      ".omo/evidence/callable-evaluator-v2-independent-review.md",
+      ".omo/plans/callable-evaluator-record-identity.md",
+      ".omo/evidence/callable-evaluator-v2-isolated-probe-review.md",
+      ".omo/evidence/callable-evaluator-v2-isolated-probe-acceptance-sol-audit.md"
+    ],
+    "privateSourceReason": "Private fixture mutations and identity tests encode expected declaration details. Full review includes private declaration/layout examples. Raw snapshots contain fixture, caller, controls, descriptors and observations.",
+    "noPrivateFixtureValuesIncluded": true,
+    "publicationHeld": false,
+    "archiveRoot": "oracle/acp/callable-evaluator-v2/source",
+    "placement": "Archive exact bytes under oracle/ benchmark context; do not track live files under build/. Coordinator owns archive/Git writes.",
+    "archiveIsLiveRuntime": false,
+    "relocatedRuntimeQualified": false,
+    "restoreRule": "Archive is non-live source provenance. Restore to isolated scratch with separately bound local private inputs/toolchain before execution; relocation itself has not been qualified.",
+    "scope": "Exact-byte non-live source archive/checkpoint proposal only; coordinator controls Git publication and issue status."
+  },
+  "limits": [
+    "Restricted Clang/GCC interface projection; ABI accuracy remains unassessed and structural score null.",
+    "External tools/environment are hash-pinned and reverified, not copied as portable binaries.",
+    "Early toolchain linkability smoke and superseded/incomplete preflights are exploratory, not accepted bounded evidence.",
+    "No authenticated model trial, historical candidate rerun, repair/retry, issue closure or production qualification is authorized."
+  ],
+  "postCreateAudit": {
+    "verdict": "CLEAR",
+    "copiedArtifactsVerified": 1746,
+    "preflightFilesVerified": 1725,
+    "externalDependencyHashesVerified": 74066,
+    "currentExecutionBindingsVerified": 276,
+    "historicalFilesVerified": 3637,
+    "sealedPathsVerified": 2379,
+    "symlinks": 0,
+    "sealedDirectoryAndExecutableMode": "0555",
+    "sealedDataMode": "0444",
+    "supersededPreparation001ArtifactsUnchanged": 1544
+  },
+  "supersession": {
+    "preparation": "preparation-001",
+    "freezeSha256": "b322bf5a3506ba1e7b400ed6dff5acc3f293d022f8f49332f5b8881ab29e0595",
+    "frozenBytesUnchanged": true,
+    "status": "semantically-unusable",
+    "reason": "Host AST probe filesystem access was not isolated. Prior integrity CLEAR does not establish isolation.",
+    "replacement": "preparation-002",
+    "replacementAcceptance": "Distinct pre-freeze source/control CLEAR and separate post-create integrity CLEAR obtained. No trial or closure authority follows."
+  }
+}

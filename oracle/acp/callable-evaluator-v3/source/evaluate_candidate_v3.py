@@ -1,0 +1,799 @@
+"""V3 bounded process comparison. Internal library/API activity is unverified."""
+import hashlib
+import json
+import os
+import stat
+import uuid
+import re
+import time
+from dataclasses import dataclass, field
+from contextvars import ContextVar
+from copy import deepcopy
+from pathlib import Path
+from bounded_runtime import (bounded_run, digest, private_directory, public_result, write_json,
+                             worker_execution_complete, contained_command)
+from bounded_runtime import _parse_worker_proof, _WORKER_PROOF_MAX_BYTES as MAX_PROOF_BYTES
+from bounded_runtime import _pin_files
+from build_contract import (profile, load_profile, load_profile_with_digest,
+                            verified_visible_snapshot, profile_scope, _read_json)
+from interface_gate_v3 import (compare_descriptors, probe, export_inventory, layout_assertions, resolve_declaration,
+                               phase_remaining, revalidate_handoff, require_handoff_execution)
+BASE = Path(__file__).resolve().parent
+SCENARIO_FAMILIES = ['acp_mix'] * 8 + ['acp_pair_scale'] * 4 + ['acp_update'] * 4 + ['acp_apply'] * 4 + ['acp_fold'] * 4
+PROOF_FLAGS = ('launcherCreated', 'launcherPidIdentityVerified', 'scopeVerified', 'scopeAdmitted', 'captureComplete', 'waitComplete', 'cleanupVerified', 'workerExecVerified', 'workerTerminationVerified')
+PHASES = ('preprocess','compile','link','exports','declarations','gccAssertions','load','behavior')
+
+
+def validate_exchange(name, value):
+    """Pinned repository JSON-schema engine; no native tools or network resolution."""
+    from interface_gate_v3 import fastjsonschema
+    from freeze_v3 import read_regular
+    schema = json.loads(read_regular(BASE / 'contracts' / (name + '-schema.json'),1048576))
+    fastjsonschema.compile(schema)(value)
+    if name == 'reference-observations':
+        for row in value['observations']:
+            if not observation_complete(row['process']) or not row['process']['completed']:
+                raise ValueError('reference requires complete protected worker evidence')
+            _bound_runtime_inputs(row['process'],{'caller':{'path':value['callerPath'],'sha256':value['callerSha256']},'library':{'path':value['libraryPath'],'sha256':value['librarySha256']}},value['profileSha256'])
+    if name == 'report':
+        expected = summarize(value['scenarios'], value['admitted'])
+        if any(value[key] != item for key, item in expected.items() if key != 'behaviorStatus'):
+            raise ValueError('report accounting disagreement')
+        if value['phases']['behavior']['status'] != expected['behaviorStatus']:
+            raise ValueError('report behavior disagreement')
+        admission = all(value['phases'][key]['status'] == 'passed' for key in ('preprocess','compile','link','exports','declarations','gccAssertions'))
+        if value['admitted'] != admission:
+            raise ValueError('report admission disagreement')
+        expected_load = {'status':'unverified' if value['runtimeRequestCount'] else 'not-attempted','value':None}
+        if value['phases']['load'] != expected_load:
+            raise ValueError('load activity is unverified, not a process phase assertion')
+        if value['admitted'] != (value['runtimeInputs'] is not None):
+            raise ValueError('runtime input binding/admission disagreement')
+        for row in value['scenarios']:
+            if row['process'] and row['process']['completed']:
+                _bound_runtime_inputs(row['process'],value['runtimeInputs'],value['profileSha256'])
+        known = set(value['evidenceFiles'].values())
+        references = [phase.get('evidenceSha256') for phase in value['phases'].values()] + [row['evidenceSha256'] for row in value['scenarios']]
+        if any(sha is not None and sha not in known for sha in references):
+            raise ValueError('unbound execution evidence reference')
+        if any(row['runtimeRequested'] and row['evidenceSha256'] is None for row in value['scenarios']):
+            raise ValueError('runtime request lacks retained execution evidence')
+    return value
+
+
+def read_exchange(path, name, maximum=8388608):
+    value, _ = _read_json(Path(path), maximum)
+    return validate_exchange(name, value)
+
+
+def _hex_stream(result, label):
+    if label in result:
+        return result[label].hex() if type(result[label]) is bytes else None
+    value = result.get(label + 'Hex')
+    return value if type(value) is str and re.fullmatch(r'(?:[0-9a-f]{2})*', value) else None
+
+
+def _proof_bytes(result):
+    if 'workerProofRaw' in result:
+        value = result['workerProofRaw']
+        return value if type(value) is bytes and len(value) <= MAX_PROOF_BYTES else b''
+    text = result.get('workerProofRawHex')
+    if type(text) is str and len(text) <= 2 * MAX_PROOF_BYTES and re.fullmatch(r'(?:[0-9a-f]{2})*', text):
+        return bytes.fromhex(text)
+    return b''
+
+
+def _proof_replays(result):
+    if not worker_execution_complete(result):
+        return False
+    try:
+        raw = _proof_bytes(result)
+        parsed = _parse_worker_proof(raw, result['workerProofBindings']['expected'])
+        return (parsed['status'] == 'verified' and parsed['proofSha256'] == result['workerProof']['proofSha256']
+                and parsed['workerTermination'] == result['workerTermination']
+                and parsed['exitCode'] == result['exitCode'])
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def process_observation(result):
+    result = result if type(result) is dict else {}
+    bounds = result.get('bounds') if type(result.get('bounds')) is dict else {}
+    phase = bounds.get('phase')
+    profile_sha = bounds.get('profileSha256')
+    profile_sha = profile_sha if type(profile_sha) is str and re.fullmatch('[0-9a-f]{64}', profile_sha) else None
+    # Retain controller-authenticated diagnostic facts. Only a replayed protected
+    # exec+terminal proof and the complete controller chain produce behavior.
+    complete = _proof_replays(result) and phase == 'runtime'
+    worker_term = result.get('workerTermination')
+    if (type(worker_term) is not dict or set(worker_term) != {'kind','value','rawWaitStatus'}
+            or worker_term['kind'] not in ('exit','signal')
+            or type(worker_term['value']) is not int or type(worker_term['rawWaitStatus']) is not int):
+        worker_term = None
+    return {**{key:result.get(key) is True for key in PROOF_FLAGS},
+            'rootReaped':result.get('rootReaped') is True,
+            'finalAbsenceVerified':result.get('finalAbsenceVerified') is True,
+            'scopeAbsenceVerified':type(result.get('kernelScope')) is dict and result['kernelScope'].get('finalAbsenceVerified') is True,
+            'launcherExitCode':result.get('launcherExitCode') if type(result.get('launcherExitCode')) is int else None,
+            'workerExitCode':result.get('exitCode') if type(result.get('exitCode')) is int else None,
+            'provisioningOnly':result.get('provisioningOnly') if type(result.get('provisioningOnly')) is bool else None,
+            'phase':phase if phase in ('runtime','compiler','probe','elf-inspection','caller-build','helper-build','toolchain-inspection','unspecified') else None,
+            'profileSha256':profile_sha,
+            'workerProof':deepcopy(result.get('workerProof')) if type(result.get('workerProof')) is dict else None,
+            'workerProofBindings':deepcopy(result.get('workerProofBindings')) if type(result.get('workerProofBindings')) is dict else None,
+            'launchInputPins':deepcopy(result.get('launchInputPins')) if type(result.get('launchInputPins')) is dict else None,
+            'workerProofRawHex':_proof_bytes(result).hex(),
+            'workerTermination':deepcopy(worker_term), 'completed':complete,
+            'termination':({'kind':worker_term['kind'],'value':worker_term['value']} if complete else None),
+            'stdoutHex':_hex_stream(result,'stdout'), 'stderrHex':_hex_stream(result,'stderr'),
+            'streamsUnambiguous':not any(label in result and label+'Hex' in result for label in ('stdout','stderr')),
+            **{key:result.get(key) if type(result.get(key)) is bool else None
+               for key in ('timedOut','outputExceeded','infrastructureFailure')}}
+
+
+def observation_complete(value):
+    if type(value) is not dict or value.get('phase') != 'runtime' or value.get('streamsUnambiguous') is not True:
+        return False
+    raw = {key:value.get(key) for key in (*PROOF_FLAGS,'rootReaped','finalAbsenceVerified','launcherExitCode',
+           'provisioningOnly','workerProof','workerProofBindings','launchInputPins','workerProofRawHex',
+           'workerTermination','stdoutHex','stderrHex','timedOut','outputExceeded','infrastructureFailure')}
+    raw.update(exitCode=value.get('workerExitCode'),
+               kernelScope={'finalAbsenceVerified':value.get('scopeAbsenceVerified')},
+               bounds={'phase':value.get('phase'),'profileSha256':value.get('profileSha256')})
+    term=value.get("workerTermination")
+    return (_proof_replays(raw) and type(term) is dict
+            and value.get("termination")=={"kind":term["kind"],"value":term["value"]})
+
+
+def compare_process(expected, result):
+    actual = process_observation(result)
+    if not actual['completed'] or expected.get('completed') is not True or not observation_complete(expected):
+        return 'unknown', actual
+    # Proof identities/PIDs/nonces differ per invocation. They establish usable
+    # observation provenance, never the behavior equality criterion.
+    keys = ('stdoutHex','stderrHex','termination')
+    return ('matched' if all(actual[key] == expected[key] for key in keys) else 'mismatched'), actual
+
+
+def scenario_entry(obs, result=None, requested=False, evidence=None):
+    status, process = compare_process(obs['process'], result) if requested else ('admission-refused', None)
+    internal = {'status':'unverified' if requested else 'not-attempted', 'value':None}
+    return {'id':obs['id'], 'family':obs['family'], 'status':status, 'runtimeRequested':requested,
+            'process':process, 'evidenceSha256':evidence, 'loadObservation':dict(internal),
+            'apiEntryObservation':dict(internal), 'apiCompletionObservation':dict(internal),
+            'callbackObservation':dict(internal)}
+
+
+def summarize(scenarios, admitted):
+    if len(scenarios) != 24 or [s['id'] for s in scenarios] != list(range(24)) or [s['family'] for s in scenarios] != SCENARIO_FAMILIES:
+        raise ValueError('exact scenario identity/family coverage required')
+    if any(s['runtimeRequested'] != admitted for s in scenarios):
+        raise ValueError('runtime request/admission disagreement')
+    for row in scenarios:
+        process = row['process']
+        if admitted:
+            if process is None or row['status'] not in ('matched','mismatched','unknown'):
+                raise ValueError('requested process evidence required')
+            if process['completed'] != observation_complete(process):
+                raise ValueError('worker proof/controller completion disagreement')
+            if (row['status'] in ('matched','mismatched')) != process['completed']:
+                raise ValueError('process completion/status disagreement')
+        elif row['status'] != 'admission-refused' or process is not None:
+            raise ValueError('refused admission has process evidence')
+        internal = {'status':'unverified' if admitted else 'not-attempted','value':None}
+        if any(row[key] != internal for key in ('loadObservation','apiEntryObservation','apiCompletionObservation','callbackObservation')):
+            raise ValueError('internal API activity is unverified')
+    count = lambda status: sum(s['status'] == status for s in scenarios)
+    completed = count('matched') + count('mismatched')
+    matched, mismatched, unknown = count('matched'), count('mismatched'), count('unknown')
+    return {'scenarioCount':24, 'runtimeRequestCount':sum(s['runtimeRequested'] for s in scenarios),
+            'launcherCreatedCount':sum(bool(s['process'] and s['process']['launcherCreated']) for s in scenarios),
+            'scopeVerifiedCount':sum(bool(s['process'] and s['process']['scopeVerified']) for s in scenarios),
+            'completedScenarioProcessCount':completed, 'matchedScenarioProcessCount':matched,
+            'mismatchedScenarioProcessCount':mismatched, 'unknownScenarioProcessCount':unknown,
+            'admissionRefusedCount':count('admission-refused'),
+            'processBehaviorRate':matched/completed if completed else None, 'processCoverage':completed/24,
+            'apiEntryCount':None, 'apiCompletionCount':None, 'callbackCount':None,
+            'apiCoverage':None, 'apiBehaviorRate':None,
+            'behaviorStatus':('not-attempted' if not admitted else 'failed' if mismatched else 'passed' if matched == 24 else 'unknown')}
+
+
+def environment(work):
+    return dict(load_profile()['environment'])
+
+
+
+def control_passed(control, report):
+    """Pure finite preflight policy shared with the trusted coordinator.
+
+    Reports must already satisfy their closed schema/accounting contract. This
+    predicate grants no runtime or native-qualification authority.
+    """
+    kind = control['expected']
+    if kind == 'matched':
+        return report['admitted'] and report['matchedScenarioProcessCount'] == 24 and report['unknownScenarioProcessCount'] == 0
+    if kind == 'mismatched':
+        return report['admitted'] and report['mismatchedScenarioProcessCount'] > 0 and report['phases']['behavior']['status'] == 'failed'
+    if kind == 'unknown':
+        return report['admitted'] and report['unknownScenarioProcessCount'] > 0
+    return (not report['admitted'] and report['runtimeRequestCount'] == 0 and report['admissionRefusedCount'] == 24
+            and report['phases'][control['stage']]['status'] in (('failed',) if kind == 'build-failed' else ('refused', 'unknown')))
+
+
+def phase_command(work, arguments, read_only_files=()):
+    command=['/usr/bin/bwrap','--unshare-all','--unshare-user','--die-with-parent','--new-session','--disable-userns','--cap-drop','ALL','--clearenv']
+    for directory in ('/usr','/lib','/lib64'):
+        if Path(directory).exists(): command += ['--ro-bind',directory,directory]
+    for path in load_profile()['analysisIsolation']['readOnlySystemFiles']:
+        command += ['--ro-bind',path,path]
+    command += ['--proc','/proc','--dev','/dev','--remount-ro','/dev','--size',str(load_profile()['bounds']['temporaryFilesystemBytes']),'--tmpfs','/tmp','--bind',str(work),'/work']
+    for source in read_only_files:
+        source=Path(source)
+        if source != source.resolve(strict=True) or not source.is_file() or not source.is_relative_to(work):
+            raise ValueError('compiler input must be an explicit canonical file inside its isolated leaf')
+        command += ['--ro-bind',str(source),'/work/'+str(source.relative_to(work))]
+    return command+['--chdir','/work',*sum((['--setenv',k,v] for k,v in environment(work).items()),[]),*arguments]
+
+
+def runtime_command(caller, library, scenario):
+    command=['/usr/bin/bwrap','--unshare-all','--unshare-user','--die-with-parent','--new-session','--disable-userns','--cap-drop','ALL','--clearenv']
+    for directory in ('/usr','/lib','/lib64'):
+        if Path(directory).exists(): command += ['--ro-bind',directory,directory]
+    for path in load_profile()['analysisIsolation']['readOnlySystemFiles']:
+        command += ['--ro-bind',path,path]
+    return command+['--proc','/proc','--dev','/dev','--remount-ro','/dev','--size',str(load_profile()['bounds']['temporaryFilesystemBytes']),'--tmpfs','/tmp','--dir','/workspace','--ro-bind',str(caller),'/caller','--ro-bind',str(library),'/library.so','--chdir','/workspace','--remount-ro','/',*sum((['--setenv',k,v] for k,v in load_profile()['environment'].items()),[]),'/caller','/library.so',str(scenario)]
+
+
+def run(argv, work, timeout=None, phase='compiler', runtime_library=None, *, deadline=None, expected_inputs=None):
+    # Keep every mounted owned leaf associated with its actual cleanup outcome.
+    mounted = [Path(argv[index + 1]) for index, argument in enumerate(argv[:-1])
+               if argument in ('--bind', '--ro-bind', '--bind-try', '--ro-bind-try')]
+    def operation():
+        if deadline is None and expected_inputs is None:
+            return (_run(argv,work,timeout,phase,runtime_library=runtime_library)
+                    if runtime_library is not None else _run(argv,work,timeout,phase))
+        result = None
+        try:
+            if expected_inputs is not None: revalidate_handoff(expected_inputs, deadline)
+            allowance = timeout
+            if deadline is not None:
+                allowance = phase_remaining(deadline, timeout if timeout is not None else load_profile()['bounds']['compilerSeconds'])
+            status, result = (_run(argv, work, allowance, phase, runtime_library=runtime_library,phase_deadline=deadline)
+                              if runtime_library is not None else _run(argv, work, allowance, phase,phase_deadline=deadline))
+            if expected_inputs is not None:
+                if not _proof_replays(result): raise ValueError('handoff lacks replayed worker proof')
+                require_handoff_execution(result, expected_inputs, deadline, phase=phase)
+            if deadline is not None: phase_remaining(deadline, 1)
+            return status, result
+        except Exception as error:
+            result = result if result is not None else getattr(error, 'bounded_result', None)
+            if type(result) is dict:
+                result.update(infrastructureFailure=True, infrastructureReason='phase-handoff-unverified', exitCode=None)
+            return {'status':'unknown','reason':type(error).__name__+':'+str(error)[:300],
+                    'execution':public_result(result) if result else None}, result
+    return _leaf_call(work, operation, mounted)
+
+
+def _run(argv, work, timeout=None, phase='compiler', runtime_library=None, *, phase_deadline=None):
+    p = load_profile()
+    try:
+        if not argv or argv[0] != '/usr/bin/bwrap':
+            raise ValueError('worker requires an explicit contained recipe')
+        r=bounded_run(argv,work,environment(work),timeout=timeout if timeout is not None else p['bounds']['compilerSeconds'],output_limit=p['bounds']['outputBytesPerStream'],managed_scope=True,phase=phase,**({'runtime_library':runtime_library} if runtime_library is not None else {}),
+                      **({'phase_deadline':phase_deadline} if phase_deadline is not None else {}))
+        complete = (_proof_replays(r) and r["bounds"]["phase"] == phase
+                    and r["bounds"]["profileSha256"] == load_profile_with_digest()[1])
+        return {'status':('passed' if r['exitCode']==0 else 'failed') if complete else 'unknown','execution':public_result(r)},r
+    except Exception as e:
+        r=getattr(e,'bounded_result',None)
+        return {'status':'unknown','reason':type(e).__name__+':'+str(e)[:300], 'execution':public_result(r) if r else None},r
+
+
+# Invocation-local worker tracking. Held descriptors survive replacement, but
+# neither they nor verified worker absence grant mutable-name deletion rights.
+_LEAF_SCOPE = ContextVar('candidate_worker_leaves', default=None)
+
+
+def _cleanup_proven(result):
+    # These controller facts are emitted only before any Popen attempt. An
+    # attempted launch without a handle leaves both absence facts unverified.
+    if (type(result) is dict and result.get('cleanupVerified') is True
+            and result.get('finalAbsenceVerified') is True
+            and all(result.get(key) is False for key in
+                    ('launcherCreated', 'launcherPidIdentityVerified', 'scopeVerified', 'scopeAdmitted',
+                     'waitComplete', 'rootReaped', 'workerExecVerified', 'workerTerminationVerified'))
+            and 'rootPid' in result and result['rootPid'] is None
+            and 'kernelScope' in result and result['kernelScope'] is None):
+        return True
+    return (type(result) is dict and all(result.get(key) is True for key in
+            ('cleanupVerified', 'finalAbsenceVerified', 'rootReaped', 'scopeVerified', 'scopeAdmitted'))
+            and type(result.get('kernelScope')) is dict
+            and result['kernelScope'].get('finalAbsenceVerified') is True)
+
+
+class WorkerLeaves:
+    def __init__(self):
+        self.leaves = {}
+
+    def own(self, path):
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        self.leaves[path] = {'fd': fd, 'identity': os.fstat(fd), 'safe': True}
+
+    def call(self, path, operation, mounted=()):
+        involved = [row for leaf, row in self.leaves.items()
+                    if leaf == path or any(source == leaf or source.is_relative_to(leaf)
+                                           for source in mounted)]
+        if not involved:
+            return operation()
+        prior = [row['safe'] for row in involved]
+        for row in involved: row['safe'] = False
+        try:
+            value = operation()
+        except BaseException as error:
+            proven = _cleanup_proven(getattr(error, 'bounded_result', None))
+            for row, was_safe in zip(involved, prior): row['safe'] = was_safe and proven
+            raise
+        results = ([value[1]] if type(value) is tuple else
+                   [value.get(key) for key in ('execution', 'sectionsExecution') if key in value])
+        proven = bool(results) and all(_cleanup_proven(r) for r in results)
+        for row, was_safe in zip(involved, prior): row['safe'] = was_safe and proven
+        return value
+
+    def close(self):
+        # Worker absence is not exclusive authority over directory entries. A
+        # same-UID writer can replace either a child or the leaf after any last
+        # stat, even with the original directory held open. Retain diagnostics
+        # until an independently protected cleanup owner/namespace is available.
+        # No current-path identity or reclamation credit follows from retention.
+        for row in self.leaves.values():
+            row['cleanup'] = {'status': 'retained', 'deletionAttempted': False,
+                              'reason': 'exclusive-deletion-authority-unavailable'}
+            fd = row['fd']
+            if fd is None:
+                continue
+            try:
+                os.close(fd)
+            except OSError:
+                pass  # Descriptor cleanup cannot replace the primary result.
+            finally:
+                row['fd'] = None
+
+
+def _leaf_call(path, operation, mounted=()):
+    scope = _LEAF_SCOPE.get()
+    return scope.call(path, operation, mounted) if scope is not None else operation()
+
+
+def new_worker_leaf(label):
+    """One controller-owned empty leaf, never an output/control/source parent."""
+    if label not in ('preprocess','compile','link','probe','assertions','expected-preprocess','inspection','runtime','caller-build'):
+        raise ValueError('unknown worker leaf role')
+    parent=BASE/'worker-work'
+    parent.mkdir(mode=0o700,exist_ok=True)
+    metadata=parent.lstat()
+    if (not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid!=os.getuid()
+            or stat.S_IMODE(metadata.st_mode)&0o077 or parent.resolve()!=parent):
+        raise ValueError('worker leaf parent must be private, owned and canonical')
+    leaf = private_directory(parent/(label+'-'+uuid.uuid4().hex))
+    scope = _LEAF_SCOPE.get()
+    if scope is not None: scope.own(leaf)
+    return leaf
+
+
+@dataclass(frozen=True)
+class CapturedArtifact:
+    """Controller bytes after one bounded capture; not producer-origin authority."""
+    data: bytes
+    origin: tuple | None = None
+    sha256: str = field(init=False)
+
+    def __post_init__(self):
+        if type(self.data) is not bytes or len(self.data) > load_profile()['bounds']['fileSizeBytes']:
+            raise ValueError('bounded immutable artifact bytes required')
+        object.__setattr__(self, 'sha256', hashlib.sha256(self.data).hexdigest())
+
+    def evidence(self):
+        return {'sha256':self.sha256, 'size':len(self.data), 'captureIdentity':self.origin,
+                'producerOriginQualified':False, 'ordinaryMountAbaQualified':False}
+
+
+@dataclass(frozen=True)
+class CopiedInput:
+    path: Path
+    identity: tuple
+    sha256: str
+
+    def pin(self):
+        return {'device':self.identity[0], 'inode':self.identity[1],
+                'mode':stat.S_IMODE(self.identity[2]), 'sha256':self.sha256}
+
+
+def _file_version(metadata):
+    return tuple(getattr(metadata, name) for name in
+                 ('st_dev','st_ino','st_mode','st_size','st_mtime_ns','st_ctime_ns'))
+
+
+def _handoff_parent(path, deadline):
+    """Bounded nofollow parent walk; reuse the invocation's held leaf when available."""
+    phase_remaining(deadline, 1)
+    path = Path(path)
+    if not path.is_absolute() or '..' in path.parts or len(path.parts)>128 or len(str(path))>4096:
+        raise ValueError('canonical bounded handoff path required')
+    scope = _LEAF_SCOPE.get()
+    row = scope.leaves.get(path.parent) if scope is not None else None
+    if row is not None:
+        current = path.parent.lstat(); held = os.fstat(row['fd'])
+        if (current.st_dev,current.st_ino)!=(held.st_dev,held.st_ino):
+            raise ValueError('owned handoff leaf name changed')
+        fd = os.dup(row['fd'])
+    else:
+        fd = os.open('/',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC)
+        try:
+            for part in path.parent.parts[1:]:
+                phase_remaining(deadline, 1)
+                child = os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=fd)
+                previous = fd; fd = child
+                os.close(previous)
+                phase_remaining(deadline, 1)
+        except BaseException:
+            os.close(fd); raise
+    try: phase_remaining(deadline, 1)
+    except BaseException:
+        os.close(fd); raise
+    return fd
+
+
+def capture_artifact(path, *, deadline, maximum=None):
+    """One nofollow/nonblocking admitted read, including the named version check."""
+    maximum = load_profile()['bounds']['fileSizeBytes'] if maximum is None else maximum
+    if type(maximum) is not int or not 0 <= maximum <= load_profile()['bounds']['fileSizeBytes']:
+        raise ValueError('artifact maximum exceeds existing file bound')
+    path = Path(path); parent = _handoff_parent(path, deadline); descriptor = None
+    try:
+        phase_remaining(deadline, 1)
+        descriptor = os.open(path.name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC,dir_fd=parent)
+        phase_remaining(deadline, 1)
+        before = os.fstat(descriptor); version = _file_version(before)
+        phase_remaining(deadline, 1)
+        if not stat.S_ISREG(before.st_mode) or not 0 <= before.st_size <= maximum:
+            raise ValueError('phase output outside bounded regular-file policy')
+        remaining = before.st_size; chunks = []
+        while remaining:
+            phase_remaining(deadline, 1)
+            block = os.read(descriptor,min(65536,remaining))
+            phase_remaining(deadline, 1)
+            if not block: raise ValueError('phase output truncated during capture')
+            chunks.append(block); remaining -= len(block)
+        if (_file_version(os.fstat(descriptor)) != version or
+                _file_version(os.stat(path.name,dir_fd=parent,follow_symlinks=False)) != version):
+            raise ValueError('phase output changed during capture')
+        phase_remaining(deadline, 1)
+        artifact = CapturedArtifact(b''.join(chunks),(str(path),version))
+        phase_remaining(deadline, 1)
+    finally:
+        try:
+            if descriptor is not None: os.close(descriptor)
+        finally: os.close(parent)
+    phase_remaining(deadline, 1)
+    return artifact
+
+
+def _capture_producer_artifact(path, *, deadline):
+    """Refuse output handoff until an authenticated producer channel exists.
+
+    A successful worker proof authenticates execution, not the mutable output
+    name after worker exit. capture_artifact() can preserve bytes but cannot
+    distinguish producer bytes from a stable replacement before its first read.
+    There is deliberately no pathname, digest, receipt flag or caller-supplied
+    qualification fallback. A future protected channel needs separate admission
+    and qualification before this boundary can return a usable artifact.
+    """
+    phase_remaining(deadline, 1)
+    raise ValueError('producer-output authority unavailable; pathname capture cannot authorize handoff')
+
+
+def copy_input(source, destination, *, deadline, executable=False):
+    """Materialize captured bytes only. A Path cannot establish a new baseline."""
+    if type(source) is not CapturedArtifact:
+        raise ValueError('immutable captured artifact required; pathname fallback forbidden')
+    destination = Path(destination); parent = _handoff_parent(destination, deadline); descriptor = None
+    try:
+        phase_remaining(deadline, 1)
+        descriptor = os.open(destination.name,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC,0o600,dir_fd=parent)
+        phase_remaining(deadline, 1)
+        view = memoryview(source.data)
+        while view:
+            phase_remaining(deadline, 1)
+            written = os.write(descriptor,view[:65536])
+            phase_remaining(deadline, 1)
+            if written <= 0: raise ValueError('artifact copy incomplete')
+            view = view[written:]
+        phase_remaining(deadline, 1)
+        mode=0o500 if executable else 0o400
+        os.fchmod(descriptor,mode)
+        phase_remaining(deadline, 1)
+        version = _file_version(os.fstat(descriptor))
+        if (not stat.S_ISREG(version[2]) or stat.S_IMODE(version[2])!=mode or version[3]!=len(source.data) or
+                _file_version(os.stat(destination.name,dir_fd=parent,follow_symlinks=False))!=version):
+            raise ValueError('artifact copy identity changed')
+        phase_remaining(deadline, 1)
+        copied = CopiedInput(destination,version,source.sha256)
+    finally:
+        try:
+            if descriptor is not None: os.close(descriptor)
+        finally: os.close(parent)
+    phase_remaining(deadline, 1)
+    return copied
+
+
+def _input_pins(inputs):
+    if not inputs or any(type(item) is not CopiedInput for item in inputs):
+        raise ValueError('captured input copies required')
+    return {str(item.path):item.pin() for item in inputs}
+
+
+def compile_sequence(source, headers=(), retain=None, *, initial_deadline=None):
+    """Fixed three-phase graph; immutable handoffs with no new timing allowance."""
+    if type(source) is not CapturedArtifact or any(type(h) is not CapturedArtifact for _,h in headers):
+        raise ValueError('compile inputs must be captured artifacts')
+    p=load_profile(); files={}; statuses={}; previous=source
+    for phase,input_name,output_name in (('preprocess','candidate.c','candidate.i'),('compile','candidate.i','candidate.o'),('link','candidate.o','libcandidate.so')):
+        end = time.monotonic()+p['bounds']['compilerSeconds']
+        if phase=='preprocess' and initial_deadline is not None:
+            phase_remaining(initial_deadline, 1)
+            end=min(end,initial_deadline)
+        leaf=new_worker_leaf(phase)
+        status=None
+        try:
+            inputs=[copy_input(previous,leaf/input_name,deadline=end)]
+            if phase=='preprocess':
+                inputs += [copy_input(header,leaf/name,deadline=end) for name,header in headers]
+            status,result=run(phase_command(leaf,p['commands'][phase],read_only_files=[item.path for item in inputs]),leaf,
+                              deadline=end,expected_inputs=_input_pins(inputs))
+            if status['status']=='passed':
+                artifact=_capture_producer_artifact(leaf/output_name,deadline=end)
+                status={**status,'outputArtifact':artifact.evidence(),'inputArtifacts':[previous.evidence()]}
+                files[phase]=artifact;previous=artifact
+        except (OSError,ValueError,TimeoutError) as error:
+            status={**(status if type(status) is dict else {}),'status':'unknown','reason':'phase handoff unverified: '+str(error)[:300]}
+        statuses[phase]=status
+        if retain is not None:retain(phase,status)
+        if status['status']!='passed':break
+    return statuses,files
+
+
+def _bound_runtime_inputs(process, inputs, profile_sha, admitted_pins=None):
+    if process.get('profileSha256')!=profile_sha:
+        raise ValueError('process profile binding differs')
+    pins=process.get('launchInputPins') or {}
+    for item in inputs.values():
+        path=Path(item['path'])
+        if not path.is_absolute() or '..' in path.parts or str(path)!=item['path']:
+            raise ValueError('runtime input path is not canonical')
+        if admitted_pins is not None and pins.get(item['path'])!=admitted_pins.get(item['path']):
+            raise ValueError('runtime input physical identity differs from admitted preparation')
+        if pins.get(item['path'],{}).get('sha256')!=item['sha256']:
+            raise ValueError('runtime input file binding missing or changed')
+    binding=process.get('workerProofBindings') or {}
+    expected=binding.get('expected') or {}
+    library = expected.get('library')
+    if (not isinstance(library, dict) or library.get('sourcePath') != inputs['library']['path'] or
+            library.get('sha256') != inputs['library']['sha256'] or not observation_complete(process)):
+        raise ValueError('runtime library lacks sealed namespace identity attestation')
+    caller_pin=pins.get(inputs['caller']['path'],{})
+    if (binding.get('targetSha256')!=inputs['caller']['sha256']
+            or (caller_pin.get('device'),caller_pin.get('inode'))!=(expected.get('targetDevice'),expected.get('targetInode'))):
+        raise ValueError('runtime target is not the bound caller')
+
+
+def validated_observations(path, caller, preparation):
+    # The coordinator chooses this root separately from the observation JSON.
+    # Fixed names cannot be redirected by a self-consistent receipt/pin row.
+    from freeze_v3 import admit_files, TreeBudget
+    preparation=Path(preparation)
+    if preparation!=preparation.resolve(strict=True) or not preparation.is_relative_to(BASE):
+        raise ValueError('reference preparation root outside trusted v3 namespace')
+    library=preparation/'reference/libcandidate.so'
+    if path!=preparation/'reference-observations.json' or caller!=preparation/'caller':
+        raise ValueError('reference paths differ from independently selected preparation')
+    def admitted():
+        return admit_files((caller,library),TreeBudget(files=2,bytes=2*load_profile()['bounds']['fileSizeBytes']),root=preparation)['files']
+    inputs=admitted()
+    expected_pins={name:{'device':record['identity'][0],'inode':record['identity'][1],
+                         'mode':stat.S_IMODE(record['identity'][2]),'sha256':record['sha256']}
+                   for name,record in inputs.items()}
+    if not path.resolve(strict=True).is_relative_to(BASE):
+        raise ValueError('observations outside trusted v3 namespace')
+    value=read_exchange(path,'reference-observations')
+    if (value['sourceSha256']!=digest(BASE/'private/original.c',maximum=load_profile()['bounds']['fileSizeBytes'],deadline=None) or value['callerSha256']!=inputs[str(caller)]['sha256']
+            or value['callerPath']!=str(caller)
+            or value['libraryPath']!=str(library)
+            or value['librarySha256']!=inputs[str(library)]['sha256']
+            or value['profileSha256']!=load_profile_with_digest()[1]):
+        raise ValueError('reference observations do not bind current fixture/caller')
+    observations=value['observations']
+    if [o['id'] for o in observations]!=list(range(24)) or [o['family'] for o in observations]!=SCENARIO_FAMILIES:
+        raise ValueError('scenario identity drift')
+    for obs in observations:
+        if not obs['process']['completed'] or not observation_complete(obs['process']):
+            raise ValueError('incomplete reference process')
+        for field in ('stdoutHex','stderrHex'):
+            if len(bytes.fromhex(obs['process'][field]))>load_profile()['bounds']['outputBytesPerStream']:
+                raise ValueError('observation output exceeds bound')
+        receipt_path=path.parent/('reference-process-'+str(obs['id'])+'.json')
+        receipt,receipt_sha=_read_json(receipt_path,1048576)
+        if receipt_sha!=obs['evidenceSha256']:
+            raise ValueError('reference process receipt drift')
+        execution=receipt.get('execution')
+        if not isinstance(execution,dict):raise ValueError('reference execution evidence missing')
+        if process_observation(execution)!=obs['process']:
+            raise ValueError('reference normalized process disagrees with raw evidence')
+        _bound_runtime_inputs(obs['process'],{'caller':{'path':value['callerPath'],'sha256':value['callerSha256']},'library':{'path':value['libraryPath'],'sha256':value['librarySha256']}},value['profileSha256'],expected_pins)
+    if admitted()!=inputs:
+        raise ValueError('reference preparation inputs changed during replay')
+    return observations
+
+
+def _reference_caller_pin(observations, caller):
+    """Retain the caller identity already bound by all24 validated reference rows."""
+    name=str(caller)
+    try:
+        pin=deepcopy(observations[0]['process']['launchInputPins'][name])
+        if (len(observations)!=24 or type(pin) is not dict
+                or set(pin)!={'device','inode','mode','sha256'}
+                or any(row['process']['launchInputPins'].get(name)!=pin for row in observations)):
+            raise ValueError('validated reference caller identity differs across observations')
+    except (IndexError,KeyError,TypeError) as error:
+        raise ValueError('validated reference caller identity missing') from error
+    return pin
+
+
+def _require_reference_caller(caller, expected):
+    """A later pathname cannot replace the validated caller's identity or digest."""
+    from freeze_v3 import admit_files, TreeBudget
+    record=admit_files((caller,),TreeBudget(files=1,bytes=load_profile()['bounds']['fileSizeBytes']),root=caller.parent)['files'][str(caller)]
+    actual={'device':record['identity'][0],'inode':record['identity'][1],
+            'mode':stat.S_IMODE(record['identity'][2]),'sha256':record['sha256']}
+    if actual!=expected:
+        raise ValueError('runtime caller differs from validated reference caller')
+
+
+def evaluate(candidate, output, helper, caller, visible, observations_path):
+    if 'build/acp-decomp-effectiveness/callable-library-v3' not in str(BASE):
+        raise ValueError('execution requires trusted v3 source copy')
+    for path in (candidate,helper,caller,visible,observations_path):
+        if not path.resolve(strict=True).is_relative_to(BASE): raise ValueError('input outside trusted v3 namespace')
+    snapshot = verified_visible_snapshot(visible)
+    with profile_scope(snapshot):
+        scope = WorkerLeaves()
+        token = _LEAF_SCOPE.set(scope)
+        primary = None
+        try:
+            return _evaluate(candidate, output, helper, caller, visible, observations_path)
+        except BaseException as failure:
+            primary = failure
+            raise
+        finally:
+            try:
+                try:
+                    scope.close()
+                except BaseException:
+                    if primary is None:
+                        raise
+                    try:
+                        BaseException.add_note(primary, 'worker leaf cleanup failed after evaluation failure')
+                    except BaseException:
+                        pass  # A diagnostic must never replace the evaluation's original failure.
+            finally:
+                _LEAF_SCOPE.reset(token)
+
+
+def _evaluate(candidate, output, helper, caller, visible, observations_path):
+    observations=validated_observations(observations_path,caller,visible)
+    p=profile(); output=private_directory(output)
+    evidence={}
+    def retain(name, value):
+        path=output/(name+'.json');sha=write_json(path,value);evidence[path.name]=sha;return sha
+    def phase_receipt(name, value):
+        return {'status':value['status'], 'reason':str(value.get('reason',''))[:500], 'evidenceSha256':retain(name,value)}
+    source_end=time.monotonic()+p['bounds']['compilerSeconds']
+    source_artifact=capture_artifact(candidate,deadline=source_end,maximum=p['bounds']['sourceBytes'])
+    raw=source_artifact.data
+    if b'\0' in raw: raise ValueError('source bound')
+    raw.decode('utf8')
+    copy_input(source_artifact,output/'candidate-source.c',deadline=source_end)
+    phases={n:{'status':'not-attempted','reason':'prior-phase-not-passed','evidenceSha256':None} for n in PHASES}
+    def retain_build(phase,status):phases[phase]=phase_receipt(phase,status)
+    build_statuses,artifacts=compile_sequence(source_artifact,retain=retain_build,initial_deadline=source_end)
+    expected=None;actual=None;expected_sources={}
+    if phases['preprocess']['status']=='passed':
+        try:
+            expected_end=time.monotonic()+p['bounds']['probeSeconds']
+            helper=helper.resolve(strict=True)
+            helper_inputs=_pin_files([helper],expected_end)
+            expected_work=new_worker_leaf('probe')
+            expected_sources={name:capture_artifact(BASE/'private'/name,deadline=expected_end) for name in ('original.c','original.h')}
+            expected_inputs=[copy_input(artifact,expected_work/name,deadline=expected_end) for name,artifact in expected_sources.items()]
+            expected=_leaf_call(expected_work, lambda: probe(expected_work/'original.c',helper,expected_work,dict(p['analysisIsolation']['environment']),
+                                deadline=expected_end,expected_inputs=_input_pins(expected_inputs),expected_helper=deepcopy(helper_inputs)))
+            retain('expected-descriptors',expected)
+            actual_end=time.monotonic()+p['bounds']['probeSeconds']
+            actual_work=new_worker_leaf('probe')
+            actual_source=copy_input(artifacts['preprocess'],actual_work/'candidate.i',deadline=actual_end)
+            actual=_leaf_call(actual_work, lambda: probe(actual_source.path,helper,actual_work,dict(p['analysisIsolation']['environment']),
+                              deadline=actual_end,expected_inputs=_input_pins([actual_source]),expected_helper=deepcopy(helper_inputs)))
+            retain('candidate-descriptors',actual)
+            phases['declarations']=phase_receipt('declarations',compare_descriptors(expected,actual,expected_helper=deepcopy(helper_inputs)))
+        except Exception as error:
+            failure={'status':'unknown','reason':str(error)[:300]}
+            if hasattr(error,'bounded_result'):failure['execution']=public_result(error.bounded_result)
+            phases['declarations']=phase_receipt('declarations',failure)
+    checks={'expected':{'status':'unknown','reason':'not-completed'},'candidate':{'status':'unknown','reason':'not-completed'}}
+    if phases['declarations']['status']=='passed':
+        for label,receipt in (('expected',expected),('candidate',actual)):
+            try:
+                if label=='expected':
+                    pre_end=time.monotonic()+p['bounds']['compilerSeconds']
+                    prework=new_worker_leaf('expected-preprocess')
+                    inputs=[copy_input(artifact,prework/name,deadline=pre_end) for name,artifact in expected_sources.items()]
+                    pre,_=run(phase_command(prework,['/usr/bin/gcc','-E','-P','-std=c11','/work/original.c','-o','/work/expected.i'],read_only_files=[item.path for item in inputs]),prework,
+                              deadline=pre_end,expected_inputs=_input_pins(inputs))
+                    expected_artifact=None
+                    if pre['status']=='passed':
+                        try:
+                            expected_artifact=_capture_producer_artifact(prework/'expected.i',deadline=pre_end)
+                            pre={**pre,'outputArtifact':expected_artifact.evidence()}
+                        except (OSError,ValueError,TimeoutError) as error:
+                            pre={**pre,'status':'unknown','reason':'expected output handoff unverified: '+str(error)[:300]}
+                    retain('gcc-expected-preprocess',pre)
+                    if pre['status']!='passed':raise ValueError('expected preprocessing incomplete')
+                else:
+                    expected_artifact=artifacts['preprocess']
+                assertion_end=time.monotonic()+p['bounds']['compilerSeconds']
+                assertion_work=new_worker_leaf('assertions')
+                input_file=copy_input(expected_artifact,assertion_work/('expected.i' if label=='expected' else 'candidate.i'),deadline=assertion_end)
+                source=Path('/work')/input_file.path.name
+                assertion_artifact=CapturedArtifact(layout_assertions(source,receipt).encode('utf8'))
+                assertions=copy_input(assertion_artifact,assertion_work/(label+'-assertions.c'),deadline=assertion_end)
+                checks[label],_=run(phase_command(assertion_work,['/usr/bin/gcc','-std=c11','-Werror','-fsyntax-only','/work/'+assertions.path.name],read_only_files=(assertions.path,input_file.path)),assertion_work,
+                                     deadline=assertion_end,expected_inputs=_input_pins([assertions,input_file]))
+            except Exception as e:checks[label]={'status':'unknown','reason':str(e)[:300]}
+        status='passed' if all(c['status']=='passed' for c in checks.values()) else 'unknown' if any(c['status'] in ('unknown','not-attempted') for c in checks.values()) else 'failed'
+        phases['gccAssertions']=phase_receipt('gcc-assertions',{'status':status,'checks':checks})
+    library_copy=None
+    if phases['link']['status']=='passed':
+        try:
+            inspection_end=time.monotonic()+p['bounds']['elfInspectionSeconds']
+            size=resolve_declaration(expected,expected['interfaces']['acp_state'])['sizeBits']//8 if expected and expected.get('status')=='supported' else -1
+            inspection=new_worker_leaf('inspection')
+            library_copy=copy_input(artifacts['link'],inspection/'libcandidate.so',deadline=inspection_end)
+            phases['exports']=phase_receipt('exports',_leaf_call(inspection, lambda: export_inventory(library_copy.path,size,inspection,environment(inspection),
+                                              deadline=inspection_end,expected_inputs=_input_pins([library_copy]))))
+        except Exception as error:
+            failure={'status':'unknown','reason':str(error)[:300]}
+            if hasattr(error,'bounded_result'):failure['execution']=public_result(error.bounded_result)
+            phases['exports']=phase_receipt('exports',failure)
+    admitted=all(phases[n]['status']=='passed' for n in ('preprocess','compile','link','exports','declarations','gccAssertions'))
+    reference_caller_pin=_reference_caller_pin(observations,caller) if admitted else None
+    runtime_inputs=({'caller':{'path':str(caller),'sha256':reference_caller_pin['sha256']},
+                     'library':{'path':str(library_copy.path),'sha256':artifacts['link'].sha256}} if admitted else None)
+    scenarios=[]
+    for obs in observations:
+        result=None;sha=None
+        if admitted:
+            runtime_end=time.monotonic()+p['bounds']['runtimeSeconds']
+            _require_reference_caller(caller,reference_caller_pin)
+            runtime_work=new_worker_leaf('runtime')
+            expected_runtime={str(caller):reference_caller_pin,**_input_pins([library_copy])}
+            status,result=run(runtime_command(caller,library_copy.path,obs['id']),runtime_work,timeout=p['bounds']['runtimeSeconds'],phase='runtime',runtime_library=runtime_inputs['library'],
+                              deadline=runtime_end,expected_inputs=expected_runtime)
+            sha=retain('scenario-'+str(obs['id']),status)
+            if (process_observation(result)['completed']
+                    and result['launchInputPins'].get(str(caller))!=reference_caller_pin):
+                raise ValueError('runtime proof caller differs from validated reference caller')
+        scenarios.append(scenario_entry(obs,result,admitted,sha))
+    summary=summarize(scenarios,admitted)
+    phases['load']={'status':'unverified' if summary['runtimeRequestCount'] else 'not-attempted','value':None}
+    phases['behavior']={'status':summary.pop('behaviorStatus'),'reason':'completed-process-bytes-and-termination','evidenceSha256':None}
+    report={'schemaVersion':3,'schema':'callable-library-candidate-evaluation-v3','candidateSha256':hashlib.sha256(raw).hexdigest(),'profileSha256':load_profile_with_digest()[1],'runtimeInputs':runtime_inputs,'phases':phases,'admitted':admitted,**summary,'scenarios':scenarios,'evidenceFiles':evidence,'formalStructuralScore':None,'abiAccuracy':'unassessed','productionFactoryQualified':False,'productionProviderQualified':False,'productionFilesystemQualified':False}
+    validate_exchange('report',report);write_json(output/'receipt.json',report);return report

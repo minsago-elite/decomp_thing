@@ -1,0 +1,94 @@
+{
+  "schemaVersion": 1,
+  "purpose": "initial public-source copy provenance, not current-source qualification",
+  "baseline": "aab1938d4e99ec960841259fa56bc28c89df0161",
+  "planSha256": "be68d448f82c15f8d7f525de1f08b29a83407a77c05b05460a265235b504271d",
+  "nativeQualification": false,
+  "semanticAcceptance": false,
+  "files": [
+    {
+      "originalPath": "oracle/acp/callable-evaluator-v2/source/bounded_runtime.py",
+      "newPath": "oracle/acp/callable-evaluator-v3/source/bounded_runtime.py",
+      "bytes": 11523,
+      "sha256": "428c8670fdc4581a613df84a7e0475cea5c8bba34b816749d50122c37887e92a"
+    },
+    {
+      "originalPath": "oracle/acp/callable-evaluator-v2/source/build_contract.py",
+      "newPath": "oracle/acp/callable-evaluator-v3/source/build_contract.py",
+      "bytes": 1775,
+      "sha256": "f01353fd58771ed006c85081519ad97378d7b52e2fbdd458c3120fe6ff6eb8c5"
+    },
+    {
+      "originalPath": "oracle/acp/callable-evaluator-v2/source/contracts/candidate-build-profile.json",
+      "newPath": "oracle/acp/callable-evaluator-v3/source/contracts/candidate-build-profile.json",
+      "bytes": 2647,
+      "sha256": "3aace398485f3d4f07d6edaa30c4d7604c85ef8585727657c0ebdd34ce1c1d13"
+    },
+    {
+      "originalPath": "oracle/acp/callable-evaluator-v2/source/contracts/report-schema.json",
+      "newPath": "oracle/acp/callable-evaluator-v3/source/contracts/report-schema.json",
+      "bytes": 1791,
+      "sha256": "86b670ace28e03b20a2ea452b4c0d60f3a0171ecc5611f4b5e077808f897d6c7"
+    },
+    {
+      "originalPath": "oracle/acp/callable-evaluator-v2/source/evaluate_candidate_v2.py",
+      "newPath": "oracle/acp/callable-evaluator-v3/source/evaluate_candidate_v3.py",
+      "bytes": 10128,
+      "sha256": "d7a06b9f519838676b3f76db8396b33260fcde684d1c0322cb22986d896115af"
+    },
+    {
+      "originalPath": "oracle/acp/callable-evaluator-v2/source/freeze_v2.py",
+      "newPath": "oracle/acp/callable-evaluator-v3/source/freeze_v3.py",
+      "bytes": 6576,
+      "sha256": "c4fdaf28e47cbd0adc55348889d6f406ff0f77704c64ee915c37bd5a111456c1"
+    },
+    {
+      "originalPath": "oracle/acp/callable-evaluator-v2/source/interface_gate_v2.py",
+      "newPath": "oracle/acp/callable-evaluator-v3/source/interface_gate_v3.py",
+      "bytes": 8753,
+      "sha256": "ec4441ecdc29d9e47b0bf5a73869d5ed890dcc48f4c4e66cd803b6c0514b31a9"
+    },
+    {
+      "originalPath": "oracle/acp/callable-evaluator-v2/source/record_identity_probe.cpp",
+      "newPath": "oracle/acp/callable-evaluator-v3/source/record_identity_probe.cpp",
+      "bytes": 10627,
+      "sha256": "d3e9e57991933f4a629422816fd9ead9a651303eb8d858d76f4ec5755cc93447"
+    },
+    {
+      "originalPath": "oracle/acp/callable-evaluator-v2/source/scope_gate.py",
+      "newPath": "oracle/acp/callable-evaluator-v3/source/scope_gate.py",
+      "bytes": 767,
+      "sha256": "5f096f24096dbe33f4c0b5f1bc9836a95d762738ad4dec8b5a67c353ac83b7ed"
+    },
+    {
+      "originalPath": "oracle/acp/callable-evaluator-v2/source/tests/test_contracts.py",
+      "newPath": "oracle/acp/callable-evaluator-v3/source/tests/test_contracts.py",
+      "bytes": 4256,
+      "sha256": "f71d8d6825c383e25055888b3cc9c17ecc2f8ed9b905d680a6fa136111a1b489"
+    },
+    {
+      "originalPath": "oracle/acp/callable-evaluator-v2/source/tests/test_probe_isolation.py",
+      "newPath": "oracle/acp/callable-evaluator-v3/source/tests/test_probe_isolation.py",
+      "bytes": 3089,
+      "sha256": "f818e27d8a1f8b0efae6c0e91aa2f63cdc41a00b65116ae582fdb9c492c1fc22"
+    },
+    {
+      "originalPath": "oracle/acp/callable-evaluator-v2/source/toolchain-001/build_helper.py",
+      "newPath": "oracle/acp/callable-evaluator-v3/source/toolchain-001/build_helper.py",
+      "bytes": 857,
+      "sha256": "33042dc89d42332676a8bfe1305e7ec55a93afd22273d0777a3013b0c0906b5d"
+    },
+    {
+      "originalPath": "oracle/acp/callable-evaluator-v2/source/toolchain-001/pin_environment.py",
+      "newPath": "oracle/acp/callable-evaluator-v3/source/toolchain-001/pin_environment.py",
+      "bytes": 2414,
+      "sha256": "5016428822cd5a910395a01da118eecf558db17d03e352fcb63f3b8d260ab6ff"
+    },
+    {
+      "originalPath": "oracle/acp/callable-evaluator-v2/source/toolchain-001/pin_helper.py",
+      "newPath": "oracle/acp/callable-evaluator-v3/source/toolchain-001/pin_helper.py",
+      "bytes": 1284,
+      "sha256": "88fbd7c6bc8c45377c6472d19f24e3adbf4ff21a51bc700a7bd83aa8a82d32c7"
+    }
+  ]
+}

@@ -1,0 +1,95 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "schemaVersion": {
+      "const": 3
+    },
+    "status": {
+      "const": "preflight-only-independent-review-required"
+    },
+    "freezeCreated": {
+      "const": false
+    },
+    "allControlsPassed": {
+      "type": "boolean"
+    },
+    "executionDependenciesUnchanged": {
+      "type": "boolean"
+    },
+    "rows": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 4096
+          },
+          "expected": {
+            "enum": [
+              "matched",
+              "mismatched",
+              "unknown",
+              "refused",
+              "build-failed"
+            ]
+          },
+          "expectedStage": {
+            "type": "string",
+            "maxLength": 4096
+          },
+          "passed": {
+            "type": "boolean"
+          },
+          "receipt": {
+            "type": "string",
+            "maxLength": 4096
+          },
+          "receiptSha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "runtimeRequestCount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 24
+          },
+          "completedScenarioProcessCount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 24
+          },
+          "unknownScenarioProcessCount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 24
+          }
+        },
+        "required": [
+          "name",
+          "expected",
+          "expectedStage",
+          "passed",
+          "receipt",
+          "receiptSha256",
+          "runtimeRequestCount",
+          "completedScenarioProcessCount",
+          "unknownScenarioProcessCount"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 1,
+      "maxItems": 1000
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "status",
+    "freezeCreated",
+    "allControlsPassed",
+    "executionDependenciesUnchanged",
+    "rows"
+  ],
+  "additionalProperties": false
+}
