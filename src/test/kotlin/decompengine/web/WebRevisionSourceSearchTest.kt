@@ -407,4 +407,22 @@ class WebRevisionSourceSearchTest {
             evidence.readRevision(reference) // Admission is always released.
         }
     }
+
+    @Test fun `source search preserves query and excerpts from committed content under redaction`() {
+        val secret = "hunter2secret"
+        val query = "password=$secret"
+        val body = "const char *path = \"/tmp/example\"; // $query\n"
+        val engine = WebRevisionSourceSearch(harness(listOf(entry("src/example.c", body)))::source)
+        val page = search(engine, "q=${encode(query)}")
+        val policy = WebRedactionPolicy.create(
+            mapOf("DB_PASSWORD" to secret), emptyList(), listOf(java.nio.file.Path.of("/tmp/example")),
+        )
+
+        assertEquals(query, page.getValue("query").jsonObject.getValue("text").jsonPrimitive.content)
+        val match = items(page).single()
+        assertTrue(match.getValue("before").jsonPrimitive.content.contains("/tmp/example"))
+        assertEquals(query, match.getValue("match").jsonPrimitive.content)
+        assertNotEquals(page, policy.json(page), "fixture must exercise credential and private-path redaction")
+        assertEquals(page, publicWebApiData("sourceSearch", page, policy))
+    }
 }
