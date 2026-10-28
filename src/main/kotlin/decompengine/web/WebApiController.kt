@@ -48,6 +48,7 @@ internal class WebApiController(
     private val revisionSourcePages = WebRevisionSourcePages(jobs::readRevisionSources)
     private val revisionDirectoryPages = WebRevisionDirectoryPages(jobs::readRevisionSources)
     private val revisionFileMetadata = WebRevisionFileMetadata(jobs::readRevisionFileMetadata)
+    private val revisionSourceSearch = WebRevisionSourceSearch(jobs::searchRevisionSources)
     private val revisionValidationReports = WebRevisionValidationReports(jobs::readRecordedValidationReport)
     private val eventStream = WebEventStream(access, streamResources, progressPages, read = { jobId, runId ->
         readWebProgress(jobs, jobId, runId).second
@@ -58,7 +59,7 @@ internal class WebApiController(
         val path = exchange.requestURI.rawPath
         if (!path.startsWith("${assets.basePath}api/")) return false
         val resource = path.removePrefix(prefix)
-        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs", "recovery", "agent/preflight") || resource.matches(Regex("(?:jobs|uploads)/[^/]+|jobs/[^/]+/runs(?:/[^/]+(?:/reports/(?:exploration|revision-validation)|/validation-history|/source-catalog|/revisions/[^/]+/(?:sources|source-directories/[^/]+|source-files/[^/]+(?:/(?:chunk|content))?)|/snapshot|/events|/progress-pin|/cancel|/recover|/controls|/queue-position)?)?|jobs/[^/]+/artifacts/[^/]+/content|jobs/[^/]+/repositories(?:/[^/]+(?:/operations/[^/]+)?)?")))) {
+        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs", "recovery", "agent/preflight") || resource.matches(Regex("(?:jobs|uploads)/[^/]+|jobs/[^/]+/runs(?:/[^/]+(?:/reports/(?:exploration|revision-validation)|/validation-history|/source-catalog|/revisions/[^/]+/(?:sources|source-search|source-directories/[^/]+|source-files/[^/]+(?:/(?:chunk|content))?)|/snapshot|/events|/progress-pin|/cancel|/recover|/controls|/queue-position)?)?|jobs/[^/]+/artifacts/[^/]+/content|jobs/[^/]+/repositories(?:/[^/]+(?:/operations/[^/]+)?)?")))) {
             try {
                 val policy = if (exchange.requestMethod in setOf("POST", "PUT", "PATCH", "DELETE")) {
                     WebEndpointPolicy.jsonMutation(exchange.requestMethod)
@@ -240,6 +241,13 @@ internal class WebApiController(
                     sendWebApiResponse(exchange, 200, "revisionDirectory", revisionDirectoryPages.page(session.sessionId,
                         parts[1], parts[3], parts[5], parts[7], exchange.requestURI.rawQuery))
                 }
+                resource.matches(Regex("jobs/[^/]+/runs/[^/]+/revisions/[^/]+/source-search")) -> {
+                    val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.privateRead(allowHead = true)))
+                    requireJsonAccept(exchange)
+                    val parts = resource.split('/')
+                    sendWebApiResponse(exchange, 200, "sourceSearch",
+                        revisionSourceSearch.search(session.sessionId, parts[1], parts[3], parts[5], exchange.requestURI.rawQuery))
+                }
                 resource.matches(Regex("jobs/[^/]+/runs/[^/]+/revisions/[^/]+/sources")) -> {
                     val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.privateRead(allowHead = true)))
                     requireJsonAccept(exchange)
@@ -386,7 +394,8 @@ internal class WebApiController(
             put("downloadIdleMs", "120000")
             put("maxJsonBytes", "1048576")
             put("maxUploadBytes", StreamingMultipartUpload.MAX_REQUEST_BYTES.toString())
-            put("maxSourceChunkBytes", "0")
+            // The chunk reader enforces 4..131072 bytes per range over digest-verified inputs of at most 8 MiB.
+            put("maxSourceChunkBytes", WebRevisionSourceContent.MAXIMUM_CHUNK_BYTES.toString())
             put("maxLogChunkBytes", "0")
             put("maxEventCount", "1024")
             put("maxEventBytes", "2097152")
