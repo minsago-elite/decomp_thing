@@ -72,6 +72,10 @@
       "reason": "Generated-C standalone MVP patch compiler and sanitizer command selected by the admitted reconstruction adapter."
     },
     {
+      "path": "src/main/kotlin/decompengine/project/GeneratedCModuleContext.kt",
+      "reason": "Generated-C selection and rendering of dependency-required module interface snapshots through the registered reconstruction adapter."
+    },
+    {
       "path": "src/main/kotlin/decompengine/project/GeneratedCModulePrompt.kt",
       "reason": "Generated-C reconstruction prompt language and compiler instructions."
     },
