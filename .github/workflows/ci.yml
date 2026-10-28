@@ -173,6 +173,7 @@ jobs:
           "$RUNNER_TEMP/web-test-browser/chrome" --version | tee build/packaged-web-ci/browser-version.txt
           python3 scripts/test-packaged-browser-install.py
           node --check scripts/check-packaged-web-browser.mjs
+          node --test scripts/packaged-browser-upload.test.mjs
       - name: Build archives and verify browser expiry and distribution contents
         env:
           DECOMP_BROWSER_CHROME: ${{ runner.temp }}/web-test-browser/chrome
@@ -245,6 +246,7 @@ jobs:
             build/packaged-browser-*/*.png
             build/reports/tests/test
             build/test-results/test
+            build/reports/junit-signatures
 
   kotlin-suite:
     needs: frontend
@@ -451,6 +453,7 @@ jobs:
             build/test-results/full-suite
             build/reports/tests/test
             build/test-results/test
+            build/reports/junit-signatures
             build/web-job-recovery-inventory.json
             build/reports/tests/v3BoundaryFinalStagingIsolated
             build/test-results/v3BoundaryFinalStagingIsolated
@@ -592,6 +595,7 @@ jobs:
           path: |
             build/reports/tests/test
             build/test-results/test
+            build/reports/junit-signatures
       - uses: actions/upload-artifact@v7
         if: always()
         with:
@@ -666,4 +670,5 @@ jobs:
           path: |
             build/reports/tests/test
             build/test-results/test
+            build/reports/junit-signatures
             build/source-identity-fixture-evidence

@@ -677,6 +677,37 @@ private val SANDBOX_HELPER_CONTROL_ENVIRONMENT_NAMES = setOf(
     "MALLOC_TRACE", "MALLOC_CHECK_", "TZDIR", "HOSTALIASES", "RES_OPTIONS", "LOCALDOMAIN",
 )
 
+/**
+ * Runtime closure authority must not provide a second, native route to workflow source bytes.
+ * Destinations are checked separately by the launcher against its empty workspace anchors.
+ * These path checks supplement, rather than replace, the launcher's pinned runtime manifests.
+ */
+internal fun requireAgentRuntimeMountsExcludeWorkspace(
+    roots: List<AgentWorkspaceRoot>,
+    mounts: List<AcpSandboxReadOnlyMount>,
+) {
+    roots.forEach { root ->
+        requireAbsoluteNormalized("agent workspace root", root.path)
+        // Captured repair and preflight use namespace-only roots that need not exist on the host.
+        // Check their existing ancestry so a symbolic-link alias cannot hide source overlap.
+        var existing = root.path
+        while (!Files.exists(existing, LinkOption.NOFOLLOW_LINKS)) {
+            existing = requireNotNull(existing.parent) { "agent workspace root has no existing ancestor" }
+        }
+        require(existing.toRealPath() == existing) {
+            "agent workspace root must have canonical ancestry without symbolic links"
+        }
+    }
+    mounts.forEach { mount ->
+        require(mount.source.toRealPath() == mount.source) {
+            "agent runtime mount source must be canonical without symbolic links"
+        }
+        require(roots.none { root ->
+            mount.source.startsWith(root.path) || root.path.startsWith(mount.source)
+        }) { "agent runtime mount sources must not overlap workflow workspace roots" }
+    }
+}
+
 private fun requireAbsoluteNormalized(name: String, path: Path) {
     require(path.isAbsolute && path == path.normalize() && '\u0000' !in path.toString()) {
         "$name must be an absolute normalized path: $path"
