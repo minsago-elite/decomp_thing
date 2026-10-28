@@ -401,6 +401,12 @@ registerOracleJavaExecTask(
 )
 
 registerOracleJavaExecTask(
+    taskName = "gccMetadataReference",
+    taskDescription = "Stages or captures the fixed GCC metadata reference with explicit trusted deployment provisioning",
+    entryPoint = "decompengine.oracle.gcc.GccMetadataReferenceCli",
+)
+
+registerOracleJavaExecTask(
     taskName = "generateLlvmBehaviorReferenceInputPlanV2",
     taskDescription = "Generates the Python-free LLVM behavior reference input plan with Kotlin/JVM authority",
     entryPoint = "decompengine.oracle.behavior.LlvmBehaviorReferenceInputPlanV2GeneratorCli",

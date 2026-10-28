@@ -2,6 +2,14 @@ import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 
+async function readyForUpload(tab, ready) {
+  // The authenticated shell can render before the lazy workspace and its picker.
+  await ready(tab, `location.pathname === '/nested/' &&
+    document.body.innerText.includes('Local session connected.') &&
+    document.querySelector('section[aria-labelledby="upload-title"] input#binary-file[type="file"]:not(:disabled)') !== null`,
+  'workspace upload control');
+}
+
 /** Isolated packaged-browser fixture: valid header only, never executable behavior. */
 export async function qualifyUpload({ makeTarget, cdp, evaluate, ready, browserOrigin, data }) {
   const tab = await makeTarget();
@@ -32,7 +40,7 @@ export async function qualifyUpload({ makeTarget, cdp, evaluate, ready, browserO
     };
   })();` }, tab.sessionId);
   await cdp.call('Page.navigate', { url: browserOrigin + '/nested/' }, tab.sessionId);
-  await ready(tab, `document.body.innerText.includes('Local session connected.')`, 'upload session');
+  await readyForUpload(tab, ready);
   const selectFixture = () => evaluate(tab, `(() => {
     const bytes = new Uint8Array(64); bytes.set([127, 69, 76, 70, 2, 1, 1]);
     const view = new DataView(bytes.buffer); view.setUint16(16, 2, true); view.setUint16(18, 62, true);
@@ -142,7 +150,7 @@ export async function qualifyUploadFailures({ makeTarget, cdp, evaluate, ready, 
     };
   })();` }, tab.sessionId);
   await cdp.call('Page.navigate', { url: browserOrigin + '/nested/' }, tab.sessionId);
-  await ready(tab, `document.body.innerText.includes('Local session connected.')`, 'failure test session');
+  await readyForUpload(tab, ready);
   const ids = (await fs.readdir(data)).filter(name => /^[a-f0-9]{32}$/.test(name));
   async function select(size, name) {
     await evaluate(tab, `(() => {
@@ -193,7 +201,7 @@ export async function qualifyMeasuredUpload({ makeTarget, cdp, evaluate, ready, 
   }, tab.sessionId);
   const before = (await fs.readdir(data)).filter(name => /^[a-f0-9]{32}$/.test(name));
   await cdp.call('Page.navigate', { url: browserOrigin + '/nested/' }, tab.sessionId);
-  await ready(tab, `document.body.innerText.includes('Local session connected.')`, 'measured upload session');
+  await readyForUpload(tab, ready);
   await evaluate(tab, `(() => {
     const bytes = new Uint8Array(512 * 1024); bytes.set([127, 69, 76, 70, 2, 1, 1]);
     const view = new DataView(bytes.buffer); view.setUint16(16, 2, true); view.setUint16(18, 62, true);
