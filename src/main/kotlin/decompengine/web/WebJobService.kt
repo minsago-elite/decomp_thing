@@ -734,7 +734,7 @@ class WebJobService(
 
     /** Recorded model/plan projection of the actual persisted candidate, rechecked after projection. */
     internal fun <T> readProgramStructure(jobId: String, runId: String, revisionId: String,
-        project: (WebProgramStructureIndex, () -> ByteArray) -> T): T {
+        project: (WebProgramStructureIndex, WebStructureRecordReader) -> T): T {
         val reference = revisionSourceReference(jobId, runId, revisionId)
         val result = try { sourceCatalogEvidence.readStructure(reference, programStructureCache, project) }
             catch (changed: WebAccessDenied) { throw changed }

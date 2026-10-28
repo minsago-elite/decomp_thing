@@ -1,0 +1,305 @@
+{
+  "apiVersion": 1,
+  "kind": "structureNeighborhood",
+  "requestId": "request_fixture_structureNeighborhood",
+  "data": {
+    "binding": {
+      "jobId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runId": "run_2",
+      "revisionId": "revision_2"
+    },
+    "authority": "recorded-program-model",
+    "state": "not-recorded",
+    "stateReason": "MODEL_NOT_RECORDED",
+    "structureVersion": "a7e226eb53535585c61364114daebb6110d6884d6608abde6a4b4fa3afeb8c31",
+    "sourceSha256": "1c84b66c611dcde6a4816d3be59421d3eb380513030b38bc03ef7e19b0be7354",
+    "metadataVersion": "2d3a33eb7d7ff295b547c1f2b75d9fa77b57eae81de51b6298978e9f5a8f25b4",
+    "manifestSha256": "b1de14119cd29910a64243ffff4c79c01656caf3fe828cf5ea17933345a4d6c3",
+    "model": {
+      "state": "not-recorded",
+      "stateReason": "MODEL_NOT_RECORDED",
+      "path": null,
+      "sha256": null,
+      "sizeBytes": null,
+      "schemaVersion": null
+    },
+    "plan": {
+      "state": "not-recorded",
+      "stateReason": "MODEL_UNAVAILABLE",
+      "path": null,
+      "sha256": null,
+      "sizeBytes": null,
+      "schemaVersion": null
+    },
+    "recoveryAssessment": "not-recorded",
+    "capabilities": [
+      {
+        "id": "function-inventory",
+        "state": "not-recorded",
+        "reason": "MODEL_NOT_RECORDED"
+      },
+      {
+        "id": "recorded-prototypes",
+        "state": "not-recorded",
+        "reason": "MODEL_NOT_RECORDED"
+      },
+      {
+        "id": "module-ownership",
+        "state": "not-recorded",
+        "reason": "MODEL_NOT_RECORDED"
+      },
+      {
+        "id": "generated-headers",
+        "state": "not-recorded",
+        "reason": "MODULE_HEADERS_NOT_RECORDED"
+      },
+      {
+        "id": "global-byte-evidence",
+        "state": "not-recorded",
+        "reason": "MODEL_SCHEMA_BEFORE_3"
+      },
+      {
+        "id": "recovery-assessment",
+        "state": "not-recorded",
+        "reason": "EXTRACTION_LABELS_ARE_UNASSESSED"
+      },
+      {
+        "id": "type-references",
+        "state": "not-recorded",
+        "reason": "MODEL_RECORDS_DECLARATION_TEXT_ONLY"
+      },
+      {
+        "id": "type-layouts",
+        "state": "not-recorded",
+        "reason": "A_SERIES_LAYOUT_FACTS_NOT_RECORDED"
+      },
+      {
+        "id": "abi-interfaces",
+        "state": "not-recorded",
+        "reason": "A_SERIES_ABI_FACTS_NOT_RECORDED"
+      },
+      {
+        "id": "cpp-object-model",
+        "state": "not-recorded",
+        "reason": "A_SERIES_CPP_FACTS_NOT_RECORDED"
+      }
+    ],
+    "query": {
+      "view": "calls",
+      "focus": "fn_0000000000401000",
+      "direction": "both",
+      "depth": 1,
+      "nodeLimit": 60,
+      "edgeLimit": 150,
+      "unresolved": "show"
+    },
+    "graphState": "not-recorded",
+    "graphReason": "MODEL_NOT_RECORDED",
+    "relationships": [
+      {
+        "id": "recorded-call",
+        "state": "not-recorded",
+        "reason": "MODEL_NOT_RECORDED"
+      },
+      {
+        "id": "unrecorded-call-target",
+        "state": "not-recorded",
+        "reason": "MODEL_NOT_RECORDED"
+      },
+      {
+        "id": "inferred-endpoint",
+        "state": "not-recorded",
+        "reason": "MODEL_NOT_RECORDED"
+      },
+      {
+        "id": "call-kind",
+        "state": "not-recorded",
+        "reason": "MODEL_DOES_NOT_RECORD_DIRECT_OR_INDIRECT_CALLS"
+      },
+      {
+        "id": "external-call",
+        "state": "not-recorded",
+        "reason": "MODEL_DOES_NOT_RECORD_EXTERNAL_TARGETS"
+      }
+    ],
+    "neighborhood": {
+      "nodes": [
+        {
+          "index": 0,
+          "depth": 0,
+          "outgoing": {
+            "total": 2,
+            "shown": 2
+          },
+          "incoming": {
+            "total": 2,
+            "shown": 2
+          },
+          "kind": "function",
+          "entityId": "fn_0000000000401000",
+          "selector": "fn_0000000000401000",
+          "name": "main",
+          "address": "0x401000",
+          "extractionStatus": "recovered",
+          "evidenceState": "recovered",
+          "ownership": "owned",
+          "moduleId": "core",
+          "moduleSelector": "core",
+          "implementationUnresolved": false,
+          "reportedUnresolved": true,
+          "nameCollision": false,
+          "implementationPath": "src/modules/core.c",
+          "implementationFileId": "file_4_50c41d7759e5243285a81b76219c7d4457d30f412c096202f4823d95adb32ac5"
+        },
+        {
+          "index": 1,
+          "depth": 1,
+          "outgoing": {
+            "total": 1,
+            "shown": 1
+          },
+          "incoming": {
+            "total": 1,
+            "shown": 1
+          },
+          "kind": "function",
+          "entityId": "fn_0000000000401010",
+          "selector": "fn_0000000000401010",
+          "name": "helper",
+          "address": "0x401010",
+          "extractionStatus": "partial",
+          "evidenceState": "inferred",
+          "ownership": "owned",
+          "moduleId": "core",
+          "moduleSelector": "core",
+          "implementationUnresolved": false,
+          "reportedUnresolved": true,
+          "nameCollision": false,
+          "implementationPath": "src/modules/core.c",
+          "implementationFileId": "file_4_50c41d7759e5243285a81b76219c7d4457d30f412c096202f4823d95adb32ac5"
+        },
+        {
+          "index": 2,
+          "depth": 1,
+          "outgoing": {
+            "total": 0,
+            "shown": 0
+          },
+          "incoming": {
+            "total": 1,
+            "shown": 1
+          },
+          "kind": "unrecorded-function",
+          "entityId": "fn_missing",
+          "selector": null
+        },
+        {
+          "index": 3,
+          "depth": 1,
+          "outgoing": {
+            "total": 1,
+            "shown": 1
+          },
+          "incoming": {
+            "total": 1,
+            "shown": 1
+          },
+          "kind": "function",
+          "entityId": "fn_0000000000401020",
+          "selector": "fn_0000000000401020",
+          "name": "leaf",
+          "address": "0x401020",
+          "extractionStatus": "failed",
+          "evidenceState": "unresolved",
+          "ownership": "owned",
+          "moduleId": "util",
+          "moduleSelector": "util",
+          "implementationUnresolved": false,
+          "reportedUnresolved": true,
+          "nameCollision": false,
+          "implementationPath": "src/modules/util.c",
+          "implementationFileId": "file_5_5020d817b3753e1d472cea2350b631e685b3754580ed4be5005b72ebd5f5e1b7"
+        },
+        {
+          "index": 4,
+          "depth": 1,
+          "outgoing": {
+            "total": 1,
+            "shown": 1
+          },
+          "incoming": {
+            "total": 0,
+            "shown": 0
+          },
+          "kind": "function",
+          "entityId": "fn_0000000000401030",
+          "selector": "fn_0000000000401030",
+          "name": "spare",
+          "address": "0x401030",
+          "extractionStatus": "recovered",
+          "evidenceState": "excluded",
+          "ownership": "unowned",
+          "moduleId": null,
+          "moduleSelector": null,
+          "implementationUnresolved": false,
+          "reportedUnresolved": true,
+          "nameCollision": false,
+          "implementationPath": null,
+          "implementationFileId": null
+        }
+      ],
+      "edges": [
+        {
+          "source": 0,
+          "target": 1,
+          "relationship": "call",
+          "resolution": "recorded",
+          "references": 1,
+          "recordedCycle": false
+        },
+        {
+          "source": 0,
+          "target": 2,
+          "relationship": "call",
+          "resolution": "no-record",
+          "references": 1,
+          "recordedCycle": false
+        },
+        {
+          "source": 3,
+          "target": 0,
+          "relationship": "call",
+          "resolution": "recorded",
+          "references": 1,
+          "recordedCycle": false
+        },
+        {
+          "source": 1,
+          "target": 3,
+          "relationship": "call",
+          "resolution": "recorded",
+          "references": 1,
+          "recordedCycle": false
+        },
+        {
+          "source": 4,
+          "target": 0,
+          "relationship": "call",
+          "resolution": "recorded",
+          "references": 1,
+          "recordedCycle": false
+        }
+      ],
+      "completeness": {
+        "state": "complete",
+        "reasons": [],
+        "reachableNodes": 5,
+        "reachableEdges": 5,
+        "omittedNodes": 0,
+        "omittedEdges": 0,
+        "edgesBeyondDepth": 0,
+        "filteredEdges": 0
+      }
+    }
+  }
+}

@@ -1,0 +1,463 @@
+{
+  "apiVersion": 1,
+  "kind": "scorecardComparison",
+  "requestId": "request_fixture_scorecardComparison",
+  "data": {
+    "binding": {
+      "jobId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runId": "run_4",
+      "revisionId": "revision_4"
+    },
+    "authority": "recorded-confidence-reports",
+    "structureVersion": "8e79f9c8cae9e4f6922e90f7e18e30bff934b054e721c269a9196f4685fa25d0",
+    "current": {
+      "binding": {
+        "jobId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "runId": "run_4",
+        "revisionId": "revision_4"
+      },
+      "structureVersion": "8e79f9c8cae9e4f6922e90f7e18e30bff934b054e721c269a9196f4685fa25d0",
+      "sourceSha256": "45bacb100aad5d511b5aee2b9e7581e1a1204c112d0e76f8ef1fb8f1017b08e0",
+      "manifestSha256": "2d8b442ffc919dfb44a738886034e23c033f5c63884ce8781b27619ecdb72d8c",
+      "model": {
+        "state": "available",
+        "stateReason": null,
+        "path": "reports/program_model.json",
+        "sha256": "1ad99c17f2e34397d8a9b6186353d711b36b9fdfab55eb05df28182d83981b1f",
+        "sizeBytes": "1531",
+        "schemaVersion": 2
+      },
+      "plan": {
+        "state": "available",
+        "stateReason": null,
+        "path": "reports/module_plan.json",
+        "sha256": "b055a06f81aea8ef49b85b1c02f40784ca817d6cb1823b10ee3677f07c2a06c8",
+        "sizeBytes": "586",
+        "schemaVersion": 2
+      },
+      "confidence": {
+        "state": "available",
+        "stateReason": null,
+        "path": "reports/confidence.json",
+        "sha256": "88bd2ee9d7dfb5317fffd0dcc73d936dc85da47398c6a30fb335529195c47d83",
+        "sizeBytes": "1576",
+        "schemaVersion": 2
+      },
+      "scope": {
+        "population": "program-model-entities",
+        "inputSha256": "c96c6d5be8d08a12e7b5cdc1b207fa6b2430974c86803d8891675e76fd992c20",
+        "modelSha256": "1ad99c17f2e34397d8a9b6186353d711b36b9fdfab55eb05df28182d83981b1f",
+        "modelSchemaVersion": 2,
+        "functions": 4,
+        "globals": 0,
+        "types": 0,
+        "entities": "4",
+        "modules": 2
+      },
+      "reconciliation": {
+        "projectNumerator": "4",
+        "projectDenominator": "4",
+        "moduleNumeratorSum": "3",
+        "moduleDenominatorSum": "3",
+        "excludedNumerator": "1",
+        "excludedEntities": "1",
+        "duplicateNumerator": "0",
+        "duplicateMemberships": "0",
+        "unrecordedPlanReferences": 0,
+        "unplannedScoreRows": 0,
+        "reconciles": true,
+        "adjustments": [
+          "EXCLUDED_ENTITIES"
+        ],
+        "scoreAdditivity": "non-additive-mean"
+      }
+    },
+    "baseline": {
+      "binding": {
+        "jobId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "runId": "run_5",
+        "revisionId": "revision_5"
+      },
+      "structureVersion": "7e0e00a5877691cfc3ab886dfb8498095e5e55effb1d8d72c1f453ffe71fd02b",
+      "sourceSha256": "45bacb100aad5d511b5aee2b9e7581e1a1204c112d0e76f8ef1fb8f1017b08e0",
+      "manifestSha256": "b928f29f14e9b70e1f42a1eb32377cc4a5e0f60842183af2a48c2630c59a1c1f",
+      "model": {
+        "state": "available",
+        "stateReason": null,
+        "path": "reports/program_model.json",
+        "sha256": "3de0885e05b7e1fef6cbbbd0dbe1a5b75a34e91079d18e46be7c2246c18595de",
+        "sizeBytes": "1318",
+        "schemaVersion": 1
+      },
+      "plan": {
+        "state": "available",
+        "stateReason": null,
+        "path": "reports/module_plan.json",
+        "sha256": "b055a06f81aea8ef49b85b1c02f40784ca817d6cb1823b10ee3677f07c2a06c8",
+        "sizeBytes": "586",
+        "schemaVersion": 2
+      },
+      "confidence": {
+        "state": "available",
+        "stateReason": null,
+        "path": "reports/confidence.json",
+        "sha256": "e79615b253aa583ae9dc391e1d942ca42ee771510eba6b51b6296f79fb1a0fcc",
+        "sizeBytes": "1466",
+        "schemaVersion": 2
+      },
+      "scope": {
+        "population": "program-model-entities",
+        "inputSha256": "c96c6d5be8d08a12e7b5cdc1b207fa6b2430974c86803d8891675e76fd992c20",
+        "modelSha256": "3de0885e05b7e1fef6cbbbd0dbe1a5b75a34e91079d18e46be7c2246c18595de",
+        "modelSchemaVersion": 1,
+        "functions": 4,
+        "globals": 0,
+        "types": 0,
+        "entities": "4",
+        "modules": 2
+      },
+      "reconciliation": {
+        "projectNumerator": "2.6",
+        "projectDenominator": "4",
+        "moduleNumeratorSum": "1.6",
+        "moduleDenominatorSum": "3",
+        "excludedNumerator": "1",
+        "excludedEntities": "1",
+        "duplicateNumerator": "0",
+        "duplicateMemberships": "0",
+        "unrecordedPlanReferences": 0,
+        "unplannedScoreRows": 0,
+        "reconciles": true,
+        "adjustments": [
+          "EXCLUDED_ENTITIES"
+        ],
+        "scoreAdditivity": "non-additive-mean"
+      }
+    },
+    "compatibility": {
+      "state": "incompatible",
+      "checks": [
+        {
+          "id": "input-binary",
+          "state": "match",
+          "blocking": true,
+          "current": "c96c6d5be8d08a12e7b5cdc1b207fa6b2430974c86803d8891675e76fd992c20",
+          "baseline": "c96c6d5be8d08a12e7b5cdc1b207fa6b2430974c86803d8891675e76fd992c20"
+        },
+        {
+          "id": "reconstruction-profile",
+          "state": "match",
+          "blocking": true,
+          "current": "generated-c-make-v1@a448a139a09f28ad9f2e08bfcebcb9d85765a0a557ebb11db6d7634bc145f28f",
+          "baseline": "generated-c-make-v1@a448a139a09f28ad9f2e08bfcebcb9d85765a0a557ebb11db6d7634bc145f28f"
+        },
+        {
+          "id": "confidence-schema",
+          "state": "match",
+          "blocking": true,
+          "current": "2",
+          "baseline": "2"
+        },
+        {
+          "id": "score-interpretation",
+          "state": "match",
+          "blocking": true,
+          "current": "structural-recovery/v1/uncalibrated",
+          "baseline": "structural-recovery/v1/uncalibrated"
+        },
+        {
+          "id": "score-formula",
+          "state": "match",
+          "blocking": true,
+          "current": "extraction-label-mean-v1",
+          "baseline": "extraction-label-mean-v1"
+        },
+        {
+          "id": "model-schema",
+          "state": "differs",
+          "blocking": true,
+          "current": "2",
+          "baseline": "1"
+        },
+        {
+          "id": "entity-population",
+          "state": "match",
+          "blocking": false,
+          "current": "4 functions/0 globals/0 types",
+          "baseline": "4 functions/0 globals/0 types"
+        },
+        {
+          "id": "module-plan",
+          "state": "match",
+          "blocking": false,
+          "current": "b055a06f81aea8ef49b85b1c02f40784ca817d6cb1823b10ee3677f07c2a06c8",
+          "baseline": "b055a06f81aea8ef49b85b1c02f40784ca817d6cb1823b10ee3677f07c2a06c8"
+        }
+      ]
+    },
+    "metrics": [
+      {
+        "id": "structural-recovery-score",
+        "unit": "ratio",
+        "current": {
+          "state": "measured",
+          "reason": null,
+          "value": "1.0000",
+          "numerator": "4",
+          "denominator": "4"
+        },
+        "baseline": {
+          "state": "measured",
+          "reason": null,
+          "value": "0.6500",
+          "numerator": "2.6",
+          "denominator": "4"
+        },
+        "delta": {
+          "state": "computed",
+          "reason": null,
+          "value": "0.3500",
+          "numerator": "1.4",
+          "denominator": "0"
+        }
+      },
+      {
+        "id": "calibrated-confidence",
+        "unit": "ratio",
+        "current": {
+          "state": "unmeasured",
+          "reason": "UNCALIBRATED",
+          "value": null,
+          "numerator": null,
+          "denominator": null
+        },
+        "baseline": {
+          "state": "unmeasured",
+          "reason": "UNCALIBRATED",
+          "value": null,
+          "numerator": null,
+          "denominator": null
+        },
+        "delta": {
+          "state": "withheld",
+          "reason": "INCOMPATIBLE_BASELINE",
+          "value": null,
+          "numerator": null,
+          "denominator": null
+        }
+      },
+      {
+        "id": "assessed-recovery",
+        "unit": "count",
+        "current": {
+          "state": "unmeasured",
+          "reason": "UNASSESSED",
+          "value": null,
+          "numerator": "0",
+          "denominator": "4"
+        },
+        "baseline": {
+          "state": "unmeasured",
+          "reason": "UNASSESSED",
+          "value": null,
+          "numerator": "0",
+          "denominator": "4"
+        },
+        "delta": {
+          "state": "withheld",
+          "reason": "INCOMPATIBLE_BASELINE",
+          "value": null,
+          "numerator": null,
+          "denominator": null
+        }
+      },
+      {
+        "id": "implementation-acceptance",
+        "unit": "count",
+        "current": {
+          "state": "measured",
+          "reason": null,
+          "value": null,
+          "numerator": "2",
+          "denominator": "2"
+        },
+        "baseline": {
+          "state": "measured",
+          "reason": null,
+          "value": null,
+          "numerator": "0",
+          "denominator": "2"
+        },
+        "delta": {
+          "state": "withheld",
+          "reason": "INCOMPATIBLE_BASELINE",
+          "value": null,
+          "numerator": null,
+          "denominator": null
+        }
+      },
+      {
+        "id": "generation-completion",
+        "unit": "count",
+        "current": {
+          "state": "measured",
+          "reason": null,
+          "value": null,
+          "numerator": "2",
+          "denominator": "2"
+        },
+        "baseline": {
+          "state": "measured",
+          "reason": null,
+          "value": null,
+          "numerator": "2",
+          "denominator": "2"
+        },
+        "delta": {
+          "state": "withheld",
+          "reason": "INCOMPATIBLE_BASELINE",
+          "value": null,
+          "numerator": null,
+          "denominator": null
+        }
+      },
+      {
+        "id": "unresolved-recovery",
+        "unit": "count",
+        "current": {
+          "state": "measured",
+          "reason": null,
+          "value": null,
+          "numerator": "4",
+          "denominator": "4"
+        },
+        "baseline": {
+          "state": "measured",
+          "reason": null,
+          "value": null,
+          "numerator": "2",
+          "denominator": "4"
+        },
+        "delta": {
+          "state": "withheld",
+          "reason": "INCOMPATIBLE_BASELINE",
+          "value": null,
+          "numerator": null,
+          "denominator": null
+        }
+      },
+      {
+        "id": "unresolved-implementation",
+        "unit": "count",
+        "current": {
+          "state": "measured",
+          "reason": null,
+          "value": null,
+          "numerator": "0",
+          "denominator": "4"
+        },
+        "baseline": {
+          "state": "measured",
+          "reason": null,
+          "value": null,
+          "numerator": "0",
+          "denominator": "4"
+        },
+        "delta": {
+          "state": "withheld",
+          "reason": "INCOMPATIBLE_BASELINE",
+          "value": null,
+          "numerator": null,
+          "denominator": null
+        }
+      },
+      {
+        "id": "excluded-entities",
+        "unit": "count",
+        "current": {
+          "state": "measured",
+          "reason": null,
+          "value": null,
+          "numerator": "1",
+          "denominator": "4"
+        },
+        "baseline": {
+          "state": "measured",
+          "reason": null,
+          "value": null,
+          "numerator": "1",
+          "denominator": "4"
+        },
+        "delta": {
+          "state": "withheld",
+          "reason": "INCOMPATIBLE_BASELINE",
+          "value": null,
+          "numerator": null,
+          "denominator": null
+        }
+      }
+    ],
+    "modules": {
+      "total": 2,
+      "items": [
+        {
+          "moduleId": "core",
+          "selector": "core",
+          "presence": "both",
+          "current": {
+            "state": "measured",
+            "reason": null,
+            "value": "1.0000",
+            "numerator": "2",
+            "denominator": "2"
+          },
+          "baseline": {
+            "state": "measured",
+            "reason": null,
+            "value": "0.8000",
+            "numerator": "1.6",
+            "denominator": "2"
+          },
+          "delta": {
+            "state": "withheld",
+            "reason": "INCOMPATIBLE_BASELINE",
+            "value": null,
+            "numerator": null,
+            "denominator": null
+          }
+        },
+        {
+          "moduleId": "util",
+          "selector": "util",
+          "presence": "both",
+          "current": {
+            "state": "measured",
+            "reason": null,
+            "value": "1.0000",
+            "numerator": "1",
+            "denominator": "1"
+          },
+          "baseline": {
+            "state": "measured",
+            "reason": null,
+            "value": "0.0000",
+            "numerator": "0",
+            "denominator": "1"
+          },
+          "delta": {
+            "state": "withheld",
+            "reason": "INCOMPATIBLE_BASELINE",
+            "value": null,
+            "numerator": null,
+            "denominator": null
+          }
+        }
+      ],
+      "page": {
+        "limit": 50,
+        "snapshotVersion": "8e79f9c8cae9e4f6922e90f7e18e30bff934b054e721c269a9196f4685fa25d0",
+        "nextCursor": null
+      }
+    }
+  }
+}

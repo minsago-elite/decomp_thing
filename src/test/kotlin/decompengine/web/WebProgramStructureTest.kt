@@ -64,7 +64,7 @@ class WebProgramStructureTest {
             "reports/runs/$runId/source-tree/source_tree_manifest.json" to manifest,
             "reports/runs/$runId/source-tree/reports/build_contract.json" to descriptor,
         )).mapValues { captured(it.value) }.toMutableMap()
-        val reads = mutableListOf<String>()
+        val reads: MutableList<String> = java.util.Collections.synchronizedList(mutableListOf())
         val evidence = WebSourceCatalogEvidence(listOf(profile), { captured(inputBytes).copy(identity = INPUT_IDENTITY) }) { _, path, maximum ->
             reads += path
             val file = files[path] ?: error("Unexpected read $path")
@@ -72,7 +72,10 @@ class WebProgramStructureTest {
             file
         }
         val cache = WebProgramStructureCache()
-        val pages = WebProgramStructurePages { job, run, revision, project ->
+        val pages = pages(cache)
+
+        /** Pages over an empty projection cache, so the next read is a first read of this revision. */
+        fun pages(cache: WebProgramStructureCache) = WebProgramStructurePages { job, run, revision, project ->
             assertEquals(Triple(jobId, runId, revisionId), Triple(job, run, revision))
             evidence.readStructure(reference, cache, project)
         }
@@ -540,6 +543,39 @@ class WebProgramStructureTest {
             assertFailsWith<WebProgramStructureBuilder.WebStructureFailure> { planBudget.charge(1) }.reason)
     }
 
+    @Test fun `speculative model charges join snapshot and plan admission before projection publication`() {
+        val revision = standard()
+        val snapshot = revision.evidence.readRevision(revision.reference)
+        val manifest = SourceTreeManifestReader.parse(revision.manifest.decodeToString(), profile)
+        val bytes = revision.model!!
+        val parsed = WebProgramStructureBuilder.parseModel(bytes).value!!
+        assertTrue(parsed.retainedBytes > 0)
+        val snapshotCharge = 64 * 1024L + snapshot.files.withIndex().sumOf { (row, file) ->
+            128L + 2L * (file.evidence.path.length + revisionSourceFileId(revision.reference, row, file.evidence.path).length)
+        }
+        fun build(charge: Long) = WebProgramStructureBuilder.build(snapshot, profile, manifest, {
+            WebStructureEvidence(captured(bytes), sha(bytes), WebStructureParse(
+                WebProgramStructureBuilder.ParsedModel(parsed.schemaVersion, parsed.inputSha256, parsed.tables, charge),
+                WebStructureOutcome.AVAILABLE))
+        }, {
+            val planBytes = revision.plan!!
+            WebStructureEvidence(captured(planBytes), sha(planBytes), WebProgramStructureBuilder.parsePlan(planBytes))
+        })
+        val admitted = build(parsed.retainedBytes)
+        assertTrue(admitted.available)
+        assertEquals("available", admitted.planOutcome.state)
+        assertTrue(admitted.retainedBytes > snapshotCharge + parsed.retainedBytes)
+        val maximum = WebProgramStructureBuilder.MAXIMUM_RETAINED_BYTES
+        val modelOverflow = build(maximum)
+        assertEquals("MODEL_RETAINED_BYTES_EXCEEDED", modelOverflow.outcome.reason)
+        assertTrue(modelOverflow.tables.isEmpty())
+        val planOverflow = build(maximum - snapshotCharge)
+        assertTrue(planOverflow.available)
+        assertEquals("PLAN_RETAINED_BYTES_EXCEEDED", planOverflow.planOutcome.reason)
+        assertTrue(planOverflow.modules.isEmpty())
+        assertTrue(planOverflow.tables.all { table -> table.owners.all { it == OWNER_NOT_RECORDED } })
+    }
+
     @Test fun `retained cache evicts by total charged bytes as well as entry count`() {
         val revision = standard()
         val index = revision.evidence.readStructure(revision.reference, revision.cache) { index, _ -> index }
@@ -635,11 +671,22 @@ class WebProgramStructureTest {
         assertEquals(1, detail.getValue("entity").jsonObject.getValue("calledBy").jsonObject.getValue("total").jsonPrimitive.int)
         val modulePage = revision.pages.modules("owner", jobId, runId, revisionId, "limit=200")
         assertEquals(modules.size, modulePage.getValue("totalModules").jsonPrimitive.int)
+        // First reads of the same revision with an empty projection cache: the full manifest, model and plan build.
+        val firstReads = (1..3).map {
+            val fresh = revision.pages(WebProgramStructureCache())
+            started = System.nanoTime()
+            assertEquals(200, fresh.functions("owner", jobId, runId, revisionId, "limit=200").items().size)
+            (System.nanoTime() - started) / 1_000_000
+        }.sorted()
         warm.sort()
-        println("program-structure-scale functions=$count modelBytes=${revision.model!!.size} coldMs=$coldMs " +
+        println("program-structure-scale functions=$count modelBytes=${revision.model!!.size} coldMs=$coldMs firstReadMs=$firstReads " +
+            "firstReadBudgetMs=$FIRST_READ_BUDGET_MS firstReadWithinBudget=${firstReads[1] < FIRST_READ_BUDGET_MS} " +
             "warmP50Ms=${warm[warm.size / 2]} warmMaxMs=${warm.last()} detailMs=$detailMs retainedBytes=$retained maxPageChars=$bytes")
         // D0 budgets: bounded responses (≤200 rows, <1 MiB), first-data-page latency and incremental JVM memory.
         assertTrue(bytes < 1_000_000, "page bytes $bytes")
+        // Shared CI hosts are noisy: the 500 ms budget is reported above and qualified in the packaged journey, while
+        // this ceiling only catches a regression to the earlier multi-second rebuild.
+        assertTrue(firstReads[1] < 3 * FIRST_READ_BUDGET_MS, "first-read latency $firstReads")
         assertTrue(warm[warm.size / 2] < 500, "warm page latency $warm")
         assertTrue(retained < 256L * 1024 * 1024, "retained projection bytes $retained")
     }
@@ -661,6 +708,7 @@ class WebProgramStructureTest {
     }
 
     private companion object {
+        const val FIRST_READ_BUDGET_MS = 500L
         val INPUT_IDENTITY = LinuxFileIdentity(LinuxFileKey(1, 1), 0x8180, 1000, 1000, 1, 1, true, false, false)
     }
 }

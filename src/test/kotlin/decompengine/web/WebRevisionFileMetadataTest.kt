@@ -110,7 +110,8 @@ class WebRevisionFileMetadataTest {
             "$run/revisions/$revisionId/sources/root", "$run/revisions/$revisionId/source-files/file_0_${"a".repeat(64)}",
             "$run/revisions/$revisionId/functions", "$run/revisions/$revisionId/modules", "$run/revisions/$revisionId/modules/core",
             "$run/revisions/$revisionId/functions/fn_0000000000401000", "$run/revisions/$revisionId/globals/global_1",
-            "$run/revisions/$revisionId/types/type_${"c".repeat(64)}")
+            "$run/revisions/$revisionId/types/type_${"c".repeat(64)}", "$run/revisions/$revisionId/graph",
+            "$run/revisions/$revisionId/scorecard")
         for (path in valid) {
             assertEquals(path, canonicalSpaDocumentPath(base, path))
             if (path != base) assertEquals(path, canonicalSpaDocumentPath(base, "$path/"))
@@ -119,7 +120,8 @@ class WebRevisionFileMetadataTest {
             "$run/revisions/$revisionId/source-files/file/a", "$run/revisions/$revisionId/source-files/é.c", "$run/revisions/$revisionId/unknown/root",
             "$run/revisions/$revisionId/sources/root/extra", "/other/jobs/$jobId/runs/$runId", "${base}api/v1/jobs/$jobId",
             "$run/revisions/$revisionId/globals", "$run/revisions/$revisionId/types", "$run/revisions/$revisionId/functions/a/b",
-            "$run/revisions/$revisionId/modules/core.c", "$run/revisions/$revisionId/functions/%66n")) {
+            "$run/revisions/$revisionId/modules/core.c", "$run/revisions/$revisionId/functions/%66n",
+            "$run/revisions/$revisionId/graph/calls", "$run/revisions/$revisionId/scorecard-comparison")) {
             assertNull(canonicalSpaDocumentPath(base, path))
         }
         // Named attempt views are document routes under both root and nested deployments.

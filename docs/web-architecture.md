@@ -212,7 +212,9 @@ Each feature owns small controller hooks and pure view-model transforms, with
 components consuming typed props. Import shared primitives/API definitions instead
 of another feature's private component state. Route modules load lazily; source,
 graph, large diff and optional provider UI load only when opened. Shared utilities
-must not import all feature modules back into the initial bundle.
+must not import all feature modules back into the initial bundle; the bundle report
+refuses any module under `frontend/src/graph/` or `frontend/src/sources/` in the
+initial chunk.
 
 On the JVM, HTTP adapters parse requests, apply authorization, invoke services and
 serialize DTOs. Reusable job/workflow services own atomic lifecycle transitions,

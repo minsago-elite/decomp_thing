@@ -4689,226 +4689,6 @@
       ],
       "additionalProperties": false
     },
-    "resumeRestoration": {
-      "type": "string",
-      "enum": [
-        "agent-session",
-        "project-evidence"
-      ]
-    },
-    "runRecovery": {
-      "type": "object",
-      "properties": {
-        "mode": {
-          "type": "string",
-          "enum": [
-            "retry",
-            "resume"
-          ]
-        },
-        "restores": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/resumeRestoration"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "checkpointSha256": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/sha256"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        }
-      },
-      "required": [
-        "mode",
-        "restores",
-        "checkpointSha256"
-      ],
-      "additionalProperties": false
-    },
-    "attemptControls": {
-      "type": "object",
-      "properties": {
-        "jobId": {
-          "$ref": "#/definitions/id"
-        },
-        "runId": {
-          "$ref": "#/definitions/id"
-        },
-        "runVersion": {
-          "$ref": "#/definitions/version"
-        },
-        "state": {
-          "$ref": "#/definitions/runState"
-        },
-        "inputRevisionId": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/id"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "cancel": {
-          "type": "object",
-          "properties": {
-            "available": {
-              "type": "boolean"
-            },
-            "reason": {
-              "anyOf": [
-                {
-                  "$ref": "#/definitions/cancelReason"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "available",
-            "reason"
-          ],
-          "additionalProperties": false
-        },
-        "retry": {
-          "type": "object",
-          "properties": {
-            "available": {
-              "type": "boolean"
-            },
-            "reason": {
-              "anyOf": [
-                {
-                  "$ref": "#/definitions/recoveryReason"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "available",
-            "reason"
-          ],
-          "additionalProperties": false
-        },
-        "resume": {
-          "type": "object",
-          "properties": {
-            "available": {
-              "type": "boolean"
-            },
-            "reason": {
-              "anyOf": [
-                {
-                  "$ref": "#/definitions/resumeReason"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "available",
-            "reason"
-          ],
-          "additionalProperties": false
-        },
-        "resumeRestores": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/resumeRestoration"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "successorRunId": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/id"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        }
-      },
-      "required": [
-        "jobId",
-        "runId",
-        "runVersion",
-        "state",
-        "inputRevisionId",
-        "cancel",
-        "retry",
-        "resume",
-        "resumeRestores",
-        "successorRunId"
-      ],
-      "additionalProperties": false
-    },
-    "cancelReason": {
-      "type": "string",
-      "enum": [
-        "RECOVERY_REQUIRED",
-        "ATTEMPT_TERMINAL",
-        "CANCEL_PENDING",
-        "SERVICE_STOPPED",
-        "NO_OWNED_WORKER",
-        "RECEIPT_CAPACITY"
-      ]
-    },
-    "recoveryReason": {
-      "type": "string",
-      "enum": [
-        "RECOVERY_REQUIRED",
-        "SERVICE_STOPPED",
-        "ATTEMPT_ACTIVE",
-        "ATTEMPT_COMPLETED",
-        "ATTEMPT_SUPERSEDED",
-        "ACTIVE_RUN",
-        "WORKFLOW_UNAVAILABLE",
-        "INPUT_UNVERIFIED",
-        "UPLOAD_CAPACITY",
-        "CAPACITY_UNAVAILABLE"
-      ]
-    },
-    "resumeReason": {
-      "anyOf": [
-        {
-          "$ref": "#/definitions/recoveryReason"
-        },
-        {
-          "type": "string",
-          "enum": [
-            "RESUME_UNSUPPORTED",
-            "HARNESS_CHANGED",
-            "CHECKPOINT_MISSING",
-            "CHECKPOINT_MISMATCH",
-            "CHECKPOINT_UNVERIFIED",
-            "WORKSPACE_UNVERIFIED",
-            "SESSION_QUARANTINED",
-            "CLEANUP_UNVERIFIED"
-          ]
-        }
-      ]
-    },
     "structureRecord": {
       "type": "object",
       "properties": {
@@ -7062,6 +6842,2631 @@
         }
       }
     },
+    "structureGraphNode": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "index": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 199
+            },
+            "depth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 3
+            },
+            "outgoing": {
+              "type": "object",
+              "properties": {
+                "total": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "shown": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "total",
+                "shown"
+              ],
+              "additionalProperties": false
+            },
+            "incoming": {
+              "type": "object",
+              "properties": {
+                "total": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "shown": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "total",
+                "shown"
+              ],
+              "additionalProperties": false
+            },
+            "kind": {
+              "const": "function"
+            },
+            "entityId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            "selector": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/id"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "name": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "address": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/address"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "extractionStatus": {
+              "type": "string",
+              "enum": [
+                "recovered",
+                "partial",
+                "failed",
+                "synthetic"
+              ],
+              "description": "Producer extraction label; never a scored recovery assessment."
+            },
+            "evidenceState": {
+              "type": "string",
+              "enum": [
+                "recovered",
+                "inferred",
+                "unresolved",
+                "excluded"
+              ],
+              "description": "Display class derived from recorded fields; see docs/web-program-structure.md."
+            },
+            "ownership": {
+              "type": "string",
+              "enum": [
+                "owned",
+                "unowned",
+                "ambiguous",
+                "not-recorded"
+              ]
+            },
+            "moduleId": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128,
+                  "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "moduleSelector": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/id"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "implementationUnresolved": {
+              "type": "boolean"
+            },
+            "reportedUnresolved": {
+              "type": "boolean"
+            },
+            "nameCollision": {
+              "type": "boolean"
+            },
+            "implementationPath": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "pattern": "^(?!/)[^\\\\\\u0000-\\u001f\\u007f:]+$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "implementationFileId": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^file_(0|[1-9][0-9]{0,6})_[a-f0-9]{64}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "index",
+            "depth",
+            "outgoing",
+            "incoming",
+            "kind",
+            "entityId",
+            "selector",
+            "name",
+            "address",
+            "extractionStatus",
+            "evidenceState",
+            "ownership",
+            "moduleId",
+            "moduleSelector",
+            "implementationUnresolved",
+            "reportedUnresolved",
+            "nameCollision",
+            "implementationPath",
+            "implementationFileId"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "index": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 199
+            },
+            "depth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 3
+            },
+            "outgoing": {
+              "type": "object",
+              "properties": {
+                "total": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "shown": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "total",
+                "shown"
+              ],
+              "additionalProperties": false
+            },
+            "incoming": {
+              "type": "object",
+              "properties": {
+                "total": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "shown": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "total",
+                "shown"
+              ],
+              "additionalProperties": false
+            },
+            "kind": {
+              "const": "unrecorded-function"
+            },
+            "entityId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            "selector": {
+              "type": "null"
+            }
+          },
+          "required": [
+            "index",
+            "depth",
+            "outgoing",
+            "incoming",
+            "kind",
+            "entityId",
+            "selector"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "index": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 199
+            },
+            "depth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 3
+            },
+            "outgoing": {
+              "type": "object",
+              "properties": {
+                "total": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "shown": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "total",
+                "shown"
+              ],
+              "additionalProperties": false
+            },
+            "incoming": {
+              "type": "object",
+              "properties": {
+                "total": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "shown": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "total",
+                "shown"
+              ],
+              "additionalProperties": false
+            },
+            "kind": {
+              "const": "module"
+            },
+            "moduleId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$"
+            },
+            "selector": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/id"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "functionCount": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "implementationDeclaration": {
+              "type": "string",
+              "enum": [
+                "accepted",
+                "unaccepted",
+                "not-classified"
+              ],
+              "description": "Recorded manifest claim for the module implementation file; not verified acceptance."
+            },
+            "inDependencyCycle": {
+              "type": "boolean"
+            },
+            "unattributedReferences": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "implementationPath": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096,
+              "pattern": "^(?!/)[^\\\\\\u0000-\\u001f\\u007f:]+$"
+            },
+            "implementationFileId": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^file_(0|[1-9][0-9]{0,6})_[a-f0-9]{64}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "interfacePath": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096,
+              "pattern": "^(?!/)[^\\\\\\u0000-\\u001f\\u007f:]+$"
+            },
+            "interfaceFileId": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^file_(0|[1-9][0-9]{0,6})_[a-f0-9]{64}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "index",
+            "depth",
+            "outgoing",
+            "incoming",
+            "kind",
+            "moduleId",
+            "selector",
+            "functionCount",
+            "implementationDeclaration",
+            "inDependencyCycle",
+            "unattributedReferences",
+            "implementationPath",
+            "implementationFileId",
+            "interfacePath",
+            "interfaceFileId"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "structureGraphEdge": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 199
+        },
+        "target": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 199
+        },
+        "relationship": {
+          "type": "string",
+          "enum": [
+            "call",
+            "module-call",
+            "module-global-reference"
+          ],
+          "description": "Recorded call target, or a module dependency derived from recorded calls or global references and plan ownership."
+        },
+        "resolution": {
+          "type": "string",
+          "enum": [
+            "recorded",
+            "no-record"
+          ]
+        },
+        "references": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "recordedCycle": {
+          "type": "boolean",
+          "description": "Both modules belong to one dependency cycle recorded by the module plan."
+        }
+      },
+      "required": [
+        "source",
+        "target",
+        "relationship",
+        "resolution",
+        "references",
+        "recordedCycle"
+      ],
+      "additionalProperties": false
+    },
+    "structureRelationshipFamily": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "enum": [
+            "recorded-call",
+            "unrecorded-call-target",
+            "inferred-endpoint",
+            "call-kind",
+            "external-call",
+            "module-call",
+            "module-global-reference",
+            "recorded-dependency-cycle",
+            "unattributed-reference"
+          ]
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "available",
+            "not-recorded",
+            "unsupported",
+            "invalid",
+            "limit-exceeded"
+          ]
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "state",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "structureNeighborhood": {
+      "type": "object",
+      "properties": {
+        "binding": {
+          "type": "object",
+          "properties": {
+            "jobId": {
+              "$ref": "#/definitions/id"
+            },
+            "runId": {
+              "$ref": "#/definitions/id"
+            },
+            "revisionId": {
+              "$ref": "#/definitions/id"
+            }
+          },
+          "required": [
+            "jobId",
+            "runId",
+            "revisionId"
+          ],
+          "additionalProperties": false
+        },
+        "authority": {
+          "const": "recorded-program-model"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "available",
+            "not-recorded",
+            "unsupported",
+            "invalid",
+            "limit-exceeded"
+          ],
+          "description": "Program-model state. Only available records may carry entity rows."
+        },
+        "stateReason": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "structureVersion": {
+          "$ref": "#/definitions/sha256"
+        },
+        "sourceSha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "metadataVersion": {
+          "$ref": "#/definitions/sha256"
+        },
+        "manifestSha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "model": {
+          "$ref": "#/definitions/structureRecord"
+        },
+        "plan": {
+          "$ref": "#/definitions/structureRecord"
+        },
+        "recoveryAssessment": {
+          "type": "string",
+          "enum": [
+            "unassessed",
+            "not-recorded"
+          ]
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/structureCapability"
+          },
+          "minItems": 1,
+          "maxItems": 32
+        },
+        "query": {
+          "type": "object",
+          "properties": {
+            "view": {
+              "type": "string",
+              "enum": [
+                "calls",
+                "modules"
+              ]
+            },
+            "focus": {
+              "$ref": "#/definitions/id"
+            },
+            "direction": {
+              "type": "string",
+              "enum": [
+                "outgoing",
+                "incoming",
+                "both"
+              ]
+            },
+            "depth": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 3
+            },
+            "nodeLimit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
+            },
+            "edgeLimit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 400
+            },
+            "unresolved": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "show",
+                    "omit"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "view",
+            "focus",
+            "direction",
+            "depth",
+            "nodeLimit",
+            "edgeLimit",
+            "unresolved"
+          ],
+          "additionalProperties": false
+        },
+        "graphState": {
+          "type": "string",
+          "enum": [
+            "available",
+            "not-recorded",
+            "unsupported",
+            "invalid",
+            "limit-exceeded"
+          ]
+        },
+        "graphReason": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "relationships": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/structureRelationshipFamily"
+          },
+          "minItems": 1,
+          "maxItems": 16
+        },
+        "neighborhood": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "nodes": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/structureGraphNode"
+                  },
+                  "minItems": 1,
+                  "maxItems": 200
+                },
+                "edges": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/structureGraphEdge"
+                  },
+                  "maxItems": 400
+                },
+                "completeness": {
+                  "type": "object",
+                  "properties": {
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "complete",
+                        "truncated"
+                      ]
+                    },
+                    "reasons": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "enum": [
+                          "VISIT_LIMIT",
+                          "NODE_LIMIT",
+                          "EDGE_LIMIT",
+                          "BYTE_LIMIT"
+                        ]
+                      },
+                      "maxItems": 4,
+                      "uniqueItems": true
+                    },
+                    "reachableNodes": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "reachableEdges": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "omittedNodes": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "omittedEdges": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "edgesBeyondDepth": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "filteredEdges": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "state",
+                    "reasons",
+                    "reachableNodes",
+                    "reachableEdges",
+                    "omittedNodes",
+                    "omittedEdges",
+                    "edgesBeyondDepth",
+                    "filteredEdges"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "nodes",
+                "edges",
+                "completeness"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "binding",
+        "authority",
+        "state",
+        "stateReason",
+        "structureVersion",
+        "sourceSha256",
+        "metadataVersion",
+        "manifestSha256",
+        "model",
+        "plan",
+        "recoveryAssessment",
+        "capabilities",
+        "query",
+        "graphState",
+        "graphReason",
+        "relationships",
+        "neighborhood"
+      ],
+      "additionalProperties": false,
+      "if": {
+        "properties": {
+          "graphState": {
+            "const": "available"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "neighborhood": {
+            "type": "object"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "neighborhood": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    "scorecardMetric": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "enum": [
+            "structural-recovery-score",
+            "module-structural-recovery-score",
+            "calibrated-confidence",
+            "assessed-recovery",
+            "implementation-acceptance",
+            "generation-completion",
+            "unresolved-recovery",
+            "unresolved-implementation",
+            "excluded-entities"
+          ]
+        },
+        "unit": {
+          "type": "string",
+          "enum": [
+            "ratio",
+            "count"
+          ]
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "measured",
+            "unmeasured",
+            "unknown",
+            "partial",
+            "failed"
+          ],
+          "description": "Only measured values carry a measurement; unmeasured, unknown, partial and failed never mean zero or pass."
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^-?(0|[1-9][0-9]{0,18})(\\.[0-9]{1,24})?$",
+              "maxLength": 48,
+              "description": "Exact decimal text: a recorded value verbatim or an exact difference of recorded values."
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The recorded value text, verbatim; never re-rounded."
+        },
+        "recomputed": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^-?(0|[1-9][0-9]{0,18})(\\.[0-9]{1,24})?$",
+              "maxLength": 48,
+              "description": "Exact decimal text: a recorded value verbatim or an exact difference of recorded values."
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The same formula reproduced from recorded labels, to state parity."
+        },
+        "numerator": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^-?(0|[1-9][0-9]{0,18})(\\.[0-9]{1,24})?$",
+              "maxLength": 48,
+              "description": "Exact decimal text: a recorded value verbatim or an exact difference of recorded values."
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "denominator": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/uint64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source": {
+          "type": "object",
+          "properties": {
+            "record": {
+              "type": "string",
+              "enum": [
+                "confidence",
+                "manifest",
+                "plan",
+                "model"
+              ]
+            },
+            "field": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "formula": {
+              "anyOf": [
+                {
+                  "const": "extraction-label-mean-v1"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "record",
+            "field",
+            "formula"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "id",
+        "unit",
+        "state",
+        "reason",
+        "value",
+        "recomputed",
+        "numerator",
+        "denominator",
+        "source"
+      ],
+      "additionalProperties": false
+    },
+    "scorecardScope": {
+      "type": "object",
+      "properties": {
+        "population": {
+          "const": "program-model-entities"
+        },
+        "inputSha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "modelSha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "modelSchemaVersion": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4
+        },
+        "functions": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "globals": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "types": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "entities": {
+          "$ref": "#/definitions/uint64"
+        },
+        "modules": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "population",
+        "inputSha256",
+        "modelSha256",
+        "modelSchemaVersion",
+        "functions",
+        "globals",
+        "types",
+        "entities",
+        "modules"
+      ],
+      "additionalProperties": false
+    },
+    "scorecardReconciliation": {
+      "type": "object",
+      "properties": {
+        "projectNumerator": {
+          "type": "string",
+          "pattern": "^-?(0|[1-9][0-9]{0,18})(\\.[0-9]{1,24})?$",
+          "maxLength": 48,
+          "description": "Exact decimal text: a recorded value verbatim or an exact difference of recorded values."
+        },
+        "projectDenominator": {
+          "$ref": "#/definitions/uint64"
+        },
+        "moduleNumeratorSum": {
+          "type": "string",
+          "pattern": "^-?(0|[1-9][0-9]{0,18})(\\.[0-9]{1,24})?$",
+          "maxLength": 48,
+          "description": "Exact decimal text: a recorded value verbatim or an exact difference of recorded values."
+        },
+        "moduleDenominatorSum": {
+          "$ref": "#/definitions/uint64"
+        },
+        "excludedNumerator": {
+          "type": "string",
+          "pattern": "^-?(0|[1-9][0-9]{0,18})(\\.[0-9]{1,24})?$",
+          "maxLength": 48,
+          "description": "Exact decimal text: a recorded value verbatim or an exact difference of recorded values."
+        },
+        "excludedEntities": {
+          "$ref": "#/definitions/uint64"
+        },
+        "duplicateNumerator": {
+          "type": "string",
+          "pattern": "^-?(0|[1-9][0-9]{0,18})(\\.[0-9]{1,24})?$",
+          "maxLength": 48,
+          "description": "Exact decimal text: a recorded value verbatim or an exact difference of recorded values."
+        },
+        "duplicateMemberships": {
+          "$ref": "#/definitions/uint64"
+        },
+        "unrecordedPlanReferences": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "unplannedScoreRows": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "reconciles": {
+          "type": "boolean"
+        },
+        "adjustments": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "EXCLUDED_ENTITIES",
+              "SHARED_OWNERSHIP",
+              "UNRECORDED_PLAN_REFERENCES",
+              "SCORES_FOR_UNPLANNED_MODULES"
+            ]
+          },
+          "maxItems": 4,
+          "uniqueItems": true
+        },
+        "scoreAdditivity": {
+          "const": "non-additive-mean",
+          "description": "Scores are means; module scores do not sum to the project score."
+        }
+      },
+      "required": [
+        "projectNumerator",
+        "projectDenominator",
+        "moduleNumeratorSum",
+        "moduleDenominatorSum",
+        "excludedNumerator",
+        "excludedEntities",
+        "duplicateNumerator",
+        "duplicateMemberships",
+        "unrecordedPlanReferences",
+        "unplannedScoreRows",
+        "reconciles",
+        "adjustments",
+        "scoreAdditivity"
+      ],
+      "additionalProperties": false
+    },
+    "structureScorecard": {
+      "type": "object",
+      "properties": {
+        "binding": {
+          "type": "object",
+          "properties": {
+            "jobId": {
+              "$ref": "#/definitions/id"
+            },
+            "runId": {
+              "$ref": "#/definitions/id"
+            },
+            "revisionId": {
+              "$ref": "#/definitions/id"
+            }
+          },
+          "required": [
+            "jobId",
+            "runId",
+            "revisionId"
+          ],
+          "additionalProperties": false
+        },
+        "authority": {
+          "const": "recorded-program-model"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "available",
+            "not-recorded",
+            "unsupported",
+            "invalid",
+            "limit-exceeded"
+          ],
+          "description": "Program-model state. Only available records may carry entity rows."
+        },
+        "stateReason": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "structureVersion": {
+          "$ref": "#/definitions/sha256"
+        },
+        "sourceSha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "metadataVersion": {
+          "$ref": "#/definitions/sha256"
+        },
+        "manifestSha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "model": {
+          "$ref": "#/definitions/structureRecord"
+        },
+        "plan": {
+          "$ref": "#/definitions/structureRecord"
+        },
+        "recoveryAssessment": {
+          "type": "string",
+          "enum": [
+            "unassessed",
+            "not-recorded"
+          ]
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/structureCapability"
+          },
+          "minItems": 1,
+          "maxItems": 32
+        },
+        "confidence": {
+          "$ref": "#/definitions/structureRecord"
+        },
+        "query": {
+          "type": "object",
+          "properties": {
+            "sort": {
+              "type": "string",
+              "enum": [
+                "module",
+                "score"
+              ]
+            },
+            "order": {
+              "type": "string",
+              "enum": [
+                "asc",
+                "desc"
+              ]
+            }
+          },
+          "required": [
+            "sort",
+            "order"
+          ],
+          "additionalProperties": false
+        },
+        "scorecard": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "interpretation": {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    "schemaVersion": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "calibrationStatus": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    "basis": {
+                      "$ref": "#/definitions/structureText"
+                    },
+                    "scoreMeaning": {
+                      "$ref": "#/definitions/structureText"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "schemaVersion",
+                    "calibrationStatus",
+                    "basis",
+                    "scoreMeaning"
+                  ],
+                  "additionalProperties": false
+                },
+                "formula": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "const": "extraction-label-mean-v1"
+                    },
+                    "weights": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "label": {
+                            "type": "string",
+                            "enum": [
+                              "recovered",
+                              "partial",
+                              "failed",
+                              "synthetic"
+                            ]
+                          },
+                          "weight": {
+                            "type": "string",
+                            "pattern": "^-?(0|[1-9][0-9]{0,18})(\\.[0-9]{1,24})?$",
+                            "maxLength": 48,
+                            "description": "Exact decimal text: a recorded value verbatim or an exact difference of recorded values."
+                          }
+                        },
+                        "required": [
+                          "label",
+                          "weight"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "minItems": 4,
+                      "maxItems": 4
+                    },
+                    "rendering": {
+                      "const": "mean-four-decimal-places"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "weights",
+                    "rendering"
+                  ],
+                  "additionalProperties": false
+                },
+                "scope": {
+                  "$ref": "#/definitions/scorecardScope"
+                },
+                "thresholds": {
+                  "type": "object",
+                  "properties": {
+                    "state": {
+                      "const": "not-recorded"
+                    },
+                    "reason": {
+                      "$ref": "#/definitions/id"
+                    }
+                  },
+                  "required": [
+                    "state",
+                    "reason"
+                  ],
+                  "additionalProperties": false
+                },
+                "metrics": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/scorecardMetric"
+                  },
+                  "minItems": 1,
+                  "maxItems": 16
+                },
+                "labels": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "label": {
+                        "type": "string",
+                        "enum": [
+                          "recovered",
+                          "partial",
+                          "failed",
+                          "synthetic"
+                        ]
+                      },
+                      "functions": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "globals": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "types": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "entities": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "weight": {
+                        "type": "string",
+                        "pattern": "^-?(0|[1-9][0-9]{0,18})(\\.[0-9]{1,24})?$",
+                        "maxLength": 48,
+                        "description": "Exact decimal text: a recorded value verbatim or an exact difference of recorded values."
+                      },
+                      "contribution": {
+                        "type": "string",
+                        "pattern": "^-?(0|[1-9][0-9]{0,18})(\\.[0-9]{1,24})?$",
+                        "maxLength": 48,
+                        "description": "Exact decimal text: a recorded value verbatim or an exact difference of recorded values."
+                      }
+                    },
+                    "required": [
+                      "label",
+                      "functions",
+                      "globals",
+                      "types",
+                      "entities",
+                      "weight",
+                      "contribution"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "minItems": 4,
+                  "maxItems": 4
+                },
+                "reconciliation": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/scorecardReconciliation"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "modules": {
+                  "type": "object",
+                  "properties": {
+                    "total": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "items": {
+                      "type": "array",
+                      "maxItems": 200,
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "moduleId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128,
+                            "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$"
+                          },
+                          "selector": {
+                            "anyOf": [
+                              {
+                                "$ref": "#/definitions/id"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "implementationDeclaration": {
+                            "type": "string",
+                            "enum": [
+                              "accepted",
+                              "unaccepted",
+                              "not-classified"
+                            ],
+                            "description": "Recorded manifest claim for the module implementation file; not verified acceptance."
+                          },
+                          "metric": {
+                            "$ref": "#/definitions/scorecardMetric"
+                          }
+                        },
+                        "required": [
+                          "moduleId",
+                          "selector",
+                          "implementationDeclaration",
+                          "metric"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "page": {
+                      "$ref": "#/definitions/page"
+                    }
+                  },
+                  "required": [
+                    "total",
+                    "items",
+                    "page"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "interpretation",
+                "formula",
+                "scope",
+                "thresholds",
+                "metrics",
+                "labels",
+                "reconciliation",
+                "modules"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "binding",
+        "authority",
+        "state",
+        "stateReason",
+        "structureVersion",
+        "sourceSha256",
+        "metadataVersion",
+        "manifestSha256",
+        "model",
+        "plan",
+        "recoveryAssessment",
+        "capabilities",
+        "confidence",
+        "query",
+        "scorecard"
+      ],
+      "additionalProperties": false,
+      "if": {
+        "properties": {
+          "confidence": {
+            "properties": {
+              "state": {
+                "const": "available"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "scorecard": {
+            "type": "object"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "scorecard": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    "scorecardComparison": {
+      "type": "object",
+      "properties": {
+        "binding": {
+          "type": "object",
+          "properties": {
+            "jobId": {
+              "$ref": "#/definitions/id"
+            },
+            "runId": {
+              "$ref": "#/definitions/id"
+            },
+            "revisionId": {
+              "$ref": "#/definitions/id"
+            }
+          },
+          "required": [
+            "jobId",
+            "runId",
+            "revisionId"
+          ],
+          "additionalProperties": false
+        },
+        "authority": {
+          "const": "recorded-confidence-reports"
+        },
+        "structureVersion": {
+          "$ref": "#/definitions/sha256"
+        },
+        "current": {
+          "type": "object",
+          "properties": {
+            "binding": {
+              "type": "object",
+              "properties": {
+                "jobId": {
+                  "$ref": "#/definitions/id"
+                },
+                "runId": {
+                  "$ref": "#/definitions/id"
+                },
+                "revisionId": {
+                  "$ref": "#/definitions/id"
+                }
+              },
+              "required": [
+                "jobId",
+                "runId",
+                "revisionId"
+              ],
+              "additionalProperties": false
+            },
+            "structureVersion": {
+              "$ref": "#/definitions/sha256"
+            },
+            "sourceSha256": {
+              "$ref": "#/definitions/sha256"
+            },
+            "manifestSha256": {
+              "$ref": "#/definitions/sha256"
+            },
+            "model": {
+              "$ref": "#/definitions/structureRecord"
+            },
+            "plan": {
+              "$ref": "#/definitions/structureRecord"
+            },
+            "confidence": {
+              "$ref": "#/definitions/structureRecord"
+            },
+            "scope": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/scorecardScope"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "reconciliation": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/scorecardReconciliation"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "binding",
+            "structureVersion",
+            "sourceSha256",
+            "manifestSha256",
+            "model",
+            "plan",
+            "confidence",
+            "scope",
+            "reconciliation"
+          ],
+          "additionalProperties": false
+        },
+        "baseline": {
+          "type": "object",
+          "properties": {
+            "binding": {
+              "type": "object",
+              "properties": {
+                "jobId": {
+                  "$ref": "#/definitions/id"
+                },
+                "runId": {
+                  "$ref": "#/definitions/id"
+                },
+                "revisionId": {
+                  "$ref": "#/definitions/id"
+                }
+              },
+              "required": [
+                "jobId",
+                "runId",
+                "revisionId"
+              ],
+              "additionalProperties": false
+            },
+            "structureVersion": {
+              "$ref": "#/definitions/sha256"
+            },
+            "sourceSha256": {
+              "$ref": "#/definitions/sha256"
+            },
+            "manifestSha256": {
+              "$ref": "#/definitions/sha256"
+            },
+            "model": {
+              "$ref": "#/definitions/structureRecord"
+            },
+            "plan": {
+              "$ref": "#/definitions/structureRecord"
+            },
+            "confidence": {
+              "$ref": "#/definitions/structureRecord"
+            },
+            "scope": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/scorecardScope"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "reconciliation": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/scorecardReconciliation"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "binding",
+            "structureVersion",
+            "sourceSha256",
+            "manifestSha256",
+            "model",
+            "plan",
+            "confidence",
+            "scope",
+            "reconciliation"
+          ],
+          "additionalProperties": false
+        },
+        "compatibility": {
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": "string",
+              "enum": [
+                "compatible",
+                "incompatible",
+                "unavailable"
+              ]
+            },
+            "checks": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 16,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "enum": [
+                      "input-binary",
+                      "reconstruction-profile",
+                      "confidence-schema",
+                      "score-interpretation",
+                      "score-formula",
+                      "model-schema",
+                      "entity-population",
+                      "module-plan"
+                    ]
+                  },
+                  "state": {
+                    "type": "string",
+                    "enum": [
+                      "match",
+                      "differs",
+                      "not-recorded"
+                    ]
+                  },
+                  "blocking": {
+                    "type": "boolean",
+                    "description": "A blocking identity must match before any delta is computed."
+                  },
+                  "current": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 512
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "baseline": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 512
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "id",
+                  "state",
+                  "blocking",
+                  "current",
+                  "baseline"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": [
+            "state",
+            "checks"
+          ],
+          "additionalProperties": false
+        },
+        "metrics": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "enum": [
+                  "structural-recovery-score",
+                  "module-structural-recovery-score",
+                  "calibrated-confidence",
+                  "assessed-recovery",
+                  "implementation-acceptance",
+                  "generation-completion",
+                  "unresolved-recovery",
+                  "unresolved-implementation",
+                  "excluded-entities"
+                ]
+              },
+              "unit": {
+                "type": "string",
+                "enum": [
+                  "ratio",
+                  "count"
+                ]
+              },
+              "current": {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "enum": [
+                      "measured",
+                      "unmeasured",
+                      "unknown",
+                      "partial",
+                      "failed"
+                    ],
+                    "description": "Only measured values carry a measurement; unmeasured, unknown, partial and failed never mean zero or pass."
+                  },
+                  "reason": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/definitions/id"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "value": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^-?(0|[1-9][0-9]{0,18})(\\.[0-9]{1,24})?$",
+                        "maxLength": 48,
+                        "description": "Exact decimal text: a recorded value verbatim or an exact difference of recorded values."
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "numerator": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^-?(0|[1-9][0-9]{0,18})(\\.[0-9]{1,24})?$",
+                        "maxLength": 48,
+                        "description": "Exact decimal text: a recorded value verbatim or an exact difference of recorded values."
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "denominator": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/definitions/uint64"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "state",
+                  "reason",
+                  "value",
+                  "numerator",
+                  "denominator"
+                ],
+                "additionalProperties": false
+              },
+              "baseline": {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "enum": [
+                      "measured",
+                      "unmeasured",
+                      "unknown",
+                      "partial",
+                      "failed"
+                    ],
+                    "description": "Only measured values carry a measurement; unmeasured, unknown, partial and failed never mean zero or pass."
+                  },
+                  "reason": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/definitions/id"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "value": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^-?(0|[1-9][0-9]{0,18})(\\.[0-9]{1,24})?$",
+                        "maxLength": 48,
+                        "description": "Exact decimal text: a recorded value verbatim or an exact difference of recorded values."
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "numerator": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^-?(0|[1-9][0-9]{0,18})(\\.[0-9]{1,24})?$",
+                        "maxLength": 48,
+                        "description": "Exact decimal text: a recorded value verbatim or an exact difference of recorded values."
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "denominator": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/definitions/uint64"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "state",
+                  "reason",
+                  "value",
+                  "numerator",
+                  "denominator"
+                ],
+                "additionalProperties": false
+              },
+              "delta": {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "enum": [
+                      "computed",
+                      "withheld",
+                      "not-comparable"
+                    ],
+                    "description": "Withheld for an incompatible or unavailable baseline; not comparable unless both sides are measured."
+                  },
+                  "reason": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/definitions/id"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "value": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^-?(0|[1-9][0-9]{0,18})(\\.[0-9]{1,24})?$",
+                        "maxLength": 48,
+                        "description": "Exact decimal text: a recorded value verbatim or an exact difference of recorded values."
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "numerator": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^-?(0|[1-9][0-9]{0,18})(\\.[0-9]{1,24})?$",
+                        "maxLength": 48,
+                        "description": "Exact decimal text: a recorded value verbatim or an exact difference of recorded values."
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "denominator": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^-?(0|[1-9][0-9]{0,19})$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "state",
+                  "reason",
+                  "value",
+                  "numerator",
+                  "denominator"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "unit",
+              "current",
+              "baseline",
+              "delta"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "modules": {
+          "type": "object",
+          "properties": {
+            "total": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "items": {
+              "type": "array",
+              "maxItems": 200,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "moduleId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$"
+                  },
+                  "selector": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/definitions/id"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "presence": {
+                    "type": "string",
+                    "enum": [
+                      "both",
+                      "current-only",
+                      "baseline-only"
+                    ]
+                  },
+                  "current": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "state": {
+                            "type": "string",
+                            "enum": [
+                              "measured",
+                              "unmeasured",
+                              "unknown",
+                              "partial",
+                              "failed"
+                            ],
+                            "description": "Only measured values carry a measurement; unmeasured, unknown, partial and failed never mean zero or pass."
+                          },
+                          "reason": {
+                            "anyOf": [
+                              {
+                                "$ref": "#/definitions/id"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "value": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "pattern": "^-?(0|[1-9][0-9]{0,18})(\\.[0-9]{1,24})?$",
+                                "maxLength": 48,
+                                "description": "Exact decimal text: a recorded value verbatim or an exact difference of recorded values."
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "numerator": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "pattern": "^-?(0|[1-9][0-9]{0,18})(\\.[0-9]{1,24})?$",
+                                "maxLength": 48,
+                                "description": "Exact decimal text: a recorded value verbatim or an exact difference of recorded values."
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "denominator": {
+                            "anyOf": [
+                              {
+                                "$ref": "#/definitions/uint64"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "state",
+                          "reason",
+                          "value",
+                          "numerator",
+                          "denominator"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "baseline": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "state": {
+                            "type": "string",
+                            "enum": [
+                              "measured",
+                              "unmeasured",
+                              "unknown",
+                              "partial",
+                              "failed"
+                            ],
+                            "description": "Only measured values carry a measurement; unmeasured, unknown, partial and failed never mean zero or pass."
+                          },
+                          "reason": {
+                            "anyOf": [
+                              {
+                                "$ref": "#/definitions/id"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "value": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "pattern": "^-?(0|[1-9][0-9]{0,18})(\\.[0-9]{1,24})?$",
+                                "maxLength": 48,
+                                "description": "Exact decimal text: a recorded value verbatim or an exact difference of recorded values."
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "numerator": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "pattern": "^-?(0|[1-9][0-9]{0,18})(\\.[0-9]{1,24})?$",
+                                "maxLength": 48,
+                                "description": "Exact decimal text: a recorded value verbatim or an exact difference of recorded values."
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "denominator": {
+                            "anyOf": [
+                              {
+                                "$ref": "#/definitions/uint64"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "state",
+                          "reason",
+                          "value",
+                          "numerator",
+                          "denominator"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "delta": {
+                    "type": "object",
+                    "properties": {
+                      "state": {
+                        "type": "string",
+                        "enum": [
+                          "computed",
+                          "withheld",
+                          "not-comparable"
+                        ],
+                        "description": "Withheld for an incompatible or unavailable baseline; not comparable unless both sides are measured."
+                      },
+                      "reason": {
+                        "anyOf": [
+                          {
+                            "$ref": "#/definitions/id"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "value": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "pattern": "^-?(0|[1-9][0-9]{0,18})(\\.[0-9]{1,24})?$",
+                            "maxLength": 48,
+                            "description": "Exact decimal text: a recorded value verbatim or an exact difference of recorded values."
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "numerator": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "pattern": "^-?(0|[1-9][0-9]{0,18})(\\.[0-9]{1,24})?$",
+                            "maxLength": 48,
+                            "description": "Exact decimal text: a recorded value verbatim or an exact difference of recorded values."
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "denominator": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "pattern": "^-?(0|[1-9][0-9]{0,19})$"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      }
+                    },
+                    "required": [
+                      "state",
+                      "reason",
+                      "value",
+                      "numerator",
+                      "denominator"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "moduleId",
+                  "selector",
+                  "presence",
+                  "current",
+                  "baseline",
+                  "delta"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "page": {
+              "$ref": "#/definitions/page"
+            }
+          },
+          "required": [
+            "total",
+            "items",
+            "page"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "binding",
+        "authority",
+        "structureVersion",
+        "current",
+        "baseline",
+        "compatibility",
+        "metrics",
+        "modules"
+      ],
+      "additionalProperties": false
+    },
+    "resumeRestoration": {
+      "type": "string",
+      "enum": [
+        "agent-session",
+        "project-evidence"
+      ]
+    },
+    "runRecovery": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "retry",
+            "resume"
+          ]
+        },
+        "restores": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/resumeRestoration"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "checkpointSha256": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "mode",
+        "restores",
+        "checkpointSha256"
+      ],
+      "additionalProperties": false
+    },
+    "attemptControls": {
+      "type": "object",
+      "properties": {
+        "jobId": {
+          "$ref": "#/definitions/id"
+        },
+        "runId": {
+          "$ref": "#/definitions/id"
+        },
+        "runVersion": {
+          "$ref": "#/definitions/version"
+        },
+        "state": {
+          "$ref": "#/definitions/runState"
+        },
+        "inputRevisionId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cancel": {
+          "type": "object",
+          "properties": {
+            "available": {
+              "type": "boolean"
+            },
+            "reason": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/cancelReason"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "available",
+            "reason"
+          ],
+          "additionalProperties": false
+        },
+        "retry": {
+          "type": "object",
+          "properties": {
+            "available": {
+              "type": "boolean"
+            },
+            "reason": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/recoveryReason"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "available",
+            "reason"
+          ],
+          "additionalProperties": false
+        },
+        "resume": {
+          "type": "object",
+          "properties": {
+            "available": {
+              "type": "boolean"
+            },
+            "reason": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/resumeReason"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "available",
+            "reason"
+          ],
+          "additionalProperties": false
+        },
+        "resumeRestores": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/resumeRestoration"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "successorRunId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "jobId",
+        "runId",
+        "runVersion",
+        "state",
+        "inputRevisionId",
+        "cancel",
+        "retry",
+        "resume",
+        "resumeRestores",
+        "successorRunId"
+      ],
+      "additionalProperties": false
+    },
+    "cancelReason": {
+      "type": "string",
+      "enum": [
+        "RECOVERY_REQUIRED",
+        "ATTEMPT_TERMINAL",
+        "CANCEL_PENDING",
+        "SERVICE_STOPPED",
+        "NO_OWNED_WORKER",
+        "RECEIPT_CAPACITY"
+      ]
+    },
+    "recoveryReason": {
+      "type": "string",
+      "enum": [
+        "RECOVERY_REQUIRED",
+        "SERVICE_STOPPED",
+        "ATTEMPT_ACTIVE",
+        "ATTEMPT_COMPLETED",
+        "ATTEMPT_SUPERSEDED",
+        "ACTIVE_RUN",
+        "WORKFLOW_UNAVAILABLE",
+        "INPUT_UNVERIFIED",
+        "UPLOAD_CAPACITY",
+        "CAPACITY_UNAVAILABLE"
+      ]
+    },
+    "resumeReason": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/recoveryReason"
+        },
+        {
+          "type": "string",
+          "enum": [
+            "RESUME_UNSUPPORTED",
+            "HARNESS_CHANGED",
+            "CHECKPOINT_MISSING",
+            "CHECKPOINT_MISMATCH",
+            "CHECKPOINT_UNVERIFIED",
+            "WORKSPACE_UNVERIFIED",
+            "SESSION_QUARANTINED",
+            "CLEANUP_UNVERIFIED"
+          ]
+        }
+      ]
+    },
     "queuePosition": {
       "oneOf": [
         {
@@ -7939,54 +10344,6 @@
           "const": 1
         },
         "kind": {
-          "const": "attemptControls"
-        },
-        "requestId": {
-          "$ref": "#/definitions/requestId"
-        },
-        "data": {
-          "$ref": "#/definitions/attemptControls"
-        }
-      },
-      "required": [
-        "apiVersion",
-        "kind",
-        "requestId",
-        "data"
-      ],
-      "additionalProperties": false
-    },
-    {
-      "type": "object",
-      "properties": {
-        "apiVersion": {
-          "const": 1
-        },
-        "kind": {
-          "const": "queuePosition"
-        },
-        "requestId": {
-          "$ref": "#/definitions/requestId"
-        },
-        "data": {
-          "$ref": "#/definitions/queuePosition"
-        }
-      },
-      "required": [
-        "apiVersion",
-        "kind",
-        "requestId",
-        "data"
-      ],
-      "additionalProperties": false
-    },
-    {
-      "type": "object",
-      "properties": {
-        "apiVersion": {
-          "const": 1
-        },
-        "kind": {
           "const": "functionInventory"
         },
         "requestId": {
@@ -8066,6 +10423,126 @@
         },
         "data": {
           "$ref": "#/definitions/entityDetail"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "structureNeighborhood"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/structureNeighborhood"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "structureScorecard"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/structureScorecard"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "scorecardComparison"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/scorecardComparison"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "attemptControls"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/attemptControls"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "queuePosition"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/queuePosition"
         }
       },
       "required": [

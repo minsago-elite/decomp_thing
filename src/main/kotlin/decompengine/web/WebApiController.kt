@@ -68,6 +68,10 @@ internal class WebApiController(
         "jobs/[^/]+/runs/[^/]+/revisions/[^/]+/modules(?:/[^/]+)?",
         "jobs/[^/]+/runs/[^/]+/revisions/[^/]+/globals/[^/]+",
         "jobs/[^/]+/runs/[^/]+/revisions/[^/]+/types/[^/]+",
+        "jobs/[^/]+/runs/[^/]+/revisions/[^/]+/graph",
+        "jobs/[^/]+/runs/[^/]+/revisions/[^/]+/scorecard",
+        "jobs/[^/]+/runs/[^/]+/revisions/[^/]+/scorecard-comparison",
+        "jobs/[^/]+/runs/[^/]+/revisions/[^/]+/records/[^/]+",
         "jobs/[^/]+/runs/[^/]+/snapshot",
         "jobs/[^/]+/runs/[^/]+/events",
         "jobs/[^/]+/runs/[^/]+/progress-pin",
@@ -255,6 +259,43 @@ internal class WebApiController(
                             }
                         } finally { exchange.close() }
                     }
+                }
+                resource.matches(Regex("jobs/[^/]+/runs/[^/]+/revisions/[^/]+/records/[^/]+")) -> {
+                    access.authorize(exchange, WebEndpointPolicy.privateRead(allowHead = true))
+                    if (exchange.requestHeaders.keys.any { it.equals("Range", true) || it.startsWith("If-", true) }) {
+                        throw WebAccessDenied(400, "UNSUPPORTED_HEADER", "Structure record downloads do not support Range or conditional headers.")
+                    }
+                    if (!acceptsWebMediaType(exchange, "application/octet-stream")) {
+                        throw WebAccessDenied(406, "NOT_ACCEPTABLE", "This endpoint returns application/octet-stream.")
+                    }
+                    val parts = resource.split('/')
+                    val record = programStructure.record(parts[1], parts[3], parts[5], parts[7], exchange.requestURI.rawQuery)
+                    webApiHeaders(exchange, UUID.randomUUID().toString())
+                    exchange.responseHeaders.set("Content-Type", "application/octet-stream")
+                    exchange.responseHeaders.set("Content-Disposition", "attachment; filename=\"${record.name}\"")
+                    exchange.responseHeaders.set("Content-Security-Policy", "sandbox; default-src 'none'; base-uri 'none'; form-action 'none'")
+                    exchange.responseHeaders.set("Content-Length", record.bytes.size.toString())
+                    exchange.responseHeaders.set("X-Decomp-Content-Verification", "committed-digest")
+                    exchange.responseHeaders.set("X-Decomp-Content-SHA256", record.sha256)
+                    try {
+                        if (exchange.requestMethod == "HEAD" || record.bytes.isEmpty()) exchange.sendResponseHeaders(200, -1)
+                        else {
+                            exchange.sendResponseHeaders(200, record.bytes.size.toLong())
+                            exchange.responseBody.use { it.write(record.bytes) }
+                        }
+                    } finally { exchange.close() }
+                }
+                resource.matches(Regex("jobs/[^/]+/runs/[^/]+/revisions/[^/]+/(?:graph|scorecard|scorecard-comparison)")) -> {
+                    val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.privateRead(allowHead = true)))
+                    requireJsonAccept(exchange)
+                    val parts = resource.split('/')
+                    val query = exchange.requestURI.rawQuery
+                    val (kind, value) = when (parts[6]) {
+                        "graph" -> "structureNeighborhood" to programStructure.neighborhood(parts[1], parts[3], parts[5], query)
+                        "scorecard" -> "structureScorecard" to programStructure.scorecard(session.sessionId, parts[1], parts[3], parts[5], query)
+                        else -> "scorecardComparison" to programStructure.comparison(session.sessionId, parts[1], parts[3], parts[5], query)
+                    }
+                    sendWebApiResponse(exchange, 200, kind, value)
                 }
                 resource.matches(Regex("jobs/[^/]+/runs/[^/]+/revisions/[^/]+/(?:functions|modules)(?:/[^/]+)?|jobs/[^/]+/runs/[^/]+/revisions/[^/]+/(?:globals|types)/[^/]+")) -> {
                     val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.privateRead(allowHead = true)))

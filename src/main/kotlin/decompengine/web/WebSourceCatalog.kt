@@ -12,7 +12,14 @@ import decompengine.repair.StableRegularFile
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.Collections
+import java.util.concurrent.Callable
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.Executors
+import java.util.concurrent.Future
+import java.util.concurrent.FutureTask
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 import kotlinx.serialization.json.*
@@ -39,6 +46,7 @@ internal class WebSourceCatalogEvidence(
 ) {
     private val profiles = profiles.associateBy { it.id to it.sha256 }
     private val capturing = AtomicBoolean(false)
+    private val structureWorkers = Executors.newThreadPerTaskExecutor(Thread.ofVirtual().name("decomp-web-structure-", 0).factory())
 
     init { require(profiles.size in 1..16 && this.profiles.size == profiles.size) }
 
@@ -97,12 +105,22 @@ internal class WebSourceCatalogEvidence(
     /**
      * Program-structure projection of the selected candidate. A retained projection is reused only for the
      * same input, manifest and descriptor digests; every read still recaptures those three commitments.
+     *
+     * On a first read the profile-declared model and plan are read and parsed on two workers while this thread
+     * parses the manifest. Each is used only after the manifest commits it and its bytes match that digest, so
+     * the result is identical to a sequential read. Admission stays held until both worker bodies exit, even
+     * after cancellation or a refused manifest; Future cancellation alone is not evidence of worker completion.
      */
     fun <T> readStructure(reference: WebRevisionSourceReference, cache: WebProgramStructureCache,
-        project: (WebProgramStructureIndex, () -> ByteArray) -> T): T {
+        project: (WebProgramStructureIndex, WebStructureRecordReader) -> T): T {
         if (!capturing.compareAndSet(false, true)) {
             throw WebAccessDenied(429, "SOURCE_CATALOG_BUSY", "Another source metadata capture is in progress. Try this read again later.")
         }
+        // One owner plus a reference for each submitted body. A cancelled Future may still be executing.
+        val pending = AtomicInteger(1)
+        fun finished() { if (pending.decrementAndGet() == 0) capturing.set(false) }
+        val tasks = mutableListOf<Future<*>>()
+        val workerExits = mutableListOf<CountDownLatch>()
         try {
             val root = "reports/runs/${reference.runId}/source-tree"
             val manifestPath = "$root/source_tree_manifest.json"
@@ -112,13 +130,34 @@ internal class WebSourceCatalogEvidence(
             val captured = readArtifact(reference.jobId, manifestPath, MAXIMUM_MANIFEST_BYTES)
             val descriptor = readArtifact(reference.jobId, descriptorPath, MAXIMUM_MANIFEST_BYTES)
             require(captured.bytes.size.toLong() <= MAXIMUM_MANIFEST_BYTES && descriptor.bytes.size.toLong() <= MAXIMUM_MANIFEST_BYTES)
-            fun evidence(entry: GeneratedFileEvidence, maximum: Int): ByteArray? {
-                val record = try { readArtifact(reference.jobId, "$root/${entry.path}", maximum.toLong()) }
-                    catch (_: RepairBudgetExceededException) { return null }
-                if (record.bytes.size > maximum) return null
-                if (record.sha256 != entry.sha256 || WebExplorationArtifact.sha256(record.bytes) != entry.sha256) revisionSourceChanged()
-                return record.bytes
+            fun <R> speculate(profile: ReconstructionProfile, declaration: String, maximum: Int,
+                parse: (ByteArray) -> WebStructureParse<R>): Future<WebStructureEvidence<R>>? {
+                val path = WebProgramStructureBuilder.declaredPath(profile, declaration) ?: return null
+                val task = FutureTask(Callable {
+                    if (Thread.currentThread().isInterrupted) throw InterruptedException()
+                    val record = try { readArtifact(reference.jobId, "$root/$path", maximum.toLong()) }
+                        catch (_: RepairBudgetExceededException) { return@Callable WebStructureEvidence<R>(null, null, null) }
+                    if (Thread.currentThread().isInterrupted) throw InterruptedException()
+                    if (record.bytes.size > maximum) WebStructureEvidence(null, null, null)
+                    else {
+                        val digest = WebExplorationArtifact.sha256(record.bytes)
+                        if (Thread.currentThread().isInterrupted) throw InterruptedException()
+                        WebStructureEvidence(record, digest, parse(record.bytes))
+                    }
+                })
+                val exited = CountDownLatch(1)
+                tasks += task
+                workerExits += exited
+                pending.incrementAndGet()
+                try {
+                    // The wrapper always runs its finally, even if task was cancelled before it started.
+                    structureWorkers.execute { try { task.run() } finally { finished(); exited.countDown() } }
+                } catch (failure: Throwable) { finished(); exited.countDown(); throw failure }
+                return task
             }
+            fun <R> joined(task: Future<WebStructureEvidence<R>>?): WebStructureEvidence<R> = try {
+                checkNotNull(task).get()
+            } catch (failure: ExecutionException) { throw failure.cause ?: failure }
             val key = WebProgramStructureCache.Key(reference.jobId, reference.runId, reference.revisionId,
                 reference.sourceSha256, captured.sha256, descriptor.sha256, input.sha256)
             val index = cache.get(key) ?: run {
@@ -129,27 +168,42 @@ internal class WebSourceCatalogEvidence(
                 val profile = profiles[profileId to profileSha256]
                     ?: throw IllegalArgumentException("Source catalog profile is unavailable.")
                 require(((document["files"] as? JsonArray)?.size ?: Int.MAX_VALUE) <= WebSourceCatalogSnapshot.MAXIMUM_FILES)
+                val model = speculate(profile, "program-model-evidence", WebProgramStructureBuilder.MAXIMUM_MODEL_BYTES,
+                    WebProgramStructureBuilder::parseModel)
+                val plan = speculate(profile, "module-plan-evidence", WebProgramStructureBuilder.MAXIMUM_PLAN_BYTES,
+                    WebProgramStructureBuilder::parsePlan)
                 val manifest = SourceTreeManifestReader.parse(document.toString(), profile)
                 require(manifest.inputSha256 == input.sha256)
                 val descriptorDocument = OracleJson.parse(descriptor.bytes, JSON_LIMITS) as? JsonObject
                     ?: throw IllegalArgumentException("Source input descriptor is invalid.")
                 val snapshot = parseWebRevisionSourceInputs(reference, manifest, captured.sha256, descriptorDocument, descriptor.sha256)
-                WebProgramStructureBuilder.build(snapshot, profile, manifest, ::evidence).also { cache.put(key, it) }
+                WebProgramStructureBuilder.build(snapshot, profile, manifest, { joined(model) }, { joined(plan) })
+                    .also { cache.put(key, it) }
             }
             // Retention pins change the attempt version without changing the candidate; the projection depends
             // only on the keyed commitments, so it stays valid for the current reference.
             check(index.reference.copy(attemptVersion = reference.attemptVersion) == reference && index.manifestSha256 == captured.sha256 && index.descriptorSha256 == descriptor.sha256)
-            val result = project(index) {
-                val model = checkNotNull(index.model)
-                val record = readArtifact(reference.jobId, "$root/${model.path}", WebProgramStructureBuilder.MAXIMUM_MODEL_BYTES.toLong())
-                if (record.sha256 != model.sha256 || WebExplorationArtifact.sha256(record.bytes) != model.sha256) revisionSourceChanged()
-                record.bytes
+            val result = project(index) { record, maximum ->
+                val read = readArtifact(reference.jobId, "$root/${record.path}", maximum.toLong())
+                if (read.bytes.size > maximum) throw RepairBudgetExceededException("Structure record exceeds its byte bound.")
+                if (read.sha256 != record.sha256 || WebExplorationArtifact.sha256(read.bytes) != record.sha256) revisionSourceChanged()
+                read.bytes
             }
             requireSame(descriptor, readArtifact(reference.jobId, descriptorPath, MAXIMUM_MANIFEST_BYTES))
             requireSame(captured, readArtifact(reference.jobId, manifestPath, MAXIMUM_MANIFEST_BYTES))
             requireSame(input, readInput(reference.jobId))
+            // Future.get() can precede its executor wrapper's final admission release, and unused speculative
+            // records may never be joined. A successful synchronous read must drain both bounded bodies before
+            // returning so its immediate continuation is not spuriously refused as SOURCE_CATALOG_BUSY.
+            // Failure/interruption still takes the nonblocking cancellation path below and retains admission
+            // until every actual body exits; cancelled Future state is never treated as cleanup evidence.
+            workerExits.forEach { it.await() }
             return result
-        } finally { capturing.set(false) }
+        } finally {
+            // Covers rejection, submission failure and an early unavailable-model result that never joins the plan.
+            tasks.forEach { it.cancel(true) }
+            finished()
+        }
     }
 
     private fun <T> revision(reference: WebRevisionSourceReference, manifest: decompengine.project.SourceTreeManifest,

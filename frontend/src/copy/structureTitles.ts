@@ -6,7 +6,16 @@ export const structureTitles = {
   function: 'Recorded function',
   global: 'Recorded global',
   type: 'Recorded type',
-  browseFunctions: 'Browse recovered functions',
-  browseModules: 'Browse recovered modules',
-  revisionViews: 'Result revision views',
+  graph: 'Recorded relationships',
+  scorecard: 'Recorded scorecard',
 } as const;
+
+export type StructureView = keyof typeof structureTitles;
+const LISTED: Record<string, StructureView> = { functions: 'functions', modules: 'modules', graph: 'graph', scorecard: 'scorecard' };
+const SELECTED: Record<string, StructureView> = { functions: 'function', globals: 'global', types: 'type', modules: 'module' };
+
+/** The view of a revision structure URL from its section and whether it selects one record; null for other sections. */
+export function structureView(section: string, selected: boolean): StructureView | null {
+  const views = selected ? SELECTED : LISTED;
+  return Object.hasOwn(views, section) ? views[section] ?? null : null;
+}
