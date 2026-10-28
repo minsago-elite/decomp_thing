@@ -34,7 +34,10 @@ class GitBranchesWorktreesTest {
             GitSourceSnapshot(snapshot, run, revision, "a".repeat(64), mapOf("src/main.c" to GitSourceCommitment(
                 GitSourceCopy.digestOf(snapshot.resolve("src/main.c")), Files.size(snapshot.resolve("src/main.c")))))
         }, policy = GitRepositoryPolicy(defaultBranch = "trunk"), crash = { hook(it) }, activity = { runs.toMap() },
-            workspaceLeases = leases).also(opened::add)
+            workspaceLeases = leases).also { repositories ->
+                opened += repositories
+                repositories.recover(listOf("0123456789abcdef0123456789abcdef"))
+            }
         override fun close() { opened.forEach { it.close() }; repositories.close() }
     }
 
@@ -577,14 +580,31 @@ class GitBranchesWorktreesTest {
             f.repositories.git("--git-dir=${f.gitDir()}", "update-ref", "refs/heads/experiment", moved, base)
             Files.writeString(records, "storage obstruction")
         } }
-        val failed = run(GitRefRequest(GitOperationAction.WORKTREE_ADD, primary, guards().second, name = "experiment", objectId = base))
-        assertEquals(GitOperationState.RECOVERY_REQUIRED, failed.state); assertEquals("REF_CONFLICT", failed.failureCode)
+        val admission = service.requestWorkspace(jobId, repositoryId,
+            GitRefRequest(GitOperationAction.WORKTREE_ADD, primary, guards().second, name = "experiment", objectId = base),
+            "recovery_add_key_0001")
+        assertTrue(service.awaitIdle(60_000))
+        val operationPath = f.store.resolve("$jobId/git/operations/${admission.operation.operationId}.json")
+        fun persistedState(): kotlinx.serialization.json.JsonObject =
+            kotlinx.serialization.json.Json.parseToJsonElement(Files.readString(operationPath)) as kotlinx.serialization.json.JsonObject
+        assertEquals("recovery-required", (persistedState().getValue("state") as kotlinx.serialization.json.JsonPrimitive).content)
+        assertEquals("REF_CONFLICT", (persistedState().getValue("failureCode") as kotlinx.serialization.json.JsonPrimitive).content)
+        assertEquals("STORAGE_UNAVAILABLE", assertFailsWith<ManagedGitException> {
+            service.operation(jobId, repositoryId, admission.operation.operationId)
+        }.code)
+
         service.close(); Files.delete(records); f.hook = {}; service = f.open()
-        assertEquals(GitOperationState.RECOVERY_REQUIRED, service.operation(jobId, repositoryId, failed.operationId).state)
-        refused("WORKTREE_BUSY", GitRefRequest(GitOperationAction.WORKTREE_ADD, primary, guards().second, objectId = base))
+        assertEquals("STORAGE_UNAVAILABLE", assertFailsWith<ManagedGitException> {
+            service.operation(jobId, repositoryId, admission.operation.operationId)
+        }.code)
+        assertEquals("STORAGE_UNAVAILABLE", assertFailsWith<ManagedGitException> {
+            service.requestWorkspace(jobId, repositoryId,
+                GitRefRequest(GitOperationAction.WORKTREE_ADD, primary, guards().second, objectId = base), "recovery_retry_key_0001")
+        }.code)
         assertEquals(moved, GitRefOperations.refObject(f.repositories.runner, f.gitDir(), GitObjectFormat.SHA1, "refs/heads/experiment"))
         // An explicit operator repair can be reconciled without forgetting or replaying the failed add.
         f.repositories.git("--git-dir=${f.gitDir()}", "update-ref", "refs/heads/experiment", base, moved)
+        service.recover(listOf(jobId))
         assertEquals(GitOperationState.COMPLETED, run(GitRefRequest(GitOperationAction.WORKTREE_ADD, primary, guards().second,
             name = "experiment", objectId = base)).state)
     }
