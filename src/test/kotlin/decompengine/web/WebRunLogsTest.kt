@@ -1,0 +1,268 @@
+package decompengine.web
+
+import decompengine.jobs.NewWorkflowAttempt
+import decompengine.jobs.WorkflowAttempt
+import decompengine.jobs.WorkflowAttemptStore
+import decompengine.jobs.WorkflowExecutionLimits
+import decompengine.jobs.WorkflowJobInspection
+import decompengine.jobs.WorkflowKind
+import decompengine.jobs.JobStore
+import decompengine.jobs.elfFixture
+import java.nio.file.Files
+import java.nio.file.Path
+import java.time.Instant
+import kotlin.io.path.createTempDirectory
+import kotlin.test.*
+import kotlinx.serialization.json.*
+
+class WebRunLogsTest {
+    private val root = Path.of("/srv/decomp-private-store")
+    private val logs = WebRunLogs(WebLogRedaction(mapOf("job-store" to root)))
+    private val sha = "a".repeat(64)
+
+    private fun attempt(): Pair<String, WorkflowAttempt> {
+        val parent = Files.createDirectories(Path.of("build/test-tmp/web-run-logs").toAbsolutePath())
+        val directory = createTempDirectory(parent, "logs-")
+        val job = JobStore(directory).createFromUpload("log.elf", elfFixture())
+        return WorkflowAttemptStore.open(directory).use { owner ->
+            val snapshot = (owner.inspect(job.id) as WorkflowJobInspection.Available).snapshot
+            job.id to owner.create(job.id, snapshot.version, NewWorkflowAttempt(WorkflowKind.RECONSTRUCT,
+                WorkflowExecutionLimits(60000u, 15000u, 1048576u, 16u))).attempt
+        }.also { directory.toFile().deleteRecursively() }
+    }
+
+    @Test fun `queries are strict bounded and searches are literal`() {
+        assertEquals(WebRunLogs.Query(1, false, 200, null), logs.parseQuery(null))
+        assertEquals(WebRunLogs.Query(null, true, 50, null), logs.parseQuery("tail=true&limit=50"))
+        assertEquals(WebRunLogs.Query(7, false, 500, "(a+)+\$"), logs.parseQuery("fromLine=7&limit=500&search=%28a%2B%29%2B%24"))
+        assertEquals(WebRunLogs.Query(null, false, 500, null, 438), logs.parseQuery("beforeLine=438&limit=500"))
+        // A maximal non-ASCII search still fits the raw query bound after percent encoding.
+        val wide = java.net.URLEncoder.encode("界".repeat(128), Charsets.UTF_8)
+        assertEquals("界".repeat(128), logs.parseQuery("fromLine=1&limit=500&search=$wide").search)
+        for (invalid in listOf("tail=true&fromLine=2", "beforeLine=3&tail=true", "beforeLine=3&fromLine=1", "beforeLine=0", "limit=501", "limit=0", "fromLine=0", "tail=yes", "search=", "search=a%0Ab",
+            "search=" + "x".repeat(129), "regex=a", "limit=1&limit=2", "fromLine=1e3")) {
+            assertEquals("VALIDATION_FAILED", assertFailsWith<WebAccessDenied>(invalid) { logs.parseQuery(invalid) }.code)
+        }
+    }
+
+    @Test fun `lines are decoded redacted and rendered inert`() {
+        val pair = charArrayOf(0xd83d.toChar(), 0xde00.toChar()).concatToString()
+        val text = "cc -c $root/module.c\r\n" + "\u001b[31merror\u001b[0m <script>x</script>\n" +
+            "spoof ‮exe.txt\n" + "x".repeat(4095) + pair + "tail\n"
+        val bytes = text.toByteArray() + byteArrayOf(0xff.toByte(), 0x41)
+        val capture = assertNotNull(logs.capture(bytes, sha))
+        assertEquals(5, capture.totalLines)
+        val lines = capture.allLines()
+        assertEquals("cc -c [job-store]/module.c", lines[0].text); assertTrue(lines[0].redacted)
+        assertEquals("\\e[31merror\\e[0m <script>x</script>", lines[1].text)
+        assertEquals("spoof \\u202eexe.txt", lines[2].text)
+        // A cut never splits a surrogate pair.
+        assertTrue(lines[3].truncated); assertEquals(4095, lines[3].text.length)
+        assertTrue(lines[4].replaced); assertEquals("�A", lines[4].text)
+        assertEquals(1, capture.redactedLines)
+    }
+
+    @Test fun `ranges enforce line and byte budgets with explicit markers`() {
+        val (jobId, run) = attempt()
+        val now = Instant.parse("2026-09-05T00:00:00Z")
+        val capture = assertNotNull(logs.capture((1..1000).joinToString("\n") { "line $it error" }.toByteArray(), sha))
+        val tail = logs.range(jobId, run, capture, false, logs.parseQuery("tail=true"), now)
+        val window = tail.getValue("range").jsonObject
+        assertEquals("801", window.getValue("firstLine").jsonPrimitive.content)
+        assertEquals("200", window.getValue("lineCount").jsonPrimitive.content)
+        assertTrue(window.getValue("truncatedBefore").jsonPrimitive.boolean); assertFalse(window.getValue("truncatedAfter").jsonPrimitive.boolean)
+        assertEquals(run.runId, tail.getValue("runId").jsonPrimitive.content)
+        assertEquals("generated-build-log", tail.getValue("source").jsonPrimitive.content)
+        assertEquals(sha, tail.getValue("sourceSha256").jsonPrimitive.content)
+        val past = logs.range(jobId, run, capture, false, logs.parseQuery("fromLine=5000"), now).getValue("range").jsonObject
+        assertEquals("1001", past.getValue("firstLine").jsonPrimitive.content); assertEquals("0", past.getValue("lineCount").jsonPrimitive.content)
+        val search = logs.range(jobId, run, capture, false, logs.parseQuery("limit=1&search=error"), now).getValue("search").jsonObject
+        assertEquals("1000", search.getValue("matchCount").jsonPrimitive.content)
+        assertEquals(200, search.getValue("matches").jsonArray.size); assertTrue(search.getValue("matchesTruncated").jsonPrimitive.boolean)
+        assertEquals("whole-log", search.getValue("scope").jsonPrimitive.content)
+
+        val wide = assertNotNull(logs.capture((1..500).joinToString("\n") { "y".repeat(4096) }.toByteArray(), sha))
+        val limited = logs.range(jobId, run, wide, false, logs.parseQuery("limit=500"), now)
+        val limitedWindow = limited.getValue("range").jsonObject
+        assertTrue(limitedWindow.getValue("byteLimited").jsonPrimitive.boolean)
+        assertTrue(limited.toString().toByteArray().size < 300 * 1024)
+        assertTrue(limitedWindow.getValue("lineCount").jsonPrimitive.int in 1 until 500)
+        // A backward page ends immediately before the loaded window, even when its byte budget stops it early.
+        val earlier = logs.range(jobId, run, wide, false, logs.parseQuery("beforeLine=438&limit=437"), now)
+        assertEquals("437", earlier.getValue("lines").jsonArray.last().jsonObject.getValue("number").jsonPrimitive.content)
+        assertTrue(earlier.getValue("range").jsonObject.getValue("byteLimited").jsonPrimitive.boolean)
+        assertEquals("0", logs.range(jobId, run, wide, false, logs.parseQuery("beforeLine=1"), now)
+            .getValue("range").jsonObject.getValue("lineCount").jsonPrimitive.content)
+        // A byte-limited tail still ends at the final line instead of stopping partway through its window.
+        val newest = logs.range(jobId, run, wide, false, logs.parseQuery("tail=true&limit=200"), now)
+        val newestWindow = newest.getValue("range").jsonObject
+        assertEquals("500", newest.getValue("lines").jsonArray.last().jsonObject.getValue("number").jsonPrimitive.content)
+        assertFalse(newestWindow.getValue("truncatedAfter").jsonPrimitive.boolean)
+        assertTrue(newestWindow.getValue("byteLimited").jsonPrimitive.boolean)
+        assertEquals(500 - newestWindow.getValue("lineCount").jsonPrimitive.int + 1, newestWindow.getValue("firstLine").jsonPrimitive.int)
+
+        // Many short lines stay under the byte cap but exceed the line budget: an explicit bound, not a failure.
+        assertNull(logs.capture(ByteArray(WebRunLogs.MAXIMUM_LOG_LINES + 1) { '\n'.code.toByte() }, sha))
+        assertNotNull(logs.capture(ByteArray(WebRunLogs.MAXIMUM_LOG_LINES) { '\n'.code.toByte() }, sha))
+        val missing = logs.range(jobId, run, null, false, logs.parseQuery(null), now)
+        assertEquals("missing", missing.getValue("state").jsonPrimitive.content); assertFalse("lines" in missing)
+        assertEquals("oversized", logs.range(jobId, run, null, true, logs.parseQuery(null), now).getValue("state").jsonPrimitive.content)
+    }
+
+    @Test fun `whole log search includes text beyond display truncation after redaction and escaping`() {
+        val (jobId, run) = attempt()
+        val prefix = "x".repeat(WebRunLogs.MAXIMUM_LINE_CHARACTERS)
+        val capture = assertNotNull(logs.capture(("${prefix}fatal-error $root/a.c\u001b[31m\n" +
+            "$prefix$root/fatal-error\n").toByteArray(), sha))
+        assertTrue(capture.allLines().all { it.truncated && it.text == prefix })
+        fun search(query: String): JsonObject = logs.range(jobId, run, capture, false,
+            WebRunLogs.Query(1, false, 1, query), Instant.EPOCH).getValue("search").jsonObject
+        val suffix = search("fatal-error")
+        assertEquals("whole-log", suffix.getValue("scope").jsonPrimitive.content)
+        assertEquals("2", suffix.getValue("matchCount").jsonPrimitive.content)
+        assertEquals(listOf("1", "2"), suffix.getValue("matches").jsonArray.map { it.jsonPrimitive.content })
+        assertFalse(suffix.getValue("matchesTruncated").jsonPrimitive.boolean)
+        assertEquals("2", search("[job-store]").getValue("matchCount").jsonPrimitive.content)
+        assertEquals("1", search("\\e[31m").getValue("matchCount").jsonPrimitive.content)
+        assertEquals("0", search(root.toString()).getValue("matchCount").jsonPrimitive.content)
+    }
+
+    @Test fun `shared configured credentials and private paths are masked before display cuts and search`() {
+        val canary = "ConfiguredLogCanary0123456789"
+        val policy = WebRedactionPolicy.create(mapOf("TEST_API_KEY" to canary), listOf(canary), emptyList())
+        val protected = WebRunLogs(WebLogRedaction(mapOf("job-store" to root), policy))
+        val (jobId, run) = attempt()
+        val inputs = listOf("raw $canary", "API_KEY=synthetic-key-123", "Authorization: Bearer synthetic-bearer-123",
+            "password=\"alpha\\\"bravo charlie\"", "token='unterminated credential", "/home/another-user/private-file",
+            "C:\\Users\\another-user\\private-file", "x".repeat(4096) + " secret=\"hidden suffix\"")
+        val capture = assertNotNull(protected.capture(inputs.joinToString("\n").toByteArray(), sha))
+        assertEquals(inputs.size, capture.redactedLines)
+        val forbidden = listOf(canary, "synthetic-key-123", "synthetic-bearer-123", "bravo", "unterminated credential",
+            "another-user", "hidden suffix")
+        val download = protected.download(jobId, run, capture, Instant.EPOCH).decodeToString()
+        for (secret in forbidden) {
+            assertFalse(download.contains(secret))
+            assertFalse(capture.allLines().any { it.text.contains(secret) || it.searchText.contains(secret) })
+            val result = protected.range(jobId, run, capture, false, WebRunLogs.Query(1, false, 1, secret), Instant.EPOCH)
+            assertEquals("0", result.getValue("search").jsonObject.getValue("matchCount").jsonPrimitive.content)
+        }
+    }
+
+    @Test fun `recorded session cookie headers and passwordless URL userinfo are redacted end to end`() {
+        val (jobId, run) = attempt()
+        val secrets = listOf(
+            "BuildCookieCanary0123456789",
+            "BuildSetCookieCanary0123456789",
+            "BuildJsonCookieCanary0123456789",
+            "BuildUrlCanary0123456789",
+        )
+        val input = listOf(
+            "Cookie: session=${secrets[0]}",
+            "Set-Cookie: session=${secrets[1]}; Path=/; HttpOnly; SameSite=Strict",
+            "{\"Cookie\": \"session=${secrets[2]}\"}",
+            "Fetching https://${secrets[3]}@example.com/repo.git",
+        ).joinToString("\n")
+        val capture = assertNotNull(logs.capture(input.toByteArray(), sha))
+        assertEquals(4, capture.redactedLines)
+        val download = logs.download(jobId, run, capture, Instant.EPOCH).decodeToString()
+        val range = logs.range(jobId, run, capture, false, WebRunLogs.Query(1, false, 10, null), Instant.EPOCH)
+        for (secret in secrets) {
+            assertFalse(download.contains(secret))
+            assertFalse(capture.allLines().any { it.text.contains(secret) || it.searchText.contains(secret) })
+            assertFalse(range.toString().contains(secret))
+            assertEquals("0", logs.range(jobId, run, capture, false,
+                WebRunLogs.Query(1, false, 1, secret), Instant.EPOCH)
+                .getValue("search").jsonObject.getValue("matchCount").jsonPrimitive.content)
+        }
+        assertTrue(download.contains("Cookie: [redacted]"))
+        assertTrue(download.contains("Set-Cookie: [redacted]"))
+        assertTrue(download.contains("{\"Cookie\": [redacted]"))
+    }
+
+    @Test fun `multiline configured credentials are redacted without losing source line numbering`() {
+        val parts = listOf("-----BEGIN PRIVATE KEY-----", "SyntheticPemBodyCanary0123456789abcdef", "-----END PRIVATE KEY-----")
+        val (jobId, run) = attempt()
+        for (separator in listOf("\n", "\r\n", "\r")) {
+            val secret = parts.joinToString(separator, postfix = separator)
+            val policy = WebRedactionPolicy.create(mapOf("TEST_PRIVATE_KEY" to secret), listOf(secret), emptyList())
+            val protected = WebRunLogs(WebLogRedaction(emptyMap(), policy))
+            // The log format itself is LF/CRLF, independent of the configured secret's newline style.
+            val bytes = ("before\n" + parts.joinToString("\r\n", postfix = "\r\n") + "after\n").toByteArray()
+            val capture = assertNotNull(protected.capture(bytes, sha))
+            assertEquals(5, capture.totalLines)
+            assertEquals(listOf(1L, 2L, 3L, 4L, 5L), capture.allLines().map { it.number })
+            assertEquals("before", capture.line(0).text); assertEquals("after", capture.line(4).text)
+            assertEquals(3, capture.redactedLines)
+            val range = protected.range(jobId, run, capture, false, WebRunLogs.Query(1, false, 500, null), Instant.EPOCH)
+            val download = protected.download(jobId, run, capture, Instant.EPOCH).decodeToString()
+            for (part in parts) {
+                assertFalse(range.toString().contains(part))
+                assertFalse(download.contains(part))
+                assertFalse(capture.allLines().any { it.searchText.contains(part) })
+                val search = protected.range(jobId, run, capture, false, WebRunLogs.Query(1, false, 1, part), Instant.EPOCH)
+                assertEquals("0", search.getValue("search").jsonObject.getValue("matchCount").jsonPrimitive.content)
+            }
+        }
+    }
+
+    @Test fun `unmaskable credential fragments and literal overflow are refused rather than dropped`() {
+        for (secret in listOf("long-credential-line\nshort", "long-credential-line\r\n  \r\nother-long-line")) {
+            assertFailsWith<IllegalArgumentException> {
+                WebRedactionPolicy.create(mapOf("TEST_PRIVATE_KEY" to secret), listOf(secret), emptyList())
+            }
+        }
+        val tooMany = (1..4097).associate { "TEST_TOKEN_$it" to "UniqueCredentialCanary$it" }
+        assertFailsWith<IllegalArgumentException> { WebRedactionPolicy.create(tooMany, emptyList(), emptyList()) }
+    }
+
+    @Test fun `credential suffix assignments are masked without configured literals`() {
+        val (jobId, run) = attempt()
+        val assignments = listOf(
+            "DATABASE_PASSWORD=unquoted-build-only-canary" to "unquoted-build-only-canary",
+            "CUSTOM_API_KEY=\"quoted build-only canary\"" to "quoted build-only canary",
+            "AWS_SECRET_ACCESS_KEY='single-quoted-build-only-canary'" to "single-quoted-build-only-canary",
+            "_DATABASE_PASSWORD=leading-underscore-build-canary" to "leading-underscore-build-canary",
+        )
+        val capture = assertNotNull(logs.capture(assignments.joinToString("\n") { it.first }.toByteArray(), sha))
+        assertEquals(assignments.size, capture.redactedLines)
+        val download = logs.download(jobId, run, capture, Instant.EPOCH).decodeToString()
+        for ((_, secret) in assignments) {
+            assertFalse(download.contains(secret))
+            assertFalse(capture.allLines().any { it.text.contains(secret) || it.searchText.contains(secret) })
+            assertEquals("0", logs.range(jobId, run, capture, false, WebRunLogs.Query(1, false, 1, secret), Instant.EPOCH)
+                .getValue("search").jsonObject.getValue("matchCount").jsonPrimitive.content)
+        }
+    }
+
+    @Test fun `complete Digest authorization values are withheld through the end of the line`() {
+        val (jobId, run) = attempt()
+        val value = "Digest username=\"alice-digest-canary\", realm=\"build-digest-canary\", nonce=\"nonce-digest-canary\", " +
+            "uri=\"/artifact\", response=\"response-digest-canary-0123456789\""
+        for (header in listOf("Authorization: $value", "Proxy-Authorization: $value", "HTTP_AUTHORIZATION=$value",
+            "{\"Authorization\": \"$value\"}")) {
+            val capture = assertNotNull(logs.capture((header + "\npublic\n").toByteArray(), sha))
+            assertEquals(2, capture.totalLines); assertEquals("public", capture.line(1).text)
+            assertTrue(capture.line(0).redacted)
+            val download = logs.download(jobId, run, capture, Instant.EPOCH).decodeToString()
+            for (secret in listOf("alice-digest-canary", "build-digest-canary", "nonce-digest-canary", "response-digest-canary-0123456789")) {
+                assertFalse(download.contains(secret))
+                assertFalse(capture.line(0).searchText.contains(secret))
+                assertEquals("0", logs.range(jobId, run, capture, false, WebRunLogs.Query(1, false, 1, secret), Instant.EPOCH)
+                    .getValue("search").jsonObject.getValue("matchCount").jsonPrimitive.content)
+            }
+        }
+    }
+
+    @Test fun `downloads share the live redaction and carry provenance`() {
+        val (jobId, run) = attempt()
+        val capture = assertNotNull(logs.capture("first $root/a.c\n\u001b[1mbold\n".toByteArray(), sha))
+        val live = logs.range(jobId, run, capture, false, logs.parseQuery(null), Instant.EPOCH).getValue("lines").jsonArray
+            .map { it.jsonObject.getValue("text").jsonPrimitive.content }
+        val download = logs.download(jobId, run, capture, Instant.EPOCH).decodeToString()
+        assertFalse(download.contains(root.toString())); assertFalse(download.contains("\u001b"))
+        assertTrue(download.endsWith(live.joinToString("\n", postfix = "\n")))
+        for (expected in listOf(jobId, run.runId, sha, "web-log-v1", "redacted lines 1", "exported 1970-01-01T00:00:00Z")) {
+            assertTrue(download.contains(expected), expected)
+        }
+    }
+}

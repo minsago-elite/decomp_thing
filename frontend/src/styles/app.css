@@ -300,6 +300,16 @@ main a + button, main button + button, main button + a { margin-inline-start: 0.
 .retained-case-detail dd { margin-inline-start: 0; }
 .retained-case-detail code { white-space: pre-wrap; overflow-wrap: anywhere; }
 
+/* Log viewer: fixed-height rows inside one scrolling viewport; only visible rows are rendered. */
+.log-viewport { overflow: auto; margin-block: 1rem; border: 1px solid var(--line); border-radius: var(--radius-panel); background: var(--surface); font-family: var(--mono); font-size: 0.8125rem; }
+.log-row { display: flex; gap: 0.75rem; line-height: 20px; white-space: pre; }
+.log-number { flex: none; min-width: 4.5rem; padding-inline: 0.6rem; color: var(--muted); text-align: end; background: var(--surface-sunken); font-variant-numeric: tabular-nums; }
+.log-text { unicode-bidi: isolate; tab-size: 4; }
+.log-flag { color: var(--attention); }
+.log-search { display: grid; gap: 0.5rem; }
+.log-search label { display: grid; gap: 0.35rem; max-width: 32rem; }
+.log-matches { display: flex; flex-wrap: wrap; gap: 0.4rem; list-style: none; padding: 0; margin: 0; }
+
 /* Source viewer: line positions in a gutter, code on the sunken surface. */
 .source-navigation { min-width: 0; overflow-wrap: anywhere; }
 .source-preview { margin-block: 1.5rem; min-width: 0; }

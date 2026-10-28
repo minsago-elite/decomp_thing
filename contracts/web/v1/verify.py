@@ -423,6 +423,22 @@ def check_semantics(document: dict) -> None:
         identities = [item["jobId"] for item in data["items"]]
         if len(identities) != len(set(identities)):
             raise ValueError("a job appears more than once in a page")
+    elif kind == "logRange":
+        if data["state"] == "available":
+            window, lines, total = data["range"], data["lines"], int(data["totalLines"])
+            first, count = int(window["firstLine"]), int(window["lineCount"])
+            if count != len(lines) or [int(line["number"]) for line in lines] != list(range(first, first + count)):
+                raise ValueError("log lines are not the declared contiguous range")
+            if first > total + 1 or window["truncatedBefore"] != (first > 1) or window["truncatedAfter"] != (first + count - 1 < total):
+                raise ValueError("log range markers disagree with its position")
+            if int(data["redactedLines"]) > total or sum(line["redacted"] for line in lines) > int(data["redactedLines"]):
+                raise ValueError("log redaction count is inconsistent")
+            search = data["search"]
+            if search is not None:
+                matches = [int(value) for value in search["matches"]]
+                if matches != sorted(set(matches)) or any(value > total for value in matches) or len(matches) > int(search["matchCount"]) \
+                        or search["matchesTruncated"] != (int(search["matchCount"]) > len(matches)):
+                    raise ValueError("log search matches are inconsistent")
     elif kind == "queuePosition":
         if data["state"] == "queued" and (int(data["ahead"]) != int(data["position"]) - 1
                 or int(data["position"]) > int(data["queuedTasks"]) or int(data["activeWorkers"]) > int(data["workerLimit"])):

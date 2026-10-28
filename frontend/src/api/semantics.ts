@@ -348,6 +348,25 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
       }
       break;
     }
+    case 'logRange': {
+      const log = document.data;
+      if (log.state === 'available') {
+        const total = BigInt(log.totalLines), first = BigInt(log.range.firstLine), count = BigInt(log.range.lineCount);
+        requireValue(count === BigInt(log.lines.length));
+        log.lines.forEach((line, index) => requireValue(BigInt(line.number) === first + BigInt(index)));
+        requireValue(first <= total + 1n);
+        requireValue(log.range.truncatedBefore === first > 1n);
+        requireValue(log.range.truncatedAfter === first + count - 1n < total);
+        requireValue(BigInt(log.redactedLines) <= total && BigInt(log.lines.filter(line => line.redacted).length) <= BigInt(log.redactedLines));
+        if (log.search) {
+          const matches = log.search.matches.map(value => BigInt(value));
+          matches.forEach((value, index) => requireValue(value <= total && (index === 0 || value > matches[index - 1]!)));
+          requireValue(BigInt(matches.length) <= BigInt(log.search.matchCount));
+          requireValue(log.search.matchesTruncated === BigInt(log.search.matchCount) > BigInt(matches.length));
+        }
+      }
+      break;
+    }
     case 'queuePosition': {
       const sample = document.data;
       if (sample.state === 'queued') {

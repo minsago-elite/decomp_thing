@@ -10,6 +10,7 @@ import { withApiFailureReference } from '../api/client';
 import { jobPath, runPath, runViewPath, sourceDirectoryPath, type RunView } from '../app/paths';
 import type { BrowserSession } from '../session/session';
 import { Activity } from '../jobs/Activity';
+import { LogViewer } from '../jobs/LogViewer';
 import { ProgressPin } from '../jobs/ProgressPin';
 import { AttemptControls } from '../jobs/AttemptControls';
 import { ExplorationEvidence } from '../jobs/ExplorationEvidence';
@@ -108,7 +109,8 @@ function Details({ jobId, runId, basePath, session, view, navigation }: {
         <dt>{copy.wallClockUsage2}</dt><dd>{run.usage.wallClockMs === null ? copy.notReported : displayMessage(copy.wallClockUsage, { value: run.usage.wallClockMs })}</dd>
       </dl> : <p>{copy.usageWasNotReportedForThisAttempt}</p>}
       </>}
-      {view !== 'evidence' && <>
+      {view === 'logs' && <LogViewer key={`logs/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} />}
+      {view !== 'evidence' && view !== 'logs' && <>
         <PanelBoundary name={panelBoundaryCopy.names.attemptControls}>
           <AttemptControls key={`controls/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} session={session}
             run={run} onChanged={() => { setRefresh(value => value + 1); }} />
@@ -120,7 +122,7 @@ function Details({ jobId, runId, basePath, session, view, navigation }: {
           <Activity key={`activity/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} {...(view === 'activity' && navigation !== undefined ? { navigation } : {})} />
         </PanelBoundary>
       </>}
-      {view !== 'activity' && <>
+      {view !== 'activity' && view !== 'logs' && <>
         <PanelBoundary name={panelBoundaryCopy.names.exploration}>
           <ExplorationEvidence key={`${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} />
         </PanelBoundary>
@@ -153,7 +155,7 @@ export default function Run({ jobId, runId, basePath, session, view = 'overview'
   const navigation = suppliedNavigation ?? routedNavigation;
   const valid = /^[0-9a-f]{32}$/.test(jobId) && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(runId);
   return <section aria-labelledby="attempt-title">
-    <h1 id="attempt-title">{view === 'activity' ? copy.activityTitle : view === 'evidence' ? copy.evidenceTitle : copy.workflowAttempt}</h1>
+    <h1 id="attempt-title">{view === 'activity' ? copy.activityTitle : view === 'evidence' ? copy.evidenceTitle : view === 'logs' ? copy.logsTitle : copy.workflowAttempt}</h1>
     {valid ? <>
       <a href={jobPath(basePath, jobId)}>{copy.returnToJobOverview}</a>
       <p><a href={`${jobPath(basePath, jobId)}/runs`}>{copy.browseAttemptHistory}</a></p>
@@ -161,6 +163,7 @@ export default function Run({ jobId, runId, basePath, session, view = 'overview'
         <a href={runViewPath(basePath, jobId, runId, 'overview')} aria-current={view === 'overview' ? 'page' : undefined}>{copy.overviewView}</a>
         <a href={runViewPath(basePath, jobId, runId, 'activity')} aria-current={view === 'activity' ? 'page' : undefined}>{copy.activityView}</a>
         <a href={runViewPath(basePath, jobId, runId, 'evidence')} aria-current={view === 'evidence' ? 'page' : undefined}>{copy.evidenceView}</a>
+        <a href={runViewPath(basePath, jobId, runId, 'logs')} aria-current={view === 'logs' ? 'page' : undefined}>{copy.logsView}</a>
       </nav>
       {session && state?.status === 'authenticated' ? <Details key={`${state.generation}/${jobId}/${runId}/${view}`} jobId={jobId} runId={runId} basePath={basePath} session={session} view={view} {...(navigation === undefined ? {} : { navigation })} />
         : <p>{copy.connectALocalSessionToViewThisAttempt}</p>}

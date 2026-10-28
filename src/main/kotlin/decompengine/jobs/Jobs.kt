@@ -293,6 +293,7 @@ class JobStore internal constructor(
         jobId: String,
         relativePath: String,
         maximumBytes: Long,
+        distinguishInitialAbsence: Boolean = false,
     ): StableRegularFile {
         jobDirectory(jobId)
         require(relativePath.startsWith("reports/") && relativePath.length <= 4096 &&
@@ -301,7 +302,9 @@ class JobStore internal constructor(
                 parts.size <= 32 && parts.none { it.isBlank() || it == "." || it == ".." }
             }
         ) { "artifact path must be a canonical report path" }
-        return contained("artifact") { readStableRegularFile(root, "$jobId/$relativePath", maximumBytes) }
+        return contained("artifact", preserveInitialAbsence = distinguishInitialAbsence) {
+            readStableRegularFile(root, "$jobId/$relativePath", maximumBytes)
+        }
     }
 
     /**
@@ -312,8 +315,11 @@ class JobStore internal constructor(
      * [ArtifactChangedException] when the file or any path binding changed during the read. Every
      * descriptor is closed before the outcome is returned, including on refusal.
      */
-    private inline fun <T> contained(subject: String, read: () -> T): T = try {
+    private inline fun <T> contained(subject: String, preserveInitialAbsence: Boolean = false, read: () -> T): T = try {
         read()
+    } catch (missing: decompengine.repair.StableRegularFileAbsentException) {
+        if (preserveInitialAbsence) throw missing
+        throw JobStoreException("$subject is unavailable or its path changed")
     } catch (_: decompengine.repair.StableFileChangedException) {
         throw ArtifactChangedException("$subject changed while it was read")
     } catch (_: decompengine.repair.StableFileUnavailableException) {

@@ -7300,6 +7300,9 @@ internal fun hashStableRegularFile(
     }
 }
 
+/** Proven ENOENT during initial traversal only; never used for failed revalidation after a read. */
+internal class StableRegularFileAbsentException : java.io.IOException("stable file-read target is absent")
+
 internal fun readStableRegularFile(
     root: Path,
     relative: String,
@@ -7317,17 +7320,45 @@ internal fun readStableRegularFile(
     val pinnedDirectories = mutableListOf<decompengine.acp.LinuxDescriptor>()
     var authorized: decompengine.acp.LinuxDescriptor? = null
     var readable: decompengine.acp.LinuxDescriptor? = null
+    fun initiallyAbsent(): Nothing {
+        cancellationCheck()
+        // ENOENT under a detached/replaced pinned directory does not prove absence at the
+        // selected path. Reopen and authenticate every traversed prefix before reporting it.
+        val opened = mutableListOf<LinuxDescriptor>()
+        var target: LinuxDescriptor? = null
+        try {
+            var parent = openRepairRootDirectory(base)
+            opened += parent
+            require(parent.identity == pinnedDirectories.first().identity) { "stable absent-read root binding changed" }
+            parts.take(pinnedDirectories.size - 1).forEachIndexed { index, segment ->
+                parent = LinuxFilesystemSyscalls.openDirectoryAt(parent.fd, segment)
+                opened += parent
+                require(parent.identity == pinnedDirectories[index + 1].identity) { "stable absent-read directory binding changed" }
+            }
+            target = LinuxFilesystemSyscalls.openPathAtOrNull(parent.fd, parts[pinnedDirectories.size - 1])
+            require(target == null) { "stable absent-read target appeared during revalidation" }
+            cancellationCheck()
+            throw StableRegularFileAbsentException()
+        } finally {
+            target?.close()
+            opened.asReversed().forEach { it.close() }
+        }
+    }
     try {
         var parent = openRepairRootDirectory(base)
         pinnedDirectories += parent
         parts.dropLast(1).forEach { segment ->
             cancellationCheck()
-            parent = LinuxFilesystemSyscalls.openDirectoryAt(parent.fd, segment)
+            parent = try { LinuxFilesystemSyscalls.openDirectoryAt(parent.fd, segment) }
+            catch (failure: decompengine.acp.LinuxSyscallException) {
+                if (failure.errno == LinuxFilesystemSyscalls.ENOENT) initiallyAbsent()
+                throw failure
+            }
             pinnedDirectories += parent
             cancellationCheck()
         }
         authorized = LinuxFilesystemSyscalls.openPathAtOrNull(parent.fd, parts.last())
-            ?: throw StableFileUnavailableException("stable file-read target disappeared: $relative")
+            ?: initiallyAbsent()
         if (!authorized.identity.isRegularFile || authorized.identity.isSymbolicLink) {
             throw StableFileUnavailableException("stable file-read target is not a regular non-symbolic-link file: $relative")
         }

@@ -850,13 +850,45 @@ class WebJobService(
         }
     }
 
-    /** Validate the report namespace and attempt ownership before a bounded retained-descriptor read. */
     @Synchronized
-    internal fun readArtifact(jobId: String, relativePath: String, maximumBytes: Long): decompengine.repair.StableRegularFile {
+    fun resolveArtifact(jobId: String, relativePath: String): Path {
+        requireInitializedRead()
+        val segments = canonicalReportSegments(relativePath)
+        if (segments[1] == "runs") {
+            getAttempt(jobId, segments[2])
+            return store.resolveRunArtifact(jobId, segments[2], segments.drop(3).joinToString("/"))
+        }
+        presentation(jobId) // Validate the record before resolving an explicitly legacy artifact.
+        return store.resolveArtifact(jobId, relativePath)
+    }
+
+    /** Host root used only to redact display text; it never enters a DTO. */
+    internal val redactionStorageRoot: Path get() = store.storageRoot
+
+    /** The attempt and its recorded build log, or null with an oversized flag; absence is not an error. */
+    internal fun readRunBuildLog(jobId: String, runId: String, maximumBytes: Long): Triple<WorkflowAttempt, decompengine.repair.StableRegularFile?, Boolean> {
+        val attempt = getAttempt(jobId, runId)
+        return try {
+            Triple(attempt, readArtifact(jobId, "reports/runs/$runId/source-tree/reports/build.log", maximumBytes, distinguishInitialAbsence = true), false)
+        } catch (_: decompengine.repair.RepairBudgetExceededException) {
+            Triple(attempt, null, true)
+        } catch (_: decompengine.repair.StableRegularFileAbsentException) {
+            Triple(attempt, null, false)
+        } catch (failure: Exception) {
+            if (failure is InterruptedException || failure is WebJobServiceException) throw failure
+            throw WebJobServiceException("JOB_STORAGE_UNAVAILABLE",
+                "The recorded build log could not be read safely. Refresh before retrying.", failure)
+        }
+    }
+
+/** Validate the report namespace and attempt ownership before a bounded retained-descriptor read. */
+    @Synchronized
+    internal fun readArtifact(jobId: String, relativePath: String, maximumBytes: Long,
+        distinguishInitialAbsence: Boolean = false): decompengine.repair.StableRegularFile {
         requireInitializedRead()
         val segments = canonicalReportSegments(relativePath)
         if (segments[1] == "runs") getAttempt(jobId, segments[2]) else presentation(jobId)
-        return store.readArtifact(jobId, relativePath, maximumBytes)
+        return store.readArtifact(jobId, relativePath, maximumBytes, distinguishInitialAbsence)
     }
 
     @Synchronized
