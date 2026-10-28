@@ -669,8 +669,15 @@ class ManagedGitRepositories(
                         if (Files.exists(located.gitDir.resolve("index"), NOFOLLOW_LINKS)) {
                             Files.copy(located.gitDir.resolve("index"), index)
                         }
-                        if (request.stage) GitWorkspaceMutations.stage(runner, located.gitDir, located.workTree, entries, reviewed, staging, index) {
-                            crash(GitOperationCrashPoint.AFTER_WORKSPACE_CAPTURE)
+                        if (request.stage) {
+                            // Ordinary status hides submodules, but an external writer may stage a
+                            // gitlink whose path conflicts with a selected file. Check the private
+                            // index before update-index can remove that hidden entry.
+                            GitWorkspaceMutations.requireNoStagedGitlinks(runner, located.gitDir, located.workTree,
+                                request.guards.expectedHeadObjectId, index)
+                            GitWorkspaceMutations.stage(runner, located.gitDir, located.workTree, entries, reviewed, staging, index) {
+                                crash(GitOperationCrashPoint.AFTER_WORKSPACE_CAPTURE)
+                            }
                         } else {
                             // Ordinary status deliberately hides gitlinks. Reset uses pathspec
                             // semantics, so hidden staged gitlinks must block publication too.

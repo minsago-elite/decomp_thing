@@ -205,6 +205,31 @@ class GitWorkspaceMutationsTest {
         }
     }
 
+    @Test fun `staging refuses hidden gitlinks that conflict with selected file paths`(): Unit {
+        for (format in listOf(GitObjectFormat.SHA1, GitObjectFormat.SHA256)) Fixture().use { f ->
+            val service = f.open(GitRepositoryPolicy(defaultBranch = "trunk", objectFormat = format))
+            val repositoryId = service.initialized()
+            val gitDir = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
+            val workTree = gitDir.parent.resolve("worktree")
+            fun raw(vararg args: String) = f.repositories.git("--git-dir=$gitDir", "--work-tree=$workTree", *args, cwd = workTree)
+            val parent = f.repositories.commitAll(gitDir, workTree, "baseline")
+            Files.writeString(workTree.resolve("a"), "int ordinary;\n")
+            val hidden = "a/hidden.c"
+            raw("update-index", "--add", "--cacheinfo", "160000,$parent,$hidden")
+            val before = raw("ls-files", "--stage", "-z")
+            val (review, guards) = service.guards(repositoryId)
+            val selection = review.ids { it.path.exact == "a" && it.untracked }
+            assertEquals(1, selection.size)
+
+            val result = service.run(repositoryId,
+                GitStageRequest(review.record.worktreeId, guards, selection, true), "stage_hidden_gitlink_01")
+            assertEquals(GitOperationState.FAILED, result.state, result.message)
+            assertEquals("EXCLUDED_PATH", result.failureCode)
+            assertEquals(before, raw("ls-files", "--stage", "-z"), "refusal preserves the hidden gitlink")
+            assertTrue(before.contains(hidden))
+        }
+    }
+
     @Test fun `external Git writers cannot change index or parent between validation and mutation`(): Unit {
         for (format in listOf(GitObjectFormat.SHA1, GitObjectFormat.SHA256)) for (stage in listOf(false, true)) Fixture().use { f ->
             val service = f.open(GitRepositoryPolicy(defaultBranch = "trunk", objectFormat = format))
