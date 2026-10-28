@@ -52,8 +52,10 @@ class GhidraLateExportCleanupWaitTest {
         val caller = abandon(owner, process)
         val failure = caller.suppressed.single()
         assertTrue(failure is GhidraAnalysisException)
-        assertEquals("late export worker did not stop within its cleanup allowance", failure.message)
-        assertEquals(1, process.waits.size)
+        assertTrue(failure.message?.startsWith("late Ghidra export cleanup could not prove absence") == true)
+        assertTrue(process.waits.isNotEmpty())
+        assertTrue(process.waits.all { it in 1..TimeUnit.MILLISECONDS.toNanos(50) })
+        assertTrue(process.waits.sum() <= FORCED_ALLOWANCE)
         assertTrue(process.isAlive)
         process.assertStreamsClosed()
         process.acknowledged = true
@@ -61,16 +63,18 @@ class GhidraLateExportCleanupWaitTest {
     }
 
     @Test
-    fun `wait interruption is retained while all streams close and caller failure stays primary`() {
+    fun `wait interruption is restored after bounded cleanup and caller failure stays primary`() {
         val process = AcknowledgementProcess(outcome = WaitOutcome.INTERRUPTED)
         val owner = owner()
-        val caller = abandon(owner, process)
-        assertSame(process.interruption, caller.suppressed.single())
-        assertEquals("late export worker did not stop within its cleanup allowance", process.interruption.suppressed.single().message)
-        assertEquals(1, process.waits.size)
-        process.assertStreamsClosed()
-        assertFalse(Thread.currentThread().isInterrupted)
-        assertStillRefused(owner, process, process.interruption)
+        try {
+            val caller = abandon(owner, process)
+            assertTrue(caller.suppressed.isEmpty())
+            assertEquals(2, process.waits.size)
+            assertTrue(Thread.currentThread().isInterrupted)
+            process.assertStreamsClosed()
+        } finally {
+            Thread.interrupted()
+        }
     }
 
     @Test
@@ -116,7 +120,9 @@ class GhidraLateExportCleanupWaitTest {
     private fun abandon(owner: BoundedAnalysisProcessLaunch, process: Process): AuthoredAbandonment {
         val expected = AuthoredAbandonment()
         val actual = assertFailsWith<AuthoredAbandonment> {
-            owner.start({ phase -> if (phase == "while starting export process") throw expected }, { process }, ::cleanup)
+            owner.start({ phase -> if (phase == "while starting export process") throw expected }, { process }) {
+                cleanup(it, owner)
+            }
         }
         assertSame(expected, actual)
         return actual
@@ -129,7 +135,7 @@ class GhidraLateExportCleanupWaitTest {
         }
         assertFalse(invoked.get())
         assertSame(cause, refusal.cause)
-        assertEquals("analysis launch is unavailable after an unconfirmed late-worker cleanup", refusal.message)
+        assertEquals("analysis launch is unavailable after an unconfirmed worker cleanup", refusal.message)
     }
 
     private class AuthoredAbandonment : RuntimeException("authored caller abandonment")
@@ -144,6 +150,7 @@ class GhidraLateExportCleanupWaitTest {
     ) : Process() {
         val waits = mutableListOf<Long>()
         val interruption = InterruptedException("authored owned-process acknowledgement interruption")
+        private var interruptionDelivered = false
         private val closed = mutableListOf<String>()
         private val output = object : ByteArrayOutputStream() {
             override fun close() { closed += "output"; outputFailure?.let { throw it }; super.close() }
@@ -181,7 +188,13 @@ class GhidraLateExportCleanupWaitTest {
             return when (outcome) {
                 WaitOutcome.ACKNOWLEDGED -> { acknowledged = true; true }
                 WaitOutcome.TIMEOUT -> false
-                WaitOutcome.INTERRUPTED -> throw interruption
+                WaitOutcome.INTERRUPTED -> if (!interruptionDelivered) {
+                    interruptionDelivered = true
+                    throw interruption
+                } else {
+                    acknowledged = true
+                    true
+                }
             }
         }
         override fun destroy(): Unit = error("already absent native handle needs no signal")
@@ -191,9 +204,14 @@ class GhidraLateExportCleanupWaitTest {
     companion object {
         private val FORCED_ALLOWANCE = TimeUnit.SECONDS.toNanos(5)
         private val stopLate = Class.forName("decompengine.project.ArchivalReconstructionKt")
-            .getDeclaredMethod("stopLateExportProcess", Process::class.java, Duration::class.java).apply { isAccessible = true }
-        private fun cleanup(process: Process) {
-            try { stopLate.invoke(null, process, Duration.ZERO) }
+            .getDeclaredMethod(
+                "stopLateExportProcess", Process::class.java, Duration::class.java,
+                BoundedAnalysisProcessLaunch::class.java, List::class.java,
+            ).apply { isAccessible = true }
+        private fun cleanup(process: Process) =
+            cleanup(process, BoundedAnalysisProcessLaunch(Executor(Runnable::run)))
+        private fun cleanup(process: Process, owner: BoundedAnalysisProcessLaunch) {
+            try { stopLate.invoke(null, process, Duration.ZERO, owner, emptyList<java.nio.file.Path>()) }
             catch (failure: InvocationTargetException) { throw failure.targetException }
         }
     }

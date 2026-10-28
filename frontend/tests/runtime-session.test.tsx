@@ -23,7 +23,7 @@ it('projects existing session evidence, reports mismatches, and clears it at log
     expect(screen.getByText('Queued tasks (count)')).toBeTruthy();
     expect(screen.getAllByText('32')).toHaveLength(2);
     expect(screen.getByText(/approximate aggregate observations/)).toBeTruthy();
-    expect(screen.getByText(/queue position and start time are not reported/)).toBeTruthy();
+    expect(screen.getByText(/own approximate queue position is shown on its attempt page/)).toBeTruthy();
     expect(screen.getByText('degraded')).toBeTruthy();
     expect(screen.getByText('Uploads unavailable')).toBeTruthy();
     expect(screen.getByText('Server instance').nextElementSibling?.textContent).toBe('Not reported');

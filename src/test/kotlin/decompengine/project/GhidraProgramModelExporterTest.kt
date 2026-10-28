@@ -26,6 +26,24 @@ import kotlin.test.assertTrue
 
 class GhidraProgramModelExporterTest {
     @Test
+    fun `generic owned exporter is versioned separately from the immutable profile-17 resource`() {
+        val retained = checkNotNull(javaClass.getResourceAsStream("/ghidra_scripts/ExportProgramModel.java"))
+            .use { it.readBytes() }
+        val owned = checkNotNull(javaClass.getResourceAsStream("/ghidra_scripts/ExportProgramModelOwned.java"))
+            .use { it.readBytes() }
+
+        assertEquals("0ee91d684d310357363cbf8516b2dc65b5f56c4b38c62d4c9e09304eb3ecafaf", sha256(retained))
+        assertTrue("public class ExportProgramModel extends GhidraScript" in retained.toString(Charsets.UTF_8))
+        assertTrue("public class ExportProgramModelOwned extends GhidraScript" in owned.toString(Charsets.UTF_8))
+        assertTrue("EXPORTER_VERSION = 18" in owned.toString(Charsets.UTF_8))
+        assertTrue("owned-model-candidate-v1" in owned.toString(Charsets.UTF_8))
+        assertTrue("arguments.length != 6 && arguments.length != 7" in owned.toString(Charsets.UTF_8))
+        assertTrue("int protocolIndex = arguments.length == 6 ? 4 : 5" in owned.toString(Charsets.UTF_8))
+        assertTrue("if (arguments.length == 7) optionalPolicy = arguments[4]" in owned.toString(Charsets.UTF_8))
+        assertFalse("owned-model-candidate-v1" in retained.toString(Charsets.UTF_8))
+    }
+
+    @Test
     fun `phase diagnostics are bounded instance local partial and primary failure neutral`() {
         val exporter = checkNotNull(javaClass.getResourceAsStream("/ghidra_scripts/ExportProgramModel.java"))
             .use { it.readBytes().toString(Charsets.UTF_8) }
@@ -88,10 +106,11 @@ class GhidraProgramModelExporterTest {
         assertEquals("fake-input", model.inputSha256)
         assertEquals(listOf("fn_0000000000001000"), model.functions.map { it.id })
         val invocation = work.resolve("invocation.txt").readText()
-        assertTrue(invocation.contains("-postScript\nExportProgramModel.java"))
+        assertTrue(invocation.contains("-postScript\nExportProgramModelOwned.java"))
         assertTrue(invocation.lineSequence().any { it.matches(Regex("[0-9a-f]{64}")) })
-        assertTrue(invocation.endsWith("${work.resolve("reports/program_model.json").toAbsolutePath()}\n"))
-        val exporter = work.resolve("scripts/ExportProgramModel.java").readText()
+        assertTrue(invocation.lineSequence().any { it == work.resolve("reports/program_model.json").toAbsolutePath().toString() })
+        assertTrue(invocation.lineSequence().last { it.isNotEmpty() }.endsWith(".candidate"))
+        val exporter = work.resolve("scripts/ExportProgramModelOwned.java").readText()
         assertTrue(exporter.contains("program-model export complete"))
         assertTrue(exporter.contains("writeIfAbsentAtomic"))
         assertTrue(exporter.contains("return isAcceptedRecord(record)"))
@@ -103,7 +122,7 @@ class GhidraProgramModelExporterTest {
         assertTrue(exporter.contains("isRetryableDecompileTimeout(exported)"))
         assertTrue(exporter.contains("exported.failure.contains(\"process: timeout\")"))
         assertTrue(exporter.contains("full-recovery-workers-v1:[1-4]"))
-        assertTrue(exporter.contains("ExporterParallelCoordinatorV1<FunctionMetadata, FunctionExport>"))
+        assertTrue(exporter.contains("ExporterParallelCoordinatorOwnedV1<FunctionMetadata, FunctionExport>"))
         assertTrue(exporter.contains("exporterSha256"))
         assertTrue(exporter.contains("analysisToolSha256"))
         assertTrue(exporter.contains("recoveryMode"))
@@ -120,7 +139,7 @@ class GhidraProgramModelExporterTest {
         assertTrue(exporter.contains("MAXIMUM_PLANNING_BATCHES = 256"))
         assertTrue(exporter.contains("MAXIMUM_PROGRAM_MODEL_BYTES = 512L * 1024 * 1024"))
         assertTrue(exporter.contains("BoundedOutput"))
-        assertTrue(exporter.contains("ExporterSemanticFingerprintV1"))
+        assertTrue(exporter.contains("ExporterSemanticFingerprintOwnedV1"))
         assertTrue(exporter.contains("MAXIMUM_CANONICAL_BYTES = 1024L * 1024 * 1024"))
         assertTrue(exporter.contains("semanticStateBinding"))
         assertTrue(exporter.contains("batchCommitmentSha256"))
@@ -141,7 +160,7 @@ class GhidraProgramModelExporterTest {
             Regex("requirePlanningBatchMatchesSemanticState\\(expectedBatch, validation\\)")
                 .findAll(exporter).count() >= 3,
         )
-        val generatedCommitment = exporter.lastIndexOf("ExporterSemanticFingerprintV1.commitBatch(\n                        start")
+        val generatedCommitment = exporter.lastIndexOf("ExporterSemanticFingerprintOwnedV1.commitBatch(\n                        start")
         val firstFragmentWrite = exporter.lastIndexOf("writePlanningAtomic(functionFragmentPath, functionFragmentText)")
         assertTrue(generatedCommitment >= 0 && generatedCommitment < firstFragmentWrite)
         val planningBranch = exporter.substring(exporter.indexOf("discardPlanningPendingFiles(planningBatchesDirectory, total)"))
@@ -160,7 +179,7 @@ class GhidraProgramModelExporterTest {
         val durableOwnership = planningBranch.indexOf("ownedGlobalIds.add(id)", durableCommitment)
         assertTrue(durableValidation >= 0 && durableValidation < durableCommitment && durableCommitment < durableOwnership)
         val semanticPreflight = exporter.lastIndexOf("computePlanningSemanticState(functions)")
-        val stateAcceptance = exporter.lastIndexOf("ExporterSemanticFingerprintV1.requireReusableState(existing, state)")
+        val stateAcceptance = exporter.lastIndexOf("ExporterSemanticFingerprintOwnedV1.requireReusableState(existing, state)")
         val batchReuse = exporter.lastIndexOf("discardPlanningPendingFiles(planningBatchesDirectory, total)")
         assertTrue(semanticPreflight >= 0 && semanticPreflight < stateAcceptance)
         assertTrue(stateAcceptance < batchReuse)
@@ -317,9 +336,9 @@ class GhidraProgramModelExporterTest {
         assertTrue(progress.contains("\"reused\":${first.functions.size}"), progress)
         val statePath = modelPath.resolveSibling("program_model.json.export/state.json")
         val priorState = statePath.readText()
-        assertTrue("\"exporterVersion\":17" in priorState)
-        for (historicalVersion in listOf(16, 13, 12, 11)) {
-            val historicalState = priorState.replace("\"exporterVersion\":17", "\"exporterVersion\":$historicalVersion")
+        assertTrue("\"exporterVersion\":18" in priorState)
+        for (historicalVersion in listOf(17, 16, 13, 12, 11)) {
+            val historicalState = priorState.replace("\"exporterVersion\":18", "\"exporterVersion\":$historicalVersion")
             statePath.writeText(historicalState)
             assertFailsWith<IllegalArgumentException> { analyzer.analyze(binary, work) }
             assertEquals(historicalState, statePath.readText())
@@ -375,7 +394,7 @@ class GhidraProgramModelExporterTest {
                     children.forEach { it.onExit().get(5, TimeUnit.SECONDS) }
                 }
             }
-            val candidate = checkNotNull(javaClass.getResourceAsStream("/ghidra_scripts/ExportProgramModel.java"))
+            val candidate = checkNotNull(javaClass.getResourceAsStream("/ghidra_scripts/ExportProgramModelOwned.java"))
                 .use { it.readBytes().toString(Charsets.UTF_8) }
             val renderOnce = "DecompiledFunction rendered = result.decompileCompleted() ? result.getDecompiledFunction() : null;\n" +
                 "            if (rendered != null) {\n                source = rendered.getC();"
@@ -420,7 +439,7 @@ class GhidraProgramModelExporterTest {
                 val jvmTemp = work.resolve("tmp").createDirectories()
                 val analyzer = GhidraHeadlessProgramModelAnalyzer(
                     commandFactory = { invocation ->
-                        invocation.scripts.resolve("ExportProgramModel.java").writeText(staged)
+                        invocation.scripts.resolve("ExportProgramModelOwned.java").writeText(staged)
                         val exporterScript = invocation.postScripts.single()
                         val command = BundledGhidra.locate().analysisCommand(invocation.copy(
                             // Ghidra rejects hidden project path components such as a .claude worktree.
@@ -496,21 +515,21 @@ class GhidraProgramModelExporterTest {
     fun `opt in pure rendering preserves all native exporter bytes against committed baseline`() {
         if (System.getenv("RUN_REAL_GHIDRA") != "true" || System.getenv("RUN_REAL_GHIDRA_PURE_RENDERING") != "true") return
         val repository = Path.of("").toAbsolutePath().normalize().toRealPath()
-        val candidate = checkNotNull(javaClass.getResourceAsStream("/ghidra_scripts/ExportProgramModel.java"))
+        val candidate = checkNotNull(javaClass.getResourceAsStream("/ghidra_scripts/ExportProgramModelOwned.java"))
             .use { it.readBytes().toString(Charsets.UTF_8) }
-        assertTrue("EXPORTER_VERSION = 17;" in candidate)
+        assertTrue("EXPORTER_VERSION = 18;" in candidate)
         // The baseline is the candidate with only the three pure-rendering call sites restored to their original
         // Formatter/regex implementations, so it keeps every other exporter behavior (byte evidence, workers, phases).
         val renderingEdits = listOf(
-            "return ExporterPureRenderingV1.addressId(\"fn_\", function.getEntryPoint().getOffset());" to
+            "return ExporterPureRenderingOwnedV1.addressId(\"fn_\", function.getEntryPoint().getOffset());" to
                 "return String.format(\"fn_%016x\", function.getEntryPoint().getOffset());",
-            "return ExporterPureRenderingV1.addressId(\"global_\", address.getOffset());" to
+            "return ExporterPureRenderingOwnedV1.addressId(\"global_\", address.getOffset());" to
                 "return String.format(\"global_%016x\", address.getOffset());",
-            "        return ExporterPureRenderingV1.hexDigest(digest);" to
+            "        return ExporterPureRenderingOwnedV1.hexDigest(digest);" to
                 "        StringBuilder result = new StringBuilder();\n" +
                 "        for (byte value : digest) result.append(String.format(\"%02x\", value & 0xff));\n" +
                 "        return result.toString();",
-            "String cName = ExporterPureRenderingV1.typeName(type.getName());" to
+            "String cName = ExporterPureRenderingOwnedV1.typeName(type.getName());" to
                 "String cName = type.getName().replaceAll(\"[^A-Za-z0-9_]\", \"_\");",
         )
         val baseline = renderingEdits.fold(candidate) { source, (from, to) ->
@@ -570,9 +589,11 @@ class GhidraProgramModelExporterTest {
             val exporterHash = sha256(exporter.toByteArray())
             val analyzer = GhidraHeadlessProgramModelAnalyzer(
                 commandFactory = { invocation ->
-                    invocation.scripts.resolve("ExportProgramModel.java").writeText(exporter)
+                    invocation.scripts.resolve("ExportProgramModelOwned.java").writeText(exporter)
                     val script = invocation.postScripts.single()
-                    val arguments = listOf(exporterHash) + script.arguments.drop(1) + "full-recovery-workers-v1:4"
+                    // Keep the legacy policy token while explicitly selecting the owned candidate protocol.
+                    val arguments = listOf(exporterHash) + script.arguments.drop(1).take(3) +
+                        "full-recovery-workers-v1:4" + "owned-model-candidate-v1" + script.arguments.last()
                     val command = BundledGhidra.locate().analysisCommand(invocation.copy(
                         project = Path.of("/proc/self/cwd/ghidra_project"),
                         postScripts = listOf(script.copy(arguments = arguments)),
@@ -616,12 +637,13 @@ class GhidraProgramModelExporterTest {
         beforeSidecars.forEach { (name, bytes) -> assertTrue(bytes.contentEquals(afterSidecars.getValue(name)), "native sidecar $name") }
         val beforeState = beforePath.resolveSibling("program_model.json.export/state.json").readText()
         val afterState = afterPath.resolveSibling("program_model.json.export/state.json").readText()
-        assertTrue("\"exporterVersion\":17" in beforeState)
-        assertTrue("\"exporterVersion\":17" in afterState)
+        assertTrue("\"exporterVersion\":18" in beforeState)
+        assertTrue("\"exporterVersion\":18" in afterState)
         assertTrue("\"decompilationWorkers\":4" in beforeState && "\"decompilationWorkers\":4" in afterState)
         val sourceIdentity = Regex("\"exporterSha256\":\"[0-9a-f]{64}\"")
-        assertEquals(beforeState.replace(sourceIdentity, "\"exporterSha256\":\"SOURCE\"").replace("\"exporterVersion\":15", "\"exporterVersion\":16"),
-            afterState.replace(sourceIdentity, "\"exporterSha256\":\"SOURCE\""), "checkpoint state differs only by exporter version/source")
+        assertEquals(beforeState.replace(sourceIdentity, "\"exporterSha256\":\"SOURCE\""),
+            afterState.replace(sourceIdentity, "\"exporterSha256\":\"SOURCE\""),
+            "worker-parity state must match at the owned exporter version after source-hash normalization")
         assertTrue(beforePath.resolveSibling("program_model.json.progress.json").readBytes()
             .contentEquals(afterPath.resolveSibling("program_model.json.progress.json").readBytes()), "exact native final progress/status bytes")
         val named = after.functions.associateBy { it.name }
