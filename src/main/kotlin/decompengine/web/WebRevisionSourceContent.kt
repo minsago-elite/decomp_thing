@@ -153,7 +153,7 @@ internal class WebRevisionSourceContent(snapshot: WebRevisionSourceSnapshot, val
         private fun continuation(byte: Byte): Boolean = (byte.toInt() and 0xc0) == 0x80
 
         /** Validate without retaining a decoded whole-file string or replacing malformed bytes. */
-        private fun textFallback(bytes: ByteArray): String? {
+        internal fun textFallback(bytes: ByteArray): String? {
             var index = 0; var lineBytes = 0; var longLine = false
             while (index < bytes.size) {
                 val first = bytes[index].toInt() and 255
