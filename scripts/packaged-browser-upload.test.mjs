@@ -31,6 +31,9 @@ function fixture({ mountAt = 3, disabled = false, renderSelection = true, enable
     },
     querySelector(selector) {
       if (selector === '#binary-file') return samples >= mountAt ? picker : null;
+      if (selector === 'section[aria-labelledby="upload-title"] input#binary-file[type="file"]:not(:disabled)') {
+        return samples >= mountAt && !picker.disabled ? picker : null;
+      }
       if (selector === 'button[type="submit"]') return samples >= mountAt ? submit : null;
       throw new Error('Unexpected selector: ' + selector);
     },
@@ -50,7 +53,7 @@ function fixture({ mountAt = 3, disabled = false, renderSelection = true, enable
     files = [];
     items = { add: file => { this.files.push(file); } };
   }
-  const context = { document, DataTransfer, File, Event };
+  const context = { document, location: { pathname: '/nested/' }, DataTransfer, File, Event };
   const tab = {};
   const evaluate = async (target, expression) => {
     assert.equal(target, tab);
@@ -80,7 +83,7 @@ test('session readiness cannot select a missing lazy-route picker', async () => 
   await selectUploadFixture(f.args);
   assert.equal(f.document.activeElement, f.picker);
   assert.deepEqual(f.counts(), { changes: 1, evaluations: 1 });
-  assert.deepEqual(f.labels, ['upload file picker', 'upload selection rendered']);
+  assert.deepEqual(f.labels, ['workspace upload control', 'upload selection rendered']);
   const [file] = f.picker.files;
   assert.equal(file.name, 'inert-browser-fixture.elf');
   assert.equal(file.size, 64);
@@ -103,7 +106,7 @@ for (const [label, options] of [
 ]) {
   test(label + ' remains a failure without dispatching a selection', async () => {
     const f = fixture(options);
-    await assert.rejects(selectUploadFixture(f.args), /Readiness deadline: upload file picker/);
+    await assert.rejects(selectUploadFixture(f.args), /Readiness deadline: workspace upload control/);
     assert.deepEqual(f.counts(), { changes: 0, evaluations: 0 });
   });
 }
@@ -141,7 +144,8 @@ for (const [name, qualify, filename, size] of [
     assert.equal(f.document.querySelector('#binary-file'), null);
     await assert.rejects(f.run(), error => error === f.submitted);
     assert.equal(f.counts().changes, 1);
-    assert.deepEqual(f.labels.slice(1), ['upload file picker', 'upload selection rendered']);
+    const controlLabel = qualify === qualifyMeasuredUpload ? 'measured workspace upload control' : 'failure workspace upload control';
+    assert.deepEqual(f.labels, [controlLabel, 'upload selection rendered']);
     const [file] = f.picker.files;
     assert.equal(file.name, filename);
     assert.equal(file.size, size);
@@ -158,9 +162,10 @@ for (const [name, qualify, filename, size] of [
     }
   });
 
+  const controlLabel = qualify === qualifyMeasuredUpload ? 'measured workspace upload control' : 'failure workspace upload control';
   for (const [state, options, label, changes] of [
-    ['missing route', { mountAt: Infinity }, 'upload file picker', 0],
-    ['disabled picker', { mountAt: 0, disabled: true }, 'upload file picker', 0],
+    ['missing route', { mountAt: Infinity }, controlLabel, 0],
+    ['disabled picker', { mountAt: 0, disabled: true }, controlLabel, 0],
     ['missing selection render', { renderSelection: false }, 'upload selection rendered', 1],
     ['disabled submit', { enableSubmit: false }, 'upload selection rendered', 1],
   ]) {
