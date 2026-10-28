@@ -375,9 +375,10 @@ object GitReads {
         if (paths.any { it.length > GitInvocation.MAX_ARGUMENT_LENGTH }) throw ManagedGitException("PATCH_UNAVAILABLE",
             "This file name exceeds the patch reader's argument bound. Its listing entry stays exact.")
         val (command, selection) = comparison(scope, commit, parent)
-        // Path filters are not record selectors (a path can now be a directory with other changes),
-        // so the patch is read with full blob IDs and only the section for this exact record is kept.
-        val result = runner.run(GitInvocation(command, selection + DIFF_OPTIONS + listOf("-p", "-U3", "--full-index", "--") + paths,
+        // Use the whole-tree comparison from the listing: path filters rerun rename detection and
+        // can pair similar blobs differently when a source path becomes a directory. Only the
+        // section for this exact listing record is retained below.
+        val result = runner.run(GitInvocation(command, selection + DIFF_OPTIONS + listOf("-p", "-U3", "--full-index"),
             gitDir = gitDir, workTree = if (scope == GitDiffScope.COMMIT) null else workTree, truncateStdout = true,
             limits = LIMITS.copy(maxStdoutBytes = MAX_PATCH_BYTES * 4)))
         val text = result.stdout.toString(Charsets.UTF_8)

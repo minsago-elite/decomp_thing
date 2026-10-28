@@ -283,6 +283,38 @@ class GitReadsTest {
         }.code)
     }
 
+    @Test fun `selected rename patches preserve whole-tree pairing when a source becomes a directory`(): Unit = GitTestRepositories().use { f ->
+        val (gitDir, workTree) = f.managed("rename-pairing")
+        val source = (0 until 100).joinToString("") { "int source_$it = $it;\n" }
+        val other = (0 until 100).joinToString("") { "int other_$it = $it;\n" }
+        f.write(workTree, "A.c", source)
+        f.write(workTree, "B.c", other)
+        f.commitAll(gitDir, workTree, "base")
+        Files.delete(workTree.resolve("A.c"))
+        val child = workTree.resolve("A.c/child.c")
+        Files.createDirectories(child.parent)
+        Files.move(workTree.resolve("B.c"), child)
+        val changed = (0 until 100).joinToString("") { index ->
+            if (index < 20) "int replacement_$index;\n" else "int source_$index = $index;\n"
+        }
+        f.write(workTree, "C.c", changed)
+        f.raw(gitDir, workTree, "add", "-A")
+
+        val listing = GitReads.diff(f.runner, gitDir, workTree, GitObjectFormat.SHA1, GitDiffScope.STAGED, null, null)
+        val nestedRename = listing.files.single { it.path.exact == "A.c/child.c" }
+        assertEquals(GitIndexChange.RENAMED, nestedRename.change)
+        assertEquals("B.c", nestedRename.originalPath?.exact)
+        val selected = listing.files.single { it.path.exact == "C.c" }
+        assertEquals(GitIndexChange.RENAMED, selected.change)
+        assertEquals("A.c", selected.originalPath?.exact)
+
+        val patch = GitReads.patch(f.runner, gitDir, workTree, GitDiffScope.STAGED, null, null, selected)
+        assertTrue(patch.text.startsWith("diff --git a/A.c b/C.c\n"), patch.text)
+        assertTrue(patch.text.contains("rename from A.c"), patch.text)
+        assertTrue(patch.text.contains("rename to C.c"), patch.text)
+        assertFalse(patch.text.contains("A.c/child.c"), patch.text)
+    }
+
     @Test fun `a selected patch holds only its exact record and modes are part of the version`(): Unit = GitTestRepositories().use { f ->
         val (gitDir, workTree) = f.managed("exact")
         f.write(workTree, "old.c", (1..20).joinToString("") { "int line_$it = $it;\n" })

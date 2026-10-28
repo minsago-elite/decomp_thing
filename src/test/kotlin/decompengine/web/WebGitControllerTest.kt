@@ -268,6 +268,63 @@ class WebGitControllerTest {
         }
     }
 
+    @Test fun `status rejects escaped paths over the schema display bound for current and original paths`(): Unit = Fixture().use { f ->
+        val (base, directory) = f.initialized()
+        decompengine.git.GitTestRepositories().use { g ->
+            val gitDir = directory.resolve("repository.git"); val workTree = directory.resolve("worktree")
+            fun raw(vararg args: String) = g.git("--git-dir=$gitDir", "--work-tree=$workTree", *args, cwd = workTree)
+            val longPath = List(12) { "\u0001".repeat(250) }.joinToString("/") + "/overflow.c"
+            val display = decompengine.git.GitPath.of(longPath.toByteArray()).display
+            assertTrue(display.codePointCount(0, display.length) > 16_384)
+            val file = workTree.resolve(longPath)
+            Files.createDirectories(file.parent)
+            Files.writeString(file, "int overflow;\n")
+            error(f.read("$base/status"), 422, "VALIDATION_FAILED")
+
+            raw("add", "-A"); raw("commit", "-q", "-m", "long path base")
+            raw("mv", "--", longPath, "short.c")
+            raw("add", "-A")
+            error(f.read("$base/status"), 422, "VALIDATION_FAILED")
+        }
+    }
+
+    @Test fun `selected rename patches match the whole-tree listing after a source becomes a directory`(): Unit = Fixture().use { f ->
+        val (base, directory) = f.initialized()
+        decompengine.git.GitTestRepositories().use { g ->
+            val gitDir = directory.resolve("repository.git"); val workTree = directory.resolve("worktree")
+            fun raw(vararg args: String) = g.git("--git-dir=$gitDir", "--work-tree=$workTree", *args, cwd = workTree)
+            val source = (0 until 100).joinToString("") { "int source_$it = $it;\n" }
+            val other = (0 until 100).joinToString("") { "int other_$it = $it;\n" }
+            Files.writeString(workTree.resolve("A.c"), source)
+            Files.writeString(workTree.resolve("B.c"), other)
+            raw("add", "-A"); raw("commit", "-q", "-m", "rename pairing base")
+            Files.delete(workTree.resolve("A.c"))
+            val child = workTree.resolve("A.c/child.c")
+            Files.createDirectories(child.parent)
+            Files.move(workTree.resolve("B.c"), child)
+            val changed = (0 until 100).joinToString("") { index ->
+                if (index < 20) "int replacement_$index;\n" else "int source_$index = $index;\n"
+            }
+            Files.writeString(workTree.resolve("C.c"), changed)
+            raw("add", "-A")
+
+            val listing = data(f.read("$base/diff?scope=staged"), 200, "gitDiff")
+            val entries = listing.getValue("files").jsonArray.map { it.jsonObject }
+            val nestedRename = entries.single { it.getValue("path").jsonPrimitive.content == "A.c/child.c" }
+            assertEquals("B.c", nestedRename.getValue("originalPath").jsonPrimitive.content)
+            val selected = entries.single { it.getValue("path").jsonPrimitive.content == "C.c" }
+            assertEquals("A.c", selected.getValue("originalPath").jsonPrimitive.content)
+            val patch = data(f.read("$base/diff?scope=staged&file=${selected.getValue("fileId").jsonPrimitive.content}"), 200, "gitDiff")
+                .getValue("patch").jsonObject
+            val text = patch.getValue("text").jsonPrimitive.content
+            assertTrue(text.startsWith("diff --git a/A.c b/C.c\n"), text)
+            assertTrue(text.contains("rename from A.c"), text)
+            assertTrue(text.contains("rename to C.c"), text)
+            assertFalse(text.contains("A.c/child.c"), text)
+            assertEquals(JsonPrimitive(false), patch.getValue("truncated"))
+        }
+    }
+
     @Test fun `directory replacements keep workspace status and diff pages usable`(): Unit = Fixture().use { f ->
         val (base, directory) = f.initialized()
         decompengine.git.GitTestRepositories().use { g ->
