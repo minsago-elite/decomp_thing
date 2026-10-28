@@ -526,9 +526,16 @@ class GitBranchesWorktreesTest {
             // Emulate process death, where finally cannot unlink the owned branch lock.
             val staging = Files.createDirectories(f.store.resolve("$jobId/git/staging/${admitted.operation.operationId}"))
             Files.writeString(staging.resolve("ref-name"), "refs/heads/reviewed")
-            val witness = Files.createFile(staging.resolve("ref-lock"))
+            // close() can interrupt the worker's final private-tree cleanup after the durable lock
+            // witness exists. Reuse that inode; creating a second witness would collide or model a
+            // different lock from the one the interrupted operation owned.
+            val witness = staging.resolve("ref-lock").let { path -> if (Files.exists(path)) path else Files.createFile(path) }
             val lock = f.gitDir().resolve("refs/heads/reviewed.lock")
-            if (foreign) Files.writeString(lock, "foreign replacement\n") else Files.createLink(lock, witness)
+            if (Files.exists(lock)) assertTrue(Files.isSameFile(lock, witness), "only the interrupted operation's lock may be replaced")
+            if (foreign) {
+                Files.deleteIfExists(lock)
+                Files.writeString(lock, "foreign replacement\n")
+            } else if (!Files.exists(lock)) Files.createLink(lock, witness)
             service = f.open()
             val recovered = service.operation(jobId, repositoryId, admitted.operation.operationId)
             if (foreign) {
