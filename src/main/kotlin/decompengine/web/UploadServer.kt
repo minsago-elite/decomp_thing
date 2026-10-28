@@ -213,6 +213,8 @@ class UploadServer(
     // Test-owned clocks exercise expiry through the real HTTP/browser path; production uses the system clock.
     webAccessClock: WebAccessClock? = null,
     private val startupCancellation: () -> Boolean = { false },
+    // Operator-admitted directory whose immediate children may be imported by name; never browser-selected.
+    gitImportRoot: Path? = null,
 ) {
     init {
         require(listenBacklog in 1..4096) { "HTTP listen backlog must be between 1 and 4096" }
@@ -292,8 +294,12 @@ class UploadServer(
             }
         }) { "Server is stopping" }
     }
+    private val gitAvailability = decompengine.git.GitRuntime.detect()
+    private val gitRepositories = decompengine.git.ManagedGitRepositories(store.storageRoot, gitAvailability,
+        jobs::gitSourceSnapshot, gitImportRoot)
     private val api = spaAssets?.let { WebApiController(access, it, jobs, jobMutations, streamResources,
-        harnessReadiness = harnessReadiness, agentPreflight = agentPreflight) }
+        harnessReadiness = harnessReadiness, agentPreflight = agentPreflight,
+        git = WebGitCapability(gitAvailability, gitRepositories)) }
     /** Admitted artifact downloads that have not yet released their stream; test evidence helper. */
     internal fun activeArtifactDownloads(): Int = api?.artifactDownloads?.activeCount() ?: 0
     // A request that finds every worker and queue slot taken is answered by this tiny pool with a stable 429
@@ -339,6 +345,8 @@ class UploadServer(
         }
         try {
             jobs.initializeExistingStorage(startupRecoveryLimitsForWeb(uiMode)) { stopRequested.get() || startupCancellation() }
+            // Interrupted repository operations become explicit outcomes before any request is served.
+            gitRepositories.recover(store.jobIds())
         } catch (failure: Throwable) {
             stopRequested.set(true)
             stopping = true
@@ -453,6 +461,7 @@ class UploadServer(
         harnessReadiness.close()
         agentPreflight.close()
         access.close()
+        gitRepositories.close()
         jobs.close()
         var inspectionWaitInterrupted = false
         try {
@@ -511,8 +520,10 @@ class UploadServer(
     private fun releaseOwnershipIfIdle(): Boolean {
         // Sample service quiescence before taking the lifecycle lock; stopping closes the service to new work.
         val jobsIdle = jobs.isIdle()
+        // A Git worker that outlived its shutdown wait may still be writing staging; keep ownership.
+        val gitIdle = gitRepositories.terminated
         return synchronized(lifecycleLock) {
-            if (stopping && activeRequests == 0 && jobsIdle && streamResources.snapshot().active == 0) {
+            if (stopping && activeRequests == 0 && jobsIdle && gitIdle && streamResources.snapshot().active == 0) {
                 ownership.close()
                 true
             } else false

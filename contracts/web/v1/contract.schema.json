@@ -1992,12 +1992,13 @@
           "$ref": "#/definitions/version"
         },
         "objectFormat": {
-          "type": "string",
-          "enum": [
-            "sha1",
-            "sha256",
-            "unknown"
-          ]
+          "$ref": "#/definitions/gitObjectFormat"
+        },
+        "origin": {
+          "$ref": "#/definitions/gitRepositoryOrigin"
+        },
+        "trackingPolicy": {
+          "const": "source-only-v1"
         },
         "headObjectId": {
           "anyOf": [
@@ -2013,6 +2014,26 @@
           "anyOf": [
             {
               "$ref": "#/definitions/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "headState": {
+          "type": "string",
+          "enum": [
+            "attached",
+            "detached",
+            "unborn"
+          ]
+        },
+        "headRefName": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024
             },
             {
               "type": "null"
@@ -2056,8 +2077,12 @@
         "repositoryVersion",
         "worktreeVersion",
         "objectFormat",
+        "origin",
+        "trackingPolicy",
         "headObjectId",
         "headRefId",
+        "headState",
+        "headRefName",
         "candidateRevisionId",
         "dirty",
         "refs",
@@ -5275,6 +5300,157 @@
         }
       ]
     },
+    "gitRepositoryInit": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "git.init"
+        },
+        "runId": {
+          "$ref": "#/definitions/id"
+        },
+        "revisionId": {
+          "$ref": "#/definitions/id"
+        },
+        "initialBranch": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "action",
+        "runId",
+        "revisionId",
+        "initialBranch"
+      ],
+      "additionalProperties": false
+    },
+    "gitRepositoryAttach": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "git.attach"
+        },
+        "sourceName": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+        }
+      },
+      "required": [
+        "action",
+        "sourceName"
+      ],
+      "additionalProperties": false
+    },
+    "gitRepositorySummary": {
+      "type": "object",
+      "properties": {
+        "repositoryId": {
+          "$ref": "#/definitions/id"
+        },
+        "worktreeId": {
+          "$ref": "#/definitions/id"
+        },
+        "operationId": {
+          "$ref": "#/definitions/id"
+        },
+        "origin": {
+          "$ref": "#/definitions/gitRepositoryOrigin"
+        },
+        "objectFormat": {
+          "$ref": "#/definitions/gitObjectFormat"
+        },
+        "trackingPolicy": {
+          "const": "source-only-v1"
+        },
+        "createdAt": {
+          "$ref": "#/definitions/instant"
+        },
+        "runId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "candidateRevisionId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "repositoryId",
+        "worktreeId",
+        "operationId",
+        "origin",
+        "objectFormat",
+        "trackingPolicy",
+        "createdAt",
+        "runId",
+        "candidateRevisionId"
+      ],
+      "additionalProperties": false
+    },
+    "gitRepositories": {
+      "type": "object",
+      "properties": {
+        "jobId": {
+          "$ref": "#/definitions/id"
+        },
+        "repositories": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/gitRepositorySummary"
+          },
+          "maxItems": 1
+        },
+        "operations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/operation"
+          },
+          "maxItems": 20
+        }
+      },
+      "required": [
+        "jobId",
+        "repositories",
+        "operations"
+      ],
+      "additionalProperties": false
+    },
+    "gitRepositoryOrigin": {
+      "type": "string",
+      "enum": [
+        "initialized",
+        "imported"
+      ]
+    },
+    "gitObjectFormat": {
+      "type": "string",
+      "enum": [
+        "sha1",
+        "sha256",
+        "unknown"
+      ]
+    },
     "queuePosition": {
       "oneOf": [
         {
@@ -6237,6 +6413,70 @@
         "apiVersion",
         "kind",
         "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "gitRepositories"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/gitRepositories"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "gitRepositoryInitRequest"
+        },
+        "data": {
+          "$ref": "#/definitions/gitRepositoryInit"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "gitRepositoryAttachRequest"
+        },
+        "data": {
+          "$ref": "#/definitions/gitRepositoryAttach"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
         "data"
       ],
       "additionalProperties": false
