@@ -787,19 +787,19 @@ class UploadServer(
                     handleAuthenticationInspection(exchange)
                 exchange.requestMethod == "POST" && segments == listOf("jobs") -> handlePostJob(exchange)
                 exchange.requestMethod in setOf("GET", "HEAD") && segments.size == 2 && segments[0] == "jobs" ->
-                    handleJob(exchange, decode(segments[1]))
+                    handleJob(exchange, publicSegment(exchange, segments, 1))
                 exchange.requestMethod == "POST" && segments.size == 3 && segments[0] == "jobs" && segments[2] == "explore" ->
                     handleExplore(exchange, segments[1])
                 exchange.requestMethod == "POST" && segments.size == 3 && segments[0] == "jobs" && segments[2] == "reconstruct" ->
                     handleReconstruct(exchange, segments[1])
                 exchange.requestMethod in setOf("GET", "HEAD") && segments.size >= 4 && segments[0] == "jobs" && segments[2] == "source" ->
-                    handleSource(exchange, decode(segments[1]), segments.drop(3).joinToString("/").let(::decode))
+                    handleSource(exchange, publicSegment(exchange, segments, 1), publicTail(exchange, segments, 3))
                 exchange.requestMethod in setOf("GET", "HEAD") && segments.size >= 4 && segments[0] == "jobs" && segments[2] == "artifacts" ->
-                    handleArtifact(exchange, decode(segments[1]), segments.drop(3).joinToString("/").let(::decode))
+                    handleArtifact(exchange, publicSegment(exchange, segments, 1), publicTail(exchange, segments, 3))
                 exchange.requestMethod in setOf("GET", "HEAD") && segments.size == 3 && segments[0] == "api" && segments[1] == "jobs" ->
-                    exchange.sendJson(200, encodeJob(jobs.get(decode(segments[2]))))
+                    exchange.sendJson(200, encodeJob(jobs.get(publicSegment(exchange, segments, 2))))
                 exchange.requestMethod in setOf("GET", "HEAD") && segments.size == 4 && segments[0] == "api" && segments[1] == "jobs" && segments[3] == "events" -> {
-                    val job = jobs.get(decode(segments[2]))
+                    val job = jobs.get(publicSegment(exchange, segments, 2))
                     val runId = exchange.requestURI.rawQuery?.let {
                         require(it.matches(Regex("runId=[A-Za-z0-9][A-Za-z0-9_-]{0,127}"))) { "Only an exact workflow attempt selection is supported" }
                         it.removePrefix("runId=")
@@ -836,6 +836,10 @@ class UploadServer(
                 else -> "The requested job or attempt is unavailable."
             }, requestDiagnosticOutput) {
                 renderErrorPage(status, "Job storage unavailable", "${publicWebDiagnosticCode(exception.code)}: ${publicWebDiagnosticMessage(exception.code)}")
+            }
+        } catch (exception: decompengine.jobs.ArtifactChangedException) {
+            legacyError(exchange, 409, "ARTIFACT_CHANGED", publicWebDiagnosticMessage("ARTIFACT_CHANGED"), requestDiagnosticOutput) {
+                renderErrorPage(409, "Artifact changed", publicWebDiagnosticMessage("ARTIFACT_CHANGED"))
             }
         } catch (exception: JobStoreException) {
             legacyError(exchange, 404, "JOB_NOT_FOUND", "The requested job is unavailable.", requestDiagnosticOutput) {
@@ -1216,6 +1220,22 @@ class UploadServer(
     }
 
     private fun decode(value: String): String = URLDecoder.decode(value, StandardCharsets.UTF_8)
+
+    /**
+     * Legacy routes name jobs and report files by URL path. The raw path is decoded exactly once, per
+     * segment, by WebPublicIdentity; an encoded separator changes the segment count and is refused.
+     */
+    private fun rawSegments(exchange: HttpExchange, decoded: List<String>): List<String> {
+        val raw = exchange.requestURI.rawPath.removePrefix("/").removeSuffix("/").split('/')
+        if (raw.size != decoded.size) throw WebAccessDenied(400, "INVALID_REQUEST", "The requested artifact identity is not a canonical contained name.")
+        return raw
+    }
+
+    private fun publicSegment(exchange: HttpExchange, decoded: List<String>, index: Int): String =
+        WebPublicIdentity.segment(rawSegments(exchange, decoded)[index])
+
+    private fun publicTail(exchange: HttpExchange, decoded: List<String>, from: Int): String =
+        WebPublicIdentity.relativePath(rawSegments(exchange, decoded).drop(from))
 
     private companion object {
         const val HEADERS = 0

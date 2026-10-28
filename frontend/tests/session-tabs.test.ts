@@ -2,6 +2,9 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { Bootstrap } from '../src/api/generated';
+import { ApiClientError } from '../src/api/errors';
+import { rememberFilterDraft, restoreFilterDraft } from '../src/jobs/filterDraft';
+import { DEFAULT_FILTERS } from '../src/jobs/query';
 import { createBrowserSession } from '../src/session/session';
 import type { SessionGateway } from '../src/session/session';
 
@@ -47,6 +50,37 @@ it('clears peer private state after confirmed logout without transmitting creden
   expect(peer.gateway.logout).not.toHaveBeenCalled(); expect(peer.gateway.exchange).not.toHaveBeenCalled();
   expect(Channel.messages).toEqual([{ version: 1, type: 'session-invalidated' }]);
   expect(JSON.stringify(Channel.messages)).not.toContain(first.data.csrfToken);
+});
+
+it.each(['expired', 'missing', 'connection'] as const)('drops retained drafts on peer logout while already %s without changing authorization or making requests', async reason => {
+  const first = await setup(); const peer = await setup();
+  rememberFilterDraft(peer.session, '/nested', '', { ...DEFAULT_FILTERS, search: 'previous-session-filename' });
+  if (reason === 'connection') {
+    peer.gateway.bootstrap.mockRejectedValueOnce(new ApiClientError('network_error'));
+    await peer.session.refresh();
+  } else {
+    peer.session.observeRequestFailure()(new ApiClientError('http_error', {
+      status: 401, serverCode: reason === 'expired' ? 'SESSION_EXPIRED' : 'SESSION_REQUIRED',
+    }));
+  }
+  const previousState = peer.session.snapshot();
+  expect(previousState.status).toBe(reason === 'connection' ? 'unavailable' : 'required');
+  // Ordinary expiry/connection loss retains the draft until an actual identity invalidation.
+  expect(restoreFilterDraft(peer.session, '/nested', '')).not.toBeNull();
+  const invalidated = vi.fn();
+  peer.session.onInvalidated(invalidated);
+  const reads = peer.gateway.bootstrap.mock.calls.length;
+  await first.session.logout();
+  expect(invalidated).toHaveBeenCalledExactlyOnceWith(true);
+  expect(peer.session.snapshot()).toEqual(previousState);
+  expect(peer.session.csrf()).toBeNull();
+  expect(peer.gateway.bootstrap).toHaveBeenCalledTimes(reads);
+  expect(peer.gateway.exchange).not.toHaveBeenCalled();
+  expect(peer.gateway.logout).not.toHaveBeenCalled();
+  expect(restoreFilterDraft(peer.session, '/nested', '')).toBeNull();
+  await peer.session.refresh();
+  expect(peer.session.snapshot().status).toBe('authenticated');
+  expect(restoreFilterDraft(peer.session, '/nested', '')).toBeNull();
 });
 
 it('aborts a peer read and refuses its late completion until an explicit session check', async () => {

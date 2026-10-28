@@ -23,6 +23,8 @@ registerContractExtension(lazyContractSchema);
 
 import { acceptReceipt, receiptOf } from '../shared/receiptTime';
 import { MetadataReceipt } from '../shared/MetadataReceipt';
+import { PanelBoundary } from '../shared/PanelBoundary';
+import { panelBoundaryCopy } from '../copy/shell';
 
 function Context({ selected, sourceSha256 }: { selected: SourceSelection; sourceSha256?: string }) {
   return <dl class="job-facts" aria-label={copy.context}>
@@ -200,10 +202,10 @@ function File({ selected, basePath, runtime, search, pin, historyEntry }: { sele
       <p>{data.item.declaredUtf8Text ? copy.declaredText : copy.declaredBinary}</p>
       <p>{previewNotice[policy.preview]}</p>
       {policy.preview === 'available' && ((previewOpened !== null && previewOpened.sourceSha256 === data.sourceSha256 && previewOpened.metadataVersion === data.metadataVersion) || search !== ''
-        ? <SourcePreview key={data.metadataVersion} selected={selected} metadata={data} basePath={basePath}
-            maximumChunkBytes={runtime.limits.maxSourceChunkBytes} search={search} {...(effectivePin ? { snapshotPin: effectivePin } : {})} />
+        ? <PanelBoundary name={panelBoundaryCopy.names.sourcePreview}><SourcePreview key={data.metadataVersion} selected={selected} metadata={data} basePath={basePath}
+            maximumChunkBytes={runtime.limits.maxSourceChunkBytes} search={search} {...(effectivePin ? { snapshotPin: effectivePin } : {})} /></PanelBoundary>
         : <button type="button" onClick={() => setPreviewOpened({ sourceSha256: data.sourceSha256, metadataVersion: data.metadataVersion })}>{copy.openPreview}</button>)}
-      {policy.download && <SourceDigestCheck key={`${key}/${data.metadataVersion}/${data.sourceSha256}/${data.item.sha256}/${data.item.sizeBytes}`} metadata={data} basePath={basePath} />}
+      {policy.download && <PanelBoundary name={panelBoundaryCopy.names.digestCheck}><SourceDigestCheck key={`${key}/${data.metadataVersion}/${data.sourceSha256}/${data.item.sha256}/${data.item.sizeBytes}`} metadata={data} basePath={basePath} /></PanelBoundary>}
       {policy.download
         ? <a href={apiPath(basePath, sourceDownloadRoute(selected, selected.fileId, data.metadataVersion))} download="">{copy.download}</a>
         : <p>{policy.downloadNotice === 'too-large' ? copy.tooLarge : copy.notArchivable}</p>}
