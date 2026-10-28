@@ -18,6 +18,31 @@ import kotlin.test.assertTrue
 
 class AgentExecutionContractTest {
     @Test
+    fun `write-only session inventory reconciles mutations without provider read authority`() {
+        val directory = createTempDirectory("agent-write-session-")
+        val workspace = directory.resolve("project").createDirectories()
+        val source = AgentWorkspacePath("project", "owned.c")
+        val continuation = AgentSessionContinuation(directory.resolve("session"), "a".repeat(64), "module",
+            mapOf(source to null))
+        val request = AgentExecutionRequest("replace owned module", listOf(AgentWorkspaceRoot("project", workspace)),
+            accessPolicy = AgentAccessPolicy(listOf(AgentPathRule(source,
+                setOf(AgentOperation.WRITE_FILE, AgentOperation.CREATE_FILE)))), sessionContinuation = continuation)
+        assertFalse(request.accessPolicy.allows(source, AgentOperation.READ_FILE))
+        assertTrue(request.accessPolicy.allows(source, AgentOperation.WRITE_FILE))
+        assertFailsWith<IllegalArgumentException> {
+            AgentExecutionRequest("unowned inventory", request.workspaceRoots,
+                accessPolicy = AgentAccessPolicy(listOf(AgentPathRule(AgentWorkspacePath("project", "other.c"),
+                    setOf(AgentOperation.WRITE_FILE)))), sessionContinuation = continuation)
+        }
+    }
+
+    @Test
+    fun `prompt renderer includes exact immutable context framing`() {
+        assertEquals("objective\n\nContext inputs (immutable):\n--- evidence [text/plain] — retained\npayload\n",
+            renderAgentPrompt("objective", listOf(AgentContextInput("evidence", "payload", description = "retained"))))
+    }
+
+    @Test
     fun `request snapshots absolute workspaces immutable context access and execution limits`() {
         val workspace = createTempDirectory("agent-contract-request-").toAbsolutePath().normalize()
         val roots = mutableListOf(AgentWorkspaceRoot("project", workspace))

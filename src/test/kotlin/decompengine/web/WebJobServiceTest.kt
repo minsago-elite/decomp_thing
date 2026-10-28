@@ -788,7 +788,13 @@ class WebJobServiceTest {
                 assertEquals(1, sample.queueCapacity)
                 assertFalse(sample.stopping)
                 release.countDown()
-                await { jobs.take(2).all { service.get(it.id).status == "complete" } }
+                // A worker can create its reports directory outside the service monitor.
+                // Descriptor-bound inspection may refuse that changing path for one sample;
+                // wait for a successful terminal snapshot, without treating refusal as completion.
+                await { jobs.take(2).all {
+                    (service.inspect(it.id) as? WebJobInspection.Available)?.presentation?.job?.status == "complete"
+                } }
+                jobs.take(2).forEach { assertEquals("complete", service.get(it.id).status) }
                 assertEquals(2, executed.get())
             } finally {
                 release.countDown()
