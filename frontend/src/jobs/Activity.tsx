@@ -12,6 +12,8 @@ import { useBrowserAvailability } from '../session/useBrowserAvailability';
 import { createUsageDisplay, isContextUsageUpdate } from './usageDisplay';
 
 import { ActivityHistory } from './ActivityHistory';
+import { ActivityStages } from './ActivityStages';
+import { useIdentityDigests } from './activityCorrelation';
 import { activityWindowLocation, activityWindowSearch, type ActivityNavigation } from './activityNavigation';
 import { runViewPath } from '../app/paths';
 
@@ -177,6 +179,7 @@ function LiveActivity({ jobId, runId, basePath, windowLinks }: { jobId: string; 
     return () => { controller.abort(); clearTimeout(timer); display.close(); };
   }, [client, stream, jobId, runId, following, reset, availability.online, availability.visible]);
 
+  const identities = useIdentityDigests(snapshot?.run ?? null);
   const visible = rows.filter(event => matchesActivity(event, group, taskDigest));
   return <section aria-labelledby="activity-title">
     <h2 id="activity-title">{copy.retainedActivity}</h2>
@@ -223,9 +226,10 @@ function LiveActivity({ jobId, runId, basePath, windowLinks }: { jobId: string; 
       {snapshot.progress ? <p>{displayMessage(copy.journal, { boundary: snapshot.progress.nextSequence, queue: snapshot.progress.queueDropped, history: snapshot.progress.historyDropped, retained: snapshot.progress.retainedEventCount })}</p>
         : <p>{copy.omissionCountsWereNotSuppliedACompleteHistoryCannotBe}</p>}
     </>}
+    <ActivityStages run={snapshot?.run ?? null} events={rows} onSelectTask={setTaskDigest} />
     {rows.length > 0 && visible.length === 0 && <p>{copy.noMatchingObservationsOnThisPageOtherRetainedPagesHave}</p>}
     <ol aria-label={copy.activityObservations}>
-      {visible.map(event => <ActivityRow key={event.cursor!} event={event} basePath={basePath} />)}
+      {visible.map(event => <ActivityRow key={event.cursor!} event={event} basePath={basePath} identities={identities} onSelectTask={setTaskDigest} />)}
     </ol>
   </section>;
 }

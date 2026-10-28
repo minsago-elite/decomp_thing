@@ -173,6 +173,7 @@ jobs:
           "$RUNNER_TEMP/web-test-browser/chrome" --version | tee build/packaged-web-ci/browser-version.txt
           python3 scripts/test-packaged-browser-install.py
           node --check scripts/check-packaged-web-browser.mjs
+          node --test scripts/packaged-browser-upload.test.mjs
       - name: Build archives and verify browser expiry and distribution contents
         env:
           DECOMP_BROWSER_CHROME: ${{ runner.temp }}/web-test-browser/chrome

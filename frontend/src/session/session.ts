@@ -55,7 +55,13 @@ export function createBrowserSession(gateway: SessionGateway, basePath: string) 
   }
 
   const invalidation = createInvalidationChannel(expectedBase, () => {
-    if (disposed || !initialized || !['authenticated', 'checking', 'signing-out'].includes(state.status)) return;
+    if (disposed || !initialized) return;
+    if (!['authenticated', 'checking', 'signing-out'].includes(state.status)) {
+      // Expiry/connection loss can retain form context for an explicit reconnect. A peer
+      // logout must still erase it, without changing authorization or starting any request.
+      notifyInvalidated(true);
+      return;
+    }
     invalidatePending(); forget();
     notifyInvalidated(true);
     publish({ status: 'required', reason: 'session-changed' });
