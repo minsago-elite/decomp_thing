@@ -1,114 +1,2810 @@
 {
-  "schemaVersion": 1,
-  "kind": "gcc-orchestration-identity-contract-v1",
-  "issue": 712,
-  "status": "reference-contract-only",
-  "profile": "oracle/gcc/16.2.0",
-  "provenance": {
-    "corpus": {
-      "path": "behavior-corpus.json",
-      "sha256": "bcc1a14ca8c54f94106c943f0bc5698cb9af3151b7bf20a49ae3c8828baaad0e"
+  "acceptanceBoundary": "This declares independently captured reference identities and equivalent required invocations. Candidate compile/assemble, linking/artifact and produced-program qualification belong to issues 713, 714 and 715; GCC verbose observations are not independent candidate execution receipts.",
+  "cases": [
+    {
+      "driverInvocation": {
+        "argv": [
+          "/oracle/install/bin/gcc",
+          "-S",
+          "source.c"
+        ],
+        "cwd": "/w",
+        "environment": {
+          "COMPILER_PATH": "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0:/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0",
+          "C_INCLUDE_PATH": "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/include",
+          "LC_ALL": "C",
+          "LIBRARY_PATH": "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0:/usr/lib/x86_64-linux-gnu",
+          "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+          "SOURCE_DATE_EPOCH": "1786060800",
+          "TZ": "UTC"
+        },
+        "inputs": [
+          {
+            "bytes": 29,
+            "path": "source.c",
+            "sha256": "2ad75d95660563887d8d3f1d0ae1dcf18c2379cbd83a5c72f5ab276351ee6949"
+          }
+        ]
+      },
+      "id": "compile-to-assembly",
+      "phaseInvocations": {
+        "planned": [
+          {
+            "argv": [
+              "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+              "-quiet",
+              "-imultiarch",
+              "x86_64-linux-gnu",
+              "source.c",
+              "-quiet",
+              "-dumpbase",
+              "source.c",
+              "-dumpbase-ext",
+              ".c",
+              "-mtune=generic",
+              "-march=x86-64",
+              "-o",
+              "source.s"
+            ],
+            "index": 0,
+            "phase": "compile",
+            "stdoutPipedToNextPhase": false,
+            "tool": "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+            "toolSha256": "e51bf6e3f3300d31ce9713e2160c6fe5895d1e4914fb25562c3542b161427905"
+          }
+        ],
+        "verbose": [
+          {
+            "argv": [
+              "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+              "-quiet",
+              "-v",
+              "-imultiarch",
+              "x86_64-linux-gnu",
+              "source.c",
+              "-quiet",
+              "-dumpbase",
+              "source.c",
+              "-dumpbase-ext",
+              ".c",
+              "-mtune=generic",
+              "-march=x86-64",
+              "-version",
+              "-o",
+              "source.s"
+            ],
+            "index": 0,
+            "phase": "compile",
+            "stdoutPipedToNextPhase": false,
+            "tool": "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+            "toolSha256": "e51bf6e3f3300d31ce9713e2160c6fe5895d1e4914fb25562c3542b161427905"
+          }
+        ]
+      },
+      "referenceObservationSha256": "0ba09bbb274aa1cc91bf73913a913848ca6243c2e7530a4f7dbd3e5272b832aa"
     },
-    "referenceEvidence": {
-      "path": "behavior-corpus-evidence.json",
-      "sha256": "9dcf787aea232615a1ff8721144b86bc1f5e9a2a7068fa9e9280db0bc4ad6803",
-      "cases": 14,
-      "passed": 14
+    {
+      "driverInvocation": {
+        "argv": [
+          "/oracle/install/bin/gcc",
+          "-c",
+          "source.c"
+        ],
+        "cwd": "/w",
+        "environment": {
+          "COMPILER_PATH": "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0:/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0",
+          "C_INCLUDE_PATH": "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/include",
+          "LC_ALL": "C",
+          "LIBRARY_PATH": "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0:/usr/lib/x86_64-linux-gnu",
+          "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+          "SOURCE_DATE_EPOCH": "1786060800",
+          "TZ": "UTC"
+        },
+        "inputs": [
+          {
+            "bytes": 29,
+            "path": "source.c",
+            "sha256": "2ad75d95660563887d8d3f1d0ae1dcf18c2379cbd83a5c72f5ab276351ee6949"
+          }
+        ]
+      },
+      "id": "compile-to-object",
+      "phaseInvocations": {
+        "planned": [
+          {
+            "argv": [
+              "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+              "-quiet",
+              "-imultiarch",
+              "x86_64-linux-gnu",
+              "source.c",
+              "-quiet",
+              "-dumpbase",
+              "source.c",
+              "-dumpbase-ext",
+              ".c",
+              "-mtune=generic",
+              "-march=x86-64",
+              "-o",
+              "<tmp-1>.s"
+            ],
+            "index": 0,
+            "phase": "compile",
+            "stdoutPipedToNextPhase": false,
+            "tool": "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+            "toolSha256": "e51bf6e3f3300d31ce9713e2160c6fe5895d1e4914fb25562c3542b161427905"
+          },
+          {
+            "argv": [
+              "as",
+              "--64",
+              "-o",
+              "source.o",
+              "<tmp-1>.s"
+            ],
+            "index": 1,
+            "phase": "assemble",
+            "stdoutPipedToNextPhase": false,
+            "tool": "as",
+            "toolSha256": "07dd8551ea0aa065975e4dddb8e1bb7dc308d12d54eca22c3858db79467c7cb9"
+          }
+        ],
+        "verbose": [
+          {
+            "argv": [
+              "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+              "-quiet",
+              "-v",
+              "-imultiarch",
+              "x86_64-linux-gnu",
+              "source.c",
+              "-quiet",
+              "-dumpbase",
+              "source.c",
+              "-dumpbase-ext",
+              ".c",
+              "-mtune=generic",
+              "-march=x86-64",
+              "-version",
+              "-o",
+              "<tmp-1>.s"
+            ],
+            "index": 0,
+            "phase": "compile",
+            "stdoutPipedToNextPhase": false,
+            "tool": "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+            "toolSha256": "e51bf6e3f3300d31ce9713e2160c6fe5895d1e4914fb25562c3542b161427905"
+          },
+          {
+            "argv": [
+              "as",
+              "-v",
+              "--64",
+              "-o",
+              "source.o",
+              "<tmp-1>.s"
+            ],
+            "index": 1,
+            "phase": "assemble",
+            "stdoutPipedToNextPhase": false,
+            "tool": "as",
+            "toolSha256": "07dd8551ea0aa065975e4dddb8e1bb7dc308d12d54eca22c3858db79467c7cb9"
+          }
+        ]
+      },
+      "referenceObservationSha256": "bfa94a3a3b92e5a87b3a8c96d5a0a5cafab402d0f6b8340bef664aedf56bde94"
     },
-    "driver": {
-      "path": "artifacts/gcc-driver.stripped",
-      "bytes": 2349296,
-      "sha256": "3c0cfef73a02b06b40456e89d9d9e33727144c2f473b8b7256b361a7699d48a4"
+    {
+      "driverInvocation": {
+        "argv": [
+          "/oracle/install/bin/gcc",
+          "-pipe",
+          "-c",
+          "source.c"
+        ],
+        "cwd": "/w",
+        "environment": {
+          "COMPILER_PATH": "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0:/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0",
+          "C_INCLUDE_PATH": "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/include",
+          "LC_ALL": "C",
+          "LIBRARY_PATH": "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0:/usr/lib/x86_64-linux-gnu",
+          "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+          "SOURCE_DATE_EPOCH": "1786060800",
+          "TZ": "UTC"
+        },
+        "inputs": [
+          {
+            "bytes": 29,
+            "path": "source.c",
+            "sha256": "2ad75d95660563887d8d3f1d0ae1dcf18c2379cbd83a5c72f5ab276351ee6949"
+          }
+        ]
+      },
+      "id": "compile-pipe",
+      "phaseInvocations": {
+        "planned": [
+          {
+            "argv": [
+              "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+              "-quiet",
+              "-imultiarch",
+              "x86_64-linux-gnu",
+              "source.c",
+              "-quiet",
+              "-dumpbase",
+              "source.c",
+              "-dumpbase-ext",
+              ".c",
+              "-mtune=generic",
+              "-march=x86-64",
+              "-o",
+              "-"
+            ],
+            "index": 0,
+            "phase": "compile",
+            "stdoutPipedToNextPhase": true,
+            "tool": "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+            "toolSha256": "e51bf6e3f3300d31ce9713e2160c6fe5895d1e4914fb25562c3542b161427905"
+          },
+          {
+            "argv": [
+              "as",
+              "--64",
+              "-o",
+              "source.o"
+            ],
+            "index": 1,
+            "phase": "assemble",
+            "stdoutPipedToNextPhase": false,
+            "tool": "as",
+            "toolSha256": "07dd8551ea0aa065975e4dddb8e1bb7dc308d12d54eca22c3858db79467c7cb9"
+          }
+        ],
+        "verbose": [
+          {
+            "argv": [
+              "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+              "-quiet",
+              "-v",
+              "-imultiarch",
+              "x86_64-linux-gnu",
+              "source.c",
+              "-quiet",
+              "-dumpbase",
+              "source.c",
+              "-dumpbase-ext",
+              ".c",
+              "-mtune=generic",
+              "-march=x86-64",
+              "-version",
+              "-o",
+              "-"
+            ],
+            "index": 0,
+            "phase": "compile",
+            "stdoutPipedToNextPhase": true,
+            "tool": "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+            "toolSha256": "e51bf6e3f3300d31ce9713e2160c6fe5895d1e4914fb25562c3542b161427905"
+          },
+          {
+            "argv": [
+              "as",
+              "-v",
+              "--64",
+              "-o",
+              "source.o"
+            ],
+            "index": 1,
+            "phase": "assemble",
+            "stdoutPipedToNextPhase": false,
+            "tool": "as",
+            "toolSha256": "07dd8551ea0aa065975e4dddb8e1bb7dc308d12d54eca22c3858db79467c7cb9"
+          }
+        ]
+      },
+      "referenceObservationSha256": "894602c384d11c35473d236e399426c66199d10606c98c91b0e9f2f4af525d94"
     },
-    "oracleManifestSha256": "c9e21c5a6422c65572ee4c4de5578107b82ae92b6730536c4fc76490fe2ecad9",
-    "sourceLockSha256": "e2930ecc9748b40e56d6fe09dbe88f21f735953d4e6da50403f2cc0aa5b650cc",
-    "buildRecordSha256": "f91a68ffde054b9598cba8506bbf6b3b373b35b8680fddb54f76bffa9db23637"
+    {
+      "driverInvocation": {
+        "argv": [
+          "/oracle/install/bin/gcc",
+          "-save-temps",
+          "-c",
+          "source.c"
+        ],
+        "cwd": "/w",
+        "environment": {
+          "COMPILER_PATH": "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0:/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0",
+          "C_INCLUDE_PATH": "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/include",
+          "LC_ALL": "C",
+          "LIBRARY_PATH": "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0:/usr/lib/x86_64-linux-gnu",
+          "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+          "SOURCE_DATE_EPOCH": "1786060800",
+          "TZ": "UTC"
+        },
+        "inputs": [
+          {
+            "bytes": 29,
+            "path": "source.c",
+            "sha256": "2ad75d95660563887d8d3f1d0ae1dcf18c2379cbd83a5c72f5ab276351ee6949"
+          }
+        ]
+      },
+      "id": "compile-save-temps",
+      "phaseInvocations": {
+        "planned": [
+          {
+            "argv": [
+              "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+              "-E",
+              "-quiet",
+              "-imultiarch",
+              "x86_64-linux-gnu",
+              "source.c",
+              "-mtune=generic",
+              "-march=x86-64",
+              "-fpch-preprocess",
+              "-o",
+              "source.i"
+            ],
+            "index": 0,
+            "phase": "preprocess",
+            "stdoutPipedToNextPhase": false,
+            "tool": "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+            "toolSha256": "e51bf6e3f3300d31ce9713e2160c6fe5895d1e4914fb25562c3542b161427905"
+          },
+          {
+            "argv": [
+              "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+              "-fpreprocessed",
+              "source.i",
+              "-quiet",
+              "-dumpbase",
+              "source.c",
+              "-dumpbase-ext",
+              ".c",
+              "-mtune=generic",
+              "-march=x86-64",
+              "-o",
+              "source.s"
+            ],
+            "index": 1,
+            "phase": "compile",
+            "stdoutPipedToNextPhase": false,
+            "tool": "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+            "toolSha256": "e51bf6e3f3300d31ce9713e2160c6fe5895d1e4914fb25562c3542b161427905"
+          },
+          {
+            "argv": [
+              "as",
+              "--64",
+              "-o",
+              "source.o",
+              "source.s"
+            ],
+            "index": 2,
+            "phase": "assemble",
+            "stdoutPipedToNextPhase": false,
+            "tool": "as",
+            "toolSha256": "07dd8551ea0aa065975e4dddb8e1bb7dc308d12d54eca22c3858db79467c7cb9"
+          }
+        ],
+        "verbose": [
+          {
+            "argv": [
+              "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+              "-E",
+              "-quiet",
+              "-v",
+              "-imultiarch",
+              "x86_64-linux-gnu",
+              "source.c",
+              "-mtune=generic",
+              "-march=x86-64",
+              "-fpch-preprocess",
+              "-o",
+              "source.i"
+            ],
+            "index": 0,
+            "phase": "preprocess",
+            "stdoutPipedToNextPhase": false,
+            "tool": "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+            "toolSha256": "e51bf6e3f3300d31ce9713e2160c6fe5895d1e4914fb25562c3542b161427905"
+          },
+          {
+            "argv": [
+              "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+              "-fpreprocessed",
+              "source.i",
+              "-quiet",
+              "-dumpbase",
+              "source.c",
+              "-dumpbase-ext",
+              ".c",
+              "-mtune=generic",
+              "-march=x86-64",
+              "-version",
+              "-o",
+              "source.s"
+            ],
+            "index": 1,
+            "phase": "compile",
+            "stdoutPipedToNextPhase": false,
+            "tool": "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+            "toolSha256": "e51bf6e3f3300d31ce9713e2160c6fe5895d1e4914fb25562c3542b161427905"
+          },
+          {
+            "argv": [
+              "as",
+              "-v",
+              "--64",
+              "-o",
+              "source.o",
+              "source.s"
+            ],
+            "index": 2,
+            "phase": "assemble",
+            "stdoutPipedToNextPhase": false,
+            "tool": "as",
+            "toolSha256": "07dd8551ea0aa065975e4dddb8e1bb7dc308d12d54eca22c3858db79467c7cb9"
+          }
+        ]
+      },
+      "referenceObservationSha256": "ce7d9394ef87464986a0bcdfcd110f7f24c72b45cdefccacb2239198b33a5786"
+    },
+    {
+      "driverInvocation": {
+        "argv": [
+          "/oracle/install/bin/gcc",
+          "-c",
+          "helper.s"
+        ],
+        "cwd": "/w",
+        "environment": {
+          "COMPILER_PATH": "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0:/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0",
+          "C_INCLUDE_PATH": "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/include",
+          "LC_ALL": "C",
+          "LIBRARY_PATH": "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0:/usr/lib/x86_64-linux-gnu",
+          "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+          "SOURCE_DATE_EPOCH": "1786060800",
+          "TZ": "UTC"
+        },
+        "inputs": [
+          {
+            "bytes": 80,
+            "path": "helper.s",
+            "sha256": "785fe7119f219b71b6d59ba556f629b17ba0fce2a50d4bc88828c7cc093e9f9b"
+          }
+        ]
+      },
+      "id": "assemble-only",
+      "phaseInvocations": {
+        "planned": [
+          {
+            "argv": [
+              "as",
+              "--64",
+              "-o",
+              "helper.o",
+              "helper.s"
+            ],
+            "index": 0,
+            "phase": "assemble",
+            "stdoutPipedToNextPhase": false,
+            "tool": "as",
+            "toolSha256": "07dd8551ea0aa065975e4dddb8e1bb7dc308d12d54eca22c3858db79467c7cb9"
+          }
+        ],
+        "verbose": [
+          {
+            "argv": [
+              "as",
+              "-v",
+              "--64",
+              "-o",
+              "helper.o",
+              "helper.s"
+            ],
+            "index": 0,
+            "phase": "assemble",
+            "stdoutPipedToNextPhase": false,
+            "tool": "as",
+            "toolSha256": "07dd8551ea0aa065975e4dddb8e1bb7dc308d12d54eca22c3858db79467c7cb9"
+          }
+        ]
+      },
+      "referenceObservationSha256": "af4cced3413d18d13cbbeda83be1652dd34f39279e5fd713a37fb1aa042ce2fe"
+    },
+    {
+      "driverInvocation": {
+        "argv": [
+          "/oracle/install/bin/gcc",
+          "-c",
+          "code.S",
+          "-o",
+          "code.o"
+        ],
+        "cwd": "/w",
+        "environment": {
+          "COMPILER_PATH": "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0:/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0",
+          "C_INCLUDE_PATH": "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/include",
+          "LC_ALL": "C",
+          "LIBRARY_PATH": "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0:/usr/lib/x86_64-linux-gnu",
+          "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+          "SOURCE_DATE_EPOCH": "1786060800",
+          "TZ": "UTC"
+        },
+        "inputs": [
+          {
+            "bytes": 36,
+            "path": "code.S",
+            "sha256": "d853af155f1b008368806678a4e803d2311df88f36cfaa4a867f670e178aa017"
+          }
+        ]
+      },
+      "id": "preprocess-and-assemble",
+      "phaseInvocations": {
+        "planned": [
+          {
+            "argv": [
+              "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+              "-E",
+              "-lang-asm",
+              "-quiet",
+              "-imultiarch",
+              "x86_64-linux-gnu",
+              "code.S",
+              "-mtune=generic",
+              "-march=x86-64",
+              "-fno-directives-only",
+              "-o",
+              "<tmp-1>.s"
+            ],
+            "index": 0,
+            "phase": "preprocess",
+            "stdoutPipedToNextPhase": false,
+            "tool": "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+            "toolSha256": "e51bf6e3f3300d31ce9713e2160c6fe5895d1e4914fb25562c3542b161427905"
+          },
+          {
+            "argv": [
+              "as",
+              "--64",
+              "-o",
+              "code.o",
+              "<tmp-1>.s"
+            ],
+            "index": 1,
+            "phase": "assemble",
+            "stdoutPipedToNextPhase": false,
+            "tool": "as",
+            "toolSha256": "07dd8551ea0aa065975e4dddb8e1bb7dc308d12d54eca22c3858db79467c7cb9"
+          }
+        ],
+        "verbose": [
+          {
+            "argv": [
+              "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+              "-E",
+              "-lang-asm",
+              "-quiet",
+              "-v",
+              "-imultiarch",
+              "x86_64-linux-gnu",
+              "code.S",
+              "-mtune=generic",
+              "-march=x86-64",
+              "-fno-directives-only",
+              "-o",
+              "<tmp-1>.s"
+            ],
+            "index": 0,
+            "phase": "preprocess",
+            "stdoutPipedToNextPhase": false,
+            "tool": "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+            "toolSha256": "e51bf6e3f3300d31ce9713e2160c6fe5895d1e4914fb25562c3542b161427905"
+          },
+          {
+            "argv": [
+              "as",
+              "-v",
+              "--64",
+              "-o",
+              "code.o",
+              "<tmp-1>.s"
+            ],
+            "index": 1,
+            "phase": "assemble",
+            "stdoutPipedToNextPhase": false,
+            "tool": "as",
+            "toolSha256": "07dd8551ea0aa065975e4dddb8e1bb7dc308d12d54eca22c3858db79467c7cb9"
+          }
+        ]
+      },
+      "referenceObservationSha256": "497ca17eec8e0ee27fa47ab66f3f604d0e5d400aed58f130b4272521c696956f"
+    },
+    {
+      "driverInvocation": {
+        "argv": [
+          "/oracle/install/bin/gcc",
+          "source.c",
+          "-o",
+          "prog"
+        ],
+        "cwd": "/w",
+        "environment": {
+          "COMPILER_PATH": "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0:/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0",
+          "C_INCLUDE_PATH": "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/include",
+          "LC_ALL": "C",
+          "LIBRARY_PATH": "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0:/usr/lib/x86_64-linux-gnu",
+          "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+          "SOURCE_DATE_EPOCH": "1786060800",
+          "TZ": "UTC"
+        },
+        "inputs": [
+          {
+            "bytes": 29,
+            "path": "source.c",
+            "sha256": "e341c722d325011613e6dc95bad2a1da0c5d3efe9d7105647eea8a35812fbcf1"
+          }
+        ]
+      },
+      "id": "link-single",
+      "phaseInvocations": {
+        "planned": [
+          {
+            "argv": [
+              "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+              "-quiet",
+              "-imultiarch",
+              "x86_64-linux-gnu",
+              "source.c",
+              "-quiet",
+              "-dumpdir",
+              "prog-",
+              "-dumpbase",
+              "source.c",
+              "-dumpbase-ext",
+              ".c",
+              "-mtune=generic",
+              "-march=x86-64",
+              "-o",
+              "<tmp-1>.s"
+            ],
+            "index": 0,
+            "phase": "compile",
+            "stdoutPipedToNextPhase": false,
+            "tool": "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+            "toolSha256": "e51bf6e3f3300d31ce9713e2160c6fe5895d1e4914fb25562c3542b161427905"
+          },
+          {
+            "argv": [
+              "as",
+              "--64",
+              "-o",
+              "<tmp-2>.o",
+              "<tmp-1>.s"
+            ],
+            "index": 1,
+            "phase": "assemble",
+            "stdoutPipedToNextPhase": false,
+            "tool": "as",
+            "toolSha256": "07dd8551ea0aa065975e4dddb8e1bb7dc308d12d54eca22c3858db79467c7cb9"
+          },
+          {
+            "argv": [
+              "/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/collect2",
+              "-plugin",
+              "/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/liblto_plugin.so",
+              "-plugin-opt=/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/lto-wrapper",
+              "-plugin-opt=-fresolution=<tmp-3>.res",
+              "-plugin-opt=-pass-through=-lgcc",
+              "-plugin-opt=-pass-through=-lgcc_s_asneeded",
+              "-plugin-opt=-pass-through=-lc",
+              "-plugin-opt=-pass-through=-lgcc",
+              "-plugin-opt=-pass-through=-lgcc_s_asneeded",
+              "--eh-frame-hdr",
+              "-m",
+              "elf_x86_64",
+              "-dynamic-linker",
+              "/lib64/ld-linux-x86-64.so.2",
+              "-o",
+              "prog",
+              "/lib/x86_64-linux-gnu/crt1.o",
+              "/lib/x86_64-linux-gnu/crti.o",
+              "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/crtbegin.o",
+              "-L/lib/x86_64-linux-gnu",
+              "-L/lib/../lib64",
+              "-L/usr/lib/x86_64-linux-gnu",
+              "-L/usr/lib/../lib64",
+              "-L/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0",
+              "-L/usr/lib/x86_64-linux-gnu",
+              "-L/lib",
+              "-L/usr/lib",
+              "<tmp-2>.o",
+              "-lgcc",
+              "-lgcc_s_asneeded",
+              "-lc",
+              "-lgcc",
+              "-lgcc_s_asneeded",
+              "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/crtend.o",
+              "/lib/x86_64-linux-gnu/crtn.o"
+            ],
+            "index": 2,
+            "phase": "link",
+            "stdoutPipedToNextPhase": false,
+            "tool": "/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/collect2",
+            "toolSha256": "0d95b90b554cb430d0c94496e15a4ab27646d23fb150096fd0cb1e6d24a05bfa"
+          }
+        ],
+        "verbose": [
+          {
+            "argv": [
+              "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+              "-quiet",
+              "-v",
+              "-imultiarch",
+              "x86_64-linux-gnu",
+              "source.c",
+              "-quiet",
+              "-dumpdir",
+              "prog-",
+              "-dumpbase",
+              "source.c",
+              "-dumpbase-ext",
+              ".c",
+              "-mtune=generic",
+              "-march=x86-64",
+              "-version",
+              "-o",
+              "<tmp-1>.s"
+            ],
+            "index": 0,
+            "phase": "compile",
+            "stdoutPipedToNextPhase": false,
+            "tool": "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+            "toolSha256": "e51bf6e3f3300d31ce9713e2160c6fe5895d1e4914fb25562c3542b161427905"
+          },
+          {
+            "argv": [
+              "as",
+              "-v",
+              "--64",
+              "-o",
+              "<tmp-2>.o",
+              "<tmp-1>.s"
+            ],
+            "index": 1,
+            "phase": "assemble",
+            "stdoutPipedToNextPhase": false,
+            "tool": "as",
+            "toolSha256": "07dd8551ea0aa065975e4dddb8e1bb7dc308d12d54eca22c3858db79467c7cb9"
+          },
+          {
+            "argv": [
+              "/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/collect2",
+              "-plugin",
+              "/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/liblto_plugin.so",
+              "-plugin-opt=/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/lto-wrapper",
+              "-plugin-opt=-fresolution=<tmp-3>.res",
+              "-plugin-opt=-pass-through=-lgcc",
+              "-plugin-opt=-pass-through=-lgcc_s_asneeded",
+              "-plugin-opt=-pass-through=-lc",
+              "-plugin-opt=-pass-through=-lgcc",
+              "-plugin-opt=-pass-through=-lgcc_s_asneeded",
+              "--eh-frame-hdr",
+              "-m",
+              "elf_x86_64",
+              "-dynamic-linker",
+              "/lib64/ld-linux-x86-64.so.2",
+              "-o",
+              "prog",
+              "/lib/x86_64-linux-gnu/crt1.o",
+              "/lib/x86_64-linux-gnu/crti.o",
+              "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/crtbegin.o",
+              "-L/lib/x86_64-linux-gnu",
+              "-L/lib/../lib64",
+              "-L/usr/lib/x86_64-linux-gnu",
+              "-L/usr/lib/../lib64",
+              "-L/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0",
+              "-L/usr/lib/x86_64-linux-gnu",
+              "-L/lib",
+              "-L/usr/lib",
+              "<tmp-2>.o",
+              "-lgcc",
+              "-lgcc_s_asneeded",
+              "-lc",
+              "-lgcc",
+              "-lgcc_s_asneeded",
+              "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/crtend.o",
+              "/lib/x86_64-linux-gnu/crtn.o"
+            ],
+            "index": 2,
+            "phase": "link",
+            "stdoutPipedToNextPhase": false,
+            "tool": "/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/collect2",
+            "toolSha256": "0d95b90b554cb430d0c94496e15a4ab27646d23fb150096fd0cb1e6d24a05bfa"
+          }
+        ]
+      },
+      "producedProgram": {
+        "exitCode": 7,
+        "invocation": {
+          "argv": [
+            "/w/prog"
+          ],
+          "cwd": "/w",
+          "environment": {
+            "LC_ALL": "C",
+            "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "SOURCE_DATE_EPOCH": "1786060800",
+            "TZ": "UTC"
+          }
+        },
+        "startupDependencies": {
+          "elf": {
+            "bytes": 15504,
+            "path": "/w/prog",
+            "resolvedPath": "/w/prog",
+            "sha256": "126d7eea9604ec69fa4885076760c6f198f49c6e8d5bfe39f5535d0e7b9a3c5d"
+          },
+          "interpreter": {
+            "bytes": 225672,
+            "path": "/lib64/ld-linux-x86-64.so.2",
+            "resolvedPath": "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+            "sha256": "438c546d8e8cc48496bf3a95f753051afd9db66a629a74e31a9ded71586b56e0"
+          },
+          "kernelObjects": [
+            "linux-vdso.so.1"
+          ],
+          "libraries": [
+            {
+              "bytes": 225672,
+              "name": "ld-linux-x86-64.so.2",
+              "path": "/lib64/ld-linux-x86-64.so.2",
+              "resolvedPath": "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+              "sha256": "438c546d8e8cc48496bf3a95f753051afd9db66a629a74e31a9ded71586b56e0"
+            },
+            {
+              "bytes": 1995216,
+              "name": "libc.so.6",
+              "path": "/lib/x86_64-linux-gnu/libc.so.6",
+              "resolvedPath": "/usr/lib/x86_64-linux-gnu/libc.so.6",
+              "sha256": "fa430b8f298f817a266046af84a77533185ad6fc4406c7d3787b5a0a0c207826"
+            }
+          ],
+          "needed": [
+            "libc.so.6"
+          ]
+        },
+        "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "referenceObservationSha256": "d1774141a712ce102470ef3e6b26a0b174c1eab0ab914f858ce70556f88807b8"
+    },
+    {
+      "driverInvocation": {
+        "argv": [
+          "/oracle/install/bin/gcc",
+          "main.c",
+          "helper.c",
+          "-o",
+          "prog"
+        ],
+        "cwd": "/w",
+        "environment": {
+          "COMPILER_PATH": "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0:/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0",
+          "C_INCLUDE_PATH": "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/include",
+          "LC_ALL": "C",
+          "LIBRARY_PATH": "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0:/usr/lib/x86_64-linux-gnu",
+          "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+          "SOURCE_DATE_EPOCH": "1786060800",
+          "TZ": "UTC"
+        },
+        "inputs": [
+          {
+            "bytes": 36,
+            "path": "helper.c",
+            "sha256": "896b272bbb0fa433759a172ec493368acd06940952898a87a6c7b7f7ac4dc805"
+          },
+          {
+            "bytes": 105,
+            "path": "main.c",
+            "sha256": "3e356140486c4ed01a4aa8939b130c666b0422585a2c5ed028e58b9e688fba07"
+          }
+        ]
+      },
+      "id": "link-multiple-sources",
+      "phaseInvocations": {
+        "planned": [
+          {
+            "argv": [
+              "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+              "-quiet",
+              "-imultiarch",
+              "x86_64-linux-gnu",
+              "main.c",
+              "-quiet",
+              "-dumpdir",
+              "prog-",
+              "-dumpbase",
+              "main.c",
+              "-dumpbase-ext",
+              ".c",
+              "-mtune=generic",
+              "-march=x86-64",
+              "-o",
+              "<tmp-1>.s"
+            ],
+            "index": 0,
+            "phase": "compile",
+            "stdoutPipedToNextPhase": false,
+            "tool": "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+            "toolSha256": "e51bf6e3f3300d31ce9713e2160c6fe5895d1e4914fb25562c3542b161427905"
+          },
+          {
+            "argv": [
+              "as",
+              "--64",
+              "-o",
+              "<tmp-2>.o",
+              "<tmp-1>.s"
+            ],
+            "index": 1,
+            "phase": "assemble",
+            "stdoutPipedToNextPhase": false,
+            "tool": "as",
+            "toolSha256": "07dd8551ea0aa065975e4dddb8e1bb7dc308d12d54eca22c3858db79467c7cb9"
+          },
+          {
+            "argv": [
+              "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+              "-quiet",
+              "-imultiarch",
+              "x86_64-linux-gnu",
+              "helper.c",
+              "-quiet",
+              "-dumpdir",
+              "prog-",
+              "-dumpbase",
+              "helper.c",
+              "-dumpbase-ext",
+              ".c",
+              "-mtune=generic",
+              "-march=x86-64",
+              "-o",
+              "<tmp-1>.s"
+            ],
+            "index": 2,
+            "phase": "compile",
+            "stdoutPipedToNextPhase": false,
+            "tool": "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+            "toolSha256": "e51bf6e3f3300d31ce9713e2160c6fe5895d1e4914fb25562c3542b161427905"
+          },
+          {
+            "argv": [
+              "as",
+              "--64",
+              "-o",
+              "<tmp-3>.o",
+              "<tmp-1>.s"
+            ],
+            "index": 3,
+            "phase": "assemble",
+            "stdoutPipedToNextPhase": false,
+            "tool": "as",
+            "toolSha256": "07dd8551ea0aa065975e4dddb8e1bb7dc308d12d54eca22c3858db79467c7cb9"
+          },
+          {
+            "argv": [
+              "/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/collect2",
+              "-plugin",
+              "/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/liblto_plugin.so",
+              "-plugin-opt=/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/lto-wrapper",
+              "-plugin-opt=-fresolution=<tmp-4>.res",
+              "-plugin-opt=-pass-through=-lgcc",
+              "-plugin-opt=-pass-through=-lgcc_s_asneeded",
+              "-plugin-opt=-pass-through=-lc",
+              "-plugin-opt=-pass-through=-lgcc",
+              "-plugin-opt=-pass-through=-lgcc_s_asneeded",
+              "--eh-frame-hdr",
+              "-m",
+              "elf_x86_64",
+              "-dynamic-linker",
+              "/lib64/ld-linux-x86-64.so.2",
+              "-o",
+              "prog",
+              "/lib/x86_64-linux-gnu/crt1.o",
+              "/lib/x86_64-linux-gnu/crti.o",
+              "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/crtbegin.o",
+              "-L/lib/x86_64-linux-gnu",
+              "-L/lib/../lib64",
+              "-L/usr/lib/x86_64-linux-gnu",
+              "-L/usr/lib/../lib64",
+              "-L/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0",
+              "-L/usr/lib/x86_64-linux-gnu",
+              "-L/lib",
+              "-L/usr/lib",
+              "<tmp-2>.o",
+              "<tmp-3>.o",
+              "-lgcc",
+              "-lgcc_s_asneeded",
+              "-lc",
+              "-lgcc",
+              "-lgcc_s_asneeded",
+              "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/crtend.o",
+              "/lib/x86_64-linux-gnu/crtn.o"
+            ],
+            "index": 4,
+            "phase": "link",
+            "stdoutPipedToNextPhase": false,
+            "tool": "/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/collect2",
+            "toolSha256": "0d95b90b554cb430d0c94496e15a4ab27646d23fb150096fd0cb1e6d24a05bfa"
+          }
+        ],
+        "verbose": [
+          {
+            "argv": [
+              "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+              "-quiet",
+              "-v",
+              "-imultiarch",
+              "x86_64-linux-gnu",
+              "main.c",
+              "-quiet",
+              "-dumpdir",
+              "prog-",
+              "-dumpbase",
+              "main.c",
+              "-dumpbase-ext",
+              ".c",
+              "-mtune=generic",
+              "-march=x86-64",
+              "-version",
+              "-o",
+              "<tmp-1>.s"
+            ],
+            "index": 0,
+            "phase": "compile",
+            "stdoutPipedToNextPhase": false,
+            "tool": "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+            "toolSha256": "e51bf6e3f3300d31ce9713e2160c6fe5895d1e4914fb25562c3542b161427905"
+          },
+          {
+            "argv": [
+              "as",
+              "-v",
+              "--64",
+              "-o",
+              "<tmp-2>.o",
+              "<tmp-1>.s"
+            ],
+            "index": 1,
+            "phase": "assemble",
+            "stdoutPipedToNextPhase": false,
+            "tool": "as",
+            "toolSha256": "07dd8551ea0aa065975e4dddb8e1bb7dc308d12d54eca22c3858db79467c7cb9"
+          },
+          {
+            "argv": [
+              "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+              "-quiet",
+              "-v",
+              "-imultiarch",
+              "x86_64-linux-gnu",
+              "helper.c",
+              "-quiet",
+              "-dumpdir",
+              "prog-",
+              "-dumpbase",
+              "helper.c",
+              "-dumpbase-ext",
+              ".c",
+              "-mtune=generic",
+              "-march=x86-64",
+              "-version",
+              "-o",
+              "<tmp-1>.s"
+            ],
+            "index": 2,
+            "phase": "compile",
+            "stdoutPipedToNextPhase": false,
+            "tool": "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+            "toolSha256": "e51bf6e3f3300d31ce9713e2160c6fe5895d1e4914fb25562c3542b161427905"
+          },
+          {
+            "argv": [
+              "as",
+              "-v",
+              "--64",
+              "-o",
+              "<tmp-3>.o",
+              "<tmp-1>.s"
+            ],
+            "index": 3,
+            "phase": "assemble",
+            "stdoutPipedToNextPhase": false,
+            "tool": "as",
+            "toolSha256": "07dd8551ea0aa065975e4dddb8e1bb7dc308d12d54eca22c3858db79467c7cb9"
+          },
+          {
+            "argv": [
+              "/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/collect2",
+              "-plugin",
+              "/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/liblto_plugin.so",
+              "-plugin-opt=/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/lto-wrapper",
+              "-plugin-opt=-fresolution=<tmp-4>.res",
+              "-plugin-opt=-pass-through=-lgcc",
+              "-plugin-opt=-pass-through=-lgcc_s_asneeded",
+              "-plugin-opt=-pass-through=-lc",
+              "-plugin-opt=-pass-through=-lgcc",
+              "-plugin-opt=-pass-through=-lgcc_s_asneeded",
+              "--eh-frame-hdr",
+              "-m",
+              "elf_x86_64",
+              "-dynamic-linker",
+              "/lib64/ld-linux-x86-64.so.2",
+              "-o",
+              "prog",
+              "/lib/x86_64-linux-gnu/crt1.o",
+              "/lib/x86_64-linux-gnu/crti.o",
+              "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/crtbegin.o",
+              "-L/lib/x86_64-linux-gnu",
+              "-L/lib/../lib64",
+              "-L/usr/lib/x86_64-linux-gnu",
+              "-L/usr/lib/../lib64",
+              "-L/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0",
+              "-L/usr/lib/x86_64-linux-gnu",
+              "-L/lib",
+              "-L/usr/lib",
+              "<tmp-2>.o",
+              "<tmp-3>.o",
+              "-lgcc",
+              "-lgcc_s_asneeded",
+              "-lc",
+              "-lgcc",
+              "-lgcc_s_asneeded",
+              "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/crtend.o",
+              "/lib/x86_64-linux-gnu/crtn.o"
+            ],
+            "index": 4,
+            "phase": "link",
+            "stdoutPipedToNextPhase": false,
+            "tool": "/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/collect2",
+            "toolSha256": "0d95b90b554cb430d0c94496e15a4ab27646d23fb150096fd0cb1e6d24a05bfa"
+          }
+        ]
+      },
+      "producedProgram": {
+        "exitCode": 3,
+        "invocation": {
+          "argv": [
+            "/w/prog"
+          ],
+          "cwd": "/w",
+          "environment": {
+            "LC_ALL": "C",
+            "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "SOURCE_DATE_EPOCH": "1786060800",
+            "TZ": "UTC"
+          }
+        },
+        "startupDependencies": {
+          "elf": {
+            "bytes": 15752,
+            "path": "/w/prog",
+            "resolvedPath": "/w/prog",
+            "sha256": "b4bf664b822f66b401554fb070e9b1e5baf13243aade7d72c3184c7aa8c34a13"
+          },
+          "interpreter": {
+            "bytes": 225672,
+            "path": "/lib64/ld-linux-x86-64.so.2",
+            "resolvedPath": "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+            "sha256": "438c546d8e8cc48496bf3a95f753051afd9db66a629a74e31a9ded71586b56e0"
+          },
+          "kernelObjects": [
+            "linux-vdso.so.1"
+          ],
+          "libraries": [
+            {
+              "bytes": 225672,
+              "name": "ld-linux-x86-64.so.2",
+              "path": "/lib64/ld-linux-x86-64.so.2",
+              "resolvedPath": "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+              "sha256": "438c546d8e8cc48496bf3a95f753051afd9db66a629a74e31a9ded71586b56e0"
+            },
+            {
+              "bytes": 1995216,
+              "name": "libc.so.6",
+              "path": "/lib/x86_64-linux-gnu/libc.so.6",
+              "resolvedPath": "/usr/lib/x86_64-linux-gnu/libc.so.6",
+              "sha256": "fa430b8f298f817a266046af84a77533185ad6fc4406c7d3787b5a0a0c207826"
+            }
+          ],
+          "needed": [
+            "libc.so.6"
+          ]
+        },
+        "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdoutSha256": "17fa68224e88467fed102fd11ec5e5c07177617d3092c7e015659de32244d08b"
+      },
+      "referenceObservationSha256": "c6aae0ead4a905b32bb436810eea4c203905e6fa070a0479cf2d796baeea6479"
+    },
+    {
+      "driverInvocation": {
+        "argv": [
+          "/oracle/install/bin/gcc",
+          "main.c",
+          "helper.s",
+          "-o",
+          "prog"
+        ],
+        "cwd": "/w",
+        "environment": {
+          "COMPILER_PATH": "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0:/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0",
+          "C_INCLUDE_PATH": "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/include",
+          "LC_ALL": "C",
+          "LIBRARY_PATH": "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0:/usr/lib/x86_64-linux-gnu",
+          "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+          "SOURCE_DATE_EPOCH": "1786060800",
+          "TZ": "UTC"
+        },
+        "inputs": [
+          {
+            "bytes": 80,
+            "path": "helper.s",
+            "sha256": "785fe7119f219b71b6d59ba556f629b17ba0fce2a50d4bc88828c7cc093e9f9b"
+          },
+          {
+            "bytes": 105,
+            "path": "main.c",
+            "sha256": "3e356140486c4ed01a4aa8939b130c666b0422585a2c5ed028e58b9e688fba07"
+          }
+        ]
+      },
+      "id": "link-mixed-c-and-assembly",
+      "phaseInvocations": {
+        "planned": [
+          {
+            "argv": [
+              "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+              "-quiet",
+              "-imultiarch",
+              "x86_64-linux-gnu",
+              "main.c",
+              "-quiet",
+              "-dumpdir",
+              "prog-",
+              "-dumpbase",
+              "main.c",
+              "-dumpbase-ext",
+              ".c",
+              "-mtune=generic",
+              "-march=x86-64",
+              "-o",
+              "<tmp-1>.s"
+            ],
+            "index": 0,
+            "phase": "compile",
+            "stdoutPipedToNextPhase": false,
+            "tool": "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+            "toolSha256": "e51bf6e3f3300d31ce9713e2160c6fe5895d1e4914fb25562c3542b161427905"
+          },
+          {
+            "argv": [
+              "as",
+              "--64",
+              "-o",
+              "<tmp-2>.o",
+              "<tmp-1>.s"
+            ],
+            "index": 1,
+            "phase": "assemble",
+            "stdoutPipedToNextPhase": false,
+            "tool": "as",
+            "toolSha256": "07dd8551ea0aa065975e4dddb8e1bb7dc308d12d54eca22c3858db79467c7cb9"
+          },
+          {
+            "argv": [
+              "as",
+              "--64",
+              "-o",
+              "<tmp-3>.o",
+              "helper.s"
+            ],
+            "index": 2,
+            "phase": "assemble",
+            "stdoutPipedToNextPhase": false,
+            "tool": "as",
+            "toolSha256": "07dd8551ea0aa065975e4dddb8e1bb7dc308d12d54eca22c3858db79467c7cb9"
+          },
+          {
+            "argv": [
+              "/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/collect2",
+              "-plugin",
+              "/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/liblto_plugin.so",
+              "-plugin-opt=/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/lto-wrapper",
+              "-plugin-opt=-fresolution=<tmp-4>.res",
+              "-plugin-opt=-pass-through=-lgcc",
+              "-plugin-opt=-pass-through=-lgcc_s_asneeded",
+              "-plugin-opt=-pass-through=-lc",
+              "-plugin-opt=-pass-through=-lgcc",
+              "-plugin-opt=-pass-through=-lgcc_s_asneeded",
+              "--eh-frame-hdr",
+              "-m",
+              "elf_x86_64",
+              "-dynamic-linker",
+              "/lib64/ld-linux-x86-64.so.2",
+              "-o",
+              "prog",
+              "/lib/x86_64-linux-gnu/crt1.o",
+              "/lib/x86_64-linux-gnu/crti.o",
+              "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/crtbegin.o",
+              "-L/lib/x86_64-linux-gnu",
+              "-L/lib/../lib64",
+              "-L/usr/lib/x86_64-linux-gnu",
+              "-L/usr/lib/../lib64",
+              "-L/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0",
+              "-L/usr/lib/x86_64-linux-gnu",
+              "-L/lib",
+              "-L/usr/lib",
+              "<tmp-2>.o",
+              "<tmp-3>.o",
+              "-lgcc",
+              "-lgcc_s_asneeded",
+              "-lc",
+              "-lgcc",
+              "-lgcc_s_asneeded",
+              "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/crtend.o",
+              "/lib/x86_64-linux-gnu/crtn.o"
+            ],
+            "index": 3,
+            "phase": "link",
+            "stdoutPipedToNextPhase": false,
+            "tool": "/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/collect2",
+            "toolSha256": "0d95b90b554cb430d0c94496e15a4ab27646d23fb150096fd0cb1e6d24a05bfa"
+          }
+        ],
+        "verbose": [
+          {
+            "argv": [
+              "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+              "-quiet",
+              "-v",
+              "-imultiarch",
+              "x86_64-linux-gnu",
+              "main.c",
+              "-quiet",
+              "-dumpdir",
+              "prog-",
+              "-dumpbase",
+              "main.c",
+              "-dumpbase-ext",
+              ".c",
+              "-mtune=generic",
+              "-march=x86-64",
+              "-version",
+              "-o",
+              "<tmp-1>.s"
+            ],
+            "index": 0,
+            "phase": "compile",
+            "stdoutPipedToNextPhase": false,
+            "tool": "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+            "toolSha256": "e51bf6e3f3300d31ce9713e2160c6fe5895d1e4914fb25562c3542b161427905"
+          },
+          {
+            "argv": [
+              "as",
+              "-v",
+              "--64",
+              "-o",
+              "<tmp-2>.o",
+              "<tmp-1>.s"
+            ],
+            "index": 1,
+            "phase": "assemble",
+            "stdoutPipedToNextPhase": false,
+            "tool": "as",
+            "toolSha256": "07dd8551ea0aa065975e4dddb8e1bb7dc308d12d54eca22c3858db79467c7cb9"
+          },
+          {
+            "argv": [
+              "as",
+              "-v",
+              "--64",
+              "-o",
+              "<tmp-3>.o",
+              "helper.s"
+            ],
+            "index": 2,
+            "phase": "assemble",
+            "stdoutPipedToNextPhase": false,
+            "tool": "as",
+            "toolSha256": "07dd8551ea0aa065975e4dddb8e1bb7dc308d12d54eca22c3858db79467c7cb9"
+          },
+          {
+            "argv": [
+              "/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/collect2",
+              "-plugin",
+              "/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/liblto_plugin.so",
+              "-plugin-opt=/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/lto-wrapper",
+              "-plugin-opt=-fresolution=<tmp-4>.res",
+              "-plugin-opt=-pass-through=-lgcc",
+              "-plugin-opt=-pass-through=-lgcc_s_asneeded",
+              "-plugin-opt=-pass-through=-lc",
+              "-plugin-opt=-pass-through=-lgcc",
+              "-plugin-opt=-pass-through=-lgcc_s_asneeded",
+              "--eh-frame-hdr",
+              "-m",
+              "elf_x86_64",
+              "-dynamic-linker",
+              "/lib64/ld-linux-x86-64.so.2",
+              "-o",
+              "prog",
+              "/lib/x86_64-linux-gnu/crt1.o",
+              "/lib/x86_64-linux-gnu/crti.o",
+              "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/crtbegin.o",
+              "-L/lib/x86_64-linux-gnu",
+              "-L/lib/../lib64",
+              "-L/usr/lib/x86_64-linux-gnu",
+              "-L/usr/lib/../lib64",
+              "-L/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0",
+              "-L/usr/lib/x86_64-linux-gnu",
+              "-L/lib",
+              "-L/usr/lib",
+              "<tmp-2>.o",
+              "<tmp-3>.o",
+              "-lgcc",
+              "-lgcc_s_asneeded",
+              "-lc",
+              "-lgcc",
+              "-lgcc_s_asneeded",
+              "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/crtend.o",
+              "/lib/x86_64-linux-gnu/crtn.o"
+            ],
+            "index": 3,
+            "phase": "link",
+            "stdoutPipedToNextPhase": false,
+            "tool": "/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/collect2",
+            "toolSha256": "0d95b90b554cb430d0c94496e15a4ab27646d23fb150096fd0cb1e6d24a05bfa"
+          }
+        ]
+      },
+      "producedProgram": {
+        "exitCode": 3,
+        "invocation": {
+          "argv": [
+            "/w/prog"
+          ],
+          "cwd": "/w",
+          "environment": {
+            "LC_ALL": "C",
+            "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "SOURCE_DATE_EPOCH": "1786060800",
+            "TZ": "UTC"
+          }
+        },
+        "startupDependencies": {
+          "elf": {
+            "bytes": 15720,
+            "path": "/w/prog",
+            "resolvedPath": "/w/prog",
+            "sha256": "99f8dbf996ba56565dd3feb04625bbb7c89fd607dd9c147ae758363d565911e8"
+          },
+          "interpreter": {
+            "bytes": 225672,
+            "path": "/lib64/ld-linux-x86-64.so.2",
+            "resolvedPath": "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+            "sha256": "438c546d8e8cc48496bf3a95f753051afd9db66a629a74e31a9ded71586b56e0"
+          },
+          "kernelObjects": [
+            "linux-vdso.so.1"
+          ],
+          "libraries": [
+            {
+              "bytes": 225672,
+              "name": "ld-linux-x86-64.so.2",
+              "path": "/lib64/ld-linux-x86-64.so.2",
+              "resolvedPath": "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+              "sha256": "438c546d8e8cc48496bf3a95f753051afd9db66a629a74e31a9ded71586b56e0"
+            },
+            {
+              "bytes": 1995216,
+              "name": "libc.so.6",
+              "path": "/lib/x86_64-linux-gnu/libc.so.6",
+              "resolvedPath": "/usr/lib/x86_64-linux-gnu/libc.so.6",
+              "sha256": "fa430b8f298f817a266046af84a77533185ad6fc4406c7d3787b5a0a0c207826"
+            }
+          ],
+          "needed": [
+            "libc.so.6"
+          ]
+        },
+        "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdoutSha256": "17fa68224e88467fed102fd11ec5e5c07177617d3092c7e015659de32244d08b"
+      },
+      "referenceObservationSha256": "0739e1273c9f3df305ed00362172999bc9031b5017d3d9d7043e4b026a13b6a6"
+    },
+    {
+      "driverInvocation": {
+        "argv": [
+          "/oracle/install/bin/gcc",
+          "source.c"
+        ],
+        "cwd": "/w",
+        "environment": {
+          "COMPILER_PATH": "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0:/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0",
+          "C_INCLUDE_PATH": "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/include",
+          "LC_ALL": "C",
+          "LIBRARY_PATH": "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0:/usr/lib/x86_64-linux-gnu",
+          "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+          "SOURCE_DATE_EPOCH": "1786060800",
+          "TZ": "UTC"
+        },
+        "inputs": [
+          {
+            "bytes": 29,
+            "path": "source.c",
+            "sha256": "e341c722d325011613e6dc95bad2a1da0c5d3efe9d7105647eea8a35812fbcf1"
+          }
+        ]
+      },
+      "id": "link-default-output",
+      "phaseInvocations": {
+        "planned": [
+          {
+            "argv": [
+              "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+              "-quiet",
+              "-imultiarch",
+              "x86_64-linux-gnu",
+              "source.c",
+              "-quiet",
+              "-dumpdir",
+              "a-",
+              "-dumpbase",
+              "source.c",
+              "-dumpbase-ext",
+              ".c",
+              "-mtune=generic",
+              "-march=x86-64",
+              "-o",
+              "<tmp-1>.s"
+            ],
+            "index": 0,
+            "phase": "compile",
+            "stdoutPipedToNextPhase": false,
+            "tool": "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+            "toolSha256": "e51bf6e3f3300d31ce9713e2160c6fe5895d1e4914fb25562c3542b161427905"
+          },
+          {
+            "argv": [
+              "as",
+              "--64",
+              "-o",
+              "<tmp-2>.o",
+              "<tmp-1>.s"
+            ],
+            "index": 1,
+            "phase": "assemble",
+            "stdoutPipedToNextPhase": false,
+            "tool": "as",
+            "toolSha256": "07dd8551ea0aa065975e4dddb8e1bb7dc308d12d54eca22c3858db79467c7cb9"
+          },
+          {
+            "argv": [
+              "/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/collect2",
+              "-plugin",
+              "/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/liblto_plugin.so",
+              "-plugin-opt=/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/lto-wrapper",
+              "-plugin-opt=-fresolution=<tmp-3>.res",
+              "-plugin-opt=-pass-through=-lgcc",
+              "-plugin-opt=-pass-through=-lgcc_s_asneeded",
+              "-plugin-opt=-pass-through=-lc",
+              "-plugin-opt=-pass-through=-lgcc",
+              "-plugin-opt=-pass-through=-lgcc_s_asneeded",
+              "--eh-frame-hdr",
+              "-m",
+              "elf_x86_64",
+              "-dynamic-linker",
+              "/lib64/ld-linux-x86-64.so.2",
+              "/lib/x86_64-linux-gnu/crt1.o",
+              "/lib/x86_64-linux-gnu/crti.o",
+              "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/crtbegin.o",
+              "-L/lib/x86_64-linux-gnu",
+              "-L/lib/../lib64",
+              "-L/usr/lib/x86_64-linux-gnu",
+              "-L/usr/lib/../lib64",
+              "-L/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0",
+              "-L/usr/lib/x86_64-linux-gnu",
+              "-L/lib",
+              "-L/usr/lib",
+              "<tmp-2>.o",
+              "-lgcc",
+              "-lgcc_s_asneeded",
+              "-lc",
+              "-lgcc",
+              "-lgcc_s_asneeded",
+              "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/crtend.o",
+              "/lib/x86_64-linux-gnu/crtn.o"
+            ],
+            "index": 2,
+            "phase": "link",
+            "stdoutPipedToNextPhase": false,
+            "tool": "/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/collect2",
+            "toolSha256": "0d95b90b554cb430d0c94496e15a4ab27646d23fb150096fd0cb1e6d24a05bfa"
+          }
+        ],
+        "verbose": [
+          {
+            "argv": [
+              "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+              "-quiet",
+              "-v",
+              "-imultiarch",
+              "x86_64-linux-gnu",
+              "source.c",
+              "-quiet",
+              "-dumpdir",
+              "a-",
+              "-dumpbase",
+              "source.c",
+              "-dumpbase-ext",
+              ".c",
+              "-mtune=generic",
+              "-march=x86-64",
+              "-version",
+              "-o",
+              "<tmp-1>.s"
+            ],
+            "index": 0,
+            "phase": "compile",
+            "stdoutPipedToNextPhase": false,
+            "tool": "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+            "toolSha256": "e51bf6e3f3300d31ce9713e2160c6fe5895d1e4914fb25562c3542b161427905"
+          },
+          {
+            "argv": [
+              "as",
+              "-v",
+              "--64",
+              "-o",
+              "<tmp-2>.o",
+              "<tmp-1>.s"
+            ],
+            "index": 1,
+            "phase": "assemble",
+            "stdoutPipedToNextPhase": false,
+            "tool": "as",
+            "toolSha256": "07dd8551ea0aa065975e4dddb8e1bb7dc308d12d54eca22c3858db79467c7cb9"
+          },
+          {
+            "argv": [
+              "/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/collect2",
+              "-plugin",
+              "/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/liblto_plugin.so",
+              "-plugin-opt=/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/lto-wrapper",
+              "-plugin-opt=-fresolution=<tmp-3>.res",
+              "-plugin-opt=-pass-through=-lgcc",
+              "-plugin-opt=-pass-through=-lgcc_s_asneeded",
+              "-plugin-opt=-pass-through=-lc",
+              "-plugin-opt=-pass-through=-lgcc",
+              "-plugin-opt=-pass-through=-lgcc_s_asneeded",
+              "--eh-frame-hdr",
+              "-m",
+              "elf_x86_64",
+              "-dynamic-linker",
+              "/lib64/ld-linux-x86-64.so.2",
+              "/lib/x86_64-linux-gnu/crt1.o",
+              "/lib/x86_64-linux-gnu/crti.o",
+              "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/crtbegin.o",
+              "-L/lib/x86_64-linux-gnu",
+              "-L/lib/../lib64",
+              "-L/usr/lib/x86_64-linux-gnu",
+              "-L/usr/lib/../lib64",
+              "-L/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0",
+              "-L/usr/lib/x86_64-linux-gnu",
+              "-L/lib",
+              "-L/usr/lib",
+              "<tmp-2>.o",
+              "-lgcc",
+              "-lgcc_s_asneeded",
+              "-lc",
+              "-lgcc",
+              "-lgcc_s_asneeded",
+              "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/crtend.o",
+              "/lib/x86_64-linux-gnu/crtn.o"
+            ],
+            "index": 2,
+            "phase": "link",
+            "stdoutPipedToNextPhase": false,
+            "tool": "/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/collect2",
+            "toolSha256": "0d95b90b554cb430d0c94496e15a4ab27646d23fb150096fd0cb1e6d24a05bfa"
+          }
+        ]
+      },
+      "producedProgram": {
+        "exitCode": 7,
+        "invocation": {
+          "argv": [
+            "/w/a.out"
+          ],
+          "cwd": "/w",
+          "environment": {
+            "LC_ALL": "C",
+            "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "SOURCE_DATE_EPOCH": "1786060800",
+            "TZ": "UTC"
+          }
+        },
+        "startupDependencies": {
+          "elf": {
+            "bytes": 15504,
+            "path": "/w/a.out",
+            "resolvedPath": "/w/a.out",
+            "sha256": "126d7eea9604ec69fa4885076760c6f198f49c6e8d5bfe39f5535d0e7b9a3c5d"
+          },
+          "interpreter": {
+            "bytes": 225672,
+            "path": "/lib64/ld-linux-x86-64.so.2",
+            "resolvedPath": "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+            "sha256": "438c546d8e8cc48496bf3a95f753051afd9db66a629a74e31a9ded71586b56e0"
+          },
+          "kernelObjects": [
+            "linux-vdso.so.1"
+          ],
+          "libraries": [
+            {
+              "bytes": 225672,
+              "name": "ld-linux-x86-64.so.2",
+              "path": "/lib64/ld-linux-x86-64.so.2",
+              "resolvedPath": "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+              "sha256": "438c546d8e8cc48496bf3a95f753051afd9db66a629a74e31a9ded71586b56e0"
+            },
+            {
+              "bytes": 1995216,
+              "name": "libc.so.6",
+              "path": "/lib/x86_64-linux-gnu/libc.so.6",
+              "resolvedPath": "/usr/lib/x86_64-linux-gnu/libc.so.6",
+              "sha256": "fa430b8f298f817a266046af84a77533185ad6fc4406c7d3787b5a0a0c207826"
+            }
+          ],
+          "needed": [
+            "libc.so.6"
+          ]
+        },
+        "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "referenceObservationSha256": "3f26fd03ffa17b394ecf927e77692811ea72c1b3060df7d3c1f100820768017d"
+    },
+    {
+      "driverInvocation": {
+        "argv": [
+          "/oracle/install/bin/gcc",
+          "-c",
+          "bad.c"
+        ],
+        "cwd": "/w",
+        "environment": {
+          "COMPILER_PATH": "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0:/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0",
+          "C_INCLUDE_PATH": "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/include",
+          "LC_ALL": "C",
+          "LIBRARY_PATH": "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0:/usr/lib/x86_64-linux-gnu",
+          "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+          "SOURCE_DATE_EPOCH": "1786060800",
+          "TZ": "UTC"
+        },
+        "inputs": [
+          {
+            "bytes": 28,
+            "path": "bad.c",
+            "sha256": "b6aeb27447c5b6109f88d664e8ce156ea440920f4699c7fcec4d99bf89ce62ba"
+          }
+        ]
+      },
+      "id": "failure-compile",
+      "phaseInvocations": {
+        "planned": [
+          {
+            "argv": [
+              "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+              "-quiet",
+              "-imultiarch",
+              "x86_64-linux-gnu",
+              "bad.c",
+              "-quiet",
+              "-dumpbase",
+              "bad.c",
+              "-dumpbase-ext",
+              ".c",
+              "-mtune=generic",
+              "-march=x86-64",
+              "-o",
+              "<tmp-1>.s"
+            ],
+            "index": 0,
+            "phase": "compile",
+            "stdoutPipedToNextPhase": false,
+            "tool": "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+            "toolSha256": "e51bf6e3f3300d31ce9713e2160c6fe5895d1e4914fb25562c3542b161427905"
+          },
+          {
+            "argv": [
+              "as",
+              "--64",
+              "-o",
+              "bad.o",
+              "<tmp-1>.s"
+            ],
+            "index": 1,
+            "phase": "assemble",
+            "stdoutPipedToNextPhase": false,
+            "tool": "as",
+            "toolSha256": "07dd8551ea0aa065975e4dddb8e1bb7dc308d12d54eca22c3858db79467c7cb9"
+          }
+        ],
+        "verbose": [
+          {
+            "argv": [
+              "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+              "-quiet",
+              "-v",
+              "-imultiarch",
+              "x86_64-linux-gnu",
+              "bad.c",
+              "-quiet",
+              "-dumpbase",
+              "bad.c",
+              "-dumpbase-ext",
+              ".c",
+              "-mtune=generic",
+              "-march=x86-64",
+              "-version",
+              "-o",
+              "<tmp-1>.s"
+            ],
+            "index": 0,
+            "phase": "compile",
+            "stdoutPipedToNextPhase": false,
+            "tool": "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+            "toolSha256": "e51bf6e3f3300d31ce9713e2160c6fe5895d1e4914fb25562c3542b161427905"
+          }
+        ]
+      },
+      "referenceObservationSha256": "ebef47b2694e20de77f95acbd70c1a302984be46f00dc0de0db09c9cc6cfbaad"
+    },
+    {
+      "driverInvocation": {
+        "argv": [
+          "/oracle/install/bin/gcc",
+          "-c",
+          "bad.s"
+        ],
+        "cwd": "/w",
+        "environment": {
+          "COMPILER_PATH": "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0:/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0",
+          "C_INCLUDE_PATH": "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/include",
+          "LC_ALL": "C",
+          "LIBRARY_PATH": "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0:/usr/lib/x86_64-linux-gnu",
+          "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+          "SOURCE_DATE_EPOCH": "1786060800",
+          "TZ": "UTC"
+        },
+        "inputs": [
+          {
+            "bytes": 24,
+            "path": "bad.s",
+            "sha256": "b51e1f0876b62a93c218d15c3b079351514b4773c32e524ed27a9d87e1006d00"
+          }
+        ]
+      },
+      "id": "failure-assemble-source",
+      "phaseInvocations": {
+        "planned": [
+          {
+            "argv": [
+              "as",
+              "--64",
+              "-o",
+              "bad.o",
+              "bad.s"
+            ],
+            "index": 0,
+            "phase": "assemble",
+            "stdoutPipedToNextPhase": false,
+            "tool": "as",
+            "toolSha256": "07dd8551ea0aa065975e4dddb8e1bb7dc308d12d54eca22c3858db79467c7cb9"
+          }
+        ],
+        "verbose": [
+          {
+            "argv": [
+              "as",
+              "-v",
+              "--64",
+              "-o",
+              "bad.o",
+              "bad.s"
+            ],
+            "index": 0,
+            "phase": "assemble",
+            "stdoutPipedToNextPhase": false,
+            "tool": "as",
+            "toolSha256": "07dd8551ea0aa065975e4dddb8e1bb7dc308d12d54eca22c3858db79467c7cb9"
+          }
+        ]
+      },
+      "referenceObservationSha256": "5b7e0c1289ac01ccf8a44f825d287b51d624742a3744468cc7b2dca514083b06"
+    },
+    {
+      "driverInvocation": {
+        "argv": [
+          "/oracle/install/bin/gcc",
+          "-c",
+          "inline.c"
+        ],
+        "cwd": "/w",
+        "environment": {
+          "COMPILER_PATH": "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0:/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0",
+          "C_INCLUDE_PATH": "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/include",
+          "LC_ALL": "C",
+          "LIBRARY_PATH": "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0:/usr/lib/x86_64-linux-gnu",
+          "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+          "SOURCE_DATE_EPOCH": "1786060800",
+          "TZ": "UTC"
+        },
+        "inputs": [
+          {
+            "bytes": 47,
+            "path": "inline.c",
+            "sha256": "18230dcf18bc4ba668722f0f04787e9982677c3101631aefe1aa14439fa4bfb7"
+          }
+        ]
+      },
+      "id": "failure-assemble-after-compile",
+      "phaseInvocations": {
+        "planned": [
+          {
+            "argv": [
+              "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+              "-quiet",
+              "-imultiarch",
+              "x86_64-linux-gnu",
+              "inline.c",
+              "-quiet",
+              "-dumpbase",
+              "inline.c",
+              "-dumpbase-ext",
+              ".c",
+              "-mtune=generic",
+              "-march=x86-64",
+              "-o",
+              "<tmp-1>.s"
+            ],
+            "index": 0,
+            "phase": "compile",
+            "stdoutPipedToNextPhase": false,
+            "tool": "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+            "toolSha256": "e51bf6e3f3300d31ce9713e2160c6fe5895d1e4914fb25562c3542b161427905"
+          },
+          {
+            "argv": [
+              "as",
+              "--64",
+              "-o",
+              "inline.o",
+              "<tmp-1>.s"
+            ],
+            "index": 1,
+            "phase": "assemble",
+            "stdoutPipedToNextPhase": false,
+            "tool": "as",
+            "toolSha256": "07dd8551ea0aa065975e4dddb8e1bb7dc308d12d54eca22c3858db79467c7cb9"
+          }
+        ],
+        "verbose": [
+          {
+            "argv": [
+              "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+              "-quiet",
+              "-v",
+              "-imultiarch",
+              "x86_64-linux-gnu",
+              "inline.c",
+              "-quiet",
+              "-dumpbase",
+              "inline.c",
+              "-dumpbase-ext",
+              ".c",
+              "-mtune=generic",
+              "-march=x86-64",
+              "-version",
+              "-o",
+              "<tmp-1>.s"
+            ],
+            "index": 0,
+            "phase": "compile",
+            "stdoutPipedToNextPhase": false,
+            "tool": "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+            "toolSha256": "e51bf6e3f3300d31ce9713e2160c6fe5895d1e4914fb25562c3542b161427905"
+          },
+          {
+            "argv": [
+              "as",
+              "-v",
+              "--64",
+              "-o",
+              "inline.o",
+              "<tmp-1>.s"
+            ],
+            "index": 1,
+            "phase": "assemble",
+            "stdoutPipedToNextPhase": false,
+            "tool": "as",
+            "toolSha256": "07dd8551ea0aa065975e4dddb8e1bb7dc308d12d54eca22c3858db79467c7cb9"
+          }
+        ]
+      },
+      "referenceObservationSha256": "e97e62e041ebb4bb3922fd40c69a122d96d772f942e3d60096b694d59fe6dddc"
+    },
+    {
+      "driverInvocation": {
+        "argv": [
+          "/oracle/install/bin/gcc",
+          "main.c",
+          "-o",
+          "prog"
+        ],
+        "cwd": "/w",
+        "environment": {
+          "COMPILER_PATH": "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0:/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0",
+          "C_INCLUDE_PATH": "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/include",
+          "LC_ALL": "C",
+          "LIBRARY_PATH": "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0:/usr/lib/x86_64-linux-gnu",
+          "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+          "SOURCE_DATE_EPOCH": "1786060800",
+          "TZ": "UTC"
+        },
+        "inputs": [
+          {
+            "bytes": 105,
+            "path": "main.c",
+            "sha256": "3e356140486c4ed01a4aa8939b130c666b0422585a2c5ed028e58b9e688fba07"
+          }
+        ]
+      },
+      "id": "failure-link-undefined-symbol",
+      "phaseInvocations": {
+        "planned": [
+          {
+            "argv": [
+              "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+              "-quiet",
+              "-imultiarch",
+              "x86_64-linux-gnu",
+              "main.c",
+              "-quiet",
+              "-dumpdir",
+              "prog-",
+              "-dumpbase",
+              "main.c",
+              "-dumpbase-ext",
+              ".c",
+              "-mtune=generic",
+              "-march=x86-64",
+              "-o",
+              "<tmp-1>.s"
+            ],
+            "index": 0,
+            "phase": "compile",
+            "stdoutPipedToNextPhase": false,
+            "tool": "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+            "toolSha256": "e51bf6e3f3300d31ce9713e2160c6fe5895d1e4914fb25562c3542b161427905"
+          },
+          {
+            "argv": [
+              "as",
+              "--64",
+              "-o",
+              "<tmp-2>.o",
+              "<tmp-1>.s"
+            ],
+            "index": 1,
+            "phase": "assemble",
+            "stdoutPipedToNextPhase": false,
+            "tool": "as",
+            "toolSha256": "07dd8551ea0aa065975e4dddb8e1bb7dc308d12d54eca22c3858db79467c7cb9"
+          },
+          {
+            "argv": [
+              "/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/collect2",
+              "-plugin",
+              "/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/liblto_plugin.so",
+              "-plugin-opt=/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/lto-wrapper",
+              "-plugin-opt=-fresolution=<tmp-3>.res",
+              "-plugin-opt=-pass-through=-lgcc",
+              "-plugin-opt=-pass-through=-lgcc_s_asneeded",
+              "-plugin-opt=-pass-through=-lc",
+              "-plugin-opt=-pass-through=-lgcc",
+              "-plugin-opt=-pass-through=-lgcc_s_asneeded",
+              "--eh-frame-hdr",
+              "-m",
+              "elf_x86_64",
+              "-dynamic-linker",
+              "/lib64/ld-linux-x86-64.so.2",
+              "-o",
+              "prog",
+              "/lib/x86_64-linux-gnu/crt1.o",
+              "/lib/x86_64-linux-gnu/crti.o",
+              "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/crtbegin.o",
+              "-L/lib/x86_64-linux-gnu",
+              "-L/lib/../lib64",
+              "-L/usr/lib/x86_64-linux-gnu",
+              "-L/usr/lib/../lib64",
+              "-L/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0",
+              "-L/usr/lib/x86_64-linux-gnu",
+              "-L/lib",
+              "-L/usr/lib",
+              "<tmp-2>.o",
+              "-lgcc",
+              "-lgcc_s_asneeded",
+              "-lc",
+              "-lgcc",
+              "-lgcc_s_asneeded",
+              "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/crtend.o",
+              "/lib/x86_64-linux-gnu/crtn.o"
+            ],
+            "index": 2,
+            "phase": "link",
+            "stdoutPipedToNextPhase": false,
+            "tool": "/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/collect2",
+            "toolSha256": "0d95b90b554cb430d0c94496e15a4ab27646d23fb150096fd0cb1e6d24a05bfa"
+          }
+        ],
+        "verbose": [
+          {
+            "argv": [
+              "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+              "-quiet",
+              "-v",
+              "-imultiarch",
+              "x86_64-linux-gnu",
+              "main.c",
+              "-quiet",
+              "-dumpdir",
+              "prog-",
+              "-dumpbase",
+              "main.c",
+              "-dumpbase-ext",
+              ".c",
+              "-mtune=generic",
+              "-march=x86-64",
+              "-version",
+              "-o",
+              "<tmp-1>.s"
+            ],
+            "index": 0,
+            "phase": "compile",
+            "stdoutPipedToNextPhase": false,
+            "tool": "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+            "toolSha256": "e51bf6e3f3300d31ce9713e2160c6fe5895d1e4914fb25562c3542b161427905"
+          },
+          {
+            "argv": [
+              "as",
+              "-v",
+              "--64",
+              "-o",
+              "<tmp-2>.o",
+              "<tmp-1>.s"
+            ],
+            "index": 1,
+            "phase": "assemble",
+            "stdoutPipedToNextPhase": false,
+            "tool": "as",
+            "toolSha256": "07dd8551ea0aa065975e4dddb8e1bb7dc308d12d54eca22c3858db79467c7cb9"
+          },
+          {
+            "argv": [
+              "/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/collect2",
+              "-plugin",
+              "/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/liblto_plugin.so",
+              "-plugin-opt=/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/lto-wrapper",
+              "-plugin-opt=-fresolution=<tmp-3>.res",
+              "-plugin-opt=-pass-through=-lgcc",
+              "-plugin-opt=-pass-through=-lgcc_s_asneeded",
+              "-plugin-opt=-pass-through=-lc",
+              "-plugin-opt=-pass-through=-lgcc",
+              "-plugin-opt=-pass-through=-lgcc_s_asneeded",
+              "--eh-frame-hdr",
+              "-m",
+              "elf_x86_64",
+              "-dynamic-linker",
+              "/lib64/ld-linux-x86-64.so.2",
+              "-o",
+              "prog",
+              "/lib/x86_64-linux-gnu/crt1.o",
+              "/lib/x86_64-linux-gnu/crti.o",
+              "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/crtbegin.o",
+              "-L/lib/x86_64-linux-gnu",
+              "-L/lib/../lib64",
+              "-L/usr/lib/x86_64-linux-gnu",
+              "-L/usr/lib/../lib64",
+              "-L/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0",
+              "-L/usr/lib/x86_64-linux-gnu",
+              "-L/lib",
+              "-L/usr/lib",
+              "<tmp-2>.o",
+              "-lgcc",
+              "-lgcc_s_asneeded",
+              "-lc",
+              "-lgcc",
+              "-lgcc_s_asneeded",
+              "/usr/local/lib/gcc/x86_64-linux-gnu/16.2.0/crtend.o",
+              "/lib/x86_64-linux-gnu/crtn.o"
+            ],
+            "index": 2,
+            "phase": "link",
+            "stdoutPipedToNextPhase": false,
+            "tool": "/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/collect2",
+            "toolSha256": "0d95b90b554cb430d0c94496e15a4ab27646d23fb150096fd0cb1e6d24a05bfa"
+          }
+        ]
+      },
+      "referenceObservationSha256": "eb42b85eb2d8fba9ca776d7926d7a382eaeb3fddaf89772036403868e57db1bf"
+    }
+  ],
+  "driver": {
+    "bytes": 2349296,
+    "path": "/oracle/install/bin/gcc",
+    "sha256": "3c0cfef73a02b06b40456e89d9d9e33727144c2f473b8b7256b361a7699d48a4"
   },
   "invocationPolicy": {
-    "mode": "closed",
-    "requiredReceiptFields": [
-      "caseId",
-      "phase",
-      "toolPath",
-      "toolSha256",
-      "argv",
-      "exitCode",
-      "stdout",
-      "stderr"
+    "argumentEquivalence": {
+      "assemble": "insert -v immediately after argv[0]",
+      "compile": "insert -v after the first -quiet unless -fpreprocessed; insert -version immediately before -o",
+      "failure": "observed phases form a nonempty prefix; successful cases include all planned phases",
+      "link": "byte-identical argv",
+      "preprocess": "insert -v after the first -quiet"
+    },
+    "caseOrder": [
+      "compile-to-assembly",
+      "compile-to-object",
+      "compile-pipe",
+      "compile-save-temps",
+      "assemble-only",
+      "preprocess-and-assemble",
+      "link-single",
+      "link-multiple-sources",
+      "link-mixed-c-and-assembly",
+      "link-default-output",
+      "failure-compile",
+      "failure-assemble-source",
+      "failure-assemble-after-compile",
+      "failure-link-undefined-symbol"
     ],
-    "requiredArguments": {
-      "source": "behavior-corpus.json#/cases[*].arguments",
-      "rule": "Preserve each case argument in order in the authenticated driver expansion; unbound arguments fail closed.",
-      "normalizations": []
+    "mode": "closed",
+    "temporaryNames": {
+      "appliesTo": "driver plans, verbose traces and execution streams; artifacts are never normalized",
+      "pattern": "/tmp/cc[A-Za-z0-9]{6}(\\.[A-Za-z0-9]+)?",
+      "reason": "the driver draws temporary file names from mkstemp, so they differ between otherwise identical runs",
+      "replacement": "<tmp-N> plus the original suffix, N numbering distinct names in order of first appearance per stream"
     },
-    "missingReceipt": "unresolved"
+    "undeclaredCaseOrArgument": "reject"
   },
-  "phaseIdentities": [
-    {
-      "phase": "compiler",
-      "tool": {
-        "path": "tools/cc1",
-        "bytes": 1023,
-        "sha256": "847484f59a66b70de4cac77751e4f712672cf52ee0b037b07a2413a7547ae2cb",
-        "source": "behavior-corpus.json#/cases[*].inputs"
+  "issue": 712,
+  "kind": "gcc-orchestration-identity-contract-v2",
+  "phaseStartupDependencies": {
+    "/oracle/install/bin/gcc": {
+      "elf": {
+        "bytes": 2349296,
+        "path": "/oracle/install/bin/gcc",
+        "resolvedPath": "/oracle/install/bin/gcc",
+        "sha256": "3c0cfef73a02b06b40456e89d9d9e33727144c2f473b8b7256b361a7699d48a4"
       },
-      "caseIds": ["preprocess-file", "preprocess-stdin", "compile-file", "compile-stdin", "response-file", "linking"]
+      "interpreter": {
+        "bytes": 225672,
+        "path": "/lib64/ld-linux-x86-64.so.2",
+        "resolvedPath": "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+        "sha256": "438c546d8e8cc48496bf3a95f753051afd9db66a629a74e31a9ded71586b56e0"
+      },
+      "kernelObjects": [
+        "linux-vdso.so.1"
+      ],
+      "libraries": [
+        {
+          "bytes": 225672,
+          "name": "ld-linux-x86-64.so.2",
+          "path": "/lib64/ld-linux-x86-64.so.2",
+          "resolvedPath": "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+          "sha256": "438c546d8e8cc48496bf3a95f753051afd9db66a629a74e31a9ded71586b56e0"
+        },
+        {
+          "bytes": 1995216,
+          "name": "libc.so.6",
+          "path": "/lib/x86_64-linux-gnu/libc.so.6",
+          "resolvedPath": "/usr/lib/x86_64-linux-gnu/libc.so.6",
+          "sha256": "fa430b8f298f817a266046af84a77533185ad6fc4406c7d3787b5a0a0c207826"
+        },
+        {
+          "bytes": 977112,
+          "name": "libm.so.6",
+          "path": "/lib/x86_64-linux-gnu/libm.so.6",
+          "resolvedPath": "/usr/lib/x86_64-linux-gnu/libm.so.6",
+          "sha256": "6d567d53e895273ca14a1f9dc164fc6c8d39aed2f60aa46a733c2784228915f3"
+        }
+      ],
+      "needed": [
+        "libm.so.6",
+        "libc.so.6",
+        "ld-linux-x86-64.so.2"
+      ]
     },
-    {
-      "phase": "assembler",
-      "tool": {
-        "path": "tools/as",
-        "bytes": 338,
-        "sha256": "59f48d8aa41d6febe825c19cfce157461c5dce8b0401104d3c825fb80004b2d1",
-        "source": "behavior-corpus.json#/cases[*].inputs"
+    "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1": {
+      "elf": {
+        "bytes": 41935768,
+        "path": "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+        "resolvedPath": "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+        "sha256": "e51bf6e3f3300d31ce9713e2160c6fe5895d1e4914fb25562c3542b161427905"
       },
-      "caseIds": ["assembly-file", "compile-file", "compile-stdin", "response-file", "linking"]
+      "interpreter": {
+        "bytes": 225672,
+        "path": "/lib64/ld-linux-x86-64.so.2",
+        "resolvedPath": "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+        "sha256": "438c546d8e8cc48496bf3a95f753051afd9db66a629a74e31a9ded71586b56e0"
+      },
+      "kernelObjects": [
+        "linux-vdso.so.1"
+      ],
+      "libraries": [
+        {
+          "bytes": 225672,
+          "name": "ld-linux-x86-64.so.2",
+          "path": "/lib64/ld-linux-x86-64.so.2",
+          "resolvedPath": "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+          "sha256": "438c546d8e8cc48496bf3a95f753051afd9db66a629a74e31a9ded71586b56e0"
+        },
+        {
+          "bytes": 1995216,
+          "name": "libc.so.6",
+          "path": "/lib/x86_64-linux-gnu/libc.so.6",
+          "resolvedPath": "/usr/lib/x86_64-linux-gnu/libc.so.6",
+          "sha256": "fa430b8f298f817a266046af84a77533185ad6fc4406c7d3787b5a0a0c207826"
+        },
+        {
+          "bytes": 566080,
+          "name": "libgmp.so.10",
+          "path": "/lib/x86_64-linux-gnu/libgmp.so.10",
+          "resolvedPath": "/usr/lib/x86_64-linux-gnu/libgmp.so.10.5.0",
+          "sha256": "d15e1585c6c267296459570c8ac217ca9123044bcd4e896d2f686b32333445d2"
+        },
+        {
+          "bytes": 977112,
+          "name": "libm.so.6",
+          "path": "/lib/x86_64-linux-gnu/libm.so.6",
+          "resolvedPath": "/usr/lib/x86_64-linux-gnu/libm.so.6",
+          "sha256": "6d567d53e895273ca14a1f9dc164fc6c8d39aed2f60aa46a733c2784228915f3"
+        },
+        {
+          "bytes": 139160,
+          "name": "libmpc.so.3",
+          "path": "/lib/x86_64-linux-gnu/libmpc.so.3",
+          "resolvedPath": "/usr/lib/x86_64-linux-gnu/libmpc.so.3.3.1",
+          "sha256": "0b478209dd7a8bc37b4f4627795f9214f02572393bacbac04b8fe610ea22e5d0"
+        },
+        {
+          "bytes": 794992,
+          "name": "libmpfr.so.6",
+          "path": "/lib/x86_64-linux-gnu/libmpfr.so.6",
+          "resolvedPath": "/usr/lib/x86_64-linux-gnu/libmpfr.so.6.2.2",
+          "sha256": "4e3ccf5b442fc91054b0153140fe62939009f98ca1367f45de62376d5b18d28c"
+        },
+        {
+          "bytes": 125376,
+          "name": "libz.so.1",
+          "path": "/lib/x86_64-linux-gnu/libz.so.1",
+          "resolvedPath": "/usr/lib/x86_64-linux-gnu/libz.so.1.3.1",
+          "sha256": "85590dd58edf5445e18bc7193e5ebc01ac5841f1ae187e97705a662e90c6421e"
+        },
+        {
+          "bytes": 825336,
+          "name": "libzstd.so.1",
+          "path": "/lib/x86_64-linux-gnu/libzstd.so.1",
+          "resolvedPath": "/usr/lib/x86_64-linux-gnu/libzstd.so.1.5.7",
+          "sha256": "27f07c9a49c2c956bcfb64cd4712976586a66facbf15fc7f09bc37413b5f2b21"
+        }
+      ],
+      "needed": [
+        "libmpc.so.3",
+        "libmpfr.so.6",
+        "libgmp.so.10",
+        "libz.so.1",
+        "libzstd.so.1",
+        "libm.so.6",
+        "libc.so.6",
+        "ld-linux-x86-64.so.2"
+      ]
     },
-    {
-      "phase": "linker",
-      "tool": {
-        "path": "tools/collect2",
-        "bytes": 368,
-        "sha256": "a7e8d29a7ed6bf83b556b9f6b1b872f84e93a4bb9948121e36f55226d047f01c",
-        "source": "behavior-corpus.json#/cases[*].inputs"
+    "/usr/bin/as": {
+      "elf": {
+        "bytes": 795184,
+        "path": "/usr/bin/as",
+        "resolvedPath": "/usr/bin/x86_64-linux-gnu-as",
+        "sha256": "07dd8551ea0aa065975e4dddb8e1bb7dc308d12d54eca22c3858db79467c7cb9"
       },
-      "caseIds": ["linking"]
+      "interpreter": {
+        "bytes": 225672,
+        "path": "/lib64/ld-linux-x86-64.so.2",
+        "resolvedPath": "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+        "sha256": "438c546d8e8cc48496bf3a95f753051afd9db66a629a74e31a9ded71586b56e0"
+      },
+      "kernelObjects": [
+        "linux-vdso.so.1"
+      ],
+      "libraries": [
+        {
+          "bytes": 225672,
+          "name": "ld-linux-x86-64.so.2",
+          "path": "/lib64/ld-linux-x86-64.so.2",
+          "resolvedPath": "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+          "sha256": "438c546d8e8cc48496bf3a95f753051afd9db66a629a74e31a9ded71586b56e0"
+        },
+        {
+          "bytes": 1463360,
+          "name": "libbfd-2.44-system.so",
+          "path": "/lib/x86_64-linux-gnu/libbfd-2.44-system.so",
+          "resolvedPath": "/usr/lib/x86_64-linux-gnu/libbfd-2.44-system.so",
+          "sha256": "7a27acdd82e38dbddd8568d54de0df4358e71a3c387d5c1d999d369450c1bf6a"
+        },
+        {
+          "bytes": 1995216,
+          "name": "libc.so.6",
+          "path": "/lib/x86_64-linux-gnu/libc.so.6",
+          "resolvedPath": "/usr/lib/x86_64-linux-gnu/libc.so.6",
+          "sha256": "fa430b8f298f817a266046af84a77533185ad6fc4406c7d3787b5a0a0c207826"
+        },
+        {
+          "bytes": 30976,
+          "name": "libsframe.so.1",
+          "path": "/lib/x86_64-linux-gnu/libsframe.so.1",
+          "resolvedPath": "/usr/lib/x86_64-linux-gnu/libsframe.so.1.0.0",
+          "sha256": "adb0b9a33909e7264ad724e138eb97995832e535b22b192c1a898c349c918a9f"
+        },
+        {
+          "bytes": 125376,
+          "name": "libz.so.1",
+          "path": "/lib/x86_64-linux-gnu/libz.so.1",
+          "resolvedPath": "/usr/lib/x86_64-linux-gnu/libz.so.1.3.1",
+          "sha256": "85590dd58edf5445e18bc7193e5ebc01ac5841f1ae187e97705a662e90c6421e"
+        },
+        {
+          "bytes": 825336,
+          "name": "libzstd.so.1",
+          "path": "/lib/x86_64-linux-gnu/libzstd.so.1",
+          "resolvedPath": "/usr/lib/x86_64-linux-gnu/libzstd.so.1.5.7",
+          "sha256": "27f07c9a49c2c956bcfb64cd4712976586a66facbf15fc7f09bc37413b5f2b21"
+        }
+      ],
+      "needed": [
+        "libbfd-2.44-system.so",
+        "libz.so.1",
+        "libzstd.so.1",
+        "libc.so.6"
+      ]
     },
-    {
-      "phase": "runtime",
-      "tool": {
-        "backend": "oci-container-v1",
-        "imageDigest": "sha256:510c510f300d811df22c7769633575a94939073b529a73125bf96cfb96dc7248",
-        "platform": "linux/amd64",
-        "source": "behavior-corpus.json#/sandbox"
+    "/usr/bin/ld": {
+      "elf": {
+        "bytes": 1861256,
+        "path": "/usr/bin/ld",
+        "resolvedPath": "/usr/bin/x86_64-linux-gnu-ld.bfd",
+        "sha256": "d2766988b6a1b1d1518cdc09242e726d1f24e151e16410ada3092b11ffd9081b"
       },
-      "caseIds": ["all-14-corpus-cases"]
-    }
-  ],
-  "referenceExpectations": {
-    "source": "behavior-corpus.json#/cases[*].expected",
-    "observations": "behavior-corpus-evidence.json#/cases[*]",
-    "independent": true,
-    "normalizations": [],
-    "selectedArtifactExpectations": {
-      "compile-file": {
-        "path": "file.o",
-        "sha256": "e5e021333c0fd167a18f93780b1a03bc65f0aef311d0232b24e6a2d06153e9a5",
-        "bytes": 15,
-        "status": "mock-object"
+      "interpreter": {
+        "bytes": 225672,
+        "path": "/lib64/ld-linux-x86-64.so.2",
+        "resolvedPath": "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+        "sha256": "438c546d8e8cc48496bf3a95f753051afd9db66a629a74e31a9ded71586b56e0"
       },
-      "linking": {
-        "path": "linked.bin",
-        "sha256": "611d8ceedfe67437b495a97682eaf5818f93b4c93eedbcddf72737c24b4f303a",
-        "bytes": 19,
-        "status": "mock-executable"
-      }
+      "kernelObjects": [
+        "linux-vdso.so.1"
+      ],
+      "libraries": [
+        {
+          "bytes": 225672,
+          "name": "ld-linux-x86-64.so.2",
+          "path": "/lib64/ld-linux-x86-64.so.2",
+          "resolvedPath": "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+          "sha256": "438c546d8e8cc48496bf3a95f753051afd9db66a629a74e31a9ded71586b56e0"
+        },
+        {
+          "bytes": 1463360,
+          "name": "libbfd-2.44-system.so",
+          "path": "/lib/x86_64-linux-gnu/libbfd-2.44-system.so",
+          "resolvedPath": "/usr/lib/x86_64-linux-gnu/libbfd-2.44-system.so",
+          "sha256": "7a27acdd82e38dbddd8568d54de0df4358e71a3c387d5c1d999d369450c1bf6a"
+        },
+        {
+          "bytes": 1995216,
+          "name": "libc.so.6",
+          "path": "/lib/x86_64-linux-gnu/libc.so.6",
+          "resolvedPath": "/usr/lib/x86_64-linux-gnu/libc.so.6",
+          "sha256": "fa430b8f298f817a266046af84a77533185ad6fc4406c7d3787b5a0a0c207826"
+        },
+        {
+          "bytes": 220288,
+          "name": "libctf.so.0",
+          "path": "/lib/x86_64-linux-gnu/libctf.so.0",
+          "resolvedPath": "/usr/lib/x86_64-linux-gnu/libctf.so.0.0.0",
+          "sha256": "bdcd09af9314ef2a40dd137882523e7cb5944189220980257c5ebcc1fe0c9b5b"
+        },
+        {
+          "bytes": 59752,
+          "name": "libjansson.so.4",
+          "path": "/lib/x86_64-linux-gnu/libjansson.so.4",
+          "resolvedPath": "/usr/lib/x86_64-linux-gnu/libjansson.so.4.14.0",
+          "sha256": "424135d01f0f2f957bd61d6a56f5f0cf7afa146a677a216173f1a20e8cd1ad8e"
+        },
+        {
+          "bytes": 30976,
+          "name": "libsframe.so.1",
+          "path": "/lib/x86_64-linux-gnu/libsframe.so.1",
+          "resolvedPath": "/usr/lib/x86_64-linux-gnu/libsframe.so.1.0.0",
+          "sha256": "adb0b9a33909e7264ad724e138eb97995832e535b22b192c1a898c349c918a9f"
+        },
+        {
+          "bytes": 125376,
+          "name": "libz.so.1",
+          "path": "/lib/x86_64-linux-gnu/libz.so.1",
+          "resolvedPath": "/usr/lib/x86_64-linux-gnu/libz.so.1.3.1",
+          "sha256": "85590dd58edf5445e18bc7193e5ebc01ac5841f1ae187e97705a662e90c6421e"
+        },
+        {
+          "bytes": 825336,
+          "name": "libzstd.so.1",
+          "path": "/lib/x86_64-linux-gnu/libzstd.so.1",
+          "resolvedPath": "/usr/lib/x86_64-linux-gnu/libzstd.so.1.5.7",
+          "sha256": "27f07c9a49c2c956bcfb64cd4712976586a66facbf15fc7f09bc37413b5f2b21"
+        }
+      ],
+      "needed": [
+        "libbfd-2.44-system.so",
+        "libctf.so.0",
+        "libjansson.so.4",
+        "libc.so.6"
+      ]
+    },
+    "/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/collect2": {
+      "elf": {
+        "bytes": 1404384,
+        "path": "/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/collect2",
+        "resolvedPath": "/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/collect2",
+        "sha256": "0d95b90b554cb430d0c94496e15a4ab27646d23fb150096fd0cb1e6d24a05bfa"
+      },
+      "interpreter": {
+        "bytes": 225672,
+        "path": "/lib64/ld-linux-x86-64.so.2",
+        "resolvedPath": "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+        "sha256": "438c546d8e8cc48496bf3a95f753051afd9db66a629a74e31a9ded71586b56e0"
+      },
+      "kernelObjects": [
+        "linux-vdso.so.1"
+      ],
+      "libraries": [
+        {
+          "bytes": 225672,
+          "name": "ld-linux-x86-64.so.2",
+          "path": "/lib64/ld-linux-x86-64.so.2",
+          "resolvedPath": "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+          "sha256": "438c546d8e8cc48496bf3a95f753051afd9db66a629a74e31a9ded71586b56e0"
+        },
+        {
+          "bytes": 1995216,
+          "name": "libc.so.6",
+          "path": "/lib/x86_64-linux-gnu/libc.so.6",
+          "resolvedPath": "/usr/lib/x86_64-linux-gnu/libc.so.6",
+          "sha256": "fa430b8f298f817a266046af84a77533185ad6fc4406c7d3787b5a0a0c207826"
+        },
+        {
+          "bytes": 977112,
+          "name": "libm.so.6",
+          "path": "/lib/x86_64-linux-gnu/libm.so.6",
+          "resolvedPath": "/usr/lib/x86_64-linux-gnu/libm.so.6",
+          "sha256": "6d567d53e895273ca14a1f9dc164fc6c8d39aed2f60aa46a733c2784228915f3"
+        }
+      ],
+      "needed": [
+        "libm.so.6",
+        "libc.so.6",
+        "ld-linux-x86-64.so.2"
+      ]
+    },
+    "/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/liblto_plugin.so": {
+      "elf": {
+        "bytes": 92592,
+        "path": "/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/liblto_plugin.so",
+        "resolvedPath": "/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/liblto_plugin.so",
+        "sha256": "c08e9eb243f928c0f63a886cbec9d4078f44cbd993ff5e203b3980999cea6113"
+      },
+      "interpreter": null,
+      "kernelObjects": [
+        "linux-vdso.so.1"
+      ],
+      "libraries": [
+        {
+          "bytes": 225672,
+          "name": "ld-linux-x86-64.so.2",
+          "path": "/lib64/ld-linux-x86-64.so.2",
+          "resolvedPath": "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+          "sha256": "438c546d8e8cc48496bf3a95f753051afd9db66a629a74e31a9ded71586b56e0"
+        },
+        {
+          "bytes": 1995216,
+          "name": "libc.so.6",
+          "path": "/lib/x86_64-linux-gnu/libc.so.6",
+          "resolvedPath": "/usr/lib/x86_64-linux-gnu/libc.so.6",
+          "sha256": "fa430b8f298f817a266046af84a77533185ad6fc4406c7d3787b5a0a0c207826"
+        }
+      ],
+      "needed": [
+        "libc.so.6"
+      ]
+    },
+    "/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/lto-wrapper": {
+      "elf": {
+        "bytes": 2371216,
+        "path": "/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/lto-wrapper",
+        "resolvedPath": "/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/lto-wrapper",
+        "sha256": "b7883635ee040c5c4e9abd567b7ce2bf4be37abcd9d4014507fad668da776dc8"
+      },
+      "interpreter": {
+        "bytes": 225672,
+        "path": "/lib64/ld-linux-x86-64.so.2",
+        "resolvedPath": "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+        "sha256": "438c546d8e8cc48496bf3a95f753051afd9db66a629a74e31a9ded71586b56e0"
+      },
+      "kernelObjects": [
+        "linux-vdso.so.1"
+      ],
+      "libraries": [
+        {
+          "bytes": 225672,
+          "name": "ld-linux-x86-64.so.2",
+          "path": "/lib64/ld-linux-x86-64.so.2",
+          "resolvedPath": "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+          "sha256": "438c546d8e8cc48496bf3a95f753051afd9db66a629a74e31a9ded71586b56e0"
+        },
+        {
+          "bytes": 1995216,
+          "name": "libc.so.6",
+          "path": "/lib/x86_64-linux-gnu/libc.so.6",
+          "resolvedPath": "/usr/lib/x86_64-linux-gnu/libc.so.6",
+          "sha256": "fa430b8f298f817a266046af84a77533185ad6fc4406c7d3787b5a0a0c207826"
+        },
+        {
+          "bytes": 977112,
+          "name": "libm.so.6",
+          "path": "/lib/x86_64-linux-gnu/libm.so.6",
+          "resolvedPath": "/usr/lib/x86_64-linux-gnu/libm.so.6",
+          "sha256": "6d567d53e895273ca14a1f9dc164fc6c8d39aed2f60aa46a733c2784228915f3"
+        }
+      ],
+      "needed": [
+        "libm.so.6",
+        "libc.so.6",
+        "ld-linux-x86-64.so.2"
+      ]
     }
   },
-  "productionGap": [
-    "The checked evidence has no phase invocation receipts; tool identity and argument equivalence remain declared policy rather than observed qualification.",
-    "The compile and link cases emit mock bytes, so real object/ELF structure, symbols, relocations, and produced-program runtime behavior are unavailable.",
-    "No authenticated reconstructed-candidate replay is retained; releaseEligible is false."
-  ],
-  "releaseEligible": false
+  "phaseTools": {
+    "assemble": {
+      "invokedAs": "as",
+      "lookup": "PATH",
+      "path": "/usr/bin/as",
+      "resolvedPath": "/usr/bin/x86_64-linux-gnu-as",
+      "role": "as",
+      "sha256": "07dd8551ea0aa065975e4dddb8e1bb7dc308d12d54eca22c3858db79467c7cb9",
+      "version": "GNU assembler (GNU Binutils for Debian) 2.44"
+    },
+    "compile": {
+      "bytes": 41935768,
+      "path": "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+      "resolvedPath": "/oracle/install/libexec/gcc/x86_64-pc-linux-gnu/16.2.0/cc1",
+      "role": "cc1",
+      "sha256": "e51bf6e3f3300d31ce9713e2160c6fe5895d1e4914fb25562c3542b161427905",
+      "source": "oracleFrontend"
+    },
+    "link": {
+      "path": "/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/collect2",
+      "resolvedPath": "/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/collect2",
+      "role": "collect2",
+      "sha256": "0d95b90b554cb430d0c94496e15a4ab27646d23fb150096fd0cb1e6d24a05bfa"
+    },
+    "linkEditor": {
+      "invokedBy": "collect2",
+      "lookup": "PATH",
+      "path": "/usr/bin/ld",
+      "resolvedPath": "/usr/bin/x86_64-linux-gnu-ld.bfd",
+      "role": "ld",
+      "sha256": "d2766988b6a1b1d1518cdc09242e726d1f24e151e16410ada3092b11ffd9081b",
+      "version": "GNU ld (GNU Binutils for Debian) 2.44"
+    },
+    "ltoPlugin": {
+      "loadedBy": "ld via collect2 -plugin",
+      "path": "/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/liblto_plugin.so",
+      "resolvedPath": "/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/liblto_plugin.so",
+      "role": "liblto_plugin.so",
+      "sha256": "c08e9eb243f928c0f63a886cbec9d4078f44cbd993ff5e203b3980999cea6113"
+    },
+    "ltoWrapper": {
+      "path": "/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/lto-wrapper",
+      "resolvedPath": "/usr/local/libexec/gcc/x86_64-linux-gnu/16.2.0/lto-wrapper",
+      "role": "lto-wrapper",
+      "sha256": "b7883635ee040c5c4e9abd567b7ce2bf4be37abcd9d4014507fad668da776dc8"
+    }
+  },
+  "provenance": {
+    "driverManifest": {
+      "bytes": 60269,
+      "inputs": {
+        "buildRecord": {
+          "bytes": 3910,
+          "path": "build-record.json",
+          "sha256": "f91a68ffde054b9598cba8506bbf6b3b373b35b8680fddb54f76bffa9db23637"
+        },
+        "sourceLock": {
+          "bytes": 3953,
+          "path": "source-lock.json",
+          "sha256": "e2930ecc9748b40e56d6fe09dbe88f21f735953d4e6da50403f2cc0aa5b650cc"
+        }
+      },
+      "path": "oracle-manifest.json",
+      "sha256": "c9e21c5a6422c65572ee4c4de5578107b82ae92b6730536c4fc76490fe2ecad9"
+    },
+    "frontendManifest": {
+      "bytes": 60519,
+      "inputs": {
+        "buildRecord": {
+          "bytes": 3972,
+          "path": "cc1-build-record.json",
+          "sha256": "f6b2711d4f82562195acebe7250d7dc62eb9425af4f736736e0ea69b65103e8e"
+        },
+        "sourceLock": {
+          "bytes": 3953,
+          "path": "source-lock.json",
+          "sha256": "e2930ecc9748b40e56d6fe09dbe88f21f735953d4e6da50403f2cc0aa5b650cc"
+        }
+      },
+      "path": "cc1-oracle-manifest.json",
+      "sha256": "dbef520c025d268f5126229ace8ad5b08a15722573d45b5e1ab934611905abb4"
+    },
+    "policySource": {
+      "bytes": 48687,
+      "path": "scripts/capture-gcc-preprocessing-reference.py",
+      "sha256": "5a699b7954745439f77710ff990faeced8f5717cd2c93d4796d701f94556b501"
+    },
+    "reference": {
+      "bytes": 734432,
+      "path": "orchestration-phase-reference.json",
+      "sha256": "41768c5ff120e4f749d02859437b122c223e2cfaea44151c044aeaf5c3bf24d1"
+    },
+    "runtimeProbe": {
+      "path": "oracle/gcc/reference_runtime_probe.py",
+      "sha256": "c6cacfc2c73f0c09344c3dfcbbe346f8a45a2e4128c0ba3d63e3e2e745a7954f"
+    },
+    "source": {
+      "id": "gcc-driver-16.2.0",
+      "sourceRevision": "78d4ac73dd391005b895a6148cd9831e28e1208b",
+      "version": "16.2.0"
+    }
+  },
+  "runtime": {
+    "image": "docker.io/library/gcc@sha256:2e6f4ae27ab8ad6f9617b46f0468889d368fdd91f2ea29aff98e4d5d1a3637f0",
+    "imageConfig": "sha256:103614947d5ebe34fc48305dcee29625bcf37fbe12d5d4bbca60e00fa601a22f",
+    "platform": "linux/amd64",
+    "sandbox": "--network none --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges"
+  },
+  "schemaVersion": 2,
+  "scope": "closed-original-driver-reference-invocations"
 }
