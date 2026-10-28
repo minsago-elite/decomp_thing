@@ -106,7 +106,8 @@ image_built=1
 run_reconstruction() {
   local binary=$1
   local output=$2
-  docker run --rm \
+  # Ghidra's native decompiler helper can exit after its JVM; PID 1 must reap it.
+  docker run --rm --init \
     --volume "$validation_root/input:/input:ro" \
     --volume "$validation_root/output:/output" \
     "$image" reconstruct "/input/$binary" --output "/output/$output" --evidence-only
