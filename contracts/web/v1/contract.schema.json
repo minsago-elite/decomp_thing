@@ -872,6 +872,21 @@
               "type": "null"
             }
           ]
+        },
+        "family": {
+          "enum": [
+            "exploration-report",
+            "progress-journal",
+            "source-manifest",
+            "build-contract",
+            "source-archive"
+          ]
+        },
+        "verification": {
+          "enum": [
+            "not-verified",
+            "source-inventory-checked"
+          ]
         }
       },
       "required": [
@@ -904,6 +919,52 @@
           }
         }
       ]
+    },
+    "artifacts": {
+      "type": "object",
+      "properties": {
+        "binding": {
+          "$ref": "#/definitions/binding"
+        },
+        "catalogedFamilies": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "exploration-report",
+              "progress-journal",
+              "source-manifest",
+              "build-contract",
+              "source-archive"
+            ]
+          },
+          "minItems": 1,
+          "maxItems": 5,
+          "uniqueItems": true
+        },
+        "unavailableFiles": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 200
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/artifact"
+          },
+          "maxItems": 200
+        },
+        "page": {
+          "$ref": "#/definitions/page"
+        }
+      },
+      "required": [
+        "binding",
+        "catalogedFamilies",
+        "unavailableFiles",
+        "items",
+        "page"
+      ],
+      "additionalProperties": false
     },
     "revision": {
       "type": "object",
@@ -5655,6 +5716,30 @@
         },
         "data": {
           "$ref": "#/definitions/artifact"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "artifacts"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/artifacts"
         }
       },
       "required": [

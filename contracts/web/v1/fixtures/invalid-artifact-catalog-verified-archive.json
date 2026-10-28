@@ -1,0 +1,22 @@
+{
+  "apiVersion": 1,
+  "kind": "artifact",
+  "requestId": "request_artifact_2",
+  "data": {
+    "artifactId": "archive_0123456789abcdef0123456789abcdef_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "binding": {
+      "jobId": "1234567890abcdef1234567890abcdef",
+      "runId": "run_example_1",
+      "revisionId": "revision_example_1"
+    },
+    "displayName": "source-tree.zip",
+    "mediaType": "application/zip",
+    "sizeBytes": "26214400",
+    "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "contentHref": "/api/v1/jobs/1234567890abcdef1234567890abcdef/artifacts/archive_0123456789abcdef0123456789abcdef_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc/content",
+    "role": "archive",
+    "derivedFromArtifactId": null,
+    "family": "source-archive",
+    "verification": "source-inventory-checked"
+  }
+}

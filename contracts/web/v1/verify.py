@@ -392,6 +392,33 @@ def check_source_search(data: dict) -> None:
         previous = item
 
 
+ARTIFACT_FAMILY_CODES = {"exploration-report": "exploration", "progress-journal": "progress", "source-manifest": "manifest",
+                         "build-contract": "contract", "source-archive": "archive"}
+
+
+def check_artifact_href(item: dict) -> None:
+    suffix = "/api/v1/jobs/" + item["binding"]["jobId"] + "/artifacts/" + item["artifactId"] + "/content"
+    if not re.fullmatch(r"(?:/[A-Za-z0-9_-]+)*" + re.escape(suffix), item["contentHref"]):
+        raise ValueError("artifact content link belongs to another resource")
+
+
+def check_catalog_artifact(item: dict) -> None:
+    """Catalog entries carry both optional fields; a verified digest needs a revision-checked family."""
+    check_artifact_href(item)
+    if ("family" in item) != ("verification" in item):
+        raise ValueError("catalog artifact family and verification must appear together")
+    if "family" not in item:
+        return
+    code = ARTIFACT_FAMILY_CODES[item["family"]]
+    if not re.fullmatch(re.escape(code) + r"_[a-f0-9]{32}_" + re.escape(item["sha256"]), item["artifactId"]):
+        raise ValueError("catalog artifact identity does not bind its family and digest")
+    if item["binding"]["runId"] is None:
+        raise ValueError("catalog artifacts belong to one attempt")
+    if item["verification"] == "source-inventory-checked" and (item["family"] not in ("source-manifest", "build-contract")
+                                                          or item["binding"]["revisionId"] is None):
+        raise ValueError("only revision-bound source metadata can be verified against a revision commitment")
+
+
 def check_semantics(document: dict) -> None:
     """Check relationships JSON Schema cannot express with portable draft-07."""
     kind = document["kind"]
@@ -446,6 +473,21 @@ def check_semantics(document: dict) -> None:
         check_source_chunk(data)
     elif kind == "sourceSearch":
         check_source_search(data)
+    elif kind == "artifact":
+        check_catalog_artifact(data)
+    elif kind == "artifacts":
+        binding, items = data["binding"], data["items"]
+        if binding["revisionId"] is not None and binding["runId"] is None:
+            raise ValueError("artifact revision filter requires its attempt filter")
+        if len(items) > data["page"]["limit"] or len({item["artifactId"] for item in items}) != len(items):
+            raise ValueError("artifact page exceeds its limit or repeats an identity")
+        for item in items:
+            check_catalog_artifact(item)
+            if "family" not in item or item["family"] not in data["catalogedFamilies"]:
+                raise ValueError("artifact catalog entry is outside the cataloged families")
+            if item["binding"]["jobId"] != binding["jobId"] or any(
+                    binding[key] is not None and item["binding"][key] != binding[key] for key in ("runId", "revisionId")):
+                raise ValueError("artifact catalog entry is outside its filter")
     elif kind == "revisionFile":
         path = data["item"]["displayName"]
         for part in path.split("/"):

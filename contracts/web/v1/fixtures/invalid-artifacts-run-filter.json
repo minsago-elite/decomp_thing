@@ -1,0 +1,78 @@
+{
+  "apiVersion": 1,
+  "kind": "artifacts",
+  "requestId": "request_artifacts_1",
+  "data": {
+    "binding": {
+      "jobId": "1234567890abcdef1234567890abcdef",
+      "runId": "run_example_1",
+      "revisionId": null
+    },
+    "catalogedFamilies": [
+      "exploration-report",
+      "progress-journal",
+      "source-manifest",
+      "build-contract",
+      "source-archive"
+    ],
+    "unavailableFiles": 0,
+    "items": [
+      {
+        "artifactId": "exploration_0123456789abcdef0123456789abcdef_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "binding": {
+          "jobId": "1234567890abcdef1234567890abcdef",
+          "runId": "run_other",
+          "revisionId": null
+        },
+        "displayName": "exploration.json",
+        "mediaType": "application/json",
+        "sizeBytes": "2048",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "contentHref": "/api/v1/jobs/1234567890abcdef1234567890abcdef/artifacts/exploration_0123456789abcdef0123456789abcdef_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/content",
+        "role": "raw-evidence",
+        "derivedFromArtifactId": null,
+        "family": "exploration-report",
+        "verification": "not-verified"
+      },
+      {
+        "artifactId": "manifest_0123456789abcdef0123456789abcdef_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "binding": {
+          "jobId": "1234567890abcdef1234567890abcdef",
+          "runId": "run_example_1",
+          "revisionId": "revision_example_1"
+        },
+        "displayName": "source_tree_manifest.json",
+        "mediaType": "application/json",
+        "sizeBytes": "4096",
+        "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "contentHref": "/api/v1/jobs/1234567890abcdef1234567890abcdef/artifacts/manifest_0123456789abcdef0123456789abcdef_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/content",
+        "role": "source",
+        "derivedFromArtifactId": null,
+        "family": "source-manifest",
+        "verification": "source-inventory-checked"
+      },
+      {
+        "artifactId": "archive_0123456789abcdef0123456789abcdef_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "binding": {
+          "jobId": "1234567890abcdef1234567890abcdef",
+          "runId": "run_example_1",
+          "revisionId": "revision_example_1"
+        },
+        "displayName": "source-tree.zip",
+        "mediaType": "application/zip",
+        "sizeBytes": "26214400",
+        "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "contentHref": "/api/v1/jobs/1234567890abcdef1234567890abcdef/artifacts/archive_0123456789abcdef0123456789abcdef_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc/content",
+        "role": "archive",
+        "derivedFromArtifactId": null,
+        "family": "source-archive",
+        "verification": "not-verified"
+      }
+    ],
+    "page": {
+      "limit": 50,
+      "snapshotVersion": "9999999999999999999999999999999999999999999999999999999999999999",
+      "nextCursor": null
+    }
+  }
+}
