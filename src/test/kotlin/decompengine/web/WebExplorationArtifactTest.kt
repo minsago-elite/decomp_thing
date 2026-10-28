@@ -23,15 +23,23 @@ class WebExplorationArtifactTest {
         val service = WebJobService(store, JobAnalyzer { _, _ -> error("execution") }, JobReconstructor { _, _ -> error("execution") })
         try {
             service.initializeExistingStorage()
+            val artifacts = WebJobArtifactStore(service)
             val descriptor = WebExplorationArtifact.descriptor(first.id, run.runId, bytes, "/nested/")
             val id = descriptor.getValue("artifactId").jsonPrimitive.content
             assertTrue(id.length <= 128)
             assertTrue(descriptor.getValue("contentHref").jsonPrimitive.content.startsWith("/nested/api/v1/jobs/${first.id}/artifacts/"))
-            assertContentEquals(bytes, WebExplorationArtifact.read(service, first.id, id))
-            assertFailsWith<WebAccessDenied> { WebExplorationArtifact.read(service, other.id, id) }
-            assertFailsWith<WebAccessDenied> { WebExplorationArtifact.read(service, first.id, "../exploration.json") }
+            // The report descriptor and the general catalog name the same digest-bound artifact.
+            val selection = resolveWebArtifact(artifacts, first.id, id)
+            assertEquals(WebArtifactFamily.EXPLORATION, selection.family); assertEquals(run.runId, selection.attempt.runId)
+            val catalog = WebArtifactCatalog(artifacts)
+            assertEquals(descriptor.getValue("artifactId"), catalog.detail(first.id, id, "/nested/").getValue("artifactId"))
+            val streamed = java.io.ByteArrayOutputStream()
+            val digest = artifacts.stream(first.id, run.runId, selection.family.path, {}, { buffer, count -> streamed.write(buffer, 0, count) }, {})
+            assertContentEquals(bytes, streamed.toByteArray()); assertEquals(selection.sha256, digest.sha256)
+            assertFailsWith<WebAccessDenied> { resolveWebArtifact(artifacts, other.id, id) }
+            assertFailsWith<WebAccessDenied> { resolveWebArtifact(artifacts, first.id, "../exploration.json") }
             Files.writeString(report, "replacement")
-            assertEquals("ARTIFACT_CHANGED", assertFailsWith<WebJobServiceException> { WebExplorationArtifact.read(service, first.id, id) }.code)
+            assertEquals("ARTIFACT_CHANGED", assertFailsWith<WebAccessDenied> { catalog.detail(first.id, id, "/nested/") }.code)
         } finally { service.close(); root.toFile().deleteRecursively() }
     }
 }

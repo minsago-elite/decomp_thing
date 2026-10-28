@@ -81,7 +81,8 @@ export type PreviewNotice = 'not-viewable' | 'too-large' | 'runtime-disabled' | 
 export function sourceFilePolicy(item: RevisionFile['item'], maximumChunkBytes: string): {
   preview: PreviewNotice; download: boolean; downloadNotice: 'too-large' | 'not-archivable' | null;
 } {
-  const tooLarge = BigInt(item.sizeBytes) > SOURCE_FILE_LIMIT;
+  // A manifest-only entry has no recorded size; the server still enforces the reader ceiling on read.
+  const tooLarge = item.sizeBytes !== null && BigInt(item.sizeBytes) > SOURCE_FILE_LIMIT;
   return {
     preview: !item.declaredViewable ? 'not-viewable' : tooLarge ? 'too-large'
       : BigInt(maximumChunkBytes) < 4n ? 'runtime-disabled' : 'available',

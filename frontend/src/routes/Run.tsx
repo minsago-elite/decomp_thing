@@ -14,6 +14,7 @@ import { ProgressPin } from '../jobs/ProgressPin';
 import { AttemptControls } from '../jobs/AttemptControls';
 import { ExplorationEvidence } from '../jobs/ExplorationEvidence';
 import { RecordedValidationEvidence } from '../jobs/RecordedValidationEvidence';
+import { ArtifactCatalog } from '../jobs/ArtifactCatalog';
 import type { ValidationNavigation } from '../jobs/validationNavigation';
 import { useSession } from '../session/useSession';
 import { receive } from '../shared/receiptTime';
@@ -126,6 +127,9 @@ function Details({ jobId, runId, basePath, session, view, navigation }: {
         </PanelBoundary>
         <PanelBoundary name={panelBoundaryCopy.names.validation}>
           <RecordedValidationEvidence key={`${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} {...(navigation === undefined ? {} : { navigation })} />
+        </PanelBoundary>
+        <PanelBoundary name="Artifact catalog">
+          <ArtifactCatalog key={`artifacts/${jobId}/${runId}`} jobId={jobId} runId={runId} revisionId={run.resultRevisionId} basePath={basePath} />
         </PanelBoundary>
       </>}
       {run.resultRevisionId ? <p><a href={sourceDirectoryPath(basePath, { jobId, runId, revisionId: run.resultRevisionId })}>{sourceCopy.browse}</a></p>

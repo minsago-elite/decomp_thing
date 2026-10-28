@@ -1,4 +1,4 @@
-import type { AttemptControls, ContractDocument, Page, RevisionDirectory, Run, SourceChunk, ValidationBytePreview, ValidationCases, ValidationFailure, ValidationHistory, ValidationSummary } from './generated';
+import type { Artifact, AttemptControls, ContractDocument, Page, RevisionDirectory, Run, SourceChunk, SourceDiff, SourceFileDiff, SourceSearch, ValidationBytePreview, ValidationCases, ValidationFailure, ValidationHistory, ValidationSummary } from './generated';
 import { ApiClientError } from './errors';
 import { normalizeBasePath, validateResourceHref } from '../app/paths';
 import type { ApiResource } from '../app/paths';
@@ -252,10 +252,90 @@ export function checkSourceChunk(data: SourceChunk): void {
   }
 }
 
+const codePoints = (value: string): number => Array.from(value).length;
+const ARTIFACT_CODES = { 'exploration-report': 'exploration', 'progress-journal': 'progress', 'source-manifest': 'manifest',
+  'build-contract': 'contract', 'source-archive': 'archive' } as const;
+
+/** Mirrors verify.py: counts partition the changed total and modifications keep their path. */
+export function checkSourceDiff(data: SourceDiff): void {
+  const { counts, items, page } = data;
+  requireValue(counts.added + counts.removed + counts.modified + counts.renamed === data.totalChanged);
+  requireValue(items.length <= page.limit && items.length <= data.totalChanged);
+  for (const item of items) {
+    if (item.status === 'renamed') requireValue(item.baseFile!.sha256 === item.headFile!.sha256);
+    // A declared content-kind change of identical bytes is a modification too.
+    if (item.status === 'modified') requireValue(item.baseFile!.displayName === item.headFile!.displayName
+      && (item.baseFile!.sha256 !== item.headFile!.sha256 || item.baseFile!.declaredUtf8Text !== item.headFile!.declaredUtf8Text));
+  }
+}
+
+/** Hunk pages are contiguous, line numbers sequential per side and truncation explicit. */
+export function checkSourceFileDiff(data: SourceFileDiff): void {
+  const end = data.hunkOffset + data.hunks.length;
+  requireValue(data.nextHunk === null || data.nextHunk === end);
+  requireValue((data.nextHunk === null) === (end === data.totalHunks || data.totalHunks === 0));
+  requireValue(data.representation !== 'text' || data.totalHunks === 0 || data.hunks.length > 0);
+  for (const hunk of data.hunks) {
+    let base = hunk.baseStart, head = hunk.headStart;
+    for (const line of hunk.lines) {
+      if (line.baseLine !== null) { requireValue(line.baseLine === base && base <= (data.baseLines ?? 0)); base++; }
+      if (line.headLine !== null) { requireValue(line.headLine === head && head <= (data.headLines ?? 0)); head++; }
+      requireValue(line.characters >= line.text.length && line.truncated === line.characters > line.text.length);
+    }
+    requireValue(base - hunk.baseStart === hunk.baseCount && head - hunk.headStart === hunk.headCount);
+  }
+}
+
+export function checkSourceSearch(data: SourceSearch): void {
+  const { page, limits, scope, progress, query, items } = data;
+  requireValue(page.snapshotVersion === data.metadataVersion && page.limit === limits.maxResults && items.length <= page.limit);
+  const complete = data.status === 'complete';
+  requireValue(complete === (data.stopReason === null) && complete === (page.nextCursor === null));
+  requireValue((progress.remainingFiles === 0) === complete && progress.remainingFiles <= scope.searchableFiles);
+  requireValue(scope.searchableFiles + scope.notViewable + scope.declaredBinary + scope.tooLarge === scope.filesInScope);
+  // A page that stops inside a file counts that file as both scanned and remaining.
+  requireValue(progress.unsearchableText <= progress.scannedFiles
+    && progress.scannedFiles + progress.unavailableFiles + progress.remainingFiles <= scope.searchableFiles + (complete ? 0 : 1)
+    && BigInt(progress.scannedBytes) <= BigInt(limits.maxScannedBytes));
+  const gaps = data.coverageGaps;
+  requireValue(gaps.unsearchableText >= progress.unsearchableText && gaps.unavailableFiles >= progress.unavailableFiles
+    && gaps.unsearchableText + gaps.unavailableFiles <= scope.searchableFiles);
+  if (query.match === 'symbol') requireValue(/^[A-Za-z_][A-Za-z0-9_]*$/u.test(query.text));
+  const seen = new Set<string>(); let previous: SourceSearch['items'][number] | undefined;
+  for (const item of items) {
+    const line = BigInt(item.line), column = BigInt(item.column), offset = BigInt(item.offsetBytes), lineOffset = BigInt(item.lineOffsetBytes);
+    requireValue(line >= 1n && column >= 1n && lineOffset <= offset && (line === 1n) === (lineOffset === 0n));
+    requireValue(![item.before, item.match, item.after].some(text => text.includes('\n')));
+    const before = codePoints(item.before), after = codePoints(item.after);
+    requireValue(before <= 80 && after <= 80 && (!item.truncatedBefore || before === 80) && (!item.truncatedAfter || after === 80)
+      && column - 1n >= BigInt(before) && (item.truncatedBefore || column - 1n === BigInt(before)));
+    requireValue((!query.caseSensitive || item.match === query.text) && codePoints(item.match) === codePoints(query.text));
+    if (query.match === 'symbol') requireValue(!/[A-Za-z0-9_]$/u.test(item.before) && !/^[A-Za-z0-9_]/u.test(item.after));
+    if (previous?.fileId === item.fileId) {
+      requireValue(previous.displayName === item.displayName
+        && offset >= BigInt(previous.offsetBytes) + BigInt(new TextEncoder().encode(previous.match).length));
+    } else {
+      requireValue(!seen.has(item.fileId) && (previous === undefined || previous.displayName < item.displayName));
+    }
+    seen.add(item.fileId); previous = item;
+  }
+}
+
 /** Mirrors the shared verifier's cross-field rules; fixtures exercise both implementations. */
 export function checkSemantics(document: ContractDocument, basePath = '/'): void {
   function checkHref(href: string, resource: ApiResource) {
     try { validateResourceHref(basePath, href, resource); } catch { throw new ApiClientError('invalid_response'); }
+  }
+  // Catalog entries carry family and verification together; only revision-bound source metadata is verified.
+  function checkCatalogArtifact(item: Artifact) {
+    checkHref(item.contentHref, { kind: 'artifact-content', jobId: item.binding.jobId, artifactId: item.artifactId });
+    requireValue((item.family === undefined) === (item.verification === undefined));
+    if (item.family === undefined) return;
+    requireValue(item.artifactId === `${ARTIFACT_CODES[item.family]}_${item.artifactId.split('_')[1] ?? ''}_${item.sha256}`
+      && /^[a-z]+_[a-f0-9]{32}_[a-f0-9]{64}$/u.test(item.artifactId) && item.binding.runId !== null);
+    if (item.verification === 'source-inventory-checked') {
+      requireValue((item.family === 'source-manifest' || item.family === 'build-contract') && item.binding.revisionId !== null);
+    }
   }
   switch (document.kind) {
     case 'validationHistory':
@@ -306,6 +386,15 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
       break;
     case 'sourceChunk':
       checkSourceChunk(document.data);
+      break;
+    case 'sourceSearch':
+      checkSourceSearch(document.data);
+      break;
+    case 'sourceDiff':
+      checkSourceDiff(document.data);
+      break;
+    case 'sourceFileDiff':
+      checkSourceFileDiff(document.data);
       break;
     case 'revisionFile': {
       const { item, parentDirectoryId } = document.data;
@@ -405,10 +494,20 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
       break;
     }
     case 'artifact':
-      checkHref(document.data.contentHref, {
-        kind: 'artifact-content', jobId: document.data.binding.jobId, artifactId: document.data.artifactId,
-      });
+      checkCatalogArtifact(document.data);
       break;
+    case 'artifacts': {
+      const { binding, items, page, catalogedFamilies } = document.data;
+      requireValue((binding.revisionId === null || binding.runId !== null) && items.length <= page.limit
+        && new Set(items.map(item => item.artifactId)).size === items.length);
+      for (const item of items) {
+        checkCatalogArtifact(item);
+        requireValue(item.family !== undefined && catalogedFamilies.includes(item.family) && item.binding.jobId === binding.jobId
+          && (binding.runId === null || item.binding.runId === binding.runId)
+          && (binding.revisionId === null || item.binding.revisionId === binding.revisionId));
+      }
+      break;
+    }
     case 'event':
       if (document.type === 'retention.gap') checkHref(document.payload.snapshotHref, {
         kind: 'snapshot', jobId: document.jobId, runId: document.runId,

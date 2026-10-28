@@ -7234,6 +7234,8 @@ internal fun hashStableRegularFile(
     readBytes: (Int, Long) -> Unit,
     cancellationCheck: () -> Unit,
     validateMetadata: (LinuxDescriptor) -> Unit = {},
+    // Receives each chunk before final revalidation; callers must not treat it as verified until this returns.
+    consumeBytes: (ByteArray, Int) -> Unit = { _, _ -> },
 ): StableFileDigest {
     cancellationCheck()
     // Snapshot paths use Linux filename semantics, independently of repair manifest grammar.
@@ -7279,6 +7281,7 @@ internal fun hashStableRegularFile(
                 size = Math.addExact(size, count.toLong())
                 readBytes(count, size)
                 digest.update(buffer, 0, count)
+                consumeBytes(buffer, count)
             }
         }
         cancellationCheck()

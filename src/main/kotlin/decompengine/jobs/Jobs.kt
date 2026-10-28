@@ -406,6 +406,61 @@ class JobStore internal constructor(
         ) { "artifact path must be a canonical report path" }
     }
 
+    /**
+     * Hash or stream one canonical report artifact through pinned descriptors without retaining its body.
+     * [consume] sees bytes before the final identity/metadata revalidation; only a normal return confirms them.
+     */
+    internal fun streamArtifact(
+        jobId: String,
+        relativePath: String,
+        declaredSize: (Long) -> Unit,
+        consume: (ByteArray, Int) -> Unit,
+        cancellationCheck: () -> Unit,
+    ): decompengine.repair.StableFileDigest {
+        jobDirectory(jobId)
+        require(relativePath.startsWith("reports/") && relativePath.length <= 4096 &&
+            relativePath.none { it == '\\' || it.code < 32 || it.code == 127 } &&
+            relativePath.split('/').let { parts -> parts.size <= 32 && parts.none { it.isBlank() || it == "." || it == ".." } }
+        ) { "artifact path must be a canonical report path" }
+        return streamContainedFile(jobId, relativePath, declaredSize, consume, cancellationCheck)
+    }
+
+    /** Inventory input reads retain the store's private upload ceiling, with the same admission accounting. */
+    internal fun readArtifactInventoryInput(jobId: String, reserveBytes: (Long) -> Unit,
+        cancellationCheck: () -> Unit): StableRegularFile =
+        readArtifactInventoryFile(jobId, "input.elf", MAX_INPUT_BYTES.toLong(), reserveBytes, cancellationCheck)
+
+    /** Catalog inventory reads use the same pinned streaming boundary, including input and failed-read accounting. */
+    internal fun readArtifactInventoryFile(jobId: String, relativePath: String, maximumBytes: Long,
+        reserveBytes: (Long) -> Unit, cancellationCheck: () -> Unit): StableRegularFile {
+        require(maximumBytes in 1 until Int.MAX_VALUE.toLong())
+        val bytes = java.io.ByteArrayOutputStream()
+        val authorize: (Long) -> Unit = { size ->
+            if (size > maximumBytes) throw decompengine.repair.RepairBudgetExceededException("artifact inventory file exceeds its byte limit")
+            reserveBytes(size)
+        }
+        val consume: (ByteArray, Int) -> Unit = { chunk, count -> bytes.write(chunk, 0, count) }
+        val digest = if (relativePath == "input.elf") {
+            jobDirectory(jobId)
+            streamContainedFile(jobId, relativePath, authorize, consume, cancellationCheck)
+        } else streamArtifact(jobId, relativePath, authorize, consume, cancellationCheck)
+        return StableRegularFile(bytes.toByteArray(), digest.sha256, digest.identity)
+    }
+
+    private fun streamContainedFile(jobId: String, relativePath: String, declaredSize: (Long) -> Unit,
+        consume: (ByteArray, Int) -> Unit, cancellationCheck: () -> Unit): decompengine.repair.StableFileDigest {
+        var authorized = -1L
+        return try {
+            // Refuse growth before a chunk past the initially authorized size is hashed or consumed, so byte ceilings
+            // and page budgets cannot be exceeded while waiting for the final size revalidation.
+            decompengine.repair.hashStableRegularFile(root, "$jobId/$relativePath", { size -> authorized = size; declaredSize(size) },
+                { _, total -> require(total <= authorized) { "artifact grew while it was read" } },
+                cancellationCheck, consumeBytes = consume)
+        } catch (_: IOException) {
+            throw JobStoreException("artifact is unavailable or its path changed")
+        }
+    }
+
     internal fun readInput(jobId: String): StableRegularFile {
         jobDirectory(jobId)
         return contained("job input") { readStableRegularFile(root, "$jobId/input.elf", MAX_INPUT_BYTES.toLong()) }

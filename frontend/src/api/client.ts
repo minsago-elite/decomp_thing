@@ -38,6 +38,10 @@ export function createApiClient(options: ClientOptions) {
     try { url = apiPath(basePath, path); } catch { throw new ApiClientError('invalid_request'); }
     if (session && path !== '/session') throw new ApiClientError('invalid_request');
     const headers = new Headers({ Accept: artifact || sourceHead ? 'application/octet-stream' : 'application/json' });
+    // Explicitly negotiate the broader inventory. Older v1 servers ignore this header and return inputs only.
+    if (method === 'GET' && (kind === 'revisionSources' || kind === 'revisionDirectory' || kind === 'revisionFile')) {
+      headers.set('X-Decomp-Source-Inventory', 'manifest');
+    }
     const mutating = method !== 'GET' && method !== 'HEAD';
     if (mutating && !upload) headers.set('Content-Type', 'application/json');
     // The agent preflight is a single-flight server action with no resource version: session, Origin and
