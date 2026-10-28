@@ -195,15 +195,15 @@ internal object GitWorkspaceMutations {
         }
     }
 
-    /** Refuse path updates that could remove or replace any gitlink already in the private index. */
-    fun requireNoGitlinkPathConflicts(
+    /** Refuse path updates that could remove or replace an unselected private-index entry. */
+    fun requireNoIndexPathConflicts(
         runner: GitCommandRunner,
         gitDir: Path,
         workTree: Path,
         index: Path,
         entries: List<GitStatusEntry>,
     ) {
-        val selectedPaths = entries.flatMap { listOfNotNull(it.path, it.originalPath) }
+        val selectedPaths = entries.flatMap { listOfNotNull(it.path, it.originalPath) }.toSet()
         val result = runner.run(GitInvocation("ls-files", listOf("--stage", "--full-name", "-z"),
             gitDir = gitDir, workTree = workTree, variables = mapOf("GIT_INDEX_FILE" to index.toString()),
             truncateStdout = true, limits = COMMIT_LIMITS.copy(maxStdoutBytes = GitReads.MAX_STATUS_BYTES)))
@@ -218,12 +218,14 @@ internal object GitWorkspaceMutations {
                 fields[2] !in setOf("0", "1", "2", "3")) {
                 throw GitRepositoryException("REPOSITORY_CORRUPT", "Git index listing is malformed.")
             }
-            if (fields[0] != "160000") continue
-            val gitlink = GitPath.of(record.copyOfRange(separator + 1, record.size))
-            if (selectedPaths.any { path ->
-                    path == gitlink || path.isDescendantOf(gitlink) || gitlink.isDescendantOf(path)
+            val indexedPath = GitPath.of(record.copyOfRange(separator + 1, record.size))
+            // An exact selected entry is the object being staged (including the old side of a
+            // selected rename). Any overlapping unselected entry can otherwise be silently
+            // removed by update-index when a file/directory replacement is published.
+            if (indexedPath !in selectedPaths && selectedPaths.any { path ->
+                    path.isDescendantOf(indexedPath) || indexedPath.isDescendantOf(path)
                 }) {
-                refuse("EXCLUDED_PATH", "A selected path overlaps a repository gitlink and cannot be staged.")
+                refuse("EXCLUDED_PATH", "A selected path overlaps an unselected index entry and cannot be staged.")
             }
         }
     }

@@ -233,6 +233,35 @@ class GitWorkspaceMutationsTest {
         }
     }
 
+    @Test fun `staging refuses hidden regular index entries that conflict with selected file paths`(): Unit {
+        for (format in listOf(GitObjectFormat.SHA1, GitObjectFormat.SHA256)) Fixture().use { f ->
+            val service = f.open(GitRepositoryPolicy(defaultBranch = "trunk", objectFormat = format))
+            val repositoryId = service.initialized()
+            val gitDir = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
+            val workTree = gitDir.parent.resolve("worktree")
+            fun raw(vararg args: String) = f.repositories.git("--git-dir=$gitDir", "--work-tree=$workTree", *args, cwd = workTree)
+            val hidden = "a/child.c"
+            Files.createDirectories(workTree.resolve("a"))
+            Files.writeString(workTree.resolve(hidden), "int retained;\n")
+            f.repositories.commitAll(gitDir, workTree, "baseline")
+            raw("update-index", "--skip-worktree", hidden)
+            Files.delete(workTree.resolve(hidden))
+            Files.delete(workTree.resolve("a"))
+            Files.writeString(workTree.resolve("a"), "int replacement;\n")
+            val before = raw("ls-files", "--stage", "-z")
+            val (review, guards) = service.guards(repositoryId)
+            val selection = review.ids { it.path.exact == "a" && it.untracked }
+            assertEquals(1, selection.size)
+
+            val result = service.run(repositoryId,
+                GitStageRequest(review.record.worktreeId, guards, selection, true), "stage_hidden_regular_01")
+            assertEquals(GitOperationState.FAILED, result.state, result.message)
+            assertEquals("EXCLUDED_PATH", result.failureCode)
+            assertEquals(before, raw("ls-files", "--stage", "-z"), "refusal preserves the hidden regular entry")
+            assertTrue(before.contains(hidden))
+        }
+    }
+
     @Test fun `staging an edited symlink placeholder preserves its reviewed logical mode`(): Unit = Fixture().use { f ->
         val service = f.open()
         val repositoryId = service.initialized()

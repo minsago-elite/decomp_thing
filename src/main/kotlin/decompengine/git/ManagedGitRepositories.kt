@@ -670,12 +670,12 @@ class ManagedGitRepositories(
                             Files.copy(located.gitDir.resolve("index"), index)
                         }
                         if (request.stage) {
-                            // Ordinary status hides submodules, but an external writer may stage a
-                            // gitlink whose path conflicts with a selected file. Check the private
-                            // index before update-index can remove that hidden entry.
+                            // Ordinary status can hide skip-worktree entries as well as submodules.
+                            // Check every private-index path before update-index can remove an
+                            // unselected entry during a file/directory replacement.
                             GitWorkspaceMutations.requireNoStagedGitlinks(runner, located.gitDir, located.workTree,
                                 request.guards.expectedHeadObjectId, index)
-                            GitWorkspaceMutations.requireNoGitlinkPathConflicts(
+                            GitWorkspaceMutations.requireNoIndexPathConflicts(
                                 runner, located.gitDir, located.workTree, index, entries,
                             )
                             GitWorkspaceMutations.stage(runner, located.gitDir, located.workTree, entries, reviewed, staging, index) {
