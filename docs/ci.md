@@ -279,7 +279,7 @@ their checks. GitHub branch-protection requirements remain separate as noted abo
 | Kotlin core / oracle / live / live-fulltree / aggregate | Normal; complementary ordinary core/oracle namespaces and tagged full-tree/complement live groups run with required hosted fixtures. Oracle owns the isolated RSS/class-data checks; core owns real Angr and quota snapshot follow-up. Primary live retains the pinned credential-free Goose initialize and Codex authentication-boundary preflights. The `kotlin` aggregate requires every shard to succeed. | [ci.yml](../.github/workflows/ci.yml), [ci.sh](../scripts/ci.sh), `build.gradle.kts` |
 | Bundled Ghidra / archival Ghidra / Clang | Normal, including the heavier direct-API/native, Docker archival and strict Clang/sanitizer checks. | [ci.yml](../.github/workflows/ci.yml), `scripts/validate-archival-docker.sh`, `scripts/validate-clang.sh` |
 | ACP contract / Built-in core contract | Normal and dispatchable; required host and strict fixture inventories, with missing/failed/skipped required verification refused. | [acp-contract.yml](../.github/workflows/acp-contract.yml), [builtin-contract.yml](../.github/workflows/builtin-contract.yml) |
-| GCC / LLVM oracle-model normal jobs | Normal; their existing source, provenance, artifact/reference and generation checks retain their separate oracle authority. Manual dispatch does not rerun these normal jobs. | [gcc-oracle-model.yml](../.github/workflows/gcc-oracle-model.yml), [llvm-oracle-model.yml](../.github/workflows/llvm-oracle-model.yml) |
+| GCC / LLVM oracle-model normal jobs | Normal; their existing source, provenance, artifact/reference and generation checks retain their separate oracle authority. The LLVM workflow also emits a dedicated `required-contract` check that succeeds only after the normal provenance lane succeeds; manual dispatch does not rerun these normal jobs. | [gcc-oracle-model.yml](../.github/workflows/gcc-oracle-model.yml), [llvm-oracle-model.yml](../.github/workflows/llvm-oracle-model.yml) |
 | Retained GCC driver DWARF interfaces | Explicit dispatch, or a triggered PR run already carrying `qualify:driver-dwarf-interfaces`. Applying the label alone is not a configured workflow trigger. | `driver-dwarf-interfaces` in [gcc-oracle-model.yml](../.github/workflows/gcc-oracle-model.yml) |
 | LLVM native runtime measurement | Explicit dispatch with `qualification=native-runtime-measurement`; measurement does not approve a production runtime. | `native-runtime-measurement` in [llvm-oracle-model.yml](../.github/workflows/llvm-oracle-model.yml) |
 | LLVM oracle clean rebuild | Manual dispatch only; run when the locked source/toolchain/flags/artifact pair needs fresh rebuild evidence. | [llvm-oracle-rebuild.yml](../.github/workflows/llvm-oracle-rebuild.yml) |
@@ -441,6 +441,9 @@ toolchain recipe and checks its immutable base, Dockerfile, build-record
 binding, platform, and every recorded live tool's exact executable bytes and
 version output. The Docker image ID is retained as origin provenance rather
 than used as a false layer-reproducibility claim.
+On push/PR events, `llvm-oracle-model.yml` publishes a `required-contract`
+check that fails if the normal provenance lane does not pass, so branch
+protection can require one stable LLVM gate.
 
 The expensive source rebuild is intentionally manual. Run the `LLVM oracle
 clean rebuild` workflow when the source lock, toolchain, flags, or artifact
