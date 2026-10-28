@@ -21,6 +21,8 @@ import { useSession } from '../session/useSession';
 import { receive } from '../shared/receiptTime';
 import type { Received } from '../shared/receiptTime';
 import { MetadataReceipt } from '../shared/MetadataReceipt';
+import { PanelBoundary } from '../shared/PanelBoundary';
+import { panelBoundaryCopy } from '../copy/shell';
 import { canRetainMetadata, metadataFailureKind } from '../shared/retainMetadata';
 import { attemptOutcomeCopy as outcomeCopy, stopOutcomeCopy } from '../copy/attemptOutcome';
 import { QueuePosition } from '../jobs/QueuePosition';
@@ -109,14 +111,24 @@ function Details({ jobId, runId, basePath, session, view, navigation }: {
       </dl> : <p>{copy.usageWasNotReportedForThisAttempt}</p>}
       </>}
       {view !== 'evidence' && <>
-        <AttemptControls key={`controls/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} session={session}
-          run={run} onChanged={() => { setRefresh(value => value + 1); }} />
-        <ProgressPin key={`pin/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} session={session} />
-        <Activity key={`activity/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} {...(view === 'activity' && navigation !== undefined ? { navigation } : {})} />
+        <PanelBoundary name={panelBoundaryCopy.names.attemptControls}>
+          <AttemptControls key={`controls/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} session={session}
+            run={run} onChanged={() => { setRefresh(value => value + 1); }} />
+        </PanelBoundary>
+        <PanelBoundary name={panelBoundaryCopy.names.progressPin}>
+          <ProgressPin key={`pin/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} session={session} />
+        </PanelBoundary>
+        <PanelBoundary name={panelBoundaryCopy.names.activity}>
+          <Activity key={`activity/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} {...(view === 'activity' && navigation !== undefined ? { navigation } : {})} />
+        </PanelBoundary>
       </>}
       {view !== 'activity' && <>
-        <ExplorationEvidence key={`${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} />
-        <RecordedValidationEvidence key={`${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} {...(navigation === undefined ? {} : { navigation })} />
+        <PanelBoundary name={panelBoundaryCopy.names.exploration}>
+          <ExplorationEvidence key={`${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} />
+        </PanelBoundary>
+        <PanelBoundary name={panelBoundaryCopy.names.validation}>
+          <RecordedValidationEvidence key={`${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} {...(navigation === undefined ? {} : { navigation })} />
+        </PanelBoundary>
       </>}
       {run.resultRevisionId ? <ul class="job-actions" aria-label={structureCopy.revisionViews}>
         <li><a href={sourceDirectoryPath(basePath, { jobId, runId, revisionId: run.resultRevisionId })}>{sourceCopy.browse}</a></li>
