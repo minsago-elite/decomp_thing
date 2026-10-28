@@ -12,6 +12,7 @@ import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.StrictJsonLimits
 import decompengine.oracle.fulltree.FullTreeFunctionObservationClassPathEntry
 import decompengine.oracle.fulltree.FullTreeFunctionObservationIsolationConfiguration
+import decompengine.oracle.fulltree.FullTreeFunctionObservationRuntimeArtifact
 import decompengine.oracle.fulltree.FullTreeFunctionObservationRuntimeMount
 import decompengine.oracle.fulltree.KotlinSystemdCgroupBootLauncher
 import decompengine.oracle.fulltree.KotlinSystemdCgroupBootLaunchException
@@ -1351,6 +1352,7 @@ private fun mountedGccInterpreterSource(
 internal fun deriveRuntimeConfiguration(
     definition: GccCompilerEngineValidatedContainmentDefinition,
     classPath: List<FullTreeFunctionObservationClassPathEntry>,
+    runtimeArtifacts: List<FullTreeFunctionObservationRuntimeArtifact> = emptyList(),
 ): FullTreeFunctionObservationIsolationConfiguration {
     val byRole = definition.artifacts.associateBy(GccCompilerEngineContainmentArtifactIdentity::role)
     val java = byRole.getValue(GccCompilerEngineContainmentArtifactRole.JAVA_EXECUTABLE)
@@ -1420,6 +1422,7 @@ internal fun deriveRuntimeConfiguration(
         expectedSystemdBusControllerSha256 = byRole.getValue(
             GccCompilerEngineContainmentArtifactRole.SYSTEMD_BUSCTL_EXECUTABLE,
         ).sha256,
+        runtimeArtifacts = runtimeArtifacts,
     )
 }
 
