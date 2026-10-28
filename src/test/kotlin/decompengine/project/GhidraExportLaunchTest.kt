@@ -76,6 +76,36 @@ class GhidraExportLaunchTest {
     }
 
     @Test
+    fun `process tree waits for Java exit acknowledgement after native handle exits`() {
+        val handleAlive = AtomicBoolean(true)
+        val processAlive = AtomicBoolean(true)
+        val handle = fixtureHandle(2000L, initialAlive = true, refusesTermination = false, alive = handleAlive)
+        val process = object : Process() {
+            override fun getOutputStream(): java.io.OutputStream = ByteArrayOutputStream()
+            override fun getInputStream(): java.io.InputStream = ByteArrayInputStream(byteArrayOf())
+            override fun getErrorStream(): java.io.InputStream = ByteArrayInputStream(byteArrayOf())
+            override fun waitFor(): Int = if (processAlive.get()) throw IllegalThreadStateException() else 70
+            override fun waitFor(timeout: Long, unit: TimeUnit): Boolean {
+                processAlive.set(false)
+                return true
+            }
+            override fun exitValue(): Int = if (processAlive.get()) throw IllegalThreadStateException() else 70
+            override fun destroy() { handleAlive.set(false) }
+            override fun destroyForcibly(): Process { handleAlive.set(false); return this }
+            override fun isAlive(): Boolean = processAlive.get()
+            override fun toHandle(): ProcessHandle = handle
+        }
+        val cleanup = ExportProcessTree(
+            process, Duration.ZERO, sleepNanos = {},
+            descendantObservation = { _, _ -> },
+        ).terminate()
+
+        assertTrue(cleanup.confirmedAbsent)
+        assertFalse(process.isAlive)
+        assertFalse(handle.isAlive)
+    }
+
+    @Test
     fun `process tree confirms known exit and retains yielded handles when observation later fails`() {
         val exited = FixtureOwnedProcess(fixtureHandle(2001L, initialAlive = true, refusesTermination = false))
         val clock = AtomicLong()

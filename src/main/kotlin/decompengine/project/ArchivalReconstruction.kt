@@ -475,7 +475,10 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
             }
             if (!treeResult.confirmedAbsent) {
                 val failure = GhidraAnalysisException(
-                    "Ghidra export cleanup could not prove absence of its retained process/handle inventory",
+                    buildString {
+                        append("Ghidra export cleanup could not prove absence of its retained process/handle inventory")
+                        treeResult.diagnostic?.let { append(": ").append(it) }
+                    },
                     treeResult.failure,
                 )
                 recordCleanupFailure(failure)
@@ -632,7 +635,11 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
     }
 }
 
-internal data class ExportProcessCleanupResult(val confirmedAbsent: Boolean, val failure: Throwable?)
+internal data class ExportProcessCleanupResult(
+    val confirmedAbsent: Boolean,
+    val failure: Throwable?,
+    val diagnostic: String? = null,
+)
 
 /** References retained after unresolved cleanup prevent another launch from assuming capacity. */
 internal data class ExportProcessCleanupOwner(
@@ -778,8 +785,17 @@ internal class ExportProcessTree(
                 if (!aliveOrUnknown()) return true
                 val remaining = remaining(allowance)
                 if (remaining == 0L) return false
-                try { sleepNanos(minOf(remaining, POLL_NANOS)) }
-                catch (_: InterruptedException) {
+                val pollNanos = minOf(remaining, POLL_NANOS)
+                val waitStarted = nanoTime()
+                try {
+                    // ProcessHandle can observe native exit before ProcessImpl acknowledges it.
+                    // Wait through the owned Process API inside this same cleanup window before
+                    // treating a still-reported Java process as a retained live owner.
+                    if (process.isAlive && process.waitFor(pollNanos, TimeUnit.NANOSECONDS)) continue
+                    val elapsed = nanoTime() - waitStarted
+                    val elapsedNanos = if (elapsed < 0) 0L else elapsed
+                    if (elapsedNanos < pollNanos) sleepNanos(pollNanos - elapsedNanos)
+                } catch (_: InterruptedException) {
                     // Interrupted waiting says nothing about the retained process inventory.
                     // Continue observing within the same window and restore interruption on exit.
                     onWaitInterrupted()
@@ -803,9 +819,31 @@ internal class ExportProcessTree(
         }
         val stillObservedAlive = aliveOrUnknown()
         val cleanupFailure = observationFailure
+        val liveHandles = LinkedHashSet<String>()
+        fun describe(role: String, handle: ProcessHandle) {
+            val executable = runCatching { handle.info().command().orElse(null) }
+                .getOrNull()?.substringAfterLast('/')?.take(80)
+            liveHandles.add("$role=${handle.pid()}${executable?.let { "($it)" }.orEmpty()}")
+        }
+        runCatching { process.isAlive }.getOrDefault(false).takeIf { it }?.let {
+            rootHandle?.let { describe("process", it) }
+        }
+        rootHandle?.let { handle ->
+            if (runCatching { handle.isAlive }.getOrDefault(false)) describe("root", handle)
+        }
+        knownHandles().forEach { handle ->
+            if (runCatching { handle.isAlive }.getOrDefault(false)) describe("descendant", handle)
+        }
+        val cleanupDiagnostic = when {
+            cleanupFailure != null -> "process observation failed: ${cleanupFailure.message ?: cleanupFailure.javaClass.simpleName}"
+            liveHandles.isNotEmpty() -> "live identities at cleanup cutoff: ${liveHandles.joinToString()}"
+            !confirmed || stillObservedAlive -> "process absence was not confirmed within the cleanup allowance"
+            else -> null
+        }
         val result = ExportProcessCleanupResult(
             confirmedAbsent = confirmed && !stillObservedAlive && cleanupFailure == null,
             failure = cleanupFailure,
+            diagnostic = cleanupDiagnostic,
         )
         this.result = result
         return result
@@ -963,7 +1001,10 @@ private fun stopLateExportProcess(
         }
         if (!result.confirmedAbsent) cleanup {
             throw GhidraAnalysisException(
-                "late Ghidra export cleanup could not prove absence of its retained process/handle inventory",
+                buildString {
+                    append("late Ghidra export cleanup could not prove absence of its retained process/handle inventory")
+                    result.diagnostic?.let { append(": ").append(it) }
+                },
                 result.failure,
             )
         }

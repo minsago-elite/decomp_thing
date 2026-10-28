@@ -68,6 +68,16 @@ class DiagnosticCollector(unittest.TestCase):
         self.assertIn("Ghidra stderr diagnostic", raw)
         self.assertNotIn("NOT-DIAGNOSTIC", raw)
 
+    def test_ghidra_log_retains_bounded_final_cleanup_evidence(self):
+        data = (b"x" * 600 + b"\n") * 64 + b"cleanup owner state\n"
+        self.file("symbols-a/analysis/reports/ghidra_stdout.log", data)
+        status, raw, rows = self.collect()
+        self.assertEqual(0, status)
+        report = next(row for row in rows if row.get("kind") == "file")
+        self.assertEqual(len(data), report["size"])
+        self.assertFalse(report["truncated"])
+        self.assertIn("cleanup owner state", raw)
+
     def test_newline_absolute_operand_counterexample_stays_inside_retained_directories(self):
         outside = tempfile.TemporaryDirectory(prefix="archival-external-control-", dir=collector.BUILD)
         self.addCleanup(outside.cleanup)

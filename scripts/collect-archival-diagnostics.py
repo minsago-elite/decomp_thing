@@ -15,7 +15,7 @@ import time
 
 BUILD = Path(__file__).resolve().parent.parent / "build"
 MAX_OUTPUT_BYTES = 262144
-MAX_FILE_BYTES = 32768
+MAX_FILE_BYTES = 65536
 MAX_LINES = 240
 MAX_LINE_BYTES = 1024
 MAX_ENTRIES = 4096
