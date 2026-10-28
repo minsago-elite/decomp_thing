@@ -2,6 +2,7 @@ package decompengine.web
 
 import decompengine.git.GitAvailability
 import decompengine.git.GitRuntime
+import decompengine.git.ManagedGitRepositories
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
@@ -11,33 +12,49 @@ import kotlinx.serialization.json.put
 
 /**
  * Git is an optional runtime prerequisite detected once per listener. Bootstrap reports the
- * sanitized version and a capability state; neither ever contains the executable path.
+ * sanitized version and capability states; neither ever contains the executable or a path.
  */
-internal class WebGitCapability(val availability: GitAvailability) {
+internal class WebGitCapability(
+    val availability: GitAvailability,
+    private val managed: ManagedGitRepositories? = null,
+) {
     /** Numeric version only, also when the detected version is too old to use. */
     val version: String? get() = availability.version?.display
 
-    fun capability(): JsonObject = buildJsonObject {
-        put("id", "git")
-        when (val current = availability) {
-            is GitAvailability.Available -> {
-                // The adapter is qualified, but no managed repository route is served yet.
-                put("state", "unsupported")
-                put("reasonCode", "GIT_WORKSPACE_UNIMPLEMENTED")
-                put("message", "Git ${current.version.display} is available; managed repositories are not served yet.")
-            }
-            is GitAvailability.Unavailable -> {
-                put("state", "unavailable")
-                put("reasonCode", current.reasonCode)
-                put("message", current.message)
-            }
+    fun capabilities(): List<JsonObject> {
+        val current = availability
+        val git = when {
+            current is GitAvailability.Unavailable -> Triple("unavailable", current.reasonCode, current.message)
+            managed == null -> Triple("unavailable", "GIT_REPOSITORIES_UNCONFIGURED", "Managed repositories are not configured for this listener.")
+            else -> Triple("supported", null, "Git ${current.version?.display} is available for managed source repositories.")
         }
+        val import = when {
+            git.first != "supported" -> Triple("unavailable", git.second, git.third)
+            managed?.importConfigured != true -> Triple("unavailable", "GIT_IMPORT_UNCONFIGURED",
+                "Repository import needs an operator-configured import root on the server.")
+            else -> Triple("supported", null, "Repositories placed under the server's import root can be imported by name.")
+        }
+        return listOf(entry("git", git), entry("git-import", import))
+    }
+
+    /** The managed registry, or an explicit unavailable refusal for every Git route. */
+    fun repositories(): ManagedGitRepositories {
+        val current = availability
+        if (current is GitAvailability.Unavailable) throw WebAccessDenied(503, "CAPABILITY_UNAVAILABLE", current.message)
+        return managed ?: throw WebAccessDenied(503, "CAPABILITY_UNAVAILABLE", "Managed repositories are not configured for this listener.")
+    }
+
+    fun versionJson() = version?.let(::JsonPrimitive) ?: JsonNull
+
+    private fun entry(id: String, state: Triple<String, String?, String>) = buildJsonObject {
+        put("id", id)
+        put("state", state.first)
+        put("reasonCode", state.second?.let(::JsonPrimitive) ?: JsonNull)
+        put("message", state.third)
         put("workflows", JsonArray(emptyList()))
         put("agentContractVersion", JsonNull)
         put("limits", JsonNull)
     }
-
-    fun versionJson() = version?.let(::JsonPrimitive) ?: JsonNull
 
     companion object {
         fun detect(): WebGitCapability = WebGitCapability(GitRuntime.detect())
