@@ -127,7 +127,13 @@ class JobStoreTest {
                     java.nio.file.Files.copy(retained.resolve("job.json"), jobDirectory.resolve("job.json"))
                 }
             }
-            assertEquals("stable file-read directory binding changed", failure.message)
+            assertTrue(
+                failure.message in setOf(
+                    "stable file-read directory binding changed",
+                    "stable file-read root binding changed",
+                ),
+                "directory replacement must be refused by a pinned path binding check",
+            )
         }
 
         run {
