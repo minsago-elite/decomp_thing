@@ -1,5 +1,6 @@
 import type { RevisionDirectory, RevisionFile } from '../api/generated';
 import { ApiClientError, withApiFailureReference } from '../api/errors';
+import { metadataFailureKind } from '../shared/retainMetadata';
 import { sourceCopy as copy } from '../copy/sources';
 import { sourceReadRoute } from '../app/paths';
 import type { SourceSelection, SourceSnapshotPin } from '../app/paths';
@@ -64,12 +65,14 @@ export function sourceSnapshotSelection(search: string): { pin: SourceSnapshotPi
 export function sourceReadMessage(failure: unknown): string {
   let text: string = copy.unavailable;
   if (failure instanceof ApiClientError) {
+    // Source-specific outcomes first, then the shared session/denied/missing/unsupported/corrupt/server
+    // categories (#628), so each failure class names its own next step.
     if (failure.code === 'invalid_request') text = copy.invalid;
-    else if (failure.status === 404) text = copy.noSnapshot;
     else if (failure.status === 429) text = copy.busy;
     else if (failure.status === 416) text = copy.invalidRange;
-    else if (failure.status === 401 || failure.status === 403) text = copy.denied;
     else if (failure.status === 409 || failure.status === 410 || ['CURSOR_EXPIRED', 'INVALID_CURSOR'].includes(failure.serverCode ?? '')) text = copy.expired;
+    else text = { session: copy.reconnect, denied: copy.denied, missing: copy.noSnapshot, unsupported: copy.incompatible,
+      unverified: copy.unverified, failed: copy.unavailable }[metadataFailureKind(failure)];
   }
   return withApiFailureReference(text, failure);
 }

@@ -125,6 +125,10 @@ class BoundStrippedModel:
     oracle: FunctionOracle
     model: RecoveredModel
     provenance: dict[str, Any]
+    # Byte records of the exact snapshots that were verified and parsed.
+    model_record: dict[str, Any]
+    binding_record: dict[str, Any]
+    qualification_record: dict[str, Any]
 
 
 def _require_equal(actual: Any, expected: Any, message: str) -> None:
@@ -342,6 +346,9 @@ class BoundRecords:
     provenance: dict[str, Any]
     binding_record: dict[str, Any]
     qualification_record: dict[str, Any]
+    # The verified binding's program-model byte length, which the parsed
+    # model snapshot must match.
+    program_model_bytes: int
 
 
 def load_bound_provenance(
@@ -365,6 +372,7 @@ def load_bound_provenance(
         provenance=bound_provenance(manifest_sha256, artifact, binding, qualification),
         binding_record=binding_record,
         qualification_record=qualification_record,
+        program_model_bytes=binding["programModel"]["bytes"],
     )
 
 
@@ -396,9 +404,10 @@ def load_bound_stripped_model(
         "function oracle stripped artifact disagrees with the manifest",
     )
 
-    provenance = load_bound_provenance(
+    records = load_bound_provenance(
         manifest_sha256, artifact, binding_path, qualification_path
-    ).provenance
+    )
+    provenance = records.provenance
     model_binding = provenance["programModel"]
     try:
         model = load_program_model(
@@ -407,6 +416,7 @@ def load_bound_stripped_model(
             artifact=artifact,
             model_image_base=artifact.elf_image_base,
             expected_sha256=model_binding["sha256"],
+            expected_bytes=records.program_model_bytes,
         )
     except ScoringError as error:
         raise CoverageError(f"program model rejected: {error}") from error
@@ -419,4 +429,13 @@ def load_bound_stripped_model(
         oracle=oracle,
         model=model,
         provenance=provenance,
+        # The parsed snapshot hashed to the bound digest and had the bound
+        # length, so the binding's commitment names exactly those bytes.
+        model_record={
+            "path": program_model_path.name,
+            "bytes": records.program_model_bytes,
+            "sha256": model_binding["sha256"],
+        },
+        binding_record=records.binding_record,
+        qualification_record=records.qualification_record,
     )
