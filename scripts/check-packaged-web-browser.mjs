@@ -369,7 +369,11 @@ async function qualifyCspDetector() {
 
 async function evaluate(target, expression) {
   const result = await cdp.call('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true }, target.sessionId);
-  if (result.exceptionDetails) throw new Error(`Browser expression failed: ${result.exceptionDetails.text}`);
+  if (result.exceptionDetails) {
+    const exception = result.exceptionDetails.exception;
+    const detail = exception?.description ?? exception?.value ?? result.exceptionDetails.text;
+    throw new Error(`Browser expression failed: ${result.exceptionDetails.text}: ${detail}`);
+  }
   return result.result.value;
 }
 
@@ -857,7 +861,7 @@ try {
       return { text: section.innerText, values: Array.from(section.querySelectorAll('dd')).map(node => node.textContent), sampledAt: section.querySelector('time')?.dateTime };
     })()`);
     assert.deepEqual(scheduler.values, ['running', '0', '2', '0', '32']);
-    assert.ok(scheduler.text.includes('approximate aggregate observations') && scheduler.text.includes('queue position and start time are not reported'));
+    assert.ok(scheduler.text.includes('approximate aggregate observations') && scheduler.text.includes('own approximate queue position is shown on its attempt page'));
     assert.ok(Number.isFinite(Date.parse(scheduler.sampledAt)));
     const retention = await evaluate(authenticated, `(() => {
       const section = document.querySelector('section[aria-labelledby="retention-title"]');

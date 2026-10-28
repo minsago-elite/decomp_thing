@@ -734,6 +734,87 @@ class AcpExecutionSchedulerTest {
         assertEmpty(scheduler)
     }
 
+    @Test
+    fun `expired original request is not retryable and releases its free reservation`() {
+        val scheduler = deadlineMetadataScheduler()
+        val failure = assertSchedulingFailure(AgentFailureKind.TIMEOUT, "requestDeadline") {
+            scheduler.acquire("expired", AgentCancellation.NONE) { true }
+        }
+        assertFalse(failure.failure.retryable)
+        assertEmpty(scheduler)
+        scheduler.admit("independent-request").finish()
+        assertEmpty(scheduler)
+    }
+
+    @Test
+    fun `expired original request leaves its queue slot without releasing the active owner`() {
+        val scheduler = deadlineMetadataScheduler()
+        val owner = scheduler.admit("owner")
+        try {
+            val failure = assertSchedulingFailure(AgentFailureKind.TIMEOUT, "requestDeadline") {
+                scheduler.acquire("expired", AgentCancellation.NONE) { true }
+            }
+            assertFalse(failure.failure.retryable)
+            assertEquals(AcpSchedulingSnapshot(1, 0, 1, 0), scheduler.snapshot())
+        } finally { owner.finish() }
+        assertEmpty(scheduler)
+    }
+
+    @Test
+    fun `full ingress distinguishes exhausted requests from transient capacity refusal`() {
+        val scheduler = deadlineMetadataScheduler()
+        val owner = scheduler.admit("owner")
+        try {
+            val queued = assertSchedulingFailure(AgentFailureKind.TIMEOUT, "requestDeadline") {
+                scheduler.acquire("queued", AgentCancellation.NONE) {
+                    assertEquals(AcpSchedulingSnapshot(1, 1, 1, 0), scheduler.snapshot())
+                    val expired = assertSchedulingFailure(AgentFailureKind.TIMEOUT, "requestDeadline") {
+                        scheduler.acquire("expired-ingress", AgentCancellation.NONE) { true }
+                    }
+                    assertFalse(expired.failure.retryable)
+                    val capacity = assertSchedulingFailure(AgentFailureKind.RESOURCE_EXHAUSTED, "queueCapacity") {
+                        scheduler.acquire("unexpired-ingress", AgentCancellation.NONE) { false }
+                    }
+                    assertTrue(capacity.failure.retryable)
+                    assertEquals(AcpSchedulingSnapshot(1, 1, 1, 0), scheduler.snapshot())
+                    true
+                }
+            }
+            assertFalse(queued.failure.retryable)
+            assertEquals(AcpSchedulingSnapshot(1, 0, 1, 0), scheduler.snapshot())
+        } finally { owner.finish() }
+        assertEmpty(scheduler)
+    }
+
+    @Test
+    fun `queue wait expiry remains a transient hint while the original request is unexpired`() {
+        val clock = java.util.concurrent.atomic.AtomicLong()
+        val scheduler = deadlineMetadataScheduler(clock::get, Duration.ofNanos(10))
+        val owner = scheduler.admit("owner")
+        try {
+            val failure = assertSchedulingFailure(AgentFailureKind.TIMEOUT, "queueDeadline") {
+                scheduler.acquire("queued", AgentCancellation.NONE) {
+                    clock.set(10)
+                    false
+                }
+            }
+            assertTrue(failure.failure.retryable)
+            assertEquals(AcpSchedulingSnapshot(1, 0, 1, 0), scheduler.snapshot())
+        } finally { owner.finish() }
+        assertEmpty(scheduler)
+    }
+
+    private fun deadlineMetadataScheduler(
+        nanoTime: () -> Long = { 0L },
+        queueWait: Duration = Duration.ofSeconds(30),
+    ) = AcpExecutionScheduler(AcpSchedulingLimits(
+        maximumActive = 1,
+        maximumActivePerWorkspace = 1,
+        maximumQueued = 1,
+        maximumQueuedPerWorkspace = 1,
+        maximumQueueWait = queueWait,
+    ), nanoTime = nanoTime)
+
     private class SyntheticWorkFailure : RuntimeException()
 
     private fun scheduler(

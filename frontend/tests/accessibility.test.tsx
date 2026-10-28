@@ -41,6 +41,7 @@ const responses: Record<string, () => unknown> = {
   events: () => fixture('events-poll'),
   revisionDirectory: () => bound('revision-directory-root', selected),
   revisionFile: () => bound('revision-file-root', selected),
+  sourceSearch: () => bound('source-search-complete', selected),
   sourceCatalog: () => bound('source-catalog', { jobId, runId, revisionId: null }),
   validationHistory: () => bound('validation-history', { jobId, runId, revisionId: null }),
   recovery: () => fixture('recovery-empty'),
@@ -98,6 +99,8 @@ const privateRoutes: [name: string, path: string, rendered: string | RegExp][] =
   ['attempt evidence', `/nested/jobs/${jobId}/runs/${runId}/evidence`, 'Attempt identity'],
   ['source directory', `/nested/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/sources/root`, 'é space'],
   ['source file', `/nested/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-files/${fileId}`, 'Makefile'],
+  ['source search form', `/nested/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-search`, 'Enter text to search the recorded inputs of this revision.'],
+  ['source search results', `/nested/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-search?q=needle`, /Showing 4 matches on this page/],
   ['unknown page', '/nested/not-a-route', 'Page unavailable'],
 ];
 
@@ -137,6 +140,16 @@ it('has no automated WCAG A/AA violations when a job read fails', async () => {
   history.replaceState(null, '', `/nested/jobs/${jobId}`);
   render(<App basePath="/nested" session={auth} />);
   await screen.findByRole('alert');
+  await settle();
+  expect(await violations()).toEqual([]);
+});
+
+it('has no automated WCAG A/AA violations with a server version notice', async () => {
+  const auth = await session();
+  history.replaceState(null, '', `/nested/jobs/${jobId}`);
+  render(<App basePath="/nested" session={auth} identity={{ uiBuildId: 'a'.repeat(64), applicationVersion: '0.1.0' }} />);
+  await screen.findByRole('status', { name: 'The local server runs a different application version' });
+  await screen.findByText('Binary metadata');
   await settle();
   expect(await violations()).toEqual([]);
 });

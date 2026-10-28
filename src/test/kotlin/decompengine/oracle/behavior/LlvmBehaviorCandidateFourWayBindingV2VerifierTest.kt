@@ -685,7 +685,7 @@ class LlvmBehaviorCandidateFourWayBindingV2VerifierTest {
             )
             onEvent(AgentMessageEvent(0, "message", AgentMessageRole.ASSISTANT, "working", true))
             onEvent(AgentFileChangeEvent(1, change))
-            evidence = snapshot()
+            evidence = snapshot(request)
             return AgentExecutionResult(
                 AgentStopReason.COMPLETED,
                 "complete",
@@ -721,7 +721,7 @@ class LlvmBehaviorCandidateFourWayBindingV2VerifierTest {
             )
         }
 
-        private fun snapshot(): AcpExecutionEvidenceSnapshot = AcpExecutionEvidenceSnapshot(
+        private fun snapshot(request: AgentExecutionRequest): AcpExecutionEvidenceSnapshot = AcpExecutionEvidenceSnapshot(
             factoryProvenance = factoryProvenance,
             negotiatedAgent = AcpNegotiatedAgentEvidence(
                 ACP_STABLE_PROTOCOL_VERSION,
@@ -730,7 +730,9 @@ class LlvmBehaviorCandidateFourWayBindingV2VerifierTest {
                 null,
                 AcpNegotiatedCapabilitiesEvidence(false, false, false, false, false, false, false),
             ),
-            wirePromptSha256 = "c".repeat(64),
+            wirePromptSha256 = sha256(
+                decompengine.agent.renderAgentPrompt(request.objective, request.contextInputs).toByteArray(),
+            ),
             diagnostics = AcpProcessDiagnostics(
                 pid = 123,
                 exitCode = 0,

@@ -126,6 +126,56 @@
       "valid": true
     },
     {
+      "file": "fixtures/git-workspace-unborn-dirty.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/git-workspace-detached-imported.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/error-git-unavailable.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/git-repositories.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/git-operation-init-completed.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/git-operation-init-interrupted.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/git-operation-attach-unsupported.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/request-git-init.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/request-git-attach.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-request-git-attach-path.json",
+      "valid": false,
+      "reason": "Import names one admitted repository; a host path is never a request field."
+    },
+    {
+      "file": "fixtures/invalid-request-git-init-command.json",
+      "valid": false,
+      "reason": "Repository requests are closed; command or template fields are refused."
+    },
+    {
+      "file": "fixtures/error-git-repository-unsupported.json",
+      "valid": true
+    },
+    {
       "file": "fixtures/request-workflow-start.json",
       "valid": true
     },
@@ -211,6 +261,16 @@
       "file": "fixtures/invalid-git-sha256-abbreviation.json",
       "valid": false,
       "reason": "Git mutation/view identity uses a full object ID for its format."
+    },
+    {
+      "file": "fixtures/invalid-git-detached-branch.json",
+      "valid": false,
+      "reason": "A detached HEAD names an object only, never a branch or ref record."
+    },
+    {
+      "file": "fixtures/invalid-git-unborn-mapping.json",
+      "valid": false,
+      "reason": "An unborn branch has no commit, so no source provenance mapping."
     },
     {
       "file": "fixtures/invalid-request-unknown-field.json",
@@ -744,6 +804,186 @@
     },
     {
       "file": "fixtures/invalid-agent-preflight-failed-identity.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/attempt-controls-retry.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/attempt-controls-resume.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/attempt-controls-running.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/attempt-controls-superseded.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/run-retry.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/run-resume.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-attempt-controls-available-reason.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-attempt-controls-resume-scope.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-attempt-controls-terminal-cancel.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-attempt-controls-superseded-retry.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-attempt-controls-retry-resume-reason.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-run-recovery-without-predecessor.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-run-retry-checkpoint.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-run-resume-without-checkpoint.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-recover-mode.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-recover-caller-workspace.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/request-recover-resume.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/source-search-complete.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/source-search-partial.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/source-search-no-matches.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/source-search-incomplete-empty.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-source-search-partial-without-cursor.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-search-complete-reason.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-search-scope-sum.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-search-case-sensitive-match.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-search-line-offset.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-search-complete-remaining.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-search-symbol-boundary.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-search-file-order.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-search-limit.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-search-numeric-line.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-search-index.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/source-search-continued-gaps.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-source-search-gaps-below-page.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-search-gaps-over-scope.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/queue-position-queued.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/queue-position-not-queued.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/queue-position-unavailable.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-queue-position-ahead.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-queue-position-exact.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-queue-position-identities.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-queue-position-queued-state.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/run-timed-out.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/run-infrastructure-failed.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-run-interrupted-timed-out.json",
       "valid": false
     }
   ]
