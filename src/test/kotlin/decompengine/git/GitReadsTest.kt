@@ -506,6 +506,48 @@ class GitReadsTest {
         assertEquals(GitCommandException.Kind.OUTPUT_LIMIT, kotlin.test.assertFailsWith<GitCommandException> {
             GitReads.history(f.runner, gitDir, GitObjectFormat.SHA1, large, 0, 1)
         }.kind)
+        val child = f.git("--git-dir=$gitDir", "commit-tree", tree, "-p", large, "-m", "small child").trim()
+        assertEquals(GitCommandException.Kind.OUTPUT_LIMIT, kotlin.test.assertFailsWith<GitCommandException> {
+            GitReads.history(f.runner, gitDir, GitObjectFormat.SHA1, child, 0, 1)
+        }.kind)
+        assertNull(GitReads.firstParent(f.runner, gitDir, GitObjectFormat.SHA1, base))
+        val parent = GitReads.firstParent(f.runner, gitDir, GitObjectFormat.SHA1, child)
+        assertEquals(large, parent)
+        assertTrue(GitReads.diff(f.runner, gitDir, null, GitObjectFormat.SHA1, GitDiffScope.COMMIT, child, parent).complete)
+    }
+
+    @Test fun `history rejects timestamps outside the public four digit date range`() = GitTestRepositories().use { f ->
+        val (gitDir, workTree) = f.managed("history-date-range")
+        f.write(workTree, "a.c", "int a;\n")
+        val base = f.commitAll(gitDir, workTree, "base")
+        val tree = f.git("--git-dir=$gitDir", "rev-parse", "$base^{tree}").trim()
+        fun commitAt(name: String, authored: Long, committed: Long): String {
+            val objectFile = f.root.resolve(name)
+            Files.writeString(objectFile, buildString {
+                append("tree $tree\n")
+                append("parent $base\n")
+                append("author Fixture Author <fixture@example.invalid> $authored +0000\n")
+                append("committer Fixture Committer <fixture@example.invalid> $committed +0000\n\n")
+                append("test commit\n")
+            })
+            return f.git("--git-dir=$gitDir", "hash-object", "--literally", "-t", "commit", "-w", objectFile.toString()).trim()
+        }
+        val unsupportedCommits = listOf(
+            commitAt("author-after-range", 253_402_300_800L, 1_767_225_600L),
+            commitAt("committer-after-range", 1_767_225_600L, 253_402_300_800L),
+            commitAt("author-before-range", -1L, 1_767_225_600L),
+            commitAt("committer-before-range", 1_767_225_600L, -1L),
+        )
+        for (commit in unsupportedCommits) {
+            val failure = assertFailsWith<GitRepositoryException> {
+                GitReads.history(f.runner, gitDir, GitObjectFormat.SHA1, commit, 0, 1)
+            }
+            assertEquals("REPOSITORY_UNSUPPORTED", failure.code, failure.message)
+        }
+        val boundaryCommit = commitAt("date-boundaries", 0L, 253_402_300_799L)
+        val boundary = GitReads.history(f.runner, gitDir, GitObjectFormat.SHA1, boundaryCommit, 0, 1).entries.single()
+        assertEquals("1970-01-01T00:00:00Z", boundary.authoredAt.toString())
+        assertEquals("9999-12-31T23:59:59Z", boundary.committedAt.toString())
     }
 
     @Test fun `staged diff works on an unborn branch`(): Unit = GitTestRepositories().use { f ->

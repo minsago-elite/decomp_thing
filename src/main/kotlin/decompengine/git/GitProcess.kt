@@ -1,13 +1,11 @@
 package decompengine.git
 
 import java.io.IOException
-import java.io.InputStream
 import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.Path
 import java.nio.file.attribute.PosixFilePermissions
 import java.time.Duration
-import java.util.concurrent.TimeUnit
 
 /** Parsed `git version` numbers. The display form never carries vendor suffixes or build paths. */
 data class GitVersion(val major: Int, val minor: Int, val patch: Int) : Comparable<GitVersion> {
@@ -246,101 +244,22 @@ class GitCommandRunner internal constructor(
         val command = argv(invocation)
         val boundedCommand = invocation.limits.maxAddressSpaceBytes?.let { bytes ->
             // Use only the fixed server utility, never repository data or request/PATH lookup.
-            // prlimit applies both limits before exec, and failure never falls back to unbounded Git.
+            // prlimit execs Git under the bound; failure never falls back to unbounded Git.
             val launcher = memoryLimiter ?: throw GitCommandException(GitCommandException.Kind.START_FAILED,
                 "The server cannot enforce the required Git memory bound.")
             listOf(launcher.toString(), "--as=$bytes:$bytes", "--core=0:0", "--") + command
         } ?: command
-        val builder = ProcessBuilder(boundedCommand)
-            .directory((invocation.workTree ?: invocation.gitDir ?: environment.root).toFile())
-            .redirectInput(ProcessBuilder.Redirect.PIPE)
-        builder.environment().clear()
-        builder.environment().putAll(environment.variables(executable))
-        builder.environment().putAll(invocation.variables)
-        val process = try { builder.start() } catch (failure: IOException) {
-            throw GitCommandException(GitCommandException.Kind.START_FAILED, "Git could not be started.")
+        val result = try {
+            GitSessionProcess(boundedCommand, environment.variables(executable) + invocation.variables,
+                invocation.workTree ?: invocation.gitDir ?: environment.root, invocation).execute()
+        } catch (failure: LinkageError) {
+            // Native containment is mandatory, never fall back to unowned ProcessBuilder children.
+            throw GitCommandException(GitCommandException.Kind.START_FAILED, "Git process containment is unavailable.")
         }
-        try {
-            val input = invocation.input
-            if (input == null) process.outputStream.close()
-            else Thread.ofVirtual().start {
-                try { process.outputStream.use { it.write(input) } } catch (_: IOException) { /* child exited early */ }
-            }
-            val stdout = BoundedCapture(process.inputStream, invocation.limits.maxStdoutBytes)
-            val stderr = BoundedCapture(process.errorStream, invocation.limits.maxStderrBytes)
-            val readers = listOf(Thread.ofVirtual().start(stdout), Thread.ofVirtual().start(stderr))
-            val deadline = System.nanoTime() + invocation.limits.timeout.toNanos()
-            while (process.isAlive) {
-                if (stdout.overflowed && invocation.truncateStdout) break
-                if (stdout.overflowed || stderr.overflowed) {
-                    terminate(process)
-                    throw GitCommandException(GitCommandException.Kind.OUTPUT_LIMIT, "Git output exceeded its bound.")
-                }
-                val remaining = deadline - System.nanoTime()
-                if (remaining <= 0) {
-                    terminate(process)
-                    throw GitCommandException(GitCommandException.Kind.TIMED_OUT, "Git did not finish within its time bound.")
-                }
-                process.waitFor(minOf(remaining, TimeUnit.MILLISECONDS.toNanos(20)), TimeUnit.NANOSECONDS)
-            }
-            if (stdout.overflowed && invocation.truncateStdout) terminate(process)
-            readers.forEach { it.join(TimeUnit.NANOSECONDS.toMillis(maxOf(deadline - System.nanoTime(), 0)) + 1000) }
-            if (readers.any { it.isAlive }) {
-                terminate(process)
-                throw GitCommandException(GitCommandException.Kind.TIMED_OUT, "Git output did not close within its time bound.")
-            }
-            // The readers can still be draining when the process exits, so only their final state
-            // decides truncation. Stderr keeps its own limit either way.
-            val truncated = stdout.overflowed && invocation.truncateStdout
-            if (stderr.overflowed || (stdout.overflowed && !truncated)) {
-                throw GitCommandException(GitCommandException.Kind.OUTPUT_LIMIT, "Git output exceeded its bound.")
-            }
-            val exit = if (truncated) -1 else process.exitValue()
-            if (!truncated && exit !in invocation.allowedExitCodes) {
-                throw GitCommandException(GitCommandException.Kind.FAILED, "Git reported a failure.", exit)
-            }
-            return GitCommandResult(exit, stdout.bytes(), stderr.bytes(), truncated)
-        } catch (interrupted: InterruptedException) {
-            terminate(process)
-            Thread.currentThread().interrupt()
-            throw GitCommandException(GitCommandException.Kind.INTERRUPTED, "Git was interrupted.")
-        } finally {
-            if (process.isAlive) terminate(process)
+        if (!result.stdoutTruncated && result.exitCode !in invocation.allowedExitCodes) {
+            throw GitCommandException(GitCommandException.Kind.FAILED, "Git reported a failure.", result.exitCode)
         }
-    }
-
-    private fun terminate(process: Process) {
-        process.descendants().forEach { it.destroyForcibly() }
-        process.destroyForcibly()
-        process.waitFor(5, TimeUnit.SECONDS)
-    }
-
-    /** Keeps at most [limit] bytes and records overflow; it keeps draining so the child cannot block. */
-    private class BoundedCapture(private val input: InputStream, private val limit: Int) : Runnable {
-        private val buffer = java.io.ByteArrayOutputStream()
-        @Volatile var overflowed = false
-            private set
-
-        override fun run() {
-            try {
-                input.use { stream ->
-                    val chunk = ByteArray(8192)
-                    while (true) {
-                        val count = stream.read(chunk)
-                        if (count < 0) break
-                        synchronized(buffer) {
-                            val room = limit - buffer.size()
-                            if (count > room) { buffer.write(chunk, 0, maxOf(room, 0)); overflowed = true }
-                            else buffer.write(chunk, 0, count)
-                        }
-                    }
-                }
-            } catch (_: IOException) {
-                // The process was terminated; the caller reports the bound that caused it.
-            }
-        }
-
-        fun bytes(): ByteArray = synchronized(buffer) { buffer.toByteArray() }
+        return result
     }
 }
 
