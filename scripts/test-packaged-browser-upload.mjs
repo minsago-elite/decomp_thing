@@ -12,23 +12,29 @@ for (const qualify of [qualifyUpload, qualifyUploadFailures, qualifyMeasuredUplo
       let waitedForPicker = false;
       let selectionReached = false;
       const selected = new Error('selection boundary reached');
+      const picker = { disabled: initialPicker === 'disabled' };
       const document = {
         body: { innerText: 'Local session connected.' },
         querySelector(selector) {
-          assert.equal(selector, '#binary-file');
-          return mounted ? { disabled: false } : initialPicker === 'disabled' ? { disabled: true } : null;
+          if (selector === '#binary-file') return mounted ? picker : initialPicker === 'disabled' ? picker : null;
+          if (selector === 'section[aria-labelledby="upload-title"] input#binary-file[type="file"]:not(:disabled)') {
+            return mounted && !picker.disabled ? picker : null;
+          }
+          assert.fail(`Unexpected upload readiness selector: ${selector}`);
         },
       };
+      const context = { document, location: { pathname: '/nested/' } };
       await assert.rejects(qualify({
         makeTarget: async () => ({ sessionId: 'test' }),
         cdp: { call: async () => ({}), on() {} },
         browserOrigin: 'http://127.0.0.1',
         data: new URL('.', import.meta.url),
         ready: async (_tab, expression) => {
-          if (!runInNewContext(expression, { document })) {
+          if (!runInNewContext(expression, context)) {
             waitedForPicker = true;
             mounted = true;
-            assert.ok(runInNewContext(expression, { document }), 'Mounted picker must satisfy readiness');
+            picker.disabled = false;
+            assert.ok(runInNewContext(expression, context), 'Mounted route and enabled picker must satisfy readiness');
           }
         },
         evaluate: async (_tab, expression) => {
