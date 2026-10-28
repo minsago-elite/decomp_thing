@@ -126,6 +126,22 @@
       "valid": true
     },
     {
+      "file": "fixtures/git-workspace-unborn-dirty.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/git-workspace-detached-imported.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/error-git-unavailable.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/error-git-repository-unsupported.json",
+      "valid": true
+    },
+    {
       "file": "fixtures/request-workflow-start.json",
       "valid": true
     },
@@ -211,6 +227,16 @@
       "file": "fixtures/invalid-git-sha256-abbreviation.json",
       "valid": false,
       "reason": "Git mutation/view identity uses a full object ID for its format."
+    },
+    {
+      "file": "fixtures/invalid-git-detached-branch.json",
+      "valid": false,
+      "reason": "A detached HEAD names an object only, never a branch or ref record."
+    },
+    {
+      "file": "fixtures/invalid-git-unborn-mapping.json",
+      "valid": false,
+      "reason": "An unborn branch has no commit, so no source provenance mapping."
     },
     {
       "file": "fixtures/invalid-request-unknown-field.json",
