@@ -377,6 +377,8 @@ internal class WebApiController(
         if (failure.status != 405) return failure
         val methods = when {
             resource == "jobs" || resource == "agent/preflight" -> setOf("GET", "POST")
+            resource.matches(Regex("jobs/[^/]+/repositories")) -> setOf("GET", "POST")
+            resource.matches(Regex("jobs/[^/]+/repositories/[^/]+(?:/operations/[^/]+)?")) -> setOf("GET")
             resource.matches(Regex("jobs/[^/]+/runs/[^/]+/progress-pin")) -> setOf("GET", "PUT")
             else -> return failure
         }

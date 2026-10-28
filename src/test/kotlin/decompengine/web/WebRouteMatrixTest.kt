@@ -73,6 +73,8 @@ class WebRouteMatrixTest {
         "/api/v1/agent/preflight" to Live(setOf("GET", "POST"), Outcome(200, "agentPreflight")),
         "$J" to Live(setOf("GET"), Outcome(200, "job")),
         "$J/runs" to Live(setOf("GET"), Outcome(200, "runs"), Query.PAGED),
+        "$J/repositories" to Live(setOf("GET", "POST"), Outcome(200, "gitRepositories"),
+            mutationRefusal = Outcome(428, "PRECONDITION_REQUIRED")),
         "$R" to Live(setOf("GET"), Outcome(200, "run")),
         "$R/progress-pin" to Live(setOf("GET", "PUT"), Outcome(200, "progressPin")),
         "$R/cancel" to Live(setOf("POST")),
@@ -87,6 +89,8 @@ class WebRouteMatrixTest {
         "$R/reports/revision-validation" to Live(setOf("GET", "HEAD"), Outcome(400, "VALIDATION_FAILED"), Query.ROUTE_SPECIFIC),
         "$R/validation-history" to Live(setOf("GET", "HEAD"), Outcome(200, "validationHistory"), Query.ROUTE_SPECIFIC),
         "$R/revisions/{revisionId}/sources" to Live(setOf("GET", "HEAD"), Outcome(404, "REVISION_NOT_FOUND"), Query.PAGED),
+        "$R/revisions/{revisionId}/source-search" to Live(
+            setOf("GET", "HEAD"), Outcome(422, "VALIDATION_FAILED"), Query.ROUTE_SPECIFIC),
         "$R/revisions/{revisionId}/source-directories/{directoryId}" to
             Live(setOf("GET", "HEAD"), Outcome(404, "REVISION_NOT_FOUND"), Query.PAGED),
         "$R/revisions/{revisionId}/source-files/{fileId}" to Live(setOf("GET", "HEAD"), Outcome(404, "SOURCE_FILE_NOT_FOUND")),
