@@ -1227,6 +1227,37 @@ its position, role, completion and `textOmitted: true`; it never buffers, stores
 commits to its text. Public projection also withholds `contentSha256`/`chunkCharacters` from
 older thought records. The ACP client never requests reasoning and no workflow depends on it.
 
+## Artifact identity normalization and snapshot containment
+
+Versioned routes accept only opaque, closed-syntax identities (`jobId`, `runId`, `artifactId`, `fileId`,
+`directoryId`) and never a host path. Legacy routes that still name report files by URL path decode the raw path
+exactly once, per segment, through `WebPublicIdentity`: RFC 3986 percent-decoding (`+` is a literal plus), strict
+UTF-8, and the result must already be the canonical spelling. Empty, `.`/`..`, encoded or literal `/` and `\`, `:`
+(drive and stream separators), NUL and other controls, Unicode format characters (including supplementary code points), non-NFC spellings, a `%` that
+survives decoding (double encoding), Windows device names (`CON`, `NUL`, `COM1`...), trailing dots or spaces,
+segments over 255 bytes and paths over 32 segments are refused with `400 INVALID_REQUEST`; an encoded separator that
+changes the segment count is refused too.
+
+Validation grants nothing by itself. Every report, input, source and archive read opens files through the
+descriptor-pinned `JobStore` containment boundary (`readStableRegularFile`/`hashStableRegularFile`), which opens each
+component without following links, reads only through the pinned descriptor and revalidates every binding after the
+read. It has exactly three outcomes: the bytes of an unchanged admitted file; unavailable (missing, symbolic link,
+special file or outside the namespace), served as a sanitized `404`; or changed during the read (concurrent
+publication, replacement or deletion), served as `409 ARTIFACT_CHANGED`. Every descriptor is closed before either
+refusal is returned. `JobStore.artifactReceipt` streams one file to a size/digest receipt scoped `observed-digest`
+(the digest of the bytes observed now, not a committed digest); `sourceArchiveReceipts` requires two complete bounded
+receipt passes with identical sizes, digests and identities, then revalidates the whole source-tree inventory. This
+also detects persistent in-place writes to files whose first receipt has already completed, not just inode replacement.
+Detected content, publication or deletion changes are conflicts, including growth beyond the per-file or aggregate
+allowance during the second receipt pass; initially oversized input retains its budget refusal. These are observed
+receipts, not an atomic filesystem snapshot or committed-revision proof. Archive verification consumes these streamed
+receipts, so the source tree is no longer read into memory twice. Later rereads of admitted archive inputs (manifest,
+build contract, executable, uploaded input and ZIP) also return `409 ARTIFACT_CHANGED` for unavailability, over-budget
+growth or identity/digest mismatch, rather than treating a detected change as an initial missing/invalid request.
+The v1 exploration report route preserves change conflicts as `409 ARTIFACT_CHANGED`;
+an ordinary missing report still returns the unavailable-report projection.
+The lexical path-returning `WebJobService.resolveArtifact` was removed.
+
 ## Agent preflight and harness readiness
 
 `GET /api/v1/agent/preflight` returns `agentPreflight` with `status` (`idle`, `inspecting`, `ready`, `failed`, `cancelled`), an application-generated `inspectionId` and a fixed `reasonCode` (`AGENT_PREFLIGHT_FAILED` only). `POST` with the exact body `{"action":"inspect"}` starts one inspection and returns `202`; a second request while one runs returns `409 AGENT_PREFLIGHT_IN_PROGRESS`. The inspection runs the configured harness's `preflight(WEB)` (initialize negotiation, no session, no model prompt) and is cancelled when the server stops. Exception text, inventories and configuration are discarded and never appear in the response.
