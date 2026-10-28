@@ -115,6 +115,7 @@ data class GitDiffFile(
     val additions: Long?,
     val deletions: Long?,
     val newSizeBytes: Long?,
+    val unmerged: Boolean = false,
 )
 
 data class GitDiffListing(val files: List<GitDiffFile>, val complete: Boolean)
@@ -342,8 +343,10 @@ object GitReads {
             }
         }
         val sizes = objectSizes(runner, gitDir, files.values.mapNotNull { it.newObjectId }.distinct())
-        return GitDiffListing(files.values.map { it.copy(newSizeBytes = it.newObjectId?.let(sizes::get)) },
-            !raw.stdoutTruncated && !numstat.stdoutTruncated && index >= records.size)
+        return GitDiffListing(files.values.map { file -> file.copy(
+            newSizeBytes = file.newObjectId?.let(sizes::get),
+            unmerged = file.path in unmerged,
+        ) }, !raw.stdoutTruncated && !numstat.stdoutTruncated && index >= records.size)
     }
 
     /** Sizes from object headers only; contents are never read for metadata. */
@@ -360,6 +363,8 @@ object GitReads {
     /** A bounded unified patch for one file. Binary content is never rendered. */
     fun patch(runner: GitCommandRunner, gitDir: Path, workTree: Path?, scope: GitDiffScope, commit: String?, parent: String?,
         file: GitDiffFile): GitPatch {
+        if (scope == GitDiffScope.STAGED && file.unmerged) throw ManagedGitException("PATCH_UNAVAILABLE",
+            "An unresolved merge conflict has no selected staged patch. Resolve the conflict or inspect its unstaged combined patch.")
         if (file.binary) return GitPatch("", truncated = false, binary = true)
         val path = file.path.exact
         if (path == null || (file.originalPath != null && file.originalPath.exact == null)) throw ManagedGitException("PATCH_UNAVAILABLE",

@@ -16,6 +16,8 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import java.net.URLDecoder
 
+private const val MAX_DIFF_PATH_DISPLAY_CODE_POINTS = 16_384
+
 /**
  * Bounded Git reads (#574, #575): `GET G/status`, `G/history`, `G/diff` and `G/refs`. Pages are
  * anchored to an exact object or work-tree version, so a moving ref cannot shift a later page;
@@ -202,16 +204,27 @@ internal class WebGitReads(private val repositories: () -> ManagedGitRepositorie
         put("submodule", entry.submodule)
     }
 
-    private fun diffFile(file: GitDiffFile, worktreeId: String) = buildJsonObject {
-        put("fileId", file.path.fileId(worktreeId))
-        path(file.path, file.originalPath)
-        put("change", file.change.wireName)
-        put("oldObjectId", file.oldObjectId?.let(::JsonPrimitive) ?: JsonNull)
-        put("newObjectId", file.newObjectId?.let(::JsonPrimitive) ?: JsonNull)
-        put("oldMode", file.oldMode); put("newMode", file.newMode); put("binary", file.binary)
-        put("additions", file.additions?.toString()?.let(::JsonPrimitive) ?: JsonNull)
-        put("deletions", file.deletions?.toString()?.let(::JsonPrimitive) ?: JsonNull)
-        put("newSizeBytes", file.newSizeBytes?.toString()?.let(::JsonPrimitive) ?: JsonNull)
+    private fun diffFile(file: GitDiffFile, worktreeId: String): JsonObject {
+        requireDiffPathDisplay(file.path)
+        file.originalPath?.let(::requireDiffPathDisplay)
+        return buildJsonObject {
+            put("fileId", file.path.fileId(worktreeId))
+            path(file.path, file.originalPath)
+            put("change", file.change.wireName)
+            put("oldObjectId", file.oldObjectId?.let(::JsonPrimitive) ?: JsonNull)
+            put("newObjectId", file.newObjectId?.let(::JsonPrimitive) ?: JsonNull)
+            put("oldMode", file.oldMode); put("newMode", file.newMode); put("binary", file.binary)
+            put("additions", file.additions?.toString()?.let(::JsonPrimitive) ?: JsonNull)
+            put("deletions", file.deletions?.toString()?.let(::JsonPrimitive) ?: JsonNull)
+            put("newSizeBytes", file.newSizeBytes?.toString()?.let(::JsonPrimitive) ?: JsonNull)
+        }
+    }
+
+    private fun requireDiffPathDisplay(path: GitPath) {
+        val display = path.display
+        if (display.codePointCount(0, display.length) > MAX_DIFF_PATH_DISPLAY_CODE_POINTS) {
+            throw WebAccessDenied(422, "VALIDATION_FAILED", "A Git path exceeds the bounded diff display limit.")
+        }
     }
 
     private fun kotlinx.serialization.json.JsonObjectBuilder.path(path: GitPath, original: GitPath?) {

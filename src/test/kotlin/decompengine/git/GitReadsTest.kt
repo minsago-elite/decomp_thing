@@ -6,6 +6,7 @@ import kotlin.io.path.exists
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNull
@@ -361,6 +362,12 @@ class GitReadsTest {
         f.raw(gitDir, workTree, "switch", "-q", "trunk")
         f.write(workTree, "shared.c", "int shared = 1;\n"); f.raw(gitDir, workTree, "commit", "-q", "-am", "ours")
         f.raw(gitDir, workTree, "merge", "-q", "other", expect = 1)
+        val staged = GitReads.diff(f.runner, gitDir, workTree, GitObjectFormat.SHA1, GitDiffScope.STAGED, null, null)
+        val stagedConflict = staged.files.single { it.path.exact == "shared.c" }
+        assertTrue(stagedConflict.unmerged)
+        assertEquals("PATCH_UNAVAILABLE", assertFailsWith<ManagedGitException> {
+            GitReads.patch(f.runner, gitDir, workTree, GitDiffScope.STAGED, null, null, stagedConflict)
+        }.code)
         val unstaged = GitReads.diff(f.runner, gitDir, workTree, GitObjectFormat.SHA1, GitDiffScope.UNSTAGED, null, null)
         val conflicted = unstaged.files.single { it.path.exact == "shared.c" }
         val patch = GitReads.patch(f.runner, gitDir, workTree, GitDiffScope.UNSTAGED, null, null, conflicted)
