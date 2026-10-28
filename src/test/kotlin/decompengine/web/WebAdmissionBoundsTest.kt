@@ -51,6 +51,12 @@ class WebAdmissionBoundsTest {
     } catch (e: java.net.SocketTimeoutException) { Raw(null, emptyMap(), "", "timeout") }
     catch (e: java.io.IOException) { Raw(null, emptyMap(), "", "${e.javaClass.simpleName}") }
 
+    private fun awaitRequestPoolSaturation(server: UploadServer) {
+        val deadline = System.nanoTime() + 20_000_000_000L
+        while (!server.requestPoolSaturatedForTest() && System.nanoTime() < deadline) Thread.sleep(10)
+        assertTrue(server.requestPoolSaturatedForTest(), "the HTTP request worker pool and queue did not saturate")
+    }
+
     private fun awaitServing(port: Int) {
         val deadline = System.nanoTime() + 20_000_000_000L
         var last: Raw
@@ -67,7 +73,7 @@ class WebAdmissionBoundsTest {
             val port = server.serverPort
             assertEquals(401, get(port).status, "an idle server answers normally")
             repeat(16 + 64) { pin(port) }
-            Thread.sleep(1_500)
+            awaitRequestPoolSaturation(server)
             for (attempt in 1..3) {
                 val response = get(port)
                 assertEquals(429, response.status, "attempt $attempt under overload: ${response.failure}")

@@ -326,6 +326,10 @@ class UploadServer(
     val serverPort: Int get() = server.address.port
     val browserOrigin: String = devFrontendOrigin ?: webOrigin(host, serverPort)
 
+    /** In-module coordination for deterministic bounded-admission tests; not part of the HTTP API. */
+    internal fun requestPoolSaturatedForTest(): Boolean =
+        requestExecutor.activeCount == requestExecutor.maximumPoolSize && requestExecutor.queue.remainingCapacity() == 0
+
     /** The CLI calls this explicitly; no HTTP route can issue a local link. */
     fun issueBrowserBootstrap(): WebBootstrapToken {
         return access.issueBootstrap()
