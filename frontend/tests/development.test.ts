@@ -97,7 +97,8 @@ describe('shared-schema deterministic fixtures', () => {
     const changedPath = `${directory}/schema.json`;
     await writeFile(changedPath, JSON.stringify(changed));
     expect(() => execFileSync('python3', [generator, '--schema', changedPath], { stdio: 'pipe' })).toThrow();
-  });
+  // Three synchronous schema-validating generator runs exceed the default 5 s on a loaded runner.
+  }, 20_000);
 
   it('labels fixtures, provides poll/SSE/download records, and rejects mutations', async () => {
     const frontend = await dev('fixtures');
