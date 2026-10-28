@@ -150,3 +150,13 @@ it('has no automated WCAG A/AA violations when a job read fails', async () => {
   await settle();
   expect(await violations()).toEqual([]);
 });
+
+it('has no automated WCAG A/AA violations with a server version notice', async () => {
+  const auth = await session();
+  history.replaceState(null, '', `/nested/jobs/${jobId}`);
+  render(<App basePath="/nested" session={auth} identity={{ uiBuildId: 'a'.repeat(64), applicationVersion: '0.1.0' }} />);
+  await screen.findByRole('status', { name: 'The local server runs a different application version' });
+  await screen.findByText('Binary metadata');
+  await settle();
+  expect(await violations()).toEqual([]);
+});

@@ -1,6 +1,9 @@
 package decompengine.exploration
 
 import decompengine.assessment.HeuristicScoreInterpretation
+import decompengine.project.ModuleObservedBehavior
+import decompengine.project.ModuleObservedCase
+import decompengine.project.ModuleObservationAttribution
 import decompengine.project.writeProjectEvidenceAtomically
 import decompengine.validation.ProcessInput
 import decompengine.validation.SandboxRunner
@@ -11,6 +14,8 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.nio.file.Path
+import java.nio.file.Files
+import java.security.MessageDigest
 import java.util.Locale
 import java.util.concurrent.CompletableFuture
 import kotlin.io.path.createDirectories
@@ -420,15 +425,46 @@ data class ExplorationReport(
     val angrDiagnostics: AngrDiagnostics? = null,
 )
 
+/**
+ * Optional bridge from retained execution traces to recovered-function IDs. Return null when the
+ * case has no such evidence. Implementations must bind the trace to this binary, input and observed
+ * execution; argument guesses, static call graphs and output similarity are not trace attribution.
+ * The resulting handoff is prompt evidence, never an authenticated oracle result.
+ */
+fun interface ModuleObservationAttributor {
+    fun attribute(inputSha256: String, input: CandidateInput, observation: CandidateObservation): ModuleObservationAttribution?
+}
+
+/** Publish actual observed inputs/outputs with only the attribution an external trace producer supplies. */
+fun ExplorationReport.writeModuleObservations(inputSha256: String, attributor: ModuleObservationAttributor): Path {
+    require(candidates.map { it.id }.distinct().size == candidates.size) { "module observations need unique candidate IDs" }
+    require(coverage.observations.map { it.candidateId }.distinct().size == coverage.observations.size) {
+        "module observations need unique observed case IDs"
+    }
+    val inputs = candidates.associate { candidate -> candidate.id to candidate.copy(
+        args = java.util.List.copyOf(candidate.args), stdin = candidate.stdin.copyOf(),
+    ) }
+    val cases = coverage.observations.mapNotNull { observation ->
+        val input = requireNotNull(inputs[observation.candidateId]) { "observed case has no matching candidate input" }
+        val attribution = attributor.attribute(inputSha256, input.copy(stdin = input.stdin.copyOf()), observation)
+            ?: return@mapNotNull null
+        ModuleObservedCase(input.id, attribution, input.args, input.stdin.toHex(), observation.exitCode,
+            observation.stdoutHex, observation.stderrHex)
+    }
+    return ModuleObservedBehavior.write(requireNotNull(reportPath.parent), inputSha256, cases)
+}
+
 class AutomaticExplorer(
     private val angrExplorer: AngrExplorer = PythonAngrExplorer(),
     private val staticHints: StaticHintGenerator = StaticHintGenerator(),
     private val mutations: MutationExpander = MutationExpander(),
     private val coverage: OutputCoverageMeasurer = OutputCoverageMeasurer(),
     private val maxCandidates: Int = 192,
+    private val moduleObservationAttributor: ModuleObservationAttributor? = null,
 ) {
     fun explore(binaryPath: Path, seedInputs: List<CandidateInput>, reportsDir: Path): ExplorationReport {
         require(seedInputs.isNotEmpty()) { "at least one seed input is required" }
+        val observationInputSha256 = moduleObservationAttributor?.let { hashObservationInput(binaryPath) }
         val expanded = proposeExplorationInputs(seedInputs,
             angr = { angrExplorer.generate(binaryPath) },
             staticHints = { staticHints.generate(binaryPath) },
@@ -448,8 +484,26 @@ class AutomaticExplorer(
         reportsDir.createDirectories()
         val report = ExplorationReport(expanded, coverageReport, confidence, reportPath, angrExplorer.diagnostics)
         reportPath.writeText(report.toJson())
+        if (moduleObservationAttributor != null) {
+            require(observationInputSha256 == hashObservationInput(binaryPath)) { "exploration input changed while observing module cases" }
+            report.writeModuleObservations(requireNotNull(observationInputSha256), moduleObservationAttributor)
+        }
         return report
     }
+}
+
+private fun hashObservationInput(path: Path): String {
+    val digest = MessageDigest.getInstance("SHA-256")
+    Files.newInputStream(path).use { input ->
+        val buffer = ByteArray(64 * 1024)
+        while (true) {
+            if (Thread.currentThread().isInterrupted) throw InterruptedException("module observation input hashing cancelled")
+            val count = input.read(buffer)
+            if (count < 0) break
+            digest.update(buffer, 0, count)
+        }
+    }
+    return digest.digest().toHex()
 }
 
 private fun ExplorationReport.toJson(): String = """
