@@ -144,8 +144,7 @@ for (const [name, qualify, filename, size] of [
     assert.equal(f.document.querySelector('#binary-file'), null);
     await assert.rejects(f.run(), error => error === f.submitted);
     assert.equal(f.counts().changes, 1);
-    const controlLabel = qualify === qualifyMeasuredUpload ? 'measured workspace upload control' : 'failure workspace upload control';
-    assert.deepEqual(f.labels, [controlLabel, 'upload selection rendered']);
+    assert.deepEqual(f.labels, ['workspace upload control', 'upload selection rendered']);
     const [file] = f.picker.files;
     assert.equal(file.name, filename);
     assert.equal(file.size, size);
@@ -162,11 +161,10 @@ for (const [name, qualify, filename, size] of [
     }
   });
 
-  const controlLabel = qualify === qualifyMeasuredUpload ? 'measured workspace upload control' : 'failure workspace upload control';
   for (const [state, options, label, changes] of [
-    ['missing picker', { mountAt: Infinity }, controlLabel, 0],
-    ['wrong route', { route: '/nested/jobs/0123456789abcdef0123456789abcdef' }, controlLabel, 0],
-    ['disabled picker', { mountAt: 0, disabled: true }, controlLabel, 0],
+    ['missing picker', { mountAt: Infinity }, 'workspace upload control', 0],
+    ['wrong route', { route: '/nested/jobs/0123456789abcdef0123456789abcdef' }, 'workspace upload control', 0],
+    ['disabled picker', { mountAt: 0, disabled: true }, 'workspace upload control', 0],
     ['missing selection render', { renderSelection: false }, 'upload selection rendered', 1],
     ['disabled submit', { enableSubmit: false }, 'upload selection rendered', 1],
   ]) {
