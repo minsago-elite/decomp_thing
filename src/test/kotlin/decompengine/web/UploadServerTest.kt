@@ -2425,9 +2425,13 @@ class UploadServerTest {
         }
     }
 
-    private fun uploadedJobId(server: UploadServer): String =
-        Json.parseToJsonElement(upload(server, "boundary.elf", elfFixture(), acceptJson = true).body.decodeToString())
-            .jsonObject.getValue("id").toString().trim('"')
+    private fun uploadedJobId(server: UploadServer): String {
+        val response = upload(server, "boundary.elf", elfFixture(), acceptJson = true)
+        assertEquals(201, response.status, "Unexpected upload response: ${response.body.decodeToString()}")
+        val document = Json.parseToJsonElement(response.body.decodeToString()).jsonObject
+        assertTrue("id" in document, "Legacy upload response omitted id: $document")
+        return document.getValue("id").toString().trim('"')
+    }
 
     private fun UploadServer.internalStore(): decompengine.jobs.JobStore =
         UploadServer::class.java.getDeclaredField("store").apply { isAccessible = true }
