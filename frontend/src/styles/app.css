@@ -309,6 +309,18 @@ main a + button, main button + button, main button + a { margin-inline-start: 0.
 .source-position { padding: 0.2rem 0.6rem; overflow-wrap: anywhere; color: var(--muted); text-align: end; background: var(--surface-sunken); border-right: 1px solid var(--line); font-variant-numeric: tabular-nums; }
 .source-row pre { margin: 0; padding: 0.2rem 0.75rem; min-height: 1.5em; white-space: pre-wrap; overflow-wrap: anywhere; tab-size: 4; unicode-bidi: isolate; }
 .source-preview nav { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-block: 1rem; }
+.source-search { min-width: 0; }
+.source-search-form { display: grid; gap: .5rem; max-width: 40rem; }
+.source-search-form input[type="search"], .source-search-form input[type="text"] { display: block; width: 100%; min-width: 0; min-height: 44px; padding: .6rem; border: 1px solid var(--control-line); border-radius: .3rem; font: inherit; color: inherit; background: var(--surface); }
+.source-search-form fieldset { border: 1px solid var(--line); border-radius: .3rem; }
+.source-search-form fieldset label { display: block; }
+.source-search-status { border: 1px solid var(--line); border-inline-start-width: .4rem; border-radius: .3rem; padding: .5rem 1rem; margin-block: 1rem; background: var(--surface); }
+.source-search-status-incomplete { border-color: var(--focus); }
+.source-search-results { padding: 0; list-style: none; }
+.source-search-results > li { padding: .75rem; margin-block: .75rem; border: 1px solid var(--line); border-radius: .3rem; background: var(--surface); overflow-wrap: anywhere; }
+.source-search-results pre { margin: .25rem 0 0; white-space: pre-wrap; overflow-wrap: anywhere; tab-size: 4; unicode-bidi: isolate; }
+.source-search-results mark { background: var(--selected); color: inherit; outline: 1px solid var(--accent); }
+.source-search nav { display: flex; flex-wrap: wrap; gap: .5rem; margin-block: 1rem; }
 .source-token-keyword { color: var(--accent); font-weight: 650; }
 .source-token-string { color: var(--attention); }
 .source-token-comment { color: var(--muted); font-style: italic; }

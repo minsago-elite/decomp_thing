@@ -2,6 +2,21 @@ import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 
+async function readJobRecord(path) {
+  try {
+    return JSON.parse(await fs.readFile(path, 'utf8'));
+  } catch (error) {
+    assert.fail(`Expected valid job metadata at ${path}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+/** Wait for the lazy route, authenticated session and enabled upload control. */
+async function waitForUploadControl(tab, ready, label = 'workspace upload control') {
+  await ready(tab, `location.pathname === '/nested/' &&
+    document.body.innerText.includes('Local session connected.') &&
+    document.querySelector('section[aria-labelledby="upload-title"] input#binary-file[type="file"]:not(:disabled)') !== null`, label);
+}
+
 /** SessionStatus can settle before the lazy upload form has its authenticated limits. */
 export const uploadFormReady = `document.body.innerText.includes('Local session connected.') &&
   document.querySelector('#upload-guidance')?.textContent.includes('The complete request limit is 33554432 bytes') &&
@@ -17,9 +32,9 @@ export function uploadSubmitReady(label) {
   })()`;
 }
 
-/** Wait for the lazy route, not just the independently rendered session header. */
+/** Wait for the upload control, then select the isolated non-executable fixture. */
 export async function selectUploadFixture({ tab, evaluate, ready }) {
-  await ready(tab, `document.querySelector('#binary-file') !== null && !document.querySelector('#binary-file').disabled`, 'upload file picker');
+  await waitForUploadControl(tab, ready);
   await evaluate(tab, `(() => {
     const bytes = new Uint8Array(64); bytes.set([127, 69, 76, 70, 2, 1, 1]);
     const view = new DataView(bytes.buffer); view.setUint16(16, 2, true); view.setUint16(18, 62, true);
@@ -61,7 +76,7 @@ export async function qualifyUpload({ makeTarget, cdp, evaluate, ready, browserO
       return response;
     };
   })();` }, tab.sessionId);
-  await cdp.call('Page.navigate', { url: browserOrigin + '/nested/' }, tab.sessionId);
+  await cdp.call('Page.navigate', { url: `${browserOrigin}/nested/` }, tab.sessionId);
   await ready(tab, uploadFormReady, 'authenticated upload form and limits');
   const selectFixture = () => selectUploadFixture({ tab, evaluate, ready });
   await selectFixture();
@@ -78,7 +93,11 @@ export async function qualifyUpload({ makeTarget, cdp, evaluate, ready, browserO
   const publishedFiles = await fs.readdir(join(data, ids[0]));
   assert.deepEqual(publishedFiles.sort(), ['input.elf', 'job.json', 'upload-receipt.json']);
   const retainedFiles = new Map(await Promise.all(publishedFiles.map(async name => [name, await fs.readFile(join(data, ids[0], name))])));
-  assert.ok(tab.requests.every(request => !/^\/nested\/api\/v1\/jobs\/[0-9a-f]{32}$/.test(new URL(request.url).pathname)),
+  const requestPaths = tab.requests.map(({ url }) => {
+    try { return new URL(url).pathname; } catch { return null; }
+  });
+  assert.ok(requestPaths.every(path => path !== null), 'Every captured browser request must have a valid absolute URL');
+  assert.ok(requestPaths.every(path => !/^\/nested\/api\/v1\/jobs\/[0-9a-f]{32}$/.test(path)),
     'The file baseline must precede every job metadata view');
   assert.equal(await evaluate(tab, 'sessionStorage.length'), 1);
   cdp.on('Page.javascriptDialogOpening', () => {
@@ -93,13 +112,13 @@ export async function qualifyUpload({ makeTarget, cdp, evaluate, ready, browserO
   await ready(tab, `location.pathname === '/nested/jobs/${ids[0]}' && document.body.innerText.includes('inert-browser-fixture.elf')`, 'retry recovers durable job route');
   assert.deepEqual(await evaluate(tab, 'window.__uploadProof()'), { requests: 1, sameKey: true, hidden: true });
   assert.deepEqual((await fs.readdir(data)).filter(name => /^[a-f0-9]{32}$/.test(name)), ids);
-  const record = JSON.parse(await fs.readFile(join(data, ids[0], 'job.json'), 'utf8'));
+  const record = await readJobRecord(join(data, ids[0], 'job.json'));
   assert.equal(record.status, 'uploaded');
   const files = await fs.readdir(join(data, ids[0]));
   assert.deepEqual(files.sort(), ['input.elf', 'job.json', 'upload-receipt.json']);
   assert.equal(await evaluate(tab, 'localStorage.length + sessionStorage.length'), 0);
   assert.deepEqual(tab.exceptions, []);
-  assert.ok(tab.requests.every(request => ['GET', 'HEAD'].includes(request.method) || request.url === browserOrigin + '/nested/api/v1/jobs'));
+  assert.ok(tab.requests.every(request => ['GET', 'HEAD'].includes(request.method) || request.url === `${browserOrigin}/nested/api/v1/jobs`));
   await cdp.call('Page.reload', {}, tab.sessionId);
   await ready(tab, `document.body.innerText.includes('inert-browser-fixture.elf')`, 'published job survives browser reload');
   const metadata = await evaluate(tab, `(async () => {
@@ -137,7 +156,7 @@ export async function qualifyUpload({ makeTarget, cdp, evaluate, ready, browserO
   assert.deepEqual((await fs.readdir(data)).filter(name => /^[a-f0-9]{32}$/.test(name)), ids);
   assert.deepEqual((await fs.readdir(join(data, ids[0]))).sort(), files.sort());
   for (const [name, bytes] of retainedFiles) assert.deepEqual(await fs.readFile(join(data, ids[0], name)), bytes,
-    'Metadata views changed the uploaded job: ' + name);
+    `Metadata views changed the uploaded job: ${name}`);
   assert.equal(await evaluate(tab, 'localStorage.length + sessionStorage.length'), 0);
   assert.deepEqual(tab.exceptions, []);
   return { keyboardSubmit: true, publicationResponseLost: true, reloadRecovery: true, sameKeyRetry: true, jobsCreated: 1,
@@ -165,17 +184,16 @@ export async function qualifyUploadFailures({ makeTarget, cdp, evaluate, ready, 
       return original.apply(this, arguments);
     };
   })();` }, tab.sessionId);
-  await cdp.call('Page.navigate', { url: browserOrigin + '/nested/' }, tab.sessionId);
-  await ready(tab, `document.body.innerText.includes('Local session connected.')`, 'failure test session');
+  await cdp.call('Page.navigate', { url: `${browserOrigin}/nested/` }, tab.sessionId);
   const ids = (await fs.readdir(data)).filter(name => /^[a-f0-9]{32}$/.test(name));
   async function select(size, name) {
-    await ready(tab, `document.querySelector('#binary-file') !== null && !document.querySelector('#binary-file').disabled`, 'upload file picker');
+    await waitForUploadControl(tab, ready, 'failure workspace upload control');
     await evaluate(tab, `(() => {
       const transfer = new DataTransfer(); transfer.items.add(new File([new Uint8Array(${size})], ${JSON.stringify(name)}));
       const picker = document.querySelector('#binary-file'); picker.files = transfer.files;
       picker.dispatchEvent(new Event('change', { bubbles: true }));
     })()`);
-    await ready(tab, `document.body.innerText.includes(${JSON.stringify('Selected: ' + name)}) && document.querySelector('button[type="submit"]')?.disabled === false`, 'upload selection rendered');
+    await ready(tab, `document.body.innerText.includes(${JSON.stringify(`Selected: ${name}`)}) && document.querySelector('button[type="submit"]')?.disabled === false`, 'upload selection rendered');
   }
   async function button(label) {
     await evaluate(tab, `[...document.querySelectorAll('button')].find(button => button.textContent === ${JSON.stringify(label)}).click()`);
@@ -218,9 +236,8 @@ export async function qualifyMeasuredUpload({ makeTarget, cdp, evaluate, ready, 
     }
   }, tab.sessionId);
   const before = (await fs.readdir(data)).filter(name => /^[a-f0-9]{32}$/.test(name));
-  await cdp.call('Page.navigate', { url: browserOrigin + '/nested/' }, tab.sessionId);
-  await ready(tab, `document.body.innerText.includes('Local session connected.')`, 'measured upload session');
-  await ready(tab, `document.querySelector('#binary-file') !== null && !document.querySelector('#binary-file').disabled`, 'upload file picker');
+  await cdp.call('Page.navigate', { url: `${browserOrigin}/nested/` }, tab.sessionId);
+  await waitForUploadControl(tab, ready, 'measured workspace upload control');
   await evaluate(tab, `(() => {
     const bytes = new Uint8Array(512 * 1024); bytes.set([127, 69, 76, 70, 2, 1, 1]);
     const view = new DataView(bytes.buffer); view.setUint16(16, 2, true); view.setUint16(18, 62, true);
@@ -248,7 +265,7 @@ export async function qualifyMeasuredUpload({ makeTarget, cdp, evaluate, ready, 
   await evaluate(tab, `[...document.querySelectorAll('button')].find(button => button.textContent === 'Retry this upload').click()`);
   await ready(tab, `location.pathname.startsWith('/nested/jobs/') && document.body.innerText.includes('measured-inert.elf')`, 'measured upload publication');
   const id = await evaluate(tab, 'location.pathname.split("/").at(-1)');
-  const record = JSON.parse(await fs.readFile(join(data, id, 'job.json'), 'utf8'));
+  const record = await readJobRecord(join(data, id, 'job.json'));
   assert.equal(record.status, 'uploaded');
   assert.ok(keys.length === 2 && typeof keys[0] === 'string' && keys[0] === keys[1], 'Cancellation retry must preserve the idempotency key');
   assert.equal(await evaluate(tab, 'localStorage.length + sessionStorage.length'), 0);

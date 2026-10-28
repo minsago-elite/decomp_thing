@@ -22,6 +22,7 @@ internal class WebApiController(
     clock: Clock = Clock.systemUTC(),
     private val harnessReadiness: WebHarnessReadinessProjector = WebHarnessReadinessProjector(),
     private val agentPreflight: WebAgentPreflight = WebAgentPreflight { error("No agent preflight is configured.") },
+    private val git: WebGitCapability = WebGitCapability.detect(),
     private val readExplorationArtifact: (String, String, Long) -> decompengine.repair.StableRegularFile = jobs::readArtifact,
 ) {
     private val prefix = "${assets.basePath}api/v1/"
@@ -35,6 +36,7 @@ internal class WebApiController(
     private val cancellations = WebCancellationController(jobMutations, assets.basePath)
     private val recoveries = WebRecoveryController(jobs, jobMutations, assets.basePath)
     private val agentPreflights = WebAgentPreflightController(access, agentPreflight, assets.basePath)
+    private val gitRoutes = WebGitController(access, jobs, jobMutations, git, assets.basePath)
     private val runPages = WebRunPages { jobId ->
         when (val inspection = jobs.inspectDurableJob(jobId)) {
             is decompengine.jobs.WorkflowJobInspection.Available -> inspection.snapshot
@@ -46,6 +48,7 @@ internal class WebApiController(
     private val revisionSourcePages = WebRevisionSourcePages(jobs::readRevisionSources)
     private val revisionDirectoryPages = WebRevisionDirectoryPages(jobs::readRevisionSources)
     private val revisionFileMetadata = WebRevisionFileMetadata(jobs::readRevisionFileMetadata)
+    private val revisionSourceSearch = WebRevisionSourceSearch(jobs::searchRevisionSources)
     private val revisionValidationReports = WebRevisionValidationReports(jobs::readRecordedValidationReport)
     private val programStructure = WebProgramStructurePages { job, run, revision, project -> jobs.readProgramStructure(job, run, revision, project) }
     private val eventStream = WebEventStream(access, streamResources, progressPages, read = { jobId, runId ->
@@ -68,6 +71,8 @@ internal class WebApiController(
         "jobs/[^/]+/runs/[^/]+/revisions/[^/]+/modules(?:/[^/]+)?",
         "jobs/[^/]+/runs/[^/]+/revisions/[^/]+/globals/[^/]+",
         "jobs/[^/]+/runs/[^/]+/revisions/[^/]+/types/[^/]+",
+        "jobs/[^/]+/runs/[^/]+/revisions/[^/]+/source-search",
+        "jobs/[^/]+/repositories(?:/[^/]+(?:/operations/[^/]+)?)?",
         "jobs/[^/]+/runs/[^/]+/snapshot",
         "jobs/[^/]+/runs/[^/]+/events",
         "jobs/[^/]+/runs/[^/]+/progress-pin",
@@ -162,6 +167,7 @@ internal class WebApiController(
                     } finally { exchange.close() }
                 }
                 resource == "agent/preflight" -> agentPreflights.handle(exchange)
+                resource.matches(Regex("jobs/[^/]+/repositories(?:/[^/]+(?:/operations/[^/]+)?)?")) -> gitRoutes.handle(exchange, resource.split('/'))
                 resource.matches(Regex("jobs/[^/]+/runs/[^/]+/cancel")) -> {
                     val parts = resource.split('/')
                     cancellations.handle(exchange, parts[1], parts[3])
@@ -280,6 +286,13 @@ internal class WebApiController(
                     val parts = resource.split('/')
                     sendWebApiResponse(exchange, 200, "revisionDirectory", revisionDirectoryPages.page(session.sessionId,
                         parts[1], parts[3], parts[5], parts[7], exchange.requestURI.rawQuery))
+                }
+                resource.matches(Regex("jobs/[^/]+/runs/[^/]+/revisions/[^/]+/source-search")) -> {
+                    val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.privateRead(allowHead = true)))
+                    requireJsonAccept(exchange)
+                    val parts = resource.split('/')
+                    sendWebApiResponse(exchange, 200, "sourceSearch",
+                        revisionSourceSearch.search(session.sessionId, parts[1], parts[3], parts[5], exchange.requestURI.rawQuery))
                 }
                 resource.matches(Regex("jobs/[^/]+/runs/[^/]+/revisions/[^/]+/sources")) -> {
                     val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.privateRead(allowHead = true)))
@@ -418,7 +431,7 @@ internal class WebApiController(
             put("workflows", JsonArray(emptyList()))
             put("agentContractVersion", JsonNull)
             put("limits", JsonNull)
-        }, harnessCapability())))
+        }, harnessCapability()) + git.capabilities()))
         // Configured ceilings for the API profile; unavailable resources remain
         // unavailable until their adapters enforce these limits and are enabled.
         put("limits", buildJsonObject {
@@ -427,7 +440,8 @@ internal class WebApiController(
             put("downloadIdleMs", "120000")
             put("maxJsonBytes", "1048576")
             put("maxUploadBytes", StreamingMultipartUpload.MAX_REQUEST_BYTES.toString())
-            put("maxSourceChunkBytes", "0")
+            // The chunk reader enforces 4..131072 bytes per range over digest-verified inputs of at most 8 MiB.
+            put("maxSourceChunkBytes", WebRevisionSourceContent.MAXIMUM_CHUNK_BYTES.toString())
             put("maxLogChunkBytes", "0")
             put("maxEventCount", "1024")
             put("maxEventBytes", "2097152")
@@ -447,7 +461,7 @@ internal class WebApiController(
                 "aarch64", "arm64" -> "aarch64"
                 else -> "unknown"
             })
-            put("gitVersion", JsonNull)
+            put("gitVersion", git.versionJson())
             put("scheduler", webSchedulerSnapshot(jobs.schedulerSnapshot()))
             put("progressRetention", webProgressRetentionStatus(jobs.progressRetentionStatus()))
         })

@@ -92,11 +92,13 @@ function Shell({ basePath, guard, identity, recovery, reload, session }: ShellPr
     ? (structure[1] === 'functions' ? structureTitles.functions : structure[1] === 'modules' ? structureTitles.modules : null)
     : ({ functions: structureTitles.function, globals: structureTitles.global, types: structureTitles.type,
       modules: structureTitles.module } as Record<string, string>)[structure[1] ?? ''] ?? null;
+  const isSourceSearch = new RegExp(`^${basePath}/jobs/[^/]+/runs/[^/]+/revisions/[^/]+/source-search$`).test(location.path);
   const pageTitle = atHome ? copy.jobs : location.path === uploadPath ? copy.uploadABinary
     : location.path === runtimePath ? copy.runtimeStatus : isJob ? copy.jobOverview
       : isRunActivity ? copy.attemptActivity : isRunEvidence ? copy.attemptEvidence
         : isRun ? copy.workflowAttempt : isHistory ? copy.attemptHistory
-      : isSourceDirectory ? sourceTitleCopy.title : isSourceFile ? sourceTitleCopy.fileTitle : structureTitle ?? copy.pageUnavailable;
+      : isSourceDirectory ? sourceTitleCopy.title : isSourceFile ? sourceTitleCopy.fileTitle
+        : isSourceSearch ? sourceTitleCopy.searchTitle : structureTitle ?? copy.pageUnavailable;
 
   function focusRouteHeading(url: string) {
     const path = new URL(url, window.location.origin).pathname.replace(/\/+$/g, '') || '/';
@@ -211,6 +213,7 @@ function Shell({ basePath, guard, identity, recovery, reload, session }: ShellPr
               <Route path={`${basePath}/jobs/:jobId/runs/:runId/revisions/:revisionId/functions/:selector`} component={Structure} view="function" basePath={basePath} session={session} />
               <Route path={`${basePath}/jobs/:jobId/runs/:runId/revisions/:revisionId/globals/:selector`} component={Structure} view="global" basePath={basePath} session={session} />
               <Route path={`${basePath}/jobs/:jobId/runs/:runId/revisions/:revisionId/types/:selector`} component={Structure} view="type" basePath={basePath} session={session} />
+              <Route path={`${basePath}/jobs/:jobId/runs/:runId/revisions/:revisionId/source-search`} component={Sources} resource="search" basePath={basePath} session={session} />
               <Route path={`${basePath}/jobs/:jobId/runs`} component={RunHistory} basePath={basePath} session={session} />
               <Route path={`${basePath}/jobs/:jobId/runs/:runId/activity`} component={Run} view="activity" basePath={basePath} session={session} />
               <Route path={`${basePath}/jobs/:jobId/runs/:runId/evidence`} component={Run} view="evidence" basePath={basePath} session={session} />

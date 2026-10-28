@@ -370,7 +370,11 @@ async function qualifyCspDetector() {
 
 async function evaluate(target, expression) {
   const result = await cdp.call('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true }, target.sessionId);
-  if (result.exceptionDetails) throw new Error(`Browser expression failed: ${result.exceptionDetails.text}`);
+  if (result.exceptionDetails) {
+    const exception = result.exceptionDetails.exception;
+    const detail = exception?.description ?? exception?.value ?? result.exceptionDetails.text;
+    throw new Error(`Browser expression failed: ${result.exceptionDetails.text}: ${detail}`);
+  }
   return result.result.value;
 }
 

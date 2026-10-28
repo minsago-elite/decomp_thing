@@ -1,0 +1,19 @@
+{
+  "apiVersion": 1,
+  "kind": "operation",
+  "requestId": "request_example_1",
+  "data": {
+    "operationId": "operation_example_2",
+    "jobId": "1234567890abcdef1234567890abcdef",
+    "repositoryId": "repository_example_2",
+    "worktreeId": "worktree_example_2",
+    "action": "git.init",
+    "state": "completed",
+    "version": "operation_v3",
+    "createdAt": "2026-10-25T00:00:00Z",
+    "endedAt": "2026-10-25T00:00:02Z",
+    "resultObjectId": null,
+    "recoveryRequired": false,
+    "message": "Initialized without a commit. Every copied source file is untracked until an explicit commit."
+  }
+}

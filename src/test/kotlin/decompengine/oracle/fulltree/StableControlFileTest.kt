@@ -355,6 +355,15 @@ class StableControlFileTest {
     }
 
     @Test
+    fun `foreign-owner refusal reports the observed effective and file UIDs`() {
+        assertEquals(
+            "machine-call bridge has an unsupported foreign non-root owner and cannot be leased " +
+                "(effectiveUid=1001 fileUid=65534)",
+            unsupportedForeignOwnerLeaseMessage("machine-call bridge", 1001, 65534),
+        )
+    }
+
+    @Test
     fun `foreign non-root owner without kernel lease authority fails closed`() =
         inControlTemporaryDirectory { root ->
             val unshare = Path.of("/usr/bin/unshare")
@@ -400,6 +409,10 @@ class StableControlFileTest {
                 ).close()
             }
             assertTrue(failure.message.orEmpty().contains("foreign non-root owner"), failure.message)
+            assertTrue(
+                failure.message.orEmpty().contains("effectiveUid=${HostileWriterLibC.geteuid()} fileUid=$owner"),
+                failure.message,
+            )
         }
 
     @Test
