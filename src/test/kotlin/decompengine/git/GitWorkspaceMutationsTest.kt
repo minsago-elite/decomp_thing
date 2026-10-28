@@ -263,6 +263,7 @@ class GitWorkspaceMutationsTest {
             }
             Files.writeString(staging.resolve("ref-name"), "refs/heads/trunk")
             val restarted = f.open()
+            restarted.recover(listOf(jobId))
             assertEquals(GitOperationState.INTERRUPTED, restarted.operation(jobId, repositoryId, operationId).state)
             assertEquals(before, f.repositories.git("--git-dir=$gitDir", "ls-files", "--stage"))
             assertTrue(Files.notExists(gitDir.resolve("HEAD.lock")))
@@ -925,6 +926,7 @@ class GitWorkspaceMutationsTest {
             assertNull(service.workspace(jobId, repositoryId).mapping)
             service.close(); f.hook = {}
             val restarted = f.open()
+            restarted.recover(listOf(jobId))
             val recovered = restarted.operation(jobId, repositoryId, commit.operationId)
             assertEquals(commit.state, recovered.state)
             assertEquals(objectId, recovered.resultObjectId)
@@ -1004,6 +1006,7 @@ class GitWorkspaceMutationsTest {
                 }
                 Files.writeString(gitDir.resolve(name), if (contents == "complete") marker else contents)
                 val restarted = f.open()
+                restarted.recover(listOf(jobId))
                 val recovered = restarted.operation(jobId, repositoryId, operationId)
                 assertEquals(GitOperationState.INTERRUPTED, recovered.state, "$name / $contents")
                 for (lock in listOf("index.lock", "HEAD.lock")) assertTrue(Files.notExists(gitDir.resolve(lock)))
@@ -1037,6 +1040,7 @@ class GitWorkspaceMutationsTest {
                 else Files.createLink(gitDir.resolve(name), witness)
             }
             val restarted = f.open()
+            restarted.recover(listOf(jobId))
             val recovered = restarted.operation(jobId, repositoryId, operationId)
             assertEquals(GitOperationState.RECOVERY_REQUIRED, recovered.state)
             assertEquals("COMMIT_LOCKS_REQUIRE_REVIEW", recovered.failureCode)
@@ -1071,6 +1075,7 @@ class GitWorkspaceMutationsTest {
                 Files.createDirectories(file.parent)
                 Files.writeString(file, bytes) // No private inode witness exists for this legacy/external lock.
                 val restarted = f.open()
+                restarted.recover(listOf(jobId))
                 val recovered = restarted.operation(jobId, repositoryId, admission.operation.operationId)
                 if (contents == "complete" && name != "refs/heads/trunk.lock") {
                     assertEquals(GitOperationState.INTERRUPTED, recovered.state)
@@ -1099,6 +1104,7 @@ class GitWorkspaceMutationsTest {
             assertTrue(service.awaitIdle(60_000)); service.close()
             f.hook = {}
             val restarted = f.open()
+            restarted.recover(listOf(jobId))
             val recovered = restarted.operation(jobId, repositoryId, admission.operation.operationId)
             assertEquals(state, recovered.state, point.name)
             val head = restarted.workspace(jobId, repositoryId).observation.head.objectId

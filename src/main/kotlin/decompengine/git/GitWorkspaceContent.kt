@@ -17,7 +17,7 @@ internal object GitWorkspaceContent {
 
     /** Never follow a leaf link. The optional destination receives exactly the hashed bytes. */
     fun fingerprint(root: Path, file: Path, budget: Budget, destination: Path? = null,
-        beforeOpen: (Path) -> Unit = {}): String {
+        beforeOpen: (Path) -> Unit = {}, nativePath: ByteArray? = null): String {
         val stat = GitRepositoryInspector.worktreeStat(root, file) ?: return "absent"
         if (stat.isDirectory) return "directory"
         if (!stat.isRegularFile && !stat.isSymbolicLink) unavailable()
@@ -40,13 +40,18 @@ internal object GitWorkspaceContent {
                 if (stat.size() > budget.remaining) unavailable()
                 try {
                     LinuxFilesystemSyscalls.requireSupported(root)
-                    openPinnedParent(root, file.parent).use { parent ->
+                    val pathComponents = nativePath?.let(::nativePathComponents)
+                    val parent = if (pathComponents == null) openPinnedParent(root, file.parent)
+                        else openPinnedParent(root, pathComponents)
+                    parent.use {
                         beforeOpen(file)
                         GitStorage.checkInterrupted()
                         // O_PATH authenticates the opened inode as a regular file before an
                         // O_NONBLOCK readable descriptor is reopened from that same inode.
-                        LinuxFilesystemSyscalls.openRegularFileAtOrNull(parent.fd, file.fileName.toString())
-                            ?.use { pinned ->
+                        val pinnedFile = if (pathComponents == null)
+                            LinuxFilesystemSyscalls.openRegularFileAtOrNull(parent.fd, file.fileName.toString())
+                        else LinuxFilesystemSyscalls.openRegularFileAtOrNull(parent.fd, pathComponents.last())
+                        pinnedFile?.use { pinned ->
                                 val pinnedPath = LinuxFilesystemSyscalls.descriptorPath(pinned)
                                 val openedSize = Files.size(pinnedPath)
                                 if (openedSize != stat.size()) unavailable()
@@ -96,6 +101,47 @@ internal object GitWorkspaceContent {
             current.close()
             throw failure
         }
+    }
+
+    private fun openPinnedParent(root: Path, pathComponents: List<ByteArray>): LinuxDescriptor {
+        if (pathComponents.isEmpty()) unavailable()
+        val absoluteRoot = root.toAbsolutePath().normalize()
+        var current = LinuxFilesystemSyscalls.openRoot(absoluteRoot.root)
+        try {
+            for (component in absoluteRoot.root.relativize(absoluteRoot)) {
+                GitStorage.checkInterrupted()
+                val next = LinuxFilesystemSyscalls.openDirectoryAt(current.fd, component.toString())
+                current.close()
+                current = next
+            }
+            for (component in pathComponents.dropLast(1)) {
+                GitStorage.checkInterrupted()
+                val next = LinuxFilesystemSyscalls.openDirectoryAt(current.fd, component)
+                current.close()
+                current = next
+            }
+            return current
+        } catch (failure: Throwable) {
+            current.close()
+            throw failure
+        }
+    }
+
+    private fun nativePathComponents(path: ByteArray): List<ByteArray> {
+        if (path.isEmpty() || path.first() == '/'.code.toByte() || path.last() == '/'.code.toByte()) unavailable()
+        val components = mutableListOf<ByteArray>()
+        var start = 0
+        path.indices.filter { path[it] == '/'.code.toByte() }.forEach { end ->
+            components += path.copyOfRange(start, end)
+            start = end + 1
+        }
+        components += path.copyOfRange(start, path.size)
+        if (components.any { component ->
+                component.isEmpty() || component.any { it == 0.toByte() } ||
+                    component.contentEquals(byteArrayOf('.'.code.toByte())) ||
+                    component.contentEquals(byteArrayOf('.'.code.toByte(), '.'.code.toByte()))
+            }) unavailable()
+        return components
     }
 
     private fun consume(bytes: ByteArray, count: Int, budget: Budget, digest: MessageDigest, output: OutputStream?) {

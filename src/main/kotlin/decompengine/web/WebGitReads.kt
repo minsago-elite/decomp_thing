@@ -94,7 +94,8 @@ internal class WebGitReads(private val repositories: () -> ManagedGitRepositorie
         val cursor = query["cursor"]
         if (cursor != null && query["start"] != null) throw WebAccessDenied(400, "INVALID_CURSOR", "Use start for a first page or cursor for a later one, not both.")
         val (start, offset) = if (cursor != null) {
-            val match = Regex("([0-9a-f]{40}|[0-9a-f]{64})~(0|[1-9][0-9]{0,6})").matchEntire(cursor)
+            // Match the reader's inclusive skip bound before any repository work, not a later 500.
+            val match = Regex("([0-9a-f]{40}|[0-9a-f]{64})~(0|[1-9][0-9]{0,5}|1000000)").matchEntire(cursor)
                 ?: throw WebAccessDenied(400, "INVALID_CURSOR", "The history cursor is invalid.")
             match.groupValues[1] to match.groupValues[2].toInt()
         } else (query["start"]?.also { requireObjectIdText(it) }) to 0
@@ -167,7 +168,7 @@ internal class WebGitReads(private val repositories: () -> ManagedGitRepositorie
         // A continuation names the listing it read through; any ref created, deleted or moved
         // before its offset changes that anchor, so the page cannot repeat or skip an entry.
         val (anchor, offset) = cursor?.let { value ->
-            Regex("refs~([0-9a-f]{32})~(0|[1-9][0-9]{0,5})").matchEntire(value)?.destructured?.let { (anchor, offset) -> anchor to offset.toInt() }
+            Regex("refs~([0-9a-f]{32})~(0|[1-9][0-9]{0,4}|100000)").matchEntire(value)?.destructured?.let { (anchor, offset) -> anchor to offset.toInt() }
                 ?: throw WebAccessDenied(400, "INVALID_CURSOR", "The refs cursor is invalid.")
         } ?: (null to 0)
         val service = repositories()

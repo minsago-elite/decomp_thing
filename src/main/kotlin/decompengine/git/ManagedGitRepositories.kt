@@ -260,27 +260,28 @@ class ManagedGitRepositories(
     // ---- Reads ----------------------------------------------------------------------------
 
     fun listing(jobId: String): GitRepositoryListing = synchronized(lock) {
-        requireRunner()
-        reconcile(jobId)
+        requireReadable(jobId)
         GitRepositoryListing(repositories(jobId), operations(jobId).sortedWith(
             compareByDescending<GitOperationRecord> { it.createdAt }.thenByDescending { it.operationId }).take(MAX_LISTED_OPERATIONS))
     }
 
     fun operation(jobId: String, repositoryId: String, operationId: String): GitOperationRecord = synchronized(lock) {
-        requireRunner()
-        reconcile(jobId)
+        requireReadable(jobId)
         operations(jobId).singleOrNull { it.operationId == operationId && it.repositoryId == repositoryId }
             ?: throw ManagedGitException("NOT_FOUND", "The repository operation is unavailable.")
     }
 
     fun workspace(jobId: String, repositoryId: String): GitWorkspaceView {
-        val runner = requireRunner()
-        val record = synchronized(lock) {
-            reconcile(jobId)
-            repositories(jobId).singleOrNull { it.repositoryId == repositoryId }
+        val (runner, record) = synchronized(lock) {
+            requireReadable(jobId)
+            val record = repositories(jobId).singleOrNull { it.repositoryId == repositoryId }
                 ?: throw ManagedGitException("NOT_FOUND", "The managed repository is unavailable.")
+            // Startup or mutation admission prepares the runtime; a read must never create it.
+            val prepared = runner ?: throw ManagedGitException("CAPABILITY_UNAVAILABLE",
+                "The server-owned Git runtime has not been prepared.")
+            prepared to record
         }
-        val directory = jobGitDirectory(jobId).resolve("repositories").resolve(record.repositoryId)
+        val directory = root.resolve(jobId).resolve("git/repositories").resolve(record.repositoryId)
         val observation = try {
             GitRepositoryInspector.inspect(runner, directory.resolve(GIT_DIR), directory.resolve(WORK_TREE))
         } catch (failure: GitRepositoryException) {
@@ -299,27 +300,24 @@ class ManagedGitRepositories(
 
     /** True while a queued or running operation holds this job's repository. */
     fun busy(jobId: String): Boolean = synchronized(lock) {
-        reconcile(jobId)
+        requireReadable(jobId)
         operations(jobId).any { !it.state.terminal }
     }
 
-    /** Resolved storage of one registered repository's primary work tree. */
-    private data class Located(val record: GitRepositoryRecord, val gitDir: Path, val workTree: Path)
+    /** Prepared runtime and existing storage; locating a read never creates storage or recovers. */
+    private data class Located(val runner: GitCommandRunner, val record: GitRepositoryRecord, val gitDir: Path, val workTree: Path)
 
-    private fun locate(jobId: String, repositoryId: String): Located {
-        val record = synchronized(lock) {
-            reconcile(jobId)
-            repositories(jobId).singleOrNull { it.repositoryId == repositoryId }
-                ?: throw ManagedGitException("NOT_FOUND", "The managed repository is unavailable.")
-        }
-        val directory = jobGitDirectory(jobId).resolve("repositories").resolve(record.repositoryId)
-        return Located(record, directory.resolve(GIT_DIR), directory.resolve(WORK_TREE))
+    private fun locate(jobId: String, repositoryId: String): Located = synchronized(lock) {
+        requireReadable(jobId)
+        val record = repositories(jobId).singleOrNull { it.repositoryId == repositoryId }
+            ?: throw ManagedGitException("NOT_FOUND", "The managed repository is unavailable.")
+        val prepared = runner ?: throw ManagedGitException("CAPABILITY_UNAVAILABLE",
+            "The server-owned Git runtime has not been prepared.")
+        val directory = root.resolve(jobId).resolve("git/repositories").resolve(record.repositoryId)
+        Located(prepared, record, directory.resolve(GIT_DIR), directory.resolve(WORK_TREE))
     }
 
-    fun repository(jobId: String, repositoryId: String): GitRepositoryRecord {
-        requireRunner()
-        return locate(jobId, repositoryId).record
-    }
+    fun repository(jobId: String, repositoryId: String): GitRepositoryRecord = locate(jobId, repositoryId).record
 
     private fun <T> reading(block: () -> T): T = try { block() } catch (failure: GitRepositoryException) {
         throw ManagedGitException(failure.code, failure.message ?: "The repository could not be read.")
@@ -330,8 +328,8 @@ class ManagedGitRepositories(
 
     /** History from a fixed start object; null starts at HEAD (an unborn HEAD has no history). */
     fun history(jobId: String, repositoryId: String, start: String?, skip: Int, limit: Int): Pair<String?, GitHistoryPage> {
-        val runner = requireRunner()
         val located = locate(jobId, repositoryId)
+        val runner = located.runner
         return reading {
             GitConfigurationAudit.requireManaged(runner, located.gitDir)
             val format = located.record.objectFormat
@@ -344,8 +342,8 @@ class ManagedGitRepositories(
 
     /** Changed files for one comparison and, when [file] selects one, its bounded patch. */
     fun diff(jobId: String, repositoryId: String, scope: GitDiffScope, commit: String?, fileId: String?): GitDiffView {
-        val runner = requireRunner()
         val located = locate(jobId, repositoryId)
+        val runner = located.runner
         return reading {
             GitConfigurationAudit.requireManaged(runner, located.gitDir)
             val format = located.record.objectFormat
@@ -364,8 +362,8 @@ class ManagedGitRepositories(
     }
 
     fun refs(jobId: String, repositoryId: String, skip: Int, limit: Int): Pair<GitRepositoryRecord, GitRefsPage> {
-        val runner = requireRunner()
         val located = locate(jobId, repositoryId)
+        val runner = located.runner
         return reading {
             GitConfigurationAudit.requireManaged(runner, located.gitDir)
             located.record to GitReads.refsPage(runner, located.gitDir, located.record.objectFormat, skip, limit)
@@ -375,11 +373,13 @@ class ManagedGitRepositories(
     private fun commitExists(runner: GitCommandRunner, gitDir: Path, objectId: String): Boolean =
         runner.run(GitInvocation("cat-file", listOf("-e", "$objectId^{commit}"), gitDir = gitDir, allowedExitCodes = setOf(0, 1, 128))).exitCode == 0
 
-    /** Startup sweep. Each job is also reconciled before its first use by this instance. */
+    /** Startup authority prepares the runtime and recovers retained jobs before serving reads. */
     fun recover(jobIds: Collection<String>) = synchronized(lock) {
         if (availability !is GitAvailability.Available) return@synchronized
+        try { requireRunner() } catch (_: ManagedGitException) { return@synchronized }
         jobIds.filter { it.matches(JOB_ID) && Files.isDirectory(root.resolve(it).resolve("git"), NOFOLLOW_LINKS) }.forEach { jobId ->
-            // An unreadable record must not block startup; that job retries and reports it on first use.
+            // An unreadable record must not block startup. Reads refuse this job without retrying;
+            // recovery can be retried only by another explicit sweep or mutation admission.
             try { reconcile(jobId) } catch (_: Exception) { }
         }
     }
@@ -847,7 +847,7 @@ class ManagedGitRepositories(
     // ---- Recovery -------------------------------------------------------------------------
 
     /**
-     * Reconcile records left by an earlier process before this instance first uses a job. A
+     * Reconcile records left by an earlier process under startup or mutation authority. A
      * published repository whose operation record still says queued/running completed before the
      * restart. Anything else stopped before publication: its private staging tree is removed and
      * the operation becomes `interrupted`, never retried. A staging tree that cannot be removed
@@ -894,10 +894,25 @@ class ManagedGitRepositories(
 
     // ---- Records --------------------------------------------------------------------------
 
+    /** Called under [lock]. Checking read readiness neither creates storage nor retries recovery. */
+    private fun requireReadable(jobId: String) {
+        val current = availability
+        if (current is GitAvailability.Unavailable) throw ManagedGitException("CAPABILITY_UNAVAILABLE", current.message)
+        if (!jobId.matches(JOB_ID) || !Files.isDirectory(root.resolve(jobId), NOFOLLOW_LINKS)) {
+            throw ManagedGitException("NOT_FOUND", "The requested job is unavailable.")
+        }
+        if (jobId !in reconciled && Files.exists(root.resolve(jobId).resolve("git"), NOFOLLOW_LINKS)) {
+            throw ManagedGitException("STORAGE_UNAVAILABLE",
+                "Repository startup recovery has not completed. Preserve storage and inspect the server before retrying recovery.")
+        }
+    }
+
     private fun requireRunner(): GitCommandRunner = when (val current = availability) {
         is GitAvailability.Unavailable -> throw ManagedGitException("CAPABILITY_UNAVAILABLE", current.message)
         is GitAvailability.Available -> synchronized(lock) {
-            runner ?: try { current.runner(GitEnvironment.prepare(root.resolve(".git-runtime"))) } catch (_: Exception) {
+            runner ?: try {
+                current.runner(GitEnvironment.prepare(root.resolve(".git-runtime"))).also(GitTrackingPolicy::prepare)
+            } catch (_: Exception) {
                 throw ManagedGitException("CAPABILITY_UNAVAILABLE", "The server-owned Git runtime directory is unavailable.")
             }.also { runner = it }
         }

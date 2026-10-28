@@ -52,6 +52,11 @@ object GitTrackingPolicy {
     private val policyLock = Any()
     private const val BATCH = 200
 
+    /** Prepare the immutable policy repository during startup, never on a GET read. */
+    internal fun prepare(runner: GitCommandRunner) {
+        policyRepository(runner)
+    }
+
     /**
      * Paths this policy excludes, decided independently of the repository. In a managed repository
      * `info/exclude` only makes excluded files appear ignored, and a `.gitignore` in source content
