@@ -850,18 +850,6 @@ class WebJobService(
         }
     }
 
-    @Synchronized
-    fun resolveArtifact(jobId: String, relativePath: String): Path {
-        requireInitializedRead()
-        val segments = canonicalReportSegments(relativePath)
-        if (segments[1] == "runs") {
-            getAttempt(jobId, segments[2])
-            return store.resolveRunArtifact(jobId, segments[2], segments.drop(3).joinToString("/"))
-        }
-        presentation(jobId) // Validate the record before resolving an explicitly legacy artifact.
-        return store.resolveArtifact(jobId, relativePath)
-    }
-
     /** Validate the report namespace and attempt ownership before a bounded retained-descriptor read. */
     @Synchronized
     internal fun readArtifact(jobId: String, relativePath: String, maximumBytes: Long): decompengine.repair.StableRegularFile {
