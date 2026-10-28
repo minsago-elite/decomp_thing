@@ -205,6 +205,64 @@ class GitWorkspaceMutationsTest {
         }
     }
 
+    @Test fun `staging refuses unchanged gitlinks hidden beneath selected file paths`(): Unit {
+        for (format in listOf(GitObjectFormat.SHA1, GitObjectFormat.SHA256)) Fixture().use { f ->
+            val service = f.open(GitRepositoryPolicy(defaultBranch = "trunk", objectFormat = format))
+            val repositoryId = service.initialized()
+            val gitDir = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
+            val workTree = gitDir.parent.resolve("worktree")
+            fun raw(vararg args: String) = f.repositories.git("--git-dir=$gitDir", "--work-tree=$workTree", *args, cwd = workTree)
+            f.repositories.commitAll(gitDir, workTree, "baseline")
+            val parent = raw("rev-parse", "HEAD").trim()
+            val hidden = "a/hidden.c"
+            raw("update-index", "--add", "--cacheinfo", "160000,$parent,$hidden")
+            raw("commit", "-q", "-m", "baseline gitlink")
+            val headBefore = raw("rev-parse", "HEAD").trim()
+            Files.writeString(workTree.resolve("a"), "int ordinary;\n")
+            val before = raw("ls-files", "--stage", "-z")
+            val (review, guards) = service.guards(repositoryId)
+            val selection = review.ids { it.path.exact == "a" && it.untracked }
+            assertEquals(1, selection.size)
+
+            val result = service.run(repositoryId,
+                GitStageRequest(review.record.worktreeId, guards, selection, true), "stage_unchanged_gitlink_01")
+            assertEquals(GitOperationState.FAILED, result.state, result.message)
+            assertEquals("EXCLUDED_PATH", result.failureCode)
+            assertEquals(before, raw("ls-files", "--stage", "-z"), "refusal preserves the unchanged gitlink")
+            assertEquals(headBefore, raw("rev-parse", "HEAD").trim())
+        }
+    }
+
+    @Test fun `staging an edited symlink placeholder preserves its reviewed logical mode`(): Unit = Fixture().use { f ->
+        val service = f.open()
+        val repositoryId = service.initialized()
+        val gitDir = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
+        val workTree = gitDir.parent.resolve("worktree")
+        fun raw(vararg args: String) = f.repositories.git("--git-dir=$gitDir", "--work-tree=$workTree", *args, cwd = workTree)
+        val target = "../src/main.c"
+        val targetFile = f.repositories.root.resolve("symlink-target")
+        Files.writeString(targetFile, target)
+        val blob = raw("hash-object", "-w", "--", targetFile.toString()).trim()
+        raw("update-index", "--add", "--cacheinfo", "120000,$blob,src/link.c")
+        raw("commit", "-q", "-m", "symlink baseline")
+        val placeholder = workTree.resolve("src/link.c")
+        Files.writeString(placeholder, target)
+        assertTrue(Files.isRegularFile(placeholder, java.nio.file.LinkOption.NOFOLLOW_LINKS))
+        assertEquals("../src/main.c", Files.readString(placeholder))
+        Files.writeString(placeholder, "../src/util.c")
+        val (review, guards) = service.guards(repositoryId)
+        val entry = review.observation.status.entries.single { it.path.exact == "src/link.c" }
+        assertEquals("120000", entry.indexMode)
+        assertEquals("120000", entry.worktreeMode)
+
+        val result = service.run(repositoryId, GitStageRequest(review.record.worktreeId, guards,
+            review.ids { it.path.exact == "src/link.c" }, true), "stage_symlink_placeholder_01")
+        assertEquals(GitOperationState.COMPLETED, result.state, result.message)
+        val indexEntry = f.repositories.git("--git-dir=$gitDir", "ls-files", "--stage", "--", "src/link.c")
+        assertTrue(indexEntry.startsWith("120000 "), indexEntry)
+        assertEquals("../src/util.c", f.repositories.git("--git-dir=$gitDir", "show", ":src/link.c"))
+    }
+
     @Test fun `staging refuses hidden gitlinks that conflict with selected file paths`(): Unit {
         for (format in listOf(GitObjectFormat.SHA1, GitObjectFormat.SHA256)) Fixture().use { f ->
             val service = f.open(GitRepositoryPolicy(defaultBranch = "trunk", objectFormat = format))

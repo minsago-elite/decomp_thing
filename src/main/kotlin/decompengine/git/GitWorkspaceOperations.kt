@@ -195,6 +195,39 @@ internal object GitWorkspaceMutations {
         }
     }
 
+    /** Refuse path updates that could remove or replace any gitlink already in the private index. */
+    fun requireNoGitlinkPathConflicts(
+        runner: GitCommandRunner,
+        gitDir: Path,
+        workTree: Path,
+        index: Path,
+        entries: List<GitStatusEntry>,
+    ) {
+        val selectedPaths = entries.flatMap { listOfNotNull(it.path, it.originalPath) }
+        val result = runner.run(GitInvocation("ls-files", listOf("--stage", "--full-name", "-z"),
+            gitDir = gitDir, workTree = workTree, variables = mapOf("GIT_INDEX_FILE" to index.toString()),
+            truncateStdout = true, limits = COMMIT_LIMITS.copy(maxStdoutBytes = GitReads.MAX_STATUS_BYTES)))
+        if (result.stdoutTruncated) refuse("STATUS_INCOMPLETE", "The staged index is too large to inspect completely.")
+        for (record in GitReads.records(result.stdout)) {
+            val separator = record.indexOf('\t'.code.toByte())
+            if (separator <= 0 || separator == record.lastIndex) {
+                throw GitRepositoryException("REPOSITORY_CORRUPT", "Git index listing is malformed.")
+            }
+            val fields = record.copyOfRange(0, separator).toString(Charsets.US_ASCII).split(' ')
+            if (fields.size != 3 || fields[0] !in setOf("100644", "100755", "120000", "160000") ||
+                fields[2] !in setOf("0", "1", "2", "3")) {
+                throw GitRepositoryException("REPOSITORY_CORRUPT", "Git index listing is malformed.")
+            }
+            if (fields[0] != "160000") continue
+            val gitlink = GitPath.of(record.copyOfRange(separator + 1, record.size))
+            if (selectedPaths.any { path ->
+                    path == gitlink || path.isDescendantOf(gitlink) || gitlink.isDescendantOf(path)
+                }) {
+                refuse("EXCLUDED_PATH", "A selected path overlaps a repository gitlink and cannot be staged.")
+            }
+        }
+    }
+
     fun validateMessage(message: String) {
         if (message.isBlank() || message.length > MAX_MESSAGE || message.any { it.isISOControl() && it != '\n' && it != '\t' }) {
             refuse("VALIDATION_FAILED", "A commit message must be 1-8192 characters of text without control characters other than newlines and tabs.")
@@ -219,7 +252,11 @@ internal object GitWorkspaceMutations {
                 if (fingerprint != observation.contentFingerprints[entry.path]) {
                     refuse("WORKTREE_CHANGED", "Selected content changed during capture. Read the current status before staging.")
                 }
-                val mode = fingerprint.substringBefore(':')
+                // Git reports the logical mode for a core.symlinks=false placeholder. Its
+                // physical regular-file mode is still used by the content fingerprint, but must
+                // not turn an edited imported symlink into an ordinary file in the index.
+                val mode = entry.worktreeMode?.takeIf { it in setOf("100644", "100755", "120000") }
+                    ?: fingerprint.substringBefore(':')
                 if (mode !in setOf("100644", "100755", "120000")) {
                     refuse("SELECTION_CHANGED", "A selected path is no longer a file or link. Read the current status before staging.")
                 }

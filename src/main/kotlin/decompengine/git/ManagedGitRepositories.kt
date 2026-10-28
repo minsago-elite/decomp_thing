@@ -675,6 +675,9 @@ class ManagedGitRepositories(
                             // index before update-index can remove that hidden entry.
                             GitWorkspaceMutations.requireNoStagedGitlinks(runner, located.gitDir, located.workTree,
                                 request.guards.expectedHeadObjectId, index)
+                            GitWorkspaceMutations.requireNoGitlinkPathConflicts(
+                                runner, located.gitDir, located.workTree, index, entries,
+                            )
                             GitWorkspaceMutations.stage(runner, located.gitDir, located.workTree, entries, reviewed, staging, index) {
                                 crash(GitOperationCrashPoint.AFTER_WORKSPACE_CAPTURE)
                             }
