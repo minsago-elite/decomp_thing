@@ -1,0 +1,3 @@
+# Raw Git objects retain signature continuation spaces and exact line endings.
+*.commit binary
+source-tree.nul binary
