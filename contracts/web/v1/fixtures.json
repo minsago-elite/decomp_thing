@@ -2,6 +2,18 @@
   "schema": "contract.schema.json",
   "fixtures": [
     {
+      "file": "fixtures/revision-sources-legacy.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/revision-directory-root-legacy.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/revision-file-root-legacy.json",
+      "valid": true
+    },
+    {
       "file": "fixtures/session.json",
       "valid": true
     },
@@ -812,6 +824,306 @@
     },
     {
       "file": "fixtures/request-recover-resume.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/source-search-complete.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/source-search-partial.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/source-search-no-matches.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/source-search-incomplete-empty.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-source-search-partial-without-cursor.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-search-complete-reason.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-search-scope-sum.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-search-case-sensitive-match.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-search-line-offset.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-search-complete-remaining.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-search-symbol-boundary.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-search-file-order.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-search-limit.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-search-numeric-line.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-search-index.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/source-search-continued-gaps.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-source-search-gaps-below-page.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-search-gaps-over-scope.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/artifacts-run.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/artifacts-revision.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/artifacts-job-partial.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/artifact-catalog-entry.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-artifacts-foreign-job.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-artifacts-revision-without-run.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-artifacts-run-filter.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-artifacts-revision-filter.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-artifacts-verified-archive.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-artifacts-duplicate.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-artifacts-family-prefix.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-artifacts-uncataloged-family.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-artifacts-missing-verification.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-artifacts-over-limit.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-artifact-catalog-verified-archive.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-artifacts-verified-without-revision.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/source-diff-page.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/source-file-diff-text.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/source-file-diff-binary.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/source-file-diff-renamed.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/revision-directory-manifest-entry.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-source-diff-added-base.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-diff-removed-head.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-diff-unchanged-listed.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-diff-count-total.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-diff-over-limit.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-diff-foreign-authority.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-file-diff-binary-patch.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-file-diff-renamed-text.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-file-diff-context-side.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-file-diff-hunk-count.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-file-diff-line-sequence.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-file-diff-next-hunk.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-file-diff-truncation.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-file-diff-binary-reason.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-directory-manifest-size.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-revision-directory-input-without-size.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/source-archive-verified.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/source-archive-stale.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/source-archive-missing.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/source-archive-git-mapped.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/operation-archive-verify-failed.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/archive-verification-request.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-source-archive-verified-without-operation.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-archive-missing-verified.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-archive-stale-without-previous.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-archive-failed-without-code.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-archive-foreign-download.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-archive-download-digest.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-archive-git-path.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-archive-build-without-executable.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-operation-archive-verify-object.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-archive-verification-request-digest.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-file-diff-empty-patch.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/source-file-diff-empty-added.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-source-diff-unchanged-modified.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/source-diff-content-kind.json",
       "valid": true
     },
     {

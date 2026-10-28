@@ -38,14 +38,22 @@ export function createApiClient(options: ClientOptions) {
     try { url = apiPath(basePath, path); } catch { throw new ApiClientError('invalid_request'); }
     if (session && path !== '/session') throw new ApiClientError('invalid_request');
     const headers = new Headers({ Accept: artifact || sourceHead ? 'application/octet-stream' : 'application/json' });
+    // Explicitly negotiate the broader inventory. Older v1 servers ignore this header and return inputs only.
+    if (method === 'GET' && (kind === 'revisionSources' || kind === 'revisionDirectory' || kind === 'revisionFile')) {
+      headers.set('X-Decomp-Source-Inventory', 'manifest');
+    }
     const mutating = method !== 'GET' && method !== 'HEAD';
     if (mutating && !upload) headers.set('Content-Type', 'application/json');
     // The agent preflight is a single-flight server action with no resource version: session, Origin and
     // CSRF authorize it, and a caller-supplied If-Match or idempotency key would have undefined meaning.
     const unversioned = method === 'POST' && path === '/agent/preflight';
     if (unversioned && (session || upload || settings.ifMatch !== undefined || settings.idempotencyKey !== undefined || settings.uploadId !== undefined)) throw new ApiClientError('invalid_request');
+    // Archive verification binds the displayed digest in its body; its key makes replay idempotent without If-Match.
+    const digestBound = method === 'POST'
+      && /^\/jobs\/[0-9a-f]{32}\/runs\/[A-Za-z0-9][A-Za-z0-9_-]{0,127}\/revisions\/[A-Za-z0-9][A-Za-z0-9_-]{0,127}\/archive-verifications$/.test(path);
+    if (digestBound && settings.ifMatch !== undefined) throw new ApiClientError('invalid_request');
     if (mutating) {
-      if (!session && !upload && !unversioned && settings.ifMatch === undefined) throw new ApiClientError('invalid_request');
+      if (!session && !upload && !unversioned && !digestBound && settings.ifMatch === undefined) throw new ApiClientError('invalid_request');
       if (!session && !unversioned && (!settings.idempotencyKey || !/^[A-Za-z0-9_-]{16,128}$/.test(settings.idempotencyKey))) throw new ApiClientError('invalid_request');
       if ((!session || method === 'DELETE') && (!settings.csrfToken || !/^[A-Za-z0-9_-]{32,256}$/.test(settings.csrfToken))) throw new ApiClientError('invalid_request');
       if (settings.idempotencyKey !== undefined && !/^[A-Za-z0-9_-]{16,128}$/.test(settings.idempotencyKey)) throw new ApiClientError('invalid_request');

@@ -211,11 +211,21 @@ class WebSessionRealRoutesTest {
                 Shape("$r/validation-history", head = true, status = 200),
                 Shape("$r/source-catalog", status = 503, code = "SOURCE_CATALOG_UNAVAILABLE"),
                 Shape("$revision/sources", head = true, status = 404, code = "REVISION_NOT_FOUND"),
-                Shape("$revision/source-directories/dir_1", head = true, status = 404, code = "SOURCE_DIRECTORY_NOT_FOUND"),
+                Shape("$revision/source-search?q=needle", head = true, status = 404, code = "REVISION_NOT_FOUND"),
+                Shape("$revision/source-diff?baseRunId=run_1&baseRevisionId=revision_1", head = true, status = 404, code = "REVISION_NOT_FOUND"),
+                Shape("$revision/source-diff/file?baseRunId=run_1&baseRevisionId=revision_1&headFileId=file_0_${"a".repeat(64)}",
+                    head = true, status = 404, code = "REVISION_NOT_FOUND"),
+                Shape("$revision/source-diff/patch?baseRunId=run_1&baseRevisionId=revision_1&headFileId=file_0_${"a".repeat(64)}",
+                    accept = bytes, head = true, status = 404, code = "REVISION_NOT_FOUND"),
+                Shape("$revision/source-archive", head = true, status = 404, code = "REVISION_NOT_FOUND"),
+                Shape("$revision/archive-verifications/operation_1", head = true, status = 404, code = "REVISION_NOT_FOUND"),
+                Shape("$revision/source-directories/dir_1",head = true, status = 404, code = "SOURCE_DIRECTORY_NOT_FOUND"),
                 Shape("$revision/source-files/file_1", head = true, status = 404, code = "SOURCE_FILE_NOT_FOUND"),
                 Shape("$revision/source-files/file_1/chunk", head = true, status = 404, code = "SOURCE_FILE_NOT_FOUND"),
                 Shape("$revision/source-files/file_1/content", accept = bytes, head = true, status = 404, code = "SOURCE_FILE_NOT_FOUND"),
-                Shape("$api/jobs/${job.id}/artifacts/artifact_1/content", accept = bytes, head = true, status = 404, code = "NOT_FOUND"),
+                Shape("$api/jobs/${job.id}/artifacts", head = true, status = 200),
+                Shape("$api/jobs/${job.id}/artifacts/artifact_1", head = true, status = 404, code = "NOT_FOUND"),
+                Shape("$api/jobs/${job.id}/artifacts/artifact_1/content",accept = bytes, head = true, status = 404, code = "NOT_FOUND"),
             )
             fun get(shape: Shape, cookie: String?, method: String = "GET"): HttpResponse<String> {
                 val builder = HttpRequest.newBuilder(URI(origin + shape.path)).timeout(Duration.ofSeconds(5)).header("Accept", shape.accept)

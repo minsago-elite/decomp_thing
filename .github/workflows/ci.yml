@@ -212,6 +212,12 @@ jobs:
             --archive "$WEB_TEST_ARCHIVE" \
             --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
             --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode metadata --no-sandbox
+      - name: Browse, preview, highlight and compare retained sources by keyboard
+        run: |
+          node scripts/check-packaged-web-browser.mjs \
+            --archive "$WEB_TEST_ARCHIVE" \
+            --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
+            --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode sources --no-sandbox
       - name: Preserve focused dashboard rows during actual background updates
         run: |
           node scripts/check-packaged-web-browser.mjs \

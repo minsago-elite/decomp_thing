@@ -256,7 +256,7 @@ class WebJobService(
     maximumRetainedStorageBytes: Long = WebUploadStorage.DEFAULT_MAXIMUM_BYTES,
     private val failureDiagnostic: (Exception) -> String = { "Workflow failed; inspect its available diagnostics before retrying" },
     progressRetentionIntervalMs: Long? = null,
-    sourceProfiles: List<decompengine.project.ReconstructionProfile> = defaultWebSourceProfiles(),
+    private val sourceProfiles: List<decompengine.project.ReconstructionProfile> = defaultWebSourceProfiles(),
 ) : AutoCloseable {
     private data class Registration(val adapter: DurableWebWorkflowAdapter, val limits: decompengine.jobs.WorkflowExecutionLimits,
         val harnessCapabilityId: String?)
@@ -713,7 +713,7 @@ class WebJobService(
     }
 
     @Synchronized
-    private fun revisionSourceReference(jobId: String, runId: String, revisionId: String): WebRevisionSourceReference =
+    internal fun revisionSourceReference(jobId: String, runId: String, revisionId: String): WebRevisionSourceReference =
         when (val inspected = inspectDurableJob(jobId)) {
             is WorkflowJobInspection.Available -> selectWebRevisionSource(inspected.snapshot, jobId, runId, revisionId)
             is WorkflowJobInspection.Unavailable -> throw WebJobServiceException(inspected.diagnostic.code, inspected.diagnostic.message)
@@ -727,6 +727,31 @@ class WebJobService(
             catch (_: Exception) {
                 throw WebAccessDenied(503, "SOURCE_REVISION_UNAVAILABLE", "The revision source input metadata is unavailable or exceeds its limits.")
             }
+        if (revisionSourceReference(jobId, runId, revisionId) != reference) revisionSourceChanged()
+        return snapshot
+    }
+
+    /** Optional artifact inventory evidence shares the request budget, deadline and pinned read boundary.
+     * Only short lifecycle/ownership checks take this monitor; input and metadata IO never do.
+     */
+    internal fun readArtifactRevisionSources(jobId: String, runId: String, revisionId: String,
+        budget: WebArtifactReadBudget): WebRevisionSourceSnapshot {
+        val reference = revisionSourceReference(jobId, runId, revisionId)
+        fun authorize(selectedJobId: String) {
+            check(selectedJobId == jobId)
+            budget.cancellationCheck()
+            synchronized(this) { requireInitializedRead(); getAttempt(jobId, runId) }
+        }
+        fun read(selectedJobId: String, path: String, maximum: Long): decompengine.repair.StableRegularFile {
+            authorize(selectedJobId)
+            return store.readArtifactInventoryFile(jobId, path, maximum, budget::reserve, budget.cancellationCheck)
+        }
+        val evidence = WebSourceCatalogEvidence(sourceProfiles, { selectedJobId ->
+            authorize(selectedJobId)
+            store.readArtifactInventoryInput(selectedJobId, budget::reserve, budget.cancellationCheck)
+        }, ::read)
+        val snapshot = evidence.readRevision(reference)
+        budget.cancellationCheck()
         if (revisionSourceReference(jobId, runId, revisionId) != reference) revisionSourceChanged()
         return snapshot
     }
@@ -758,6 +783,21 @@ class WebJobService(
             }
         if (revisionSourceReference(jobId, runId, revisionId) != reference) revisionSourceChanged()
         return content
+    }
+
+    /** Bounded literal search over the persisted candidate's canonical inputs; no index or body is retained. */
+    internal fun searchRevisionSources(jobId: String, runId: String, revisionId: String,
+        scan: (WebRevisionSourceSnapshot, (WebRevisionSourceFile) -> ByteArray?) -> kotlinx.serialization.json.JsonObject,
+    ): kotlinx.serialization.json.JsonObject {
+        val reference = revisionSourceReference(jobId, runId, revisionId)
+        val result = try { sourceCatalogEvidence.search(reference, ::readSourceInput, scan) }
+            catch (changed: WebAccessDenied) { throw changed }
+            catch (failure: Exception) {
+                if (failure is java.util.concurrent.CancellationException || failure is InterruptedException) throw failure
+                throw WebAccessDenied(503, "SOURCE_SEARCH_UNAVAILABLE", "The revision sources could not be searched within their limits.")
+            }
+        if (revisionSourceReference(jobId, runId, revisionId) != reference) revisionSourceChanged()
+        return result
     }
 
     @Synchronized
@@ -848,6 +888,38 @@ class WebJobService(
             if (failure !is Exception) throw failure
             throw unavailable
         }
+    }
+
+    @Synchronized
+    fun resolveArtifact(jobId: String, relativePath: String): Path {
+        requireInitializedRead()
+        val segments = canonicalReportSegments(relativePath)
+        if (segments[1] == "runs") {
+            getAttempt(jobId, segments[2])
+            return store.resolveRunArtifact(jobId, segments[2], segments.drop(3).joinToString("/"))
+        }
+        presentation(jobId) // Validate the record before resolving an explicitly legacy artifact.
+        return store.resolveArtifact(jobId, relativePath)
+    }
+
+    /**
+     * Authorize one fixed attempt artifact under the service monitor, then hash or stream it through pinned
+     * descriptors without holding the monitor, so workflow publication and retention are never blocked by a reader.
+     */
+    internal fun streamRunArtifact(jobId: String, runId: String, artifactPath: String, declaredSize: (Long) -> Unit,
+        consume: (ByteArray, Int) -> Unit, cancellationCheck: () -> Unit): decompengine.repair.StableFileDigest {
+        val relative = "reports/runs/$runId/$artifactPath"
+        canonicalReportSegments(relative)
+        synchronized(this) { requireInitializedRead(); getAttempt(jobId, runId) }
+        return store.streamArtifact(jobId, relative, declaredSize, consume, cancellationCheck)
+    }
+
+    /** Presence only: a regular file at the fixed attempt path. It is never opened or trusted for content. */
+    @Synchronized
+    internal fun runArtifactPresent(jobId: String, runId: String, artifactPath: String): Boolean {
+        requireInitializedRead()
+        getAttempt(jobId, runId)
+        return try { store.resolveRunArtifact(jobId, runId, artifactPath); true } catch (_: decompengine.jobs.JobStoreException) { false }
     }
 
     /** Validate the report namespace and attempt ownership before a bounded retained-descriptor read. */

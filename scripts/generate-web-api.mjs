@@ -70,7 +70,13 @@ const typesText = header + '// String bounds and cross-field/conditional constra
   `export type ResponseOf<K extends ResponseKind> = Extract<ContractDocument, { kind: K }>;\n` +
   `export type RequestData<K extends RequestKind> = Extract<ContractDocument, { kind: K }>['data'];\n`;
 const runtimeSchema = structuredClone(schema);
-delete runtimeSchema.$schema; delete runtimeSchema.title; delete runtimeSchema.description;
+delete runtimeSchema.$schema; delete runtimeSchema.title;
+// Descriptions document the contract for reviewers; the runtime decoder never reads them, so keep them out of the bundle.
+(function stripDescriptions(node) {
+  if (!node || typeof node !== 'object') return;
+  if (!Array.isArray(node) && typeof node.description === 'string') delete node.description;
+  for (const child of Object.values(node)) stripDescriptions(child);
+})(runtimeSchema);
 const files = {
   'frontend/src/api/generated.ts': typesText,
   'frontend/src/api/generated-schema.ts': header + `import type { Schema } from './schema-types';\n\nexport const contractSchema: Schema = ${JSON.stringify(runtimeSchema, null, 2)};\n`,

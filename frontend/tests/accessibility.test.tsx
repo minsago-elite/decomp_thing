@@ -41,6 +41,11 @@ const responses: Record<string, () => unknown> = {
   events: () => fixture('events-poll'),
   revisionDirectory: () => bound('revision-directory-root', selected),
   revisionFile: () => bound('revision-file-root', selected),
+  sourceSearch: () => bound('source-search-complete', selected),
+  sourceDiff: () => { const document = bound('source-diff-page', selected); (document.data.page as { limit: number }).limit = 50; return document; },
+  sourceFileDiff: () => bound('source-file-diff-text', selected),
+  sourceArchive: () => ({ data: { ...(JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/source-archive-stale.json'), 'utf8')
+    .replaceAll('job_1', jobId).replaceAll('"/api/v1/', '"/nested/api/v1/')) as Fixture).data, binding: selected } }),
   sourceCatalog: () => bound('source-catalog', { jobId, runId, revisionId: null }),
   validationHistory: () => bound('validation-history', { jobId, runId, revisionId: null }),
   recovery: () => fixture('recovery-empty'),
@@ -85,6 +90,8 @@ async function violations() {
 }
 
 const fileId = (fixture('revision-file-root').data.item as { fileId: string }).fileId;
+const diffFile = fixture('source-file-diff-text').data as { baseFile: { fileId: string }; headFile: { fileId: string } };
+const diffBase = 'baseRunId=run_1&baseRevisionId=revision_1';
 
 // Each case names text that only the populated view renders, so a failed read cannot pass as the view.
 const privateRoutes: [name: string, path: string, rendered: string | RegExp][] = [
@@ -98,6 +105,11 @@ const privateRoutes: [name: string, path: string, rendered: string | RegExp][] =
   ['attempt evidence', `/nested/jobs/${jobId}/runs/${runId}/evidence`, 'Attempt identity'],
   ['source directory', `/nested/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/sources/root`, 'é space'],
   ['source file', `/nested/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-files/${fileId}`, 'Makefile'],
+  ['source search form', `/nested/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-search`, 'Enter text to search the recorded inputs of this revision.'],
+  ['source search results', `/nested/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-search?q=needle`, /Showing 4 matches on this page/],
+  ['source comparison chooser', `/nested/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-diff`, 'Choose a base revision'],
+  ['source comparison list', `/nested/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-diff?${diffBase}`, /4 changed files/],
+  ['source file comparison', `/nested/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-diff/file?${diffBase}&baseFileId=${diffFile.baseFile.fileId}&headFileId=${diffFile.headFile.fileId}`, '@@ -4,4 +4,5 @@'],
   ['unknown page', '/nested/not-a-route', 'Page unavailable'],
 ];
 
@@ -113,6 +125,17 @@ for (const [name, path, rendered] of privateRoutes) {
     expect(await violations()).toEqual([]);
   });
 }
+
+it('has no automated WCAG A/AA violations with the source archive panel open', async () => {
+  const auth = await session();
+  history.replaceState(null, '', `/nested/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/sources/root`);
+  render(<App basePath="/nested" session={auth} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Show source archive status' }));
+  await screen.findByText('Not verified: the archive changed since its last verification.');
+  await settle();
+  expect(document.querySelector('main [role="alert"]')).toBeNull();
+  expect(await violations()).toEqual([]);
+}, 15000);
 
 it('has no automated WCAG A/AA violations on the public shell without a session', async () => {
   history.replaceState(null, '', '/nested/');

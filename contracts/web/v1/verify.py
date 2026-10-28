@@ -318,6 +318,52 @@ def check_directory(data: dict) -> None:
         raise ValueError("directory parent identity is inconsistent")
 
 
+def check_source_diff(data: dict) -> None:
+    counts, items, page = data["counts"], data["items"], data["page"]
+    if counts["added"] + counts["removed"] + counts["modified"] + counts["renamed"] != data["totalChanged"]:
+        raise ValueError("source diff change counts disagree with the changed total")
+    if len(items) > page["limit"] or len(items) > data["totalChanged"]:
+        raise ValueError("source diff page exceeds its limit or changed total")
+    for item in items:
+        for side, revision in (("baseFile", "base"), ("headFile", "head")):
+            entry = item[side]
+            if entry is not None and entry["commitment"] == "source-input" and entry["sizeBytes"] is None:
+                raise ValueError("source diff input entry lacks its committed size")
+        if item["status"] == "renamed" and item["baseFile"]["sha256"] != item["headFile"]["sha256"]:
+            raise ValueError("source diff renames require identical recorded digests")
+        if item["status"] == "modified" and (item["baseFile"]["displayName"] != item["headFile"]["displayName"]
+                                             or (item["baseFile"]["sha256"] == item["headFile"]["sha256"]
+                                                 and item["baseFile"]["declaredUtf8Text"] == item["headFile"]["declaredUtf8Text"])):
+            raise ValueError("source diff modification must keep its path and change its digest or declared content kind")
+
+
+def check_source_file_diff(data: dict) -> None:
+    hunks = data["hunks"]
+    end = data["hunkOffset"] + len(hunks)
+    if data["nextHunk"] is not None and data["nextHunk"] != end:
+        raise ValueError("source diff continuation does not follow this page")
+    if (data["nextHunk"] is None) != (end == data["totalHunks"] or data["totalHunks"] == 0):
+        raise ValueError("source diff hunk pages disagree with the total")
+    if data["representation"] == "text" and data["totalHunks"] > 0 and not hunks:
+        raise ValueError("source diff text page has no hunks")
+    for hunk in hunks:
+        base, head = hunk["baseStart"], hunk["headStart"]
+        for line in hunk["lines"]:
+            if line["baseLine"] is not None:
+                if line["baseLine"] != base or base > data["baseLines"]:
+                    raise ValueError("source diff base line numbers are not sequential within the file")
+                base += 1
+            if line["headLine"] is not None:
+                if line["headLine"] != head or head > data["headLines"]:
+                    raise ValueError("source diff head line numbers are not sequential within the file")
+                head += 1
+            shown = len(line["text"].encode("utf-16-le", "surrogatepass")) // 2
+            if line["characters"] < shown or line["truncated"] != (line["characters"] > shown):
+                raise ValueError("source diff truncation marker disagrees with the line length")
+        if base - hunk["baseStart"] != hunk["baseCount"] or head - hunk["headStart"] != hunk["headCount"]:
+            raise ValueError("source diff hunk counts disagree with its lines")
+
+
 def check_source_chunk(data: dict) -> None:
     size, offset, length = int(data["sizeBytes"]), int(data["offsetBytes"]), int(data["lengthBytes"])
     end = offset + length
@@ -340,6 +386,100 @@ def check_source_chunk(data: dict) -> None:
             raise ValueError("UTF-8 source start line is inconsistent")
         if data["endsMidLine"] != (end < size and not data["text"].endswith("\n")):
             raise ValueError("UTF-8 source end line is inconsistent")
+
+
+def check_source_search(data: dict) -> None:
+    page, limits, scope, progress, query = data["page"], data["limits"], data["scope"], data["progress"], data["query"]
+    items = data["items"]
+    if page["snapshotVersion"] != data["metadataVersion"] or page["limit"] != limits["maxResults"] or len(items) > page["limit"]:
+        raise ValueError("source search page does not match its captured metadata or result bound")
+    complete = data["status"] == "complete"
+    if complete != (data["stopReason"] is None) or complete != (page["nextCursor"] is None):
+        raise ValueError("source search completeness, stop reason and continuation disagree")
+    if (progress["remainingFiles"] == 0) != complete or progress["remainingFiles"] > scope["searchableFiles"]:
+        raise ValueError("source search remaining file count disagrees with completeness")
+    if scope["searchableFiles"] + scope["notViewable"] + scope["declaredBinary"] + scope["tooLarge"] != scope["filesInScope"]:
+        raise ValueError("source search scope counts do not partition the files in scope")
+    # A page that stops inside a file counts that file as both scanned and remaining.
+    if progress["unsearchableText"] > progress["scannedFiles"] or \
+            progress["scannedFiles"] + progress["unavailableFiles"] + progress["remainingFiles"] > scope["searchableFiles"] + (0 if complete else 1) or \
+            int(progress["scannedBytes"]) > int(limits["maxScannedBytes"]):
+        raise ValueError("source search progress exceeds its scope or byte bound")
+    gaps = data["coverageGaps"]
+    if gaps["unsearchableText"] < progress["unsearchableText"] or gaps["unavailableFiles"] < progress["unavailableFiles"] or \
+            gaps["unsearchableText"] + gaps["unavailableFiles"] > scope["searchableFiles"]:
+        raise ValueError("source search cumulative coverage gaps disagree with this page or scope")
+    identifier = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+    if query["match"] == "symbol" and identifier.fullmatch(query["text"]) is None:
+        raise ValueError("symbol search requires an identifier query")
+    seen, previous = set(), None
+    for item in items:
+        line, column = int(item["line"]), int(item["column"])
+        offset, line_offset = int(item["offsetBytes"]), int(item["lineOffsetBytes"])
+        if line < 1 or column < 1 or line_offset > offset or (line == 1) != (line_offset == 0):
+            raise ValueError("source search position is inconsistent")
+        if any("\n" in item[key] for key in ("before", "match", "after")):
+            raise ValueError("source search context crosses a line")
+        before, after = len(item["before"]), len(item["after"])
+        if before > 80 or after > 80 or (item["truncatedBefore"] and before != 80) or (item["truncatedAfter"] and after != 80) or \
+                (column - 1 < before) or (not item["truncatedBefore"] and column - 1 != before):
+            raise ValueError("source search context bounds are inconsistent")
+        if (query["caseSensitive"] and item["match"] != query["text"]) or len(item["match"]) != len(query["text"]):
+            raise ValueError("source search match does not represent its query")
+        if query["match"] == "symbol" and (re.search(r"[A-Za-z0-9_]$", item["before"]) or re.match(r"[A-Za-z0-9_]", item["after"])):
+            raise ValueError("symbol match is not bounded by non-identifier characters")
+        key = item["displayName"].encode("utf-16-be", "surrogatepass")
+        if previous is not None and previous["fileId"] == item["fileId"]:
+            if previous["displayName"] != item["displayName"] or offset < int(previous["offsetBytes"]) + len(previous["match"].encode("utf-8")):
+                raise ValueError("source search matches in one file overlap or are out of order")
+        elif item["fileId"] in seen or (previous is not None and previous["displayName"].encode("utf-16-be", "surrogatepass") >= key):
+            raise ValueError("source search files are repeated or out of canonical order")
+        seen.add(item["fileId"])
+        previous = item
+
+
+ARTIFACT_FAMILY_CODES = {"exploration-report": "exploration", "progress-journal": "progress", "source-manifest": "manifest",
+                         "build-contract": "contract", "source-archive": "archive"}
+
+
+def check_artifact_href(item: dict) -> None:
+    suffix = "/api/v1/jobs/" + item["binding"]["jobId"] + "/artifacts/" + item["artifactId"] + "/content"
+    if not re.fullmatch(r"(?:/[A-Za-z0-9_-]+)*" + re.escape(suffix), item["contentHref"]):
+        raise ValueError("artifact content link belongs to another resource")
+
+
+def check_catalog_artifact(item: dict) -> None:
+    """Catalog entries carry both optional fields; a verified digest needs a revision-checked family."""
+    check_artifact_href(item)
+    if ("family" in item) != ("verification" in item):
+        raise ValueError("catalog artifact family and verification must appear together")
+    if "family" not in item:
+        return
+    code = ARTIFACT_FAMILY_CODES[item["family"]]
+    if not re.fullmatch(re.escape(code) + r"_[a-f0-9]{32}_" + re.escape(item["sha256"]), item["artifactId"]):
+        raise ValueError("catalog artifact identity does not bind its family and digest")
+    if item["binding"]["runId"] is None:
+        raise ValueError("catalog artifacts belong to one attempt")
+    if item["verification"] == "source-inventory-checked" and (item["family"] not in ("source-manifest", "build-contract")
+                                                          or item["binding"]["revisionId"] is None):
+        raise ValueError("only revision-bound source metadata can be verified against a revision commitment")
+
+
+def check_source_archive(data: dict) -> None:
+    archive, verification = data["archive"], data["verification"]
+    if archive["state"] == "present":
+        if not re.fullmatch(r"archive_[a-f0-9]{32}_" + re.escape(archive["sha256"]), archive["artifactId"]):
+            raise ValueError("source archive identity does not bind its digest")
+        check_artifact_href({"binding": data["binding"], "artifactId": archive["artifactId"], "contentHref": archive["contentHref"]})
+    if (archive["state"] == "present") != (verification["state"] not in ("missing", "too-large")) or \
+            (archive["state"] != "present" and verification["state"] != archive["state"]):
+        raise ValueError("source archive verification state disagrees with the retained archive")
+    if verification["state"] == "stale" and verification["previousVerifiedSha256"] == archive["sha256"]:
+        raise ValueError("a stale verification names a different archive")
+    if data["git"]["state"] == "mapped":
+        mapping = data["git"]["mapping"]
+        if mapping["revisionId"] != data["binding"]["revisionId"] or mapping["sourceSha256"] != data["sourceSha256"]:
+            raise ValueError("Git mapping belongs to another revision")
 
 
 def check_semantics(document: dict) -> None:
@@ -394,6 +534,32 @@ def check_semantics(document: dict) -> None:
         check_directory(data)
     elif kind == "sourceChunk":
         check_source_chunk(data)
+    elif kind == "sourceSearch":
+        check_source_search(data)
+    elif kind == "sourceDiff":
+        check_source_diff(data)
+    elif kind == "sourceFileDiff":
+        check_source_file_diff(data)
+    elif kind == "sourceArchive":
+        check_source_archive(data)
+    elif kind == "operation" and data["action"] == "archive.verify":
+        if data["repositoryId"] is not None or data["worktreeId"] is not None or data["resultObjectId"] is not None:
+            raise ValueError("archive verification has no repository, worktree or Git result object")
+    elif kind == "artifact":
+        check_catalog_artifact(data)
+    elif kind == "artifacts":
+        binding, items = data["binding"], data["items"]
+        if binding["revisionId"] is not None and binding["runId"] is None:
+            raise ValueError("artifact revision filter requires its attempt filter")
+        if len(items) > data["page"]["limit"] or len({item["artifactId"] for item in items}) != len(items):
+            raise ValueError("artifact page exceeds its limit or repeats an identity")
+        for item in items:
+            check_catalog_artifact(item)
+            if "family" not in item or item["family"] not in data["catalogedFamilies"]:
+                raise ValueError("artifact catalog entry is outside the cataloged families")
+            if item["binding"]["jobId"] != binding["jobId"] or any(
+                    binding[key] is not None and item["binding"][key] != binding[key] for key in ("runId", "revisionId")):
+                raise ValueError("artifact catalog entry is outside its filter")
     elif kind == "revisionFile":
         path = data["item"]["displayName"]
         for part in path.split("/"):
