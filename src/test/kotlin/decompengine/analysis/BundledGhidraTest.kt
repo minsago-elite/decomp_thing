@@ -488,6 +488,18 @@ class BundledGhidraTest {
                 try { latch.await(); }
                 catch (InterruptedException failure) { throw new AssertionError(failure); }
             }
+            private static void phaseAndAwait(JvmMxBeanDiagnostics sampler, Frames frames, String exporter) throws Exception {
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+                while (System.nanoTime() < deadline) {
+                    sampler.phase(JvmMxBeanDiagnostics.Phase.EXPORTER, exporter);
+                    long attemptDeadline = Math.min(deadline, System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(50));
+                    while (System.nanoTime() < attemptDeadline) {
+                        if (frames.all().contains(exporter)) return;
+                        Thread.sleep(1);
+                    }
+                }
+                throw new AssertionError("phase event missing: " + exporter);
+            }
             private static final class Frames implements JvmMxBeanDiagnostics.Sink {
                 final List<byte[]> frames = Collections.synchronizedList(new ArrayList<>());
                 final Semaphore written = new Semaphore(0);
@@ -564,8 +576,8 @@ class BundledGhidraTest {
                 }, TimeUnit.MILLISECONDS.toNanos(2));
                 await(sampled);
                 sampler.phase(JvmMxBeanDiagnostics.Phase.EXPORTER, "ExportProgramModel.java");
-                sampler.phase(JvmMxBeanDiagnostics.Phase.EXPORTER, "ExportProgramModelOwned.java");
-                sampler.phase(JvmMxBeanDiagnostics.Phase.EXPORTER, "ExportNativeCallsV1.class");
+                phaseAndAwait(sampler, frames, "ExportProgramModelOwned.java");
+                phaseAndAwait(sampler, frames, "ExportNativeCallsV1.class");
                 sampler.finish(true);
                 await(frames.terminal); frames.validate();
                 require(frames.all().contains("\"exporter\":\"ExportProgramModelOwned.java\""), "owned program-model exporter phase missing");
