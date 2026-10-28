@@ -82,8 +82,8 @@ class WebArchiveEvidenceTest {
             assertTrue(reads.isNotEmpty() && reads.all { it.startsWith("$prefix/") })
             // Other namespaces have no archive: each is refused as a missing pinned read, never served from this attempt.
             // A missing final file is refused by the pinned read itself; a missing namespace directory by the store.
-            val missingFile = assertFailsWith<IllegalArgumentException> { archives.read(job.id) }
-            assertEquals("stable file-read target disappeared: ${job.id}/reports/source-tree.zip", missingFile.message)
+            val missingFile = assertFailsWith<decompengine.jobs.JobStoreException> { archives.read(job.id) }
+            assertEquals("artifact is unavailable", missingFile.message)
             val missingNamespace = assertFailsWith<decompengine.jobs.JobStoreException> {
                 archives.read(job.id, reportPrefix = "reports/runs/run_other")
             }
