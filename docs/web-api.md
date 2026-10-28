@@ -141,6 +141,8 @@ internal storage optimization and must not merge identity, permissions or histor
 | `GET /api/v1/bootstrap` | `200 bootstrap` | Sanitized capabilities/readiness/build IDs/limits; #166 |
 | `GET /api/v1/jobs` | `200 jobs` | Bounded cursor/filter query; #162 |
 | `GET`, `HEAD /api/v1/recovery` | `200 recovery` | Private, bounded, display-only recovery-file summary; no query parameters |
+| `GET`, `HEAD /api/v1/capacity` | `200 capacity` | Aggregate limits, occupancy and outcome counts; no query; #208/#591 |
+| `GET /api/v1/support-export?scope=server` or `?scope=job&jobId={jobId}` | `200 supportExport` | Explicitly scoped redacted diagnostic export; no default scope; audited; #177/#522 |
 | `GET /api/v1/uploads/{uploadId}` | `200 uploadProgress` | Ephemeral session-bound transfer bytes and publication phase; #169 |
 | `POST /api/v1/jobs` | `201 job`, `Location: J` | Multipart, upload limits, idempotency; #162 |
 | `GET J` | `200 job`, ETag | Snapshot read; #159/#160 |
@@ -379,15 +381,59 @@ it never silently launches execution or duplicates accepted publication.
 
 ### Admission and overload
 
-The server admits at most 16 concurrent requests, with 64 more waiting in a bounded queue. A request that finds
-every worker and queue slot taken is answered immediately, without routing, session lookup or storage access, with
-`429` and the fixed error code `SERVER_BUSY` (`retryable: true`, `retryAfterMs: "30000"`, `Retry-After: 30`,
-`Cache-Control: no-store`, `Connection: close`), in the same error envelope as every other denial. The 30-second guidance
-matches the longest ordinary request deadline, after which a slow request releases its worker. A small responder
-pool (two threads, no queue) produces these answers, so overload never buffers more than the main queue holds. If
-that responder pool is also busy, the connection is closed without a response; clients should treat a reset
-connection like `SERVER_BUSY`. Each admitted request's exchange is closed at a 30-second deadline (120 seconds for
-multipart uploads); the release of a worker pinned by a slow client at that deadline is not yet covered by a test.
+The following request-admission bounds are reported by `GET /api/v1/capacity` (`WebAdmissionLimits`).
+They do **not** cap all accepted TCP connections: the JDK can accept silent sockets before submitting an executor
+task, so neither the executor watchdog nor the listen backlog bounds those sockets. No accepted-connection count
+cap is configured here; that part of #589 remains open, and capacity occupancy is not a socket count.
+
+| Bound | Default | Enforcement |
+| --- | --- | --- |
+| HTTP workers / queued requests | 16 / 64 | Bounded executor (not a bound on pre-dispatch accepted sockets) |
+| Overload responders | 2, no queue | Fixed `429 SERVER_BUSY` without routing, session or storage access |
+| Listen backlog | 64 | Kernel accept queue |
+| Header deadline | 10 s | From worker start through header parsing and header-limit/overload refusal cleanup; interruption aborts blocked socket-channel I/O even when response close is draining an unfinished body. Applies on the responder tier too; not to silent sockets before executor dispatch |
+| Request deadline | 30 s (120 s for multipart uploads) | Schedules `exchange.close()`; does not interrupt the worker or guarantee recovery from blocked refusal cleanup (see below) |
+| Header count / bytes | 100 / 32 KiB | `431 HEADERS_TOO_LARGE`, `Connection: close` |
+| JSON response / request bodies | 1 MiB response; per-route request ceilings (1–4 KiB mutations) | Checked before serialization or parsing |
+| Upload body | 32 MiB | `413 UPLOAD_TOO_LARGE` |
+| Event streams | 16 total, 2 per session, 30 s lifetime | `429 STREAM_LIMIT`; streams hold no file descriptor between polls |
+
+A request that finds every worker and queue slot taken is answered immediately with `429` and the fixed error code
+`SERVER_BUSY` (`retryable: true`, `retryAfterMs: "30000"`, `Retry-After: 30`, `Cache-Control: no-store`,
+`Connection: close`), in the same error envelope as every other denial. The 30-second guidance matches the configured
+request deadline; it is retry guidance, not a guarantee that a worker or capacity will be available then. If the responder
+pool is also busy, the connection is closed without a response; clients should treat a reset connection like `SERVER_BUSY`.
+Response bodies are produced in memory before writing, so a slow reader holds no storage descriptor while its response
+is written.
+
+**Remaining request-deadline gap (#589):** requests that pass header admission disable the interrupting header watchdog
+and rely on `exchange.close()` at the request deadline. An ordinary authorization or other routing refusal can block while
+closing its response, because the JDK drains an incomplete fixed-length or chunked request body. If that drain is already
+blocked, the later exchange close need not abort it; the worker and socket descriptor can remain occupied beyond the
+request budget. This includes unauthenticated refusals with otherwise admissible headers. The interrupting cleanup bound
+for early `431` header-limit and `429 SERVER_BUSY` refusals does not cover these ordinary refusals. Effective ordinary-refusal
+cancellation and real-listener qualification with peers held open remain required under #589; do not infer unconditional
+worker, staging or descriptor recovery from the configured request deadline or its closure counter.
+
+`GET`/`HEAD /api/v1/capacity` (session, no query) returns `capacity`: the limits above, sampled worker/queue/responder/
+stream occupancy, aggregate outcome counts for the listener lifetime (successful, client and server errors, closed
+without response, overload responses and closures, header/request deadline closures, header-limit rejections) and
+`failureReasons` counted by fixed public error code (unknown codes count as `UNCLASSIFIED`). It never contains a path,
+query, header, body, job identity or exception text. The diagnostic log carries the same vocabulary: per-failure
+`web-http-failure` lines, a rate-limited `web-overload` line when overload begins (at most once a minute) and a
+`web-capacity-summary` line at shutdown. `headerDeadlineClosures` includes aborted header-limit and overload refusal
+cleanup as well as unfinished header blocks. Refusal cleanup is checked with incomplete fixed-length and chunked bodies
+while the client peers remain open; executor occupancy, peer EOF and Linux descriptor recovery are asserted.
+
+### Shutdown and resource recovery
+
+Stop publishes cancellation first, then closes the listener (new connections are refused) before it interrupts owned
+workers, so no request can join work that is being stopped. Queued work is persisted as discarded and running work as
+interrupted/failed (never complete); a worker that outlives the grace period keeps storage ownership until it exits,
+and startup recovery marks any abandoned attempt `interrupted`. `WebResourceBaselineTest` repeats workload, slow-client
+and shutdown cycles with fake workers and requires listener/worker/deadline threads, descriptors and upload staging to
+return to the pre-server baseline (heap within 64 MiB); it records the measurements in
+`build/reports/web-resource-baseline/measurements.json`.
 
 ## Bootstrap and capability truth
 
@@ -1087,6 +1133,66 @@ Provider reasoning (`agent_thought_chunk`, role `thought`) is private. The journ
 its position, role, completion and `textOmitted: true`; it never buffers, stores, measures or
 commits to its text. Public projection also withholds `contentSha256`/`chunkCharacters` from
 older thought records. The ACP client never requests reasoning and no workflow depends on it.
+
+## Shared redaction, audit and support export
+
+**Redaction (`web-redaction-v1`).** One policy (`WebRedactionPolicy`) is installed on the listener and applied
+where bytes leave the server: every versioned JSON document (success and error envelopes), each live SSE frame
+and polling page (so live and replayed events are identical), legacy JSON, the server-generated exploration
+download and support exports. Persisted failure prose is passed through the same policy before it is stored. It
+replaces values of credential-named environment variables and long opaque configured values with `[redacted]`
+(short generic environment values such as `1` or `development` are deliberately not treated as secrets, because
+substituting them would corrupt public vocabulary). Nonempty credential-named environment values outside
+8–4096 characters are an unsupported configuration: listener policy construction fails with a fixed, secret-free
+error rather than silently excluding a known credential. This includes short passwords/tokens (1–7 characters);
+empty optional values remain allowed. Redacted names and common bounded prose fields that expand beyond their
+public field bound are withheld as a whole (`[redacted]`), never returned as over-limit DTO values.
+The policy also replaces credential syntax (authorization headers, bearer tokens,
+`password=`/`token=`-style assignments, URL user information and well-known token prefixes) and private host
+paths (the storage root, home, temporary, working and Java directories plus the generic per-user and temporary
+directory families) with `[private-path]`. Closed-syntax protocol fields (`*Id`, `*Cursor`, `*Token`, `*Sha256`,
+`version` and similar) keep their exact bytes unless they contain a configured literal, so cursors and ETags stay
+valid. A download is byte-identical when nothing needs redaction, and the exploration artifact digest is computed
+over the same projection the download serves. Committed job content (`sourceChunk`, the committed source-tree names in `revisionDirectory`, `revisionSources`, `revisionFile` and `sourceCatalog`, source-file downloads and the exact-byte
+validation output previews in reports) is digest-bound user data, not server configuration, and is served verbatim under job authorization. Progress events
+remain allowlisted projections: journal prose, paths, usage that was not reported and any agent reasoning are never
+requested or displayed (the activity view shows "Not reported").
+
+**Audit.** Every sensitive action is recorded durably in `<store>/.web-audit/` before the request thread
+finishes, including refused and failed requests: `session.start`, `session.end`, `job.upload`, `job.update`,
+`job.delete`, `run.start`, `run.cancel`, `run.recover`, `run.progress-pin`, `agent.preflight`,
+`operator.auth-inspection` and `operator.auth-inspection-cancel` (legacy) and `support.export`. An entry records a sequence, time, the response request
+ID, the actor (`browser_session` with a domain-separated SHA-256 digest of the authorization-owned session
+identity, or `unauthenticated`), the action, the target job/run, an `ifmatch_`-prefixed, domain-separated SHA-256
+commitment to a bounded strong `If-Match` value (never the caller's header bytes), and the server version the
+response reported, the outcome (`accepted`, `replayed`, `rejected` for 4xx, `failed` for 5xx) with its
+status and public error code. Canonical server run IDs (`run_` plus 32 lowercase hexadecimal digits) keep their
+identity; other requested run IDs become `requested_run_`-prefixed domain-separated commitments. Configured-sensitive
+job IDs and result versions are omitted, and configured-sensitive run IDs are committed before append. Closed syntax
+is not treated as proof that caller input is credential-free; raw cookies, CSRF tokens, filenames, request bodies
+and host paths are never intentionally collected. Retention is two fsync'd segments of 2048 entries. Server-wide
+`omittedEntries` counts the rotated prefix plus the returned-window omissions; for a job scope it counts only
+known matching window omissions (rotated job membership is unknown). Rotation or window truncation sets
+`complete:false`, including an empty job scope whose earlier membership is unknown. A torn final append is
+discarded on reopen. Each append is preceded by an fsync'd intent flag; failed/interrupted appends leave sticky
+loss evidence, so restart and later successful appends cannot strengthen the history to complete. The live
+`unrecordedEntries` count is exact for observed failures; after reopening, sticky loss/uncertainty reports a
+lower bound of one, not an invented exact count. This state file remains alongside the segments. Failures before
+even the intent can be made durable (e.g. storage inaccessible) can only be reported by the live process.
+Segment, recovery, rotation and intent operations use no-follow secure directory handles and reject parent
+replacement; filesystem providers without secure handles report incomplete auditing instead of falling back to
+unsafe path opens. Recording failures never throw into the request. Auditing never creates job storage: entries made before the store root exists (session exchanges and refused requests) are held in a bounded 256-entry buffer and written first, in order, once storage appears. Entries are sequenced in recording order, as each handler exits just after its response, so a client that reads the audit immediately after a response may not see that entry yet. New mutation routes are audited by adding their method and
+route to `WebAuditRecorder.versionedAction`.
+
+**Support export.** `GET /api/v1/support-export` requires an explicit scope: `scope=server` (runtime, limits,
+capabilities, recovery inventory and the latest 100 audit entries) or `scope=job&jobId=…` (the job, its latest 50
+attempts and that job's latest 100 audit entries). Any other parameter, a missing scope or a malformed job ID is
+`400 VALIDATION_FAILED`; an unknown job is `404 NOT_FOUND`. The `supportExport` document records `redactionVersion`
+and lists every `omittedSections` entry with a reason: `not-in-scope`, `unavailable` (a section that could not be
+read; its state is unknown), or the sections never exported (`input-binary`, `source-content`, `artifact-content`,
+`progress-events` as `job-content`; `environment`, `host-paths` as `private-configuration`; `credentials`,
+`session-material` as `secret`; `agent-reasoning` as `not-recorded`). The Runtime view previews the document only on
+an explicit request and downloads exactly the previewed bytes; it never issues a second request for the download.
 
 ## Artifact identity normalization and snapshot containment
 

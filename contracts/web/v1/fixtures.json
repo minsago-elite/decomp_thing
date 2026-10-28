@@ -815,6 +815,58 @@
       "valid": true
     },
     {
+      "file": "fixtures/support-export-server.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/support-export-job.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-support-export-redaction-version.json",
+      "valid": false,
+      "reason": "An export must name the redaction policy version that produced it."
+    },
+    {
+      "file": "fixtures/invalid-support-export-unscoped-job.json",
+      "valid": false,
+      "reason": "A job-scoped export must name its job."
+    },
+    {
+      "file": "fixtures/invalid-support-export-section.json",
+      "valid": false,
+      "reason": "Only the closed public sections can be exported."
+    },
+    {
+      "file": "fixtures/invalid-support-export-audit-actor.json",
+      "valid": false,
+      "reason": "A browser-session actor is identified only by its session digest."
+    },
+    {
+      "file": "fixtures/invalid-support-export-audit-outcome.json",
+      "valid": false,
+      "reason": "A rejected action reports a 4xx status."
+    },
+    {
+      "file": "fixtures/invalid-support-export-audit-complete.json",
+      "valid": false,
+      "reason": "A page with unrecorded entries cannot claim completeness."
+    },
+    {
+      "file": "fixtures/capacity-saturated.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-capacity-reason-text.json",
+      "valid": false,
+      "reason": "Failure reasons are fixed public error codes, never request text."
+    },
+    {
+      "file": "fixtures/invalid-capacity-extra-field.json",
+      "valid": false,
+      "reason": "Capacity is closed; no job or path detail can be added."
+    },
+    {
       "file": "fixtures/queue-position-queued.json",
       "valid": true
     },

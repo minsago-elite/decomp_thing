@@ -22,8 +22,12 @@ internal class WebApiController(
     clock: Clock = Clock.systemUTC(),
     private val harnessReadiness: WebHarnessReadinessProjector = WebHarnessReadinessProjector(),
     private val agentPreflight: WebAgentPreflight = WebAgentPreflight { error("No agent preflight is configured.") },
+    audit: WebAuditLog? = null,
+    private val capacity: (() -> JsonObject)? = null,
     private val readExplorationArtifact: (String, String, Long) -> decompengine.repair.StableRegularFile = jobs::readArtifact,
 ) {
+    private val auditRecorder = WebAuditRecorder(access, audit)
+    private val supportExport = WebSupportExport(jobs, audit, ::runtimeJson, ::limitsJson, ::capabilitiesJson, clock)
     private val prefix = "${assets.basePath}api/v1/"
     private val applicationBuildId = applicationBuildId()
     // The build hash is stable across restarts; this identity belongs to one listener lifetime.
@@ -55,8 +59,20 @@ internal class WebApiController(
     fun route(exchange: HttpExchange): Boolean {
         val path = exchange.requestURI.rawPath
         if (!path.startsWith("${assets.basePath}api/")) return false
+        val audited = if (path.startsWith(prefix)) WebAuditRecorder.versionedAction(exchange.requestMethod, path.removePrefix(prefix)) else null
+        var target = audited?.second ?: WebAuditTarget()
+        if (audited?.first == WebAuditAction.SUPPORT_EXPORT) {
+            // A job-scoped export is access to that job's support data; attribute it to the validated job.
+            val scope = try { WebSupportExportScope.parse(exchange.requestURI.rawQuery) } catch (_: WebAccessDenied) { null }
+            if (scope is WebSupportExportScope.Job) target = target.copy(jobId = scope.jobId)
+        }
+        return auditRecorder.around(exchange, audited?.first, target) { dispatch(exchange) }
+    }
+
+    private fun dispatch(exchange: HttpExchange): Boolean {
+        val path = exchange.requestURI.rawPath
         val resource = path.removePrefix(prefix)
-        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs", "recovery", "agent/preflight") || resource.matches(Regex("(?:jobs|uploads)/[^/]+|jobs/[^/]+/runs(?:/[^/]+(?:/reports/(?:exploration|revision-validation)|/validation-history|/source-catalog|/revisions/[^/]+/(?:sources|source-directories/[^/]+|source-files/[^/]+(?:/(?:chunk|content))?)|/snapshot|/events|/progress-pin|/cancel|/recover|/controls|/queue-position)?)?|jobs/[^/]+/artifacts/[^/]+/content")))) {
+        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs", "recovery", "agent/preflight", "support-export", "capacity") || resource.matches(Regex("(?:jobs|uploads)/[^/]+|jobs/[^/]+/runs(?:/[^/]+(?:/reports/(?:exploration|revision-validation)|/validation-history|/source-catalog|/revisions/[^/]+/(?:sources|source-directories/[^/]+|source-files/[^/]+(?:/(?:chunk|content))?)|/snapshot|/events|/progress-pin|/cancel|/recover|/controls|/queue-position)?)?|jobs/[^/]+/artifacts/[^/]+/content")))) {
             try {
                 val policy = if (exchange.requestMethod in setOf("POST", "PUT", "PATCH", "DELETE")) {
                     WebEndpointPolicy.jsonMutation(exchange.requestMethod)
@@ -122,7 +138,7 @@ internal class WebApiController(
                         throw WebAccessDenied(400, "UNSUPPORTED_HEADER", "This bounded artifact endpoint does not support Range or conditional requests.")
                     }
                     val parts = resource.split('/')
-                    val bytes = WebExplorationArtifact.read(jobs, parts[1], parts[3])
+                    val bytes = WebExplorationArtifact.read(jobs, parts[1], parts[3], WebRedactionPolicy.of(exchange)::document)
                     webApiHeaders(exchange, UUID.randomUUID().toString())
                     exchange.responseHeaders.set("Content-Type", "application/octet-stream")
                     exchange.responseHeaders.set("Content-Disposition", "attachment; filename=\"exploration.json\"")
@@ -136,6 +152,18 @@ internal class WebApiController(
                     } finally { exchange.close() }
                 }
                 resource == "agent/preflight" -> agentPreflights.handle(exchange)
+                resource == "capacity" -> {
+                    access.authorize(exchange, WebEndpointPolicy.privateRead(allowHead = true))
+                    requireNoWebApiQuery(exchange); requireJsonAccept(exchange)
+                    val sample = capacity ?: throw WebAccessDenied(404, "NOT_FOUND", "The requested API route is unavailable.")
+                    sendWebApiResponse(exchange, 200, "capacity", sample())
+                }
+                resource == "support-export" -> {
+                    access.authorize(exchange, WebEndpointPolicy.privateRead())
+                    requireJsonAccept(exchange)
+                    sendWebApiResponse(exchange, 200, "supportExport",
+                        supportExport.build(WebSupportExportScope.parse(exchange.requestURI.rawQuery)))
+                }
                 resource.matches(Regex("jobs/[^/]+/runs/[^/]+/cancel")) -> {
                     val parts = resource.split('/')
                     cancellations.handle(exchange, parts[1], parts[3])
@@ -273,7 +301,7 @@ internal class WebApiController(
                     requireNoWebApiQuery(exchange); requireJsonAccept(exchange)
                     val parts = resource.split('/')
                     val attempt = jobs.getAttempt(parts[1], parts[3])
-                    val bytes = try { readExplorationArtifact(parts[1], "reports/runs/${attempt.runId}/exploration.json", 1_048_576).bytes }
+                    val bytes = try { WebRedactionPolicy.of(exchange).document(readExplorationArtifact(parts[1], "reports/runs/${attempt.runId}/exploration.json", 1_048_576).bytes) }
                         catch (failure: decompengine.jobs.ArtifactChangedException) { throw failure }
                         catch (_: JobStoreException) { null }
                     if (jobs.getAttempt(parts[1], parts[3]).version != attempt.version) throw WebJobServiceException("REPORT_CHANGED", "The attempt changed during this read. Refresh its evidence.")
@@ -366,47 +394,53 @@ internal class WebApiController(
         put("readiness", "degraded")
         put("sessionExpiresAt", credentials.session.expiresAt.toString())
         put("csrfToken", credentials.csrfToken)
-        put("capabilities", JsonArray(listOf(buildJsonObject {
-            put("id", "workflows")
-            put("state", "unavailable")
-            put("reasonCode", "PREVIEW_UNAVAILABLE")
-            put("message", "Workflow actions are unavailable in this preview.")
-            put("workflows", JsonArray(emptyList()))
-            put("agentContractVersion", JsonNull)
-            put("limits", JsonNull)
-        }, harnessCapability())))
-        // Configured ceilings for the API profile; unavailable resources remain
-        // unavailable until their adapters enforce these limits and are enabled.
-        put("limits", buildJsonObject {
-            put("requestDeadlineMs", "30000")
-            put("uploadDeadlineMs", "120000")
-            put("downloadIdleMs", "120000")
-            put("maxJsonBytes", "1048576")
-            put("maxUploadBytes", StreamingMultipartUpload.MAX_REQUEST_BYTES.toString())
-            put("maxSourceChunkBytes", "0")
-            put("maxLogChunkBytes", "0")
-            put("maxEventCount", "1024")
-            put("maxEventBytes", "2097152")
-            put("terminalEventRetentionMs", if (jobs.progressRetentionStatus().enabled) decompengine.jobs.AgentProgressJournalRetention.DEFAULT_TERMINAL_RETENTION.toMillis().toString() else "0")
-            put("defaultPageLimit", 50)
-            put("maxPageLimit", 200)
+        put("capabilities", capabilitiesJson())
+        put("limits", limitsJson())
+        put("runtime", runtimeJson())
+    }
+
+    private fun capabilitiesJson(): JsonArray = JsonArray(listOf(buildJsonObject {
+        put("id", "workflows")
+        put("state", "unavailable")
+        put("reasonCode", "PREVIEW_UNAVAILABLE")
+        put("message", "Workflow actions are unavailable in this preview.")
+        put("workflows", JsonArray(emptyList()))
+        put("agentContractVersion", JsonNull)
+        put("limits", JsonNull)
+    }, harnessCapability()))
+
+    // Configured ceilings for the API profile; unavailable resources remain
+    // unavailable until their adapters enforce these limits and are enabled.
+    private fun limitsJson(): JsonObject = buildJsonObject {
+        put("requestDeadlineMs", "30000")
+        put("uploadDeadlineMs", "120000")
+        put("downloadIdleMs", "120000")
+        put("maxJsonBytes", "1048576")
+        put("maxUploadBytes", StreamingMultipartUpload.MAX_REQUEST_BYTES.toString())
+        put("maxSourceChunkBytes", "0")
+        put("maxLogChunkBytes", "0")
+        put("maxEventCount", "1024")
+        put("maxEventBytes", "2097152")
+        put("terminalEventRetentionMs", if (jobs.progressRetentionStatus().enabled) decompengine.jobs.AgentProgressJournalRetention.DEFAULT_TERMINAL_RETENTION.toMillis().toString() else "0")
+        put("defaultPageLimit", 50)
+        put("maxPageLimit", 200)
+    }
+
+    private fun runtimeJson(): JsonObject = buildJsonObject {
+        put("javaVersion", Runtime.version().toString().take(64))
+        put("osName", when (System.getProperty("os.name").lowercase()) {
+            "linux" -> "linux"
+            "mac os x" -> "macos"
+            else -> if (System.getProperty("os.name").lowercase().startsWith("windows")) "windows" else "unknown"
         })
-        put("runtime", buildJsonObject {
-            put("javaVersion", Runtime.version().toString().take(64))
-            put("osName", when (System.getProperty("os.name").lowercase()) {
-                "linux" -> "linux"
-                "mac os x" -> "macos"
-                else -> if (System.getProperty("os.name").lowercase().startsWith("windows")) "windows" else "unknown"
-            })
-            put("architecture", when (System.getProperty("os.arch").lowercase()) {
-                "amd64", "x86_64" -> "x86_64"
-                "aarch64", "arm64" -> "aarch64"
-                else -> "unknown"
-            })
-            put("gitVersion", JsonNull)
-            put("scheduler", webSchedulerSnapshot(jobs.schedulerSnapshot()))
-            put("progressRetention", webProgressRetentionStatus(jobs.progressRetentionStatus()))
+        put("architecture", when (System.getProperty("os.arch").lowercase()) {
+            "amd64", "x86_64" -> "x86_64"
+            "aarch64", "arm64" -> "aarch64"
+            else -> "unknown"
         })
+        put("gitVersion", JsonNull)
+        put("scheduler", webSchedulerSnapshot(jobs.schedulerSnapshot()))
+        put("progressRetention", webProgressRetentionStatus(jobs.progressRetentionStatus()))
     }
 
     // Configuration-only and cached: reports whether a harness is selectable, never that a workflow can run.

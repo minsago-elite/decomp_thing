@@ -15,6 +15,11 @@ import type { DirectorySelection, FileSelection, SourceHistoryEntry, SourceReadS
 import { SourcePreview } from '../sources/SourcePreview';
 import { SourceDigestCheck } from '../sources/SourceDigestCheck';
 import { sourcePosition } from '../sources/viewer';
+import { registerContractExtension } from '../api/decode';
+import { lazyContractSchema } from '../api/generated-schema-lazy';
+
+// Contracts decoded only by lazily loaded routes stay out of the initial bundle.
+registerContractExtension(lazyContractSchema);
 
 import { acceptReceipt, receiptOf } from '../shared/receiptTime';
 import { MetadataReceipt } from '../shared/MetadataReceipt';
