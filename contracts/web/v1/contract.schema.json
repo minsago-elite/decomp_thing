@@ -3597,6 +3597,311 @@
       ],
       "additionalProperties": false
     },
+    "sourceSearchMatch": {
+      "type": "object",
+      "properties": {
+        "fileId": {
+          "$ref": "#/definitions/id"
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "^(?!/)[^\\\\\\u0000-\\u001f\\u007f:]+$"
+        },
+        "sha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "line": {
+          "$ref": "#/definitions/uint64"
+        },
+        "column": {
+          "$ref": "#/definitions/uint64"
+        },
+        "offsetBytes": {
+          "$ref": "#/definitions/uint64"
+        },
+        "lineOffsetBytes": {
+          "$ref": "#/definitions/uint64"
+        },
+        "before": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "match": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "after": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "truncatedBefore": {
+          "type": "boolean"
+        },
+        "truncatedAfter": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "fileId",
+        "displayName",
+        "sha256",
+        "line",
+        "column",
+        "offsetBytes",
+        "lineOffsetBytes",
+        "before",
+        "match",
+        "after",
+        "truncatedBefore",
+        "truncatedAfter"
+      ],
+      "additionalProperties": false
+    },
+    "sourceSearch": {
+      "type": "object",
+      "properties": {
+        "binding": {
+          "type": "object",
+          "properties": {
+            "jobId": {
+              "$ref": "#/definitions/id"
+            },
+            "runId": {
+              "$ref": "#/definitions/id"
+            },
+            "revisionId": {
+              "$ref": "#/definitions/id"
+            }
+          },
+          "required": [
+            "jobId",
+            "runId",
+            "revisionId"
+          ],
+          "additionalProperties": false
+        },
+        "authority": {
+          "const": "source-input-commitments"
+        },
+        "sourceSha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "metadataVersion": {
+          "$ref": "#/definitions/sha256"
+        },
+        "query": {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "match": {
+              "enum": [
+                "text",
+                "symbol"
+              ]
+            },
+            "caseSensitive": {
+              "type": "boolean"
+            },
+            "directoryId": {
+              "$ref": "#/definitions/id"
+            },
+            "path": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 512
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "text",
+            "match",
+            "caseSensitive",
+            "directoryId",
+            "path"
+          ],
+          "additionalProperties": false
+        },
+        "index": {
+          "const": "none"
+        },
+        "status": {
+          "enum": [
+            "complete",
+            "partial"
+          ]
+        },
+        "stopReason": {
+          "anyOf": [
+            {
+              "enum": [
+                "result-limit",
+                "byte-limit",
+                "deadline"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "scope": {
+          "type": "object",
+          "properties": {
+            "filesInScope": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            },
+            "searchableFiles": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            },
+            "notViewable": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            },
+            "declaredBinary": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            },
+            "tooLarge": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            }
+          },
+          "required": [
+            "filesInScope",
+            "searchableFiles",
+            "notViewable",
+            "declaredBinary",
+            "tooLarge"
+          ],
+          "additionalProperties": false
+        },
+        "progress": {
+          "type": "object",
+          "properties": {
+            "scannedFiles": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            },
+            "scannedBytes": {
+              "$ref": "#/definitions/uint64"
+            },
+            "unsearchableText": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            },
+            "unavailableFiles": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            },
+            "remainingFiles": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            }
+          },
+          "required": [
+            "scannedFiles",
+            "scannedBytes",
+            "unsearchableText",
+            "unavailableFiles",
+            "remainingFiles"
+          ],
+          "additionalProperties": false
+        },
+        "coverageGaps": {
+          "type": "object",
+          "properties": {
+            "unsearchableText": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            },
+            "unavailableFiles": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            }
+          },
+          "required": [
+            "unsearchableText",
+            "unavailableFiles"
+          ],
+          "additionalProperties": false
+        },
+        "limits": {
+          "type": "object",
+          "properties": {
+            "maxResults": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            },
+            "maxScannedBytes": {
+              "$ref": "#/definitions/uint64"
+            },
+            "deadlineMs": {
+              "$ref": "#/definitions/uint64"
+            }
+          },
+          "required": [
+            "maxResults",
+            "maxScannedBytes",
+            "deadlineMs"
+          ],
+          "additionalProperties": false
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/sourceSearchMatch"
+          },
+          "maxItems": 100
+        },
+        "page": {
+          "$ref": "#/definitions/page"
+        }
+      },
+      "required": [
+        "binding",
+        "authority",
+        "sourceSha256",
+        "metadataVersion",
+        "query",
+        "index",
+        "status",
+        "stopReason",
+        "scope",
+        "progress",
+        "coverageGaps",
+        "limits",
+        "items",
+        "page"
+      ],
+      "additionalProperties": false
+    },
     "revisionFileDetail": {
       "type": "object",
       "properties": {
@@ -6270,6 +6575,30 @@
         },
         "data": {
           "$ref": "#/definitions/sourceChunk"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "sourceSearch"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/sourceSearch"
         }
       },
       "required": [
