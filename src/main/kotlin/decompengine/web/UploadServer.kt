@@ -204,6 +204,8 @@ class UploadServer(
     uiMode: WebUiMode = WebUiMode.LEGACY,
     basePath: String = "/",
     devFrontendOrigin: String? = null,
+    // Optional #216 reverse-proxy profile; null keeps the default loopback-only, no-forwarding policy.
+    reverseProxy: WebReverseProxyProfile? = null,
     sourceProfiles: List<ReconstructionProfile> = defaultWebSourceProfiles(),
     sensitiveValues: Collection<String> = System.getenv().values,
     private val listenBacklog: Int = 64,
@@ -230,15 +232,17 @@ class UploadServer(
     private val spaAssets = when (uiMode) {
         WebUiMode.SPA -> {
             require(java.net.InetAddress.getByName(host).isLoopbackAddress) {
-                "the SPA preview currently requires a loopback host"
+                if (reverseProxy == null) "the SPA preview currently requires a loopback host"
+                else "the reverse-proxy profile keeps the JVM listener on a loopback host; run the TLS proxy on the same host"
             }
             // Validate the explicit origin spelling before binding, including
             // when an ephemeral port is requested. No origin comes from HTTP.
             LocalWebAccessConfiguration(webOrigin(host, port.takeIf { it != 0 } ?: 1), basePath,
-                setOfNotNull(devFrontendOrigin))
+                setOfNotNull(devFrontendOrigin), reverseProxy)
             EmbeddedWebAssets.load(basePath = basePath)
         }
         WebUiMode.LEGACY -> {
+            require(reverseProxy == null) { "the reverse-proxy profile requires --ui spa" }
             require(java.net.InetAddress.getByName(host).isLoopbackAddress) {
                 "legacy browser access requires a loopback host until a remote access profile is qualified"
             }
@@ -272,7 +276,7 @@ class UploadServer(
     private val sourceEvidence = WebSourceEvidence(store, admittedSourceProfiles, jobs::readArtifact)
     private val archiveEvidence = WebArchiveEvidence(store, sourceEvidence, jobs::readArtifact)
     private val access = LocalWebAccess(LocalWebAccessConfiguration(webOrigin(host, server.address.port), basePath,
-        setOfNotNull(devFrontendOrigin)), webAccessClock ?: SystemWebAccessClock,
+        setOfNotNull(devFrontendOrigin), reverseProxy), webAccessClock ?: SystemWebAccessClock,
         requestDiagnosticOutput = requestDiagnosticOutput)
     private val jobMutations = WebJobMutationBoundary(access, jobs)
     private val legacySessions = WebSessionController(access)
@@ -320,7 +324,7 @@ class UploadServer(
     private val requestsDrained = java.util.concurrent.CountDownLatch(1)
     private val stopRequested = java.util.concurrent.atomic.AtomicBoolean(false)
     val serverPort: Int get() = server.address.port
-    val browserOrigin: String = devFrontendOrigin ?: webOrigin(host, serverPort)
+    val browserOrigin: String = reverseProxy?.publicOrigin ?: devFrontendOrigin ?: webOrigin(host, serverPort)
 
     /** The CLI calls this explicitly; no HTTP route can issue a local link. */
     fun issueBrowserBootstrap(): WebBootstrapToken {

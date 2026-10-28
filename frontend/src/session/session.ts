@@ -6,6 +6,16 @@ import { captureReceiptTime } from '../shared/receiptTime';
 import type { ReceiptTime } from '../shared/receiptTime';
 import type { BootstrapFragment } from './fragment';
 
+// Deployment configuration refusals: exact Host/Origin pairing and the optional reverse-proxy profile.
+const CONFIGURATION_CODES: ReadonlySet<string> = new Set([
+  'HOST_DENIED',
+  'ORIGIN_DENIED',
+  'FORWARDED_HEADERS_DENIED',
+  'PROXY_PEER_DENIED',
+  'PROXY_FORWARDING_INVALID',
+  'PROXY_BASE_PATH_MISMATCH',
+]);
+
 export type SessionGateway = {
   exchange: (token: string, signal: AbortSignal) => Promise<Session>;
   bootstrap: (signal: AbortSignal) => Promise<Bootstrap>;
@@ -76,7 +86,7 @@ export function createBrowserSession(gateway: SessionGateway, basePath: string) 
     else if (code === 'SESSION_EXPIRED') publish({ status: 'required', reason: 'expired', ...reference });
     else if (code === 'BOOTSTRAP_REQUIRED') publish({ status: 'required', reason: 'bootstrap-required', ...reference });
     else if (code === 'BOOTSTRAP_EXPIRED') publish({ status: 'required', reason: 'bootstrap-expired', ...reference });
-    else if (code === 'HOST_DENIED' || code === 'ORIGIN_DENIED') publish({ status: 'unavailable', reason: 'configuration', ...reference });
+    else if (code !== undefined && CONFIGURATION_CODES.has(code)) publish({ status: 'unavailable', reason: 'configuration', ...reference });
     else if (!logout && error instanceof ApiClientError && error.code === 'unsupported_contract') {
       notifyInvalidated(false);
       publish({ status: 'unavailable', reason: 'incompatible', ...reference });

@@ -191,6 +191,10 @@ describe('page-local session state', () => {
     ['SESSION_EXPIRED', { status: 'required', reason: 'expired' }],
     ['BOOTSTRAP_EXPIRED', { status: 'required', reason: 'bootstrap-expired' }],
     ['ORIGIN_DENIED', { status: 'unavailable', reason: 'configuration' }],
+    ['HOST_DENIED', { status: 'unavailable', reason: 'configuration' }],
+    ['PROXY_PEER_DENIED', { status: 'unavailable', reason: 'configuration' }],
+    ['PROXY_FORWARDING_INVALID', { status: 'unavailable', reason: 'configuration' }],
+    ['PROXY_BASE_PATH_MISMATCH', { status: 'unavailable', reason: 'configuration' }],
   ])('exposes a safe recoverable state for %s', async (code, state) => {
     const { gateway, session } = setup();
     gateway.bootstrap.mockRejectedValueOnce(denied(code));

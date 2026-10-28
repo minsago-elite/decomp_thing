@@ -95,7 +95,8 @@ class WebEventStreamTest {
         val first = f.open()
         assertEquals(200, first.statusCode())
         assertEquals("text/event-stream; charset=utf-8", first.headers().firstValue("Content-Type").orElseThrow())
-        assertEquals("no-store", first.headers().firstValue("Cache-Control").orElseThrow())
+        assertEquals("no-store, no-transform", first.headers().firstValue("Cache-Control").orElseThrow())
+        assertEquals("no", first.headers().firstValue("X-Accel-Buffering").orElseThrow())
         val event = first.body().bufferedReader().use(::frame)
         assertEquals("workflow.observation", event["event"])
         val data = Json.parseToJsonElement(event.getValue("data")).jsonObject
