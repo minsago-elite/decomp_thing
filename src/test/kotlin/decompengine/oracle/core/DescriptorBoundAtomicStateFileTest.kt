@@ -1,6 +1,7 @@
 package decompengine.oracle.core
 
 import decompengine.acp.LinuxFilesystemSyscalls
+import decompengine.oracle.fulltree.ContainedCommandOperationDeadline
 import java.io.IOException
 import java.lang.reflect.Modifier
 import java.nio.file.Files
@@ -291,6 +292,213 @@ class DescriptorBoundAtomicStateFileTest {
     }
 
     @Test
+    fun `expired fresh publication retains the exact temporary and releases its prepared descriptor`() =
+        withStateDirectory { path ->
+            LinuxFilesystemSyscalls.openRoot(path).use { root ->
+                val expected = "deadline-bound result\n".toByteArray()
+                val temporaryName = DescriptorBoundAtomicStateFile.temporaryName(STATE_FILE)
+                var now = 0L
+                val deadline = ContainedCommandOperationDeadline(2_000) { now }
+                val descriptors = ownedDescriptorTargets(path)
+                var retained: DescriptorBoundStateSnapshot? = null
+                var observedPreparedDescriptor = false
+                assertFailsWith<IllegalStateException> {
+                    DescriptorBoundAtomicStateFile.publishNoReplace(
+                        root, STATE_FILE, expected, MAXIMUM_BYTES,
+                        faultInjector = DescriptorBoundStateFaultInjector { point ->
+                            if (point == DescriptorBoundStateFaultPoint.AFTER_TEMPORARY_DIRECTORY_SYNC) {
+                                retained = DescriptorBoundAtomicStateFile.readOrNull(root, temporaryName, MAXIMUM_BYTES)
+                                observedPreparedDescriptor = ownedDescriptorTargets(path).size == descriptors.size + 1
+                                now = 2_000_000_000L
+                            }
+                        },
+                        beforePublication = deadline::requireCurrent,
+                    )
+                }
+                assertTrue(observedPreparedDescriptor)
+                assertFalse(Files.exists(path.resolve(STATE_FILE), LinkOption.NOFOLLOW_LINKS))
+                val current = requireNotNull(DescriptorBoundAtomicStateFile.readOrNull(root, temporaryName, MAXIMUM_BYTES))
+                assertEquals(requireNotNull(retained).identity, current.identity)
+                assertContentEquals(expected, current.bytes)
+                assertEquals(PosixFilePermissions.fromString("r--------"), Files.getPosixFilePermissions(path.resolve(temporaryName)))
+                assertEquals(descriptors, ownedDescriptorTargets(path))
+            }
+        }
+
+    @Test
+    fun `expired temporary recovery preserves the exact inode and releases its inspection descriptor`() =
+        withStateDirectory { path ->
+            LinuxFilesystemSyscalls.openRoot(path).use { root ->
+                val expected = "recoverable result\n".toByteArray()
+                val temporaryName = DescriptorBoundAtomicStateFile.temporaryName(STATE_FILE)
+                var now = 0L
+                val deadline = ContainedCommandOperationDeadline(2_000) { now }
+                assertFailsWith<SimulatedProcessDeath> {
+                    DescriptorBoundAtomicStateFile.publishNoReplace(
+                        root, STATE_FILE, expected, MAXIMUM_BYTES,
+                        faultInjector = DescriptorBoundStateFaultInjector { point ->
+                            if (point == DescriptorBoundStateFaultPoint.AFTER_TEMPORARY_DIRECTORY_SYNC) throw SimulatedProcessDeath()
+                        },
+                        beforePublication = deadline::requireCurrent,
+                    )
+                }
+                val retained = requireNotNull(DescriptorBoundAtomicStateFile.readOrNull(root, temporaryName, MAXIMUM_BYTES))
+                val descriptors = ownedDescriptorTargets(path)
+                now = 2_000_000_000L
+                var observedInspectionDescriptor = false
+                assertFailsWith<IllegalStateException> {
+                    DescriptorBoundAtomicStateFile.publishNoReplace(
+                        root, STATE_FILE, expected, MAXIMUM_BYTES,
+                        beforePublication = {
+                            observedInspectionDescriptor = ownedDescriptorTargets(path).size == descriptors.size + 1
+                            deadline.requireCurrent()
+                        },
+                    )
+                }
+                assertTrue(observedInspectionDescriptor)
+                assertFalse(Files.exists(path.resolve(STATE_FILE), LinkOption.NOFOLLOW_LINKS))
+                val current = requireNotNull(DescriptorBoundAtomicStateFile.readOrNull(root, temporaryName, MAXIMUM_BYTES))
+                assertEquals(retained.identity, current.identity)
+                assertContentEquals(expected, current.bytes)
+                assertEquals(PosixFilePermissions.fromString("r--------"), Files.getPosixFilePermissions(path.resolve(temporaryName)))
+                assertEquals(descriptors, ownedDescriptorTargets(path))
+            }
+        }
+
+    @Test
+    fun `unexpired publication keeps idempotent reads and conflicting targets unchanged`() =
+        withStateDirectory { path ->
+            LinuxFilesystemSyscalls.openRoot(path).use { root ->
+                val expected = "admitted result\n".toByteArray()
+                var now = 0L
+                val deadline = ContainedCommandOperationDeadline(2_000) { now }
+                var admissions = 0
+                val admit = { admissions++; deadline.requireCurrent() }
+                val published = DescriptorBoundAtomicStateFile.publishNoReplace(
+                    root, STATE_FILE, expected, MAXIMUM_BYTES, beforePublication = admit,
+                )
+                now = 1_000_000_000L
+                val repeated = DescriptorBoundAtomicStateFile.publishNoReplace(
+                    root, STATE_FILE, expected, MAXIMUM_BYTES, beforePublication = admit,
+                )
+                assertEquals(published.identity, repeated.identity)
+                assertContentEquals(expected, repeated.bytes)
+                assertEquals(1, admissions)
+                assertFailsWith<IOException> {
+                    DescriptorBoundAtomicStateFile.publishNoReplace(
+                        root, STATE_FILE, "different\n".toByteArray(), MAXIMUM_BYTES, beforePublication = admit,
+                    )
+                }
+                assertEquals(1, admissions)
+                assertContentEquals(expected, Files.readAllBytes(path.resolve(STATE_FILE)))
+                assertEquals(PosixFilePermissions.fromString("r--------"), Files.getPosixFilePermissions(path.resolve(STATE_FILE)))
+                assertFalse(Files.exists(path.resolve(DescriptorBoundAtomicStateFile.temporaryName(STATE_FILE))))
+            }
+        }
+
+    @Test
+    fun `fresh publication revalidates the temporary inode after fault and admission callbacks`() {
+        for (substituteAtFault in listOf(false, true)) {
+            withStateDirectory { path ->
+                LinuxFilesystemSyscalls.openRoot(path).use { root ->
+                    val expected = "same bytes different inode\n".toByteArray()
+                    val temporary = path.resolve(DescriptorBoundAtomicStateFile.temporaryName(STATE_FILE))
+                    val original = path.resolve("retained-original")
+                    val descriptors = ownedDescriptorTargets(path)
+                    var substitutions = 0
+                    fun substitute() {
+                        Files.move(temporary, original)
+                        Files.write(temporary, expected)
+                        Files.setPosixFilePermissions(temporary, PosixFilePermissions.fromString("r--------"))
+                        substitutions++
+                    }
+                    assertFailsWith<IOException> {
+                        DescriptorBoundAtomicStateFile.publishNoReplace(
+                            root, STATE_FILE, expected, MAXIMUM_BYTES,
+                            faultInjector = DescriptorBoundStateFaultInjector { point ->
+                                if (substituteAtFault && point == DescriptorBoundStateFaultPoint.AFTER_TEMPORARY_DIRECTORY_SYNC) substitute()
+                            },
+                            beforePublication = { if (!substituteAtFault) substitute() },
+                        )
+                    }
+                    assertEquals(1, substitutions)
+                    assertFalse(Files.exists(path.resolve(STATE_FILE), LinkOption.NOFOLLOW_LINKS))
+                    assertContentEquals(expected, Files.readAllBytes(temporary))
+                    assertContentEquals(expected, Files.readAllBytes(original))
+                    assertEquals(descriptors, ownedDescriptorTargets(path))
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `temporary recovery revalidates its pinned inode after admission callbacks`() =
+        withStateDirectory { path ->
+            LinuxFilesystemSyscalls.openRoot(path).use { root ->
+                val expected = "same recovery bytes different inode\n".toByteArray()
+                retainTemporary(root, expected)
+                val temporary = path.resolve(DescriptorBoundAtomicStateFile.temporaryName(STATE_FILE))
+                val original = path.resolve("retained-original")
+                val descriptors = ownedDescriptorTargets(path)
+                var substitutions = 0
+                assertFailsWith<IOException> {
+                    DescriptorBoundAtomicStateFile.publishNoReplace(
+                        root, STATE_FILE, expected, MAXIMUM_BYTES,
+                        beforePublication = {
+                            Files.move(temporary, original)
+                            Files.write(temporary, expected)
+                            Files.setPosixFilePermissions(temporary, PosixFilePermissions.fromString("r--------"))
+                            substitutions++
+                        },
+                    )
+                }
+                assertEquals(1, substitutions)
+                assertFalse(Files.exists(path.resolve(STATE_FILE), LinkOption.NOFOLLOW_LINKS))
+                assertContentEquals(expected, Files.readAllBytes(temporary))
+                assertContentEquals(expected, Files.readAllBytes(original))
+                assertEquals(descriptors, ownedDescriptorTargets(path))
+            }
+        }
+
+    @Test
+    fun `publication admission rechecks temporary bytes mode and parent permissions`() {
+        for (recover in listOf(false, true)) {
+            for (mutation in listOf("bytes", "mode", "parent")) {
+                withStateDirectory { path ->
+                    LinuxFilesystemSyscalls.openRoot(path).use { root ->
+                        val expected = "bound immutable bytes\n".toByteArray()
+                        if (recover) retainTemporary(root, expected)
+                        val temporary = path.resolve(DescriptorBoundAtomicStateFile.temporaryName(STATE_FILE))
+                        val descriptors = ownedDescriptorTargets(path)
+                        var mutations = 0
+                        assertFailsWith<IOException> {
+                            DescriptorBoundAtomicStateFile.publishNoReplace(
+                                root, STATE_FILE, expected, MAXIMUM_BYTES,
+                                beforePublication = {
+                                    when (mutation) {
+                                        "bytes" -> {
+                                            Files.setPosixFilePermissions(temporary, PosixFilePermissions.fromString("rw-------"))
+                                            Files.write(temporary, "changed immutable bytes\n".toByteArray())
+                                            Files.setPosixFilePermissions(temporary, PosixFilePermissions.fromString("r--------"))
+                                        }
+                                        "mode" -> Files.setPosixFilePermissions(temporary, PosixFilePermissions.fromString("rw-------"))
+                                        "parent" -> Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("rwxr-x---"))
+                                    }
+                                    mutations++
+                                },
+                            )
+                        }
+                        assertEquals(1, mutations)
+                        assertFalse(Files.exists(path.resolve(STATE_FILE), LinkOption.NOFOLLOW_LINKS))
+                        assertTrue(Files.isRegularFile(temporary, LinkOption.NOFOLLOW_LINKS))
+                        assertEquals(descriptors, ownedDescriptorTargets(path))
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
     fun `unknown deterministic temporary residue is retained and rejected`() =
         withStateDirectory { path ->
             val temporaryName = DescriptorBoundAtomicStateFile.temporaryName(STATE_FILE)
@@ -348,6 +556,30 @@ class DescriptorBoundAtomicStateFileTest {
             }
             assertContentEquals(expected, Files.readAllBytes(path.resolve(STATE_FILE)))
             assertContentEquals(expected, Files.readAllBytes(temporary))
+        }
+    }
+
+    private fun retainTemporary(root: decompengine.acp.LinuxDescriptor, expected: ByteArray) {
+        assertFailsWith<SimulatedProcessDeath> {
+            DescriptorBoundAtomicStateFile.publishNoReplace(
+                root, STATE_FILE, expected, MAXIMUM_BYTES,
+                faultInjector = DescriptorBoundStateFaultInjector { point ->
+                    if (point == DescriptorBoundStateFaultPoint.AFTER_TEMPORARY_DIRECTORY_SYNC) throw SimulatedProcessDeath()
+                },
+            )
+        }
+    }
+
+    private fun ownedDescriptorTargets(path: Path): Map<Int, String> {
+        val prefix = path.toRealPath().toString()
+        return Files.list(Path.of("/proc/self/fd")).use { descriptors ->
+            descriptors.toList().mapNotNull { descriptor ->
+                val target = runCatching { Files.readSymbolicLink(descriptor).toString() }.getOrNull()
+                    ?: return@mapNotNull null
+                if (target == prefix || target.startsWith("$prefix/")) {
+                    descriptor.fileName.toString().toInt() to target
+                } else null
+            }.toMap()
         }
     }
 
