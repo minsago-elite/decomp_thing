@@ -98,7 +98,7 @@ data class JobDeletionOperation(
     }
 }
 
-internal enum class JobDeletionFaultPoint { BEFORE_INTENT, BEFORE_DETACH, AFTER_DETACH, PURGE_ENTRY, BEFORE_COMPLETION }
+internal enum class JobDeletionFaultPoint { BEFORE_INTENT, BEFORE_DETACH, AFTER_DETACH, PURGE_ENTRY, PURGE_SYNC, BEFORE_COMPLETION }
 internal fun interface JobDeletionFaults { @Throws(IOException::class) fun hit(point: JobDeletionFaultPoint) }
 
 internal class JobDeletionCapacityException : IllegalStateException("deletion record capacity")
@@ -227,13 +227,20 @@ internal class JobDeletionStore(
         return running
     }
 
-    data class PurgeResult(val complete: Boolean, val bytes: Long, val entries: Long, val failureCode: String?)
+    data class PurgeResult(
+        val complete: Boolean,
+        val bytes: Long,
+        val entries: Long,
+        val failureCode: String?,
+        val countsDurable: Boolean = true,
+    )
 
     /** Runs without the caller's monitor. Only this operation's detached directory is touched. */
     fun purge(operation: JobDeletionOperation, check: () -> Boolean, maximumNanos: Long = 10_000_000_000L): PurgeResult {
         val started = System.nanoTime()
         var bytes = 0L
         var entries = 0L
+        var countsDurable = true
         val name = "${operation.operationId}.removing"
         fun proceed(): Boolean = check() && System.nanoTime() - started < maximumNanos && !Thread.currentThread().isInterrupted
         try {
@@ -246,32 +253,50 @@ internal class JobDeletionStore(
                             identity.uid != rootDirectory.identity.uid) throw JobDeletionContainmentException("detached job directory is not owned")
                         fun clear(directory: LinuxDescriptor, depth: Int): Boolean {
                             if (depth > 64) throw JobDeletionContainmentException("detached job tree is too deep")
-                            for (child in Linux.directoryEntryNames(directory, 200_000)) {
-                                if (!proceed()) return false
-                                faults.hit(JobDeletionFaultPoint.PURGE_ENTRY)
-                                val entry = Linux.openPathAtOrNull(directory.fd, child) ?: continue
-                                entry.use { selected ->
-                                    val current = selected.identity
-                                    // A foreign-owned entry is never removed or traversed, even when permissions would allow it.
-                                    if (!owned(child, current, rootDirectory.identity)) throw JobDeletionContainmentException("job tree contains a foreign-owned entry")
-                                    if (current.isDirectory && !current.isSymbolicLink) {
-                                        if (current.mountId != rootDirectory.identity.mountId) throw JobDeletionContainmentException("job tree crosses a mount")
-                                        Linux.openDirectoryAt(directory.fd, child).use { opened ->
-                                            if (opened.identity != current) throw JobDeletionContainmentException("job directory changed during cleanup")
-                                            if (!clear(opened, depth + 1)) return false
+                            var localBytes = 0L
+                            var localEntries = 0L
+                            var changed = false
+                            try {
+                                for (child in Linux.directoryEntryNames(directory, 200_000)) {
+                                    if (!proceed()) return false
+                                    faults.hit(JobDeletionFaultPoint.PURGE_ENTRY)
+                                    val entry = Linux.openPathAtOrNull(directory.fd, child) ?: continue
+                                    entry.use { selected ->
+                                        val current = selected.identity
+                                        // A foreign-owned entry is never removed or traversed, even when permissions would allow it.
+                                        if (!owned(child, current, rootDirectory.identity)) throw JobDeletionContainmentException("job tree contains a foreign-owned entry")
+                                        if (current.isDirectory && !current.isSymbolicLink) {
+                                            if (current.mountId != rootDirectory.identity.mountId) throw JobDeletionContainmentException("job tree crosses a mount")
+                                            Linux.openDirectoryAt(directory.fd, child).use { opened ->
+                                                if (opened.identity != current) throw JobDeletionContainmentException("job directory changed during cleanup")
+                                                if (!clear(opened, depth + 1)) return false
+                                            }
+                                            Linux.removeDirectory(directory.fd, child)
+                                        } else {
+                                            // Links (symbolic or hard) are removed as names; their targets are never opened.
+                                            val size = if (current.isRegularFile && !current.isSymbolicLink) Files.size(Linux.descriptorPath(selected)) else 0L
+                                            Linux.unlink(directory.fd, child)
+                                            localBytes = saturatingAdd(localBytes, size)
                                         }
-                                        Linux.removeDirectory(directory.fd, child)
-                                    } else {
-                                        // Links (symbolic or hard) are removed as names; their targets are never opened.
-                                        val size = if (current.isRegularFile && !current.isSymbolicLink) Files.size(Linux.descriptorPath(selected)) else 0L
-                                        Linux.unlink(directory.fd, child)
-                                        bytes += size // Charged only once the name is really gone, so retries never double-count.
+                                        localEntries = saturatingAdd(localEntries, 1)
+                                        changed = true
                                     }
-                                    entries++
+                                }
+                                return true
+                            } finally {
+                                if (changed) {
+                                    try {
+                                        faults.hit(JobDeletionFaultPoint.PURGE_SYNC)
+                                        Linux.synchronize(directory)
+                                    } catch (failure: IOException) {
+                                        countsDurable = false
+                                        throw failure
+                                    }
+                                    // Only publish counts after this directory's unlinks are durable.
+                                    bytes = saturatingAdd(bytes, localBytes)
+                                    entries = saturatingAdd(entries, localEntries)
                                 }
                             }
-                            Linux.synchronize(directory)
-                            return true
                         }
                         Linux.openDirectoryAt(journal.fd, name).use { opened ->
                             if (opened.identity != identity) throw JobDeletionContainmentException("detached job directory changed")
@@ -283,9 +308,9 @@ internal class JobDeletionStore(
                 }
             }
         } catch (failure: JobDeletionContainmentException) {
-            return PurgeResult(false, bytes, entries, "CLEANUP_CONTAINMENT")
+            return PurgeResult(false, bytes, entries, "CLEANUP_CONTAINMENT", countsDurable)
         } catch (_: IOException) {
-            return PurgeResult(false, bytes, entries, "STORAGE_UNAVAILABLE")
+            return PurgeResult(false, bytes, entries, "STORAGE_UNAVAILABLE", countsDurable)
         }
         return PurgeResult(true, bytes, entries, null)
     }
@@ -294,7 +319,8 @@ internal class JobDeletionStore(
     fun record(operation: JobDeletionOperation, result: PurgeResult): JobDeletionOperation {
         val current = records[operation.operationId] ?: operation
         val accumulated = current.copy(removedBytes = saturatingAdd(current.removedBytes, result.bytes),
-            removedEntries = saturatingAdd(current.removedEntries, result.entries))
+            removedEntries = saturatingAdd(current.removedEntries, result.entries),
+            removedCountsExact = current.removedCountsExact && result.countsDurable)
         return when {
             result.complete -> finish(accumulated, JobDeletionState.COMPLETED)
             result.failureCode == "CLEANUP_CONTAINMENT" -> finish(accumulated, JobDeletionState.FAILED, failureCode = "CLEANUP_CONTAINMENT")

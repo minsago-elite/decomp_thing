@@ -65,6 +65,46 @@ class JobDeletionStoreTest {
         }
     }
 
+    @Test fun `a failed directory sync does not publish unconfirmed purge counts`() {
+        val root = Files.createTempDirectory("job-deletion-store-")
+        try {
+            val job = JobStore(root).createFromUpload("inert.elf", elfFixture())
+            val jobDirectory = root.resolve(job.id)
+            val expectedBytes = Files.walk(jobDirectory).use { paths ->
+                paths.filter { Files.isRegularFile(it) }.mapToLong { Files.size(it) }.sum()
+            }
+            val expectedEntries = Files.walk(jobDirectory).use { paths -> paths.count() - 1 }
+            var failNextSync = true
+            val store = JobDeletionStore(root, faults = JobDeletionFaults { point ->
+                if (point == JobDeletionFaultPoint.PURGE_SYNC && failNextSync) {
+                    failNextSync = false
+                    throw java.io.IOException("directory sync failed")
+                }
+            }).also { it.load() }
+            val running = store.detach(store.admit(job.id, digest, "1".repeat(64), "2".repeat(64)))
+            val detachedDirectory = root.resolve("${JobDeletionStore.DIRECTORY}/${running.operationId}.removing")
+            val entriesBefore = Files.walk(detachedDirectory).use { it.count() }
+            val pass = store.purge(running, { true })
+            val entriesAfter = Files.walk(detachedDirectory).use { it.count() }
+            assertTrue(entriesAfter < entriesBefore, "the sync failure follows actual removals")
+            assertFalse(pass.complete)
+            assertEquals("STORAGE_UNAVAILABLE", pass.failureCode)
+            assertFalse(pass.countsDurable)
+            assertEquals(0, pass.bytes)
+            assertEquals(0, pass.entries)
+
+            val recorded = store.record(running, pass)
+            assertFalse(recorded.removedCountsExact)
+            assertEquals(0, recorded.removedBytes)
+            assertEquals(0, recorded.removedEntries)
+            val finished = store.record(recorded, store.purge(recorded, { true }))
+            assertEquals(JobDeletionState.COMPLETED, finished.state)
+            assertFalse(finished.removedCountsExact)
+            assertTrue(finished.removedBytes <= expectedBytes)
+            assertTrue(finished.removedEntries <= expectedEntries)
+        } finally { root.toFile().deleteRecursively() }
+    }
+
     @Test fun `a purge that finished without persisted records still reconciles as deleted after restart`() {
         val root = Files.createTempDirectory("job-deletion-store-")
         try {
