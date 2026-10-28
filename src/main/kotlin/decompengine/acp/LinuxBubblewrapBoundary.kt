@@ -6193,9 +6193,10 @@ internal fun AcpTerminalExecutionPolicy.policyDigest(
     require(canonicalRules.map { it.first }.distinct().size == canonicalRules.size) {
         "terminal command rules must have distinct canonical authority"
     }
-    val sortedRules = canonicalRules.sortedWith { left, right ->
-        compareCheckpointed(left.first, right.first, cancellationCheck)
-    }
+    val sortedRules =
+        canonicalRules.sortedWith { left, right ->
+            compareCheckpointed(left.first, right.first, cancellationCheck)
+        }
     val digest = CanonicalMetadataDigest(MAXIMUM_TERMINAL_POLICY_AUTHORITY_BYTES * 2L, cancellationCheck)
     digest.field("schema", "acp-terminal-policy-v2")
     stagingRoots.sortedWith { left, right ->
