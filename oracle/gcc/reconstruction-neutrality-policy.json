@@ -26,7 +26,9 @@
     "scripts/generate-gcc-behavior-corpus.py",
     "scripts/generate-gcc-compiler-engine-build-records.py",
     "scripts/run-gcc-behavior-corpus.py",
-    "scripts/verify-gcc-oracle-source.py"
+    "scripts/verify-gcc-oracle-source.py",
+    ".github/workflows/gcc-signed-source.yml",
+    "scripts/ci-fetch-gcc-signed-source.py"
   ],
   "adapterFiles": [
     {
@@ -68,6 +70,10 @@
     {
       "path": "src/main/kotlin/decompengine/project/GeneratedCMvpPatchCompilerPolicy.kt",
       "reason": "Generated-C standalone MVP patch compiler and sanitizer command selected by the admitted reconstruction adapter."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/GeneratedCModuleContext.kt",
+      "reason": "Generated-C selection and rendering of dependency-required module interface snapshots through the registered reconstruction adapter."
     },
     {
       "path": "src/main/kotlin/decompengine/project/GeneratedCModulePrompt.kt",
