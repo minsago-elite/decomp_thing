@@ -841,6 +841,78 @@
       "valid": true
     },
     {
+      "file": "fixtures/source-search-complete.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/source-search-partial.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/source-search-no-matches.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/source-search-incomplete-empty.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-source-search-partial-without-cursor.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-search-complete-reason.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-search-scope-sum.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-search-case-sensitive-match.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-search-line-offset.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-search-complete-remaining.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-search-symbol-boundary.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-search-file-order.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-search-limit.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-search-numeric-line.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-search-index.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/source-search-continued-gaps.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-source-search-gaps-below-page.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-source-search-gaps-over-scope.json",
+      "valid": false
+    },
+    {
       "file": "fixtures/queue-position-queued.json",
       "valid": true
     },
