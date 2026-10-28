@@ -61,6 +61,8 @@ jobs:
           python3 -m pip install --requirement requirements/oracle-generation.txt
       - name: Verify packaged upgrade and cache evidence controls
         run: node scripts/test-packaged-browser-upgrade.mjs
+      - name: Verify packaged upload route readiness controls
+        run: node scripts/test-packaged-browser-upload.mjs
       - name: Verify bounded archival cleanup controls
         timeout-minutes: 1
         run: python3 -B scripts/test-archival-diagnostics.py --verbose
@@ -171,6 +173,7 @@ jobs:
           "$RUNNER_TEMP/web-test-browser/chrome" --version | tee build/packaged-web-ci/browser-version.txt
           python3 scripts/test-packaged-browser-install.py
           node --check scripts/check-packaged-web-browser.mjs
+          node --test scripts/packaged-browser-upload.test.mjs
       - name: Build archives and verify browser expiry and distribution contents
         env:
           DECOMP_BROWSER_CHROME: ${{ runner.temp }}/web-test-browser/chrome
