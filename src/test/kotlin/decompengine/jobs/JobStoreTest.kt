@@ -144,6 +144,71 @@ class JobStoreTest {
             }
             assertEquals("stable file-read target binding changed", failure.message)
         }
+
+        run {
+            val root = createTempDirectory("jobs-metadata-root-replacement-")
+            val store = JobStore(root)
+            val job = store.createFromUpload("snapshot.elf", elfFixture())
+            val failure = assertFailsWith<IllegalArgumentException> {
+                store.getWithMetadataAuthorization(job.id) {
+                    val retainedRoot = root.resolveSibling("${root.fileName}-retained")
+                    java.nio.file.Files.move(root, retainedRoot)
+                    java.nio.file.Files.createDirectory(root)
+                    val replacementJob = java.nio.file.Files.createDirectory(root.resolve(job.id))
+                    java.nio.file.Files.copy(retainedRoot.resolve(job.id).resolve("job.json"), replacementJob.resolve("job.json"))
+                }
+            }
+            assertEquals("stable file-read root binding changed", failure.message)
+        }
+
+        run {
+            val root = createTempDirectory("jobs-metadata-hardlink-replacement-")
+            val store = JobStore(root)
+            val job = store.createFromUpload("snapshot.elf", elfFixture())
+            val metadata = root.resolve(job.id).resolve("job.json")
+            val failure = assertFailsWith<IllegalArgumentException> {
+                store.getWithMetadataAuthorization(job.id) {
+                    java.nio.file.Files.createLink(metadata.resolveSibling("retained-job.json"), metadata)
+                }
+            }
+            assertTrue(failure.message.orEmpty().contains("descriptor identity differs"))
+        }
+
+        run {
+            val root = createTempDirectory("jobs-metadata-symlink-replacement-")
+            val store = JobStore(root)
+            val job = store.createFromUpload("snapshot.elf", elfFixture())
+            val metadata = root.resolve(job.id).resolve("job.json")
+            val failure = assertFailsWith<IllegalArgumentException> {
+                store.getWithMetadataAuthorization(job.id) {
+                    val retained = metadata.resolveSibling("retained-job.json")
+                    java.nio.file.Files.move(metadata, retained)
+                    java.nio.file.Files.createSymbolicLink(metadata, retained.fileName)
+                }
+            }
+            assertEquals("stable file-read target binding changed", failure.message)
+        }
+
+        run {
+            val root = createTempDirectory("jobs-metadata-mode-change-")
+            val store = JobStore(root)
+            val job = store.createFromUpload("snapshot.elf", elfFixture())
+            val metadata = root.resolve(job.id).resolve("job.json")
+            val originalMode = java.nio.file.Files.getPosixFilePermissions(metadata)
+            val failure = try {
+                assertFailsWith<IllegalArgumentException> {
+                    store.getWithMetadataAuthorization(job.id) {
+                        java.nio.file.Files.setPosixFilePermissions(
+                            metadata,
+                            originalMode - java.nio.file.attribute.PosixFilePermission.OWNER_WRITE,
+                        )
+                    }
+                }
+            } finally {
+                java.nio.file.Files.setPosixFilePermissions(metadata, originalMode)
+            }
+            assertTrue(failure.message.orEmpty().contains("identity differs"))
+        }
     }
 
     @Test
