@@ -494,6 +494,11 @@ def check_semantics(document: dict) -> None:
         capabilities = [item["id"] for item in data["capabilities"]]
         if len(capabilities) != len(set(capabilities)):
             raise ValueError("duplicate capability identity")
+        for item in data["capabilities"]:
+            launch = item.get("launch")  # Optional: older v1 producers omit it.
+            # An agent contract version is reported exactly for launch options that contact an agent.
+            if launch is not None and launch["contactsAgent"] != (item["agentContractVersion"] is not None):
+                raise ValueError("launch agent contact and agent contract version disagree")
     elif kind == "report":
         artifact = data["sourceArtifact"]
         if artifact is not None and artifact["binding"] != data["binding"]:

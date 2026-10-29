@@ -17,7 +17,6 @@ import java.nio.file.Path
 import java.nio.file.Files
 import java.security.MessageDigest
 import java.util.Locale
-import java.util.concurrent.CompletableFuture
 import kotlin.io.path.createDirectories
 import kotlin.io.path.pathString
 import kotlin.io.path.writeText
@@ -93,12 +92,7 @@ class PythonAngrExplorer(
             argvBytes.toString(),
             stdinBytes.toString(),
         )
-        val process = ProcessBuilder(command).start()
-        val stdoutFuture = CompletableFuture.supplyAsync { process.inputStream.bufferedReader().readText() }
-        val stderrFuture = CompletableFuture.supplyAsync { process.errorStream.bufferedReader().readText() }
-        val exitCode = process.waitFor()
-        val stdout = stdoutFuture.join()
-        val stderr = stderrFuture.join()
+        val (exitCode, stdout, stderr) = collectOwnedExplorationProcess(ProcessBuilder(command).start())
         if (exitCode != 0) {
             val reason = if (exitCode == 124) "timed out after ${timeoutSeconds}s" else "failed with exit code $exitCode"
             error("angr candidate generation $reason: ${stderr.ifBlank { stdout }}")
@@ -258,8 +252,7 @@ class StaticHintGenerator(
         val process = ProcessBuilder(stringsPath.pathString, "-a", "-n", "3", binaryPath.pathString)
             .redirectErrorStream(true)
             .start()
-        val output = process.inputStream.bufferedReader().readText()
-        val exitCode = process.waitFor()
+        val (exitCode, output) = collectOwnedExplorationProcess(process)
         if (exitCode != 0) error("strings failed with exit code $exitCode: $output")
         val hints = output.lineSequence()
             .map(String::trim)
@@ -333,7 +326,11 @@ data class CoverageReport(
     val networkIsolated: Boolean = observations.isNotEmpty() && observations.all { it.networkIsolated }
 }
 
-class OutputCoverageMeasurer(private val sandbox: SandboxRunner = SandboxRunner()) {
+class OutputCoverageMeasurer(
+    private val sandbox: SandboxRunner = SandboxRunner(),
+    /** Called after every finished sample, successful or not; an owner can treat it as progress. */
+    private val onSample: () -> Unit = {},
+) {
     fun measure(binaryPath: Path, baseline: List<CandidateInput>, expanded: List<CandidateInput>): CoverageReport =
         measure(binaryPath, baseline, expanded, capture = null)
 
@@ -378,7 +375,7 @@ class OutputCoverageMeasurer(private val sandbox: SandboxRunner = SandboxRunner(
                 stdoutHex = stdoutHex,
                 stderrHex = stderrHex,
                 networkIsolated = output.networkIsolated,
-            ).also { capture?.completed(phase, it) }
+            ).also { capture?.completed(phase, it); onSample() }
         } catch (failure: Exception) {
             if (capture != null) capture.failed(phase, index, failure)
             throw failure
@@ -491,6 +488,11 @@ class AutomaticExplorer(
         return report
     }
 }
+
+/** Linux process state Z: exited and awaiting its parent's wait; no other platform reports one. */
+internal fun isZombie(pid: Long): Boolean = try {
+    java.nio.file.Files.readString(java.nio.file.Path.of("/proc/$pid/stat")).substringAfterLast(") ").firstOrNull() == 'Z'
+} catch (_: Exception) { false }
 
 private fun hashObservationInput(path: Path): String {
     val digest = MessageDigest.getInstance("SHA-256")

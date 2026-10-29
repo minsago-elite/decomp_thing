@@ -270,7 +270,8 @@ class WebNegotiationMatrixTest {
         val id = JobStore(root).createFromUpload("fixture.elf", elfFixture()).id
         val server = UploadServer("127.0.0.1", 0, root, JobAnalyzer { _, _ -> error("analysis must remain inert") },
             JobReconstructor { _, _ -> error("reconstruction must remain inert") }, uiMode = mode,
-            basePath = if (mode == WebUiMode.SPA) "/workbench/" else "/")
+            // The matrix covers the unregistered start route; production admission has its own controls.
+            basePath = if (mode == WebUiMode.SPA) "/workbench/" else "/", durableAdapters = emptyList())
         server.start()
         try { block(server, root, id) } finally { server.stop(); root.toFile().deleteRecursively() }
     }

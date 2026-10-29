@@ -855,7 +855,10 @@ try {
     await ready(authenticated, `document.querySelector('h1')?.textContent === 'Runtime status' && document.querySelector('#server-runtime-title')?.textContent === 'Connected server'`, 'authenticated Runtime');
     assert.equal((await evaluate(authenticated, 'window.__sessionTestRequests')).length, firstRequests.length,
       'Opening Runtime issued a probe or another bootstrap request');
-    assert.ok(await evaluate(authenticated, `document.body.innerText.includes('Workflow actions are unavailable in this preview.') && document.body.innerText.includes('33554432 bytes')`));
+    // The packaged environment configures no agent: agent options report that reason, unimplemented workflows say so.
+    assert.ok(await evaluate(authenticated, `(() => { const text = document.body.innerText; return text.includes('workflow-reconstruct-agent: unavailable')
+      && text.includes('HARNESS_NOT_CONFIGURED') && text.includes('workflow-build: unsupported') && text.includes('WORKFLOW_NOT_IMPLEMENTED')
+      && !text.includes('Workflow actions are unavailable in this preview.') && text.includes('33554432 bytes'); })()`));
     const scheduler = await evaluate(authenticated, `(() => {
       const section = document.querySelector('section[aria-labelledby="scheduler-title"]');
       return { text: section.innerText, values: Array.from(section.querySelectorAll('dd')).map(node => node.textContent), sampledAt: section.querySelector('time')?.dateTime };
