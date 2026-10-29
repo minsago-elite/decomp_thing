@@ -62,6 +62,23 @@ class OwnedModuleCompilerSnapshotTest {
         requireContainedCommandExecutableAliases(listOf(original, copy), emptyList())
     }
 
+    @Test
+    fun `normal completion removes the real staged compiler before its request directory and refuses unknown residue`() = fixture { root ->
+        val privateMode = PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------"))
+        val complete = Files.createDirectory(root.resolve("complete"), privateMode)
+        Files.writeString(complete.resolve("request.json"), "authenticated request fixture")
+        materializeOwnedModuleCompilerSnapshot(compiler(), complete.resolve("compiler"))
+        removeOwnedModuleCompilerRequestDirectory(complete)
+        assertFalse(Files.exists(complete), "normal cleanup must remove the executable before deleting its parent")
+
+        val unexpected = Files.createDirectory(root.resolve("unexpected"), privateMode)
+        Files.writeString(unexpected.resolve("request.json"), "authenticated request fixture")
+        materializeOwnedModuleCompilerSnapshot(compiler(), unexpected.resolve("compiler"))
+        Files.writeString(unexpected.resolve("not-owned-by-cleanup"), "preserve")
+        assertFails { removeOwnedModuleCompilerRequestDirectory(unexpected) }
+        assertEquals("preserve", Files.readString(unexpected.resolve("not-owned-by-cleanup")))
+    }
+
     private fun compiler(): KotlinSystemdCgroupCommandInput {
         val path = Path.of(System.getProperty("decompengine.analysis.io.testCompiler", "/usr/bin/cc")).toRealPath()
         assertEquals(0, Files.getAttribute(path, "unix:uid"))
