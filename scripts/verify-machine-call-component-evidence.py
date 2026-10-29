@@ -4,17 +4,18 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
-from hashlib import sha256
 import json
 import os
-from pathlib import Path, PurePosixPath
 import re
 import stat
 import subprocess
 import sys
 import zlib
-
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
+from hashlib import sha256
+from pathlib import Path, PurePosixPath
+from typing import cast
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 MAX_BYTES = 64 * 1024 * 1024
@@ -46,22 +47,26 @@ def require(condition: bool, message: str) -> None:
 
 
 def fields(value: object, expected: set[str], label: str) -> dict:
-    require(type(value) is dict and set(value) == expected, f"{label}: unknown or missing fields")
+    if type(value) is not dict or set(value) != expected:
+        raise VerificationError(f"{label}: unknown or missing fields")
     return value
 
 
 def integer(value: object, minimum: int = 0, maximum: int = MAX_BYTES) -> int:
-    require(type(value) is int and minimum <= value <= maximum, "integer exceeds its supported bound")
+    if type(value) is not int or not minimum <= value <= maximum:
+        raise VerificationError("integer exceeds its supported bound")
     return value
 
 
 def text(value: object, maximum: int = 16384) -> str:
-    require(type(value) is str and 0 < len(value) <= maximum and "\0" not in value, "invalid bounded text")
+    if type(value) is not str or not 0 < len(value) <= maximum or "\0" in value:
+        raise VerificationError("invalid bounded text")
     return value
 
 
 def digest(value: object, length: int = 64) -> str:
-    require(type(value) is str and re.fullmatch(f"[0-9a-f]{{{length}}}", value) is not None, "noncanonical digest")
+    if type(value) is not str or re.fullmatch(f"[0-9a-f]{{{length}}}", value) is None:
+        raise VerificationError("noncanonical digest")
     return value
 
 
@@ -81,36 +86,43 @@ def informational_path(value: object) -> None:
     require(path.is_absolute() and str(path) == value and ".." not in path.parts, "invalid informational original path")
 
 
-def repository_path(path: Path) -> Path:
-    # Lexical admission only. Filesystem access must use repository_parent, never this pathname.
-    root = REPOSITORY_ROOT
+def repository_path(path: Path, *, existing: bool) -> Path:
+    root = REPOSITORY_ROOT.resolve()
     absolute = path if path.is_absolute() else root / path
     require(absolute == Path(os.path.abspath(absolute)), "path must be normalized")
     require(absolute.is_relative_to(root) and absolute != root, "path is outside the repository")
+    cursor = root
+    for part in absolute.relative_to(root).parts[:-1]:
+        cursor /= part
+        info = cursor.lstat()
+        require(stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode), "path parent must be an existing nonsymlink directory")
+    if existing:
+        info = absolute.lstat()
+        require(stat.S_ISREG(info.st_mode) and not stat.S_ISLNK(info.st_mode), "input must be a regular nonsymlink file")
+    else:
+        require(not os.path.lexists(absolute), "extraction destination already exists")
     return absolute
 
 
 @contextmanager
-def repository_parent(path: Path):
-    absolute = repository_path(path)
-    parts = absolute.relative_to(REPOSITORY_ROOT).parts
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
-    parent = os.open(REPOSITORY_ROOT, flags)
-    try:
-        # Hold each selected directory before opening its child. A renamed ancestor cannot
-        # redirect subsequent reads, creates, or cleanup through a substituted symlink.
+def open_repository_parent(path: Path, *, existing: bool) -> Iterator[tuple[int, str]]:
+    # Pathname preflight is diagnostic only. Every subsequent filesystem operation is
+    # anchored to retained nonsymlink directory descriptors, including leaf cleanup.
+    selected = repository_path(path, existing=existing)
+    root = REPOSITORY_ROOT.resolve()
+    parts = selected.relative_to(root).parts
+    with ExitStack() as descriptors:
+        parent = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        descriptors.callback(os.close, parent)
         for part in parts[:-1]:
-            child = os.open(part, flags, dir_fd=parent)
-            os.close(parent)
-            parent = child
+            parent = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+            descriptors.callback(os.close, parent)
         yield parent, parts[-1]
-    finally:
-        os.close(parent)
 
 
 def read_file(path: Path, maximum: int) -> bytes:
-    with repository_parent(path) as (parent, name):
-        descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=parent)
+    with open_repository_parent(path, existing=True) as (parent, leaf):
+        descriptor = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=parent)
         with os.fdopen(descriptor, "rb") as stream:
             before = os.fstat(stream.fileno())
             require(stat.S_ISREG(before.st_mode) and before.st_size <= maximum, "input file exceeds byte bound")
@@ -229,7 +241,7 @@ def git(arguments: list[str], maximum: int = MAX_BYTES) -> bytes:
     environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
     environment.update({"GIT_OPTIONAL_LOCKS": "0", "GIT_NO_REPLACE_OBJECTS": "1", "GIT_TERMINAL_PROMPT": "0"})
     result = subprocess.run(["git", "--no-replace-objects", "-C", str(REPOSITORY_ROOT), *arguments],
-                            env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30, check=False)
+                            env=environment, capture_output=True, timeout=30, check=False)
     require(result.returncode == 0 and len(result.stdout) <= maximum, "recorded Git object is missing or exceeds bound")
     return result.stdout
 
@@ -289,7 +301,7 @@ def verify_report_bindings(evidence: dict, request: dict, report: dict) -> None:
             report["artifactManifestSha256"] == request["manifestSha256"], "report input commitment differs")
     require(report["languageId"] == runtime["languageId"] and report["languageVersion"] == runtime["languageVersion"] and
             type(report["canonicalOracleRecordLimit"]) is int and report["canonicalOracleRecordLimit"] == 20000, "report language or oracle limit differs")
-    require(type(report["imageBase"]) is str and re.fullmatch(r"0x(?:0|[1-9a-f][0-9a-f]{0,15})", report["imageBase"]), "invalid image base")
+    require(type(report["imageBase"]) is str and re.fullmatch(r"0x(?:0|[1-9a-f][0-9a-f]{0,15})", report["imageBase"]) is not None, "invalid image base")
     for name, maximum in (("canonicalPopulation", min(20000, limits["maximumRoots"])), ("roots", limits["maximumRoots"]), ("calls", limits["maximumCalls"])):
         require(type(report[name]) is list and len(report[name]) <= maximum, "report inventory exceeds bound")
     root_ids = set()
@@ -339,7 +351,7 @@ def verify_report_bindings(evidence: dict, request: dict, report: dict) -> None:
 
 
 def verify_evidence(evidence_path: Path) -> tuple[bytes, dict]:
-    evidence_path = repository_path(evidence_path)
+    evidence_path = repository_path(evidence_path, existing=True)
     evidence = parse_canonical(read_file(evidence_path, MAX_CONTROL_BYTES), MAX_CONTROL_BYTES)
     fields(evidence, {"schemaVersion", "kind", "authority", "complete", "releaseEligible", "negativeCompleteness", "containmentStatus",
         "counts", "inputs", "payloads", "producerJar", "runtime", "source"}, "evidence")
@@ -382,19 +394,23 @@ def verify_evidence(evidence_path: Path) -> tuple[bytes, dict]:
         raise VerificationError(f"recorded source commit {commit} is unavailable or invalid; fetch that commit's history before offline verification") from error
     verify_git_object(tree, "tree")
     require(git(["show", "-s", "--format=%T", commit], 64) == (tree + "\n").encode(), "recorded source commit/tree disagree")
-    require(type(source["files"]) is list and len(source["files"]) == len(SOURCE_PATHS), "incomplete source inventory")
-    for reference in source["files"]:
+    raw_source_files = source["files"]
+    if type(raw_source_files) is not list:
+        raise VerificationError("incomplete source inventory")
+    source_files = cast(list[dict], raw_source_files)
+    require(len(source_files) == len(SOURCE_PATHS), "incomplete source inventory")
+    for reference in source_files:
         file_reference(reference)
-    require([item["path"] for item in source["files"]] == sorted(SOURCE_PATHS), "source inventory is not exact and ordered")
+    require([item["path"] for item in source_files] == sorted(SOURCE_PATHS), "source inventory is not exact and ordered")
     for reference in [*source["files"], *inputs.values()]:
         verify_git_blob(commit, reference)
     return report_bytes, evidence["counts"]
 
 
 def extract_report(destination: Path, report_bytes: bytes) -> None:
-    with repository_parent(destination) as (parent, name):
+    with open_repository_parent(destination, existing=False) as (parent, leaf):
         try:
-            descriptor = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+            descriptor = os.open(leaf, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
                                  0o600, dir_fd=parent)
         except FileExistsError as error:
             raise VerificationError("extraction destination already exists") from error
@@ -404,7 +420,7 @@ def extract_report(destination: Path, report_bytes: bytes) -> None:
                 stream.flush()
                 os.fsync(stream.fileno())
         except BaseException:
-            os.unlink(name, dir_fd=parent)
+            os.unlink(leaf, dir_fd=parent)
             raise
 
 
