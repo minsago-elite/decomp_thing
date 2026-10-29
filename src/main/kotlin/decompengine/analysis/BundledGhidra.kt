@@ -1,6 +1,7 @@
 package decompengine.analysis
 
 import java.io.BufferedReader
+import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.InputStream
 import java.io.InputStreamReader
@@ -79,15 +80,32 @@ class BundledGhidra private constructor(val root: Path) {
     }
 
     /** Called only by the short-lived verifier worker; the parent enforces the in-flight deadline. */
-    internal fun verifiedLibraryPaths(checkpoint: (String) -> Unit): List<Path> {
+    internal fun verifiedLibraryPaths(checkpoint: (String) -> Unit): List<Path> =
+        verifiedLibraryPaths(checkpoint, null)
+
+    /** Uses the caller-authenticated manifest snapshot to select and verify this same tree. */
+    internal fun verifiedLibraryPathsFromManifestSnapshot(
+        manifestBytes: ByteArray,
+        checkpoint: (String) -> Unit,
+    ): List<Path> = verifiedLibraryPaths(checkpoint, manifestBytes)
+
+    private fun verifiedLibraryPaths(checkpoint: (String) -> Unit, manifestBytes: ByteArray?): List<Path> {
         checkpoint("before bundled Ghidra verification")
         val manifest = root.resolve("bundle.sha256")
-        require(Files.isRegularFile(manifest, LinkOption.NOFOLLOW_LINKS) && Files.size(manifest) <= 4L * 1024 * 1024) {
-            "Bundled Ghidra is missing at $root; rebuild or reinstall the complete application distribution"
+        if (manifestBytes == null) {
+            require(Files.isRegularFile(manifest, LinkOption.NOFOLLOW_LINKS) && Files.size(manifest) <= 4L * 1024 * 1024) {
+                "Bundled Ghidra is missing at $root; rebuild or reinstall the complete application distribution"
+            }
+        } else {
+            require(manifestBytes.isNotEmpty() && manifestBytes.size <= 4 * 1024 * 1024) {
+                "Authenticated bundled Ghidra checksum manifest exceeds its bound"
+            }
         }
         val expectedPaths = mutableSetOf<String>()
         checkpoint("before reading bundled Ghidra checksum manifest")
-        val records = Files.newInputStream(manifest, LinkOption.NOFOLLOW_LINKS).use { input ->
+        val manifestInput = manifestBytes?.let(::ByteArrayInputStream)
+            ?: Files.newInputStream(manifest, LinkOption.NOFOLLOW_LINKS)
+        val records = manifestInput.use { input ->
             BufferedReader(InputStreamReader(
                 CheckpointInputStream(input, checkpoint, "bundled Ghidra checksum manifest"),
                 StandardCharsets.UTF_8.newDecoder()

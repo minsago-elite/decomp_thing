@@ -12,6 +12,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
 import org.junit.jupiter.api.Assumptions.assumeTrue
@@ -39,6 +40,14 @@ class NativeCallCollectorRealTest {
     @Test
     fun `genuine delayed MIPS calls remain explicit unsupported boundaries`() = withRealControl("delayed") { root ->
         root.resolve("mips-input").also { Files.write(it, byteArrayOf(0x0c, 0, 4, 4, 0, 0, 0, 0)) }
+    }
+
+    @Test
+    fun `real bundled iterator scans ordinary high reference sources and rejects late call overflow`() = withRealControl("reference-scan") { root ->
+        val assembly = copyResource("control-calls.s", root)
+        root.resolve("calls").also { binary ->
+            run(root, listOf("cc", "-nostdlib", "-no-pie", "-Wl,--build-id=none", "-o", binary.toString(), assembly.toString()), "compile-elf", Duration.ofSeconds(30))
+        }
     }
 
     private fun withRealControl(mode: String, prepareInput: (Path) -> Path) {
@@ -111,6 +120,18 @@ class NativeCallCollectorRealTest {
         assertFalse(receipt.authoritativeOracleEvidence)
         assertFalse(receipt.recoveredModelScored)
         assertFalse(receipt.releaseEligible)
+        if (mode == "reference-scan") {
+            val controls = Json.parseToJsonElement(Files.readString(root.resolve("reference-scan-controls.json"))) as JsonObject
+            assertEquals(1720L, controls.getValue("ordinaryReferenceCount").jsonPrimitive.long)
+            assertEquals(65L, controls.getValue("jumpReferenceCount").jsonPrimitive.long)
+            for (field in listOf("completeScan", "sameCountMutationRejected", "midScanCancellationRejected"))
+                assertTrue(controls.getValue(field).jsonPrimitive.boolean)
+            val failure = controls.getValue("lateCallOverflowDiagnostic").jsonPrimitive.content
+            assertTrue(failure.contains("count=66") && failure.contains("limit=64") && failure.contains("offsetBits="))
+            val sites = observed.filterIsInstance<NativeCallSiteRecordV1>()
+            assertEquals(sites.sumOf { it.references.size.toLong() }, receipt.scanSummary.directReferences)
+            assertEquals(sites.sumOf { site -> site.referenceNeighborhoods.sumOf { it.references.size.toLong() } }, receipt.scanSummary.neighborhoodReferences)
+        }
     }
 
     private fun copyResource(name: String, root: Path): Path = root.resolve(name).also { path ->

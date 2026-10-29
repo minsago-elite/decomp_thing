@@ -1,0 +1,19 @@
+{
+  "apiVersion": 1,
+  "kind": "operation",
+  "requestId": "request_example_1",
+  "data": {
+    "operationId": "operation_example_4",
+    "jobId": "1234567890abcdef1234567890abcdef",
+    "repositoryId": "repository_example_4",
+    "worktreeId": "worktree_example_4",
+    "action": "git.init",
+    "state": "interrupted",
+    "version": "operation_v3",
+    "createdAt": "2026-10-25T00:00:00Z",
+    "endedAt": "2026-10-25T00:05:00Z",
+    "resultObjectId": null,
+    "recoveryRequired": false,
+    "message": "Interrupted by a server restart before publication. No repository was published and the source snapshot was not changed. Start a new request explicitly."
+  }
+}

@@ -4,6 +4,7 @@ import com.sun.net.httpserver.HttpExchange
 import decompengine.jobs.PublishedJobUpload
 import decompengine.jobs.NewWorkflowAttempt
 import decompengine.jobs.WorkflowPinActor
+import decompengine.jobs.WorkflowRecoveryMode
 import decompengine.jobs.WorkflowPinRequestResult
 import decompengine.jobs.WorkflowCancellationActor
 import decompengine.jobs.WorkflowCancellationRequestResult
@@ -39,10 +40,55 @@ internal class WebJobMutationBoundary(
         return AuthorizedWebWorkflowStart(jobs)
     }
 
+    fun authorizeRecovery(exchange: HttpExchange): AuthorizedWebRecovery {
+        checkNotNull(access.authorize(exchange, WebEndpointPolicy.jsonMutation("POST")))
+        return AuthorizedWebRecovery(jobs)
+    }
+
     fun authorizeCancellation(exchange: HttpExchange): AuthorizedWebCancellation {
         val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.jsonMutation("POST")))
         return AuthorizedWebCancellation(session, jobs)
     }
+
+    fun authorizeJobOrganization(exchange: HttpExchange): AuthorizedWebJobOrganization {
+        val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.jsonMutation("PATCH")))
+        return AuthorizedWebJobOrganization(session, jobs)
+    }
+
+    fun authorizeJobDeletion(exchange: HttpExchange): AuthorizedWebJobDeletion {
+        val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.jsonMutation("DELETE")))
+        return AuthorizedWebJobDeletion(session, jobs)
+    }
+
+    fun authorizeGitRepository(exchange: HttpExchange): AuthorizedWebGitRepository {
+        checkNotNull(access.authorize(exchange, WebEndpointPolicy.jsonMutation("POST")))
+        return AuthorizedWebGitRepository()
+    }
+}
+
+/** Display-metadata capability; the body selects only allowlisted label/archive values. */
+internal class AuthorizedWebJobOrganization internal constructor(
+    private val session: AuthorizedWebSession,
+    private val jobs: WebJobService,
+) {
+    fun request(jobId: String, expectedVersion: String, change: decompengine.jobs.JobOrganizationChange, requestKey: String) =
+        jobs.requestJobOrganization(jobId, expectedVersion, change, session.sessionId, requestKey)
+}
+
+/** Deletion capability; attribution and key scope come only from the authorized session. */
+internal class AuthorizedWebJobDeletion internal constructor(
+    private val session: AuthorizedWebSession,
+    private val jobs: WebJobService,
+) {
+    fun request(jobId: String, expectedVersion: String, requestKey: String): WebJobDeletionAdmission =
+        jobs.requestJobDeletion(jobId, expectedVersion, session.sessionId, requestKey)
+}
+
+/** Repository-creation capability; the body selects only typed intent, never a path or command. */
+internal class AuthorizedWebGitRepository internal constructor() {
+    fun request(repositories: decompengine.git.ManagedGitRepositories, jobId: String,
+        request: decompengine.git.GitRepositoryRequest, requestKey: String, precondition: () -> Unit,
+    ): decompengine.git.GitOperationAdmission = repositories.request(jobId, request, requestKey, precondition)
 }
 
 /** Upload-only capability shared by the legacy and versioned HTTP adapters. */
@@ -72,6 +118,13 @@ internal class AuthorizedWebWorkflowStart internal constructor(private val jobs:
     fun request(jobId: String, expectedJobVersion: String, request: NewWorkflowAttempt,
         requestKey: String): DurableWebWorkflowStartResult =
         jobs.requestDurableStart(jobId, expectedJobVersion, request, requestKey)
+}
+
+/** Recovery capability for one identified predecessor; callers cannot select a workflow, harness, path or session. */
+internal class AuthorizedWebRecovery internal constructor(private val jobs: WebJobService) {
+    fun request(jobId: String, runId: String, expectedRunVersion: String, mode: WorkflowRecoveryMode,
+        expectedInputRevisionId: String?, requestKey: String): DurableWebWorkflowStartResult =
+        jobs.requestDurableRecovery(jobId, runId, expectedRunVersion, mode, expectedInputRevisionId, requestKey)
 }
 
 /** Cancellation-only capability; the body cannot select the authenticated actor. */

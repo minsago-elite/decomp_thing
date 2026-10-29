@@ -1,0 +1,54 @@
+{
+  "apiVersion": 1,
+  "kind": "sourceSearch",
+  "requestId": "request_source_search_4",
+  "data": {
+    "binding": {
+      "jobId": "1234567890abcdef1234567890abcdef",
+      "runId": "run_1",
+      "revisionId": "revision_1"
+    },
+    "authority": "source-input-commitments",
+    "sourceSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "metadataVersion": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "query": {
+      "text": "absent",
+      "match": "text",
+      "caseSensitive": true,
+      "directoryId": "root",
+      "path": null
+    },
+    "index": "none",
+    "status": "partial",
+    "stopReason": "byte-limit",
+    "scope": {
+      "filesInScope": 4,
+      "searchableFiles": 4,
+      "notViewable": 0,
+      "declaredBinary": 0,
+      "tooLarge": 0
+    },
+    "progress": {
+      "scannedFiles": 2,
+      "scannedBytes": "33000000",
+      "unsearchableText": 0,
+      "unavailableFiles": 1,
+      "remainingFiles": 1
+    },
+    "coverageGaps": {
+      "unsearchableText": 0,
+      "unavailableFiles": 1
+    },
+    "limits": {
+      "maxResults": 50,
+      "maxScannedBytes": "33554432",
+      "deadlineMs": "2000"
+    },
+    "items": [],
+    "page": {
+      "limit": 50,
+      "snapshotVersion": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "nextCursor": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc_3_120_0_1_ffffffffffffffffffffffffffffffff"
+    }
+  }
+}

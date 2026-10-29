@@ -14,6 +14,12 @@ import decompengine.acp.AcpPermissionAuditReason
 import decompengine.acp.AcpTerminalAuditOutcome
 import decompengine.acp.AcpTerminalAuditReason
 import decompengine.agent.AGENT_EXECUTION_CONTRACT_VERSION
+import decompengine.agent.AgentAccessPolicy
+import decompengine.agent.AgentExecutionRequest
+import decompengine.agent.AgentExecutionRequestBinding
+import decompengine.agent.AgentOperation
+import decompengine.agent.AgentPathRule
+import decompengine.agent.AgentWorkspaceRoot
 import decompengine.agent.AgentFileChange
 import decompengine.agent.AgentFileChangeKind
 import decompengine.agent.AgentMessageRole
@@ -214,21 +220,23 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
                     val profileBudget = profile.budgets.reconstructionMaximumContextCharacters.toLong()
                     require(checkpoint.promptBudgetCharacters in minOf(4_096L, profileBudget)..profileBudget &&
                         checkpoint.reconstructorIdentity.matches(Regex(
-                            "agent:.*:context-${checkpoint.promptBudgetCharacters}:factory-(?:[0-9a-f]{64}|unbound):v3",
+                            "agent:.*:context-${checkpoint.promptBudgetCharacters}:factory-(?:[0-9a-f]{64}|unbound):v[34]",
                             RegexOption.DOT_MATCHES_ALL,
                         ))
                     ) {
                         "pre-dispatch fallback prompt budget differs from the reconstruction profile or reconstructor identity: $moduleId"
                     }
-                    val request = promptInputs.request(moduleId, projectDir, checkpoint.preDispatchObservedBehavior)
+                    val legacy = checkpoint.reconstructorIdentity.endsWith(":v3")
+                    val request = promptInputs.requestFromRetainedObservation(moduleId, projectDir,
+                        checkpoint.preDispatchObservedBehavior, legacy)
                     require(request.module.sourcePath == source.path &&
                         (request.module.functionIds + request.module.globalIds).sorted() == source.entityIds) {
                         "pre-dispatch fallback differs from the retained module plan: $moduleId"
                     }
-                    val prompt = modulePromptEvidence(request).text
+                    val prompt = modulePromptEvidence(request, legacy = legacy).text
                     require(prompt.length.toLong() == checkpoint.promptCharacters &&
                         sha256(prompt.toByteArray(StandardCharsets.UTF_8)) == checkpoint.promptSha256 &&
-                        promptInputs.fingerprint(request) == checkpoint.fingerprint) {
+                        promptInputs.fingerprint(request, legacy = legacy) == checkpoint.fingerprint) {
                         "pre-dispatch fallback prompt differs from independently rendered inputs: $moduleId"
                     }
                     // Retained observation text is caller input, not proof of historical dispatch.
@@ -300,6 +308,9 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
                     source = receiptSource,
                     sourceBytes = receiptSourceBytes,
                     checkpoint = checkpoint,
+                    expectedAccessPolicySha256 = if (checkpoint.reconstructorIdentity.endsWith(":v4")) {
+                        ownedModuleAccessPolicySha256(projectDir, source.path)
+                    } else null,
                 )
                 val releaseFacts = requireNotNull(verifiedReceipt.releaseFacts)
                 val exactChange = releaseFacts.changes.single()
@@ -578,12 +589,31 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         )
     }
 
+    // A v4 receipt may write/create only its owned implementation. Interface snapshots
+    // are immutable prompt inputs, so a retained whole-header read grant is not equivalent.
+    // v3 receipts keep their historical acceptance scope rather than gaining this v4 claim.
+    private fun ownedModuleAccessPolicySha256(
+        projectDir: Path,
+        sourcePath: String,
+    ): String {
+        val operations = setOf(AgentOperation.WRITE_FILE, AgentOperation.CREATE_FILE)
+        val request = AgentExecutionRequest(
+            objective = "archive policy replay",
+            workspaceRoots = listOf(AgentWorkspaceRoot("project", projectDir.toAbsolutePath().normalize())),
+            accessPolicy = AgentAccessPolicy(listOf(AgentPathRule(
+                AgentWorkspacePath("project", sourcePath), operations,
+            ))),
+        )
+        return AgentExecutionRequestBinding.capture(request).accessPolicySha256
+    }
+
     private fun verifyExecutionReceipt(
         bytes: ByteArray,
         moduleId: String,
         source: GeneratedFileEvidence,
         sourceBytes: Long,
         checkpoint: ReconstructionCheckpoint,
+        expectedAccessPolicySha256: String?,
     ): VerifiedAcpExecutionReceiptDocument {
         val root = strictObject(bytes, EVIDENCE_JSON_LIMITS, "reconstruction ACP execution receipt")
         root.requireExactKeys(RECEIPT_FIELDS, "reconstruction ACP execution receipt")
@@ -597,7 +627,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
             "reconstruction ACP execution receipt names the wrong module: $moduleId"
         }
 
-        val requestBounds = verifyReceiptRequest(root, checkpoint)
+        val requestBounds = verifyReceiptRequest(root, checkpoint, expectedAccessPolicySha256)
         val provider = root.requiredObject("provider", "ACP receipt")
         provider.requireExactKeys(RECEIPT_PROVIDER_FIELDS, "ACP receipt provider")
         require(provider.requiredString("id", "ACP receipt provider") == "acp" &&
@@ -674,6 +704,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
     private fun verifyReceiptRequest(
         root: JsonObject,
         checkpoint: ReconstructionCheckpoint,
+        expectedAccessPolicySha256: String?,
     ): ReceiptBounds {
         val request = root.requiredObject("request", "ACP receipt")
         request.requireExactKeys(RECEIPT_REQUEST_FIELDS, "ACP receipt request")
@@ -684,7 +715,10 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         require(requestSha256 == checkpoint.executionRequestSha256) {
             "ACP receipt request digest differs from its checkpoint assessment"
         }
-        request.requiredSha256("accessPolicySha256", "ACP receipt request")
+        val accessPolicySha256 = request.requiredSha256("accessPolicySha256", "ACP receipt request")
+        require(expectedAccessPolicySha256 == null || accessPolicySha256 == expectedAccessPolicySha256) {
+            "module-minimal ACP receipt differs from its owned-source write policy"
+        }
         verifyTextCommitment(
             request.requiredObject("objective", "ACP receipt request"),
             "ACP objective",
@@ -693,7 +727,12 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         require(request.requiredSha256("promptSha256", "ACP receipt request") == checkpoint.promptSha256) {
             "ACP receipt prompt digest differs from the reconstruction checkpoint"
         }
-        request.requiredSha256("wirePromptSha256", "ACP receipt request")
+        val wirePromptSha256 = request.requiredSha256("wirePromptSha256", "ACP receipt request")
+        // v4 budgets and commits the exact shared ACP wire rendering. The v3 workflow
+        // digest included separate header snapshots, so historical receipts keep that scope.
+        require(!checkpoint.reconstructorIdentity.endsWith(":v4") || wirePromptSha256 == checkpoint.promptSha256) {
+            "module-minimal ACP wire prompt digest differs from its complete prompt commitment"
+        }
         verifyTextCommitmentList(
             request.requiredObject("workspaceRootIds", "ACP receipt request"),
             listOf("project"),
@@ -1554,8 +1593,13 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
             val budget = requireNotNull(promptBudgetCharacters) {
                 "agent reconstruction checkpoint is missing its prompt budget"
             }
+            val version = when {
+                reconstructorIdentity.endsWith(":v3") -> 3
+                reconstructorIdentity.endsWith(":v4") -> 4
+                else -> throw IllegalArgumentException("unsupported module reconstructor identity version")
+            }
             return "agent:${factory.implementationId}:context-$budget:" +
-                "factory-${sha256(factory.descriptor.toByteArray(StandardCharsets.UTF_8))}:v3"
+                "factory-${sha256(factory.descriptor.toByteArray(StandardCharsets.UTF_8))}:v$version"
         }
     }
 

@@ -1,0 +1,154 @@
+{
+  "status": "passed",
+  "tasks": [
+    {
+      "classes": [
+        "/home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/build/classes/java/test",
+        "/home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/build/classes/kotlin/test"
+      ],
+      "dependencies": [
+        ":ghidra-bridge:stageBundle",
+        "buildAnalysisIoHelper",
+        "generateAcpGateHelperChecksum",
+        "generateGccBundledGhidraReference",
+        "generateKotlinBootClasspathReference",
+        "generateLlvmBehaviorHelperChecksum",
+        "generateLlvmHostedWorkerClasspathReference",
+        "installDist",
+        "stageOracleNativeLibraries",
+        "verifyCompiledJunitSignatures"
+      ],
+      "excludes": [],
+      "forkEvery": 1,
+      "includes": [
+        "decompengine.oracle.gcc.GccCompilerEnginePlanningTest"
+      ],
+      "maxHeapSize": "512m",
+      "maxParallelForks": 1,
+      "task": "gccCompilerEnginePlanningIsolated"
+    },
+    {
+      "classes": [
+        "/home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/build/classes/java/test",
+        "/home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/build/classes/kotlin/test"
+      ],
+      "dependencies": [
+        "verifyCompiledJunitSignatures"
+      ],
+      "excludes": [],
+      "forkEvery": 0,
+      "includes": [
+        "decompengine.exploration.AutomaticExplorationTest.real angr symbolically discovers branching argv and stdin when configured"
+      ],
+      "maxHeapSize": "512m",
+      "maxParallelForks": 1,
+      "task": "realAngrQualification"
+    },
+    {
+      "classes": [
+        "/home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/build/classes/java/test",
+        "/home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/build/classes/kotlin/test"
+      ],
+      "dependencies": [
+        ":ghidra-bridge:stageBundle",
+        "buildAnalysisIoHelper",
+        "gccCompilerEnginePlanningIsolated",
+        "generateAcpGateHelperChecksum",
+        "generateGccBundledGhidraReference",
+        "generateKotlinBootClasspathReference",
+        "generateLlvmBehaviorHelperChecksum",
+        "generateLlvmHostedWorkerClasspathReference",
+        "installDist",
+        "snapshotCapsuleAuditDataTest",
+        "stageOracleNativeLibraries",
+        "verifyCompiledJunitSignatures"
+      ],
+      "excludes": [
+        "decompengine.oracle.gcc.GccCompilerEnginePlanningTest"
+      ],
+      "forkEvery": 0,
+      "includes": [],
+      "maxHeapSize": "2g",
+      "maxParallelForks": 1,
+      "task": "test"
+    },
+    {
+      "classes": [
+        "/home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/build/classes/java/test",
+        "/home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/build/classes/kotlin/test"
+      ],
+      "dependencies": [
+        ":ghidra-bridge:stageBundle",
+        "buildAnalysisIoHelper",
+        "generateAcpGateHelperChecksum",
+        "generateGccBundledGhidraReference",
+        "generateKotlinBootClasspathReference",
+        "generateLlvmBehaviorHelperChecksum",
+        "generateLlvmHostedWorkerClasspathReference",
+        "installDist",
+        "stageOracleNativeLibraries",
+        "verifyCompiledJunitSignatures"
+      ],
+      "excludes": [],
+      "forkEvery": 1,
+      "includes": [
+        "decompengine.oracle.fulltree.FullTreeFunctionTruthSqliteV3Test.truth v3 rederives observation census and preserves one score row per RVA"
+      ],
+      "maxHeapSize": null,
+      "maxParallelForks": 1,
+      "task": "v3BoundaryCensusIsolated"
+    },
+    {
+      "classes": [
+        "/home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/build/classes/java/test",
+        "/home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/build/classes/kotlin/test"
+      ],
+      "dependencies": [
+        ":ghidra-bridge:stageBundle",
+        "buildAnalysisIoHelper",
+        "generateAcpGateHelperChecksum",
+        "generateGccBundledGhidraReference",
+        "generateKotlinBootClasspathReference",
+        "generateLlvmBehaviorHelperChecksum",
+        "generateLlvmHostedWorkerClasspathReference",
+        "installDist",
+        "stageOracleNativeLibraries",
+        "verifyCompiledJunitSignatures"
+      ],
+      "excludes": [],
+      "forkEvery": 1,
+      "includes": [
+        "decompengine.oracle.fulltree.FullTreeFunctionTruthSqliteV3Test.truth v3 final staging recheck rejects rewriting an earlier shard"
+      ],
+      "maxHeapSize": null,
+      "maxParallelForks": 1,
+      "task": "v3BoundaryFinalStagingIsolated"
+    },
+    {
+      "classes": [
+        "/home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/build/classes/java/test",
+        "/home/june/decomp_thing/.claude/worktrees/a-series-20261026-junit-signatures/build/classes/kotlin/test"
+      ],
+      "dependencies": [
+        ":ghidra-bridge:stageBundle",
+        "buildAnalysisIoHelper",
+        "generateAcpGateHelperChecksum",
+        "generateGccBundledGhidraReference",
+        "generateKotlinBootClasspathReference",
+        "generateLlvmBehaviorHelperChecksum",
+        "generateLlvmHostedWorkerClasspathReference",
+        "installDist",
+        "stageOracleNativeLibraries",
+        "verifyCompiledJunitSignatures"
+      ],
+      "excludes": [],
+      "forkEvery": 1,
+      "includes": [
+        "decompengine.oracle.fulltree.FullTreeFunctionTruthSqliteV3Test.truth v3 publication retains member guards through rename and revokes raced output"
+      ],
+      "maxHeapSize": null,
+      "maxParallelForks": 1,
+      "task": "v3BoundaryPublicationIsolated"
+    }
+  ]
+}
