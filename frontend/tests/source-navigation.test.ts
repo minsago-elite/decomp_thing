@@ -7,6 +7,7 @@ import { ApiClientError } from '../src/api/errors';
 import { decodeContract, decodeResponse } from '../src/api/decode';
 import { sourceDirectoryPath, sourceDownloadRoute, sourceFilePath, sourceReadRoute } from '../src/app/paths';
 import { sourceCopy as copy } from '../src/copy/sources';
+import { jobCopy } from '../src/copy/job';
 import { beginSourceRead, bindDirectory, bindFile, currentSourceRead, directoryReadRoute, pinSourceEntry, sourceCursor, sourceEntryCurrent, sourceFilePolicy, sourceReadMessage, sourceSnapshotSelection } from '../src/sources/navigation';
 import type { SourceHistoryEntry, SourceReadState } from '../src/sources/navigation';
 
@@ -234,4 +235,6 @@ it('renders fixed recovery copy with a canonical reference and no raw error or p
   expect(sourceReadMessage(failure)).toContain(requestId); expect(sourceReadMessage(failure)).not.toContain('PRIVATE');
   expect(sourceReadMessage(new ApiClientError('http_error', { status: 404 }))).toBe(copy.noSnapshot);
   expect(sourceReadMessage(new ApiClientError('http_error', { serverCode: 'CURSOR_EXPIRED' }))).toBe(copy.expired);
+  expect(sourceReadMessage(new ApiClientError('http_error', { status: 410, serverCode: 'CURSOR_EXPIRED' }))).toBe(copy.expired);
+  expect(sourceReadMessage(new ApiClientError('http_error', { status: 410, serverCode: 'RESOURCE_GONE' }))).toBe(jobCopy.thisJobWasDeleted);
 });

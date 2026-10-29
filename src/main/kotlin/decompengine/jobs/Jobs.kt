@@ -11,6 +11,7 @@ import decompengine.oracle.core.StrictJsonLimits
 import decompengine.oracle.core.StrictJsonException
 import decompengine.project.ArchiveTransportLayout
 import decompengine.repair.StableRegularFile
+import decompengine.repair.readStableJobMetadataFile
 import decompengine.repair.readStableRegularFile
 import decompengine.repair.RepairHistoryReadResult
 import decompengine.repair.readSelectedJobRecordedRepairHistory
@@ -168,10 +169,18 @@ class JobStore internal constructor(
     }
 
     @Synchronized
-    fun get(jobId: String): Job {
+    fun get(jobId: String): Job = getInternal(jobId, null)
+
+    @Synchronized
+    internal fun getWithMetadataAuthorization(jobId: String, afterAuthorization: () -> Unit): Job =
+        getInternal(jobId, afterAuthorization)
+
+    private fun getInternal(jobId: String, afterAuthorization: (() -> Unit)?): Job {
         jobDirectory(jobId)
         val payload = try {
-            OracleJson.parse(readStableRegularFile(root, "$jobId/job.json", MAX_METADATA_BYTES.toLong()).bytes).jsonObject
+            OracleJson.parse(
+                readStableJobMetadataFile(root, jobId, MAX_METADATA_BYTES.toLong(), afterAuthorization).bytes,
+            ).jsonObject
         } catch (_: IOException) {
             throw JobStoreException("job metadata is unavailable or its path changed")
         }

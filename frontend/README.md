@@ -263,6 +263,26 @@ Type checking requires every named slot; changing a locale must preserve those
 slot names. No language selector or locale persistence is introduced by these
 catalogs.
 
+`tests/copy-catalog.test.ts` parses every component with the TypeScript compiler and
+fails on inline JSX text, rendered string/template expressions, inline accessible
+names/titles/placeholders, prose string literals and punctuation that composes a
+sentence around values. Parser fixtures cover expression and interpolated-label
+bypasses as well as technical attributes, protocol comparisons and catalog references.
+This is a syntax guard, not general data-flow analysis through arbitrary helper calls.
+Compose such text with a catalog template (for example `commonCopy.labeledValue`, `{label}: {value}`)
+so a translation can reorder it. The exported validation record's limitation sentences
+are catalogued separately as stable record text because they belong to a versioned file
+format, not to the interface.
+
+`src/copy/format.ts` is the single display-format layer. It names the one display
+locale, selects plural forms with `Intl.PluralRules`, and owns every formatter that turns
+a value into text (`formatExactCount`, `formatExactBytes`, `formatExactTimestamp`,
+`formatJobStatus`). Adding digit grouping or translated units for another locale changes
+only this module and the catalogs; exact digits must survive (format `BigInt`, never
+`Number`). The former `src/jobs/metadataFormat.ts` path remains a compatibility
+re-export for consumers introduced on the base branch during migration; it owns no
+formatting logic. New consumers should import `src/copy/format.ts` directly.
+
 Use `formatExactTimestamp` for reported timestamps and retain the original string
 in both `dateTime` and `title`. It preserves fractional digits and the source
 offset, displaying `Z` as `UTC` without converting through `Date`. Use
