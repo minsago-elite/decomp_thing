@@ -1390,7 +1390,9 @@ class RetainedExternalEvidenceRegressionTest(unittest.TestCase):
                                     ("plt-file-mapping-disagrees", "byte-window ownership"),
                                     ("plt-nonexecutable-load", "source call instruction lacks uniquely owned executable file-backed bytes"),
                                     ("overlapping-forwarder-probe", "retained probe byte windows conflict"),
-                                    ("overlapping-string-name", "retained symbol names conflict in linked string table")):
+                                    ("overlapping-string-name", "retained symbol names conflict in linked string table"),
+                                    ("verneed-provider-conflict", "retained Verneed provider request differs within header"),
+                                    ("copy-raw-section-index", "active COPY relocation symbol raw/resolved section index differs")):
                 with self.subTest(mutation=mutation):
                     report, evidence = copy.deepcopy(original_report), copy.deepcopy(original_evidence)
                     if mutation in {"strtab-pointer", "strtab-size"}:
@@ -1473,6 +1475,39 @@ class RetainedExternalEvidenceRegressionTest(unittest.TestCase):
                         strlen = next(row for row in symbols if row["name"] == "strlen")
                         memmove = next(row for row in symbols if row["name"] == "memmove")
                         strlen["nameOffset"] = memmove["nameOffset"]
+                    elif mutation == "verneed-provider-conflict":
+                        inventory = report["dynamicInventory"]
+                        requirement = next(row for row in inventory["versionRequirements"]
+                            if row["sectionIndex"] == 8 and row["recordOffset"] == 7344 and row["name"] == "GLIBC_2.2.5")
+                        requirement["providerRequest"] = "other.so"
+                        symbol_strings = {row["index"]: row["link"] for row in inventory["sections"] if row["type"] == 11}
+                        affected_symbols = {(symbol["tableSectionIndex"], symbol["symbolIndex"]): symbol
+                            for symbol in inventory["dynamicSymbols"]
+                            if symbol_strings[symbol["tableSectionIndex"]] == requirement["stringSectionIndex"] and
+                                symbol["version"] is not None and symbol["version"]["index"] == requirement["index"]}
+                        self.assertTrue(affected_symbols)
+                        for symbol in affected_symbols.values():
+                            symbol["version"]["providerRequest"] = "other.so"
+                        for entry in report["externalNamespace"]["entries"]:
+                            identity = entry["identity"]
+                            key = (identity["symbolTableSectionIndex"], identity["symbolIndex"])
+                            if key in affected_symbols:
+                                old_id = entry["id"]
+                                identity["version"]["providerRequest"] = "other.so"
+                                entry["id"] = "ext-" + sha256(VERIFY.canonical_bytes(identity)).hexdigest()
+                                for site in report["sites"]:
+                                    if site["externalTargetId"] == old_id:
+                                        site["externalTargetId"] = entry["id"]
+                        report["externalNamespaceSha256"] = sha256(VERIFY.canonical_bytes(report["externalNamespace"])).hexdigest()
+                    elif mutation == "copy-raw-section-index":
+                        inventory = report["dynamicInventory"]
+                        relocation = next(row for row in inventory["relocations"] if row["type"] == 5)
+                        symbol = next(row for row in inventory["dynamicSymbols"]
+                            if row["tableSectionIndex"] == relocation["symbolTableSectionIndex"] and
+                                row["symbolIndex"] == relocation["symbolIndex"])
+                        self.assertEqual(("stderr", 28, 28, "defined"),
+                            (symbol["name"], symbol["rawSectionIndex"], symbol["resolvedSectionIndex"], symbol["sectionKind"]))
+                        symbol["rawSectionIndex"] = 0
                     elif mutation.startswith("verneed-"):
                         inventory = report["dynamicInventory"]
                         if mutation in {"verneed-zero-count", "verneed-invalid-pointer"}:

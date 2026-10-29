@@ -788,6 +788,7 @@ def retained_version_records(inventory: dict, sections: dict, input_bytes: int) 
         order = [(row["sectionIndex"], row["recordOffset"], *([row["auxiliaryOffset"]] if group == "versionRequirements" else [])) for row in rows]
         require(order == sorted(order), "retained GNU version record order differs")
         auxiliary_offsets = set()
+        provider_by_verneed = {}
         for row in rows:
             owner = owner_for(row, kind)
             index, raw = row["index"], row["rawIndex"]
@@ -802,6 +803,9 @@ def retained_version_records(inventory: dict, sections: dict, input_bytes: int) 
             records.add(row["recordOffset"])
             if group == "versionRequirements":
                 offsets, auxiliary_width = [row["auxiliaryOffset"]], 16
+                verneed = (row["sectionIndex"], row["recordOffset"])
+                provider = provider_by_verneed.setdefault(verneed, row["providerRequest"])
+                require(provider == row["providerRequest"], "retained Verneed provider request differs within header")
                 requirements.setdefault(key, []).append(row)
             else:
                 offsets, auxiliary_width = row["auxiliaryOffsets"], 8
@@ -888,7 +892,20 @@ class RetainedRelocationIndex:
             width = 0 if kind == 0 else 8 if kind in {1, 6, 7, 8, 16, 17, 18, 33, 37, 38} else 4 if kind in {2, 10, 32} else 16 if kind == 36 else None
             if kind == 5:
                 symbol = symbols[(row["symbolTableSectionIndex"], row["symbolIndex"])]
-                section = self.sections.get(symbol["resolvedSectionIndex"])
+                raw_section = integer(symbol["rawSectionIndex"], 0, 65535)
+                resolved_section = integer(symbol["resolvedSectionIndex"], 0, 131071)
+                if raw_section == 0:
+                    section_consistent = symbol["sectionKind"] == "undefined" and resolved_section == 0
+                elif raw_section == 0xfff1:
+                    section_consistent = symbol["sectionKind"] == "absolute" and resolved_section == raw_section
+                elif raw_section == 0xffff:
+                    # SHN_XINDEX companion words are not retained, so their resolved COPY index is unverifiable offline.
+                    section_consistent = False
+                else:
+                    section_consistent = (0 < raw_section < 0xff00 and raw_section in self.sections and
+                        symbol["sectionKind"] == "defined" and resolved_section == raw_section)
+                require(section_consistent, "active COPY relocation symbol raw/resolved section index differs")
+                section = self.sections.get(resolved_section)
                 if symbol["sectionKind"] == "defined" and address(symbol["value"]) == slot and section is not None and address(section["flags"]) & 2:
                     width = address(symbol["size"])
             self.active[row["locator"]] = (slot, width)
