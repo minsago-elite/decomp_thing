@@ -12,13 +12,16 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from hashlib import sha256
+from importlib.machinery import ModuleSpec
 from pathlib import Path
+from typing import cast
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location("machine_call_evidence", ROOT / "scripts/verify-machine-call-component-evidence.py")
 if spec is None:
     raise ImportError("cannot load offline machine-call evidence verifier")
+spec = cast(ModuleSpec, spec)
 loader = spec.loader
 if loader is None:
     raise ImportError("offline machine-call evidence verifier has no loader")
