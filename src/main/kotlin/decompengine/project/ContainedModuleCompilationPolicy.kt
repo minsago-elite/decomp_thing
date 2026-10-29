@@ -209,6 +209,7 @@ internal class VerifiedContainedModuleCompilation private constructor(private va
                 acquired.requireCleanAndRelease()
                 released = true
                 Files.delete(requestPath)
+                Files.delete(executableSnapshotPath)
                 Files.delete(temporary)
                 val worker = checkNotNull(workerResult)
                 val proof = JsonObject(mapOf(
