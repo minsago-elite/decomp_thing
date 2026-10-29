@@ -802,6 +802,15 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
         with self.assertRaises(VERIFY.VerificationError):
             self.verify()
 
+    def test_source_instruction_bytes_conflict_with_overlapping_probe_windows(self) -> None:
+        # Ordinal 1184's source call starts eight bytes inside ordinal 1183's probe window.
+        source_instruction = bytes.fromhex("e867c80f00")
+        probe_window = b"\x00" * 8 + b"\x90" + b"\x00" * 6
+        ranges = [(0, 0x412244, source_instruction), (0, 0x41223C, probe_window)]
+        with self.assertRaisesRegex(VERIFY.VerificationError, "source/probe byte windows conflict"):
+            VERIFY.require_consistent_byte_ranges(ranges,
+                "retained source/probe byte windows conflict at overlapping executable addresses")
+
     def test_nonforwarded_receipt_requires_the_exact_physical_instruction(self) -> None:
         symbols, relocations, imports = VERIFY.verify_external_inventory(self.report["dynamicInventory"],
             self.report["externalNamespace"], self.report["externalNamespaceSha256"], self.report["inputSha256"], self.report["imageBase"])
@@ -1466,7 +1475,7 @@ class RetainedExternalEvidenceRegressionTest(unittest.TestCase):
                                     ("plt-nonexecutable-section", "byte-window ownership"),
                                     ("plt-file-mapping-disagrees", "byte-window ownership"),
                                     ("plt-nonexecutable-load", "source call instruction lacks uniquely owned executable file-backed bytes"),
-                                    ("overlapping-forwarder-probe", "retained probe byte windows conflict"),
+                                    ("overlapping-forwarder-probe", "retained source/probe byte windows conflict"),
                                     ("overlapping-string-name", "retained symbol names conflict in linked string table"),
                                     ("verneed-provider-conflict", "retained Verneed provider request differs within header"),
                                     ("verneed-oversized-provider", "retained GNU version string exceeds linked string table"),

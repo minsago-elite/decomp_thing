@@ -536,7 +536,7 @@ def require_consistent_byte_ranges(ranges: list[tuple[int, int, bytes]], message
         if current_owner != owner or start > cluster_end:
             owner, cluster_start, cluster_end, cluster = current_owner, start, end, bytearray(data)
             continue
-        overlap = max(0, cluster_end - start)
+        overlap = min(max(0, cluster_end - start), len(data))
         offset = start - cluster_start
         require(cluster[offset:offset + overlap] == data[:overlap], message)
         if end > cluster_end:
@@ -1137,7 +1137,7 @@ def verify_external_bindings(evidence: dict, request: dict, report: dict, source
     sites = inventory_rows(report["sites"], SITE_KEYS, limits["maximumCalls"], "external sites")
     require(len(sites) == len(source_report["calls"]), "source physical calls were omitted or duplicated")
     counts = {}
-    probe_ranges = []
+    byte_ranges = []
     for ordinal, (site, call) in enumerate(zip(sites, source_report["calls"], strict=True)):
         require(type(site["sourceOrdinal"]) is int and site["sourceOrdinal"] == ordinal and site["negativeCompleteness"] is False and
                 type(site["viaForwarder"]) is bool, "site identity/authority differs")
@@ -1156,6 +1156,7 @@ def verify_external_bindings(evidence: dict, request: dict, report: dict, source
                 address(site["returnAddress"]) == location + instruction_length, "invalid source instruction coordinates")
         require((relocation_index.code_window_length(location) or 0) >= instruction_length,
                 "source call instruction lacks uniquely owned executable file-backed bytes")
+        byte_ranges.append((0, location, bytes.fromhex(site["instructionBytes"])))
         status = site["compositionDisposition"]
         require(status in EXTERNAL_STATUSES and site["targetBindingDisposition"] in EXTERNAL_STATUSES, "unknown external disposition")
         caller = canonical_by_id.get(site["callerCanonicalId"])
@@ -1184,8 +1185,8 @@ def verify_external_bindings(evidence: dict, request: dict, report: dict, source
         verify_external_site(site, location, symbols, relocations, imports, relocation_index)
         probe = site["memoryProbe"]
         if probe is not None:
-            probe_ranges.append((0, address(probe["address"]), bytes.fromhex(probe["availableBytes"])))
-    require_consistent_byte_ranges(probe_ranges, "retained probe byte windows conflict at overlapping executable addresses")
+            byte_ranges.append((0, address(probe["address"]), bytes.fromhex(probe["availableBytes"])))
+    require_consistent_byte_ranges(byte_ranges, "retained source/probe byte windows conflict at overlapping executable addresses")
     expected_counts = {"sourcePhysicalSites": len(sites), "composedSiteRecords": len(sites), "namespaceEntries": len(imports), "dispositions": counts}
     fields(report["counts"], EXTERNAL_COUNTS, "external report counts")
     require(canonical_bytes(report["counts"]) == canonical_bytes(expected_counts) == canonical_bytes(evidence["counts"]),
