@@ -39,6 +39,12 @@ public class BundledGhidraWorker {
     public static void exportsCompleted() { completed = true; }
 }
 """,
+    "ExportGlobalTypeObservationsV1.java": """
+import ghidra.util.task.TaskMonitor;
+public class ExportGlobalTypeObservationsV1 {
+    public static void collectWithByteLimit(Object program, TaskMonitor monitor, String[] arguments, long limit) {}
+}
+""",
     "Controls.java": r"""
 import ghidra.app.script.GhidraScript;
 import ghidra.util.task.TaskMonitor;
@@ -182,6 +188,7 @@ class OwnedInterfaceStagingTest(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content)
             sources.append(str(path))
+        sources.append(str(ROOT / "ghidra-bridge/src/main/java/BundledExportPhaseRoute.java"))
         subprocess.run(["javac", "-proc:none", f"-J-Djava.io.tmpdir={cls.root}", "-J-XX:-UsePerfData",
                         "-d", str(cls.classes), *sources,
                         str(ROOT / "ghidra-bridge/src/main/java/RunBundledExports.java")],
