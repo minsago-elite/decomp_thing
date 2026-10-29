@@ -483,7 +483,7 @@ try {
   report.origin = origin;
   browserOrigin ??= origin;
 
-  browserTmp = await fs.mkdtemp(join(repo, 'build/ct-'));
+  browserTmp = await fs.mkdtemp(join(values['work-parent'], 'ct-'));
   report.browserTempDirectory = browserTmp;
   await fs.mkdir(profile);
   browser = startOwned(chromeBinary, ['--headless=new', '--disable-gpu', ...(values['no-sandbox'] ? ['--no-sandbox'] : []), '--no-first-run', '--no-default-browser-check', '--disable-background-networking', '--disable-extensions', '--disable-default-apps', '--disable-sync', '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1', `--user-data-dir=${profile}`, 'about:blank'], {

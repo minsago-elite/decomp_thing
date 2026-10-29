@@ -3,11 +3,11 @@
 
 Every case runs in the pinned official base image that `build-toolchain.Dockerfile`
 builds on. Every metadata case runs the authenticated oracle driver mounted at
-its configured bindir; frontend cases mount its manifest-pinned cc1. Preprocessing
-and dependency cases run the image's installed `gcc`. Runs have
-no network, a read-only root
-filesystem, no capabilities, and only staged include roots; preprocessing and
-dependency cases add `-nostdinc`, metadata cases invoke the driver as users do. Each
+its configured bindir; frontend cases mount its manifest-pinned cc1. Preprocessing,
+dependency and orchestration cases run the image's installed `gcc`. Runs have
+no network, a read-only root filesystem and no capabilities. Preprocessing and
+dependency cases add `-nostdinc` and use staged include roots; metadata and
+orchestration cases use the driver's default include search. Each
 case is executed twice in fresh workspaces; any byte difference fails the
 capture. `--check` re-captures and compares with the checked-in records.
 """
@@ -21,25 +21,30 @@ import json
 import lzma
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).resolve().parents[1]
 ORACLE = ROOT / "oracle/gcc/16.2.0"
 PREPROCESSING_RECORD = ORACLE / "preprocessing-reference-evidence.json"
 DEPENDENCY_RECORD = ORACLE / "dependency-generation-reference.json"
 METADATA_RECORD = ORACLE / "metadata-diagnostic-reference.json"
+ORCHESTRATION_RECORD = ORACLE / "orchestration-phase-reference.json"
 ORACLE_MANIFEST = ORACLE / "oracle-manifest.json"
 BUILD_RECORD = ORACLE / "build-record.json"
 ORACLE_DRIVER = ORACLE / "artifacts/gcc-driver.stripped"
+RUNTIME_PROBE = ROOT / "oracle/gcc/reference_runtime_probe.py"
+RUNTIME_PROBE_BYTES = RUNTIME_PROBE.read_bytes()
 ORACLE_FRONTEND_MANIFEST = ORACLE / "cc1-oracle-manifest.json"
 ORACLE_FRONTEND_ARCHIVE = ORACLE / "artifacts/gcc-cc1.stripped.xz"
 IMAGE = "docker.io/library/gcc@sha256:2e6f4ae27ab8ad6f9617b46f0468889d368fdd91f2ea29aff98e4d5d1a3637f0"
 IMAGE_CONFIG = "sha256:103614947d5ebe34fc48305dcee29625bcf37fbe12d5d4bbca60e00fa601a22f"
 ENVIRONMENT = {"LC_ALL": "C", "SOURCE_DATE_EPOCH": "1786060800", "TZ": "UTC"}
+PROGRAM_ENVIRONMENT = {**ENVIRONMENT, "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}
 WORKDIR = "/w"
 TIMEOUT_SECONDS = 60
 ANALYSIS_BOUNDARY = (
@@ -267,6 +272,291 @@ METADATA_CASES = [
     ),
 ]
 
+MAIN_C = b'#include <stdio.h>\nint helper(int);\nint main(void) { printf("sum=%d\\n", helper(40)); return helper(1); }\n'
+HELPER_C = b"int helper(int x) { return x + 2; }\n"
+HELPER_S = b"\t.text\n\t.globl helper\n\t.type helper, @function\nhelper:\n\tleal 2(%rdi), %eax\n\tret\n"
+EXIT_C = b"int main(void) { return 7; }\n"
+
+
+def orchestration(case_id, arguments, inputs, categories, program=None):
+    spec = case(case_id, arguments, inputs, categories=categories, nostdinc=False)
+    spec["program"] = program
+    return spec
+
+
+ORCHESTRATION_CASES = [
+    orchestration("compile-to-assembly", ["-S", "source.c"], {"source.c": SOURCE_C}, ["compile"]),
+    orchestration("compile-to-object", ["-c", "source.c"], {"source.c": SOURCE_C}, ["compile", "assemble"]),
+    orchestration("compile-pipe", ["-pipe", "-c", "source.c"], {"source.c": SOURCE_C}, ["compile", "assemble", "pipe"]),
+    orchestration(
+        "compile-save-temps",
+        ["-save-temps", "-c", "source.c"],
+        {"source.c": SOURCE_C},
+        ["preprocess", "compile", "assemble", "save-temps"],
+    ),
+    orchestration("assemble-only", ["-c", "helper.s"], {"helper.s": HELPER_S}, ["assemble"]),
+    orchestration(
+        "preprocess-and-assemble",
+        ["-c", "code.S", "-o", "code.o"],
+        {"code.S": ASSEMBLY},
+        ["preprocess", "assemble"],
+    ),
+    orchestration(
+        "link-single",
+        ["source.c", "-o", "prog"],
+        {"source.c": EXIT_C},
+        ["compile", "assemble", "link", "program-behavior"],
+        program="prog",
+    ),
+    orchestration(
+        "link-multiple-sources",
+        ["main.c", "helper.c", "-o", "prog"],
+        {"main.c": MAIN_C, "helper.c": HELPER_C},
+        ["compile", "assemble", "link", "program-behavior"],
+        program="prog",
+    ),
+    orchestration(
+        "link-mixed-c-and-assembly",
+        ["main.c", "helper.s", "-o", "prog"],
+        {"main.c": MAIN_C, "helper.s": HELPER_S},
+        ["compile", "assemble", "link", "program-behavior"],
+        program="prog",
+    ),
+    orchestration("link-default-output", ["source.c"], {"source.c": EXIT_C}, ["link", "program-behavior"], program="a.out"),
+    orchestration(
+        "failure-compile",
+        ["-c", "bad.c"],
+        {"bad.c": MALFORMED_C},
+        ["compile", "failure-propagation"],
+    ),
+    orchestration(
+        "failure-assemble-source",
+        ["-c", "bad.s"],
+        {"bad.s": b"\tbogus_instruction %eax\n"},
+        ["assemble", "failure-propagation"],
+    ),
+    orchestration(
+        "failure-assemble-after-compile",
+        ["-c", "inline.c"],
+        {"inline.c": b'void f(void) { __asm__("bogus_instruction"); }\n'},
+        ["compile", "assemble", "failure-propagation"],
+    ),
+    orchestration(
+        "failure-link-undefined-symbol",
+        ["main.c", "-o", "prog"],
+        {"main.c": MAIN_C},
+        ["compile", "assemble", "link", "failure-propagation"],
+    ),
+]
+
+# Phase tools are recognised by the basename of the first word of a driver command line.
+PHASE_TOOLS = {"cc1": "compile", "as": "assemble", "collect2": "link", "lto-wrapper": "lto", "ld": "link"}
+TEMPORARY_NAME = re.compile(rb"/tmp/cc[A-Za-z0-9]{6}(\.[A-Za-z0-9]+)?")
+TEMPORARY_NORMALIZATION = {
+    "pattern": TEMPORARY_NAME.pattern.decode(),
+    "replacement": "<tmp-N> plus the original suffix, N numbering distinct names in order of first appearance per stream",
+    "reason": "the driver draws temporary file names from mkstemp, so they differ between otherwise identical runs",
+    "appliesTo": "driver plans, verbose traces and execution streams; artifacts are never normalized",
+}
+
+
+def normalize_temporaries(data: bytes) -> bytes:
+    names: dict[bytes, int] = {}
+
+    def replace(match: re.Match) -> bytes:
+        stem = match.group(0)[: len(match.group(0)) - len(match.group(1) or b"")]
+        number = names.setdefault(stem, len(names) + 1)
+        return b"<tmp-%d>%s" % (number, match.group(1) or b"")
+
+    return TEMPORARY_NAME.sub(replace, data)
+
+
+def phase_commands(text: str, *, strict: bool = False) -> list[dict]:
+    commands = []
+    for line in text.splitlines():
+        if not line.startswith(" "):
+            continue
+        # The driver ends a command whose stdout feeds the next one (-pipe) with an unquoted
+        # " |". It is a pipeline connector, not an argument of the phase tool. A literal "|"
+        # argument is printed quoted by -###, so it never matches here.
+        piped = line.endswith(" |")
+        if piped:
+            line = line[:-2]
+        try:
+            argv = shlex.split(line)
+        except ValueError:
+            if strict:
+                raise SystemExit(f"unparseable reference phase command: {line}")
+            continue
+        if not argv:
+            continue
+        tool = PurePosixPath(argv[0]).name
+        if tool not in PHASE_TOOLS:
+            if strict:
+                raise SystemExit(f"undeclared reference phase command: {argv[0]}")
+            continue
+        phase = "preprocess" if tool == "cc1" and "-E" in argv else PHASE_TOOLS[tool]
+        commands.append({"phase": phase, "tool": argv[0], "argv": argv, "stdoutPipedToNextPhase": piped})
+    return commands
+
+
+def run_gcc(runtime: str, scratch: Path, spec: dict, label: str, extra: list[str]) -> tuple[Path, subprocess.CompletedProcess]:
+    workspace = scratch / f"{spec['id']}-{label}"
+    workspace.mkdir()
+    stage(workspace, spec["inputs"])
+    return workspace, run_container(runtime, workspace, ["gcc", *extra, *spec["arguments"]], b"")
+
+
+def inspect_runtime(runtime: str, workspace: Path, paths: list[str]) -> dict:
+    result = run_container(runtime, workspace,
+                           ["python3", "-B", "-c", RUNTIME_PROBE_BYTES.decode(), *paths], b"",
+                           workspace_read_only=True)
+    if result.returncode or result.stderr:
+        raise SystemExit(f"reference runtime inspection failed: {result.stderr.decode(errors='replace')}")
+    return json.loads(result.stdout)
+
+
+def validate_phase_tools(phases: list[dict], identities: dict) -> None:
+    allowed = {entry["path"] for entry in identities.values()}
+    allowed.update(entry["invokedAs"] for entry in identities.values() if "invokedAs" in entry)
+    for phase in phases:
+        if phase["tool"] not in allowed:
+            raise SystemExit(f"reference phase path is not admitted: {phase['tool']}")
+
+
+def execute_reference_program(runtime: str, workspace: Path, path: str, closure: dict) -> subprocess.CompletedProcess:
+    # The producer has exited; this separate execution sees the entire workspace read-only.
+    # Recheck the measured executable, loader and libraries before the fixed invocation.
+    script = (
+        "import base64,hashlib,json,subprocess,sys; from pathlib import Path\n"
+        "record=json.loads(sys.argv[1]); target=sys.argv[2]\n"
+        "if target!=record['elf']['path']: raise SystemExit('runtime target does not match measured executable')\n"
+        "entries=[record['elf'],*record['libraries']]\n"
+        "if record['interpreter']: entries.append(record['interpreter'])\n"
+        "for entry in entries:\n"
+        " p=Path(entry['path']); resolved=p.resolve(strict=True); data=resolved.read_bytes()\n"
+        " if str(resolved)!=entry['resolvedPath'] or len(data)!=entry['bytes'] or hashlib.sha256(data).hexdigest()!=entry['sha256']: raise SystemExit('runtime input changed: '+entry['path'])\n"
+        "result=subprocess.run([target],env=json.loads(sys.argv[3]),capture_output=True,timeout=15,check=False)\n"
+        "print(json.dumps({'exitCode':result.returncode,'stdoutBase64':base64.b64encode(result.stdout).decode(),'stderrBase64':base64.b64encode(result.stderr).decode()}))\n"
+    )
+    result = run_container(runtime, workspace,
+                           ["python3", "-B", "-c", script, json.dumps(closure), path, json.dumps(PROGRAM_ENVIRONMENT)],
+                           b"", workspace_read_only=True)
+    if result.returncode or result.stderr:
+        raise SystemExit(f"reference program guard or launcher failed: {result.stderr.decode(errors='replace')}")
+    observed = json.loads(result.stdout)
+    if set(observed) != {"exitCode", "stdoutBase64", "stderrBase64"} or type(observed["exitCode"]) is not int:
+        raise SystemExit("invalid reference program launcher response")
+    return subprocess.CompletedProcess([path], observed["exitCode"],
+                                       base64.b64decode(observed["stdoutBase64"], validate=True),
+                                       base64.b64decode(observed["stderrBase64"], validate=True))
+
+
+def orchestrate(runtime: str, scratch: Path, spec: dict, attempt: int, phase_tools: dict) -> dict:
+    if spec not in ORCHESTRATION_CASES:
+        raise SystemExit("orchestration invocation is outside the fixed reference inventory")
+    _, plan = run_gcc(runtime, scratch, spec, f"plan-{attempt}", ["-###"])
+    plan_stderr = normalize_temporaries(plan.stderr)
+    planned = phase_commands(plan_stderr.decode("utf-8", "backslashreplace"), strict=True)
+    validate_phase_tools(planned, phase_tools)
+    _, trace = run_gcc(runtime, scratch, spec, f"trace-{attempt}", ["-v"])
+    trace_stderr = normalize_temporaries(trace.stderr)
+    traced = phase_commands(trace_stderr.decode("utf-8", "backslashreplace"))
+    validate_phase_tools(traced, phase_tools)
+    workspace, result = run_gcc(runtime, scratch, spec, f"run-{attempt}", [])
+    observed = {
+        "plan": {
+            "exitCode": plan.returncode,
+            "stderr": stream(plan_stderr),
+            "phases": planned,
+        },
+        "executedPhases": {
+            "source": "commands echoed by `gcc -v` before each phase runs; a failing phase stops later ones",
+            "exitCode": trace.returncode,
+            "stderrSha256": digest(trace_stderr),
+            "stderr": stream(trace_stderr),
+            "phases": traced,
+        },
+        "execution": {
+            "exitCode": result.returncode,
+            "stdout": stream(normalize_temporaries(result.stdout)),
+            "stderr": stream(normalize_temporaries(result.stderr)),
+            "artifacts": collect(workspace, spec["inputs"]),
+        },
+    }
+    if spec["program"]:
+        if result.returncode:
+            raise SystemExit(f"{spec['id']}: linked reference program was not produced successfully")
+        path = f"{WORKDIR}/{spec['program']}"
+        closure = inspect_runtime(runtime, workspace, [path])[path]
+        program = execute_reference_program(runtime, workspace, path, closure)
+        observed["programBehavior"] = {
+            "program": spec["program"],
+            "invocation": {"argv": [path], "cwd": WORKDIR, "environment": PROGRAM_ENVIRONMENT},
+            "runtime": closure,
+            "exitCode": program.returncode,
+            "stdout": stream(program.stdout),
+            "stderr": stream(program.stderr),
+        }
+    return observed
+
+
+def capture_orchestration_case(runtime: str, scratch: Path, spec: dict, phase_tools: dict) -> dict:
+    first = orchestrate(runtime, scratch, spec, 1, phase_tools)
+    second = orchestrate(runtime, scratch, spec, 2, phase_tools)
+    if first != second:
+        raise SystemExit(f"{spec['id']}: independent repetition differs")
+    return {
+        "id": spec["id"],
+        "categories": spec["categories"],
+        "arguments": spec["arguments"],
+        "environment": ENVIRONMENT,
+        "inputs": [
+            {"path": path, "bytes": len(data), "sha256": digest(data)}
+            for path, data in sorted(spec["inputs"].items())
+        ],
+        "observed": first,
+        "repetitions": 2,
+        "normalizations": ["temporary-file-names"],
+    }
+
+
+def phase_tool_identities(runtime: str, scratch: Path) -> dict:
+    workspace = scratch / "phase-identity"
+    workspace.mkdir()
+    stage(workspace, {})
+    script = (
+        "set -eu; "
+        "for tool in cc1 collect2 lto-wrapper liblto_plugin.so; do "
+        "path=$(gcc -print-prog-name=$tool); "
+        "printf '%s\\t%s\\t%s\\t%s\\n' \"$tool\" \"$path\" \"$(readlink -f \"$path\")\" \"$(sha256sum < \"$path\" | cut -d' ' -f1)\"; "
+        "done; "
+        "for tool in as ld; do "
+        "path=$(command -v $tool); "
+        "printf '%s\\t%s\\t%s\\t%s\\t%s\\n' \"$tool\" \"$path\" \"$(readlink -f \"$path\")\" "
+        "\"$(sha256sum < \"$path\" | cut -d' ' -f1)\" \"$($tool --version | head -n 1)\"; "
+        "done"
+    )
+    result = run_container(runtime, workspace, ["sh", "-c", script], b"")
+    if result.returncode != 0:
+        raise SystemExit(f"phase tool identity query failed: {result.stderr.decode(errors='replace')}")
+    identities = {}
+    for line in result.stdout.decode().splitlines():
+        fields = line.split("\t")
+        entry = {"path": fields[1], "resolvedPath": fields[2], "sha256": fields[3]}
+        if len(fields) > 4:
+            entry["version"] = fields[4]
+        identities[fields[0]] = entry
+    return {
+        "compile": {"role": "cc1", **identities["cc1"]},
+        "assemble": {"role": "as", "invokedAs": "as", "lookup": "PATH", **identities["as"]},
+        "link": {"role": "collect2", **identities["collect2"]},
+        "linkEditor": {"role": "ld", "invokedBy": "collect2", "lookup": "PATH", **identities["ld"]},
+        "ltoWrapper": {"role": "lto-wrapper", **identities["lto-wrapper"]},
+        "ltoPlugin": {"role": "liblto_plugin.so", "loadedBy": "ld via collect2 -plugin", **identities["liblto_plugin.so"]},
+    }
+
+
 # Each pattern's group 1 is the only span the substitution may replace. The driver
 # name sites were found by running every case as a differently named symlink;
 # `gcc version` in `-v` and `other gcc components` in `--help` are literal text.
@@ -368,18 +658,37 @@ def stream(data: bytes) -> dict:
     }
 
 
+def authenticate_image(runtime: str) -> str:
+    inspect = subprocess.run(
+        [runtime, "image", "inspect", "--format", "{{.Id}}", IMAGE],
+        capture_output=True, text=True, timeout=15, check=True,
+    )
+    image_id = inspect.stdout.strip()
+    if not image_id.startswith("sha256:"):
+        image_id = f"sha256:{image_id}"
+    if image_id != IMAGE_CONFIG:
+        raise SystemExit(f"image config {image_id} does not match pinned {IMAGE_CONFIG}")
+    return image_id
+
+
 def run_container(
-    runtime: str, workspace: Path, arguments: list[str], stdin: bytes, mounts: tuple = ()
+    runtime: str, workspace: Path, arguments: list[str], stdin: bytes, mounts: tuple = (),
+    *, workspace_read_only: bool = False,
 ) -> subprocess.CompletedProcess:
+    authenticate_image(runtime)
     command = [
         runtime, "run", "--rm", "-i",
         "--platform", "linux/amd64",
         "--network", "none",
         "--read-only",
+        # The driver writes its temporaries to /tmp. Docker's --read-only leaves /tmp read-only,
+        # so GCC would fall back to "./ccXXXXXX" names, while podman mounts a tmpfs there; an
+        # explicit tmpfs gives both runtimes the same writable /tmp.
+        "--tmpfs", "/tmp",
         "--cap-drop", "ALL",
         "--security-opt", "no-new-privileges",
         "--pull", "never",
-        "-v", f"{workspace}:{WORKDIR}",
+        "-v", f"{workspace}:{WORKDIR}" + (":ro" if workspace_read_only else ""),
         "-w", WORKDIR,
     ]
     for source, target in mounts:
@@ -572,14 +881,6 @@ def toolchain_identity(runtime: str, scratch: Path) -> dict:
     lines = result.stdout.decode().splitlines()
     version, machine, driver, cc1, include = lines[:5]
     hashes = {path: sha for sha, path in (line.split(maxsplit=1) for line in lines[5:])}
-    inspect = subprocess.run(
-        [runtime, "image", "inspect", "--format", "{{.Id}}", IMAGE], capture_output=True, text=True, check=True
-    )
-    image_id = inspect.stdout.strip()
-    if not image_id.startswith("sha256:"):
-        image_id = f"sha256:{image_id}"
-    if image_id != IMAGE_CONFIG:
-        raise SystemExit(f"image config {image_id} does not match pinned {IMAGE_CONFIG}")
     return {
         "image": IMAGE,
         "imageConfig": IMAGE_CONFIG,
@@ -591,11 +892,11 @@ def toolchain_identity(runtime: str, scratch: Path) -> dict:
         "frontend": {"role": "cc1", "path": cc1, "sha256": hashes[cc1]},
         "resourceIncludeDirectory": include,
         "includeSearch": "-nostdinc; only staged workspace include roots are searched",
-        "sandbox": "--network none --read-only --cap-drop ALL --security-opt no-new-privileges",
+        "sandbox": "--network none --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges",
     }
 
 
-def records(runtime: str, scratch: Path) -> tuple[dict, dict, dict]:
+def records(runtime: str, scratch: Path) -> tuple[dict, dict, dict, dict]:
     identity = toolchain_identity(runtime, scratch)
     oracle_driver = oracle_driver_identity()
     oracle_frontend = prepare_oracle_frontend(scratch)
@@ -605,6 +906,10 @@ def records(runtime: str, scratch: Path) -> tuple[dict, dict, dict]:
         check_driver_name_substitution(runtime, scratch, spec, captured["observed"])
     preprocessing = [capture_case(runtime, scratch, spec) for spec in PREPROCESSING_CASES]
     dependency = [capture_case(runtime, scratch, spec) for spec in DEPENDENCY_CASES]
+    phase_tools = phase_tool_identities(runtime, scratch)
+    phase_runtime = inspect_runtime(runtime, scratch / "phase-identity",
+                                    [identity["driver"]["path"], *[item["path"] for item in phase_tools.values()]])
+    orchestration_cases = [capture_orchestration_case(runtime, scratch, spec, phase_tools) for spec in ORCHESTRATION_CASES]
     capture = {
         "tool": "scripts/capture-gcc-preprocessing-reference.py",
         "independentRepetition": "each case ran twice in fresh workspaces with byte-identical results",
@@ -672,6 +977,44 @@ def records(runtime: str, scratch: Path) -> tuple[dict, dict, dict]:
             "productionGates": gaps,
             "analysisBoundary": ANALYSIS_BOUNDARY,
         },
+        {
+            "schemaVersion": 2,
+            "issue": 712,
+            "id": "gcc-16-2-0-orchestration-phase-reference",
+            "status": "captured",
+            "scope": "real-driver-phase-orchestration",
+            "toolchain": {**identity, "includeSearch": "default system include search", "phaseTools": phase_tools,
+                          "runtimeClosure": phase_runtime},
+            "referenceInvocationPolicy": {
+                "imageAuthentication": "the exact pinned image config is verified before every container invocation",
+                "driver": identity["driver"],
+                "cases": "only the exact versioned arguments and staged input bytes listed in cases are admitted",
+                "modes": [["-###"], ["-v"], []],
+                "phaseTools": "unknown or malformed planned commands are rejected; each parsed planned or verbose phase path must match a declared phaseTools path or its explicit invokedAs name",
+                "producedPrograms": "only the named output of a successful reference case; executable, interpreter and library bytes are rechecked before exec in a read-only workspace with only the fixed environment and PATH",
+                "runtimeProbe": {"path": "oracle/gcc/reference_runtime_probe.py", "sha256": digest(RUNTIME_PROBE_BYTES)},
+                "runtimeScope": "ELF interpreter and transitive startup libraries from the pinned loader --list; the linker plugin is inspected separately; kernel vDSO is identified by name, not image-owned bytes",
+                "executionEvidence": "GCC plans and verbose transcripts are reference observations, not independent exec receipts; candidate enforcement and authenticated Kotlin-owned consumption remain required",
+            },
+            "capture": {
+                **capture,
+                "runsPerRepetition": (
+                    "`gcc -###` for the planned phases, `gcc -v` for the phases actually started, "
+                    "then the plain command for exit status, streams and artifacts; linked programs "
+                    "are then run in the same sandbox"
+                ),
+            },
+            "normalizations": {"temporary-file-names": TEMPORARY_NORMALIZATION},
+            "cases": orchestration_cases,
+            "productionGates": {
+                **gaps,
+                "reason": (
+                    "This record is the real GCC 16.2.0 phase-orchestration reference. Replaying a "
+                    "reconstructed candidate driver against it, with the same phase tools, is downstream work."
+                ),
+            },
+            "analysisBoundary": ANALYSIS_BOUNDARY,
+        },
     )
 
 
@@ -691,7 +1034,7 @@ def main() -> int:
     scratch = Path(tempfile.mkdtemp(prefix="gcc-preprocessing-", dir=scratch_parent))
     try:
         rendered = {path: render(record) for path, record in zip(
-            (PREPROCESSING_RECORD, DEPENDENCY_RECORD, METADATA_RECORD), records(args.runtime, scratch)
+            (PREPROCESSING_RECORD, DEPENDENCY_RECORD, METADATA_RECORD, ORCHESTRATION_RECORD), records(args.runtime, scratch)
         )}
     finally:
         shutil.rmtree(scratch, ignore_errors=True)

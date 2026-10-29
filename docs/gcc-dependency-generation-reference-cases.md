@@ -7,21 +7,22 @@ captured from real GCC 16.2.0 by `scripts/capture-gcc-preprocessing-reference.py
 
 ## Execution environment
 
-Preprocessing and dependency-generation cases run the installed
+Preprocessing, dependency-generation and phase-orchestration cases run the installed
 `/usr/local/bin/gcc` and its `cc1`. All metadata cases run the oracle driver
 described below instead. Every case runs inside the pinned
 official image `docker.io/library/gcc@sha256:2e6f4ae27ab8ad6f9617b46f0468889d368fdd91f2ea29aff98e4d5d1a3637f0`
 (config `sha256:103614947d5e…`), which is the base image of
 `oracle/gcc/16.2.0/build-toolchain.Dockerfile`. The container has no network, a
-read-only root filesystem, no capabilities and `no-new-privileges`; it sees only
-a fresh per-case workspace. Preprocessing and dependency cases pass `-nostdinc`
+read-only root filesystem, no capabilities and `no-new-privileges`. Host access
+is restricted to a fresh per-case workspace and declared read-only oracle artifact
+mounts. Preprocessing and dependency cases pass `-nostdinc`
 so only staged include roots are searched, and `LC_ALL=C`, `TZ=UTC` and `SOURCE_DATE_EPOCH=1786060800` are
 fixed. The script verifies the image config digest and records the driver and
 `cc1` hashes, version and target triple.
 
 Each case runs twice in separate workspaces; the capture fails unless stdout,
-stderr, exit status and produced artifacts are byte-identical. No normalization
-is applied.
+stderr, exit status and produced artifacts are byte-identical. Only the phase
+orchestration record normalizes anything (driver temporary-file names, below).
 
 ## Cases
 
@@ -77,6 +78,55 @@ are not searched again. Earlier rules own overlapping spans, so an explicitly
 substituted `argv[0]` remains independent of the configured install prefix even
 when the invocation path contains the original prefix. Everything else must
 match byte-for-byte.
+
+Phase orchestration (`oracle/gcc/16.2.0/orchestration-phase-reference.json`,
+issue #712): compile to assembly, compile to object (plain, `-pipe`,
+`-save-temps`), assemble `.s`, preprocess-and-assemble `.S`, link one source,
+two C sources, and mixed C plus assembly, the default `a.out` output, and
+failure propagation from `cc1`, from `as` on a source file, from `as` after a
+successful compile, and from the linker on an undefined symbol. Each repetition
+runs `gcc -###` (the planned phases), `gcc -v` (the phases actually started; a
+failing phase stops the rest) and the plain command (exit status, streams and
+artifacts), then runs any linked program in the same sandbox and records its
+exit status and output. `toolchain.phaseTools` records the path, resolved path
+and hash of `cc1`, `as`, `collect2`, `ld`, `lto-wrapper` and `liblto_plugin.so`,
+plus the binutils versions. Driver temporaries (`/tmp/ccXXXXXX.s` and so on)
+come from `mkstemp`, so plans, traces and streams replace them with `<tmp-N>`
+by order of first appearance; artifacts are never normalized. Every container
+gets a tmpfs `/tmp`, so Docker and Podman pick the same temporary directory.
+Each phase records its `argv` without the driver's trailing ` |` pipeline
+connector; `stdoutPipedToNextPhase` says whether its output feeds the next
+phase. These cases do not pass `-nostdinc`.
+
+Every container invocation first verifies the pinned image config, including
+identity queries. The orchestration reference accepts only its fixed case
+arguments and staged inputs. Unknown or malformed planned commands fail the
+capture, and parsed phase executable paths must match the declared tool paths
+or explicit `PATH` names. The complete verbose transcript is retained so its
+reported phase observations can be independently parsed.
+
+`toolchain.runtimeClosure` records the ELF bytes, interpreter, resolved loader
+and transitive startup libraries for the driver and each phase tool, including
+the linker plugin. The probe uses the pinned image's `readelf` and glibc loader
+in `--list` mode; inspected programs are not started by the probe. Unexpected
+interpreters, RPATH/RUNPATH, unresolved libraries and libraries outside image
+roots fail capture. The kernel-provided vDSO is identified by name, not by an
+image file hash. This inventory describes startup loading, not arbitrary later
+`dlopen` activity.
+
+Each produced executable has its own runtime closure tied to the captured
+artifact hash. Execution uses a separate container with the workspace mounted
+read-only; the launcher rechecks executable, interpreter and library bytes,
+then starts only the declared output with the retained exact argv, cwd and
+cleared environment. Launcher failure aborts capture, separately from a valid
+nonzero program exit. Both repetitions must retain identical runtime identities
+and behavior. The reference policy and probe source digest are recorded beside
+the cases.
+
+These checks establish the reference invocation contract. GCC's verbose report
+does not independently observe internal `collect2` to `ld` execution or plugin
+loading. Authenticated Kotlin-owned phase receipts and enforcement for an
+untrusted reconstructed candidate remain required by issues #53, #136 and #712.
 
 ## Reproduction
 
