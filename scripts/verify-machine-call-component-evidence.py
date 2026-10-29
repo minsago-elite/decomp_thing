@@ -30,6 +30,7 @@ COUNTS = {"rawFunctionSymbols", "roots", "canonicalFunctions", "instructionAttem
           "positiveInternalCallSites", "unresolvedCallSites", "rootsWithUnresolvedOwnership", "rootsWithTraversalStops"}
 RUNTIME = {"archiveBytes", "archiveSha256", "bridgeSha256", "bundleManifestSha256", "languageId", "languageVersion"}
 RUNTIME_PATHS = {"bundleRoot", "ghidraArchivePath"}
+RUNTIME_SNAPSHOTS = {"bridgeSnapshot", "bundleManifestSnapshot"}
 SOURCE_PATHS = {
     "ghidra-bridge/src/main/java/decompengine/ghidra/ByteInstructionDecoderV1.java",
     "src/main/kotlin/decompengine/oracle/fulltree/FullTreeElfLayout.kt",
@@ -1111,9 +1112,15 @@ def verify_external_bindings(evidence: dict, request: dict, report: dict, source
     require(type(request["schemaVersion"]) is int and request["schemaVersion"] == 1 and request["kind"] == "independent-external-call-request-v1",
             "external request schema differs")
     informational_path(request["outputPath"])
-    runtime = fields(request["runtime"], RUNTIME | RUNTIME_PATHS, "external request runtime")
+    runtime = fields(request["runtime"], RUNTIME | RUNTIME_PATHS | RUNTIME_SNAPSHOTS, "external request runtime")
     for key in RUNTIME_PATHS:
         informational_path(runtime[key])
+    for key, digest_key in (("bridgeSnapshot", "bridgeSha256"), ("bundleManifestSnapshot", "bundleManifestSha256")):
+        snapshot = fields(runtime[key], {"path", "bytes", "sha256"}, f"external runtime {key}")
+        informational_path(snapshot["path"])
+        integer(snapshot["bytes"], 1, MAX_BYTES)
+        digest(snapshot["sha256"])
+        require(snapshot["sha256"] == runtime[digest_key], f"external runtime {key} digest differs")
     require({key: runtime[key] for key in RUNTIME} == evidence["runtime"], "external request runtime commitment differs")
     limits = fields(request["limits"], set(EXTERNAL_LIMITS), "external request limits")
     for key, ceiling in EXTERNAL_LIMITS.items():
@@ -1138,7 +1145,12 @@ def verify_external_bindings(evidence: dict, request: dict, report: dict, source
             report["containmentStatus"] == "external-owner-required", "external report boundary differs")
     false_authority(report)
     require(report["sourceCallRecordsEnumerated"] is True and report["sourceCallPopulationComplete"] is False, "source population authority differs")
-    require(report["requestSha256"] == evidence["payloads"]["request"]["sha256"] and canonical_bytes(report["runtime"]) == canonical_bytes(runtime) and
+    report_runtime = fields(report["runtime"], RUNTIME | RUNTIME_PATHS, "external report runtime")
+    for key in RUNTIME_PATHS:
+        informational_path(report_runtime[key])
+    expected_report_runtime = {key: runtime[key] for key in RUNTIME | RUNTIME_PATHS}
+    require(report["requestSha256"] == evidence["payloads"]["request"]["sha256"] and
+            canonical_bytes(report_runtime) == canonical_bytes(expected_report_runtime) and
             canonical_bytes(report["limits"]) == canonical_bytes(limits) and
             report["metadataPolicy"] == request["metadataPolicy"], "external report request/runtime/policy commitment differs")
     require(type(report["inputBytes"]) is int and report["inputBytes"] == request["richFile"]["bytes"] and report["inputSha256"] == request["richFile"]["sha256"] and

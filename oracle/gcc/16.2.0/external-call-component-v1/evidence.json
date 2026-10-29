@@ -27,36 +27,36 @@
   "negativeCompleteness": false,
   "payloads": {
     "report": {
-      "bytes": 21980778,
+      "bytes": 21981741,
       "compression": "gzip",
       "path": "driver-report.json.gz",
-      "sha256": "e4d43d13254e4420429c1597c21c5d40fdc1c9963456b0a79edffa4f00e34203",
-      "storedBytes": 672731,
-      "storedSha256": "48eb0e6e79421955e3e63994645bedd37dfde5c470394618645f265a75079d1b"
+      "sha256": "79ed778678178ab0f3f494c129c8b3ee9edd3049bd82bba9f6666243ea51725b",
+      "storedBytes": 672809,
+      "storedSha256": "4ea97dd6bced3dc7f56d15fcad4eae3383fe3c2ef79844b3e65bc8d88341e7ad"
     },
     "request": {
-      "bytes": 1919,
+      "bytes": 2317,
       "path": "driver-request.json",
-      "sha256": "5d0a922ba00db8fd7095904914cc42902039c748d920d9e5123dce73684b37ef"
+      "sha256": "56eff45e0a5648cf429ddd3de90c1fcdf2ef3a82f039a793e92bf8d8836f80b4"
     }
   },
   "producerJar": {
-    "bytes": 15520101,
-    "path": "build/oracle/gcc/kotlin-boot-runtime/llm-bin-patch-0.1.0.jar",
-    "sha256": "8151f18df65c198463fed2bbcc38c3f8eb9fc2a9e541b1a738ff4f228e439c82"
+    "bytes": 16685301,
+    "path": "build/install/llm_bin_patch/lib/llm-bin-patch-0.1.0.jar",
+    "sha256": "40527269f420a02bd3b6636097a735b62201a73db8679b7aa188f8f5e87961ce"
   },
   "releaseEligible": false,
   "runtime": {
     "archiveBytes": 569445154,
     "archiveSha256": "93a5d11a9ad510622acaaf908c556a7b9b764d338e78a7567f3689bf5081fd54",
-    "bridgeSha256": "68c12a9960bcae53098014e56360879b3805af1c0ac241b0d5f4317ebe906c62",
-    "bundleManifestSha256": "9a61e137810b18c5fc9cec1e968ef3a11dbd24f81bedac655f70d25dc3b4ccb4",
+    "bridgeSha256": "3b75101db8664856502b609fbd4d4070c90f5e2cf90c4fcf36158c4b32febcee",
+    "bundleManifestSha256": "40bc1a3c090f47e3cd18f2a1e4a95adc7deeb1a5575adfc4c97bdef1837527f5",
     "languageId": "x86:LE:64:default",
     "languageVersion": "4.8"
   },
   "schemaVersion": 1,
   "source": {
-    "commit": "2ea80eced566aa590e6ae26988da897bb4a438c7",
+    "commit": "47de7b184b61306d1e45276888619d34247101b7",
     "files": [
       {
         "bytes": 17720,
@@ -69,9 +69,9 @@
         "sha256": "11a5e36cac6c54fc14bee8220f658cd0bb08672fbdc7d02d76e3c617332e2e38"
       },
       {
-        "bytes": 41667,
+        "bytes": 42272,
         "path": "src/main/kotlin/decompengine/oracle/externalcalls/BoundedElfDynamicBindingsV1.kt",
-        "sha256": "1652a50751f9c5408c6b00536bddf7dc53d7535b5f63bd05af991850d0b6d73d"
+        "sha256": "bd313d09a57028d1c1f0c66be1b6e364aff9ee946c28e5df21d66ffd4033c25e"
       },
       {
         "bytes": 10503,
@@ -79,19 +79,19 @@
         "sha256": "e854d4d12b163a06adf2614fcc1cff6229c798ef5f4b5ce02186145335b80182"
       },
       {
-        "bytes": 55971,
+        "bytes": 56972,
         "path": "src/main/kotlin/decompengine/oracle/externalcalls/IndependentExternalCallReportV1.kt",
-        "sha256": "d71860cf8585f67fed9b6fd467385c6a6fdef60fe83a1e9e8d86d7ad2c8e80c8"
+        "sha256": "e0f7d003929b98e88fa8a4fd7e2bed216c7fe9f00b9107e90cccbd78be1e08bd"
       },
       {
-        "bytes": 18165,
+        "bytes": 18717,
         "path": "src/main/kotlin/decompengine/oracle/externalcalls/IndependentExternalCallWorkerV1.kt",
-        "sha256": "9ed356b72fac85d415b1946e4371a489eaae482718e8831f9dcc726500100be9"
+        "sha256": "60616253ccfc431490ac5bbb3ecf2077939854b96094b65b2f60f188a7aabefc"
       },
       {
-        "bytes": 29210,
+        "bytes": 29853,
         "path": "src/main/kotlin/decompengine/oracle/externalcalls/IndependentExternalCallsV1.kt",
-        "sha256": "9ce71f2fcbeb72e9d127810111976e74b85c8cd34da7a1866df1a9e6924bdbcc"
+        "sha256": "9440dfd01e968e0138ce16dcc270d0db66a908b75784c3ca37900a7ec280b792"
       },
       {
         "bytes": 79347,
@@ -99,22 +99,22 @@
         "sha256": "db419f5c23b816c25f876a9b34579436777dec2f89e4dbc646d9f117931c65f3"
       },
       {
-        "bytes": 26984,
+        "bytes": 27305,
         "path": "src/main/kotlin/decompengine/oracle/machinecalls/IndependentMachineCallReportV1.kt",
-        "sha256": "b82d17a5eb0efb9ce5d92d17dca21b5a07fb33cd1137025b619e9d311785f7ec"
+        "sha256": "53ebc09cefe1df8ca35224267c31178ab134a9bc034a8d4fdbf56abb7213bcb6"
       },
       {
-        "bytes": 32599,
+        "bytes": 44463,
         "path": "src/main/kotlin/decompengine/oracle/machinecalls/IndependentMachineCallWorkerV1.kt",
-        "sha256": "ab99828ffc0a54ae56180c2a22980e3e48291bbf7c0ebde179b731fb8a639f86"
+        "sha256": "29b80f8d4b7876c8f447c1371f59a5a9480b8f338efaf2aaccae755fb3f867e0"
       },
       {
-        "bytes": 26732,
+        "bytes": 26714,
         "path": "src/main/kotlin/decompengine/oracle/machinecalls/IndependentMachineCallsV1.kt",
-        "sha256": "e659d0ec16f30cf1d48ed30200f22a652e7e89c9d98c607412e764d80e68d5c6"
+        "sha256": "fdb39d2c7ce928f3f76496517cd56663cb39f965c3d1c06c9a7b61ec6903c26a"
       }
     ],
-    "tree": "eb5696d46f090b2eb9cc343e13293575fd19c718"
+    "tree": "2ad2f0da5a6941418ed44fe0a4c8abceca5dde8e"
   },
   "sourceEvidence": {
     "bytes": 3529,

@@ -1,14 +1,14 @@
 # Retained external-call component evidence
 
 This directory retains a standalone external-call composition run of producer
-commit `2ea80eced566aa590e6ae26988da897bb4a438c7`. `evidence.json` binds the exact request,
+commit `47de7b184b61306d1e45276888619d34247101b7`. `evidence.json` binds the exact request,
 report, rich ELF, runtime identities, source tree, and eleven producer source
 files. Its `sourceEvidence` binds the existing machine-call evidence in that
 commit; the verifier follows that evidence to its original producer commit and
 checks the original request, report, canonical oracle, and artifact manifest.
 
-`driver-report.json.gz` decompresses to 21,980,778 bytes with SHA-256
-`e4d43d13254e4420429c1597c21c5d40fdc1c9963456b0a79edffa4f00e34203`.
+`driver-report.json.gz` decompresses to 21,981,741 bytes with SHA-256
+`79ed778678178ab0f3f494c129c8b3ee9edd3049bd82bba9f6666243ea51725b`.
 `driver-request.json` preserves the exact original request. Absolute paths in
 requests record capture locations; the offline verifier never dereferences them.
 Both recorded source commits must be available in the local Git object database.
@@ -28,6 +28,11 @@ single-member gzip bounds, exact byte commitments, canonical JSON, source and
 input Git blobs, source-call preservation, object-local import namespace
 identities, request/runtime consistency, retained counts, and authority flags.
 It performs no network access, ELF analysis, or decoder execution.
+
+GNU version records retain their offsets into the linked string table. The offline
+verifier bounds the UTF-8 bytes plus terminating NUL and reconciles overlapping
+ranges among version strings, dynamic-symbol names, and `DT_NEEDED` strings;
+individually plausible strings cannot claim incompatible bytes in one table.
 
 The report retains all 15,376 physical sites from its
 source report and emits 15,376 composition records.

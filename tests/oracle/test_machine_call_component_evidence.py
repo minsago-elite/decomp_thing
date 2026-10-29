@@ -471,6 +471,11 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
         source = self.source_provenance()
         runtime = copy.deepcopy(self.source_request["runtime"])
         runtime["bridgeSha256"] = "c" * 64  # The new bridge legitimately differs from the source run's bridge.
+        runtime["bridgeSnapshot"] = {"path": "/unavailable/original/bridge.runtime", "bytes": 3,
+            "sha256": runtime["bridgeSha256"]}
+        runtime["bundleManifestSnapshot"] = {"path": "/unavailable/original/manifest.runtime", "bytes": 3,
+            "sha256": runtime["bundleManifestSha256"]}
+        report_runtime = {key: runtime[key] for key in VERIFY.RUNTIME | VERIFY.RUNTIME_PATHS}
         self.request = {"schemaVersion": 1, "kind": "independent-external-call-request-v1",
             "richFile": copy.deepcopy(self.source_request["richFile"]),
             "sourceReport": self.source_evidence["payloads"]["report"] | {"path": "/unavailable/source-report.json"},
@@ -560,7 +565,7 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
             "sourceRequestSha256": self.request["sourceRequest"]["sha256"], "externalNamespaceSha256": sha256(VERIFY.canonical_bytes(namespace)).hexdigest(),
             "externalNamespace": namespace, "sourceCanonicalPopulation": [{key: row[key] for key in ("id", "rva", "exclusion")}
                 for row in self.source_report["canonicalPopulation"]], "dynamicInventory": inventory, "sites": [site], "counts": copy.deepcopy(counts),
-            "requestSha256": "", "runtime": runtime, "containmentStatus": "external-owner-required"}
+            "requestSha256": "", "runtime": report_runtime, "containmentStatus": "external-owner-required"}
         self.evidence = {"schemaVersion": 1, "kind": VERIFY.EXTERNAL_KIND, "authority": "component-only", "complete": False,
             "releaseEligible": False, "negativeCompleteness": False, "containmentStatus": "external-owner-required", "counts": counts,
             "inputs": {"rich": copy.deepcopy(self.source_evidence["inputs"]["rich"])}, "payloads": {},
@@ -654,6 +659,8 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
         changes = [lambda: self.request["sourceReport"].update(sha256="0" * 64),
             lambda: self.request["sourceRequest"].update(bytes=self.request["sourceRequest"]["bytes"] + 1),
             lambda: self.request["richFile"].update(sha256="0" * 64), lambda: self.request["runtime"].update(bridgeSha256="0" * 64),
+            lambda: self.request["runtime"]["bridgeSnapshot"].update(sha256="0" * 64),
+            lambda: self.request["runtime"]["bundleManifestSnapshot"].update(bytes=0),
             lambda: self.report.update(complete=True), lambda: self.report.update(sourceCallPopulationComplete=True),
             lambda: self.report.update(sourceCallRecordsEnumerated=False), lambda: self.report.update(sourceReportSha256="0" * 64),
             lambda: self.report.update(runtime=original_report["runtime"] | {"bridgeSha256": "0" * 64}),
