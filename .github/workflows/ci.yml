@@ -66,6 +66,11 @@ jobs:
       - name: Verify bounded archival cleanup controls
         timeout-minutes: 1
         run: python3 -B scripts/test-archival-diagnostics.py --verbose
+      - name: Verify ext4 admission qualification controls
+        timeout-minutes: 1
+        run: |
+          python3 -B scripts/test-oracle-ext4-admission-report.py --verbose
+          python3 -B scripts/test-ci-oracle-ext4-admission.py --verbose
       - name: Verify bounded sanitizer invocation controls
         timeout-minutes: 1
         run: python3 -B scripts/test-clang-sanitizer.py --verbose
@@ -356,6 +361,13 @@ jobs:
         run: bash scripts/ci-prepare-acp-quota.sh
       - name: Prepare bounded ext4 oracle scratch authority
         run: bash scripts/ci-prepare-oracle-ext4-scratch.sh
+      - name: Prepare separate finite ext4 admission controls
+        if: matrix.shard == 'live-fulltree'
+        run: |
+          mkdir -p build/issue930-evidence
+          sudo -n python3 -I -S scripts/ci-oracle-ext4-admission.py prepare > build/issue930-evidence/prepare.json
+          echo "DECOMP_TEST_ORACLE_EXT4_ADMISSION_HELPER=$GITHUB_WORKSPACE/scripts/ci-oracle-ext4-admission.py" >> "$GITHUB_ENV"
+          echo "DECOMP_TEST_ORACLE_EXT4_ADMISSION_SCRATCH=/var/lib/decomp-oracle-ext4-admission-ci/scratch" >> "$GITHUB_ENV"
       - name: Prepare separate bounded ext4 bundled-analysis scratch
         run: bash scripts/ci-prepare-oracle-ext4-scratch.sh --bundled-ghidra
       - name: Prepare separate bundled interruption-resume scratch
@@ -411,9 +423,16 @@ jobs:
       - name: Run JVM and Kotlin checks
         env:
           DECOMP_REQUIRE_ORACLE_EXT4_SCRATCH: "true"
+          DECOMP_REQUIRE_ORACLE_EXT4_ADMISSION: ${{ matrix.shard == 'live-fulltree' && 'true' || 'false' }}
           DECOMP_REQUIRE_BUNDLED_GHIDRA_EXECUTION: "true"
           DECOMP_CI_TEST_SHARD: ${{ matrix.test-shard }}
         run: scripts/ci.sh
+      - name: Require every actual mounted ext4 admission control
+        if: always() && matrix.shard == 'live-fulltree'
+        run: >-
+          python3 scripts/verify-oracle-ext4-admission.py
+          --reports build/test-results/test
+          --output build/issue930-evidence/qualification.json
       - name: Require every source-declared recovery scenario in core reports
         if: always() && matrix.shard == 'core'
         run: >-
@@ -440,6 +459,9 @@ jobs:
       - name: Release bounded ext4 oracle scratch authority
         if: always()
         run: bash scripts/ci-release-oracle-ext4-scratch.sh
+      - name: Release only authenticated ext4 admission fixtures
+        if: always() && matrix.shard == 'live-fulltree'
+        run: sudo -n python3 -I -S scripts/ci-oracle-ext4-admission.py cleanup > build/issue930-evidence/cleanup.json
       - name: Release bounded ext4 bundled-analysis fixture scratch
         if: always()
         run: bash scripts/ci-release-oracle-ext4-scratch.sh --bundled-ghidra
@@ -460,6 +482,7 @@ jobs:
             build/reports/tests/test
             build/test-results/test
             build/reports/junit-signatures
+            build/issue930-evidence
             build/web-job-recovery-inventory.json
             build/reports/tests/v3BoundaryFinalStagingIsolated
             build/test-results/v3BoundaryFinalStagingIsolated
