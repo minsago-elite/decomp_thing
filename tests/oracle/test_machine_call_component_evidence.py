@@ -6,24 +6,28 @@ CI fetches those objects before these tests, never from inside the verifier.
 
 from __future__ import annotations
 
-from contextlib import redirect_stdout
 import copy
-from hashlib import sha256
 import gzip
 import importlib.util
 import io
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
+from collections.abc import Callable
+from contextlib import redirect_stdout
+from hashlib import sha256
+from pathlib import Path
+from typing import cast
 from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location("machine_call_evidence", ROOT / "scripts/verify-machine-call-component-evidence.py")
+if SPEC is None or SPEC.loader is None:
+    raise ImportError("cannot load machine-call evidence verifier")
 VERIFY = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(VERIFY)
 
@@ -46,7 +50,7 @@ class MachineCallComponentEvidenceTest(unittest.TestCase):
 
         def git(*arguments: str) -> str:
             return subprocess.run(["git", "-C", str(self.root), *arguments], env=environment,
-                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, timeout=10).stdout.decode().strip()
+                                  capture_output=True, check=True, timeout=10).stdout.decode().strip()
 
         self.git = git
         git("init", "--quiet")
@@ -207,9 +211,8 @@ class MachineCallComponentEvidenceTest(unittest.TestCase):
     def test_json_is_bounded_duplicate_free_closed_and_canonical(self) -> None:
         for data in (b'{"a":1,"a":2}', b'{"a":NaN}', b'{"a":1.0}', b'{"a":"\\ud800"}',
                      b'{"a":' + b'[' * 65 + b'0' + b']' * 65 + b'}', b'{}', b'{}\n\n'):
-            with self.subTest(data=data[:40]):
-                with self.assertRaises(VERIFY.VerificationError):
-                    VERIFY.parse_canonical(data)
+            with self.subTest(data=data[:40]), self.assertRaises(VERIFY.VerificationError):
+                VERIFY.parse_canonical(data)
         self.evidence["unexpected"] = False
         self.write_manifest()
         with self.assertRaises(VERIFY.VerificationError):
@@ -247,8 +250,7 @@ else:
 """
         result = subprocess.run([sys.executable, "-c", child,
             str(ROOT / "scripts/verify-machine-call-component-evidence.py"), str(self.root)],
-            env=os.environ | {"PYTHONDONTWRITEBYTECODE": "1"}, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, timeout=5, check=True)
+            env=os.environ | {"PYTHONDONTWRITEBYTECODE": "1"}, capture_output=True, timeout=5, check=True)
         self.assertIn(b"real FIFO substitution refused", result.stdout)
 
     def parent_substitution_control(self, operation: str, stage: str) -> None:
@@ -335,9 +337,12 @@ else:
             parent.symlink_to(outside, target_is_directory=True)
             raise OSError("authored sync failure after parent substitution")
 
-        with mock.patch.object(VERIFY, "REPOSITORY_ROOT", repository), mock.patch.object(VERIFY.os, "fsync", side_effect=fail_sync):
-            with self.assertRaisesRegex(OSError, "authored sync failure"):
-                VERIFY.extract_report(parent / "report.json", b"verified report")
+        with (
+            mock.patch.object(VERIFY, "REPOSITORY_ROOT", repository),
+            mock.patch.object(VERIFY.os, "fsync", side_effect=fail_sync),
+            self.assertRaisesRegex(OSError, "authored sync failure"),
+        ):
+            VERIFY.extract_report(parent / "report.json", b"verified report")
         self.assertFalse((moved / "report.json").exists())
         self.assertEqual(b"outside file must survive", outside_victim.read_bytes())
 
@@ -352,21 +357,23 @@ else:
         parent_link = self.root / "parent-link"
         parent_link.symlink_to(self.directory, target_is_directory=True)
         for destination in (link, parent_link / "output.json", self.root / "absent/output.json", self.root.parent / "escape.json"):
-            with self.subTest(path=destination):
-                with self.assertRaises((VERIFY.VerificationError, OSError)):
-                    VERIFY.extract_report(destination, recovered)
+            with self.subTest(path=destination), self.assertRaises((VERIFY.VerificationError, OSError)):
+                VERIFY.extract_report(destination, recovered)
         self.assertEqual(recovered, output.read_bytes())
         self.assertFalse((self.directory / "output.json").exists())
 
 
 class ExternalCallComponentEvidenceTest(unittest.TestCase):
+    root: Path
+    git: Callable[..., str]
+
     # Reuse the tiny authored Git fixture without inheriting/re-running the eight machine controls.
     write_manifest = MachineCallComponentEvidenceTest.write_manifest
     write_payloads = MachineCallComponentEvidenceTest.write_payloads
     verify = MachineCallComponentEvidenceTest.verify
 
     def setUp(self) -> None:
-        MachineCallComponentEvidenceTest.setUp(self)
+        MachineCallComponentEvidenceTest.setUp(cast(MachineCallComponentEvidenceTest, self))
         call = self.report["calls"][0]
         call.update(instructionBytes="e8eb0f0000", directTargetRva="0x1000", directTargetAddress="0x2000",
             rawPcodeCallTargetAddress="0x2000", directTargetAddresses=["0x2000"], targetCanonicalId=None,
@@ -545,7 +552,8 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
             lambda: self.evidence["source"]["files"][0].update(sha256="0" * 64)]
         for change in mutations:
             self.evidence = copy.deepcopy(original)
-            change(); self.write_manifest()
+            change()
+            self.write_manifest()
             with self.assertRaises(VERIFY.VerificationError):
                 self.verify()
         self.evidence = original
@@ -577,7 +585,8 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
         for index, change in enumerate(changes):
             with self.subTest(index=index):
                 self.request, self.report = copy.deepcopy(original_request), copy.deepcopy(original_report)
-                change(); self.write_payloads()
+                change()
+                self.write_payloads()
                 with self.assertRaises(VERIFY.VerificationError):
                     self.verify()
 
