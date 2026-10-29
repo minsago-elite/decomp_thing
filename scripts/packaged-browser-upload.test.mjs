@@ -6,7 +6,7 @@ import { qualifyMeasuredUpload, qualifyUploadFailures, selectUploadFixture } fro
 
 // A session header can exist before the lazy upload route. Run the actual driver
 // expressions against that ordering, including its asynchronous selection render.
-function fixture({ mountAt = 3, disabled = false, renderSelection = true, enableSubmit = true } = {}) {
+function fixture({ mountAt = 3, disabled = false, renderSelection = true, enableSubmit = true, route = '/nested/' } = {}) {
   let samples = 0;
   let selectedAt = Infinity;
   let changes = 0;
@@ -53,7 +53,7 @@ function fixture({ mountAt = 3, disabled = false, renderSelection = true, enable
     files = [];
     items = { add: file => { this.files.push(file); } };
   }
-  const context = { document, location: { pathname: '/nested/' }, DataTransfer, File, Event };
+  const context = { document, location: { pathname: route }, DataTransfer, File, Event };
   const tab = {};
   const evaluate = async (target, expression) => {
     assert.equal(target, tab);
@@ -144,8 +144,7 @@ for (const [name, qualify, filename, size] of [
     assert.equal(f.document.querySelector('#binary-file'), null);
     await assert.rejects(f.run(), error => error === f.submitted);
     assert.equal(f.counts().changes, 1);
-    const controlLabel = qualify === qualifyMeasuredUpload ? 'measured workspace upload control' : 'failure workspace upload control';
-    assert.deepEqual(f.labels, [controlLabel, 'upload selection rendered']);
+    assert.deepEqual(f.labels, ['workspace upload control', 'upload selection rendered']);
     const [file] = f.picker.files;
     assert.equal(file.name, filename);
     assert.equal(file.size, size);
@@ -162,10 +161,10 @@ for (const [name, qualify, filename, size] of [
     }
   });
 
-  const controlLabel = qualify === qualifyMeasuredUpload ? 'measured workspace upload control' : 'failure workspace upload control';
   for (const [state, options, label, changes] of [
-    ['missing route', { mountAt: Infinity }, controlLabel, 0],
-    ['disabled picker', { mountAt: 0, disabled: true }, controlLabel, 0],
+    ['missing picker', { mountAt: Infinity }, 'workspace upload control', 0],
+    ['wrong route', { route: '/nested/jobs/0123456789abcdef0123456789abcdef' }, 'workspace upload control', 0],
+    ['disabled picker', { mountAt: 0, disabled: true }, 'workspace upload control', 0],
     ['missing selection render', { renderSelection: false }, 'upload selection rendered', 1],
     ['disabled submit', { enableSubmit: false }, 'upload selection rendered', 1],
   ]) {

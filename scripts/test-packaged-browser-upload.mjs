@@ -89,9 +89,6 @@ function fixture(t, { markup = '', route = '/nested/', connected = true, onTick 
 }
 
 for (const [name, run] of Object.entries(entries)) {
-  const controlLabel = run === qualifyUploadFailures ? 'failure workspace upload control' :
-    run === qualifyMeasuredUpload ? 'measured workspace upload control' : 'workspace upload control';
-
   test(`${name} waits through authenticated shell then mounted disabled route until picker is enabled`, async t => {
     const f = fixture(t, { onTick: ({ elapsed, document }) => {
       if (elapsed === 225) document.querySelector('main').innerHTML = panel(`<fieldset disabled>${picker}</fieldset>`);
@@ -116,7 +113,7 @@ for (const [name, run] of Object.entries(entries)) {
 
   test(`${name} never-ready route fails within the unchanged driver deadline before assignment`, async t => {
     const f = fixture(t);
-    await assert.rejects(run(f.args), new RegExp(`Timed out waiting for ${controlLabel}`));
+    await assert.rejects(run(f.args), /Timed out waiting for workspace upload control/);
     assert.equal(f.state.fixtureEvaluations, 0);
     assert.equal(f.state.readyCalls.length, 1);
     assert.equal(f.state.elapsed, 20025, 'Existing 20-second deadline plus its final 75ms poll');
