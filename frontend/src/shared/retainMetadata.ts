@@ -21,3 +21,8 @@ export function canRetainMetadata(failure: unknown): boolean {
   return failure.code === 'http_error' && failure.status !== undefined
     && (failure.status === 408 || failure.status === 429 || (failure.status >= 500 && failure.status <= 599));
 }
+
+/** A retained deletion tombstone: the job existed and was deliberately deleted. */
+export function isDeletedJob(failure: unknown): boolean {
+  return failure instanceof ApiClientError && failure.status === 410 && failure.serverCode === 'RESOURCE_GONE';
+}
