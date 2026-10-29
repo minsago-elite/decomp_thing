@@ -494,7 +494,7 @@ class WebApiControllerTest {
         assertNotEquals(etag, changed.headers().firstValue("ETag").orElseThrow())
         val head = request(server, "$api/jobs/$jobId", "HEAD", headers = mapOf("Cookie" to cookie))
         assertEquals(405, head.statusCode())
-        assertEquals("GET", head.headers().firstValue("Allow").orElseThrow())
+        assertEquals("DELETE, GET, PATCH", head.headers().firstValue("Allow").orElseThrow())
         assertTrue(head.body().isEmpty())
     }
 

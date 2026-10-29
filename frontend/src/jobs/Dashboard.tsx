@@ -15,6 +15,7 @@ import { receive } from '../shared/receiptTime';
 import type { Received } from '../shared/receiptTime';
 import { MetadataReceipt } from '../shared/MetadataReceipt';
 import { RecoverySummary } from './RecoverySummary';
+import { onLibraryChange } from './libraryChannel';
 
 function currentFilters() {
   try { return { ...jobLocation(location.search), valid: true }; }
@@ -130,6 +131,10 @@ export function Dashboard({ basePath, draftOwner = null }: { basePath: string; d
     } else setError(withApiFailureReference(copy.jobsCouldNotBeLoadedTheServerMayBeUnavailable, failure));
     pageTransition.current = null;
   }, []);
+  const reloadLatest = useRef(reload);
+  reloadLatest.current = reload;
+  // Another tab deleted or reorganized a job: read a fresh first page instead of trusting this snapshot.
+  useEffect(() => onLibraryChange(basePath, () => { if (location.pathname === dashboardPath.current) reloadLatest.current(); }), [basePath]);
   useEffect(() => {
     const restore = () => {
       activeBinding.current = null;
@@ -342,6 +347,9 @@ export function Dashboard({ basePath, draftOwner = null }: { basePath: string; d
       <label>{copy.sortBy}<select {...fieldA11y('sort')} value={draft.sort} onChange={event => field('sort', event.currentTarget.value)}>
         <option value="newest">{copy.newestFirst}</option><option value="oldest">{copy.oldestFirst}</option>
       </select></label>
+      <label>{copy.archivedJobs}<select {...fieldA11y('archived')} value={draft.archived} onChange={event => field('archived', event.currentTarget.value)}>
+        <option value="">{copy.hideArchived}</option><option value="all">{copy.includeArchived}</option><option value="only">{copy.onlyArchived}</option>
+      </select></label>
       <label>{copy.jobsPerPage}<select {...fieldA11y('limit')} value={draft.limit} onChange={event => field('limit', event.currentTarget.value)}>
         {[50, 100, 200].map(limit => <option key={limit}>{limit}</option>)}
       </select></label>
@@ -370,7 +378,8 @@ export function Dashboard({ basePath, draftOwner = null }: { basePath: string; d
     {phase === 'ready' && retainedEmpty && <p>{filtered ? copy.noJobsMatchTheseFilters : copy.noUploadedJobsYet}</p>}
     {data && <ul ref={list} class="job-list" aria-label={copy.uploadedJobs}>
       {data.items.map(job => <li key={job.jobId}>
-        <h4><a href={jobPath(basePath, job.jobId)}>{job.displayFilename}</a></h4>
+        <h4><a href={jobPath(basePath, job.jobId)}>{job.label ?? job.displayFilename}</a></h4>
+        {job.archived && <p>{copy.archivedMark}</p>}
         <JobSummary job={job} />
       </li>)}
     </ul>}

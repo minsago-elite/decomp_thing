@@ -1,0 +1,50 @@
+{
+  "apiVersion": 1,
+  "kind": "storageSummary",
+  "requestId": "request_storage_summary",
+  "data": {
+    "sampledAt": "2026-10-25T10:00:00Z",
+    "accounting": "logical-bytes",
+    "complete": true,
+    "scannedEntries": "41",
+    "uninspectedEntries": "0",
+    "jobCount": "2",
+    "categories": {
+      "originalInputs": {
+        "bytes": "8192",
+        "entries": "2"
+      },
+      "reports": {
+        "bytes": "1200",
+        "entries": "3"
+      },
+      "sourceSnapshots": {
+        "bytes": "8000",
+        "entries": "12"
+      },
+      "logs": {
+        "bytes": "900",
+        "entries": "2"
+      },
+      "archives": {
+        "bytes": "5000",
+        "entries": "1"
+      },
+      "metadata": {
+        "bytes": "3100",
+        "entries": "7"
+      },
+      "temporary": {
+        "bytes": "4096",
+        "entries": "2"
+      },
+      "other": {
+        "bytes": "0",
+        "entries": "1"
+      }
+    },
+    "totalBytes": "30488",
+    "pendingDeletions": "1",
+    "pendingDeletionBytes": "4089"
+  }
+}
