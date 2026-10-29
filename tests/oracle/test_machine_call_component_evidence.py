@@ -23,7 +23,6 @@ from pathlib import Path
 from typing import cast
 from unittest import mock
 
-
 ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location("machine_call_evidence", ROOT / "scripts/verify-machine-call-component-evidence.py")
 if SPEC is None or SPEC.loader is None:
@@ -1389,7 +1388,9 @@ class RetainedExternalEvidenceRegressionTest(unittest.TestCase):
                                     ("verneed-out-of-file-records", "GNU version record bounds"),
                                     ("plt-nonexecutable-section", "byte-window ownership"),
                                     ("plt-file-mapping-disagrees", "byte-window ownership"),
-                                    ("plt-nonexecutable-load", "source call instruction lacks uniquely owned executable file-backed bytes")):
+                                    ("plt-nonexecutable-load", "source call instruction lacks uniquely owned executable file-backed bytes"),
+                                    ("overlapping-forwarder-probe", "retained probe byte windows conflict"),
+                                    ("overlapping-string-name", "retained symbol names conflict in linked string table")):
                 with self.subTest(mutation=mutation):
                     report, evidence = copy.deepcopy(original_report), copy.deepcopy(original_evidence)
                     if mutation in {"strtab-pointer", "strtab-size"}:
@@ -1458,6 +1459,20 @@ class RetainedExternalEvidenceRegressionTest(unittest.TestCase):
                             load = next(row for row in inventory["programHeaders"] if row["type"] == 1 and
                                 int(row["virtualAddress"], 16) <= location < int(row["virtualAddress"], 16) + int(row["fileSize"], 16))
                             load["flags"] &= ~1
+                    elif mutation == "overlapping-forwarder-probe":
+                        site = report["sites"][40]
+                        memmove = next(row for row in report["sites"] if row["relocationBinding"] is not None and
+                            row["relocationBinding"]["slotAddress"] == "0x63c2c0")
+                        site["memoryProbe"] = copy.deepcopy(memmove["memoryProbe"])
+                        site["memoryProbe"]["address"] = site["physicalTargetAddress"]
+                        for key in ("memoryTransfer", "relocationBinding", "externalTargetId"):
+                            site[key] = copy.deepcopy(memmove[key])
+                        site["memoryTransfer"]["address"] = site["physicalTargetAddress"]
+                    elif mutation == "overlapping-string-name":
+                        symbols = report["dynamicInventory"]["dynamicSymbols"]
+                        strlen = next(row for row in symbols if row["name"] == "strlen")
+                        memmove = next(row for row in symbols if row["name"] == "memmove")
+                        strlen["nameOffset"] = memmove["nameOffset"]
                     elif mutation.startswith("verneed-"):
                         inventory = report["dynamicInventory"]
                         if mutation in {"verneed-zero-count", "verneed-invalid-pointer"}:

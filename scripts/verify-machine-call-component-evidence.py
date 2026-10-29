@@ -4,19 +4,20 @@
 from __future__ import annotations
 
 import argparse
-from bisect import bisect_left, bisect_right
-from collections.abc import Iterator
-from contextlib import contextmanager, ExitStack
-from hashlib import sha256
 import json
 import os
-from pathlib import Path, PurePosixPath
 import re
 import stat
 import subprocess
 import sys
 import zlib
-
+from bisect import bisect_left, bisect_right
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
+from hashlib import sha256
+from itertools import pairwise
+from pathlib import Path, PurePosixPath
+from typing import Literal, cast, overload
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 MAX_BYTES = 64 * 1024 * 1024
@@ -60,22 +61,26 @@ def require(condition: bool, message: str) -> None:
 
 
 def fields(value: object, expected: set[str], label: str) -> dict:
-    require(type(value) is dict and set(value) == expected, f"{label}: unknown or missing fields")
+    if type(value) is not dict or set(value) != expected:
+        raise VerificationError(f"{label}: unknown or missing fields")
     return value
 
 
 def integer(value: object, minimum: int = 0, maximum: int = MAX_BYTES) -> int:
-    require(type(value) is int and minimum <= value <= maximum, "integer exceeds its supported bound")
+    if type(value) is not int or not minimum <= value <= maximum:
+        raise VerificationError("integer exceeds its supported bound")
     return value
 
 
 def text(value: object, maximum: int = 16384) -> str:
-    require(type(value) is str and 0 < len(value) <= maximum and "\0" not in value, "invalid bounded text")
+    if type(value) is not str or not 0 < len(value) <= maximum or "\0" in value:
+        raise VerificationError("invalid bounded text")
     return value
 
 
 def digest(value: object, length: int = 64) -> str:
-    require(type(value) is str and re.fullmatch(f"[0-9a-f]{{{length}}}", value) is not None, "noncanonical digest")
+    if type(value) is not str or re.fullmatch(f"[0-9a-f]{{{length}}}", value) is None:
+        raise VerificationError("noncanonical digest")
     return value
 
 
@@ -250,7 +255,7 @@ def git(arguments: list[str], maximum: int = MAX_BYTES) -> bytes:
     environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
     environment.update({"GIT_OPTIONAL_LOCKS": "0", "GIT_NO_REPLACE_OBJECTS": "1", "GIT_TERMINAL_PROMPT": "0"})
     result = subprocess.run(["git", "--no-replace-objects", "-C", str(REPOSITORY_ROOT), *arguments],
-                            env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30, check=False)
+                            env=environment, capture_output=True, timeout=30, check=False)
     require(result.returncode == 0 and len(result.stdout) <= maximum, "recorded Git object is missing or exceeds bound")
     return result.stdout
 
@@ -318,7 +323,8 @@ def verify_report_bindings(evidence: dict, request: dict, report: dict) -> None:
             report["artifactManifestSha256"] == request["manifestSha256"], "report input commitment differs")
     require(report["languageId"] == runtime["languageId"] and report["languageVersion"] == runtime["languageVersion"] and
             type(report["canonicalOracleRecordLimit"]) is int and report["canonicalOracleRecordLimit"] == 20000, "report language or oracle limit differs")
-    require(type(report["imageBase"]) is str and re.fullmatch(r"0x(?:0|[1-9a-f][0-9a-f]{0,15})", report["imageBase"]), "invalid image base")
+    require(type(report["imageBase"]) is str and re.fullmatch(r"0x(?:0|[1-9a-f][0-9a-f]{0,15})", report["imageBase"]) is not None,
+            "invalid image base")
     for name, maximum in (("canonicalPopulation", min(20000, limits["maximumRoots"])), ("roots", limits["maximumRoots"]), ("calls", limits["maximumCalls"])):
         require(type(report[name]) is list and len(report[name]) <= maximum, "report inventory exceeds bound")
     root_ids = set()
@@ -367,19 +373,28 @@ def verify_report_bindings(evidence: dict, request: dict, report: dict) -> None:
     require(instructions <= limits["maximumInstructions"] and len(locators) <= limits["maximumRoots"], "retained population exceeds request bounds")
 
 
+@overload
+def address(value: object, *, nullable: Literal[False] = False) -> int: ...
+
+
+@overload
+def address(value: object, *, nullable: Literal[True]) -> int | None: ...
+
+
 def address(value: object, *, nullable: bool = False) -> int | None:
     if nullable and value is None:
         return None
-    require(type(value) is str and re.fullmatch(r"0x(?:0|[1-9a-f][0-9a-f]{0,15})", value) is not None,
-            "invalid canonical unsigned address")
+    if type(value) is not str or re.fullmatch(r"0x(?:0|[1-9a-f][0-9a-f]{0,15})", value) is None:
+        raise VerificationError("invalid canonical unsigned address")
     return int(value, 16)
 
 
 def inventory_rows(value: object, keys: set[str], maximum: int, label: str) -> list[dict]:
-    require(type(value) is list and len(value) <= maximum, f"{label}: inventory exceeds bound")
+    if type(value) is not list or len(value) > maximum:
+        raise VerificationError(f"{label}: inventory exceeds bound")
     for item in value:
         fields(item, keys, label)
-    return value
+    return cast(list[dict], value)
 
 
 EXTERNAL_STATUSES = {"retained-canonical-target", "static-import-request-reference"} | {
@@ -459,9 +474,8 @@ def verify_external_inventory(inventory: dict, namespace: dict, checksum: str, i
                             require(type(item) is str and len(item) <= 16384, "invalid metadata array string")
                 elif key in string_fields:
                     require(type(value) is str and len(value) <= 16384 and "\0" not in value, "invalid metadata string")
-                elif key in address_fields and not (key == "flags" and group in {"programHeaders", "versionRequirements", "versionDefinitions"}):
-                    address(value)
-                elif key == "offset" and group in {"programHeaders", "relocations"}:
+                elif ((key in address_fields and not (key == "flags" and group in {"programHeaders", "versionRequirements", "versionDefinitions"})) or
+                        (key == "offset" and group in {"programHeaders", "relocations"})):
                     address(value)
                 elif key in {"slotFileOffset", "addend"} and value is None:
                     continue
@@ -511,6 +525,25 @@ def verify_external_inventory(inventory: dict, namespace: dict, checksum: str, i
     return symbols, relocations, imports
 
 
+def require_consistent_byte_ranges(ranges: list[tuple[int, int, bytes]], message: str) -> None:
+    """Reject contradictory bytes in retained ranges that share the same storage."""
+    ranges.sort(key=lambda row: (row[0], row[1], len(row[2])))
+    owner = None
+    cluster_start = cluster_end = 0
+    cluster = bytearray()
+    for current_owner, start, data in ranges:
+        end = start + len(data)
+        if current_owner != owner or start > cluster_end:
+            owner, cluster_start, cluster_end, cluster = current_owner, start, end, bytearray(data)
+            continue
+        overlap = max(0, cluster_end - start)
+        offset = start - cluster_start
+        require(cluster[offset:offset + overlap] == data[:overlap], message)
+        if end > cluster_end:
+            cluster.extend(data[overlap:])
+            cluster_end = end
+
+
 def retained_symbol_populations(inventory: dict, symbols: dict) -> None:
     """Bind every retained symbol/name/version entry to its declared section storage."""
     sections = {row["index"]: row for row in inventory["sections"]}
@@ -518,6 +551,7 @@ def retained_symbol_populations(inventory: dict, symbols: dict) -> None:
     tables = {index: row for index, row in sections.items() if row["type"] == 11}
     populations = {index: [] for index in tables}
     versions = {}
+    name_ranges = []
     for section in sections.values():
         if section["type"] == 0x6fffffff:
             link = section["link"]
@@ -541,6 +575,7 @@ def retained_symbol_populations(inventory: dict, symbols: dict) -> None:
                 symbol["binding"] == symbol["info"] >> 4 and symbol["visibility"] == symbol["other"] & 3 and
                 (symbol["binding"] == 0) == (index < table["info"]), "retained DYNSYM local-symbol boundary/encoding differs")
         populations[table_index].append(index)
+        name_ranges.append((table["link"], symbol["nameOffset"], encoded_name + b"\0"))
         if index == 0:
             require(all(symbol[key] == 0 for key in ("nameOffset", "info", "other", "rawSectionIndex", "resolvedSectionIndex")) and
                     symbol["name"] == "" and symbol["sectionKind"] == "undefined" and
@@ -553,6 +588,7 @@ def retained_symbol_populations(inventory: dict, symbols: dict) -> None:
                     version["raw"] <= 65535 and version["index"] == version["raw"] & 0x7fff and
                     version["hidden"] == bool(version["raw"] & 0x8000) and (index != 0 or version["raw"] == 0),
                     "retained VERSYM entry ownership/encoding differs")
+    require_consistent_byte_ranges(name_ranges, "retained symbol names conflict in linked string table")
     for index, table in tables.items():
         items = populations[index]
         require(address(table["entrySize"]) == 24 and address(table["size"]) == len(items) * 24 and
@@ -653,7 +689,7 @@ def retained_relocation_tables(inventory: dict, sections: dict) -> tuple[bool, d
         for begin, index, section_end in sorted(pieces):
             section = sections[index]
             require(address(section["entrySize"]) == width and section["link"] == inventory["activeSymbolTableSectionIndex"] and
-                    address(section["flags"]) & 2 and not address(section["flags"]) & 0x800,
+                    address(section["flags"]) & 2 != 0 and address(section["flags"]) & 0x800 == 0,
                     "retained dynamic relocation section metadata differs")
             piece_start, piece_end = max(start, begin), min(end, section_end)
             require(piece_start == covered and (piece_start - begin) % width == (piece_end - begin) % width == 0,
@@ -674,7 +710,8 @@ def retained_relocation_tables(inventory: dict, sections: dict) -> tuple[bool, d
     relative_tables = {"rela": [], "rel": []}
     for row in inventory["relocations"]:
         section = sections.get(row["sectionIndex"])
-        require(section is not None and section["type"] in {4, 9}, "missing retained relocation section")
+        if section is None or section["type"] not in {4, 9}:
+            raise VerificationError("missing retained relocation section")
         width = 24 if section["type"] == 4 else 16
         identity = (row["sectionIndex"], row["relocationIndex"])
         size = address(section["size"])
@@ -688,9 +725,9 @@ def retained_relocation_tables(inventory: dict, sections: dict) -> tuple[bool, d
         tables = [name for name, start, end, kind in ranges if kind == section["type"] and start <= location < end]
         require(row["dynamicTables"] == tables, "retained dynamic relocation membership differs from raw tags")
         memberships[row["locator"]] = tables
-        for name in relative_tables:
+        for name, rows in relative_tables.items():
             if name in tables:
-                relative_tables[name].append((location, row))
+                rows.append((location, row))
     for section in sections.values():
         linked = sections.get(section["link"])
         if section["type"] in {4, 9} and linked is not None and linked["type"] == 11:
@@ -725,11 +762,12 @@ def retained_version_records(inventory: dict, sections: dict, input_bytes: int) 
     def owner_for(row: dict, kind: int) -> dict:
         owner = sections.get(row["sectionIndex"])
         strings = sections.get(row["stringSectionIndex"])
-        require(owner is not None and owner["type"] == kind and owner["link"] == row["stringSectionIndex"] and
-                strings is not None and strings["type"] == 3, "retained GNU version record ownership differs")
+        if (owner is None or owner["type"] != kind or owner["link"] != row["stringSectionIndex"] or
+                strings is None or strings["type"] != 3):
+            raise VerificationError("retained GNU version record ownership differs")
         if owner["index"] not in owners:
             start, size, flags = (address(owner[key]) for key in ("address", "size", "flags"))
-            require(flags & 2 and not flags & 0x800 and start + size <= (1 << 64) - 1 and
+            require(flags & 2 != 0 and flags & 0x800 == 0 and start + size <= (1 << 64) - 1 and
                     owner["offset"] + size <= input_bytes and address(owner["entrySize"]) == 0 and owner["info"] > 0,
                     "retained GNU version section bounds/metadata differs")
             loads = [load for load in inventory["programHeaders"] if load["type"] == 1 and
@@ -768,7 +806,7 @@ def retained_version_records(inventory: dict, sections: dict, input_bytes: int) 
             else:
                 offsets, auxiliary_width = row["auxiliaryOffsets"], 8
                 require(len(offsets) == len(row["parentNames"]) + 1 and all(row["parentNames"]) and
-                        offsets == sorted(set(offsets)) and all(b - a >= 8 for a, b in zip(offsets, offsets[1:])),
+                        offsets == sorted(set(offsets)) and all(b - a >= 8 for a, b in pairwise(offsets)),
                         "retained Verdaux population/order differs")
             for offset in offsets:
                 require(offset not in auxiliary_offsets and offset >= row["recordOffset"] + width and within(owner, offset, auxiliary_width),
@@ -796,8 +834,8 @@ class RetainedRelocationIndex:
         for section in self.sections.values():
             if section["type"] == 0x6fffffff:
                 table = self.sections.get(section["link"])
-                require(table is not None and table["type"] == 11 and table["index"] not in self.version_sections,
-                        "retained VERSYM table linkage/uniqueness differs")
+                if table is None or table["type"] != 11 or table["index"] in self.version_sections:
+                    raise VerificationError("retained VERSYM table linkage/uniqueness differs")
                 self.version_sections[table["index"]] = section
         for symbol in symbols.values():
             require((symbol["version"] is not None) == (symbol["tableSectionIndex"] in self.version_sections),
@@ -1055,7 +1093,8 @@ def verify_external_bindings(evidence: dict, request: dict, report: dict, source
     sites = inventory_rows(report["sites"], SITE_KEYS, limits["maximumCalls"], "external sites")
     require(len(sites) == len(source_report["calls"]), "source physical calls were omitted or duplicated")
     counts = {}
-    for ordinal, (site, call) in enumerate(zip(sites, source_report["calls"])):
+    probe_ranges = []
+    for ordinal, (site, call) in enumerate(zip(sites, source_report["calls"], strict=True)):
         require(type(site["sourceOrdinal"]) is int and site["sourceOrdinal"] == ordinal and site["negativeCompleteness"] is False and
                 type(site["viaForwarder"]) is bool, "site identity/authority differs")
         for key in ("callerRoot", "callerCanonicalId", "callerRva", "instructionRva", "instructionBytes", "instructionLength"):
@@ -1099,6 +1138,10 @@ def verify_external_bindings(evidence: dict, request: dict, report: dict, source
             require(site["viaForwarder"] is (probe_location != location), "forwarding mode differs from physical call destination")
         counts[status] = counts.get(status, 0) + 1
         verify_external_site(site, location, symbols, relocations, imports, relocation_index)
+        probe = site["memoryProbe"]
+        if probe is not None:
+            probe_ranges.append((0, address(probe["address"]), bytes.fromhex(probe["availableBytes"])))
+    require_consistent_byte_ranges(probe_ranges, "retained probe byte windows conflict at overlapping executable addresses")
     expected_counts = {"sourcePhysicalSites": len(sites), "composedSiteRecords": len(sites), "namespaceEntries": len(imports), "dispositions": counts}
     fields(report["counts"], EXTERNAL_COUNTS, "external report counts")
     require(canonical_bytes(report["counts"]) == canonical_bytes(expected_counts) == canonical_bytes(evidence["counts"]),
@@ -1180,7 +1223,8 @@ def verify_external_site(site: dict, location: int, symbols: dict, relocations: 
     require(binding["runtimeImplementationAvailable"] is False and binding["runtimeProviderAvailable"] is False and address(binding["slotAddress"]) == slot,
             "binding grants runtime authority or differs from slot")
     relocation = relocations.get(binding["relocationLocator"])
-    require(relocation is not None and address(relocation["offset"]) == slot, "missing slot relocation")
+    if relocation is None or address(relocation["offset"]) != slot:
+        raise VerificationError("missing slot relocation")
     for target, source in (("relocationType", "type"), ("relocationAddend", "addend"), ("relocationDispositions", "dispositions"),
             ("dynamicTables", "dynamicTables"), ("slotLoadIndices", "slotLoadIndices"), ("slotFileOffset", "slotFileOffset"),
             ("symbolTableSectionIndex", "symbolTableSectionIndex"), ("symbolIndex", "symbolIndex")):
@@ -1262,11 +1306,13 @@ def verify_source(evidence: dict, expected_paths: set[str]) -> str:
         raise VerificationError(f"recorded source commit {commit} is unavailable or invalid; fetch that commit's history before offline verification") from error
     verify_git_object(tree, "tree")
     require(git(["show", "-s", "--format=%T", commit], 64) == (tree + "\n").encode(), "recorded source commit/tree disagree")
-    require(type(source["files"]) is list and len(source["files"]) == len(expected_paths), "incomplete source inventory")
-    for reference in source["files"]:
+    if type(source["files"]) is not list or len(source["files"]) != len(expected_paths):
+        raise VerificationError("incomplete source inventory")
+    source_files = cast(list[dict], source["files"])
+    for reference in source_files:
         file_reference(reference)
-    require([item["path"] for item in source["files"]] == sorted(expected_paths), "source inventory is not exact and ordered")
-    for reference in [*source["files"], *evidence["inputs"].values()]:
+    require([item["path"] for item in source_files] == sorted(expected_paths), "source inventory is not exact and ordered")
+    for reference in [*source_files, *evidence["inputs"].values()]:
         verify_git_blob(commit, reference)
     return commit
 
@@ -1275,7 +1321,7 @@ def verify_machine_evidence(evidence: dict, load) -> tuple[bytes, bytes, dict, d
     # Intentionally single-level: an external manifest cannot be used as source evidence.
     verify_envelope(evidence, MACHINE_KIND)
     payloads = read_payloads(evidence, load)
-    request_bytes, report_bytes, request, report = payloads
+    _request_bytes, report_bytes, request, report = payloads
     verify_report_bindings(evidence, request, report)
     require(len(report_bytes) <= request["limits"]["maximumOutputBytes"], "report exceeds committed output limit")
     verify_source(evidence, SOURCE_PATHS)
@@ -1285,7 +1331,8 @@ def verify_machine_evidence(evidence: dict, load) -> tuple[bytes, bytes, dict, d
 def verify_evidence(evidence_path: Path) -> tuple[bytes, dict]:
     evidence_path = repository_path(evidence_path, existing=True)
     evidence = parse_canonical(read_file(evidence_path, MAX_CONTROL_BYTES), MAX_CONTROL_BYTES)
-    load = lambda reference, maximum: read_file(evidence_path.parent / reference["path"], maximum)
+    def load(reference: dict, maximum: int) -> bytes:
+        return read_file(evidence_path.parent / reference["path"], maximum)
     if evidence.get("kind") == MACHINE_KIND:
         _, report_bytes, _, _ = verify_machine_evidence(evidence, load)
     else:
