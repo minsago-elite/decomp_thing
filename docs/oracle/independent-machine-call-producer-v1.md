@@ -174,10 +174,24 @@ digests and byte count, and limits. This checks report consistency; authentic
 instruction semantics still come from the authenticated byte decoder and inputs.
 It does not turn caller-authored JSON into authenticated positive evidence.
 
-After successful validation, the worker stages and syncs the complete canonical
-result, rechecks its output parent, and publishes with an atomic hard-link create.
-An existing output is never replaced. Failure is not permission to publish a
-partial result as complete or erase earlier evidence.
+After successful validation, the worker traverses the output directory chain
+through retained no-follow directory descriptors and requires a non-group/world-
+writable output parent. It stages and syncs the complete canonical result in an
+unnamed `O_TMPFILE` inode, verifies that retained inode, and publishes through the
+retained parent with `linkat(AT_EMPTY_PATH)`. An existing output is never replaced.
+If a parent or ancestor is renamed/replaced, publication stays in the pinned
+original directory; it cannot publish replacement bytes or touch a replacement
+directory. Failure cleanup only closes the unnamed staging descriptor, with no
+pathname to unlink. This requires the existing Linux syscall boundary and
+filesystem support for unnamed temporary files; unsupported hosts fail closed,
+without a pathname fallback. This does not establish production containment or
+an immutable output pathname for a downstream consumer. Failure is not permission
+to publish a partial result as complete or erase earlier evidence.
+
+Worker publication controls deterministically substitute both parents and
+ancestors before linking, substitute an ancestor during failure cleanup, exercise
+a late create-new collision, and reject pre-existing directory symlinks. They
+check original and replacement bytes and absence of staging entries.
 
 ## Verification scope
 

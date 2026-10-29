@@ -37,10 +37,12 @@ import claripy
 import cle
 import pyvex
 import bitstring
+import pycparser
 
 expected_pins = json.loads(Path("build/angr-qualification/pin-selection.json").read_text())
 assert angr.__version__ == expected_pins["angrVersion"], angr.__version__
 assert importlib.metadata.version("bitstring") == expected_pins["bitstringVersion"]
+assert importlib.metadata.version("pycparser") == expected_pins["pycparserVersion"]
 def identity(path):
     p = Path(path).resolve(strict=True)
     return {"path": str(p), "sha256": hashlib.sha256(p.read_bytes()).hexdigest()}
@@ -49,7 +51,7 @@ record = {
     "python": identity(sys.executable),
     "platform": platform.platform(),
     "modules": {m.__name__: {"version": importlib.metadata.version(m.__name__), **identity(m.__file__)}
-                for m in (angr, archinfo, claripy, cle, pyvex, bitstring)},
+                for m in (angr, archinfo, claripy, cle, pyvex, bitstring, pycparser)},
     "command": ["./gradlew", "--no-daemon", "realAngrQualification"],
     "interpreter": os.environ["ANGR_PYTHON"],
     "scope": "authored argv/stdin proposal fixture; no equivalence or process-attestation credit",

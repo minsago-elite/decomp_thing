@@ -126,17 +126,17 @@ def open_repository_parent(path: Path, *, existing: bool) -> Iterator[tuple[int,
     root = REPOSITORY_ROOT.resolve()
     parts = selected.relative_to(root).parts
     with ExitStack() as descriptors:
-        parent = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        parent = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
         descriptors.callback(os.close, parent)
         for part in parts[:-1]:
-            parent = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+            parent = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
             descriptors.callback(os.close, parent)
         yield parent, parts[-1]
 
 
 def read_file(path: Path, maximum: int) -> bytes:
     with open_repository_parent(path, existing=True) as (parent, leaf):
-        descriptor = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+        descriptor = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=parent)
         with os.fdopen(descriptor, "rb") as stream:
             before = os.fstat(stream.fileno())
             require(stat.S_ISREG(before.st_mode) and before.st_size <= maximum, "input file exceeds byte bound")
@@ -1350,9 +1350,11 @@ def verify_source(evidence: dict, expected_paths: set[str]) -> str:
         raise VerificationError(f"recorded source commit {commit} is unavailable or invalid; fetch that commit's history before offline verification") from error
     verify_git_object(tree, "tree")
     require(git(["show", "-s", "--format=%T", commit], 64) == (tree + "\n").encode(), "recorded source commit/tree disagree")
-    if type(source["files"]) is not list or len(source["files"]) != len(expected_paths):
+    raw_source_files = source["files"]
+    if type(raw_source_files) is not list:
         raise VerificationError("incomplete source inventory")
-    source_files = cast(list[dict], source["files"])
+    source_files = cast(list[dict], raw_source_files)
+    require(len(source_files) == len(expected_paths), "incomplete source inventory")
     for reference in source_files:
         file_reference(reference)
     require([item["path"] for item in source_files] == sorted(expected_paths), "source inventory is not exact and ordered")
@@ -1399,7 +1401,11 @@ def verify_evidence(evidence_path: Path) -> tuple[bytes, dict]:
 
 def extract_report(destination: Path, report_bytes: bytes) -> None:
     with open_repository_parent(destination, existing=False) as (parent, leaf):
-        descriptor = os.open(leaf, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
+        try:
+            descriptor = os.open(leaf, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                 0o600, dir_fd=parent)
+        except FileExistsError as error:
+            raise VerificationError("extraction destination already exists") from error
         try:
             with os.fdopen(descriptor, "wb") as stream:
                 stream.write(report_bytes)

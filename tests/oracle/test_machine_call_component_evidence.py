@@ -19,16 +19,21 @@ import unittest
 from collections.abc import Callable
 from contextlib import redirect_stdout
 from hashlib import sha256
+from importlib.machinery import ModuleSpec
 from pathlib import Path
 from typing import cast
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
-SPEC = importlib.util.spec_from_file_location("machine_call_evidence", ROOT / "scripts/verify-machine-call-component-evidence.py")
-if SPEC is None or SPEC.loader is None:
-    raise ImportError("cannot load machine-call evidence verifier")
-VERIFY = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(VERIFY)
+spec = importlib.util.spec_from_file_location("machine_call_evidence", ROOT / "scripts/verify-machine-call-component-evidence.py")
+if spec is None:
+    raise ImportError("cannot load offline machine-call evidence verifier")
+spec = cast(ModuleSpec, spec)
+loader = spec.loader
+if loader is None:
+    raise ImportError("offline machine-call evidence verifier has no loader")
+VERIFY = importlib.util.module_from_spec(spec)
+loader.exec_module(VERIFY)
 
 
 def reference(path: str, data: bytes) -> dict:
@@ -231,14 +236,14 @@ verify = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(verify)
 verify.REPOSITORY_ROOT = Path(sys.argv[2])
 victim = verify.REPOSITORY_ROOT / "fifo-substitution.bin"
-original = verify.repository_path
-def substitute(path, *, existing):
-    selected = original(path, existing=existing)
-    assert selected == victim and existing
-    selected.unlink()
-    os.mkfifo(selected, 0o600)
-    return selected
-verify.repository_path = substitute
+original = os.open
+def substitute(path, flags, *args, **kwargs):
+    if path == victim.name:
+        assert kwargs.get("dir_fd") is not None
+        victim.unlink()
+        os.mkfifo(victim, 0o600)
+    return original(path, flags, *args, **kwargs)
+os.open = substitute
 try:
     verify.read_file(victim, 64)
 except verify.VerificationError:
@@ -344,7 +349,79 @@ else:
             VERIFY.extract_report(parent / "report.json", b"verified report")
         self.assertFalse((moved / "report.json").exists())
         self.assertEqual(b"outside file must survive", outside_victim.read_bytes())
+    def test_parent_substitution_cannot_redirect_read_create_or_failure_cleanup(self) -> None:
+        # Deterministic syscall-boundary substitutions, not timing-dependent race loops.
+        for operation in ("read", "create", "cleanup"):
+            with self.subTest(operation=operation):
+                base = self.root / operation
+                repository = base / "repository"
+                parent = repository / "parent"
+                outside = base / "outside"
+                parent.mkdir(parents=True)
+                outside.mkdir()
+                held = repository / "held-parent"
+                destination = parent / "report.json"
+                sentinel = outside / destination.name
+                sentinel.write_bytes(b"outside sentinel")
+                if operation == "read":
+                    destination.write_bytes(b"inside input")
+                original_open = os.open
+                substituted = False
 
+                def substitute(path, flags, *args, destination=destination, parent=parent, held=held,
+                               outside=outside, original_open=original_open, **kwargs):
+                    nonlocal substituted
+                    if path == destination.name:
+                        self.assertIsNotNone(kwargs.get("dir_fd"))
+                        self.assertFalse(substituted)
+                        parent.rename(held)
+                        parent.symlink_to(outside, target_is_directory=True)
+                        substituted = True
+                    return original_open(path, flags, *args, **kwargs)
+
+                with mock.patch.object(VERIFY, "REPOSITORY_ROOT", repository), mock.patch.object(VERIFY.os, "open", substitute):
+                    if operation == "read":
+                        self.assertEqual(b"inside input", VERIFY.read_file(destination, 64))
+                    elif operation == "create":
+                        VERIFY.extract_report(destination, b"inside output")
+                        self.assertEqual(b"inside output", (held / destination.name).read_bytes())
+                    else:
+                        with (mock.patch.object(VERIFY.os, "fsync", side_effect=OSError("authored write failure")),
+                              self.assertRaisesRegex(OSError, "authored write failure")):
+                            VERIFY.extract_report(destination, b"partial output")
+                        self.assertFalse((held / destination.name).exists())
+                self.assertTrue(substituted)
+                self.assertEqual(b"outside sentinel", sentinel.read_bytes())
+
+    def test_parent_substitution_before_directory_open_is_rejected(self) -> None:
+        parent = self.root / "race-parent"
+        parent.mkdir()
+        outside = self.root / "race-outside"
+        outside.mkdir()
+        original_open = os.open
+
+        def substitute(path, flags, *args, **kwargs):
+            if path == parent.name:
+                parent.rename(self.root / "race-held")
+                parent.symlink_to(outside, target_is_directory=True)
+            return original_open(path, flags, *args, **kwargs)
+
+        with (mock.patch.object(VERIFY.os, "open", substitute), self.assertRaises(OSError)):
+            VERIFY.extract_report(parent / "report.json", b"must not escape")
+        self.assertEqual([], list(outside.iterdir()))
+
+    def test_read_refuses_symlink_parent_final_symlink_and_oversized_input(self) -> None:
+        victim = self.root / "input.bin"
+        victim.write_bytes(b"bounded input")
+        link = self.root / "input-link"
+        link.symlink_to(victim)
+        parent_link = self.root / "input-parent-link"
+        parent_link.symlink_to(self.directory, target_is_directory=True)
+        for candidate in (link, parent_link / "request.json", self.directory):
+            with self.subTest(path=candidate), self.assertRaises((VERIFY.VerificationError, OSError)):
+                VERIFY.read_file(candidate, 64)
+        with self.assertRaises(VERIFY.VerificationError):
+            VERIFY.read_file(victim, 1)
     def test_extraction_refuses_overwrite_symlinks_missing_parent_and_repository_escape(self) -> None:
         recovered, _ = self.verify()
         output = self.root / "output.json"

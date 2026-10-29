@@ -4,6 +4,7 @@ import decompengine.analysis.BundledGhidra
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.gcc.GccKotlinBootClasspathReference
+import decompengine.oracle.fulltree.FullTreeFunctionObservationRuntimeArtifactRole
 import java.io.File
 import java.util.concurrent.TimeUnit
 import java.net.URLClassLoader
@@ -55,6 +56,26 @@ class IndependentMachineCallWorkerV1Test {
         }
     }
 
+    @Test fun `live v2 request binds snapshot files and exact control root`() = fixture { root ->
+        val request = liveRequest(root)
+        assertContentEquals(request.canonicalBytes,
+            IndependentMachineCallRequestV2.parse(request.canonicalBytes).canonicalBytes)
+        assertFailsWith<IllegalArgumentException> { request.copy(controlRoot = root.resolve("other")) }
+        assertFailsWith<IllegalArgumentException> {
+            request.copy(runtime = request.runtime.copy(bridgeSnapshot =
+                request.runtime.bridgeSnapshot.copy(path = root.resolve("elsewhere/bridge.jar"))))
+        }
+        assertFailsWith<IllegalArgumentException> {
+            request.copy(runtime = request.runtime.copy(bridgeSnapshot =
+                request.runtime.bridgeSnapshot.copy(bytes = FullTreeFunctionObservationRuntimeArtifactRole.GHIDRA_BRIDGE.maximumBytes + 1)))
+        }
+        // A legacy v1 live envelope is still parseable for frozen evidence, but the live worker
+        // admission path must reject it instead of treating its source-path hashes as snapshots.
+        val legacy = request(root)
+        val path = Files.write(root.resolve("legacy-request.json"), legacy.canonicalBytes)
+        assertFailsWith<IllegalArgumentException> { IndependentMachineCallWorkerV1.run(path, OracleArtifacts.sha256(legacy.canonicalBytes)) }
+    }
+
     @Test fun `runtime pins paths hashes and finite budgets cannot be loosened by a request`() = fixture { root ->
         val base = json(request(root))
         val runtime = base.getValue("runtime") as JsonObject
@@ -82,16 +103,28 @@ class IndependentMachineCallWorkerV1Test {
     @Test fun `request and input commitment mutations fail before runtime loading or output`() = fixture { root ->
         val rich = Files.write(root.resolve("rich.elf"), byteArrayOf(1, 2, 3))
         val oracle = Files.write(root.resolve("oracle.json"), byteArrayOf(123, 125))
-        val base = request(root).copy(
+        val base = liveRequest(root).copy(
             richFile = MachineCallFileV1(rich, 3, OracleArtifacts.sha256(Files.readAllBytes(rich))),
             canonicalOracle = MachineCallFileV1(oracle, 2, OracleArtifacts.sha256(Files.readAllBytes(oracle))),
         )
         val requestPath = Files.write(root.resolve("request.json"), base.canonicalBytes)
-        assertFailsWith<IllegalArgumentException> { IndependentMachineCallWorkerV1.run(requestPath, "0".repeat(64)) }
+        val requestSha = OracleArtifacts.sha256(base.canonicalBytes)
+        assertContentEquals(base.canonicalBytes, IndependentMachineCallRequestV2.parse(base.canonicalBytes).canonicalBytes)
+        assertEquals("machine-call request SHA-256 differs", assertFailsWith<IllegalArgumentException> {
+            IndependentMachineCallWorkerV1.run(requestPath, "0".repeat(64))
+        }.message)
         Files.write(rich, byteArrayOf(1, 2, 4))
-        assertFailsWith<IllegalArgumentException> {
-            IndependentMachineCallWorkerV1.run(requestPath, OracleArtifacts.sha256(base.canonicalBytes))
-        }
+        assertEquals("machine-call rich ELF bytes or SHA-256 differ", assertFailsWith<IllegalArgumentException> {
+            IndependentMachineCallWorkerV1.run(requestPath, requestSha)
+        }.message)
+        assertFalse(Files.exists(base.outputPath))
+
+        // Restore the rich input so the oracle substitution must pass the first input check.
+        Files.write(rich, byteArrayOf(1, 2, 3))
+        Files.write(oracle, byteArrayOf(123, 93))
+        assertEquals("machine-call canonical oracle bytes or SHA-256 differ", assertFailsWith<IllegalArgumentException> {
+            IndependentMachineCallWorkerV1.run(requestPath, requestSha)
+        }.message)
         assertFalse(Files.exists(base.outputPath))
     }
 
@@ -101,10 +134,39 @@ class IndependentMachineCallWorkerV1Test {
         val manifest = Files.writeString(bundle.resolve("bundle.sha256"),
             OracleArtifacts.sha256(Files.readAllBytes(bridge)) + "  decomp-ghidra-bridge.jar\n")
         Files.write(root.resolve("ghidra.zip"), byteArrayOf(80, 75, 3, 4))
-        val runtime = request(root).runtime.copy(bridgeSha256 = OracleArtifacts.sha256(Files.readAllBytes(bridge)),
-            bundleManifestSha256 = OracleArtifacts.sha256(Files.readAllBytes(manifest)))
-        assertFailsWith<IllegalArgumentException> { AuthenticatedMachineCallRuntimeV1.open(runtime).close() }
+        val runtime = MachineCallRuntimeV2(bundle, root.resolve("ghidra.zip"), BundledGhidra.ARCHIVE_SHA256,
+            569445154L, OracleArtifacts.sha256(Files.readAllBytes(bridge)),
+            OracleArtifacts.sha256(Files.readAllBytes(manifest)), "x86:LE:64:default", "4.8",
+            MachineCallFileV1(root.resolve("control/runtime/ghidra-bridge.runtime"), Files.size(bridge),
+                OracleArtifacts.sha256(Files.readAllBytes(bridge))),
+            MachineCallFileV1(root.resolve("control/runtime/ghidra-bundle-manifest.runtime"), Files.size(manifest),
+                OracleArtifacts.sha256(Files.readAllBytes(manifest))))
+        assertFailsWith<IllegalArgumentException> { AuthenticatedMachineCallRuntimeV2.open(runtime).close() }
         assertFalse(Files.exists(root.resolve("output.json")))
+    }
+
+    @Test fun `runtime library verification consumes the authenticated manifest snapshot`() = fixture { root ->
+        val bundle = Files.createDirectory(root.resolve("bundle"))
+        val bridge = Files.write(bundle.resolve("decomp-ghidra-bridge.jar"), byteArrayOf(1, 2, 3))
+        val application = Files.createDirectories(bundle.resolve("ghidra_${BundledGhidra.VERSION}_PUBLIC/Ghidra"))
+            .resolve("application.properties")
+        Files.writeString(application,
+            "application.version=${BundledGhidra.VERSION}\napplication.release.name=PUBLIC\n")
+        val library = Files.createDirectories(application.parent.resolve("Framework/Test/lib"))
+            .resolve("runtime.jar").also { Files.write(it, byteArrayOf(4, 5, 6)) }
+        fun record(path: Path): String = "${OracleArtifacts.sha256(Files.readAllBytes(path))}  ${bundle.relativize(path).joinToString("/")}\n"
+        val manifestBytes = (record(bridge) + record(application) + record(library)).toByteArray()
+        Files.write(bundle.resolve("bundle.sha256"), manifestBytes)
+        val expected = listOf(library)
+        assertEquals(expected, BundledGhidra.at(bundle)
+            .verifiedLibraryPathsFromManifestSnapshot(manifestBytes) {})
+
+        // The worker's selected inventory remains bound to the snapshot even if the source-side
+        // manifest path changes; a source manifest is not allowed to silently replace it.
+        Files.writeString(bundle.resolve("bundle.sha256"), "malformed source manifest\n")
+        assertEquals(expected, BundledGhidra.at(bundle)
+            .verifiedLibraryPathsFromManifestSnapshot(manifestBytes) {})
+        assertFailsWith<IllegalArgumentException> { BundledGhidra.at(bundle).verifiedLibraryPaths {} }
     }
 
     @Test fun `loaded bridge must have the committed jar source and bytes`() = fixture { root ->
@@ -155,9 +217,7 @@ class IndependentMachineCallWorkerV1Test {
     @Test fun `pinned bundled runtime initializes and decodes bytes in a fresh worker JVM`() = fixture { root ->
         val bundle = Path.of(requireNotNull(System.getProperty("decompengine.ghidra.bundle"))).toAbsolutePath().normalize()
         val archive = Path.of(requireNotNull(System.getProperty("decompengine.ghidra.provenanceArchive"))).toAbsolutePath().normalize()
-        val runtime = MachineCallRuntimeV1(bundle, archive, BundledGhidra.ARCHIVE_SHA256, 569445154L,
-            OracleArtifacts.sha256(Files.readAllBytes(bundle.resolve("decomp-ghidra-bridge.jar"))),
-            OracleArtifacts.sha256(Files.readAllBytes(bundle.resolve("bundle.sha256"))), "x86:LE:64:default", "4.8")
+        val runtime = runtimeV2(root, bundle, archive)
         val bootRoot = Path.of(requireNotNull(System.getProperty("decompengine.oracle.gcc.bootKeeperClasspathRoot")))
         val classpath = GccKotlinBootClasspathReference.open().use { reference ->
             reference.entries.joinToString(File.pathSeparator) { bootRoot.resolve(it.logicalName).toString() }
@@ -166,8 +226,11 @@ class IndependentMachineCallWorkerV1Test {
         val temporary = Files.createDirectory(root.resolve("tmp"))
         val log = Files.createTempDirectory(root.parent, "runtime-evidence-").resolve("worker.log")
         withMachineCallWorkerFixtureV1 { rich, oracle, inputSha, oracleSha, manifestSha ->
-            val request = IndependentMachineCallRequestV1(MachineCallFileV1(rich, Files.size(rich), inputSha),
-                MachineCallFileV1(oracle, Files.size(oracle), oracleSha), manifestSha, runtime, root.resolve("output.json"))
+            val control = Files.createDirectories(root.resolve("control/runtime"))
+            val reports = Files.createDirectory(root.resolve("control/reports"))
+            val request = IndependentMachineCallRequestV2(MachineCallFileV1(rich, Files.size(rich), inputSha),
+                MachineCallFileV1(oracle, Files.size(oracle), oracleSha), manifestSha, runtime, root.resolve("control"),
+                reports.resolve("independent-machine-call-observations.json"))
             val requestPath = Files.write(root.resolve("request.json"), request.canonicalBytes)
             val requestSha = OracleArtifacts.sha256(request.canonicalBytes)
             val process = ProcessBuilder(Path.of(System.getProperty("java.home"), "bin/java").toString(), "-Xmx512m",
@@ -259,12 +322,135 @@ class IndependentMachineCallWorkerV1Test {
         Files.list(root).use { paths -> assertFalse(paths.anyMatch { it.fileName.toString().endsWith(".pending") }) }
     }
 
+    @Test fun `publication stays anchored when parent or ancestor is substituted before link`() = fixture { root ->
+        for (replaceAncestor in listOf(false, true)) for (symlink in listOf(false, true)) {
+            val case = Files.createDirectory(root.resolve("case-$replaceAncestor-$symlink"))
+            val ancestor = Files.createDirectory(case.resolve("ancestor"))
+            val parent = Files.createDirectory(ancestor.resolve("parent"))
+            val output = parent.resolve("output.json")
+            val replaced = if (replaceAncestor) ancestor else parent
+            val moved = case.resolve("retained")
+            val replacement = Files.createDirectory(case.resolve("replacement"))
+            val replacementParent = if (replaceAncestor) Files.createDirectory(replacement.resolve("parent")) else replacement
+            val decoy = Files.writeString(replacementParent.resolve("output.json"), "untrusted replacement")
+            var linked = false
+            publishMachineCallResultV1(output, "validated report".toByteArray()) { phase ->
+                if (phase == "before publication link") {
+                    linked = true
+                    Files.move(replaced, moved)
+                    if (symlink) Files.createSymbolicLink(replaced, replacement) else Files.move(replacement, replaced)
+                }
+            }
+            assertTrue(linked)
+            val retainedParent = if (replaceAncestor) moved.resolve("parent") else moved
+            assertEquals("validated report", Files.readString(retainedParent.resolve("output.json")))
+            assertEquals("untrusted replacement", Files.readString(output))
+            if (symlink) assertEquals("untrusted replacement", Files.readString(decoy))
+            Files.list(retainedParent).use { paths -> assertEquals(listOf("output.json"), paths.map { it.fileName.toString() }.toList()) }
+        }
+    }
+
+    @Test fun `failed publication closes unnamed staging without touching substituted cleanup paths`() = fixture { root ->
+        val ancestor = Files.createDirectory(root.resolve("ancestor"))
+        val parent = Files.createDirectory(ancestor.resolve("parent"))
+        val output = parent.resolve("output.json")
+        val moved = root.resolve("retained")
+        val replacement = Files.createDirectories(root.resolve("replacement/parent"))
+        val sentinel = Files.writeString(replacement.resolve(".machine-call-decoy.pending"), "keep me")
+        Files.writeString(replacement.resolve("output.json"), "replacement report")
+        val injected = IllegalStateException("injected before link")
+        var cleaned = false
+        val failure = assertFailsWith<IllegalStateException> {
+            publishMachineCallResultV1(output, "validated report".toByteArray()) { phase ->
+                when (phase) {
+                    "before publication link" -> throw injected
+                    "before staging close" -> {
+                        cleaned = true
+                        Files.move(ancestor, moved)
+                        Files.createSymbolicLink(ancestor, replacement.parent)
+                    }
+                }
+            }
+        }
+        assertTrue(failure === injected)
+        assertTrue(cleaned)
+        assertEquals("keep me", Files.readString(sentinel))
+        assertEquals("replacement report", Files.readString(output))
+        Files.list(moved.resolve("parent")).use { paths -> assertEquals(0L, paths.count()) }
+    }
+
+    @Test fun `late output collision cannot replace bytes and leaves no staging entry`() = fixture { root ->
+        val output = root.resolve("output.json")
+        var cleaned = false
+        assertFails {
+            publishMachineCallResultV1(output, "validated report".toByteArray()) { phase ->
+                if (phase == "before publication link") Files.writeString(output, "concurrent winner")
+                if (phase == "before staging close") cleaned = true
+            }
+        }
+        assertTrue(cleaned)
+        assertEquals("concurrent winner", Files.readString(output))
+        Files.list(root).use { paths -> assertEquals(listOf(output), paths.toList()) }
+    }
+
+    @Test fun `publication rejects group or world writable output parents`() = fixture { root ->
+        val permissions = Files.getPosixFilePermissions(root)
+        try {
+            for (untrusted in listOf(java.nio.file.attribute.PosixFilePermission.GROUP_WRITE,
+                java.nio.file.attribute.PosixFilePermission.OTHERS_WRITE)) {
+                Files.setPosixFilePermissions(root, permissions + untrusted)
+                assertFailsWith<IllegalArgumentException> {
+                    publishMachineCallResultV1(root.resolve("output.json"), byteArrayOf(1))
+                }
+                Files.list(root).use { paths -> assertEquals(0L, paths.count()) }
+            }
+        } finally {
+            Files.setPosixFilePermissions(root, permissions)
+        }
+    }
+
+    @Test fun `publication rejects symlinked directory chains without creating output`() = fixture { root ->
+        val real = Files.createDirectories(root.resolve("real/parent"))
+        val linked = Files.createSymbolicLink(root.resolve("linked"), real.parent)
+        assertFails { publishMachineCallResultV1(linked.resolve("parent/output.json"), byteArrayOf(1)) }
+        val leafLink = Files.createSymbolicLink(root.resolve("leaf-link"), real)
+        assertFails { publishMachineCallResultV1(leafLink.resolve("output.json"), byteArrayOf(1)) }
+        Files.list(real).use { paths -> assertEquals(0L, paths.count()) }
+    }
+
     private fun request(root: Path) = IndependentMachineCallRequestV1(
         MachineCallFileV1(root.resolve("rich.elf"), 3, "1".repeat(64)),
         MachineCallFileV1(root.resolve("oracle.json"), 2, "2".repeat(64)), "3".repeat(64),
         MachineCallRuntimeV1(root.resolve("bundle"), root.resolve("ghidra.zip"), BundledGhidra.ARCHIVE_SHA256,
             569445154L, "4".repeat(64), "5".repeat(64), "x86:LE:64:default", "4.8"), root.resolve("output.json"),
     )
+
+    private fun liveRequest(root: Path): IndependentMachineCallRequestV2 {
+        val control = root.resolve("control")
+        val bridge = MachineCallFileV1(control.resolve("runtime/ghidra-bridge.runtime"), 4, "4".repeat(64))
+        val manifest = MachineCallFileV1(control.resolve("runtime/ghidra-bundle-manifest.runtime"), 5, "5".repeat(64))
+        return IndependentMachineCallRequestV2(
+            MachineCallFileV1(root.resolve("rich.elf"), 3, "1".repeat(64)),
+            MachineCallFileV1(root.resolve("oracle.json"), 2, "2".repeat(64)), "3".repeat(64),
+            MachineCallRuntimeV2(root.resolve("bundle"), root.resolve("ghidra.zip"), BundledGhidra.ARCHIVE_SHA256,
+                569445154L, "4".repeat(64), "5".repeat(64), "x86:LE:64:default", "4.8", bridge, manifest),
+            control, control.resolve("reports/independent-machine-call-observations.json"),
+        )
+    }
+
+    private fun runtimeV2(root: Path, bundle: Path, archive: Path): MachineCallRuntimeV2 {
+        val directory = Files.createDirectories(root.resolve("control/runtime"))
+        val bridgeSource = bundle.resolve("decomp-ghidra-bridge.jar")
+        val manifestSource = bundle.resolve("bundle.sha256")
+        val bridge = Files.copy(bridgeSource, directory.resolve("ghidra-bridge.runtime"))
+        val manifest = Files.copy(manifestSource, directory.resolve("ghidra-bundle-manifest.runtime"))
+        val bridgeSha = OracleArtifacts.sha256(Files.readAllBytes(bridgeSource))
+        val manifestSha = OracleArtifacts.sha256(Files.readAllBytes(manifestSource))
+        return MachineCallRuntimeV2(bundle, archive, BundledGhidra.ARCHIVE_SHA256, 569445154L,
+            bridgeSha, manifestSha, "x86:LE:64:default", "4.8",
+            MachineCallFileV1(bridge, Files.size(bridge), bridgeSha),
+            MachineCallFileV1(manifest, Files.size(manifest), manifestSha))
+    }
 
     private fun json(request: IndependentMachineCallRequestV1) = OracleJson.parseCanonical(request.canonicalBytes) as JsonObject
     private fun parse(value: JsonObject) = IndependentMachineCallRequestV1.parse(OracleJson.canonicalBytes(value))

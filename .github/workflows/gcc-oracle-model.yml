@@ -421,6 +421,7 @@ jobs:
             build/gcc-driver-dwarf-interfaces
             build/reports/tests/test
             build/test-results/test
+            build/reports/junit-signatures
 
   preprocessing-reference:
     name: Real GCC preprocessing and dependency references
