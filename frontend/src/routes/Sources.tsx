@@ -9,7 +9,7 @@ import type { SourceSelection, SourceSnapshotPin } from '../app/paths';
 import { usePrivateTransport } from '../session/PrivateTransport';
 import { useSession } from '../session/useSession';
 import type { BrowserSession, RuntimeSnapshot } from '../session/session';
-import { formatExactBytes } from '../jobs/metadataFormat';
+import { formatExactBytes } from '../copy/format';
 import { beginSourceRead, bindDirectory, bindFile, currentSourceRead, directoryReadRoute, pinSourceEntry, sourceCursor, sourceEntryCurrent, sourceFilePolicy, sourceReadMessage, sourceSnapshotSelection } from '../sources/navigation';
 import type { DirectorySelection, FileSelection, SourceHistoryEntry, SourceReadState, SourceSnapshot } from '../sources/navigation';
 import { SourcePreview } from '../sources/SourcePreview';
