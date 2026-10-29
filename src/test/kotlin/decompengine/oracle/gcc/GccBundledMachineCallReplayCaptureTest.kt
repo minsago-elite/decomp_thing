@@ -4,9 +4,10 @@ import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.analysis.BundledGhidra
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
-import decompengine.oracle.machinecalls.IndependentMachineCallRequestV1
+import decompengine.oracle.machinecalls.IndependentMachineCallRequestV2
 import decompengine.oracle.machinecalls.MachineCallFileV1
-import decompengine.oracle.machinecalls.MachineCallRuntimeV1
+import decompengine.oracle.machinecalls.MachineCallRuntimeV2
+import decompengine.oracle.fulltree.FullTreeFunctionObservationRuntimeArtifactRole
 import decompengine.oracle.machinecalls.withMachineCallComponentFixtureV1
 import decompengine.oracle.structural.VerifiedStructuralInputsV1
 import java.nio.file.Files
@@ -68,20 +69,20 @@ class GccBundledMachineCallReplayCaptureTest {
         assertTrue(constructors.isNotEmpty())
         for (constructor in constructors) {
             val parameters = constructor.parameterTypes
-            assertTrue(GccBundledNativeCallOperation::class.java in parameters)
+            assertTrue(GccBundledNativeClaimFreezeOperation::class.java in parameters)
             assertTrue(VerifiedStructuralInputsV1::class.java in parameters)
-            assertTrue(IndependentMachineCallRequestV1::class.java in parameters)
+            assertTrue(IndependentMachineCallRequestV2::class.java in parameters)
             assertFails { constructor.newInstance(*arrayOfNulls<Any>(parameters.size)) }
         }
     }
 
     private class Fixture(val root: Path, val reports: Path, val controlName: String,
-        val request: IndependentMachineCallRequestV1, val bytes: ByteArray) {
+        val request: IndependentMachineCallRequestV2, val bytes: ByteArray) {
         fun writeReport(value: ByteArray) {
             Files.write(request.outputPath, value)
             Files.setPosixFilePermissions(request.outputPath, PosixFilePermissions.fromString("rw-------"))
         }
-        fun capture(selected: IndependentMachineCallRequestV1 = request, checkpoint: () -> Unit = {}): GccBundledMachineCallReplayCapture =
+        fun capture(selected: IndependentMachineCallRequestV2 = request, checkpoint: () -> Unit = {}): GccBundledMachineCallReplayCapture =
             LinuxFilesystemSyscalls.openRoot(root).use { run ->
                 LinuxFilesystemSyscalls.openDirectoryAt(run.fd, controlName).use { control ->
                     GccBundledMachineCallReplayOutputCapture.capture(run, controlName, control.identity, selected, checkpoint)
@@ -99,17 +100,22 @@ class GccBundledMachineCallReplayCaptureTest {
         val controlName = "control-" + "a".repeat(64)
         val reports = directory(directory(root.resolve(controlName)).resolve("reports"))
         try {
-            val request = IndependentMachineCallRequestV1(
+            val control = root.resolve(controlName)
+            val request = IndependentMachineCallRequestV2(
                 MachineCallFileV1(root.resolve("rich"), component.getValue("inputBytes").jsonPrimitive.long,
                     component.getValue("inputSha256").jsonPrimitive.content),
                 MachineCallFileV1(root.resolve("oracle"), 1, component.getValue("canonicalOracleSha256").jsonPrimitive.content),
                 component.getValue("artifactManifestSha256").jsonPrimitive.content,
-                MachineCallRuntimeV1(root.resolve("bundle"), root.resolve("archive"), BundledGhidra.ARCHIVE_SHA256,
-                    569445154L, "b".repeat(64), "c".repeat(64), "x86:LE:64:default", "4.8"),
-                reports.resolve(GccBundledMachineCallReplayOutputCapture.REPORT_NAME))
+                MachineCallRuntimeV2(root.resolve("bundle"), root.resolve("archive"), BundledGhidra.ARCHIVE_SHA256,
+                    569445154L, "b".repeat(64), "c".repeat(64), "x86:LE:64:default", "4.8",
+                    MachineCallFileV1(control.resolve("runtime").resolve(
+                        FullTreeFunctionObservationRuntimeArtifactRole.GHIDRA_BRIDGE.snapshotName), 1, "b".repeat(64)),
+                    MachineCallFileV1(control.resolve("runtime").resolve(
+                        FullTreeFunctionObservationRuntimeArtifactRole.GHIDRA_BUNDLE_MANIFEST.snapshotName), 1, "c".repeat(64))),
+                control, reports.resolve(GccBundledMachineCallReplayOutputCapture.REPORT_NAME))
             val bytes = OracleJson.canonicalBytes(JsonObject(component + mapOf(
                 "requestSha256" to JsonPrimitive(OracleArtifacts.sha256(request.canonicalBytes)),
-                "runtime" to request.runtime.json(),
+                "runtime" to request.runtime.reportJson(),
                 "decoderAuthentication" to JsonPrimitive("authenticated-bundled-worker-v1"),
                 "containmentStatus" to JsonPrimitive("external-owner-required"),
             )))

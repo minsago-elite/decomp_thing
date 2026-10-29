@@ -16,6 +16,9 @@ internal object GccBundledNativeStructuralEvidenceV1 {
     const val BINDING_NAME = "native-structural-replay-binding.json"
     const val BOUNDARY_NAME = "native-selected-boundary-score.json"
     const val MODEL_BINDING_NAME = "native-model-structural-binding.json"
+    const val CLAIMS_NAME = "native-recovered-call-claims.json"
+    const val FREEZE_NAME = "native-recovered-call-freeze.json"
+    const val POPULATION_NAME = "native-recovered-call-population.json"
     private val REPORT_LIMITS = StrictJsonLimits(maximumInputBytes = 64 * 1024 * 1024,
         maximumCanonicalBytes = 64 * 1024 * 1024, maximumNodes = 1_000_000,
         maximumStringBytes = 16 * 1024 * 1024, maximumTotalStringBytes = 48 * 1024 * 1024)
@@ -52,6 +55,9 @@ internal object GccBundledNativeStructuralEvidenceV1 {
             "programModelBytes" to JsonPrimitive(selected.programModelBytes),
             "nativeBindingSha256" to JsonPrimitive(OracleArtifacts.sha256(GccNativeCallReceiptLineage.createBinding(operation.native))),
             "nativeObservationsSha256" to JsonPrimitive(operation.native.snapshot.summary.observationsSha256),
+            "nativeClaimFreezeSha256" to JsonPrimitive(OracleArtifacts.sha256(operation.frozenNativeClaims.canonicalBytes)),
+            "nativeClaimsSha256" to JsonPrimitive(operation.frozenNativeClaims.claimsSha256),
+            "nativePopulationSha256" to JsonPrimitive(OracleArtifacts.sha256(operation.projectedPopulationBytes)),
             "selectedBoundaryScoreSha256" to JsonPrimitive(OracleArtifacts.sha256(score)),
             "boundaryObservationSha256" to parsedScore.getValue("boundaryObservationSha256"),
             "modelBindingSha256" to JsonPrimitive(OracleArtifacts.sha256(selected.fullExportBindingBytes)),
