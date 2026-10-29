@@ -1392,6 +1392,7 @@ class RetainedExternalEvidenceRegressionTest(unittest.TestCase):
                                     ("overlapping-forwarder-probe", "retained probe byte windows conflict"),
                                     ("overlapping-string-name", "retained symbol names conflict in linked string table"),
                                     ("verneed-provider-conflict", "retained Verneed provider request differs within header"),
+                                    ("verneed-overlapping-auxiliary", "retained GNU version record storage overlaps"),
                                     ("copy-raw-section-index", "active COPY relocation symbol raw/resolved section index differs")):
                 with self.subTest(mutation=mutation):
                     report, evidence = copy.deepcopy(original_report), copy.deepcopy(original_evidence)
@@ -1499,6 +1500,11 @@ class RetainedExternalEvidenceRegressionTest(unittest.TestCase):
                                     if site["externalTargetId"] == old_id:
                                         site["externalTargetId"] = entry["id"]
                         report["externalNamespaceSha256"] = sha256(VERIFY.canonical_bytes(report["externalNamespace"])).hexdigest()
+                    elif mutation == "verneed-overlapping-auxiliary":
+                        requirement = next(row for row in report["dynamicInventory"]["versionRequirements"]
+                            if row["sectionIndex"] == 8 and row["name"] == "GLIBC_2.14")
+                        self.assertEqual(7360, requirement["auxiliaryOffset"])
+                        requirement["auxiliaryOffset"] = 7372
                     elif mutation == "copy-raw-section-index":
                         inventory = report["dynamicInventory"]
                         relocation = next(row for row in inventory["relocations"] if row["type"] == 5)

@@ -750,6 +750,7 @@ def retained_relocation_tables(inventory: dict, sections: dict) -> tuple[bool, d
 def retained_version_records(inventory: dict, sections: dict, input_bytes: int) -> dict:
     """Validate retained Verneed/Verdef provenance, not the original ELF strings/bytes."""
     requirements, keys, owners, populations = {}, set(), {}, {}
+    storage_ranges, record_headers = {}, set()
 
     def elf_hash(name: str) -> int:
         result = 0
@@ -787,7 +788,6 @@ def retained_version_records(inventory: dict, sections: dict, input_bytes: int) 
         rows = inventory[group]
         order = [(row["sectionIndex"], row["recordOffset"], *([row["auxiliaryOffset"]] if group == "versionRequirements" else [])) for row in rows]
         require(order == sorted(order), "retained GNU version record order differs")
-        auxiliary_offsets = set()
         provider_by_verneed = {}
         for row in rows:
             owner = owner_for(row, kind)
@@ -798,6 +798,10 @@ def retained_version_records(inventory: dict, sections: dict, input_bytes: int) 
                     bool(row["name"]) and row["hash"] == elf_hash(row["name"]), "retained GNU version identity/hash differs")
             keys.add(key)
             require(within(owner, row["recordOffset"], width), "retained GNU version record bounds differ")
+            header = (owner["index"], row["recordOffset"])
+            if header not in record_headers:
+                storage_ranges.setdefault(owner["index"], []).append((row["recordOffset"], row["recordOffset"] + width))
+                record_headers.add(header)
             records = populations.setdefault(owner["index"], set())
             require(group == "versionRequirements" or row["recordOffset"] not in records, "duplicate retained Verdef record")
             records.add(row["recordOffset"])
@@ -813,9 +817,13 @@ def retained_version_records(inventory: dict, sections: dict, input_bytes: int) 
                         offsets == sorted(set(offsets)) and all(b - a >= 8 for a, b in pairwise(offsets)),
                         "retained Verdaux population/order differs")
             for offset in offsets:
-                require(offset not in auxiliary_offsets and offset >= row["recordOffset"] + width and within(owner, offset, auxiliary_width),
-                        "retained GNU version auxiliary bounds/uniqueness differs")
-                auxiliary_offsets.add(offset)
+                require(offset >= row["recordOffset"] + width and within(owner, offset, auxiliary_width),
+                        "retained GNU version auxiliary bounds/order differs")
+                storage_ranges.setdefault(owner["index"], []).append((offset, offset + auxiliary_width))
+    for ranges in storage_ranges.values():
+        ordered = sorted(ranges)
+        require(all(right[0] >= left[1] for left, right in pairwise(ordered)),
+                "retained GNU version record storage overlaps")
     for owner in sections.values():
         if owner["type"] in {0x6ffffffe, 0x6ffffffd}:
             require(owner["index"] in owners and owner["info"] == len(populations.get(owner["index"], set())),
