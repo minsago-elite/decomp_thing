@@ -22,6 +22,8 @@ internal class WebApiController(
     clock: Clock = Clock.systemUTC(),
     private val harnessReadiness: WebHarnessReadinessProjector = WebHarnessReadinessProjector(),
     private val agentPreflight: WebAgentPreflight = WebAgentPreflight { error("No agent preflight is configured.") },
+    private val git: WebGitCapability = WebGitCapability.detect(),
+    private val readExplorationArtifact: (String, String, Long) -> decompengine.repair.StableRegularFile = jobs::readArtifact,
 ) {
     private val prefix = "${assets.basePath}api/v1/"
     private val applicationBuildId = applicationBuildId()
@@ -38,6 +40,7 @@ internal class WebApiController(
         webAdmissionPrerequisites(jobs.durableRegistrations(), workflow, harness, readiness().prerequisites, harnessReadiness::inspectSandbox)
     }
     private val agentPreflights = WebAgentPreflightController(access, agentPreflight, assets.basePath)
+    private val gitRoutes = WebGitController(access, jobs, jobMutations, git, assets.basePath)
     private val runPages = WebRunPages { jobId ->
         when (val inspection = jobs.inspectDurableJob(jobId)) {
             is decompengine.jobs.WorkflowJobInspection.Available -> inspection.snapshot
@@ -49,6 +52,7 @@ internal class WebApiController(
     private val revisionSourcePages = WebRevisionSourcePages(jobs::readRevisionSources)
     private val revisionDirectoryPages = WebRevisionDirectoryPages(jobs::readRevisionSources)
     private val revisionFileMetadata = WebRevisionFileMetadata(jobs::readRevisionFileMetadata)
+    private val revisionSourceSearch = WebRevisionSourceSearch(jobs::searchRevisionSources)
     private val revisionValidationReports = WebRevisionValidationReports(jobs::readRecordedValidationReport)
     private val eventStream = WebEventStream(access, streamResources, progressPages, read = { jobId, runId ->
         readWebProgress(jobs, jobId, runId).second
@@ -59,7 +63,7 @@ internal class WebApiController(
         val path = exchange.requestURI.rawPath
         if (!path.startsWith("${assets.basePath}api/")) return false
         val resource = path.removePrefix(prefix)
-        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs", "recovery", "agent/preflight") || resource.matches(Regex("(?:jobs|uploads)/[^/]+|jobs/[^/]+/runs(?:/[^/]+(?:/reports/(?:exploration|revision-validation)|/validation-history|/source-catalog|/revisions/[^/]+/(?:sources|source-directories/[^/]+|source-files/[^/]+(?:/(?:chunk|content))?)|/snapshot|/events|/progress-pin|/cancel|/recover|/controls|/queue-position)?)?|jobs/[^/]+/artifacts/[^/]+/content")))) {
+        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs", "recovery", "agent/preflight") || resource.matches(Regex("(?:jobs|uploads)/[^/]+|jobs/[^/]+/runs(?:/[^/]+(?:/reports/(?:exploration|revision-validation)|/validation-history|/source-catalog|/revisions/[^/]+/(?:sources|source-search|source-directories/[^/]+|source-files/[^/]+(?:/(?:chunk|content))?)|/snapshot|/events|/progress-pin|/cancel|/recover|/controls|/queue-position)?)?|jobs/[^/]+/artifacts/[^/]+/content|jobs/[^/]+/repositories(?:/[^/]+(?:/operations/[^/]+)?)?")))) {
             try {
                 val policy = if (exchange.requestMethod in setOf("POST", "PUT", "PATCH", "DELETE")) {
                     WebEndpointPolicy.jsonMutation(exchange.requestMethod)
@@ -139,6 +143,7 @@ internal class WebApiController(
                     } finally { exchange.close() }
                 }
                 resource == "agent/preflight" -> agentPreflights.handle(exchange)
+                resource.matches(Regex("jobs/[^/]+/repositories(?:/[^/]+(?:/operations/[^/]+)?)?")) -> gitRoutes.handle(exchange, resource.split('/'))
                 resource.matches(Regex("jobs/[^/]+/runs/[^/]+/cancel")) -> {
                     val parts = resource.split('/')
                     cancellations.handle(exchange, parts[1], parts[3])
@@ -240,6 +245,13 @@ internal class WebApiController(
                     sendWebApiResponse(exchange, 200, "revisionDirectory", revisionDirectoryPages.page(session.sessionId,
                         parts[1], parts[3], parts[5], parts[7], exchange.requestURI.rawQuery))
                 }
+                resource.matches(Regex("jobs/[^/]+/runs/[^/]+/revisions/[^/]+/source-search")) -> {
+                    val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.privateRead(allowHead = true)))
+                    requireJsonAccept(exchange)
+                    val parts = resource.split('/')
+                    sendWebApiResponse(exchange, 200, "sourceSearch",
+                        revisionSourceSearch.search(session.sessionId, parts[1], parts[3], parts[5], exchange.requestURI.rawQuery))
+                }
                 resource.matches(Regex("jobs/[^/]+/runs/[^/]+/revisions/[^/]+/sources")) -> {
                     val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.privateRead(allowHead = true)))
                     requireJsonAccept(exchange)
@@ -276,7 +288,8 @@ internal class WebApiController(
                     requireNoWebApiQuery(exchange); requireJsonAccept(exchange)
                     val parts = resource.split('/')
                     val attempt = jobs.getAttempt(parts[1], parts[3])
-                    val bytes = try { jobs.readArtifact(parts[1], "reports/runs/${attempt.runId}/exploration.json", 1_048_576).bytes }
+                    val bytes = try { readExplorationArtifact(parts[1], "reports/runs/${attempt.runId}/exploration.json", 1_048_576).bytes }
+                        catch (failure: decompengine.jobs.ArtifactChangedException) { throw failure }
                         catch (_: JobStoreException) { null }
                     if (jobs.getAttempt(parts[1], parts[3]).version != attempt.version) throw WebJobServiceException("REPORT_CHANGED", "The attempt changed during this read. Refresh its evidence.")
                     sendWebApiResponse(exchange, 200, "report", webExplorationReport(parts[1], parts[3], bytes, assets.basePath))
@@ -348,6 +361,8 @@ internal class WebApiController(
                 access.sendDenied(exchange, WebAccessDenied(status, if (status == 404) "NOT_FOUND" else publicWebDiagnosticCode(failure.code),
                     publicWebDiagnosticMessage(failure.code)))
             }
+        } catch (_: decompengine.jobs.ArtifactChangedException) {
+            access.sendDenied(exchange, WebAccessDenied(409, "ARTIFACT_CHANGED", publicWebDiagnosticMessage("ARTIFACT_CHANGED")))
         } catch (_: JobStoreException) {
             access.sendDenied(exchange, WebAccessDenied(404, "NOT_FOUND", "The requested job is unavailable."))
         } catch (_: Exception) {
@@ -367,7 +382,8 @@ internal class WebApiController(
         put("sessionExpiresAt", credentials.session.expiresAt.toString())
         put("csrfToken", credentials.csrfToken)
         val readiness = readiness()
-        put("capabilities", JsonArray(webWorkflowCapabilities(jobs.durableRegistrations(), readiness) + harnessCapability(readiness)))
+        put("capabilities", JsonArray(webWorkflowCapabilities(jobs.durableRegistrations(), readiness) +
+            harnessCapability(readiness) + git.capabilities()))
         // Configured ceilings for the API profile; unavailable resources remain
         // unavailable until their adapters enforce these limits and are enabled.
         put("limits", buildJsonObject {
@@ -376,7 +392,8 @@ internal class WebApiController(
             put("downloadIdleMs", "120000")
             put("maxJsonBytes", "1048576")
             put("maxUploadBytes", StreamingMultipartUpload.MAX_REQUEST_BYTES.toString())
-            put("maxSourceChunkBytes", "0")
+            // The chunk reader enforces 4..131072 bytes per range over digest-verified inputs of at most 8 MiB.
+            put("maxSourceChunkBytes", WebRevisionSourceContent.MAXIMUM_CHUNK_BYTES.toString())
             put("maxLogChunkBytes", "0")
             put("maxEventCount", "1024")
             put("maxEventBytes", "2097152")
@@ -396,7 +413,7 @@ internal class WebApiController(
                 "aarch64", "arm64" -> "aarch64"
                 else -> "unknown"
             })
-            put("gitVersion", JsonNull)
+            put("gitVersion", git.versionJson())
             put("scheduler", webSchedulerSnapshot(jobs.schedulerSnapshot()))
             put("progressRetention", webProgressRetentionStatus(jobs.progressRetentionStatus()))
         })

@@ -155,6 +155,16 @@ data class RepairResourceBudget(
 
 class RepairBudgetExceededException(message: String) : IllegalArgumentException(message)
 
+/** A contained stable read found no admissible regular file (missing, linked, special or escaping). */
+internal class StableFileUnavailableException(message: String) : IllegalArgumentException(message)
+
+/** A contained stable read observed its file or a path binding change; nothing read may be used. */
+internal class StableFileChangedException(message: String) : IllegalArgumentException(message)
+
+private inline fun requireUnchanged(condition: Boolean, message: () -> String) {
+    if (!condition) throw StableFileChangedException(message())
+}
+
 class RepairGraphLockTimeoutException(message: String) : IllegalStateException(message)
 
 /** Optional source-bound diagnostic ownership supplied by a profile. */
@@ -7252,15 +7262,14 @@ internal fun hashStableRegularFile(
             parent = LinuxFilesystemSyscalls.openDirectoryAt(parent.fd, segment)
             directories += parent
         }
-        authorized = requireNotNull(LinuxFilesystemSyscalls.openRegularFileAtOrNull(parent.fd, parts.last())) {
-            "stable hash target is unavailable"
-        }
+        authorized = LinuxFilesystemSyscalls.openRegularFileAtOrNull(parent.fd, parts.last())
+            ?: throw StableFileUnavailableException("stable hash target is unavailable")
         readable = LinuxFilesystemSyscalls.openReadableFrom(authorized)
-        require(readable.identity == authorized.identity) { "stable hash descriptor identity changed" }
+        requireUnchanged(readable.identity == authorized.identity) { "stable hash descriptor identity changed" }
         validateMetadata(readable)
         val descriptorPath = Path.of("/proc/self/fd/${readable.fd}")
         val before = Files.readAttributes(descriptorPath, BasicFileAttributes::class.java)
-        require(before.isRegularFile) { "stable hash descriptor is not regular" }
+        requireUnchanged(before.isRegularFile) { "stable hash descriptor is not regular" }
         declaredSize(before.size())
         val digest = java.security.MessageDigest.getInstance("SHA-256")
         val buffer = ByteArray(64 * 1024)
@@ -7279,7 +7288,7 @@ internal fun hashStableRegularFile(
         cancellationCheck()
         val after = Files.readAttributes(descriptorPath, BasicFileAttributes::class.java)
         validateMetadata(readable)
-        require(after.isRegularFile && before.fileKey() == after.fileKey() &&
+        requireUnchanged(after.isRegularFile && before.fileKey() == after.fileKey() &&
             before.size() == after.size() && after.size() == size &&
             before.lastModifiedTime() == after.lastModifiedTime() &&
             LinuxFilesystemSyscalls.identity(readable.fd) == readable.identity) {
@@ -7321,20 +7330,19 @@ internal fun readStableRegularFile(
             pinnedDirectories += parent
             cancellationCheck()
         }
-        authorized = requireNotNull(LinuxFilesystemSyscalls.openPathAtOrNull(parent.fd, parts.last())) {
-            "stable file-read target disappeared: $relative"
-        }
-        require(authorized.identity.isRegularFile && !authorized.identity.isSymbolicLink) {
-            "stable file-read target is not a regular non-symbolic-link file: $relative"
+        authorized = LinuxFilesystemSyscalls.openPathAtOrNull(parent.fd, parts.last())
+            ?: throw StableFileUnavailableException("stable file-read target disappeared: $relative")
+        if (!authorized.identity.isRegularFile || authorized.identity.isSymbolicLink) {
+            throw StableFileUnavailableException("stable file-read target is not a regular non-symbolic-link file: $relative")
         }
         afterAuthorization?.invoke()
         readable = LinuxFilesystemSyscalls.openReadableFrom(authorized)
-        require(readable.identity == authorized.identity) {
+        requireUnchanged(readable.identity == authorized.identity) {
             "stable file-read descriptor identity differs from its authorized path: $relative"
         }
         val descriptorPath = Path.of("/proc/self/fd/${readable.fd}")
         val before = Files.readAttributes(descriptorPath, BasicFileAttributes::class.java)
-        require(before.isRegularFile) { "stable file-read descriptor is not regular: $relative" }
+        requireUnchanged(before.isRegularFile) { "stable file-read descriptor is not regular: $relative" }
         if (before.size() > maximumBytes) {
             throw RepairBudgetExceededException(
                 "stable file-read target $relative has ${before.size()} bytes; limit=$maximumBytes",
@@ -7348,7 +7356,7 @@ internal fun readStableRegularFile(
         afterRead?.invoke()
         cancellationCheck()
         val after = Files.readAttributes(descriptorPath, BasicFileAttributes::class.java)
-        require(
+        requireUnchanged(
             after.isRegularFile && before.fileKey() == after.fileKey() &&
                 before.size() == after.size() && after.size() == bytes.size.toLong() &&
                 before.lastModifiedTime() == after.lastModifiedTime() &&
@@ -7375,18 +7383,20 @@ private fun revalidateDescriptorPath(
     try {
         var parent = openRepairRootDirectory(base)
         opened += parent
-        require(parent.identity == expectedDirectories.first()) { "stable file-read root binding changed" }
+        requireUnchanged(parent.identity == expectedDirectories.first()) { "stable file-read root binding changed" }
         parts.dropLast(1).forEachIndexed { index, segment ->
             parent = LinuxFilesystemSyscalls.openDirectoryAt(parent.fd, segment)
             opened += parent
-            require(parent.identity == expectedDirectories[index + 1]) {
+            requireUnchanged(parent.identity == expectedDirectories[index + 1]) {
                 "stable file-read directory binding changed"
             }
         }
-        target = requireNotNull(LinuxFilesystemSyscalls.openPathAtOrNull(parent.fd, parts.last())) {
-            "stable file-read target disappeared during revalidation"
-        }
-        require(target.identity == expectedFile) { "stable file-read target binding changed" }
+        target = LinuxFilesystemSyscalls.openPathAtOrNull(parent.fd, parts.last())
+            ?: throw StableFileChangedException("stable file-read target disappeared during revalidation")
+        requireUnchanged(target.identity == expectedFile) { "stable file-read target binding changed" }
+    } catch (failure: java.io.IOException) {
+        // The path was admitted at open; failing to reopen it now is a concurrent change, not absence.
+        throw StableFileChangedException("stable file-read path binding changed").apply { initCause(failure) }
     } finally {
         target?.close()
         opened.asReversed().forEach { it.close() }

@@ -67,7 +67,7 @@ class WebApiControllerTest {
             assertEquals(StreamingMultipartUpload.MAX_REQUEST_BYTES.toString(), limits.getValue("maxUploadBytes").jsonPrimitive.content)
             assertEquals("30000", limits.getValue("requestDeadlineMs").jsonPrimitive.content)
             assertEquals("120000", limits.getValue("uploadDeadlineMs").jsonPrimitive.content)
-            assertEquals("0", limits.getValue("maxSourceChunkBytes").jsonPrimitive.content)
+            assertEquals("131072", limits.getValue("maxSourceChunkBytes").jsonPrimitive.content)
             assertEquals("0", limits.getValue("maxLogChunkBytes").jsonPrimitive.content)
             assertEquals("50", limits.getValue("defaultPageLimit").jsonPrimitive.content)
             assertEquals("200", limits.getValue("maxPageLimit").jsonPrimitive.content)
