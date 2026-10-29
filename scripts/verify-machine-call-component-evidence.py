@@ -891,6 +891,7 @@ class RetainedRelocationIndex:
                 if linked is None or linked["type"] != 3:
                     raise VerificationError("retained dynamic metadata version string table is missing")
                 required.add(linked["index"])
+        metadata_ranges = []
         for index in sorted(required):
             section = self.sections[index]
             start, size, flags = (address(section[key]) for key in ("address", "size", "flags"))
@@ -902,6 +903,7 @@ class RetainedRelocationIndex:
                     "retained dynamic metadata is not allocated uncompressed file storage within bounds")
             if not size:
                 continue  # As in the producer, an empty table requires no LOAD owner.
+            metadata_ranges.append((section["offset"], section["offset"] + size))
             end = start + size - 1
             require(bisect_right(self.load_starts, end) - bisect_left(self.load_ends, start) == 1,
                     "retained dynamic metadata lacks unique LOAD ownership")
@@ -909,6 +911,10 @@ class RetainedRelocationIndex:
             require(load[0] <= start and end < load[0] + load[3] and
                     load[4] + start - load[0] == section["offset"],
                     "retained dynamic metadata file and LOAD mappings disagree")
+        previous_end = 0
+        for range_start, range_end in sorted(metadata_ranges):
+            require(range_start >= previous_end, "retained dynamic metadata sections overlap")
+            previous_end = range_end
 
     def code_window_length(self, location: int) -> int | None:
         """Unique executable section/LOAD ownership, mirroring codeWindowLength().

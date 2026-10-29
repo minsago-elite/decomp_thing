@@ -974,6 +974,22 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
                         with self.assertRaisesRegex(VERIFY.VerificationError, "relative relocation prefix"):
                             self.verify()
 
+    def test_dynamic_metadata_rejects_overlapping_symbol_and_string_ranges_after_rehash(self) -> None:
+        inventory = self.report["dynamicInventory"]
+        symbols = next(row for row in inventory["sections"] if row["name"] == ".dynsym")
+        strings = next(row for row in inventory["sections"] if row["name"] == ".dynstr")
+        old_string_address = int(strings["address"], 16)
+        strings.update(address=symbols["address"], offset=symbols["offset"])
+        next(row for row in inventory["dynamicEntries"] if row["tag"] == "0x5")["value"] = symbols["address"]
+        inventory["programHeaders"] = [row for row in inventory["programHeaders"]
+            if not (row["type"] == 1 and int(row["virtualAddress"], 16) == old_string_address)]
+        symbol_load = next(row for row in inventory["programHeaders"]
+            if row["type"] == 1 and row["virtualAddress"] == symbols["address"])
+        symbol_load.update(fileSize=strings["size"], memorySize=strings["size"])
+        self.write_payloads()  # Rehash every payload while keeping the contradictory positive import claim.
+        with self.assertRaisesRegex(VERIFY.VerificationError, "dynamic metadata sections overlap"):
+            self.verify()
+
     def test_dynamic_metadata_requires_allocated_uncompressed_uniquely_mapped_storage(self) -> None:
         inventory = self.report["dynamicInventory"]
         # The baseline includes complete nonempty symbol/string/dynamic storage.
@@ -1093,18 +1109,18 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
         inventory["sections"].extend({"index": index, "name": name, "type": kind, "flags": "0x2", "address": "0x0", "offset": 0,
             "size": "0x0", "link": link, "info": 0, "alignment": "0x1", "entrySize": "0x0"}
             for index, name, kind, link in ((6, ".gnu.version", 0x6fffffff, 1), (7, ".gnu.version_r", 0x6ffffffe, 3)))
-        inventory["sections"][7].update(entrySize="0x2", size="0x4")
-        inventory["programHeaders"].append({"index": 22, "type": 1, "flags": 4, "offset": "0x0",
-            "virtualAddress": "0x0", "physicalAddress": "0x0", "fileSize": "0x4", "memorySize": "0x4", "alignment": "0x1"})
+        inventory["sections"][7].update(address="0x6300", offset=128, entrySize="0x2", size="0x4")
+        inventory["programHeaders"].append({"index": 22, "type": 1, "flags": 4, "offset": "0x80",
+            "virtualAddress": "0x6300", "physicalAddress": "0x6300", "fileSize": "0x4", "memorySize": "0x4", "alignment": "0x1"})
         inventory["sections"][8].update(address="0x6000", offset=64, size="0x20", info=1)
         inventory["programHeaders"].append({"index": 1, "type": 1, "flags": 4, "offset": "0x40",
             "virtualAddress": "0x6000", "physicalAddress": "0x6000", "fileSize": "0x20", "memorySize": "0x20", "alignment": "0x1"})
         inventory["dynamicEntries"][-1:-1] = [{"index": index + 8, "fileOffset": (index + 8) * 16, "tag": hex(tag), "value": hex(value)}
-            for index, (tag, value) in enumerate(((0x6ffffffe, 0x6000), (0x6fffffff, 1), (0x6ffffff0, 0)))]
+            for index, (tag, value) in enumerate(((0x6ffffffe, 0x6000), (0x6fffffff, 1), (0x6ffffff0, 0x6300)))]
         self.sync_dynamic_storage(inventory)
-        inventory["dynamicSymbols"][0]["version"] = {"sectionIndex": 6, "fileOffset": 0, "raw": 0, "index": 0, "hidden": False,
+        inventory["dynamicSymbols"][0]["version"] = {"sectionIndex": 6, "fileOffset": 128, "raw": 0, "index": 0, "hidden": False,
             "kind": "local", "name": None, "providerRequest": None}
-        inventory["dynamicSymbols"][1]["version"] = {"sectionIndex": 6, "fileOffset": 2, "raw": 2, "index": 2, "hidden": False,
+        inventory["dynamicSymbols"][1]["version"] = {"sectionIndex": 6, "fileOffset": 130, "raw": 2, "index": 2, "hidden": False,
             "kind": "required-version", "name": "VER_1", "providerRequest": "libexample.so"}
         inventory["versionRequirements"] = [{"sectionIndex": 7, "stringSectionIndex": 3, "recordOffset": 64, "auxiliaryOffset": 80,
             "providerRequest": "libexample.so", "name": "VER_1", "rawIndex": 2, "index": 2, "flags": 0, "hash": 0x5aa821}]
@@ -1364,7 +1380,7 @@ class RetainedExternalEvidenceRegressionTest(unittest.TestCase):
                                     ("verneed-out-of-file-records", "GNU version record bounds"),
                                     ("plt-nonexecutable-section", "byte-window ownership"),
                                     ("plt-file-mapping-disagrees", "byte-window ownership"),
-                                    ("plt-nonexecutable-load", "byte-window ownership")):
+                                    ("plt-nonexecutable-load", "source call instruction lacks uniquely owned executable file-backed bytes")):
                 with self.subTest(mutation=mutation):
                     report, evidence = copy.deepcopy(original_report), copy.deepcopy(original_evidence)
                     if mutation in {"strtab-pointer", "strtab-size"}:
