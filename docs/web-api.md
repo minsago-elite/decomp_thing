@@ -149,8 +149,8 @@ internal storage optimization and must not merge identity, permissions or histor
 | `GET J/runs`, `GET R` | `200 runs`, `200 run` | Bounded attempts or durable attempt snapshot; #160 |
 | `GET R/progress-pin` | `200 progressPin`, strong run ETag | Current per-attempt journal pin; #172 |
 | `PUT R/progress-pin` | `200 progressPin`, original result on keyed replay | Strict `progressPinRequest`, session/Origin/CSRF, run If-Match and idempotency; #172/#177 |
-| `GET /agent/preflight` | `200 agentPreflight` | Last explicit agent inspection result; never starts the agent; #493 |
-| `POST /agent/preflight` | `202 agentPreflight`, `409` while one runs | Strict `agentPreflightRequest` (`{"action":"inspect"}`), session/Origin/CSRF; starts one single-flight `preflight(WEB)`; #493 |
+| `GET /api/v1/agent/preflight` | `200 agentPreflight` | Last explicit agent inspection result; never starts the agent; #493 |
+| `POST /api/v1/agent/preflight` | `202 agentPreflight`, `409` while one runs | Strict `agentPreflightRequest` (`{"action":"inspect"}`), session/Origin/CSRF; starts one single-flight `preflight(WEB)`; #493 |
 | `POST J/runs` | `202 run`, `Location: R` | `workflowStart` request, capability/limits/input checks, job If-Match; #163 |
 | `POST R/cancel` | `202 run` or `200 run` if already terminal | Closed `workflowCancel` request, idempotent recorded intent, run If-Match; #163 |
 | `POST R/recover` | `202 run`, `Location` of a new attempt | Closed `recover` request; explicit `retry` or capability-gated `resume`; run If-Match and idempotency; #486 |
@@ -162,6 +162,7 @@ internal storage optimization and must not merge identity, permissions or histor
 | `GET R/reports/{reportId}` | `200 report` | State may be missing/partial/unsupported/unknown; #165 |
 | `GET R/source-catalog` | `200 sourceCatalog` | Bounded flat manifest metadata; selected durable job/run; #490 |
 | `GET`, `HEAD R/reports/revision-validation` | `200 report` | Explicit graph and evidence-owner selection; checked normal summary and bounded case pages; #489, #543 |
+| `GET`, `HEAD R/validation-history` | `200 validationHistory` | Bounded finalized-attempt, baseline and failed-operation history windows; see validation history discovery |
 | `GET`, `HEAD R/revisions/{revisionId}/sources` | `200 revisionSources` | Bounded canonical input commitments for the selected persisted candidate; #490 |
 | `GET`, `HEAD R/revisions/{revisionId}/source-directories/{directoryId}` | `200 revisionDirectory` | Lazy immediate children of canonical input prefixes; use `root` for the first directory; #188 |
 | `GET`, `HEAD R/revisions/{revisionId}/source-files/{fileId}` | `200 revisionFile` | Recorded file metadata and opaque parent directory, without requesting its body; #188 |
@@ -198,6 +199,26 @@ job filters are bounded display-name search (256 characters), exact known status
 (default) or `sort=oldest` creation/identity ordering. Cursors cannot be reused across
 resources, revisions or filters. Counts are optional and explicitly exact/estimated/unknown;
 absence of a total never prevents page navigation.
+
+### Route matrix qualification
+
+`WebRouteMatrixTest` parses the table above and probes every documented method and route through
+the real SPA listener. Foreign `Origin`, cross-site `Sec-Fetch-Site` and forwarding headers are
+refused before route selection; private routes require a session and mutations the exact Origin,
+JSON or multipart media type and CSRF token. A `405` lists every live method of the resource in
+`Allow`, HEAD matches its GET status without a body, and wrong `Accept`, unknown queries and
+out-of-range page limits are typed refusals. Every JSON body, including each error, validates
+against `contract.schema.json`, and the route's success kind must be one the row names. Contract
+request fixtures and malformed bodies are refused without changing stored bytes. A documented row
+without a live matrix entry is reserved and must stay an authenticated `404 NOT_FOUND`; enabling it
+requires adding its live methods and fixture outcome to the matrix. `verify.py` checks that every
+success document named here is a schema kind or one of the reserved collection documents. Each
+documented error status is produced by the matrix or owned by a named suite; `501` and `504` are
+reserved and not emitted by the current producer, whose request deadline closes the exchange.
+
+An exploration report whose file is missing, linked, nonregular, multiply named or over its byte
+bound is an `unknown` report without an artifact descriptor, and its download is `404`. Browser
+readable job artifacts and selected source inputs must have exactly one filesystem name.
 
 ## Errors, deadlines and concurrent mutations
 

@@ -301,7 +301,9 @@ class JobStore internal constructor(
                 parts.size <= 32 && parts.none { it.isBlank() || it == "." || it == ".." }
             }
         ) { "artifact path must be a canonical report path" }
-        return contained("artifact") { readStableRegularFile(root, "$jobId/$relativePath", maximumBytes) }
+        return contained("artifact") {
+            readStableRegularFile(root, "$jobId/$relativePath", maximumBytes).requireSingleName("artifact")
+        }
     }
 
     /**
@@ -417,7 +419,10 @@ class JobStore internal constructor(
         require(runId.matches(Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}"))) { "source attempt identity is invalid" }
         decompengine.project.requireNormalizedProjectPath(sourcePath, "selected source input")
         require(maximumBytes in 1..8L * 1024 * 1024) { "source input read limit is invalid" }
-        return contained("source input") { readStableRegularFile(root, "$jobId/reports/runs/$runId/source-tree/$sourcePath", maximumBytes) }
+        return contained("source input") {
+            readStableRegularFile(root, "$jobId/reports/runs/$runId/source-tree/$sourcePath", maximumBytes)
+                .requireSingleName("source input")
+        }
     }
 
     internal fun sourceArchiveInventory(
@@ -621,6 +626,15 @@ class JobStore internal constructor(
         val STATUS_MESSAGE_RESERVE = "\u0001".repeat(500)
         const val MAXIMUM_UPDATE_TIMESTAMP = "9999-12-31T23:59:59.999999999Z"
     }
+}
+
+/**
+ * A second name can be a hard link created inside the job tree to bytes owned elsewhere. Descriptor
+ * pinning contains the path, not the inode, so browser-readable job files must have exactly one name.
+ */
+private fun StableRegularFile.requireSingleName(kind: String): StableRegularFile {
+    if (identity.linkCount != 1) throw JobStoreException("$kind has more than one filesystem name")
+    return this
 }
 
 fun ElfMetadata.toJson(): JsonObject = buildJsonObject {
