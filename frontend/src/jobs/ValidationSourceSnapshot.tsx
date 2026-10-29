@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from 'preact/hooks';
 import { sourceDirectoryPath } from '../app/paths';
 import { ApiClientError, withApiFailureReference } from '../api/errors';
 import { recordedValidationCopy as copy } from '../copy/attempt';
+import { commonCopy } from '../copy/common';
+import { message } from '../shared/messages';
 import { usePrivateTransport } from '../session/PrivateTransport';
 import { bindDirectory, directoryReadRoute } from '../sources/navigation';
 
@@ -46,6 +48,6 @@ export function ValidationSourceSnapshot({ jobId, runId, validationRevisionId, s
     <button type="button" disabled={view?.loading ?? false} onClick={() => { void resolve(); }}>{copy.findSource}</button>
     {view?.loading && <p role="status">{copy.readingSource}</p>}
     {view?.error && <p role="alert">{view.error}</p>}
-    {view?.data && <><MetadataReceipt kind="sourceResolution" receipt={view.data.receipt} /><p>{copy.retainedRevision}: <code>{view.data.value.revisionId}</code></p><a href={view.data.value.href}>{copy.openSource}</a></>}
+    {view?.data && <><MetadataReceipt kind="sourceResolution" receipt={view.data.receipt} /><p>{message(commonCopy.labeledValue, { label: copy.retainedRevision, value: <code>{view.data.value.revisionId}</code> })}</p><a href={view.data.value.href}>{copy.openSource}</a></>}
   </section>;
 }

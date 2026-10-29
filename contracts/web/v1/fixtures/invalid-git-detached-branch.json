@@ -1,0 +1,29 @@
+{
+  "apiVersion": 1,
+  "kind": "gitWorkspace",
+  "requestId": "request_example_1",
+  "data": {
+    "repositoryId": "repository_example_3",
+    "worktreeId": "worktree_example_3",
+    "repositoryVersion": "repo_version_1",
+    "worktreeVersion": "worktree_version_2",
+    "objectFormat": "sha1",
+    "origin": "imported",
+    "trackingPolicy": "source-only-v1",
+    "headObjectId": "0123456789abcdef0123456789abcdef01234567",
+    "headRefId": "ref_develop",
+    "headState": "detached",
+    "headRefName": "refs/heads/develop",
+    "candidateRevisionId": null,
+    "dirty": false,
+    "refs": [
+      {
+        "refId": "ref_develop",
+        "displayName": "refs/heads/develop",
+        "objectId": "0123456789abcdef0123456789abcdef01234567",
+        "version": "ref_version_1"
+      }
+    ],
+    "mapping": null
+  }
+}

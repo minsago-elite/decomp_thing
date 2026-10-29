@@ -2,6 +2,18 @@
 
 export { activityReceiptAgeCopy, receiptAge } from './receiptAge';
 
+/**
+ * Limitations written into the exported validation record. They describe a versioned file format,
+ * so they stay stable record text even when interface copy is translated.
+ */
+export const validationExportLimitations = [
+  'This export contains the selected observation only, not a complete receipt or every case page.',
+  'A compact full-corpus mismatch index may be included; unselected case details and full outputs are not included.',
+  'Output previews are bounded prefixes; comparison flags describe the retained full-byte observations.',
+  'Failure labels and completed-pair counts are producer reports, not inferred per-case outcomes.',
+  'This export grants no acceptance, authentication, containment or equivalence qualification.',
+] as const;
+
 export const recordedValidationCopy = {
   savedSelectionInvalid: 'This saved validation selection is invalid. No validation read was made. Read validation evidence to select a current observation.',
   savedSelectionUnavailable: 'This exact saved validation selection could not be restored. No different observation was substituted. Read validation evidence to select a current observation.',
@@ -46,6 +58,9 @@ export const recordedValidationCopy = {
   noCases: 'Verified case details are unavailable for this receipt. No case result is inferred.',
   bytes: 'Observed bytes', prefix: 'Prefix bytes', truncated: 'Prefix truncated.', complete: 'Complete output prefix.',
   hex: 'Hexadecimal prefix', text: 'Escaped UTF-8 prefix', empty: 'Empty observed output',
+  previewSize: '{bytes}: {total}. {prefix}: {prefixBytes}. {completeness}', previewPart: '{title}: {part}',
+  ownerAction: '{action}: {kind} {owner}', ordinalAction: '{action}: {ordinal}',
+  comparisonFacts: '{population}: {total}. {policy}: {value}.', comparisonWindowText: '{window} {page} / {pages}. {ordinals}',
   noText: 'No UTF-8 text preview is available; inspect the hexadecimal prefix.',
   inspectFailure: 'Inspect failure', failureTitle: 'Recorded failed operation',
   failureScope: 'These producer diagnostics identify an enclosing operation. They do not establish an individual child-process outcome, successful case comparisons, process absence or independent cleanup verification.',
@@ -122,7 +137,7 @@ export const activityRowCopy = {
   "trackingExhausted": "Producer message tracking limit reached.",
   "correlation": "Correlation details for sequence {sequence}",
   "otherObservation": "{type} metadata retained; content is not displayed in this observation view.",
-  "theseAreRecordedReferencesTaskSessionAndRevisionEvidencePages": "These are recorded references. Task, session and revision evidence pages are not available from this view.",
+  "theseAreRecordedReferencesTaskSessionAndRevisionEvidencePages": "These are recorded references. Each one states whether this view links it to attempt or revision evidence, or why it does not.",
   "taskDigest": "Task digest",
   "sessionDigest": "Session digest",
   "revisionDigest": "Revision digest",
@@ -296,6 +311,7 @@ export const explorationCasesCopy = {
 } as const;
 
 export const runCopy = {
+  thisJobWasDeleted: "This attempt’s job was deleted. Its files were removed and cannot be recovered.",
   attemptViews: 'Attempt views', overviewView: 'Overview', activityView: 'Activity', evidenceView: 'Evidence',
   activityTitle: 'Attempt activity', evidenceTitle: 'Attempt evidence',
   "wallClockLimit": "{value} milliseconds",
@@ -318,7 +334,6 @@ export const runCopy = {
   "created": "Created",
   "started": "Started",
   "ended": "Ended",
-  "terminalReason": "Terminal reason",
   "inputRevision": "Input revision",
   "resultRevision": "Result revision",
   "completionAloneDoesNotEstablishAcceptedReconstructionAcceptanceBelongsTo": "Completion alone does not establish accepted reconstruction. Acceptance belongs to this attempt; a job may retain an accepted result from another attempt.",
@@ -327,13 +342,11 @@ export const runCopy = {
   "harnessCapabilityNotRecorded": "Not recorded for this attempt",
   "recordedHarnessBoundary": "This identity comes from the persisted attempt configuration. It does not identify the current server configuration, verify authentication or establish readiness.",
   "recordedLimits": "Recorded limits",
-  "sourceThePersistedConfigurationForThisAttemptLimitsDoNot": "Source: the persisted configuration for this attempt. Limits do not measure consumption or confer acceptance.",
   "wallClockLimit2": "Wall-clock limit",
   "idleLimit2": "Idle limit",
   "outputLimit2": "Output limit",
   "toolCallLimit2": "Tool-call limit",
   "reportedUsage": "Reported usage",
-  "sourceThePersistedAttemptReceiptMeasurementTimeIsNotReported": "Source: the persisted attempt receipt. Measurement time is not reported; the attempt end time is not a substitute. Missing counters remain unknown.",
   "inputTokens": "Input tokens",
   "outputTokens": "Output tokens",
   "cachedInputTokens": "Cached input tokens",
