@@ -407,7 +407,17 @@ public final class NativeInterfaceCollectorControls {
         return nextType;
     }
 
+    private static void assertGlobalTypeWorkChargeOnce() throws Exception {
+        long[] work = {0};
+        java.lang.reflect.Method charge = ExportGlobalTypeObservationsV1.class.getDeclaredMethod(
+            "chargeWork", long[].class, long.class, TaskMonitor.class);
+        charge.setAccessible(true);
+        charge.invoke(null, work, 0L, MONITOR);
+        require(work[0] == 1, "one non-graph work charge must consume exactly one unit");
+    }
+
     private static void globalTypeCapture(Program program) throws Exception {
+        assertGlobalTypeWorkChargeOnce();
         String modelSha = sha256(model);
         long modification = program.getModificationNumber();
         Path first = root.resolve("global-types.ndjson");

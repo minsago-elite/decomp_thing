@@ -358,7 +358,6 @@ public final class ExportGlobalTypeObservationsV1 {
         monitor.checkCancelled();
         if (work[0] >= MAXIMUM_WORK || graphSteps >= MAXIMUM_WORK - work[0]) throw new IllegalStateException("global/type collector work bound exceeded");
         work[0]++;
-        work[0]++;
     }
 
     private static void checkGraphWork(long[] work, long graphSteps, TaskMonitor monitor) throws Exception {
