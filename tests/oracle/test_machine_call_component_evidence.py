@@ -1392,6 +1392,8 @@ class RetainedExternalEvidenceRegressionTest(unittest.TestCase):
                                     ("overlapping-forwarder-probe", "retained probe byte windows conflict"),
                                     ("overlapping-string-name", "retained symbol names conflict in linked string table"),
                                     ("verneed-provider-conflict", "retained Verneed provider request differs within header"),
+                                    ("verneed-oversized-provider", "retained GNU version string exceeds linked string table"),
+                                    ("verneed-oversized-name", "retained GNU version string exceeds linked string table"),
                                     ("verneed-overlapping-auxiliary", "retained GNU version record storage overlaps"),
                                     ("copy-raw-section-index", "active COPY relocation symbol raw/resolved section index differs")):
                 with self.subTest(mutation=mutation):
@@ -1495,6 +1497,44 @@ class RetainedExternalEvidenceRegressionTest(unittest.TestCase):
                             if key in affected_symbols:
                                 old_id = entry["id"]
                                 identity["version"]["providerRequest"] = "other.so"
+                                entry["id"] = "ext-" + sha256(VERIFY.canonical_bytes(identity)).hexdigest()
+                                for site in report["sites"]:
+                                    if site["externalTargetId"] == old_id:
+                                        site["externalTargetId"] = entry["id"]
+                        report["externalNamespaceSha256"] = sha256(VERIFY.canonical_bytes(report["externalNamespace"])).hexdigest()
+                    elif mutation in {"verneed-oversized-provider", "verneed-oversized-name"}:
+                        inventory = report["dynamicInventory"]
+                        requirement = next(row for row in inventory["versionRequirements"]
+                            if row["sectionIndex"] == 8 and row["recordOffset"] == 7344 and row["name"] == "GLIBC_2.2.5")
+                        field = "providerRequest" if mutation == "verneed-oversized-provider" else "name"
+                        oversized = "x" * 2000
+                        affected_requirements = [row for row in inventory["versionRequirements"]
+                            if row["sectionIndex"] == requirement["sectionIndex"] and row["recordOffset"] == requirement["recordOffset"]]
+                        if field == "name":
+                            affected_requirements = [requirement]
+                        for row in affected_requirements:
+                            row[field] = oversized
+                            if field == "name":
+                                elf_hash = 0
+                                for byte in oversized.encode("utf-8"):
+                                    elf_hash = (elf_hash << 4) + byte
+                                    high = elf_hash & 0xf0000000
+                                    elf_hash = (elf_hash ^ (high >> 24)) & ~high
+                                row["hash"] = elf_hash
+                        symbol_strings = {row["index"]: row["link"] for row in inventory["sections"] if row["type"] == 11}
+                        affected_versions = {(row["stringSectionIndex"], row["index"]) for row in affected_requirements}
+                        affected_symbols = {(symbol["tableSectionIndex"], symbol["symbolIndex"]): symbol
+                            for symbol in inventory["dynamicSymbols"] if symbol["version"] is not None and
+                            (symbol_strings[symbol["tableSectionIndex"]], symbol["version"]["index"]) in affected_versions}
+                        self.assertTrue(affected_symbols)
+                        for symbol in affected_symbols.values():
+                            symbol["version"][field] = oversized
+                        for entry in report["externalNamespace"]["entries"]:
+                            identity = entry["identity"]
+                            key = (identity["symbolTableSectionIndex"], identity["symbolIndex"])
+                            if key in affected_symbols:
+                                old_id = entry["id"]
+                                identity["version"][field] = oversized
                                 entry["id"] = "ext-" + sha256(VERIFY.canonical_bytes(identity)).hexdigest()
                                 for site in report["sites"]:
                                     if site["externalTargetId"] == old_id:

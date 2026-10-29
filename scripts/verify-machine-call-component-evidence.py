@@ -784,6 +784,24 @@ def retained_version_records(inventory: dict, sections: dict, input_bytes: int) 
     def within(owner: dict, offset: int, width: int) -> bool:
         return owner["offset"] <= offset and offset + width <= owner["offset"] + address(owner["size"])
 
+    def require_linked_string_capacity(row: dict, group: str) -> None:
+        strings = sections.get(row["stringSectionIndex"])
+        if strings is None:
+            raise VerificationError("retained GNU version string table is absent")
+        size = address(strings["size"])
+        values = [row["name"]]
+        if group == "versionRequirements":
+            values.append(row["providerRequest"])
+        else:
+            values.extend(row["parentNames"])
+        for value in values:
+            try:
+                encoded = value.encode("utf-8")
+            except UnicodeEncodeError as error:
+                raise VerificationError("retained GNU version string is not UTF-8 encodable") from error
+            require("\\0" not in value and len(encoded) + 1 <= size,
+                    "retained GNU version string exceeds linked string table")
+
     for group, kind, width in (("versionRequirements", 0x6ffffffe, 16), ("versionDefinitions", 0x6ffffffd, 20)):
         rows = inventory[group]
         order = [(row["sectionIndex"], row["recordOffset"], *([row["auxiliaryOffset"]] if group == "versionRequirements" else [])) for row in rows]
@@ -791,6 +809,7 @@ def retained_version_records(inventory: dict, sections: dict, input_bytes: int) 
         provider_by_verneed = {}
         for row in rows:
             owner = owner_for(row, kind)
+            require_linked_string_capacity(row, group)
             index, raw = row["index"], row["rawIndex"]
             key = (row["stringSectionIndex"], index)
             require(0 <= raw <= 65535 and (2 if group == "versionRequirements" else 1) <= index <= 32767 and
