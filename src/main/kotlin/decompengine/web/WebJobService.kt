@@ -479,7 +479,7 @@ class WebJobService(
             budget.checkpoint()
             return acquired
         } catch (failure: Throwable) {
-            attempts = null
+            attemptReadLifetime.write { attempts = null }
             try { acquired.close() } catch (cleanup: Throwable) { failure.addSuppressed(cleanup) }
             throw webStartupFailure(failure)
         }
