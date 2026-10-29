@@ -306,12 +306,12 @@ is used to hide dependency declaration problems.
 `tests/accessibility.test.tsx` runs axe-core (pinned dev dependency, never bundled)
 against every routed view with contract fixtures: the public shell, workspace with jobs,
 upload, runtime, job overview, attempt history/overview/activity/evidence, source
-directory and file, the not-found page, the open display-preference panel and a failed
+directory, search form/results and file, the not-found page, the open display-preference panel and a failed
 job read. Any WCAG 2.0/2.1/2.2 A or AA rule violation fails `npm test`. jsdom has no
 layout or colour, so contrast and reflow stay in the packaged Chrome checks
 (`scripts/packaged-browser-contrast.mjs` and the `--mode audit` route audit in
-`scripts/packaged-browser-audit.mjs`); `tests/contrast-tokens.test.ts` checks the token
-pairings early. [The audit record](../docs/web-accessibility-audit.md) lists every gate,
+`scripts/packaged-browser-audit.mjs`). That audit also measures visible non-empty control values
+and rendered placeholders; `tests/contrast-tokens.test.ts` checks the token pairings early. [The audit record](../docs/web-accessibility-audit.md) lists every gate,
 its findings and the manual screen-reader checklist (#617). Add a new route or state to the
 component suite and to the packaged audit's page list when you add a view.
 

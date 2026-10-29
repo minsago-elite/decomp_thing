@@ -41,7 +41,7 @@ const verdict = (audit, served = responses) => assertAudit(audit, manifest, serv
 test('a clean audit with every packaged asset and the worker has no failures', () => {
   const audit = clean();
   assert.deepEqual(auditFixtures(repo, manifest.buildId).pages.map(page => page.name), auditPageNames);
-  assert.deepEqual([audit.layout.length, audit.contrast.length, audit.focus.length], [100, 40, 20]);
+  assert.deepEqual([audit.layout.length, audit.contrast.length, audit.focus.length], [120, 48, 24]);
   assert.deepEqual(verdict(audit), []);
 });
 
@@ -165,6 +165,14 @@ test('fixtures bind one job, attempt and revision with long names and a self-con
   assert.equal(new Set(fixtures.pages.map((page) => page.path)).size, fixtures.pages.length);
   const job = fixtures.respond('GET', `/jobs/${fixtures.pages[3].path.split('/').at(-1)}`, 'application/json').document;
   assert.equal(job.data.displayFilename.length, 255);
+  const searchForm = fixtures.pages.find((page) => page.name === 'source search form');
+  const searchResults = fixtures.pages.find((page) => page.name === 'source search results');
+  assert.ok(searchForm && searchResults);
+  assert.notEqual(searchForm.path, searchResults.path);
+  const searchRoute = searchResults.path.slice('/nested'.length).split('?')[0];
+  const search = fixtures.respond('GET', searchRoute, 'application/json').document;
+  assert.equal(search.data.query.text, 'needle');
+  assert.equal(search.data.items.length, 4);
   const file = fixtures.pages.find((page) => page.name === 'source file');
   const fileRoute = file.path.slice('/nested'.length).split('?')[0];
   const metadata = fixtures.respond('GET', fileRoute, 'application/json').document.data;
@@ -189,18 +197,21 @@ function contentModel(page, { omitRead = null, omitContent = null, onRead = () =
   const document = {
     body: { innerText: page.rendered },
     querySelector: selector => selector === 'main h1' ? { focus() {} } : null,
-    querySelectorAll: selector => selector === 'main button' ? (page.preparation ?? []).map(step => ({
-      disabled: false, textContent: step.action, getAttribute: () => null,
-      click() {
-        actions.push(step.action);
-        for (const path of step.reads) if (path !== omitRead) {
-          fulfilled.push({ method: 'GET', path, status: 200 }); onRead(path);
-        }
-        for (const check of step.content) if (check.selector !== omitContent) nodes.set(check.selector, {
-          textContent: check.text, getClientRects: () => [{}],
-        });
-      },
-    })) : nodes.has(selector) ? [nodes.get(selector)] : [],
+    querySelectorAll(selector) {
+      if (selector === 'main button') return (page.preparation ?? []).map(step => ({
+        disabled: false, textContent: step.action, getAttribute: () => null,
+        click() {
+          actions.push(step.action);
+          for (const path of step.reads) if (path !== omitRead) {
+            fulfilled.push({ method: 'GET', path, status: 200 }); onRead(path);
+          }
+          for (const check of step.content) if (check.selector !== omitContent) nodes.set(check.selector, {
+            textContent: check.text, getClientRects: () => [{}],
+          });
+        },
+      }));
+      return nodes.has(selector) ? [nodes.get(selector)] : [];
+    },
   };
   const evaluate = async (_, expression) => runInNewContext(expression, { document });
   const ready = async (tab, expression, label) => assert.ok(await evaluate(tab, expression), label);
@@ -263,7 +274,10 @@ test('qualifyAudit prepares every fresh layout/contrast/focus navigation before 
     makeTarget: async () => ({ sessionId: 'modeled' }), delay: async () => {}, capture: async () => {},
     ready: async (tab, expression, label) => current.ready(tab, expression, label),
     evaluate: async (tab, expression) => {
-      const kind = expression === measurePage ? 'layout' : expression === measureContrast ? 'contrast' : expression === measureFocus ? 'focus' : null;
+      let kind = null;
+      if (expression === measurePage) kind = 'layout';
+      else if (expression === measureContrast) kind = 'contrast';
+      else if (expression === measureFocus) kind = 'focus';
       if (kind) {
         assert.equal(await current.evaluate(tab, auditPageReady(page, true)), true, `${kind} measured an empty ${page.name}`);
         assert.deepEqual(current.actions, (page.preparation ?? []).map(step => step.action));
@@ -273,7 +287,7 @@ test('qualifyAudit prepares every fresh layout/contrast/focus navigation before 
       return current.evaluate(tab, expression);
     },
   }), error => error === completed);
-  assert.deepEqual(counts, { layout: 100, contrast: 40, focus: 40, navigations: 70 });
+  assert.deepEqual(counts, { layout: 120, contrast: 48, focus: 48, navigations: 84 });
 });
 
 test('content checks require visible, distinctive rows rather than an empty or hidden table', () => {
@@ -326,7 +340,11 @@ function geometryModel({ exempt = false, overflow = 'auto', outsideChild = false
     scrollingElement: { clientWidth: 320, scrollWidth: 320 },
     body: { querySelectorAll: () => [container, child, heading] },
     querySelectorAll: selector => selector === selectors && exempt ? [container] : [],
-    querySelector: selector => selector === '.navigation-toggle' ? toggle : selector === 'main h1' ? heading : null,
+    querySelector(selector) {
+      if (selector === '.navigation-toggle') return toggle;
+      if (selector === 'main h1') return heading;
+      return null;
+    },
     getAnimations: () => [],
   };
   return runInNewContext(measurePage, { document, innerWidth: 320, innerHeight: 640, devicePixelRatio: 1,
@@ -401,6 +419,27 @@ test('measures every highlighted token kind and rejects insufficient rendered to
       source.tokens[kind] = 0;
       assert.match(verdict(audit).join('\n'), new RegExp(`no measured highlighted ${kind} tokens`));
     }
+  }
+});
+
+test('measures visible input values and placeholders and rejects low contrast for either', () => {
+  for (const failing of ['value', 'placeholder']) {
+    const control = { tagName: 'INPUT', type: 'search', name: 'query', value: failing === 'value' ? 'needle' : '',
+      placeholder: failing === 'placeholder' ? 'Search recorded inputs' : '',
+      valueColor: failing === 'value' ? 'rgb(255, 255, 255)' : 'rgb(0, 0, 0)',
+      placeholderColor: failing === 'placeholder' ? 'rgb(170, 170, 170)' : 'rgb(0, 0, 0)',
+      parentElement: null, closest: () => null, checkVisibility: () => true, hasAttribute: name => name === 'placeholder' };
+    const document = { body: {}, createTreeWalker: () => ({ nextNode: () => null }), querySelectorAll: () => [control] };
+    const measured = runInNewContext(measureContrast, { document, NodeFilter: { SHOW_TEXT: 4 },
+      getComputedStyle: (element, pseudo) => ({ visibility: 'visible', opacity: '1',
+        color: pseudo === '::placeholder' ? element.placeholderColor : element.valueColor,
+        backgroundImage: 'none', backgroundColor: 'rgb(255, 255, 255)', fontSize: '16px', fontWeight: '400' }) });
+    assert.equal(measured.measured, 1, 'the visible value or placeholder is measured');
+    assert.equal(measured.failureCount, 1, failing);
+    assert.match(measured.failures[0].text, new RegExp(failing));
+    const audit = clean();
+    Object.assign(audit.contrast.find(entry => entry.page === 'source search results' && entry.viewport === 'desktop 1440x900' && entry.scheme === 'light'), measured);
+    assert.match(verdict(audit).join('\\n'), /text contrast/);
   }
 });
 

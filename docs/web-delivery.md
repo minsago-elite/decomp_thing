@@ -128,11 +128,13 @@ packaged JVM at `/nested/` in the pinned Chrome on the CI runner, after its layo
 keyboard checks pass (`scripts/packaged-browser-audit.mjs`). It records 20 cold dashboard loads,
 each in a new target with the HTTP cache disabled, timed from navigation to a populated first
 page with no alert; and 50 in-app route activations cycling through job, attempt, activity,
-evidence and source views, timed to the new heading receiving focus (local feedback) and to the
+evidence, source directory/file and source-search views, timed to the new heading receiving focus (local feedback) and to the
 view's initial-route metadata (or source rows for source views). Attempt metadata readiness
 is not evidence/activity readiness: those routes intentionally require explicit reads. Before
 each layout/contrast/focus pass, the audit activates the activity/exploration/history/receipt
-controls and requires their populated content and successful reads. Each explicit action's
+controls and requires populated content and successful reads. The source-search form and
+populated results each have independent route coverage, and visible input values and placeholders
+are included in contrast measurements. Each explicit action's
 elapsed time and expected reads are recorded separately in `interactions`, not folded into
 route timing or claimed as a qualified interaction p95. The navigation gate asserts p95 ≤1.5 s
 cold, ≤100 ms feedback and ≤500 ms first route data, the loopback budgets above, and keeps the

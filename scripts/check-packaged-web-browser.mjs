@@ -122,13 +122,22 @@ class Protocol {
     this.pending = new Map();
     this.listeners = new Map();
     socket.addEventListener('message', ({ data }) => {
-      const message = JSON.parse(data);
+      let message;
+      try { message = JSON.parse(data); }
+      catch (error) {
+        const failure = new Error('Chrome DevTools returned invalid JSON', { cause: error });
+        for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(failure); }
+        this.pending.clear();
+        socket.close();
+        return;
+      }
       if (message.id) {
         const pending = this.pending.get(message.id);
         if (!pending) return;
         clearTimeout(pending.timer);
         this.pending.delete(message.id);
-        message.error ? pending.reject(new Error(message.error.message)) : pending.resolve(message.result);
+        if (message.error) pending.reject(new Error(message.error.message));
+        else pending.resolve(message.result);
       } else {
         for (const listener of this.listeners.get(`${message.sessionId ?? ''}:${message.method}`) ?? []) listener(message.params);
       }
@@ -191,7 +200,8 @@ async function connectDevTools(url, timeoutMs = 15000) {
         clearTimeout(timer);
         socket.removeEventListener('open', opened);
         socket.removeEventListener('error', failed);
-        error ? reject(error) : resolve();
+        if (error) reject(error);
+        else resolve();
       };
       const opened = () => finish();
       const failed = () => finish(new Error('Chrome DevTools connection failed'));
@@ -211,8 +221,13 @@ function responseHeader(response, name) {
   return value === undefined ? null : String(value);
 }
 
+function urlPath(value) {
+  try { return new URL(value).pathname; }
+  catch { return null; }
+}
+
 function responseSummary(response, source) {
-  return { responseRoute: new URL(response.url.split('#')[0].split('?')[0]).pathname,
+  return { responseRoute: urlPath(response.url.split('#')[0].split('?')[0]),
     status: response.status, contentSecurityPolicy: responseHeader(response, 'content-security-policy'), source };
 }
 
@@ -249,7 +264,7 @@ async function makeTarget({ cspProbe = false, cacheEnabled = false } = {}) {
     if (cacheEnabled) state.cacheRequests.push({ requestId: event.requestId, method: event.request.method, url, type });
     if (type === 'Document') {
       const request = { requestId: event.requestId, sequence: state.documentRequests.length,
-        route: new URL(url).pathname, method: event.request.method, status: null,
+        route: urlPath(url), method: event.request.method, status: null,
         contentSecurityPolicy: null, source: null, failure: null };
       state.documentRequests.push(request);
       state.pendingDocumentRequests.set(event.requestId, request);
@@ -336,6 +351,12 @@ function cspEvidence() {
     target.unresolvedDocumentRequests.map((request) => ({ targetIndex, ...request })));
   const orphanDocumentResponses = inspectedTargets.flatMap((target, targetIndex) =>
     target.orphanDocumentResponses.map((response) => ({ targetIndex, ...response })));
+  const invalidDocumentUrls = [
+    ...documentRequests.filter((request) => request.route === null || request.responseRoute === null)
+      .map(({ sequence, route, responseRoute }) => ({ sequence, route, responseRoute })),
+    ...orphanDocumentResponses.filter((response) => response.responseRoute === null)
+      .map(({ targetIndex, responseRoute }) => ({ targetIndex, responseRoute })),
+  ];
   return safeEvidence({
     inspectedTargets,
     attachedTargetCount: inspectedTargets.length,
@@ -346,6 +367,7 @@ function cspEvidence() {
     unresolvedDocumentRequests,
     orphanDocumentResponseCount: orphanDocumentResponses.length,
     orphanDocumentResponses,
+    invalidDocumentUrls,
     missingPolicyDocuments: documentPolicies.filter((response) => !response.contentSecurityPolicy),
     unsafePolicyDocuments: documentPolicies.filter((response) => /'unsafe-(?:inline|eval)'/.test(response.contentSecurityPolicy ?? '')),
     violationCount: productTargets.reduce((count, target) => count + targetCspViolationCount(target), 0),
@@ -399,8 +421,13 @@ async function prepareArchive(archivePath) {
   const archiveSha256 = await fileHash(archivePath);
   work = await fs.mkdtemp(join(values['work-parent'], 'packaged-browser-work-'));
   report.workDirectory = work;
-  const setup = JSON.parse(execFileSync(values.python, [installHelper, 'prepare', '--archive', archivePath,
-    '--work', work, '--owner-token', ownerToken], { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 }));
+  let setup;
+  try {
+    setup = JSON.parse(execFileSync(values.python, [installHelper, 'prepare', '--archive', archivePath,
+      '--work', work, '--owner-token', ownerToken], { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 }));
+  } catch (error) {
+    throw new Error('Packaged archive preparation failed or returned invalid JSON', { cause: error });
+  }
   const before = await snapshot(setup.app);
   const bins = join(work, 'launcher tools');
   const working = join(work, 'unrelated working directory');
@@ -485,7 +512,7 @@ try {
   report.origin = origin;
   browserOrigin ??= origin;
 
-  browserTmp = await fs.mkdtemp(join(repo, 'build/ct-'));
+  browserTmp = await fs.mkdtemp(join(values['work-parent'], 'chrome-tmp-'));
   report.browserTempDirectory = browserTmp;
   await fs.mkdir(profile);
   browser = startOwned(chromeBinary, ['--headless=new', '--disable-gpu', ...(values['no-sandbox'] ? ['--no-sandbox'] : []), '--no-first-run', '--no-default-browser-check', '--disable-background-networking', '--disable-extensions', '--disable-default-apps', '--disable-sync', '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1', `--user-data-dir=${profile}`, 'about:blank'], {
@@ -1034,6 +1061,8 @@ try {
     'A packaged Document request did not receive a correlated response');
   assert.deepEqual(report.contentSecurityPolicy.orphanDocumentResponses, [],
     'A packaged Document response did not correlate to its request');
+  assert.deepEqual(report.contentSecurityPolicy.invalidDocumentUrls, [],
+    'A packaged Document request or response had an invalid URL');
   if (values.mode !== 'proxy') assert.deepEqual(report.contentSecurityPolicy.missingPolicyDocuments, [],
     'A packaged production Document response omitted CSP');
   assert.deepEqual(report.contentSecurityPolicy.unsafePolicyDocuments, [],
