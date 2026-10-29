@@ -21,8 +21,8 @@ same query. Jobs sort by creation instant and then job identity, both descending
 and ascending for `oldest`. Sort is part of the cursor-bound query.
 
 The first read captures existing job identities and copies each job's presentation
-under a short service lock. Rows reflect their individual read time; this is not a
-transaction across all job files. Continuations use those retained immutable rows.
+using short service-state checks around the metadata reads. Rows reflect their
+individual read time; this is not a transaction across all job files. Continuations use those retained immutable rows.
 New uploads and subsequent status changes therefore cannot insert, reorder or
 replace rows midway through pagination. Deleting a job does not erase its retained
 historical row; follow-up detail reads still check current storage authority.
@@ -50,8 +50,39 @@ at most one physical overflow byte before refusal.
 The same five-second deadline reaches root enumeration and bounded metadata-read
 units. It is checked after collection, including empty or fully filtered results,
 after sorting, and before snapshot publication. These cooperative checks cannot
-preempt blocked kernel I/O. Per-record service locks still cover each inspection;
-full upload/listing responsiveness under blocked I/O is not established here.
+preempt blocked kernel I/O. Per-record listing I/O holds neither the service monitor
+nor an attempt-store stripe or lifetime lock. The v1 collection and the legacy HTML
+dashboard capture the monitor-guarded service state for one record (publication
+failure, store owner, legacy task) in a short section. An in-memory attempt-store
+identity token brackets the entire workflow and legacy-presentation capture. A
+command on that stripe invalidates the token even if the command fails; startup
+recovery invalidates all tokens. Read-only detail/replay calls do not invalidate
+rows. The final token check also rejects closed or poisoned owners. Raced captures
+are refused without retrying metadata reads. The 64 tokens are bounded; a command
+on a colliding job can conservatively invalidate the row too.
+
+The job store's listing read takes no store monitor, and descriptor checks refuse
+a record replaced during the read. A same-job or colliding-stripe detail/command
+contender therefore cannot retain the service monitor waiting behind listing I/O.
+`WebJobServiceTest` exercises both listings, their first and last physical reads,
+and no contender, a same-job contender and a colliding-stripe contender before
+third-job status reads and upload admission. Separate regressions refuse durable
+commands crossing either physical read and legacy admissions crossing presentation.
+Store-level controls cover close/ownership handoff, recovery and failed commands.
+These are focused authored regressions, not full #162 quota/responsiveness or
+physical-I/O qualification. Detail/command I/O and root enumeration retain their
+existing locking profiles; scheduler sampling remains monitor-free.
+
+Before publishing a row, the service rechecks shutdown, storage ownership,
+publication failures and task identity. A legacy admission changes an identity token,
+so even a start and finish wholly within a row read invalidate that observation.
+This token conservatively invalidates in-flight rows on any legacy admission without
+retaining per-job history. Changed observations are refused with
+`JOB_RECORD_UNAVAILABLE` (a diagnostic row on the dashboard; collection admission
+fails), rather than combining a new queued record with a pre-admission task flag or
+retrying reads outside the original budget. A fresh read may observe the new state.
+`WebJobServiceTest` covers both projections with a deferred legacy task and with a
+task that finishes before the paused presentation read resumes.
 Each snapshot retains at most 16 MiB of
 serialized row data, with at most 4 KiB per row so a 200-row response fits the
 1 MiB transport ceiling; the cache retains at most eight snapshots and 32 MiB of row
@@ -66,6 +97,7 @@ and 64 MiB encoded recovery-plan limits. The legacy startup profile remains 4096
 root entries. This preserves libraries seeded before SPA startup as well as those
 uploaded after initialization; the profile is retained for lazy storage creation.
 
-This is the collection portion of #162. Streaming upload, upload/storage quotas,
-a persistent query index beyond the bounded scan profile, and full dashboard
-integration remain separate unfinished work within the original D-series scope.
+Streaming upload admission and the retained-storage quota are described in the
+upload documents; uploads refuse before consuming a body when the quota cannot hold
+a reservation, while listings stay readable. A persistent query index beyond the
+bounded scan profile is not provided.
