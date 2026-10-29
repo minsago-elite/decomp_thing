@@ -63,7 +63,9 @@ function instrument() {
     .map(prototype => ({ prototype, add: prototype.addEventListener, remove: prototype.removeEventListener }));
   for (const { prototype, add, remove } of owners) {
     prototype.addEventListener = function (this: EventTarget, type: string, listener: EventListenerOrEventListenerObject | null, options?: boolean | AddEventListenerOptions) {
-      if (listener && outlives(this) && !find(this, type, listener, capture(options))) listeners.add({ target: this, type, listener, capture: capture(options) });
+      if (listener && outlives(this) && !find(this, type, listener, capture(options))) {
+        listeners.add({ target: this, type, listener, capture: capture(options) });
+      }
       return add.call(this, type, listener, options);
     };
     prototype.removeEventListener = function (this: EventTarget, type: string, listener: EventListenerOrEventListenerObject | null, options?: boolean | EventListenerOptions) {
@@ -92,7 +94,13 @@ function instrument() {
   if (originals.channel) {
     const Tracked = class extends originals.channel {
       constructor(name: string) { super(name); channels.add(this); }
-      override close() { channels.delete(this); super.close(); }
+      override close() {
+        channels.delete(this);
+        // A closed channel cannot dispatch; discard its entries so this harness does not keep
+        // the channel (and its handlers) strongly reachable after the application releases it.
+        for (const entry of listeners) if (entry.target === this) listeners.delete(entry);
+        super.close();
+      }
     };
     globalThis.BroadcastChannel = Tracked;
     window.BroadcastChannel = Tracked;
@@ -199,11 +207,11 @@ it('detects a retained global listener, interval and open channel (harness contr
   channel.addEventListener('message', listener);
   const leaked = harness.snapshot();
   expect(leaked.listeners['window:resize']).toBe(1);
+  expect(leaked.listeners['Tracked:message']).toBe(1);
   expect(leaked.intervals).toBe(baseline.intervals + 1);
   expect(leaked.channels).toBe(baseline.channels + 1);
   window.removeEventListener('resize', listener);
   clearInterval(interval);
-  channel.removeEventListener('message', listener);
   channel.close();
   expect(harness.snapshot()).toEqual(baseline);
 });
