@@ -2,14 +2,17 @@ package decompengine.oracle.fulltree
 
 import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.acp.LinuxProcessDescriptor
+import decompengine.acp.LinuxFileIdentity
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
+import decompengine.project.ContainedModuleHostedCase
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.nio.file.attribute.PosixFilePermissions
 import java.security.MessageDigest
 import java.util.UUID
+import java.util.Base64
 import java.util.concurrent.TimeUnit
 import java.util.jar.JarEntry
 import java.util.jar.JarOutputStream
@@ -19,6 +22,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlin.test.assertContentEquals
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -31,22 +35,40 @@ import org.junit.jupiter.api.Tag
 class ContainedCommandTerminalResourceLiveTest {
     @Test
     fun `strict generic command accepts clean exit and rejects handled task limit with zero exit`() {
-        assumeTrue(System.getProperty("os.name").lowercase().contains("linux"))
+        ContainedModuleHostedCase.run("generic-default-512", javaClass.name, DEFAULT_METHOD, null) { record ->
+            withConfiguredBoundary(record) { mount, configuration, fixture, managerCgroup ->
+                for (mode in listOf("benign", "refusal")) {
+                    exerciseCommand(mount, configuration, fixture, managerCgroup, mode, record)
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `configured visibility only command retains selected files and proves owned cleanup`() {
+        ContainedModuleHostedCase.run("generic-visibility-v4", javaClass.name, VISIBILITY_METHOD, null) { record ->
+            withConfiguredBoundary(record) { mount, configuration, fixture, managerCgroup ->
+                exerciseCommand(mount, configuration, fixture, managerCgroup, "visibility", record)
+            }
+        }
+    }
+
+    private fun withConfiguredBoundary(record: ContainedModuleHostedCase.Case,
+        action: (Path, FullTreeFunctionObservationIsolationConfiguration, Path, String) -> Unit) {
+        record.stage("configuration")
+        requireOrAssume(System.getProperty("os.name").lowercase().contains("linux"), "live contained-command test requires Linux")
         val mount = provisionedScratchMount()
         inControlTemporaryDirectory { root ->
             val configuration = availableConfiguration(privateDirectory(root.resolve("runtime")))
-            if (System.getenv("DECOMP_REQUIRE_ORACLE_EXT4_SCRATCH") == "true") {
-                assertNotNull(configuration, "required live contained-command boundary is unavailable")
-            }
-            assumeTrue(configuration != null, "live contained-command boundary is unavailable")
+            requireOrAssume(configuration != null, "live contained-command boundary is unavailable")
             checkNotNull(configuration)
             val fixture = compileFixture(root)
+            record.retain("configuration.json", configuration.canonicalBytesForTest())
+            record.retain("fixture-source.java", FIXTURE_SOURCE.toByteArray())
+            record.retain("fixture.jar", readBoundedBytes(fixture, 1024 * 1024))
             val managerCgroup = systemctl(configuration, listOf("show", "--property=ControlGroup", "--value")).trim()
             require(managerCgroup.startsWith('/') && !managerCgroup.contains(".."))
-
-            for (mode in listOf("benign", "refusal")) {
-                exerciseCommand(mount, configuration, fixture, managerCgroup, mode)
-            }
+            action(mount, configuration, fixture, managerCgroup)
         }
     }
 
@@ -56,39 +78,65 @@ class ContainedCommandTerminalResourceLiveTest {
         fixture: Path,
         managerCgroup: String,
         mode: String,
+        record: ContainedModuleHostedCase.Case,
     ) {
+        record.stage("$mode-prepare")
+        val visibilityOnly = mode == "visibility"
         assertTrue(Files.list(mount).use { it.findAny().isEmpty }, "provisioned ext4 slot must be empty")
         val capacity = LinuxFilesystemSyscalls.openRoot(mount).use(LinuxFilesystemSyscalls::filesystemCapacity)
         val operationId = randomDigest()
         val operation = FullTreeDiskScratchOperation(operationId, randomDigest(), "terminal-resource-$mode", randomDigest())
         val policy = FullTreeDiskScratchPolicy(1, capacity.totalBytes, 4, capacity.totalInodes)
         val fixtureInput = KotlinSystemdCgroupCommandInput(fixture, Files.size(fixture), sha256(fixture))
-        val deploymentClosureSha256 = OracleArtifacts.sha256(OracleJson.canonicalBytes(JsonObject(mapOf(
+        val deploymentBytes = OracleJson.canonicalBytes(JsonObject(mapOf(
             "provider" to JsonPrimitive("contained-command-terminal-resource-test-deployment-v1"),
             "configurationSha256" to JsonPrimitive(configuration.canonicalSha256),
             "fixtureSha256" to JsonPrimitive(fixtureInput.sha256),
-        ))))
+        )))
+        record.retain("$mode/deployment.json", deploymentBytes)
+        val deploymentClosureSha256 = OracleArtifacts.sha256(deploymentBytes)
         val unitName = "decomp-terminal-resource-${operationId.take(32)}.scope"
         val controlGroup = "${managerCgroup.trimEnd('/')}/app.slice/$unitName"
         val processHandles = mutableListOf<LinuxProcessDescriptor>()
         FullTreeDiskScratchAuthority.acquireDedicatedFilesystem(mount, operation, policy).use { lease ->
             val token = lease.createEmptyOperationRunRoot()
+            var stateIdentity: LinuxFileIdentity? = null
+            var reportsIdentity: LinuxFileIdentity? = null
             val runPath = lease.withCurrentOperationRunRootBeforeLaunch(token) { borrowed ->
                 borrowed.withPinnedDescriptor { directory ->
                     for (name in listOf("state", "reports", "tmp")) {
                         LinuxFilesystemSyscalls.createDirectory(directory.fd, name, 448)
                     }
+                    if (visibilityOnly) {
+                        stateIdentity = LinuxFilesystemSyscalls.openDirectoryAt(directory.fd, "state").use { it.identity }
+                        reportsIdentity = LinuxFilesystemSyscalls.openDirectoryAt(directory.fd, "reports").use { it.identity }
+                    }
                 }
                 borrowed.path
             }
+            val activeName = "control-$operationId".takeIf { visibilityOnly }
+            val controlPath = activeName?.let(runPath::resolve) ?: runPath
+            val canaries = if (visibilityOnly) VISIBILITY_CANARIES else emptyMap()
+            val selected = if (visibilityOnly) listOf(KotlinContainedCommandRetainedInput(
+                "reports/selected.txt", VISIBILITY_CANARIES.getValue("reports/selected.txt").toByteArray().size.toLong(),
+                OracleArtifacts.sha256(VISIBILITY_CANARIES.getValue("reports/selected.txt").toByteArray()))) else null
             var absenceProved = true
             var cleanup: KotlinSystemdCgroupCommandCleanup? = null
             try {
+                for ((relative, content) in canaries) {
+                    val file = runPath.resolve(relative)
+                    if (!Files.exists(file.parent)) privateDirectory(file.parent)
+                    Files.write(file, content.toByteArray())
+                    Files.setPosixFilePermissions(file, PosixFilePermissions.fromString("rw-------"))
+                    record.retain("$mode/host-before/$relative", readBoundedBytes(file, 4096))
+                }
                 lease.withCurrentOperationRunRootForContainedExecution(token) { borrowed ->
                     var attachmentBytes: ByteArray? = null
                     var execution: KotlinSystemdCgroupCommandExecution? = null
                     var failure: KotlinSystemdCgroupCommandExecutionException? = null
+                    var keeperNamespacePid: Long? = null
                     absenceProved = false
+                    record.stage("$mode-launch")
                     try {
                         execution = KotlinSystemdCgroupCommandLauncher.execute(
                             borrowed = borrowed,
@@ -99,9 +147,9 @@ class ContainedCommandTerminalResourceLiveTest {
                             command = listOf(
                                 configuration.javaExecutable.toString(), "-Xms16m", "-Xmx32m", "-Xss256k",
                                 "-XX:+UseSerialGC", "-XX:ActiveProcessorCount=1", "-XX:-UsePerfData", "-Xlog:os+thread=off",
-                                "-XX:+DisableAttachMechanism", "-Djava.io.tmpdir=${runPath.resolve("tmp")}",
+                                "-XX:+DisableAttachMechanism", "-Djava.io.tmpdir=${controlPath.resolve("tmp")}",
                                 "-classpath", fixture.toString(), FIXTURE_CLASS, mode,
-                            ),
+                            ) + if (visibilityOnly) listOf(runPath.toString(), checkNotNull(activeName)) else emptyList(),
                             environment = mapOf("LANG" to "C.UTF-8", "LC_ALL" to "C.UTF-8", "TZ" to "UTC"),
                             readOnlyInputs = listOf(fixtureInput),
                             // The launcher deduplicates this already authenticated root-owned runtime mount.
@@ -110,20 +158,82 @@ class ContainedCommandTerminalResourceLiveTest {
                             deploymentClosureSha256 = deploymentClosureSha256,
                             beforeStart = { attachment ->
                                 attachmentBytes = attachment.canonicalBytes
+                                record.stage("$mode-before-start")
+                                record.retain("$mode/attachment.json", attachment.canonicalBytes)
                                 val document = OracleJson.parseCanonical(attachment.canonicalBytes) as JsonObject
                                 for (process in document.getValue("processes") as JsonArray) {
                                     val pid = (process as JsonObject).getValue("hostPid").jsonPrimitive.long
                                     processHandles += LinuxFilesystemSyscalls.openProcessHandle(pid)
                                 }
+                                keeperNamespacePid = captureDefaultKeeperLimits(document, controlGroup, record, mode)
                             },
-                            requireTerminalResourceEventProof = true,
+                            requireTerminalResourceEventProof = !visibilityOnly,
+                            controlDirectoryName = activeName,
+                            readOnlyStateDirectory = stateIdentity,
+                            readOnlyReportsDirectory = reportsIdentity,
+                            retainedInputVisibility = selected,
                         )
                         absenceProved = true
                     } catch (caught: KotlinSystemdCgroupCommandExecutionException) {
                         failure = caught
                         cleanup = caught.cleanup
                         absenceProved = caught.cleanup.absenceProved
+                    } finally {
+                        record.stage("$mode-retain-lifecycle")
+                        execution?.let { record.retain("$mode/execution.json", it.canonicalBytes) }
+                        failure?.let { record.retain("$mode/refusal.txt", it.stackTraceToString().toByteArray()) }
+                        retainAvailableLifecycle(controlPath, record, mode)
                     }
+                    failure?.let { caught ->
+                        if (mode != "refusal" || generateSequence<Throwable>(caught) { it.cause }.none {
+                            it.message.orEmpty().contains("contained command terminal resource limit event: pids.max")
+                        }) throw caught
+                    }
+
+                    val requestBytes = readBoundedBytes(controlPath.resolve("runtime/contained-command-request.json"),
+                        KotlinContainedCommandRequest.MAXIMUM_REQUEST_BYTES)
+                    val request = KotlinContainedCommandRequest.parse(requestBytes)
+                    assertNull(request.fileDescriptorPolicy)
+                    if (!visibilityOnly) {
+                        assertEquals(ContainedCommandTerminalResourceEvidence.policySha256, request.terminalResourcePolicySha256)
+                        assertNull(request.retainedInputVisibilitySha256)
+                        assertEquals(JsonPrimitive(3), (OracleJson.parseCanonical(requestBytes) as JsonObject)["schemaVersion"])
+                    }
+                    val attachment = OracleJson.parseCanonical(assertNotNull(attachmentBytes)) as JsonObject
+                    assertEquals(JsonPrimitive(request.sha256), attachment["requestSha256"])
+                    assertEquals(JsonPrimitive(deploymentClosureSha256), attachment["deploymentClosureSha256"])
+                    assertTrue("fileDescriptorLimits" !in attachment)
+                    val outcomeBytes = readBoundedBytes(controlPath.resolve(KotlinContainedCommandProtocol.OUTCOME_FILE),
+                        KotlinContainedCommandProtocol.MAXIMUM_PROTOCOL_BYTES)
+                    val outcome = OracleJson.parseCanonical(outcomeBytes) as JsonObject
+                    assertEquals(JsonPrimitive(request.sha256), outcome["requestSha256"])
+                    val boot = OracleJson.parseCanonical(readBoundedBytes(controlPath.resolve(KotlinContainedCommandProtocol.BOOT_FILE),
+                        KotlinContainedCommandProtocol.MAXIMUM_PROTOCOL_BYTES)) as JsonObject
+                    val start = OracleJson.parseCanonical(readBoundedBytes(controlPath.resolve(KotlinContainedCommandProtocol.START_FILE),
+                        KotlinContainedCommandProtocol.MAXIMUM_PROTOCOL_BYTES)) as JsonObject
+                    for (event in listOf(boot, start)) {
+                        assertEquals(JsonPrimitive(request.sha256), event["requestSha256"])
+                        assertEquals(keeperNamespacePid, event.getValue("keeperPid").jsonPrimitive.long)
+                    }
+                    assertEquals(keeperNamespacePid, boot.getValue("keeperPid").jsonPrimitive.long)
+                    assertEquals(keeperNamespacePid, outcome.getValue("keeperPid").jsonPrimitive.long)
+                    execution?.let { retained ->
+                        val document = OracleJson.parseCanonical(retained.canonicalBytes) as JsonObject
+                        assertEquals(JsonPrimitive(request.sha256), document["requestSha256"])
+                        assertEquals(JsonPrimitive(OracleArtifacts.sha256(assertNotNull(attachmentBytes))), document["attachmentSha256"])
+                        assertEquals(JsonPrimitive(OracleArtifacts.sha256(outcomeBytes)), document["outcomeSha256"])
+                        assertEquals(outcome, document["outcome"])
+                    }
+                    val stdout = readBoundedBytes(controlPath.resolve("reports/${KotlinContainedCommandProtocol.STDOUT_FILE}"), MAXIMUM_CHILD_OUTPUT_BYTES)
+                    val stderr = readBoundedBytes(controlPath.resolve("reports/${KotlinContainedCommandProtocol.STDERR_FILE}"), MAXIMUM_CHILD_OUTPUT_BYTES)
+                    assertEquals(stdout.size.toLong(), outcome.getValue("stdoutBytes").jsonPrimitive.long)
+                    assertEquals(stderr.size.toLong(), outcome.getValue("stderrBytes").jsonPrimitive.long)
+                    if (!visibilityOnly) {
+                        assertEquals(JsonPrimitive(OracleArtifacts.sha256(stdout)), outcome["stdoutSha256"])
+                        assertEquals(JsonPrimitive(OracleArtifacts.sha256(stderr)), outcome["stderrSha256"])
+                    }
+                    val childMarker = verifyChildDefaultLimits(stdout, outcome, record, mode)
+                    record.stage("$mode-validate")
 
                     if (mode == "benign") {
                         assertNull(failure, failure?.stackTraceToString())
@@ -148,8 +258,8 @@ class ContainedCommandTerminalResourceLiveTest {
                             assertEquals(JsonPrimitive(true), cleanupEvidence[field])
                             assertEquals(JsonPrimitive(true), document[field])
                         }
-                        assertEquals("BENIGN_EXIT_ZERO\n", readBounded(runPath.resolve("reports").resolve(KotlinContainedCommandProtocol.STDOUT_FILE)))
-                    } else {
+                        assertEquals("BENIGN_EXIT_ZERO", childMarker)
+                    } else if (mode == "refusal") {
                         val refused = assertNotNull(failure, "a handled pids.max refusal must invalidate the zero exit")
                         assertTrue(generateSequence<Throwable>(refused) { it.cause }.any {
                             it.message.orEmpty().contains("contained command terminal resource limit event: pids.max")
@@ -157,20 +267,47 @@ class ContainedCommandTerminalResourceLiveTest {
                         assertNull(execution, "resource refusal must not produce an accepted execution")
                         assertTrue(refused.cleanup.absenceProved, "strict refusal must complete its cleanup proof")
                         refused.cleanup.closeAndProveAbsent()
-                        assertEquals("HANDLED_PIDS_REFUSAL_EXIT_ZERO\n",
-                            readBounded(runPath.resolve("reports").resolve(KotlinContainedCommandProtocol.STDOUT_FILE)))
+                        assertEquals("HANDLED_PIDS_REFUSAL_EXIT_ZERO", childMarker)
+                    } else {
+                        assertNull(failure, failure?.stackTraceToString())
+                        val executionDocument = OracleJson.parseCanonical(assertNotNull(execution).canonicalBytes) as JsonObject
+                        assertEquals(JsonPrimitive(1), executionDocument["schemaVersion"])
+                        assertEquals(JsonPrimitive("kotlin-lease-contained-command-execution-v1"), executionDocument["provider"])
+                        assertEquals(JsonPrimitive(1), attachment["schemaVersion"])
+                        assertNull(request.terminalResourcePolicySha256)
+                        assertEquals(JsonPrimitive(4), (OracleJson.parseCanonical(requestBytes) as JsonObject)["schemaVersion"])
+                        assertTrue("terminalResourceEvidence" !in executionDocument)
+                        assertTrue("terminalResourcePolicySha256" !in attachment)
+                        val visibility = ContainedCommandRetainedInputVisibility(checkNotNull(activeName), setOf("reports", "state"),
+                            checkNotNull(selected)).canonicalIdentity()
+                        record.retain("$mode/visibility-policy.json", OracleJson.canonicalBytes(visibility))
+                        assertEquals(OracleArtifacts.sha256(OracleJson.canonicalBytes(visibility)), request.retainedInputVisibilitySha256)
+                        assertEquals("VISIBILITY_ONLY_OK", childMarker)
+                        for ((relative, content) in canaries) {
+                            val current = readBoundedBytes(runPath.resolve(relative), 4096)
+                            record.retain("$mode/host-after/$relative", current)
+                            assertContentEquals(content.toByteArray(), current)
+                        }
+                        val owned = readBoundedBytes(controlPath.resolve("owned-result"), 4096)
+                        record.retain("$mode/owned-result", owned)
+                        assertContentEquals("owned-write".toByteArray(), owned)
+                        assertTrue(Files.notExists(runPath.resolve("overlay-residue"), LinkOption.NOFOLLOW_LINKS))
+                        for (field in listOf("unitAbsent", "cgroupAbsent", "processesAbsent")) {
+                            assertEquals(JsonPrimitive(true), executionDocument[field])
+                        }
                     }
 
                     // The launcher authenticated this outcome before accepting or rejecting resource evidence.
-                    val outcome = OracleJson.parseCanonical(Files.readAllBytes(runPath.resolve(KotlinContainedCommandProtocol.OUTCOME_FILE))) as JsonObject
                     assertEquals(JsonPrimitive("EXITED"), outcome["status"])
                     assertEquals(JsonPrimitive(0), outcome["exitCode"])
                     assertTrue(absenceProved)
                     assertEquals(3, processHandles.size, "retain all three attached keeper processes")
                     processHandles.forEach { assertTrue(!LinuxFilesystemSyscalls.processExists(it), "retained keeper survived cleanup") }
                     assertTrue(Files.notExists(Path.of("/sys/fs/cgroup").resolve(controlGroup.removePrefix("/")), LinkOption.NOFOLLOW_LINKS))
-                    assertTrue(systemctl(configuration,
-                        listOf("--no-legend", "--plain", "--full", "list-units", "--all", "--", unitName)).isBlank(),
+                    val unitsAfter = systemctl(configuration,
+                        listOf("--no-legend", "--plain", "--full", "list-units", "--all", "--", unitName))
+                    record.retain("$mode/systemd-units-after.txt", unitsAfter.toByteArray())
+                    assertTrue(unitsAfter.isBlank(),
                         "completed contained unit remains in the manager inventory")
                 }
             } finally {
@@ -180,13 +317,115 @@ class ContainedCommandTerminalResourceLiveTest {
                         absenceProved = retained.absenceProved
                     }
                     if (absenceProved) {
+                        record.stage("$mode-remove-scratch")
                         lease.removeOperationRunRootAfterCgroupAbsence(token, 256, CLEANUP_MAXIMUM_BYTES)
                         lease.requireCleanAndRelease()
+                        assertTrue(Files.notExists(runPath, LinkOption.NOFOLLOW_LINKS), "completed run root remains")
                         assertTrue(Files.list(mount).use { it.findAny().isEmpty }, "completed test must release its scratch lease")
+                        record.retain("$mode/cleanup-observed.json", OracleJson.canonicalBytes(JsonObject(mapOf(
+                            "unitName" to JsonPrimitive(unitName), "controlGroup" to JsonPrimitive(controlGroup),
+                            "runPath" to JsonPrimitive(runPath.toString()), "scratchMount" to JsonPrimitive(mount.toString()),
+                            "runAbsent" to JsonPrimitive(Files.notExists(runPath, LinkOption.NOFOLLOW_LINKS)),
+                            "scratchEmpty" to JsonPrimitive(true), "retainedKeeperHandleCount" to JsonPrimitive(processHandles.size),
+                            "retainedKeeperHandlesAbsent" to JsonPrimitive(
+                                processHandles.all { !LinuxFilesystemSyscalls.processExists(it) }),
+                        ))))
                     }
                 } finally {
                     processHandles.forEach(LinuxProcessDescriptor::close)
                 }
+            }
+        }
+    }
+
+    /** Passive reads of the actual attached keeper; none of these test records supplies launcher authority. */
+    private fun captureDefaultKeeperLimits(attachment: JsonObject, controlGroup: String,
+        record: ContainedModuleHostedCase.Case, mode: String): Long {
+        val processes = (attachment.getValue("processes") as JsonArray).map { it as JsonObject }
+        val keeper = processes.single { it.getValue("role").jsonPrimitive.content == "supervisor-jvm" }
+        val pid = keeper.getValue("hostPid").jsonPrimitive.long
+        val start = keeper.getValue("startTimeTicks").jsonPrimitive.long
+        val namespaces = (keeper.getValue("namespacePids") as JsonArray).map { it.jsonPrimitive.long }
+        val parentRole = keeper.getValue("parentRole").jsonPrimitive.content
+        val parentPid = processes.single { it.getValue("role").jsonPrimitive.content == parentRole }
+            .getValue("hostPid").jsonPrimitive.long
+        fun read(name: String, destination: String): ByteArray = readBoundedBytes(Path.of("/proc/$pid/$name"),
+            MAXIMUM_CONTAINED_PROCESS_LIMITS_BYTES).also { record.retain("$mode/keeper/$destination", it) }
+        fun statusIdentity(bytes: ByteArray): Pair<List<Long>, Long> {
+            val lines = bytes.toString(Charsets.UTF_8).lineSequence().toList()
+            val ns = lines.single { it.startsWith("NSpid:") }.substringAfter(':').trim().split(Regex("[ \\t]+"))
+                .map { requireNotNull(it.toLongOrNull()) }
+            val parent = lines.single { it.startsWith("PPid:") }.substringAfter(':').trim().toLong()
+            require(ns.size in 1..2 && ns.first() == pid && ns.all { it in 1L..Int.MAX_VALUE.toLong() })
+            return ns to parent
+        }
+        LinuxFilesystemSyscalls.openProcessHandle(pid).use { handle ->
+            assertTrue(LinuxFilesystemSyscalls.processExists(handle), "attached keeper is not alive before observation")
+            val beforeStat = read("stat", "before-stat.txt")
+            val beforeStatus = read("status", "before-status.txt")
+            val beforeCgroup = read("cgroup", "before-cgroup.txt")
+            val limits = read("limits", "limits.txt")
+            val afterStat = read("stat", "after-stat.txt")
+            val afterStatus = read("status", "after-status.txt")
+            val afterCgroup = read("cgroup", "after-cgroup.txt")
+            assertTrue(LinuxFilesystemSyscalls.processExists(handle), "attached keeper exited during observation")
+            assertEquals(start, parseFullTreeFunctionObservationProcessStartTimeTicks(pid, beforeStat.toString(Charsets.UTF_8)))
+            assertEquals(start, parseFullTreeFunctionObservationProcessStartTimeTicks(pid, afterStat.toString(Charsets.UTF_8)))
+            assertEquals(namespaces to parentPid, statusIdentity(beforeStatus))
+            assertEquals(namespaces to parentPid, statusIdentity(afterStatus))
+            assertEquals("0::$controlGroup", beforeCgroup.toString(Charsets.UTF_8).trimEnd('\n'))
+            assertContentEquals(beforeCgroup, afterCgroup)
+            val pair = parseContainedCommandFileDescriptorLimits(limits.toString(Charsets.UTF_8))
+            assertEquals(ContainedCommandFileDescriptorLimits(512, 512), pair)
+            val observed = ContainedCommandFileDescriptorObservation(pid, start, pair)
+            observed.requireIdentity(pid, start)
+            record.retain("$mode/keeper/observation.json", OracleJson.canonicalBytes(observed.json()))
+        }
+        return namespaces.last()
+    }
+
+    private fun verifyChildDefaultLimits(stdout: ByteArray, outcome: JsonObject,
+        record: ContainedModuleHostedCase.Case, mode: String): String {
+        val lines = stdout.toString(Charsets.UTF_8).split('\n')
+        assertEquals(6, lines.size, "fixture output has four raw observation records, one result marker and final LF")
+        assertEquals("", lines.last())
+        assertTrue(lines[0].startsWith("CHILD_PID="))
+        val pid = requireNotNull(lines[0].removePrefix("CHILD_PID=").toLongOrNull())
+        assertEquals(outcome.getValue("childPid").jsonPrimitive.long, pid)
+        record.retain("$mode/child/namespace-pid.txt", "$pid\n".toByteArray())
+        fun raw(index: Int, key: String, destination: String): ByteArray {
+            assertTrue(lines[index].startsWith("$key="))
+            val encoded = lines[index].removePrefix("$key=")
+            require(encoded.length <= 4 * ((MAXIMUM_CONTAINED_PROCESS_LIMITS_BYTES + 2) / 3))
+            val bytes = Base64.getDecoder().decode(encoded)
+            require(bytes.size in 1..MAXIMUM_CONTAINED_PROCESS_LIMITS_BYTES)
+            assertEquals(encoded, Base64.getEncoder().encodeToString(bytes))
+            record.retain("$mode/child/$destination", bytes)
+            return bytes
+        }
+        val before = raw(1, "CHILD_STAT_BEFORE", "before-stat.txt")
+        val limits = raw(2, "CHILD_LIMITS", "limits.txt")
+        val after = raw(3, "CHILD_STAT_AFTER", "after-stat.txt")
+        val beforeStart = parseFullTreeFunctionObservationProcessStartTimeTicks(pid, before.toString(Charsets.UTF_8))
+        assertEquals(beforeStart, parseFullTreeFunctionObservationProcessStartTimeTicks(pid, after.toString(Charsets.UTF_8)))
+        assertEquals(ContainedCommandFileDescriptorLimits(512, 512),
+            parseContainedCommandFileDescriptorLimits(limits.toString(Charsets.UTF_8)))
+        return lines[4]
+    }
+
+    private fun retainAvailableLifecycle(controlPath: Path, record: ContainedModuleHostedCase.Case, mode: String) {
+        val paths = linkedMapOf(
+            "request.json" to "runtime/contained-command-request.json",
+            "boot.json" to KotlinContainedCommandProtocol.BOOT_FILE,
+            "start.json" to KotlinContainedCommandProtocol.START_FILE,
+            "outcome.json" to KotlinContainedCommandProtocol.OUTCOME_FILE,
+            "stdout.bin" to "reports/${KotlinContainedCommandProtocol.STDOUT_FILE}",
+            "stderr.bin" to "reports/${KotlinContainedCommandProtocol.STDERR_FILE}",
+        )
+        for ((name, relative) in paths) {
+            val path = controlPath.resolve(relative)
+            if (Files.exists(path, LinkOption.NOFOLLOW_LINKS)) {
+                record.retain("$mode/$name", readBoundedBytes(path, MAXIMUM_RETAINED_MEMBER_BYTES))
             }
         }
     }
@@ -323,11 +562,14 @@ class ContainedCommandTerminalResourceLiveTest {
 
     private fun provisionedScratchMount(): Path {
         val configured = System.getenv("DECOMP_TEST_ORACLE_EXT4_SCRATCH")
-        if (System.getenv("DECOMP_REQUIRE_ORACLE_EXT4_SCRATCH") == "true") {
-            assertTrue(!configured.isNullOrBlank(), "required CI ext4 scratch slot was not provisioned")
-        }
-        assumeTrue(!configured.isNullOrBlank(), "set DECOMP_TEST_ORACLE_EXT4_SCRATCH to the provisioned empty private ext4 slot")
+        requireOrAssume(!configured.isNullOrBlank(), "set DECOMP_TEST_ORACLE_EXT4_SCRATCH to the provisioned empty private ext4 slot")
         return Path.of(checkNotNull(configured)).toAbsolutePath().normalize()
+    }
+
+    private fun requireOrAssume(condition: Boolean, message: String) {
+        if (System.getenv("DECOMP_REQUIRE_ORACLE_EXT4_SCRATCH") == "true" ||
+            System.getenv("GENERATED_C_MODULE_COMPILE_REQUIRE") == "true") assertTrue(condition, message)
+        else assumeTrue(condition, message)
     }
 
     private fun realExecutable(path: Path): Path? = runCatching { path.toRealPath() }.getOrNull()
@@ -337,8 +579,12 @@ class ContainedCommandTerminalResourceLiveTest {
         Files.setPosixFilePermissions(it, PosixFilePermissions.fromString("rwx------"))
     }
 
-    private fun readBounded(path: Path): String = Files.newInputStream(path).use { input ->
-        input.readNBytes(4097).also { require(it.size <= 4096) }.toString(Charsets.UTF_8)
+    private fun readBoundedBytes(path: Path, maximumBytes: Int): ByteArray {
+        require(maximumBytes in 1..MAXIMUM_RETAINED_MEMBER_BYTES)
+        require(Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) { "bounded fixture record must be a regular file: $path" }
+        return Files.newInputStream(path, LinkOption.NOFOLLOW_LINKS).use { input ->
+            input.readNBytes(maximumBytes + 1).also { require(it.size <= maximumBytes) { "fixture record exceeds its bound: $path" } }
+        }
     }
 
     private fun sha256(path: Path): String {
@@ -358,16 +604,75 @@ class ContainedCommandTerminalResourceLiveTest {
 
     private companion object {
         const val FIXTURE_CLASS = "TerminalResourceFixture"
+        const val DEFAULT_METHOD = "strict generic command accepts clean exit and rejects handled task limit with zero exit"
+        const val VISIBILITY_METHOD = "configured visibility only command retains selected files and proves owned cleanup"
+        const val MAXIMUM_RETAINED_MEMBER_BYTES = 4 * 1024 * 1024
+        const val MAXIMUM_CHILD_OUTPUT_BYTES = 512 * 1024
+        val VISIBILITY_CANARIES = linkedMapOf(
+            "reports/selected.txt" to "selected-retained-input",
+            "reports/hidden.txt" to "forbidden-report",
+            "state/hidden.txt" to "forbidden-state",
+            "untracked-sibling/hidden.txt" to "forbidden-untracked",
+        )
         // Match the bounded BOOT fixture: reserve 16 MiB of the unchanged 64 MiB slot for metadata,
         // protocol and temporary files. The contained resource contract also bounds total cleanup.
         const val KEEPER_CLASSPATH_MAXIMUM_BYTES = 48L * 1024 * 1024
         const val CLEANUP_MAXIMUM_BYTES = 64L * 1024 * 1024
         val FIXTURE_SOURCE = """
+            import java.io.IOException;
+            import java.io.InputStream;
+            import java.nio.file.Files;
+            import java.nio.file.Path;
+            import java.nio.file.StandardOpenOption;
+            import java.util.Base64;
             import java.util.concurrent.CountDownLatch;
 
             public final class TerminalResourceFixture {
+                private static byte[] bounded(Path path) throws IOException {
+                    try (InputStream input = Files.newInputStream(path)) {
+                        byte[] bytes = input.readNBytes(65537);
+                        if (bytes.length == 0 || bytes.length > 65536) throw new IOException("proc record exceeds fixture bound");
+                        return bytes;
+                    }
+                }
+                private static void observeSelf() throws IOException {
+                    long pid = ProcessHandle.current().pid();
+                    byte[] before = bounded(Path.of("/proc/self/stat"));
+                    byte[] limits = bounded(Path.of("/proc/self/limits"));
+                    byte[] after = bounded(Path.of("/proc/self/stat"));
+                    System.out.println("CHILD_PID=" + pid);
+                    System.out.println("CHILD_STAT_BEFORE=" + Base64.getEncoder().encodeToString(before));
+                    System.out.println("CHILD_LIMITS=" + Base64.getEncoder().encodeToString(limits));
+                    System.out.println("CHILD_STAT_AFTER=" + Base64.getEncoder().encodeToString(after));
+                }
+                private static void requireReadonly(Path path) throws IOException {
+                    try { Files.writeString(path, "unauthorized-write"); }
+                    catch (IOException expected) { return; }
+                    throw new IllegalStateException("forbidden writable path: " + path);
+                }
+                private static void visibility(Path root, String active) throws IOException {
+                    Path selected = root.resolve("reports/selected.txt");
+                    if (!Files.readString(selected).equals("selected-retained-input")) throw new IllegalStateException("selected input differs");
+                    requireReadonly(selected);
+                    for (String relative : new String[] {"reports/hidden.txt", "state/hidden.txt", "untracked-sibling/hidden.txt"}) {
+                        try { Files.readAllBytes(root.resolve(relative)); }
+                        catch (IOException expected) { continue; }
+                        throw new IllegalStateException("forbidden readable path: " + relative);
+                    }
+                    requireReadonly(root.resolve("overlay-residue"));
+                    requireReadonly(root.resolve("reports/unauthorized-file"));
+                    Files.writeString(root.resolve(active).resolve("owned-result"), "owned-write", StandardOpenOption.CREATE_NEW);
+                    System.out.println("VISIBILITY_ONLY_OK");
+                }
                 public static void main(String[] args) throws Exception {
-                    if (args.length != 1) throw new IllegalArgumentException("one mode is required");
+                    if (args.length < 1) throw new IllegalArgumentException("one mode is required");
+                    boolean visibility = args[0].equals("visibility");
+                    if (args.length != (visibility ? 3 : 1)) throw new IllegalArgumentException("mode arguments differ");
+                    observeSelf();
+                    if (visibility) {
+                        visibility(Path.of(args[1]), args[2]);
+                        return;
+                    }
                     if (args[0].equals("benign")) {
                         System.out.println("BENIGN_EXIT_ZERO");
                         return;

@@ -1,0 +1,19 @@
+{
+  "activeControl": "control-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "aggregateBytes": 1,
+  "files": [
+    {
+      "bytes": 1,
+      "relativePath": "reports/a",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ],
+  "maximumAggregateBytes": 134217728,
+  "maximumDepth": 4,
+  "maximumFiles": 64,
+  "maximumParents": 128,
+  "mode": "empty-readonly-root-with-owned-active-control",
+  "parentCount": 2,
+  "provider": "contained-retained-input-visibility-v1",
+  "schemaVersion": 1
+}

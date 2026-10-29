@@ -179,6 +179,213 @@ class ContainedCommandTerminalResourceEvidenceTest {
         assertFailsWith<IllegalArgumentException> { ContainedCommandTerminalResourceEvidence.requireCapturedOutput(legacy, stdout, stderr) }
     }
 
+    // BEGIN authored v5 terminal verifier controls. These records are not live or complete module proofs.
+    @Test
+    fun `v5 authored successful evidence retains strict pipe proof and complete requested resources`() {
+        val attachment = v5Attachment()
+        val execution = v5Execution(attachment)
+        val proof = ContainedCommandTerminalResourceEvidence.verifyExecution(execution, attachment)
+        assertEquals(counters().json, proof["baseline"])
+        assertEquals(counters().json, proof["final"])
+        val resources = document(attachment).getValue("resources") as JsonObject
+        assertEquals(setOf("wallClockMillis", "maximumResidentBytes", "pidsMax", "maximumFileBytes", "processorCount",
+            "fileDescriptorPolicySha256", "maximumOpenFiles"), resources.keys)
+        assertEquals(JsonPrimitive(7678), resources["maximumOpenFiles"])
+        val outcome = document(execution).getValue("outcome") as JsonObject
+        assertEquals(JsonPrimitive(2), outcome["schemaVersion"])
+        assertEquals(JsonPrimitive("kotlin-contained-command-protocol-v2"), outcome["provider"])
+        ContainedCommandTerminalResourceEvidence.requireCapturedOutput(outcome, v5Stdout(), v5Stderr())
+        for ((stdout, stderr) in listOf("substituted".toByteArray() to v5Stderr(), v5Stdout() to "substituted".toByteArray())) {
+            assertFailsWith<IllegalArgumentException> {
+                ContainedCommandTerminalResourceEvidence.requireCapturedOutput(outcome, stdout, stderr)
+            }
+        }
+    }
+
+    @Test
+    fun `v5 successful verifier rejects unsupported or mismatched outer versions after complete rehash`() {
+        for ((attachmentVersion, executionVersion) in listOf(3 to 5, 5 to 3, 4 to 4, 6 to 6)) {
+            val attachment = record(JsonObject(document(v5Attachment()) + mapOf(
+                "schemaVersion" to JsonPrimitive(attachmentVersion),
+                "provider" to JsonPrimitive("kotlin-lease-contained-command-attachment-v$attachmentVersion"))), "attachmentSha256")
+            val execution = record(JsonObject(document(v5Execution(attachment)) + mapOf(
+                "schemaVersion" to JsonPrimitive(executionVersion),
+                "provider" to JsonPrimitive("kotlin-lease-contained-command-execution-v$executionVersion"))), "executionSha256")
+            assertRehashedV5Failure(attachment, execution, "contained command execution lacks strict terminal resource evidence")
+        }
+        val attachment = record(JsonObject(document(v5Attachment()) +
+            ("provider" to JsonPrimitive("kotlin-lease-contained-command-attachment-v3"))), "attachmentSha256")
+        assertRehashedV5Failure(attachment, v5Execution(attachment),
+            "contained command execution lacks strict terminal resource evidence")
+    }
+
+    @Test
+    fun `v5 interrupted provider and interrupted outcomes cannot pass the successful verifier`() {
+        val request = v5Request(interruption = true)
+        val attachment = v5Attachment(request)
+        val interrupted = v5Execution(attachment, request, "INTERRUPTED")
+        val outer = record(JsonObject(document(v5Execution(attachment, request)) +
+            ("provider" to JsonPrimitive("kotlin-lease-contained-command-interrupted-v5"))), "executionSha256")
+        assertRehashedV5Failure(attachment, outer, "contained command execution lacks strict terminal resource evidence")
+        assertRehashedV5Failure(attachment, interrupted, "contained command strict execution was not successful")
+    }
+
+    @Test
+    fun `v5 rehashed unknown descriptor policy cannot match the observed resource declaration`() {
+        val attachment = document(v5Attachment())
+        val resources = attachment.getValue("resources") as JsonObject
+        for (digest in listOf("0".repeat(64), ContainedCommandTerminalResourceEvidence.policySha256)) {
+            assertRehashedV5AttachmentFailure(JsonObject(attachment + ("resources" to JsonObject(resources +
+                ("fileDescriptorPolicySha256" to JsonPrimitive(digest))))),
+                "contained command FD resources differ from the actual observation")
+        }
+    }
+
+    @Test
+    fun `v5 rehashed resource limit and serial processor declarations must retain exact integer values`() {
+        val attachment = document(v5Attachment())
+        val resources = attachment.getValue("resources") as JsonObject
+        val changes = listOf("maximumOpenFiles" to JsonPrimitive(7677), "maximumOpenFiles" to JsonPrimitive(7679),
+            "maximumOpenFiles" to JsonPrimitive("7678"), "maximumOpenFiles" to JsonNull,
+            "processorCount" to JsonPrimitive(2), "processorCount" to JsonPrimitive("1"))
+        for ((field, value) in changes) {
+            assertRehashedV5AttachmentFailure(JsonObject(attachment + ("resources" to JsonObject(resources + (field to value)))),
+                "contained command FD resources differ from the actual observation")
+        }
+    }
+
+    @Test
+    fun `v5 rehashed observed limits reject finite mismatched pairs after numeric parsing`() {
+        val attachment = document(v5Attachment())
+        val observation = attachment.getValue("fileDescriptorLimits") as JsonObject
+        for ((soft, hard) in listOf(7677 to 7678, 7678 to 7679, 512 to 512, 7679 to 7679)) {
+            val changed = JsonObject(observation + mapOf("softLimit" to JsonPrimitive(soft), "hardLimit" to JsonPrimitive(hard)))
+            assertRehashedV5AttachmentFailure(JsonObject(attachment + ("fileDescriptorLimits" to changed)),
+                "actual process open-file limits differ from the selected finite pair")
+        }
+    }
+
+    @Test
+    fun `v5 rehashed observation must name the supervisor host PID from the unchanged population`() {
+        val attachment = document(v5Attachment())
+        val observation = attachment.getValue("fileDescriptorLimits") as JsonObject
+        for (hostPid in listOf(1001, 7777)) {
+            val changed = JsonObject(observation + ("hostPid" to JsonPrimitive(hostPid)))
+            val mutated = JsonObject(attachment + ("fileDescriptorLimits" to changed))
+            assertEquals(attachment["processes"], mutated["processes"])
+            assertRehashedV5AttachmentFailure(mutated, "process open-file observation changed process generation")
+        }
+    }
+
+    @Test
+    fun `v5 rehashed observation must retain the supervisor start ticks from the unchanged population`() {
+        val attachment = document(v5Attachment())
+        val observation = attachment.getValue("fileDescriptorLimits") as JsonObject
+        val mutated = JsonObject(attachment + ("fileDescriptorLimits" to JsonObject(observation +
+            ("startTimeTicks" to JsonPrimitive(101)))))
+        assertEquals(attachment["processes"], mutated["processes"])
+        assertRehashedV5AttachmentFailure(mutated, "process open-file observation changed process generation")
+    }
+
+    @Test
+    fun `v5 observation rejects extra missing and incorrect provider fields after complete rehash`() {
+        val attachment = document(v5Attachment())
+        val observation = attachment.getValue("fileDescriptorLimits") as JsonObject
+        val malformed = listOf(JsonObject(observation + ("unrecorded" to JsonPrimitive(true))),
+            JsonObject(observation + ("provider" to JsonPrimitive("linux-proc-nofile-observation-v2")))) +
+            observation.keys.map { JsonObject(observation - it) }
+        for (changed in malformed) {
+            assertRehashedV5AttachmentFailure(JsonObject(attachment + ("fileDescriptorLimits" to changed)))
+        }
+        assertRehashedV5AttachmentFailure(JsonObject(attachment + ("fileDescriptorLimits" to JsonNull)),
+            "contained command fileDescriptorLimits is not an object")
+    }
+
+    @Test
+    fun `v5 observation rejects wrong integer types after complete rehash`() {
+        val attachment = document(v5Attachment())
+        val observation = attachment.getValue("fileDescriptorLimits") as JsonObject
+        for (field in listOf("hostPid", "startTimeTicks", "softLimit", "hardLimit")) {
+            for (value in listOf(JsonPrimitive("7678"), JsonPrimitive(7678.0), JsonPrimitive(true), JsonNull)) {
+                assertRehashedV5AttachmentFailure(JsonObject(attachment + ("fileDescriptorLimits" to
+                    JsonObject(observation + (field to value)))))
+            }
+        }
+    }
+
+    @Test
+    fun `v5 rehashed successful records cannot discard either strict pipe hash`() {
+        val attachment = v5Attachment()
+        val execution = document(v5Execution(attachment))
+        val outcome = execution.getValue("outcome") as JsonObject
+        for (field in listOf("stdoutSha256", "stderrSha256")) {
+            val changed = JsonObject(outcome - field)
+            val mutated = record(JsonObject(execution + mapOf("outcome" to changed,
+                "outcomeSha256" to JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(changed))))), "executionSha256")
+            assertRehashedV5Failure(attachment, mutated, "contained command strict outcome lacks authenticated pipe hashes")
+        }
+    }
+
+    private fun v5Request(interruption: Boolean = false) = KotlinContainedCommandRequest(
+        Path.of("/srv/contained-run"), "a".repeat(64), listOf("/usr/bin/java", "-version"),
+        mapOf("LANG" to "C.UTF-8", "LC_ALL" to "C.UTF-8", "TZ" to "UTC"), 30, 30, 1024, 1024,
+        allowInterruption = interruption, terminalResourcePolicySha256 = ContainedCommandTerminalResourceEvidence.policySha256,
+        fileDescriptorPolicy = ContainedCommandFileDescriptorPolicy.MODULE_COMPILATION,
+    )
+
+    private fun v5Attachment(request: KotlinContainedCommandRequest = v5Request()): ByteArray {
+        val resources = KotlinSystemdCgroupCommandResources(30_000, 512L * 1024 * 1024, 128, 64L * 1024 * 1024,
+            fileDescriptorPolicy = ContainedCommandFileDescriptorPolicy.MODULE_COMPILATION)
+        return record(JsonObject(document(attachment()) + mapOf(
+            "schemaVersion" to JsonPrimitive(5), "provider" to JsonPrimitive("kotlin-lease-contained-command-attachment-v5"),
+            "requestSha256" to JsonPrimitive(request.sha256), "resources" to resources.json(),
+            "fileDescriptorLimits" to JsonObject(mapOf(
+                "provider" to JsonPrimitive("linux-proc-nofile-observation-v1"), "hostPid" to JsonPrimitive(1002),
+                "startTimeTicks" to JsonPrimitive(100), "softLimit" to JsonPrimitive(7678), "hardLimit" to JsonPrimitive(7678),
+            )),
+        )), "attachmentSha256")
+    }
+
+    private fun v5Execution(attachment: ByteArray, request: KotlinContainedCommandRequest = v5Request(),
+        status: String = "EXITED"): ByteArray {
+        val stdout = v5Stdout()
+        val stderr = v5Stderr()
+        val outcome = KotlinContainedCommandProtocol.outcome(ByteArray(32), request,
+            KotlinContainedCommandOutcome(123, 124, 0, 1, stdout.size.toLong(), stderr.size.toLong(), status,
+                OracleArtifacts.sha256(stdout), OracleArtifacts.sha256(stderr)))
+        return record(JsonObject(document(execution(attachment)) + mapOf(
+            "schemaVersion" to JsonPrimitive(5), "provider" to JsonPrimitive("kotlin-lease-contained-command-execution-v5"),
+            "attachmentSha256" to JsonPrimitive(OracleArtifacts.sha256(attachment)),
+            "requestSha256" to JsonPrimitive(request.sha256), "outcome" to document(outcome),
+            "outcomeSha256" to JsonPrimitive(OracleArtifacts.sha256(outcome)),
+            "terminalResourceEvidence" to ContainedCommandTerminalResourceEvidence.create(attachment, counters()),
+        )), "executionSha256")
+    }
+
+    private fun assertRehashedV5AttachmentFailure(value: JsonObject, expectedMessage: String? = null) {
+        val attachment = record(value, "attachmentSha256")
+        assertRehashedV5Failure(attachment, v5Execution(attachment), expectedMessage)
+    }
+
+    private fun assertRehashedV5Failure(attachment: ByteArray, execution: ByteArray, expectedMessage: String? = null) {
+        // These checks prevent a stale self-hash or attachment/proof link from satisfying a semantic counterexample.
+        assertContentEquals(attachment, record(document(attachment), "attachmentSha256"))
+        val decoded = document(execution)
+        assertContentEquals(execution, record(decoded, "executionSha256"))
+        assertEquals(JsonPrimitive(OracleArtifacts.sha256(attachment)), decoded["attachmentSha256"])
+        assertEquals(ContainedCommandTerminalResourceEvidence.create(attachment, counters()), decoded["terminalResourceEvidence"])
+        assertEquals(JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(decoded.getValue("outcome")))), decoded["outcomeSha256"])
+        val failure = assertFailsWith<IllegalArgumentException> {
+            ContainedCommandTerminalResourceEvidence.verifyExecution(execution, attachment)
+        }
+        if (expectedMessage != null) assertEquals(expectedMessage, failure.message)
+        assertNotEquals("contained command evidence digest differs", failure.message)
+    }
+
+    private fun v5Stdout() = "authored-v5-result".toByteArray()
+    private fun v5Stderr() = "authored-v5-diagnostic".toByteArray()
+    // END authored v5 terminal verifier controls.
+
     private fun request(strict: Boolean = true, interruption: Boolean = false) = KotlinContainedCommandRequest(
         Path.of("/srv/contained-run"), "a".repeat(64), listOf("/usr/bin/java", "-version"),
         mapOf("LANG" to "C.UTF-8", "LC_ALL" to "C.UTF-8", "TZ" to "UTC"), 30, 30, 1024, 1024,

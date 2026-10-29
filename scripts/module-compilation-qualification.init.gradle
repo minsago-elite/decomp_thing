@@ -1,10 +1,17 @@
 import groovy.json.JsonOutput
+import groovy.json.JsonSlurper
+import java.nio.file.Files
+import java.nio.file.LinkOption
 import java.security.MessageDigest
+import java.util.zip.ZipFile
 
 // Explicit hosted qualification tasks; ordinary tests never acquire production compiler authority.
 allprojects {
     afterEvaluate { project ->
         if (project != rootProject) return
+        def acceptsWorkerManifestByteCount = { long byteCount ->
+            byteCount >= 1L && byteCount <= 1024L * 1024L
+        }
         if (providers.gradleProperty('deferContainedModuleAcceptance').orNull == 'true') {
             // One explicit required ACP positive is owned by the successful configured prerequisite.
             tasks.named('test', Test) { useJUnitPlatform { excludeTags 'ci-contained-module' } }
@@ -12,9 +19,14 @@ allprojects {
         tasks.register('moduleCompilerDeploymentManifest') {
             dependsOn tasks.named('jar'), tasks.named('stageOracleNativeLibraries')
             def output = layout.buildDirectory.file('module-compilation-qualification/worker-classpath.json')
+            def staged = layout.buildDirectory.dir('module-compilation-qualification/deployment')
             inputs.file(tasks.named('jar').flatMap { it.archiveFile })
             inputs.files(configurations.runtimeClasspath)
             outputs.file(output)
+            outputs.dir(staged)
+            // Re-entry must authenticate the published directory on every invocation, even when
+            // Gradle would otherwise skip the action after observing unchanged task inputs.
+            outputs.upToDateWhen { false }
             doLast {
                 def required = ['kotlin-stdlib', 'kotlinx-serialization-core-jvm', 'kotlinx-serialization-json-jvm', 'jna', 'sqlite-jdbc'] as Set
                 def optional = ['kotlin-reflect', 'slf4j-api', 'slf4j-simple'] as Set
@@ -22,25 +34,18 @@ allprojects {
                 def selected = artifacts.findAll { required.contains(it.name) || optional.contains(it.name) }
                 assert selected.collect { it.name }.containsAll(required): 'module compiler deployment dependency is absent'
                 assert selected.collect { it.name }.unique().size() == selected.size(): 'module compiler deployment dependency duplicates'
-                def staged = file('build/module-compilation-qualification/deployment')
-                assert !staged.exists(): 'refusing to replace staged compiler deployment'
-                staged.mkdirs()
                 def sources = [tasks.named('jar').get().archiveFile.get().asFile] + selected.sort { it.name }.collect { it.file }
-                long total = 0
-                def entries = sources.withIndex().collect { source, index ->
-                    assert source.isFile() && source.name.endsWith('.jar') && source.length() > 0
-                    total = Math.addExact(total, source.length())
-                    assert total <= 256L * 1024 * 1024: 'module compiler deployment exceeds finite bound'
-                    def target = new File(staged, String.format('%03d-%s', index, source.name))
-                    java.nio.file.Files.copy(source.toPath(), target.toPath())
-                    def digest = MessageDigest.getInstance('SHA-256')
-                    target.withInputStream { input ->
-                        byte[] buffer = new byte[65536]
-                        for (int count; (count = input.read(buffer)) >= 0;) if (count > 0) digest.update(buffer, 0, count)
-                    }
-                    [path: target.canonicalPath, bytes: target.length(), sha256: digest.digest().encodeHex().toString()]
-                }
-                output.get().asFile.text = JsonOutput.toJson([schemaVersion: 1, entries: entries]) + '\n'
+                def helper = new File(rootProject.projectDir, 'scripts/module_compiler_deployment.py')
+                assert helper.isFile(): 'module compiler deployment verifier is missing'
+                def command = ['python3', helper.absolutePath,
+                    '--manifest', output.get().asFile.absolutePath,
+                    '--stage', staged.get().asFile.absolutePath]
+                sources.each { source -> command.addAll(['--source', source.absolutePath]) }
+                def process = new ProcessBuilder(command).redirectErrorStream(true).start()
+                String helperOutput = process.inputStream.getText('UTF-8')
+                int exitCode = process.waitFor()
+                if (!helperOutput.isEmpty()) println(helperOutput)
+                assert exitCode == 0: 'module compiler deployment verification failed'
             }
         }
         tasks.register('moduleCompilerWriteConfig', JavaExec) {
@@ -63,16 +68,183 @@ allprojects {
                     file('build/module-compilation-qualification/compiled-live-tests.json').absolutePath
             }
         }
+        // This is an explicitly inventoried test-only child deployment. It is not the
+        // authenticated production worker deployment and supplies no live authority.
+        tasks.register('moduleCompilerHostedTestJar', Jar) {
+            dependsOn tasks.named('testClasses')
+            from sourceSets.test.output
+            archiveFileName = 'module-hosted-test-output.jar'
+            destinationDirectory = layout.buildDirectory.dir('module-compilation-hosted-test-jar')
+            preserveFileTimestamps = false
+            reproducibleFileOrder = true
+            duplicatesStrategy = DuplicatesStrategy.FAIL
+        }
+        tasks.register('moduleCompilerHostedManifestByteBoundControls') {
+            outputs.upToDateWhen { false }
+            doLast {
+                def output = file('build/module-compilation-qualification/manifest-byte-bound-controls.json')
+                assert !output.exists(): 'refusing previous manifest byte-bound controls'
+                def controls = [
+                    [value: -1L, expected: false], [value: 0L, expected: false],
+                    [value: 1L, expected: true], [value: 1861L, expected: true],
+                    [value: 1048575L, expected: true], [value: 1048576L, expected: true],
+                    [value: 1048577L, expected: false], [value: Long.MAX_VALUE, expected: false],
+                    [value: 1861, expected: true],
+                ].collect { control ->
+                    boolean accepted = acceptsWorkerManifestByteCount(control.value)
+                    assert accepted == control.expected: 'manifest byte-bound control differs'
+                    [bytes: control.value, inputType: control.value.getClass().name,
+                        expected: control.expected, accepted: accepted]
+                }
+                assert output.parentFile.isDirectory() || output.parentFile.mkdirs()
+                output.text = JsonOutput.toJson([schemaVersion: 1,
+                    provider: 'contained-module-hosted-manifest-byte-bound-controls-v1',
+                    minimumBytes: 1L, maximumBytes: 1048576L, controls: controls]) + '\n'
+            }
+        }
+        tasks.register('moduleCompilerHostedChildManifest') {
+            dependsOn tasks.named('moduleCompilerHostedTestJar'), tasks.named('jar'), tasks.named('moduleCompilerDeploymentManifest'),
+                tasks.named('moduleCompilerHostedManifestByteBoundControls')
+            outputs.upToDateWhen { false }
+            doLast {
+                def root = file('build/module-compilation-qualification')
+                def output = new File(root, 'child-classpath.json')
+                def staged = new File(root, 'child-classpath')
+                assert !output.exists() && !staged.exists(): 'refusing an existing test-child deployment'
+                assert staged.mkdirs(): 'cannot create test-child deployment'
+                def sources = [tasks.named('moduleCompilerHostedTestJar').get().archiveFile.get().asFile,
+                    tasks.named('jar').get().archiveFile.get().asFile] +
+                    configurations.testRuntimeClasspath.files.sort { it.absolutePath }
+                assert sources.size() in 1..128 && sources.collect { it.canonicalPath }.toSet().size() == sources.size()
+                long total = 0
+                def entries = sources.withIndex().collect { source, index ->
+                    assert source.absoluteFile.toPath() == source.canonicalFile.toPath()
+                    assert Files.isRegularFile(source.toPath(), LinkOption.NOFOLLOW_LINKS) && source.name.endsWith('.jar')
+                    assert source.length() in 1..(128L * 1024 * 1024): 'test-child member exceeds its bound'
+                    total = Math.addExact(total, source.length())
+                    assert total <= 512L * 1024 * 1024: 'test-child deployment exceeds its aggregate bound'
+                    def target = new File(staged, String.format('%03d-%s', index, source.name))
+                    Files.copy(source.toPath(), target.toPath())
+                    def digest = MessageDigest.getInstance('SHA-256')
+                    target.withInputStream { input ->
+                        byte[] buffer = new byte[65536]
+                        for (int count; (count = input.read(buffer)) >= 0;) if (count > 0) digest.update(buffer, 0, count)
+                    }
+                    [path: target.canonicalPath, bytes: target.length(), sha256: digest.digest().encodeHex().toString()]
+                }
+                def workerFile = new File(root, 'worker-classpath.json')
+                long workerByteCount = workerFile.length()
+                assert acceptsWorkerManifestByteCount(workerByteCount): 'worker manifest exceeds its byte bound'
+                def workerBytes = workerFile.bytes
+                def worker = new JsonSlurper().parse(workerBytes)
+                assert worker.keySet() == (['schemaVersion', 'entries'] as Set) && worker.schemaVersion == 1
+                assert worker.entries.size() in 1..128
+                worker.entries.each { entry ->
+                    assert entry.keySet() == (['path', 'bytes', 'sha256'] as Set)
+                    assert entries.count { it.bytes == entry.bytes && it.sha256 == entry.sha256 } == 1:
+                        'test-child app or dependency differs from the exact installed worker deployment'
+                }
+                output.text = JsonOutput.toJson(new TreeMap([schemaVersion: 1,
+                    provider: 'contained-module-hosted-child-classpath-v1',
+                    workerClasspathManifestSha256: MessageDigest.getInstance('SHA-256').digest(workerBytes).encodeHex().toString(),
+                    entries: entries.collect { new TreeMap(it) }])) + '\n'
+            }
+        }
+        tasks.register('moduleCompilerHostedCompiledEvidence') {
+            dependsOn tasks.named('testClasses'), tasks.named('jar'), tasks.named('moduleCompilerHostedChildManifest')
+            outputs.upToDateWhen { false }
+            doLast {
+                def output = file('build/module-compilation-qualification/compiled-class-inventory.json')
+                assert !output.exists(): 'refusing previous compiled hosted evidence'
+                def entries = []
+                long total = 0
+                def roots = sourceSets.main.output.classesDirs.files.collect { [kind: 'main', root: it] } +
+                    sourceSets.test.output.classesDirs.files.collect { [kind: 'test', root: it] }
+                roots.findAll { it.root.exists() }.sort { it.root.absolutePath }.each { selected ->
+                    def root = selected.root
+                    assert root.canonicalFile == root.absoluteFile && root.isDirectory()
+                    Files.walk(root.toPath()).withCloseable { paths ->
+                        def iterator = paths.iterator()
+                        int visited = 0
+                        while (iterator.hasNext()) {
+                            def path = iterator.next()
+                            assert ++visited <= 32768: 'compiled class tree exceeds its entry bound'
+                            assert !Files.isSymbolicLink(path): 'compiled class tree contains a symbolic link'
+                            if (Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS)) continue
+                            assert Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)
+                            if (!path.fileName.toString().endsWith('.class')) continue
+                            assert entries.size() < 32768: 'compiled class inventory exceeds its count bound'
+                            long bytes = Files.size(path)
+                            assert bytes in 1..(16L * 1024 * 1024)
+                            total = Math.addExact(total, bytes)
+                            assert total <= 256L * 1024 * 1024: 'compiled class inventory exceeds its byte bound'
+                            def digest = MessageDigest.getInstance('SHA-256')
+                            Files.newInputStream(path).withCloseable { input ->
+                                byte[] buffer = new byte[65536]
+                                for (int count; (count = input.read(buffer)) >= 0;) if (count > 0) digest.update(buffer, 0, count)
+                            }
+                            entries.add([path: rootProject.projectDir.toPath().relativize(path).toString(),
+                                kind: selected.kind, classPath: root.toPath().relativize(path).toString(),
+                                bytes: bytes, sha256: digest.digest().encodeHex().toString()])
+                        }
+                    }
+                }
+                assert !entries.isEmpty() && entries.collect { it.path }.toSet().size() == entries.size()
+                def archives = [main: tasks.named('jar').get().archiveFile.get().asFile,
+                    test: tasks.named('moduleCompilerHostedTestJar').get().archiveFile.get().asFile].collect { kind, archive ->
+                    assert archive.length() in 1..(128L * 1024 * 1024)
+                    def expected = entries.findAll { it.kind == kind }.collectEntries { [(it.classPath): it] }
+                    assert expected.size() == entries.count { it.kind == kind }
+                    new ZipFile(archive).withCloseable { zip ->
+                        def enumeration = zip.entries()
+                        def actual = [] as Set
+                        int count = 0
+                        while (enumeration.hasMoreElements()) {
+                            def entry = enumeration.nextElement()
+                            assert ++count <= 131072: 'compiled archive exceeds its entry bound'
+                            if (!entry.name.endsWith('.class')) continue
+                            assert actual.add(entry.name) && expected.containsKey(entry.name): 'compiled archive class population differs'
+                            def row = expected[entry.name]
+                            assert !entry.directory && entry.size == row.bytes
+                            def digest = MessageDigest.getInstance('SHA-256')
+                            long observed = 0
+                            zip.getInputStream(entry).withCloseable { input ->
+                                byte[] buffer = new byte[65536]
+                                for (int read; (read = input.read(buffer)) >= 0;) if (read > 0) {
+                                    observed = Math.addExact(observed, read)
+                                    assert observed <= row.bytes: 'compiled archive class exceeds its pinned bound'
+                                    digest.update(buffer, 0, read)
+                                }
+                            }
+                            assert observed == row.bytes && digest.digest().encodeHex().toString() == row.sha256:
+                                'compiled class differs from packaged child/worker class'
+                        }
+                        assert actual == expected.keySet(): 'compiled archive omits classes'
+                    }
+                    def digest = MessageDigest.getInstance('SHA-256')
+                    archive.withInputStream { input ->
+                        byte[] buffer = new byte[65536]
+                        for (int count; (count = input.read(buffer)) >= 0;) if (count > 0) digest.update(buffer, 0, count)
+                    }
+                    [kind: kind, path: archive.canonicalPath, bytes: archive.length(),
+                        sha256: digest.digest().encodeHex().toString(), classCount: expected.size()]
+                }
+                output.text = JsonOutput.toJson([schemaVersion: 1,
+                    provider: 'contained-module-hosted-compiled-class-inventory-v1',
+                    archives: archives, entries: entries.sort { it.path }]) + '\n'
+            }
+        }
         tasks.register('moduleCompilerLivePreflight') {
             // Test.doFirst is too late: Gradle has already prepared the Test outputs.
             // A separate prerequisite runs before output preparation, including for direct
             // Gradle invocations that do not use the shell's earlier freshness admission.
             doLast {
-                assert !file('build/test-results/moduleCompilationLiveQualification').exists(): 'refusing existing hosted compiler test reports'
+                def reports = file('build/test-results/moduleCompilationLiveQualification').toPath()
+                assert !Files.exists(reports, LinkOption.NOFOLLOW_LINKS): 'refusing existing hosted compiler test reports'
             }
         }
         tasks.register('moduleCompilationLiveQualification', Test) {
-            dependsOn tasks.named('testClasses'), tasks.named('generateAcpGateHelperChecksum'), tasks.named('stageOracleNativeLibraries'), tasks.named('moduleCompilerLiveInventory'), tasks.named('moduleCompilerLivePreflight')
+            dependsOn tasks.named('testClasses'), tasks.named('generateAcpGateHelperChecksum'), tasks.named('stageOracleNativeLibraries'), tasks.named('moduleCompilerLiveInventory'), tasks.named('moduleCompilerLivePreflight'), tasks.named('moduleCompilerHostedCompiledEvidence')
             outputs.upToDateWhen { false }
             outputs.doNotCacheIf('hosted compiler authority must execute in this attempt') { true }
             testClassesDirs = sourceSets.test.output.classesDirs
@@ -82,6 +254,8 @@ allprojects {
             maxParallelForks = 1
             systemProperty 'java.io.tmpdir', file('build/module-compilation-qualification/tmp').absolutePath
             systemProperty 'decompengine.oracle.nativeLibraryDirectory', file('build/native/oracle').absolutePath
+            systemProperty 'decompengine.moduleQualification.caseDirectory', file('build/reports/contained-module-compilation-live/cases').absolutePath
+            systemProperty 'decompengine.moduleQualification.childClasspathManifest', file('build/module-compilation-qualification/child-classpath.json').absolutePath
             systemProperty 'decompengine.acp.gateHelperExecutable', file('build/native/acp/decomp-acp-gate-helper').absolutePath
             systemProperty 'decompengine.acp.gateHelperChecksum', file('build/native/acp/decomp-acp-gate-helper.sha256').absolutePath
             environment 'GENERATED_C_MODULE_COMPILE_REQUIRE', 'true'

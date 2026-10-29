@@ -141,7 +141,8 @@ internal class VerifiedContainedModuleCompilation private constructor(private va
                             listOf(KotlinSystemdCgroupCommandInput(requestPath, request.canonicalBytes.size.toLong(), request.sha256), compilerInput, executableSnapshot),
                             configuration.compilerRuntimeMounts,
                             KotlinSystemdCgroupCommandResources(deadline.remainingWholeSecondsMillis(60_000), 512L * 1024 * 1024,
-                                128, ContainedModuleCompilerRequest.MAXIMUM_OBJECT_BYTES), configuration.configurationSha256,
+                                128, ContainedModuleCompilerRequest.MAXIMUM_OBJECT_BYTES,
+                                fileDescriptorPolicy = ContainedCommandFileDescriptorPolicy.MODULE_COMPILATION), configuration.configurationSha256,
                             beforeStart = { receipt ->
                                 acquired.requireCurrentOperationRunRootAfterScopeAttachment(rootToken)
                                 snapshot.requireCurrent { deadline.requireCurrent() }
@@ -210,12 +211,13 @@ internal class VerifiedContainedModuleCompilation private constructor(private va
                 removeOwnedModuleCompilerRequestDirectory(temporary)
                 val worker = checkNotNull(workerResult)
                 val proof = JsonObject(mapOf(
-                    "schemaVersion" to JsonPrimitive(1), "provider" to JsonPrimitive("contained-module-compilation-v1"),
+                    "schemaVersion" to JsonPrimitive(2), "provider" to JsonPrimitive("contained-module-compilation-v2"),
                     "scope" to JsonPrimitive("module-object"), "policyId" to JsonPrimitive(ContainedModuleCompilationPolicy.POLICY_ID),
                     "profileId" to JsonPrimitive(profile.id), "profileSha256" to JsonPrimitive(profile.sha256),
                     "sourceSha256" to JsonPrimitive(request.sourceSha256), "snapshotSha256" to JsonPrimitive(request.snapshotSha256),
                     "runtimeConfigurationSha256" to JsonPrimitive(configuration.configurationSha256),
                     "runtimeConfiguration" to configuration.configurationRecord, "intent" to intent,
+                    "runtimeClosure" to OracleJson.parseCanonical(checkNotNull(execution.runtimeClosureCanonicalBytes)),
                     "request" to OracleJson.parseCanonical(request.canonicalBytes), "result" to OracleJson.parseCanonical(worker.canonicalBytes),
                     "commandRequest" to OracleJson.parseCanonical(checkNotNull(commandRequest)),
                     "attachment" to OracleJson.parseCanonical(checkNotNull(attachment)), "execution" to OracleJson.parseCanonical(execution.canonicalBytes),

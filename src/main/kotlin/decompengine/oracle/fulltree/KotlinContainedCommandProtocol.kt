@@ -23,9 +23,13 @@ internal class KotlinContainedCommandRequest(
     val maximumStderrBytes: Long,
     val allowInterruption: Boolean = false,
     val terminalResourcePolicySha256: String? = null,
+    val retainedInputVisibilitySha256: String? = null,
+    val fileDescriptorPolicy: ContainedCommandFileDescriptorPolicy? = null,
 ) {
     val command: List<String>
     val environment: Map<String, String>
+    val fileDescriptorPolicySha256: String? = fileDescriptorPolicy?.sha256
+    val maximumOpenFiles: Long? = fileDescriptorPolicy?.maximumOpenFiles
     private val encoded: ByteArray
     val canonicalBytes: ByteArray get() = encoded.copyOf()
     val sha256: String
@@ -65,11 +69,8 @@ internal class KotlinContainedCommandRequest(
         require(maximumStdoutBytes in 1L..MAXIMUM_LOG_BYTES && maximumStderrBytes in 1L..MAXIMUM_LOG_BYTES) {
             "contained command log budget is outside its bound"
         }
-        require(terminalResourcePolicySha256 == null ||
-            terminalResourcePolicySha256 == ContainedCommandTerminalResourceEvidence.policySha256) {
-            "contained command terminal resource policy is unsupported"
-        }
-        val version = if (terminalResourcePolicySha256 != null) 3 else if (allowInterruption) 2 else 1
+        val version = containedCommandRequestVersion(allowInterruption,
+            terminalResourcePolicySha256, retainedInputVisibilitySha256, fileDescriptorPolicy)
         val fields = mapOf(
             "schemaVersion" to JsonPrimitive(version),
             "provider" to JsonPrimitive("kotlin-contained-command-request-v$version"),
@@ -82,10 +83,20 @@ internal class KotlinContainedCommandRequest(
             "maximumStdoutBytes" to JsonPrimitive(maximumStdoutBytes),
             "maximumStderrBytes" to JsonPrimitive(maximumStderrBytes),
         )
-        encoded = OracleJson.canonicalBytes(JsonObject(fields +
-            (if (allowInterruption) mapOf("allowInterruption" to JsonPrimitive(true)) else emptyMap()) +
-            (terminalResourcePolicySha256?.let { mapOf("terminalResourcePolicySha256" to JsonPrimitive(it)) } ?: emptyMap())),
-            CONTAINED_REQUEST_LIMITS)
+        encoded = OracleJson.canonicalBytes(JsonObject(fields + when {
+            fileDescriptorPolicy != null -> mapOf(
+                "allowInterruption" to JsonPrimitive(allowInterruption),
+                "terminalResourcePolicySha256" to JsonPrimitive(checkNotNull(terminalResourcePolicySha256)),
+                "fileDescriptorPolicySha256" to JsonPrimitive(checkNotNull(fileDescriptorPolicySha256)),
+                "maximumOpenFiles" to JsonPrimitive(checkNotNull(maximumOpenFiles)),
+            ) + (retainedInputVisibilitySha256?.let {
+                mapOf("retainedInputVisibilitySha256" to JsonPrimitive(it))
+            } ?: emptyMap())
+            retainedInputVisibilitySha256 != null -> mapOf("allowInterruption" to JsonPrimitive(allowInterruption),
+                "retainedInputVisibilitySha256" to JsonPrimitive(retainedInputVisibilitySha256))
+            else -> (if (allowInterruption) mapOf("allowInterruption" to JsonPrimitive(true)) else emptyMap()) +
+                (terminalResourcePolicySha256?.let { mapOf("terminalResourcePolicySha256" to JsonPrimitive(it)) } ?: emptyMap())
+        }), CONTAINED_REQUEST_LIMITS)
         sha256 = OracleArtifacts.sha256(encoded)
     }
 
@@ -99,8 +110,12 @@ internal class KotlinContainedCommandRequest(
             val document = OracleJson.parseCanonical(bytes, CONTAINED_REQUEST_LIMITS) as? JsonObject
                 ?: throw IllegalArgumentException("contained command request must be an object")
             val version = document.number("schemaVersion")
-            require(version in 1L..3L) { "contained command request version is unsupported" }
-            val allowInterruption = version == 2L || (version == 3L && "allowInterruption" in document)
+            if (version == 5L) return parseFileDescriptorRequest(document, bytes)
+            require(version in setOf(1L, 2L, 3L, 4L)) { "contained command request version is unsupported" }
+            val visibility = if (version == 4L) document.string("retainedInputVisibilitySha256") else null
+            if (version == 4L) require(document["allowInterruption"] in setOf(JsonPrimitive(true), JsonPrimitive(false)))
+            val allowInterruption = version == 2L || (version == 3L && "allowInterruption" in document) ||
+                (version == 4L && document["allowInterruption"] == JsonPrimitive(true))
             require(!allowInterruption || document["allowInterruption"] == JsonPrimitive(true)) {
                 "contained command requires explicit interruption admission"
             }
@@ -110,8 +125,9 @@ internal class KotlinContainedCommandRequest(
             val terminalResourcePolicySha256 = if (version == 3L) document.string("terminalResourcePolicySha256") else null
             require(document.keys == setOf("schemaVersion", "provider", "runDirectory", "nonce", "command",
                 "environment", "maximumStartWaitSeconds", "maximumWallSeconds", "maximumStdoutBytes", "maximumStderrBytes") +
-                (if (allowInterruption) setOf("allowInterruption") else emptySet()) +
-                (if (version == 3L) setOf("terminalResourcePolicySha256") else emptySet())) {
+                (if (version == 4L) setOf("allowInterruption", "retainedInputVisibilitySha256")
+                    else (if (allowInterruption) setOf("allowInterruption") else emptySet()) +
+                        (if (version == 3L) setOf("terminalResourcePolicySha256") else emptySet()))) {
                 "contained command request fields differ from its closed contract"
             }
             require(document.string("provider") == "kotlin-contained-command-request-v$version") {
@@ -125,10 +141,97 @@ internal class KotlinContainedCommandRequest(
                 Path.of(document.string("runDirectory")), document.string("nonce"),
                 command.map { it.requireString() }, environment.mapValues { it.value.requireString() },
                 document.number("maximumStartWaitSeconds"), document.number("maximumWallSeconds"),
-                document.number("maximumStdoutBytes"), document.number("maximumStderrBytes"), allowInterruption,
-                terminalResourcePolicySha256,
+                document.number("maximumStdoutBytes"), document.number("maximumStderrBytes"),
+                allowInterruption = allowInterruption,
+                terminalResourcePolicySha256 = terminalResourcePolicySha256,
+                retainedInputVisibilitySha256 = visibility,
             ).also { require(it.canonicalBytes.contentEquals(bytes)) { "contained command request changed during parsing" } }
         }
+
+        private fun parseFileDescriptorRequest(document: JsonObject, bytes: ByteArray): KotlinContainedCommandRequest {
+            val hasVisibility = "retainedInputVisibilitySha256" in document
+            require(document.keys == setOf("schemaVersion", "provider", "runDirectory", "nonce", "command",
+                "environment", "maximumStartWaitSeconds", "maximumWallSeconds", "maximumStdoutBytes", "maximumStderrBytes",
+                "allowInterruption", "terminalResourcePolicySha256", "fileDescriptorPolicySha256", "maximumOpenFiles") +
+                if (hasVisibility) setOf("retainedInputVisibilitySha256") else emptySet()) {
+                "contained command v5 fields differ from its closed contract"
+            }
+            require(document.string("provider") == "kotlin-contained-command-request-v5") {
+                "contained command request version is unsupported"
+            }
+            require(document["allowInterruption"] in setOf(JsonPrimitive(true), JsonPrimitive(false))) {
+                "contained command v5 requires explicit Boolean interruption admission"
+            }
+            val terminal = document.string("terminalResourcePolicySha256")
+            require(terminal == ContainedCommandTerminalResourceEvidence.policySha256) {
+                "contained command v5 requires its exact terminal resource policy"
+            }
+            // Raw fields may select only this closed policy; neither a digest nor parsing grants launch authority.
+            val policy = ContainedCommandFileDescriptorPolicy.MODULE_COMPILATION
+            require(document.string("fileDescriptorPolicySha256") == policy.sha256 &&
+                document.number("maximumOpenFiles") == policy.maximumOpenFiles) {
+                "contained command file descriptor policy declaration is unsupported"
+            }
+            val visibility = if (hasVisibility) document.string("retainedInputVisibilitySha256") else null
+            val command = document["command"] as? JsonArray
+                ?: throw IllegalArgumentException("contained command arguments must be an array")
+            val environment = document["environment"] as? JsonObject
+                ?: throw IllegalArgumentException("contained command environment must be an object")
+            return KotlinContainedCommandRequest(
+                Path.of(document.string("runDirectory")), document.string("nonce"),
+                command.map { it.requireString() }, environment.mapValues { it.value.requireString() },
+                document.number("maximumStartWaitSeconds"), document.number("maximumWallSeconds"),
+                document.number("maximumStdoutBytes"), document.number("maximumStderrBytes"),
+                allowInterruption = document["allowInterruption"] == JsonPrimitive(true),
+                terminalResourcePolicySha256 = terminal,
+                retainedInputVisibilitySha256 = visibility,
+                fileDescriptorPolicy = policy,
+            ).also { require(it.canonicalBytes.contentEquals(bytes)) { "contained command request changed during parsing" } }
+        }
+    }
+}
+
+/** A typed selection or digest selects a closed contract, never execution authority. */
+private fun containedCommandRequestVersion(
+    allowInterruption: Boolean,
+    terminalResourcePolicySha256: String?,
+    retainedInputVisibilitySha256: String?,
+    fileDescriptorPolicy: ContainedCommandFileDescriptorPolicy? = null,
+): Int {
+    require(terminalResourcePolicySha256 == null ||
+        terminalResourcePolicySha256 == ContainedCommandTerminalResourceEvidence.policySha256) {
+        "contained command terminal resource policy is unsupported"
+    }
+    require(retainedInputVisibilitySha256 == null || retainedInputVisibilitySha256.matches(CONTAINED_SHA256))
+    require(fileDescriptorPolicy == null || terminalResourcePolicySha256 != null) {
+        "contained command file descriptor policy requires the terminal resource policy"
+    }
+    require(fileDescriptorPolicy != null || terminalResourcePolicySha256 == null || retainedInputVisibilitySha256 == null) {
+        "contained command terminal and visibility policies cannot be combined"
+    }
+    return when {
+        fileDescriptorPolicy != null -> 5
+        terminalResourcePolicySha256 != null -> 3
+        retainedInputVisibilitySha256 != null -> 4
+        allowInterruption -> 2
+        else -> 1
+    }
+}
+
+/** Canonical runtime fields for the same old modes; legacy null keeps its original empty map. */
+internal fun containedCommandRuntimePolicyFields(
+    interruptionPolicySha256: String?,
+    terminalResourcePolicySha256: String?,
+    retainedInputVisibility: JsonObject?,
+): Map<String, JsonElement> {
+    val visibilitySha256 = retainedInputVisibility?.let { OracleArtifacts.sha256(OracleJson.canonicalBytes(it)) }
+    val version = containedCommandRequestVersion(interruptionPolicySha256 != null,
+        terminalResourcePolicySha256, visibilitySha256)
+    return buildMap {
+        interruptionPolicySha256?.let { put("interruptionPolicySha256", JsonPrimitive(it)) }
+        retainedInputVisibility?.let { put("retainedInputVisibility", it) }
+        terminalResourcePolicySha256?.let { put("terminalResourcePolicySha256", JsonPrimitive(it)) }
+        if (version != 1) put("commandRequestProvider", JsonPrimitive("kotlin-contained-command-request-v$version"))
     }
 }
 
@@ -155,7 +258,7 @@ internal data class KotlinContainedCommandOutcome(
 }
 
 internal object KotlinContainedCommandProtocol {
-    // The bootstrap argv is unchanged; request v3 selects HMAC wire v2 after request admission.
+    // The bootstrap argv is unchanged; strict terminal requests v3/v5 select HMAC wire v2 after admission.
     const val VERSION = "contained-command-v1"
     const val BOOT_FILE = "contained-command.boot.json"
     const val START_FILE = "contained-command.start.json"
