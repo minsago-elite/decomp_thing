@@ -454,7 +454,9 @@ gates. Fixture/dev/test modules stay outside the production payload. Preserve
 `frontend/THIRD_PARTY_NOTICES.txt` for shipped runtime dependencies and Vite-generated
 browser helpers; Gradle packages it as `docs/frontend-THIRD_PARTY_NOTICES.txt` in
 the distribution, outside public UI assets. Review notices when shipped code or
-dependencies change.
+dependencies change. [Release artifacts](web-release.md) describes how
+`scripts/release-artifacts.py` binds the checksums, inventory, UI manifest, notices and locked
+frontend packages to the shipped archive bytes.
 
 Record planned work, acceptance and verification status in the repository's
 [GitHub milestones](https://github.com/minsago-elite/decomp_thing/milestones) and
