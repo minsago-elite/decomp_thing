@@ -696,7 +696,6 @@ class WebJobService(
                         else throw WebJobServiceException(inspection.diagnostic.code, inspection.diagnostic.message)
                     }
                 }
-                }
                 checkpoint()
                 if (record != null) yield(record)
             }
