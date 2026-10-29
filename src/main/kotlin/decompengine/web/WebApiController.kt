@@ -50,16 +50,44 @@ internal class WebApiController(
     private val revisionFileMetadata = WebRevisionFileMetadata(jobs::readRevisionFileMetadata)
     private val revisionSourceSearch = WebRevisionSourceSearch(jobs::searchRevisionSources)
     private val revisionValidationReports = WebRevisionValidationReports(jobs::readRecordedValidationReport)
+    private val programStructure = WebProgramStructurePages { job, run, revision, project -> jobs.readProgramStructure(job, run, revision, project) }
     private val eventStream = WebEventStream(access, streamResources, progressPages, read = { jobId, runId ->
         readWebProgress(jobs, jobId, runId).second
     }, clock = clock)
     private val jobPages = WebJobPages(jobs::collectionRecords, checkpointedSource = jobs::collectionRecordsWithProgress)
 
+    // One private resource pattern per line, so independent route additions merge cleanly.
+    private val privateResources = listOf(
+        "(?:jobs|uploads)/[^/]+",
+        "jobs/[^/]+/runs",
+        "jobs/[^/]+/runs/[^/]+",
+        "jobs/[^/]+/runs/[^/]+/reports/(?:exploration|revision-validation)",
+        "jobs/[^/]+/runs/[^/]+/validation-history",
+        "jobs/[^/]+/runs/[^/]+/source-catalog",
+        "jobs/[^/]+/runs/[^/]+/revisions/[^/]+/sources",
+        "jobs/[^/]+/runs/[^/]+/revisions/[^/]+/source-directories/[^/]+",
+        "jobs/[^/]+/runs/[^/]+/revisions/[^/]+/source-files/[^/]+(?:/(?:chunk|content))?",
+        "jobs/[^/]+/runs/[^/]+/revisions/[^/]+/functions(?:/[^/]+)?",
+        "jobs/[^/]+/runs/[^/]+/revisions/[^/]+/modules(?:/[^/]+)?",
+        "jobs/[^/]+/runs/[^/]+/revisions/[^/]+/globals/[^/]+",
+        "jobs/[^/]+/runs/[^/]+/revisions/[^/]+/types/[^/]+",
+        "jobs/[^/]+/runs/[^/]+/revisions/[^/]+/source-search",
+        "jobs/[^/]+/repositories(?:/[^/]+(?:/operations/[^/]+)?)?",
+        "jobs/[^/]+/runs/[^/]+/snapshot",
+        "jobs/[^/]+/runs/[^/]+/events",
+        "jobs/[^/]+/runs/[^/]+/progress-pin",
+        "jobs/[^/]+/runs/[^/]+/cancel",
+        "jobs/[^/]+/runs/[^/]+/recover",
+        "jobs/[^/]+/runs/[^/]+/controls",
+        "jobs/[^/]+/runs/[^/]+/queue-position",
+        "jobs/[^/]+/artifacts/[^/]+/content",
+    ).map(::Regex)
+
     fun route(exchange: HttpExchange): Boolean {
         val path = exchange.requestURI.rawPath
         if (!path.startsWith("${assets.basePath}api/")) return false
         val resource = path.removePrefix(prefix)
-        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs", "recovery", "agent/preflight") || resource.matches(Regex("(?:jobs|uploads)/[^/]+|jobs/[^/]+/runs(?:/[^/]+(?:/reports/(?:exploration|revision-validation)|/validation-history|/source-catalog|/revisions/[^/]+/(?:sources|source-search|source-directories/[^/]+|source-files/[^/]+(?:/(?:chunk|content))?)|/snapshot|/events|/progress-pin|/cancel|/recover|/controls|/queue-position)?)?|jobs/[^/]+/artifacts/[^/]+/content|jobs/[^/]+/repositories(?:/[^/]+(?:/operations/[^/]+)?)?")))) {
+        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs", "recovery", "agent/preflight") || privateResources.any { resource.matches(it) })) {
             try {
                 val policy = if (exchange.requestMethod in setOf("POST", "PUT", "PATCH", "DELETE")) {
                     WebEndpointPolicy.jsonMutation(exchange.requestMethod)
@@ -233,6 +261,24 @@ internal class WebApiController(
                             }
                         } finally { exchange.close() }
                     }
+                }
+                resource.matches(Regex("jobs/[^/]+/runs/[^/]+/revisions/[^/]+/(?:functions|modules)(?:/[^/]+)?|jobs/[^/]+/runs/[^/]+/revisions/[^/]+/(?:globals|types)/[^/]+")) -> {
+                    val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.privateRead(allowHead = true)))
+                    requireJsonAccept(exchange)
+                    val parts = resource.split('/')
+                    val query = exchange.requestURI.rawQuery
+                    if (parts.size == 8 && !WebProgramStructurePages.addressable(parts[7])) {
+                        throw WebAccessDenied(404, if (parts[6] == "modules") "MODULE_NOT_FOUND" else "ENTITY_NOT_FOUND",
+                            "The requested structure record is not addressable in this revision.")
+                    }
+                    val (kind, value) = when {
+                        parts.size == 7 && parts[6] == "functions" -> "functionInventory" to programStructure.functions(session.sessionId, parts[1], parts[3], parts[5], query)
+                        parts.size == 7 -> "moduleInventory" to programStructure.modules(session.sessionId, parts[1], parts[3], parts[5], query)
+                        parts[6] == "modules" -> "moduleDetail" to programStructure.module(session.sessionId, parts[1], parts[3], parts[5], parts[7], query)
+                        else -> "entityDetail" to programStructure.entity(WebStructureKind.entries.single { it.route == parts[6] },
+                            parts[1], parts[3], parts[5], parts[7], query)
+                    }
+                    sendWebApiResponse(exchange, 200, kind, value)
                 }
                 resource.matches(Regex("jobs/[^/]+/runs/[^/]+/revisions/[^/]+/source-directories/[^/]+")) -> {
                     val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.privateRead(allowHead = true)))

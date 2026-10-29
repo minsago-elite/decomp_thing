@@ -126,56 +126,6 @@
       "valid": true
     },
     {
-      "file": "fixtures/git-workspace-unborn-dirty.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/git-workspace-detached-imported.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/error-git-unavailable.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/git-repositories.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/git-operation-init-completed.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/git-operation-init-interrupted.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/git-operation-attach-unsupported.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/request-git-init.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/request-git-attach.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/invalid-request-git-attach-path.json",
-      "valid": false,
-      "reason": "Import names one admitted repository; a host path is never a request field."
-    },
-    {
-      "file": "fixtures/invalid-request-git-init-command.json",
-      "valid": false,
-      "reason": "Repository requests are closed; command or template fields are refused."
-    },
-    {
-      "file": "fixtures/error-git-repository-unsupported.json",
-      "valid": true
-    },
-    {
       "file": "fixtures/request-workflow-start.json",
       "valid": true
     },
@@ -261,16 +211,6 @@
       "file": "fixtures/invalid-git-sha256-abbreviation.json",
       "valid": false,
       "reason": "Git mutation/view identity uses a full object ID for its format."
-    },
-    {
-      "file": "fixtures/invalid-git-detached-branch.json",
-      "valid": false,
-      "reason": "A detached HEAD names an object only, never a branch or ref record."
-    },
-    {
-      "file": "fixtures/invalid-git-unborn-mapping.json",
-      "valid": false,
-      "reason": "An unborn branch has no commit, so no source provenance mapping."
     },
     {
       "file": "fixtures/invalid-request-unknown-field.json",
@@ -875,6 +815,198 @@
       "valid": true
     },
     {
+      "file": "fixtures/queue-position-queued.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/queue-position-not-queued.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/queue-position-unavailable.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-queue-position-ahead.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-queue-position-exact.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-queue-position-identities.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-queue-position-queued-state.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/run-timed-out.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/run-infrastructure-failed.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-run-interrupted-timed-out.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/function-inventory.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/function-inventory-filtered-empty.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/function-inventory-unsupported.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/function-inventory-limit-exceeded.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-function-inventory-unavailable-rows.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-function-inventory-unavailable-empty-success.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-function-inventory-verified-label.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-function-inventory-excluded-owner.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-function-inventory-selector.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-function-inventory-version.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-function-inventory-address.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/module-inventory.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/module-inventory-plan-not-recorded.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-module-inventory-unavailable-summary.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/module-detail.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-module-detail-missing-owned.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/entity-detail-function.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/entity-detail-function-references.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/entity-detail-global.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/entity-detail-not-recorded.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-entity-detail-unrecorded-link.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-entity-detail-unbounded-preview.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-entity-detail-unavailable-entity.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/git-workspace-unborn-dirty.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/git-workspace-detached-imported.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/error-git-unavailable.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/git-repositories.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/git-operation-init-completed.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/git-operation-init-interrupted.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/git-operation-attach-unsupported.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/request-git-init.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/request-git-attach.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-request-git-attach-path.json",
+      "valid": false,
+      "reason": "Import names one admitted repository; a host path is never a request field."
+    },
+    {
+      "file": "fixtures/invalid-request-git-init-command.json",
+      "valid": false,
+      "reason": "Repository requests are closed; command or template fields are refused."
+    },
+    {
+      "file": "fixtures/error-git-repository-unsupported.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-git-detached-branch.json",
+      "valid": false,
+      "reason": "A detached HEAD names an object only, never a branch or ref record."
+    },
+    {
+      "file": "fixtures/invalid-git-unborn-mapping.json",
+      "valid": false,
+      "reason": "An unborn branch has no commit, so no source provenance mapping."
+    },
+    {
       "file": "fixtures/source-search-complete.json",
       "valid": true
     },
@@ -944,46 +1076,6 @@
     },
     {
       "file": "fixtures/invalid-source-search-gaps-over-scope.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/queue-position-queued.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/queue-position-not-queued.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/queue-position-unavailable.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/invalid-queue-position-ahead.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-queue-position-exact.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-queue-position-identities.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-queue-position-queued-state.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/run-timed-out.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/run-infrastructure-failed.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/invalid-run-interrupted-timed-out.json",
       "valid": false
     }
   ]

@@ -7,17 +7,26 @@ requirements/oracle-generation.txt. This is not an HTTP or runtime conformance t
 
 from __future__ import annotations
 
+import codecs
+import copy
 import json
 import re
-import codecs
-import unicodedata
-from pathlib import Path
 import sys
+import unicodedata
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any, cast
 
 import fastjsonschema
 
-
 ROOT = Path(__file__).resolve().parent
+
+
+def load_json(path: Path) -> Any:
+    try:
+        return json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"could not load JSON fixture {path.relative_to(ROOT)}") from error
 
 
 def check_validation_preview(value: dict | None, byte_count: str | None) -> None:
@@ -99,7 +108,7 @@ def check_validation_cases(data: dict) -> None:
             continue
         if any(flag is None for flag in flags):
             raise ValueError("compared validation cases require every comparison flag")
-        for preview, count in zip(previews, counts):
+        for preview, count in zip(previews, counts, strict=True):
             check_validation_preview(preview, count)
         for flag, first, second in [(item["stdoutMatches"], previews[0], previews[1]),
                                     (item["stderrMatches"], previews[2], previews[3])]:
@@ -117,7 +126,7 @@ def check_validation_cases(data: dict) -> None:
     indexed_pages = None
     comparison = value.get("comparisonIndex")
     if comparison is not None:
-        if not behavior or total > 10000:
+        if not behavior or matched is None or total > 10000:
             raise ValueError("complete mismatch indexes require a supported behavior population")
         bitmap = bytes.fromhex(comparison["mismatchBitmapHex"])
         if len(bitmap) != (total + 7) // 8:
@@ -174,7 +183,7 @@ OUTCOME_EXPECTATIONS = {
 
 def check_outcomes(manifest: dict, validate) -> None:
     """Require one safe, schema-valid wire document for each named web outcome."""
-    index = json.loads((ROOT / "outcomes.json").read_text())
+    index = load_json(ROOT / "outcomes.json")
     if index.get("version") != 1 or not isinstance(index.get("cases"), list):
         raise ValueError("outcome index must use version 1 and a cases array")
     cases = index["cases"]
@@ -188,7 +197,7 @@ def check_outcomes(manifest: dict, validate) -> None:
             raise ValueError(f"{outcome}: invalid outcome fixture reference")
         if filename not in valid_files:
             raise ValueError(f"{outcome}: outcome fixture must be in the positive manifest")
-        document = json.loads((ROOT / filename).read_text())
+        document = load_json(ROOT / filename)
         validate(document)
         check_semantics(document)
         kind, expectations = OUTCOME_EXPECTATIONS[outcome]
@@ -203,7 +212,7 @@ def check_outcomes(manifest: dict, validate) -> None:
         # These fixtures are wire metadata, never host-specific test inputs or
         # bearer material. Runtime auth and actual binary payloads are out of scope.
         serialized = json.dumps(document, ensure_ascii=False)
-        if re.search(r'"(?:csrfToken|password|secret|privatePath|binaryBytes|authorization)"\s*:', serialized, re.I):
+        if re.search(r'"(?:csrfToken|password|secret|privatePath|binaryBytes|authorization)"\s*:', serialized, re.IGNORECASE):
             raise ValueError(f"{outcome}: outcome fixture contains credential or binary fields")
         if re.search(r"/home/|/Users/|[A-Za-z]:\\\\Users\\\\|-----BEGIN [A-Z ]*PRIVATE KEY-----|gh[pousr]_[A-Za-z0-9]{20,}", serialized):
             raise ValueError(f"{outcome}: outcome fixture contains a private path or credential")
@@ -342,6 +351,57 @@ def check_source_chunk(data: dict) -> None:
             raise ValueError("UTF-8 source end line is inconsistent")
 
 
+def check_structure(kind: str, data: dict) -> None:
+    """Recorded program structure: explicit unavailable states, exact selectors and derived evidence classes."""
+    if data["model"]["state"] != data["state"] or data["model"]["stateReason"] != data["stateReason"]:
+        raise ValueError("structure state must restate the program model record state")
+    if len({item["id"] for item in data["capabilities"]}) != len(data["capabilities"]):
+        raise ValueError("structure capabilities repeat a fact family")
+    if kind == "functionInventory":
+        rows, pages = data["items"], [data["page"]]
+    elif kind == "moduleInventory":
+        rows, pages = [], [data["page"]]
+        if (data["totalModules"] is None and data["items"]) or (data["totalModules"] is not None and len(data["items"]) > data["totalModules"]):
+            raise ValueError("module rows exceed the recorded module plan")
+        if any(item["selector"] not in (None, item["moduleId"]) for item in data["items"]):
+            raise ValueError("module selectors must be the recorded module identity")
+    elif kind == "moduleDetail":
+        owned = data["owned"]
+        if (data["module"] is None) != (owned is None):
+            raise ValueError("module detail and owned entities must be recorded together")
+        rows, pages = (owned["items"], [owned["page"]]) if owned else ([], [])
+        if owned and (len(owned["items"]) > owned["total"] or any(item["kind"] != owned["kind"] for item in owned["items"])):
+            raise ValueError("owned entity page disagrees with its kind or total")
+    else:
+        rows, pages = ([data["entity"]] if data["entity"] else []), []
+    if data["state"] != "available" and (rows or data["recoveryAssessment"] != "not-recorded"):
+        raise ValueError("unavailable program records cannot present entities or an assessment")
+    for page in pages:
+        if page["snapshotVersion"] != data["structureVersion"]:
+            raise ValueError("structure pages must be bound to the structure version")
+    for row in rows:
+        if row["selector"] not in (None, row["entityId"]):
+            raise ValueError("entity selectors must be the recorded entity identity")
+        if not row["recorded"]:
+            continue
+        if (row["evidenceState"] == "excluded") != (row["ownership"] == "unowned"):
+            raise ValueError("excluded entities are exactly those the plan assigns to no module")
+        if (row["ownership"] == "owned") != (row["moduleId"] is not None):
+            raise ValueError("an owning module is recorded exactly for owned entities")
+    if kind == "functionInventory" and data["totalFunctions"] is not None and not len(rows) <= data["matchedFunctions"] <= data["totalFunctions"]:
+        raise ValueError("matched functions must lie within the recorded total")
+    if kind == "entityDetail" and data["entity"]:
+        entity = data["entity"]
+        if (entity["kind"] == "function") != (entity["calls"] is not None):
+            raise ValueError("call references belong only to functions")
+        for references in (entity["calls"], entity["calledBy"], entity["referencedGlobals"], entity["referencedBy"], entity["collisions"]):
+            if references and (len(references["items"]) > references["total"] or any(
+                    item["resolution"] != "recorded" and item["selector"] is not None for item in references["items"])):
+                raise ValueError("unrecorded references cannot carry a selector")
+        if any(text["recorded"] != (text["preview"] is not None) for text in entity["texts"]):
+            raise ValueError("text previews exist exactly for recorded fields")
+
+
 def check_source_search(data: dict) -> None:
     page, limits, scope, progress, query = data["page"], data["limits"], data["scope"], data["progress"], data["query"]
     items = data["items"]
@@ -396,6 +456,9 @@ def check_semantics(document: dict) -> None:
     """Check relationships JSON Schema cannot express with portable draft-07."""
     kind = document["kind"]
     data = document.get("data", {})
+    if kind in ("functionInventory", "moduleInventory", "moduleDetail", "entityDetail"):
+        check_structure(kind, data)
+        return
     if kind == "validationHistory":
         if data["state"] != "recorded":
             if any(data[key] is not None for key in ("graphSha256", "corpusSha256", "page", "totalPages", "previousPage", "nextPage")) or data["items"]:
@@ -481,13 +544,15 @@ def check_semantics(document: dict) -> None:
             raise ValueError("queue position sample is inconsistent")
     elif kind == "bootstrap":
         retention = data["runtime"].get("progressRetention")
-        if retention is not None:
-            if int(retention["expired"]) > int(retention["examined"]) or ((int(retention["failures"]) == 0) != (retention["lastFailureCode"] is None)):
-                raise ValueError("retention counters are inconsistent")
+        if retention is not None and (
+                int(retention["expired"]) > int(retention["examined"])
+                or ((int(retention["failures"]) == 0) != (retention["lastFailureCode"] is None))):
+            raise ValueError("retention counters are inconsistent")
         scheduler = data["runtime"].get("scheduler")
-        if scheduler is not None and scheduler["state"] == "available":
-            if int(scheduler["activeWorkers"]) > int(scheduler["workerLimit"]) or int(scheduler["queuedTasks"]) > int(scheduler["queueCapacity"]):
-                raise ValueError("scheduler sample exceeds configured capacity")
+        if scheduler is not None and scheduler["state"] == "available" and (
+                int(scheduler["activeWorkers"]) > int(scheduler["workerLimit"])
+                or int(scheduler["queuedTasks"]) > int(scheduler["queueCapacity"])):
+            raise ValueError("scheduler sample exceeds configured capacity")
         limits = data["limits"]
         if limits["defaultPageLimit"] > limits["maxPageLimit"]:
             raise ValueError("default page size exceeds configured maximum")
@@ -504,9 +569,8 @@ def check_semantics(document: dict) -> None:
                 raise ValueError("exploration adapter has a foreign summary schema")
             if data["reportType"] == "revision-validation" and "result" not in summary:
                 raise ValueError("validation adapter has a foreign summary schema")
-        if data["acceptance"] == "accepted":
-            if summary is None or summary.get("result") != "passed":
-                raise ValueError("accepted report requires a passed validation summary")
+        if data["acceptance"] == "accepted" and (summary is None or summary.get("result") != "passed"):
+            raise ValueError("accepted report requires a passed validation summary")
         check_validation_cases(data)
         failure = data.get("validationFailure")
         if failure is not None:
@@ -591,9 +655,9 @@ def check_semantics(document: dict) -> None:
 
 def check_run_lifecycle_controls(validate) -> int:
     """Exercise every state/reason pair and start alternative in each Run position."""
-    single = json.loads((ROOT / "fixtures/run-completed-unaccepted.json").read_text())
-    page = json.loads((ROOT / "fixtures/runs-page.json").read_text())
-    snapshot = json.loads((ROOT / "fixtures/snapshot.json").read_text())
+    single = load_json(ROOT / "fixtures/run-completed-unaccepted.json")
+    page = load_json(ROOT / "fixtures/runs-page.json")
+    snapshot = load_json(ROOT / "fixtures/snapshot.json")
     expected = {
         "queued": {None}, "running": {None}, "cancelling": {None},
         "completed": {"COMPLETED", "NO_CHANGES"},
@@ -615,9 +679,9 @@ def check_run_lifecycle_controls(validate) -> int:
             try:
                 validate(document)
                 check_semantics(document)
-            except (fastjsonschema.JsonSchemaException, ValueError):
+            except (fastjsonschema.JsonSchemaException, ValueError) as error:
                 if valid:
-                    raise ValueError("valid lifecycle metadata was rejected")
+                    raise ValueError("valid lifecycle metadata was rejected") from error
             else:
                 if not valid:
                     raise ValueError("contradictory lifecycle metadata was accepted")
@@ -637,7 +701,7 @@ def check_run_lifecycle_controls(validate) -> int:
 
 def check_validation_display_controls(validate) -> int:
     """Authored wire controls only: byte/text binding and absence of partial results."""
-    original = json.loads((ROOT / "fixtures/report-normal-cases.json").read_text())
+    original = load_json(ROOT / "fixtures/report-normal-cases.json")
     cases = [
         ([65], None, "A", 1), ([0xef, 0xbb, 0xbf, 65], None, "\\ufeffA", 4),
         ([92, 13, 10, 9, 0, 0xe2, 0x80, 0xae], None, '\\\\\\r\\n\n\\t\\u0000\\u202e', 8),
@@ -650,15 +714,15 @@ def check_validation_display_controls(validate) -> int:
         try:
             validate(document)
             check_semantics(document)
-        except (fastjsonschema.JsonSchemaException, ValueError):
+        except (fastjsonschema.JsonSchemaException, ValueError) as error:
             if valid:
-                raise ValueError("valid validation display metadata was rejected")
+                raise ValueError("valid validation display metadata was rejected") from error
         else:
             if not valid:
                 raise ValueError("fabricated validation display metadata was accepted")
         checked += 1
     for octets, total, text, consumed in cases:
-        document = json.loads(json.dumps(original))
+        document = copy.deepcopy(original)
         item = document["data"]["validationCases"]["items"][0]
         count = total or str(len(octets))
         hexadecimal = "".join(("" if i == 0 else "\n" if i % 16 == 0 else " ") + format(byte, "02x")
@@ -674,7 +738,7 @@ def check_validation_display_controls(validate) -> int:
         if text is not None:
             item["originalStdoutPreview"] = item["rebuiltStdoutPreview"] = {**preview, "text": None, "textBytes": None}
             check(document, False)
-    document = json.loads(json.dumps(original))
+    document = copy.deepcopy(original)
     document["data"].update(state="partial", validationCases=None, validationFailure=None)
     check(document, False)
     document["data"]["summary"] = None
@@ -684,28 +748,28 @@ def check_validation_display_controls(validate) -> int:
 
 def check_validation_mismatch_controls(validate) -> int:
     """Authored multi-page receipt metadata; no execution, HTTP or browser instance."""
-    original = json.loads((ROOT / "fixtures/report-normal-cases.json").read_text())
+    original = load_json(ROOT / "fixtures/report-normal-cases.json")
     checked = 0
     def check(document, valid):
         nonlocal checked
         try:
             validate(document)
             check_semantics(document)
-        except (fastjsonschema.JsonSchemaException, ValueError):
+        except (fastjsonschema.JsonSchemaException, ValueError) as error:
             if valid:
-                raise ValueError("valid mismatch page metadata was rejected")
+                raise ValueError("valid mismatch page metadata was rejected") from error
         else:
             if not valid:
                 raise ValueError("contradictory mismatch page metadata was accepted")
         checked += 1
     def page(number):
-        document = json.loads(json.dumps(original))
+        document = copy.deepcopy(original)
         detail = document["data"]["validationCases"]
         document["data"]["summary"].update(result="failed", casesCompared="61")
         template = detail["items"][0]
         items = []
         for ordinal in range((number - 1) * 20 + 1, min(number * 20, 61) + 1):
-            item = json.loads(json.dumps(template))
+            item = copy.deepcopy(template)
             item.update(caseId=f"case_{ordinal}", ordinal=str(ordinal))
             if ordinal in (22, 61):
                 item.update(outcome="mismatch", stdoutMatches=False)
@@ -749,7 +813,7 @@ def check_validation_mismatch_controls(validate) -> int:
     document["data"]["validationCases"].update(matchedInputs="60", firstMismatchPage=1,
                                                 previousMismatchPage=2, nextMismatchPage=4)
     check(document, False)
-    document = json.loads(json.dumps(original))
+    document = copy.deepcopy(original)
     document["data"]["validationCases"].update(firstMismatchPage=None, previousMismatchPage=None, nextMismatchPage=None)
     check(document, True)
     document["data"]["validationCases"]["firstMismatchPage"] = 1
@@ -758,9 +822,13 @@ def check_validation_mismatch_controls(validate) -> int:
 
 
 def main() -> int:
-    manifest = json.loads((ROOT / "fixtures.json").read_text())
-    schema = json.loads((ROOT / manifest["schema"]).read_text())
-    validate = fastjsonschema.compile(schema)
+    try:
+        manifest = load_json(ROOT / "fixtures.json")
+        schema = load_json(ROOT / manifest["schema"])
+    except (KeyError, TypeError, ValueError) as error:
+        print(f"Could not load contract manifest or schema: {error}", file=sys.stderr)
+        return 2
+    validate: Callable[[dict], Any] = cast(Callable[[dict], Any], fastjsonschema.compile(schema))
     records = manifest["fixtures"]
     declared = [record["file"] for record in records]
     actual = {str(path.relative_to(ROOT)) for path in (ROOT / "fixtures").glob("*.json")}
@@ -770,7 +838,12 @@ def main() -> int:
     failures = []
     accepted = rejected = 0
     for record in records:
-        value = json.loads((ROOT / record["file"]).read_text())
+        try:
+            filename = record["file"]
+            value = load_json(ROOT / filename)
+        except (KeyError, TypeError, ValueError) as error:
+            failures.append(f"invalid fixture record: {error}")
+            continue
         try:
             validate(value)
             check_semantics(value)
@@ -784,6 +857,9 @@ def main() -> int:
                 accepted += 1
             else:
                 failures.append(f"{record['file']}: invalid fixture was accepted")
+    lifecycle_controls = 0
+    validation_display_controls = 0
+    mismatch_controls = 0
     try:
         check_outcomes(manifest, validate)
     except (fastjsonschema.JsonSchemaException, KeyError, TypeError, ValueError) as error:

@@ -71,10 +71,38 @@ const typesText = header + '// String bounds and cross-field/conditional constra
   `export type RequestData<K extends RequestKind> = Extract<ContractDocument, { kind: K }>['data'];\n`;
 const runtimeSchema = structuredClone(schema);
 delete runtimeSchema.$schema; delete runtimeSchema.title; delete runtimeSchema.description;
+// Response kinds decoded only inside one lazily loaded route. Definitions that only they reach ship with
+// that route's chunk, keeping the shell entry within its budget; decode.ts refuses them until registered.
+const lazyGroups = { structure: ['functionInventory', 'moduleInventory', 'moduleDetail', 'entityDetail'] };
+const kindOf = (variant) => variant.properties?.kind?.const;
+const lazyKinds = new Set(Object.values(lazyGroups).flat());
+for (const kind of lazyKinds) if (!responses.includes(kind)) throw Error(`Unknown lazy response kind: ${kind}`);
+function reach(nodes) {
+  const seen = new Set();
+  const visit = (key) => { if (!seen.has(key)) { seen.add(key); for (const target of references(runtimeSchema.definitions[key])) visit(target); } };
+  for (const node of nodes) for (const key of references(node)) visit(key);
+  return seen;
+}
+const lazyReach = reach(runtimeSchema.oneOf.filter((variant) => lazyKinds.has(kindOf(variant))));
+const eager = reach([...runtimeSchema.oneOf.filter((variant) => !lazyKinds.has(kindOf(variant))),
+  ...Object.keys(runtimeSchema.definitions).filter((key) => !lazyReach.has(key)).map((key) => ({ $ref: `#/definitions/${key}` }))]);
+const split = (keys, variants) => ({
+  definitions: Object.fromEntries(Object.entries(runtimeSchema.definitions).filter(([key]) => keys(key))),
+  oneOf: runtimeSchema.oneOf.filter(variants),
+});
 const files = {
   'frontend/src/api/generated.ts': typesText,
-  'frontend/src/api/generated-schema.ts': header + `import type { Schema } from './schema-types';\n\nexport const contractSchema: Schema = ${JSON.stringify(runtimeSchema, null, 2)};\n`,
+  'frontend/src/api/generated-schema.ts': header + `import type { Schema } from './schema-types';\n\nexport const contractSchema: Schema = ${
+    JSON.stringify(split((key) => eager.has(key), (variant) => !lazyKinds.has(kindOf(variant))), null, 2)};\n`,
 };
+const claimed = new Set();
+for (const [group, kinds] of Object.entries(lazyGroups)) {
+  const own = [...reach(runtimeSchema.oneOf.filter((variant) => kinds.includes(kindOf(variant))))].filter((key) => !eager.has(key));
+  for (const key of own) { if (claimed.has(key)) throw Error(`Lazy definition shared by two groups: ${key}`); claimed.add(key); }
+  files[`frontend/src/api/generated-schema-${group}.ts`] = header + `import type { Schema } from './schema-types';\n\n` +
+    `/** Register with registerContractGroup before decoding ${kinds.join(', ')}. */\n` +
+    `export const ${group}ContractGroup: Schema = ${JSON.stringify(split((key) => own.includes(key), (variant) => kinds.includes(kindOf(variant))), null, 2)};\n`;
+}
 if (process.argv.slice(2).some((arg) => arg !== '--check')) throw Error('Usage: generate-web-api.mjs [--check]');
 for (const [path, contents] of Object.entries(files)) {
   const destination = resolve(root, path);

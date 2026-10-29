@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { qualifyUpload, qualifyUploadFailures, qualifyMeasuredUpload } from './packaged-browser-upload.mjs';
 import { seedScale, qualifyScale, dashboardFiltersWithSnapshot } from './packaged-browser-scale.mjs';
+import { seedStructure, qualifyStructure } from './packaged-browser-structure.mjs';
 import { seedLive, qualifyLive } from './packaged-browser-live.mjs';
 import { seedHistory, qualifyHistory } from './packaged-browser-history.mjs';
 import { seedLegacy, qualifyLegacy } from './packaged-browser-legacy.mjs';
@@ -28,8 +29,8 @@ const { values } = parseArgs({ options: {
   help: { type: 'boolean', default: false },
 } });
 if (values.help) {
-  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|metadata|history|scale|live|proxy|upgrade|legacy] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
-  console.log('public: packaged home/Runtime/recovery; session: public plus local session journey; upload: session plus inert upload and lost-response retry; history: session plus preseeded inert multi-page attempts; scale: session plus 10,000 persisted jobs and keyboard pagination; proxy: real Vite HMR and session journey against packaged JVM; upgrade: previous JVM to current JVM on one origin with an old tab.');
+  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|metadata|history|scale|structure|live|proxy|upgrade|legacy] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
+  console.log('public: packaged home/Runtime/recovery; session: public plus local session journey; upload: session plus inert upload and lost-response retry; history: session plus preseeded inert multi-page attempts; scale: session plus 10,000 persisted jobs and keyboard pagination; structure: session plus a 100,000-function recorded revision; proxy: real Vite HMR and session journey against packaged JVM; upgrade: previous JVM to current JVM on one origin with an old tab.');
   console.log('legacy: inert legacy HTML/polling with explicit test-owned state edits; no workflow execution.');
   console.log('metadata: session plus one inert header upload/retry, real packaged job metadata, maximum uint64 address, and simulated malformed-response recovery; no workflow execution or upload quota/scale measurement.');
   console.log('live: session plus authored inert job changes and real background listing reads; preserves focused row order and applies new jobs on explicit refresh.');
@@ -44,7 +45,7 @@ for (const option of ['archive', 'chrome', 'java-home', 'python']) {
   assert.ok(values[option] && isAbsolute(values[option]), `--${option} must name an absolute existing path; see --help`);
   await fs.access(values[option]);
 }
-assert.ok(['public', 'session', 'upload', 'metadata', 'history', 'scale', 'live', 'proxy', 'upgrade', 'legacy'].includes(values.mode), '--mode must be public, session, upload, metadata, history, scale, live, proxy, upgrade or legacy');
+assert.ok(['public', 'session', 'upload', 'metadata', 'history', 'scale', 'structure', 'live', 'proxy', 'upgrade', 'legacy'].includes(values.mode), '--mode must be public, session, upload, metadata, history, scale, structure, live, proxy, upgrade or legacy');
 if (values.mode === 'upgrade') {
   assert.ok(values['previous-archive'] && isAbsolute(values['previous-archive']), 'upgrade requires --previous-archive as an absolute existing ZIP path');
   await fs.access(values['previous-archive']);
@@ -463,9 +464,11 @@ try {
   const legacyFixture = values.mode === 'legacy' ? await seedLegacy(data) : null;
   const historyFixture = values.mode === 'history' ? await seedHistory(data) : null;
   const scaleFixture = values.mode === 'scale' ? await seedScale(data) : null;
+  const structureFixture = values.mode === 'structure' ? await seedStructure(data) : null;
   const liveFixture = values.mode === 'live' ? await seedLive(data) : null;
-  const populated = !!(historyFixture || scaleFixture || liveFixture);
+  const populated = !!(historyFixture || scaleFixture || structureFixture || liveFixture);
   const libraryText = historyFixture ? 'synthetic-history.elf' : scaleFixture ? 'synthetic-project-09999.elf'
+    : structureFixture ? 'synthetic-structure.elf'
     : liveFixture ? 'live-dashboard-2.elf' : 'No uploaded jobs yet.';
   let developmentPort;
   let browserOrigin;
@@ -623,7 +626,7 @@ try {
     report.requests.upgradeCacheWarm = cacheProbe.requests;
     report.jobDataCreated = false;
   }
-  if (values.mode === 'public' || values.mode === 'session' || values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'history' || values.mode === 'scale' || values.mode === 'live') {
+  if (values.mode === 'public' || values.mode === 'session' || values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'history' || values.mode === 'scale' || values.mode === 'structure' || values.mode === 'live') {
     const identityExpression = `(() => ({ buildId: document.querySelector('meta[name="decomp-ui-build"]')?.content, applicationVersion: document.querySelector('meta[name="decomp-application-version"]')?.content, page: location.pathname, text: document.body.innerText }))()`;
     const home = await makeTarget();
     await cdp.call('Page.navigate', { url: `${origin}/nested/` }, home.sessionId);
@@ -780,7 +783,7 @@ try {
     report.requests = {};
   }
 
-  if (values.mode === 'session' || values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'history' || values.mode === 'scale' || values.mode === 'live' || values.mode === 'proxy') {
+  if (values.mode === 'session' || values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'history' || values.mode === 'scale' || values.mode === 'structure' || values.mode === 'live' || values.mode === 'proxy') {
     const bootstrapUrl = await waitFor(() => applicationOutput.split(/\s+/).find((part) => part.startsWith(browserOrigin + '/nested/#bootstrap=')), 'local bootstrap handoff');
     const token = new URL(bootstrapUrl).hash.slice('#bootstrap='.length);
     sensitiveValues.push(token);
@@ -907,6 +910,7 @@ try {
     report.attemptHistory = { navigation: true, directReload: true, missingExplained: true, mutationRequests: 0 };
 
     if (scaleFixture) report.scale = await qualifyScale({ fixture: scaleFixture, makeTarget, cdp, evaluate, ready, browserOrigin });
+    if (structureFixture) report.structure = await qualifyStructure({ fixture: structureFixture, makeTarget, cdp, evaluate, ready, browserOrigin });
     if (liveFixture) {
       report.liveDashboard = await qualifyLive({ fixture: liveFixture, makeTarget, cdp, evaluate, ready, waitFor, browserOrigin });
       report.jobDataCreated = true;

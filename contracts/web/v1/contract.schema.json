@@ -3622,311 +3622,6 @@
       ],
       "additionalProperties": false
     },
-    "sourceSearchMatch": {
-      "type": "object",
-      "properties": {
-        "fileId": {
-          "$ref": "#/definitions/id"
-        },
-        "displayName": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 4096,
-          "pattern": "^(?!/)[^\\\\\\u0000-\\u001f\\u007f:]+$"
-        },
-        "sha256": {
-          "$ref": "#/definitions/sha256"
-        },
-        "line": {
-          "$ref": "#/definitions/uint64"
-        },
-        "column": {
-          "$ref": "#/definitions/uint64"
-        },
-        "offsetBytes": {
-          "$ref": "#/definitions/uint64"
-        },
-        "lineOffsetBytes": {
-          "$ref": "#/definitions/uint64"
-        },
-        "before": {
-          "type": "string",
-          "maxLength": 160
-        },
-        "match": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 256
-        },
-        "after": {
-          "type": "string",
-          "maxLength": 160
-        },
-        "truncatedBefore": {
-          "type": "boolean"
-        },
-        "truncatedAfter": {
-          "type": "boolean"
-        }
-      },
-      "required": [
-        "fileId",
-        "displayName",
-        "sha256",
-        "line",
-        "column",
-        "offsetBytes",
-        "lineOffsetBytes",
-        "before",
-        "match",
-        "after",
-        "truncatedBefore",
-        "truncatedAfter"
-      ],
-      "additionalProperties": false
-    },
-    "sourceSearch": {
-      "type": "object",
-      "properties": {
-        "binding": {
-          "type": "object",
-          "properties": {
-            "jobId": {
-              "$ref": "#/definitions/id"
-            },
-            "runId": {
-              "$ref": "#/definitions/id"
-            },
-            "revisionId": {
-              "$ref": "#/definitions/id"
-            }
-          },
-          "required": [
-            "jobId",
-            "runId",
-            "revisionId"
-          ],
-          "additionalProperties": false
-        },
-        "authority": {
-          "const": "source-input-commitments"
-        },
-        "sourceSha256": {
-          "$ref": "#/definitions/sha256"
-        },
-        "metadataVersion": {
-          "$ref": "#/definitions/sha256"
-        },
-        "query": {
-          "type": "object",
-          "properties": {
-            "text": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 256
-            },
-            "match": {
-              "enum": [
-                "text",
-                "symbol"
-              ]
-            },
-            "caseSensitive": {
-              "type": "boolean"
-            },
-            "directoryId": {
-              "$ref": "#/definitions/id"
-            },
-            "path": {
-              "anyOf": [
-                {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 512
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "text",
-            "match",
-            "caseSensitive",
-            "directoryId",
-            "path"
-          ],
-          "additionalProperties": false
-        },
-        "index": {
-          "const": "none"
-        },
-        "status": {
-          "enum": [
-            "complete",
-            "partial"
-          ]
-        },
-        "stopReason": {
-          "anyOf": [
-            {
-              "enum": [
-                "result-limit",
-                "byte-limit",
-                "deadline"
-              ]
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "scope": {
-          "type": "object",
-          "properties": {
-            "filesInScope": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 25000
-            },
-            "searchableFiles": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 25000
-            },
-            "notViewable": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 25000
-            },
-            "declaredBinary": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 25000
-            },
-            "tooLarge": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 25000
-            }
-          },
-          "required": [
-            "filesInScope",
-            "searchableFiles",
-            "notViewable",
-            "declaredBinary",
-            "tooLarge"
-          ],
-          "additionalProperties": false
-        },
-        "progress": {
-          "type": "object",
-          "properties": {
-            "scannedFiles": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 25000
-            },
-            "scannedBytes": {
-              "$ref": "#/definitions/uint64"
-            },
-            "unsearchableText": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 25000
-            },
-            "unavailableFiles": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 25000
-            },
-            "remainingFiles": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 25000
-            }
-          },
-          "required": [
-            "scannedFiles",
-            "scannedBytes",
-            "unsearchableText",
-            "unavailableFiles",
-            "remainingFiles"
-          ],
-          "additionalProperties": false
-        },
-        "coverageGaps": {
-          "type": "object",
-          "properties": {
-            "unsearchableText": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 25000
-            },
-            "unavailableFiles": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 25000
-            }
-          },
-          "required": [
-            "unsearchableText",
-            "unavailableFiles"
-          ],
-          "additionalProperties": false
-        },
-        "limits": {
-          "type": "object",
-          "properties": {
-            "maxResults": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 100
-            },
-            "maxScannedBytes": {
-              "$ref": "#/definitions/uint64"
-            },
-            "deadlineMs": {
-              "$ref": "#/definitions/uint64"
-            }
-          },
-          "required": [
-            "maxResults",
-            "maxScannedBytes",
-            "deadlineMs"
-          ],
-          "additionalProperties": false
-        },
-        "items": {
-          "type": "array",
-          "items": {
-            "$ref": "#/definitions/sourceSearchMatch"
-          },
-          "maxItems": 100
-        },
-        "page": {
-          "$ref": "#/definitions/page"
-        }
-      },
-      "required": [
-        "binding",
-        "authority",
-        "sourceSha256",
-        "metadataVersion",
-        "query",
-        "index",
-        "status",
-        "stopReason",
-        "scope",
-        "progress",
-        "coverageGaps",
-        "limits",
-        "items",
-        "page"
-      ],
-      "additionalProperties": false
-    },
     "revisionFileDetail": {
       "type": "object",
       "properties": {
@@ -5239,6 +4934,2593 @@
         }
       ]
     },
+    "queuePosition": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "jobId": {
+              "$ref": "#/definitions/id"
+            },
+            "runId": {
+              "$ref": "#/definitions/id"
+            },
+            "sampledAt": {
+              "$ref": "#/definitions/instant"
+            },
+            "state": {
+              "const": "queued"
+            },
+            "source": {
+              "const": "web-workflow-executor"
+            },
+            "approximate": {
+              "const": true
+            },
+            "position": {
+              "type": "string",
+              "pattern": "^([1-9]|[12][0-9]|3[0-2])$"
+            },
+            "ahead": {
+              "type": "string",
+              "pattern": "^([0-9]|[12][0-9]|3[01])$"
+            },
+            "queuedTasks": {
+              "type": "string",
+              "pattern": "^([1-9]|[12][0-9]|3[0-2])$"
+            },
+            "activeWorkers": {
+              "type": "string",
+              "pattern": "^[0-2]$"
+            },
+            "workerLimit": {
+              "type": "string",
+              "pattern": "^[1-2]$"
+            }
+          },
+          "required": [
+            "jobId",
+            "runId",
+            "sampledAt",
+            "state",
+            "source",
+            "approximate",
+            "position",
+            "ahead",
+            "queuedTasks",
+            "activeWorkers",
+            "workerLimit"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "jobId": {
+              "$ref": "#/definitions/id"
+            },
+            "runId": {
+              "$ref": "#/definitions/id"
+            },
+            "sampledAt": {
+              "$ref": "#/definitions/instant"
+            },
+            "state": {
+              "const": "not-queued"
+            },
+            "runState": {
+              "type": "string",
+              "enum": [
+                "running",
+                "cancelling",
+                "completed",
+                "failed",
+                "cancelled",
+                "interrupted"
+              ]
+            }
+          },
+          "required": [
+            "jobId",
+            "runId",
+            "sampledAt",
+            "state",
+            "runState"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "jobId": {
+              "$ref": "#/definitions/id"
+            },
+            "runId": {
+              "$ref": "#/definitions/id"
+            },
+            "sampledAt": {
+              "$ref": "#/definitions/instant"
+            },
+            "state": {
+              "const": "unavailable"
+            },
+            "reasonCode": {
+              "type": "string",
+              "enum": [
+                "EXTERNAL_EXECUTOR",
+                "NOT_IN_LOCAL_QUEUE"
+              ]
+            }
+          },
+          "required": [
+            "jobId",
+            "runId",
+            "sampledAt",
+            "state",
+            "reasonCode"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "structureRecord": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "type": "string",
+          "enum": [
+            "available",
+            "not-recorded",
+            "unsupported",
+            "invalid",
+            "limit-exceeded"
+          ]
+        },
+        "stateReason": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "path": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096,
+              "pattern": "^(?!/)[^\\\\\\u0000-\\u001f\\u007f:]+$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sha256": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sizeBytes": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/uint64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "schemaVersion": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "state",
+        "stateReason",
+        "path",
+        "sha256",
+        "sizeBytes",
+        "schemaVersion"
+      ],
+      "additionalProperties": false
+    },
+    "structureCapability": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "enum": [
+            "function-inventory",
+            "recorded-prototypes",
+            "module-ownership",
+            "generated-headers",
+            "global-byte-evidence",
+            "recovery-assessment",
+            "type-references",
+            "type-layouts",
+            "abi-interfaces",
+            "cpp-object-model"
+          ]
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "available",
+            "not-recorded",
+            "unsupported",
+            "invalid",
+            "limit-exceeded"
+          ]
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "state",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "structureText": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string",
+          "maxLength": 2048
+        },
+        "characters": {
+          "$ref": "#/definitions/uint64"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "text",
+        "characters",
+        "truncated"
+      ],
+      "additionalProperties": false
+    },
+    "structureEntity": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "function",
+            "global",
+            "type"
+          ]
+        },
+        "entityId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "selector": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "recorded": {
+          "const": true
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "address": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/address"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "extractionStatus": {
+          "type": "string",
+          "enum": [
+            "recovered",
+            "partial",
+            "failed",
+            "synthetic"
+          ],
+          "description": "Producer extraction label; never a scored recovery assessment."
+        },
+        "evidenceState": {
+          "type": "string",
+          "enum": [
+            "recovered",
+            "inferred",
+            "unresolved",
+            "excluded"
+          ],
+          "description": "Display class derived from recorded fields; see docs/web-program-structure.md."
+        },
+        "ownership": {
+          "type": "string",
+          "enum": [
+            "owned",
+            "unowned",
+            "ambiguous",
+            "not-recorded"
+          ]
+        },
+        "moduleId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "moduleSelector": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "implementationUnresolved": {
+          "type": "boolean"
+        },
+        "reportedUnresolved": {
+          "type": "boolean"
+        },
+        "nameCollision": {
+          "type": "boolean"
+        },
+        "callCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "referencedGlobalCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "kind",
+        "entityId",
+        "selector",
+        "recorded",
+        "name",
+        "address",
+        "extractionStatus",
+        "evidenceState",
+        "ownership",
+        "moduleId",
+        "moduleSelector",
+        "implementationUnresolved",
+        "reportedUnresolved",
+        "nameCollision"
+      ],
+      "additionalProperties": false
+    },
+    "structureUnrecordedEntity": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "function",
+            "global",
+            "type"
+          ]
+        },
+        "entityId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "selector": {
+          "type": "null"
+        },
+        "recorded": {
+          "const": false
+        }
+      },
+      "required": [
+        "kind",
+        "entityId",
+        "selector",
+        "recorded"
+      ],
+      "additionalProperties": false
+    },
+    "structureReference": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "function",
+            "global",
+            "type"
+          ]
+        },
+        "entityId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "selector": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "resolution": {
+          "type": "string",
+          "enum": [
+            "recorded",
+            "no-record"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "entityId",
+        "selector",
+        "name",
+        "resolution"
+      ],
+      "additionalProperties": false
+    },
+    "structureReferences": {
+      "type": "object",
+      "properties": {
+        "total": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/structureReference"
+          },
+          "maxItems": 50
+        }
+      },
+      "required": [
+        "total",
+        "items"
+      ],
+      "additionalProperties": false
+    },
+    "structureModule": {
+      "type": "object",
+      "properties": {
+        "moduleId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$"
+        },
+        "selector": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "functionCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "globalCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "typeCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "implementationDeclaration": {
+          "type": "string",
+          "enum": [
+            "accepted",
+            "unaccepted",
+            "not-classified"
+          ],
+          "description": "Recorded manifest claim for the module implementation file; not verified acceptance."
+        },
+        "inDependencyCycle": {
+          "type": "boolean"
+        },
+        "functionEvidence": {
+          "type": "object",
+          "properties": {
+            "recovered": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "inferred": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "unresolved": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "excluded": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "recovered",
+            "inferred",
+            "unresolved",
+            "excluded"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "moduleId",
+        "selector",
+        "functionCount",
+        "globalCount",
+        "typeCount",
+        "implementationDeclaration",
+        "inDependencyCycle",
+        "functionEvidence"
+      ],
+      "additionalProperties": false
+    },
+    "structureSummary": {
+      "type": "object",
+      "properties": {
+        "functions": {
+          "type": "object",
+          "properties": {
+            "total": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "evidence": {
+              "type": "object",
+              "properties": {
+                "recovered": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "inferred": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "unresolved": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "excluded": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "recovered",
+                "inferred",
+                "unresolved",
+                "excluded"
+              ],
+              "additionalProperties": false
+            },
+            "extraction": {
+              "type": "object",
+              "properties": {
+                "recovered": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "partial": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "failed": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "synthetic": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "recovered",
+                "partial",
+                "failed",
+                "synthetic"
+              ],
+              "additionalProperties": false
+            },
+            "ownership": {
+              "type": "object",
+              "properties": {
+                "owned": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "unowned": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "ambiguous": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "not-recorded": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "owned",
+                "unowned",
+                "ambiguous",
+                "not-recorded"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "total",
+            "evidence",
+            "extraction",
+            "ownership"
+          ],
+          "additionalProperties": false
+        },
+        "globals": {
+          "type": "object",
+          "properties": {
+            "total": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "evidence": {
+              "type": "object",
+              "properties": {
+                "recovered": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "inferred": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "unresolved": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "excluded": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "recovered",
+                "inferred",
+                "unresolved",
+                "excluded"
+              ],
+              "additionalProperties": false
+            },
+            "extraction": {
+              "type": "object",
+              "properties": {
+                "recovered": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "partial": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "failed": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "synthetic": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "recovered",
+                "partial",
+                "failed",
+                "synthetic"
+              ],
+              "additionalProperties": false
+            },
+            "ownership": {
+              "type": "object",
+              "properties": {
+                "owned": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "unowned": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "ambiguous": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "not-recorded": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "owned",
+                "unowned",
+                "ambiguous",
+                "not-recorded"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "total",
+            "evidence",
+            "extraction",
+            "ownership"
+          ],
+          "additionalProperties": false
+        },
+        "types": {
+          "type": "object",
+          "properties": {
+            "total": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "evidence": {
+              "type": "object",
+              "properties": {
+                "recovered": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "inferred": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "unresolved": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "excluded": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "recovered",
+                "inferred",
+                "unresolved",
+                "excluded"
+              ],
+              "additionalProperties": false
+            },
+            "extraction": {
+              "type": "object",
+              "properties": {
+                "recovered": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "partial": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "failed": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "synthetic": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "recovered",
+                "partial",
+                "failed",
+                "synthetic"
+              ],
+              "additionalProperties": false
+            },
+            "ownership": {
+              "type": "object",
+              "properties": {
+                "owned": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "unowned": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "ambiguous": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "not-recorded": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "owned",
+                "unowned",
+                "ambiguous",
+                "not-recorded"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "total",
+            "evidence",
+            "extraction",
+            "ownership"
+          ],
+          "additionalProperties": false
+        },
+        "modules": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "modulesDeclaredAccepted": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "dependencyCycles": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "unknownPlanReferences": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "nameCollisions": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "unresolvedCallTargets": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "unresolvedGlobalReferences": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "functions",
+        "globals",
+        "types",
+        "modules",
+        "modulesDeclaredAccepted",
+        "dependencyCycles",
+        "unknownPlanReferences",
+        "nameCollisions",
+        "unresolvedCallTargets",
+        "unresolvedGlobalReferences"
+      ],
+      "additionalProperties": false
+    },
+    "functionInventory": {
+      "type": "object",
+      "properties": {
+        "binding": {
+          "type": "object",
+          "properties": {
+            "jobId": {
+              "$ref": "#/definitions/id"
+            },
+            "runId": {
+              "$ref": "#/definitions/id"
+            },
+            "revisionId": {
+              "$ref": "#/definitions/id"
+            }
+          },
+          "required": [
+            "jobId",
+            "runId",
+            "revisionId"
+          ],
+          "additionalProperties": false
+        },
+        "authority": {
+          "const": "recorded-program-model"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "available",
+            "not-recorded",
+            "unsupported",
+            "invalid",
+            "limit-exceeded"
+          ],
+          "description": "Program-model state. Only available records may carry entity rows."
+        },
+        "stateReason": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "structureVersion": {
+          "$ref": "#/definitions/sha256"
+        },
+        "sourceSha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "metadataVersion": {
+          "$ref": "#/definitions/sha256"
+        },
+        "manifestSha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "model": {
+          "$ref": "#/definitions/structureRecord"
+        },
+        "plan": {
+          "$ref": "#/definitions/structureRecord"
+        },
+        "recoveryAssessment": {
+          "type": "string",
+          "enum": [
+            "unassessed",
+            "not-recorded"
+          ]
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/structureCapability"
+          },
+          "minItems": 1,
+          "maxItems": 32
+        },
+        "query": {
+          "type": "object",
+          "properties": {
+            "sort": {
+              "type": "string",
+              "enum": [
+                "address",
+                "name",
+                "id"
+              ]
+            },
+            "order": {
+              "type": "string",
+              "enum": [
+                "asc",
+                "desc"
+              ]
+            },
+            "search": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "status": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "recovered",
+                    "partial",
+                    "failed",
+                    "synthetic"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "evidence": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "recovered",
+                    "inferred",
+                    "unresolved",
+                    "excluded"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "ownership": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "owned",
+                    "unowned",
+                    "ambiguous",
+                    "not-recorded"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "module": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "sort",
+            "order",
+            "search",
+            "status",
+            "evidence",
+            "ownership",
+            "module"
+          ],
+          "additionalProperties": false
+        },
+        "totalFunctions": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "matchedFunctions": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/structureEntity"
+          },
+          "maxItems": 200
+        },
+        "page": {
+          "$ref": "#/definitions/page"
+        }
+      },
+      "required": [
+        "binding",
+        "authority",
+        "state",
+        "stateReason",
+        "structureVersion",
+        "sourceSha256",
+        "metadataVersion",
+        "manifestSha256",
+        "model",
+        "plan",
+        "recoveryAssessment",
+        "capabilities",
+        "query",
+        "totalFunctions",
+        "matchedFunctions",
+        "items",
+        "page"
+      ],
+      "additionalProperties": false,
+      "if": {
+        "properties": {
+          "state": {
+            "const": "available"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "totalFunctions": {
+            "type": "null"
+          },
+          "matchedFunctions": {
+            "type": "null"
+          },
+          "items": {
+            "maxItems": 0
+          }
+        }
+      }
+    },
+    "moduleInventory": {
+      "type": "object",
+      "properties": {
+        "binding": {
+          "type": "object",
+          "properties": {
+            "jobId": {
+              "$ref": "#/definitions/id"
+            },
+            "runId": {
+              "$ref": "#/definitions/id"
+            },
+            "revisionId": {
+              "$ref": "#/definitions/id"
+            }
+          },
+          "required": [
+            "jobId",
+            "runId",
+            "revisionId"
+          ],
+          "additionalProperties": false
+        },
+        "authority": {
+          "const": "recorded-program-model"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "available",
+            "not-recorded",
+            "unsupported",
+            "invalid",
+            "limit-exceeded"
+          ],
+          "description": "Program-model state. Only available records may carry entity rows."
+        },
+        "stateReason": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "structureVersion": {
+          "$ref": "#/definitions/sha256"
+        },
+        "sourceSha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "metadataVersion": {
+          "$ref": "#/definitions/sha256"
+        },
+        "manifestSha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "model": {
+          "$ref": "#/definitions/structureRecord"
+        },
+        "plan": {
+          "$ref": "#/definitions/structureRecord"
+        },
+        "recoveryAssessment": {
+          "type": "string",
+          "enum": [
+            "unassessed",
+            "not-recorded"
+          ]
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/structureCapability"
+          },
+          "minItems": 1,
+          "maxItems": 32
+        },
+        "summary": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/structureSummary"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "totalModules": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/structureModule"
+          },
+          "maxItems": 200
+        },
+        "page": {
+          "$ref": "#/definitions/page"
+        }
+      },
+      "required": [
+        "binding",
+        "authority",
+        "state",
+        "stateReason",
+        "structureVersion",
+        "sourceSha256",
+        "metadataVersion",
+        "manifestSha256",
+        "model",
+        "plan",
+        "recoveryAssessment",
+        "capabilities",
+        "summary",
+        "totalModules",
+        "items",
+        "page"
+      ],
+      "additionalProperties": false,
+      "if": {
+        "properties": {
+          "state": {
+            "const": "available"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "summary": {
+            "type": "null"
+          },
+          "totalModules": {
+            "type": "null"
+          },
+          "items": {
+            "maxItems": 0
+          }
+        }
+      }
+    },
+    "moduleDetail": {
+      "type": "object",
+      "properties": {
+        "binding": {
+          "type": "object",
+          "properties": {
+            "jobId": {
+              "$ref": "#/definitions/id"
+            },
+            "runId": {
+              "$ref": "#/definitions/id"
+            },
+            "revisionId": {
+              "$ref": "#/definitions/id"
+            }
+          },
+          "required": [
+            "jobId",
+            "runId",
+            "revisionId"
+          ],
+          "additionalProperties": false
+        },
+        "authority": {
+          "const": "recorded-program-model"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "available",
+            "not-recorded",
+            "unsupported",
+            "invalid",
+            "limit-exceeded"
+          ],
+          "description": "Program-model state. Only available records may carry entity rows."
+        },
+        "stateReason": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "structureVersion": {
+          "$ref": "#/definitions/sha256"
+        },
+        "sourceSha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "metadataVersion": {
+          "$ref": "#/definitions/sha256"
+        },
+        "manifestSha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "model": {
+          "$ref": "#/definitions/structureRecord"
+        },
+        "plan": {
+          "$ref": "#/definitions/structureRecord"
+        },
+        "recoveryAssessment": {
+          "type": "string",
+          "enum": [
+            "unassessed",
+            "not-recorded"
+          ]
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/structureCapability"
+          },
+          "minItems": 1,
+          "maxItems": 32
+        },
+        "module": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "moduleId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128,
+                  "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$"
+                },
+                "selector": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/id"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "functionCount": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "globalCount": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "typeCount": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "implementationDeclaration": {
+                  "type": "string",
+                  "enum": [
+                    "accepted",
+                    "unaccepted",
+                    "not-classified"
+                  ],
+                  "description": "Recorded manifest claim for the module implementation file; not verified acceptance."
+                },
+                "inDependencyCycle": {
+                  "type": "boolean"
+                },
+                "functionEvidence": {
+                  "type": "object",
+                  "properties": {
+                    "recovered": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "inferred": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "unresolved": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "excluded": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "recovered",
+                    "inferred",
+                    "unresolved",
+                    "excluded"
+                  ],
+                  "additionalProperties": false
+                },
+                "implementationPath": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "pattern": "^(?!/)[^\\\\\\u0000-\\u001f\\u007f:]+$"
+                },
+                "implementationFileId": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/id"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "interfacePath": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "pattern": "^(?!/)[^\\\\\\u0000-\\u001f\\u007f:]+$"
+                },
+                "interfaceFileId": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/id"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "cycle": {
+                  "type": "object",
+                  "properties": {
+                    "total": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "moduleId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128,
+                            "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$"
+                          },
+                          "selector": {
+                            "anyOf": [
+                              {
+                                "$ref": "#/definitions/id"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "moduleId",
+                          "selector"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "maxItems": 20
+                    }
+                  },
+                  "required": [
+                    "total",
+                    "items"
+                  ],
+                  "additionalProperties": false
+                },
+                "boundaryEvidence": {
+                  "type": "object",
+                  "properties": {
+                    "total": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/definitions/structureText"
+                      },
+                      "maxItems": 20
+                    }
+                  },
+                  "required": [
+                    "total",
+                    "items"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "moduleId",
+                "selector",
+                "functionCount",
+                "globalCount",
+                "typeCount",
+                "implementationDeclaration",
+                "inDependencyCycle",
+                "functionEvidence",
+                "implementationPath",
+                "implementationFileId",
+                "interfacePath",
+                "interfaceFileId",
+                "cycle",
+                "boundaryEvidence"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "owned": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "function",
+                    "global",
+                    "type"
+                  ]
+                },
+                "total": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "items": {
+                  "type": "array",
+                  "items": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/definitions/structureEntity"
+                      },
+                      {
+                        "$ref": "#/definitions/structureUnrecordedEntity"
+                      }
+                    ]
+                  },
+                  "maxItems": 200
+                },
+                "page": {
+                  "$ref": "#/definitions/page"
+                }
+              },
+              "required": [
+                "kind",
+                "total",
+                "items",
+                "page"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "binding",
+        "authority",
+        "state",
+        "stateReason",
+        "structureVersion",
+        "sourceSha256",
+        "metadataVersion",
+        "manifestSha256",
+        "model",
+        "plan",
+        "recoveryAssessment",
+        "capabilities",
+        "module",
+        "owned"
+      ],
+      "additionalProperties": false,
+      "if": {
+        "properties": {
+          "state": {
+            "const": "available"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "module": {
+            "type": "null"
+          },
+          "owned": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    "entityDetail": {
+      "type": "object",
+      "properties": {
+        "binding": {
+          "type": "object",
+          "properties": {
+            "jobId": {
+              "$ref": "#/definitions/id"
+            },
+            "runId": {
+              "$ref": "#/definitions/id"
+            },
+            "revisionId": {
+              "$ref": "#/definitions/id"
+            }
+          },
+          "required": [
+            "jobId",
+            "runId",
+            "revisionId"
+          ],
+          "additionalProperties": false
+        },
+        "authority": {
+          "const": "recorded-program-model"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "available",
+            "not-recorded",
+            "unsupported",
+            "invalid",
+            "limit-exceeded"
+          ],
+          "description": "Program-model state. Only available records may carry entity rows."
+        },
+        "stateReason": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "structureVersion": {
+          "$ref": "#/definitions/sha256"
+        },
+        "sourceSha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "metadataVersion": {
+          "$ref": "#/definitions/sha256"
+        },
+        "manifestSha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "model": {
+          "$ref": "#/definitions/structureRecord"
+        },
+        "plan": {
+          "$ref": "#/definitions/structureRecord"
+        },
+        "recoveryAssessment": {
+          "type": "string",
+          "enum": [
+            "unassessed",
+            "not-recorded"
+          ]
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/structureCapability"
+          },
+          "minItems": 1,
+          "maxItems": 32
+        },
+        "entity": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "function",
+                    "global",
+                    "type"
+                  ]
+                },
+                "entityId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                },
+                "selector": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/id"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "recorded": {
+                  "const": true
+                },
+                "name": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 4096
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "address": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/address"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "extractionStatus": {
+                  "type": "string",
+                  "enum": [
+                    "recovered",
+                    "partial",
+                    "failed",
+                    "synthetic"
+                  ],
+                  "description": "Producer extraction label; never a scored recovery assessment."
+                },
+                "evidenceState": {
+                  "type": "string",
+                  "enum": [
+                    "recovered",
+                    "inferred",
+                    "unresolved",
+                    "excluded"
+                  ],
+                  "description": "Display class derived from recorded fields; see docs/web-program-structure.md."
+                },
+                "ownership": {
+                  "type": "string",
+                  "enum": [
+                    "owned",
+                    "unowned",
+                    "ambiguous",
+                    "not-recorded"
+                  ]
+                },
+                "moduleId": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128,
+                      "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "moduleSelector": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/id"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "implementationUnresolved": {
+                  "type": "boolean"
+                },
+                "reportedUnresolved": {
+                  "type": "boolean"
+                },
+                "nameCollision": {
+                  "type": "boolean"
+                },
+                "callCount": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "referencedGlobalCount": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "texts": {
+                  "type": "array",
+                  "maxItems": 2,
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "field": {
+                        "type": "string",
+                        "enum": [
+                          "prototype",
+                          "decompiledC",
+                          "type",
+                          "initializer",
+                          "declaration"
+                        ]
+                      },
+                      "recorded": {
+                        "type": "boolean"
+                      },
+                      "preview": {
+                        "anyOf": [
+                          {
+                            "$ref": "#/definitions/structureText"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      }
+                    },
+                    "required": [
+                      "field",
+                      "recorded",
+                      "preview"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "strings": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "total": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "items": {
+                          "type": "array",
+                          "items": {
+                            "$ref": "#/definitions/structureText"
+                          },
+                          "maxItems": 20
+                        }
+                      },
+                      "required": [
+                        "total",
+                        "items"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "calls": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/structureReferences"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "referencedGlobals": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/structureReferences"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "calledBy": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/structureReferences"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "referencedBy": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/structureReferences"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "byteEvidence": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "enum": [
+                        "recorded",
+                        "not-recorded",
+                        "unsupported-schema"
+                      ]
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "collisions": {
+                  "type": "object",
+                  "properties": {
+                    "total": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/definitions/structureReference"
+                      },
+                      "maxItems": 20
+                    }
+                  },
+                  "required": [
+                    "total",
+                    "items"
+                  ],
+                  "additionalProperties": false
+                },
+                "sources": {
+                  "type": "object",
+                  "properties": {
+                    "implementationPath": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 4096,
+                          "pattern": "^(?!/)[^\\\\\\u0000-\\u001f\\u007f:]+$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "implementationFileId": {
+                      "anyOf": [
+                        {
+                          "$ref": "#/definitions/id"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "interfacePath": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 4096,
+                          "pattern": "^(?!/)[^\\\\\\u0000-\\u001f\\u007f:]+$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "interfaceFileId": {
+                      "anyOf": [
+                        {
+                          "$ref": "#/definitions/id"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "sharedInterfacePath": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 4096,
+                          "pattern": "^(?!/)[^\\\\\\u0000-\\u001f\\u007f:]+$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "sharedInterfaceFileId": {
+                      "anyOf": [
+                        {
+                          "$ref": "#/definitions/id"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "implementationPath",
+                    "implementationFileId",
+                    "interfacePath",
+                    "interfaceFileId",
+                    "sharedInterfacePath",
+                    "sharedInterfaceFileId"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "kind",
+                "entityId",
+                "selector",
+                "recorded",
+                "name",
+                "address",
+                "extractionStatus",
+                "evidenceState",
+                "ownership",
+                "moduleId",
+                "moduleSelector",
+                "implementationUnresolved",
+                "reportedUnresolved",
+                "nameCollision",
+                "texts",
+                "strings",
+                "calls",
+                "referencedGlobals",
+                "calledBy",
+                "referencedBy",
+                "byteEvidence",
+                "collisions",
+                "sources"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "binding",
+        "authority",
+        "state",
+        "stateReason",
+        "structureVersion",
+        "sourceSha256",
+        "metadataVersion",
+        "manifestSha256",
+        "model",
+        "plan",
+        "recoveryAssessment",
+        "capabilities",
+        "entity"
+      ],
+      "additionalProperties": false,
+      "if": {
+        "properties": {
+          "state": {
+            "const": "available"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "entity": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    "sourceSearchMatch": {
+      "type": "object",
+      "properties": {
+        "fileId": {
+          "$ref": "#/definitions/id"
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "^(?!/)[^\\\\\\u0000-\\u001f\\u007f:]+$"
+        },
+        "sha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "line": {
+          "$ref": "#/definitions/uint64"
+        },
+        "column": {
+          "$ref": "#/definitions/uint64"
+        },
+        "offsetBytes": {
+          "$ref": "#/definitions/uint64"
+        },
+        "lineOffsetBytes": {
+          "$ref": "#/definitions/uint64"
+        },
+        "before": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "match": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "after": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "truncatedBefore": {
+          "type": "boolean"
+        },
+        "truncatedAfter": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "fileId",
+        "displayName",
+        "sha256",
+        "line",
+        "column",
+        "offsetBytes",
+        "lineOffsetBytes",
+        "before",
+        "match",
+        "after",
+        "truncatedBefore",
+        "truncatedAfter"
+      ],
+      "additionalProperties": false
+    },
+    "sourceSearch": {
+      "type": "object",
+      "properties": {
+        "binding": {
+          "type": "object",
+          "properties": {
+            "jobId": {
+              "$ref": "#/definitions/id"
+            },
+            "runId": {
+              "$ref": "#/definitions/id"
+            },
+            "revisionId": {
+              "$ref": "#/definitions/id"
+            }
+          },
+          "required": [
+            "jobId",
+            "runId",
+            "revisionId"
+          ],
+          "additionalProperties": false
+        },
+        "authority": {
+          "const": "source-input-commitments"
+        },
+        "sourceSha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "metadataVersion": {
+          "$ref": "#/definitions/sha256"
+        },
+        "query": {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "match": {
+              "enum": [
+                "text",
+                "symbol"
+              ]
+            },
+            "caseSensitive": {
+              "type": "boolean"
+            },
+            "directoryId": {
+              "$ref": "#/definitions/id"
+            },
+            "path": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 512
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "text",
+            "match",
+            "caseSensitive",
+            "directoryId",
+            "path"
+          ],
+          "additionalProperties": false
+        },
+        "index": {
+          "const": "none"
+        },
+        "status": {
+          "enum": [
+            "complete",
+            "partial"
+          ]
+        },
+        "stopReason": {
+          "anyOf": [
+            {
+              "enum": [
+                "result-limit",
+                "byte-limit",
+                "deadline"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "scope": {
+          "type": "object",
+          "properties": {
+            "filesInScope": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            },
+            "searchableFiles": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            },
+            "notViewable": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            },
+            "declaredBinary": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            },
+            "tooLarge": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            }
+          },
+          "required": [
+            "filesInScope",
+            "searchableFiles",
+            "notViewable",
+            "declaredBinary",
+            "tooLarge"
+          ],
+          "additionalProperties": false
+        },
+        "progress": {
+          "type": "object",
+          "properties": {
+            "scannedFiles": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            },
+            "scannedBytes": {
+              "$ref": "#/definitions/uint64"
+            },
+            "unsearchableText": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            },
+            "unavailableFiles": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            },
+            "remainingFiles": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            }
+          },
+          "required": [
+            "scannedFiles",
+            "scannedBytes",
+            "unsearchableText",
+            "unavailableFiles",
+            "remainingFiles"
+          ],
+          "additionalProperties": false
+        },
+        "coverageGaps": {
+          "type": "object",
+          "properties": {
+            "unsearchableText": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            },
+            "unavailableFiles": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            }
+          },
+          "required": [
+            "unsearchableText",
+            "unavailableFiles"
+          ],
+          "additionalProperties": false
+        },
+        "limits": {
+          "type": "object",
+          "properties": {
+            "maxResults": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            },
+            "maxScannedBytes": {
+              "$ref": "#/definitions/uint64"
+            },
+            "deadlineMs": {
+              "$ref": "#/definitions/uint64"
+            }
+          },
+          "required": [
+            "maxResults",
+            "maxScannedBytes",
+            "deadlineMs"
+          ],
+          "additionalProperties": false
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/sourceSearchMatch"
+          },
+          "maxItems": 100
+        },
+        "page": {
+          "$ref": "#/definitions/page"
+        }
+      },
+      "required": [
+        "binding",
+        "authority",
+        "sourceSha256",
+        "metadataVersion",
+        "query",
+        "index",
+        "status",
+        "stopReason",
+        "scope",
+        "progress",
+        "coverageGaps",
+        "limits",
+        "items",
+        "page"
+      ],
+      "additionalProperties": false
+    },
     "gitRepositoryInit": {
       "type": "object",
       "properties": {
@@ -5388,135 +7670,6 @@
         "sha1",
         "sha256",
         "unknown"
-      ]
-    },
-    "queuePosition": {
-      "oneOf": [
-        {
-          "type": "object",
-          "properties": {
-            "jobId": {
-              "$ref": "#/definitions/id"
-            },
-            "runId": {
-              "$ref": "#/definitions/id"
-            },
-            "sampledAt": {
-              "$ref": "#/definitions/instant"
-            },
-            "state": {
-              "const": "queued"
-            },
-            "source": {
-              "const": "web-workflow-executor"
-            },
-            "approximate": {
-              "const": true
-            },
-            "position": {
-              "type": "string",
-              "pattern": "^([1-9]|[12][0-9]|3[0-2])$"
-            },
-            "ahead": {
-              "type": "string",
-              "pattern": "^([0-9]|[12][0-9]|3[01])$"
-            },
-            "queuedTasks": {
-              "type": "string",
-              "pattern": "^([1-9]|[12][0-9]|3[0-2])$"
-            },
-            "activeWorkers": {
-              "type": "string",
-              "pattern": "^[0-2]$"
-            },
-            "workerLimit": {
-              "type": "string",
-              "pattern": "^[1-2]$"
-            }
-          },
-          "required": [
-            "jobId",
-            "runId",
-            "sampledAt",
-            "state",
-            "source",
-            "approximate",
-            "position",
-            "ahead",
-            "queuedTasks",
-            "activeWorkers",
-            "workerLimit"
-          ],
-          "additionalProperties": false
-        },
-        {
-          "type": "object",
-          "properties": {
-            "jobId": {
-              "$ref": "#/definitions/id"
-            },
-            "runId": {
-              "$ref": "#/definitions/id"
-            },
-            "sampledAt": {
-              "$ref": "#/definitions/instant"
-            },
-            "state": {
-              "const": "not-queued"
-            },
-            "runState": {
-              "type": "string",
-              "enum": [
-                "running",
-                "cancelling",
-                "completed",
-                "failed",
-                "cancelled",
-                "interrupted"
-              ]
-            }
-          },
-          "required": [
-            "jobId",
-            "runId",
-            "sampledAt",
-            "state",
-            "runState"
-          ],
-          "additionalProperties": false
-        },
-        {
-          "type": "object",
-          "properties": {
-            "jobId": {
-              "$ref": "#/definitions/id"
-            },
-            "runId": {
-              "$ref": "#/definitions/id"
-            },
-            "sampledAt": {
-              "$ref": "#/definitions/instant"
-            },
-            "state": {
-              "const": "unavailable"
-            },
-            "reasonCode": {
-              "type": "string",
-              "enum": [
-                "EXTERNAL_EXECUTOR",
-                "NOT_IN_LOCAL_QUEUE"
-              ]
-            }
-          },
-          "required": [
-            "jobId",
-            "runId",
-            "sampledAt",
-            "state",
-            "reasonCode"
-          ],
-          "additionalProperties": false
-        }
       ]
     }
   },
@@ -6243,30 +8396,6 @@
           "const": 1
         },
         "kind": {
-          "const": "sourceSearch"
-        },
-        "requestId": {
-          "$ref": "#/definitions/requestId"
-        },
-        "data": {
-          "$ref": "#/definitions/sourceSearch"
-        }
-      },
-      "required": [
-        "apiVersion",
-        "kind",
-        "requestId",
-        "data"
-      ],
-      "additionalProperties": false
-    },
-    {
-      "type": "object",
-      "properties": {
-        "apiVersion": {
-          "const": 1
-        },
-        "kind": {
           "const": "revisionFile"
         },
         "requestId": {
@@ -6322,6 +8451,126 @@
         },
         "data": {
           "$ref": "#/definitions/attemptControls"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "functionInventory"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/functionInventory"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "moduleInventory"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/moduleInventory"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "moduleDetail"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/moduleDetail"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "entityDetail"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/entityDetail"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "sourceSearch"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/sourceSearch"
         }
       },
       "required": [
