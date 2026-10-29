@@ -492,6 +492,34 @@ binding, `state`, completeness, provenance limitations and explicit acceptance s
 Missing is a known absent report; unknown means the association/meaning cannot be established.
 Partial means available observations cover less than the declared scope. None implies pass.
 
+Both implemented report adapters (`reports/exploration` and `reports/revision-validation`)
+map the evidence conditions onto these states the same way, and withhold `summary` in every
+state except `available`:
+
+| Evidence condition | `state` | Exploration adapter | Revision-validation adapter |
+| --- | --- | --- | --- |
+| Unavailable: bytes missing, unreadable or changed during the bounded read | `unknown` | no captured report bytes | no normal receipt, or receipt bytes not captured |
+| Incomplete: fewer observations than the declared scope | `partial` | absent producer fields, versioned failure records | missing required scope, diff or identity evidence |
+| Unsupported producer version | `unsupported` | declared `schema`/`schemaVersion` it does not support | unsupported producer schema |
+| Corrupt or inconsistent bytes | `invalid` | malformed JSON, count/array mismatch, non-decimal counts | malformed or inconsistent receipt evidence |
+| Structurally checked observations | `available` | exact counts with `authority: observations` | checked normal receipt and result |
+
+`WebExplorationReportTest`, `WebExplorationPreparationReportTest`,
+`RecordedRepairValidationDiagnosticTest` and `RecordedRepairValidationCasesTest` cover each row.
+
+`available` means the adapter verified the report's structure and bindings, not that the
+reconstruction was accepted: `acceptance` stays `not-evaluated` unless an acceptance artifact
+supplies it.
+
+Sizes, counts and addresses keep their exact values on the wire and in the SPA. Unsigned
+counts and byte sizes are canonical decimal strings, and the SPA prints them unchanged
+(`formatExactBytes` adds only a unit label, never `Number` rounding). ELF entry addresses are
+hexadecimal strings shown as sent. Timestamps keep their original fractional digits and
+offset; the SPA only replaces `T` with a space and a trailing `Z` with ` UTC`. The exploration
+confidence `score` is the one JSON number, a producer ratio in `[0, 1]`, shown as received.
+Each report carries its provenance: the `binding` (job, run, revision), `sourceArtifact`
+digest descriptor, `producerSchemaVersion`, `adapterVersion` and `limitations`.
+
 An exploration confidence score reports observed input/output breadth and active isolation,
 never universal equivalence. A graph root is an initial snapshot, not an accepted repair.
 For graph-backed revision acceptance, canonical accepted nodes, validation evidence, agent receipt binding and source
