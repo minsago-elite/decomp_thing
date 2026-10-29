@@ -161,7 +161,7 @@ export async function qualifyUploadFailures({ makeTarget, cdp, evaluate, ready, 
   await cdp.call('Page.navigate', { url: browserOrigin + '/nested/' }, tab.sessionId);
   const ids = (await fs.readdir(data)).filter(name => /^[a-f0-9]{32}$/.test(name));
   async function select(size, name) {
-    await waitForUploadControl(tab, ready, 'failure workspace upload control');
+    await waitForUploadControl(tab, ready);
     await evaluate(tab, `(() => {
       const transfer = new DataTransfer(); transfer.items.add(new File([new Uint8Array(${size})], ${JSON.stringify(name)}));
       const picker = document.querySelector('#binary-file'); picker.files = transfer.files;
@@ -211,7 +211,7 @@ export async function qualifyMeasuredUpload({ makeTarget, cdp, evaluate, ready, 
   }, tab.sessionId);
   const before = (await fs.readdir(data)).filter(name => /^[a-f0-9]{32}$/.test(name));
   await cdp.call('Page.navigate', { url: browserOrigin + '/nested/' }, tab.sessionId);
-  await waitForUploadControl(tab, ready, 'measured workspace upload control');
+  await waitForUploadControl(tab, ready);
   await evaluate(tab, `(() => {
     const bytes = new Uint8Array(512 * 1024); bytes.set([127, 69, 76, 70, 2, 1, 1]);
     const view = new DataView(bytes.buffer); view.setUint16(16, 2, true); view.setUint16(18, 62, true);

@@ -61,6 +61,8 @@ jobs:
           python3 -m pip install --requirement requirements/oracle-generation.txt
       - name: Verify packaged upgrade and cache evidence controls
         run: node scripts/test-packaged-browser-upgrade.mjs
+      - name: Verify packaged upload route readiness controls
+        run: node scripts/test-packaged-browser-upload.mjs
       - name: Verify bounded archival cleanup controls
         timeout-minutes: 1
         run: python3 -B scripts/test-archival-diagnostics.py --verbose
@@ -206,6 +208,12 @@ jobs:
             --archive "$WEB_TEST_ARCHIVE" \
             --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
             --python "$(command -v python3)" --work-parent "$RUNNER_TEMP" --mode session --no-sandbox
+      - name: Exercise exact packaged upload readiness and lost-response retry
+        run: |
+          node scripts/check-packaged-web-browser.mjs \
+            --archive "$WEB_TEST_ARCHIVE" \
+            --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
+            --python "$(command -v python3)" --work-parent "$RUNNER_TEMP" --mode upload --no-sandbox
       - name: Exercise exact packaged binary metadata and malformed-response recovery
         run: |
           node scripts/check-packaged-web-browser.mjs \
