@@ -414,10 +414,10 @@ INVENTORY_ROWS = {
         "visibility", "rawSectionIndex", "resolvedSectionIndex", "sectionKind", "value", "size", "version"}),
     "relocations": (1000000, {"sectionIndex", "relocationIndex", "fileOffset", "locator", "symbolTableSectionIndex", "symbolIndex", "offset",
         "type", "addend", "dynamicTables", "slotFileOffset", "slotLoadIndices", "dispositions"}),
-    "versionRequirements": (131072, {"sectionIndex", "stringSectionIndex", "recordOffset", "auxiliaryOffset", "providerRequest", "name",
-        "rawIndex", "index", "flags", "hash"}),
+    "versionRequirements": (131072, {"sectionIndex", "stringSectionIndex", "recordOffset", "auxiliaryOffset", "providerRequest",
+        "providerRequestOffset", "name", "nameOffset", "rawIndex", "index", "flags", "hash"}),
     "versionDefinitions": (131072, {"sectionIndex", "stringSectionIndex", "recordOffset", "rawIndex", "index", "flags", "hash", "name",
-        "parentNames", "auxiliaryOffsets"}),
+        "parentNames", "auxiliaryOffsets", "auxiliaryNameOffsets"}),
 }
 SYMBOL_VERSION_KEYS = {"sectionIndex", "fileOffset", "raw", "index", "hidden", "kind", "name", "providerRequest"}
 SITE_KEYS = {"sourceOrdinal", "callerRoot", "callerCanonicalId", "callerRva", "instructionRva", "instructionBytes", "instructionLength",
@@ -459,7 +459,7 @@ def verify_external_inventory(inventory: dict, namespace: dict, checksum: str, i
     # Primitive closure also rules out nested, unrecognized authority objects in scalar fields.
     address_fields = {"flags", "address", "size", "alignment", "entrySize", "virtualAddress", "physicalAddress", "fileSize", "memorySize", "tag", "value"}
     string_fields = {"name", "locator", "sectionKind", "providerRequest"}
-    list_fields = {"dynamicTables", "slotLoadIndices", "dispositions", "parentNames", "auxiliaryOffsets"}
+    list_fields = {"dynamicTables", "slotLoadIndices", "dispositions", "parentNames", "auxiliaryOffsets", "auxiliaryNameOffsets"}
     for group in INVENTORY_ROWS:
         for row in inventory[group]:
             for key, value in row.items():
@@ -468,7 +468,7 @@ def verify_external_inventory(inventory: dict, namespace: dict, checksum: str, i
                 if key in list_fields:
                     require(type(value) is list and len(value) <= 65535, "metadata array exceeds bound")
                     for item in value:
-                        if key in {"slotLoadIndices", "auxiliaryOffsets"}:
+                        if key in {"slotLoadIndices", "auxiliaryOffsets", "auxiliaryNameOffsets"}:
                             integer(item, 0, (1 << 63) - 1)
                         else:
                             require(type(item) is str and len(item) <= 16384, "invalid metadata array string")
@@ -755,7 +755,7 @@ def retained_version_records(inventory: dict, sections: dict, input_bytes: int) 
     def elf_hash(name: str) -> int:
         result = 0
         for byte in name.encode("utf-8"):
-            result = (result << 4) + byte
+            result = ((result << 4) + byte) & 0xffffffff
             high = result & 0xf0000000
             result = (result ^ (high >> 24)) & ~high
         return result
@@ -784,23 +784,34 @@ def retained_version_records(inventory: dict, sections: dict, input_bytes: int) 
     def within(owner: dict, offset: int, width: int) -> bool:
         return owner["offset"] <= offset and offset + width <= owner["offset"] + address(owner["size"])
 
-    def require_linked_string_capacity(row: dict, group: str) -> None:
-        strings = sections.get(row["stringSectionIndex"])
+    string_ranges: list[tuple[int, int, bytes]] = []
+
+    def retain_linked_string(string_section_index: int, offset: int, value: str) -> None:
+        strings = sections.get(string_section_index)
         if strings is None:
             raise VerificationError("retained GNU version string table is absent")
+        try:
+            encoded = value.encode("utf-8")
+        except UnicodeEncodeError as error:
+            raise VerificationError("retained GNU version string is not UTF-8 encodable") from error
         size = address(strings["size"])
-        values = [row["name"]]
-        if group == "versionRequirements":
-            values.append(row["providerRequest"])
-        else:
-            values.extend(row["parentNames"])
-        for value in values:
-            try:
-                encoded = value.encode("utf-8")
-            except UnicodeEncodeError as error:
-                raise VerificationError("retained GNU version string is not UTF-8 encodable") from error
-            require("\\0" not in value and len(encoded) + 1 <= size,
-                    "retained GNU version string exceeds linked string table")
+        offset = integer(offset, 0, (1 << 32) - 1)
+        require("\0" not in value and offset < size and len(encoded) + 1 <= size - offset and
+                (offset != 0 or not value), "retained GNU version string exceeds linked string table")
+        string_ranges.append((string_section_index, offset, encoded + b"\0"))
+
+    for symbol in inventory["dynamicSymbols"]:
+        table = sections.get(symbol["tableSectionIndex"])
+        if table is None or table["type"] != 11:
+            raise VerificationError("retained dynamic symbol table is absent")
+        retain_linked_string(table["link"], symbol["nameOffset"], symbol["name"])
+    active_table = sections.get(inventory["activeSymbolTableSectionIndex"])
+    if active_table is None or active_table["type"] != 11:
+        raise VerificationError("retained active dynamic symbol table is absent")
+    needed_entries = [entry for entry in inventory["dynamicEntries"] if address(entry["tag"]) == 1]
+    require(len(needed_entries) == len(inventory["neededLibraries"]), "retained DT_NEEDED population differs")
+    for entry, library in zip(needed_entries, inventory["neededLibraries"], strict=True):
+        retain_linked_string(active_table["link"], address(entry["value"]), library)
 
     for group, kind, width in (("versionRequirements", 0x6ffffffe, 16), ("versionDefinitions", 0x6ffffffd, 20)):
         rows = inventory[group]
@@ -809,7 +820,14 @@ def retained_version_records(inventory: dict, sections: dict, input_bytes: int) 
         provider_by_verneed = {}
         for row in rows:
             owner = owner_for(row, kind)
-            require_linked_string_capacity(row, group)
+            if group == "versionRequirements":
+                retain_linked_string(row["stringSectionIndex"], row["nameOffset"], row["name"])
+                retain_linked_string(row["stringSectionIndex"], row["providerRequestOffset"], row["providerRequest"])
+            else:
+                require(len(row["auxiliaryNameOffsets"]) == len(row["parentNames"]) + 1,
+                        "retained Verdaux string-offset population differs")
+                for offset, value in zip(row["auxiliaryNameOffsets"], [row["name"], *row["parentNames"]], strict=True):
+                    retain_linked_string(row["stringSectionIndex"], offset, value)
             index, raw = row["index"], row["rawIndex"]
             key = (row["stringSectionIndex"], index)
             require(0 <= raw <= 65535 and (2 if group == "versionRequirements" else 1) <= index <= 32767 and
@@ -839,6 +857,7 @@ def retained_version_records(inventory: dict, sections: dict, input_bytes: int) 
                 require(offset >= row["recordOffset"] + width and within(owner, offset, auxiliary_width),
                         "retained GNU version auxiliary bounds/order differs")
                 storage_ranges.setdefault(owner["index"], []).append((offset, offset + auxiliary_width))
+    require_consistent_byte_ranges(string_ranges, "retained GNU version strings conflict in linked table")
     for ranges in storage_ranges.values():
         ordered = sorted(ranges)
         require(all(right[0] >= left[1] for left, right in pairwise(ordered)),

@@ -243,6 +243,10 @@ private class Validator(val document: JsonObject, val worker: Boolean) {
         fun section(index: Int, type: Long): FullTreeElfRawSection {
             step(); return sections.getOrNull(index)?.also { require(it.type == type) } ?: error("missing inventory section")
         }
+        fun linkedStringFits(table: FullTreeElfRawSection, offset: Long, value: String) {
+            val start = offset.toULong(); val bytes = value.toByteArray(Charsets.UTF_8).size.toULong()
+            require(start < table.size && bytes < table.size - start)
+        }
         fun metadata(section: FullTreeElfRawSection) {
             step(); require(section.flags and 2UL != 0UL && section.flags and 0x800UL == 0UL && section.type != 8L)
             if (section.size == 0UL) return
@@ -280,10 +284,14 @@ private class Validator(val document: JsonObject, val worker: Boolean) {
             step(); val item = value.record()
             val result = ElfVersionRequirementV1(item.number("sectionIndex", 1, sections.lastIndex.toLong()).toInt(),
                 item.number("stringSectionIndex", 1, sections.lastIndex.toLong()).toInt(), item.number("recordOffset"), item.number("auxiliaryOffset"),
-                item.text("providerRequest", 16384, true), item.text("name", 16384), item.number("rawIndex", 0, 65535).toInt(),
+                item.text("providerRequest", 16384, true), item.number("providerRequestOffset", 0, 0xffffffffL),
+                item.text("name", 16384), item.number("nameOffset", 0, 0xffffffffL), item.number("rawIndex", 0, 65535).toInt(),
                 item.number("index", 2, 32767).toInt(), item.number("flags", 0, 65535).toInt(), item.number("hash", 0, 0xffffffffL))
             require(result.index == (result.rawIndex and 0x7fff) && result.hash == elfHash(result.name))
-            val owner = section(result.sectionIndex, 0x6ffffffeL); require(owner.link == result.stringSectionIndex); section(owner.link, 3L)
+            val owner = section(result.sectionIndex, 0x6ffffffeL); require(owner.link == result.stringSectionIndex)
+            val stringTable = section(owner.link, 3L)
+            linkedStringFits(stringTable, result.providerRequestOffset, result.providerRequest)
+            linkedStringFits(stringTable, result.nameOffset, result.name)
             metadata(owner); require(within(owner, result.recordOffset, 16) && within(owner, result.auxiliaryOffset, 16) && result.auxiliaryOffset >= result.recordOffset + 16)
             result
         }
@@ -293,9 +301,15 @@ private class Validator(val document: JsonObject, val worker: Boolean) {
                 item.number("stringSectionIndex", 1, sections.lastIndex.toLong()).toInt(), item.number("recordOffset"),
                 item.number("rawIndex", 0, 65535).toInt(), item.number("index", 1, 32767).toInt(), item.number("flags", 0, 65535).toInt(),
                 item.number("hash", 0, 0xffffffffL), item.text("name", 16384), item.strings("parentNames", 65535),
-                item.array("auxiliaryOffsets", 65535).map { it.integer() })
+                item.array("auxiliaryOffsets", 65535).map { it.integer() },
+                item.array("auxiliaryNameOffsets", 65535).map { it.integer(0, 0xffffffffL) })
             require(result.index == (result.rawIndex and 0x7fff) && result.hash == elfHash(result.name))
-            val owner = section(result.sectionIndex, 0x6ffffffdL); require(owner.link == result.stringSectionIndex); section(owner.link, 3L)
+            val owner = section(result.sectionIndex, 0x6ffffffdL); require(owner.link == result.stringSectionIndex)
+            val stringTable = section(owner.link, 3L)
+            require(result.auxiliaryNameOffsets.size == result.parentNames.size + 1)
+            (listOf(result.name) + result.parentNames).zip(result.auxiliaryNameOffsets).forEach { (name, offset) ->
+                linkedStringFits(stringTable, offset, name)
+            }
             metadata(owner); require(within(owner, result.recordOffset, 20) && result.auxiliaryOffsets.size == result.parentNames.size + 1)
             require(result.auxiliaryOffsets.isNotEmpty() && result.auxiliaryOffsets == result.auxiliaryOffsets.distinct().sorted())
             require(result.parentNames.all { it.isNotEmpty() }) { "empty defined parent version name" }
@@ -575,7 +589,7 @@ private class Validator(val document: JsonObject, val worker: Boolean) {
     private fun elfHash(value: String): Long {
         var hash = 0L
         value.toByteArray(Charsets.UTF_8).forEach { byte ->
-            step(); hash = (hash shl 4) + (byte.toInt() and 255); val high = hash and 0xf0000000L
+            step(); hash = ((hash shl 4) + (byte.toInt() and 255)) and 0xffffffffL; val high = hash and 0xf0000000L
             if (high != 0L) hash = hash xor (high ushr 24); hash = hash and high.inv()
         }
         return hash

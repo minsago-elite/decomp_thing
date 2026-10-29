@@ -47,13 +47,13 @@ internal data class ElfDynamicBindingLimitsV1(
 internal data class ElfDynamicEntryV1(val index: Int, val fileOffset: Long, val tag: ULong, val value: ULong)
 internal data class ElfVersionRequirementV1(
     val sectionIndex: Int, val stringSectionIndex: Int, val recordOffset: Long, val auxiliaryOffset: Long,
-    val providerRequest: String, val name: String, val rawIndex: Int, val index: Int,
-    val flags: Int, val hash: Long,
+    val providerRequest: String, val providerRequestOffset: Long, val name: String, val nameOffset: Long,
+    val rawIndex: Int, val index: Int, val flags: Int, val hash: Long,
 )
 internal data class ElfVersionDefinitionV1(
     val sectionIndex: Int, val stringSectionIndex: Int, val recordOffset: Long,
     val rawIndex: Int, val index: Int, val flags: Int, val hash: Long,
-    val name: String, val parentNames: List<String>, val auxiliaryOffsets: List<Long>,
+    val name: String, val parentNames: List<String>, val auxiliaryOffsets: List<Long>, val auxiliaryNameOffsets: List<Long>,
 )
 internal data class ElfSymbolVersionV1(
     val sectionIndex: Int, val fileOffset: Long, val raw: Int, val index: Int, val hidden: Boolean,
@@ -132,13 +132,15 @@ internal class ElfDynamicBindingInventoryV1(
             "slotLoadIndices" to array(it.slotLoadIndices.map(::n)), "dispositions" to strings(it.dispositions)) }),
         "versionRequirements" to array(versionRequirements.map { obj("sectionIndex" to n(it.sectionIndex),
             "stringSectionIndex" to n(it.stringSectionIndex), "recordOffset" to n(it.recordOffset),
-            "auxiliaryOffset" to n(it.auxiliaryOffset), "providerRequest" to s(it.providerRequest), "name" to s(it.name),
+            "auxiliaryOffset" to n(it.auxiliaryOffset), "providerRequest" to s(it.providerRequest),
+            "providerRequestOffset" to n(it.providerRequestOffset), "name" to s(it.name), "nameOffset" to n(it.nameOffset),
             "rawIndex" to n(it.rawIndex), "index" to n(it.index), "flags" to n(it.flags), "hash" to n(it.hash)) }),
         "versionDefinitions" to array(versionDefinitions.map { obj("sectionIndex" to n(it.sectionIndex),
             "stringSectionIndex" to n(it.stringSectionIndex), "recordOffset" to n(it.recordOffset),
             "rawIndex" to n(it.rawIndex), "index" to n(it.index), "flags" to n(it.flags), "hash" to n(it.hash),
             "name" to s(it.name), "parentNames" to strings(it.parentNames),
-            "auxiliaryOffsets" to array(it.auxiliaryOffsets.map(::n))) }),
+            "auxiliaryOffsets" to array(it.auxiliaryOffsets.map(::n)),
+            "auxiliaryNameOffsets" to array(it.auxiliaryNameOffsets.map(::n))) }),
         "neededLibraries" to strings(neededLibraries), "unsupportedReasons" to strings(unsupportedReasons),
     )
 }
@@ -299,26 +301,29 @@ private class Reader(
                     "invalid version record extent")
                 requireBound(auxDelta >= width && auxDelta % 4L == 0L, "invalid version auxiliary offset")
                 var auxiliary = add(position, auxDelta)
-                val names = arrayListOf<String>(); val offsets = arrayListOf<Long>()
-                val provider = if (definition) null else string(strings, u32(header, 4).toULong())
+                val names = arrayListOf<String>(); val offsets = arrayListOf<Long>(); val nameOffsets = arrayListOf<Long>()
+                val providerOffset = if (definition) null else u32(header, 4).toULong()
+                val provider = providerOffset?.let { string(strings, it) }
                 repeat(count) { auxIndex ->
                     versionRecord()
                     val auxWidth = if (definition) 8 else 16
                     requireBound(auxiliary <= recordEnd - auxWidth, "version auxiliary exceeds its record")
                     val bytes = within(section, auxiliary, auxWidth)
-                    val name = string(strings, u32(bytes, if (definition) 0 else 8).toULong())
+                    val nameOffset = u32(bytes, if (definition) 0 else 8).toULong()
+                    val name = string(strings, nameOffset)
                     requireBound(name.isNotEmpty(), "empty version name")
                     val nextAux = u32(bytes, if (definition) 4 else 12)
                     requireBound((auxIndex == count - 1) == (nextAux == 0L), "version auxiliary count/terminator mismatch")
                     if (definition) {
-                        names += name; offsets += add(section.offset, auxiliary)
+                        names += name; offsets += add(section.offset, auxiliary); nameOffsets += nameOffset.toLong()
                     } else {
                         val rawIndex = u16(bytes, 6); val index = rawIndex and 0x7fff
                         requireBound(index > 1, "invalid required version index")
                         val hash = u32(bytes, 0); requireBound(hash == elfHash(name), "required version hash mismatch")
-                        retain(512); retainString(checkNotNull(provider))
+                        retain(528); retainString(checkNotNull(provider))
                         requirements += ElfVersionRequirementV1(section.index, strings.index, add(section.offset, position),
-                            add(section.offset, auxiliary), provider, name, rawIndex, index, u16(bytes, 4), hash)
+                            add(section.offset, auxiliary), checkNotNull(provider), checkNotNull(providerOffset).toLong(), name,
+                            nameOffset.toLong(), rawIndex, index, u16(bytes, 4), hash)
                     }
                     if (nextAux != 0L) {
                         requireBound(nextAux >= auxWidth && nextAux % 4L == 0L, "overlapping or misaligned version auxiliaries")
@@ -329,9 +334,9 @@ private class Reader(
                     val rawIndex = u16(header, 4); val index = rawIndex and 0x7fff
                     requireBound(index > 0, "invalid defined version index")
                     val hash = u32(header, 8); requireBound(hash == elfHash(names.first()), "defined version hash mismatch")
-                    retain(512L + offsets.size * 32L)
+                    retain(512L + offsets.size * 40L)
                     definitions += ElfVersionDefinitionV1(section.index, strings.index, add(section.offset, position),
-                        rawIndex, index, u16(header, 2), hash, names.first(), immutable(names.drop(1)), immutable(offsets))
+                        rawIndex, index, u16(header, 2), hash, names.first(), immutable(names.drop(1)), immutable(offsets), immutable(nameOffsets))
                 }
                 position = recordEnd
             }
@@ -562,7 +567,7 @@ private class Reader(
     private fun elfHash(name: String): Long {
         var hash = 0L
         name.toByteArray(StandardCharsets.UTF_8).forEach { byte ->
-            step(); hash = (hash shl 4) + (byte.toInt() and 255); val high = hash and 0xf0000000L
+            step(); hash = ((hash shl 4) + (byte.toInt() and 255)) and 0xffffffffL; val high = hash and 0xf0000000L
             if (high != 0L) hash = hash xor (high ushr 24)
             hash = hash and high.inv()
         }

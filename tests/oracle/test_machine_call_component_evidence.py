@@ -500,7 +500,7 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
                 "memorySize": "0x8", "alignment": "0x1"}], "dynamicEntries": [
                     {"index": index, "fileOffset": index * 16, "tag": hex(tag), "value": hex(value)}
                     for index, (tag, value) in enumerate(((23, 0x4000), (2, 24), (20, 7), (7, 0x5000), (8, 0), (9, 24),
-                                                         (6, 0x7000), (11, 24), (5, 0x7100), (10, 64), (0, 0)))],
+                                                         (6, 0x7000), (11, 24), (5, 0x7100), (10, 64), (1, 20), (0, 0)))],
             "dynamicSymbols": [symbol | {"symbolIndex": 0, "locator": "dynsym:1:0", "nameOffset": 0,
                 "name": "", "info": 0, "type": 0, "binding": 0}, symbol], "relocations": [relocation], "versionRequirements": [], "versionDefinitions": [],
             "neededLibraries": ["libexample.so"], "unsupportedReasons": ["dynamic-hash-population-not-reconciled",
@@ -900,7 +900,7 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
                 self.report["sites"][0]["relocationBinding"]["dynamicTables"] = inventory["relocations"][0]["dynamicTables"]
                 inventory["dynamicEntries"] = [{"index": index, "fileOffset": index * 16, "tag": hex(tag), "value": hex(value)}
                     for index, (tag, value) in enumerate(((pointer, 0x4000), (size, width), (entry_size, width),
-                                                       (6, 0x7000), (11, 24), (5, 0x7100), (10, 64), (0, 0)))]
+                                                       (6, 0x7000), (11, 24), (5, 0x7100), (10, 64), (1, 20), (0, 0)))]
                 self.sync_dynamic_storage(inventory)
                 self.write_payloads()
                 self.verify()
@@ -1217,7 +1217,8 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
         inventory["dynamicSymbols"][1]["version"] = {"sectionIndex": 6, "fileOffset": 130, "raw": 2, "index": 2, "hidden": False,
             "kind": "required-version", "name": "VER_1", "providerRequest": "libexample.so"}
         inventory["versionRequirements"] = [{"sectionIndex": 7, "stringSectionIndex": 3, "recordOffset": 64, "auxiliaryOffset": 80,
-            "providerRequest": "libexample.so", "name": "VER_1", "rawIndex": 2, "index": 2, "flags": 0, "hash": 0x5aa821}]
+            "providerRequest": "libexample.so", "providerRequestOffset": 20, "name": "VER_1", "nameOffset": 35,
+            "rawIndex": 2, "index": 2, "flags": 0, "hash": 0x5aa821}]
 
         def rehash_identity() -> None:
             version = self.report["dynamicInventory"]["dynamicSymbols"][1]["version"]
@@ -1232,6 +1233,34 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
         rehash_identity()
         self.verify()
         original = copy.deepcopy(self.report)
+
+        self.report = copy.deepcopy(original)
+        inventory = self.report["dynamicInventory"]
+        version_name, provider = "N" * 1846, "P" * 1846
+        version = inventory["versionRequirements"][0]
+        version.update(name=version_name, nameOffset=1, providerRequest=provider, providerRequestOffset=2)
+        value = 0
+        for byte in version_name.encode("utf-8"):
+            value = ((value << 4) + byte) & 0xffffffff
+            high = value & 0xf0000000
+            if high:
+                value ^= high >> 24
+            value &= ~high
+        version["hash"] = value
+        inventory["dynamicSymbols"][1]["nameOffset"] = 1863
+        inventory["dynamicSymbols"][1]["version"].update(name=version_name, providerRequest=provider)
+        string_table = next(row for row in inventory["sections"] if row["index"] == 3)
+        string_table.update(address="0x9000", offset=1024, size=hex(1881))
+        string_load = next(row for row in inventory["programHeaders"] if row["index"] == 25)
+        string_load.update(offset="0x400", virtualAddress="0x9000", physicalAddress="0x9000",
+            fileSize=hex(1881), memorySize=hex(1881))
+        next(row for row in inventory["dynamicEntries"] if int(row["tag"], 16) == 5).update(value="0x9000")
+        next(row for row in inventory["dynamicEntries"] if int(row["tag"], 16) == 10).update(value=hex(1881))
+        next(row for row in inventory["dynamicEntries"] if int(row["tag"], 16) == 1).update(value=hex(1849))
+        rehash_identity()
+        with self.assertRaisesRegex(VERIFY.VerificationError, "retained GNU version strings conflict in linked table"):
+            self.verify()
+
         changes = [lambda inv: inv["sections"][7].update(size="0x2"),
             lambda inv: inv["sections"][7].update(size="0x6"),
             lambda inv: inv["sections"][7].update(entrySize="0x4"),
@@ -1408,7 +1437,7 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
             "virtualAddress": "0x6080", "physicalAddress": "0x6080", "fileSize": "0x24", "memorySize": "0x24", "alignment": "0x1"})
         inventory["versionDefinitions"] = [{"sectionIndex": 8, "stringSectionIndex": 3, "recordOffset": 128,
             "rawIndex": 1, "index": 1, "flags": 1, "hash": 0x5aa821, "name": "VER_1",
-            "parentNames": ["PARENT"], "auxiliaryOffsets": [148, 156]}]
+            "parentNames": ["PARENT"], "auxiliaryOffsets": [148, 156], "auxiliaryNameOffsets": [35, 42]}]
         inventory["dynamicEntries"][-1:-1] = [{"index": index + 8, "fileOffset": (index + 8) * 16, "tag": hex(tag), "value": hex(value)}
             for index, (tag, value) in enumerate(((0x6ffffffc, 0x6080), (0x6ffffffd, 1)))]
         self.sync_dynamic_storage(inventory)
