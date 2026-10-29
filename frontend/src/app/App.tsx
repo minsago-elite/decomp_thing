@@ -5,7 +5,10 @@ import { useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { LocationProvider, Route, Router, useLocation } from 'preact-iso/router';
 import { NotFound } from '../routes/NotFound';
 import { ViewBoundary } from '../shared/ViewBoundary';
-import { AssetRecoveryNotice } from '../shared/AssetRecoveryNotice';
+import { AssetRecoveryNotice, BuildMismatchNotice } from '../shared/AssetRecoveryNotice';
+import { createReloadGuard } from './reloadGuard';
+import type { ReloadGuard } from './reloadGuard';
+import { useSession } from '../session/useSession';
 import { PrivateSessionContext } from '../session/PrivateTransport';
 import { SessionStatus } from '../session/SessionStatus';
 import { useBrowserAvailability } from '../session/useBrowserAvailability';
@@ -21,6 +24,7 @@ import mark from './mark.svg';
 
 type ShellProps = {
   basePath: string;
+  guard: ReloadGuard;
   identity: BuildIdentity;
   recovery: AssetRecovery;
   reload: () => void;
@@ -40,7 +44,8 @@ function ConnectionNotice() {
   </aside>;
 }
 
-function Shell({ basePath, identity, recovery, reload, session }: ShellProps) {
+function Shell({ basePath, guard, identity, recovery, reload, session }: ShellProps) {
+  const sessionState = useSession(session);
   // Every route, including the workspace landing page, loads on demand so the initial
   // closure stays the shell, session and transport (#622).
   const Home = useMemo(() => lazyRoute(() => import('../routes/Home'), recovery), [recovery]);
@@ -80,11 +85,12 @@ function Shell({ basePath, identity, recovery, reload, session }: ShellProps) {
   const isHistory = location.path.startsWith(`${basePath}/jobs/`) && /^[^/]+\/runs$/.test(location.path.slice(`${basePath}/jobs/`.length));
   const isSourceDirectory = new RegExp(`^${basePath}/jobs/[^/]+/runs/[^/]+/revisions/[^/]+/sources/[^/]+$`).test(location.path);
   const isSourceFile = new RegExp(`^${basePath}/jobs/[^/]+/runs/[^/]+/revisions/[^/]+/source-files/[^/]+$`).test(location.path);
+  const isSourceSearch = new RegExp(`^${basePath}/jobs/[^/]+/runs/[^/]+/revisions/[^/]+/source-search$`).test(location.path);
   const pageTitle = atHome ? copy.jobs : location.path === uploadPath ? copy.uploadABinary
     : location.path === runtimePath ? copy.runtimeStatus : isJob ? copy.jobOverview
       : isRunActivity ? copy.attemptActivity : isRunEvidence ? copy.attemptEvidence
         : isRun ? copy.workflowAttempt : isHistory ? copy.attemptHistory
-      : isSourceDirectory ? sourceTitleCopy.title : isSourceFile ? sourceTitleCopy.fileTitle : copy.pageUnavailable;
+      : isSourceDirectory ? sourceTitleCopy.title : isSourceFile ? sourceTitleCopy.fileTitle : isSourceSearch ? sourceTitleCopy.searchTitle : copy.pageUnavailable;
 
   function focusRouteHeading(url: string) {
     const path = new URL(url, window.location.origin).pathname.replace(/\/+$/g, '') || '/';
@@ -152,7 +158,9 @@ function Shell({ basePath, identity, recovery, reload, session }: ShellProps) {
         <DisplayPreferences />
         {session && <SessionStatus session={session} placement="header" />}
       </header>
-      <AssetRecoveryNotice recovery={recovery} identity={identity} reload={reload} />
+      <AssetRecoveryNotice recovery={recovery} identity={identity} reload={reload} guard={guard} />
+      {sessionState?.status === 'authenticated' && <BuildMismatchNotice identity={identity} serverBuild={sessionState.runtime.uiBuildId}
+        reload={reload} guard={guard} />}
       <ConnectionNotice />
       {session && <SessionStatus session={session} placement="page" />}
       <div class="app-layout">
@@ -188,9 +196,10 @@ function Shell({ basePath, identity, recovery, reload, session }: ShellProps) {
             <Router onLoadStart={() => setLoading(true)} onLoadEnd={viewReady} onRouteChange={viewReady}>
               <Route path={homePath} component={Home} basePath={basePath} session={session} />
               <Route path={uploadPath} component={UploadPage} basePath={basePath} session={session} />
-              <Route path={runtimePath} component={Runtime} identity={identity} session={session} />
+              <Route path={runtimePath} component={Runtime} identity={identity} session={session} basePath={basePath} />
               <Route path={`${basePath}/jobs/:jobId/runs/:runId/revisions/:revisionId/sources/:directoryId`} component={Sources} resource="directory" basePath={basePath} session={session} />
               <Route path={`${basePath}/jobs/:jobId/runs/:runId/revisions/:revisionId/source-files/:fileId`} component={Sources} resource="file" basePath={basePath} session={session} />
+              <Route path={`${basePath}/jobs/:jobId/runs/:runId/revisions/:revisionId/source-search`} component={Sources} resource="search" basePath={basePath} session={session} />
               <Route path={`${basePath}/jobs/:jobId/runs`} component={RunHistory} basePath={basePath} session={session} />
               <Route path={`${basePath}/jobs/:jobId/runs/:runId/activity`} component={Run} view="activity" basePath={basePath} session={session} />
               <Route path={`${basePath}/jobs/:jobId/runs/:runId/evidence`} component={Run} view="evidence" basePath={basePath} session={session} />
@@ -206,21 +215,26 @@ function Shell({ basePath, identity, recovery, reload, session }: ShellProps) {
   );
 }
 
-export function App({ basePath = '', identity = UNKNOWN_BUILD, recovery: suppliedRecovery, reload = () => window.location.reload(), session = null }: {
+export function App({ basePath = '', identity = UNKNOWN_BUILD, recovery: suppliedRecovery, reload = () => window.location.reload(), session = null, reloadGuard }: {
   basePath?: string;
+  reloadGuard?: ReloadGuard;
   identity?: BuildIdentity;
   recovery?: AssetRecovery;
   reload?: () => void;
   session?: BrowserSession | null;
 }) {
   const ownedRecovery = useMemo(createAssetRecovery, []);
+  const ownedGuard = useMemo(() => createReloadGuard(basePath), [basePath]);
+  const guard = reloadGuard ?? ownedGuard;
+  // A page that loaded a build other than the one a reload left has converged.
+  useLayoutEffect(() => { guard.settle(identity.uiBuildId); }, [guard, identity.uiBuildId]);
   const recovery = suppliedRecovery ?? ownedRecovery;
   useLayoutEffect(() => observeAssetFailures(window, recovery), [recovery]);
   return (
     <ViewBoundary>
       <LocationProvider scope={`${basePath}/`}>
         <PrivateSessionContext.Provider value={session}>
-          <Shell basePath={basePath} identity={identity} recovery={recovery} reload={reload} session={session} />
+          <Shell basePath={basePath} guard={guard} identity={identity} recovery={recovery} reload={reload} session={session} />
         </PrivateSessionContext.Provider>
       </LocationProvider>
     </ViewBoundary>

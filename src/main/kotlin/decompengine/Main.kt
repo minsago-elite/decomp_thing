@@ -899,6 +899,7 @@ private fun runWeb(args: List<String>) {
     var uiMode = WebUiMode.LEGACY
     var basePath = "/"
     var devFrontendOrigin: String? = null
+    var gitImportRoot: Path? = null
     var index = 0
     while (index < args.size) {
         require(index + 1 < args.size) { "${args[index]} requires a value; see llm_bin_patch --help" }
@@ -936,6 +937,10 @@ private fun runWeb(args: List<String>) {
                 devFrontendOrigin = args[index + 1]
                 index += 2
             }
+            "--git-import-root" -> {
+                gitImportRoot = Path.of(args.getOrNull(index + 1) ?: error("--git-import-root requires a directory")).toAbsolutePath()
+                index += 2
+            }
             else -> error("unknown web argument: ${args[index]}")
         }
     }
@@ -943,7 +948,7 @@ private fun runWeb(args: List<String>) {
     val server = try {
         decompengine.web.startWebServerWithShutdownHook { cancellation ->
             UploadServer(host, port, dataDir, uiMode = uiMode, basePath = basePath, devFrontendOrigin = devFrontendOrigin,
-                listenBacklog = listenBacklog, startupCancellation = cancellation)
+                listenBacklog = listenBacklog, startupCancellation = cancellation, gitImportRoot = gitImportRoot)
         }
     } catch (_: java.net.BindException) {
         System.err.println("Cannot bind web server to $host:$port. Check --host or choose an unused --port.")
@@ -975,7 +980,7 @@ private fun printHelp() {
           llm_bin_patch gcc-engine-native-calls <cc1|driver> <stripped-binary> --profile <file> --ghidra-archive <file> --output <empty-private-directory> --scratch <provisioned-mount>
           llm_bin_patch gcc-engine-interface-observations driver <stripped-binary> --profile <file> --ghidra-archive <file> --output <empty-private-directory> --scratch <provisioned-mount>
           llm_bin_patch llvm-native-runtime-measurement [--listener-continuity] <oci-layout> <fixed-client> <empty-config> <private-socket> <fresh-output>
-          llm_bin_patch web [--host 127.0.0.1] [--port 8000] [--listen-backlog 64] [--data-dir .decomp_engine/jobs] [--ui legacy|spa] [--base-path /] [--dev-frontend-origin http://127.0.0.1:5173]
+          llm_bin_patch web [--host 127.0.0.1] [--port 8000] [--listen-backlog 64] [--data-dir .decomp_engine/jobs] [--ui legacy|spa] [--base-path /] [--dev-frontend-origin http://127.0.0.1:5173] [--git-import-root <directory>]
 
         Agent harness selection for doctor, patch, reconstruction, and repair:
           --harness acp            use the ACP agent provisioned by ACP_CONFIG_FILE (default)

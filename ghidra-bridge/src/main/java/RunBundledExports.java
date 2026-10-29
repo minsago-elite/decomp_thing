@@ -19,7 +19,11 @@ public final class RunBundledExports extends GhidraScript {
         String phaseRoute = BundledExportPhaseRoute.route(arguments);
         boolean interfacePhases = "invocation9".equals(phaseRoute);
         boolean globalTypePhases = "invocation10".equals(phaseRoute);
-        Set<String> exporters = Set.of("ExportProgramModel.java", "ExportRecoveredCallSites.java", "ExportDecompiledC.java", "ExportNativeCallsV1.class", "ExportNativeInterfacesV1.class", "ExportInferredInterfacesV1.class", "ExportGlobalTypeObservationsV1.class");
+        // Keep each exact-name exporter admission, including the ordinary owned analyzer, distinct.
+        Set<String> exporters = Set.of("ExportProgramModel.java", "ExportProgramModelOwned.java",
+            "ExportRecoveredCallSites.java", "ExportDecompiledC.java", "ExportNativeCallsV1.class",
+            "ExportNativeInterfacesV1.class", "ExportInferredInterfacesV1.class",
+            "ExportGlobalTypeObservationsV1.class");
         for (int index = 0; index < arguments.length;) {
             String name = arguments[index++];
             if (!exporters.contains(name) || index == arguments.length) {

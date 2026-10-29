@@ -5857,6 +5857,52 @@ internal enum class ObservationUnitMutationTargetState {
 }
 
 /**
+ * Pure exact-unit decision over one atomic manager snapshot. The callbacks perform the path probe and
+ * the descriptor-pinned reselection; tests inject them to reproduce the manager's asynchronous cgroup
+ * prune between the snapshot and reselection (#1566) without native setup.
+ */
+internal fun decideObservationUnitMutationTarget(
+    properties: Map<String, String>,
+    unitName: String,
+    expectedInvocation: String,
+    expectedCgroup: Path,
+    pathAbsent: () -> Boolean,
+    reselect: () -> Unit,
+    onSelectionFailure: (Throwable) -> Unit,
+): ObservationUnitMutationTargetState {
+    if (properties["LoadState"] == "not-found") {
+        return ObservationUnitMutationTargetState.ABSENT
+    }
+    val observedInvocation = properties["InvocationID"].orEmpty()
+    if (
+        properties["Id"] != unitName || properties["Transient"] != "yes" ||
+        observedInvocation != expectedInvocation ||
+        !observedInvocation.matches(SYSTEMD_ID128) ||
+        observedInvocation in RESERVED_SYSTEMD_ID128S
+    ) return ObservationUnitMutationTargetState.REPLACED
+    val controlGroup = properties["ControlGroup"].orEmpty()
+    if (controlGroup.isBlank()) return ObservationUnitMutationTargetState.ABSENT
+    if (!controlGroup.startsWith('/') || '\u0000' in controlGroup) {
+        return ObservationUnitMutationTargetState.REPLACED
+    }
+    val selected = CGROUP_ROOT.resolve(controlGroup.removePrefix("/")).normalize()
+    if (
+        !selected.startsWith(CGROUP_ROOT) || selected == CGROUP_ROOT ||
+        selected.fileName?.toString() != unitName || selected != expectedCgroup
+    ) return ObservationUnitMutationTargetState.REPLACED
+    if (pathAbsent()) {
+        return ObservationUnitMutationTargetState.ABSENT
+    }
+    return runCatching { reselect() }.fold(
+        onSuccess = { ObservationUnitMutationTargetState.SAME },
+        onFailure = { failure ->
+            onSelectionFailure(failure)
+            observationCgroupSelectionFailureState(failure)
+        },
+    )
+}
+
+/**
  * A missing path during an otherwise authenticated reselection proves neither absence nor
  * replacement. This state grants no name mutation; cleanup must still prove absence separately
  * within its original deadline. Other failures retain the replacement refusal.
@@ -7366,38 +7412,16 @@ private class ManagedObservationUnit(
                 expectedCgroup.toString().removePrefix(CGROUP_ROOT.toString()),
             )
         }.getOrNull()
-        if (properties["LoadState"] == "not-found") {
-            return ObservationUnitMutationTargetState.ABSENT
-        }
-        val observedInvocation = properties["InvocationID"].orEmpty()
-        if (
-            properties["Id"] != unitName || properties["Transient"] != "yes" ||
-            observedInvocation != expectedInvocation ||
-            !observedInvocation.matches(SYSTEMD_ID128) ||
-            observedInvocation in RESERVED_SYSTEMD_ID128S
-        ) return ObservationUnitMutationTargetState.REPLACED
-        val controlGroup = properties["ControlGroup"].orEmpty()
-        if (controlGroup.isBlank()) return ObservationUnitMutationTargetState.ABSENT
-        if (!controlGroup.startsWith('/') || '\u0000' in controlGroup) {
-            return ObservationUnitMutationTargetState.REPLACED
-        }
-        val selected = CGROUP_ROOT.resolve(controlGroup.removePrefix("/")).normalize()
-        if (
-            !selected.startsWith(CGROUP_ROOT) || selected == CGROUP_ROOT ||
-            selected.fileName?.toString() != unitName || selected != expectedCgroup
-        ) return ObservationUnitMutationTargetState.REPLACED
-        if (Files.notExists(expectedCgroup, LinkOption.NOFOLLOW_LINKS)) {
-            return ObservationUnitMutationTargetState.ABSENT
-        }
-        return runCatching { requirePinnedCgroupSelection(expectedCgroup) }.fold(
-            onSuccess = { ObservationUnitMutationTargetState.SAME },
-            onFailure = { failure ->
+        return decideObservationUnitMutationTarget(
+            properties, unitName, expectedInvocation, expectedCgroup,
+            pathAbsent = { Files.notExists(expectedCgroup, LinkOption.NOFOLLOW_LINKS) },
+            reselect = { requirePinnedCgroupSelection(expectedCgroup) },
+            onSelectionFailure = { failure ->
                 runCatching {
                     lastCleanupTargetDiagnostic = lastCleanupTargetDiagnostic?.let {
                         "$it; ${describeObservationCgroupSelectionFailure(failure)}"
                     }
                 }
-                observationCgroupSelectionFailureState(failure)
             },
         )
     }

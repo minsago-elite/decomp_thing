@@ -396,7 +396,9 @@ final class JvmMxBeanDiagnostics {
             if (closing.get()) return;
             if (phase == null || phase == Phase.TERMINAL || (phase == Phase.EXPORTER) != (exporter != null) ||
                 (exporter != null && !exporter.equals("ExportProgramModel.java") &&
-                    !exporter.equals("ExportRecoveredCallSites.java") && !exporter.equals("ExportDecompiledC.java"))) {
+                    !exporter.equals("ExportProgramModelOwned.java") &&
+                    !exporter.equals("ExportRecoveredCallSites.java") && !exporter.equals("ExportDecompiledC.java") &&
+                    !exporter.equals("ExportNativeCallsV1.class"))) {
                 lose(Loss.INTERNAL_FAILURE);
                 return;
             }

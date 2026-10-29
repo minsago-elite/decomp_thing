@@ -1910,6 +1910,33 @@ tasks.test {
     configureOracleTestRuntime(this)
 }
 
+tasks.register<Test>("gccSignedSourceQualification") {
+    group = "verification"
+    description = "Requires the exact signed GCC release and source-only boundary controls"
+    testClassesDirs = sourceSets["test"].output.classesDirs
+    classpath = sourceSets["test"].runtimeClasspath
+    useJUnitPlatform()
+    filter {
+        listOf("GccSourceOpenPgpTest", "GccSourceArchiveTest", "GccSignedSourceTest", "GccSignedSourceQualificationTest")
+            .forEach { includeTestsMatching("decompengine.oracle.gcc.$it") }
+        isFailOnNoMatchingTests = true
+    }
+    dependsOn(stageOracleNativeLibraries)
+    doFirst {
+        systemProperty("decompengine.oracle.nativeLibraryDirectory", oracleNativeLibraryDirectory.get().asFile.absolutePath)
+        check(temporaryDir.isDirectory || temporaryDir.mkdirs())
+        systemProperty("java.io.tmpdir", temporaryDir.absolutePath)
+        systemProperty("jna.tmpdir", temporaryDir.absolutePath)
+        environment("TMPDIR", temporaryDir.absolutePath)
+    }
+    environment("DECOMP_REQUIRE_GCC_SIGNED_SOURCE", "1")
+    maxParallelForks = 1
+    maxHeapSize = "512m"
+    timeout.set(Duration.ofMinutes(15))
+    outputs.upToDateWhen { false }
+    outputs.cacheIf("signed GCC source qualification must execute") { false }
+}
+
 // Select the entire class, including future methods, in a worker with no earlier suite RSS peak.
 // A dependency of test keeps this required for local check and the full/core CI entry points.
 tasks.register<Test>("gccCompilerEnginePlanningIsolated") {
