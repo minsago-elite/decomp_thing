@@ -6131,6 +6131,64 @@ private data class RawObservationCgroupSample(
     val memoryOomKillEvents: Long,
 )
 
+/** Keeps the complete frozen-sample guard separate from its bounded failure diagnostics. */
+internal fun requireStableFrozenObservationCgroupSample(
+    memoryEventsBefore: Map<String, Long>,
+    peakBefore: Long,
+    cpuBefore: Map<String, Long>,
+    memoryEventsAfter: Map<String, Long>,
+    peakAfter: Long,
+    cpuAfter: Map<String, Long>,
+    cgroupEvents: Map<String, Long>,
+) {
+    val memoryChanged = memoryEventsBefore != memoryEventsAfter
+    val cpuChanged = cpuBefore != cpuAfter
+    if (
+        !memoryChanged && peakBefore == peakAfter && !cpuChanged &&
+        cgroupEvents["frozen"] == 1L && cgroupEvents["populated"] == 1L
+    ) return
+
+    val summary = "isolated cgroup accounting changed across its frozen sample: " +
+        "memory.events.changed=$memoryChanged; cpu.stat.changed=$cpuChanged; " +
+        "memory.peak=$peakBefore->$peakAfter; " +
+        "cgroup.events.frozen=${cgroupEvents["frozen"] ?: "absent"}," +
+        "populated=${cgroupEvents["populated"] ?: "absent"}; "
+    // The exception is also thrown directly by the host controller, outside encodeFailure.
+    // Reserve independent detail space for both maps and retain their omission counts.
+    val detailBytes = MAXIMUM_FAILURE_MESSAGE_CHARS - summary.toByteArray(Charsets.UTF_8).size - 2
+    val memoryDiagnostic = frozenCounterDifferenceDiagnostic(
+        "memory.events", memoryEventsBefore, memoryEventsAfter, detailBytes / 2,
+    )
+    val cpuDiagnostic = frozenCounterDifferenceDiagnostic(
+        "cpu.stat", cpuBefore, cpuAfter, detailBytes - detailBytes / 2,
+    )
+    isolationFail("$summary$memoryDiagnostic; $cpuDiagnostic")
+}
+
+private fun frozenCounterDifferenceDiagnostic(
+    label: String,
+    before: Map<String, Long>,
+    after: Map<String, Long>,
+    maximumBytes: Int,
+): String {
+    val changedKeys = (before.keys + after.keys).toSortedSet().filter { before[it] != after[it] }
+    val maximumHeader = "$label changes=${changedKeys.size} omitted=${changedKeys.size} []"
+    var remainingBytes = maximumBytes - maximumHeader.toByteArray(Charsets.UTF_8).size
+    val details = StringBuilder()
+    var included = 0
+    changedKeys.forEach { key ->
+        val values = "=${before[key] ?: "absent"}->${after[key] ?: "absent"}"
+        val separator = if (included == 0) "" else ","
+        val entryBytes = key.toByteArray(Charsets.UTF_8).size + values.length + separator.length
+        if (entryBytes <= remainingBytes) {
+            details.append(separator).append(key).append(values)
+            remainingBytes -= entryBytes
+            included += 1
+        }
+    }
+    return "$label changes=${changedKeys.size} omitted=${changedKeys.size - included} [$details]"
+}
+
 private data class ObservationProcessIdentity(
     val parentPid: Long,
     val namespacePids: List<Long>,
@@ -7088,10 +7146,9 @@ private class ManagedObservationUnit(
             readBoundedText(cgroup.resolve("cgroup.events"), CGROUP_TEXT_BYTES),
             "cgroup.events",
         )
-        if (
-            eventsBefore != eventsAfter || peakBefore != peakAfter || cpuBefore != cpuAfter ||
-            cgroupEvents["frozen"] != 1L || cgroupEvents["populated"] != 1L
-        ) isolationFail("isolated cgroup accounting changed across its frozen sample")
+        requireStableFrozenObservationCgroupSample(
+            eventsBefore, peakBefore, cpuBefore, eventsAfter, peakAfter, cpuAfter, cgroupEvents,
+        )
 
         val peak = peakAfter
         val cpuUsec = cpuAfter["usage_usec"] ?: isolationFail("isolated cpu.stat lacks usage_usec")

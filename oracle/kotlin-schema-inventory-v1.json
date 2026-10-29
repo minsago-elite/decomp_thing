@@ -1,7 +1,7 @@
 {
   "historicalStartingCount": 43,
   "kind": "kotlin-oracle-schema-inventory",
-  "schemaCount": 83,
+  "schemaCount": 84,
   "schemaInventoryVersion": 1,
   "schemas": [
     {
@@ -50,6 +50,16 @@
       "path": "oracle/clang-diagnostic-matrix.schema.json",
       "registration": "shared-kotlin",
       "schemaSha256": "387f66279dbef93df56d777133389cfa7ba35132753c3619c01e2e42a91e497c"
+    },
+    {
+      "formatVersions": [
+        1
+      ],
+      "name": "clang/18.1.3/build-record",
+      "path": "oracle/clang/18.1.3/build-record.schema.json",
+      "registration": "separate-non-authoritative-validator",
+      "schemaSha256": "3f6f27a52ee1da9b90bf426232358f0c00855b6ae7aad14bfed9b4ab5371b587",
+      "scopeNote": "Clang 18.1.3 provisioning uses its separate Python build-record validator; no accepted toolchain, image, frontend adapter, or production scoring authority is registered."
     },
     {
       "formatVersions": [
