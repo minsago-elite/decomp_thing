@@ -396,7 +396,7 @@ internal class AuthenticatedMachineCallRuntimeV2 private constructor(
             val refusalType = Class.forName("decompengine.ghidra.ByteInstructionDecoderV1\$DecodeException", false, loader)
             for (loaded in listOf(type, recordType, wrapperType, refusalType)) {
                 require(loaded.classLoader === loader) { "static memory decoder escaped its isolated loader" }
-                requireLoadedMachineCallBridgeV1(loaded, request.bundleRoot.resolve(BRIDGE_FILE), request.bridgeSha256)
+                requireLoadedMachineCallBridgeV1(loaded, request.bridgeSnapshot.path, request.bridgeSha256)
             }
             require(recordType.isRecord)
             val decode = type.getMethod("decode", java.lang.Long.TYPE, ByteArray::class.java)

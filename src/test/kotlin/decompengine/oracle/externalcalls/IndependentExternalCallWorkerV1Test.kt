@@ -6,8 +6,9 @@ import decompengine.oracle.core.OracleJson
 import decompengine.oracle.gcc.GccKotlinBootClasspathReference
 import decompengine.oracle.machinecalls.IndependentMachineCallWorkerV1
 import decompengine.oracle.machinecalls.IndependentMachineCallReportV1
+import decompengine.oracle.machinecalls.IndependentMachineCallRequestV2
 import decompengine.oracle.machinecalls.MachineCallFileV1
-import decompengine.oracle.machinecalls.MachineCallRuntimeV1
+import decompengine.oracle.machinecalls.MachineCallRuntimeV2
 import java.net.URLClassLoader
 import java.io.File
 import java.nio.file.Files
@@ -101,7 +102,7 @@ class IndependentExternalCallWorkerV1Test {
         val digest = OracleArtifacts.sha256(request.canonicalBytes)
         val output = JsonObject(mapOf(
             "schemaVersion" to JsonPrimitive(1), "kind" to JsonPrimitive("independent-external-call-component-v1"), "scope" to JsonPrimitive("component"),
-            "requestSha256" to JsonPrimitive(digest), "runtime" to request.runtime.json(), "limits" to externalCallLimitsJsonV1(request.limits),
+            "requestSha256" to JsonPrimitive(digest), "runtime" to request.runtime.reportJson(), "limits" to externalCallLimitsJsonV1(request.limits),
             "metadataPolicy" to JsonPrimitive("elf-dynamic-binding-default-limits-v1"), "inputSha256" to JsonPrimitive(request.richFile.sha256),
             "inputBytes" to JsonPrimitive(request.richFile.bytes), "sourceReportSha256" to JsonPrimitive(request.sourceReport.sha256),
             "sourceRequestSha256" to JsonPrimitive(request.sourceRequest.sha256), "decoderAuthentication" to JsonPrimitive("authenticated-bundled-worker-v1"),
@@ -150,14 +151,26 @@ class IndependentExternalCallWorkerV1Test {
         val authored = ExternalCallFixtureV1(root)
         val bundle = Path.of(requireNotNull(System.getProperty("decompengine.ghidra.bundle"))).toAbsolutePath().normalize()
         val archive = Path.of(requireNotNull(System.getProperty("decompengine.ghidra.provenanceArchive"))).toAbsolutePath().normalize()
-        val runtime = MachineCallRuntimeV1(bundle, archive, BundledGhidra.ARCHIVE_SHA256, 569445154L,
-            OracleArtifacts.sha256(Files.readAllBytes(bundle.resolve("decomp-ghidra-bridge.jar"))),
-            OracleArtifacts.sha256(Files.readAllBytes(bundle.resolve("bundle.sha256"))), "x86:LE:64:default", "4.8")
+        val controlRoot = Files.createDirectories(root.resolve("source-control"))
+        Files.createDirectories(controlRoot.resolve("reports"))
+        val runtimeFiles = Files.createDirectories(controlRoot.resolve("runtime"))
+        val bridgeSource = bundle.resolve("decomp-ghidra-bridge.jar")
+        val manifestSource = bundle.resolve("bundle.sha256")
+        val bridgeSnapshot = Files.copy(bridgeSource, runtimeFiles.resolve("ghidra-bridge.runtime"))
+        val manifestSnapshot = Files.copy(manifestSource, runtimeFiles.resolve("ghidra-bundle-manifest.runtime"))
+        val bridgeSha = OracleArtifacts.sha256(Files.readAllBytes(bridgeSource))
+        val manifestSha = OracleArtifacts.sha256(Files.readAllBytes(manifestSource))
+        val runtime = MachineCallRuntimeV2(bundle, archive, BundledGhidra.ARCHIVE_SHA256, 569445154L,
+            bridgeSha, manifestSha, "x86:LE:64:default", "4.8",
+            MachineCallFileV1(bridgeSnapshot, Files.size(bridgeSnapshot), bridgeSha),
+            MachineCallFileV1(manifestSnapshot, Files.size(manifestSnapshot), manifestSha))
         val bootRoot = Path.of(requireNotNull(System.getProperty("decompengine.oracle.gcc.bootKeeperClasspathRoot")))
         val classpath = GccKotlinBootClasspathReference.open().use { reference ->
             reference.entries.joinToString(File.pathSeparator) { bootRoot.resolve(it.logicalName).toString() }
         }
-        val sourceRequest = authored.request.copy(runtime = runtime, outputPath = root.resolve("authenticated-source-report.json"))
+        val sourceRequest = IndependentMachineCallRequestV2(authored.request.richFile, authored.request.canonicalOracle,
+            authored.request.manifestSha256, runtime, controlRoot,
+            controlRoot.resolve("reports/independent-machine-call-observations.json"))
         val sourceRequestPath = Files.write(root.resolve("authenticated-source-request.json"), sourceRequest.canonicalBytes)
         val sourceRequestSha = OracleArtifacts.sha256(sourceRequest.canonicalBytes)
         freshWorker(root, "source", classpath, IndependentMachineCallWorkerV1::class.java.name, sourceRequestPath, sourceRequestSha)
@@ -189,12 +202,24 @@ class IndependentExternalCallWorkerV1Test {
         }
     }
 
-    private fun request(root: Path) = IndependentExternalCallRequestV1(
-        MachineCallFileV1(root.resolve("rich.elf"), 3, "1".repeat(64)),
-        MachineCallFileV1(root.resolve("source-report.json"), 3, "2".repeat(64)),
-        MachineCallFileV1(root.resolve("source-request.json"), 3, "3".repeat(64)),
-        MachineCallRuntimeV1(root.resolve("bundle"), root.resolve("ghidra.zip"), BundledGhidra.ARCHIVE_SHA256,
-            569445154L, "4".repeat(64), "5".repeat(64), "x86:LE:64:default", "4.8"), root.resolve("output.json"))
+    private fun request(root: Path): IndependentExternalCallRequestV1 {
+        val snapshotRoot = Files.createDirectories(root.resolve("request-runtime"))
+        val bridgeBytes = byteArrayOf(1, 2, 3)
+        val manifestBytes = byteArrayOf(4, 5, 6)
+        val bridgePath = Files.write(snapshotRoot.resolve("bridge.runtime"), bridgeBytes)
+        val manifestPath = Files.write(snapshotRoot.resolve("manifest.runtime"), manifestBytes)
+        val bridgeSha = OracleArtifacts.sha256(bridgeBytes)
+        val manifestSha = OracleArtifacts.sha256(manifestBytes)
+        val runtime = MachineCallRuntimeV2(root.resolve("bundle"), root.resolve("ghidra.zip"), BundledGhidra.ARCHIVE_SHA256,
+            569445154L, bridgeSha, manifestSha, "x86:LE:64:default", "4.8",
+            MachineCallFileV1(bridgePath, bridgeBytes.size.toLong(), bridgeSha),
+            MachineCallFileV1(manifestPath, manifestBytes.size.toLong(), manifestSha))
+        return IndependentExternalCallRequestV1(
+            MachineCallFileV1(root.resolve("rich.elf"), 3, "1".repeat(64)),
+            MachineCallFileV1(root.resolve("source-report.json"), 3, "2".repeat(64)),
+            MachineCallFileV1(root.resolve("source-request.json"), 3, "3".repeat(64)),
+            runtime, root.resolve("output.json"))
+    }
     private fun document(request: IndependentExternalCallRequestV1) = OracleJson.parseCanonical(request.canonicalBytes) as JsonObject
     private fun parse(document: JsonObject) = IndependentExternalCallRequestV1.parse(OracleJson.canonicalBytes(document))
 

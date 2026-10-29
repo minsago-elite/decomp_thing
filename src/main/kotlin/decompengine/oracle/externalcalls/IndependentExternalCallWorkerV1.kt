@@ -4,9 +4,9 @@ import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.StrictJsonLimits
 import decompengine.oracle.fulltree.StableControlFile
-import decompengine.oracle.machinecalls.AuthenticatedMachineCallRuntimeV1
+import decompengine.oracle.machinecalls.AuthenticatedMachineCallRuntimeV2
 import decompengine.oracle.machinecalls.MachineCallFileV1
-import decompengine.oracle.machinecalls.MachineCallRuntimeV1
+import decompengine.oracle.machinecalls.MachineCallRuntimeV2
 import decompengine.oracle.machinecalls.publishMachineCallResultV1
 import java.nio.file.Path
 import kotlinx.serialization.json.JsonObject
@@ -18,7 +18,7 @@ internal data class IndependentExternalCallRequestV1(
     val richFile: MachineCallFileV1,
     val sourceReport: MachineCallFileV1,
     val sourceRequest: MachineCallFileV1,
-    val runtime: MachineCallRuntimeV1,
+    val runtime: MachineCallRuntimeV2,
     val outputPath: Path,
     val limits: ExternalCallLimitsV1 = ExternalCallLimitsV1(),
 ) {
@@ -28,8 +28,9 @@ internal data class IndependentExternalCallRequestV1(
             "external-call inputs exceed their producer bounds"
         }
         val inputs = listOf(richFile.path, sourceReport.path, sourceRequest.path)
-        require(inputs.distinct().size == inputs.size && outputPath !in inputs && outputPath != runtime.ghidraArchivePath &&
-            !outputPath.startsWith(runtime.bundleRoot)) { "external-call input/output paths overlap" }
+        require(inputs.distinct().size == inputs.size && outputPath !in inputs && outputPath !in listOf(
+            runtime.ghidraArchivePath, runtime.bridgeSnapshot.path, runtime.bundleManifestSnapshot.path,
+        ) && !outputPath.startsWith(runtime.bundleRoot)) { "external-call input/output paths overlap" }
         require(limits.metadata == ElfDynamicBindingLimitsV1()) { "external-call worker supports only the pinned default metadata policy" }
     }
 
@@ -52,13 +53,20 @@ internal data class IndependentExternalCallRequestV1(
                 return MachineCallFileV1(Path.of(record.string("path")), record.number("bytes"), record.string("sha256"))
             }
             val runtime = root.obj("runtime")
-            runtime.fields("bundleRoot", "ghidraArchivePath", "archiveSha256", "archiveBytes", "bridgeSha256", "bundleManifestSha256", "languageId", "languageVersion")
+            runtime.fields("bundleRoot", "ghidraArchivePath", "archiveSha256", "archiveBytes", "bridgeSha256", "bundleManifestSha256",
+                "languageId", "languageVersion", "bridgeSnapshot", "bundleManifestSnapshot")
+            fun runtimeInput(key: String): MachineCallFileV1 {
+                val record = runtime.obj(key)
+                record.fields("path", "bytes", "sha256")
+                return MachineCallFileV1(Path.of(record.string("path")), record.number("bytes"), record.string("sha256"))
+            }
             val limits = root.obj("limits")
             limits.fields("maximumCalls", "maximumWorkUnits", "maximumOutputBytes", "maximumWallMillis")
             return IndependentExternalCallRequestV1(input("richFile"), input("sourceReport"), input("sourceRequest"),
-                MachineCallRuntimeV1(Path.of(runtime.string("bundleRoot")), Path.of(runtime.string("ghidraArchivePath")),
+                MachineCallRuntimeV2(Path.of(runtime.string("bundleRoot")), Path.of(runtime.string("ghidraArchivePath")),
                     runtime.string("archiveSha256"), runtime.number("archiveBytes"), runtime.string("bridgeSha256"),
-                    runtime.string("bundleManifestSha256"), runtime.string("languageId"), runtime.string("languageVersion")),
+                    runtime.string("bundleManifestSha256"), runtime.string("languageId"), runtime.string("languageVersion"),
+                    runtimeInput("bridgeSnapshot"), runtimeInput("bundleManifestSnapshot")),
                 Path.of(root.string("outputPath")), ExternalCallLimitsV1(Math.toIntExact(limits.number("maximumCalls")),
                     limits.number("maximumWorkUnits"), Math.toIntExact(limits.number("maximumOutputBytes")), limits.number("maximumWallMillis")))
         }
@@ -87,7 +95,7 @@ object IndependentExternalCallWorkerV1 {
             openCommitted(request.richFile, "external-call rich ELF", checkpoint).use { rich ->
                 openCommitted(request.sourceReport, "external-call source report", checkpoint).use { sourceReport ->
                     openCommitted(request.sourceRequest, "external-call source request", checkpoint).use { sourceRequest ->
-                        AuthenticatedMachineCallRuntimeV1.open(request.runtime, checkpoint).use { runtime ->
+                        AuthenticatedMachineCallRuntimeV2.open(request.runtime, checkpoint).use { runtime ->
                             val result = runtime.withDecoder { basic ->
                                 runtime.withStaticMemoryTransferDecoder { memory ->
                                     IndependentExternalCallsV1.produce(request.richFile.path, request.sourceReport.path, request.sourceRequest.path,
@@ -101,7 +109,7 @@ object IndependentExternalCallWorkerV1 {
                             requestFile.verifyUnchanged("external-call request after composition")
                             checkpoint("before publication")
                             val final = JsonObject(result + mapOf(
-                                "requestSha256" to JsonPrimitive(requestSha256), "runtime" to request.runtime.json(),
+                                "requestSha256" to JsonPrimitive(requestSha256), "runtime" to request.runtime.reportJson(),
                                 "limits" to externalCallLimitsJsonV1(request.limits), "metadataPolicy" to JsonPrimitive(METADATA_POLICY),
                                 "complete" to JsonPrimitive(false), "releaseEligible" to JsonPrimitive(false), "negativeCompleteness" to JsonPrimitive(false),
                                 "decoderAuthentication" to JsonPrimitive("authenticated-bundled-worker-v1"),
@@ -122,7 +130,7 @@ object IndependentExternalCallWorkerV1 {
 internal fun validateExternalWorkerCommitmentsV1(document: JsonObject, expectedRequestSha256: String, request: IndependentExternalCallRequestV1) {
     requireDigest(expectedRequestSha256)
     require(OracleArtifacts.sha256(request.canonicalBytes) == expectedRequestSha256)
-    require(document["requestSha256"] == JsonPrimitive(expectedRequestSha256) && document["runtime"] == request.runtime.json() &&
+    require(document["requestSha256"] == JsonPrimitive(expectedRequestSha256) && document["runtime"] == request.runtime.reportJson() &&
         document["limits"] == externalCallLimitsJsonV1(request.limits) && document["metadataPolicy"] == JsonPrimitive(METADATA_POLICY)) {
         "external-call worker commitments differ"
     }

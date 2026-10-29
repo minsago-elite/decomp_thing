@@ -129,14 +129,14 @@ class IndependentExternalCallReportV1Test {
             MachineCallFileV1(fixture.sourceRequest, Files.size(fixture.sourceRequest), fixture.requestSha), fixture.runtime,
             fixture.root.resolve("external-worker-report.json"))
         val requestSha = OracleArtifacts.sha256(request.canonicalBytes)
-        val worker = JsonObject(report + mapOf("requestSha256" to JsonPrimitive(requestSha), "runtime" to request.runtime.json(),
+        val worker = JsonObject(report + mapOf("requestSha256" to JsonPrimitive(requestSha), "runtime" to request.runtime.reportJson(),
             "decoderAuthentication" to JsonPrimitive("authenticated-bundled-worker-v1"), "containmentStatus" to JsonPrimitive("external-owner-required")))
         IndependentExternalCallReportV1.validateWorker(worker, requestSha, request)
         reject(worker)
         for (key in listOf("requestSha256", "inputSha256", "sourceReportSha256", "sourceRequestSha256")) assertFails(key) {
             IndependentExternalCallReportV1.validateWorker(worker.edit(listOf(key), JsonPrimitive("f".repeat(64))), requestSha, request)
         }
-        request.runtime.json().keys.forEach { key -> assertFails(key) {
+        request.runtime.reportJson().keys.forEach { key -> assertFails(key) {
             IndependentExternalCallReportV1.validateWorker(worker.edit(listOf("runtime", key), JsonPrimitive("changed")), requestSha, request)
         } }
         for ((path, value) in listOf(listOf("limits", "maximumWallMillis") to JsonPrimitive(1000),

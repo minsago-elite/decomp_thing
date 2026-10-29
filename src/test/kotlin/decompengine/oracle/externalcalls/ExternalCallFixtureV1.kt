@@ -8,6 +8,7 @@ import decompengine.oracle.machinecalls.IndependentMachineCallReportV1
 import decompengine.oracle.machinecalls.IndependentMachineCallRequestV1
 import decompengine.oracle.machinecalls.MachineCallFileV1
 import decompengine.oracle.machinecalls.MachineCallRuntimeV1
+import decompengine.oracle.machinecalls.MachineCallRuntimeV2
 import decompengine.oracle.machinecalls.MachineInstructionDecoderV1
 import decompengine.oracle.machinecalls.MachineInstructionV1
 import java.nio.file.Files
@@ -38,8 +39,21 @@ internal class ExternalCallFixtureV1(
     val oracleSha: String
     val sourceRequest: Path = root.resolve("source-request.json")
     val sourceReport: Path = root.resolve("source-report.json")
-    val runtime = MachineCallRuntimeV1(root.resolve("bundle"), root.resolve("ghidra.zip"), BundledGhidra.ARCHIVE_SHA256,
+    private val machineRuntime = MachineCallRuntimeV1(root.resolve("bundle"), root.resolve("ghidra.zip"), BundledGhidra.ARCHIVE_SHA256,
         569445154L, "a".repeat(64), "b".repeat(64), "x86:LE:64:default", "4.8")
+    val runtime: MachineCallRuntimeV2 = run {
+        val snapshotRoot = Files.createDirectories(root.resolve("runtime-snapshots"))
+        val bridgeBytes = byteArrayOf(1, 2, 3)
+        val manifestBytes = byteArrayOf(4, 5, 6)
+        val bridgePath = Files.write(snapshotRoot.resolve("bridge.runtime"), bridgeBytes)
+        val manifestPath = Files.write(snapshotRoot.resolve("manifest.runtime"), manifestBytes)
+        val bridgeSha = OracleArtifacts.sha256(bridgeBytes)
+        val manifestSha = OracleArtifacts.sha256(manifestBytes)
+        MachineCallRuntimeV2(root.resolve("bundle"), root.resolve("ghidra.zip"), BundledGhidra.ARCHIVE_SHA256,
+            569445154L, bridgeSha, manifestSha, "x86:LE:64:default", "4.8",
+            MachineCallFileV1(bridgePath, bridgeBytes.size.toLong(), bridgeSha),
+            MachineCallFileV1(manifestPath, manifestBytes.size.toLong(), manifestSha))
+    }
     val request: IndependentMachineCallRequestV1
     val requestSha: String
     var reportSha: String
@@ -67,11 +81,11 @@ internal class ExternalCallFixtureV1(
         oracle = Files.write(root.resolve("oracle.json"), oracleBytes)
         oracleSha = OracleArtifacts.sha256(oracleBytes)
         request = IndependentMachineCallRequestV1(MachineCallFileV1(rich, Files.size(rich), inputSha),
-            MachineCallFileV1(oracle, oracleBytes.size.toLong(), oracleSha), manifestSha, runtime, sourceReport)
+            MachineCallFileV1(oracle, oracleBytes.size.toLong(), oracleSha), manifestSha, machineRuntime, sourceReport)
         requestSha = OracleArtifacts.sha256(request.canonicalBytes)
         Files.write(sourceRequest, request.canonicalBytes)
         val component = IndependentMachineCallsV1.produce(rich, oracle, inputSha, oracleSha, manifestSha, decoder)
-        val worker = JsonObject(component + mapOf("requestSha256" to text(requestSha), "runtime" to runtime.json(),
+        val worker = JsonObject(component + mapOf("requestSha256" to text(requestSha), "runtime" to machineRuntime.json(),
             "decoderAuthentication" to text("authenticated-bundled-worker-v1"), "containmentStatus" to text("external-owner-required")))
         IndependentMachineCallReportV1.validateWorker(worker, requestSha, request)
         val reportBytes = OracleJson.canonicalBytes(worker)
