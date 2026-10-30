@@ -748,6 +748,15 @@ def retained_relocation_tables(inventory: dict, sections: dict) -> tuple[bool, d
     return uncertain, memberships
 
 
+def unique_intersecting_interval(rows: list, starts: list, ends: list, prefix_ends: list,
+        start: int, end: int):
+    """Return the sole retained interval intersecting an inclusive range, if any."""
+    if end < start or bisect_right(starts, end) - bisect_left(ends, start) != 1:
+        return None
+    index = bisect_left(prefix_ends, start)
+    return rows[index] if index < len(rows) else None
+
+
 class RetainedLoadIndex:
     """Index retained LOAD intervals once for version and metadata ownership checks."""
     def __init__(self, inventory: dict, input_bytes: int):
@@ -771,11 +780,8 @@ class RetainedLoadIndex:
     def unique_intersecting(self, start: int, end_exclusive: int) -> tuple | None:
         if end_exclusive <= start:
             return None
-        end = end_exclusive - 1
-        if bisect_right(self.load_starts, end) - bisect_left(self.load_ends, start) != 1:
-            return None
-        index = bisect_left(self.load_prefix_ends, start)
-        return self.loads[index] if index < len(self.loads) else None
+        return unique_intersecting_interval(self.loads, self.load_starts, self.load_ends,
+            self.load_prefix_ends, start, end_exclusive - 1)
 
 
 def retained_version_records(inventory: dict, sections: dict, input_bytes: int, load_index: RetainedLoadIndex) -> dict:
@@ -921,12 +927,6 @@ class RetainedRelocationIndex:
             require((symbol["version"] is not None) == (symbol["tableSectionIndex"] in self.version_sections),
                     "retained symbol version presence differs from VERSYM metadata")
         self.load_index = RetainedLoadIndex(inventory, input_bytes)
-        self.loads = self.load_index.loads
-        self.load_positions = self.load_index.load_positions
-        self.load_prefix_ends = self.load_index.load_prefix_ends
-        self.load_starts = self.load_index.load_starts
-        self.load_ends = self.load_index.load_ends
-        self.load_flags = self.load_index.load_flags
         self.requirements = retained_version_records(inventory, self.sections, input_bytes, self.load_index)
         self.supported_versions = {key for key, symbol in symbols.items() if self.import_version(symbol)}
         self.validate_metadata_storage(input_bytes)
@@ -1056,26 +1056,24 @@ class RetainedRelocationIndex:
         self.code_lengths[location] = None
         self.code_file_offsets[location] = None
 
-        def unique_owner(rows: list, starts: list, ends: list, prefix_ends: list, end: int):
-            # Count intersecting intervals, including small intervals nested in a larger owner.
-            if bisect_right(starts, end) - bisect_left(ends, location) != 1:
-                return None
-            index = bisect_left(prefix_ends, location)
-            row = rows[index]
-            return row if row[0] <= location and row[2] >= end else None
+        def unique_owner(rows: list, starts: list, ends: list, prefix_ends: list, start: int, end: int):
+            row = unique_intersecting_interval(rows, starts, ends, prefix_ends, start, end)
+            return row if row is not None and row[0] <= start and row[2] >= end else None
 
-        section_row = unique_owner(self.code_sections, self.code_starts, self.code_ends, self.code_prefix_ends, location)
-        load = unique_owner(self.loads, self.load_starts, self.load_ends, self.load_prefix_ends, location)
+        section_row = unique_owner(self.code_sections, self.code_starts, self.code_ends, self.code_prefix_ends, location, location)
+        load = unique_owner(self.load_index.loads, self.load_index.load_starts, self.load_index.load_ends,
+            self.load_index.load_prefix_ends, location, location)
         if section_row is None or load is None:
             return None
         section = self.sections[section_row[1]]
-        if (section["type"] != 1 or address(section["flags"]) & 6 != 6 or not self.load_flags[load[1]] & 1 or
+        if (section["type"] != 1 or address(section["flags"]) & 6 != 6 or not self.load_index.load_flags[load[1]] & 1 or
                 location >= load[0] + load[3] or section["offset"] + address(section["size"]) > self.input_bytes):
             return None
         length = min(15, section_row[2] - location + 1, load[0] + load[3] - location)
         end = location + length - 1
-        if (unique_owner(self.code_sections, self.code_starts, self.code_ends, self.code_prefix_ends, end) != section_row or
-                unique_owner(self.loads, self.load_starts, self.load_ends, self.load_prefix_ends, end) != load):
+        if (unique_owner(self.code_sections, self.code_starts, self.code_ends, self.code_prefix_ends, location, end) != section_row or
+                unique_owner(self.load_index.loads, self.load_index.load_starts, self.load_index.load_ends,
+                    self.load_index.load_prefix_ends, location, end) != load):
             return None
         section_offset = section["offset"] + location - section_row[0]
         load_offset = load[4] + location - load[0]
@@ -1095,14 +1093,14 @@ class RetainedRelocationIndex:
     def owned_slot(self, relocation: dict, slot: int) -> bool:
         if len(relocation["slotLoadIndices"]) != 1 or relocation["slotFileOffset"] is None:
             return False
-        index = self.load_positions.get(relocation["slotLoadIndices"][0])
+        index = self.load_index.load_positions.get(relocation["slotLoadIndices"][0])
         if index is None:
             return False
-        start, _, end, file_size, offset = self.loads[index]
+        start, _, end, file_size, offset = self.load_index.loads[index]
         return (start <= slot and slot + 7 <= end and slot + 8 <= start + file_size and
                 offset + slot - start == relocation["slotFileOffset"] and
-                (index == 0 or self.load_prefix_ends[index - 1] < slot) and
-                (index + 1 == len(self.loads) or self.loads[index + 1][0] > slot + 7))
+                (index == 0 or self.load_index.load_prefix_ends[index - 1] < slot) and
+                (index + 1 == len(self.load_index.loads) or self.load_index.loads[index + 1][0] > slot + 7))
 
     def import_version(self, symbol: dict) -> bool:
         version = symbol["version"]
@@ -1217,8 +1215,9 @@ def verify_external_bindings(evidence: dict, request: dict, report: dict, source
         source_window = relocation_index.code_window(location)
         if source_window is None or source_window[0] < instruction_length:
             raise VerificationError("source call instruction lacks uniquely owned executable file-backed bytes")
-        byte_ranges.append((0, location, bytes.fromhex(site["instructionBytes"])))
-        byte_ranges.append((1, source_window[1], bytes.fromhex(site["instructionBytes"])))
+        instruction_bytes = bytes.fromhex(site["instructionBytes"])
+        byte_ranges.append((0, location, instruction_bytes))
+        byte_ranges.append((1, source_window[1], instruction_bytes))
         status = site["compositionDisposition"]
         require(status in EXTERNAL_STATUSES and site["targetBindingDisposition"] in EXTERNAL_STATUSES, "unknown external disposition")
         caller = canonical_by_id.get(site["callerCanonicalId"])
