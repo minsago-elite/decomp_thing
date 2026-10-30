@@ -322,7 +322,7 @@ class DoctorTest {
             commandProbe = CommandProbe { _, _ -> CommandProbeResult(0, "available") },
             connectivityProbe = ConnectivityProbe { _, _ -> error("auth inspection must not connect to legacy provider") })
         val report = doctor.inspect(DoctorOptions(output, harnessOverride = "legacy-openai", showAuthMethods = true))
-        assertTrue(report.checks.any { it.name == "ACP authentication methods" && !it.passed })
+        assertTrue(report.checks.any { it.name == "ACP harness" && !it.passed })
         assertFalse(report.checks.any { it.name.startsWith("LLM") })
     }
 
@@ -366,34 +366,8 @@ class DoctorTest {
         val report = doctor.inspect(DoctorOptions(temp.resolve("output")))
 
         assertFalse(report.passed)
-        assertTrue(report.checks.any { it.name == "LLM base URL" && !it.passed })
-        assertTrue(report.checks.any { it.name == "LLM API key" && !it.passed })
-        assertTrue(report.checks.any { it.name == "LLM model" && !it.passed })
-        assertTrue(report.checks.any { it.name == "LLM connectivity" && !it.passed })
-    }
-
-    @Test
-    fun `invalid legacy URL settings do not trigger provider connectivity`() {
-        val temporary = createTempDirectory("doctor-legacy-url-")
-        val doctor = Doctor(
-            environment = mapOf(
-                "ACP_HARNESS" to "legacy-openai",
-                "BASE_URL" to "https://private-user:private-password@example.com/v1",
-                "API_KEY" to "private-api-key",
-                "MODEL" to "model",
-            ),
-            commandProbe = CommandProbe { _, _ -> CommandProbeResult(0, "ok") },
-            connectivityProbe = ConnectivityProbe { _, _ -> error("invalid legacy configuration must not connect") },
-        )
-
-        val report = doctor.inspect(DoctorOptions(temporary.resolve("output")))
-        val rendered = report.checks.joinToString("\n") { "${it.name}: ${it.detail}" }
-
-        assertFalse(report.passed)
-        assertTrue(report.checks.any { it.name == "ACP harness" && it.passed })
-        assertFalse(report.checks.single { it.name == "LLM connectivity" }.passed)
-        assertTrue(report.checks.single { it.name == "LLM connectivity" }.detail.contains("not attempted"))
-        assertFalse("private-user" in rendered || "private-password" in rendered || "private-api-key" in rendered)
+        assertTrue(report.checks.any { it.name == "ACP harness" && !it.passed })
+        assertFalse(report.checks.any { it.name.startsWith("LLM") })
     }
 
     @Test
@@ -430,10 +404,8 @@ class DoctorTest {
 
         val report = doctor.inspect(DoctorOptions(temp.resolve("output")))
 
-        assertTrue(report.checks.any { it.name == "ACP harness" && it.passed && it.detail.contains("deprecated") })
-        assertTrue(report.checks.any { it.name == "LLM base URL" && !it.passed })
-        assertTrue(report.checks.any { it.name == "LLM API key" && !it.passed })
-        assertTrue(report.checks.any { it.name == "LLM model" && !it.passed })
+        assertTrue(report.checks.any { it.name == "ACP harness" && !it.passed })
+        assertFalse(report.checks.any { it.name.startsWith("LLM") })
     }
 
     @Test
