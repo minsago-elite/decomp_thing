@@ -86,3 +86,30 @@ it('keeps only the latest conflict read and invalidates reads on page changes', 
   expect(screen.queryByRole('group', { name: 'Conflict in src/b.c' })).toBeNull();
   view.unmount();
 });
+
+it('does not replace a newer conflict review when an earlier save completes', async () => {
+  const secondFile = { ...file, fileId: 'file_second', path: 'src/b.c' };
+  const page = { ...conflicts('merge_1'), files: [file, secondFile], totalCount: 2 };
+  let finishSave!: (saved: boolean) => void;
+  const readConflict = vi.fn((fileId: string) => Promise.resolve(fileId === secondFile.fileId
+    ? { ...detail('merge_1', 'remote B'), file: secondFile }
+    : detail('merge_1', 'remote A')));
+  const onAction = vi.fn().mockImplementation((request: { kind: string }) => request.kind === 'gitConflictSaveRequest'
+    ? new Promise<boolean>(resolve => { finishSave = resolve; })
+    : Promise.resolve(true));
+  render(<GitIntegrationPanel {...defaults} conflicts={page} readConflict={readConflict} onAction={onAction} />);
+
+  fireEvent.click(screen.getByRole('button', { name: 'Review src/a.c' }));
+  await screen.findByText('remote A');
+  fireEvent.click(screen.getByRole('button', { name: 'Use the remote version' }));
+  await waitFor(() => expect(onAction).toHaveBeenCalledWith(expect.objectContaining({ kind: 'gitConflictSaveRequest', fileId: file.fileId })));
+
+  fireEvent.click(screen.getByRole('button', { name: 'Review src/b.c' }));
+  await screen.findByText('remote B');
+  fireEvent.input(screen.getByLabelText('Resolved text'), { target: { value: 'draft B' } });
+  await act(() => { finishSave(true); return Promise.resolve(); });
+
+  expect(screen.getByRole('group', { name: 'Conflict in src/b.c' })).toBeTruthy();
+  expect(screen.getByLabelText('Resolved text')).toHaveProperty('value', 'draft B');
+  expect(readConflict).toHaveBeenCalledTimes(2);
+});

@@ -71,7 +71,7 @@ function IntegrationReviewPanel({ remotes, conflicts, destination, writable, rea
     const reviewed = detail;
     // The shown file is stale from the moment a save is sent: nothing can be marked reviewed at the
     // old digest, and the file is read again (on failure too) before it can be.
-    conflictReads.current++;
+    const saveRead = ++conflictReads.current;
     setDetail(null);
     setReviewed(previous => { const next = { ...previous }; delete next[reviewed.file.fileId]; return next; });
     const submitted = draft;
@@ -79,7 +79,8 @@ function IntegrationReviewPanel({ remotes, conflicts, destination, writable, rea
       resolution, content: resolution === 'text' ? submitted : null });
     // On failure the draft survives the re-read, which only refreshes the concurrency token.
     unsaved.current = saved ? null : { fileId: reviewed.file.fileId, text: submitted };
-    await open(reviewed.file.fileId);
+    // A different conflict may have been opened while the save was pending; never steal that editor.
+    if (saveRead === conflictReads.current) await open(reviewed.file.fileId);
   }
 
   return <section aria-labelledby="git-integration-title">
