@@ -818,6 +818,22 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
             VERIFY.require_consistent_byte_ranges(ranges,
                 "retained source/probe byte windows conflict at overlapping executable addresses")
 
+    def test_source_and_probe_bytes_reconcile_aliased_executable_file_ranges(self) -> None:
+        site = self.report["sites"][0]
+        self.assertEqual("static-import-request-reference", site["compositionDisposition"])
+        inventory = self.report["dynamicInventory"]
+        text = next(row for row in inventory["sections"] if row["name"] == ".text")
+        plt = next(row for row in inventory["sections"] if row["name"] == ".plt")
+        load = next(row for row in inventory["programHeaders"] if row["type"] == 1 and row["virtualAddress"] == plt["address"])
+        self.assertEqual(16, text["offset"])
+        self.assertNotEqual(text["offset"], plt["offset"])
+        # Distinct virtual addresses now claim the same retained file bytes.
+        plt["offset"] = text["offset"]
+        load["offset"] = hex(text["offset"])
+        self.write_payloads()
+        with self.assertRaisesRegex(VERIFY.VerificationError, "file ranges"):
+            self.verify()
+
     def test_nonforwarded_receipt_requires_the_exact_physical_instruction(self) -> None:
         symbols, relocations, imports = VERIFY.verify_external_inventory(self.report["dynamicInventory"],
             self.report["externalNamespace"], self.report["externalNamespaceSha256"], self.report["inputSha256"], self.report["imageBase"])
@@ -1477,6 +1493,41 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
                 self.write_payloads()
                 with self.assertRaises(VERIFY.VerificationError):
                     self.verify()
+
+    def test_version_section_ownership_reuses_one_load_interval_index(self) -> None:
+        inventory = copy.deepcopy(self.report["dynamicInventory"])
+        rows = []
+        definitions = 24
+        for ordinal in range(definitions):
+            section_index = 8 + ordinal
+            load_index = 30 + ordinal
+            offset = 128 + ordinal * 36
+            start = 0x6080 + ordinal * 36
+            inventory["sections"].append({"index": section_index, "name": f".gnu.version_d.{ordinal}",
+                "type": 0x6ffffffd, "flags": "0x2", "address": hex(start), "offset": offset, "size": "0x24",
+                "link": 3, "info": 1, "alignment": "0x4", "entrySize": "0x0"})
+            inventory["programHeaders"].append({"index": load_index, "type": 1, "flags": 4, "offset": hex(offset),
+                "virtualAddress": hex(start), "physicalAddress": hex(start), "fileSize": "0x24", "memorySize": "0x24",
+                "alignment": "0x1"})
+            rows.append({"sectionIndex": section_index, "stringSectionIndex": 3, "recordOffset": offset,
+                "rawIndex": ordinal + 1, "index": ordinal + 1, "flags": 1, "hash": 0x5aa821, "name": "VER_1",
+                "parentNames": ["PARENT"], "auxiliaryOffsets": [offset + 20, offset + 28],
+                "auxiliaryNameOffsets": [35, 42]})
+        inventory["versionDefinitions"] = rows
+        inventory["dynamicEntries"][-1:-1] = [{"index": index + 8, "fileOffset": (index + 8) * 16,
+            "tag": hex(tag), "value": hex(value)} for index, (tag, value) in enumerate(
+                ((0x6ffffffc, 0x6080), (0x6ffffffd, definitions)))]
+        self.sync_dynamic_storage(inventory)
+        interval_index = VERIFY.RetainedLoadIndex(inventory, self.report["inputBytes"])
+
+        class NoRescanList(list):
+            def __iter__(self):
+                raise AssertionError("version-record ownership rescanned LOAD headers")
+
+        inventory["programHeaders"] = NoRescanList(inventory["programHeaders"])
+        sections = {row["index"]: row for row in inventory["sections"]}
+        requirements = VERIFY.retained_version_records(inventory, sections, self.report["inputBytes"], interval_index)
+        self.assertEqual({}, requirements)
 
 
 class RetainedExternalEvidenceRegressionTest(unittest.TestCase):

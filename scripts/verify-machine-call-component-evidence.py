@@ -748,7 +748,37 @@ def retained_relocation_tables(inventory: dict, sections: dict) -> tuple[bool, d
     return uncertain, memberships
 
 
-def retained_version_records(inventory: dict, sections: dict, input_bytes: int) -> dict:
+class RetainedLoadIndex:
+    """Index retained LOAD intervals once for version and metadata ownership checks."""
+    def __init__(self, inventory: dict, input_bytes: int):
+        self.loads, self.load_positions, self.load_prefix_ends = [], {}, []
+        load_headers = [row for row in inventory["programHeaders"] if row["type"] == 1]
+        for row in load_headers:
+            start, size, file_size, offset = (address(row[key]) for key in ("virtualAddress", "memorySize", "fileSize", "offset"))
+            require(file_size <= size and start + size <= (1 << 64) - 1 and offset + file_size <= input_bytes,
+                    "retained load bounds differ")
+            if size:
+                self.loads.append((start, row["index"], start + size - 1, file_size, offset))
+        self.loads.sort()
+        for index, row in enumerate(self.loads):
+            require(row[1] not in self.load_positions, "duplicate retained load index")
+            self.load_positions[row[1]] = index
+            self.load_prefix_ends.append(max(row[2], self.load_prefix_ends[-1] if self.load_prefix_ends else 0))
+        self.load_starts = [row[0] for row in self.loads]
+        self.load_ends = sorted(row[2] for row in self.loads)
+        self.load_flags = {row["index"]: row["flags"] for row in load_headers}
+
+    def unique_intersecting(self, start: int, end_exclusive: int) -> tuple | None:
+        if end_exclusive <= start:
+            return None
+        end = end_exclusive - 1
+        if bisect_right(self.load_starts, end) - bisect_left(self.load_ends, start) != 1:
+            return None
+        index = bisect_left(self.load_prefix_ends, start)
+        return self.loads[index] if index < len(self.loads) else None
+
+
+def retained_version_records(inventory: dict, sections: dict, input_bytes: int, load_index: RetainedLoadIndex) -> dict:
     """Validate retained Verneed/Verdef provenance, not the original ELF strings/bytes."""
     requirements, keys, owners, populations = {}, set(), {}, {}
     storage_ranges, record_headers = {}, set()
@@ -772,13 +802,12 @@ def retained_version_records(inventory: dict, sections: dict, input_bytes: int) 
             require(flags & 2 != 0 and flags & 0x800 == 0 and start + size <= (1 << 64) - 1 and
                     owner["offset"] + size <= input_bytes and address(owner["entrySize"]) == 0 and owner["info"] > 0,
                     "retained GNU version section bounds/metadata differs")
-            loads = [load for load in inventory["programHeaders"] if load["type"] == 1 and
-                     address(load["virtualAddress"]) < start + size and start < address(load["virtualAddress"]) + address(load["memorySize"])]
-            require(len(loads) == 1, "retained GNU version section lacks unique LOAD ownership")
-            load = loads[0]
-            begin = address(load["virtualAddress"])
-            require(begin <= start and start + size <= begin + address(load["fileSize"]) and
-                    address(load["offset"]) + start - begin == owner["offset"], "retained GNU version section mapping differs")
+            load = load_index.unique_intersecting(start, start + size)
+            if load is None:
+                raise VerificationError("retained GNU version section lacks unique LOAD ownership")
+            begin, _, _, file_size, file_offset = load
+            require(begin <= start and start + size <= begin + file_size and
+                    file_offset + start - begin == owner["offset"], "retained GNU version section mapping differs")
             owners[owner["index"]] = owner
         return owner
 
@@ -891,25 +920,15 @@ class RetainedRelocationIndex:
         for symbol in symbols.values():
             require((symbol["version"] is not None) == (symbol["tableSectionIndex"] in self.version_sections),
                     "retained symbol version presence differs from VERSYM metadata")
-        self.requirements = retained_version_records(inventory, self.sections, input_bytes)
+        self.load_index = RetainedLoadIndex(inventory, input_bytes)
+        self.loads = self.load_index.loads
+        self.load_positions = self.load_index.load_positions
+        self.load_prefix_ends = self.load_index.load_prefix_ends
+        self.load_starts = self.load_index.load_starts
+        self.load_ends = self.load_index.load_ends
+        self.load_flags = self.load_index.load_flags
+        self.requirements = retained_version_records(inventory, self.sections, input_bytes, self.load_index)
         self.supported_versions = {key for key, symbol in symbols.items() if self.import_version(symbol)}
-        self.loads, self.load_positions, self.load_prefix_ends = [], {}, []
-        for row in inventory["programHeaders"]:
-            if row["type"] != 1:
-                continue
-            start, size, file_size, offset = (address(row[key]) for key in ("virtualAddress", "memorySize", "fileSize", "offset"))
-            require(file_size <= size and start + size <= (1 << 64) - 1 and offset + file_size <= input_bytes,
-                    "retained load bounds differ")
-            if size:
-                self.loads.append((start, row["index"], start + size - 1, file_size, offset))
-        self.loads.sort()
-        for index, row in enumerate(self.loads):
-            require(row[1] not in self.load_positions, "duplicate retained load index")
-            self.load_positions[row[1]] = index
-            self.load_prefix_ends.append(max(row[2], self.load_prefix_ends[-1] if self.load_prefix_ends else 0))
-        self.load_starts = [row[0] for row in self.loads]
-        self.load_ends = sorted(row[2] for row in self.loads)
-        self.load_flags = {row["index"]: row["flags"] for row in inventory["programHeaders"] if row["type"] == 1}
         self.validate_metadata_storage(input_bytes)
         self.code_sections, self.code_prefix_ends = [], []
         for section in self.sections.values():
@@ -922,7 +941,7 @@ class RetainedRelocationIndex:
         self.code_ends = sorted(row[2] for row in self.code_sections)
         for row in self.code_sections:
             self.code_prefix_ends.append(max(row[2], self.code_prefix_ends[-1] if self.code_prefix_ends else 0))
-        self.input_bytes, self.code_lengths = input_bytes, {}
+        self.input_bytes, self.code_lengths, self.code_file_offsets = input_bytes, {}, {}
         self.slot_counts, self.active, self.positions = {}, {}, {}
         self.unknown = self.overflow = False
         self.writes = []
@@ -1007,9 +1026,9 @@ class RetainedRelocationIndex:
                 continue  # As in the producer, an empty table requires no LOAD owner.
             metadata_ranges.append((section["offset"], section["offset"] + size))
             end = start + size - 1
-            require(bisect_right(self.load_starts, end) - bisect_left(self.load_ends, start) == 1,
-                    "retained dynamic metadata lacks unique LOAD ownership")
-            load = self.loads[bisect_left(self.load_prefix_ends, start)]
+            load = self.load_index.unique_intersecting(start, start + size)
+            if load is None:
+                raise VerificationError("retained dynamic metadata lacks unique LOAD ownership")
             require(load[0] <= start and end < load[0] + load[3] and
                     load[4] + start - load[0] == section["offset"],
                     "retained dynamic metadata file and LOAD mappings disagree")
@@ -1017,6 +1036,14 @@ class RetainedRelocationIndex:
         for range_start, range_end in sorted(metadata_ranges):
             require(range_start >= previous_end, "retained dynamic metadata sections overlap")
             previous_end = range_end
+
+    def code_window(self, location: int) -> tuple[int, int] | None:
+        length = self.code_window_length(location)
+        if length is None:
+            return None
+        file_offset = self.code_file_offsets[location]
+        assert file_offset is not None
+        return length, file_offset
 
     def code_window_length(self, location: int) -> int | None:
         """Unique executable section/LOAD ownership, mirroring codeWindowLength().
@@ -1027,6 +1054,7 @@ class RetainedRelocationIndex:
         if location in self.code_lengths:
             return self.code_lengths[location]
         self.code_lengths[location] = None
+        self.code_file_offsets[location] = None
 
         def unique_owner(rows: list, starts: list, ends: list, prefix_ends: list, end: int):
             # Count intersecting intervals, including small intervals nested in a larger owner.
@@ -1054,6 +1082,7 @@ class RetainedRelocationIndex:
         if section_offset != load_offset or load_offset > (1 << 63) - 1 or load_offset + length > self.input_bytes:
             return None
         self.code_lengths[location] = length
+        self.code_file_offsets[location] = load_offset
         return length
 
     def safe_slot(self, locator: str, slot: int) -> bool:
@@ -1185,9 +1214,11 @@ def verify_external_bindings(evidence: dict, request: dict, report: dict, source
         require(location <= (1 << 64) - 1 and re.fullmatch(r"(?:[0-9a-f]{2}){1,15}", site["instructionBytes"]) is not None and
                 len(site["instructionBytes"]) == 2 * instruction_length and
                 address(site["returnAddress"]) == location + instruction_length, "invalid source instruction coordinates")
-        require((relocation_index.code_window_length(location) or 0) >= instruction_length,
-                "source call instruction lacks uniquely owned executable file-backed bytes")
+        source_window = relocation_index.code_window(location)
+        if source_window is None or source_window[0] < instruction_length:
+            raise VerificationError("source call instruction lacks uniquely owned executable file-backed bytes")
         byte_ranges.append((0, location, bytes.fromhex(site["instructionBytes"])))
+        byte_ranges.append((1, source_window[1], bytes.fromhex(site["instructionBytes"])))
         status = site["compositionDisposition"]
         require(status in EXTERNAL_STATUSES and site["targetBindingDisposition"] in EXTERNAL_STATUSES, "unknown external disposition")
         caller = canonical_by_id.get(site["callerCanonicalId"])
@@ -1216,8 +1247,15 @@ def verify_external_bindings(evidence: dict, request: dict, report: dict, source
         verify_external_site(site, location, symbols, relocations, imports, relocation_index)
         probe = site["memoryProbe"]
         if probe is not None:
-            byte_ranges.append((0, address(probe["address"]), bytes.fromhex(probe["availableBytes"])))
-    require_consistent_byte_ranges(byte_ranges, "retained source/probe byte windows conflict at overlapping executable addresses")
+            probe_location = address(probe["address"])
+            probe_window = relocation_index.code_window(probe_location)
+            if probe_window is None or probe_window[0] != len(probe["availableBytes"]) // 2:
+                raise VerificationError("retained probe lacks uniquely owned executable file-backed bytes")
+            probe_bytes = bytes.fromhex(probe["availableBytes"])
+            byte_ranges.append((0, probe_location, probe_bytes))
+            byte_ranges.append((1, probe_window[1], probe_bytes))
+    require_consistent_byte_ranges(byte_ranges,
+        "retained source/probe byte windows conflict at overlapping executable addresses or file ranges")
     expected_counts = {"sourcePhysicalSites": len(sites), "composedSiteRecords": len(sites), "namespaceEntries": len(imports), "dispositions": counts}
     fields(report["counts"], EXTERNAL_COUNTS, "external report counts")
     require(canonical_bytes(report["counts"]) == canonical_bytes(expected_counts) == canonical_bytes(evidence["counts"]),
