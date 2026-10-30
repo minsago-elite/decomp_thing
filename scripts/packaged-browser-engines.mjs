@@ -90,10 +90,16 @@ async function context(options = {}) {
   await created.addInitScript(() => {
     addEventListener('securitypolicyviolation', (event) => {
       const location = value => value ? value.split(/[?#]/, 1)[0].slice(0, 512) : null;
+      const inlineStyleState = () => ({
+        styleElements: document.querySelectorAll('style').length,
+        styleAttributes: document.querySelectorAll('[style]').length,
+        selects: document.querySelectorAll('select').length,
+        fileInputs: document.querySelectorAll('input[type="file"]').length,
+      });
       globalThis.__decompRecordCspViolation(JSON.stringify({
         blockedURI: event.blockedURI, effectiveDirective: event.effectiveDirective,
         documentURI: location(event.documentURI), sourceFile: location(event.sourceFile),
-        lineNumber: event.lineNumber, columnNumber: event.columnNumber,
+        lineNumber: event.lineNumber, columnNumber: event.columnNumber, inlineStyleState: inlineStyleState(),
       }));
     });
   });
@@ -111,6 +117,38 @@ async function context(options = {}) {
     page.on('worker', (worker) => record.workers.push({ url: worker.url(), responses: [] }));
   });
   return { context: created, record };
+}
+
+/** Isolate browser-native form controls from application code under the same inline-style policy. */
+async function probeNativeControlCsp() {
+  const { context: probeContext, record } = await context();
+  const cases = [
+    { name: 'plain-document', body: '<p>control probe</p>' },
+    { name: 'visible-select', body: '<label>Theme <select><option>System</option></select></label>' },
+    { name: 'hidden-selects', body: '<div hidden><label>Theme <select><option>System</option></select></label><label>Motion <select><option>System</option></select></label></div>' },
+    { name: 'file-input', body: '<input type="file" aria-label="Choose file">' },
+  ];
+  try {
+    const results = [];
+    for (const item of cases) {
+      const page = await probeContext.newPage();
+      const before = record.csp.length;
+      const policy = "default-src 'self'; script-src 'self'; style-src 'self'";
+      await page.setContent(`<!doctype html><meta http-equiv="Content-Security-Policy" content="${policy}"><main>${item.body}</main>`);
+      await delay(100);
+      const documentState = await page.evaluate(() => ({
+        styleElements: document.querySelectorAll('style').length,
+        styleAttributes: document.querySelectorAll('[style]').length,
+        selects: document.querySelectorAll('select').length,
+        fileInputs: document.querySelectorAll('input[type="file"]').length,
+      }));
+      results.push({ name: item.name, documentState, violations: record.csp.slice(before) });
+      await page.close();
+    }
+    return results;
+  } finally {
+    await probeContext.close();
+  }
 }
 
 /** Real server session: bootstrap link, cookie restore across reload, runtime identity and sign-out. */
@@ -343,6 +381,7 @@ try {
   report.browserVersion = browser.version();
   const smoked = await smoke(origin, installation.manifest);
   report.smoke = smoked.result;
+  report.nativeControlCspProbe = await probeNativeControlCsp();
   const audited = await audit(origin, installation.manifest);
   report.audit = audited.result;
   report.auditOrigins = { packaged: origin, fixtures: audited.origin };
