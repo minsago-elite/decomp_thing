@@ -14,5 +14,11 @@ export function onLibraryChange(basePath: string, changed: () => void): () => vo
       if (data && typeof data === 'object' && Object.keys(data).length === 2 && data.version === 1 && data.type === 'jobs-changed') changed();
     };
   } catch { channel = null; }
-  return () => { channel?.close(); };
+  return () => {
+    const owned = channel;
+    channel = null;
+    if (!owned) return;
+    owned.onmessage = null;
+    owned.close();
+  };
 }
