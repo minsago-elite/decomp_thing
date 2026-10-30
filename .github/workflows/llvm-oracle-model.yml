@@ -243,7 +243,8 @@ jobs:
             build/test-results/test
             build/reports/junit-signatures
 
-  required-contract:
+  llvm-required-contract:
+    name: LLVM oracle required-contract
     if: always() && github.event_name != 'workflow_dispatch'
     needs:
       - provenance-artifacts-and-ground-truth

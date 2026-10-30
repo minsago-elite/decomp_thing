@@ -441,9 +441,10 @@ toolchain recipe and checks its immutable base, Dockerfile, build-record
 binding, platform, and every recorded live tool's exact executable bytes and
 version output. The Docker image ID is retained as origin provenance rather
 than used as a false layer-reproducibility claim.
-On push/PR events, `llvm-oracle-model.yml` publishes a `required-contract`
-check that fails if the normal provenance lane does not pass, so branch
-protection can require one stable LLVM gate.
+On push/PR events, `llvm-oracle-model.yml` publishes the uniquely named
+`LLVM oracle required-contract` check (job ID `llvm-required-contract`). It fails
+if the normal provenance lane does not pass, so branch protection can require
+this LLVM status independently of the ACP workflow's `required-contract` check.
 
 The expensive source rebuild is intentionally manual. Run the `LLVM oracle
 clean rebuild` workflow when the source lock, toolchain, flags, or artifact
