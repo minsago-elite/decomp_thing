@@ -88,6 +88,56 @@ async function context(options = {}) {
   const record = { responses: [], csp: [], documents: [], exceptions: [], workers: [], apiRequests: [] };
   await created.exposeBinding('__decompRecordCspViolation', (_source, payload) => { record.csp.push(JSON.parse(payload)); });
   await created.addInitScript(() => {
+    const recentStyleOperations = [];
+    const recordStyleOperation = operation => {
+      recentStyleOperations.push({
+        at: performance.now(), operation,
+        stack: new Error().stack?.split('\n').slice(2, 8).join('\n') ?? null,
+      });
+      if (recentStyleOperations.length > 24) recentStyleOperations.shift();
+    };
+    globalThis.__decompStyleOperations = recentStyleOperations;
+    const containsStyleElement = node => node?.nodeType === 1
+      ? node.localName === 'style'
+      : node?.nodeType === 11 && Boolean(node.querySelector('style'));
+    const originalCreateElement = Document.prototype.createElement;
+    Document.prototype.createElement = function(name, ...options) {
+      const element = Reflect.apply(originalCreateElement, this, [name, ...options]);
+      if (String(name).toLowerCase() === 'style') recordStyleOperation('createElement(style)');
+      return element;
+    };
+    for (const method of ['appendChild', 'insertBefore', 'replaceChild']) {
+      const original = Node.prototype[method];
+      Node.prototype[method] = function(...nodes) {
+        if (nodes.some(containsStyleElement)) recordStyleOperation(`${method}(style)`);
+        return Reflect.apply(original, this, nodes);
+      };
+    }
+    const innerHTML = Object.getOwnPropertyDescriptor(Element.prototype, 'innerHTML');
+    if (innerHTML?.set) {
+      Object.defineProperty(Element.prototype, 'innerHTML', {
+        ...innerHTML,
+        set(value) {
+          if (typeof value === 'string' && /<style\b/i.test(value)) recordStyleOperation('innerHTML(style)');
+          return innerHTML.set.call(this, value);
+        },
+      });
+    }
+    const insertAdjacentHTML = Element.prototype.insertAdjacentHTML;
+    Element.prototype.insertAdjacentHTML = function(position, value) {
+      if (typeof value === 'string' && /<style\b/i.test(value)) recordStyleOperation('insertAdjacentHTML(style)');
+      return Reflect.apply(insertAdjacentHTML, this, [position, value]);
+    };
+    const cssText = Object.getOwnPropertyDescriptor(CSSStyleDeclaration.prototype, 'cssText');
+    if (cssText?.set) {
+      Object.defineProperty(CSSStyleDeclaration.prototype, 'cssText', {
+        ...cssText,
+        set(value) {
+          if (value) recordStyleOperation('style.cssText');
+          return cssText.set.call(this, value);
+        },
+      });
+    }
     addEventListener('securitypolicyviolation', (event) => {
       const location = value => value ? value.split(/[?#]/, 1)[0].slice(0, 512) : null;
       const inlineStyleState = () => ({
@@ -96,10 +146,12 @@ async function context(options = {}) {
         selects: document.querySelectorAll('select').length,
         fileInputs: document.querySelectorAll('input[type="file"]').length,
       });
+      const at = performance.now();
+      const styleOperations = recentStyleOperations.filter(operation => at - operation.at < 1000).slice(-8);
       globalThis.__decompRecordCspViolation(JSON.stringify({
         blockedURI: event.blockedURI, effectiveDirective: event.effectiveDirective,
         documentURI: location(event.documentURI), sourceFile: location(event.sourceFile),
-        lineNumber: event.lineNumber, columnNumber: event.columnNumber, inlineStyleState: inlineStyleState(),
+        lineNumber: event.lineNumber, columnNumber: event.columnNumber, inlineStyleState: inlineStyleState(), styleOperations,
       }));
     });
   });
