@@ -94,6 +94,9 @@ dependencies { compileOnly(ghidraJars) }
 
 tasks.jar {
     archiveFileName.set("decomp-ghidra-bridge.jar")
+    // Interface helper families (including every nested class) have one owner: this JAR.
+    // Only the wrapper and legacy native-call family are staged in the script directory.
+    duplicatesStrategy = DuplicatesStrategy.FAIL
     exclude("RunBundledExports.class")
     exclude("ExportNativeCallsV1*.class")
     isPreserveFileTimestamps = false

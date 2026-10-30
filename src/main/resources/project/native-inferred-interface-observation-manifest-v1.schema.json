@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/minsago-elite/decomp_thing/native-inferred-interface-observation-manifest-v1.schema.json",
+  "title": "Raw inferred native-interface observation manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "bytes",
+    "collectorSha256",
+    "configurationSha256",
+    "file",
+    "inputSha256",
+    "kind",
+    "listingSha256",
+    "programModelSha256",
+    "schemaVersion",
+    "sha256",
+    "typeGraphSha256"
+  ],
+  "properties": {
+    "bytes": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1073741824
+    },
+    "collectorSha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "configurationSha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "file": {
+      "const": "native-inferred-interfaces.json"
+    },
+    "inputSha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "kind": {
+      "const": "ghidra-native-inferred-interface-observation-manifest-v1"
+    },
+    "listingSha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "programModelSha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "schemaVersion": {
+      "const": 1
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "typeGraphSha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

@@ -22,6 +22,7 @@ internal class KotlinContainedCommandRequest(
     val maximumStdoutBytes: Long,
     val maximumStderrBytes: Long,
     val allowInterruption: Boolean = false,
+    val retainedInputVisibilitySha256: String? = null,
 ) {
     val command: List<String>
     val environment: Map<String, String>
@@ -64,9 +65,12 @@ internal class KotlinContainedCommandRequest(
         require(maximumStdoutBytes in 1L..MAXIMUM_LOG_BYTES && maximumStderrBytes in 1L..MAXIMUM_LOG_BYTES) {
             "contained command log budget is outside its bound"
         }
+        require(retainedInputVisibilitySha256 == null || retainedInputVisibilitySha256.matches(CONTAINED_SHA256))
+        // Version 3 is reserved by the separately qualified terminal-resource evidence contract.
+        val version = if (retainedInputVisibilitySha256 != null) 4 else if (allowInterruption) 2 else 1
         val fields = mapOf(
-            "schemaVersion" to JsonPrimitive(if (allowInterruption) 2 else 1),
-            "provider" to JsonPrimitive(if (allowInterruption) "kotlin-contained-command-request-v2" else "kotlin-contained-command-request-v1"),
+            "schemaVersion" to JsonPrimitive(version),
+            "provider" to JsonPrimitive("kotlin-contained-command-request-v$version"),
             "runDirectory" to JsonPrimitive(runDirectory.toString()),
             "nonce" to JsonPrimitive(nonce),
             "command" to JsonArray(this.command.map(::JsonPrimitive)),
@@ -76,8 +80,12 @@ internal class KotlinContainedCommandRequest(
             "maximumStdoutBytes" to JsonPrimitive(maximumStdoutBytes),
             "maximumStderrBytes" to JsonPrimitive(maximumStderrBytes),
         )
-        encoded = OracleJson.canonicalBytes(JsonObject(fields +
-            if (allowInterruption) mapOf("allowInterruption" to JsonPrimitive(true)) else emptyMap()), CONTAINED_REQUEST_LIMITS)
+        encoded = OracleJson.canonicalBytes(JsonObject(fields + when {
+            retainedInputVisibilitySha256 != null -> mapOf("allowInterruption" to JsonPrimitive(allowInterruption),
+                "retainedInputVisibilitySha256" to JsonPrimitive(retainedInputVisibilitySha256))
+            allowInterruption -> mapOf("allowInterruption" to JsonPrimitive(true))
+            else -> emptyMap()
+        }), CONTAINED_REQUEST_LIMITS)
         sha256 = OracleArtifacts.sha256(encoded)
     }
 
@@ -91,14 +99,17 @@ internal class KotlinContainedCommandRequest(
             val document = OracleJson.parseCanonical(bytes, CONTAINED_REQUEST_LIMITS) as? JsonObject
                 ?: throw IllegalArgumentException("contained command request must be an object")
             val version = document.number("schemaVersion")
-            require(version in 1L..2L) { "contained command request version is unsupported" }
-            val allowInterruption = version == 2L
+            require(version in setOf(1L, 2L, 4L)) { "contained command request version is unsupported" }
+            val visibility = if (version == 4L) document.string("retainedInputVisibilitySha256") else null
+            if (version == 4L) require(document["allowInterruption"] in setOf(JsonPrimitive(true), JsonPrimitive(false)))
+            val allowInterruption = version == 2L || (version == 4L && document["allowInterruption"] == JsonPrimitive(true))
             require(!allowInterruption || document["allowInterruption"] == JsonPrimitive(true)) {
                 "contained command v2 requires explicit interruption admission"
             }
             require(document.keys == setOf("schemaVersion", "provider", "runDirectory", "nonce", "command",
                 "environment", "maximumStartWaitSeconds", "maximumWallSeconds", "maximumStdoutBytes", "maximumStderrBytes") +
-                if (allowInterruption) setOf("allowInterruption") else emptySet()) {
+                (if (version == 4L) setOf("allowInterruption", "retainedInputVisibilitySha256")
+                    else if (allowInterruption) setOf("allowInterruption") else emptySet())) {
                 "contained command request fields differ from its closed contract"
             }
             require(document.string("provider") == "kotlin-contained-command-request-v$version") {
@@ -112,7 +123,7 @@ internal class KotlinContainedCommandRequest(
                 Path.of(document.string("runDirectory")), document.string("nonce"),
                 command.map { it.requireString() }, environment.mapValues { it.value.requireString() },
                 document.number("maximumStartWaitSeconds"), document.number("maximumWallSeconds"),
-                document.number("maximumStdoutBytes"), document.number("maximumStderrBytes"), allowInterruption,
+                document.number("maximumStdoutBytes"), document.number("maximumStderrBytes"), allowInterruption, visibility,
             ).also { require(it.canonicalBytes.contentEquals(bytes)) { "contained command request changed during parsing" } }
         }
     }

@@ -29,8 +29,12 @@ class NativeInterfaceCollectorRealTest {
         assertTrue(jars.isNotEmpty(), "bundled Ghidra jars missing")
         val source = copyResource("NativeInterfaceCollectorControls.java", root)
         val collector = repository.resolve("ghidra-bridge/src/main/java/ExportNativeCallsV1.java")
+        val globalCollector = repository.resolve("ghidra-bridge/src/main/java/ExportGlobalTypeObservationsV1.java")
         val interfaceCollector = repository.resolve("ghidra-bridge/src/main/java/ExportNativeInterfacesV1.java")
+        val inferredCollector = repository.resolve("ghidra-bridge/src/main/java/ExportInferredInterfacesV1.java")
+        val typeGraph = repository.resolve("ghidra-bridge/src/main/java/NativeInterfaceTypeGraphV1.java")
         val exporter = repository.resolve("src/main/resources/ghidra_scripts/ExportProgramModel.java")
+        val phaseRoute = repository.resolve("ghidra-bridge/src/main/java/BundledExportPhaseRoute.java")
         val dispatch = repository.resolve("ghidra-bridge/src/main/java/RunBundledExports.java")
         val worker = repository.resolve("ghidra-bridge/src/main/java/decompengine/ghidra/BundledGhidraWorker.java")
         assertTrue(Files.isRegularFile(collector), "current compiled collector source missing")
@@ -38,7 +42,7 @@ class NativeInterfaceCollectorRealTest {
         val classpath = jars.joinToString(System.getProperty("path.separator"))
         val javaBin = Path.of(System.getProperty("java.home"), "bin")
         val javaProperties = listOf("-Djava.io.tmpdir=$temporary", "-Djna.tmpdir=$temporary", "-Duser.home=$home", "-Djava.awt.headless=true", "-XX:-UsePerfData")
-        run(root, listOf(javaBin.resolve("javac").toString()) + javaProperties.map { "-J$it" } + listOf("-proc:none", "-cp", classpath, "-d", classes.toString(), source.toString(), collector.toString(), interfaceCollector.toString(), exporter.toString(), dispatch.toString(), worker.toString()), "compile-controls", Duration.ofSeconds(45))
+        run(root, listOf(javaBin.resolve("javac").toString()) + javaProperties.map { "-J$it" } + listOf("-proc:none", "-cp", classpath, "-d", classes.toString(), source.toString(), collector.toString(), interfaceCollector.toString(), inferredCollector.toString(), globalCollector.toString(), typeGraph.toString(), exporter.toString(), phaseRoute.toString(), dispatch.toString(), worker.toString()), "compile-controls", Duration.ofSeconds(45))
 
         run(root, listOf(javaBin.resolve("java").toString(), "-Xmx1g") + javaProperties + listOf("-cp", "$classes${System.getProperty("path.separator")}$classpath", "NativeInterfaceCollectorControls", release.toString(), root.toString(), interfaceCollector.toString(), exporter.toString()), "native-control", Duration.ofSeconds(120))
         assertTrue(Files.readString(root.resolve("verified-controls.txt")).contains("model-unchanged"))
@@ -79,6 +83,30 @@ class NativeInterfaceCollectorRealTest {
         assertTrue(functions.any { it.parameters.any { p -> p.forcedIndirect && p.formalType != p.effectiveType } })
         assertTrue(functions.any { it.parameters.any { p -> p.autoParameter } })
         assertTrue(functions.any { it.parameters.any { p -> p.storage.varnodes.size > 1 } })
+        // The actual global collector must join the complete independently read listing census,
+        // including external owners, and preserve undefined targets as unresolved observations.
+        val sidecar = root.resolve("global-types.ndjson")
+        val globalHeader = Json.parseToJsonElement(Files.readAllLines(sidecar).first()).jsonObject
+        val imageSpace = globalHeader.getValue("addressSpaces").jsonArray.single {
+            it.jsonObject.getValue("name").jsonPrimitive.content == native.getValue("imageBaseSpace").jsonPrimitive.content
+        }.jsonObject.getValue("index").jsonPrimitive.int
+        val global = GlobalTypeObservationsV1.validate(
+            GlobalTypeObservationBindingsV1(
+                inputSha256 = sha256(root.resolve("synthetic-input.bin")), exporterSha256 = sha256(exporter),
+                archiveSha256 = "93a5d11a9ad510622acaaf908c556a7b9b764d338e78a7567f3689bf5081fd54",
+                programModelBytes = Files.size(model), programModelSha256 = sha256(model),
+                languageId = native.getValue("languageId").jsonPrimitive.content,
+                compilerSpecId = native.getValue("compilerSpecId").jsonPrimitive.content,
+                imageBase = "as$imageSpace@${native.getValue("imageBaseOffsetBits").jsonPrimitive.content}",
+            ), Files.size(sidecar), sha256(sidecar),
+            expectedFunctionIds = functions.map { "fn_${it.entry.offsetBits}" }.toSet(),
+            checkpoint = {}, openObservations = { Files.newInputStream(sidecar) },
+        )
+        assertEquals(result.scan.functions, global.functionsInCapture)
+        assertEquals(1, global.definedDataEntities)
+        assertEquals(1, global.functionGlobalReferences)
+        assertEquals(1, global.unresolvedFunctionGlobalReferences)
+        assertEquals("recovered-observations-only", global.authorityBoundary)
         assertFalse(result.authoritativeOracleEvidence)
         assertFalse(result.productionInterfacesAdmitted)
         assertFalse(result.releaseEligible)

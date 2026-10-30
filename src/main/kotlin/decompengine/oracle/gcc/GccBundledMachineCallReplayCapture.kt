@@ -10,12 +10,17 @@ import decompengine.oracle.machinecalls.IndependentMachineCallReportV1
 import decompengine.oracle.machinecalls.IndependentMachineCallRequestV2
 import decompengine.oracle.machinecalls.IndependentMachineCallRequestIdentity
 import decompengine.oracle.machinecalls.IndependentMachineCallsV1
+import java.nio.file.Files
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
 
 /** Owned byte snapshot, never a caller-supplied production authority receipt. */
-internal class GccBundledMachineCallReplayCapture(report: ByteArray, assessment: ByteArray) {
+internal class GccBundledMachineCallReplayCapture(report: ByteArray, assessment: ByteArray,
+    val controlName: String, val controlIdentity: LinuxFileIdentity, val reportsIdentity: LinuxFileIdentity,
+    files: Map<String, GccNativeCallCapturedFile>) {
+    internal val files = java.util.Collections.unmodifiableMap(files.mapValues { (_, value) ->
+        value.copy(metadata = java.util.Collections.unmodifiableMap(HashMap(value.metadata))) })
     private val storedReport = report.copyOf()
     private val storedAssessment = assessment.copyOf()
     val reportBytes: ByteArray get() = storedReport.copyOf()
@@ -44,8 +49,9 @@ internal object GccBundledMachineCallReplayOutputCapture {
             LinuxFilesystemSyscalls.openDirectoryAt(control.fd, "reports").use { reports ->
                 requirePrivate(reports.identity, control.identity)
                 val names = setOf(REPORT_NAME, "contained-command.stdout", "contained-command.stderr")
+                var callbacks = true
                 fun verify() {
-                    checkpoint()
+                    if (callbacks) checkpoint()
                     require(LinuxFilesystemSyscalls.identity(run.fd) == runIdentity)
                     require(LinuxFilesystemSyscalls.stableDescriptorPath(run.fd).toRealPath() == runPath)
                     LinuxFilesystemSyscalls.openDirectoryAt(run.fd, controlName).use { require(it.identity == control.identity) }
@@ -55,7 +61,8 @@ internal object GccBundledMachineCallReplayOutputCapture {
                     }
                 }
                 verify()
-                val files = GccBoundExportFiles(request.limits.maximumOutputBytes.toLong() + 2L * MAXIMUM_LOG_BYTES, checkpoint)
+                val pins = names.associateWith { pin(reports, it) }
+                val files = GccBoundExportFiles(request.limits.maximumOutputBytes.toLong() + 2L * MAXIMUM_LOG_BYTES) { if (callbacks) checkpoint() }
                 val report = files.read(reports, REPORT_NAME, request.limits.maximumOutputBytes)
                 val stdout = files.read(reports, "contained-command.stdout", MAXIMUM_LOG_BYTES)
                 val stderr = files.read(reports, "contained-command.stderr", MAXIMUM_LOG_BYTES)
@@ -75,10 +82,34 @@ internal object GccBundledMachineCallReplayOutputCapture {
                     "complete" to JsonPrimitive(false), "scored" to JsonPrimitive(false),
                     "negativeCompleteness" to JsonPrimitive(false), "releaseEligible" to JsonPrimitive(false),
                 )))
-                GccBundledMachineCallReplayCapture(report, assessment)
+                checkpoint()
+                callbacks = false
+                files.verify()
+                verify()
+                pins.forEach { (name, expected) -> require(pin(reports, name) == expected) }
+                GccBundledMachineCallReplayCapture(report, assessment, controlName, control.identity, reports.identity, pins)
             }
         }
     }
+
+    fun requireUnchanged(run: LinuxDescriptor, capture: GccBundledMachineCallReplayCapture) {
+        LinuxFilesystemSyscalls.openDirectoryAt(run.fd, capture.controlName).use { control ->
+            require(control.identity == capture.controlIdentity)
+            LinuxFilesystemSyscalls.openDirectoryAt(control.fd, "reports").use { reports ->
+                require(reports.identity == capture.reportsIdentity)
+                require(LinuxFilesystemSyscalls.directoryEntryNames(reports, capture.files.size + 1).toSet() == capture.files.keys)
+                capture.files.forEach { (name, expected) -> require(pin(reports, name) == expected) }
+            }
+        }
+    }
+    private fun pin(directory: LinuxDescriptor, name: String): GccNativeCallCapturedFile =
+        requireNotNull(LinuxFilesystemSyscalls.openRegularFileAtOrNull(directory.fd, name)).use { file ->
+            require(file.identity.isRegularFile && !file.identity.isSymbolicLink && file.identity.linkCount == 1 &&
+                file.identity.uid == directory.identity.uid && file.identity.mountId == directory.identity.mountId &&
+                file.identity.mode.permissions and 0x12 == 0)
+            GccNativeCallCapturedFile(file.identity, Files.readAttributes(LinuxFilesystemSyscalls.stableDescriptorPath(file.fd),
+                "unix:size,lastModifiedTime,ctime"))
+        }
 
     private fun requirePrivate(identity: LinuxFileIdentity, parent: LinuxFileIdentity) {
         require(identity.isDirectory && !identity.isSymbolicLink && identity.mode.permissions == 448 &&

@@ -33,6 +33,7 @@ internal class GccBundledOperationInputs private constructor(
     private val plannerProfile: GccRetainedCompilerEngineProfile?,
     private val cliInvocation: GccBundledCliInvocation?,
     private val nativeCallObservations: Boolean,
+    private val nativeInterfaceObservations: Boolean,
 ) : AutoCloseable {
     val deploymentClosureSha256: String = gccBundledLiveDeploymentClosureSha256(
         deploymentReference.closureSha256,
@@ -41,6 +42,7 @@ internal class GccBundledOperationInputs private constructor(
     )
     val classPathEntries: List<FullTreeFunctionObservationClassPathEntry> =
         Collections.unmodifiableList(ArrayList(classPathEntries))
+    val ghidraRuntimeIdentitySha256: String = bundledRuntime.runtimeIdentitySha256
     private var closed = false
 
     @Synchronized
@@ -72,6 +74,39 @@ internal class GccBundledOperationInputs private constructor(
             java.util.List.copyOf(layout.executableRanges), pinned.engineId)
         checkpoint()
         verify("after native-call target derivation")
+        return result
+    }
+
+    @Synchronized
+    fun interfaceTargetEvidence(checkpoint: () -> Unit): GccBundledInterfaceTargetEvidenceV1 {
+        check(nativeInterfaceObservations && !nativeCallObservations) {
+            "interface target evidence requires the distinct retained interface operation"
+        }
+        checkpoint()
+        verify("before interface target derivation")
+        val profile = checkNotNull(plannerProfile) { "interface observations require a retained production profile" }
+        val pinned = profile.requireInterfaceObservationProfile()
+        checkpoint()
+        val binary = guards.single { (name, _) -> name == "bundled operation artifact engine-binary" }.second
+        require(binary.size == pinned.strippedBinary.bytes && binary.authenticatedSha256 == pinned.strippedBinary.sha256) {
+            "interface target differs from the independently pinned driver"
+        }
+        val layout = FullTreeElfLayout.scanLayout(binary, "interface pinned driver", checkpoint = { checkpoint() })
+        require(layout.elfClass == 2 && layout.byteOrder == 1 && layout.machine == pinned.targetAbi.machine &&
+            layout.osAbi == pinned.targetAbi.osAbi && layout.elfType == pinned.targetAbi.elfType &&
+            layout.imageBase == pinned.imageBase &&
+            layout.executableRanges.map { it.start to it.endExclusive } ==
+                pinned.executableRanges.map { it.startRva to it.endExclusiveRva } &&
+            layout.elfType == "ET_EXEC" && layout.imageBase == 0x400000UL) {
+            "interface target ELF layout differs from the independently pinned driver profile"
+        }
+        val result = GccBundledInterfaceTargetEvidenceV1(profile.suite.profileSha256, profile.suite.target,
+            binary.authenticatedSha256, binary.size, layout.imageBase,
+            pinned.targetAbi.ghidraLanguage, pinned.targetAbi.ghidraCompilerSpec,
+            GccBundledInterfaceAddressSpaceIdentityV1("ram", 1, 64, 1, false, false),
+            java.util.List.copyOf(layout.executableRanges))
+        checkpoint()
+        verify("after interface target derivation")
         return result
     }
 
@@ -189,6 +224,7 @@ internal class GccBundledOperationInputs private constructor(
                 val inputs = GccBundledOperationInputs(
                     reference, bundle, Collections.unmodifiableList(opened.toList()), classPath, plannerProfile, intent.cliInvocation,
                     intent.bundledRuntime.invocationVersion == 8,
+                    intent.bundledRuntime.invocationVersion in setOf(9, 10),
                 )
                 inputs.verify("after prepared operation input authentication")
                 return inputs

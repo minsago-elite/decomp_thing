@@ -1,5 +1,6 @@
 import java.io.File
 import java.io.ByteArrayOutputStream
+import java.io.ByteArrayInputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.file.Files
@@ -232,9 +233,11 @@ listOf("compileKotlin", "compileTestKotlin").forEach { taskName ->
 }
 tasks.processResources {
     duplicatesStrategy = DuplicatesStrategy.FAIL
-    from(layout.projectDirectory.file("ghidra-bridge/src/main/java/ExportNativeCallsV1.java")) {
-        into("ghidra_scripts")
-    }
+    from(listOf("ExportNativeCallsV1.java", "ExportNativeInterfacesV1.java", "ExportInferredInterfacesV1.java",
+        "ExportGlobalTypeObservationsV1.java",
+        "NativeInterfaceTypeGraphV1.java", "RunBundledExports.java").map {
+        layout.projectDirectory.file("ghidra-bridge/src/main/java/$it")
+    }) { into("ghidra_scripts") }
     // Copy does not provide Sync's deletion semantics. Remove only our generated
     // namespace so renamed chunks cannot survive in later JARs.
     doFirst {
@@ -775,7 +778,11 @@ val generateGccBundledGhidraReference = tasks.register("generateGccBundledGhidra
     dependsOn(":ghidra-bridge:stageBundle", tasks.named("jar"))
     inputs.dir(gccBundledGhidraDirectory)
     inputs.file(tasks.named<Jar>("jar").flatMap { it.archiveFile })
-    inputs.file(layout.projectDirectory.file("ghidra-bridge/src/main/java/ExportNativeCallsV1.java"))
+    inputs.files(listOf("ExportNativeCallsV1.java", "ExportNativeInterfacesV1.java", "ExportInferredInterfacesV1.java",
+        "ExportGlobalTypeObservationsV1.java", "BundledExportPhaseRoute.java",
+        "NativeInterfaceTypeGraphV1.java", "RunBundledExports.java").map {
+        layout.projectDirectory.file("ghidra-bridge/src/main/java/$it")
+    })
     outputs.file(gccBundledGhidraReference)
 
     doLast {
@@ -896,6 +903,34 @@ val generateGccBundledGhidraReference = tasks.register("generateGccBundledGhidra
                 }
             }
         }
+        val globalTypeCollectorResourcePath = "ghidra_scripts/ExportGlobalTypeObservationsV1.java"
+        val globalTypeCollectorClassPath = "ExportGlobalTypeObservationsV1.class"
+        val globalTypeCollectorBytes = JarFile(applicationJar, false).use { jar ->
+            val resources = jar.entries().asSequence().filter { it.name == globalTypeCollectorResourcePath }.take(2).toList()
+            require(resources.size == 1 && !resources.single().isDirectory &&
+                resources.single().size in 1L..(4L * 1024 * 1024)
+            ) { "Application JAR has a missing, duplicate or excessive global/type collector source" }
+            jar.getInputStream(resources.single()).use { input ->
+                input.readNBytes(4 * 1024 * 1024 + 1).also { content ->
+                    require(content.size.toLong() == resources.single().size && content.size <= 4 * 1024 * 1024) {
+                        "Application JAR global/type collector source changed length"
+                    }
+                }
+            }
+        }
+        val globalTypeCollectorClass = JarFile(root.resolve(bridge).toFile(), false).use { jar ->
+            val entry = jar.getJarEntry(globalTypeCollectorClassPath)
+            require(entry != null && !entry.isDirectory && entry.size in 1L..(4L * 1024 * 1024)) {
+                "Bundled bridge JAR omits the compiled global/type collector"
+            }
+            jar.getInputStream(entry).use { input ->
+                input.readNBytes(4 * 1024 * 1024 + 1).also { content ->
+                    require(content.size.toLong() == entry.size && content.size <= 4 * 1024 * 1024) {
+                        "Bundled global/type collector class changed length"
+                    }
+                }
+            }
+        }
         fun digest(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256").digest(bytes)
             .joinToString("") { byte -> "%02x".format(byte) }
         fun canonicalBytes(value: Map<String, Any>): ByteArray {
@@ -932,7 +967,7 @@ val generateGccBundledGhidraReference = tasks.register("generateGccBundledGhidra
                         append("]")
                     }
                     is String -> append(canonicalJsonString(element))
-                    is Int, is Long -> append(element.toString())
+                    is Int, is Long, is Boolean -> append(element.toString())
                     else -> error("Unsupported bundled Ghidra deployment reference value")
                 }
             }
@@ -940,6 +975,108 @@ val generateGccBundledGhidraReference = tasks.register("generateGccBundledGhidra
             append("\n")
             return output.toByteArray()
         }
+        val sourceRoles = sortedMapOf(
+            "inferred" to "ExportInferredInterfacesV1.java", "listing" to "ExportNativeInterfacesV1.java",
+            "model" to "ExportProgramModel.java", "typeGraph" to "NativeInterfaceTypeGraphV1.java",
+            "wrapper" to "RunBundledExports.java",
+        )
+        val interfaceSources = JarFile(applicationJar, false).use { jar ->
+            val resources = jar.entries().asSequence().take(200_001).toList()
+            require(resources.size <= 200_000) { "Interface application JAR exceeds its entry bound" }
+            sourceRoles.map { (role, name) ->
+                val path = "ghidra_scripts/$name"
+                val entry = resources.singleOrNull { it.name == path }
+                require(entry != null && !entry.isDirectory && entry.size in 1L..4L * 1024 * 1024) {
+                    "Interface application source is missing, duplicate or excessive: $path"
+                }
+                val bytes = jar.getInputStream(entry).use { it.readNBytes(4 * 1024 * 1024 + 1) }
+                require(bytes.size.toLong() == entry.size) { "Interface application source changed length" }
+                mapOf<String, Any>("role" to role, "resourcePath" to "/$path", "bytes" to bytes.size.toLong(), "sha256" to digest(bytes))
+            }
+        }
+        val interfaceFamilies = listOf("ExportInferredInterfacesV1", "ExportNativeInterfacesV1", "NativeInterfaceTypeGraphV1",
+            "decompengine/ghidra/BundledGhidraWorker", "decompengine/ghidra/JvmMxBeanDiagnostics")
+        fun interfaceFamily(name: String) = interfaceFamilies.any { name == "$it.class" || name.startsWith("$it$") && name.endsWith(".class") }
+        var jarEntryCount = 0
+        var interfaceClassBytes = 0L
+        val interfaceClasses = mutableListOf<Map<String, Any>>()
+        classPath.forEachIndexed { index, path ->
+            JarFile(root.resolve(path).toFile(), false).use { jar ->
+                jar.getJarEntry("META-INF/MANIFEST.MF")?.let { manifest ->
+                    val prefix = jar.getInputStream(manifest).use { it.readNBytes(65537) }
+                    val text = prefix.toString(Charsets.ISO_8859_1)
+                    val crlf = text.indexOf("\r\n\r\n").takeIf { it >= 0 }?.plus(4)
+                    val lf = text.indexOf("\n\n").takeIf { it >= 0 }?.plus(2)
+                    val end = listOfNotNull(crlf, lf).minOrNull()
+                        ?: prefix.size.takeIf { it <= 65536 && it.toLong() == manifest.size }
+                    require(end != null && end <= 65536) { "Interface JAR manifest main section exceeds its byte bound" }
+                    val linked = Manifest(ByteArrayInputStream(prefix, 0, end)).mainAttributes.getValue("Class-Path")
+                    if (!linked.isNullOrBlank()) {
+                        val targets = linked.trim().split(Regex(" +"))
+                        require(targets.size <= 128 && targets.all { it.matches(Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,250}\\.jar")) }) {
+                            "Interface JAR manifest escapes its bounded sibling classpath"
+                        }
+                        for (name in targets) {
+                            val target = (Path.of(path).parent ?: Path.of("")).resolve(name).toString()
+                            require(target in classPath || target !in byPath && !Files.exists(root.resolve(target), LinkOption.NOFOLLOW_LINKS)) {
+                                "Interface JAR manifest adds an unscanned classpath target"
+                            }
+                        }
+                    }
+                }
+                val names = HashSet<String>()
+                val records = jar.entries()
+                while (records.hasMoreElements()) {
+                    require(++jarEntryCount <= 1_000_000) { "Interface classpath exceeds its aggregate JAR entry bound" }
+                    val entry = records.nextElement()
+                    require(entry.name.length <= 4096 && names.add(entry.name)) { "Interface classpath repeats an entry" }
+                    val logical = if (entry.name.startsWith("META-INF/versions/"))
+                        entry.name.removePrefix("META-INF/versions/").substringAfter('/') else entry.name
+                    require(logical != "RunBundledExports.class") { "Interface wrapper is shadowed by a classpath JAR" }
+                    if (!interfaceFamily(logical)) continue
+                    require(index == 0 && logical == entry.name && !entry.isDirectory &&
+                        interfaceClasses.size < 512 && entry.size in 1L..4L * 1024 * 1024) {
+                        "Interface helper family is shadowed, versioned or excessive"
+                    }
+                    interfaceClassBytes = Math.addExact(interfaceClassBytes, entry.size)
+                    require(interfaceClassBytes <= 128L * 1024 * 1024) { "Interface class families exceed their byte bound" }
+                    val bytes = jar.getInputStream(entry).use { it.readNBytes(4 * 1024 * 1024 + 1) }
+                    require(bytes.size.toLong() == entry.size) { "Interface helper class changed length" }
+                    interfaceClasses.add(mapOf("path" to entry.name, "bytes" to entry.size, "sha256" to digest(bytes)))
+                }
+            }
+        }
+        require(interfaceFamilies.all { family -> interfaceClasses.any { it["path"] == "$family.class" } }) {
+            "Interface runtime omits a compiled class family"
+        }
+        require(byPath.keys.none { path -> path.endsWith(".class") &&
+            (interfaceFamilies.any { family -> val name = path.substringAfterLast('/'); val base = family.substringAfterLast('/');
+                name == "$base.class" || name.startsWith("$base$") && name.endsWith(".class") } || path.substringAfterLast('/') == "RunBundledExports.class") && path != guard
+        }) { "Interface helper class is shadowed outside the bridge" }
+        fun interfaceFile(path: String, mode: Int): Map<String, Any> {
+            val entry = byPath.getValue(path)
+            require(entry["kind"] == "file" && entry["mode"] == mode && (entry["bytes"] as Long) > 0) {
+                "Interface runtime file has an invalid layout or mode"
+            }
+            return entry - "kind"
+        }
+        val interfaceConfiguration = mapOf<String, Any>("simplificationStyle" to "decompile", "syntaxTree" to true,
+            "cCode" to false, "maximumInstructions" to 500000, "maximumPayloadMBytes" to 50,
+            "maximumJumpTableEntries" to 1024, "maximumSecondsPerFunction" to 60,
+            "maximumOperationMillis" to 120000, "attemptsPerFunction" to 1)
+        val interfaceUnsigned = mapOf<String, Any>("schemaVersion" to 1,
+            "provider" to "gcc-bundled-interface-runtime-identity-v1", "sources" to interfaceSources,
+            "sourceClosureSha256" to digest(canonicalBytes(mapOf("sources" to interfaceSources))),
+            "bridge" to interfaceFile(bridge, 0x1a4), "wrapper" to interfaceFile(guard, 0x1a4),
+            "nativeDecompiler" to interfaceFile("ghidra_12.1.3_PUBLIC/Ghidra/Features/Decompiler/os/linux_x86_64/decompile", 0x1ed),
+            "classes" to interfaceClasses.sortedBy { it.getValue("path") as String },
+            "configurationSha256" to digest(canonicalBytes(interfaceConfiguration)))
+        val interfaceIdentity = interfaceUnsigned + ("closureSha256" to digest(canonicalBytes(interfaceUnsigned)))
+        val globalTypeUnsigned = mapOf<String, Any>("schemaVersion" to 1,
+            "provider" to "gcc-bundled-global-type-runtime-identity-v1",
+            "sourceBytes" to globalTypeCollectorBytes.size.toLong(), "sourceSha256" to digest(globalTypeCollectorBytes),
+            "classBytes" to globalTypeCollectorClass.size.toLong(), "classSha256" to digest(globalTypeCollectorClass))
+        val globalTypeIdentity = globalTypeUnsigned + ("closureSha256" to digest(canonicalBytes(globalTypeUnsigned)))
         val unsigned = mapOf<String, Any>(
             "archive" to mapOf(
                 "bytes" to 569445154L,
@@ -954,6 +1091,8 @@ val generateGccBundledGhidraReference = tasks.register("generateGccBundledGhidra
                 "resourcePath" to "/$resourcePath",
                 "sha256" to digest(exporterBytes),
             ),
+            "globalTypeCollector" to globalTypeIdentity,
+            "interfaceCollector" to interfaceIdentity,
             "ghidraRelease" to "PUBLIC",
             "ghidraVersion" to "12.1.3",
             "nativeCallCollector" to mapOf(

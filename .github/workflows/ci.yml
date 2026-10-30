@@ -338,6 +338,11 @@ jobs:
       - name: Check CI partition routing and report ownership controls
         if: matrix.shard == 'core'
         run: python3 scripts/test-ci-partitions.py
+      - name: Check invocation9 shared staging budget and qualification inventory controls
+        if: matrix.shard == 'core'
+        run: |
+          python3 -B scripts/test-owned-interface-staging.py
+          python3 -B scripts/test-gcc-interface-qualification.py
       - name: Check pinned Goose archive acquisition controls
         if: matrix.shard == 'core'
         run: python3 scripts/test-goose-archive-download.py

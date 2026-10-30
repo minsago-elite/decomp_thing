@@ -1,0 +1,37 @@
+{
+  "kind": "independent-external-call-request-v1",
+  "limits": {
+    "maximumCalls": 100000,
+    "maximumOutputBytes": 67108864,
+    "maximumWallMillis": 1800000,
+    "maximumWorkUnits": 100000000
+  },
+  "metadataPolicy": "elf-dynamic-binding-default-limits-v1",
+  "outputPath": "/home/june/decomp_thing/.claude/worktrees/a-series-20261026-external-call-evidence/.omo/external-call-evidence/driver-external-report.json",
+  "richFile": {
+    "bytes": 20713760,
+    "path": "/home/june/decomp_thing/.claude/worktrees/a-series-20261026-external-call-evidence/oracle/gcc/16.2.0/artifacts/gcc-driver.full",
+    "sha256": "8009c7cfc4f66017aa932d86a6d4ec7f374e6ab7a01b3ef5ab3d2fcc78c2378b"
+  },
+  "runtime": {
+    "archiveBytes": 569445154,
+    "archiveSha256": "93a5d11a9ad510622acaaf908c556a7b9b764d338e78a7567f3689bf5081fd54",
+    "bridgeSha256": "68c12a9960bcae53098014e56360879b3805af1c0ac241b0d5f4317ebe906c62",
+    "bundleManifestSha256": "9a61e137810b18c5fc9cec1e968ef3a11dbd24f81bedac655f70d25dc3b4ccb4",
+    "bundleRoot": "/home/june/decomp_thing/.claude/worktrees/a-series-20261026-external-call-evidence/ghidra-bridge/build/bundle",
+    "ghidraArchivePath": "/home/june/decomp_thing/.gradle/caches/decomp-ghidra/ghidra_12.1.3_PUBLIC_20260817.zip",
+    "languageId": "x86:LE:64:default",
+    "languageVersion": "4.8"
+  },
+  "schemaVersion": 1,
+  "sourceReport": {
+    "bytes": 19116784,
+    "path": "/home/june/decomp_thing/.claude/worktrees/a-series-20261026-external-call-evidence/.omo/external-call-evidence/driver-source-report.json",
+    "sha256": "d9afc3bbdfff322e5d1112d77a7dce23c033d05642ff1cb03e934660a7a3110e"
+  },
+  "sourceRequest": {
+    "bytes": 1723,
+    "path": "/home/june/decomp_thing/.claude/worktrees/a-series-20261026-external-call-evidence/oracle/gcc/16.2.0/machine-call-component-v1/driver-request.json",
+    "sha256": "836809dd40e4f1c909e93e87c48490d6cc029d346335da51bff01bad391c24f8"
+  }
+}

@@ -116,13 +116,19 @@ class BundledGhidraTest {
             it.parent.createDirectories()
             it.writeText(text.trimIndent())
         }
+        val taskMonitorStub = source("ghidra/util/task/TaskMonitor.java", """
+            package ghidra.util.task;
+            public interface TaskMonitor { void checkCancelled() throws Exception; }
+        """)
         val scriptStub = source("ghidra/app/script/GhidraScript.java", """
             package ghidra.app.script;
+            import ghidra.util.task.TaskMonitor;
             public abstract class GhidraScript {
                 public static String[] arguments;
                 public static final java.util.List<String> invocations = new java.util.ArrayList<>();
                 public static boolean fail;
-                protected Object currentProgram, monitor;
+                protected Object currentProgram;
+                protected TaskMonitor monitor = () -> {};
                 protected abstract void run() throws Exception;
                 public final void execute() throws Exception { run(); }
                 protected String[] getScriptArgs() { return arguments; }
@@ -149,11 +155,28 @@ class BundledGhidraTest {
                 }
             }
         """)
-        val nativeInterfaceStub = source("ExportNativeInterfacesV1.java", """
+        val nativeInterfacesStub = source("ExportNativeInterfacesV1.java", """
+            import ghidra.util.task.TaskMonitor;
             public final class ExportNativeInterfacesV1 {
-                public static void collect(Object program, Object monitor, String[] args) {
+                public static void collect(Object program, TaskMonitor monitor, String[] args) {
                     ghidra.app.script.GhidraScript.invocations.add("native-interface:" + java.util.Arrays.toString(args));
                 }
+                public static void collectWithStagingBudget(Object program, TaskMonitor monitor, String[] args, long limit) {
+                    ghidra.app.script.GhidraScript.invocations.add("native-interface-budget:" + java.util.Arrays.toString(args));
+                }
+            }
+        """)
+        val inferredInterfacesStub = source("ExportInferredInterfacesV1.java", """
+            import ghidra.util.task.TaskMonitor;
+            public final class ExportInferredInterfacesV1 {
+                public static void collect(Object program, TaskMonitor monitor, String[] args) {}
+                public static void collectWithByteLimit(Object program, TaskMonitor monitor, String[] args, long limit) {}
+            }
+        """)
+        val globalTypeStub = source("ExportGlobalTypeObservationsV1.java", """
+            import ghidra.util.task.TaskMonitor;
+            public final class ExportGlobalTypeObservationsV1 {
+                public static void collectWithByteLimit(Object program, TaskMonitor monitor, String[] args, long limit) {}
             }
         """)
         val probe = source("GuardProbe.java", """
@@ -220,10 +243,12 @@ class BundledGhidraTest {
             }
         """)
         val guard = Path.of("ghidra-bridge/src/main/java/RunBundledExports.java").toAbsolutePath()
+        val phaseRoute = Path.of("ghidra-bridge/src/main/java/BundledExportPhaseRoute.java").toAbsolutePath()
         val compiler = checkNotNull(javax.tools.ToolProvider.getSystemJavaCompiler())
         assertEquals(0, compiler.run(null, null, null, "-proc:none", "-encoding", "UTF-8", "-d", work.toString(),
-            scriptStub.toString(), workerStub.toString(), nativeStub.toString(), nativeInterfaceStub.toString(),
-            guard.toString(), probe.toString()))
+            taskMonitorStub.toString(), scriptStub.toString(), workerStub.toString(), nativeStub.toString(),
+            nativeInterfacesStub.toString(), inferredInterfacesStub.toString(), globalTypeStub.toString(),
+            phaseRoute.toString(), guard.toString(), probe.toString()))
         java.net.URLClassLoader(arrayOf(work.toUri().toURL()), null).use { loader ->
             loader.loadClass("GuardProbe").getMethod("verify").invoke(null)
         }

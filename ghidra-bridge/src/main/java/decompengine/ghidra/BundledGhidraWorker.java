@@ -76,6 +76,8 @@ public final class BundledGhidraWorker {
     private static void run(String[] arguments) throws Exception {
         if (arguments.length < 2) throw new IllegalArgumentException("Expected bundle and operation");
         validateNativeCallInvocation(arguments);
+        validateInterfaceInvocation(arguments);
+        probeInterfaceContainment(arguments);
         Path bundle = Path.of(arguments[0]).toAbsolutePath().normalize();
         var configuration = new HeadlessGhidraApplicationConfiguration();
         Application.initializeApplication(new GhidraApplicationLayout(bundle.toFile()), configuration);
@@ -140,6 +142,131 @@ public final class BundledGhidraWorker {
         }
         if (analyzer.checkAnalysisTimedOut()) throw new IllegalStateException("Ghidra analysis timed out");
         if (!exportsCompleted) throw new IllegalStateException("Bundled Ghidra import or export failed; existing output is not a successful result");
+    }
+
+    private static boolean interfaceInvocationRequested(String[] arguments) {
+        return Arrays.stream(arguments).anyMatch(value ->
+            value.equals("ExportNativeInterfacesV1.class") || value.equals("ExportNativeInterfacesV1.java") ||
+            value.equals("ExportInferredInterfacesV1.class") || value.equals("ExportInferredInterfacesV1.java") ||
+            value.equals("ExportGlobalTypeObservationsV1.class") || value.equals("ExportGlobalTypeObservationsV1.java"));
+    }
+
+    // Fixed recovery-only probe: no paths, bypass flags, callbacks or policy arrive from the CLI.
+    private static void probeInterfaceContainment(String[] arguments) throws java.io.IOException {
+        if (!interfaceInvocationRequested(arguments)) return;
+        String receipt = interfaceContainmentReceipt(arguments, new NioInterfaceContainmentAccess());
+        System.err.println(receipt);
+        if (System.err.checkError()) throw new java.io.IOException("Interface containment receipt could not be retained");
+    }
+
+    /** This private seam permits authored refusal controls, never worker/provider selection. */
+    private static String interfaceContainmentReceipt(String[] arguments, InterfaceContainmentAccess access)
+            throws java.io.IOException {
+        validateInterfaceInvocation(arguments);
+        if (!interfaceInvocationRequested(arguments)) throw new IllegalArgumentException("Interface probe requires invocation9");
+        Path binary = Path.of(arguments[4]);
+        Path scriptDirectory = Path.of(arguments[5]);
+        if (!binary.isAbsolute() || !binary.normalize().equals(binary) || binary.getParent() == null ||
+            !scriptDirectory.isAbsolute() || !scriptDirectory.normalize().equals(scriptDirectory))
+            throw new IllegalArgumentException("Interface probe inputs are not canonical");
+        Path exporter = scriptDirectory.resolve("ExportProgramModel.java");
+        Path hidden = binary.getParent().resolve(".decomp-interface-hidden-canaries-v1");
+        for (String role : new String[] {"rich", "debug", "source", "build", "oracle", "nominal"}) {
+            requireUnreadable(hidden.resolve(role + ".canary"), access);
+        }
+        requireUnreadable(binary.getParent().resolve("gcc-driver.full"), access);
+        for (Path input : new Path[] {binary, exporter}) {
+            access.openReadable(input);
+            if (!access.readOnly(input)) throw new IllegalStateException("Interface recovery input is on a writable filesystem");
+            try {
+                access.openWritable(input);
+            } catch (java.nio.file.AccessDeniedException denied) {
+                continue;
+            } catch (java.nio.file.FileSystemException denied) {
+                // The contained Linux worker has a fixed C locale; EROFS is not mapped to
+                // AccessDeniedException by the default Unix file-system provider.
+                if ("Read-only file system".equals(denied.getReason())) continue;
+                throw denied;
+            }
+            throw new IllegalStateException("Interface recovery input admits a WRITE open");
+        }
+        // All values other than the prevalidated input digest are fixed. JSON keys are sorted;
+        // no native names, paths, file contents or exception details enter this frame.
+        String receipt = "DECOMP_INTERFACE_CONTAINMENT_V1 " +
+            "{\"hidden\":{\"build\":true,\"debug\":true,\"fullBinary\":true,\"nominal\":true," +
+            "\"oracle\":true,\"rich\":true,\"source\":true},\"inputSha256\":\"" + arguments[14] +
+            "\",\"provider\":\"gcc-interface-containment-probe-v1\",\"readOnly\":{\"binary\":true," +
+            "\"exporter\":true},\"schemaVersion\":1}";
+        if (receipt.getBytes(java.nio.charset.StandardCharsets.UTF_8).length + 1 > 2048)
+            throw new IllegalStateException("Interface containment receipt exceeds its byte bound");
+        return receipt;
+    }
+
+    private static void requireUnreadable(Path path, InterfaceContainmentAccess access) throws java.io.IOException {
+        try {
+            access.openReadable(path);
+        } catch (java.nio.file.NoSuchFileException | java.nio.file.AccessDeniedException denied) {
+            return;
+        }
+        throw new IllegalStateException("Hidden interface truth admits a READ open");
+    }
+
+    private interface InterfaceContainmentAccess {
+        void openReadable(Path path) throws java.io.IOException;
+        boolean readOnly(Path path) throws java.io.IOException;
+        void openWritable(Path path) throws java.io.IOException;
+    }
+
+    private static final class NioInterfaceContainmentAccess implements InterfaceContainmentAccess {
+        @Override public void openReadable(Path path) throws java.io.IOException {
+            try (var ignored = java.nio.channels.FileChannel.open(path, java.nio.file.StandardOpenOption.READ)) {
+                // Opening alone proves visibility. Never read hidden canary contents.
+            }
+        }
+        @Override public boolean readOnly(Path path) throws java.io.IOException {
+            return Files.getFileStore(path).isReadOnly();
+        }
+        @Override public void openWritable(Path path) throws java.io.IOException {
+            try (var ignored = java.nio.channels.FileChannel.open(path, java.nio.file.StandardOpenOption.WRITE)) {
+                // Do not create, truncate or write even when this negative control succeeds.
+            }
+        }
+    }
+
+    private static void validateInterfaceInvocation(String[] arguments) {
+        if (!interfaceInvocationRequested(arguments)) return;
+        boolean globalType = Arrays.stream(arguments).anyMatch(value -> value.equals("ExportGlobalTypeObservationsV1.class") || value.equals("ExportGlobalTypeObservationsV1.java"));
+        if (arguments.length != (globalType ? 40 : 33) || !arguments[1].equals("analyze") ||
+            !arguments[6].equals("ExportProgramModel.java") || !arguments[7].equals("4") ||
+            !arguments[10].equals("full") || !arguments[12].equals("ExportNativeInterfacesV1.class") ||
+            !arguments[13].equals("6") || !arguments[20].equals("ExportInferredInterfacesV1.class") ||
+            !arguments[21].equals("11") || !arguments[15].equals(arguments[8]) ||
+            !arguments[16].equals(arguments[9]) || !arguments[18].equals(arguments[11]) ||
+            !arguments[22].equals(arguments[14]) || !arguments[23].equals(arguments[8]) ||
+            !arguments[24].equals(arguments[9]) || !arguments[25].equals(arguments[17]) ||
+            !arguments[30].equals(arguments[11]) || !arguments[31].equals(arguments[19])) {
+            throw new IllegalArgumentException("Interface observations require the exact paired model-listing-inferred invocation");
+        }
+        for (int index : new int[] {8, 9, 14, 17, 26, 27, 28, 29}) {
+            if (!arguments[index].matches("[a-f0-9]{64}"))
+                throw new IllegalArgumentException("Interface observation binding digest is invalid");
+        }
+        Path model = Path.of(arguments[11]);
+        if (!model.isAbsolute() || !model.normalize().equals(model) || model.getFileName() == null ||
+            !model.getFileName().toString().equals("program_model.json") || model.getParent() == null ||
+            model.getParent().getFileName() == null || !model.getParent().getFileName().toString().equals("reports") ||
+            !Path.of(arguments[19]).equals(model.getParent().resolve("native-interfaces-v1")) ||
+            !Path.of(arguments[32]).equals(model.getParent().resolve("native-inferred-interfaces-v1"))) {
+            throw new IllegalArgumentException("Interface observation outputs differ from the paired report layout");
+        }
+        if (globalType) {
+            if (!arguments[33].equals("ExportGlobalTypeObservationsV1.class") || !arguments[34].equals("5") ||
+                !arguments[35].equals(arguments[30]) || !arguments[37].equals(arguments[22]) ||
+                !arguments[38].matches("[a-f0-9]{64}") || !arguments[39].equals(arguments[24]) ||
+                !Path.of(arguments[36]).equals(model.getParent().resolve("native-global-type-observations-v1.json"))) {
+                throw new IllegalArgumentException("Global/type observations require the exact paired invocation10 sidecar");
+            }
+        }
     }
 
     private static void validateNativeCallInvocation(String[] arguments) {

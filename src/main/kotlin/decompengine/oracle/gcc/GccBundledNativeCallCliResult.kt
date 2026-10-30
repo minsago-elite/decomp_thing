@@ -12,7 +12,8 @@ import kotlinx.serialization.json.*
 /** Immutable pointers to retained native observations; qualification and cold recovery remain open. */
 internal object GccBundledNativeCallCliResult {
     fun create(operation: GccBundledNativeCallOperation, binding: ByteArray, journal: Path, run: Path,
-        output: Path, operationWallTime: JsonObject, replay: GccBundledMachineCallReplayOperation? = null): ByteArray {
+        output: Path, operationWallTime: JsonObject, replay: GccBundledMachineCallReplayOperation? = null,
+        external: GccBundledExternalCallReplayOperation? = null): ByteArray {
         listOf(journal, run, output).forEach { require(it.isAbsolute && it.normalize() == it) }
         require(binding.contentEquals(GccNativeCallReceiptLineage.createBinding(operation))) {
             "native CLI binding belongs to another operation"
@@ -21,6 +22,7 @@ internal object GccBundledNativeCallCliResult {
         val snapshot = operation.snapshot
         val model = operation.model
         require(replay == null || replay.native === operation) { "native replay belongs to another captured operation" }
+        require(external == null || external.machine === replay)
         val replayFields = replay?.let {
             mapOf(
                 "structuralReplayBinding" to JsonPrimitive(output.resolve(GccBundledNativeStructuralEvidenceV1.BINDING_NAME).toString()),
@@ -30,12 +32,22 @@ internal object GccBundledNativeCallCliResult {
                     decompengine.oracle.structural.StructuralProductionReplayContract.scoreSelectedBoundary(it.selectedInputs))),
                 "independentMachineCallReport" to JsonPrimitive(output.resolve(GccBundledMachineCallReplayOutputCapture.REPORT_NAME).toString()),
                 "independentMachineCallReportSha256" to JsonPrimitive(OracleArtifacts.sha256(it.capture.reportBytes)),
-                "callAuthority" to JsonPrimitive("unavailable-pending-population-and-external-composition"),
+                "callAuthority" to JsonPrimitive(if (external == null) "unavailable-pending-population-and-external-composition"
+                    else "unavailable-pending-scoped-production-contract-admission"),
             )
         } ?: emptyMap()
+        val externalFields = external?.let { mapOf(
+            "externalCallReplayBinding" to JsonPrimitive(output.resolve(GccBundledExternalCallEvidenceV1.BINDING_NAME).toString()),
+            "externalCallReplayBindingSha256" to JsonPrimitive(OracleArtifacts.sha256(GccBundledExternalCallEvidenceV1.create(it))),
+            "callPopulationInput" to JsonPrimitive(output.resolve(GccBundledExternalCallEvidenceV1.LEDGER_INPUT_NAME).toString()),
+            "callPopulationInputSha256" to JsonPrimitive(OracleArtifacts.sha256(it.projection.inputBytes)),
+            "callPopulationReport" to JsonPrimitive(output.resolve(GccBundledExternalCallEvidenceV1.LEDGER_REPORT_NAME).toString()),
+            "callPopulationReportSha256" to JsonPrimitive(OracleArtifacts.sha256(it.projection.reportBytes)),
+        ) } ?: emptyMap()
+        val version = if (external != null) 3 else if (replay != null) 2 else 1
         return OracleJson.canonicalBytes(JsonObject(mapOf(
-            "provider" to JsonPrimitive(if (replay == null) "gcc-bundled-cli-native-call-result-v1" else "gcc-bundled-cli-native-call-result-v2"),
-            "schemaVersion" to JsonPrimitive(if (replay == null) 1 else 2),
+            "provider" to JsonPrimitive("gcc-bundled-cli-native-call-result-v$version"),
+            "schemaVersion" to JsonPrimitive(version),
             "complete" to JsonPrimitive(false), "scored" to JsonPrimitive(false), "releaseEligible" to JsonPrimitive(false),
             "operationId" to intent.getValue("operationId"),
             "requestSha256" to JsonPrimitive(OracleArtifacts.sha256(operation.intentBytes)),
@@ -56,7 +68,7 @@ internal object GccBundledNativeCallCliResult {
             "nativeAssessmentReceiptSha256" to JsonPrimitive(OracleArtifacts.sha256(operation.nativeAssessmentReceiptBytes)),
             "operationWallTime" to operationWallTime,
             "scratchDisposition" to JsonPrimitive("retained; native observations unscored; release and cold recovery unqualified"),
-        ) + replayFields))
+        ) + replayFields + externalFields))
     }
 }
 
@@ -67,7 +79,7 @@ internal object GccBundledNativeCallCliPublication {
         val retainedBytes = resultBytes.copyOf()
         val result = OracleJson.parseCanonical(retainedBytes).jsonObject
         val version = result.getValue("schemaVersion").jsonPrimitive.intOrNull
-        require(version in setOf(1, 2) &&
+        require(version in setOf(1, 2, 3) &&
             result.getValue("provider") == JsonPrimitive("gcc-bundled-cli-native-call-result-v$version") &&
             result.getValue("complete") == JsonPrimitive(false) && result.getValue("scored") == JsonPrimitive(false) &&
             result.getValue("releaseEligible") == JsonPrimitive(false)) { "native marker must remain an unscored byte result" }
