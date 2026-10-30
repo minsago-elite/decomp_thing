@@ -156,7 +156,28 @@ async function auditWithFixtures(origin, fixtures, fulfilled, unmapped) {
   const populated = (page) => `document.querySelector('main h1') !== null && document.querySelector('main [aria-busy="true"]') === null
     && document.body.innerText.includes(${JSON.stringify(page.rendered)}) && !document.querySelector('main [role="alert"]')`;
   const open = async (target, page, context, prepare = true) => {
-    interactions.push(...await openEngineAuditPage(target, { origin, page, fulfilled, context, prepare }));
+    try {
+      interactions.push(...await openEngineAuditPage(target, { origin, page, fulfilled, context, prepare }));
+    } catch (failure) {
+      const record = records.at(-1);
+      const state = await target.evaluate(() => ({
+        url: location.href,
+        heading: document.querySelector('main h1')?.textContent?.trim() ?? null,
+        alerts: Array.from(document.querySelectorAll('main [role="alert"]'), element => element.textContent?.trim().slice(0, 200)).slice(0, 4),
+      })).catch(() => null);
+      const details = {
+        page: page.name,
+        context,
+        url: target.url(),
+        state,
+        apiRequests: record?.apiRequests.slice(-8) ?? [],
+        recentResponses: record?.responses.slice(-12) ?? [],
+        exceptions: record?.exceptions.slice(-8) ?? [],
+        csp: record?.csp.slice(-8) ?? [],
+      };
+      if (failure instanceof Error) failure.message = `${failure.message}; cross-engine state ${JSON.stringify(details)}`;
+      throw failure;
+    }
   };
   const layout = []; const contrast = []; const focus = [];
   for (const viewport of auditViewports) {

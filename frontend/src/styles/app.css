@@ -156,7 +156,13 @@ input:not([type="checkbox"], [type="radio"], [type="file"], [type="range"]), sel
 }
 textarea { min-height: 6rem; }
 input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); width: 1.1rem; height: 1.1rem; }
-input[type="file"] { max-width: 100%; }
+input[type="file"] {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+}
 input[type="file"]::file-selector-button {
   min-height: 2.75rem; margin-inline-end: 0.75rem; padding: 0.5rem 1rem; border: 1px solid var(--control-line);
   border-radius: var(--radius-control); background: var(--surface); color: var(--accent); font: inherit; font-weight: 600; cursor: pointer;
