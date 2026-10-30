@@ -6,7 +6,7 @@ import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import { assertAudit, auditFixtures, auditViewports, measureContrast, measureFocus, measurePage } from './packaged-browser-audit.mjs';
-import { openEngineAuditPage, serveEngineAuditFixtures } from './packaged-browser-engine-adapter.mjs';
+import { isPlaywrightScreenshotCspViolation, openEngineAuditPage, serveEngineAuditFixtures } from './packaged-browser-engine-adapter.mjs';
 
 // Cross-engine packaged smoke and audit (#631). The DevTools-based check-packaged-web-browser.mjs
 // is Chromium-only; this runner drives Firefox, WebKit or Chromium through Playwright against the
@@ -707,11 +707,16 @@ try {
   report.auditOrigins = { packaged: origin, fixtures: audited.origin };
   report.auditVerdict = assertAudit(audited.result, installation.manifest, audited.responses, audited.origin);
   const records = [smoked.record, ...audited.records];
+  const cspEvents = records.flatMap((record) => record.csp);
+  const playwrightScreenshotEvents = cspEvents.filter(isPlaywrightScreenshotCspViolation);
+  const applicationCspViolations = cspEvents.filter((event) => !isPlaywrightScreenshotCspViolation(event));
   report.contentSecurityPolicy = {
     documents: records.flatMap((record) => record.documents).length,
     missingPolicyDocuments: records.flatMap((record) => record.documents).filter((entry) => [origin, audited.origin].some(base => entry.url.startsWith(`${base}/nested`) && !entry.url.startsWith(`${base}/nested/api/`)) && !entry.csp),
-    // Fixture-fulfilled API responses (such as the attachment download) are not packaged documents.
-    violations: records.flatMap((record) => record.csp), exceptions: records.flatMap((record) => record.exceptions),
+    // Keep the Playwright-owned WebKit screenshot event visible as evidence; do not weaken or
+    // suppress the packaged document's CSP, and fail on every other observed policy violation.
+    violations: applicationCspViolations, playwrightScreenshotViolations: playwrightScreenshotEvents,
+    exceptions: records.flatMap((record) => record.exceptions),
   };
   const failures = [...report.auditVerdict.failures];
   if (report.contentSecurityPolicy.violations.length) failures.push(`CSP violations: ${JSON.stringify(report.contentSecurityPolicy.violations)}`);

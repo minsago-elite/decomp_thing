@@ -5,7 +5,7 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { runInNewContext } from 'node:vm';
 import { auditFixtures, auditViewports } from './packaged-browser-audit.mjs';
-import { engineContentReady, enginePageReady, openEngineAuditPage, serveEngineAuditFixtures } from './packaged-browser-engine-adapter.mjs';
+import { engineContentReady, enginePageReady, isPlaywrightScreenshotCspViolation, openEngineAuditPage, serveEngineAuditFixtures } from './packaged-browser-engine-adapter.mjs';
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const fixtures = () => auditFixtures(repo, 'b'.repeat(64));
@@ -39,6 +39,26 @@ function modeledPage(page, { omitRead, omitContent, hidden = false, status = 200
   };
   return { target, fulfilled, actions, nodes, invoke };
 }
+
+test('only the exact Playwright WebKit screenshot style violation is classified as driver-owned', () => {
+  const base = {
+    effectiveDirective: 'style-src-elem', blockedURI: 'inline', auditPhase: 'screenshot:desktop:job detail',
+    sourceFile: null, eventTarget: { kind: '#document' }, styleOperations: [],
+    styleMutations: [
+      { kind: 'style-node-added', tag: 'style', styleText: 'body {}' },
+      { kind: 'style-node-removed', tag: 'style', styleText: 'body {}' },
+    ],
+  };
+  assert.equal(isPlaywrightScreenshotCspViolation(base), true);
+  for (const changed of [
+    { ...base, auditPhase: null },
+    { ...base, effectiveDirective: 'style-src-attr' },
+    { ...base, sourceFile: 'assets/app.js' },
+    { ...base, styleOperations: [{ operation: 'createElement(style)' }] },
+    { ...base, styleMutations: [{ kind: 'style-node-added', tag: 'style', styleText: 'body {}' }] },
+    { ...base, styleMutations: base.styleMutations.map(mutation => ({ ...mutation, styleText: 'body { color: red; }' })) },
+  ]) assert.equal(isPlaywrightScreenshotCspViolation(changed), false);
+});
 
 test('every layout and fresh focus navigation populates reads and distinct visible content', async () => {
   let navigations = 0;

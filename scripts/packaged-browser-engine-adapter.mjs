@@ -14,6 +14,21 @@ export function enginePageReady({ rendered, checks = [] }) {
       element.getClientRects().length > 0 && element.textContent.includes(check.text)));
 }
 
+/**
+ * Playwright 1.58.2's WebKit screenshot path injects `body {}` in its isolated utility world
+ * while synchronizing animations. The enforced CSP correctly blocks that driver-only style;
+ * retain this exact signature separately instead of attributing it to packaged application code.
+ */
+export function isPlaywrightScreenshotCspViolation(violation) {
+  if (violation?.effectiveDirective !== 'style-src-elem' || violation.blockedURI !== 'inline'
+      || !violation.auditPhase?.startsWith('screenshot:') || violation.sourceFile !== null
+      || violation.eventTarget?.kind !== '#document' || !Array.isArray(violation.styleOperations)
+      || violation.styleOperations.length !== 0 || !Array.isArray(violation.styleMutations)) return false;
+  const mutations = violation.styleMutations;
+  return ['style-node-added', 'style-node-removed'].every(kind => mutations.some(mutation =>
+    mutation.kind === kind && mutation.tag === 'style' && mutation.styleText === 'body {}'));
+}
+
 /** Every fresh layout/contrast/focus navigation must populate its explicit-read views. */
 export async function openEngineAuditPage(target, { origin, page, fulfilled, context, prepare = true }) {
   await target.goto(origin + page.path);
