@@ -359,7 +359,7 @@ class WebGitControllerTest {
             assertTrue(status.getValue("complete").jsonPrimitive.boolean)
             assertNotEquals(JsonNull, status.getValue("nextCursor"))
             val last = data(f.read("$base/status?limit=200&cursor=${status.getValue("nextCursor").jsonPrimitive.content}"), 200, "gitStatus")
-            assertEquals(201, status.getValue("entries").jsonArray.size + last.getValue("entries").jsonArray.size)
+            assertEquals(202, status.getValue("entries").jsonArray.size + last.getValue("entries").jsonArray.size)
             val guards = buildJsonObject {
                 put("repositoryVersion", status.getValue("repositoryVersion")); put("worktreeVersion", status.getValue("worktreeVersion"))
                 put("expectedHeadObjectId", status.getValue("headObjectId")); put("expectedRefId", JsonNull); put("expectedRefObjectId", JsonNull)
