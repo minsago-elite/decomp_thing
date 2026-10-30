@@ -296,7 +296,7 @@ class UploadServer(
     }
     private val gitAvailability = decompengine.git.GitRuntime.detect()
     private val gitRepositories = decompengine.git.ManagedGitRepositories(store.storageRoot, gitAvailability,
-        jobs::gitSourceSnapshot, gitImportRoot)
+        jobs::gitSourceSnapshot, gitImportRoot, acceptance = decompengine.git.GitAcceptanceResolver(jobs::gitAcceptance))
     private val api = spaAssets?.let { WebApiController(access, it, jobs, jobMutations, streamResources,
         harnessReadiness = harnessReadiness, agentPreflight = agentPreflight,
         git = WebGitCapability(gitAvailability, gitRepositories)) }

@@ -182,7 +182,7 @@ internal storage optimization and must not merge identity, permissions or histor
 | `GET G/{status,history,diff,refs}` | `200 gitStatus`, `gitHistory`, `gitDiff`, `gitRefs` | Bounded, anchored pages; full object IDs; opaque file IDs; implemented by #202 |
 | `GET G/{worktrees,remotes,conflicts}` | Bounded typed Git read | Scoped worktree/ref/object IDs; #204/#207/#210/#211 |
 | `POST J/repositories` | `202 operation` | Strict `gitRepositoryInit`/`gitRepositoryAttach`, session/Origin/CSRF, job If-Match and idempotency; init/attach implemented by #201, clone #209 |
-| `POST G/operations` | `202 operation` | Named action, selected IDs, guards, idempotency; #203–#212 |
+| `POST G/operations` | `202 operation` | Named action, selected file IDs, full guards, work-tree If-Match, idempotency; stage/unstage/commit implemented by #203, others #204–#212 |
 | `GET G/operations/{operationId}` | `200 operation` | Durable outcome/recovery state; init/attach operations implemented by #201, others #209 |
 | `POST G/operations/{operationId}/cancel` | `202 operation` or terminal `200` | Explicit cancellation, optimistic guard; #209 |
 
@@ -930,6 +930,120 @@ conflicts, unusual and invalid-UTF-8 names, anchored history pages across a merg
 branch, renames, binary sizes, a large patch truncated within its bound, staged diffs on an unborn
 branch, and paged peeled tags. `WebGitControllerTest` covers the HTTP shapes, cursors and
 refusals.
+
+### Staging and deliberate commits
+
+`POST G/operations` accepts `git.stage`, `git.unstage` and `git.commit` (#576, #577). The body
+holds the target `worktreeId`, the full `guards` taken from the reviewed status and the exact
+`selectedFileIds`; a commit also carries its `message`. Bodies are strict JSON of at most 64 KiB
+and never contain a path or pathspec. `If-Match` must name the guarded `worktreeVersion`, and an
+`Idempotency-Key` is required. Keyed replay returns the original operation. The response is
+`202 operation`, already terminal for most local actions, with the durable operation at
+`Location`.
+
+Routine work-tree operations never use up the job's operation quota. When an admission would
+reach it, the oldest terminal work-tree records are retired, and the newest 63 stay replayable by
+their keys. Initialization, import and `recovery-required` records are never retired. If a
+retired key is sent again, it is admitted as a new request, and its guards refuse it unless the
+reviewed state still holds.
+
+After `git rm --cached`, a path is both staged for deletion and untracked, in one status entry.
+Selecting that entry for `git.unstage` unstages the deletion, and selecting it for `git.stage`
+stages the replacement. Its staged deletion remains protected by overlap checks: an untracked
+replacement does not allow another selected path to silently unstage the deletion.
+
+The server checks guards and selection at admission under the job lock. Mutation worktree
+versions additionally bind bounded exact content/mode commitments for non-ignored status paths;
+the metadata-only pagination fingerprint is not staging authorization. Status must be complete.
+Stage/unstage acquire Git's `index.lock`, `HEAD.lock` and the symbolic HEAD's branch lock before
+final validation. They mutate a private index and atomically publish it under those locks, so an
+external Git writer cannot invalidate overlap checks between validation and mutation. Unstage
+resets against the guarded parent object ID, not mutable `HEAD`. Stage captures selected file/link
+bytes, verifies their reviewed commitments, and writes exact blob/index entries from the capture;
+later worktree edits never supply unreviewed bytes to Git. Content reads share a 512 MiB bound and
+fail closed on drift, unsupported entries or overflow; partial private mutations are not published.
+Commits acquire `index.lock` and `HEAD.lock`, revalidate, and capture the reviewed index into a
+private immutable tree. The commit uses that tree and the reviewed parent, never the later live index. Publication locks the
+target ref, compares the reviewed HEAD under that lock, and atomically replaces the ref. Busy
+writers or a changed parent are refused; no unreviewed index entries can enter the commit.
+Because read-only status suppresses submodules, commit validation separately reads a bounded,
+gitlink-inclusive index comparison at admission, execution and from the captured private index.
+Any staged gitlink addition, pointer change, deletion or type change is refused with
+`EXCLUDED_PATH`, even if it is absent from status and has not changed the status-derived guards.
+An incomplete index comparison fails closed with `STATUS_INCOMPLETE`.
+
+| Refusal | Meaning |
+| --- | --- |
+| `409 REF_CHANGED` | `repositoryVersion`, HEAD or the guarded ref changed |
+| `WORKTREE_BUSY` (operation failure) | Another Git writer holds the index, HEAD or target-ref lock; nothing is published |
+| `409 WORKTREE_CHANGED` | The work tree or index changed (any status entry, index blob or file stat) |
+| `409 SELECTION_CHANGED` | A selected file identity is no longer in the current status |
+| `409 SELECTION_OVERLAP` | A pathspec would affect unselected descendants, staging a descendant would remove an unselected tracked ancestor, or unstaging a deletion/rename source would remove an unselected staged ancestor |
+| `409 INDEX_CHANGED` | A commit's `selectedFileIds` differ from today's staged set; nothing is swept in or left out |
+| `409 CONFLICTED`, `409 NOTHING_TO_COMMIT` | Unmerged paths exist, or nothing is staged |
+| `422 EXCLUDED_PATH` | The file is excluded by the source-only policy (decided independently of any repository `.gitignore`), is a submodule, or has a non-UTF-8 name |
+| `422 NOTHING_SELECTED`, `422 STATUS_INCOMPLETE` | A selected file has nothing to stage or unstage, or the status/index comparison was too large to review completely |
+| `503 SIGNING_UNAVAILABLE` | Server policy requires signed commits, which no capability provides |
+
+Staging runs `git add -- <paths>` with literal pathspecs. Unstaging runs `reset -q HEAD -- <paths>`
+(or `rm --cached` on an unborn branch), so work-tree contents never change. A commit uses the
+server's configured identity, passed as allowlisted author and committer variables. `write-tree`
+uses an operation-private index, and `commit-tree --no-gpg-sign` creates the exact reviewed commit
+without running commit hooks. The message is read verbatim from an operation-private file.
+Managed files-backend ref publication does not append reflogs; history remains object-based.
+Nothing is pushed. Bootstrap reports
+`git-signing` as `unsupported`, so a signing requirement can never hang on a hidden prompt.
+
+A successful commit returns its object ID as `resultObjectId`. It is mapped to the repository's
+candidate revision only when its tree, compared by Git blob IDs computed from the recorded
+snapshot, equals exactly the copied snapshot minus policy-excluded files. The complete captured
+file manifest must match the manifest retained at initialization. SHA-256 commitments, sizes and
+Git blob IDs come from the same bounded read of each file, so changed canonical inputs or added
+undeclared files cannot borrow the original revision's identity. The mapping is stored
+under the repository as `(repositoryId, objectId, revisionId, sourceSha256)` with the
+work-tree's dirty state. `gitWorkspace.mapping` and history entries show it. `acceptance` is read
+from the job's canonical accepted revision at view time, never stored and never changed by a
+commit. Any other commit is a new candidate and stays unmapped. Mapping/inspection IO failure
+also leaves the published commit successful with an explicit unconfirmed-mapping message; it
+never turns that commit into an apparently uncommitted failure. Other post-publication failures
+report `recovery-required`, retaining the exact published `resultObjectId` when known, rather
+than reading a possibly later writer's HEAD as this operation's result.
+
+After a restart, stage and unstage operations become `interrupted`: their index publication may
+have completed, so status must be re-read; they are never replayed. All mutation locks have private inode witnesses persisted
+before the public lock names are linked, so owned locks can be reclaimed even with empty or
+partial contents. A replacement inode is never reclaimed on the basis of matching contents when
+a witness exists. Complete operation markers from older versions remain recoverable; legacy
+partial locks without ownership proof are preserved.
+
+A commit is `interrupted` when HEAD is still the reviewed parent and no unproven Git locks
+remain. Otherwise it becomes `recovery-required`: `COMMIT_LOCKS_REQUIRE_REVIEW` means a remaining
+index, HEAD or target-ref lock requires inspection of the repository and its writers. A moved
+HEAD is included as `resultObjectId`, because the commit may or may not be the requested one.
+Nothing is repeated automatically.
+
+Job retention: uncommitted or unpublished Git work should hold the job against deletion. The
+`JobRetentionHold` interface arrives with #1694 (D10, #509) and has not merged yet. Registering a
+hold for a dirty work tree or for unmapped commits is left as a follow-up once it lands.
+
+`GitWorkspaceMutationsTest` covers:
+- exact partial staging, unstaging on an unborn branch, a mapped commit with the server identity
+  and verbatim message, and a second, unmapped commit;
+- acceptance derived at read time;
+- every refusal above, including a `.gitignore` negation that tries to re-include a credential;
+- keyed replay and idempotency conflict;
+- an external edit between admission and execution, which fails with `WORKTREE_CHANGED`;
+- staging a descendant refuses an unselected tracked ancestor deletion, but succeeds after that
+  deletion is explicitly staged;
+- external index writers after capture, busy locks, parent CAS, detached parents in both object
+  formats, and exact result identity when a later writer advances HEAD;
+- snapshot file additions and mutation after capture, ordinary post-publication errors and
+  optional mapping-write failure;
+- restart before and after the commit, empty/partial owned lock recovery, external replacement
+  preservation and conservative recovery status for unproven legacy locks.
+
+`WebGitControllerTest` covers the HTTP guards, `If-Match` binding, strict bodies and the mapping
+shown on the workspace and in history.
 
 ## Legacy compatibility
 

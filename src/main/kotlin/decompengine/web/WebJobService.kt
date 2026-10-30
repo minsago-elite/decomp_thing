@@ -875,6 +875,18 @@ class WebJobService(
         return decompengine.git.GitSourceSnapshot(directory, runId, revisionId, candidate.sourceSha256, commitments)
     }
 
+    /**
+     * Canonical acceptance of one revision and source digest, for Git provenance views. Only the
+     * job's recorded accepted revision is `accepted`; nothing is inferred from a commit or branch.
+     */
+    internal fun gitAcceptance(jobId: String, revisionId: String, sourceSha256: String): Pair<String, String?> =
+        when (val inspected = inspectDurableJob(jobId)) {
+            is WorkflowJobInspection.Available -> inspected.snapshot.acceptedRevision
+                ?.takeIf { it.revisionId == revisionId && it.sourceSha256 == sourceSha256 }
+                ?.let { "accepted" to it.artifactId } ?: ("not-evaluated" to null)
+            is WorkflowJobInspection.Unavailable -> "unknown" to null
+        }
+
     /** Shared fixed-path journal read for both HTTP adapters; absence is not empty history. */
     @Synchronized
     internal fun readProgressJournal(jobId: String, runId: String? = null): ByteArray {

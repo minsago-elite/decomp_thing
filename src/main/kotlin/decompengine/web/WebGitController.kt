@@ -1,12 +1,12 @@
 package decompengine.web
 
 import com.sun.net.httpserver.HttpExchange
-import decompengine.git.GitHeadState
 import decompengine.git.GitOperationRecord
-import decompengine.git.GitRefObservation
 import decompengine.git.GitRepositoryRecord
 import decompengine.git.GitRepositoryRequest
 import decompengine.git.GitWorkspaceView
+import decompengine.git.GitWorkspaceVersions
+import decompengine.git.GitMappingView
 import decompengine.git.ManagedGitException
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.StrictJsonLimits
@@ -17,7 +17,6 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
-import java.security.MessageDigest
 
 /**
  * Managed repository routes (#571-#573): `GET`/`POST J/repositories`, `GET G` and
@@ -32,22 +31,25 @@ internal class WebGitController(
     private val basePath: String,
 ) {
     private val reads = WebGitReads { git.repositories() }
+    private val operations = WebGitOperations({ git.repositories() }, basePath)
 
     fun handle(exchange: HttpExchange, parts: List<String>) {
         val jobId = parts[1]
-        val mutation = if (parts.size == 3 && exchange.requestMethod == "POST") jobMutations.authorizeGitRepository(exchange) else null
+        val workspaceChange = parts.size == 5 && parts[4] == "operations"
+        val mutation = if ((parts.size == 3 || workspaceChange) && exchange.requestMethod == "POST") jobMutations.authorizeGitRepository(exchange) else null
         if (mutation == null) {
             access.authorize(exchange, WebEndpointPolicy.privateRead())
             if (exchange.requestMethod != "GET") throw WebAccessDenied(405, "METHOD_NOT_ALLOWED", "This repository resource is read-only.",
-                if (parts.size == 3) setOf("GET", "POST") else setOf("GET"))
+                if (parts.size == 3 || workspaceChange) setOf("GET", "POST") else setOf("GET"))
             if (exchange.requestHeaders.keys.any { it.startsWith("If-", true) && !it.equals("If-None-Match", true) }) {
                 throw WebAccessDenied(400, "UNSUPPORTED_HEADER", "Repository reads do not support conditional headers.")
             }
         }
-        val read = parts.size == 5
+        if (workspaceChange && mutation == null) throw WebAccessDenied(405, "METHOD_NOT_ALLOWED", "Repository operations are created with POST.", setOf("POST"))
+        val read = parts.size == 5 && !workspaceChange
         if (!read) requireNoWebApiQuery(exchange)
         requireJsonAccept(exchange)
-        if (!jobId.matches(JOB) || (if (read) listOf(parts[3]) else parts.drop(3).filterIndexed { index, _ -> index != 1 }).any { !it.matches(ID) }) {
+        if (!jobId.matches(JOB) || (if (read || workspaceChange) listOf(parts[3]) else parts.drop(3).filterIndexed { index, _ -> index != 1 }).any { !it.matches(ID) }) {
             throw WebAccessDenied(404, "NOT_FOUND", "The requested repository resource is unavailable.")
         }
         // A job must exist before any repository fact is disclosed; it also supplies the job version guard.
@@ -55,6 +57,7 @@ internal class WebGitController(
         val repositories = git.repositories()
         try {
             when {
+                workspaceChange -> operations.handle(exchange, checkNotNull(mutation), jobId, parts[3])
                 mutation != null -> {
                     val match = header(exchange, "If-Match")
                         ?: throw WebAccessDenied(428, "PRECONDITION_REQUIRED", "Creating a repository requires the current job version in If-Match.")
@@ -162,21 +165,22 @@ internal fun webGitDenied(failure: ManagedGitException): WebAccessDenied {
     return when (failure.code) {
         "CAPABILITY_UNAVAILABLE", "IMPORT_UNAVAILABLE", "SERVER_DRAINING" -> WebAccessDenied(503, "CAPABILITY_UNAVAILABLE", message)
         "NOT_FOUND" -> WebAccessDenied(404, "NOT_FOUND", message)
-        "REPOSITORY_EXISTS", "WORKTREE_BUSY", "IDEMPOTENCY_CONFLICT" -> WebAccessDenied(409, failure.code, message)
+        "REPOSITORY_EXISTS", "WORKTREE_BUSY", "IDEMPOTENCY_CONFLICT", "REF_CHANGED", "WORKTREE_CHANGED", "INDEX_CHANGED",
+        "SELECTION_CHANGED", "SELECTION_OVERLAP", "CONFLICTED", "NOTHING_TO_COMMIT", "ACTIVE_RUN", "WORKTREE_DIRTY", "BRANCH_EXISTS", "TAG_EXISTS",
+        "BRANCH_UNMERGED", "BRANCH_CURRENT", "WORKTREE_UNMERGED" -> WebAccessDenied(409, failure.code, message)
         "QUOTA_EXCEEDED" -> WebAccessDenied(429, "QUOTA_EXCEEDED", message)
-        "VALIDATION_FAILED", "SOURCE_REVISION_UNAVAILABLE", "IMPORT_SOURCE_UNAVAILABLE", "PATCH_UNAVAILABLE" -> WebAccessDenied(422, failure.code, message)
+        "VALIDATION_FAILED", "SOURCE_REVISION_UNAVAILABLE", "IMPORT_SOURCE_UNAVAILABLE", "EXCLUDED_PATH", "NOTHING_SELECTED",
+        "STATUS_INCOMPLETE", "SIZE_EXCEEDED", "PATCH_UNAVAILABLE" -> WebAccessDenied(422, failure.code, message)
+        "SIGNING_UNAVAILABLE" -> WebAccessDenied(503, failure.code, message)
         "REPOSITORY_UNSUPPORTED", "REPOSITORY_CORRUPT", "REPOSITORY_CONFIG_UNTRUSTED", "REPOSITORY_UNAVAILABLE" ->
             WebAccessDenied(503, failure.code, message)
         else -> WebAccessDenied(503, "STORAGE_UNAVAILABLE", "Repository storage is unavailable. Preserve it and inspect the server.")
     }
 }
 
-private fun digest(prefix: String, text: String): String = prefix + MessageDigest.getInstance("SHA-256")
-    .digest(text.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }.take(32)
+internal fun webGitRefId(repositoryId: String, name: String) = GitWorkspaceVersions.refId(repositoryId, name)
 
-internal fun webGitRefId(repositoryId: String, name: String) = digest("ref_", "$repositoryId\n$name")
-
-internal fun webGitRefVersion(name: String, objectId: String) = digest("ref_v_", "$name\n$objectId")
+internal fun webGitRefVersion(name: String, objectId: String) = GitWorkspaceVersions.refVersion(name, objectId)
 
 internal fun webGitOperation(operation: GitOperationRecord): JsonObject = buildJsonObject {
     put("operationId", operation.operationId)
@@ -213,31 +217,37 @@ internal fun webGitWorkspace(view: GitWorkspaceView): JsonObject {
     val record = view.record
     val observation = view.observation
     val head = observation.head
-    fun refId(name: String) = webGitRefId(record.repositoryId, name)
-    val headRef = if (head.state == GitHeadState.ATTACHED) GitRefObservation(checkNotNull(head.refName), checkNotNull(head.objectId)) else null
-    val refs = (listOfNotNull(headRef) + observation.refs.filter { it != headRef }).take(200)
-    val refsText = refs.joinToString("") { "${it.name}\u0000${it.objectId}\n" }
     return buildJsonObject {
         put("repositoryId", record.repositoryId)
         put("worktreeId", record.worktreeId)
-        put("repositoryVersion", digest("repository_v_", "${record.repositoryId}\n${record.operationId}\n${observation.refsTruncated}\n$refsText"))
-        put("worktreeVersion", digest("worktree_v_", observation.statusDigest))
+        put("repositoryVersion", GitWorkspaceVersions.repositoryVersion(record, observation))
+        put("worktreeVersion", GitWorkspaceVersions.worktreeVersion(observation))
         put("objectFormat", observation.objectFormat.wireName)
         put("origin", record.origin)
         put("trackingPolicy", record.trackingPolicy)
         put("headObjectId", head.objectId?.let(::JsonPrimitive) ?: JsonNull)
-        put("headRefId", headRef?.let { JsonPrimitive(refId(it.name)) } ?: JsonNull)
+        put("headRefId", GitWorkspaceVersions.headRefId(record, observation)?.let(::JsonPrimitive) ?: JsonNull)
         put("headState", head.state.wireName)
         put("headRefName", head.refName?.let(::JsonPrimitive) ?: JsonNull)
         put("candidateRevisionId", record.candidateRevisionId?.let(::JsonPrimitive) ?: JsonNull)
         put("dirty", observation.dirty)
-        put("refs", JsonArray(refs.map { ref ->
+        put("refs", JsonArray(GitWorkspaceVersions.refs(observation).map { ref ->
             buildJsonObject {
-                put("refId", refId(ref.name)); put("displayName", ref.name); put("objectId", ref.objectId)
-                put("version", webGitRefVersion(ref.name, ref.objectId))
+                put("refId", GitWorkspaceVersions.refId(record.repositoryId, ref.name)); put("displayName", ref.name)
+                put("objectId", ref.objectId); put("version", GitWorkspaceVersions.refVersion(ref.name, ref.objectId))
             }
         }))
-        // No commit is mapped to a source revision until an explicit, validated commit records one.
-        put("mapping", JsonNull)
+        // A commit maps to a reconstruction revision only through an explicit, validated record.
+        put("mapping", view.mapping?.let(::webGitMapping) ?: JsonNull)
     }
+}
+
+internal fun webGitMapping(mapping: GitMappingView): JsonObject = buildJsonObject {
+    put("repositoryId", mapping.record.repositoryId)
+    put("objectId", mapping.record.objectId)
+    put("revisionId", mapping.record.revisionId)
+    put("sourceSha256", mapping.record.sourceSha256)
+    put("archiveArtifactId", JsonNull)
+    put("acceptance", mapping.acceptance)
+    put("acceptanceArtifactId", mapping.acceptanceArtifactId?.let(::JsonPrimitive) ?: JsonNull)
 }
