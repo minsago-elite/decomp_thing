@@ -330,7 +330,7 @@ export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready
   assert.equal(await evaluate(tab, `document.querySelector('ol[aria-label="Activity observations"]').closest('[aria-live], [role="status"], [role="log"]') === null`), true);
   await evaluate(tab, `[...document.querySelectorAll('button')].find(b => b.textContent === 'Read exploration evidence').click()`);
   try {
-    await ready(tab, `document.body.innerText.includes('Report state: available. Authority: observations.') && document.body.innerText.includes('Producer confidence score')`, 'bound exploration summary');
+    await ready(tab, `document.body.innerText.includes('Report state: available. Authority: observations.') && document.body.innerText.includes('Uncalibrated exploration breadth heuristic')`, 'bound exploration summary');
   } catch (failure) {
     const page = await evaluate(tab, `({ pathname: location.pathname,
       heading: document.querySelector('h1')?.textContent ?? null,
