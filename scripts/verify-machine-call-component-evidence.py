@@ -762,7 +762,10 @@ class RetainedLoadIndex:
     def __init__(self, inventory: dict, input_bytes: int):
         self.loads, self.load_positions, self.load_prefix_ends = [], {}, []
         load_headers = [row for row in inventory["programHeaders"] if row["type"] == 1]
+        load_indices = set()
         for row in load_headers:
+            require(row["index"] not in load_indices, "duplicate retained load index")
+            load_indices.add(row["index"])
             start, size, file_size, offset = (address(row[key]) for key in ("virtualAddress", "memorySize", "fileSize", "offset"))
             require(file_size <= size and start + size <= (1 << 64) - 1 and offset + file_size <= input_bytes,
                     "retained load bounds differ")

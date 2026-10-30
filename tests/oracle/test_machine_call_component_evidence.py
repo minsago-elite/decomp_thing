@@ -1424,6 +1424,17 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
                     self.verify()
                 version[field] = previous
 
+    def test_duplicate_empty_load_index_cannot_override_text_segment_permissions(self) -> None:
+        inventory = self.report["dynamicInventory"]
+        text_load = next(row for row in inventory["programHeaders"] if row["index"] == 9)
+        text_load["flags"] = 4
+        empty_duplicate = copy.deepcopy(text_load)
+        empty_duplicate.update(flags=5, fileSize="0x0", memorySize="0x0")
+        inventory["programHeaders"].append(empty_duplicate)
+        self.write_payloads()
+        with self.assertRaisesRegex(VERIFY.VerificationError, "duplicate retained load index"):
+            self.verify()
+
     def test_probe_requires_unique_executable_file_backed_window_and_exact_length(self) -> None:
         original = copy.deepcopy(self.report)
         for length in (6, 7, 14, 15):
