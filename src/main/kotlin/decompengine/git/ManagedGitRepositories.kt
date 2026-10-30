@@ -1078,12 +1078,13 @@ class ManagedGitRepositories(
                         }
                         val path = checkNotNull(entry.path.exact)
                         GitConflictFiles.replace(located.workTree, path,
-                            checkNotNull(request.parameters["expectedSha256"]), bytes) {
-                            crash(GitOperationCrashPoint.BEFORE_PUBLISH)
-                            requireNoLease(located, runs)
-                            val publishObservation = GitRepositoryInspector.inspect(runner, located.gitDir, located.workTree, located.commonDir)
-                            validateIntegration(runner, located, publishObservation, request)
-                        }
+                            checkNotNull(request.parameters["expectedSha256"]), bytes,
+                            beforePublish = {
+                                crash(GitOperationCrashPoint.BEFORE_PUBLISH)
+                                requireNoLease(located, runs)
+                                val publishObservation = GitRepositoryInspector.inspect(runner, located.gitDir, located.workTree, located.commonDir)
+                                validateIntegration(runner, located, publishObservation, request)
+                            }, temporaryDirectory = staging)
                         entry.path.fileId(located.worktreeId)
                     }
                 }
@@ -2018,20 +2019,24 @@ class ManagedGitRepositories(
         val gitDir = if (operation.worktreeId == record.worktreeId) commonDir else commonDir.resolve("worktrees").resolve(operation.worktreeId)
         val workTree = if (operation.worktreeId == record.worktreeId) directory.resolve(WORK_TREE) else directory.resolve(LINKED_WORK_TREES).resolve(operation.worktreeId)
         val staging = directory.resolve("staging").resolve(operation.operationId)
-        if (request.action == GitOperationAction.CONFLICT_COMPLETE) {
-            // Completion acquires Git-compatible index/HEAD/branch locks. Reclaim only witnesses
-            // owned by this operation before reconciliation can persist an outcome or retire staging.
+        val recoversWorkspaceLocks = request.action == GitOperationAction.CONFLICT_COMPLETE ||
+            request.action == GitOperationAction.CONFLICT_SAVE
+        if (recoversWorkspaceLocks) {
+            // Save and completion both hold Git-compatible index/HEAD/branch locks. Reclaim only
+            // witnesses owned by this operation before reconciliation can retire staging.
             GitWorkspaceMutations.reclaimCommitLocks(gitDir, staging, operation.operationId, commonDir)
         }
         val merging = GitIntegrations.mergeInProgress(gitDir)
         val observed = GitRepositoryInspector.head(runner, gitDir, record.objectFormat)
         val head = observed.objectId
-        if (request.action == GitOperationAction.CONFLICT_COMPLETE) {
+        if (recoversWorkspaceLocks) {
             val locks = listOf(gitDir.resolve("index.lock"), gitDir.resolve("HEAD.lock")) +
                 listOfNotNull(observed.refName?.let { commonDir.resolve("$it.lock") })
             if (locks.any { Files.exists(it, NOFOLLOW_LINKS) }) {
-                return finish(operation, GitOperationState.RECOVERY_REQUIRED, "COMPLETION_LOCKS_REQUIRE_REVIEW",
-                    "Interrupted conflict completion left a Git lock whose ownership cannot be confirmed. Inspect its writers before a new request.", head)
+                val failureCode = if (request.action == GitOperationAction.CONFLICT_COMPLETE) "COMPLETION_LOCKS_REQUIRE_REVIEW"
+                    else "SAVE_LOCKS_REQUIRE_REVIEW"
+                return finish(operation, GitOperationState.RECOVERY_REQUIRED, failureCode,
+                    "Interrupted conflict operation left a Git lock whose ownership cannot be confirmed. Inspect its writers before a new request.", head)
             }
         }
         fun headMoved() = finish(operation, GitOperationState.RECOVERY_REQUIRED, "HEAD_MOVED",
@@ -2153,11 +2158,14 @@ class ManagedGitRepositories(
                     val recovered = reconcileWorkspace(jobId, operation)
                     persist(directory, recovered)
                     clearRemoteAudit(recovered)
-                    // A conflict completion keeps its Git-lock inode witnesses in repository-owned
-                    // staging. Preserve both operation staging trees if recovery cannot prove ownership.
-                    if (!(operation.action == GitOperationAction.CONFLICT_COMPLETE && recovered.recoveryRequired)) {
+                    // Conflict saves and completions keep their Git-lock inode witnesses in
+                    // repository-owned staging. Preserve both operation staging trees if recovery
+                    // cannot prove ownership; otherwise retire the witnesses after reconciliation.
+                    val conflictLockOperation = operation.action == GitOperationAction.CONFLICT_COMPLETE ||
+                        operation.action == GitOperationAction.CONFLICT_SAVE
+                    if (!(conflictLockOperation && recovered.recoveryRequired)) {
                         try { GitStorage.deleteTree(staging) } catch (_: Exception) { /* retained for inspection */ }
-                        if (operation.action == GitOperationAction.CONFLICT_COMPLETE) {
+                        if (conflictLockOperation) {
                             try { GitStorage.deleteTree(repositoryDirectory(jobId, operation.repositoryId)
                                 .resolve("staging").resolve(operation.operationId)) } catch (_: Exception) { /* retained for inspection */ }
                         }

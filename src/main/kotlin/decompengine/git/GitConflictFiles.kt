@@ -115,27 +115,31 @@ internal object GitConflictFiles {
 
     /** Prepare and force privately, then recheck the digest under the workflow lease boundary.
      * A successful return follows fsync of the exact directory in which the rename occurred. */
-    fun replace(workTree: Path, path: String, expected: String, bytes: ByteArray,
+    fun replace(workTree: Path, path: String, expected: String, bytes: ByteArray, temporaryDirectory: Path = workTree,
         afterSync: (DurabilityPoint) -> Unit = {}, beforePublish: () -> Unit) {
         withDurableParent(workTree, path) { directory, name, pinned ->
             val permissions = try {
                 directory.getFileAttributeView(name, PosixFileAttributeView::class.java, NOFOLLOW_LINKS)?.readAttributes()?.permissions()
             } catch (_: NoSuchFileException) { null }
             val temporary = Path.of(".conflict-${UUID.randomUUID()}.tmp")
-            try {
-                directory.newByteChannel(temporary, setOf(StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE, NOFOLLOW_LINKS)).use { channel ->
-                    val buffer = ByteBuffer.wrap(bytes)
-                    while (buffer.hasRemaining()) channel.write(buffer)
-                    if (permissions != null) directory.getFileAttributeView(temporary, PosixFileAttributeView::class.java, NOFOLLOW_LINKS).setPermissions(permissions)
-                    (channel as? FileChannel ?: unsupported()).force(true)
-                }
-                afterSync(DurabilityPoint.PREPARED_FILE)
-                beforePublish()
-                if (observe(directory, name).sha256 != expected) changed()
-                directory.move(temporary, directory, name)
-                LinuxFilesystemSyscalls.synchronize(pinned)
-                afterSync(DurabilityPoint.PUBLISHED_DIRECTORY)
-            } finally { try { directory.deleteFile(temporary) } catch (_: NoSuchFileException) { } }
+            withDurableParent(temporaryDirectory, temporary.toString()) { preparedDirectory, _, preparedPinned ->
+                try {
+                    preparedDirectory.newByteChannel(temporary, setOf(StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE, NOFOLLOW_LINKS)).use { channel ->
+                        val buffer = ByteBuffer.wrap(bytes)
+                        while (buffer.hasRemaining()) channel.write(buffer)
+                        if (permissions != null) preparedDirectory.getFileAttributeView(temporary, PosixFileAttributeView::class.java, NOFOLLOW_LINKS).setPermissions(permissions)
+                        (channel as? FileChannel ?: unsupported()).force(true)
+                    }
+                    LinuxFilesystemSyscalls.synchronize(preparedPinned)
+                    afterSync(DurabilityPoint.PREPARED_FILE)
+                    beforePublish()
+                    if (observe(directory, name).sha256 != expected) changed()
+                    preparedDirectory.move(temporary, directory, name)
+                    LinuxFilesystemSyscalls.synchronize(pinned)
+                    LinuxFilesystemSyscalls.synchronize(preparedPinned)
+                    afterSync(DurabilityPoint.PUBLISHED_DIRECTORY)
+                } finally { try { preparedDirectory.deleteFile(temporary) } catch (_: NoSuchFileException) { } }
+            }
         }
     }
 }

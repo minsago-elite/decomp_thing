@@ -202,6 +202,21 @@ class GitIntegrationTest {
         assertNull(service.conflicts(jobId, repositoryId, null).integration)
     }
 
+    @Test fun `conflict save keeps prepared temporary bytes outside the guarded work tree`(): Unit = Fixture().use { f ->
+        Files.writeString(f.seed.resolve(".gitignore"), "!*.tmp\n")
+        f.remoteCommit("reinclude temporary files")
+        f.cloned()
+        val fileId = f.conflictOn("README.md")
+        val detail = service.conflictFile(jobId, repositoryId, null, fileId)
+        val saved = sync(GitOperationAction.CONFLICT_SAVE, mapOf("fileId" to fileId, "expectedSha256" to detail.currentSha256,
+            "resolution" to "text"), "line one\nresolved two\n")
+        assertEquals(GitOperationState.COMPLETED, saved.state, saved.message)
+        assertEquals("line one\nresolved two\n", Files.readString(f.workTree().resolve("README.md")))
+        assertFalse(service.workspace(jobId, repositoryId).observation.status.entries.any {
+            it.untracked && it.path.exact?.endsWith(".tmp") == true
+        })
+    }
+
     @Test fun `abort restores the pre-merge state and restarts keep merge state recoverable`(): Unit = Fixture().use { f ->
         f.cloned()
         f.localCommit("line one\nlocal two\n")
@@ -1161,6 +1176,61 @@ class GitIntegrationTest {
         assertFalse(Files.exists(repositoryGitDir.resolve("$branch.lock")))
         assertFalse(Files.exists(staging), "recovered operation staging is retired after owned locks are reclaimed")
         assertTrue(service.conflicts(jobId, repositoryId, null).mergeInProgress)
+    }
+
+    @Test fun `restart reclaims witnessed locks from interrupted conflict save and preserves foreign locks`() {
+        for (foreignLock in listOf(false, true)) Fixture().use { f ->
+            f.cloned()
+            val fileId = f.conflictOn("README.md")
+            val detail = service.conflictFile(jobId, repositoryId, null, fileId)
+            val (view, guard) = guards()
+            f.hook = { if (it == GitOperationCrashPoint.BEFORE_PUBLISH) throw SimulatedGitCrash() }
+            val admission = service.requestWorkspace(jobId, repositoryId, GitSyncRequest(GitOperationAction.CONFLICT_SAVE,
+                view.worktreeId, guard, mapOf("fileId" to fileId, "expectedSha256" to detail.currentSha256, "resolution" to "text"),
+                "reviewed resolution\n"), key())
+            assertTrue(service.awaitIdle(60_000))
+            f.hook = {}
+
+            val repositoryGitDir = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
+            val staging = f.store.resolve("$jobId/git/repositories/$repositoryId/staging/${admission.operation.operationId}")
+            val branch = f.repositories.git("--git-dir=$repositoryGitDir", "symbolic-ref", "HEAD").trim()
+            Files.createDirectories(staging)
+            for (name in listOf("index.lock", "HEAD.lock")) {
+                val witness = staging.resolve(name)
+                Files.deleteIfExists(witness)
+                Files.createFile(witness)
+                Files.writeString(witness, "decomp-operation:${admission.operation.operationId}\n")
+                val lock = repositoryGitDir.resolve(name)
+                assertFalse(Files.exists(lock), "unexpected $name before crash-lock setup")
+                if (foreignLock && name == "index.lock") Files.writeString(lock, "foreign writer\n")
+                else Files.createLink(lock, witness)
+            }
+            Files.writeString(staging.resolve("ref-name"), branch)
+            val refWitness = staging.resolve("ref-lock")
+            Files.deleteIfExists(refWitness)
+            Files.createFile(refWitness)
+            val branchLock = repositoryGitDir.resolve("$branch.lock")
+            assertFalse(Files.exists(branchLock), "unexpected branch lock before crash-lock setup")
+            Files.createLink(branchLock, refWitness)
+
+            service.close(); service = f.open()
+            val recovered = service.operation(jobId, repositoryId, admission.operation.operationId)
+            if (foreignLock) {
+                assertEquals(GitOperationState.RECOVERY_REQUIRED, recovered.state, recovered.message)
+                assertEquals("SAVE_LOCKS_REQUIRE_REVIEW", recovered.failureCode)
+                assertEquals("foreign writer\n", Files.readString(repositoryGitDir.resolve("index.lock")))
+                assertFalse(Files.exists(repositoryGitDir.resolve("HEAD.lock")))
+                assertFalse(Files.exists(repositoryGitDir.resolve("$branch.lock")))
+                assertTrue(Files.exists(staging), "uncertain lock ownership preserves the recovery witnesses")
+            } else {
+                assertEquals(GitOperationState.INTERRUPTED, recovered.state, recovered.message)
+                assertFalse(Files.exists(repositoryGitDir.resolve("index.lock")))
+                assertFalse(Files.exists(repositoryGitDir.resolve("HEAD.lock")))
+                assertFalse(Files.exists(repositoryGitDir.resolve("$branch.lock")))
+                assertFalse(Files.exists(staging), "recovered save staging is retired after owned locks are reclaimed")
+            }
+            assertTrue(service.conflicts(jobId, repositoryId, null).mergeInProgress)
+        }
     }
 
     @Test fun `every published resolution choice recovers and replays as completed`() {
