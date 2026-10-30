@@ -39,7 +39,8 @@ do not mutate this project's planning repository implicitly.
 `F` an opaque file ID and `A` an artifact ID. Route identity and query rules are in
 [navigation](web-navigation.md); request schemas and service ownership are in
 [the API contract](web-api.md). Every case below belongs in the real packaged
-browser suite under #225 and the migration suite under #230. IDs remain stable
+browser suite under #225 and the migration suite under #230 (route outcomes and upgrade evidence:
+[legacy migration](web-legacy-migration.md)). IDs remain stable
 when a case is split into finer tests.
 
 | Case | Current route/behavior and baseline evidence | Future route and API | Implementation owner and required browser assertion |
