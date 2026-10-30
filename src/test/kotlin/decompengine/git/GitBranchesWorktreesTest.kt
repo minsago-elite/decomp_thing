@@ -421,6 +421,62 @@ class GitBranchesWorktreesTest {
         assertEquals(GitOperationState.COMPLETED, retried.state, retried.message)
     }
 
+    @Test fun `work-tree add preserves an external branch created after final validation`(): Unit = Fixture().use { f ->
+        val base = f.prepare()
+        val primary = service.workspace(jobId, repositoryId).worktreeId
+        f.hook = { point ->
+            if (point == GitOperationCrashPoint.BEFORE_PUBLISH) {
+                f.repositories.git("--git-dir=${f.gitDir()}", "update-ref", "refs/heads/experiment", base)
+            }
+        }
+        val admission = service.requestWorkspace(jobId, repositoryId,
+            GitRefRequest(GitOperationAction.WORKTREE_ADD, primary, guards().second, name = "experiment", objectId = base),
+            "external_branch_race_01")
+        assertTrue(service.awaitIdle(60_000))
+        val operationPath = f.store.resolve("$jobId/git/operations/${admission.operation.operationId}.json")
+        fun persistedState(): kotlinx.serialization.json.JsonObject =
+            kotlinx.serialization.json.Json.parseToJsonElement(Files.readString(operationPath)) as kotlinx.serialization.json.JsonObject
+        assertEquals("recovery-required", (persistedState().getValue("state") as kotlinx.serialization.json.JsonPrimitive).content)
+        assertEquals("WORKTREE_BRANCH_OWNERSHIP_UNKNOWN",
+            (persistedState().getValue("failureCode") as kotlinx.serialization.json.JsonPrimitive).content)
+        assertEquals(base, GitRefOperations.refObject(f.repositories.runner, f.gitDir(), GitObjectFormat.SHA1, "refs/heads/experiment"))
+        assertFalse(f.gitDir().parent.resolve("worktrees/${admission.operation.worktreeId}").exists())
+        assertFalse(f.gitDir().resolve("worktrees/${admission.operation.worktreeId}").exists())
+
+        service.close(); f.hook = {}; service = f.open()
+        assertEquals("recovery-required", (persistedState().getValue("state") as kotlinx.serialization.json.JsonPrimitive).content)
+        assertEquals(base, GitRefOperations.refObject(f.repositories.runner, f.gitDir(), GitObjectFormat.SHA1, "refs/heads/experiment"))
+        assertEquals("STORAGE_UNAVAILABLE", assertFailsWith<ManagedGitException> {
+            service.requestWorkspace(jobId, repositoryId,
+                GitRefRequest(GitOperationAction.WORKTREE_ADD, primary, guards().second, objectId = base), "external_branch_retry_01")
+        }.code)
+    }
+
+    @Test fun `restart preserves a matching branch when queued work-tree add never ran`(): Unit = Fixture().use { f ->
+        val base = f.prepare()
+        val primary = service.workspace(jobId, repositoryId).worktreeId
+        f.hook = { point ->
+            if (point == GitOperationCrashPoint.AFTER_RUNNING) {
+                f.repositories.git("--git-dir=${f.gitDir()}", "update-ref", "refs/heads/experiment", base)
+                throw SimulatedGitCrash()
+            }
+        }
+        val admission = service.requestWorkspace(jobId, repositoryId,
+            GitRefRequest(GitOperationAction.WORKTREE_ADD, primary, guards().second, name = "experiment", objectId = base),
+            "queued_worktree_race_01")
+        assertTrue(service.awaitIdle(60_000))
+        service.close(); f.hook = {}; service = f.open()
+        val operationPath = f.store.resolve("$jobId/git/operations/${admission.operation.operationId}.json")
+        val persisted = kotlinx.serialization.json.Json.parseToJsonElement(Files.readString(operationPath)) as kotlinx.serialization.json.JsonObject
+        assertEquals("recovery-required", (persisted.getValue("state") as kotlinx.serialization.json.JsonPrimitive).content)
+        assertEquals("WORKTREE_BRANCH_OWNERSHIP_UNKNOWN",
+            (persisted.getValue("failureCode") as kotlinx.serialization.json.JsonPrimitive).content)
+        assertEquals(base, GitRefOperations.refObject(f.repositories.runner, f.gitDir(), GitObjectFormat.SHA1, "refs/heads/experiment"))
+        assertEquals("STORAGE_UNAVAILABLE", assertFailsWith<ManagedGitException> {
+            service.operation(jobId, repositoryId, admission.operation.operationId)
+        }.code)
+    }
+
     @Test fun `checkout and removal exclude workflow admission in both orders`(): Unit {
         for (action in listOf(GitOperationAction.SWITCH, GitOperationAction.WORKTREE_REMOVE)) Fixture().use { f ->
             val base = f.prepare()
@@ -583,18 +639,18 @@ class GitBranchesWorktreesTest {
         assertEquals(moved, GitRefOperations.refObject(f.repositories.runner, f.gitDir(), GitObjectFormat.SHA1, "refs/heads/reviewed"))
     }
 
-    @Test fun `work-tree command failure rolls back partial creation and permits retry after restart`(): Unit = Fixture().use { f ->
+    @Test fun `work-tree command failure rolls back partial detached creation and permits retry after restart`(): Unit = Fixture().use { f ->
         val base = f.prepare()
         val primary = service.workspace(jobId, repositoryId).worktreeId
         // A historical object can fit the checkout bounds but contain a filename that the host
-        // cannot materialize. Git creates -b's branch before checkout fails inside worktree add.
+        // cannot materialize, exercising detached work-tree cleanup after Git fails its checkout.
         val blob = f.raw("rev-parse", "$base:src/main.c").trim()
         f.raw("update-index", "--add", "--cacheinfo", "100644,$blob,${"x".repeat(256)}")
         val tree = f.raw("write-tree").trim()
         val historical = f.raw("commit-tree", "-p", base, "-m", "uncheckoutable history", tree).trim()
         f.raw("read-tree", base)
         GitRepositoryImport.requireCheckoutBounds(f.repositories.runner, f.gitDir(), historical, GitCheckoutLimits())
-        for (name in listOf("failed-checkout", null)) {
+        for (name in listOf<String?>(null)) {
             val failed = run(GitRefRequest(GitOperationAction.WORKTREE_ADD, primary, guards().second,
                 name = name, objectId = historical))
             assertEquals(GitOperationState.FAILED, failed.state, failed.message)

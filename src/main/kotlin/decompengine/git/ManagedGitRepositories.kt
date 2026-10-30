@@ -1222,23 +1222,38 @@ class ManagedGitRepositories(
                     val recordFile = directory.resolve(WORKTREE_RECORDS).resolve("${operation.worktreeId}.json")
                     if (Files.isRegularFile(recordFile, NOFOLLOW_LINKS)) completed("The work tree was created before the server restarted.", request.objectId)
                     else {
-                        // A work tree without its registration was never visible: remove Git's metadata and the files.
                         val path = directory.resolve(LINKED_WORK_TREES).resolve(operation.worktreeId)
-                        if (Files.exists(path, NOFOLLOW_LINKS)) {
-                            try { GitRefOperations.removeWorktree(runner, commonDir, path, force = true) } catch (_: GitOperationRefusal) { }
-                            GitStorage.deleteTree(path)
+                        val worktreeAdmin = commonDir.resolve("worktrees").resolve(operation.worktreeId)
+                        // A matching branch tip is not ownership evidence: a queued request, or a
+                        // failed `worktree add -b`, may have collided with an external writer. Only
+                        // clean up and roll back when Git registered this operation's work tree.
+                        val registeredWorktree = Files.isDirectory(path, NOFOLLOW_LINKS) &&
+                            Files.isDirectory(worktreeAdmin, NOFOLLOW_LINKS)
+                        if (!registeredWorktree && (Files.exists(path, NOFOLLOW_LINKS) || Files.exists(worktreeAdmin, NOFOLLOW_LINKS))) {
+                            return recovery("WORKTREE_OWNERSHIP_UNKNOWN",
+                                "An unregistered work-tree path or Git entry exists. Preserve it and inspect ownership before any new request.")
                         }
-                        runner.run(GitInvocation("worktree", listOf("prune"), gitDir = commonDir))
-                        // `worktree add -b` also created the branch; roll it back only at the exact start object.
                         val branch = request.name?.let { "refs/heads/$it" }
                         val tip = branch?.let { GitRefOperations.refObject(runner, commonDir, format, it) }
                         when {
-                            tip == null -> interrupted("Interrupted by a server restart before the work tree was registered; nothing was created.")
-                            tip == request.objectId -> {
-                                GitRefOperations.deleteRef(runner, commonDir, checkNotNull(branch), tip)
-                                interrupted("Interrupted by a server restart before the work tree was registered; its new branch was rolled back and nothing remains.")
+                            branch != null && tip != null && tip != request.objectId ->
+                                recovery("REF_CONFLICT", "The work tree's new branch now names a different commit. Inspect it before any new request.")
+                            branch != null && tip == request.objectId && !registeredWorktree ->
+                                recovery("WORKTREE_BRANCH_OWNERSHIP_UNKNOWN",
+                                    "The requested branch exists at the start commit, but this operation cannot prove that it created the branch. Preserve it and inspect ownership before any new request.")
+                            else -> {
+                                // Compare-and-delete while the work-tree registration still proves
+                                // ownership. If an external writer moved the ref, leave both intact.
+                                if (branch != null && tip != null) GitRefOperations.deleteRef(runner, commonDir, branch, tip)
+                                if (registeredWorktree) {
+                                    try { GitRefOperations.removeWorktree(runner, commonDir, path, force = true) } catch (_: GitOperationRefusal) { }
+                                    GitStorage.deleteTree(path)
+                                }
+                                runner.run(GitInvocation("worktree", listOf("prune"), gitDir = commonDir))
+                                if (branch != null && tip != null) {
+                                    interrupted("Interrupted by a server restart before the work tree was registered; its operation-owned branch was rolled back and nothing remains.")
+                                } else interrupted("Interrupted by a server restart before the work tree was registered; nothing was created.")
                             }
-                            else -> recovery("REF_CONFLICT", "The work tree's new branch now names a different commit. Inspect it before any new request.")
                         }
                     }
                 }
