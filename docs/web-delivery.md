@@ -121,6 +121,38 @@ cold load; warm data is measured separately. Do not hide failing runs as outlier
 | Git transfer | Reserved growth ≤512 MiB; over-limit/timeout/cancel produces terminal bounded operation evidence, ≤5 s process-tree cleanup after cancel | Isolated 64/256/512 MiB remote with delay/disconnect injection; #209 #215 |
 | Accessible use | WCAG 2.2 AA target, zero serious/critical automated violations, all documented keyboard/dialog/status cases pass; manual NVDA/Firefox and VoiceOver/Safari smoke | Four navigation walkthroughs plus conflict/push review; #147 #217 #226 |
 
+### Packaged navigation and interaction timing
+
+`node scripts/check-packaged-web-browser.mjs --mode audit` (CI `web-packaged`) measures the
+packaged JVM at `/nested/` in the pinned Chrome on the CI runner, after its layout, contrast and
+keyboard checks pass (`scripts/packaged-browser-audit.mjs`). It records 20 cold dashboard loads,
+each in a new target with the HTTP cache disabled, timed from navigation to a populated first
+page with no alert; and 50 in-app route activations cycling through job, attempt, activity,
+evidence, source directory/file and source-search views, timed to the new heading receiving focus (local feedback) and to the
+view's initial-route metadata (or source rows for source views). Attempt metadata readiness
+is not evidence/activity readiness: those routes intentionally require explicit reads. Before
+each layout/contrast/focus pass, the audit activates the activity/exploration/history/receipt
+controls and requires populated content and successful reads. The source-search form and
+populated results each have independent route coverage, and visible input values and placeholders
+are included in contrast measurements. Each explicit action's
+elapsed time and expected reads are recorded separately in `interactions`, not folded into
+route timing or claimed as a qualified interaction p95. The navigation gate asserts p95 ≤1.5 s
+cold, ≤100 ms feedback and ≤500 ms first route data, the loopback budgets above, and keeps the
+raw navigation samples and median/p95 in `report.json`.
+
+The API reads in this mode are contract fixtures fulfilled in DevTools; the document, CSP,
+chunks and worker are real packaged responses. That isolates browser-side navigation and
+rendering work. It is not the constrained 4× CPU / 10 Mbit profile, a fresh browser process per
+cold load, a server-latency measurement or a cross-engine result. A local run on a development
+host measured cold p95 0.25–0.94 s, feedback p95 39–64 ms and first data p95 61–86 ms; CI
+retains its own numbers.
+
+Heavy browser work is bounded rather than deferred: source previews read at most one
+64 KiB chunk and mount at most 200 rows, and syntax highlighting is an explicit action that runs
+in a dedicated module worker with a one-second deadline and is cancelled whenever the row window,
+file or route changes (`sources/highlightOperation.ts`). The audit drives that worker under the
+enforced CSP and requires its tokens to render.
+
 Performance tools may themselves consume memory; record measurement overhead and
 use the same method for control/candidate comparisons. Use server counters and
 heap snapshots alongside process RSS; GC-sensitive numbers cannot be compared
