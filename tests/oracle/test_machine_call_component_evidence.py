@@ -856,6 +856,22 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
         with self.assertRaisesRegex(VERIFY.VerificationError, "alias dynamic metadata"):
             self.verify()
 
+    def test_metadata_alias_lookup_uses_the_sorted_interval_index(self) -> None:
+        inventory = self.report["dynamicInventory"]
+        symbols, _, _ = VERIFY.verify_external_inventory(inventory, self.report["externalNamespace"],
+            self.report["externalNamespaceSha256"], self.report["inputSha256"], self.report["imageBase"])
+        index = VERIFY.RetainedRelocationIndex(inventory, symbols, self.report["inputBytes"])
+
+        class NoIterationTuple(tuple):
+            def __iter__(self):
+                raise AssertionError("metadata aliases must not scan every metadata range")
+
+        active_table = next(row for row in inventory["sections"]
+            if row["index"] == inventory["activeSymbolTableSectionIndex"])
+        index.metadata_file_ranges = NoIterationTuple(index.metadata_file_ranges)
+        self.assertTrue(index.metadata_file_aliases(active_table["offset"], active_table["offset"] + 1))
+        self.assertFalse(index.metadata_file_aliases(self.report["inputBytes"], self.report["inputBytes"] + 1))
+
     def test_nonforwarded_receipt_requires_the_exact_physical_instruction(self) -> None:
         symbols, relocations, imports = VERIFY.verify_external_inventory(self.report["dynamicInventory"],
             self.report["externalNamespace"], self.report["externalNamespaceSha256"], self.report["inputSha256"], self.report["imageBase"])

@@ -1052,11 +1052,19 @@ class RetainedRelocationIndex:
             require(load[0] <= start and end < load[0] + load[3] and
                     load[4] + start - load[0] == section["offset"],
                     "retained dynamic metadata file and LOAD mappings disagree")
+        ordered_metadata_ranges = tuple(sorted(metadata_ranges))
         previous_end = 0
-        for range_start, range_end in sorted(metadata_ranges):
+        for range_start, range_end in ordered_metadata_ranges:
             require(range_start >= previous_end, "retained dynamic metadata sections overlap")
             previous_end = range_end
-        self.metadata_file_ranges = tuple(metadata_ranges)
+        self.metadata_file_ranges = ordered_metadata_ranges
+        self.metadata_file_starts = tuple(start for start, _ in ordered_metadata_ranges)
+
+    def metadata_file_aliases(self, start: int, end_exclusive: int) -> bool:
+        if end_exclusive <= start:
+            return False
+        candidate = bisect_left(self.metadata_file_starts, end_exclusive) - 1
+        return candidate >= 0 and self.metadata_file_ranges[candidate][1] > start
 
     def code_window(self, location: int) -> tuple[int, int] | None:
         length = self.code_window_length(location)
@@ -1278,8 +1286,7 @@ def verify_external_bindings(evidence: dict, request: dict, report: dict, source
         if coordinate_space != 1:
             continue
         file_end = file_offset + len(data)
-        require(all(file_end <= metadata_start or metadata_end <= file_offset
-                    for metadata_start, metadata_end in relocation_index.metadata_file_ranges),
+        require(not relocation_index.metadata_file_aliases(file_offset, file_end),
                 "retained executable file bytes alias dynamic metadata storage")
     require_consistent_byte_ranges(byte_ranges,
         "retained source/probe byte windows conflict at overlapping executable addresses or file ranges")
