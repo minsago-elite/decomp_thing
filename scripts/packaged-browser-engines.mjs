@@ -121,6 +121,11 @@ async function context(options = {}) {
       parentId: element?.parentElement?.id || null,
       parentClassName: String(element?.parentElement?.className ?? '').slice(0, 128),
     });
+    const describeMutationTarget = target => ({
+      mutationTargetTag: target?.nodeType === 9 ? '#document' : target?.localName ?? null,
+      mutationTargetId: target?.id || null,
+      mutationTargetClassName: String(target?.className ?? '').slice(0, 128),
+    });
     const recordStyleMutation = (kind, element, extra = {}) => {
       recentStyleMutations.push({ at: performance.now(), kind, ...describeElement(element), ...extra });
       if (recentStyleMutations.length > 32) recentStyleMutations.shift();
@@ -128,8 +133,12 @@ async function context(options = {}) {
     const styleMutationObserver = new MutationObserver(mutations => {
       for (const mutation of mutations) {
         if (mutation.type === 'attributes' && mutation.attributeName === 'style') {
+          const style = mutation.target.getAttribute('style') ?? '';
           recordStyleMutation('style-attribute', mutation.target, {
-            styleLength: mutation.target.getAttribute('style')?.length ?? 0,
+            ...describeMutationTarget(mutation.target.parentNode),
+            styleLength: style.length,
+            styleValue: style.slice(0, 96),
+            previousStyleValue: mutation.oldValue?.slice(0, 96) ?? null,
           });
         }
         const removedNodes = Array.from(mutation.removedNodes);
@@ -137,11 +146,18 @@ async function context(options = {}) {
           const styles = node.nodeType === 1
             ? [ ...(node.localName === 'style' ? [node] : []), ...Array.from(node.querySelectorAll?.('style') ?? []) ].slice(0, 4)
             : [];
-          for (const element of styles) recordStyleMutation(removedNodes.includes(node) ? 'style-node-removed' : 'style-node-added', element);
+          for (const element of styles) {
+            const text = (element.textContent ?? '').replace(/\s+/g, ' ').trim();
+            recordStyleMutation(removedNodes.includes(node) ? 'style-node-removed' : 'style-node-added', element, {
+              ...describeMutationTarget(mutation.target),
+              styleTextLength: text.length,
+              styleText: text.slice(0, 192),
+            });
+          }
         }
       }
     });
-    styleMutationObserver.observe(document, { subtree: true, childList: true, attributes: true, attributeFilter: ['style'] });
+    styleMutationObserver.observe(document, { subtree: true, childList: true, attributes: true, attributeOldValue: true, attributeFilter: ['style'] });
     globalThis.__decompStyleOperations = recentStyleOperations;
     globalThis.__decompStyleMutations = recentStyleMutations;
     const containsStyleElement = node => node?.nodeType === 1
