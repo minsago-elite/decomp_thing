@@ -1051,26 +1051,43 @@ class ManagedGitRepositories(
                     "Aborted the merge and restored the branch and work tree to their state before it. Accepted snapshots were not touched."
             }
             GitOperationAction.CONFLICT_SAVE -> {
-                val entry = conflictFor(runner, located, request.parameters["fileId"])
-                conflictPath(runner, located, entry)
-                val bytes = when (request.parameters["resolution"]) {
-                    "text" -> checkNotNull(request.content).toByteArray()
-                    else -> {
-                        val objectId = checkNotNull(when (request.parameters["resolution"]) { "ours" -> entry.oursObjectId; "theirs" -> entry.theirsObjectId; else -> entry.baseObjectId })
-                        checkNotNull(GitIntegrations.blobText(runner, located.commonDir, objectId)).toByteArray()
-                    }
-                }
+                val staging = directory.resolve("staging").resolve(operation.operationId)
+                GitStorage.directories(directory, "staging", operation.operationId)
+                GitStorage.forceDirectory(staging.parent)
+                GitStorage.forceDirectory(directory)
                 crash(GitOperationCrashPoint.AFTER_STAGING)
-                // Workflow admission and final digest/publication share the activity owner's lock.
-                activity.withStableRuns(located.record.jobId) { runs ->
+                // Workflow admission and Git-compatible locks cover validation through publication.
+                // Re-read the conflict after locking: an external abort must not publish an obsolete resolution.
+                val fileId = activity.withStableRuns(located.record.jobId) { runs ->
                     requireNoLease(located, runs)
-                    GitConflictFiles.replace(located.workTree, checkNotNull(entry.path.exact),
-                        checkNotNull(request.parameters["expectedSha256"]), bytes) {
-                        crash(GitOperationCrashPoint.BEFORE_PUBLISH)
-                        requireNoLease(located)
+                    GitWorkspaceMutations.withWorkspaceLocks(runner, located.gitDir, staging, operation.operationId,
+                        located.record.objectFormat, located.commonDir) {
+                        requireNoLease(located, runs)
+                        val lockedObservation = GitRepositoryInspector.inspect(runner, located.gitDir, located.workTree, located.commonDir)
+                        validateIntegration(runner, located, lockedObservation, request)
+                        val entry = conflictFor(runner, located, request.parameters["fileId"])
+                        conflictPath(runner, located, entry)
+                        val bytes = when (request.parameters["resolution"]) {
+                            "text" -> checkNotNull(request.content).toByteArray()
+                            else -> {
+                                val objectId = checkNotNull(when (request.parameters["resolution"]) {
+                                    "ours" -> entry.oursObjectId; "theirs" -> entry.theirsObjectId; else -> entry.baseObjectId
+                                })
+                                checkNotNull(GitIntegrations.blobText(runner, located.commonDir, objectId)).toByteArray()
+                            }
+                        }
+                        val path = checkNotNull(entry.path.exact)
+                        GitConflictFiles.replace(located.workTree, path,
+                            checkNotNull(request.parameters["expectedSha256"]), bytes) {
+                            crash(GitOperationCrashPoint.BEFORE_PUBLISH)
+                            requireNoLease(located, runs)
+                            val publishObservation = GitRepositoryInspector.inspect(runner, located.gitDir, located.workTree, located.commonDir)
+                            validateIntegration(runner, located, publishObservation, request)
+                        }
+                        entry.path.fileId(located.worktreeId)
                     }
                 }
-                null to "Saved the resolution of ${entry.path.fileId(located.worktreeId)}. It is not staged; mark it resolved when the review is complete."
+                null to "Saved the resolution of $fileId. It is not staged; mark it resolved when the review is complete."
             }
             GitOperationAction.CONFLICT_COMPLETE -> {
                 val staging = directory.resolve("staging").resolve(operation.operationId)
@@ -2000,9 +2017,23 @@ class ManagedGitRepositories(
         val commonDir = directory.resolve(GIT_DIR)
         val gitDir = if (operation.worktreeId == record.worktreeId) commonDir else commonDir.resolve("worktrees").resolve(operation.worktreeId)
         val workTree = if (operation.worktreeId == record.worktreeId) directory.resolve(WORK_TREE) else directory.resolve(LINKED_WORK_TREES).resolve(operation.worktreeId)
+        val staging = directory.resolve("staging").resolve(operation.operationId)
+        if (request.action == GitOperationAction.CONFLICT_COMPLETE) {
+            // Completion acquires Git-compatible index/HEAD/branch locks. Reclaim only witnesses
+            // owned by this operation before reconciliation can persist an outcome or retire staging.
+            GitWorkspaceMutations.reclaimCommitLocks(gitDir, staging, operation.operationId, commonDir)
+        }
         val merging = GitIntegrations.mergeInProgress(gitDir)
         val observed = GitRepositoryInspector.head(runner, gitDir, record.objectFormat)
         val head = observed.objectId
+        if (request.action == GitOperationAction.CONFLICT_COMPLETE) {
+            val locks = listOf(gitDir.resolve("index.lock"), gitDir.resolve("HEAD.lock")) +
+                listOfNotNull(observed.refName?.let { commonDir.resolve("$it.lock") })
+            if (locks.any { Files.exists(it, NOFOLLOW_LINKS) }) {
+                return finish(operation, GitOperationState.RECOVERY_REQUIRED, "COMPLETION_LOCKS_REQUIRE_REVIEW",
+                    "Interrupted conflict completion left a Git lock whose ownership cannot be confirmed. Inspect its writers before a new request.", head)
+            }
+        }
         fun headMoved() = finish(operation, GitOperationState.RECOVERY_REQUIRED, "HEAD_MOVED",
             "The retained integration does not prove the current branch and HEAD. Inspect history and recovery evidence before any new request.", head)
         when (request.action) {
@@ -2122,7 +2153,15 @@ class ManagedGitRepositories(
                     val recovered = reconcileWorkspace(jobId, operation)
                     persist(directory, recovered)
                     clearRemoteAudit(recovered)
-                    try { GitStorage.deleteTree(staging) } catch (_: Exception) { /* retained for inspection */ }
+                    // A conflict completion keeps its Git-lock inode witnesses in repository-owned
+                    // staging. Preserve both operation staging trees if recovery cannot prove ownership.
+                    if (!(operation.action == GitOperationAction.CONFLICT_COMPLETE && recovered.recoveryRequired)) {
+                        try { GitStorage.deleteTree(staging) } catch (_: Exception) { /* retained for inspection */ }
+                        if (operation.action == GitOperationAction.CONFLICT_COMPLETE) {
+                            try { GitStorage.deleteTree(repositoryDirectory(jobId, operation.repositoryId)
+                                .resolve("staging").resolve(operation.operationId)) } catch (_: Exception) { /* retained for inspection */ }
+                        }
+                    }
                     continue
                 }
                 val recovered = published[operation.operationId]?.let { repository ->
