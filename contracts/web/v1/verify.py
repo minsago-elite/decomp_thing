@@ -599,6 +599,18 @@ def check_semantics(document: dict) -> None:
             raise ValueError("an attached HEAD must name a listed ref at the observed object")
         if len({ref["refId"] for ref in data["refs"]}) != len(data["refs"]):
             raise ValueError("Git refs must be unique")
+    elif kind == "gitStatus":
+        expected_head = {"attached": (True, True), "unborn": (True, False), "detached": (False, True)}[data["headState"]]
+        if (data["headRefName"] is not None, data["headObjectId"] is not None) != expected_head:
+            raise ValueError("Git status HEAD state disagrees with its branch and object")
+        if len({entry["fileId"] for entry in data["entries"]}) != len(data["entries"]):
+            raise ValueError("Git status file identities must be unique")
+    elif kind == "gitDiff":
+        if (data["scope"] == "commit") != (data["commitObjectId"] is not None):
+            raise ValueError("only a commit diff names a commit")
+        patch = data["patch"]
+        if patch is not None and patch["fileId"] not in {item["fileId"] for item in data["files"]}:
+            raise ValueError("a diff patch must belong to a listed file")
 
 
 def check_run_lifecycle_controls(validate) -> int:

@@ -1,4 +1,5 @@
 {
+  "schema": "contract.schema.json",
   "fixtures": [
     {
       "file": "fixtures/session.json",
@@ -1056,7 +1057,26 @@
     {
       "file": "fixtures/invalid-source-search-gaps-over-scope.json",
       "valid": false
+    },
+    {
+      "file": "fixtures/git-status.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/git-history.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/git-history-many-parents.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/git-diff.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/git-refs.json",
+      "valid": true
     }
-  ],
-  "schema": "contract.schema.json"
+  ]
 }

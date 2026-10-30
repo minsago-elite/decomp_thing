@@ -92,6 +92,13 @@ class ManagedGitRepositoriesTest {
         assertEquals("NOT_FOUND", assertFailsWith<ManagedGitException> {
             service.operation(jobId, "repository_missing", "operation_missing")
         }.code)
+        assertFalse(service.busy(jobId))
+        for (read in listOf<() -> Any>(
+            { service.repository(jobId, "repository_missing") },
+            { service.history(jobId, "repository_missing", null, 0, 1) },
+            { service.diff(jobId, "repository_missing", GitDiffScope.UNSTAGED, null, null) },
+            { service.refs(jobId, "repository_missing", 0, 1) },
+        )) assertEquals("NOT_FOUND", assertFailsWith<ManagedGitException> { read() }.code)
         assertEquals(before, f.storageTree())
         assertFalse(f.store.resolve(".git-runtime").exists())
     }
@@ -114,6 +121,11 @@ class ManagedGitRepositoriesTest {
                 { restarted.listing(jobId) },
                 { restarted.operation(jobId, operation.repositoryId, operation.operationId) },
                 { restarted.workspace(jobId, operation.repositoryId) },
+                { restarted.busy(jobId) },
+                { restarted.repository(jobId, operation.repositoryId) },
+                { restarted.history(jobId, operation.repositoryId, null, 0, 1) },
+                { restarted.diff(jobId, operation.repositoryId, GitDiffScope.UNSTAGED, null, null) },
+                { restarted.refs(jobId, operation.repositoryId, 0, 1) },
             )) assertEquals("STORAGE_UNAVAILABLE", assertFailsWith<ManagedGitException> { read() }.code)
             assertEquals(before, f.storageTree())
             assertTrue(f.store.resolve("$jobId/git/staging/${operation.operationId}").exists())
@@ -139,6 +151,11 @@ class ManagedGitRepositoriesTest {
             assertEquals(1, restarted.listing(jobId).repositories.size)
             assertEquals(completed, restarted.operation(jobId, completed.repositoryId, completed.operationId))
             assertEquals(GitHeadState.UNBORN, restarted.workspace(jobId, completed.repositoryId).observation.head.state)
+            assertFalse(restarted.busy(jobId))
+            assertEquals(completed.repositoryId, restarted.repository(jobId, completed.repositoryId).repositoryId)
+            assertNull(restarted.history(jobId, completed.repositoryId, null, 0, 1).first)
+            assertTrue(restarted.diff(jobId, completed.repositoryId, GitDiffScope.UNSTAGED, null, null).listing.files.isEmpty())
+            assertTrue(restarted.refs(jobId, completed.repositoryId, 0, 1).second.entries.isEmpty())
         }
         assertEquals(before, f.storageTree())
     }
@@ -181,6 +198,26 @@ class ManagedGitRepositoriesTest {
         assertEquals("REPOSITORY_EXISTS", assertFailsWith<ManagedGitException> {
             service.request(jobId, GitRepositoryRequest.Init("run_1", "revision_1", null), "init_request_key_0002")
         }.code)
+    }
+
+    @Test fun `commit diff resolves a bounded parent without materializing history subjects`(): Unit = Fixture().use { f ->
+        val service = f.open()
+        val admission = service.request(jobId, GitRepositoryRequest.Init("run_1", "revision_1", null), "diff_parent_request_0001")
+        val completed = service.settle(admission)
+        assertEquals(GitOperationState.COMPLETED, completed.state, completed.message)
+        val directory = f.repositoryDirectory(completed.repositoryId)
+        val gitDir = directory.resolve("repository.git")
+        val workTree = directory.resolve("worktree")
+        val base = f.repositories.commitAll(gitDir, workTree, "base")
+        val tree = f.repositories.git("--git-dir=$gitDir", "rev-parse", "$base^{tree}").trim()
+        val message = f.repositories.root.resolve("large-subject")
+        Files.writeString(message, "x".repeat(GitReads.MAX_HISTORY_BYTES + 1))
+        val large = f.repositories.git("--git-dir=$gitDir", "commit-tree", tree, "-F", message.toString()).trim()
+        val child = f.repositories.git("--git-dir=$gitDir", "commit-tree", tree, "-p", large, "-m", "small child").trim()
+
+        val diff = service.diff(jobId, completed.repositoryId, GitDiffScope.COMMIT, child, null)
+        assertTrue(diff.listing.complete)
+        assertTrue(diff.listing.files.isEmpty())
     }
 
     @Test fun `a retained snapshot that no longer matches its commitments is never published`(): Unit {

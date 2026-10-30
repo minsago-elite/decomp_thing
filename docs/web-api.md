@@ -179,7 +179,8 @@ internal storage optimization and must not merge identity, permissions or histor
 | `POST V/archive-verifications` | `202 operation` | Explicit bounded integrity verification, no binary execution; #193 |
 | `GET J/repositories` | `200 gitRepositories` | Capability-gated repository summary and latest 20 operations; implemented by #201 |
 | `GET G`, `GET G/worktrees/{worktreeId}` | `200 gitWorkspace` | Capability-gated repository/worktree registry; `GET G` implemented by #201, worktrees #202 |
-| `GET G/{status,diff,history,refs,worktrees,remotes,conflicts}` | Bounded typed Git read | Scoped worktree/ref/object IDs; #202/#204/#207/#210/#211 |
+| `GET G/{status,history,diff,refs}` | `200 gitStatus`, `gitHistory`, `gitDiff`, `gitRefs` | Bounded, anchored pages; full object IDs; opaque file IDs; implemented by #202 |
+| `GET G/{worktrees,remotes,conflicts}` | Bounded typed Git read | Scoped worktree/ref/object IDs; #204/#207/#210/#211 |
 | `POST J/repositories` | `202 operation` | Strict `gitRepositoryInit`/`gitRepositoryAttach`, session/Origin/CSRF, job If-Match and idempotency; init/attach implemented by #201, clone #209 |
 | `POST G/operations` | `202 operation` | Named action, selected IDs, guards, idempotency; #203–#212 |
 | `GET G/operations/{operationId}` | `200 operation` | Durable outcome/recovery state; init/attach operations implemented by #201, others #209 |
@@ -847,6 +848,88 @@ capability states, guards, strict bodies, path-free responses and the unavailabl
 job page's minimal Git panel (`GitRepositoryPanel`) shows availability, the observed HEAD and a
 single initialization action from the latest attempt's candidate. The full Git UI belongs to
 #583.
+
+### Bounded Git status, history, diffs and refs
+
+`GET G/status`, `G/history`, `G/diff` and `G/refs` are capability-gated private reads (#574, #575).
+They accept only their listed query parameters, each at most once. `limit` is 1-200 and defaults
+to 50, and pages also stop early at a 256 KiB rendering budget. No read runs a hook, filter,
+textconv, external diff tool or submodule command, and no read refreshes the index with a lock.
+Every GitReads child also has a hard and soft 512 MiB address-space ceiling, including raw/numstat
+comparisons, selected patches and object-size reads. Enforcement is fail-closed; a missing limiter
+or an allocation failure returns an explicit repository-unavailable/corrupt error, never an
+unbounded retry.
+
+- `status` (`gitStatus`) parses `git status --porcelain=v2 -z --untracked-files=all
+  --ignored=matching --find-renames` byte by byte. Each entry reports its `staged` and `unstaged`
+  change (`added`, `modified`, `deleted`, `renamed`, `copied`, `type-changed` or `none`) and
+  whether it is untracked, ignored (by the source-only policy), conflicted (with the exact
+  conflict kind) or a submodule. Renames carry `originalPath`. `counts` covers the whole status.
+  `notices` explain the current state and its available next steps: clean, dirty, unborn,
+  detached, conflicted, busy (a queued or running operation) and incomplete (status output
+  exceeded 4 MiB). The read itself stays usable in every one of those states. The cursor is bound to
+  `worktreeVersion` plus all listed paths/states, including ignored entries; observable listing
+  changes cause a later page to answer `409 REF_CHANGED`.
+- `worktreeVersion` now digests HEAD plus every non-ignored status entry. That includes the
+  entry's index blob and the work-tree file's size and modification time, so re-editing an
+  already modified file or re-staging different content changes it. Native invalid-UTF-8 names
+  are observed using their exact filesystem bytes, not their escaped display names. Observation
+  errors other than a missing file fail explicitly rather than supplying a stable placeholder.
+  Ignored files never change this version. This is a bounded read fingerprint, not a source-content
+  identity: edits preserving size/mtime or beyond the status output bound may leave it unchanged.
+- `history` (`gitHistory`) lists commits from an exact `start` object (default HEAD; an unborn
+  branch has none). The output is NUL-delimited `git log` with full object IDs, all parents (merges
+  included), author, timestamps and a 200-character subject with an explicit truncation flag.
+  Parent arrays are never silently shortened. The raw history read (including its lookahead
+  commit) is capped at 128 KiB; this also bounds any one parent list below the schema's 3200
+  entries. Output above that bound returns `REPOSITORY_UNAVAILABLE`, not a partial parent list;
+  a smaller page limit can help when multiple commits exhaust the bound.
+  The cursor embeds the start object and offset, so a branch that moves after the first page
+  cannot shift later pages. A history entry's `mapping` is non-null only for an explicitly
+  recorded, validated commit-to-revision binding. A commit alone is never treated as a
+  reconstruction revision.
+- `diff` (`gitDiff`) compares `scope=staged` (index against HEAD, or against the empty tree on an
+  unborn branch), `scope=unstaged` (work tree against the index) or `scope=commit&commit=<full id>`
+  (against its first parent, or nothing for a root commit). Files come from `--raw -z --no-abbrev`
+  and `--numstat -z` with rename detection. Each carries its change, old and new blob IDs and
+  modes, line counts and a binary flag (`-` counts mean binary). The new blob's size comes from
+  `cat-file --batch-check` without reading the content. `file=<fileId>` returns that file alone
+  with a unified patch of at most 128 KiB, flagged `truncated` when cut. Binary files never
+  render content. Text patches whose current or original path is invalid UTF-8 or exceeds the
+  runner's 4,096 UTF-16-code-unit argument bound return `422 PATCH_UNAVAILABLE`; the exact listing
+  identity and display entry remain available, including for trees never checked out at HEAD.
+  Managed `info/attributes` restores automatic binary detection with `!diff`,
+  overriding source-controlled forced-text/binary/driver attributes. The exact previous managed
+  attributes layout is atomically upgraded on audit; unrecognized layouts are rejected without
+  rewriting them. No source or index bytes change during that upgrade. Abbreviated object IDs
+  are rejected with 422.
+- `refs` (`gitRefs`) pages through branches and tags with exact and peeled object IDs, stable
+  `refId`s and the branch HEAD currently names. Its cursor carries a digest of every ref listed
+  before it. If a branch or tag is created, deleted or moved ahead of the offset, the page answers
+  `409 REF_CHANGED` instead of repeating or skipping an entry.
+
+A path has exactly one status entry. After `git rm --cached`, Git reports both a staged deletion
+and an untracked record for the file, and these are merged into one entry with
+`staged: "deleted"` and `untracked: true`. The patch for a selected file is the section that
+belongs to its record:
+
+- a type change keeps both its deletion and addition sections;
+- an unresolved conflict returns Git's combined `diff --cc` section;
+- a metadata-only rename or mode change is matched by its header, quoted as Git quotes unusual
+  names.
+
+If the bounded capture ends before the selected section (for example, an unrelated subtree
+under a rename's former path fills the capture), the response reports `truncated: true`, even
+if its selected text is empty. An incomplete source capture is never presented as complete.
+
+Paths are display strings. Backslashes, control characters (newline, tab, escape and the like)
+and invalid UTF-8 bytes are escaped, and `pathEscaped` marks any name whose display differs from
+its bytes. Identity is the opaque `fileId`, derived from the exact bytes and the work tree, so
+look-alike names never share an identity. `GitReadsTest` checks every status category, real merge
+conflicts, unusual and invalid-UTF-8 names, anchored history pages across a merge and a moving
+branch, renames, binary sizes, a large patch truncated within its bound, staged diffs on an unborn
+branch, and paged peeled tags. `WebGitControllerTest` covers the HTTP shapes, cursors and
+refusals.
 
 ## Legacy compatibility
 

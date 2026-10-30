@@ -192,20 +192,32 @@ data class GitInvocation(
     val allowedExitCodes: Set<Int> = setOf(0),
     val truncateStdout: Boolean = false,
     val limits: GitExecutionLimits = GitExecutionLimits(),
+    /** Bounded standard input, written once and closed; null keeps stdin closed. */
+    val input: ByteArray? = null,
+    /** Additional variables from a fixed allowlist (commit identity and dates only). */
+    val variables: Map<String, String> = emptyMap(),
 ) {
     init {
         require(subcommand in SUBCOMMANDS) { "Git subcommand is not allowlisted" }
-        require(arguments.size <= 256 && arguments.all { it.length <= 4096 && '\u0000' !in it }) { "Git arguments are unbounded" }
+        require(arguments.size <= 256 && arguments.all { it.length <= MAX_ARGUMENT_LENGTH && '\u0000' !in it }) { "Git arguments are unbounded" }
         require(gitDir == null || gitDir.isAbsolute) { "Git directory must be absolute" }
         require(workTree == null || (workTree.isAbsolute && gitDir != null)) { "Git work tree requires an absolute path and Git directory" }
         require(allowedExitCodes.isNotEmpty() && allowedExitCodes.all { it in 0..255 })
+        require(input == null || input.size <= 4 * 1024 * 1024) { "Git input is unbounded" }
+        require(variables.keys.all { it in VARIABLES } && variables.values.all { it.length <= 512 && it.none(Char::isISOControl) }) {
+            "Git variables are not allowlisted"
+        }
     }
 
     companion object {
+        const val MAX_ARGUMENT_LENGTH = 4096
         val SUBCOMMANDS = setOf(
             "version", "init", "config", "check-ref-format", "rev-parse", "symbolic-ref", "for-each-ref",
             "status", "read-tree", "fsck", "cat-file", "ls-files", "ls-tree", "check-ignore", "update-ref",
+            "log", "diff", "diff-tree",
         )
+        val VARIABLES = setOf("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_AUTHOR_DATE",
+            "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_COMMITTER_DATE")
     }
 }
 
@@ -238,7 +250,7 @@ class GitCommandRunner internal constructor(
             listOf(launcher.toString(), "--as=$bytes:$bytes", "--core=0:0", "--") + command
         } ?: command
         val result = try {
-            GitSessionProcess(boundedCommand, environment.variables(executable),
+            GitSessionProcess(boundedCommand, environment.variables(executable) + invocation.variables,
                 invocation.workTree ?: invocation.gitDir ?: environment.root, invocation).execute()
         } catch (failure: LinkageError) {
             // Native containment is mandatory, never fall back to unowned ProcessBuilder children.
