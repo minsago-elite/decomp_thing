@@ -89,7 +89,12 @@ async function context(options = {}) {
   await created.exposeBinding('__decompRecordCspViolation', (_source, payload) => { record.csp.push(JSON.parse(payload)); });
   await created.addInitScript(() => {
     addEventListener('securitypolicyviolation', (event) => {
-      globalThis.__decompRecordCspViolation(JSON.stringify({ blockedURI: event.blockedURI, effectiveDirective: event.effectiveDirective }));
+      const location = value => value ? value.split(/[?#]/, 1)[0].slice(0, 512) : null;
+      globalThis.__decompRecordCspViolation(JSON.stringify({
+        blockedURI: event.blockedURI, effectiveDirective: event.effectiveDirective,
+        documentURI: location(event.documentURI), sourceFile: location(event.sourceFile),
+        lineNumber: event.lineNumber, columnNumber: event.columnNumber,
+      }));
     });
   });
   created.on('request', (request) => {
