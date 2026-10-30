@@ -345,6 +345,7 @@ async function context(options = {}) {
       const styleMutations = recentStyleMutations.filter(mutation => at - mutation.at < 1000).slice(-12);
       globalThis.__decompRecordCspViolation(JSON.stringify({
         blockedURI: event.blockedURI, effectiveDirective: event.effectiveDirective,
+        auditPhase: globalThis.__decompAuditPhase ?? null,
         documentURI: location(event.documentURI), sourceFile: location(event.sourceFile),
         lineNumber: event.lineNumber, columnNumber: event.columnNumber,
         sample: event.sample?.slice(0, 160) ?? null, originalPolicy: event.originalPolicy?.slice(0, 512) ?? null,
@@ -580,8 +581,15 @@ async function auditWithFixtures(origin, fixtures, fulfilled, unmapped) {
         if (viewport.width === 1440 || (viewport.width === 320 && viewport.deviceScaleFactor === 1))
           contrast.push({ page: page.name, viewport: viewport.name, scheme, ...await target.evaluate(measureContrast) });
       }
-      if (viewport.deviceScaleFactor === 4 || ['job detail', 'source file'].includes(page.name))
-        await target.screenshot({ path: join(root, `${values.engine}-${viewport.width}x${viewport.height}@${viewport.deviceScaleFactor}-${page.name.replaceAll(' ', '-')}.png`) });
+      if (viewport.deviceScaleFactor === 4 || ['job detail', 'source file'].includes(page.name)) {
+        const phase = `screenshot:${viewport.name}:${page.name}`;
+        await target.evaluate((value) => { globalThis.__decompAuditPhase = value; }, phase);
+        try {
+          await target.screenshot({ path: join(root, `${values.engine}-${viewport.width}x${viewport.height}@${viewport.deviceScaleFactor}-${page.name.replaceAll(' ', '-')}.png`) });
+        } finally {
+          await target.evaluate(() => { globalThis.__decompAuditPhase = null; }).catch(() => undefined);
+        }
+      }
       if (viewport.width === 1440) {
         for (const scheme of ['light', 'dark']) {
           await target.emulateMedia({ colorScheme: scheme, reducedMotion: 'reduce' });
