@@ -102,7 +102,7 @@ async function context(options = {}) {
       : node?.nodeType === 11 && Boolean(node.querySelector('style'));
     const originalCreateElement = Document.prototype.createElement;
     Document.prototype.createElement = function(name, ...options) {
-      const element = Reflect.apply(originalCreateElement, this, [name, ...options]);
+      const element = originalCreateElement.apply(this, [name, ...options]);
       if (String(name).toLowerCase() === 'style') recordStyleOperation('createElement(style)');
       return element;
     };
@@ -110,7 +110,7 @@ async function context(options = {}) {
       const original = Node.prototype[method];
       Node.prototype[method] = function(...nodes) {
         if (nodes.some(containsStyleElement)) recordStyleOperation(`${method}(style)`);
-        return Reflect.apply(original, this, nodes);
+        return original.apply(this, nodes);
       };
     }
     const innerHTML = Object.getOwnPropertyDescriptor(Element.prototype, 'innerHTML');
@@ -126,7 +126,7 @@ async function context(options = {}) {
     const insertAdjacentHTML = Element.prototype.insertAdjacentHTML;
     Element.prototype.insertAdjacentHTML = function(position, value) {
       if (typeof value === 'string' && /<style\b/i.test(value)) recordStyleOperation('insertAdjacentHTML(style)');
-      return Reflect.apply(insertAdjacentHTML, this, [position, value]);
+      return insertAdjacentHTML.apply(this, [position, value]);
     };
     const cssText = Object.getOwnPropertyDescriptor(CSSStyleDeclaration.prototype, 'cssText');
     if (cssText?.set) {
