@@ -45,6 +45,7 @@ export async function serveEngineAuditFixtures(packagedOrigin, fixtures, fulfill
   const upstream = new URL(packagedOrigin);
   assert.equal(upstream.protocol, 'http:');
   assert.equal(upstream.hostname, '127.0.0.1');
+  let auditOrigin;
   const server = createServer((incoming, outgoing) => {
     const url = new URL(incoming.url, packagedOrigin);
     const pathname = url.pathname;
@@ -63,12 +64,16 @@ export async function serveEngineAuditFixtures(packagedOrigin, fixtures, fulfill
       outgoing.end(incoming.method === 'HEAD' ? undefined : body);
       return;
     }
-    // Fixed upstream only; never proxy commands, arbitrary hosts or paths outside the deployment.
+      // Fixed upstream only; never proxy commands, arbitrary hosts or paths outside the deployment.
     if (!['GET', 'HEAD'].includes(incoming.method) || !pathname.startsWith('/nested/')) {
       incoming.resume(); outgoing.writeHead(404); outgoing.end(); return;
     }
+    const headers = { ...incoming.headers, host: upstream.host };
+    // The browser's same-origin Origin names this temporary audit proxy, not the packaged listener.
+    // Translate only that exact origin; preserve foreign values so the upstream policy can deny them.
+    if (headers.origin === auditOrigin) headers.origin = packagedOrigin;
     const pending = request({ hostname: upstream.hostname, port: upstream.port, method: incoming.method,
-      path: pathname + url.search, headers: { ...incoming.headers, host: upstream.host } }, response => {
+      path: pathname + url.search, headers }, response => {
       outgoing.writeHead(response.statusCode, response.headers);
       response.on('error', () => outgoing.destroy());
       response.pipe(outgoing);
@@ -81,7 +86,8 @@ export async function serveEngineAuditFixtures(packagedOrigin, fixtures, fulfill
     server.once('error', reject);
     server.listen(0, '127.0.0.1', resolve);
   });
-  return { origin: `http://127.0.0.1:${server.address().port}`,
+  auditOrigin = `http://127.0.0.1:${server.address().port}`;
+  return { origin: auditOrigin,
     close: () => new Promise((resolve, reject) => {
       server.close(error => error ? reject(error) : resolve());
       server.closeAllConnections();

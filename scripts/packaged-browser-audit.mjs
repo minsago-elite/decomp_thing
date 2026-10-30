@@ -182,7 +182,10 @@ export const measurePage = `(() => {
     const outside = box.width > 0 && (box.right > width + 1 || box.left < -1);
     // A bounded local scroller or clipping container need not enlarge the root. Only the
     // named source/table regions may retain horizontal overflow, including hidden overflow.
-    const local = !region && element.clientWidth > 0 && element.scrollWidth > element.clientWidth + 1;
+    // Firefox includes the native file-picker button's intrinsic width in scrollWidth even
+    // when its clipped control box fits; the box itself is still checked for viewport bounds.
+    const clippedFilePicker = element.matches('input[type="file"]') && getComputedStyle(element).overflowX === 'clip';
+    const local = !region && !clippedFilePicker && element.clientWidth > 0 && element.scrollWidth > element.clientWidth + 1;
     if (outside || local) overflow.push(describe(element));
   }
   const actions = [...document.querySelectorAll('button, a[href], input, select, textarea, summary')].filter(shown);

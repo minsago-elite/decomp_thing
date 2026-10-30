@@ -96,24 +96,36 @@ test('metadata timing deliberately does not claim explicit interactions', async 
 });
 
 test('HTTP fixture boundary serves native attachment bytes without reaching authenticated upstream API', async () => {
-  const hits = [];
+  const hits = []; const origins = [];
   const csp = "default-src 'self'; script-src 'self'; object-src 'none'";
+  let packagedOrigin;
   const packaged = createServer((incoming, outgoing) => {
-    hits.push(incoming.url);
-    outgoing.writeHead(incoming.url.includes('/api/') ? 401 : 200, { 'Content-Security-Policy': csp,
+    hits.push(incoming.url); origins.push(incoming.headers.origin ?? null);
+    const originDenied = incoming.headers.origin != null && incoming.headers.origin !== packagedOrigin;
+    let status = 200;
+    if (originDenied) status = 403;
+    else if (incoming.url.includes('/api/')) status = 401;
+    outgoing.writeHead(status, { 'Content-Security-Policy': csp,
       'Content-Type': 'text/html', 'X-Packaged-Identity': 'unchanged' });
     outgoing.end('<h1>Packaged bytes</h1>');
   });
   await new Promise(resolve => packaged.listen(0, '127.0.0.1', resolve));
+  packagedOrigin = `http://127.0.0.1:${packaged.address().port}`;
   const fulfilled = [], unmapped = [];
   const bound = fixtures();
   let audit;
   try {
-    audit = await serveEngineAuditFixtures(`http://127.0.0.1:${packaged.address().port}`, bound, fulfilled, unmapped);
+    audit = await serveEngineAuditFixtures(packagedOrigin, bound, fulfilled, unmapped);
     const document = await fetch(audit.origin + '/nested/');
     assert.equal(document.headers.get('content-security-policy'), csp);
     assert.equal(document.headers.get('x-packaged-identity'), 'unchanged');
     assert.equal(await document.text(), '<h1>Packaged bytes</h1>');
+    const sameOriginAsset = await fetch(audit.origin + '/nested/assets/ui/assets/index-test.js', { headers: { Origin: audit.origin } });
+    assert.equal(sameOriginAsset.status, 200);
+    assert.equal(origins.at(-1), packagedOrigin, 'same-origin browser Origin must be translated to the fixed listener');
+    const foreignOriginAsset = await fetch(audit.origin + '/nested/assets/ui/assets/foreign.js', { headers: { Origin: 'https://invalid.example' } });
+    assert.equal(foreignOriginAsset.status, 403);
+    assert.equal(origins.at(-1), 'https://invalid.example', 'foreign Origin must remain unchanged for upstream denial');
     const source = bound.pages.find(page => page.name === 'source file');
     const path = source.path.split('?')[0].replace('/nested/jobs/', '/nested/api/v1/jobs/') + '/content';
     const download = await fetch(audit.origin + path);
@@ -137,7 +149,8 @@ test('HTTP fixture boundary serves native attachment bytes without reaching auth
       idempotencyKey: 'audit_command', ifMatch: `"${bound.runVersion}"`, csrf: true });
     for (const [path, method] of [['/outside', 'GET'], ['/nested/', 'POST']])
       assert.equal((await fetch(audit.origin + path, { method })).status, 404);
-    assert.deepEqual(hits, ['/nested/'], 'fixture API and rejected paths must never fall through to the JVM');
+    assert.deepEqual(hits, ['/nested/', '/nested/assets/ui/assets/index-test.js', '/nested/assets/ui/assets/foreign.js'],
+      'fixture API and rejected paths must never fall through to the JVM');
     await assert.rejects(serveEngineAuditFixtures('http://example.com', bound, [], []), /127\.0\.0\.1/);
   } finally {
     await audit?.close();
