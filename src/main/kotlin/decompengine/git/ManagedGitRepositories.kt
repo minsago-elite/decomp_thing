@@ -806,9 +806,7 @@ class ManagedGitRepositories(
                 if (name in checkedOutBranches(runner, located)) {
                     GitRefOperations.refuse("BRANCH_CURRENT", "The branch is checked out in a work tree. Switch that work tree first.")
                 }
-                val unmerged = GitRefOperations.unmergedCount(runner, located.commonDir, tip, name)
-                if (unmerged > 0) GitRefOperations.refuse("BRANCH_UNMERGED",
-                    "$unmerged commit(s) are reachable only from this branch. Merge or tag them first; nothing is force-deleted.")
+                GitRefOperations.requireBranchDeleteSafe(runner, located.commonDir, tip, name)
             }
             GitOperationAction.WORKTREE_ADD -> {
                 if (!located.primary) GitRefOperations.refuse("VALIDATION_FAILED", "New work trees are created from the primary work tree.")
@@ -1030,9 +1028,13 @@ class ManagedGitRepositories(
                 GitRepositoryInspector.head(runner, located.gitDir, format).objectId
             }
             GitOperationAction.BRANCH_DELETE -> {
-                val (name, _) = branchFor(runner, located, request.refId)
-                // Compare-and-delete the reviewed tip, not a fresh observation of a concurrently moved ref.
-                GitRefOperations.deleteRef(runner, located.commonDir, name, checkNotNull(request.objectId))
+                val (name, tip) = branchFor(runner, located, request.refId)
+                val expected = checkNotNull(request.objectId)
+                if (tip != expected) GitRefOperations.refuse("REF_CHANGED", "The branch moved since it was reviewed; nothing was deleted.")
+                // Repeat reachability and symbolic-ref checks at the destructive boundary; an external
+                // Git writer can change aliases after request validation.
+                GitRefOperations.requireBranchDeleteSafe(runner, located.commonDir, tip, name)
+                GitRefOperations.deleteRef(runner, located.commonDir, name, expected)
                 crash(GitOperationCrashPoint.AFTER_PUBLISH)
                 null
             }

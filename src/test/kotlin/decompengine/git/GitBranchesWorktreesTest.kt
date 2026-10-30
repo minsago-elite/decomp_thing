@@ -129,6 +129,48 @@ class GitBranchesWorktreesTest {
         assertNull(GitRefOperations.refObject(f.repositories.runner, f.gitDir(), GitObjectFormat.SHA1, "refs/heads/feature"))
     }
 
+    @Test fun `branch deletion refuses dependent symbolic refs including aliases added after validation`(): Unit {
+        Fixture().use { f ->
+            val base = f.prepare()
+            val primary = service.workspace(jobId, repositoryId).worktreeId
+            run(GitRefRequest(GitOperationAction.BRANCH_CREATE, primary, guards().second, name = "feature", objectId = base))
+            val tree = f.raw("rev-parse", "$base^{tree}").trim()
+            val tip = f.raw("commit-tree", "-p", base, "-m", "feature-only commit", tree).trim()
+            f.raw("update-ref", "refs/heads/feature", tip, base)
+            f.raw("symbolic-ref", "refs/heads/alias", "refs/heads/feature")
+            val nestedAlias = f.gitDir().resolve("refs/heads/nested-alias")
+            Files.writeString(nestedAlias, "ref: refs/heads/alias\n",
+                java.nio.file.StandardOpenOption.CREATE_NEW, java.nio.file.StandardOpenOption.WRITE)
+
+            // The old --exclude=feature reachability check treats aliases as roots and misses this commit.
+            assertEquals(0L, GitRefOperations.unmergedCount(f.repositories.runner, f.gitDir(), tip, "refs/heads/feature"))
+            refused("BRANCH_UNMERGED", GitRefRequest(GitOperationAction.BRANCH_DELETE, primary, guards().second,
+                refId = refId("refs/heads/feature"), objectId = tip))
+            assertEquals(tip, GitRefOperations.refObject(f.repositories.runner, f.gitDir(), GitObjectFormat.SHA1, "refs/heads/feature"))
+            assertEquals("refs/heads/feature", f.raw("symbolic-ref", "refs/heads/alias").trim())
+            assertEquals("ref: refs/heads/alias", Files.readString(nestedAlias).trim())
+        }
+
+        Fixture().use { f ->
+            val base = f.prepare()
+            val primary = service.workspace(jobId, repositoryId).worktreeId
+            run(GitRefRequest(GitOperationAction.BRANCH_CREATE, primary, guards().second, name = "feature", objectId = base))
+            // The branch is merged at validation time; an alias appearing before the destructive
+            // boundary must still prevent deletion rather than become dangling.
+            f.hook = { point ->
+                if (point == GitOperationCrashPoint.BEFORE_PUBLISH) {
+                    f.raw("symbolic-ref", "refs/heads/late-alias", "refs/heads/feature")
+                }
+            }
+            val deletion = run(GitRefRequest(GitOperationAction.BRANCH_DELETE, primary, guards().second,
+                refId = refId("refs/heads/feature"), objectId = base))
+            assertEquals(GitOperationState.FAILED, deletion.state)
+            assertEquals("BRANCH_UNMERGED", deletion.failureCode)
+            assertEquals(base, GitRefOperations.refObject(f.repositories.runner, f.gitDir(), GitObjectFormat.SHA1, "refs/heads/feature"))
+            assertEquals("refs/heads/feature", f.raw("symbolic-ref", "refs/heads/late-alias").trim())
+        }
+    }
+
     @Test fun `linked work trees are contained, bounded, owned and removed only when clean and merged`(): Unit = Fixture().use { f ->
         val base = f.prepare()
         val primary = service.workspace(jobId, repositoryId).worktreeId
