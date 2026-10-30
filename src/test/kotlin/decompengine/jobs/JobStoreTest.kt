@@ -14,9 +14,209 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
+import org.junit.jupiter.api.Assumptions.assumeTrue
 
 @ExtendWith(RecoveryMatrixEvidence::class)
 class JobStoreTest {
+    @Test
+    fun `strict metadata read detects only owned sibling directory link count change`() {
+        val root = createTempDirectory("jobs-metadata-sibling-diagnostic-")
+        val store = JobStore(root)
+        val job = store.createFromUpload("snapshot.elf", elfFixture())
+        val jobDirectory = root.resolve(job.id)
+        val metadata = jobDirectory.resolve("job.json")
+        val beforeDirectory = directoryIdentity(jobDirectory)
+        val beforeMetadata = fileIdentity(metadata)
+        val beforeBytes = java.nio.file.Files.readAllBytes(metadata)
+        var afterDirectory: decompengine.acp.LinuxFileIdentity? = null
+        var afterMetadata: decompengine.acp.LinuxFileIdentity? = null
+        var afterBytes: ByteArray? = null
+
+        val read = runCatching {
+            decompengine.repair.readStableRegularFile(root, "${job.id}/job.json", 256 * 1024L,
+                afterAuthorization = {
+                    store.reportsDirectory(job.id)
+                    assertTrue(java.nio.file.Files.isDirectory(jobDirectory.resolve("reports")))
+                    afterDirectory = directoryIdentity(jobDirectory)
+                    afterMetadata = fileIdentity(metadata)
+                    afterBytes = java.nio.file.Files.readAllBytes(metadata)
+                })
+        }
+
+        val observedDirectory = checkNotNull(afterDirectory) { "authorization callback did not run" }
+        assertEquals(beforeDirectory.copy(linkCount = observedDirectory.linkCount), observedDirectory)
+        assertEquals(beforeMetadata, afterMetadata)
+        kotlin.test.assertContentEquals(beforeBytes, afterBytes)
+        val linkCountChanged = beforeDirectory.linkCount != observedDirectory.linkCount
+        assumeTrue(linkCountChanged,
+            "filesystem ${java.nio.file.Files.getFileStore(root).type()} did not change directory nlink for owned sibling creation")
+
+        val refusal = read.exceptionOrNull()
+        assertTrue(refusal is IllegalArgumentException)
+        assertEquals("stable file-read directory binding changed", refusal.message)
+        assertTrue(store.get(job.id).binaryPath.toFile().isFile)
+    }
+
+    private fun directoryIdentity(path: java.nio.file.Path): decompengine.acp.LinuxFileIdentity =
+        decompengine.acp.LinuxFilesystemSyscalls.openAbsolutePathOrNull(path).use { descriptor ->
+            decompengine.acp.LinuxFilesystemSyscalls.identity(requireNotNull(descriptor).fd)
+        }
+
+    private fun fileIdentity(path: java.nio.file.Path): decompengine.acp.LinuxFileIdentity = directoryIdentity(path)
+
+    @Test
+    fun `job metadata read accepts owned sibling directory creation and removal`() {
+        fun exercise(
+            label: String,
+            beforeRead: (java.nio.file.Path) -> Unit = {},
+            duringRead: (java.nio.file.Path) -> Unit,
+        ): Boolean {
+            val root = createTempDirectory("jobs-metadata-$label-")
+            val store = JobStore(root)
+            val job = store.createFromUpload("snapshot.elf", elfFixture())
+            val jobDirectory = root.resolve(job.id)
+            val metadata = jobDirectory.resolve("job.json")
+            beforeRead(jobDirectory)
+            val beforeDirectory = directoryIdentity(jobDirectory)
+            val beforeMetadata = fileIdentity(metadata)
+            val beforeBytes = java.nio.file.Files.readAllBytes(metadata)
+            var afterDirectory: decompengine.acp.LinuxFileIdentity? = null
+            var afterMetadata: decompengine.acp.LinuxFileIdentity? = null
+            var afterBytes: ByteArray? = null
+
+            val result = store.getWithMetadataAuthorization(job.id) {
+                duringRead(jobDirectory)
+                afterDirectory = directoryIdentity(jobDirectory)
+                afterMetadata = fileIdentity(metadata)
+                afterBytes = java.nio.file.Files.readAllBytes(metadata)
+            }
+
+            val observedDirectory = checkNotNull(afterDirectory)
+            assertEquals(beforeDirectory.copy(linkCount = observedDirectory.linkCount), observedDirectory)
+            assertEquals(beforeMetadata, afterMetadata)
+            kotlin.test.assertContentEquals(beforeBytes, afterBytes)
+            assertEquals(job, result)
+            return beforeDirectory.linkCount != observedDirectory.linkCount
+        }
+
+        val creationChangedLinkCount = exercise("sibling-create") { directory ->
+            java.nio.file.Files.createDirectory(directory.resolve("reports"))
+        }
+        val removalChangedLinkCount = exercise(
+            "sibling-remove",
+            beforeRead = { directory -> java.nio.file.Files.createDirectory(directory.resolve("reports")) },
+            duringRead = { directory -> java.nio.file.Files.delete(directory.resolve("reports")) },
+        )
+        val filesystemType = java.nio.file.Files.getFileStore(java.nio.file.Path.of(".")).type()
+        assumeTrue(creationChangedLinkCount && removalChangedLinkCount,
+            "filesystem $filesystemType did not change directory nlink for both owned sibling controls")
+    }
+
+    @Test
+    fun `job metadata read still refuses directory and target replacement`() {
+        run {
+            val root = createTempDirectory("jobs-metadata-parent-replacement-")
+            val store = JobStore(root)
+            val job = store.createFromUpload("snapshot.elf", elfFixture())
+            val jobDirectory = root.resolve(job.id)
+            val failure = assertFailsWith<IllegalArgumentException> {
+                store.getWithMetadataAuthorization(job.id) {
+                    val retained = root.resolve("retained-job-directory")
+                    java.nio.file.Files.move(jobDirectory, retained)
+                    java.nio.file.Files.createDirectory(jobDirectory)
+                    java.nio.file.Files.copy(retained.resolve("job.json"), jobDirectory.resolve("job.json"))
+                }
+            }
+            assertTrue(
+                failure.message in setOf(
+                    "stable file-read directory binding changed",
+                    "stable file-read root binding changed",
+                ),
+                "directory replacement must be refused by a pinned path binding check",
+            )
+        }
+
+        run {
+            val root = createTempDirectory("jobs-metadata-target-replacement-")
+            val store = JobStore(root)
+            val job = store.createFromUpload("snapshot.elf", elfFixture())
+            val metadata = root.resolve(job.id).resolve("job.json")
+            val failure = assertFailsWith<IllegalArgumentException> {
+                store.getWithMetadataAuthorization(job.id) {
+                    val retained = metadata.resolveSibling("retained-job.json")
+                    java.nio.file.Files.move(metadata, retained)
+                    java.nio.file.Files.copy(retained, metadata)
+                }
+            }
+            assertEquals("stable file-read target binding changed", failure.message)
+        }
+
+        run {
+            val root = createTempDirectory("jobs-metadata-root-replacement-")
+            val store = JobStore(root)
+            val job = store.createFromUpload("snapshot.elf", elfFixture())
+            val failure = assertFailsWith<IllegalArgumentException> {
+                store.getWithMetadataAuthorization(job.id) {
+                    val retainedRoot = root.resolveSibling("${root.fileName}-retained")
+                    java.nio.file.Files.move(root, retainedRoot)
+                    java.nio.file.Files.createDirectory(root)
+                    val replacementJob = java.nio.file.Files.createDirectory(root.resolve(job.id))
+                    java.nio.file.Files.copy(retainedRoot.resolve(job.id).resolve("job.json"), replacementJob.resolve("job.json"))
+                }
+            }
+            assertEquals("stable file-read root binding changed", failure.message)
+        }
+
+        run {
+            val root = createTempDirectory("jobs-metadata-hardlink-replacement-")
+            val store = JobStore(root)
+            val job = store.createFromUpload("snapshot.elf", elfFixture())
+            val metadata = root.resolve(job.id).resolve("job.json")
+            val failure = assertFailsWith<IllegalArgumentException> {
+                store.getWithMetadataAuthorization(job.id) {
+                    java.nio.file.Files.createLink(metadata.resolveSibling("retained-job.json"), metadata)
+                }
+            }
+            assertTrue(failure.message.orEmpty().contains("descriptor identity differs"))
+        }
+
+        run {
+            val root = createTempDirectory("jobs-metadata-symlink-replacement-")
+            val store = JobStore(root)
+            val job = store.createFromUpload("snapshot.elf", elfFixture())
+            val metadata = root.resolve(job.id).resolve("job.json")
+            val failure = assertFailsWith<IllegalArgumentException> {
+                store.getWithMetadataAuthorization(job.id) {
+                    val retained = metadata.resolveSibling("retained-job.json")
+                    java.nio.file.Files.move(metadata, retained)
+                    java.nio.file.Files.createSymbolicLink(metadata, retained.fileName)
+                }
+            }
+            assertEquals("stable file-read target binding changed", failure.message)
+        }
+
+        run {
+            val root = createTempDirectory("jobs-metadata-mode-change-")
+            val store = JobStore(root)
+            val job = store.createFromUpload("snapshot.elf", elfFixture())
+            val metadata = root.resolve(job.id).resolve("job.json")
+            val originalMode = java.nio.file.Files.getPosixFilePermissions(metadata)
+            val failure = try {
+                assertFailsWith<IllegalArgumentException> {
+                    store.getWithMetadataAuthorization(job.id) {
+                        java.nio.file.Files.setPosixFilePermissions(
+                            metadata,
+                            originalMode - java.nio.file.attribute.PosixFilePermission.OWNER_WRITE,
+                        )
+                    }
+                }
+            } finally {
+                java.nio.file.Files.setPosixFilePermissions(metadata, originalMode)
+            }
+            assertTrue(failure.message.orEmpty().contains("identity differs"))
+        }
+    }
+
     @Test
     fun `artifact reads enforce the selected byte bound and reject retained file or directory substitution`() {
         val root = createTempDirectory("jobs-artifact-snapshot-")

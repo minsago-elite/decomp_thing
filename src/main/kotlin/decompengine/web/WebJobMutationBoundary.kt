@@ -50,10 +50,38 @@ internal class WebJobMutationBoundary(
         return AuthorizedWebCancellation(session, jobs)
     }
 
+    fun authorizeJobOrganization(exchange: HttpExchange): AuthorizedWebJobOrganization {
+        val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.jsonMutation("PATCH")))
+        return AuthorizedWebJobOrganization(session, jobs)
+    }
+
+    fun authorizeJobDeletion(exchange: HttpExchange): AuthorizedWebJobDeletion {
+        val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.jsonMutation("DELETE")))
+        return AuthorizedWebJobDeletion(session, jobs)
+    }
+
     fun authorizeGitRepository(exchange: HttpExchange): AuthorizedWebGitRepository {
         checkNotNull(access.authorize(exchange, WebEndpointPolicy.jsonMutation("POST")))
         return AuthorizedWebGitRepository()
     }
+}
+
+/** Display-metadata capability; the body selects only allowlisted label/archive values. */
+internal class AuthorizedWebJobOrganization internal constructor(
+    private val session: AuthorizedWebSession,
+    private val jobs: WebJobService,
+) {
+    fun request(jobId: String, expectedVersion: String, change: decompengine.jobs.JobOrganizationChange, requestKey: String) =
+        jobs.requestJobOrganization(jobId, expectedVersion, change, session.sessionId, requestKey)
+}
+
+/** Deletion capability; attribution and key scope come only from the authorized session. */
+internal class AuthorizedWebJobDeletion internal constructor(
+    private val session: AuthorizedWebSession,
+    private val jobs: WebJobService,
+) {
+    fun request(jobId: String, expectedVersion: String, requestKey: String): WebJobDeletionAdmission =
+        jobs.requestJobDeletion(jobId, expectedVersion, session.sessionId, requestKey)
 }
 
 /** Repository-creation capability; the body selects only typed intent, never a path or command. */
