@@ -56,7 +56,7 @@ test('every layout and fresh focus navigation populates reads and distinct visib
       }
     }
   }
-  assert.equal(navigations, 140);
+  assert.equal(navigations, 168);
 });
 
 test('attempt shells and missing/hidden highlighted tokens cannot satisfy populated predicates', () => {

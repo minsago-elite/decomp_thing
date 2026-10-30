@@ -43,7 +43,12 @@ enum class WorkflowRunState(val wireName: String) {
     QUEUED("queued"), RUNNING("running"), CANCELLING("cancelling"), COMPLETED("completed"), FAILED("failed"), CANCELLED("cancelled"), INTERRUPTED("interrupted");
     val terminal: Boolean get() = this in setOf(COMPLETED, FAILED, CANCELLED, INTERRUPTED)
 }
-enum class WorkflowTerminalReason { COMPLETED, NO_CHANGES, REFUSED, CANCELLED, LIMIT_EXHAUSTED, FAILED, PROCESS_INTERRUPTED }
+/**
+ * Stop outcomes stay distinct: LIMIT_EXHAUSTED is a budget (tool calls, output, tokens), TIMED_OUT a
+ * wall-clock or idle deadline, CANCELLED a recorded user request, FAILED a workflow-reported failure,
+ * INFRASTRUCTURE_FAILED an adapter that could not report any outcome and PROCESS_INTERRUPTED a stopped service.
+ */
+enum class WorkflowTerminalReason { COMPLETED, NO_CHANGES, REFUSED, CANCELLED, LIMIT_EXHAUSTED, TIMED_OUT, FAILED, INFRASTRUCTURE_FAILED, PROCESS_INTERRUPTED }
 
 data class WorkflowExecutionLimits(val wallClockMs: ULong, val idleMs: ULong, val maxOutputBytes: ULong, val maxToolCalls: ULong) {
     init { require(wallClockMs > 0uL && idleMs > 0uL && idleMs <= wallClockMs && maxOutputBytes > 0uL) { "invalid workflow execution limits" } }
@@ -130,20 +135,41 @@ class WorkflowAttemptStore private constructor(
 ) : AutoCloseable {
     private val lifetime = ReentrantReadWriteLock(true)
     private val stripes = Array(64) { ReentrantLock() }
+    // Guarded by the matching stripe (or the exclusive lifetime lock during startup).
+    // Identity tokens are bounded and cannot wrap back to an earlier observation.
+    private val listingEpochs = Array<Any>(stripes.size) { Any() }
     private val poisoned = AtomicBoolean()
     private var closed = false
 
-    fun inspect(jobId: String): WorkflowJobInspection = withJob(jobId) { directory -> inspectLocked(jobId, directory) }
+    fun inspect(jobId: String): WorkflowJobInspection = withJob(jobId, readOnly = true) { directory -> inspectLocked(jobId, directory) }
 
-    /** Display-only collection inspection; ordinary detail/mutation readers retain their existing profile. */
-    internal fun inspectForListing(jobId: String, read: (String, Int) -> ByteArray): WorkflowJobInspection = withJob(jobId) { directory ->
-        inspectRecord(jobId, directory) { path, maximum -> read("$jobId/${path.fileName}", maximum) }
+    /** Optimistic display-only read: neither lifetime nor stripe locks span physical listing I/O.
+     * Validate after presentation too, so a command crossing either metadata read refuses the row.
+     * Close/recovery/publication failures are rechecked before returning captured data; listing
+     * callbacks must only capture bounded metadata/presentation, never mutate or publish it.
+     */
+    internal fun <T> inspectForListing(jobId: String, read: (String, Int) -> ByteArray,
+        present: (WorkflowJobInspection.Available) -> T): T {
+        val epoch = listingEpoch(jobId)
+        val directory = root.resolve(jobId)
+        if (!Files.isDirectory(directory, NOFOLLOW_LINKS)) fail("JOB_NOT_FOUND", "The job storage directory is missing or invalid.")
+        val result = present(inspectRecord(jobId, directory) { path, maximum -> read("$jobId/${path.fileName}", maximum) })
+        if (epoch !== listingEpoch(jobId)) fail("JOB_RECORD_UNAVAILABLE", "The job changed during listing capture; refresh its state.")
+        return result
+    }
+
+    /** Only in-memory checks under these locks: even directory probes belong outside them. */
+    private fun listingEpoch(jobId: String): Any = lifetime.read {
+        ensureOpen()
+        requireJobId(jobId)
+        val stripe = (jobId.hashCode() and Int.MAX_VALUE) % stripes.size
+        stripes[stripe].withLock { ensureOpen(); listingEpochs[stripe] }
     }
 
     /** Read-side transaction: callers may read bounded local evidence, never wait on network delivery.
      * Lifecycle publication and close cannot interleave until the callback has returned.
      */
-    internal fun <T> withAttemptSnapshot(jobId: String, runId: String, read: (WorkflowAttempt) -> T): T = withJob(jobId) { directory ->
+    internal fun <T> withAttemptSnapshot(jobId: String, runId: String, read: (WorkflowAttempt) -> T): T = withJob(jobId, readOnly = true) { directory ->
         val attempt = available(jobId, directory).snapshot.attempts.singleOrNull { it.runId == runId }
             ?: fail("RUN_NOT_FOUND", "The requested attempt does not belong to this job.")
         read(attempt)
@@ -240,7 +266,7 @@ class WorkflowAttemptStore private constructor(
 
     /** Read-only replay lookup for a future authenticated service admission, before queue/CAS checks. */
     internal fun replayStart(jobId: String, request: NewWorkflowAttempt, requestKey: String,
-        expectedRequestVersion: String): WorkflowStartResult? = withJob(jobId) { directory ->
+        expectedRequestVersion: String): WorkflowStartResult? = withJob(jobId, readOnly = true) { directory ->
         val key = workflowStartKeyDigest(jobId, requestKey)
         val intent = workflowStartIntentSha256(expectedRequestVersion, request)
         val current = available(jobId, directory).snapshot
@@ -250,7 +276,7 @@ class WorkflowAttemptStore private constructor(
 
     /** Read-only recovery replay lookup; it precedes predecessor, capability and CAS checks. */
     internal fun replayRecovery(jobId: String, previousRunId: String, expectedRunVersion: String, mode: WorkflowRecoveryMode,
-        inputRevisionId: String?, requestKey: String): WorkflowStartResult? = withJob(jobId) { directory ->
+        inputRevisionId: String?, requestKey: String): WorkflowStartResult? = withJob(jobId, readOnly = true) { directory ->
         val key = workflowStartKeyDigest(jobId, requestKey)
         val intent = workflowRecoveryIntentSha256(expectedRunVersion, previousRunId, mode, inputRevisionId)
         val current = available(jobId, directory).snapshot
@@ -414,6 +440,9 @@ class WorkflowAttemptStore private constructor(
         } catch (failure: Error) {
             if (budget.changesStarted) poisoned.set(true)
             throw failure
+        } finally {
+            // Recovery uses the exclusive lifetime lock rather than withJob's command boundary.
+            listingEpochs.indices.forEach { listingEpochs[it] = Any() }
         }
     }
 
@@ -599,14 +628,19 @@ class WorkflowAttemptStore private constructor(
         throw WorkflowStoreException("CORRUPT_WORKFLOW_STATE", "The workflow state is invalid; preserve workflow-state.json and restore a verified backup before retrying.", cause = failure)
     }
 
-    private fun <T> withJob(jobId: String, operation: (Path) -> T): T = lifetime.read {
+    private fun <T> withJob(jobId: String, readOnly: Boolean = false, operation: (Path) -> T): T = lifetime.read {
         ensureOpen()
         requireJobId(jobId)
-        stripes[(jobId.hashCode() and Int.MAX_VALUE) % stripes.size].withLock {
+        val stripe = (jobId.hashCode() and Int.MAX_VALUE) % stripes.size
+        stripes[stripe].withLock {
             ensureOpen()
             val directory = root.resolve(jobId)
             if (!Files.isDirectory(directory, NOFOLLOW_LINKS)) fail("JOB_NOT_FOUND", "The job storage directory is missing or invalid.")
-            operation(directory)
+            try { operation(directory) } finally {
+                // Invalidate even a failed/uncertain command, and conservatively include colliding
+                // jobs. Read-only status/replay calls do not invalidate concurrent listing rows.
+                if (!readOnly) listingEpochs[stripe] = Any()
+            }
         }
     }
     private fun ensureOpen() {
@@ -666,7 +700,8 @@ class WorkflowAttemptStore private constructor(
         private fun validateTerminal(state: WorkflowRunState, reason: WorkflowTerminalReason) {
             val valid = when (state) {
                 WorkflowRunState.COMPLETED -> reason in setOf(WorkflowTerminalReason.COMPLETED, WorkflowTerminalReason.NO_CHANGES)
-                WorkflowRunState.FAILED -> reason in setOf(WorkflowTerminalReason.FAILED, WorkflowTerminalReason.REFUSED, WorkflowTerminalReason.LIMIT_EXHAUSTED)
+                WorkflowRunState.FAILED -> reason in setOf(WorkflowTerminalReason.FAILED, WorkflowTerminalReason.REFUSED, WorkflowTerminalReason.LIMIT_EXHAUSTED,
+                    WorkflowTerminalReason.TIMED_OUT, WorkflowTerminalReason.INFRASTRUCTURE_FAILED)
                 WorkflowRunState.CANCELLED -> reason == WorkflowTerminalReason.CANCELLED
                 WorkflowRunState.INTERRUPTED -> reason == WorkflowTerminalReason.PROCESS_INTERRUPTED
                 else -> false

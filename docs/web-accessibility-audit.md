@@ -15,7 +15,7 @@ own live status; this page records what is checked, how, and what still needs a 
 | Copy catalog | `npm test` → `frontend/tests/copy-catalog.test.ts` | Accessible names, titles and placeholders come from catalogs, so names stay consistent across views. | Name quality; that is a manual check below. |
 | Shell keyboard and navigation | `npm test` → `frontend/tests/app.test.tsx` | Skip link, route heading focus (including history traversal without scrolling), the narrow Navigation disclosure (Escape, focus return, breakpoint changes), offline notices without focus theft. | Physical keyboard behaviour in each engine. |
 | Form error relationships | `dashboard-*.test.tsx`, `upload.test.tsx` | Invalid fields are focused, `aria-invalid`, and described by their message; upload errors persist through retry. | Screen-reader phrasing. |
-| Packaged audit | CI `web-packaged` → `check-packaged-web-browser.mjs --mode audit` (`scripts/packaged-browser-audit.mjs`) | In pinned Chrome against the packaged JVM at `/nested/` with its enforced CSP: every SPA route at all five sizes in light and dark (system preference) has no page-wide horizontal scroll; only `.source-rows` and `.retained-case-table` scroll, and each such region fits, is focusable and named; no action is pushed off-screen; buttons, fields, navigation and breadcrumb targets are at least 24×24 CSS px; the Navigation disclosure replaces the sidebar below 48rem; reduced motion leaves zero running animations. Every rendered text node is measured against its effective opaque background (4.5:1, or 3:1 for large text), failing on any colour it cannot measure. Every Tab stop on every route, forward from the heading and backward to the skip link, is `:focus-visible` with a ≥2 px outline at ≥3:1 and is neither off-screen nor covered. Attempt retry and cancellation and the source download are completed with Tab plus Enter/Space only, and each command carries its If-Match, idempotency key and CSRF token. Screenshots of every route at 400% zoom, and of the dashboard, job detail and source views at every size, are retained. | Other engines: `scripts/packaged-browser-engines.mjs` runs the same checks in Firefox (qualified locally) and WebKit (dispatch workflow) — see [browser support](web-browser-support.md). Manual screen-reader output, Git views (not implemented), the router's not-found view (unknown paths are a server 404 document). API reads are contract fixtures fulfilled in DevTools, because inert seeding cannot persist source revisions; the document, CSP, assets and worker are the real packaged responses. |
+| Packaged audit | CI `web-packaged` → `check-packaged-web-browser.mjs --mode audit` (`scripts/packaged-browser-audit.mjs`) | In pinned Chrome against the packaged JVM at `/nested/` with its enforced CSP: every SPA route at all five sizes in light and dark (system preference) has no page-wide horizontal scroll; only `.source-rows` and `.retained-case-table` scroll, and each such region fits, is focusable and named; no action is pushed off-screen; buttons, fields, navigation and breadcrumb targets are at least 24×24 CSS px; the Navigation disclosure replaces the sidebar below 48rem; reduced motion leaves zero running animations. Every rendered text node, non-empty visible control value, and visible `::placeholder` is measured against its effective opaque background (4.5:1, or 3:1 for large text), failing on any colour it cannot measure. Every Tab stop on every route, forward from the heading and backward to the skip link, is `:focus-visible` with a ≥2 px outline at ≥3:1 and is neither off-screen nor covered. Attempt retry and cancellation and the source download are completed with Tab plus Enter/Space only, and each command carries its If-Match, idempotency key and CSRF token. Screenshots of every route at 400% zoom, and of the dashboard, job detail and source views at every size, are retained. | Firefox/WebKit are exercised separately by `scripts/packaged-browser-engines.mjs`; see [browser support](web-browser-support.md) and #1791 for per-engine qualification status. Manual screen-reader output, Git views (not implemented), the router's not-found view (unknown paths are a server 404 document). API reads are contract fixtures fulfilled in DevTools, because inert seeding cannot persist source revisions; the document, CSP, assets and worker are the real packaged responses. |
 | Dashboard contrast/reflow | CI `--mode scale` | Dashboard controls' border and focus contrast at their measured colours and 320/390 px reflow with 10,000 persisted jobs. | Other routes (covered by the audit). |
 
 ## Findings from this audit and their fixes
@@ -52,9 +52,9 @@ regression controls require visible overflow and insufficient contrast to fail. 
 exempt visible previews or add any new horizontal-scroll exception.
 
 An independent review found two further coverage gaps. The verdict previously accepted empty
-layout/contrast/focus arrays and `null` timing percentiles. It now requires the exact 10-route ×
-5-viewport × 2-theme layout matrix (100 records), contrast at desktop and 320 CSS pixels in
-both themes (40 records), and both-theme focus walks for every route (20 records), rejecting
+layout/contrast/focus arrays and `null` timing percentiles. It now requires the exact 12-route ×
+5-viewport × 2-theme layout matrix (120 records), contrast at desktop and 320 CSS pixels in
+both themes (48 records), and both-theme focus walks for every route (24 records), rejecting
 missing, duplicate or unexpected cells. Timing evidence must contain 20 target-load and 50/50
 route-feedback/data finite nonnegative samples, with matching finite median/p95 summaries;
 only then are the existing budgets evaluated. These target-load measurements still do not
@@ -65,8 +65,11 @@ contrast and layout measurements. Each fresh source navigation for layout/contra
 explicitly highlights and requires distinctive rendered plain/keyword/string/comment/number
 tokens before measurement. Each source contrast record must include measured text of all five
 token kinds in both themes at both contrast profiles. The dedicated worker-target/CSP checks
-remain separate and mandatory. Negative controls inject low-contrast rendered tokens and absent
-token measurements, as well as empty/partial matrices and missing/null/nonfinite timing evidence.
+remain separate and mandatory. The route matrix separately visits the source-search form and
+populated results. Contrast measures each visible non-empty input value and, only when the field
+is empty, its rendered `::placeholder`; negative controls make either fail on insufficient
+contrast. Negative controls also inject low-contrast rendered tokens and absent token
+measurements, as well as empty/partial matrices and missing/null/nonfinite timing evidence.
 These controls validate the audit, not browser rendering; the expanded highlighted-state coverage
 requires new-head hosted qualification and does not establish a pre-existing token colour defect.
 

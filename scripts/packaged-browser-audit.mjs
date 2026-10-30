@@ -10,7 +10,7 @@ import { join } from 'node:path';
 // response is a schema fixture the SPA validates exactly as it would a server response.
 
 export const auditPageNames = ['workspace', 'upload', 'runtime', 'job detail', 'attempt history',
-  'attempt overview', 'attempt activity', 'attempt evidence', 'source directory', 'source file'];
+  'attempt overview', 'attempt activity', 'attempt evidence', 'source directory', 'source search form', 'source search results', 'source file'];
 export const auditTokenKinds = ['plain', 'keyword', 'string', 'comment', 'number'];
 
 const fixtureRoot = (repo) => join(repo, 'contracts/web/v1/fixtures');
@@ -22,7 +22,11 @@ const sourceText = ['/* Synthetic audit source: long unbroken lines must stay in
 
 /** Contract fixtures bound to one job, attempt and revision, with long names and lines. */
 export function auditFixtures(repo, buildId) {
-  const load = (name) => JSON.parse(readFileSync(join(fixtureRoot(repo), `${name}.json`), 'utf8'));
+  const load = (name) => {
+    const path = join(fixtureRoot(repo), `${name}.json`);
+    try { return JSON.parse(readFileSync(path, 'utf8')); }
+    catch (error) { throw new Error(`Could not load browser-audit fixture ${name} from ${path}`, { cause: error }); }
+  };
   const job = load('job-lossless');
   const jobId = job.data.jobId;
   job.data.displayFilename = longFilename;
@@ -66,6 +70,7 @@ export function auditFixtures(repo, buildId) {
   exploration.data.sourceArtifact.binding = selected;
   exploration.data.sourceArtifact.contentHref = `/nested${exploration.data.sourceArtifact.contentHref}`;
   const history = bound('validation-history', { jobId, runId, revisionId: null });
+  const sourceSearch = bound('source-search-complete', selected);
   const owner = history.data.items[0];
   const validation = bound('report-normal-cases', { jobId, runId, revisionId: owner.candidateId });
   const routes = [
@@ -87,6 +92,7 @@ export function auditFixtures(repo, buildId) {
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/reports/exploration$`), () => ok(exploration)],
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/validation-history$`), () => ok(history)],
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/reports/revision-validation$`), () => ok(validation)],
+    [new RegExp(`^/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-search$`), () => ok(sourceSearch)],
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-directories/${id}$`), () => ok(directory)],
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-files/${id}/chunk$`), () => ok(chunk)],
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-files/${id}$`), () => ok(file)],
@@ -123,6 +129,8 @@ export function auditFixtures(repo, buildId) {
     { name: 'attempt activity', path: `${base}/activity`, rendered: 'Attempt identity', preparation: activity },
     { name: 'attempt evidence', path: `${base}/evidence`, rendered: 'Attempt identity', preparation: evidence },
     { name: 'source directory', path: `${base}/revisions/${revisionId}/sources/root`, rendered: 'é space' },
+    { name: 'source search form', path: `${base}/revisions/${revisionId}/source-search`, rendered: 'Enter text to search the recorded inputs of this revision.' },
+    { name: 'source search results', path: `${base}/revisions/${revisionId}/source-search?q=needle`, rendered: 'Showing 4 matches on this page.' },
     { name: 'source file', path: `${base}/revisions/${revisionId}/source-files/${file.data.item.fileId}?byte=0`, rendered: 'embedded_table_with_a_long_identifier',
       preparation: [{ action: 'Highlight displayed rows locally', reads: [], content: [
         { selector: '.source-token-plain', text: 'embedded_table_with_a_long_identifier' },
@@ -208,7 +216,8 @@ export const measurePage = `(() => {
   };
 })()`;
 
-// Opaque sRGB only; an unsupported or translucent colour fails instead of being guessed.
+// Opaque sRGB only; unsupported backgrounds fail instead of being guessed. Text-bearing
+// control values and ::placeholder glyphs are measured separately from ordinary text nodes.
 export const measureContrast = `(() => {
   const parse = value => {
     const match = /^rgba?\\((\\d+), (\\d+), (\\d+)(?:, ([\\d.]+))?\\)$/.exec(value);
@@ -230,6 +239,22 @@ export const measureContrast = `(() => {
   };
   const results = []; const failures = []; const unsupported = [];
   const tokens = Object.fromEntries((${JSON.stringify(auditTokenKinds)}).map(kind => [kind, 0]));
+  const record = (label, colorText, bg, style, allowAlpha) => {
+    const fg = parse(colorText);
+    if (!fg || bg.unsupported) { unsupported.push({ text: label, color: colorText, background: bg.unsupported }); return; }
+    let rgb = fg.rgb;
+    if (allowAlpha) {
+      const opacity = Number(style.opacity);
+      if (!Number.isFinite(opacity) || opacity < 0 || opacity > 1) { unsupported.push({ text: label, color: colorText, background: 'invalid opacity ' + style.opacity }); return; }
+      const alpha = fg.alpha * opacity;
+      rgb = fg.rgb.map((channel, index) => Math.round(channel * alpha + bg.rgb[index] * (1 - alpha)));
+    } else if (fg.alpha !== 1) { unsupported.push({ text: label, color: colorText, background: bg.unsupported }); return; }
+    const size = parseFloat(style.fontSize); const bold = Number(style.fontWeight) >= 700;
+    const required = size >= 24 || (bold && size >= 18.66) ? 3 : 4.5;
+    const value = ratio(rgb, bg.rgb);
+    results.push(value);
+    if (value < required) failures.push({ text: label, ratio: Number(value.toFixed(3)), required, color: colorText, background: 'rgb(' + bg.rgb.join(', ') + ')' });
+  };
   const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
   const seen = new Set();
   for (let node = walker.nextNode(); node; node = walker.nextNode()) {
@@ -241,15 +266,26 @@ export const measureContrast = `(() => {
     if (style.visibility !== 'visible' || Number(style.opacity) === 0) continue;
     // WCAG 1.4.3 exempts inactive controls.
     if (element.closest(':disabled, [aria-disabled="true"]')) continue;
-    const fg = parse(style.color); const bg = background(element);
-    if (!fg || fg.alpha !== 1 || bg.unsupported) { unsupported.push({ text: node.textContent.trim().slice(0, 40), color: style.color, background: bg.unsupported }); continue; }
-    const size = parseFloat(style.fontSize); const bold = Number(style.fontWeight) >= 700;
-    const large = size >= 24 || (bold && size >= 18.66);
-    const value = ratio(fg.rgb, bg.rgb);
-    const required = large ? 3 : 4.5;
-    results.push(value);
+    const bg = background(element);
+    record(node.textContent.trim().slice(0, 40), style.color, bg, style, false);
     for (const kind of Object.keys(tokens)) if (element.matches('.source-token-' + kind)) tokens[kind]++;
-    if (value < required) failures.push({ text: node.textContent.trim().slice(0, 40), ratio: Number(value.toFixed(3)), required, color: style.color, background: 'rgb(' + bg.rgb.join(', ') + ')' });
+  }
+  const controls = document.querySelectorAll?.('input, textarea, select') ?? [];
+  for (const element of controls) {
+    if (element.closest('[hidden], .sr-only') || !element.checkVisibility()) continue;
+    const style = getComputedStyle(element);
+    if (style.visibility !== 'visible' || Number(style.opacity) === 0 || element.closest(':disabled, [aria-disabled="true"]')) continue;
+    if (Number(style.opacity) !== 1) { unsupported.push({ text: (element.name || element.tagName.toLowerCase()) + ' value', color: style.color, background: 'translucent control opacity' }); continue; }
+    const bg = background(element);
+    const type = (element.type || '').toLowerCase();
+    const valueTypes = new Set(['', 'text', 'search', 'email', 'url', 'tel', 'password', 'number', 'date', 'datetime-local', 'month', 'time', 'week']);
+    const value = valueTypes.has(type) ? element.value : element.tagName === 'TEXTAREA' || element.tagName === 'SELECT' ? element.value : '';
+    if (value) record((element.name || element.tagName.toLowerCase()) + ' value: ' + value.slice(0, 40), style.color, bg, style, true);
+    if (!value && element.hasAttribute('placeholder') && element.placeholder) {
+      const placeholderStyle = getComputedStyle(element, '::placeholder');
+      if (placeholderStyle.visibility === 'visible' && Number(placeholderStyle.opacity) !== 0)
+        record((element.name || element.tagName.toLowerCase()) + ' placeholder: ' + element.placeholder.slice(0, 40), placeholderStyle.color, bg, placeholderStyle, true);
+    }
   }
   return { measured: results.length, minimum: results.length ? Number(Math.min(...results).toFixed(3)) : null, failures: failures.slice(0, 12), failureCount: failures.length, unsupported: unsupported.slice(0, 12), tokens };
 })()`;
@@ -330,14 +366,23 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
   const fulfilled = []; const unmapped = [];
   async function intercept(tab) {
     cdp.on('Fetch.requestPaused', (event) => {
-      const url = new URL(event.request.url);
+      let url;
+      try { url = new URL(event.request.url); }
+      catch {
+        unmapped.push(`Invalid intercepted API URL: ${event.request.url}`);
+        void cdp.call('Fetch.failRequest', { requestId: event.requestId, errorReason: 'Aborted' }, tab.sessionId).catch(() => undefined);
+        return;
+      }
       const pathname = url.pathname.slice('/nested/api/v1'.length);
       const headers = Object.fromEntries(Object.entries(event.request.headers).map(([name, value]) => [name.toLowerCase(), value]));
       const response = fixtures.respond(event.request.method, pathname, headers.accept ?? '');
       if (response.status === 404) unmapped.push(`${event.request.method} ${pathname}`);
-      fulfilled.push({ method: event.request.method, path: pathname, status: response.status,
-        ...(event.request.method === 'POST' ? { idempotencyKey: headers['idempotency-key'] ?? null, ifMatch: headers['if-match'] ?? null,
-          csrf: headers['x-csrf-token'] === fixtures.csrfToken, body: event.request.postData ?? null } : {}) });
+      const evidence = { method: event.request.method, path: pathname, status: response.status };
+      if (event.request.method === 'POST') Object.assign(evidence, {
+        idempotencyKey: headers['idempotency-key'] ?? null, ifMatch: headers['if-match'] ?? null,
+        csrf: headers['x-csrf-token'] === fixtures.csrfToken, body: event.request.postData ?? null,
+      });
+      fulfilled.push(evidence);
       const body = response.bytes ?? Buffer.from(JSON.stringify(response.document));
       const requestId = response.document?.requestId ?? 'request_audit_download';
       void cdp.call('Fetch.fulfillRequest', { requestId: event.requestId, responseCode: response.status, body: body.toString('base64'),
@@ -531,8 +576,13 @@ export function assertAudit(audit, manifest, responses, origin, budgets = { cold
   const failures = [];
   // Expectations come from the qualification contract, not the report's claimed coverage.
   const schemes = ['light', 'dark'];
-  const expected = (viewports) => auditPageNames.flatMap(page => viewports.flatMap(viewport =>
-    schemes.map(scheme => ({ page, ...(viewport ? { viewport: viewport.name } : {}), scheme }))));
+  const expected = (viewports) => auditPageNames.flatMap(page => viewports.flatMap(viewport => {
+    return schemes.map(scheme => {
+      const entry = { page, scheme };
+      if (viewport) entry.viewport = viewport.name;
+      return entry;
+    });
+  }));
   const coverage = (kind, matrix) => {
     const records = Array.isArray(audit[kind]) ? audit[kind] : [];
     const key = entry => JSON.stringify([entry.page, ...(kind === 'focus' ? [] : [entry.viewport]), entry.scheme]);

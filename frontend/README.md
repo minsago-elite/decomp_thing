@@ -263,6 +263,26 @@ Type checking requires every named slot; changing a locale must preserve those
 slot names. No language selector or locale persistence is introduced by these
 catalogs.
 
+`tests/copy-catalog.test.ts` parses every component with the TypeScript compiler and
+fails on inline JSX text, rendered string/template expressions, inline accessible
+names/titles/placeholders, prose string literals and punctuation that composes a
+sentence around values. Parser fixtures cover expression and interpolated-label
+bypasses as well as technical attributes, protocol comparisons and catalog references.
+This is a syntax guard, not general data-flow analysis through arbitrary helper calls.
+Compose such text with a catalog template (for example `commonCopy.labeledValue`, `{label}: {value}`)
+so a translation can reorder it. The exported validation record's limitation sentences
+are catalogued separately as stable record text because they belong to a versioned file
+format, not to the interface.
+
+`src/copy/format.ts` is the single display-format layer. It names the one display
+locale, selects plural forms with `Intl.PluralRules`, and owns every formatter that turns
+a value into text (`formatExactCount`, `formatExactBytes`, `formatExactTimestamp`,
+`formatJobStatus`). Adding digit grouping or translated units for another locale changes
+only this module and the catalogs; exact digits must survive (format `BigInt`, never
+`Number`). The former `src/jobs/metadataFormat.ts` path remains a compatibility
+re-export for consumers introduced on the base branch during migration; it owns no
+formatting logic. New consumers should import `src/copy/format.ts` directly.
+
 Use `formatExactTimestamp` for reported timestamps and retain the original string
 in both `dateTime` and `title`. It preserves fractional digits and the source
 offset, displaying `Z` as `UTC` without converting through `Date`. Use
@@ -286,12 +306,12 @@ is used to hide dependency declaration problems.
 `tests/accessibility.test.tsx` runs axe-core (pinned dev dependency, never bundled)
 against every routed view with contract fixtures: the public shell, workspace with jobs,
 upload, runtime, job overview, attempt history/overview/activity/evidence, source
-directory and file, the not-found page, the open display-preference panel and a failed
+directory, search form/results and file, the not-found page, the open display-preference panel and a failed
 job read. Any WCAG 2.0/2.1/2.2 A or AA rule violation fails `npm test`. jsdom has no
 layout or colour, so contrast and reflow stay in the packaged Chrome checks
 (`scripts/packaged-browser-contrast.mjs` and the `--mode audit` route audit in
-`scripts/packaged-browser-audit.mjs`); `tests/contrast-tokens.test.ts` checks the token
-pairings early. [The audit record](../docs/web-accessibility-audit.md) lists every gate,
+`scripts/packaged-browser-audit.mjs`). That audit also measures visible non-empty control values
+and rendered placeholders; `tests/contrast-tokens.test.ts` checks the token pairings early. [The audit record](../docs/web-accessibility-audit.md) lists every gate,
 its findings and the manual screen-reader checklist (#617). Add a new route or state to the
 component suite and to the packaged audit's page list when you add a view.
 

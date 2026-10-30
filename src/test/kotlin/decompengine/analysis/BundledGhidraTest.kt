@@ -109,6 +109,127 @@ class BundledGhidraTest {
         }
     }
     @Test
+    fun `compiled export guard admits owned candidates but rejects unknown names malformed framing and failed exports`() {
+        val root = Path.of("build/bundled-export-guard-tests").toAbsolutePath().createDirectories()
+        val work = Files.createTempDirectory(root, "guard-")
+        fun source(name: String, text: String): Path = work.resolve(name).also {
+            it.parent.createDirectories()
+            it.writeText(text.trimIndent())
+        }
+        val scriptStub = source("ghidra/app/script/GhidraScript.java", """
+            package ghidra.app.script;
+            public abstract class GhidraScript {
+                public static String[] arguments;
+                public static final java.util.List<String> invocations = new java.util.ArrayList<>();
+                public static boolean fail;
+                protected Object currentProgram, monitor;
+                protected abstract void run() throws Exception;
+                public final void execute() throws Exception { run(); }
+                protected String[] getScriptArgs() { return arguments; }
+                protected void runScript(String name, String[] args) throws Exception {
+                    if (fail) throw new IllegalStateException("export failed");
+                    invocations.add(name + ":" + java.util.Arrays.toString(args));
+                }
+            }
+        """)
+        val workerStub = source("decompengine/ghidra/BundledGhidraWorker.java", """
+            package decompengine.ghidra;
+            public final class BundledGhidraWorker {
+                public static boolean completed;
+                public static void exportsCompleted() { completed = true; }
+                public static void diagnosticsGuard() {}
+                public static void diagnosticsExporter(String name) {}
+                public static void diagnosticsFinalization() {}
+            }
+        """)
+        val nativeStub = source("ExportNativeCallsV1.java", """
+            public final class ExportNativeCallsV1 {
+                public static void collect(Object program, Object monitor, String[] args) {
+                    ghidra.app.script.GhidraScript.invocations.add("native:" + java.util.Arrays.toString(args));
+                }
+            }
+        """)
+        val nativeInterfaceStub = source("ExportNativeInterfacesV1.java", """
+            public final class ExportNativeInterfacesV1 {
+                public static void collect(Object program, Object monitor, String[] args) {
+                    ghidra.app.script.GhidraScript.invocations.add("native-interface:" + java.util.Arrays.toString(args));
+                }
+            }
+        """)
+        val probe = source("GuardProbe.java", """
+            import ghidra.app.script.GhidraScript;
+            import decompengine.ghidra.BundledGhidraWorker;
+            public final class GuardProbe {
+                private static void check(boolean valid) {
+                    if (!valid) throw new AssertionError("bundled export guard contract failed");
+                }
+                private static void prepare(String... args) {
+                    GhidraScript.arguments = args;
+                    GhidraScript.invocations.clear();
+                    GhidraScript.fail = false;
+                    BundledGhidraWorker.completed = false;
+                }
+                public static void verify() throws Exception {
+                    for (String name : new String[] {"ExportProgramModel.java", "ExportProgramModelOwned.java",
+                            "ExportRecoveredCallSites.java", "ExportDecompiledC.java", "ExportNativeCallsV1.class",
+                            "ExportNativeInterfacesV1.class"}) {
+                        prepare(name, "2", "argument with spaces", "--not-an-option");
+                        new RunBundledExports().execute();
+                        check(BundledGhidraWorker.completed);
+                        String target = name.equals("ExportNativeCallsV1.class") ? "native" :
+                            name.equals("ExportNativeInterfacesV1.class") ? "native-interface" : name;
+                        check(GhidraScript.invocations.equals(java.util.List.of(
+                            target + ":[argument with spaces, --not-an-option]")));
+                    }
+                    // The actual ordinary model/call pair must preserve the candidate protocol.
+                    prepare("ExportProgramModelOwned.java", "6", "exporter-hash", "tool-hash", "full",
+                        "/reports/program_model.json", "owned-model-candidate-v1", "/reports/.model.candidate",
+                        "ExportRecoveredCallSites.java", "4", "calls-hash", "tool-hash",
+                        "/reports/.model.candidate", "/reports/.calls.candidate");
+                    new RunBundledExports().execute();
+                    check(BundledGhidraWorker.completed && GhidraScript.invocations.size() == 2);
+                    check(GhidraScript.invocations.get(0).endsWith(
+                        "owned-model-candidate-v1, /reports/.model.candidate]"));
+                    check(GhidraScript.invocations.get(1).endsWith(
+                        "/reports/.model.candidate, /reports/.calls.candidate]"));
+                    for (String[] args : new String[][] {
+                        {}, {"ExportProgramModelOwned.java"}, {"ExportProgramModelOwned.java", "-1"},
+                        {"ExportProgramModelOwned.java", "17"}, {"ExportProgramModelOwned.java", "1"},
+                        {"ExportProgramModelOwned.java", "not-a-count"}, {"Unknown.java", "0"},
+                        {"../ExportProgramModelOwned.java", "0"}, {"ExportProgramModelOwned.class", "0"},
+                        {"ExportProgramModelOwned.java.extra", "0"}, {"ExportNativeCallsV1.java", "0"}
+                    }) {
+                        prepare(args);
+                        try {
+                            new RunBundledExports().execute();
+                            throw new AssertionError("invalid exporter invocation was accepted");
+                        } catch (IllegalArgumentException expected) {
+                            check(!BundledGhidraWorker.completed && GhidraScript.invocations.isEmpty());
+                        }
+                    }
+                    prepare("ExportProgramModelOwned.java", "0", "ExportRecoveredCallSites.java", "0");
+                    GhidraScript.fail = true;
+                    try {
+                        new RunBundledExports().execute();
+                        throw new AssertionError("export failure was swallowed");
+                    } catch (IllegalStateException expected) {
+                        check(expected.getMessage().equals("export failed"));
+                        check(!BundledGhidraWorker.completed && GhidraScript.invocations.isEmpty());
+                    }
+                }
+            }
+        """)
+        val guard = Path.of("ghidra-bridge/src/main/java/RunBundledExports.java").toAbsolutePath()
+        val compiler = checkNotNull(javax.tools.ToolProvider.getSystemJavaCompiler())
+        assertEquals(0, compiler.run(null, null, null, "-proc:none", "-encoding", "UTF-8", "-d", work.toString(),
+            scriptStub.toString(), workerStub.toString(), nativeStub.toString(), nativeInterfaceStub.toString(),
+            guard.toString(), probe.toString()))
+        java.net.URLClassLoader(arrayOf(work.toUri().toURL()), null).use { loader ->
+            loader.loadClass("GuardProbe").getMethod("verify").invoke(null)
+        }
+    }
+
+    @Test
     fun `shared worker command rejects empty duplicate and ambiguous classpaths`() {
         val java = Path.of("/runtime/bin/java")
         val release = Path.of("/application/ghidra")
@@ -377,6 +498,18 @@ class BundledGhidraTest {
                 try { latch.await(); }
                 catch (InterruptedException failure) { throw new AssertionError(failure); }
             }
+            private static void phaseAndAwait(JvmMxBeanDiagnostics sampler, Frames frames, String exporter) throws Exception {
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+                while (System.nanoTime() < deadline) {
+                    sampler.phase(JvmMxBeanDiagnostics.Phase.EXPORTER, exporter);
+                    long attemptDeadline = Math.min(deadline, System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(50));
+                    while (System.nanoTime() < attemptDeadline) {
+                        if (frames.all().contains(exporter)) return;
+                        Thread.sleep(1);
+                    }
+                }
+                throw new AssertionError("phase event missing: " + exporter);
+            }
             private static final class Frames implements JvmMxBeanDiagnostics.Sink {
                 final List<byte[]> frames = Collections.synchronizedList(new ArrayList<>());
                 final Semaphore written = new Semaphore(0);
@@ -453,8 +586,13 @@ class BundledGhidraTest {
                 }, TimeUnit.MILLISECONDS.toNanos(2));
                 await(sampled);
                 sampler.phase(JvmMxBeanDiagnostics.Phase.EXPORTER, "ExportProgramModel.java");
+                phaseAndAwait(sampler, frames, "ExportProgramModelOwned.java");
+                phaseAndAwait(sampler, frames, "ExportNativeCallsV1.class");
                 sampler.finish(true);
                 await(frames.terminal); frames.validate();
+                require(frames.all().contains("\"exporter\":\"ExportProgramModelOwned.java\""), "owned program-model exporter phase missing");
+                require(frames.all().contains("\"exporter\":\"ExportNativeCallsV1.class\""), "native-call exporter phase missing");
+                require(!frames.all().contains("internal_failure"), "known exporter rejected by diagnostics phase validation");
                 require(frames.all().contains("\"jvmCpuNanos\":null"), "unavailable CPU not explicit");
                 require(frames.all().contains("VM \\\"雪\\\"\\nname"), "UTF-8/JSON escaping");
                 require(frames.all().contains("\"outcome\":\"success\""), "success changed");
