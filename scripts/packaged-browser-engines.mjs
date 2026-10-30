@@ -105,6 +105,7 @@ async function context(options = {}) {
   });
   await created.addInitScript(() => {
     const recentStyleOperations = [];
+    const recentStyleMutations = [];
     const recordStyleOperation = operation => {
       recentStyleOperations.push({
         at: performance.now(), operation,
@@ -112,7 +113,37 @@ async function context(options = {}) {
       });
       if (recentStyleOperations.length > 24) recentStyleOperations.shift();
     };
+    const describeElement = element => ({
+      tag: element?.localName ?? null,
+      id: element?.id || null,
+      className: String(element?.className ?? '').slice(0, 128),
+      parentTag: element?.parentElement?.localName ?? null,
+      parentId: element?.parentElement?.id || null,
+      parentClassName: String(element?.parentElement?.className ?? '').slice(0, 128),
+    });
+    const recordStyleMutation = (kind, element, extra = {}) => {
+      recentStyleMutations.push({ at: performance.now(), kind, ...describeElement(element), ...extra });
+      if (recentStyleMutations.length > 32) recentStyleMutations.shift();
+    };
+    const styleMutationObserver = new MutationObserver(mutations => {
+      for (const mutation of mutations) {
+        if (mutation.type === 'attributes' && mutation.attributeName === 'style') {
+          recordStyleMutation('style-attribute', mutation.target, {
+            styleLength: mutation.target.getAttribute('style')?.length ?? 0,
+          });
+        }
+        const removedNodes = Array.from(mutation.removedNodes);
+        for (const node of [...mutation.addedNodes, ...removedNodes]) {
+          const styles = node.nodeType === 1
+            ? [ ...(node.localName === 'style' ? [node] : []), ...Array.from(node.querySelectorAll?.('style') ?? []) ].slice(0, 4)
+            : [];
+          for (const element of styles) recordStyleMutation(removedNodes.includes(node) ? 'style-node-removed' : 'style-node-added', element);
+        }
+      }
+    });
+    styleMutationObserver.observe(document, { subtree: true, childList: true, attributes: true, attributeFilter: ['style'] });
     globalThis.__decompStyleOperations = recentStyleOperations;
+    globalThis.__decompStyleMutations = recentStyleMutations;
     const containsStyleElement = node => node?.nodeType === 1
       ? node.localName === 'style'
       : node?.nodeType === 11 && Boolean(node.querySelector('style'));
@@ -223,13 +254,14 @@ async function context(options = {}) {
       const probeName = globalThis.location.search.match(/[?&]__csp_probe=([a-z-]+)/)?.[1] ?? null;
       const at = performance.now();
       const styleOperations = recentStyleOperations.filter(operation => at - operation.at < 1000).slice(-8);
+      const styleMutations = recentStyleMutations.filter(mutation => at - mutation.at < 1000).slice(-12);
       globalThis.__decompRecordCspViolation(JSON.stringify({
         blockedURI: event.blockedURI, effectiveDirective: event.effectiveDirective,
         documentURI: location(event.documentURI), sourceFile: location(event.sourceFile),
         lineNumber: event.lineNumber, columnNumber: event.columnNumber,
         sample: event.sample?.slice(0, 160) ?? null, originalPolicy: event.originalPolicy?.slice(0, 512) ?? null,
         probeName, eventTimeStamp: event.timeStamp, readyState: document.readyState, headElements,
-        eventTarget, inlineStyleState: inlineStyleState(), styleOperations,
+        eventTarget, inlineStyleState: inlineStyleState(), styleOperations, styleMutations,
       }));
     });
   });
