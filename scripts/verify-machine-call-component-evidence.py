@@ -862,6 +862,8 @@ def retained_version_records(inventory: dict, sections: dict, input_bytes: int, 
             for offset, next_offset in zip(ordered_offsets, [*ordered_offsets[1:], section_end], strict=True):
                 require(offset + width <= next_offset, "retained GNU version record header crosses the next record")
                 record_ends[(owner_index, offset)] = next_offset
+            require(bool(ordered_offsets) and ordered_offsets[0] == owner["offset"],
+                    "retained GNU version section does not begin with its first record")
 
     for group, kind, width in (("versionRequirements", 0x6ffffffe, 16), ("versionDefinitions", 0x6ffffffd, 20)):
         rows = inventory[group]

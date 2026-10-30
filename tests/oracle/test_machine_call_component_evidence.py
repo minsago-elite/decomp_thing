@@ -1372,6 +1372,10 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
             lambda inv: inv["sections"][8].update(info=2), lambda inv: inv["sections"][8].update(flags="0x802"),
             lambda inv: inv["sections"][8].update(offset=4090), lambda inv: inv["sections"][8].update(address="0x6001"),
             lambda inv: inv["versionRequirements"][0].update(recordOffset=4096),
+            lambda inv: (inv["sections"][8].update(size="0x24"),
+                next(row for row in inv["programHeaders"] if row["type"] == 1 and
+                    row["virtualAddress"] == inv["sections"][8]["address"]).update(fileSize="0x24", memorySize="0x24"),
+                inv["versionRequirements"][0].update(recordOffset=68, auxiliaryOffset=84)),
             lambda inv: inv["versionRequirements"][0].update(auxiliaryOffset=79),
             lambda inv: inv["versionRequirements"][0].update(auxiliaryOffset=81),
             lambda inv: inv["versionRequirements"][0].update(hash=0),
@@ -1652,6 +1656,7 @@ class RetainedExternalEvidenceRegressionTest(unittest.TestCase):
                                     ("verneed-provider-conflict", "retained Verneed provider request differs within header"),
                                     ("verneed-oversized-provider", "retained GNU version string exceeds linked string table"),
                                     ("verneed-oversized-name", "retained GNU version string exceeds linked string table"),
+                                    ("verneed-crossed-next-header", "auxiliary bounds/order"),
                                     ("verneed-overlapping-auxiliary", "retained GNU version record storage overlaps"),
                                     ("copy-raw-section-index", "active COPY relocation symbol raw/resolved section index differs")):
                 with self.subTest(mutation=mutation):
@@ -1798,6 +1803,13 @@ class RetainedExternalEvidenceRegressionTest(unittest.TestCase):
                                     if site["externalTargetId"] == old_id:
                                         site["externalTargetId"] = entry["id"]
                         report["externalNamespaceSha256"] = sha256(VERIFY.canonical_bytes(report["externalNamespace"])).hexdigest()
+                    elif mutation == "verneed-crossed-next-header":
+                        requirements = report["dynamicInventory"]["versionRequirements"]
+                        first = next(row for row in requirements if row["sectionIndex"] == 8 and row["recordOffset"] == 7312)
+                        first["auxiliaryOffset"] = 7344
+                        for row in requirements:
+                            if row["sectionIndex"] == 8 and row["recordOffset"] == 7344:
+                                row["recordOffset"] = 7328
                     elif mutation == "verneed-overlapping-auxiliary":
                         requirement = next(row for row in report["dynamicInventory"]["versionRequirements"]
                             if row["sectionIndex"] == 8 and row["name"] == "GLIBC_2.14")
