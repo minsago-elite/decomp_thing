@@ -35,7 +35,15 @@ const delay = (ms) => new Promise((done) => setTimeout(done, ms));
 const root = await fs.mkdtemp(join(repo, 'build/packaged-engines-'));
 const ownerToken = randomUUID();
 const installHelper = join(repo, 'scripts/packaged-browser-install.py');
-const report = { status: 'running', engine: values.engine, playwright: JSON.parse(readFileSync(join(values.playwright, 'package.json'), 'utf8')).version,
+function readJson(path, label) {
+  try { return JSON.parse(readFileSync(path, 'utf8')); }
+  catch (cause) { throw new Error(`Could not read ${label} as JSON`, { cause }); }
+}
+function parseUrl(value, label) {
+  try { return new URL(value); }
+  catch (cause) { throw new Error(`Invalid URL for ${label}`, { cause }); }
+}
+const report = { status: 'running', engine: values.engine, playwright: readJson(join(values.playwright, 'package.json'), 'Playwright package metadata').version,
   driverNode: process.versions.node, evidenceDirectory: root };
 const secrets = [];
 const safe = (text) => secrets.reduce((value, secret) => value.replaceAll(secret, '[redacted]'), String(text)).replaceAll(/#bootstrap=[A-Za-z0-9_-]+/g, '#bootstrap=[redacted]');
@@ -49,8 +57,13 @@ async function waitFor(check, label, timeout = 30000) {
 
 async function prepare() {
   work = await fs.mkdtemp(join(values['work-parent'], 'packaged-engines-work-'));
-  const setup = JSON.parse(execFileSync(values.python, [installHelper, 'prepare', '--archive', values.archive, '--work', work,
-    '--owner-token', ownerToken], { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 }));
+  let setup;
+  try {
+    setup = JSON.parse(execFileSync(values.python, [installHelper, 'prepare', '--archive', values.archive, '--work', work,
+      '--owner-token', ownerToken], { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 }));
+  } catch (cause) {
+    throw new Error('Packaged installation helper failed or returned invalid JSON', { cause });
+  }
   const bins = join(work, 'launcher tools'); const working = join(work, 'unrelated working directory');
   await fs.mkdir(bins); await fs.mkdir(working);
   for (const name of ['uname', 'ls', 'xargs', 'sed', 'tr']) {
@@ -86,7 +99,10 @@ async function stop(child) {
 async function context(options = {}) {
   const created = await browser.newContext({ acceptDownloads: true, ...options });
   const record = { responses: [], csp: [], documents: [], exceptions: [], workers: [], apiRequests: [] };
-  await created.exposeBinding('__decompRecordCspViolation', (_source, payload) => { record.csp.push(JSON.parse(payload)); });
+  await created.exposeBinding('__decompRecordCspViolation', (_source, payload) => {
+    try { record.csp.push(JSON.parse(payload)); }
+    catch (cause) { throw new Error('CSP instrumentation returned invalid JSON', { cause }); }
+  });
   await created.addInitScript(() => {
     const recentStyleOperations = [];
     const recordStyleOperation = operation => {
@@ -264,7 +280,7 @@ async function smoke(origin, manifest) {
   const { context: created, record } = await context();
   const page = await created.newPage();
   const link = await waitFor(() => output.split(/\s+/).find((part) => part.startsWith(`${origin}/nested/#bootstrap=`)), 'local bootstrap handoff');
-  secrets.push(new URL(link).hash.slice('#bootstrap='.length));
+  secrets.push(parseUrl(link, 'bootstrap handoff').hash.slice('#bootstrap='.length));
   await page.goto(link);
   try { await page.getByText('Local session connected.').waitFor(); }
   catch (error) {
@@ -275,7 +291,7 @@ async function smoke(origin, manifest) {
     }).catch((failure) => String(failure));
     throw new Error(`Sign-in did not connect: ${safe((await page.locator('body').innerText().catch(() => '')).slice(0, 600))}; probe ${safe(probe)}; requests ${safe(JSON.stringify(record.apiRequests))}; exceptions ${JSON.stringify(record.exceptions)}; csp ${JSON.stringify(record.csp)}`, { cause: error });
   }
-  assert.equal(new URL(page.url()).hash, '', 'The bootstrap fragment must be removed');
+  assert.equal(parseUrl(page.url(), 'post-authentication page').hash, '', 'The bootstrap fragment must be removed');
   await page.getByText('No uploaded jobs yet.').waitFor();
   await page.reload();
   await page.getByText('Local session connected.').waitFor();
