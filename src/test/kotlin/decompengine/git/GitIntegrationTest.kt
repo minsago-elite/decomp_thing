@@ -529,25 +529,34 @@ class GitIntegrationTest {
         assertEquals("int util = 4;\n", Files.readString(f.workTree().resolve("util.c")))
     }
 
-    @Test fun `conflict markers of the configured width are never accepted as resolved`(): Unit = Fixture().use { f ->
+    @Test fun `source attributes cannot change the enforced conflict marker width`(): Unit = Fixture().use { f ->
         f.cloned()
         Files.writeString(f.seed.resolve(".gitattributes"), "README.md conflict-marker-size=32\n"); f.remoteCommit("wide markers")
         forward()
         val fileId = f.conflictOn("README.md")
         val detail = service.conflictFile(jobId, repositoryId, null, fileId)
-        assertTrue(checkNotNull(detail.current).lines().any { it.startsWith("<".repeat(32) + " ") }, detail.current)
+        val gitDir = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
+        val width = GitIntegrations.markerSize(f.repositories.runner, gitDir, f.workTree(), "README.md")
+        val text = checkNotNull(detail.current)
+        assertEquals(7, width)
+        assertTrue(text.lines().any { it.startsWith("<".repeat(width) + " ") }, text)
+        assertFalse(text.lines().any { it.startsWith("<".repeat(32) + " ") }, text)
         refused("UNRESOLVED_MARKERS", GitOperationAction.CONFLICT_COMPLETE, content = "$fileId ${detail.currentSha256}\n")
-        assertTrue(GitIntegrations.hasMarkers("a\n" + ">".repeat(32) + " theirs\n", 32))
-        assertFalse(GitIntegrations.hasMarkers("a\n" + "<".repeat(40) + "\n", 32))
+        assertTrue(GitIntegrations.hasMarkers("a\n" + ">".repeat(width) + " theirs\n", width))
     }
 
-    @Test fun `marker widths above 1024 cannot bypass completion`(): Unit = Fixture().use { f ->
+    @Test fun `hostile marker width cannot expand merge output or bypass completion`(): Unit = Fixture().use { f ->
         f.cloned()
-        Files.writeString(f.seed.resolve(".gitattributes"), "README.md conflict-marker-size=2048\n"); f.remoteCommit("very wide markers")
+        Files.writeString(f.seed.resolve(".gitattributes"), "README.md conflict-marker-size=1048576\n"); f.remoteCommit("hostile marker width")
         forward()
         val fileId = f.conflictOn("README.md")
         val detail = service.conflictFile(jobId, repositoryId, null, fileId)
-        assertTrue(checkNotNull(detail.current).startsWith("line one\n" + "<".repeat(2048) + " "))
+        val text = checkNotNull(detail.current)
+        val gitDir = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
+        val width = GitIntegrations.markerSize(f.repositories.runner, gitDir, f.workTree(), "README.md")
+        assertEquals(7, width)
+        assertTrue(text.length < 4096, "bounded conflict output was ${text.length} characters")
+        assertTrue(text.lines().any { it.startsWith("<".repeat(width) + " ") }, text)
         refused("UNRESOLVED_MARKERS", GitOperationAction.CONFLICT_COMPLETE, content = "$fileId ${detail.currentSha256}\n")
         assertEquals(1, service.conflicts(jobId, repositoryId, null).files.size)
         assertFalse(GitIntegrations.hasMarkers("short line", Int.MAX_VALUE))

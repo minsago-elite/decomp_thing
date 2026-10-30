@@ -82,8 +82,8 @@ object GitConfigurationAudit {
             Files.isRegularFile(attributes, NOFOLLOW_LINKS) && Files.size(attributes) <= 4096) Files.readString(attributes) else null
         when (content) {
             GitManagedLayout.ATTRIBUTES -> Unit
-            // Upgrade only the exact previously audited server layout, never arbitrary attributes.
-            GitManagedLayout.LEGACY_ATTRIBUTES -> GitManagedLayout.upgradeAttributes(gitDir)
+            // Upgrade only exact previously audited server layouts, never arbitrary attributes.
+            GitManagedLayout.LEGACY_ATTRIBUTES, GitManagedLayout.PREVIOUS_ATTRIBUTES -> GitManagedLayout.upgradeAttributes(gitDir)
             else -> throw GitRepositoryException("REPOSITORY_CONFIG_UNTRUSTED",
                 "The managed repository does not neutralize content conversions and diff attributes.")
         }
@@ -99,8 +99,11 @@ object GitConfigurationAudit {
  */
 object GitManagedLayout {
     internal const val LEGACY_ATTRIBUTES = "* -text !eol -crlf -ident -filter !working-tree-encoding\n"
-    // Unspecified diff restores Git's automatic binary detection, overriding source `diff` rules.
-    const val ATTRIBUTES = "* -text !eol -crlf -ident -filter !working-tree-encoding !diff\n"
+    // Previous server layout before marker width was pinned. Recognized only for exact migration.
+    internal const val PREVIOUS_ATTRIBUTES = "* -text !eol -crlf -ident -filter !working-tree-encoding !diff\n"
+    // Unspecified diff restores automatic binary detection; fixed conflict markers bound merge output.
+    // info/attributes has the highest precedence, overriding any source-controlled marker width.
+    const val ATTRIBUTES = "* -text !eol -crlf -ident -filter !working-tree-encoding !diff conflict-marker-size=7\n"
 
     internal fun upgradeAttributes(gitDir: Path) {
         val attributes = gitDir.resolve("info/attributes")

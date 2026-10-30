@@ -452,6 +452,14 @@ class GitReadsTest {
         assertEquals(tampered, Files.readString(attributes), "Unrecognized layouts must not be rewritten")
     }
 
+    @Test fun `previous server attribute layout upgrades to bounded merge markers`(): Unit = GitTestRepositories().use { f ->
+        val (gitDir, _) = f.managed("marker-attributes")
+        val attributes = gitDir.resolve("info/attributes")
+        Files.writeString(attributes, GitManagedLayout.PREVIOUS_ATTRIBUTES)
+        GitConfigurationAudit.requireManaged(f.runner, gitDir)
+        assertEquals(GitManagedLayout.ATTRIBUTES, Files.readString(attributes))
+    }
+
     @Test fun `history preserves more than 64 parents and refuses oversized output explicitly`(): Unit = GitTestRepositories().use { f ->
         val (gitDir, workTree) = f.managed("many-parents")
         f.write(workTree, "a.c", "int a;\n")
