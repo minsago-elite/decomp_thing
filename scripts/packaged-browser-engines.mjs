@@ -191,6 +191,44 @@ async function context(options = {}) {
       if (typeof value === 'string' && /<style\b/i.test(value)) recordStyleOperation('insertAdjacentHTML(style)');
       return insertAdjacentHTML.apply(this, [position, value]);
     };
+    const setAttribute = Element.prototype.setAttribute;
+    Element.prototype.setAttribute = function(name, value) {
+      if (String(name).toLowerCase() === 'style') recordStyleOperation('Element.setAttribute(style)');
+      return setAttribute.apply(this, [name, value]);
+    };
+    const removeAttribute = Element.prototype.removeAttribute;
+    Element.prototype.removeAttribute = function(name) {
+      if (String(name).toLowerCase() === 'style') recordStyleOperation('Element.removeAttribute(style)');
+      return removeAttribute.apply(this, [name]);
+    };
+    for (const method of ['setProperty', 'removeProperty']) {
+      const original = CSSStyleDeclaration.prototype[method];
+      CSSStyleDeclaration.prototype[method] = function(property, ...args) {
+        if (String(property).toLowerCase() === 'caret-color') {
+          recordStyleOperation(`CSSStyleDeclaration.${method}(caret-color)`);
+        }
+        return original.apply(this, [property, ...args]);
+      };
+    }
+    const caretColor = Object.getOwnPropertyDescriptor(CSSStyleDeclaration.prototype, 'caretColor');
+    if (caretColor?.set) {
+      Object.defineProperty(CSSStyleDeclaration.prototype, 'caretColor', {
+        ...caretColor,
+        set(value) {
+          recordStyleOperation('CSSStyleDeclaration.caretColor');
+          return caretColor.set.call(this, value);
+        },
+      });
+    }
+    for (const method of ['write', 'writeln']) {
+      const original = Document.prototype[method];
+      Document.prototype[method] = function(...values) {
+        if (values.some(value => typeof value === 'string' && /<style\b/i.test(value))) {
+          recordStyleOperation(`Document.${method}(style)`);
+        }
+        return original.apply(this, values);
+      };
+    }
     const cssText = Object.getOwnPropertyDescriptor(CSSStyleDeclaration.prototype, 'cssText');
     if (cssText?.set) {
       Object.defineProperty(CSSStyleDeclaration.prototype, 'cssText', {
@@ -305,6 +343,17 @@ async function probeNativeControlCsp() {
     { name: 'visible-select', body: '<label>Theme <select><option>System</option></select></label>' },
     { name: 'hidden-selects', body: '<div hidden><label>Theme <select><option>System</option></select></label><label>Motion <select><option>System</option></select></label></div>' },
     { name: 'file-input', body: '<input type="file" aria-label="Choose file">' },
+    { name: 'text-input-idle', body: '<label>Search <input type="text" autocomplete="off"></label>' },
+    {
+      name: 'text-input-focused',
+      body: '<label>Search <input type="text" autocomplete="off"></label>',
+      interact: async (page) => {
+        const input = page.locator('input[type="text"]');
+        await input.focus();
+        await input.fill('probe');
+        await input.blur();
+      },
+    },
   ];
   try {
     const results = [];
@@ -313,6 +362,7 @@ async function probeNativeControlCsp() {
       const before = record.csp.length;
       const policy = "default-src 'self'; script-src 'self'; style-src 'self'";
       await page.setContent(`<!doctype html><meta http-equiv="Content-Security-Policy" content="${policy}"><main>${item.body}</main>`);
+      await item.interact?.(page);
       await delay(100);
       const documentState = await page.evaluate(() => ({
         styleElements: document.querySelectorAll('style').length,
