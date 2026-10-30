@@ -897,8 +897,9 @@ def retained_version_records(inventory: dict, sections: dict, input_bytes: int, 
             if group == "versionRequirements":
                 offsets, auxiliary_width = [row["auxiliaryOffset"]], 16
                 verneed = (row["sectionIndex"], row["recordOffset"])
-                provider = provider_by_verneed.setdefault(verneed, row["providerRequest"])
-                require(provider == row["providerRequest"], "retained Verneed provider request differs within header")
+                provider_identity = (row["providerRequest"], row["providerRequestOffset"])
+                provider = provider_by_verneed.setdefault(verneed, provider_identity)
+                require(provider == provider_identity, "retained Verneed provider request differs within header")
                 requirements.setdefault(key, []).append(row)
             else:
                 offsets, auxiliary_width = row["auxiliaryOffsets"], 8

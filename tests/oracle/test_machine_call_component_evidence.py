@@ -1281,6 +1281,44 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
 
         self.report = copy.deepcopy(original)
         inventory = self.report["dynamicInventory"]
+        requirement = inventory["versionRequirements"][0]
+        owner = next(row for row in inventory["sections"] if row["index"] == requirement["sectionIndex"])
+        owner.update(size="0x30")
+        load = next(row for row in inventory["programHeaders"]
+                    if row["type"] == 1 and row["virtualAddress"] == owner["address"])
+        load.update(fileSize="0x30", memorySize="0x30")
+        second = requirement | {"auxiliaryOffset": 96, "rawIndex": 3, "index": 3}
+        inventory["versionRequirements"].append(second)
+        self.write_payloads()
+        self.verify()
+        # A Verneed header has one vn_file offset shared by all its Vernaux entries.
+        second["providerRequestOffset"] = 49
+        self.write_payloads()
+        with self.assertRaisesRegex(VERIFY.VerificationError, "provider request differs within header"):
+            self.verify()
+
+        # A Vernaux record cannot cross the next distinct Verneed header.
+        self.report = copy.deepcopy(original)
+        inventory = self.report["dynamicInventory"]
+        requirement = inventory["versionRequirements"][0]
+        owner = next(row for row in inventory["sections"] if row["index"] == requirement["sectionIndex"])
+        owner.update(size="0x40", info=2)
+        load = next(row for row in inventory["programHeaders"]
+                    if row["type"] == 1 and row["virtualAddress"] == owner["address"])
+        load.update(fileSize="0x40", memorySize="0x40")
+        second = requirement | {"recordOffset": 96, "auxiliaryOffset": 112, "rawIndex": 3, "index": 3}
+        inventory["versionRequirements"].append(second)
+        next(row for row in inventory["dynamicEntries"] if row["tag"] == "0x6fffffff").update(value="0x2")
+        self.sync_dynamic_storage(inventory)
+        self.write_payloads()
+        self.verify()
+        requirement["auxiliaryOffset"] = 112
+        self.write_payloads()
+        with self.assertRaisesRegex(VERIFY.VerificationError, "auxiliary bounds/order"):
+            self.verify()
+
+        self.report = copy.deepcopy(original)
+        inventory = self.report["dynamicInventory"]
         version_name, provider = "N" * 1846, "P" * 1846
         version = inventory["versionRequirements"][0]
         version.update(name=version_name, nameOffset=1, providerRequest=provider, providerRequestOffset=2)
