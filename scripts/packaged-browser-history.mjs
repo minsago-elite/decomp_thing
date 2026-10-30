@@ -329,7 +329,15 @@ export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready
   assert.ok(accessibility.nodes.some(node => node.role?.value === 'status' && node.properties?.some(property => property.name === 'live' && property.value.value === 'polite')));
   assert.equal(await evaluate(tab, `document.querySelector('ol[aria-label="Activity observations"]').closest('[aria-live], [role="status"], [role="log"]') === null`), true);
   await evaluate(tab, `[...document.querySelectorAll('button')].find(b => b.textContent === 'Read exploration evidence').click()`);
-  await ready(tab, `document.body.innerText.includes('Report state: available. Authority: observations.') && document.body.innerText.includes('Producer confidence score')`, 'bound exploration summary');
+  try {
+    await ready(tab, `document.body.innerText.includes('Report state: available. Authority: observations.') && document.body.innerText.includes('Producer confidence score')`, 'bound exploration summary');
+  } catch (failure) {
+    const page = await evaluate(tab, `({ pathname: location.pathname,
+      heading: document.querySelector('h1')?.textContent ?? null,
+      evidence: document.querySelector('[aria-labelledby="exploration-evidence-title"]')?.innerText.slice(0, 2000) ?? null,
+      alerts: [...document.querySelectorAll('[role="alert"]')].map(node => node.innerText.slice(0, 500)) })`).catch(() => null);
+    throw new Error(`Bound exploration summary diagnostic: ${JSON.stringify({ page, requests: tab.requests.slice(-12), responses: tab.responses.slice(-12) })}`, { cause: failure });
+  }
   assert.ok(await evaluate(tab, `document.body.innerText.includes('not proof of equivalence')`));
   assert.equal(await fs.readFile(fixture.reportPath, 'utf8'), fixture.exploration);
   const downloads = join(fixture.directory, '..', '..', 'browser downloads');
