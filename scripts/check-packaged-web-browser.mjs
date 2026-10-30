@@ -854,7 +854,14 @@ try {
       field.value = 'absent fixture'; field.dispatchEvent(new Event('input', { bubbles: true }));
     })()`);
     await evaluate(authenticated, `[...document.querySelectorAll('button')].find(button => button.textContent === 'Apply filters').click()`);
-    await ready(authenticated, `document.body.innerText.includes('No jobs match these filters.')`, 'filtered empty job library');
+    try {
+      await ready(authenticated, `document.body.innerText.includes('No jobs match these filters.')`, 'filtered empty job library');
+    } catch (failure) {
+      const page = await evaluate(authenticated, `({ pathname: location.pathname, search: location.search,
+        alerts: [...document.querySelectorAll('[role="alert"]')].map(node => node.innerText.slice(0, 800)),
+        results: document.querySelector('ul[aria-label="Uploaded jobs"]')?.innerText.slice(0, 1200) ?? null })`).catch(() => null);
+      throw new Error(`Filtered empty job library diagnostic: ${JSON.stringify({ page, requests: authenticated.requests.slice(-12), responses: authenticated.responses.slice(-12) })}`, { cause: failure });
+    }
     assert.equal(dashboardFiltersWithSnapshot(await evaluate(authenticated, 'location.search')), '?search=absent+fixture');
     await cdp.call('Page.reload', {}, authenticated.sessionId);
     await ready(authenticated, `document.body.innerText.includes('Local session connected.') && document.body.innerText.includes('No jobs match these filters.')`, 'saved job filters after reload');
