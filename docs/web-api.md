@@ -654,6 +654,10 @@ higher precedence, so a pattern such as `!secret.key` would re-include a credent
 therefore enforced on its own terms. `GitTrackingPolicy.excluded` evaluates paths with
 `check-ignore --no-index` in a server-owned scratch repository whose only ignore source is the
 policy, so no repository file can override it. Staging refuses any path it excludes.
+Startup or mutation-owned runtime preparation creates this policy repository before reads. Workspace
+reads only use the prepared policy; missing policy storage is unavailable, not silently recreated.
+A completed recovery sweep can leave a worktree conflict available for read-only inspection; viewing
+it does not retry recovery. After operator repair, sweep explicitly before reviewing new guards.
 
 ### Server-owned Git adapter
 
@@ -1134,6 +1138,75 @@ repository is never an input to it.
   timestamps, tamper detection, and identity unchanged by moved refs.
 
 `WebGitControllerTest` covers the HTTP endpoints and the downloaded export digest.
+
+### Git workspace view and packaged journey
+
+The SPA route `/jobs/{jobId}/git` (#583) is a lazily loaded view over the endpoints above. The job
+page's repository panel links to it. Viewing it never mutates anything. Every change sends the
+guards of the status it was reviewed against, waits for the durable operation, and then reads the
+repository again. The view has these parts:
+
+- **Capability.** When Git is unavailable, unsupported or not reported, the view says so with the
+  reported reason and sends no request. Source and evidence routes are unaffected.
+- **Repository.** With no repository it explains initialization, which stays on the job page, and
+  offers import by name when `git-import` is supported. Otherwise it shows the repository, work
+  tree, HEAD, object format and status notices.
+- **Changes.** Changes are grouped as staged, not staged, untracked and conflicted. Ignored files
+  are only counted. Selection is per group, so a file with both staged and unstaged changes is
+  chosen separately for each action. A diff is shown for the chosen file.
+- **Commit review.** It lists exactly the staged files and the parent commit before the message is
+  accepted. Staging, unstaging and committing are disabled while the status is incomplete, the
+  repository is busy, or (for a commit) conflicts remain.
+- **History.** History pages with **Older commits**. Each commit shows whether it is mapped to a
+  reconstruction revision and that revision's acceptance. A mapped commit links to the recorded
+  source revision and attempt. Inspecting a commit shows its files, provenance, export digest and
+  verification, and offers the export download and a tag form. Changed files and immutable-target
+  tagging appear as soon as the diff pages arrive; optional provenance/export has a separate pending
+  or unavailable state and cannot delay them. Obsolete export results cannot replace a new selection.
+- **Branches and work trees.** Branches show their exact object IDs. The current marker comes from
+  the selected tree's HEAD, not the repository-scoped primary-tree ref marker. Branches checked out
+  elsewhere are labelled explicitly and cannot be switched to or deleted; the selected current
+  branch has no switch-self/delete controls. Switching is disabled, with
+  the reason shown, while the work tree has changes, status is incomplete or an operation is running.
+  The `active-worker` status notice projects the backend lease for the selected work tree: any active
+  attempt holds the primary tree, while only the owning attempt holds a linked tree. Switching and
+  removal are disabled while that notice is present; reads and non-checkout actions stay available.
+  This is advisory snapshot evidence, not a lease reservation: mutation admission still rechecks
+  ownership and guards, and users refresh after the worker finishes. Linked work trees show their
+  owning attempt, and removal is offered only for the selected, clean one. A refused removal retains
+  that selection.
+
+All controls are native buttons, checkboxes and forms. Outcomes are announced in a polite status
+region.
+
+`node scripts/check-packaged-web-browser.mjs --mode git` (#584) runs the packaged journey in the
+`web-packaged` CI job. It runs the session journey, then:
+
+1. Creates a disposable, 1,001-commit repository with `scripts/web-git-fixtures.mjs`. Its pre-commit hook always
+   fails. The repository lives under the work parent and is admitted with `--git-import-root`.
+2. Puts the system `git` on the packaged application's otherwise minimal `PATH`.
+
+In the browser, the journey:
+
+- uploads an inert ELF from the keyboard and follows the job page's link to the workspace;
+- imports the repository by name from the keyboard;
+- traverses all 51 bounded history pages using Enter and compares every displayed object ID, in
+  order, with the admitted repository's `rev-list main`, with no mutation requests;
+- edits the managed work tree on disk and checks that a policy-excluded `helper.o` is only counted;
+- selects and stages one file with Space and Enter, and checks that the review lists exactly that
+  file;
+- commits it, so the failing hook also proves hooks are inert.
+
+It then downloads the commit's export and checks that its SHA-256 equals the displayed provenance
+digest, that its entries are stored, sorted and free of `.git` and excluded files, and that the
+admitted repository is unchanged. Finally it replaces the JVM on the same origin and, with a new
+session, loads `/jobs/{jobId}/git` directly. It confirms that the commit, the unstaged change and
+the export digest are still there. The route is a server-classified SPA document path, so a direct
+load or reload gets the shell. No network access or credentials are used.
+
+This journey does not start a fake workflow worker. Worker lease projection/admission is covered by
+HTTP, service and component regressions; the active-fake-worker packaged qualification required by
+#206 remains outstanding. Component or service results do not substitute for that gate.
 
 ## Legacy compatibility
 

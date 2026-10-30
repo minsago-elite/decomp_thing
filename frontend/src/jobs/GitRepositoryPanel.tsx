@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 import { ApiClientError, withApiFailureReference } from '../api/client';
 import type { Capability, GitRepositories, GitWorkspace, Job, Operation } from '../api/generated';
 import type { BrowserSession } from '../session/session';
+import { jobPath } from '../app/paths';
 
 const terminal = new Set<Operation['state']>(['completed', 'failed', 'cancelled', 'interrupted', 'recovery-required']);
 const defaultPollIntervalMs = 1000;
@@ -134,6 +135,7 @@ export function GitRepositoryPanel({ job, capabilities, basePath, session, pollI
       {observed && !workspace && (observed.revisionId
         ? <button type="button" disabled={busy} onClick={() => { void act(true); }}>{copy.initialize}</button>
         : <p>{copy.noCandidate}</p>)}
+      <p><a href={`${jobPath(basePath, job.jobId)}/git`}>{copy.openWorkspace}</a></p>
     </>}
   </section>;
 }

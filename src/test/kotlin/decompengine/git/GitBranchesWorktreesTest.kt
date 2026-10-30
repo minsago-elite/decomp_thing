@@ -34,9 +34,9 @@ class GitBranchesWorktreesTest {
             GitSourceSnapshot(snapshot, run, revision, "a".repeat(64), mapOf("src/main.c" to GitSourceCommitment(
                 GitSourceCopy.digestOf(snapshot.resolve("src/main.c")), Files.size(snapshot.resolve("src/main.c")))))
         }, policy = GitRepositoryPolicy(defaultBranch = "trunk"), crash = { hook(it) }, activity = { runs.toMap() },
-            workspaceLeases = leases).also { repositories ->
-                opened += repositories
-                repositories.recover(listOf("0123456789abcdef0123456789abcdef"))
+            workspaceLeases = leases).also { service ->
+                opened.add(service)
+                service.recover(listOf("0123456789abcdef0123456789abcdef")) // Mirror production startup authority.
             }
         override fun close() { opened.forEach { it.close() }; repositories.close() }
     }
@@ -81,6 +81,24 @@ class GitBranchesWorktreesTest {
     private fun Fixture.gitDir() = store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
     private fun Fixture.raw(vararg args: String, worktree: Path = workTree(), gitDir: Path = gitDir()) =
         repositories.git("--git-dir=$gitDir", "--work-tree=$worktree", *args, cwd = worktree)
+
+    @Test fun `worker lock reads distinguish the primary tree from each linked owner`(): Unit = Fixture().use { f ->
+        val base = f.prepare()
+        val primary = service.workspace(jobId, repositoryId).worktreeId
+        val owned = run(GitRefRequest(GitOperationAction.WORKTREE_ADD, primary, guards().second, objectId = base, runId = "run_1")).worktreeId
+        val unowned = run(GitRefRequest(GitOperationAction.WORKTREE_ADD, primary, guards().second, objectId = base)).worktreeId
+        assertFalse(service.activeWorker(jobId, repositoryId))
+        f.runs["run_2"] = true
+        assertTrue(service.activeWorker(jobId, repositoryId, primary))
+        assertFalse(service.activeWorker(jobId, repositoryId, owned))
+        assertFalse(service.activeWorker(jobId, repositoryId, unowned))
+        f.runs["run_1"] = true
+        assertTrue(service.activeWorker(jobId, repositoryId, owned))
+        assertFalse(service.busy(jobId))
+        f.runs.replaceAll { _, _ -> false }
+        assertFalse(service.activeWorker(jobId, repositoryId, owned))
+        assertFalse(service.activeWorker(jobId, repositoryId))
+    }
 
     @Test fun `branches are created at an exact base and switched only when clean and unleased`(): Unit = Fixture().use { f ->
         val base = f.prepare()
@@ -369,6 +387,75 @@ class GitBranchesWorktreesTest {
         }
     }
 
+    @Test fun `linked staging and unstaging pin the common branch and private index without shadow locks`(): Unit = Fixture().use { f ->
+        val base = f.prepare()
+        val primary = service.workspace(jobId, repositoryId).worktreeId
+        val linked = run(GitRefRequest(GitOperationAction.WORKTREE_ADD, primary, guards().second,
+            objectId = base, name = "linked-index")).worktreeId
+        val path = f.store.resolve("$jobId/git/repositories/$repositoryId/worktrees/$linked")
+        val admin = f.gitDir().resolve("worktrees/$linked")
+        Files.writeString(path.resolve("src/new.c"), "int linked_index;\n")
+        var attempts = 0
+        f.hook = { if (it == GitOperationCrashPoint.AFTER_WORKSPACE_VALIDATION) {
+            attempts++
+            assertTrue(Files.exists(admin.resolve("index.lock")))
+            assertTrue(Files.exists(admin.resolve("HEAD.lock")))
+            assertTrue(Files.exists(f.gitDir().resolve("refs/heads/linked-index.lock")))
+            assertFalse(Files.exists(admin.resolve("refs/heads/linked-index.lock")))
+            f.repositories.git("--git-dir=${f.gitDir()}", "update-ref", "refs/heads/linked-index", base, base, expect = 128)
+            f.repositories.git("--git-dir=$admin", "--work-tree=$path", "add", "src/main.c", cwd = path, expect = 128)
+        } }
+        for (stage in listOf(true, false)) {
+            val (view, guarded) = guards(linked)
+            val result = run(GitStageRequest(linked, guarded, view.observation.status.entries
+                .filter { it.path.exact == "src/new.c" }.map { it.path.fileId(linked) }, stage))
+            assertEquals(GitOperationState.COMPLETED, result.state, result.message)
+            assertEquals(if (stage) "src/new.c\n" else "", f.raw("diff", "--cached", "--name-only", worktree = path, gitDir = admin))
+            for (name in listOf("index.lock", "HEAD.lock")) assertFalse(Files.exists(admin.resolve(name)))
+            assertFalse(Files.exists(f.gitDir().resolve("refs/heads/linked-index.lock")))
+        }
+        assertEquals(2, attempts)
+        assertEquals("", f.raw("diff", "--cached", "--name-only"), "The primary index stays untouched")
+    }
+
+    @Test fun `linked index restart reclaims private and common witnessed locks but preserves a foreign index`(): Unit {
+        for (external in listOf(false, true)) Fixture().use { f ->
+            val base = f.prepare()
+            val primary = service.workspace(jobId, repositoryId).worktreeId
+            val linked = run(GitRefRequest(GitOperationAction.WORKTREE_ADD, primary, guards().second,
+                objectId = base, name = "linked-recovery")).worktreeId
+            val path = f.store.resolve("$jobId/git/repositories/$repositoryId/worktrees/$linked")
+            val admin = f.gitDir().resolve("worktrees/$linked")
+            Files.writeString(path.resolve("src/new.c"), "int linked_restart;\n")
+            val (view, guarded) = guards(linked)
+            val before = f.raw("ls-files", "--stage", worktree = path, gitDir = admin)
+            f.hook = { if (it == GitOperationCrashPoint.AFTER_WORKSPACE_VALIDATION) throw SimulatedGitCrash() }
+            val admission = service.requestWorkspace(jobId, repositoryId, GitStageRequest(linked, guarded,
+                view.observation.status.entries.filter { it.untracked }.map { it.path.fileId(linked) }, true), "linked_index_crash_01")
+            assertTrue(service.awaitIdle(60_000)); service.close(); f.hook = {}
+            val operationId = admission.operation.operationId
+            val staging = Files.createDirectories(f.store.resolve("$jobId/git/staging/$operationId"))
+            val marker = "decomp-operation:$operationId\n"
+            for (name in listOf("index.lock", "HEAD.lock", "ref-lock")) {
+                val witness = Files.writeString(staging.resolve(name), marker)
+                val lock = if (name == "ref-lock") f.gitDir().resolve("refs/heads/linked-recovery.lock") else admin.resolve(name)
+                if (external && name == "index.lock") Files.writeString(lock, marker) else Files.createLink(lock, witness)
+            }
+            Files.writeString(staging.resolve("ref-name"), "refs/heads/linked-recovery")
+            service = f.open()
+            service.recover(listOf(jobId))
+            assertEquals(GitOperationState.INTERRUPTED, service.operation(jobId, repositoryId, operationId).state)
+            assertEquals(before, f.raw("ls-files", "--stage", worktree = path, gitDir = admin))
+            assertFalse(Files.exists(admin.resolve("HEAD.lock")))
+            assertFalse(Files.exists(f.gitDir().resolve("refs/heads/linked-recovery.lock")))
+            if (external) {
+                assertEquals(marker, Files.readString(admin.resolve("index.lock")))
+                Files.delete(admin.resolve("index.lock")) // Release only this fixture-owned foreign lock.
+            } else assertFalse(Files.exists(admin.resolve("index.lock")))
+            assertEquals("int linked_restart;\n", Files.readString(path.resolve("src/new.c")))
+        }
+    }
+
     @Test fun `linked commit restart preserves an unproven common branch lock`(): Unit = Fixture().use { f ->
         val base = f.prepare()
         val primary = service.workspace(jobId, repositoryId).worktreeId
@@ -518,7 +605,7 @@ class GitBranchesWorktreesTest {
         service.close(); f.hook = {}; service = f.open()
         assertEquals("recovery-required", (persistedState().getValue("state") as kotlinx.serialization.json.JsonPrimitive).content)
         assertEquals(base, GitRefOperations.refObject(f.repositories.runner, f.gitDir(), GitObjectFormat.SHA1, "refs/heads/experiment"))
-        assertEquals("STORAGE_UNAVAILABLE", assertFailsWith<ManagedGitException> {
+        assertEquals("WORKTREE_BUSY", assertFailsWith<ManagedGitException> {
             service.requestWorkspace(jobId, repositoryId,
                 GitRefRequest(GitOperationAction.WORKTREE_ADD, primary, guards().second, objectId = base), "external_branch_retry_01")
         }.code)
@@ -544,9 +631,9 @@ class GitBranchesWorktreesTest {
         assertEquals("WORKTREE_BRANCH_OWNERSHIP_UNKNOWN",
             (persisted.getValue("failureCode") as kotlinx.serialization.json.JsonPrimitive).content)
         assertEquals(base, GitRefOperations.refObject(f.repositories.runner, f.gitDir(), GitObjectFormat.SHA1, "refs/heads/experiment"))
-        assertEquals("STORAGE_UNAVAILABLE", assertFailsWith<ManagedGitException> {
-            service.operation(jobId, repositoryId, admission.operation.operationId)
-        }.code)
+        val observed = service.operation(jobId, repositoryId, admission.operation.operationId)
+        assertEquals(GitOperationState.RECOVERY_REQUIRED, observed.state)
+        assertEquals("WORKTREE_BRANCH_OWNERSHIP_UNKNOWN", observed.failureCode)
     }
 
     @Test fun `checkout and removal exclude workflow admission in both orders`(): Unit {
@@ -785,21 +872,23 @@ class GitBranchesWorktreesTest {
             kotlinx.serialization.json.Json.parseToJsonElement(Files.readString(operationPath)) as kotlinx.serialization.json.JsonObject
         assertEquals("recovery-required", (persistedState().getValue("state") as kotlinx.serialization.json.JsonPrimitive).content)
         assertEquals("REF_CONFLICT", (persistedState().getValue("failureCode") as kotlinx.serialization.json.JsonPrimitive).content)
-        assertEquals("STORAGE_UNAVAILABLE", assertFailsWith<ManagedGitException> {
-            service.operation(jobId, repositoryId, admission.operation.operationId)
-        }.code)
+        val pending = service.operation(jobId, repositoryId, admission.operation.operationId)
+        assertEquals(GitOperationState.RECOVERY_REQUIRED, pending.state)
+        assertEquals("REF_CONFLICT", pending.failureCode)
 
         service.close(); Files.delete(records); f.hook = {}; service = f.open()
-        assertEquals("STORAGE_UNAVAILABLE", assertFailsWith<ManagedGitException> {
-            service.operation(jobId, repositoryId, admission.operation.operationId)
-        }.code)
-        assertEquals("STORAGE_UNAVAILABLE", assertFailsWith<ManagedGitException> {
+        val afterRestart = service.operation(jobId, repositoryId, admission.operation.operationId)
+        assertEquals(GitOperationState.RECOVERY_REQUIRED, afterRestart.state)
+        assertEquals("REF_CONFLICT", afterRestart.failureCode)
+        assertEquals("WORKTREE_BUSY", assertFailsWith<ManagedGitException> {
             service.requestWorkspace(jobId, repositoryId,
                 GitRefRequest(GitOperationAction.WORKTREE_ADD, primary, guards().second, objectId = base), "recovery_retry_key_0001")
         }.code)
         assertEquals(moved, GitRefOperations.refObject(f.repositories.runner, f.gitDir(), GitObjectFormat.SHA1, "refs/heads/experiment"))
         // An explicit operator repair can be reconciled without forgetting or replaying the failed add.
         f.repositories.git("--git-dir=${f.gitDir()}", "update-ref", "refs/heads/experiment", base, moved)
+        // GET no longer performs this rollback. Explicitly sweep the repaired operation before
+        // reviewing fresh guards; mutation admission must still refuse pre-rollback ref versions.
         service.recover(listOf(jobId))
         assertEquals(GitOperationState.COMPLETED, run(GitRefRequest(GitOperationAction.WORKTREE_ADD, primary, guards().second,
             name = "experiment", objectId = base)).state)
