@@ -301,7 +301,7 @@ async function probeApplicationShellCsp(origin) {
   ]);
   const { context: probeContext, record } = await context();
   try {
-    await probeContext.route(url => url.startsWith(`${origin}/nested/?__csp_probe=`), route => {
+    await probeContext.route(url => url.href.startsWith(`${origin}/nested/?__csp_probe=`), route => {
       const name = route.request().url().split('__csp_probe=')[1]?.split('&')[0] ?? '';
       const body = variants.get(name);
       if (!body) return route.abort();
