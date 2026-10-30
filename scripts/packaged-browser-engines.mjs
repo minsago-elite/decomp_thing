@@ -138,20 +138,76 @@ async function context(options = {}) {
         },
       });
     }
+    const textContent = Object.getOwnPropertyDescriptor(Node.prototype, 'textContent');
+    if (textContent?.set) {
+      Object.defineProperty(Node.prototype, 'textContent', {
+        ...textContent,
+        set(value) {
+          if (this?.nodeType === 1 && this.localName === 'style' && value) recordStyleOperation('style.textContent');
+          return textContent.set.call(this, value);
+        },
+      });
+    }
+    if (globalThis.HTMLStyleElement) {
+      const styleText = Object.getOwnPropertyDescriptor(HTMLStyleElement.prototype, 'text');
+      if (styleText?.set) {
+        Object.defineProperty(HTMLStyleElement.prototype, 'text', {
+          ...styleText,
+          set(value) {
+            if (value) recordStyleOperation('style.text');
+            return styleText.set.call(this, value);
+          },
+        });
+      }
+    }
+    if (globalThis.CSSStyleSheet) {
+      for (const method of ['insertRule', 'replace', 'replaceSync']) {
+        const original = CSSStyleSheet.prototype[method];
+        if (typeof original !== 'function') continue;
+        CSSStyleSheet.prototype[method] = function(...args) {
+          const owner = this.ownerNode?.localName ?? (this.href ? 'external' : 'constructed');
+          recordStyleOperation(`CSSStyleSheet.${method}(${owner})`);
+          return original.apply(this, args);
+        };
+      }
+    }
     addEventListener('securitypolicyviolation', (event) => {
       const location = value => value ? value.split(/[?#]/, 1)[0].slice(0, 512) : null;
-      const inlineStyleState = () => ({
-        styleElements: document.querySelectorAll('style').length,
-        styleAttributes: document.querySelectorAll('[style]').length,
-        selects: document.querySelectorAll('select').length,
-        fileInputs: document.querySelectorAll('input[type="file"]').length,
-      });
+      const inlineStyleState = () => {
+        const roots = [{ kind: 'document', root: document }];
+        const summaries = [];
+        for (let index = 0; index < roots.length && index < 32; index++) {
+          const { kind, root } = roots[index];
+          const elements = Array.from(root.querySelectorAll('*'));
+          for (const element of elements) if (element.shadowRoot && roots.length < 32) roots.push({ kind: 'shadow-root', root: element.shadowRoot });
+          const adoptedStyleSheets = Array.from(root.adoptedStyleSheets ?? []).slice(0, 4).map(sheet => {
+            let ruleCount = null;
+            try { ruleCount = sheet.cssRules.length; } catch { /* Cross-origin sheets expose no rules. */ }
+            return { owner: sheet.ownerNode?.localName ?? null, href: location(sheet.href), ruleCount };
+          });
+          summaries.push({
+            kind,
+            styleElements: root.querySelectorAll('style').length,
+            styleAttributes: root.querySelectorAll('[style]').length,
+            selects: root.querySelectorAll('select').length,
+            fileInputs: root.querySelectorAll('input[type="file"]').length,
+            adoptedStyleSheets,
+          });
+        }
+        return summaries;
+      };
+      const target = event.target;
+      const eventTarget = target?.nodeType === 1
+        ? { kind: target.localName, id: target.id || null, className: String(target.className ?? '').slice(0, 128) }
+        : { kind: target?.nodeName ?? typeof target, nodeType: target?.nodeType ?? null };
       const at = performance.now();
       const styleOperations = recentStyleOperations.filter(operation => at - operation.at < 1000).slice(-8);
       globalThis.__decompRecordCspViolation(JSON.stringify({
         blockedURI: event.blockedURI, effectiveDirective: event.effectiveDirective,
         documentURI: location(event.documentURI), sourceFile: location(event.sourceFile),
-        lineNumber: event.lineNumber, columnNumber: event.columnNumber, inlineStyleState: inlineStyleState(), styleOperations,
+        lineNumber: event.lineNumber, columnNumber: event.columnNumber,
+        sample: event.sample?.slice(0, 160) ?? null, originalPolicy: event.originalPolicy?.slice(0, 512) ?? null,
+        eventTarget, inlineStyleState: inlineStyleState(), styleOperations,
       }));
     });
   });
