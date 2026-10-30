@@ -175,7 +175,11 @@ async function auditWithFixtures(origin, fixtures, fulfilled, unmapped) {
         exceptions: record?.exceptions.slice(-8) ?? [],
         csp: record?.csp.slice(-8) ?? [],
       };
-      if (failure instanceof Error) failure.message = `${failure.message}; cross-engine state ${JSON.stringify(details)}`;
+      if (failure instanceof Error) {
+        const diagnostic = `cross-engine state ${JSON.stringify(details)}`;
+        failure.message = `${failure.message}; ${diagnostic}`;
+        if (failure.stack && !failure.stack.includes(diagnostic)) failure.stack = `${failure.stack}\n${diagnostic}`;
+      }
       throw failure;
     }
   };
@@ -192,7 +196,33 @@ async function auditWithFixtures(origin, fixtures, fulfilled, unmapped) {
       for (const scheme of ['light', 'dark']) {
         await target.emulateMedia({ colorScheme: scheme, reducedMotion: 'reduce' });
         await delay(50);
-        layout.push({ page: page.name, viewport: viewport.name, scheme, ...await target.evaluate(measurePage) });
+        const measured = await target.evaluate(measurePage);
+        const overflowDiagnostics = measured.overflow.some((entry) => entry.includes('input#binary-file'))
+          ? await target.evaluate(() => {
+            const selected = document.querySelector('#binary-file');
+            if (!selected) return null;
+            const describe = (element) => {
+              const bounds = element.getBoundingClientRect();
+              const style = getComputedStyle(element);
+              return {
+                tag: element.tagName.toLowerCase(), id: element.id, className: element.className,
+                bounds: { left: bounds.left, right: bounds.right, width: bounds.width },
+                clientWidth: element.clientWidth, scrollWidth: element.scrollWidth,
+                style: {
+                  display: style.display, width: style.width, minWidth: style.minWidth,
+                  maxWidth: style.maxWidth, boxSizing: style.boxSizing, overflowX: style.overflowX,
+                  fontSize: style.fontSize, flexBasis: style.flexBasis, gridColumn: style.gridColumn,
+                },
+              };
+            };
+            const chain = [];
+            for (let element = selected; element && element instanceof HTMLElement && chain.length < 6; element = element.parentElement) {
+              chain.push(describe(element));
+            }
+            return chain;
+          })()
+          : null;
+        layout.push({ page: page.name, viewport: viewport.name, scheme, ...measured, ...(overflowDiagnostics ? { overflowDiagnostics } : {}) });
         if (viewport.width === 1440 || (viewport.width === 320 && viewport.deviceScaleFactor === 1))
           contrast.push({ page: page.name, viewport: viewport.name, scheme, ...await target.evaluate(measureContrast) });
       }
