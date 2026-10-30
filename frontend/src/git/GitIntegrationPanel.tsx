@@ -42,6 +42,8 @@ function IntegrationReviewPanel({ remotes, conflicts, destination, writable, rea
   const [reviewed, setReviewed] = useState<Record<string, string>>({});
   // Only the newest divergence read may land.
   const divergenceReads = useRef(0);
+  // Only the latest conflict-detail request may replace the file or its draft.
+  const conflictReads = useRef(0);
   // A resolution whose save failed stays the draft until a save succeeds.
   const unsaved = useRef<{ fileId: string; text: string } | null>(null);
   const selected = chosen || tracking[0]?.refId || '';
@@ -56,7 +58,10 @@ function IntegrationReviewPanel({ remotes, conflicts, destination, writable, rea
   }
 
   async function open(fileId: string) {
+    const read = ++conflictReads.current;
+    setDetail(null);
     const file = await readConflict(fileId);
+    if (read !== conflictReads.current) return;
     setDetail(file);
     if (file) setDraft(unsaved.current?.fileId === fileId ? unsaved.current.text : file.current ?? '');
   }
@@ -66,6 +71,7 @@ function IntegrationReviewPanel({ remotes, conflicts, destination, writable, rea
     const reviewed = detail;
     // The shown file is stale from the moment a save is sent: nothing can be marked reviewed at the
     // old digest, and the file is read again (on failure too) before it can be.
+    conflictReads.current++;
     setDetail(null);
     setReviewed(previous => { const next = { ...previous }; delete next[reviewed.file.fileId]; return next; });
     const submitted = draft;
@@ -105,7 +111,7 @@ function IntegrationReviewPanel({ remotes, conflicts, destination, writable, rea
     </div>}
     {!conflicts && <div role="alert">
       <p>{copy.conflictsUnavailable}</p>
-      <button type="button" disabled={!writable} onClick={() => { void onAction({ kind: 'gitMergeAbortRequest' }); }}>{copy.abort}</button>
+      <button type="button" disabled={!writable} onClick={() => { conflictReads.current++; void onAction({ kind: 'gitMergeAbortRequest' }); }}>{copy.abort}</button>
     </div>}
     {conflicts?.mergeInProgress && <section aria-labelledby="git-conflicts-title">
       <h4 id="git-conflicts-title">{copy.conflicts}</h4>
@@ -126,10 +132,10 @@ function IntegrationReviewPanel({ remotes, conflicts, destination, writable, rea
       </li>)}</ul>}
       {(conflicts.offset > 0 || conflicts.nextOffset !== null) && <nav aria-label={copy.conflictPages}>
         <button type="button" disabled={conflicts.offset === 0 || !writable} onClick={() => {
-          setReviewed({}); setDetail(null); onConflictPage(Math.max(0, conflicts.offset - 200));
+          conflictReads.current++; setReviewed({}); setDetail(null); onConflictPage(Math.max(0, conflicts.offset - 200));
         }}>{copy.previousConflicts}</button>
         {' '}<button type="button" disabled={conflicts.nextOffset === null || !writable} onClick={() => {
-          setReviewed({}); setDetail(null); if (conflicts.nextOffset !== null) onConflictPage(conflicts.nextOffset);
+          conflictReads.current++; setReviewed({}); setDetail(null); if (conflicts.nextOffset !== null) onConflictPage(conflicts.nextOffset);
         }}>{copy.nextConflicts}</button>
       </nav>}
       {detail && <div aria-label={textMessage(copy.detail, { path: detail.file.path })} role="group">
@@ -150,9 +156,9 @@ function IntegrationReviewPanel({ remotes, conflicts, destination, writable, rea
       </div>}
       <button type="button" disabled={!writable || Object.keys(reviewed).length === 0} onClick={() => {
         void onAction({ kind: 'gitConflictCompleteRequest', files: Object.entries(reviewed).map(([fileId, sha256]) => ({ fileId, sha256 })) })
-          .then(done => { if (done) { setReviewed({}); setDetail(null); } });
+          .then(done => { if (done) { conflictReads.current++; setReviewed({}); setDetail(null); } });
       }}>{copy.complete}</button>
-      {' '}<button type="button" disabled={!writable} onClick={() => { void onAction({ kind: 'gitMergeAbortRequest' }); }}>{copy.abort}</button>
+      {' '}<button type="button" disabled={!writable} onClick={() => { conflictReads.current++; void onAction({ kind: 'gitMergeAbortRequest' }); }}>{copy.abort}</button>
       <p>{copy.commitAfter}</p>
     </section>}
   </section>;

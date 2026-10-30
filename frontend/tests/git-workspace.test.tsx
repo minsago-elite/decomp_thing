@@ -661,6 +661,41 @@ it('reviews and commits the complete merge index beyond the ordinary 200-file se
     guards: { worktreeVersion: 'tree_v1' } });
 });
 
+it('continues bounded status pages until a large merge index can be reviewed and committed', async () => {
+  // Small responses still span the ten-page automatic budget, with one more than the ordinary commit limit.
+  const total = 201;
+  const pageSize = 20;
+  entries = Array.from({ length: total }, (_, index) => entry(`file_${index}`, `src/f${index}.c`, 'added', 'none'));
+  conflictState = { repositoryId, worktreeId, mergeInProgress: true, integration: null, files: [] };
+  transport.post.mockResolvedValueOnce(operation('completed', 'git.commit'));
+  transport.get.mockImplementation(async (kind, path) => {
+    if (kind === 'gitStatus') {
+      const cursor = new URLSearchParams(path.split('?')[1] ?? '').get('cursor');
+      const start = Number(cursor ?? 0);
+      const pageEntries = entries.slice(start, start + pageSize);
+      return { data: { ...status(true), entries: pageEntries,
+        nextCursor: start + pageEntries.length < entries.length ? String(start + pageEntries.length) : null } };
+    }
+    return serve(kind, path);
+  });
+  const view = mount();
+  await screen.findByText(/status is incomplete/i);
+  const commitButton = screen.getByRole('button', { name: 'Commit staged files' });
+  expect(commitButton).toHaveProperty('disabled', true);
+  expect(view.container.querySelector('ul[aria-label="Exactly these staged files will be committed:"]')?.querySelectorAll('li')).toHaveLength(200);
+  fireEvent.click(screen.getByRole('button', { name: 'Load more status entries' }));
+  await waitFor(() => expect(commitButton).toHaveProperty('disabled', false));
+  expect(screen.queryByText(/status is incomplete/i)).toBeNull();
+  expect(transport.get.mock.calls.filter(call => call[0] === 'gitStatus')).toHaveLength(11);
+  expect(view.container.querySelector('ul[aria-label="Exactly these staged files will be committed:"]')?.querySelectorAll('li')).toHaveLength(total);
+
+  fireEvent.input(screen.getByLabelText('Commit message'), { target: { value: 'Merge all incoming changes' } });
+  fireEvent.click(commitButton);
+  await waitFor(() => expect(transport.post).toHaveBeenCalledOnce());
+  expect(transport.post.mock.calls[0]?.[3]).toMatchObject({ action: 'git.commit', selectedFileIds: [], reviewedMergeIndex: true,
+    guards: { worktreeVersion: 'tree_v1' } });
+}, 20_000);
+
 it('reviews fetched divergence and offers only reviewed fast-forward or merge, never rebase', async () => {
   transport.post.mockResolvedValueOnce(operation('completed', 'git.merge'));
   mount();

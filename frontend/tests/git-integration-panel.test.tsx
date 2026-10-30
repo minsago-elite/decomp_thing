@@ -57,3 +57,32 @@ it('discards late conflict reads from a previous integration even if the path an
   expect(screen.getByText('new remote')).toBeTruthy();
   expect(screen.getByRole('checkbox', { name: 'Mark src/a.c reviewed' })).toHaveProperty('checked', false);
 });
+
+it('keeps only the latest conflict read and invalidates reads on page changes', async () => {
+  const secondFile = { ...file, fileId: 'file_second', path: 'src/b.c' };
+  const page = { ...conflicts('merge_1'), files: [file, secondFile], totalCount: 2, nextOffset: 200 };
+  const reads: ((value: GitConflictFile) => void)[] = [];
+  const readConflict = vi.fn(() => new Promise<GitConflictFile>(resolve => { reads.push(resolve); }));
+  const onConflictPage = vi.fn();
+  const props = { ...defaults, readConflict, onConflictPage, onAction: vi.fn().mockResolvedValue(true) };
+  const view = render(<GitIntegrationPanel {...props} conflicts={page} />);
+
+  fireEvent.click(screen.getByRole('button', { name: 'Review src/a.c' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Review src/b.c' }));
+  await waitFor(() => expect(readConflict).toHaveBeenCalledTimes(2));
+  await act(() => { reads[1]!({ ...detail('merge_1', 'latest remote'), file: secondFile }); return Promise.resolve(); });
+  await screen.findByText('latest remote');
+  fireEvent.input(screen.getByLabelText('Resolved text'), { target: { value: 'latest draft' } });
+  await act(() => { reads[0]!({ ...detail('merge_1', 'stale remote'), file }); return Promise.resolve(); });
+  expect(screen.queryByText('stale remote')).toBeNull();
+  expect(screen.getByRole('group', { name: 'Conflict in src/b.c' })).toBeTruthy();
+  expect(screen.getByLabelText('Resolved text')).toHaveProperty('value', 'latest draft');
+
+  fireEvent.click(screen.getByRole('button', { name: 'Review src/b.c' }));
+  await waitFor(() => expect(readConflict).toHaveBeenCalledTimes(3));
+  fireEvent.click(screen.getByRole('button', { name: 'Next conflicts' }));
+  expect(onConflictPage).toHaveBeenCalledWith(200);
+  await act(() => { reads[2]!({ ...detail('merge_1', 'obsolete page'), file: secondFile }); return Promise.resolve(); });
+  expect(screen.queryByRole('group', { name: 'Conflict in src/b.c' })).toBeNull();
+  view.unmount();
+});

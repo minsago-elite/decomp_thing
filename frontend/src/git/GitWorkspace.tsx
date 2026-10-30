@@ -84,6 +84,8 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
   const [tagDraft, setTagDraft] = useState<{ target: string; name: string } | null>(null);
   const olderPending = useRef(false);
   const refsPending = useRef(false);
+  const statusPending = useRef(false);
+  const [statusLoading, setStatusLoading] = useState(false);
   const commitRequest = useRef(0);
   const [refresh, setRefresh] = useState(0);
   const active = useRef<AbortController | null>(null);
@@ -156,10 +158,50 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
       entries.push(...page.entries);
       pages++;
     }
-    return { ...page, entries, complete: page.complete && page.nextCursor === null, nextCursor: null };
+    return { ...page, entries, complete: page.complete && page.nextCursor === null };
   }
 
   const statusData = loaded?.status ?? null;
+
+  /** Continue status under the same anchored snapshot; each request remains bounded to ten pages. */
+  async function moreStatus(cursor: string) {
+    const reviewed = statusData;
+    if (!base || !reviewed || reviewed.nextCursor !== cursor || statusPending.current) return;
+    const generation = diffGeneration.current;
+    const scope = worktree ? `worktree=${worktree}&` : '';
+    const matchesReview = (page: GitStatus) => page.repositoryVersion === reviewed.repositoryVersion
+      && page.worktreeVersion === reviewed.worktreeVersion && page.worktreeId === reviewed.worktreeId
+      && page.headObjectId === reviewed.headObjectId;
+    statusPending.current = true;
+    setStatusLoading(true);
+    try {
+      let page = (await client.get('gitStatus', `${base}/status?${scope}limit=200&cursor=${cursor}`)).data;
+      const entries = [...page.entries];
+      let pages = 1;
+      if (!matchesReview(page)) {
+        if (generation === diffGeneration.current) { setStatus(copy.statusChanged); setRefresh(value => value + 1); }
+        return;
+      }
+      while (page.nextCursor && pages < MAX_STATUS_PAGES) {
+        page = (await client.get('gitStatus', `${base}/status?${scope}limit=200&cursor=${page.nextCursor}`)).data;
+        entries.push(...page.entries);
+        pages++;
+        if (!matchesReview(page)) {
+          if (generation === diffGeneration.current) { setStatus(copy.statusChanged); setRefresh(value => value + 1); }
+          return;
+        }
+      }
+      if (generation !== diffGeneration.current) return;
+      setLoaded(previous => previous?.status?.nextCursor === cursor && matchesReview(previous.status)
+        ? { ...previous, status: { ...page, entries: [...previous.status.entries, ...entries], complete: page.complete && page.nextCursor === null } }
+        : previous);
+    } catch (failure: unknown) {
+      if (generation === diffGeneration.current) setStatus(withApiFailureReference(copy.statusContinuationFailed, failure));
+    } finally {
+      statusPending.current = false;
+      setStatusLoading(false);
+    }
+  }
   const groups = useMemo(() => {
     const entries = statusData?.entries ?? [];
     return {
@@ -442,6 +484,8 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
       <section aria-labelledby="git-changes-title">
         <h3 id="git-changes-title">{copy.changes}</h3>
         {!statusData.complete && <p role="alert">{copy.incomplete}</p>}
+        {!statusData.complete && statusData.nextCursor !== null && <button type="button" disabled={busy || statusLoading}
+          onClick={() => { void moreStatus(statusData.nextCursor ?? ''); }}>{statusLoading ? copy.statusLoading : copy.moreStatus}</button>}
         {(['staged', 'unstaged', 'untracked', 'conflicted'] as const).map(group => groups[group].length > 0 && <fieldset key={group}>
           <legend>{copy[group]}</legend>
           <ul>{groups[group].map(entry => <li key={`${group}:${entry.fileId}`}>
