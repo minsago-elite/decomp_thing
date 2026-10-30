@@ -9,10 +9,10 @@ public final class RunBundledExports extends GhidraScript {
         BundledGhidraWorker.diagnosticsGuard();
         String[] arguments = getScriptArgs();
         if (arguments.length == 0) throw new IllegalArgumentException("No bundled exporters requested");
-        // The ordinary owned analyzer has a separate versioned candidate-writing entry point.
-        // Keep admission exact-name only; the retained GCC exporter remains a distinct protocol.
+        // Keep the owned analyzer and typed listing collector on distinct exact-name routes.
         Set<String> exporters = Set.of("ExportProgramModel.java", "ExportProgramModelOwned.java",
-            "ExportRecoveredCallSites.java", "ExportDecompiledC.java", "ExportNativeCallsV1.class");
+            "ExportRecoveredCallSites.java", "ExportDecompiledC.java", "ExportNativeCallsV1.class",
+            "ExportNativeInterfacesV1.class");
         for (int index = 0; index < arguments.length;) {
             String name = arguments[index++];
             if (!exporters.contains(name) || index == arguments.length) {
@@ -28,6 +28,8 @@ public final class RunBundledExports extends GhidraScript {
                 if (name.equals("ExportNativeCallsV1.class")) {
                     // The nested source-script loader cannot load the pinned compiled collector.
                     ExportNativeCallsV1.collect(currentProgram, monitor, exporterArguments);
+                } else if (name.equals("ExportNativeInterfacesV1.class")) {
+                    ExportNativeInterfacesV1.collect(currentProgram, monitor, exporterArguments);
                 } else {
                     runScript(name, exporterArguments);
                 }

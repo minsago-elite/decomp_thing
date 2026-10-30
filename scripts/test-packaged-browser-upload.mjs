@@ -24,34 +24,11 @@ const data = await fs.mkdtemp(join(scratchParent, 'upload-readiness-'));
 after(() => fs.rm(data, { recursive: true, force: true }));
 
 const entries = { qualifyUpload, qualifyUploadFailures, qualifyMeasuredUpload };
+const picker = '<input id="binary-file" type="file">';
+const panel = content => `<section aria-labelledby="upload-title"><h2 id="upload-title">Upload a binary</h2>${content}</section>`;
 const bannerOnly = `document.body.innerText.includes('Local session connected.')`;
 
-function fileInput(document, { type = 'file', disabled = false } = {}) {
-  const input = document.createElement('input');
-  input.id = 'binary-file';
-  input.type = type;
-  input.disabled = disabled;
-  return input;
-}
-
-function uploadPanel(document, ...children) {
-  const section = document.createElement('section');
-  section.setAttribute('aria-labelledby', 'upload-title');
-  const title = document.createElement('h2');
-  title.id = 'upload-title';
-  title.textContent = 'Upload a binary';
-  section.append(title, ...children);
-  return section;
-}
-
-function disabledPicker(document) {
-  const fieldset = document.createElement('fieldset');
-  fieldset.disabled = true;
-  fieldset.append(fileInput(document));
-  return fieldset;
-}
-
-function fixture(t, { render = () => [], route = '/nested/', connected = true, onTick = () => {}, evaluateFailure } = {}) {
+function fixture(t, { markup = '', route = '/nested/', connected = true, onTick = () => {}, evaluateFailure } = {}) {
   const dom = new JSDOM('<body><header></header><main></main></body>', {
     url: 'http://fixture.invalid' + route, runScripts: 'outside-only',
   });
@@ -60,7 +37,7 @@ function fixture(t, { render = () => [], route = '/nested/', connected = true, o
   // jsdom does not implement rendered innerText. All authored text here is visible plain text.
   Object.defineProperty(document.body, 'innerText', { get: () => document.body.textContent });
   document.querySelector('header').textContent = connected ? 'Local session connected.' : 'Connect a local session.';
-  document.querySelector('main').replaceChildren(...render(document));
+  document.querySelector('main').innerHTML = markup;
   const state = { elapsed: 0, polls: 0, delays: [], fixtureEvaluations: 0, calls: [], readyCalls: [] };
   const stopAtFixture = new Error('Authored stop before file assignment or browser mutation');
   const target = { sessionId: 'authored-upload-tab' };
@@ -114,7 +91,7 @@ function fixture(t, { render = () => [], route = '/nested/', connected = true, o
 for (const [name, run] of Object.entries(entries)) {
   test(`${name} waits through authenticated shell then mounted disabled route until picker is enabled`, async t => {
     const f = fixture(t, { onTick: ({ elapsed, document }) => {
-      if (elapsed === 225) document.querySelector('main').replaceChildren(uploadPanel(document, disabledPicker(document)));
+      if (elapsed === 225) document.querySelector('main').innerHTML = panel(`<fieldset disabled>${picker}</fieldset>`);
       if (elapsed === 450) document.querySelector('fieldset').disabled = false;
     } });
     assert.equal(f.dom.window.eval(bannerOnly), true, 'The prior banner-only gate already passes');
@@ -127,7 +104,7 @@ for (const [name, run] of Object.entries(entries)) {
   });
 
   test(`${name} reaches a mounted enabled picker without an added delay`, async t => {
-    const f = fixture(t, { render: document => [uploadPanel(document, fileInput(document))] });
+    const f = fixture(t, { markup: panel(picker) });
     await assert.rejects(run(f.args), error => error === f.stopAtFixture);
     assert.equal(f.state.elapsed, 0);
     assert.equal(f.state.polls, 1);
@@ -146,12 +123,12 @@ for (const [name, run] of Object.entries(entries)) {
 }
 
 for (const [name, options] of Object.entries({
-  'wrong route': { render: document => [uploadPanel(document, fileInput(document))], route: '/nested/upload' },
-  'picker outside the upload panel': { render: document => [fileInput(document), uploadPanel(document)] },
-  'wrong input type': { render: document => [uploadPanel(document, fileInput(document, { type: 'text' }))] },
-  'disabled picker': { render: document => [uploadPanel(document, fileInput(document, { disabled: true }))] },
-  'disabled ancestor fieldset': { render: document => [uploadPanel(document, disabledPicker(document))] },
-  'disconnected shell': { render: document => [uploadPanel(document, fileInput(document))], connected: false },
+  'wrong route': { markup: panel(picker), route: '/nested/upload' },
+  'picker outside the upload panel': { markup: picker + panel('') },
+  'wrong input type': { markup: panel('<input id="binary-file" type="text">') },
+  'disabled picker': { markup: panel('<input id="binary-file" type="file" disabled>') },
+  'disabled ancestor fieldset': { markup: panel(`<fieldset disabled>${picker}</fieldset>`) },
+  'disconnected shell': { markup: panel(picker), connected: false },
 })) {
   test(`mounted but invalid control remains bounded: ${name}`, async t => {
     const f = fixture(t, options);
@@ -163,7 +140,7 @@ for (const [name, options] of Object.entries({
 }
 
 test('existing ready retries transient context loss without replacing its deadline', async t => {
-  const f = fixture(t, { render: document => [uploadPanel(document, fileInput(document))], evaluateFailure: poll => poll === 1 ? new Error('Execution context was destroyed') : null });
+  const f = fixture(t, { markup: panel(picker), evaluateFailure: poll => poll === 1 ? new Error('Execution context was destroyed') : null });
   await assert.rejects(qualifyUpload(f.args), error => error === f.stopAtFixture);
   assert.equal(f.state.elapsed, 75);
   assert.equal(f.state.polls, 2);
@@ -172,7 +149,7 @@ test('existing ready retries transient context loss without replacing its deadli
 
 test('existing ready preserves unrelated expression failure before file assignment', async t => {
   const failure = new Error('Authored evaluator refusal');
-  const f = fixture(t, { render: document => [uploadPanel(document, fileInput(document))], evaluateFailure: () => failure });
+  const f = fixture(t, { markup: panel(picker), evaluateFailure: () => failure });
   await assert.rejects(qualifyUpload(f.args), error => error === failure);
   assert.equal(f.state.elapsed, 0);
   assert.equal(f.state.fixtureEvaluations, 0);

@@ -205,6 +205,8 @@ main > section, main section { max-width: 72rem; }
 .breadcrumbs { display: flex; flex-wrap: wrap; gap: 0.4rem; margin: 0 0 1rem; padding: 0; list-style: none; font-size: 0.875rem; color: var(--muted); }
 .breadcrumbs li + li::before { content: "/"; margin-inline-end: 0.4rem; color: var(--line); }
 .breadcrumbs [aria-current="page"] { color: var(--text); }
+/* Breadcrumbs are standalone targets, not links in a sentence: keep them at least 24px (WCAG 2.5.8). */
+.breadcrumbs a { display: inline-flex; align-items: center; min-height: 1.5rem; min-width: 1.5rem; }
 
 /* Notices carry tone on a left rule rather than as floating cards. */
 .notice { padding: 1rem 1.25rem; border: 1px solid var(--line); border-left: 4px solid var(--control-line); border-radius: var(--radius-control); background: var(--surface); }
@@ -235,8 +237,10 @@ main a + button, main button + button, main button + a { margin-inline-start: 0.
 /* Jobs */
 .job-filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 13rem), 1fr)); align-items: end; gap: 0.85rem 1rem; margin: 1rem 0; }
 .job-filters label { display: grid; align-content: start; gap: 0.35rem; }
+.job-filters .job-archive-toggle { display: flex; align-items: flex-start; gap: 0.5rem; min-width: 0; }
+.job-filters .job-archive-toggle input[type="checkbox"] { flex: 0 0 auto; }
 .job-filters .job-actions { grid-column: 1 / -1; margin: 0.25rem 0 0; }
-.job-filters input, .job-filters select { width: 100%; }
+.job-filters input:not([type="checkbox"]), .job-filters select { width: 100%; }
 .job-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.6rem; margin: 1rem 0; }
 .job-list { list-style: none; margin: 1rem 0; padding: 0; border: 1px solid var(--line); border-radius: var(--radius-panel); background: var(--surface); overflow: hidden; }
 .job-list > li { max-width: none; padding: 1rem 1.25rem; overflow-wrap: anywhere; }
@@ -342,9 +346,13 @@ main a + button, main button + button, main button + a { margin-inline-start: 0.
   .source-row { grid-template-columns: 4.5rem minmax(0, 1fr); }
   .app-footer { padding: 1rem; }
 }
+/*
+ * Reduced motion removes motion outright. A tiny non-zero duration would turn every property
+ * change (such as a theme switch) into a running transition, which the packaged audit measures.
+ */
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { scroll-behavior: auto !important; animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
+  *, *::before, *::after { scroll-behavior: auto !important; animation: none !important; transition: none !important; }
 }
 :root[data-motion="reduce"], :root[data-motion="reduce"] *, :root[data-motion="reduce"] *::before, :root[data-motion="reduce"] *::after {
-  scroll-behavior: auto !important; animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important;
+  scroll-behavior: auto !important; animation: none !important; transition: none !important;
 }
