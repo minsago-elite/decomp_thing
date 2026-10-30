@@ -149,6 +149,13 @@ class BundledGhidraTest {
                 }
             }
         """)
+        val nativeInterfaceStub = source("ExportNativeInterfacesV1.java", """
+            public final class ExportNativeInterfacesV1 {
+                public static void collect(Object program, Object monitor, String[] args) {
+                    ghidra.app.script.GhidraScript.invocations.add("native-interface:" + java.util.Arrays.toString(args));
+                }
+            }
+        """)
         val probe = source("GuardProbe.java", """
             import ghidra.app.script.GhidraScript;
             import decompengine.ghidra.BundledGhidraWorker;
@@ -164,11 +171,13 @@ class BundledGhidraTest {
                 }
                 public static void verify() throws Exception {
                     for (String name : new String[] {"ExportProgramModel.java", "ExportProgramModelOwned.java",
-                            "ExportRecoveredCallSites.java", "ExportDecompiledC.java", "ExportNativeCallsV1.class"}) {
+                            "ExportRecoveredCallSites.java", "ExportDecompiledC.java", "ExportNativeCallsV1.class",
+                            "ExportNativeInterfacesV1.class"}) {
                         prepare(name, "2", "argument with spaces", "--not-an-option");
                         new RunBundledExports().execute();
                         check(BundledGhidraWorker.completed);
-                        String target = name.equals("ExportNativeCallsV1.class") ? "native" : name;
+                        String target = name.equals("ExportNativeCallsV1.class") ? "native" :
+                            name.equals("ExportNativeInterfacesV1.class") ? "native-interface" : name;
                         check(GhidraScript.invocations.equals(java.util.List.of(
                             target + ":[argument with spaces, --not-an-option]")));
                     }
@@ -213,7 +222,8 @@ class BundledGhidraTest {
         val guard = Path.of("ghidra-bridge/src/main/java/RunBundledExports.java").toAbsolutePath()
         val compiler = checkNotNull(javax.tools.ToolProvider.getSystemJavaCompiler())
         assertEquals(0, compiler.run(null, null, null, "-proc:none", "-encoding", "UTF-8", "-d", work.toString(),
-            scriptStub.toString(), workerStub.toString(), nativeStub.toString(), guard.toString(), probe.toString()))
+            scriptStub.toString(), workerStub.toString(), nativeStub.toString(), nativeInterfaceStub.toString(),
+            guard.toString(), probe.toString()))
         java.net.URLClassLoader(arrayOf(work.toUri().toURL()), null).use { loader ->
             loader.loadClass("GuardProbe").getMethod("verify").invoke(null)
         }
