@@ -1,0 +1,48 @@
+{
+  "apiVersion": 1,
+  "kind": "maintenancePreview",
+  "requestId": "request_maintenance_preview",
+  "data": {
+    "sampledAt": "2026-10-25T10:00:00Z",
+    "dryRun": false,
+    "complete": true,
+    "policy": {
+      "automaticJobDeletion": false,
+      "periodicMaintenance": true,
+      "terminalProgressRetentionMs": "86400000",
+      "deletionTombstoneRetentionMs": "86400000"
+    },
+    "actions": [
+      {
+        "action": "progress-journal-expiry",
+        "jobId": "1234567890abcdef1234567890abcdef",
+        "runId": "run_fixture",
+        "bytes": "8812",
+        "schedule": "periodic"
+      },
+      {
+        "action": "deletion-resume",
+        "jobId": "abcdef1234567890abcdef1234567890",
+        "runId": null,
+        "bytes": "4089",
+        "schedule": "periodic"
+      }
+    ],
+    "omittedActions": "0",
+    "affectedJobs": "2",
+    "reclaimableBytes": "12901",
+    "protectedJobs": [
+      {
+        "jobId": "fedcba0987654321fedcba0987654321",
+        "protections": [
+          {
+            "code": "PINNED_EVIDENCE",
+            "source": "retention-pin",
+            "message": "At least one attempt's progress history is pinned. Unpin it on the attempt page before deleting."
+          }
+        ]
+      }
+    ],
+    "omittedProtectedJobs": "0"
+  }
+}

@@ -146,19 +146,6 @@
       "valid": true
     },
     {
-      "file": "fixtures/request-git-stage.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/git-operation-commit-completed.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/invalid-request-git-stage-path.json",
-      "valid": false,
-      "reason": "Staging selects registered file identities only; a path or pathspec is never a request field."
-    },
-    {
       "file": "fixtures/git-history.json",
       "valid": true
     },
@@ -1017,6 +1004,91 @@
     },
     {
       "file": "fixtures/invalid-run-interrupted-timed-out.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/request-git-stage.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/git-operation-commit-completed.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-request-git-stage-path.json",
+      "valid": false,
+      "reason": "Staging selects registered file identities only; a path or pathspec is never a request field."
+    },
+    {
+      "file": "fixtures/job-organized.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/job-deletion-preview.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/job-deletion-preview-protected.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-deletion-preview-protected-deletable.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-deletion-preview-undo.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/operation-job-delete.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/storage-summary.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-storage-summary-complete-uninspected.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/maintenance-preview.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-maintenance-preview-automatic-deletion.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-maintenance-preview-not-dry-run.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/request-job-organization.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/request-job-organization-clear.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-request-job-organization-empty.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-request-job-organization-filename.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-job-label-control.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/request-job-deletion.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-request-job-deletion-extra.json",
       "valid": false
     }
   ]
