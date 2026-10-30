@@ -329,7 +329,7 @@ class RepairHistorySnapshotReaderTest {
         val root = root()
         Files.createDirectory(root.resolve("reports"))
         root.resolve("reports/not-a-directory").writeText("x")
-        val chain = construct("HistoryDirectoryChain", root, listOf("reports", "not-a-directory"), {}, { _: Long -> })
+        val chain = construct("HistoryDirectoryChain", root, listOf("reports", "not-a-directory"), {}, { _: Long -> Unit })
         assertFails { call(chain, "open") }
         @Suppress("UNCHECKED_CAST")
         val acquired = (field(chain, "held") as List<LinuxDescriptor>).toList()
