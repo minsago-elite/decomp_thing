@@ -212,6 +212,10 @@ internal fun requireDistinctControlOutput(
     }
 }
 
+internal fun unsupportedForeignOwnerLeaseMessage(label: String, effectiveUid: Int, fileUid: Int): String =
+    "$label has an unsupported foreign non-root owner and cannot be leased " +
+        "(effectiveUid=$effectiveUid fileUid=$fileUid)"
+
 /** Stable bounded access to a descriptor-selected authenticated input. */
 internal class StableControlFile private constructor(
     private val authenticatedSize: Long,
@@ -735,7 +739,7 @@ internal class StableControlFile private constructor(
             if (effectiveUid != 0 && identity.uid != effectiveUid) {
                 if (identity.uid != 0) {
                     throw FullTreeControlException(
-                        "$label has an unsupported foreign non-root owner and cannot be leased",
+                        unsupportedForeignOwnerLeaseMessage(label, effectiveUid, identity.uid),
                     )
                 }
                 val writeDenied = descriptor.whileOpen { fd -> effectiveWriteAccessDenied(fd, label) }

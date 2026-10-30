@@ -39,6 +39,7 @@ internal class WebSourceCatalogEvidence(
 ) {
     private val profiles = profiles.associateBy { it.id to it.sha256 }
     private val capturing = AtomicBoolean(false)
+    private val searching = AtomicBoolean(false)
 
     init { require(profiles.size in 1..16 && this.profiles.size == profiles.size) }
 
@@ -93,6 +94,37 @@ internal class WebSourceCatalogEvidence(
                 content
             }
         }
+
+    /**
+     * One bounded search admission. Metadata is captured before and after the scan; each body is selected only from
+     * that snapshot's canonical inputs and must match its committed size and SHA-256. Missing bodies are reported as
+     * unavailable to the scan; changed bodies or metadata refuse the whole page.
+     */
+    fun search(reference: WebRevisionSourceReference, readSource: (String, String, String, Long) -> StableRegularFile,
+        scan: (WebRevisionSourceSnapshot, (WebRevisionSourceFile) -> ByteArray?) -> JsonObject): JsonObject {
+        if (!searching.compareAndSet(false, true)) {
+            throw WebAccessDenied(429, "SOURCE_SEARCH_BUSY", "Another source search is in progress. Try this search again later.")
+        }
+        try {
+            val before = readRevision(reference)
+            val members = Collections.newSetFromMap(java.util.IdentityHashMap<WebRevisionSourceFile, Boolean>()).apply { addAll(before.files) }
+            val result = scan(before) { file ->
+                check(file in members)
+                val captured = try {
+                    readSource(reference.jobId, reference.runId, file.evidence.path, WebRevisionSourceContent.MAXIMUM_FILE_BYTES)
+                } catch (failure: Exception) {
+                    if (failure is WebAccessDenied || failure is java.util.concurrent.CancellationException || failure is InterruptedException) throw failure
+                    null
+                }
+                captured?.bytes?.copyOf()?.also { bytes ->
+                    if (bytes.size.toLong() != file.sizeBytes || captured.sha256 != file.evidence.sha256 ||
+                        WebExplorationArtifact.sha256(bytes) != file.evidence.sha256) revisionSourceChanged()
+                }
+            }
+            if (readRevision(reference).metadataVersion != before.metadataVersion) revisionSourceChanged()
+            return result
+        } finally { searching.set(false) }
+    }
 
     private fun <T> revision(reference: WebRevisionSourceReference, manifest: decompengine.project.SourceTreeManifest,
         captured: StableRegularFile, project: (WebRevisionSourceSnapshot) -> T): T {

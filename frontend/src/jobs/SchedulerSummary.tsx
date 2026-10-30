@@ -1,6 +1,6 @@
 import { schedulerSummaryCopy as copy } from '../copy/runtime';
 import { message as displayMessage } from '../shared/messages';
-import { formatExactTimestamp } from './metadataFormat';
+import { formatExactTimestamp } from '../copy/format';
 import type { Scheduler } from '../api/generated';
 
 export function SchedulerSummary({ scheduler }: { scheduler?: Scheduler | undefined }) {
