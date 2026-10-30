@@ -18,7 +18,9 @@ internal fun webStorageStartupGuidance(failure: Throwable): String? {
             else -> null
         }
     } ?: return null
-    val changesMayHaveBegun = chain.any { it is WorkflowStoreException && it.outcomeUnknown }
+    val changesMayHaveBegun = chain.any {
+        (it is WorkflowStoreException && it.outcomeUnknown) || (it is WebJobServiceException && it.recoveryMayHaveChanged)
+    }
     val reason = when (code) {
         "UNSUPPORTED_WORKFLOW_SCHEMA" ->
             "A workflow-state.json file uses a schema version this build does not support. It was probably written by a newer application version; start that version again or restore a verified backup taken before the upgrade."

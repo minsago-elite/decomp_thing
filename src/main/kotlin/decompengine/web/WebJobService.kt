@@ -472,6 +472,7 @@ class WebJobService(
         if (stopping || Thread.currentThread().isInterrupted || cancellation()) throw decompengine.jobs.WorkflowStoreException(
             "RECOVERY_CANCELLED", "Startup recovery was cancelled before acquiring storage.")
         val acquired = attemptStoreFactory(store.storageRoot)
+        var recoveryCompleted = false
         try {
             acquired.recoverForStartup(limits = startupRecoveryLimits, cancellation = { stopping || cancellation() }) { check ->
                 check()
@@ -484,6 +485,7 @@ class WebJobService(
                 check()
                 decompengine.jobs.UploadStagingRecovery.recover(store.storageRoot, check)
             }
+            recoveryCompleted = true
             deletions = decompengine.jobs.JobDeletionStore(store.storageRoot, faults = { point -> deletionFaults.hit(point) }).also { journal ->
                 try { journal.load() } catch (failure: WorkflowStoreException) {
                     throw WebJobServiceException(failure.code, "The job deletion journal is invalid. Preserve it before reopening storage.", failure)
@@ -493,7 +495,15 @@ class WebJobService(
             return acquired
         } catch (failure: Throwable) {
             try { acquired.close() } catch (cleanup: Throwable) { failure.addSuppressed(cleanup) }
-            throw webStartupFailure(failure)
+            val reported = if (recoveryCompleted) {
+                val code = when (failure) {
+                    is WebJobServiceException -> failure.code
+                    is WorkflowStoreException -> failure.code
+                    else -> "JOB_STORAGE_UNAVAILABLE"
+                }
+                WebJobServiceException(code, publicWebDiagnosticMessage(code), failure, recoveryMayHaveChanged = true)
+            } else failure
+            throw webStartupFailure(reported)
         }
     }
 

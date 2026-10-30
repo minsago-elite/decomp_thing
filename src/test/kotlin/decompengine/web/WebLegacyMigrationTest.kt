@@ -245,7 +245,7 @@ class WebLegacyMigrationTest {
     }
 
     /** Files the upgrade may add. Nothing else may appear, and no existing byte may change. */
-    private fun expectedAdditions(fixture: Fixture) = setOf(".web-owner.lock", ".workflow-owner.lock", "${fixture.interrupted}/workflow-state.json")
+    private fun expectedAdditions(fixture: Fixture) = setOf(".web-owner.lock", ".workflow-owner.lock", ".git-runtime/empty-config", "${fixture.interrupted}/workflow-state.json")
 
     @Test
     fun `every legacy route answers its documented migration outcome in both modes without starting work or writing`() {
@@ -273,8 +273,10 @@ class WebLegacyMigrationTest {
                 val after = storageDigest()
                 for ((path, digest) in original) assertEquals(digest, after[path], "$path changed after $mode lifecycle")
                 assertEquals(expectedAdditions(fixture), after.keys - original.keys, "unexpected files after $mode lifecycle")
-                assertEquals(originalDirectories, directories(), "the upgrade created or removed directories after $mode")
+                assertEquals(originalDirectories + setOf(".git-runtime", ".git-runtime/home", ".git-runtime/hooks", ".git-runtime/templates"),
+                    directories(), "the upgrade created or removed directories after $mode")
             }
+            assertEquals(0L, Files.size(root.resolve(".git-runtime/empty-config")), "the isolated Git runtime config must remain empty")
             // The only job-scoped addition records the historical interruption without an invented attempt.
             val state = Json.parseToJsonElement(Files.readString(root.resolve(fixture.interrupted).resolve("workflow-state.json"))).jsonObject
             assertEquals(1, state.getValue("schemaVersion").jsonPrimitive.int)
@@ -310,6 +312,25 @@ class WebLegacyMigrationTest {
             for ((path, digest) in original) assertEquals(digest, after[path], "$path changed by refused $mode startup")
             assertTrue((after.keys - original.keys).all { it.startsWith(".") && it.endsWith("-owner.lock") }, "refused startup wrote ${after.keys - original.keys}")
         }
+    }
+
+    @Test
+    fun `a corrupt deletion journal after workflow recovery warns that changes may have begun`() {
+        val fixture = retainedLegacyStore()
+        val statePath = "${fixture.interrupted}/workflow-state.json"
+        assertFalse(Files.exists(root.resolve(statePath)))
+        val journal = Files.createDirectories(root.resolve(".job-deletions"))
+        val record = journal.resolve("jobdel_${"a".repeat(32)}.json")
+        record.writeText("{truncated")
+        val originalRecord = sha256(record.readBytes())
+
+        val failure = assertFailsWith<Exception> { start(WebUiMode.SPA).close() }
+        val guidance = assertNotNull(webStorageStartupGuidance(failure))
+        assertTrue(guidance.contains("CORRUPT_DELETION_RECORD"), guidance)
+        assertTrue(guidance.contains("Recovery changes may have begun"), guidance)
+        assertFalse(guidance.contains("No recovery changes were applied"), guidance)
+        assertTrue(Files.isRegularFile(root.resolve(statePath)), "startup recovery should have migrated the interrupted record before journal validation")
+        assertEquals(originalRecord, sha256(record.readBytes()), "startup must preserve the corrupt journal record")
     }
 
     @Test
@@ -433,7 +454,10 @@ class WebLegacyMigrationTest {
             assertTrue(beforeIndex.contentEquals(repository.resolve(".git/index").readBytes()), "the user index changed")
             // The only status difference is the job store's own lock files, which the user's repository sees as untracked.
             val added = git("status", "--porcelain=v1", "--untracked-files=all").lines().toSet() - beforeStatus.lines().toSet()
-            assertTrue(added.all { it.startsWith("?? jobs/") && it.endsWith("-owner.lock") }, "unexpected repository changes: $added")
+            assertTrue(added.all {
+                it == "?? jobs/.git-runtime/empty-config" || (it.startsWith("?? jobs/") && it.endsWith("-owner.lock"))
+            }, "unexpected repository changes: $added")
+            assertEquals(0L, Files.size(data.resolve(".git-runtime/empty-config")), "the isolated Git runtime config must remain empty")
             Files.walk(data).use { paths -> assertTrue(paths.noneMatch { it.fileName.toString() == ".git" }, "a .git entry appeared in the job store") }
         } finally {
             repository.toFile().deleteRecursively()
