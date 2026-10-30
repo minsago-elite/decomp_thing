@@ -220,7 +220,7 @@ async function auditWithFixtures(origin, fixtures, fulfilled, unmapped) {
               chain.push(describe(element));
             }
             return chain;
-          })()
+          })
           : null;
         layout.push({ page: page.name, viewport: viewport.name, scheme, ...measured, ...(overflowDiagnostics ? { overflowDiagnostics } : {}) });
         if (viewport.width === 1440 || (viewport.width === 320 && viewport.deviceScaleFactor === 1))
