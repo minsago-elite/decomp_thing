@@ -516,7 +516,7 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
             inventory["programHeaders"].append({"index": index, "type": 1, "flags": 4, "offset": hex(offset),
                 "virtualAddress": hex(start), "physicalAddress": hex(start), "fileSize": hex(size),
                 "memorySize": hex(size), "alignment": "0x1"})
-        for index, name, start, offset in ((9, ".text", 0x1010, 16), (10, ".plt", 0x2000, 32)):
+        for index, name, start, offset in ((9, ".text", 0x1010, 160), (10, ".plt", 0x2000, 200)):
             inventory["sections"].append({"index": index, "name": name, "type": 1, "flags": "0x6", "address": hex(start),
                 "offset": offset, "size": "0xf", "link": 0, "info": 0, "alignment": "0x1", "entrySize": "0x0"})
             inventory["programHeaders"].append({"index": index, "type": 1, "flags": 5, "offset": hex(offset),
@@ -825,13 +825,35 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
         text = next(row for row in inventory["sections"] if row["name"] == ".text")
         plt = next(row for row in inventory["sections"] if row["name"] == ".plt")
         load = next(row for row in inventory["programHeaders"] if row["type"] == 1 and row["virtualAddress"] == plt["address"])
-        self.assertEqual(16, text["offset"])
+        self.assertEqual(160, text["offset"])
         self.assertNotEqual(text["offset"], plt["offset"])
         # Distinct virtual addresses now claim the same retained file bytes.
         plt["offset"] = text["offset"]
         load["offset"] = hex(text["offset"])
         self.write_payloads()
         with self.assertRaisesRegex(VERIFY.VerificationError, "file ranges"):
+            self.verify()
+
+    def test_executable_source_bytes_cannot_alias_retained_dynamic_metadata(self) -> None:
+        inventory = self.report["dynamicInventory"]
+        text = next(row for row in inventory["sections"] if row["name"] == ".text")
+        dynsym = next(row for row in inventory["sections"] if row["type"] == 11)
+        load = next(row for row in inventory["programHeaders"] if row["type"] == 1 and row["virtualAddress"] == text["address"])
+        text["offset"] = dynsym["offset"]
+        load["offset"] = hex(dynsym["offset"])
+        self.write_payloads()
+        with self.assertRaisesRegex(VERIFY.VerificationError, "alias dynamic metadata"):
+            self.verify()
+
+    def test_executable_probe_bytes_cannot_alias_retained_dynamic_metadata(self) -> None:
+        inventory = self.report["dynamicInventory"]
+        plt = next(row for row in inventory["sections"] if row["name"] == ".plt")
+        dynsym = next(row for row in inventory["sections"] if row["type"] == 11)
+        load = next(row for row in inventory["programHeaders"] if row["type"] == 1 and row["virtualAddress"] == plt["address"])
+        plt["offset"] = dynsym["offset"]
+        load["offset"] = hex(dynsym["offset"])
+        self.write_payloads()
+        with self.assertRaisesRegex(VERIFY.VerificationError, "alias dynamic metadata"):
             self.verify()
 
     def test_nonforwarded_receipt_requires_the_exact_physical_instruction(self) -> None:
@@ -1455,12 +1477,12 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
     def test_version_definition_provenance_tags_population_and_verdaux_are_checked(self) -> None:
         inventory = self.report["dynamicInventory"]
         inventory["sections"].append({"index": 8, "name": ".gnu.version_d", "type": 0x6ffffffd, "flags": "0x2",
-            "address": "0x6080", "offset": 128, "size": "0x24", "link": 3, "info": 1, "alignment": "0x4", "entrySize": "0x0"})
-        inventory["programHeaders"].append({"index": 1, "type": 1, "flags": 4, "offset": "0x80",
+            "address": "0x6080", "offset": 1024, "size": "0x24", "link": 3, "info": 1, "alignment": "0x4", "entrySize": "0x0"})
+        inventory["programHeaders"].append({"index": 1, "type": 1, "flags": 4, "offset": "0x400",
             "virtualAddress": "0x6080", "physicalAddress": "0x6080", "fileSize": "0x24", "memorySize": "0x24", "alignment": "0x1"})
-        inventory["versionDefinitions"] = [{"sectionIndex": 8, "stringSectionIndex": 3, "recordOffset": 128,
+        inventory["versionDefinitions"] = [{"sectionIndex": 8, "stringSectionIndex": 3, "recordOffset": 1024,
             "rawIndex": 1, "index": 1, "flags": 1, "hash": 0x5aa821, "name": "VER_1",
-            "parentNames": ["PARENT"], "auxiliaryOffsets": [148, 156], "auxiliaryNameOffsets": [35, 42]}]
+            "parentNames": ["PARENT"], "auxiliaryOffsets": [1044, 1052], "auxiliaryNameOffsets": [35, 42]}]
         inventory["dynamicEntries"][-1:-1] = [{"index": index + 8, "fileOffset": (index + 8) * 16, "tag": hex(tag), "value": hex(value)}
             for index, (tag, value) in enumerate(((0x6ffffffc, 0x6080), (0x6ffffffd, 1)))]
         self.sync_dynamic_storage(inventory)
@@ -1481,11 +1503,11 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
             lambda inv: inv["versionDefinitions"][0].update(hash=0),
             lambda inv: inv["versionDefinitions"][0].update(parentNames=[""]),
             lambda inv: inv["versionDefinitions"][0].update(auxiliaryOffsets=[]),
-            lambda inv: inv["versionDefinitions"][0].update(auxiliaryOffsets=[148, 148]),
-            lambda inv: inv["versionDefinitions"][0].update(auxiliaryOffsets=[148, 155]),
-            lambda inv: inv["versionDefinitions"][0].update(auxiliaryOffsets=[156, 148]),
-            lambda inv: inv["versionDefinitions"][0].update(auxiliaryOffsets=[147, 156]),
-            lambda inv: inv["versionDefinitions"][0].update(auxiliaryOffsets=[148, 157])]
+            lambda inv: inv["versionDefinitions"][0].update(auxiliaryOffsets=[1044, 1044]),
+            lambda inv: inv["versionDefinitions"][0].update(auxiliaryOffsets=[1044, 1051]),
+            lambda inv: inv["versionDefinitions"][0].update(auxiliaryOffsets=[1052, 1044]),
+            lambda inv: inv["versionDefinitions"][0].update(auxiliaryOffsets=[1043, 1052]),
+            lambda inv: inv["versionDefinitions"][0].update(auxiliaryOffsets=[1044, 1053])]
         for ordinal, change in enumerate(changes):
             with self.subTest(mutation=ordinal):
                 self.report = copy.deepcopy(original)
@@ -1493,6 +1515,31 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
                 self.write_payloads()
                 with self.assertRaises(VERIFY.VerificationError):
                     self.verify()
+
+    def test_version_auxiliary_must_end_before_next_record_header(self) -> None:
+        inventory = self.report["dynamicInventory"]
+        inventory["sections"].append({"index": 8, "name": ".gnu.version_d", "type": 0x6ffffffd, "flags": "0x2",
+            "address": "0x6080", "offset": 1024, "size": "0x50", "link": 3, "info": 2, "alignment": "0x4", "entrySize": "0x0"})
+        inventory["programHeaders"].append({"index": 1, "type": 1, "flags": 4, "offset": "0x400",
+            "virtualAddress": "0x6080", "physicalAddress": "0x6080", "fileSize": "0x50", "memorySize": "0x50", "alignment": "0x1"})
+        first = {"sectionIndex": 8, "stringSectionIndex": 3, "recordOffset": 1024, "rawIndex": 1, "index": 1,
+            "flags": 1, "hash": 0x5aa821, "name": "VER_1", "parentNames": ["PARENT"],
+            "auxiliaryOffsets": [1044, 1052], "auxiliaryNameOffsets": [35, 42]}
+        second = {"sectionIndex": 8, "stringSectionIndex": 3, "recordOffset": 1060, "rawIndex": 2, "index": 2,
+            "flags": 1, "hash": 0x5aa821, "name": "VER_1", "parentNames": [],
+            "auxiliaryOffsets": [1096], "auxiliaryNameOffsets": [35]}
+        inventory["versionDefinitions"] = [first, second]
+        inventory["dynamicEntries"][-1:-1] = [{"index": index + 8, "fileOffset": (index + 8) * 16, "tag": hex(tag), "value": hex(value)}
+            for index, (tag, value) in enumerate(((0x6ffffffc, 0x6080), (0x6ffffffd, 2)))]
+        self.sync_dynamic_storage(inventory)
+        self.write_payloads()
+        self.verify()
+        # This disjoint range does not overlap any other retained record or auxiliary,
+        # but it belongs after the next Verdef header and cannot be this record's child.
+        first["auxiliaryOffsets"][1] = 1080
+        self.write_payloads()
+        with self.assertRaisesRegex(VERIFY.VerificationError, "auxiliary bounds/order"):
+            self.verify()
 
     def test_version_section_ownership_reuses_one_load_interval_index(self) -> None:
         inventory = copy.deepcopy(self.report["dynamicInventory"])
@@ -1558,7 +1605,7 @@ class RetainedExternalEvidenceRegressionTest(unittest.TestCase):
                                     ("relcount-without-table", "relative relocation prefix"),
                                     ("verneed-zero-count", "GNU version tag"), ("verneed-invalid-pointer", "GNU version tag"),
                                     ("verneed-tags-absent", "GNU version tag"), ("verneed-wrong-section-type", "GNU version"),
-                                    ("verneed-out-of-file-records", "GNU version record bounds"),
+                                    ("verneed-out-of-file-records", "GNU version record"),
                                     ("plt-nonexecutable-section", "byte-window ownership"),
                                     ("plt-file-mapping-disagrees", "byte-window ownership"),
                                     ("plt-nonexecutable-load", "source call instruction lacks uniquely owned executable file-backed bytes"),

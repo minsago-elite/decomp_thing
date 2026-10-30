@@ -849,6 +849,20 @@ def retained_version_records(inventory: dict, sections: dict, input_bytes: int, 
     for entry, library in zip(needed_entries, inventory["neededLibraries"], strict=True):
         retain_linked_string(active_table["link"], address(entry["value"]), library)
 
+    record_ends = {}
+    for group, kind, width in (("versionRequirements", 0x6ffffffe, 16), ("versionDefinitions", 0x6ffffffd, 20)):
+        offsets_by_owner = {}
+        for row in inventory[group]:
+            owner = owner_for(row, kind)
+            offsets_by_owner.setdefault(owner["index"], set()).add(row["recordOffset"])
+        for owner_index, offsets in offsets_by_owner.items():
+            owner = owners[owner_index]
+            section_end = owner["offset"] + address(owner["size"])
+            ordered_offsets = sorted(offsets)
+            for offset, next_offset in zip(ordered_offsets, [*ordered_offsets[1:], section_end], strict=True):
+                require(offset + width <= next_offset, "retained GNU version record header crosses the next record")
+                record_ends[(owner_index, offset)] = next_offset
+
     for group, kind, width in (("versionRequirements", 0x6ffffffe, 16), ("versionDefinitions", 0x6ffffffd, 20)):
         rows = inventory[group]
         order = [(row["sectionIndex"], row["recordOffset"], *([row["auxiliaryOffset"]] if group == "versionRequirements" else [])) for row in rows]
@@ -870,7 +884,9 @@ def retained_version_records(inventory: dict, sections: dict, input_bytes: int, 
                     index == raw & 0x7fff and key not in keys and 0 <= row["flags"] <= 65535 and
                     bool(row["name"]) and row["hash"] == elf_hash(row["name"]), "retained GNU version identity/hash differs")
             keys.add(key)
-            require(within(owner, row["recordOffset"], width), "retained GNU version record bounds differ")
+            record_end = record_ends[(owner["index"], row["recordOffset"])]
+            require(within(owner, row["recordOffset"], width) and row["recordOffset"] + width <= record_end,
+                    "retained GNU version record bounds differ")
             header = (owner["index"], row["recordOffset"])
             if header not in record_headers:
                 storage_ranges.setdefault(owner["index"], []).append((row["recordOffset"], row["recordOffset"] + width))
@@ -890,7 +906,8 @@ def retained_version_records(inventory: dict, sections: dict, input_bytes: int, 
                         offsets == sorted(set(offsets)) and all(b - a >= 8 for a, b in pairwise(offsets)),
                         "retained Verdaux population/order differs")
             for offset in offsets:
-                require(offset >= row["recordOffset"] + width and within(owner, offset, auxiliary_width),
+                require(offset >= row["recordOffset"] + width and offset + auxiliary_width <= record_end and
+                        within(owner, offset, auxiliary_width),
                         "retained GNU version auxiliary bounds/order differs")
                 storage_ranges.setdefault(owner["index"], []).append((offset, offset + auxiliary_width))
     require_consistent_byte_ranges(string_ranges, "retained GNU version strings conflict in linked table")
@@ -1036,6 +1053,7 @@ class RetainedRelocationIndex:
         for range_start, range_end in sorted(metadata_ranges):
             require(range_start >= previous_end, "retained dynamic metadata sections overlap")
             previous_end = range_end
+        self.metadata_file_ranges = tuple(metadata_ranges)
 
     def code_window(self, location: int) -> tuple[int, int] | None:
         length = self.code_window_length(location)
@@ -1253,6 +1271,13 @@ def verify_external_bindings(evidence: dict, request: dict, report: dict, source
             probe_bytes = bytes.fromhex(probe["availableBytes"])
             byte_ranges.append((0, probe_location, probe_bytes))
             byte_ranges.append((1, probe_window[1], probe_bytes))
+    for coordinate_space, file_offset, data in byte_ranges:
+        if coordinate_space != 1:
+            continue
+        file_end = file_offset + len(data)
+        require(all(file_end <= metadata_start or metadata_end <= file_offset
+                    for metadata_start, metadata_end in relocation_index.metadata_file_ranges),
+                "retained executable file bytes alias dynamic metadata storage")
     require_consistent_byte_ranges(byte_ranges,
         "retained source/probe byte windows conflict at overlapping executable addresses or file ranges")
     expected_counts = {"sourcePhysicalSites": len(sites), "composedSiteRecords": len(sites), "namespaceEntries": len(imports), "dispositions": counts}
