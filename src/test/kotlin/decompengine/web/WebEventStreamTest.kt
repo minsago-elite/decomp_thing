@@ -246,6 +246,43 @@ class WebEventStreamTest {
         }
     }
 
+    @Test fun `client disconnect releases both session reservations long before the lease and shutdown closes the rest`() =
+        Fixture(lifetimeMs = 30_000).use { f ->
+            fun connected(): Socket = Socket().also { peer ->
+                peer.connect(InetSocketAddress("127.0.0.1", f.server.address.port), 2000)
+                peer.soTimeout = 3000
+                peer.getOutputStream().write(("GET /events HTTP/1.1\r\nHost: 127.0.0.1:${f.server.address.port}\r\n" +
+                    "Cookie: ${f.cookie}\r\nAccept: text/event-stream\r\n\r\n").toByteArray())
+                peer.getOutputStream().flush()
+                val reader = peer.getInputStream().bufferedReader()
+                assertEquals("HTTP/1.1 200 OK", reader.readLine())
+                assertTrue(generateSequence { reader.readLine() }.any { it == ": connected" })
+            }
+            val peers = listOf(connected(), connected())
+            assertEquals(2, f.resources.snapshot().active)
+            assertEquals(429, f.open().also { it.body().close() }.statusCode(), "The per-session bound applies while both are connected")
+            // A browser navigation or tab close drops the socket without any request; nothing reads from it again.
+            val started = System.nanoTime()
+            peers.forEach(Socket::close)
+            val deadline = started + TimeUnit.SECONDS.toNanos(5)
+            while (f.resources.snapshot().active != 0 && System.nanoTime() < deadline) Thread.sleep(10)
+            val elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)
+            assertEquals(0, f.resources.snapshot().active, "Disconnected peers must release their reservations")
+            assertEquals(0, f.resources.snapshot().cleanupFailures)
+            assertTrue(elapsedMs < 5000, "Release must follow the failed heartbeat write, not the 30 s lease")
+            val replacement = f.open()
+            try {
+                assertEquals(200, replacement.statusCode(), "Released reservations must admit the session's next stream")
+                assertEquals(1, f.resources.snapshot().active)
+                assertTrue(f.resources.shutdown(), "Shutdown must close the remaining stream and report a clean release")
+                assertEquals(0, f.resources.snapshot().active)
+                assertTrue(eof(replacement.body().bufferedReader()))
+                val refused = f.open()
+                assertEquals(503, refused.statusCode()); refused.body().close()
+            } finally { replacement.body().close() }
+            println("Disconnect qualification: two dropped peers released in ${elapsedMs} ms of a 30000 ms lease; shutdown closed the replacement stream.")
+        }
+
     companion object {
         private fun journal(sequences: List<Int>) = buildJsonObject {
             put("schemaVersion", 1); put("displayOnly", true); put("nextSequence", (sequences.lastOrNull() ?: -1) + 1)
