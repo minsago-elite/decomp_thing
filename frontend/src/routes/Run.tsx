@@ -1,7 +1,7 @@
 import { runCopy as copy } from '../copy/attempt';
 import { sourceCopy } from '../copy/sources';
 import { message as displayMessage } from '../shared/messages';
-import { formatExactTimestamp } from '../jobs/metadataFormat';
+import { formatExactTimestamp } from '../copy/format';
 import { usePrivateTransport } from '../session/PrivateTransport';
 import { useEffect, useMemo, useState } from 'preact/hooks';
 import { useLocation } from 'preact-iso/router';
@@ -19,7 +19,10 @@ import { useSession } from '../session/useSession';
 import { receive } from '../shared/receiptTime';
 import type { Received } from '../shared/receiptTime';
 import { MetadataReceipt } from '../shared/MetadataReceipt';
-import { canRetainMetadata, metadataFailureKind } from '../shared/retainMetadata';
+import { PanelBoundary } from '../shared/PanelBoundary';
+import { panelBoundaryCopy } from '../copy/shell';
+import { canRetainMetadata, isDeletedJob, metadataFailureKind } from '../shared/retainMetadata';
+import { onLibraryChange } from '../jobs/libraryChannel';
 import { attemptOutcomeCopy as outcomeCopy, stopOutcomeCopy } from '../copy/attemptOutcome';
 import { QueuePosition } from '../jobs/QueuePosition';
 
@@ -33,6 +36,7 @@ function Details({ jobId, runId, basePath, session, view, navigation }: {
   const { data: observation, error, loading } = stored.binding === binding ? stored : { data: null, error: '', loading: true };
   const run = observation?.value;
   const [refresh, setRefresh] = useState(0);
+  useEffect(() => onLibraryChange(basePath, () => setRefresh(value => value + 1)), [basePath]);
   useEffect(() => {
     const controller = new AbortController();
     setStored(previous => ({ binding, data: previous.binding === binding ? previous.data : null, error: '', loading: true }));
@@ -45,7 +49,7 @@ function Details({ jobId, runId, basePath, session, view, navigation }: {
     }).catch((failure: unknown) => {
       if (!controller.signal.aborted) setStored(previous => ({ binding,
         data: previous.binding === binding && canRetainMetadata(failure) ? previous.data : null,
-        error: withApiFailureReference({
+        error: withApiFailureReference(isDeletedJob(failure) ? copy.thisJobWasDeleted : {
           session: copy.reconnectToReadThisAttempt, denied: copy.attemptAccessDenied,
           missing: copy.thisAttemptIsUnavailableForThisJob, unsupported: copy.incompatibleAttemptResponse,
           unverified: copy.attemptMetadataCouldNotBeVerified,
@@ -76,10 +80,11 @@ function Details({ jobId, runId, basePath, session, view, navigation }: {
         <dt>{copy.created}</dt><dd><time dateTime={run.createdAt} title={run.createdAt}>{formatExactTimestamp(run.createdAt)}</time></dd>
         <dt>{copy.started}</dt><dd>{run.startedAt ? <time dateTime={run.startedAt} title={run.startedAt}>{formatExactTimestamp(run.startedAt)}</time> : copy.notRecorded}</dd>
         <dt>{copy.ended}</dt><dd>{run.endedAt ? <time dateTime={run.endedAt} title={run.endedAt}>{formatExactTimestamp(run.endedAt)}</time> : copy.notRecorded}</dd>
-        <dt>{outcomeCopy.stopReason}</dt><dd>{run.terminalReason ? <>
-          <strong>{stopOutcomeCopy[run.terminalReason].label}</strong>. {stopOutcomeCopy[run.terminalReason].detail}{' '}
-          {displayMessage(outcomeCopy.recordedCode, { code: <code>{run.terminalReason}</code> })}
-        </> : copy.noTerminalReasonRecorded}</dd>
+        <dt>{outcomeCopy.stopReason}</dt><dd>{run.terminalReason ? displayMessage(outcomeCopy.stopDescription, {
+          label: <strong>{stopOutcomeCopy[run.terminalReason].label}</strong>,
+          detail: stopOutcomeCopy[run.terminalReason].detail,
+          recordedCode: displayMessage(outcomeCopy.recordedCode, { code: <code>{run.terminalReason}</code> }),
+        }) : copy.noTerminalReasonRecorded}</dd>
         <dt>{copy.inputRevision}</dt><dd>{run.inputRevisionId ?? copy.originalUploadedInput}</dd>
         <dt>{copy.resultRevision}</dt><dd>{run.resultRevisionId ?? copy.noResultRevisionRecorded}</dd>
       </dl>
@@ -107,14 +112,24 @@ function Details({ jobId, runId, basePath, session, view, navigation }: {
       </dl> : <p>{copy.usageWasNotReportedForThisAttempt}</p>}
       </>}
       {view !== 'evidence' && <>
-        <AttemptControls key={`controls/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} session={session}
-          run={run} onChanged={() => { setRefresh(value => value + 1); }} />
-        <ProgressPin key={`pin/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} session={session} />
-        <Activity key={`activity/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} {...(view === 'activity' && navigation !== undefined ? { navigation } : {})} />
+        <PanelBoundary name={panelBoundaryCopy.names.attemptControls}>
+          <AttemptControls key={`controls/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} session={session}
+            run={run} onChanged={() => { setRefresh(value => value + 1); }} />
+        </PanelBoundary>
+        <PanelBoundary name={panelBoundaryCopy.names.progressPin}>
+          <ProgressPin key={`pin/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} session={session} />
+        </PanelBoundary>
+        <PanelBoundary name={panelBoundaryCopy.names.activity}>
+          <Activity key={`activity/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} {...(view === 'activity' && navigation !== undefined ? { navigation } : {})} />
+        </PanelBoundary>
       </>}
       {view !== 'activity' && <>
-        <ExplorationEvidence key={`${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} />
-        <RecordedValidationEvidence key={`${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} {...(navigation === undefined ? {} : { navigation })} />
+        <PanelBoundary name={panelBoundaryCopy.names.exploration}>
+          <ExplorationEvidence key={`${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} />
+        </PanelBoundary>
+        <PanelBoundary name={panelBoundaryCopy.names.validation}>
+          <RecordedValidationEvidence key={`${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} {...(navigation === undefined ? {} : { navigation })} />
+        </PanelBoundary>
       </>}
       {run.resultRevisionId ? <p><a href={sourceDirectoryPath(basePath, { jobId, runId, revisionId: run.resultRevisionId })}>{sourceCopy.browse}</a></p>
         : <p>{sourceCopy.noRevision}</p>}

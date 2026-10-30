@@ -261,8 +261,10 @@ class GhidraSharedDeadlineTest {
             commandFactory = { invocation ->
                 commandPreparations++
                 assertEquals(input, invocation.input)
-                val output = Path.of(invocation.postScripts.single().arguments.last())
-                assertEquals(work.resolve("reports/program_model.json").toAbsolutePath().normalize(), output)
+                val arguments = invocation.postScripts.single().arguments
+                val output = Path.of(arguments.last())
+                assertEquals(work.resolve("reports/program_model.json").toAbsolutePath().normalize(), Path.of(arguments[3]))
+                assertEquals("owned-model-candidate-v1", arguments[4])
                 output.writeBytes(canonicalBytes)
                 listOf("/usr/bin/printf", "authored export complete\n")
             },

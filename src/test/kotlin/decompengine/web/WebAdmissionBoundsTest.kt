@@ -27,7 +27,7 @@ class WebAdmissionBoundsTest {
     private fun pin(port: Int) {
         val socket = Socket("127.0.0.1", port)
         socket.getOutputStream().write(("POST /w/api/v1/session HTTP/1.1\r\nHost: 127.0.0.1:$port\r\nOrigin: http://127.0.0.1:$port\r\n" +
-            "Content-Type: application/json\r\nAccept: application/json\r\nContent-Length: 4000\r\n\r\n{\"token\":\"x").toByteArray())
+            "Content-Type: application/json\r\nAccept: application/json\r\nContent-Length: 1024\r\n\r\n{\"token\":\"x").toByteArray())
         socket.getOutputStream().flush()
         pinned += socket
     }
