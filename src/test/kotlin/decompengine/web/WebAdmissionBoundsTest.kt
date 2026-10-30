@@ -58,6 +58,24 @@ class WebAdmissionBoundsTest {
         assertEquals(401, last.status, "the server did not recover after the load was released (${last.failure})")
     }
 
+    /**
+     * Wait for the load we sent to reach the executor, not an arbitrary dispatcher delay. A GET
+     * sent before every pin is dispatched can land in the normal queue and wait on a pinned body
+     * instead of exercising the rejection path. No probe request may consume a saturation slot.
+     */
+    private fun awaitSaturated(server: UploadServer, responders: Int = 0) {
+        fun pool(name: String) = UploadServer::class.java.getDeclaredField(name).let { field ->
+            field.isAccessible = true
+            field.get(server) as java.util.concurrent.ThreadPoolExecutor
+        }
+        val workers = pool("requestExecutor")
+        val overflow = pool("overloadResponders")
+        val deadline = System.nanoTime() + 20_000_000_000L
+        fun saturated() = workers.activeCount == 16 && workers.queue.size == 64 && overflow.activeCount == responders
+        while (!saturated() && System.nanoTime() < deadline) Thread.sleep(10)
+        assertTrue(saturated(), "pins did not saturate admission: workers=${workers.activeCount}, queued=${workers.queue.size}, responders=${overflow.activeCount}")
+    }
+
     private fun server() = UploadServer("127.0.0.1", 0, directory.resolve("jobs"), uiMode = WebUiMode.SPA, basePath = "/w/").also { it.start() }
 
     @Test
@@ -67,7 +85,7 @@ class WebAdmissionBoundsTest {
             val port = server.serverPort
             assertEquals(401, get(port).status, "an idle server answers normally")
             repeat(16 + 64) { pin(port) }
-            Thread.sleep(1_500)
+            awaitSaturated(server)
             for (attempt in 1..3) {
                 val response = get(port)
                 assertEquals(429, response.status, "attempt $attempt under overload: ${response.failure}")
@@ -93,7 +111,7 @@ class WebAdmissionBoundsTest {
             val port = server.serverPort
             // 16 workers + 64 queued, then two more slow requests that occupy both responder threads.
             repeat(16 + 64 + 2) { pin(port) }
-            Thread.sleep(1_500)
+            awaitSaturated(server, responders = 2)
             val results = (1..3).map { get(port, 3_000) }
             for (result in results) {
                 assertTrue(

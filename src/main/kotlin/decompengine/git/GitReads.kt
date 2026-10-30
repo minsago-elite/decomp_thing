@@ -446,6 +446,17 @@ object GitReads {
             cut, binary = false)
     }
 
+    /** Every branch and tag, page by page, up to [maximum]; identity lookups must not stop at one page. */
+    fun allRefs(runner: GitCommandRunner, gitDir: Path, format: GitObjectFormat, maximum: Int = 10_000): List<GitRefEntry> {
+        val refs = mutableListOf<GitRefEntry>()
+        while (refs.size < maximum) {
+            val (page, more) = refs(runner, gitDir, format, refs.size, 200)
+            refs += page
+            if (!more) return refs
+        }
+        throw GitRepositoryException("REPOSITORY_UNSUPPORTED", "The repository has more refs than the workbench resolves.")
+    }
+
     /**
      * A diff header path as Git prints it with the default `core.quotePath`: a name holding a
      * quote, backslash, control character or any byte above 0x7f is wrapped in quotes with C

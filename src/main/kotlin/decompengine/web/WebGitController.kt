@@ -46,10 +46,12 @@ internal class WebGitController(
             }
         }
         if (workspaceChange && mutation == null) throw WebAccessDenied(405, "METHOD_NOT_ALLOWED", "Repository operations are created with POST.", setOf("POST"))
-        val read = parts.size == 5 && !workspaceChange
+        val read = parts.size == 5 && !workspaceChange && parts[4] != "worktrees"
+        val nested = parts.size == 6 && parts[4] in setOf("worktrees", "provenance", "exports") ||
+            parts.size == 5 && parts[4] == "worktrees"
         if (!read) requireNoWebApiQuery(exchange)
-        requireJsonAccept(exchange)
-        if (!jobId.matches(JOB) || (if (read || workspaceChange) listOf(parts[3]) else parts.drop(3).filterIndexed { index, _ -> index != 1 }).any { !it.matches(ID) }) {
+        if (!(nested && parts[4] == "exports")) requireJsonAccept(exchange)
+        if (!jobId.matches(JOB) || (if (read || workspaceChange || nested) listOfNotNull(parts[3], parts.getOrNull(5)?.takeIf { parts[4] == "worktrees" }) else parts.drop(3).filterIndexed { index, _ -> index != 1 }).any { !it.matches(ID) }) {
             throw WebAccessDenied(404, "NOT_FOUND", "The requested repository resource is unavailable.")
         }
         // A job must exist before any repository fact is disclosed; it also supplies the job version guard.
@@ -93,6 +95,7 @@ internal class WebGitController(
                     })
                 }
                 read -> reads.handle(exchange, jobId, parts[3], parts[4])
+                nested -> reads.nested(exchange, jobId, parts[3], parts[4], parts.getOrNull(5))
                 parts.size == 4 -> {
                     val workspace = webGitWorkspace(repositories.workspace(jobId, parts[3]))
                     val etag = "\"${(workspace.getValue("worktreeVersion") as JsonPrimitive).content}\""
@@ -167,7 +170,7 @@ internal fun webGitDenied(failure: ManagedGitException): WebAccessDenied {
         "NOT_FOUND" -> WebAccessDenied(404, "NOT_FOUND", message)
         "REPOSITORY_EXISTS", "WORKTREE_BUSY", "IDEMPOTENCY_CONFLICT", "REF_CHANGED", "WORKTREE_CHANGED", "INDEX_CHANGED",
         "SELECTION_CHANGED", "SELECTION_OVERLAP", "CONFLICTED", "NOTHING_TO_COMMIT", "ACTIVE_RUN", "WORKTREE_DIRTY", "BRANCH_EXISTS", "TAG_EXISTS",
-        "BRANCH_UNMERGED", "BRANCH_CURRENT", "WORKTREE_UNMERGED" -> WebAccessDenied(409, failure.code, message)
+        "BRANCH_UNMERGED", "BRANCH_CURRENT", "WORKTREE_UNMERGED", "WORKTREE_PRIMARY", "SWITCH_REFUSED", "REF_CONFLICT" -> WebAccessDenied(409, failure.code, message)
         "QUOTA_EXCEEDED" -> WebAccessDenied(429, "QUOTA_EXCEEDED", message)
         "VALIDATION_FAILED", "SOURCE_REVISION_UNAVAILABLE", "IMPORT_SOURCE_UNAVAILABLE", "EXCLUDED_PATH", "NOTHING_SELECTED",
         "STATUS_INCOMPLETE", "SIZE_EXCEEDED", "PATCH_UNAVAILABLE" -> WebAccessDenied(422, failure.code, message)
@@ -219,7 +222,7 @@ internal fun webGitWorkspace(view: GitWorkspaceView): JsonObject {
     val head = observation.head
     return buildJsonObject {
         put("repositoryId", record.repositoryId)
-        put("worktreeId", record.worktreeId)
+        put("worktreeId", view.worktreeId)
         put("repositoryVersion", GitWorkspaceVersions.repositoryVersion(record, observation))
         put("worktreeVersion", GitWorkspaceVersions.worktreeVersion(observation))
         put("objectFormat", observation.objectFormat.wireName)

@@ -47,6 +47,8 @@ internal class WebRecoveryController(
                 "CAPACITY_UNAVAILABLE", "UPLOAD_CAPACITY" ->
                     WebAccessDenied(429, "QUOTA_EXCEEDED", "Workflow admission is at capacity. Inspect current work before a new request.")
                 "SCHEDULING_FAILED" -> WebAccessDenied(503, failure.code, "Scheduling did not finish. Inspect the retained run before retrying.")
+                "WORKTREE_BUSY" -> WebAccessDenied(409, failure.code,
+                    "A Git checkout or work-tree removal owns this job. Wait for it to finish before recovering a workflow.")
                 in WebAttemptControls.RETRY_REASONS + WebAttemptControls.RESUME_REASONS - setOf("RECOVERY_REQUIRED", "SERVICE_STOPPED") ->
                     WebAccessDenied(409, failure.code, refusal(failure.code))
                 else -> failure

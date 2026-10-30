@@ -27,6 +27,8 @@ import java.util.concurrent.TimeUnit
 enum class GitOperationAction(val wireName: String, val workspace: Boolean = false) {
     INIT("git.init"), ATTACH("git.attach"),
     STAGE("git.stage", true), UNSTAGE("git.unstage", true), COMMIT("git.commit", true),
+    BRANCH_CREATE("git.branch.create", true), SWITCH("git.switch", true), BRANCH_DELETE("git.branch.delete", true),
+    TAG("git.tag", true), WORKTREE_ADD("git.worktree.add", true), WORKTREE_REMOVE("git.worktree.remove", true),
 }
 
 enum class GitOperationState(val wireName: String, val terminal: Boolean) {
@@ -90,7 +92,15 @@ data class GitRepositoryRecord(
 }
 
 /** Read view of one registered repository plus its current bounded observation. */
-data class GitWorkspaceView(val record: GitRepositoryRecord, val observation: GitWorkspaceObservation, val mapping: GitMappingView? = null)
+data class GitWorkspaceView(
+    val record: GitRepositoryRecord,
+    val observation: GitWorkspaceObservation,
+    val mapping: GitMappingView? = null,
+    val worktreeId: String = record.worktreeId,
+    val ownerRunId: String? = null,
+) {
+    val primary: Boolean get() = worktreeId == record.worktreeId
+}
 
 /** One diff read: the comparison, its changed files and an optional selected patch. */
 data class GitDiffView(
@@ -100,6 +110,7 @@ data class GitDiffView(
     val parent: String?,
     val listing: GitDiffListing,
     val patch: Pair<GitDiffFile, GitPatch>?,
+    val worktreeId: String = record.worktreeId,
 )
 
 data class GitRepositoryListing(val repositories: List<GitRepositoryRecord>, val operations: List<GitOperationRecord>)
@@ -171,6 +182,8 @@ class ManagedGitRepositories(
     private val crash: (GitOperationCrashPoint) -> Unit = {},
     private val importLimits: GitCheckoutLimits = GitCheckoutLimits(),
     private val acceptance: GitAcceptanceResolver = GitAcceptanceResolver { _, _, _ -> "not-evaluated" to null },
+    private val activity: GitJobActivity = GitJobActivity { emptyMap() },
+    private val workspaceLeases: GitWorkspaceLeases = GitWorkspaceLeases(),
     /** How long [close] waits for the Git worker to stop before reporting it still running. */
     private val shutdownTimeout: java.time.Duration = java.time.Duration.ofSeconds(30),
 ) : AutoCloseable {
@@ -231,7 +244,7 @@ class ManagedGitRepositories(
                         }
                     }
                 }
-                is GitStageRequest, is GitCommitRequest, is GitRetainedCommit -> throw IllegalArgumentException("workspace requests use requestWorkspace")
+                is GitStageRequest, is GitCommitRequest, is GitRetainedCommit, is GitRefRequest -> throw IllegalArgumentException("workspace requests use requestWorkspace")
                 is GitRepositoryRequest.Attach -> {
                     val admitted = importRoot ?: throw ManagedGitException("IMPORT_UNAVAILABLE",
                         "Repository import is not configured on this server.")
@@ -271,19 +284,13 @@ class ManagedGitRepositories(
             ?: throw ManagedGitException("NOT_FOUND", "The repository operation is unavailable.")
     }
 
-    fun workspace(jobId: String, repositoryId: String): GitWorkspaceView {
-        val (runner, record) = synchronized(lock) {
-            requireReadable(jobId)
-            val record = repositories(jobId).singleOrNull { it.repositoryId == repositoryId }
-                ?: throw ManagedGitException("NOT_FOUND", "The managed repository is unavailable.")
-            // Startup or mutation admission prepares the runtime; a read must never create it.
-            val prepared = runner ?: throw ManagedGitException("CAPABILITY_UNAVAILABLE",
-                "The server-owned Git runtime has not been prepared.")
-            prepared to record
-        }
-        val directory = root.resolve(jobId).resolve("git/repositories").resolve(record.repositoryId)
+    /** Fresh bounded observation of one work tree (the primary one by default). */
+    fun workspace(jobId: String, repositoryId: String, worktreeId: String? = null): GitWorkspaceView {
+        val located = locate(jobId, repositoryId, worktreeId)
+        val runner = located.runner
+        val record = located.record
         val observation = try {
-            GitRepositoryInspector.inspect(runner, directory.resolve(GIT_DIR), directory.resolve(WORK_TREE))
+            GitRepositoryInspector.inspect(runner, located.gitDir, located.workTree, located.commonDir)
         } catch (failure: GitRepositoryException) {
             throw ManagedGitException(failure.code, failure.message ?: "The repository could not be read.")
         }
@@ -295,7 +302,14 @@ class ManagedGitRepositories(
             catch (_: GitCommandException) { emptySet() }
         val shown = if (excluded.isEmpty()) observation else observation.copy(status = observation.status.copy(
             entries = observation.status.entries.map { if (it.untracked && it.path.exact in excluded) it.copy(untracked = false, ignored = true) else it }))
-        return GitWorkspaceView(record, shown, observation.head.objectId?.let { mappingView(jobId, record, it) })
+        return GitWorkspaceView(record, shown, observation.head.objectId?.let { mappingView(jobId, record, it) },
+            located.worktreeId, located.ownerRunId)
+    }
+
+    /** The primary work tree and every registered linked work tree. */
+    fun worktrees(jobId: String, repositoryId: String): List<GitWorkspaceView> {
+        val record = repository(jobId, repositoryId)
+        return listOf(workspace(jobId, repositoryId)) + linkedWorktrees(jobId, record).map { workspace(jobId, repositoryId, it.worktreeId) }
     }
 
     /** True while a queued or running operation holds this job's repository. */
@@ -304,17 +318,42 @@ class ManagedGitRepositories(
         operations(jobId).any { !it.state.terminal }
     }
 
-    /** Prepared runtime and existing storage; locating a read never creates storage or recovers. */
-    private data class Located(val runner: GitCommandRunner, val record: GitRepositoryRecord, val gitDir: Path, val workTree: Path)
+    /** Resolved storage of one registered work tree; reads never create storage or recover. */
+    private data class Located(val runner: GitCommandRunner, val record: GitRepositoryRecord, val gitDir: Path, val workTree: Path,
+        val commonDir: Path, val worktreeId: String, val ownerRunId: String?) {
+        val primary: Boolean get() = gitDir == commonDir
+    }
 
-    private fun locate(jobId: String, repositoryId: String): Located = synchronized(lock) {
+    private fun repositoryDirectory(jobId: String, repositoryId: String): Path =
+        root.resolve(jobId).resolve("git/repositories").resolve(repositoryId)
+
+    private fun linkedWorktrees(jobId: String, record: GitRepositoryRecord): List<GitWorktreeRecord> {
+        val directory = repositoryDirectory(jobId, record.repositoryId).resolve(WORKTREE_RECORDS)
+        if (!Files.isDirectory(directory, NOFOLLOW_LINKS)) return emptyList()
+        return Files.newDirectoryStream(directory).use { entries ->
+            entries.filter { it.fileName.toString().matches(Regex("worktree_[0-9a-f]{32}\\.json")) }.take(GitRefOperations.MAX_LINKED_WORKTREES + 1).mapNotNull { file ->
+                GitRefOperations.decodeWorktree(record.repositoryId, file.fileName.toString().removeSuffix(".json"),
+                    try { GitStorage.read(file, MAX_RECORD_BYTES) } catch (_: IOException) { return@mapNotNull null })
+            }.sortedBy { it.createdAt }
+        }
+    }
+
+    private fun locate(jobId: String, repositoryId: String, worktreeId: String? = null): Located = synchronized(lock) {
         requireReadable(jobId)
         val record = repositories(jobId).singleOrNull { it.repositoryId == repositoryId }
             ?: throw ManagedGitException("NOT_FOUND", "The managed repository is unavailable.")
         val prepared = runner ?: throw ManagedGitException("CAPABILITY_UNAVAILABLE",
             "The server-owned Git runtime has not been prepared.")
-        val directory = root.resolve(jobId).resolve("git/repositories").resolve(record.repositoryId)
-        Located(prepared, record, directory.resolve(GIT_DIR), directory.resolve(WORK_TREE))
+        val directory = repositoryDirectory(jobId, record.repositoryId)
+        val commonDir = directory.resolve(GIT_DIR)
+        if (worktreeId == null || worktreeId == record.worktreeId) {
+            Located(prepared, record, commonDir, directory.resolve(WORK_TREE), commonDir, record.worktreeId, null)
+        } else {
+            val linked = linkedWorktrees(jobId, record).singleOrNull { it.worktreeId == worktreeId }
+                ?: throw ManagedGitException("NOT_FOUND", "The work tree is not registered.")
+            Located(prepared, record, commonDir.resolve("worktrees").resolve(worktreeId),
+                directory.resolve(LINKED_WORK_TREES).resolve(worktreeId), commonDir, worktreeId, linked.ownerRunId)
+        }
     }
 
     fun repository(jobId: String, repositoryId: String): GitRepositoryRecord = locate(jobId, repositoryId).record
@@ -326,38 +365,42 @@ class ManagedGitRepositories(
             "The repository could not be read within its bounds.")
     }
 
-    /** History from a fixed start object; null starts at HEAD (an unborn HEAD has no history). */
-    fun history(jobId: String, repositoryId: String, start: String?, skip: Int, limit: Int): Pair<String?, GitHistoryPage> {
-        val located = locate(jobId, repositoryId)
+    private fun audit(runner: GitCommandRunner, located: Located) =
+        if (located.primary) GitConfigurationAudit.requireManaged(runner, located.gitDir)
+        else GitConfigurationAudit.requireManagedWorktree(runner, located.commonDir, located.gitDir)
+
+    /** History from a fixed start object; null starts at the selected work tree's HEAD (an unborn HEAD has none). */
+    fun history(jobId: String, repositoryId: String, start: String?, skip: Int, limit: Int, worktreeId: String? = null): Pair<String?, GitHistoryPage> {
+        val located = locate(jobId, repositoryId, worktreeId)
         val runner = located.runner
         return reading {
-            GitConfigurationAudit.requireManaged(runner, located.gitDir)
+            audit(runner, located)
             val format = located.record.objectFormat
             val origin = start ?: GitRepositoryInspector.head(runner, located.gitDir, format).objectId
                 ?: return@reading null to GitHistoryPage(emptyList(), false)
-            if (!commitExists(runner, located.gitDir, origin)) throw ManagedGitException("NOT_FOUND", "The commit is not in this repository.")
-            origin to GitReads.history(runner, located.gitDir, format, origin, skip, limit)
+            if (!commitExists(runner, located.commonDir, origin)) throw ManagedGitException("NOT_FOUND", "The commit is not in this repository.")
+            origin to GitReads.history(runner, located.commonDir, format, origin, skip, limit)
         }
     }
 
-    /** Changed files for one comparison and, when [file] selects one, its bounded patch. */
-    fun diff(jobId: String, repositoryId: String, scope: GitDiffScope, commit: String?, fileId: String?): GitDiffView {
-        val located = locate(jobId, repositoryId)
+    /** Changed files for one comparison and, when [fileId] selects one, its bounded patch. */
+    fun diff(jobId: String, repositoryId: String, scope: GitDiffScope, commit: String?, fileId: String?, worktreeId: String? = null): GitDiffView {
+        val located = locate(jobId, repositoryId, worktreeId)
         val runner = located.runner
         return reading {
-            GitConfigurationAudit.requireManaged(runner, located.gitDir)
+            audit(runner, located)
             val format = located.record.objectFormat
             val parent = commit?.let {
-                if (!commitExists(runner, located.gitDir, it)) throw ManagedGitException("NOT_FOUND", "The commit is not in this repository.")
-                GitReads.firstParent(runner, located.gitDir, format, it)
+                if (!commitExists(runner, located.commonDir, it)) throw ManagedGitException("NOT_FOUND", "The commit is not in this repository.")
+                GitReads.firstParent(runner, located.commonDir, format, it)
             }
             val listing = GitReads.diff(runner, located.gitDir, located.workTree, format, scope, commit, parent)
             val selected = fileId?.let { id ->
-                listing.files.firstOrNull { it.path.fileId(located.record.worktreeId) == id }
+                listing.files.firstOrNull { it.path.fileId(located.worktreeId) == id }
                     ?: throw ManagedGitException("NOT_FOUND", "The file is not part of this comparison.")
             }
             GitDiffView(located.record, scope, commit, parent, listing,
-                selected?.let { it to GitReads.patch(runner, located.gitDir, located.workTree, scope, commit, parent, it) })
+                selected?.let { it to GitReads.patch(runner, located.gitDir, located.workTree, scope, commit, parent, it) }, located.worktreeId)
         }
     }
 
@@ -365,8 +408,40 @@ class ManagedGitRepositories(
         val located = locate(jobId, repositoryId)
         val runner = located.runner
         return reading {
-            GitConfigurationAudit.requireManaged(runner, located.gitDir)
+            audit(runner, located)
             located.record to GitReads.refsPage(runner, located.gitDir, located.record.objectFormat, skip, limit)
+        }
+    }
+
+    /** Deterministic export of one exact commit tree; ref names play no part in its identity. */
+    fun export(jobId: String, repositoryId: String, objectId: String): GitSourceExport {
+        val located = locate(jobId, repositoryId)
+        val runner = located.runner
+        return reading {
+            GitConfigurationAudit.requireManaged(runner, located.commonDir)
+            val format = located.record.objectFormat
+            if (format.objectIdOrNull(objectId) == null || !commitExists(runner, located.commonDir, objectId)) {
+                throw ManagedGitException("NOT_FOUND", "The commit is not in this repository.")
+            }
+            GitSourceExports.build(runner, located.commonDir, format, objectId)
+        }
+    }
+
+    /**
+     * Provenance envelope of one commit (#581): its exact object, the recorded revision mapping (with
+     * the work tree's dirty state at commit time), the refs that currently name it for display only,
+     * and the deterministic export's digest after independent blob-ID verification.
+     */
+    fun provenance(jobId: String, repositoryId: String, objectId: String): GitProvenanceView {
+        val located = locate(jobId, repositoryId)
+        val runner = located.runner
+        val export = export(jobId, repositoryId, objectId)
+        return reading {
+            val format = located.record.objectFormat
+            val commit = GitReads.history(runner, located.commonDir, format, objectId, 0, 1).entries.single()
+            val refs = GitReads.allRefs(runner, located.commonDir, format)
+            GitProvenanceView(located.record, commit, refs.filter { (it.peeledObjectId ?: it.objectId) == objectId }.map { it.name },
+                mappingView(jobId, located.record, objectId), export, GitSourceExports.verify(export.bytes, format, export.blobs))
         }
     }
 
@@ -425,7 +500,7 @@ class ManagedGitRepositories(
             val record = when (val request = queued.request) {
                 is GitRepositoryRequest.Init -> initialize(queued, request, staging)
                 is GitRepositoryRequest.Attach -> import(queued, request, staging)
-                is GitStageRequest, is GitCommitRequest, is GitRetainedCommit -> error("workspace operations run separately")
+                is GitStageRequest, is GitCommitRequest, is GitRetainedCommit, is GitRefRequest -> error("workspace operations run separately")
             }
             crash(GitOperationCrashPoint.AFTER_STAGING)
             GitStorage.replaceAtomically(staging.resolve(RECORD), encode(record).toByteArray())
@@ -576,15 +651,17 @@ class ManagedGitRepositories(
                 return GitOperationAdmission(existing, replayed = true)
             }
             precondition()
-            val located = locate(jobId, repositoryId)
-            if (operations.any { !it.state.terminal }) {
-                throw ManagedGitException("WORKTREE_BUSY", "Another repository operation is still running for this job.")
+            val located = locate(jobId, repositoryId, targetWorktree(request))
+            if (operations.any { !it.state.terminal || (it.action == GitOperationAction.WORKTREE_ADD && it.recoveryRequired) }) {
+                throw ManagedGitException("WORKTREE_BUSY", "Another repository operation is running or needs work-tree recovery for this job.")
             }
             if (retireTerminalWorkspace(jobId, operations).size >= MAX_OPERATIONS || executor.queue.remainingCapacity() == 0) {
                 throw ManagedGitException("QUOTA_EXCEEDED", "Repository operation capacity is exhausted. Review existing operations first.")
             }
             refusing { validate(runner, located, request) }
-            val operation = GitOperationRecord(identity("operation"), jobId, repositoryId, located.record.worktreeId,
+            // A new work tree's identity is assigned at admission and is the operation's work tree.
+            val worktreeId = if (request.action == GitOperationAction.WORKTREE_ADD) identity("worktree") else located.worktreeId
+            val operation = GitOperationRecord(identity("operation"), jobId, repositoryId, worktreeId,
                 request.action, GitOperationState.QUEUED, 1, clock.instant(), null, null, null, QUEUED_WORKSPACE_MESSAGE, keyDigest, request)
             persist(directory, operation)
             active += operation.operationId
@@ -597,6 +674,14 @@ class ManagedGitRepositories(
             }
             return GitOperationAdmission(operations(jobId).single { it.operationId == operation.operationId }, replayed = false)
         }
+    }
+
+    private fun targetWorktree(request: GitRepositoryRequest): String? = when (request) {
+        is GitStageRequest -> request.worktreeId
+        is GitCommitRequest -> request.worktreeId
+        is GitRetainedCommit -> request.worktreeId
+        is GitRefRequest -> request.worktreeId
+        else -> null
     }
 
     /** Wait briefly for a just-admitted operation so small actions answer with their outcome. */
@@ -614,12 +699,11 @@ class ManagedGitRepositories(
 
     /** Guards, selection and policy for one workspace request against the current observation. */
     private fun validate(runner: GitCommandRunner, located: Located, request: GitRepositoryRequest): GitWorkspaceObservation {
-        val observation = GitRepositoryInspector.inspect(runner, located.gitDir, located.workTree)
+        val observation = GitRepositoryInspector.inspect(runner, located.gitDir, located.workTree, located.commonDir)
         when (request) {
             is GitStageRequest -> {
-                if (request.worktreeId != located.record.worktreeId) GitWorkspaceMutations.refuse("NOT_FOUND", "The work tree is not registered.")
                 GitWorkspaceMutations.checkGuards(located.record, observation, request.guards)
-                val entries = GitWorkspaceMutations.select(located.record, observation, request.fileIds, request.stage)
+                val entries = GitWorkspaceMutations.select(located.record, observation, request.fileIds, request.stage, located.worktreeId)
                 if (request.stage) {
                     val paths = entries.flatMap { listOfNotNull(it.path.exact, it.originalPath?.exact) }
                     if (GitTrackingPolicy.excluded(runner, paths).isNotEmpty()) {
@@ -628,29 +712,174 @@ class ManagedGitRepositories(
                 }
             }
             is GitCommitRequest -> {
-                if (request.worktreeId != located.record.worktreeId) GitWorkspaceMutations.refuse("NOT_FOUND", "The work tree is not registered.")
                 GitWorkspaceMutations.validateMessage(request.message)
                 if (policy.requireSignedCommits) GitWorkspaceMutations.refuse("SIGNING_UNAVAILABLE",
                     "Policy requires signed commits, but this server has no signing capability. Nothing was committed.")
                 GitWorkspaceMutations.checkGuards(located.record, observation, request.guards)
                 GitWorkspaceMutations.requireNoStagedGitlinks(runner, located.gitDir, located.workTree, observation.head.objectId)
-                GitWorkspaceMutations.requireStagedSet(located.record, observation, request.fileIds)
+                GitWorkspaceMutations.requireStagedSet(located.record, observation, request.fileIds, located.worktreeId)
             }
+            is GitRefRequest -> validateRef(runner, located, observation, request)
             else -> error("not a workspace request")
         }
         return observation
+    }
+
+    /**
+     * A work tree is leased to active workflow attempts: the primary one to any active attempt of
+     * the job, and a linked one to the attempt that owns it. Checkout or removal never replaces
+     * files under a running worker.
+     */
+    private fun requireNoLease(located: Located) {
+        val runs = activity.runs(located.record.jobId)
+        val held = if (located.primary) runs.any { it.value } else located.ownerRunId?.let { runs[it] } == true
+        if (held) GitRefOperations.refuse("ACTIVE_RUN", "A workflow attempt is running against this work tree. Wait for it to finish; nothing was changed.")
+    }
+
+    private fun relevant(observation: GitWorkspaceObservation) = observation.status.entries.filter { !it.ignored }
+
+    /** Every work tree's symbolic HEAD, so a branch checked out anywhere is never deleted. */
+    private fun checkedOutBranches(runner: GitCommandRunner, located: Located): Set<String> {
+        val linked = linkedWorktrees(located.record.jobId, located.record).map { located.commonDir.resolve("worktrees").resolve(it.worktreeId) }
+        return (listOf(located.commonDir) + linked).filter { Files.isDirectory(it, NOFOLLOW_LINKS) }.mapNotNull { gitDir ->
+            val result = runner.run(GitInvocation("symbolic-ref", listOf("-q", "HEAD"), gitDir = gitDir, allowedExitCodes = setOf(0, 1)))
+            result.text.trim().takeIf { result.exitCode == 0 && it.isNotEmpty() }
+        }.toSet()
+    }
+
+    private fun branchFor(runner: GitCommandRunner, located: Located, refId: String?): Pair<String, String> {
+        val id = refId ?: GitRefOperations.refuse("VALIDATION_FAILED", "A branch ref identity is required.")
+        val refs = GitReads.allRefs(runner, located.commonDir, located.record.objectFormat)
+        val ref = refs.singleOrNull { it.name.startsWith("refs/heads/") && GitWorkspaceVersions.refId(located.record.repositoryId, it.name) == id }
+            ?: GitRefOperations.refuse("NOT_FOUND", "The branch is not registered in this repository.")
+        return ref.name to ref.objectId
+    }
+
+    private fun validateRef(runner: GitCommandRunner, located: Located, observation: GitWorkspaceObservation, request: GitRefRequest) {
+        val record = located.record
+        val format = record.objectFormat
+        GitWorkspaceMutations.checkGuards(record, observation, request.guards)
+        when (request.action) {
+            GitOperationAction.BRANCH_CREATE, GitOperationAction.TAG -> {
+                val namespace = if (request.action == GitOperationAction.TAG) "tags" else "heads"
+                val name = GitRefOperations.requireName(runner, request.name, namespace)
+                GitRefOperations.requireCommit(runner, located.commonDir, format, request.objectId)
+                if (GitRefOperations.refObject(runner, located.commonDir, format, "refs/$namespace/$name") != null) {
+                    GitRefOperations.refuse(if (namespace == "tags") "TAG_EXISTS" else "BRANCH_EXISTS",
+                        "That name already exists; nothing is ever overwritten. Choose another name.")
+                }
+            }
+            GitOperationAction.SWITCH -> {
+                requireNoLease(located)
+                val entries = relevant(observation)
+                if (entries.any { it.conflict != null }) GitRefOperations.refuse("CONFLICTED", "Resolve conflicted files before switching.")
+                if (entries.any { it.staged != GitIndexChange.NONE || it.unstaged != GitIndexChange.NONE }) {
+                    GitRefOperations.refuse("WORKTREE_DIRTY", "The work tree has uncommitted changes. Commit them, or unstage and keep them, before switching; switching never discards or stashes work.")
+                }
+                if (request.refId == null && request.objectId == null) {
+                    GitRefOperations.refuse("VALIDATION_FAILED", "A switch names a branch (with its reviewed tip) or one commit.")
+                }
+                val target = request.refId?.let { refId ->
+                    val (name, tip) = branchFor(runner, located, refId)
+                    // The guards cover only the bounded ref observation; the reviewed tip covers the
+                    // destination itself, so a branch that moved after review is never checked out.
+                    if (request.objectId != null && request.objectId != tip) {
+                        GitRefOperations.refuse("REF_CHANGED", "The branch moved since it was reviewed; nothing was checked out. Read it again first.")
+                    }
+                    if (request.objectId == null && observation.refsTruncated) GitRefOperations.refuse("VALIDATION_FAILED",
+                        "This repository has more refs than one review covers, so a branch switch must name the branch's reviewed tip.")
+                    // An imported name such as `--detach` would be read as a switch option; refuse it.
+                    if (name.removePrefix("refs/heads/").startsWith("-")) {
+                        GitRefOperations.refuse("VALIDATION_FAILED", "That branch name starts with '-' and cannot be switched to by the workbench.")
+                    }
+                    // The bare common layout hides the primary checkout from Git's own check; use ours.
+                    if (name != observation.head.refName && name in checkedOutBranches(runner, located)) {
+                        GitRefOperations.refuse("BRANCH_CURRENT", "That branch is checked out in another work tree. Use a new branch or switch that work tree first.")
+                    }
+                    tip
+                } ?: GitRefOperations.requireCommit(runner, located.commonDir, format, request.objectId)
+                GitRepositoryImport.requireCheckoutBounds(runner, located.commonDir, target, importLimits)
+            }
+            GitOperationAction.BRANCH_DELETE -> {
+                val (name, tip) = branchFor(runner, located, request.refId)
+                if (request.objectId != tip) GitRefOperations.refuse("REF_CHANGED", "The branch moved since it was reviewed; nothing was deleted.")
+                if (name in checkedOutBranches(runner, located)) {
+                    GitRefOperations.refuse("BRANCH_CURRENT", "The branch is checked out in a work tree. Switch that work tree first.")
+                }
+                GitRefOperations.requireBranchDeleteSafe(runner, located.commonDir, tip, name)
+            }
+            GitOperationAction.WORKTREE_ADD -> {
+                if (!located.primary) GitRefOperations.refuse("VALIDATION_FAILED", "New work trees are created from the primary work tree.")
+                if (linkedWorktrees(record.jobId, record).size >= GitRefOperations.MAX_LINKED_WORKTREES) {
+                    GitRefOperations.refuse("QUOTA_EXCEEDED", "This repository already has the maximum of ${GitRefOperations.MAX_LINKED_WORKTREES} linked work trees.")
+                }
+                val start = GitRefOperations.requireCommit(runner, located.commonDir, format, request.objectId)
+                request.name?.let { name ->
+                    GitRefOperations.requireName(runner, name, "heads")
+                    if (GitRefOperations.refObject(runner, located.commonDir, format, "refs/heads/$name") != null) {
+                        GitRefOperations.refuse("BRANCH_EXISTS", "That branch already exists; nothing is ever overwritten.")
+                    }
+                }
+                request.runId?.let { runId ->
+                    if (runId !in activity.runs(record.jobId)) GitRefOperations.refuse("VALIDATION_FAILED", "The owning attempt is not a run of this job.")
+                }
+                GitRepositoryImport.requireCheckoutBounds(runner, located.commonDir, start, importLimits)
+            }
+            GitOperationAction.WORKTREE_REMOVE -> {
+                if (located.primary) GitRefOperations.refuse("WORKTREE_PRIMARY", "The primary work tree cannot be removed.")
+                requireNoLease(located)
+                GitRefOperations.requireNoHiddenIndexEntries(runner, located.gitDir, located.workTree)
+                // Ignored files count too: `git worktree remove` deletes them without --force,
+                // and they are often experiment output. An incomplete status is never clean.
+                if (observation.status.entries.isNotEmpty() || !observation.status.complete) GitRefOperations.refuse("WORKTREE_DIRTY",
+                    "The work tree has uncommitted, untracked or ignored local files. Commit or move them first; nothing is force-removed.")
+                // Status ignores submodules, so files inside a gitlink's directory are invisible to it;
+                // look at those directories directly (nothing is initialized or executed).
+                GitRefOperations.gitlinkPaths(runner, located.gitDir, located.workTree).forEach { path ->
+                    val directory = path?.let(located.workTree::resolve)
+                    val occupied = directory == null || (Files.isDirectory(directory, NOFOLLOW_LINKS) &&
+                        Files.newDirectoryStream(directory).use { it.iterator().hasNext() })
+                    if (occupied) GitRefOperations.refuse("WORKTREE_DIRTY",
+                        "A submodule directory in the work tree holds local files. Move them first; nothing is force-removed.")
+                }
+                val head = observation.head
+                if (head.state == GitHeadState.DETACHED) {
+                    val unmerged = GitRefOperations.unmergedCount(runner, located.commonDir, checkNotNull(head.objectId), null)
+                    if (unmerged > 0) GitRefOperations.refuse("WORKTREE_UNMERGED",
+                        "$unmerged commit(s) exist only in this detached work tree. Create a branch or tag for them first.")
+                }
+            }
+            else -> error("not a ref request")
+        }
     }
 
     private fun executeWorkspace(queued: GitOperationRecord, located: Located) {
         val directory = root.resolve(queued.jobId).resolve("git")
         val staging = directory.resolve("staging").resolve(queued.operationId)
         var current = queued
+        var worktreeAddAttempted = false
+        var lease: AutoCloseable? = null
+        var switchBranchLock: AutoCloseable? = null
         var publishedCommit: String? = null
         var publicationAttempted = false
         try {
+            if (queued.action == GitOperationAction.SWITCH || queued.action == GitOperationAction.WORKTREE_REMOVE) {
+                lease = workspaceLeases.tryGit(queued.jobId) ?: throw ManagedGitException("ACTIVE_RUN",
+                    "A workflow is being admitted for this job. Wait for it to finish; nothing was changed.")
+            }
             val runner = requireRunner()
             current = synchronized(lock) { advance(directory, current, GitOperationState.RUNNING, RUNNING_WORKSPACE_MESSAGE) }
             crash(GitOperationCrashPoint.AFTER_RUNNING)
+            val switchRequest = (queued.request as? GitRefRequest)?.takeIf { it.action == GitOperationAction.SWITCH }
+            switchRequest?.refId?.let { refId ->
+                val branch = branchFor(runner, located, refId).first
+                GitStorage.directories(directory, "staging", queued.operationId)
+                GitStorage.forceDirectory(staging.parent)
+                switchBranchLock = GitRefOperations.lockSwitchBranch(runner, located.commonDir, branch, staging)
+            }
+            // Admission cannot race this final activity check: retain exclusive ownership through publication.
+            synchronized(lock) { validate(runner, located, queued.request) }
+            crash(GitOperationCrashPoint.BEFORE_PUBLISH)
             var result: String? = null
             var message = completedMessage(queued.action)
             when (val request = queued.request) {
@@ -659,11 +888,12 @@ class ManagedGitRepositories(
                     GitStorage.directories(directory, "staging", queued.operationId)
                     GitStorage.forceDirectory(staging.parent)
                     GitStorage.forceDirectory(directory)
-                    GitWorkspaceMutations.withWorkspaceLocks(runner, located.gitDir, staging, queued.operationId, located.record.objectFormat) {
+                    GitWorkspaceMutations.withWorkspaceLocks(runner, located.gitDir, staging, queued.operationId, located.record.objectFormat,
+                        located.commonDir) {
                         // External Git writers obey index.lock, not our JVM lease. Validation,
                         // private mutation and atomic publication all live inside that lock.
                         val reviewed = synchronized(lock) { validate(runner, located, request) }
-                        val entries = GitWorkspaceMutations.select(located.record, reviewed, request.fileIds, request.stage)
+                        val entries = GitWorkspaceMutations.select(located.record, reviewed, request.fileIds, request.stage, located.worktreeId)
                         crash(GitOperationCrashPoint.AFTER_WORKSPACE_VALIDATION)
                         val index = staging.resolve("reviewed-index")
                         if (Files.exists(located.gitDir.resolve("index"), NOFOLLOW_LINKS)) {
@@ -707,7 +937,7 @@ class ManagedGitRepositories(
                         val commit = GitWorkspaceMutations.createCommit(runner, located.gitDir, located.workTree, messageFile, policy, reviewed)
                         crash(GitOperationCrashPoint.AFTER_STAGING)
                         publicationAttempted = true
-                        GitWorkspaceMutations.publishCommit(runner, located.gitDir, staging, reviewed.head, reviewed.objectFormat, commit) {
+                        GitWorkspaceMutations.publishCommit(runner, located.gitDir, staging, reviewed.head, reviewed.objectFormat, commit, located.commonDir) {
                             publishedCommit = commit
                         }
                     }
@@ -716,15 +946,20 @@ class ManagedGitRepositories(
                     // Mapping is optional. Its IO must never turn a published commit into an
                     // apparently uncommitted failure, and HEAD may already name another commit.
                     val mapping = try {
-                        val after = GitRepositoryInspector.inspect(runner, located.gitDir, located.workTree)
+                        val after = GitRepositoryInspector.inspect(runner, located.gitDir, located.workTree, located.commonDir)
                         recordMapping(runner, located, result, after.dirty)
                     } catch (_: Exception) { null }
                     if (mapping == null) {
                         message += " The reconstruction revision mapping could not be confirmed; treat this commit as not mapped until refreshed."
                     }
                 }
+                is GitRefRequest -> result = executeRef(runner, located, queued, request) { worktreeAddAttempted = true }
                 else -> error("not a workspace request")
             }
+            // Release before persisting a terminal record: a process death must not leave a lock
+            // attached to an operation that restart reconciliation would otherwise skip.
+            switchBranchLock?.close()
+            switchBranchLock = null
             synchronized(lock) { current = finish(current, GitOperationState.COMPLETED, null, message, result); persist(directory, current) }
         } catch (_: SimulatedGitCrash) {
             synchronized(lock) { active -= queued.operationId }
@@ -738,16 +973,97 @@ class ManagedGitRepositories(
                     else "REPOSITORY_UNAVAILABLE" to "Git did not complete within its bounds. Read the current status before trying again."
                 else -> "STORAGE_FAILED" to "Repository storage could not be written. Read the current status before trying again."
             }
+            switchBranchLock?.close()
+            switchBranchLock = null
             synchronized(lock) {
-                current = if (publishedCommit != null || (publicationAttempted && failure !is GitOperationRefusal)) {
+                current = if (worktreeAddAttempted) {
+                    // Git can create -b's branch before checkout fails inside the command, and storage
+                    // can fail after checkout. Reconcile either partial intent just like restart recovery;
+                    // never record terminal failure while leaving an unowned branch or checkout.
+                    val recovered = reconcileRef(queued.jobId, current, queued.request as GitRefRequest)
+                    if (recovered.state == GitOperationState.INTERRUPTED) finish(current, GitOperationState.FAILED, code,
+                        "Work-tree creation failed. The unpublished checkout and its unchanged new branch were rolled back; nothing remains.")
+                    else recovered
+                } else if (publishedCommit != null || (publicationAttempted && failure !is GitOperationRefusal)) {
                     finish(current, GitOperationState.RECOVERY_REQUIRED, "COMMIT_OUTCOME_REQUIRES_REVIEW",
                         "Commit publication was attempted before an error. Inspect history before any new commit.", publishedCommit)
                 } else finish(current, if (code == "INTERRUPTED") GitOperationState.INTERRUPTED else GitOperationState.FAILED, code, message.take(500))
+                if (current.recoveryRequired && queued.action == GitOperationAction.WORKTREE_ADD) reconciled -= queued.jobId
                 try { persist(directory, current) } catch (_: Exception) { /* reconciled after restart */ }
             }
         } finally {
-            try { GitStorage.deleteTree(staging) } catch (_: Exception) { /* removed by reconciliation */ }
-            synchronized(lock) { active -= queued.operationId }
+            try {
+                switchBranchLock?.close()
+                try { GitStorage.deleteTree(staging) } catch (_: Exception) { /* removed by reconciliation */ }
+            } finally {
+                synchronized(lock) { active -= queued.operationId }
+                lease?.close()
+            }
+        }
+    }
+
+    /** Apply one validated branch, tag or work-tree intent. Returns the resulting object, if any. */
+    private fun executeRef(runner: GitCommandRunner, located: Located, operation: GitOperationRecord, request: GitRefRequest,
+        worktreeAddStarting: () -> Unit): String? {
+        val format = located.record.objectFormat
+        return when (request.action) {
+            GitOperationAction.BRANCH_CREATE, GitOperationAction.TAG -> {
+                val namespace = if (request.action == GitOperationAction.TAG) "tags" else "heads"
+                val objectId = checkNotNull(request.objectId)
+                GitRefOperations.createRef(runner, located.commonDir, "refs/$namespace/${request.name}", objectId,
+                    if (namespace == "tags") "TAG_EXISTS" else "BRANCH_EXISTS")
+                crash(GitOperationCrashPoint.AFTER_PUBLISH)
+                objectId
+            }
+            GitOperationAction.SWITCH -> {
+                val destination = request.refId?.let { branchFor(runner, located, it) }
+                if (destination != null) {
+                    // Persist the exact pinned target even for guard-covered switches that omit objectId.
+                    // Restart must not mistake a later external branch move for our checkout result.
+                    val staging = root.resolve(operation.jobId).resolve("git/staging").resolve(operation.operationId)
+                    GitStorage.replaceAtomically(staging.resolve("switch-target"), destination.second.toByteArray(Charsets.US_ASCII))
+                }
+                GitRefOperations.switch(runner, located.gitDir, located.workTree, destination?.first?.removePrefix("refs/heads/"), request.objectId)
+                crash(GitOperationCrashPoint.AFTER_PUBLISH)
+                GitRepositoryInspector.head(runner, located.gitDir, format).objectId
+            }
+            GitOperationAction.BRANCH_DELETE -> {
+                val (name, tip) = branchFor(runner, located, request.refId)
+                val expected = checkNotNull(request.objectId)
+                if (tip != expected) GitRefOperations.refuse("REF_CHANGED", "The branch moved since it was reviewed; nothing was deleted.")
+                // Repeat reachability and symbolic-ref checks at the destructive boundary; an external
+                // Git writer can change aliases after request validation.
+                GitRefOperations.requireBranchDeleteSafe(runner, located.commonDir, tip, name)
+                GitRefOperations.deleteRef(runner, located.commonDir, name, expected)
+                crash(GitOperationCrashPoint.AFTER_PUBLISH)
+                null
+            }
+            GitOperationAction.WORKTREE_ADD -> {
+                val directory = repositoryDirectory(operation.jobId, operation.repositoryId)
+                val path = GitStorage.directories(directory, LINKED_WORK_TREES).resolve(operation.worktreeId)
+                if (Files.exists(path, NOFOLLOW_LINKS)) GitRefOperations.refuse("STORAGE_FAILED", "The work-tree location is already occupied.")
+                val objectId = checkNotNull(request.objectId)
+                // From this point even a command exception may have published part of the intent.
+                worktreeAddStarting()
+                GitRefOperations.addWorktree(runner, located.commonDir, path, objectId, request.name)
+                crash(GitOperationCrashPoint.AFTER_STAGING)
+                val records = GitStorage.directories(directory, WORKTREE_RECORDS)
+                GitStorage.replaceAtomically(records.resolve("${operation.worktreeId}.json"), GitRefOperations.encodeWorktree(
+                    GitWorktreeRecord(operation.worktreeId, operation.repositoryId, operation.jobId, operation.operationId, request.runId,
+                        clock.instant())).toByteArray())
+                crash(GitOperationCrashPoint.AFTER_PUBLISH)
+                objectId
+            }
+            GitOperationAction.WORKTREE_REMOVE -> {
+                // Recheck immediately before deletion: an external writer may set an index flag
+                // after final request validation and hide a tracked edit from Git's removal check.
+                GitRefOperations.requireNoHiddenIndexEntries(runner, located.gitDir, located.workTree)
+                GitRefOperations.removeWorktree(runner, located.commonDir, located.workTree)
+                crash(GitOperationCrashPoint.AFTER_STAGING)
+                Files.deleteIfExists(repositoryDirectory(operation.jobId, operation.repositoryId).resolve(WORKTREE_RECORDS).resolve("${located.worktreeId}.json"))
+                null
+            }
+            else -> error("not a ref request")
         }
     }
 
@@ -773,10 +1089,10 @@ class ManagedGitRepositories(
             snapshot.commitments.any { (path, commitment) -> capture.commitments[path] != commitment }) return null
         // Policy-excluded files are copied but can never be committed, so they are not expected.
         val expected = capture.blobs - GitTrackingPolicy.excluded(runner, capture.blobs.keys)
-        val actual = GitWorkspaceMutations.commitBlobs(runner, located.gitDir, record.objectFormat, commit) ?: return null
+        val actual = GitWorkspaceMutations.commitBlobs(runner, located.commonDir, record.objectFormat, commit) ?: return null
         if (expected != actual) return null
         val mapping = GitMappingRecord(record.repositoryId, commit, revisionId, sourceSha256, clock.instant(), dirty)
-        val mappings = GitStorage.directories(located.gitDir.parent, "mappings")
+        val mappings = GitStorage.directories(located.commonDir.parent, "mappings")
         GitStorage.replaceAtomically(mappings.resolve("$commit.json"), GitWorkspaceMutations.encodeMapping(mapping).toByteArray())
         return mapping
     }
@@ -806,14 +1122,17 @@ class ManagedGitRepositories(
      * may not be the requested one; external or legacy partial locks are never removed blindly.
      */
     private fun reconcileWorkspace(jobId: String, operation: GitOperationRecord): GitOperationRecord {
+        (operation.request as? GitRefRequest)?.let { return reconcileRef(jobId, operation, it) }
         if (operation.action != GitOperationAction.COMMIT) {
             // Stage/unstage use the same witnessed Git locks as commits. Reclaim only inodes
             // proven to belong to this operation; never replay an interrupted index publication.
             val record = repositories(jobId).singleOrNull { it.repositoryId == operation.repositoryId }
             if (record != null) {
-                val gitDir = root.resolve(jobId).resolve("git/repositories").resolve(record.repositoryId).resolve(GIT_DIR)
+                val commonDir = root.resolve(jobId).resolve("git/repositories").resolve(record.repositoryId).resolve(GIT_DIR)
+                val gitDir = if (operation.worktreeId == record.worktreeId) commonDir
+                    else commonDir.resolve("worktrees").resolve(operation.worktreeId)
                 GitWorkspaceMutations.reclaimCommitLocks(gitDir,
-                    root.resolve(jobId).resolve("git/staging").resolve(operation.operationId), operation.operationId)
+                    root.resolve(jobId).resolve("git/staging").resolve(operation.operationId), operation.operationId, commonDir)
             }
             return finish(operation, GitOperationState.INTERRUPTED, "INTERRUPTED",
                 "Interrupted by a server restart. Review the current index before a new request.")
@@ -823,11 +1142,14 @@ class ManagedGitRepositories(
             val runner = requireRunner()
             // Reconciliation runs inside reconcile(); read the registration directly, never through locate().
             val record = repositories(jobId).single { it.repositoryId == operation.repositoryId }
-            val gitDir = root.resolve(jobId).resolve("git/repositories").resolve(record.repositoryId).resolve(GIT_DIR)
+            val commonDir = root.resolve(jobId).resolve("git/repositories").resolve(record.repositoryId).resolve(GIT_DIR)
+            // Index and HEAD are private to a linked work tree; branch refs are shared.
+            val gitDir = if (operation.worktreeId == record.worktreeId) commonDir else commonDir.resolve("worktrees").resolve(operation.worktreeId)
             val observed = GitRepositoryInspector.head(runner, gitDir, record.objectFormat)
-            GitWorkspaceMutations.reclaimCommitLocks(gitDir, root.resolve(jobId).resolve("git/staging").resolve(operation.operationId), operation.operationId)
-            val lockNames = listOf("index.lock", "HEAD.lock") + listOfNotNull(observed.refName?.let { "$it.lock" })
-            if (lockNames.any { Files.exists(gitDir.resolve(it), NOFOLLOW_LINKS) }) {
+            GitWorkspaceMutations.reclaimCommitLocks(gitDir, root.resolve(jobId).resolve("git/staging").resolve(operation.operationId), operation.operationId, commonDir)
+            val locks = listOf(gitDir.resolve("index.lock"), gitDir.resolve("HEAD.lock")) +
+                listOfNotNull(observed.refName?.let { commonDir.resolve("$it.lock") })
+            if (locks.any { Files.exists(it, NOFOLLOW_LINKS) }) {
                 return finish(operation, GitOperationState.RECOVERY_REQUIRED, "COMMIT_LOCKS_REQUIRE_REVIEW",
                     "Interrupted by a server restart with a Git lock whose ownership could not be confirmed. Inspect the repository and its writers before a new request.",
                     observed.objectId.takeIf { it != guards?.expectedHeadObjectId })
@@ -839,6 +1161,121 @@ class ManagedGitRepositories(
             "Interrupted by a server restart before a commit was created. Review the staged files and commit again explicitly.")
         else finish(operation, GitOperationState.RECOVERY_REQUIRED, "HEAD_MOVED",
             "Interrupted by a server restart after HEAD moved. Inspect the latest history entry before any new commit.", head)
+    }
+
+    /**
+     * Compare a branch, tag or work-tree intent with the actual refs after a restart. An effect that
+     * is fully present completes the operation; an absent effect makes it `interrupted`; anything
+     * in between is `recovery-required`. HEAD states are named explicitly, including a HEAD left on
+     * a branch that no longer exists. Nothing is repeated and accepted snapshots are never touched.
+     */
+    private fun reconcileRef(jobId: String, operation: GitOperationRecord, request: GitRefRequest): GitOperationRecord {
+        fun interrupted(message: String) = finish(operation, GitOperationState.INTERRUPTED, "INTERRUPTED", message)
+        fun completed(message: String, objectId: String? = null) = finish(operation, GitOperationState.COMPLETED, null, message, objectId)
+        fun recovery(code: String, message: String, objectId: String? = null) =
+            finish(operation, GitOperationState.RECOVERY_REQUIRED, code, message, objectId)
+        return try {
+            val runner = requireRunner()
+            val record = repositories(jobId).single { it.repositoryId == operation.repositoryId }
+            val directory = repositoryDirectory(jobId, record.repositoryId)
+            val commonDir = directory.resolve(GIT_DIR)
+            val format = record.objectFormat
+            when (request.action) {
+                GitOperationAction.BRANCH_CREATE, GitOperationAction.TAG -> {
+                    val namespace = if (request.action == GitOperationAction.TAG) "tags" else "heads"
+                    when (GitRefOperations.refObject(runner, commonDir, format, "refs/$namespace/${request.name}")) {
+                        null -> interrupted("Interrupted by a server restart before the name was created. Create it again explicitly.")
+                        request.objectId -> completed("The name was created before the server restarted.", request.objectId)
+                        else -> recovery("REF_CONFLICT", "A ref with that name now names a different object. Inspect it before any new request.")
+                    }
+                }
+                GitOperationAction.BRANCH_DELETE -> {
+                    val refs = GitReads.allRefs(runner, commonDir, format)
+                    val present = refs.any { it.name.startsWith("refs/heads/") && GitWorkspaceVersions.refId(record.repositoryId, it.name) == request.refId }
+                    if (present) interrupted("Interrupted by a server restart before the branch was deleted; it is unchanged.")
+                    else completed("The branch was deleted before the server restarted.")
+                }
+                GitOperationAction.SWITCH -> {
+                    val gitDir = if (operation.worktreeId == record.worktreeId) commonDir else commonDir.resolve("worktrees").resolve(operation.worktreeId)
+                    val staging = root.resolve(jobId).resolve("git/staging").resolve(operation.operationId)
+                    GitWorkspaceMutations.reclaimCommitLocks(gitDir, staging, operation.operationId, commonDir)
+                    val head = GitRepositoryInspector.head(runner, gitDir, format)
+                    val target = request.refId?.let { refId ->
+                        GitReads.allRefs(runner, commonDir, format).singleOrNull { GitWorkspaceVersions.refId(record.repositoryId, it.name) == refId }?.name
+                    }
+                    if (target != null && Files.exists(commonDir.resolve("$target.lock"), NOFOLLOW_LINKS)) {
+                        return recovery("SWITCH_LOCK_REQUIRES_REVIEW", "The destination branch has a Git lock whose ownership could not be confirmed. Inspect its writers before switching again.")
+                    }
+                    val targetFile = staging.resolve("switch-target")
+                    val expectedTarget = request.objectId ?: if (Files.isRegularFile(targetFile, NOFOLLOW_LINKS))
+                        format.objectIdOrNull(GitStorage.read(targetFile, 128).toString(Charsets.US_ASCII)) else null
+                    when {
+                        head.state == GitHeadState.UNBORN && head.refName != null && target == null && request.refId != null ->
+                            recovery("REF_DELETED", "HEAD names a branch that no longer exists (unborn). Choose a branch or commit before new work.")
+                        target != null && head.refName == target && (expectedTarget == null || head.objectId != expectedTarget) ->
+                            recovery("REF_CHANGED", "The destination's reviewed object cannot be confirmed after restart. Inspect the checkout before any new request.", head.objectId)
+                        target != null && head.refName == target -> completed("The switch finished before the server restarted.", expectedTarget)
+                        request.objectId != null && head.state == GitHeadState.DETACHED && head.objectId == request.objectId ->
+                            completed("The switch finished before the server restarted.", head.objectId)
+                        head.objectId == request.guards.expectedHeadObjectId && (request.guards.expectedRefId == null ||
+                            head.refName?.let { GitWorkspaceVersions.refId(record.repositoryId, it) } == request.guards.expectedRefId) ->
+                            interrupted("Interrupted by a server restart before HEAD moved. Read the status before switching again.")
+                        else -> recovery("HEAD_MOVED", "Interrupted by a server restart during checkout; HEAD is ${head.state.wireName}. " +
+                            "Read the status and inspect the work tree before any new request.", head.objectId)
+                    }
+                }
+                GitOperationAction.WORKTREE_ADD -> {
+                    val recordFile = directory.resolve(WORKTREE_RECORDS).resolve("${operation.worktreeId}.json")
+                    if (Files.isRegularFile(recordFile, NOFOLLOW_LINKS)) completed("The work tree was created before the server restarted.", request.objectId)
+                    else {
+                        val path = directory.resolve(LINKED_WORK_TREES).resolve(operation.worktreeId)
+                        val worktreeAdmin = commonDir.resolve("worktrees").resolve(operation.worktreeId)
+                        // A matching branch tip is not ownership evidence: a queued request, or a
+                        // failed `worktree add -b`, may have collided with an external writer. Only
+                        // clean up and roll back when Git registered this operation's work tree.
+                        val registeredWorktree = Files.isDirectory(path, NOFOLLOW_LINKS) &&
+                            Files.isDirectory(worktreeAdmin, NOFOLLOW_LINKS)
+                        if (!registeredWorktree && (Files.exists(path, NOFOLLOW_LINKS) || Files.exists(worktreeAdmin, NOFOLLOW_LINKS))) {
+                            return recovery("WORKTREE_OWNERSHIP_UNKNOWN",
+                                "An unregistered work-tree path or Git entry exists. Preserve it and inspect ownership before any new request.")
+                        }
+                        val branch = request.name?.let { "refs/heads/$it" }
+                        val tip = branch?.let { GitRefOperations.refObject(runner, commonDir, format, it) }
+                        when {
+                            branch != null && tip != null && tip != request.objectId ->
+                                recovery("REF_CONFLICT", "The work tree's new branch now names a different commit. Inspect it before any new request.")
+                            branch != null && tip == request.objectId && !registeredWorktree ->
+                                recovery("WORKTREE_BRANCH_OWNERSHIP_UNKNOWN",
+                                    "The requested branch exists at the start commit, but this operation cannot prove that it created the branch. Preserve it and inspect ownership before any new request.")
+                            else -> {
+                                // Compare-and-delete while the work-tree registration still proves
+                                // ownership. If an external writer moved the ref, leave both intact.
+                                if (branch != null && tip != null) GitRefOperations.deleteRef(runner, commonDir, branch, tip)
+                                if (registeredWorktree) {
+                                    try { GitRefOperations.removeWorktree(runner, commonDir, path, force = true) } catch (_: GitOperationRefusal) { }
+                                    GitStorage.deleteTree(path)
+                                }
+                                runner.run(GitInvocation("worktree", listOf("prune"), gitDir = commonDir))
+                                if (branch != null && tip != null) {
+                                    interrupted("Interrupted by a server restart before the work tree was registered; its operation-owned branch was rolled back and nothing remains.")
+                                } else interrupted("Interrupted by a server restart before the work tree was registered; nothing was created.")
+                            }
+                        }
+                    }
+                }
+                GitOperationAction.WORKTREE_REMOVE -> {
+                    val path = directory.resolve(LINKED_WORK_TREES).resolve(operation.worktreeId)
+                    if (Files.exists(path, NOFOLLOW_LINKS)) interrupted("Interrupted by a server restart before the work tree was removed; it is unchanged.")
+                    else {
+                        Files.deleteIfExists(directory.resolve(WORKTREE_RECORDS).resolve("${operation.worktreeId}.json"))
+                        completed("The work tree was removed before the server restarted.")
+                    }
+                }
+                else -> interrupted("Interrupted by a server restart.")
+            }
+        } catch (_: Exception) {
+            recovery("STATE_UNKNOWN", "Interrupted by a server restart and the repository state could not be read. Inspect it before a new request.")
+        }
     }
 
     private fun encodeGuards(guards: GitGuards) = buildJsonObject {
@@ -869,7 +1306,8 @@ class ManagedGitRepositories(
         if (Files.isDirectory(directory, NOFOLLOW_LINKS)) {
             val published = repositories(jobId).associateBy { it.operationId }
             for (operation in operations(jobId)) {
-                if (operation.state.terminal || operation.operationId in active) continue
+                val pendingWorktreeRecovery = operation.action == GitOperationAction.WORKTREE_ADD && operation.recoveryRequired
+                if ((operation.state.terminal && !pendingWorktreeRecovery) || operation.operationId in active) continue
                 val staging = directory.resolve("staging").resolve(operation.operationId)
                 if (operation.action.workspace) {
                     persist(directory, reconcileWorkspace(jobId, operation))
@@ -899,7 +1337,7 @@ class ManagedGitRepositories(
                 }
             }
         }
-        reconciled += jobId
+        if (operations(jobId).none { it.action == GitOperationAction.WORKTREE_ADD && it.recoveryRequired }) reconciled += jobId
     }
 
     // ---- Records --------------------------------------------------------------------------
@@ -1017,6 +1455,11 @@ class ManagedGitRepositories(
                 put("fileIds", kotlinx.serialization.json.JsonArray(request.fileIds.map(::JsonPrimitive)))
                 put("messageSha256", GitStorage.sha256(request.message))
             }
+            is GitRefRequest -> buildJsonObject {
+                put("worktreeId", request.worktreeId); put("guards", encodeGuards(request.guards))
+                put("name", request.name?.let(::JsonPrimitive) ?: JsonNull); put("refId", request.refId?.let(::JsonPrimitive) ?: JsonNull)
+                put("objectId", request.objectId?.let(::JsonPrimitive) ?: JsonNull); put("runId", request.runId?.let(::JsonPrimitive) ?: JsonNull)
+            }
             is GitRetainedCommit -> buildJsonObject {
                 put("worktreeId", request.worktreeId); put("guards", encodeGuards(request.guards))
                 put("fileIds", kotlinx.serialization.json.JsonArray(request.fileIds.map(::JsonPrimitive)))
@@ -1049,6 +1492,10 @@ class ManagedGitRepositories(
                 GitOperationAction.STAGE, GitOperationAction.UNSTAGE -> GitStageRequest(request.text("worktreeId"),
                     decodeGuards(request.getValue("guards").jsonObject), fileIds(request), action == GitOperationAction.STAGE)
                 // The message itself is kept only for execution; a retained record proves its digest.
+                GitOperationAction.BRANCH_CREATE, GitOperationAction.SWITCH, GitOperationAction.BRANCH_DELETE, GitOperationAction.TAG,
+                GitOperationAction.WORKTREE_ADD, GitOperationAction.WORKTREE_REMOVE -> GitRefRequest(action, request.text("worktreeId"),
+                    decodeGuards(request.getValue("guards").jsonObject), request.nullableText("name"), request.nullableText("refId"),
+                    request.nullableText("objectId"), request.nullableText("runId"))
                 GitOperationAction.COMMIT -> GitRetainedCommit(request.text("worktreeId"), decodeGuards(request.getValue("guards").jsonObject),
                     fileIds(request), request.text("messageSha256"))
             }
@@ -1088,11 +1535,19 @@ class ManagedGitRepositories(
         GitOperationAction.STAGE -> "Staged exactly the selected files. Nothing was committed."
         GitOperationAction.UNSTAGE -> "Unstaged exactly the selected files. Work-tree contents were not changed."
         GitOperationAction.COMMIT -> "Committed exactly the reviewed staged files. A commit records source state; it is not validation or acceptance."
+        GitOperationAction.BRANCH_CREATE -> "Created the branch at the reviewed commit. Nothing was checked out."
+        GitOperationAction.SWITCH -> "Switched the work tree. No changes were discarded or stashed."
+        GitOperationAction.BRANCH_DELETE -> "Deleted the branch; all of its commits remain reachable from other refs."
+        GitOperationAction.TAG -> "Created the tag at the reviewed commit. Existing tags are never overwritten."
+        GitOperationAction.WORKTREE_ADD -> "Created a linked work tree at the reviewed commit."
+        GitOperationAction.WORKTREE_REMOVE -> "Removed the clean linked work tree; its commits remain reachable."
     }
 
     internal companion object {
         const val GIT_DIR = "repository.git"
         const val WORK_TREE = "worktree"
+        const val LINKED_WORK_TREES = "worktrees"
+        const val WORKTREE_RECORDS = "worktree-records"
         const val RECORD = "repository.json"
         const val MAX_OPERATIONS = 64
         const val MAX_LISTED_OPERATIONS = 20

@@ -107,11 +107,12 @@ internal object GitWorkspaceMutations {
     }
 
     /** Map reviewed file identities to the current status entries, refusing anything not selectable. */
-    fun select(record: GitRepositoryRecord, observation: GitWorkspaceObservation, fileIds: List<String>, stage: Boolean): List<GitStatusEntry> {
+    fun select(record: GitRepositoryRecord, observation: GitWorkspaceObservation, fileIds: List<String>, stage: Boolean,
+        worktreeId: String = record.worktreeId): List<GitStatusEntry> {
         if (!observation.status.complete) refuse("STATUS_INCOMPLETE", "The status is too large to review completely; selection is unavailable.")
         // One path can have two records: a staged deletion and an untracked replacement share a
         // file identity. Resolve each selection against the record the action applies to.
-        val byId = observation.status.entries.groupBy { it.path.fileId(record.worktreeId) }
+        val byId = observation.status.entries.groupBy { it.path.fileId(worktreeId) }
         fun applies(entry: GitStatusEntry) = if (stage) entry.untracked || entry.unstaged != GitIndexChange.NONE else entry.staged != GitIndexChange.NONE
         return fileIds.map { id ->
             val records = byId[id] ?: refuse("SELECTION_CHANGED", "A selected file is no longer in the current status.")
@@ -161,11 +162,12 @@ internal object GitWorkspaceMutations {
     }
 
     /** The reviewed selection must be exactly today's staged set: nothing swept in, nothing left out. */
-    fun requireStagedSet(record: GitRepositoryRecord, observation: GitWorkspaceObservation, fileIds: List<String>) {
+    fun requireStagedSet(record: GitRepositoryRecord, observation: GitWorkspaceObservation, fileIds: List<String>,
+        worktreeId: String = record.worktreeId) {
         // A truncated status can hide staged files beyond its bound; never commit an unreviewable index.
         if (!observation.status.complete) refuse("STATUS_INCOMPLETE", "The status is too large to review completely; the staged set cannot be confirmed.")
         if (observation.status.entries.any { it.conflict != null }) refuse("CONFLICTED", "Resolve conflicted files before committing.")
-        val staged = observation.status.entries.filter { it.staged != GitIndexChange.NONE }.map { it.path.fileId(record.worktreeId) }.toSet()
+        val staged = observation.status.entries.filter { it.staged != GitIndexChange.NONE }.map { it.path.fileId(worktreeId) }.toSet()
         if (staged.isEmpty()) refuse("NOTHING_TO_COMMIT", "No changes are staged.")
         if (staged != fileIds.toSet()) refuse("INDEX_CHANGED", "The staged files differ from the reviewed selection. Review the staged diff again.")
     }
@@ -326,14 +328,14 @@ internal object GitWorkspaceMutations {
 
     /** Also pin the symbolic HEAD's branch while a stage/unstage transaction publishes its index. */
     fun <T> withWorkspaceLocks(runner: GitCommandRunner, gitDir: Path, staging: Path, operationId: String,
-        format: GitObjectFormat, block: () -> T): T = withCommitLocks(gitDir, staging, operationId) {
+        format: GitObjectFormat, commonDir: Path = gitDir, block: () -> T): T = withCommitLocks(gitDir, staging, operationId) {
         val ref = GitRepositoryInspector.head(runner, gitDir, format).refName
         if (ref == null) block() else {
-            GitStorage.directories(gitDir, *ref.split('/').dropLast(1).toTypedArray())
+            GitStorage.directories(commonDir, *ref.split('/').dropLast(1).toTypedArray())
             Files.writeString(staging.resolve("ref-name"), ref)
             val witness = Files.createFile(staging.resolve("ref-lock"))
             GitStorage.forceDirectory(staging)
-            val file = gitDir.resolve("$ref.lock")
+            val file = commonDir.resolve("$ref.lock")
             try { Files.createLink(file, witness) } catch (_: FileAlreadyExistsException) {
                 refuse("WORKTREE_BUSY", "Another Git writer holds the reviewed branch lock. Nothing was staged.")
             }
@@ -347,13 +349,13 @@ internal object GitWorkspaceMutations {
     }
 
     /** Reclaim proven owned inodes, never a different writer's replacement at the same name. */
-    fun reclaimCommitLocks(gitDir: Path, staging: Path, operationId: String) {
+    fun reclaimCommitLocks(gitDir: Path, staging: Path, operationId: String, commonDir: Path = gitDir) {
         val refNameFile = staging.resolve("ref-name")
         val privateLock = staging.resolve("ref-lock")
         if (Files.isRegularFile(refNameFile, NOFOLLOW_LINKS) && Files.isRegularFile(privateLock, NOFOLLOW_LINKS)) {
             val ref = GitStorage.read(refNameFile, 4096).toString(Charsets.UTF_8)
             check(GitRefNames.isObservedRefName(ref))
-            val refLock = gitDir.resolve("$ref.lock")
+            val refLock = commonDir.resolve("$ref.lock")
             // The private hard link proves inode ownership even if the process died while writing
             // the lock. Never remove a different writer's replacement at the same pathname.
             if (Files.isRegularFile(refLock, NOFOLLOW_LINKS) && Files.isSameFile(refLock, privateLock)) Files.delete(refLock)
@@ -396,12 +398,14 @@ internal object GitWorkspaceMutations {
      * A loose ref safely supersedes a packed ref; neither packed-refs nor reflogs are rewritten.
      */
     fun publishCommit(runner: GitCommandRunner, gitDir: Path, staging: Path, head: GitHeadObservation,
-        format: GitObjectFormat, commit: String, published: () -> Unit) {
+        format: GitObjectFormat, commit: String, commonDir: Path = gitDir, published: () -> Unit) {
         val ref = head.refName
-        val target = gitDir.resolve(ref ?: "HEAD")
+        // Linked HEAD/index live in their administrative directory, but attached refs belong
+        // to the common repository. A private refs/ shadow would report a commit never published.
+        val target = if (ref == null) gitDir.resolve("HEAD") else commonDir.resolve(ref)
         val privateLock = staging.resolve("ref-lock")
         val refLock = if (ref == null) null else {
-            GitStorage.directories(gitDir, *ref.split('/').dropLast(1).toTypedArray())
+            GitStorage.directories(commonDir, *ref.split('/').dropLast(1).toTypedArray())
             Files.writeString(staging.resolve("ref-name"), ref)
             Files.createFile(privateLock)
             val file = target.resolveSibling("${target.fileName}.lock")

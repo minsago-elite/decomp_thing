@@ -315,6 +315,46 @@ class WebGitControllerTest {
         error(f.send(headers = mapOf("Cookie" to f.cookie), target = "$base/operations"), 405)
     }
 
+    @Test fun `branches, work trees, provenance and exports over HTTP name exact objects`(): Unit = Fixture().use { f ->
+        val (base, directory) = f.initialized()
+        decompengine.git.GitTestRepositories().use { g ->
+            val workTree = directory.resolve("worktree")
+            g.git("--git-dir=${directory.resolve("repository.git")}", "--work-tree=$workTree", "add", "-A", cwd = workTree)
+            g.git("--git-dir=${directory.resolve("repository.git")}", "--work-tree=$workTree", "commit", "-q", "-m", "base", cwd = workTree)
+        }
+        val workspace = data(f.read(base), 200, "gitWorkspace")
+        val head = workspace.getValue("headObjectId").jsonPrimitive.content
+        val guards = buildJsonObject {
+            put("repositoryVersion", workspace.getValue("repositoryVersion")); put("worktreeVersion", workspace.getValue("worktreeVersion"))
+            put("expectedHeadObjectId", head); put("expectedRefId", workspace.getValue("headRefId")); put("expectedRefObjectId", head)
+        }
+        val version = workspace.getValue("worktreeVersion").jsonPrimitive.content
+        fun change(body: JsonObject, key: String) = f.send("POST", body.toString(), f.headers(key = key) + ("If-Match" to "\"$version\""), "$base/operations")
+        val branch = buildJsonObject { put("action", "git.branch.create"); put("worktreeId", workspace.getValue("worktreeId")); put("guards", guards)
+            put("name", "feature"); put("startObjectId", head) }
+        error(change(JsonObject(branch + ("force" to JsonPrimitive(true))), "http_branch_intent_1"), 422, "VALIDATION_FAILED")
+        val created = change(branch, "http_branch_intent_1")
+        data(created, 202, "operation")
+        assertEquals("completed", f.awaitOperation(created.headers().firstValue("Location").orElseThrow()).getValue("state").jsonPrimitive.content)
+        val refs = data(f.read("$base/refs"), 200, "gitRefs").getValue("refs").jsonArray.map { it.jsonObject.getValue("displayName").jsonPrimitive.content }
+        assertTrue("refs/heads/feature" in refs)
+        val worktrees = data(f.read("$base/worktrees"), 200, "gitWorktrees").getValue("worktrees").jsonArray
+        assertEquals(workspace.getValue("worktreeId"), worktrees.single().jsonObject["worktreeId"])
+        data(f.read("$base/worktrees/${workspace.getValue("worktreeId").jsonPrimitive.content}"), 200, "gitWorkspace")
+        error(f.read("$base/worktrees/worktree_${"0".repeat(32)}"), 404, "NOT_FOUND")
+        val provenance = data(f.read("$base/provenance/$head"), 200, "gitProvenance")
+        assertEquals("tree-blob-ids-match", provenance.getValue("export").jsonObject.getValue("verification").jsonPrimitive.content)
+        // A commit made outside the workbench is never mapped to a reconstruction revision.
+        assertEquals(JsonNull, provenance["mapping"])
+        val download = f.client.send(HttpRequest.newBuilder(URI(f.origin + "$base/exports/$head")).header("Cookie", f.cookie)
+            .header("Accept", "application/zip").build(), HttpResponse.BodyHandlers.ofByteArray())
+        assertEquals(200, download.statusCode()); assertEquals("application/zip", download.headers().firstValue("Content-Type").orElseThrow())
+        val digest = java.security.MessageDigest.getInstance("SHA-256").digest(download.body()).joinToString("") { "%02x".format(it) }
+        assertEquals(provenance.getValue("export").jsonObject.getValue("sha256").jsonPrimitive.content, digest)
+        assertEquals(digest, download.headers().firstValue("X-Source-Export-SHA256").orElseThrow())
+        error(f.read("$base/provenance/${head.take(10)}"), 422, "VALIDATION_FAILED")
+    }
+
     @Test fun `status rejects escaped paths over the schema display bound for current and original paths`(): Unit = Fixture().use { f ->
         val (base, directory) = f.initialized()
         decompengine.git.GitTestRepositories().use { g ->

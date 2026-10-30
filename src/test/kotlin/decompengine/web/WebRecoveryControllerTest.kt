@@ -122,6 +122,36 @@ class WebRecoveryControllerTest {
     }
 
     @Test
+    fun `retry and resume respect checkout ownership while keyed recovery replay stays read-only`() {
+        for (mode in listOf("retry", "resume")) Fixture(checkpoints = {
+            DurableWebWorkflowCheckpoint.Verified(SHA, WorkflowResumeRestoration.PROJECT_EVIDENCE)
+        }).use { f ->
+            val failed = f.start()
+            val before = f.snapshot().attempts.size
+            val lease = assertNotNull(f.service.gitWorkspaceLeases.tryGit(f.job.id))
+            try {
+                val refused = f.recover(failed, mode = mode)
+                assertEquals(409, refused.statusCode(), refused.body())
+                assertTrue(refused.body().contains("WORKTREE_BUSY"), refused.body())
+                assertEquals(before, f.snapshot().attempts.size)
+                assertEquals(1, f.contexts.size)
+            } finally { lease.close() }
+            f.deferred = true
+            val recovered = f.recover(failed, mode = mode)
+            assertEquals(202, recovered.statusCode(), recovered.body())
+            assertEquals(before + 1, f.snapshot().attempts.size)
+            assertEquals(1, f.pending.size)
+            // Replaying an already retained request neither reserves checkout nor schedules work.
+            assertNotNull(f.service.gitWorkspaceLeases.tryGit(f.job.id)).use {
+                assertEquals(202, f.recover(failed, mode = mode).statusCode())
+                assertEquals(before + 1, f.snapshot().attempts.size)
+                assertEquals(1, f.pending.size)
+            }
+            f.pending.remove().run()
+        }
+    }
+
+    @Test
     fun `retry publishes one new linked attempt and keyed replay returns it without rescheduling`() = Fixture().use { f ->
         val failed = f.start()
         assertEquals(WorkflowRunState.FAILED, f.attempt(failed).state)

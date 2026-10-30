@@ -827,6 +827,31 @@
       "valid": false
     },
     {
+      "file": "fixtures/request-git-switch.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/request-git-tag.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/request-git-worktree-add.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-request-git-branch-force.json",
+      "valid": false,
+      "reason": "Branch creation never overwrites; force or command fields are refused."
+    },
+    {
+      "file": "fixtures/git-worktrees.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/git-provenance.json",
+      "valid": true
+    },
+    {
       "file": "fixtures/attempt-controls-retry.json",
       "valid": true
     },

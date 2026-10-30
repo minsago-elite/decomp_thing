@@ -27,19 +27,23 @@ private const val MAX_GIT_PATH_DISPLAY_CODE_POINTS = 16_384
 internal class WebGitReads(private val repositories: () -> ManagedGitRepositories) {
     fun handle(exchange: HttpExchange, jobId: String, repositoryId: String, resource: String) {
         val query = parseQuery(exchange.requestURI.rawQuery, when (resource) {
-            "status", "refs" -> setOf("cursor", "limit")
-            "history" -> setOf("start", "cursor", "limit")
-            else -> setOf("scope", "commit", "file", "cursor", "limit")
+            "status" -> setOf("worktree", "cursor", "limit")
+            "refs" -> setOf("cursor", "limit")
+            "history" -> setOf("worktree", "start", "cursor", "limit")
+            else -> setOf("worktree", "scope", "commit", "file", "cursor", "limit")
         })
         val limit = query["limit"]?.let { value ->
             value.takeIf { it.matches(Regex("[1-9][0-9]{0,2}")) }?.toInt()?.takeIf { it <= 200 }
                 ?: throw WebAccessDenied(422, "VALIDATION_FAILED", "limit must be an integer from 1 to 200.")
         } ?: 50
+        val worktree = query["worktree"]?.also {
+            if (!it.matches(Regex("worktree_[0-9a-f]{32}"))) throw WebAccessDenied(422, "VALIDATION_FAILED", "worktree must be a registered work-tree identity.")
+        }
         try {
             when (resource) {
-                "status" -> sendWebApiResponse(exchange, 200, "gitStatus", status(jobId, repositoryId, query["cursor"], limit))
-                "history" -> sendWebApiResponse(exchange, 200, "gitHistory", history(jobId, repositoryId, query, limit))
-                "diff" -> sendWebApiResponse(exchange, 200, "gitDiff", diff(jobId, repositoryId, query, limit))
+                "status" -> sendWebApiResponse(exchange, 200, "gitStatus", status(jobId, repositoryId, query["cursor"], limit, worktree))
+                "history" -> sendWebApiResponse(exchange, 200, "gitHistory", history(jobId, repositoryId, query, limit, worktree))
+                "diff" -> sendWebApiResponse(exchange, 200, "gitDiff", diff(jobId, repositoryId, query, limit, worktree))
                 else -> sendWebApiResponse(exchange, 200, "gitRefs", refs(jobId, repositoryId, query["cursor"], limit))
             }
         } catch (failure: ManagedGitException) {
@@ -47,9 +51,71 @@ internal class WebGitReads(private val repositories: () -> ManagedGitRepositorie
         }
     }
 
-    private fun status(jobId: String, repositoryId: String, cursor: String?, limit: Int): JsonObject {
+    /** `G/worktrees`, `G/worktrees/{id}`, `G/provenance/{objectId}` and `G/exports/{objectId}`. */
+    fun nested(exchange: HttpExchange, jobId: String, repositoryId: String, resource: String, item: String?) {
+        if (!exchange.requestURI.rawQuery.isNullOrEmpty()) throw WebAccessDenied(400, "VALIDATION_FAILED", "This endpoint does not accept query parameters.")
         val service = repositories()
-        val view = service.workspace(jobId, repositoryId)
+        try {
+            when {
+                resource == "worktrees" && item == null -> sendWebApiResponse(exchange, 200, "gitWorktrees", buildJsonObject {
+                    put("repositoryId", repositoryId)
+                    put("worktrees", JsonArray(service.worktrees(jobId, repositoryId).map { view ->
+                        val head = view.observation.head
+                        buildJsonObject {
+                            put("worktreeId", view.worktreeId); put("primary", view.primary)
+                            put("ownerRunId", view.ownerRunId?.let(::JsonPrimitive) ?: JsonNull)
+                            put("worktreeVersion", decompengine.git.GitWorkspaceVersions.worktreeVersion(view.observation))
+                            put("headState", head.state.wireName)
+                            put("headObjectId", head.objectId?.let(::JsonPrimitive) ?: JsonNull)
+                            put("headRefName", head.refName?.let(::JsonPrimitive) ?: JsonNull)
+                            put("dirty", view.observation.dirty)
+                        }
+                    }))
+                })
+                resource == "worktrees" -> {
+                    val workspace = webGitWorkspace(service.workspace(jobId, repositoryId, item))
+                    exchange.responseHeaders.set("ETag", "\"${(workspace.getValue("worktreeVersion") as JsonPrimitive).content}\"")
+                    sendWebApiResponse(exchange, 200, "gitWorkspace", workspace)
+                }
+                resource == "provenance" -> {
+                    requireObjectIdText(checkNotNull(item))
+                    val view = service.provenance(jobId, repositoryId, item)
+                    sendWebApiResponse(exchange, 200, "gitProvenance", buildJsonObject {
+                        put("repositoryId", repositoryId); put("objectId", item); put("objectFormat", view.record.objectFormat.wireName)
+                        put("committedAt", view.commit.committedAt.toString()); put("subject", view.commit.subject)
+                        put("refNames", JsonArray(view.refNames.take(200).map(::JsonPrimitive)))
+                        put("mapping", view.mapping?.let(::webGitMapping) ?: JsonNull)
+                        put("worktreeDirtyAtCommit", view.mapping?.record?.worktreeDirty?.let(::JsonPrimitive) ?: JsonNull)
+                        put("export", buildJsonObject {
+                            put("sha256", view.export.sha256); put("sizeBytes", view.export.bytes.size.toString())
+                            put("files", view.export.blobs.size); put("skippedEntries", view.export.skippedEntries)
+                            put("verification", if (view.verified) "tree-blob-ids-match" else "mismatch")
+                        })
+                    })
+                }
+                else -> {
+                    requireObjectIdText(checkNotNull(item))
+                    if (!acceptsWebMediaType(exchange, "application/zip")) throw WebAccessDenied(406, "NOT_ACCEPTABLE", "This endpoint returns application/zip.")
+                    val export = service.export(jobId, repositoryId, item)
+                    webApiHeaders(exchange, java.util.UUID.randomUUID().toString())
+                    exchange.responseHeaders.set("Content-Type", "application/zip")
+                    exchange.responseHeaders.set("Content-Disposition", "attachment; filename=\"source-${item.take(12)}.zip\"")
+                    exchange.responseHeaders.set("X-Source-Export-SHA256", export.sha256)
+                    exchange.responseHeaders.set("Content-Length", export.bytes.size.toString())
+                    try {
+                        if (exchange.requestMethod == "HEAD") exchange.sendResponseHeaders(200, -1)
+                        else { exchange.sendResponseHeaders(200, export.bytes.size.toLong()); exchange.responseBody.use { it.write(export.bytes) } }
+                    } finally { exchange.close() }
+                }
+            }
+        } catch (failure: ManagedGitException) {
+            throw webGitDenied(failure)
+        }
+    }
+
+    private fun status(jobId: String, repositoryId: String, cursor: String?, limit: Int, worktree: String?): JsonObject {
+        val service = repositories()
+        val view = service.workspace(jobId, repositoryId, worktree)
         val busy = service.busy(jobId)
         val workspace = webGitWorkspace(view)
         val version = (workspace.getValue("worktreeVersion") as JsonPrimitive).content
@@ -58,7 +124,7 @@ internal class WebGitReads(private val repositories: () -> ManagedGitRepositorie
         // the version plus every listed path and state, so any change to the listing ends the walk.
         val anchor = "status_v_" + decompengine.git.GitStorage.sha256(buildString {
             append(version).append('\n')
-            entries.forEach { append(it.path.fileId(view.record.worktreeId)).append(it.ignored).append(it.untracked).append(it.staged).append(it.unstaged).append('\n') }
+            entries.forEach { append(it.path.fileId(view.worktreeId)).append(it.ignored).append(it.untracked).append(it.staged).append(it.unstaged).append('\n') }
         }).take(32)
         val offset = anchoredOffset(cursor, anchor)
         val counts = buildJsonObject {
@@ -67,7 +133,7 @@ internal class WebGitReads(private val repositories: () -> ManagedGitRepositorie
             put("untracked", entries.count { it.untracked }); put("ignored", entries.count { it.ignored })
             put("conflicted", entries.count { it.conflict != null })
         }
-        val (page, next) = budgeted(entries.drop(offset), limit) { statusEntry(it, view.record.worktreeId) }
+        val (page, next) = budgeted(entries.drop(offset), limit) { statusEntry(it, view.worktreeId) }
         val head = view.observation.head
         val notices = buildList {
             if (head.state == GitHeadState.UNBORN) add("unborn" to "The branch has no commits yet. Stage source files and commit to create its first commit.")
@@ -79,7 +145,7 @@ internal class WebGitReads(private val repositories: () -> ManagedGitRepositorie
             if (!view.observation.status.complete) add("incomplete" to "Status output exceeded its bound, so this listing is incomplete.")
         }
         return buildJsonObject {
-            put("repositoryId", view.record.repositoryId); put("worktreeId", view.record.worktreeId)
+            put("repositoryId", view.record.repositoryId); put("worktreeId", view.worktreeId)
             put("repositoryVersion", workspace.getValue("repositoryVersion")); put("worktreeVersion", version)
             put("headState", head.state.wireName)
             put("headObjectId", head.objectId?.let(::JsonPrimitive) ?: JsonNull)
@@ -92,7 +158,7 @@ internal class WebGitReads(private val repositories: () -> ManagedGitRepositorie
         }
     }
 
-    private fun history(jobId: String, repositoryId: String, query: Map<String, String>, limit: Int): JsonObject {
+    private fun history(jobId: String, repositoryId: String, query: Map<String, String>, limit: Int, worktree: String?): JsonObject {
         val cursor = query["cursor"]
         if (cursor != null && query["start"] != null) throw WebAccessDenied(400, "INVALID_CURSOR", "Use start for a first page or cursor for a later one, not both.")
         val (start, offset) = if (cursor != null) {
@@ -101,11 +167,11 @@ internal class WebGitReads(private val repositories: () -> ManagedGitRepositorie
                 ?: throw WebAccessDenied(400, "INVALID_CURSOR", "The history cursor is invalid.")
             match.groupValues[1] to match.groupValues[2].toInt()
         } else (query["start"]?.also { requireObjectIdText(it) }) to 0
-        val (origin, page) = repositories().history(jobId, repositoryId, start, offset, limit)
+        val (origin, page) = repositories().history(jobId, repositoryId, start, offset, limit, worktree)
         val record = repositories().repository(jobId, repositoryId)
         val mappings = repositories().mappings(jobId, repositoryId, page.entries.map { it.objectId })
         return buildJsonObject {
-            put("repositoryId", repositoryId); put("worktreeId", record.worktreeId)
+            put("repositoryId", repositoryId); put("worktreeId", worktree ?: record.worktreeId)
             put("startObjectId", origin?.let(::JsonPrimitive) ?: JsonNull)
             put("entries", JsonArray(page.entries.map { entry ->
                 buildJsonObject {
@@ -122,7 +188,7 @@ internal class WebGitReads(private val repositories: () -> ManagedGitRepositorie
         }
     }
 
-    private fun diff(jobId: String, repositoryId: String, query: Map<String, String>, limit: Int): JsonObject {
+    private fun diff(jobId: String, repositoryId: String, query: Map<String, String>, limit: Int, worktree: String?): JsonObject {
         val scope = GitDiffScope.entries.singleOrNull { it.wireName == query["scope"] }
             ?: throw WebAccessDenied(422, "VALIDATION_FAILED", "scope must be staged, unstaged or commit.")
         val commit = query["commit"]?.also { requireObjectIdText(it) }
@@ -133,21 +199,21 @@ internal class WebGitReads(private val repositories: () -> ManagedGitRepositorie
             if (!it.matches(Regex("file_[0-9a-f]{32}"))) throw WebAccessDenied(422, "VALIDATION_FAILED", "file must be a file identity from this repository.")
         }
         val service = repositories()
-        fun version() = (webGitWorkspace(service.workspace(jobId, repositoryId)).getValue("worktreeVersion") as JsonPrimitive).content
+        fun version() = (webGitWorkspace(service.workspace(jobId, repositoryId, worktree)).getValue("worktreeVersion") as JsonPrimitive).content
         // A staged or unstaged listing must belong to the version its cursor names: observe the
         // version on both sides of the comparison and retry once if the work tree moved meanwhile.
         fun consistent(): Pair<decompengine.git.GitDiffView, String> {
-            if (commit != null) return service.diff(jobId, repositoryId, scope, commit, file) to commit
+            if (commit != null) return service.diff(jobId, repositoryId, scope, commit, file, worktree) to commit
             repeat(2) {
                 val before = version()
-                val listing = service.diff(jobId, repositoryId, scope, null, file)
+                val listing = service.diff(jobId, repositoryId, scope, null, file, worktree)
                 if (version() == before) return listing to before
             }
             throw WebAccessDenied(409, "REF_CHANGED", "The work tree kept changing during the diff read. Read it again.")
         }
         val (view, anchor) = consistent()
         val offset = anchoredOffset(query["cursor"], anchor)
-        val worktreeId = view.record.worktreeId
+        val worktreeId = view.worktreeId
         // A selected file is read alone: its listing entry and its bounded patch.
         val (page, next) = view.patch?.let { listOf(diffFile(it.first, worktreeId)) to null }
             ?: budgeted(view.listing.files.drop(offset), limit) { diffFile(it, worktreeId) }

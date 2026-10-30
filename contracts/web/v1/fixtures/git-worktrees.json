@@ -1,0 +1,30 @@
+{
+  "apiVersion": 1,
+  "kind": "gitWorktrees",
+  "requestId": "request_example_1",
+  "data": {
+    "repositoryId": "repository_example_2",
+    "worktrees": [
+      {
+        "worktreeId": "worktree_example_2",
+        "primary": true,
+        "ownerRunId": null,
+        "worktreeVersion": "worktree_v_1",
+        "headState": "attached",
+        "headObjectId": "0123456789abcdef0123456789abcdef01234567",
+        "headRefName": "refs/heads/trunk",
+        "dirty": false
+      },
+      {
+        "worktreeId": "worktree_example_3",
+        "primary": false,
+        "ownerRunId": "run_example_1",
+        "worktreeVersion": "worktree_v_2",
+        "headState": "detached",
+        "headObjectId": "0123456789abcdef0123456789abcdef01234567",
+        "headRefName": null,
+        "dirty": true
+      }
+    ]
+  }
+}
