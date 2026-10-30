@@ -400,7 +400,7 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
         {loaded.history?.nextCursor && <button type="button" disabled={busy} onClick={() => { void older(loaded.history?.nextCursor ?? ''); }}>{copy.olderHistory}</button>}
         {commit && <section aria-labelledby="git-commit-title">
           <h4 id="git-commit-title">{textMessage(copy.commitDetail, { object: short(commit.objectId) })}</h4>
-          <ul>{commit.diff.files.map(file => <li key={file.fileId}><code>{file.path}</code> {file.change}{file.binary ? ' (binary)' : ''}</li>)}</ul>
+          <ul>{commit.diff.files.map(file => <li key={file.fileId}><code>{file.path}</code> {file.change}{file.binary && <> <span>{copy.binaryCommit}</span></>}</li>)}</ul>
           {!commit.diff.complete && <p role="alert">{copy.commitIncomplete}</p>}
           <h5>{copy.provenance}</h5>
           {commit.provenance ? <>

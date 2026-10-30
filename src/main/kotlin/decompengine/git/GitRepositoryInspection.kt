@@ -307,7 +307,7 @@ object GitRepositoryInspector {
                                 if (it == '/'.code.toByte()) "/" else "%%%02X".format(it.toInt() and 0xff)
                             }))
                         if (!file.normalize().startsWith(root) || file.normalize() == root) throw IllegalArgumentException()
-                        content[entry.path] = GitWorkspaceContent.fingerprint(root, file, budget)
+                        content[entry.path] = GitWorkspaceContent.fingerprint(root, file, budget, nativePath = entry.path.bytes)
                         worktreeStat(root, file)
                     } catch (_: Exception) {
                         throw GitRepositoryException("REPOSITORY_UNAVAILABLE", "A work-tree file could not be observed exactly.")

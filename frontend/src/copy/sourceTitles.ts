@@ -2,4 +2,5 @@
 export const sourceTitleCopy = {
   title: 'Recorded source inputs',
   fileTitle: 'Recorded source file',
+  searchTitle: 'Search recorded source inputs',
 } as const;

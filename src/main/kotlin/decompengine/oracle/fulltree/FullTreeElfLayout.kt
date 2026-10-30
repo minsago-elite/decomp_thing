@@ -136,6 +136,48 @@ internal data class FullTreeElfFunctionSymbol(
     val rva: ULong?,
 )
 
+/**
+ * One raw STT_FUNC or GNU_IFUNC record. No section, extent, or executable-ownership
+ * decision has been made: zero-sized, unnamed, undefined and unmapped entries remain.
+ * An RVA is only arithmetic relative to imageBase, not evidence of mapped storage.
+ */
+internal data class FullTreeElfFunctionExtent(
+    val name: String,
+    val locator: String,
+    val type: Int,
+    val binding: Int,
+    val visibility: Int,
+    val other: Int,
+    val rawSectionIndex: Int,
+    val resolvedSectionIndex: Long,
+    val sectionKind: FullTreeElfSymbolSectionKind,
+    val value: ULong,
+    val size: ULong,
+    val rva: ULong?,
+    val sectionName: String?,
+    val sectionType: Long?,
+    val sectionFlags: ULong?,
+    val sectionAddress: ULong?,
+    val sectionSize: ULong?,
+    val sectionFileOffset: Long?,
+)
+
+internal class FullTreeElfFunctionExtentLayout(
+    val elfClass: Int,
+    val byteOrder: Int,
+    val elfType: String,
+    val machine: Int,
+    val osAbi: Int,
+    val abiVersion: Int,
+    val imageBase: ULong,
+    executableRanges: List<FullTreeElfExecutableRange>,
+    val scannedSymbols: Long,
+    loadedMemory: List<FullTreeElfMemorySegment>,
+) {
+    val executableRanges: List<FullTreeElfExecutableRange> = Collections.unmodifiableList(ArrayList(executableRanges))
+    val loadedMemory: List<FullTreeElfMemorySegment> = Collections.unmodifiableList(ArrayList(loadedMemory))
+}
+
 internal data class FullTreeElfSectionGroupLimits(
     val maximumGroups: Int = 16_384,
     val maximumMemberships: Int = 131_072,
@@ -371,6 +413,19 @@ internal object FullTreeElfLayout {
         file.verifyUnchanged("$label ELF object source")
         return observation
     }
+
+    /** Consumers must discard streamed records unless the complete scan returns successfully. */
+    fun scanFunctionExtents(
+        file: StableControlFile,
+        label: String,
+        limits: FullTreeElfLayoutLimits = FullTreeElfLayoutLimits(),
+        checkpoint: (String) -> Unit = {},
+        consume: (FullTreeElfFunctionExtent) -> Unit,
+    ): FullTreeElfFunctionExtentLayout {
+        val observation = ElfReader(file, label, limits, checkpoint).scanFunctionExtents(consume)
+        file.verifyUnchanged("$label ELF function-extent source")
+        return observation
+    }
 }
 
 private class ElfReader(
@@ -533,6 +588,39 @@ private class ElfReader(
         return FullTreeElfObjectLayoutObservation(
             core.elfClass, core.byteOrder, core.elfType, core.machine, core.osAbi, core.abiVersion,
             core.imageBase, core.executableRanges, scanned, ranges.loaded, ranges.tls,
+        )
+    }
+
+    fun scanFunctionExtents(consume: (FullTreeElfFunctionExtent) -> Unit): FullTreeElfFunctionExtentLayout {
+        val headers = parseHeaders()
+        val sections = readNamedSections(headers)
+        val ranges = readExecutableRanges(
+            headers.programOffset, headers.programEntrySize, headers.programCount,
+            headers.elfClass, headers.byteOrder, includeObjectStorage = true,
+        )
+        val core = readCoreLayout(headers, ranges)
+        val scanned = scanSymbols(headers, sections, objectMode = true) { symbol ->
+            val type = symbol.info and ELF_ST_TYPE_MASK
+            if (type == STT_FUNC || type == STT_GNU_IFUNC) {
+                val section = if (symbol.sectionKind == FullTreeElfSymbolSectionKind.DEFINED) {
+                    sections[symbol.resolvedSectionIndex.toInt()]
+                } else null
+                consume(FullTreeElfFunctionExtent(
+                    name = symbolName(symbol, "function extent"),
+                    locator = symbolLocator(symbol, "function extent"),
+                    type = type, binding = symbol.info ushr 4,
+                    visibility = symbol.other and 3, other = symbol.other,
+                    rawSectionIndex = symbol.rawSectionIndex, resolvedSectionIndex = symbol.resolvedSectionIndex,
+                    sectionKind = symbol.sectionKind, value = symbol.value, size = symbol.size,
+                    rva = symbol.value.takeIf { it >= core.imageBase }?.minus(core.imageBase),
+                    sectionName = section?.name, sectionType = section?.type, sectionFlags = section?.flags,
+                    sectionAddress = section?.address, sectionSize = section?.size, sectionFileOffset = section?.offset,
+                ))
+            }
+        }
+        return FullTreeElfFunctionExtentLayout(
+            core.elfClass, core.byteOrder, core.elfType, core.machine, core.osAbi, core.abiVersion,
+            core.imageBase, core.executableRanges, scanned, ranges.loaded,
         )
     }
 
@@ -1507,6 +1595,7 @@ private const val PN_XNUM = 0xffff
 private const val STT_OBJECT = 1
 private const val STT_TLS = 6
 private const val STT_FUNC = 2
+private const val STT_GNU_IFUNC = 10
 private const val ELF_ST_TYPE_MASK = 0x0f
 private val ELF32_ADDRESS_SPACE_END = 1UL shl 32
 private val ELF_MAGIC = byteArrayOf(0x7f, 'E'.code.toByte(), 'L'.code.toByte(), 'F'.code.toByte())

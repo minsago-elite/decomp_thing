@@ -115,6 +115,7 @@ data class GitDiffFile(
     val additions: Long?,
     val deletions: Long?,
     val newSizeBytes: Long?,
+    val unmerged: Boolean = false,
 )
 
 data class GitDiffListing(val files: List<GitDiffFile>, val complete: Boolean)
@@ -147,6 +148,8 @@ object GitReads {
     const val MAX_PATCH_BYTES = 128 * 1024
     // All parents are preserved. Oversized history output fails explicitly, never drops parents.
     const val MAX_HISTORY_BYTES = 128 * 1024
+    private const val MIN_API_EPOCH_SECOND = 0L // 1970-01-01T00:00:00Z
+    private const val MAX_API_EPOCH_SECOND = 253_402_300_799L // 9999-12-31T23:59:59Z
     const val MAX_DIFF_FILES = 2000
     const val MAX_SUBJECT = 200
     // Output/time caps do not constrain allocations while inflating or comparing historical blobs.
@@ -262,10 +265,34 @@ object GitReads {
             }
             val parents = values[1].split(' ').filter { it.isNotEmpty() }.map(format::requireObjectId)
             GitHistoryEntry(format.requireObjectId(values[0]), parents, values[2].take(256), values[3].take(256),
-                Instant.ofEpochSecond(values[4].toLong()), Instant.ofEpochSecond(values[5].toLong()),
+                historyInstant(values[4]), historyInstant(values[5]),
                 values[6].take(MAX_SUBJECT), values[6].length > MAX_SUBJECT)
         }
         return GitHistoryPage(entries.take(limit), entries.size > limit)
+    }
+
+    /** Resolve one parent ID from a caller-validated commit without materializing history subjects. */
+    fun firstParent(runner: GitCommandRunner, gitDir: Path, format: GitObjectFormat, commit: String): String? {
+        val objectId = format.requireObjectId(commit)
+        val result = runner.run(GitInvocation("rev-parse", listOf("--verify", "--quiet", "$objectId^1"),
+            gitDir = gitDir, allowedExitCodes = setOf(0, 1), limits = LIMITS.copy(maxStdoutBytes = 128)))
+        if (result.exitCode == 1) return null // The caller validated the commit; a root has no first parent.
+        val parent = result.text.removeSuffix("\n")
+        if (result.stdoutTruncated || !Regex("[0-9a-f]{40}|[0-9a-f]{64}").matches(parent)) {
+            throw GitRepositoryException("REPOSITORY_CORRUPT", "The selected commit parent is malformed.")
+        }
+        return try { format.requireObjectId(parent) } catch (_: IllegalArgumentException) {
+            throw GitRepositoryException("REPOSITORY_CORRUPT", "The selected commit parent is malformed.")
+        }
+    }
+
+    private fun historyInstant(value: String): Instant {
+        val epochSecond = value.toLongOrNull()
+            ?: throw GitRepositoryException("REPOSITORY_UNSUPPORTED", "A commit timestamp cannot be represented by the public date contract.")
+        if (epochSecond !in MIN_API_EPOCH_SECOND..MAX_API_EPOCH_SECOND) {
+            throw GitRepositoryException("REPOSITORY_UNSUPPORTED", "A commit timestamp is outside the supported API date range.")
+        }
+        return Instant.ofEpochSecond(epochSecond)
     }
 
     /** Arguments selecting one comparison; commit scope compares against the first parent (or nothing). */
@@ -342,8 +369,10 @@ object GitReads {
             }
         }
         val sizes = objectSizes(runner, gitDir, files.values.mapNotNull { it.newObjectId }.distinct())
-        return GitDiffListing(files.values.map { it.copy(newSizeBytes = it.newObjectId?.let(sizes::get)) },
-            !raw.stdoutTruncated && !numstat.stdoutTruncated && index >= records.size)
+        return GitDiffListing(files.values.map { file -> file.copy(
+            newSizeBytes = file.newObjectId?.let(sizes::get),
+            unmerged = file.path in unmerged,
+        ) }, !raw.stdoutTruncated && !numstat.stdoutTruncated && index >= records.size)
     }
 
     /** Sizes from object headers only; contents are never read for metadata. */
@@ -360,6 +389,8 @@ object GitReads {
     /** A bounded unified patch for one file. Binary content is never rendered. */
     fun patch(runner: GitCommandRunner, gitDir: Path, workTree: Path?, scope: GitDiffScope, commit: String?, parent: String?,
         file: GitDiffFile): GitPatch {
+        if (scope == GitDiffScope.STAGED && file.unmerged) throw ManagedGitException("PATCH_UNAVAILABLE",
+            "An unresolved merge conflict has no selected staged patch. Resolve the conflict or inspect its unstaged combined patch.")
         if (file.binary) return GitPatch("", truncated = false, binary = true)
         val path = file.path.exact
         if (path == null || (file.originalPath != null && file.originalPath.exact == null)) throw ManagedGitException("PATCH_UNAVAILABLE",
@@ -370,9 +401,10 @@ object GitReads {
         if (paths.any { it.length > GitInvocation.MAX_ARGUMENT_LENGTH }) throw ManagedGitException("PATCH_UNAVAILABLE",
             "This file name exceeds the patch reader's argument bound. Its listing entry stays exact.")
         val (command, selection) = comparison(scope, commit, parent)
-        // Path filters are not record selectors (a path can now be a directory with other changes),
-        // so the patch is read with full blob IDs and only the section for this exact record is kept.
-        val result = runner.run(GitInvocation(command, selection + DIFF_OPTIONS + listOf("-p", "-U3", "--full-index", "--") + paths,
+        // Use the whole-tree comparison from the listing: path filters rerun rename detection and
+        // can pair similar blobs differently when a source path becomes a directory. Only the
+        // section for this exact listing record is retained below.
+        val result = runner.run(GitInvocation(command, selection + DIFF_OPTIONS + listOf("-p", "-U3", "--full-index"),
             gitDir = gitDir, workTree = if (scope == GitDiffScope.COMMIT) null else workTree, truncateStdout = true,
             limits = LIMITS.copy(maxStdoutBytes = MAX_PATCH_BYTES * 4)))
         val text = result.stdout.toString(Charsets.UTF_8)

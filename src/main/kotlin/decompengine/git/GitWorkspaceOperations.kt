@@ -132,24 +132,29 @@ internal object GitWorkspaceMutations {
      * Pathspecs match descendants, and both add and reset resolve index file/directory conflicts
      * by removing ancestors. Neither direction may silently act on an unselected index entry.
      */
+    private fun GitPath.isDescendantOf(parent: GitPath): Boolean {
+        val parentBytes = parent.bytes
+        if (bytes.size <= parentBytes.size + 1) return false
+        for (index in parentBytes.indices) if (bytes[index] != parentBytes[index]) return false
+        return bytes[parentBytes.size] == '/'.code.toByte()
+    }
+
     private fun refuseOverlap(observation: GitWorkspaceObservation, selected: List<GitStatusEntry>, stage: Boolean) {
         val chosen = selected.toSet()
         // Reset also restores rename sources, so protect ancestors of every expanded path.
-        val paths = selected.flatMap { listOfNotNull(it.path.exact, it.originalPath?.exact.takeUnless { stage }) }
-        val prefixes = selected.flatMap { listOfNotNull(it.path.exact, it.originalPath?.exact) }.map { "$it/" }
+        val paths = selected.flatMap { listOfNotNull(it.path, it.originalPath.takeUnless { stage }) }
+        val prefixes = selected.flatMap { listOfNotNull(it.path, it.originalPath) }
         val overlapping = observation.status.entries.any { entry ->
             val purelyUntracked = entry.untracked && entry.staged == GitIndexChange.NONE && entry.unstaged == GitIndexChange.NONE
             if (entry in chosen || entry.ignored || purelyUntracked) false
             else {
-                val descendant = listOfNotNull(entry.path.exact, entry.originalPath?.exact).any { path ->
-                    prefixes.any { path.startsWith(it) }
+                val descendant = listOfNotNull(entry.path, entry.originalPath).any { path ->
+                    prefixes.any { path.isDescendantOf(it) }
                 }
                 // A staged deletion has no remaining index entry. Reset must also protect
                 // unselected staged ancestors that it would remove while restoring a child.
                 val ancestor = (stage || entry.staged != GitIndexChange.NONE) &&
-                    entry.staged != GitIndexChange.DELETED && entry.path.exact?.let { path ->
-                    paths.any { it.startsWith("$path/") }
-                } == true
+                    entry.staged != GitIndexChange.DELETED && paths.any { it.isDescendantOf(entry.path) }
                 descendant || ancestor
             }
         }
@@ -192,6 +197,41 @@ internal object GitWorkspaceMutations {
         }
     }
 
+    /** Refuse path updates that could remove or replace an unselected private-index entry. */
+    fun requireNoIndexPathConflicts(
+        runner: GitCommandRunner,
+        gitDir: Path,
+        workTree: Path,
+        index: Path,
+        entries: List<GitStatusEntry>,
+    ) {
+        val selectedPaths = entries.flatMap { listOfNotNull(it.path, it.originalPath) }.toSet()
+        val result = runner.run(GitInvocation("ls-files", listOf("--stage", "--full-name", "-z"),
+            gitDir = gitDir, workTree = workTree, variables = mapOf("GIT_INDEX_FILE" to index.toString()),
+            truncateStdout = true, limits = COMMIT_LIMITS.copy(maxStdoutBytes = GitReads.MAX_STATUS_BYTES)))
+        if (result.stdoutTruncated) refuse("STATUS_INCOMPLETE", "The staged index is too large to inspect completely.")
+        for (record in GitReads.records(result.stdout)) {
+            val separator = record.indexOf('\t'.code.toByte())
+            if (separator <= 0 || separator == record.lastIndex) {
+                throw GitRepositoryException("REPOSITORY_CORRUPT", "Git index listing is malformed.")
+            }
+            val fields = record.copyOfRange(0, separator).toString(Charsets.US_ASCII).split(' ')
+            if (fields.size != 3 || fields[0] !in setOf("100644", "100755", "120000", "160000") ||
+                fields[2] !in setOf("0", "1", "2", "3")) {
+                throw GitRepositoryException("REPOSITORY_CORRUPT", "Git index listing is malformed.")
+            }
+            val indexedPath = GitPath.of(record.copyOfRange(separator + 1, record.size))
+            // An exact selected entry is the object being staged (including the old side of a
+            // selected rename). Any overlapping unselected entry can otherwise be silently
+            // removed by update-index when a file/directory replacement is published.
+            if (indexedPath !in selectedPaths && selectedPaths.any { path ->
+                    path.isDescendantOf(indexedPath) || indexedPath.isDescendantOf(path)
+                }) {
+                refuse("EXCLUDED_PATH", "A selected path overlaps an unselected index entry and cannot be staged.")
+            }
+        }
+    }
+
     fun validateMessage(message: String) {
         if (message.isBlank() || message.length > MAX_MESSAGE || message.any { it.isISOControl() && it != '\n' && it != '\t' }) {
             refuse("VALIDATION_FAILED", "A commit message must be 1-8192 characters of text without control characters other than newlines and tabs.")
@@ -216,7 +256,11 @@ internal object GitWorkspaceMutations {
                 if (fingerprint != observation.contentFingerprints[entry.path]) {
                     refuse("WORKTREE_CHANGED", "Selected content changed during capture. Read the current status before staging.")
                 }
-                val mode = fingerprint.substringBefore(':')
+                // Git reports the logical mode for a core.symlinks=false placeholder. Its
+                // physical regular-file mode is still used by the content fingerprint, but must
+                // not turn an edited imported symlink into an ordinary file in the index.
+                val mode = entry.worktreeMode?.takeIf { it in setOf("100644", "100755", "120000") }
+                    ?: fingerprint.substringBefore(':')
                 if (mode !in setOf("100644", "100755", "120000")) {
                     refuse("SELECTION_CHANGED", "A selected path is no longer a file or link. Read the current status before staging.")
                 }

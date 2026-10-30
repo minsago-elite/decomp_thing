@@ -83,6 +83,26 @@ class GitWorkspaceMutationsTest {
         }
     }
 
+    @Test fun `content capture authenticates opened regular inode without blocking on a raced FIFO`(): Unit = Fixture().use { f ->
+        val root = Files.createDirectories(f.repositories.root.resolve("fifo-worktree"))
+        val file = root.resolve("raced.c")
+        Files.writeString(file, "int ordinary;\\n")
+        val failure = assertFailsWith<GitRepositoryException> {
+            GitWorkspaceContent.fingerprint(root, file, GitWorkspaceContent.Budget(), beforeOpen = {
+                Files.delete(file)
+                val process = ProcessBuilder("mkfifo", file.toString()).start()
+                assertEquals(0, process.waitFor())
+            })
+        }
+        assertEquals("REPOSITORY_UNAVAILABLE", failure.code)
+        Files.delete(file)
+        Files.writeString(file, "int ordinary;\\n")
+        val expected = GitWorkspaceContent.fingerprint(root, file, GitWorkspaceContent.Budget())
+        Files.createSymbolicLink(root.resolve("link.c"), Path.of("raced.c"))
+        assertTrue(GitWorkspaceContent.fingerprint(root, root.resolve("link.c"), GitWorkspaceContent.Budget()).startsWith("120000:"))
+        assertTrue(expected.startsWith("100644:"))
+    }
+
     @Test fun `staging verifies capture and never indexes bytes written after capture`(): Unit {
         for (format in listOf(GitObjectFormat.SHA1, GitObjectFormat.SHA256)) for (afterCapture in listOf(false, true)) Fixture().use { f ->
             val service = f.open(GitRepositoryPolicy(defaultBranch = "trunk", objectFormat = format))
@@ -163,6 +183,143 @@ class GitWorkspaceMutationsTest {
         }
     }
 
+    @Test fun `unstage refuses hidden gitlinks before reset pathspec can remove them`(): Unit {
+        for (format in listOf(GitObjectFormat.SHA1, GitObjectFormat.SHA256)) Fixture().use { f ->
+            val service = f.open(GitRepositoryPolicy(defaultBranch = "trunk", objectFormat = format))
+            val repositoryId = service.initialized()
+            val gitDir = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
+            val workTree = gitDir.parent.resolve("worktree")
+            fun raw(vararg args: String) = f.repositories.git("--git-dir=$gitDir", "--work-tree=$workTree", *args, cwd = workTree)
+            Files.writeString(workTree.resolve("a.c"), "int rename_source;\\n")
+            val parent = f.repositories.commitAll(gitDir, workTree, "baseline")
+            raw("mv", "a.c", "b.c")
+            val (review, guards) = service.guards(repositoryId)
+            val selection = review.ids { it.path.exact == "b.c" && it.staged == GitIndexChange.RENAMED }
+            assertEquals(1, selection.size)
+            val hidden = "a.c/hidden.c"
+            raw("update-index", "--add", "--cacheinfo", "160000,$parent,$hidden")
+            val before = raw("ls-files", "--stage", "-z")
+            val result = service.run(repositoryId,
+                GitStageRequest(review.record.worktreeId, guards, selection, false), "unstage_hidden_gitlink_01")
+            assertEquals(GitOperationState.FAILED, result.state, result.message)
+            assertEquals("EXCLUDED_PATH", result.failureCode)
+            assertEquals(before, raw("ls-files", "--stage", "-z"), "refusal preserves both rename and hidden gitlink")
+            assertTrue(raw("ls-files", "--stage", "-z").contains(hidden))
+        }
+    }
+
+    @Test fun `staging refuses unchanged gitlinks hidden beneath selected file paths`(): Unit {
+        for (format in listOf(GitObjectFormat.SHA1, GitObjectFormat.SHA256)) Fixture().use { f ->
+            val service = f.open(GitRepositoryPolicy(defaultBranch = "trunk", objectFormat = format))
+            val repositoryId = service.initialized()
+            val gitDir = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
+            val workTree = gitDir.parent.resolve("worktree")
+            fun raw(vararg args: String) = f.repositories.git("--git-dir=$gitDir", "--work-tree=$workTree", *args, cwd = workTree)
+            f.repositories.commitAll(gitDir, workTree, "baseline")
+            val parent = raw("rev-parse", "HEAD").trim()
+            val hidden = "a/hidden.c"
+            raw("update-index", "--add", "--cacheinfo", "160000,$parent,$hidden")
+            raw("commit", "-q", "-m", "baseline gitlink")
+            val headBefore = raw("rev-parse", "HEAD").trim()
+            Files.writeString(workTree.resolve("a"), "int ordinary;\n")
+            val before = raw("ls-files", "--stage", "-z")
+            val (review, guards) = service.guards(repositoryId)
+            val selection = review.ids { it.path.exact == "a" && it.untracked }
+            assertEquals(1, selection.size)
+
+            val result = service.run(repositoryId,
+                GitStageRequest(review.record.worktreeId, guards, selection, true), "stage_unchanged_gitlink_01")
+            assertEquals(GitOperationState.FAILED, result.state, result.message)
+            assertEquals("EXCLUDED_PATH", result.failureCode)
+            assertEquals(before, raw("ls-files", "--stage", "-z"), "refusal preserves the unchanged gitlink")
+            assertEquals(headBefore, raw("rev-parse", "HEAD").trim())
+        }
+    }
+
+    @Test fun `staging refuses hidden regular index entries that conflict with selected file paths`(): Unit {
+        for (format in listOf(GitObjectFormat.SHA1, GitObjectFormat.SHA256)) Fixture().use { f ->
+            val service = f.open(GitRepositoryPolicy(defaultBranch = "trunk", objectFormat = format))
+            val repositoryId = service.initialized()
+            val gitDir = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
+            val workTree = gitDir.parent.resolve("worktree")
+            fun raw(vararg args: String) = f.repositories.git("--git-dir=$gitDir", "--work-tree=$workTree", *args, cwd = workTree)
+            val hidden = "a/child.c"
+            Files.createDirectories(workTree.resolve("a"))
+            Files.writeString(workTree.resolve(hidden), "int retained;\n")
+            f.repositories.commitAll(gitDir, workTree, "baseline")
+            raw("update-index", "--skip-worktree", hidden)
+            Files.delete(workTree.resolve(hidden))
+            Files.delete(workTree.resolve("a"))
+            Files.writeString(workTree.resolve("a"), "int replacement;\n")
+            val before = raw("ls-files", "--stage", "-z")
+            val (review, guards) = service.guards(repositoryId)
+            val selection = review.ids { it.path.exact == "a" && it.untracked }
+            assertEquals(1, selection.size)
+
+            val result = service.run(repositoryId,
+                GitStageRequest(review.record.worktreeId, guards, selection, true), "stage_hidden_regular_01")
+            assertEquals(GitOperationState.FAILED, result.state, result.message)
+            assertEquals("EXCLUDED_PATH", result.failureCode)
+            assertEquals(before, raw("ls-files", "--stage", "-z"), "refusal preserves the hidden regular entry")
+            assertTrue(before.contains(hidden))
+        }
+    }
+
+    @Test fun `staging an edited symlink placeholder preserves its reviewed logical mode`(): Unit = Fixture().use { f ->
+        val service = f.open()
+        val repositoryId = service.initialized()
+        val gitDir = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
+        val workTree = gitDir.parent.resolve("worktree")
+        fun raw(vararg args: String) = f.repositories.git("--git-dir=$gitDir", "--work-tree=$workTree", *args, cwd = workTree)
+        val target = "../src/main.c"
+        val targetFile = f.repositories.root.resolve("symlink-target")
+        Files.writeString(targetFile, target)
+        val blob = raw("hash-object", "-w", "--", targetFile.toString()).trim()
+        raw("update-index", "--add", "--cacheinfo", "120000,$blob,src/link.c")
+        raw("commit", "-q", "-m", "symlink baseline")
+        val placeholder = workTree.resolve("src/link.c")
+        Files.writeString(placeholder, target)
+        assertTrue(Files.isRegularFile(placeholder, java.nio.file.LinkOption.NOFOLLOW_LINKS))
+        assertEquals("../src/main.c", Files.readString(placeholder))
+        Files.writeString(placeholder, "../src/util.c")
+        val (review, guards) = service.guards(repositoryId)
+        val entry = review.observation.status.entries.single { it.path.exact == "src/link.c" }
+        assertEquals("120000", entry.indexMode)
+        assertEquals("120000", entry.worktreeMode)
+
+        val result = service.run(repositoryId, GitStageRequest(review.record.worktreeId, guards,
+            review.ids { it.path.exact == "src/link.c" }, true), "stage_symlink_placeholder_01")
+        assertEquals(GitOperationState.COMPLETED, result.state, result.message)
+        val indexEntry = f.repositories.git("--git-dir=$gitDir", "ls-files", "--stage", "--", "src/link.c")
+        assertTrue(indexEntry.startsWith("120000 "), indexEntry)
+        assertEquals("../src/util.c", f.repositories.git("--git-dir=$gitDir", "show", ":src/link.c"))
+    }
+
+    @Test fun `staging refuses hidden gitlinks that conflict with selected file paths`(): Unit {
+        for (format in listOf(GitObjectFormat.SHA1, GitObjectFormat.SHA256)) Fixture().use { f ->
+            val service = f.open(GitRepositoryPolicy(defaultBranch = "trunk", objectFormat = format))
+            val repositoryId = service.initialized()
+            val gitDir = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
+            val workTree = gitDir.parent.resolve("worktree")
+            fun raw(vararg args: String) = f.repositories.git("--git-dir=$gitDir", "--work-tree=$workTree", *args, cwd = workTree)
+            val parent = f.repositories.commitAll(gitDir, workTree, "baseline")
+            Files.writeString(workTree.resolve("a"), "int ordinary;\n")
+            val hidden = "a/hidden.c"
+            raw("update-index", "--add", "--cacheinfo", "160000,$parent,$hidden")
+            val before = raw("ls-files", "--stage", "-z")
+            val (review, guards) = service.guards(repositoryId)
+            val selection = review.ids { it.path.exact == "a" && it.untracked }
+            assertEquals(1, selection.size)
+
+            val result = service.run(repositoryId,
+                GitStageRequest(review.record.worktreeId, guards, selection, true), "stage_hidden_gitlink_01")
+            assertEquals(GitOperationState.FAILED, result.state, result.message)
+            assertEquals("EXCLUDED_PATH", result.failureCode)
+            assertEquals(before, raw("ls-files", "--stage", "-z"), "refusal preserves the hidden gitlink")
+            assertTrue(before.contains(hidden))
+        }
+    }
+
     @Test fun `external Git writers cannot change index or parent between validation and mutation`(): Unit {
         for (format in listOf(GitObjectFormat.SHA1, GitObjectFormat.SHA256)) for (stage in listOf(false, true)) Fixture().use { f ->
             val service = f.open(GitRepositoryPolicy(defaultBranch = "trunk", objectFormat = format))
@@ -221,6 +378,7 @@ class GitWorkspaceMutationsTest {
             }
             Files.writeString(staging.resolve("ref-name"), "refs/heads/trunk")
             val restarted = f.open()
+            restarted.recover(listOf(jobId))
             assertEquals(GitOperationState.INTERRUPTED, restarted.operation(jobId, repositoryId, operationId).state)
             assertEquals(before, f.repositories.git("--git-dir=$gitDir", "ls-files", "--stage"))
             assertTrue(Files.notExists(gitDir.resolve("HEAD.lock")))
@@ -645,6 +803,36 @@ class GitWorkspaceMutationsTest {
         assertEquals(GitIndexChange.MODIFIED, service.workspace(jobId, repositoryId).observation.status.entries.single { it.path.exact == "src/util.c" }.staged)
     }
 
+    @Test fun `unstaging a rename refuses invalid native descendants beneath its original path`() {
+        for (format in listOf(GitObjectFormat.SHA1, GitObjectFormat.SHA256)) Fixture().use { f ->
+            val service = f.open(GitRepositoryPolicy(defaultBranch = "trunk", objectFormat = format))
+            val repositoryId = service.initialized()
+            val gitDir = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
+            val workTree = gitDir.parent.resolve("worktree")
+            fun raw(vararg args: String) = f.repositories.git("--git-dir=$gitDir", "--work-tree=$workTree", *args, cwd = workTree)
+            Files.writeString(workTree.resolve("a.c"), "int rename_source;\n")
+            f.repositories.commitAll(gitDir, workTree, "baseline")
+            raw("mv", "a.c", "b.c")
+            val invalidChild = Path.of(java.net.URI(workTree.toUri().toASCIIString() + "a.c/%FF.c"))
+            Files.createDirectories(invalidChild.parent)
+            Files.writeString(invalidChild, "int unselected;\n")
+            raw("add", "-A")
+
+            val (view, guards) = service.guards(repositoryId)
+            val invalidEntry = view.observation.status.entries.single { it.path.display == "a.c/\\xff.c" }
+            assertNull(invalidEntry.path.exact)
+            assertTrue(invalidEntry.path.bytes.contentEquals(byteArrayOf(97, 46, 99, 47, 0xff.toByte(), 46, 99)))
+            val rename = view.ids { it.path.exact == "b.c" && it.staged == GitIndexChange.RENAMED }
+            assertEquals(1, rename.size)
+            val indexBefore = raw("ls-files", "--stage")
+            assertEquals("SELECTION_OVERLAP", assertFailsWith<ManagedGitException> {
+                service.requestWorkspace(jobId, repositoryId,
+                    GitStageRequest(view.record.worktreeId, guards, rename, false), "native_overlap_${format.name}")
+            }.code)
+            assertEquals(indexBefore, raw("ls-files", "--stage"))
+        }
+    }
+
     @Test fun `unstaging a rename never touches staged entries beneath its original path`(): Unit = Fixture().use { f ->
         val service = f.open()
         val repositoryId = service.initialized()
@@ -883,6 +1071,7 @@ class GitWorkspaceMutationsTest {
             assertNull(service.workspace(jobId, repositoryId).mapping)
             service.close(); f.hook = {}
             val restarted = f.open()
+            restarted.recover(listOf(jobId))
             val recovered = restarted.operation(jobId, repositoryId, commit.operationId)
             assertEquals(commit.state, recovered.state)
             assertEquals(objectId, recovered.resultObjectId)
@@ -962,6 +1151,7 @@ class GitWorkspaceMutationsTest {
                 }
                 Files.writeString(gitDir.resolve(name), if (contents == "complete") marker else contents)
                 val restarted = f.open()
+                restarted.recover(listOf(jobId))
                 val recovered = restarted.operation(jobId, repositoryId, operationId)
                 assertEquals(GitOperationState.INTERRUPTED, recovered.state, "$name / $contents")
                 for (lock in listOf("index.lock", "HEAD.lock")) assertTrue(Files.notExists(gitDir.resolve(lock)))
@@ -995,6 +1185,7 @@ class GitWorkspaceMutationsTest {
                 else Files.createLink(gitDir.resolve(name), witness)
             }
             val restarted = f.open()
+            restarted.recover(listOf(jobId))
             val recovered = restarted.operation(jobId, repositoryId, operationId)
             assertEquals(GitOperationState.RECOVERY_REQUIRED, recovered.state)
             assertEquals("COMMIT_LOCKS_REQUIRE_REVIEW", recovered.failureCode)
@@ -1029,6 +1220,7 @@ class GitWorkspaceMutationsTest {
                 Files.createDirectories(file.parent)
                 Files.writeString(file, bytes) // No private inode witness exists for this legacy/external lock.
                 val restarted = f.open()
+                restarted.recover(listOf(jobId))
                 val recovered = restarted.operation(jobId, repositoryId, admission.operation.operationId)
                 if (contents == "complete" && name != "refs/heads/trunk.lock") {
                     assertEquals(GitOperationState.INTERRUPTED, recovered.state)
@@ -1057,6 +1249,7 @@ class GitWorkspaceMutationsTest {
             assertTrue(service.awaitIdle(60_000)); service.close()
             f.hook = {}
             val restarted = f.open()
+            restarted.recover(listOf(jobId))
             val recovered = restarted.operation(jobId, repositoryId, admission.operation.operationId)
             assertEquals(state, recovered.state, point.name)
             val head = restarted.workspace(jobId, repositoryId).observation.head.objectId

@@ -5,6 +5,7 @@ import decompengine.git.GitAvailability
 import decompengine.git.GitRuntime
 import decompengine.git.ManagedGitRepositories
 import decompengine.jobs.*
+import org.junit.jupiter.api.Test
 import kotlinx.serialization.json.*
 import java.net.InetSocketAddress
 import java.net.URI
@@ -368,6 +369,63 @@ class WebGitControllerTest {
         error(f.read("$base/provenance/${head.take(10)}"), 422, "VALIDATION_FAILED")
     }
 
+    @Test fun `status rejects escaped paths over the schema display bound for current and original paths`(): Unit = Fixture().use { f ->
+        val (base, directory) = f.initialized()
+        decompengine.git.GitTestRepositories().use { g ->
+            val gitDir = directory.resolve("repository.git"); val workTree = directory.resolve("worktree")
+            fun raw(vararg args: String) = g.git("--git-dir=$gitDir", "--work-tree=$workTree", *args, cwd = workTree)
+            val longPath = List(12) { "\u0001".repeat(250) }.joinToString("/") + "/overflow.c"
+            val display = decompengine.git.GitPath.of(longPath.toByteArray()).display
+            assertTrue(display.codePointCount(0, display.length) > 16_384)
+            val file = workTree.resolve(longPath)
+            Files.createDirectories(file.parent)
+            Files.writeString(file, "int overflow;\n")
+            error(f.read("$base/status"), 422, "VALIDATION_FAILED")
+
+            raw("add", "-A"); raw("commit", "-q", "-m", "long path base")
+            raw("mv", "--", longPath, "short.c")
+            raw("add", "-A")
+            error(f.read("$base/status"), 422, "VALIDATION_FAILED")
+        }
+    }
+
+    @Test fun `selected rename patches match the whole-tree listing after a source becomes a directory`(): Unit = Fixture().use { f ->
+        val (base, directory) = f.initialized()
+        decompengine.git.GitTestRepositories().use { g ->
+            val gitDir = directory.resolve("repository.git"); val workTree = directory.resolve("worktree")
+            fun raw(vararg args: String) = g.git("--git-dir=$gitDir", "--work-tree=$workTree", *args, cwd = workTree)
+            val source = (0 until 100).joinToString("") { "int source_$it = $it;\n" }
+            val other = (0 until 100).joinToString("") { "int other_$it = $it;\n" }
+            Files.writeString(workTree.resolve("A.c"), source)
+            Files.writeString(workTree.resolve("B.c"), other)
+            raw("add", "-A"); raw("commit", "-q", "-m", "rename pairing base")
+            Files.delete(workTree.resolve("A.c"))
+            val child = workTree.resolve("A.c/child.c")
+            Files.createDirectories(child.parent)
+            Files.move(workTree.resolve("B.c"), child)
+            val changed = (0 until 100).joinToString("") { index ->
+                if (index < 20) "int replacement_$index;\n" else "int source_$index = $index;\n"
+            }
+            Files.writeString(workTree.resolve("C.c"), changed)
+            raw("add", "-A")
+
+            val listing = data(f.read("$base/diff?scope=staged"), 200, "gitDiff")
+            val entries = listing.getValue("files").jsonArray.map { it.jsonObject }
+            val nestedRename = entries.single { it.getValue("path").jsonPrimitive.content == "A.c/child.c" }
+            assertEquals("B.c", nestedRename.getValue("originalPath").jsonPrimitive.content)
+            val selected = entries.single { it.getValue("path").jsonPrimitive.content == "C.c" }
+            assertEquals("A.c", selected.getValue("originalPath").jsonPrimitive.content)
+            val patch = data(f.read("$base/diff?scope=staged&file=${selected.getValue("fileId").jsonPrimitive.content}"), 200, "gitDiff")
+                .getValue("patch").jsonObject
+            val text = patch.getValue("text").jsonPrimitive.content
+            assertTrue(text.startsWith("diff --git a/A.c b/C.c\n"), text)
+            assertTrue(text.contains("rename from A.c"), text)
+            assertTrue(text.contains("rename to C.c"), text)
+            assertFalse(text.contains("A.c/child.c"), text)
+            assertEquals(JsonPrimitive(false), patch.getValue("truncated"))
+        }
+    }
+
     @Test fun `directory replacements keep workspace status and diff pages usable`(): Unit = Fixture().use { f ->
         val (base, directory) = f.initialized()
         decompengine.git.GitTestRepositories().use { g ->
@@ -407,6 +465,32 @@ class WebGitControllerTest {
         }
     }
 
+    @Test fun `staged conflict patches are unavailable while unstaged conflicts retain combined patches`(): Unit = Fixture().use { f ->
+        val (base, directory) = f.initialized()
+        decompengine.git.GitTestRepositories().use { g ->
+            val gitDir = directory.resolve("repository.git"); val workTree = directory.resolve("worktree")
+            fun raw(vararg args: String) = g.git("--git-dir=$gitDir", "--work-tree=$workTree", *args, cwd = workTree).trim()
+            raw("add", "-A"); raw("commit", "-q", "-m", "base")
+            val baseBranch = raw("branch", "--show-current")
+            raw("switch", "-q", "-c", "other")
+            Files.writeString(workTree.resolve("src/modules/unit.c"), "int conflict_value = 2;\n")
+            raw("commit", "-q", "-am", "other")
+            raw("switch", "-q", baseBranch)
+            Files.writeString(workTree.resolve("src/modules/unit.c"), "int conflict_value = 1;\n")
+            raw("commit", "-q", "-am", "ours")
+            g.git("--git-dir=$gitDir", "--work-tree=$workTree", "merge", "-q", "other", cwd = workTree, expect = 1)
+
+            val listing = data(f.read("$base/diff?scope=staged"), 200, "gitDiff")
+            val conflict = listing.getValue("files").jsonArray.map { it.jsonObject }
+                .single { it.getValue("path").jsonPrimitive.content == "src/modules/unit.c" }
+            val fileId = conflict.getValue("fileId").jsonPrimitive.content
+            error(f.read("$base/diff?scope=staged&file=$fileId"), 422, "PATCH_UNAVAILABLE")
+            val combined = data(f.read("$base/diff?scope=unstaged&file=$fileId"), 200, "gitDiff")
+                .getValue("patch").jsonObject.getValue("text").jsonPrimitive.content
+            assertTrue(combined.startsWith("diff --cc"), combined)
+        }
+    }
+
     @Test fun `historical paths beyond the argument bound stay listed but patches are explicitly unavailable`(): Unit = Fixture().use { f ->
         val (base, directory) = f.initialized()
         decompengine.git.GitTestRepositories().use { g ->
@@ -442,6 +526,12 @@ class WebGitControllerTest {
             val patch = data(f.read("$base/diff?scope=commit&commit=$head&file=${ordinary.getValue("fileId").jsonPrimitive.content}"), 200, "gitDiff")
                 .getValue("patch").jsonObject
             assertTrue(patch.getValue("text").jsonPrimitive.content.contains("+int main(void)"))
+            val oversizedDisplayPath = List(70) { "d".repeat(240) }.joinToString("/") + "/too-long.c"
+            assertTrue(oversizedDisplayPath.length > 16_384)
+            val oversizedTree = g.treeWithFile(gitDir, oversizedDisplayPath, blob)
+            val oversizedCommit = raw("commit-tree", oversizedTree, "-m", "path exceeds diff display bound")
+            raw("update-ref", "refs/heads/oversized-display", oversizedCommit)
+            error(f.read("$base/diff?scope=commit&commit=$oversizedCommit"), 422, "VALIDATION_FAILED")
             assertEquals(head, raw("rev-parse", "HEAD"))
             assertFalse(Files.exists(workTree.resolve("short.c")))
         }

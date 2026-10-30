@@ -6,6 +6,7 @@ import kotlin.io.path.exists
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNull
@@ -282,6 +283,38 @@ class GitReadsTest {
         }.code)
     }
 
+    @Test fun `selected rename patches preserve whole-tree pairing when a source becomes a directory`(): Unit = GitTestRepositories().use { f ->
+        val (gitDir, workTree) = f.managed("rename-pairing")
+        val source = (0 until 100).joinToString("") { "int source_$it = $it;\n" }
+        val other = (0 until 100).joinToString("") { "int other_$it = $it;\n" }
+        f.write(workTree, "A.c", source)
+        f.write(workTree, "B.c", other)
+        f.commitAll(gitDir, workTree, "base")
+        Files.delete(workTree.resolve("A.c"))
+        val child = workTree.resolve("A.c/child.c")
+        Files.createDirectories(child.parent)
+        Files.move(workTree.resolve("B.c"), child)
+        val changed = (0 until 100).joinToString("") { index ->
+            if (index < 20) "int replacement_$index;\n" else "int source_$index = $index;\n"
+        }
+        f.write(workTree, "C.c", changed)
+        f.raw(gitDir, workTree, "add", "-A")
+
+        val listing = GitReads.diff(f.runner, gitDir, workTree, GitObjectFormat.SHA1, GitDiffScope.STAGED, null, null)
+        val nestedRename = listing.files.single { it.path.exact == "A.c/child.c" }
+        assertEquals(GitIndexChange.RENAMED, nestedRename.change)
+        assertEquals("B.c", nestedRename.originalPath?.exact)
+        val selected = listing.files.single { it.path.exact == "C.c" }
+        assertEquals(GitIndexChange.RENAMED, selected.change)
+        assertEquals("A.c", selected.originalPath?.exact)
+
+        val patch = GitReads.patch(f.runner, gitDir, workTree, GitDiffScope.STAGED, null, null, selected)
+        assertTrue(patch.text.startsWith("diff --git a/A.c b/C.c\n"), patch.text)
+        assertTrue(patch.text.contains("rename from A.c"), patch.text)
+        assertTrue(patch.text.contains("rename to C.c"), patch.text)
+        assertFalse(patch.text.contains("A.c/child.c"), patch.text)
+    }
+
     @Test fun `a selected patch holds only its exact record and modes are part of the version`(): Unit = GitTestRepositories().use { f ->
         val (gitDir, workTree) = f.managed("exact")
         f.write(workTree, "old.c", (1..20).joinToString("") { "int line_$it = $it;\n" })
@@ -361,6 +394,12 @@ class GitReadsTest {
         f.raw(gitDir, workTree, "switch", "-q", "trunk")
         f.write(workTree, "shared.c", "int shared = 1;\n"); f.raw(gitDir, workTree, "commit", "-q", "-am", "ours")
         f.raw(gitDir, workTree, "merge", "-q", "other", expect = 1)
+        val staged = GitReads.diff(f.runner, gitDir, workTree, GitObjectFormat.SHA1, GitDiffScope.STAGED, null, null)
+        val stagedConflict = staged.files.single { it.path.exact == "shared.c" }
+        assertTrue(stagedConflict.unmerged)
+        assertEquals("PATCH_UNAVAILABLE", assertFailsWith<ManagedGitException> {
+            GitReads.patch(f.runner, gitDir, workTree, GitDiffScope.STAGED, null, null, stagedConflict)
+        }.code)
         val unstaged = GitReads.diff(f.runner, gitDir, workTree, GitObjectFormat.SHA1, GitDiffScope.UNSTAGED, null, null)
         val conflicted = unstaged.files.single { it.path.exact == "shared.c" }
         val patch = GitReads.patch(f.runner, gitDir, workTree, GitDiffScope.UNSTAGED, null, null, conflicted)
@@ -467,6 +506,48 @@ class GitReadsTest {
         assertEquals(GitCommandException.Kind.OUTPUT_LIMIT, kotlin.test.assertFailsWith<GitCommandException> {
             GitReads.history(f.runner, gitDir, GitObjectFormat.SHA1, large, 0, 1)
         }.kind)
+        val child = f.git("--git-dir=$gitDir", "commit-tree", tree, "-p", large, "-m", "small child").trim()
+        assertEquals(GitCommandException.Kind.OUTPUT_LIMIT, kotlin.test.assertFailsWith<GitCommandException> {
+            GitReads.history(f.runner, gitDir, GitObjectFormat.SHA1, child, 0, 1)
+        }.kind)
+        assertNull(GitReads.firstParent(f.runner, gitDir, GitObjectFormat.SHA1, base))
+        val parent = GitReads.firstParent(f.runner, gitDir, GitObjectFormat.SHA1, child)
+        assertEquals(large, parent)
+        assertTrue(GitReads.diff(f.runner, gitDir, null, GitObjectFormat.SHA1, GitDiffScope.COMMIT, child, parent).complete)
+    }
+
+    @Test fun `history rejects timestamps outside the public four digit date range`() = GitTestRepositories().use { f ->
+        val (gitDir, workTree) = f.managed("history-date-range")
+        f.write(workTree, "a.c", "int a;\n")
+        val base = f.commitAll(gitDir, workTree, "base")
+        val tree = f.git("--git-dir=$gitDir", "rev-parse", "$base^{tree}").trim()
+        fun commitAt(name: String, authored: Long, committed: Long): String {
+            val objectFile = f.root.resolve(name)
+            Files.writeString(objectFile, buildString {
+                append("tree $tree\n")
+                append("parent $base\n")
+                append("author Fixture Author <fixture@example.invalid> $authored +0000\n")
+                append("committer Fixture Committer <fixture@example.invalid> $committed +0000\n\n")
+                append("test commit\n")
+            })
+            return f.git("--git-dir=$gitDir", "hash-object", "--literally", "-t", "commit", "-w", objectFile.toString()).trim()
+        }
+        val unsupportedCommits = listOf(
+            commitAt("author-after-range", 253_402_300_800L, 1_767_225_600L),
+            commitAt("committer-after-range", 1_767_225_600L, 253_402_300_800L),
+            commitAt("author-before-range", -1L, 1_767_225_600L),
+            commitAt("committer-before-range", 1_767_225_600L, -1L),
+        )
+        for (commit in unsupportedCommits) {
+            val failure = assertFailsWith<GitRepositoryException> {
+                GitReads.history(f.runner, gitDir, GitObjectFormat.SHA1, commit, 0, 1)
+            }
+            assertEquals("REPOSITORY_UNSUPPORTED", failure.code, failure.message)
+        }
+        val boundaryCommit = commitAt("date-boundaries", 0L, 253_402_300_799L)
+        val boundary = GitReads.history(f.runner, gitDir, GitObjectFormat.SHA1, boundaryCommit, 0, 1).entries.single()
+        assertEquals("1970-01-01T00:00:00Z", boundary.authoredAt.toString())
+        assertEquals("9999-12-31T23:59:59Z", boundary.committedAt.toString())
     }
 
     @Test fun `staged diff works on an unborn branch`(): Unit = GitTestRepositories().use { f ->

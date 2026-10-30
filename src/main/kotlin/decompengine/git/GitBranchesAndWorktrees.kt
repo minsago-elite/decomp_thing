@@ -102,6 +102,35 @@ internal object GitRefOperations {
         return runner.run(GitInvocation("rev-list", arguments, gitDir = commonDir, limits = LIMITS)).text.trim().toLongOrNull() ?: Long.MAX_VALUE
     }
 
+    /** Refuse to delete a branch while any symbolic ref depends on it, including indirect aliases. */
+    fun requireBranchDeleteSafe(runner: GitCommandRunner, commonDir: Path, objectId: String, branchRef: String) {
+        val refs = runner.run(GitInvocation("for-each-ref", listOf("--format=%(refname)%00%(symref)"),
+            gitDir = commonDir, limits = LIMITS)).stdout.toString(Charsets.UTF_8)
+        val symbolicTargets = mutableMapOf<String, String>()
+        refs.split('\n').filter(String::isNotEmpty).forEach { record ->
+            val separator = record.indexOf('\u0000')
+            if (separator <= 0 || record.indexOf('\u0000', separator + 1) >= 0) {
+                refuse("REPOSITORY_UNAVAILABLE", "Git could not verify symbolic refs. Nothing was deleted.")
+            }
+            val ref = record.substring(0, separator)
+            val target = record.substring(separator + 1)
+            if (target.isNotEmpty()) symbolicTargets[ref] = target
+        }
+        val dependentRefs = linkedSetOf(branchRef)
+        var changed: Boolean
+        do {
+            changed = false
+            symbolicTargets.forEach { (ref, target) ->
+                if (target in dependentRefs && dependentRefs.add(ref)) changed = true
+            }
+        } while (changed)
+        if (dependentRefs.size > 1) refuse("BRANCH_UNMERGED",
+            "A symbolic ref depends on this branch. Retarget or remove it before deleting; nothing was deleted.")
+        val unmerged = unmergedCount(runner, commonDir, objectId, branchRef)
+        if (unmerged > 0) refuse("BRANCH_UNMERGED",
+            "$unmerged commit(s) are reachable only from this branch. Merge or tag them first; nothing is force-deleted.")
+    }
+
     /**
      * Pin a branch through final validation AND checkout using Git's files-ref lock protocol.
      * A private inode witness lets restart recovery reclaim only our lock, never another writer's.
@@ -143,6 +172,17 @@ internal object GitRefOperations {
         return result.stdout.toString(Charsets.ISO_8859_1).split('\u0000').filter { it.startsWith("160000 ") }.map { record ->
             GitPath.of(record.substringAfter('\t').toByteArray(Charsets.ISO_8859_1)).exact
         }
+    }
+
+    /** Refuse removal when index flags could hide tracked local edits from ordinary status. */
+    fun requireNoHiddenIndexEntries(runner: GitCommandRunner, gitDir: Path, workTree: Path) {
+        val result = runner.run(GitInvocation("ls-files", listOf("-v", "-z"), gitDir = gitDir, workTree = workTree, limits = LIMITS))
+        val hasHiddenEntries = result.stdout.toString(Charsets.ISO_8859_1).split('\u0000').any { entry ->
+            val tag = entry.firstOrNull()
+            tag == 'S' || tag?.isLowerCase() == true
+        }
+        if (hasHiddenEntries) refuse("WORKTREE_DIRTY",
+            "The work tree has tracked files hidden by index flags. Clear the flags and review the files before removal; nothing was discarded.")
     }
 
     fun addWorktree(runner: GitCommandRunner, commonDir: Path, path: Path, objectId: String, branch: String?) {

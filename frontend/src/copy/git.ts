@@ -48,6 +48,7 @@ export const gitCopy = {
   showDiff: 'Show diff for {path}',
   diffTitle: '{scope} diff: {path}',
   binary: 'Binary file; content is not shown.',
+  binaryCommit: '(binary)',
   truncated: 'The diff is truncated at its bound.',
   commitTitle: 'Commit staged files',
   commitFiles: 'Exactly these staged files will be committed:',

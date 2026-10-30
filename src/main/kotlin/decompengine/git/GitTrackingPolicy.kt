@@ -25,7 +25,10 @@ object GitTrackingPolicy {
             ".netrc", ".git-credentials", ".npmrc", ".pypirc", "*.token", "credentials.json",
         )),
         Category("job-runtime-state", "Job databases, records and staging state", listOf(
-            "job.json", "workflow-state.json", "*.sqlite", "*.sqlite3", "*.db", "*.db-journal", "*.db-wal",
+            "job.json", "workflow-state.json", "workflow-state.pending.json",
+            "*.sqlite", "*.sqlite-journal", "*.sqlite-wal", "*.sqlite-shm",
+            "*.sqlite3", "*.sqlite3-journal", "*.sqlite3-wal", "*.sqlite3-shm",
+            "*.db", "*.db-journal", "*.db-wal", "*.db-shm",
             ".upload-*/", ".job-metadata-*", ".git-runtime/",
         )),
         Category("private-transcripts", "Agent sessions, transcripts and progress journals", listOf(
@@ -52,6 +55,11 @@ object GitTrackingPolicy {
     private val policyLock = Any()
     private const val BATCH = 200
 
+    /** Prepare the immutable policy repository during startup, never on a GET read. */
+    internal fun prepare(runner: GitCommandRunner) {
+        policyRepository(runner, prepare = true)
+    }
+
     /**
      * Paths this policy excludes, decided independently of the repository. In a managed repository
      * `info/exclude` only makes excluded files appear ignored, and a `.gitignore` in source content
@@ -59,8 +67,6 @@ object GitTrackingPolicy {
      * server-owned scratch repository whose only ignore source is this policy, with `--no-index`, so
      * nothing a repository contains can override it. Staging enforces this result.
      */
-    internal fun prepare(runner: GitCommandRunner) { policyRepository(runner, prepare = true) }
-
     fun excluded(runner: GitCommandRunner, paths: Collection<String>, prepare: Boolean = true): Set<String> {
         if (paths.isEmpty()) return emptySet()
         val (gitDir, workTree) = policyRepository(runner, prepare)

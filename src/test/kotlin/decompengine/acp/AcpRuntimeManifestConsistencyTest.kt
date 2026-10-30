@@ -7,6 +7,7 @@ import java.security.MessageDigest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 
 class AcpRuntimeManifestConsistencyTest {
@@ -35,5 +36,27 @@ class AcpRuntimeManifestConsistencyTest {
             .joinToString("") { "%02x".format(it) }
         val matchingContent = ForbiddenRuntimeFile(-1, -1, Files.size(source), digest)
         assertFailsWith<IOException> { buildRuntimeManifest(source, AcpRuntimeClosureLimits(), setOf(matchingContent)) }
+    }
+
+    @Test
+    fun `pinned descriptor change time detects same size edits after mtime restoration`() {
+        val source = Files.createTempFile(Path.of("build"), "acp-pinned-identity-", ".bin")
+        try {
+            val original = byteArrayOf(1, 2, 3, 4)
+            Files.write(source, original)
+            val descriptor = LinuxFilesystemSyscalls.openAbsolutePathOrNull(source)
+                ?: error("temporary pinned identity fixture disappeared")
+            descriptor.use {
+                val before = readPinnedDescriptorIdentity(descriptor)
+                val originalModified = Files.getLastModifiedTime(source)
+                Files.write(source, byteArrayOf(5, 6, 7, 8))
+                Files.setLastModifiedTime(source, originalModified)
+                val after = readPinnedDescriptorIdentity(descriptor)
+                assertEquals(before.modifiedMillis, after.modifiedMillis)
+                assertNotEquals(before.changedTime, after.changedTime)
+            }
+        } finally {
+            Files.deleteIfExists(source)
+        }
     }
 }
