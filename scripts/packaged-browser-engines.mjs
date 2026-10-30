@@ -117,6 +117,9 @@ async function context(options = {}) {
       tag: element?.localName ?? null,
       id: element?.id || null,
       className: String(element?.className ?? '').slice(0, 128),
+      type: element?.getAttribute?.('type')?.slice(0, 32) ?? null,
+      name: element?.getAttribute?.('name')?.slice(0, 64) ?? null,
+      ariaLabel: element?.getAttribute?.('aria-label')?.slice(0, 96) ?? null,
       parentTag: element?.parentElement?.localName ?? null,
       parentId: element?.parentElement?.id || null,
       parentClassName: String(element?.parentElement?.className ?? '').slice(0, 128),
@@ -174,6 +177,37 @@ async function context(options = {}) {
       Node.prototype[method] = function(...nodes) {
         if (nodes.some(containsStyleElement)) recordStyleOperation(`${method}(style)`);
         return original.apply(this, nodes);
+      };
+    }
+    const parentNodePrototype = globalThis.ParentNode?.prototype;
+    for (const method of ['append', 'prepend', 'replaceChildren']) {
+      const original = parentNodePrototype?.[method];
+      if (typeof original !== 'function') continue;
+      parentNodePrototype[method] = function(...nodes) {
+        if (nodes.some(containsStyleElement)) recordStyleOperation(`ParentNode.${method}(style)`);
+        return original.apply(this, nodes);
+      };
+    }
+    const childNodePrototype = globalThis.ChildNode?.prototype;
+    for (const method of ['before', 'after', 'replaceWith']) {
+      const original = childNodePrototype?.[method];
+      if (typeof original !== 'function') continue;
+      childNodePrototype[method] = function(...nodes) {
+        if (nodes.some(containsStyleElement)) recordStyleOperation(`ChildNode.${method}(style)`);
+        return original.apply(this, nodes);
+      };
+    }
+    const insertAdjacentElement = Element.prototype.insertAdjacentElement;
+    Element.prototype.insertAdjacentElement = function(position, element) {
+      if (containsStyleElement(element)) recordStyleOperation('insertAdjacentElement(style)');
+      return insertAdjacentElement.apply(this, [position, element]);
+    };
+    const createContextualFragment = globalThis.Range?.prototype.createContextualFragment;
+    if (typeof createContextualFragment === 'function') {
+      globalThis.Range.prototype.createContextualFragment = function(...args) {
+        const fragment = createContextualFragment.apply(this, args);
+        if (containsStyleElement(fragment)) recordStyleOperation('Range.createContextualFragment(style)');
+        return fragment;
       };
     }
     const innerHTML = Object.getOwnPropertyDescriptor(Element.prototype, 'innerHTML');
