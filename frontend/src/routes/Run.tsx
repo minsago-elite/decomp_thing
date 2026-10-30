@@ -88,7 +88,7 @@ function Details({ jobId, runId, basePath, session, view, navigation }: {
       <p>{copy.completionAloneDoesNotEstablishAcceptedReconstructionAcceptanceBelongsTo}</p>
       <p>{copy.recordedHarnessBoundary}</p>
       {run.previousRunId && <a href={runPath(basePath, jobId, run.previousRunId)}>{copy.openPreviousAttempt}</a>}
-      <RecordedConfiguration run={run} />
+      <RecordedConfiguration run={run} basePath={basePath} />
       {run.state === 'queued' && <QueuePosition key={`queue/${jobId}/${runId}/${run.version}`} jobId={jobId} runId={runId} basePath={basePath} />}
       <h2>{copy.recordedLimits}</h2>
       <p>{displayMessage(outcomeCopy.limitsSource, { time: <time dateTime={run.createdAt} title={run.createdAt}>{formatExactTimestamp(run.createdAt)}</time> })}</p>

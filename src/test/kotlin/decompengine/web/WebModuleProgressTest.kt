@@ -327,6 +327,8 @@ class WebModuleProgressTest {
             override fun reconstruct(binary: Path, reportsDirectory: Path, mode: WebReconstructionMode,
                 progress: decompengine.agent.AgentWorkflowProgress, harness: WebAdmittedHarness?, maxContextCharacters: Int?) = error("not executed")
             override fun repair(project: Path, binary: Path, reportsDirectory: Path, harness: WebAdmittedHarness) = error("not executed")
+            override fun validate(project: Path, binary: Path, reportsDirectory: Path, inputs: List<decompengine.validation.ProcessInput>) =
+                error("not executed")
         }
         return listOf(ExploreWorkflowAdapter(engines, BoundedWorkflowExecutor()),
             ReconstructWorkflowAdapter(engines, BoundedWorkflowExecutor(), WebReconstructionMode.AGENT, WebAgentHarness.ACP, emptyList()),

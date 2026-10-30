@@ -28,6 +28,15 @@ class WorkflowAttemptConfigurationTest {
             }
             // The earlier record named an always-null profileId instead of the reconstruction object.
             val state = root.resolve(job.id).resolve("workflow-state.json")
+            // The record from before validation existed omits that field.
+            val beforeValidation = state.readText().replace(Regex(",\\s*\"validation\"\\s*:\\s*null"), "")
+            check(beforeValidation != state.readText()) { state.readText() }
+            state.writeText(beforeValidation)
+            WorkflowAttemptStore.open(root, Clock.systemUTC()).use { owner ->
+                val inspected = owner.inspect(job.id)
+                val attempt = assertIs<WorkflowJobInspection.Available>(inspected, "$inspected\n$beforeValidation").snapshot.attempts.single()
+                assertEquals(configuration, attempt.configuration); assertNull(attempt.configuration?.validation)
+            }
             val earlier = state.readText().replace(Regex("\"reconstruction\"\\s*:\\s*null"), "\"profileId\":null")
             check(earlier != state.readText()) { state.readText() }
             state.writeText(earlier)

@@ -22,6 +22,7 @@ import decompengine.repair.RepairValidationProof
 import decompengine.repair.RevisionRepairMetadata
 import decompengine.repair.readProjectRecordedRepairHistory
 import decompengine.repair.repairCandidateSourceSha256
+import decompengine.repair.repairRegressionCorpusSha256
 import decompengine.testing.RecoveryMatrixEvidence
 import decompengine.testing.recoveryMatrixTempDirectory as createTempDirectory
 import decompengine.validation.ProcessInput
@@ -736,12 +737,12 @@ class WebProductionWorkflowsTest {
         assertEquals("HARNESS_UNSUPPORTED", unsupported.getValue(WebAgentHarness.ACP).prerequisite.reasonCode)
 
         assertEquals(listOf("workflow-explore-tools", "workflow-reconstruct-agent-acp", "workflow-reconstruct-evidence-only",
-            "workflow-repair-agent-acp"), productionDurableWebWorkflows(emptyMap(), engines = FakeEngines()).map(::webWorkflowCapabilityId))
+            "workflow-repair-agent-acp", "workflow-validate-tools"), productionDurableWebWorkflows(emptyMap(), engines = FakeEngines()).map(::webWorkflowCapabilityId))
         val retained = productionDurableWebWorkflows(legacyEnvironment, engines = FakeEngines())
         assertEquals(listOf("workflow-explore-tools", "workflow-reconstruct-agent-acp", "workflow-reconstruct-agent-legacy-openai",
-            "workflow-reconstruct-evidence-only", "workflow-repair-agent-acp", "workflow-repair-agent-legacy-openai"),
+            "workflow-reconstruct-evidence-only", "workflow-repair-agent-acp", "workflow-repair-agent-legacy-openai", "workflow-validate-tools"),
             retained.map(::webWorkflowCapabilityId))
-        assertEquals(listOf("agent-acp", "agent-legacy-openai", "evidence-only", "agent-acp", "agent-legacy-openai"),
+        assertEquals(listOf("agent-acp", "agent-legacy-openai", "evidence-only", "agent-acp", "agent-legacy-openai", null),
             retained.drop(1).map { it.harnessCapabilityId })
         assertTrue(retained.none { it.launch?.harness == WebAgentHarness.BUILTIN }, "the built-in harness was registered")
     }
@@ -1082,6 +1083,169 @@ class WebProductionWorkflowsTest {
     }
 
     @Test
+    fun `validation requests bind their revision and reviewed server-approved cases and are never retargeted`() = withRoot { root ->
+        val store = JobStore(root); val job = store.createFromUpload("validate.elf", elfFixture())
+        val engines = FakeEngines()
+        val adapters = adapters(engines) + ValidateWorkflowAdapter(engines, FAST, acceptTestOnlyPublication = true)
+        val validate = adapters.last()
+        assertEquals("workflow-validate-tools", webWorkflowCapabilityId(validate))
+        assertFalse(checkNotNull(validate.launch).contactsAgent); assertEquals(DurableWebWorkflowInput.RECORDED_REQUIRED, validate.input)
+        val capabilities = webWorkflowCapabilities(adapters, WebHarnessReadiness("supported", null, "ready", prerequisites = harnessPrerequisites(ACP_PROVENANCE)))
+            .associateBy { it.getValue("id").jsonPrimitive.content }
+        assertEquals("supported", capabilities.getValue("workflow-validate-tools").getValue("state").jsonPrimitive.content)
+        assertFalse("workflow-validate" in capabilities, "a registered validation is still reported as unimplemented")
+        // Validation runs the same contained validator as repair, so it is unavailable until that validator is qualified.
+        val unqualified = harnessPrerequisites(ACP_PROVENANCE).copy(repairValidator = WebPrerequisite(false, "REPAIR_VALIDATOR_UNQUALIFIED",
+            "The contained repair validator is not yet qualified for production use, so repair cannot run on this server."))
+        val closed = webWorkflowCapabilities(adapters, WebHarnessReadiness("supported", null, "ready", prerequisites = unqualified))
+            .single { it.getValue("id").jsonPrimitive.content == "workflow-validate-tools" }
+        assertEquals("unavailable" to "REPAIR_VALIDATOR_UNQUALIFIED",
+            closed.getValue("state").jsonPrimitive.content to closed.getValue("reasonCode").jsonPrimitive.content)
+        service(store, adapters).use { service ->
+            service.initializeExistingStorage()
+            fun start(request: NewWorkflowAttempt, key: String) = service.requestDurableStart(job.id, version(service, job.id), request, key)
+            val revisionA = start(NewWorkflowAttempt(WorkflowKind.RECONSTRUCT, WebWorkflowDefaults.RECONSTRUCT_EVIDENCE,
+                harnessCapabilityId = EVIDENCE_ONLY_CAPABILITY), "validate_reconstruct_a1").attempt.candidate!!.revisionId
+            // A revision without a repair graph runs exactly the server default case.
+            val plan = service.readValidationCasePlan(job.id, revisionA)
+            assertTrue(plan.available); assertEquals(listOf("default"), plan.cases.map { it.caseId })
+            assertEquals(repairRegressionCorpusSha256(WEB_VALIDATION_DEFAULT_CASES), plan.corpusSha256)
+            val dto = webValidationCasePlan(job.id, revisionA, plan)
+            assertEquals(schemaProperties("validationCasePlan"), dto.keys)
+            assertCode("INPUT_REVISION_UNAVAILABLE") { service.readValidationCasePlan(job.id, "source_unrecorded") }
+            val request = NewWorkflowAttempt(WorkflowKind.VALIDATE, WebWorkflowDefaults.VALIDATE, revisionA)
+            val reviewed = WorkflowValidationCases(WEB_VALIDATION_PRESET, checkNotNull(plan.corpusSha256))
+            val before = engines.calls.get()
+            assertCode("VALIDATION_CASES_REQUIRED") { start(request, "validate_without_cases") }
+            assertCode("VALIDATION_CASES_CHANGED") { start(request.copy(cases = reviewed.copy(corpusSha256 = "0".repeat(64))), "validate_other_cases1") }
+            assertCode("VALIDATION_CASES_UNAVAILABLE") { start(request.copy(cases = reviewed.copy(presetId = "host-shell")), "validate_other_preset") }
+            assertCode("VALIDATION_CASES_UNAVAILABLE") {
+                start(NewWorkflowAttempt(WorkflowKind.EXPLORE, WebWorkflowDefaults.EXPLORE, cases = reviewed), "explore_with_cases_01")
+            }
+            assertCode("INPUT_REVISION_REQUIRED") { start(request.copy(inputRevisionId = null, cases = reviewed), "validate_without_input") }
+            assertCode("WORKFLOW_PREREQUISITE_UNAVAILABLE") {
+                service.requestDurableStart(job.id, version(service, job.id), request.copy(cases = reviewed), "validate_unqualified_01", unqualified)
+            }
+            assertEquals(before, engines.calls.get(), "a refused validation executed an engine")
+            val validated = start(request.copy(cases = reviewed), "validate_revision_a_01").attempt
+            assertEquals(WorkflowRunState.COMPLETED, validated.state); assertEquals(revisionA, validated.inputRevisionId)
+            assertEquals(WorkflowAttemptValidation(WEB_VALIDATION_PRESET, reviewed.corpusSha256, 1), validated.configuration?.validation)
+            assertEquals(listOf(WEB_VALIDATION_DEFAULT_CASES), engines.validated, "validation ran other than the server cases")
+            assertEquals("1", webRun(validated).getValue("configuration").jsonObject.getValue("validation").jsonObject
+                .getValue("caseCount").jsonPrimitive.content)
+            // A newer accepted revision leaves the configured and completed validation bound to revision A.
+            val repaired = start(NewWorkflowAttempt(WorkflowKind.REPAIR, WebWorkflowDefaults.REPAIR, revisionA, "agent-acp"), "validate_repair_b_01").attempt
+            assertNotEquals(revisionA, repaired.candidate?.revisionId)
+            val retained = service.presentation(job.id).snapshot!!.attempts.single { it.runId == validated.runId }
+            assertEquals(revisionA, retained.inputRevisionId); assertEquals(validated.configuration, retained.configuration)
+            // The repaired revision retains a graph corpus, so its reviewed cases include the retained case and differ from A's.
+            val revisionB = checkNotNull(repaired.candidate).revisionId
+            val retainedPlan = service.readValidationCasePlan(job.id, revisionB)
+            assertEquals(listOf("default" to false, "fixture-case" to true), retainedPlan.cases.map { it.caseId to it.retained })
+            assertNotEquals(plan.corpusSha256, retainedPlan.corpusSha256)
+            assertCode("VALIDATION_CASES_CHANGED") { start(request.copy(inputRevisionId = revisionB, cases = reviewed), "validate_b_stale_cases") }
+        }
+    }
+
+    @Test
+    fun `validation retry retains the reviewed corpus and refuses a changed retained corpus`() = withRoot { root ->
+        for (changed in listOf(false, true)) {
+            val store = JobStore(root.resolve("retry-$changed"))
+            val job = store.createFromUpload("validation-retry.elf", elfFixture())
+            val engines = FakeEngines().apply { validateBody = { error("inert validation failure") } }
+            var retried: WorkflowAttempt? = null
+            service(store, adapters(engines) + ValidateWorkflowAdapter(engines, FAST)).use { service ->
+                service.initializeExistingStorage()
+                fun start(request: NewWorkflowAttempt, key: String) = service.requestDurableStart(job.id, version(service, job.id), request, key).attempt
+                val source = start(NewWorkflowAttempt(WorkflowKind.RECONSTRUCT, WebWorkflowDefaults.RECONSTRUCT_EVIDENCE,
+                    harnessCapabilityId = EVIDENCE_ONLY_CAPABILITY), "validation_retry_source_1")
+                val revision = checkNotNull(source.candidate).revisionId
+                val plan = service.readValidationCasePlan(job.id, revision)
+                val cases = WorkflowValidationCases(WEB_VALIDATION_PRESET, checkNotNull(plan.corpusSha256))
+                val failed = start(NewWorkflowAttempt(WorkflowKind.VALIDATE, WebWorkflowDefaults.VALIDATE, revision,
+                    cases = cases), "validation_retry_failed_1")
+                assertEquals(WorkflowRunState.FAILED, failed.state)
+                val calls = engines.calls.get()
+                if (changed) {
+                    // Same source revision, different retained graph corpus: never silently validate new cases.
+                    acceptRepairBaseline(store.runReportsDirectory(job.id, source.runId).resolve("source-tree"))
+                    assertEquals("INPUT_UNVERIFIED", service.attemptControls(job.id, failed.runId).retryReason)
+                    assertCode("INPUT_UNVERIFIED") {
+                        service.requestDurableRecovery(job.id, failed.runId, failed.version, WorkflowRecoveryMode.RETRY,
+                            revision, "validation_retry_changed_1")
+                    }
+                    assertEquals(calls, engines.calls.get())
+                } else {
+                    assertNull(service.attemptControls(job.id, failed.runId).retryReason)
+                    engines.validateBody = { RepairRunStatus.REJECTED }
+                    val result = service.requestDurableRecovery(job.id, failed.runId, failed.version, WorkflowRecoveryMode.RETRY,
+                        revision, "validation_retry_reviewed_1")
+                    val attempt = result.attempt
+                    assertEquals(WorkflowRunState.COMPLETED, attempt.state)
+                    assertEquals(failed.runId, attempt.previousRunId); assertEquals(revision, attempt.inputRevisionId)
+                    assertEquals(cases, attempt.cases); assertEquals(failed.configuration?.validation, attempt.configuration?.validation)
+                    val replay = service.requestDurableRecovery(job.id, failed.runId, failed.version, WorkflowRecoveryMode.RETRY,
+                        revision, "validation_retry_reviewed_1")
+                    assertTrue(replay.replayed); assertEquals(attempt.runId, replay.attempt.runId)
+                    assertEquals(calls + 1, engines.calls.get())
+                    retried = attempt
+                }
+            }
+            retried?.let { expected ->
+                WorkflowAttemptStore.open(store.storageRoot).use { owner ->
+                    val retained = assertIs<WorkflowJobInspection.Available>(owner.inspect(job.id)).snapshot.latestRun!!
+                    assertEquals(expected, retained, "retry lost its validation selection, configuration or receipt on restart")
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `a validation without an admission corpus is refused before copying or validating`() = withRoot { root ->
+        val engines = FakeEngines()
+        val input = root.resolve("input"); writeSourceTree(input, "base")
+        val reports = root.resolve("reports")
+        val base = context(root, reports, WebWorkflowDefaults.VALIDATE)
+        val context = base.copy(attempt = base.attempt.copy(workflow = WorkflowKind.VALIDATE), inputSourceTree = input)
+        val refused = assertIs<DurableWebWorkflowOutcome.Failed>(ValidateWorkflowAdapter(engines, FAST).execute(context))
+        assertEquals(WorkflowTerminalReason.REFUSED, refused.reason)
+        assertTrue(engines.validated.isEmpty()); assertFalse(Files.exists(reports.resolve("source-tree")))
+    }
+
+    @Test
+    fun `a validation whose copied corpus differs from the admitted one is refused before validating`() = withRoot { root ->
+        val engines = FakeEngines()
+        val input = root.resolve("input"); writeSourceTree(input, "base")
+        val reports = root.resolve("reports")
+        val base = context(root, reports, WebWorkflowDefaults.VALIDATE)
+        val recorded = WorkflowAttemptConfiguration("workflow-validate-tools", "tools", true, false, listOf("sandbox", "c-toolchain"),
+            "recorded-required", true, null, validation = WorkflowAttemptValidation(WEB_VALIDATION_PRESET, "0".repeat(64), 1))
+        val context = base.copy(attempt = base.attempt.copy(workflow = WorkflowKind.VALIDATE, configuration = recorded), inputSourceTree = input)
+        val refused = assertIs<DurableWebWorkflowOutcome.Failed>(ValidateWorkflowAdapter(engines, FAST).execute(context))
+        assertEquals(WorkflowTerminalReason.REFUSED, refused.reason); assertTrue(engines.validated.isEmpty())
+        // A copied repair graph's retained corpus is reproducible from its recorded metadata alone.
+        val graphTree = root.resolve("graph"); writeSourceTree(graphTree, "base"); acceptRepairGraph(graphTree)
+        assertTrue(WebValidationCasePlan.of(graphTree).available)
+    }
+
+    @Test
+    fun `validator results keep their own identity and say whether this attempt or its input history recorded them`() = withRoot { root ->
+        val project = root.resolve("project"); writeSourceTree(project, "base"); acceptRepairGraph(project)
+        val recorded = readProjectRecordedRepairHistory(project)
+        val snapshot = checkNotNull(recorded.snapshot)
+        val started = snapshot.runs.single().startedEpochMillis
+        fun origins(attemptStarted: Long?) = webValidationHistory("a".repeat(32), "run_fixture", WebValidationHistoryCapture(recorded,
+            decompengine.repair.recordedRepairHistoryPage(recorded, decompengine.repair.RepairRecordedHistorySelection(), 20), attemptStarted))
+            .getValue("items").jsonArray.map { item -> item.jsonObject.let {
+                it.getValue("ownerKind").jsonPrimitive.content to it.getValue("origin").jsonPrimitive.content } }
+        val own = origins(started)
+        assertTrue(own.isNotEmpty() && own.all { it.second == "this-attempt" }, own.toString())
+        assertTrue(own.map { it.first }.containsAll(listOf("attempt", "run-baseline")))
+        assertTrue(origins(started + 1).all { it.second == "inherited" }, "copied history was attributed to the attempt")
+        assertTrue(origins(null).all { it.second == "unknown" })
+    }
+
+    @Test
     fun `startup graph captures share the recovery budget and preserve partial publication uncertainty`() = withRoot { root ->
         val store = JobStore(root)
         val jobs = List(2) { store.createFromUpload("pending.elf", elfFixture()) }.sortedBy { it.id }
@@ -1191,6 +1355,11 @@ class WebProductionWorkflowsTest {
             resolvedDescriptor?.let { harness.requireResolved(it) }
             repairBody(project); return RepairRunStatus.FULLY_ACCEPTED
         }
+        val validated = mutableListOf<List<ProcessInput>>()
+        var validateBody: (Path) -> RepairRunStatus = { RepairRunStatus.REJECTED }
+        override fun validate(project: Path, binary: Path, reportsDirectory: Path, inputs: List<ProcessInput>): RepairRunStatus {
+            calls.incrementAndGet(); validated += inputs; return validateBody(project)
+        }
     }
 
     private fun adapters(engines: WebWorkflowEngines, acceptTestOnly: Boolean = false): List<DurableWebWorkflowAdapter> = listOf(
@@ -1211,6 +1380,9 @@ class WebProductionWorkflowsTest {
             java.time.Instant.now(), java.time.Instant.now(), null, null, null, null, limits, null, null, null, null)
         return DurableWebWorkflowContext(job, attempt, reports)
     }
+    private fun schemaProperties(definition: String): Set<String> =
+        kotlinx.serialization.json.Json.parseToJsonElement(Files.readString(Path.of("contracts/web/v1/contract.schema.json"))).jsonObject
+            .getValue("definitions").jsonObject.getValue(definition).jsonObject.getValue("properties").jsonObject.keys
     private fun request(root: Path) = AgentExecutionRequest("inert", listOf(AgentWorkspaceRoot("project", root)), accessPolicy = AgentAccessPolicy(emptyList()))
     private fun version(service: WebJobService, jobId: String) = webJob(service.presentation(jobId)).getValue("version").jsonPrimitive.content
     private fun assertCode(code: String, operation: () -> Unit) = assertEquals(code, assertFailsWith<WebJobServiceException> { operation() }.code)

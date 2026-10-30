@@ -76,8 +76,13 @@ internal class AuthorizedLegacyWebJobStart internal constructor(
 /** Versioned start capability; caller input cannot select paths, adapters or commands. */
 internal class AuthorizedWebWorkflowStart internal constructor(private val jobs: WebJobService) {
     fun request(jobId: String, expectedJobVersion: String, request: NewWorkflowAttempt,
-        requestKey: String, prerequisites: WebWorkflowPrerequisites?): DurableWebWorkflowStartResult =
-        jobs.requestDurableStart(jobId, expectedJobVersion, request, requestKey, prerequisites)
+        requestKey: String, prerequisites: WebWorkflowPrerequisites?): DurableWebWorkflowStartResult {
+        // Read the selected revision's recorded corpus before the service monitor; admission still binds the digest.
+        val prepared = request.cases?.let { request.inputRevisionId }?.let { revision ->
+            try { revision to jobs.readValidationCasePlan(jobId, revision) } catch (_: WebJobServiceException) { null }
+        }
+        return jobs.requestDurableStart(jobId, expectedJobVersion, request, requestKey, prerequisites, prepared)
+    }
 }
 
 /** Recovery capability for one identified predecessor; callers cannot select a workflow, harness, path or session. */

@@ -991,6 +991,42 @@
       "valid": false
     },
     {
+      "file": "fixtures/validation-case-plan.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/validation-case-plan-unavailable.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/request-workflow-start-validation.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/run-validation.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-validation-case-plan-command.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-validation-case-plan-control-argument.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-validation-case-plan-unavailable-digest.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-request-validation-cases-runner.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-request-validation-cases-preset.json",
+      "valid": false
+    },
+    {
       "file": "fixtures/legacy-run-before-reconstruction.json",
       "valid": true
     },

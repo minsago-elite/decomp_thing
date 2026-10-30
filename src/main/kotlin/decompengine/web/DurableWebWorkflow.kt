@@ -29,6 +29,8 @@ interface DurableWebWorkflowAdapter {
     val publication: DurableWebWorkflowPublication? get() = null
     /** Reconstruction scope facts, or null for workflows without a reconstruction plan. */
     val reconstruction: DurableWebReconstructionScope? get() = null
+    /** Whether a start must name the reviewed server-approved validation corpus of its input revision. */
+    val validationCases: Boolean get() = false
     /** Null means checkpoint resume is unsupported; explicit retry remains a separate new attempt. */
     val checkpoints: DurableWebWorkflowCheckpointPolicy? get() = null
     fun execute(context: DurableWebWorkflowContext): DurableWebWorkflowOutcome

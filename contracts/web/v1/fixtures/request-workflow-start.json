@@ -11,6 +11,7 @@
       "maxOutputBytes": "1048576",
       "maxToolCalls": "16"
     },
-    "scope": null
+    "scope": null,
+    "cases": null
   }
 }

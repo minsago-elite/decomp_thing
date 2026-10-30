@@ -51,7 +51,8 @@
         "configurationSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "deprecated": false
       },
-      "reconstruction": null
+      "reconstruction": null,
+      "validation": null
     }
   }
 }

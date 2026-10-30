@@ -1,7 +1,7 @@
 import { Fragment } from 'preact';
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { ApiClientError, withApiFailureReference } from '../api/client';
-import type { Capability, ExecutionLimits, HarnessFacts, Job, ReconstructionScopeFacts, Run, Workflow, WorkflowLaunch as Launch, WorkflowStart } from '../api/generated';
+import type { Capability, ExecutionLimits, HarnessFacts, Job, ReconstructionScopeFacts, Run, ValidationCasePlan, Workflow, WorkflowLaunch as Launch, WorkflowStart } from '../api/generated';
 import { appPath, runPath } from '../app/paths';
 import { launchCopy as copy } from '../copy/launch';
 import { jobCopy } from '../copy/job';
@@ -63,6 +63,7 @@ function failureMessage(failure: unknown): { text: string; refresh: boolean; ren
   if (status === 401 || status === 403) return result(copy.sessionLost);
   if (status === 412) return result(copy.versionConflict, true, true);
   if (status === 409 && code === 'IDEMPOTENCY_CONFLICT') return result(copy.keyConflict, false, true);
+  if (status === 409 && code === 'VALIDATION_CASES_CHANGED') return result(copy.casesChanged, true, true);
   if (status === 409) return result(copy.activeConflict, true, true);
   if (status === 429) return result(copy.atCapacity);
   if (status === 422 && (code === 'INPUT_REVISION_UNAVAILABLE' || code === 'INPUT_REVISION_REQUIRED')) return result(copy.revisionUnavailable, true, true);
@@ -73,6 +74,51 @@ function failureMessage(failure: unknown): { text: string; refresh: boolean; ren
 }
 
 interface Revision { id: string; label: string }
+
+/** The server-approved cases for one selected revision; read only for an option that validates. */
+function useCasePlan(basePath: string, job: Job, revisionId: string, needed: boolean, reload: number) {
+  const { client } = usePrivateTransport(basePath);
+  // A job change re-reads the plan for the same selected revision; it never selects another revision.
+  const key = `${job.jobId}/${job.version}/${revisionId}/${reload}`;
+  const [state, setState] = useState<{ key: string; plan: ValidationCasePlan | null; failed: boolean } | null>(null);
+  useEffect(() => {
+    if (!needed || revisionId === '') return;
+    const controller = new AbortController();
+    setState({ key, plan: null, failed: false });
+    void client.get('validationCasePlan', `/jobs/${job.jobId}/validation-cases?revision=${revisionId}`, { signal: controller.signal })
+      .then(response => {
+        if (controller.signal.aborted) return;
+        const plan = response.data;
+        // A plan for another job or revision never stands in for the selected one.
+        if (plan.binding.jobId !== job.jobId || plan.binding.revisionId !== revisionId) throw new Error('binding');
+        setState({ key, plan, failed: false });
+      }).catch(() => { if (!controller.signal.aborted) setState({ key, plan: null, failed: true }); });
+    return () => { controller.abort(); };
+  }, [client, job.jobId, revisionId, needed, key]);
+  return needed && revisionId !== '' && state?.key === key ? state : { plan: null, failed: false };
+}
+
+function CasePlan({ plan }: { plan: ValidationCasePlan }) {
+  if (plan.state !== 'available' || plan.corpusSha256 === null) return <p role="alert">{copy.casesUnavailable}</p>;
+  return <>
+    <p>{copy.casesIntroduction}</p>
+    <div role="region" aria-label={copy.casesTable} tabIndex={0}>
+      <table><caption>{copy.casesTable}</caption><thead><tr>
+        <th scope="col">{copy.caseIdentity}</th><th scope="col">{copy.caseOrigin}</th>
+        <th scope="col">{copy.caseArguments}</th><th scope="col">{copy.caseStdin}</th>
+      </tr></thead><tbody>{plan.cases.map(item => <tr key={item.caseId}>
+        <th scope="row"><code>{item.caseId}</code></th>
+        <td>{item.origin === 'retained' ? copy.caseRetained : copy.caseServerDefault}</td>
+        <td>{item.arguments === null ? copy.caseArgumentsWithheld : item.arguments.length === 0 ? copy.caseNoArguments
+          : item.arguments.map((argument, index) => <Fragment key={index}>{index > 0 && ' '}<code>{argument}</code></Fragment>)}</td>
+        <td>{item.stdinBytes}</td>
+      </tr>)}</tbody></table>
+    </div>
+    {plan.truncated && <p>{textMessage(copy.casesTruncated, { shown: plan.cases.length, total: plan.totalCases })}</p>}
+    <p>{message(copy.casesDigest, { digest: <code>{plan.corpusSha256}</code> })}</p>
+    <p>{copy.casesBinding}</p>
+  </>;
+}
 
 /** The store retains at most 1024 attempts, so six 200-row pages always reach the oldest one. */
 const MAXIMUM_REVISION_PAGES = 6;
@@ -192,6 +238,7 @@ export function WorkflowLaunch({ job, runtime, basePath, session, onRefresh, onS
   const [limits, setLimits] = useState<Record<LimitKey, string> | null>(null);
   const [inputRevisionId, setInputRevisionId] = useState<string>('');
   const [context, setContext] = useState<string>('');
+  const [planReload, setPlanReload] = useState(0);
   const [pending, setPending] = useState(false);
   const [notice, setNotice] = useState<{ text: string; refresh: boolean; alert: boolean } | null>(null);
   const [intent, setIntent] = useState<{ signature: string; key: string } | null>(null);
@@ -201,6 +248,9 @@ export function WorkflowLaunch({ job, runtime, basePath, session, onRefresh, onS
   const { revisions, failed: revisionsFailed, retry: retryRevisions } = useRevisions(basePath, job, selected?.launch.input === 'recorded-required'
     || selected?.launch.input === 'accepted-optional');
   useEffect(() => () => { active.current?.abort(); active.current = null; }, []);
+  const validates = selected?.workflows[0] === 'validate';
+  const { plan, failed: planFailed } = useCasePlan(basePath, job, inputRevisionId, validates, planReload);
+  const reviewed = validates && plan?.state === 'available' && plan.corpusSha256 !== null ? plan : null;
 
   function choose(option: LaunchOption) {
     if (pending) return;
@@ -214,13 +264,16 @@ export function WorkflowLaunch({ job, runtime, basePath, session, onRefresh, onS
   const contextRange = selected?.launch.reconstruction?.contextCharacters ?? null;
   const scopeProblem = contextRange ? contextProblem(context, contextRange) : null;
   const body: WorkflowStart | null = selected && values && problems && limitKeys.every(key => problems[key] === null) && !inputMissing
-    && scopeProblem === null ? {
+    && scopeProblem === null && (!validates || reviewed !== null) ? {
     workflow: selected.workflows[0]!, inputRevisionId: inputRevisionId === '' ? null : inputRevisionId,
     harnessCapabilityId: selected.launch.harnessCapabilityId,
     limits: selected.launch.limitsAdjustable ? { ...values } : { ...selected.limits },
     // Only submit scope when the server advertises it. Older v1 servers reject even an unknown null field.
     // The context budget can narrow a reconstruction; the planner keeps every module.
     ...(contextRange ? { scope: { maxContextCharacters: context } } : {}),
+    // Only validation sends cases; older v1 peers do not know this additive field.
+    // A validation names only the reviewed server-approved corpus of its revision, by digest.
+    ...(reviewed ? { cases: { presetId: reviewed.presetId, corpusSha256: reviewed.corpusSha256! } } : {}),
   } : null;
   const signature = body ? JSON.stringify([job.jobId, job.version, body]) : null;
 
@@ -248,6 +301,7 @@ export function WorkflowLaunch({ job, runtime, basePath, session, onRefresh, onS
       if (controller.signal.aborted) return;
       const result = failureMessage(failure);
       if (result.renew) setIntent(null);
+      if (failure instanceof ApiClientError && failure.serverCode === 'VALIDATION_CASES_CHANGED') setPlanReload(value => value + 1);
       setNotice({ text: result.text, refresh: result.refresh, alert: true });
     } finally {
       if (active.current === controller) { active.current = null; setPending(false); }
@@ -304,6 +358,17 @@ export function WorkflowLaunch({ job, runtime, basePath, session, onRefresh, onS
                 .map(revision => <option key={revision.id} value={revision.id}>{revision.label}</option>)}
             </select>
           </>}
+          {selected.launch.input === 'recorded-required' && inputRevisionId !== '' && <p role="note">
+            {message(copy.targetFixed, { revision: <code>{inputRevisionId}</code> })}
+            {job.acceptedRevisionId && job.acceptedRevisionId !== inputRevisionId && <>{' '}{message(copy.targetNewerAccepted, {
+              revision: <code>{job.acceptedRevisionId}</code> })}</>}
+          </p>}
+        </>}
+        {validates && <>
+          <h4>{copy.casesHeading}</h4>
+          {inputRevisionId === '' ? <p>{copy.casesSelectRevision}</p>
+            : planFailed ? <p role="alert">{copy.casesFailed}</p>
+            : plan === null ? <p role="status">{copy.casesLoading}</p> : <CasePlan plan={plan} />}
         </>}
         {selected.launch.reconstruction && <>
           <h4>{copy.scopeHeading}</h4>
@@ -340,6 +405,8 @@ export function WorkflowLaunch({ job, runtime, basePath, session, onRefresh, onS
           {selected?.launch.harness && <><dt>{copy.summaryHarnessImplementation}</dt><dd>{textMessage(copy.summaryHarnessResolvedAtStart, {
             kind: selected.launch.harness.kind, implementation: selected.launch.harness.implementationId ?? copy.harnessImplementationUnresolved })}</dd></>}
           <dt>{copy.summaryInput}</dt><dd>{body.inputRevisionId ? <code>{body.inputRevisionId}</code> : copy.inputUploaded}</dd>
+          {body.cases && reviewed && <><dt>{copy.summaryCases}</dt><dd>{message(copy.summaryCasesValue, {
+            count: reviewed.totalCases, digest: <code>{body.cases.corpusSha256}</code> })}</dd></>}
           {selected?.launch.reconstruction && <><dt>{copy.summaryScope}</dt><dd>{body.scope
             ? textMessage(copy.summaryScopeAgent, { characters: body.scope.maxContextCharacters }) : copy.summaryScopeEvidence}</dd></>}
           <dt>{copy.summaryLimits}</dt><dd>{textMessage(copy.summaryLimitValues, { wall: body.limits.wallClockMs, idle: body.limits.idleMs,

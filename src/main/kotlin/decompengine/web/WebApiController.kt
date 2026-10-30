@@ -59,7 +59,7 @@ internal class WebApiController(
         val path = exchange.requestURI.rawPath
         if (!path.startsWith("${assets.basePath}api/")) return false
         val resource = path.removePrefix(prefix)
-        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs", "recovery", "agent/preflight") || resource.matches(Regex("(?:jobs|uploads)/[^/]+|jobs/[^/]+/runs(?:/[^/]+(?:/reports/(?:exploration|revision-validation|module-progress)|/validation-history|/source-catalog|/revisions/[^/]+/(?:sources|source-directories/[^/]+|source-files/[^/]+(?:/(?:chunk|content))?)|/snapshot|/events|/progress-pin|/cancel|/recover|/controls|/queue-position)?)?|jobs/[^/]+/artifacts/[^/]+/content")))) {
+        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs", "recovery", "agent/preflight") || resource.matches(Regex("(?:jobs|uploads)/[^/]+|jobs/[^/]+/runs(?:/[^/]+(?:/reports/(?:exploration|revision-validation|module-progress)|/validation-history|/source-catalog|/revisions/[^/]+/(?:sources|source-directories/[^/]+|source-files/[^/]+(?:/(?:chunk|content))?)|/snapshot|/events|/progress-pin|/cancel|/recover|/controls|/queue-position)?)?|jobs/[^/]+/artifacts/[^/]+/content|jobs/[^/]+/validation-cases")))) {
             try {
                 val policy = if (exchange.requestMethod in setOf("POST", "PUT", "PATCH", "DELETE")) {
                     WebEndpointPolicy.jsonMutation(exchange.requestMethod)
@@ -270,6 +270,21 @@ internal class WebApiController(
                         revisionValidationReports.failure(parts[1], parts[3], query, jobs::readRecordedValidationFailureReport)
                     else revisionValidationReports.read(parts[1], parts[3], query)
                     sendWebApiResponse(exchange, 200, "report", report)
+                }
+                resource.matches(Regex("jobs/[^/]+/validation-cases")) -> {
+                    access.authorize(exchange, WebEndpointPolicy.privateRead())
+                    requireJsonAccept(exchange)
+                    val jobId = resource.split('/')[1]
+                    // Exactly one recorded revision identity; no other selector reaches the case reader.
+                    val revision = exchange.requestURI.rawQuery?.takeIf { it.matches(Regex("revision=[A-Za-z0-9][A-Za-z0-9_-]{0,127}")) }
+                        ?.removePrefix("revision=")
+                        ?: throw WebAccessDenied(400, "VALIDATION_FAILED", "Select exactly one revision recorded by this job.")
+                    val plan = try { jobs.readValidationCasePlan(jobId, revision) } catch (failure: WebJobServiceException) {
+                        if (failure.code == "INPUT_REVISION_UNAVAILABLE") throw WebAccessDenied(404, "REVISION_NOT_FOUND",
+                            "The selected revision is unavailable for this job.")
+                        throw failure
+                    }
+                    sendWebApiResponse(exchange, 200, "validationCasePlan", webValidationCasePlan(jobId, revision, plan))
                 }
                 resource.matches(Regex("jobs/[^/]+/runs/[^/]+/reports/module-progress")) -> {
                     access.authorize(exchange, WebEndpointPolicy.privateRead())

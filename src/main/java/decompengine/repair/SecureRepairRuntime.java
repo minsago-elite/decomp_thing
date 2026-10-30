@@ -89,6 +89,48 @@ public final class SecureRepairRuntime {
         return new SecureRepairSession(loop, harnessSelection.getProvenance().getStableDescriptor());
     }
 
+    /**
+     * Opens a validation-only facade for the same registered profile and strict contained validation.
+     * It selects no agent harness and reads no harness environment; its session only validates.
+     */
+    public static SecureRepairSession openValidation(RepairRuntimeConfiguration configuration) {
+        Objects.requireNonNull(configuration, "configuration");
+        if (configuration.getHarnessOverride() != null) {
+            throw new IllegalArgumentException("validation-only sessions do not select an agent harness");
+        }
+        RepairRuntimeProfileRegistry.ResolvedProfile resolved =
+            PROFILE_REGISTRY.requireProfile(configuration.getProfileId());
+        RepairValidationStrategy validation = resolved.createValidationStrategy();
+        validation.requireAvailable();
+        if (validation.getAssurance() != RepairValidationAssurance.STRICT_CONTAINED) {
+            throw new SecurityException(
+                "public validation requires a strict contained validation strategy"
+            );
+        }
+        RegisteredProfile profile = new RegisteredProfile(
+            resolved.id(),
+            resolved.indexProfile()
+        );
+        RepairHistory history = new RepairHistory(
+            configuration.getHistoryPath(),
+            configuration.getResourceBudget().getMaximumProjectionBytes()
+        );
+        TraceGuidedRepairLoop loop = TraceGuidedRepairLoop.Companion.openAuthorized(
+            RUNTIME_IDENTITY,
+            ValidationOnlyAgentHarness.INSTANCE,
+            history,
+            profile,
+            validation,
+            CapturedRepairStagingAuthority.INSTANCE,
+            null,
+            null,
+            null,
+            configuration.getResourceBudget(),
+            false
+        );
+        return new SecureRepairSession(loop, ValidationOnlyAgentHarness.PROVENANCE);
+    }
+
     /** Package-owned graph acquisition; callers cannot construct a {@link RegisteredProfile}. */
     static ModuleRevisionGraph openGraph(
         Object profileHandle,

@@ -28,6 +28,9 @@ it('wires explicit validation discovery into the attempt and discards its privat
     await screen.findByRole('button', { name: 'Read validation evidence' });
     expect(transport.get).toHaveBeenCalledOnce();
     fireEvent.click(screen.getByRole('button', { name: 'Read validation evidence' }));
+    // Each validator keeps its own identity and says whether this attempt or its input history recorded it.
+    const owners = await screen.findByRole('table', { name: 'Recorded validation operations' });
+    expect(owners.textContent).toContain('This attempt');
     fireEvent.click(await screen.findByRole('button', { name: /^Inspect cases:/ }));
     await screen.findByRole('table', { name: 'Recorded validation cases' });
     expect(transport.get).toHaveBeenCalledTimes(3);

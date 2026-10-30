@@ -13,6 +13,10 @@ import { acceptReceipt, receiptOf } from '../shared/receiptTime';
 import type { ReceiptTime } from '../shared/receiptTime';
 import { MetadataReceipt } from '../shared/MetadataReceipt';
 
+// Each validator keeps its own identity; its origin separates this attempt's results from inherited history.
+const validatorLabels = { attempt: copy.validatorAttempt, 'run-baseline': copy.validatorBaseline, 'run-failure': copy.validatorFailure } satisfies Record<ValidationOwner['ownerKind'], string>;
+const originLabels = { 'this-attempt': copy.originThisAttempt, inherited: copy.originInherited, unknown: copy.originUnknown } satisfies Record<NonNullable<ValidationOwner['origin']>, string>;
+
 function requestedValidation(search: string, preserveRouteContext = false) {
   try {
     const location = preserveRouteContext ? validationRouteLocation(search) : validationLocation(search);
@@ -228,9 +232,10 @@ export function RecordedValidationEvidence({ jobId, runId, basePath, navigation 
         <p>{copy.historyPage} {history.page} / {history.totalPages}</p>
         <div role="region" aria-label={copy.owners} tabIndex={0}>
           <table><caption>{copy.owners}</caption><thead><tr>
-            <th scope="col">{copy.operation}</th><th scope="col">{copy.candidate}</th><th scope="col">{copy.source}</th><th scope="col">{copy.receipt}</th>
+            <th scope="col">{copy.operation}</th><th scope="col">{copy.origin}</th><th scope="col">{copy.candidate}</th><th scope="col">{copy.source}</th><th scope="col">{copy.receipt}</th>
           </tr></thead><tbody>{history.items.map(owner => <tr key={`${owner.ownerKind}:${owner.ownerId}`}>
-            <th scope="row">{owner.ownerKind}: <code>{owner.ownerId}</code></th>
+            <th scope="row">{owner.ownerKind}: <code>{owner.ownerId}</code> ({validatorLabels[owner.ownerKind]})</th>
+            <td>{originLabels[owner.origin ?? 'unknown']}</td>
             <td><code>{owner.candidateId ?? copy.withheld}</code></td><td><code>{owner.sourceSha256 ?? copy.withheld}</code></td>
             <td>{owner.normalOutcome ?? owner.failureKind ?? copy.notRecorded} <button type="button" disabled={loading || !owner.canInspect}
               aria-label={`${owner.ownerKind === 'run-failure' ? copy.inspectFailure : copy.inspect}: ${owner.ownerKind} ${owner.ownerId}`}

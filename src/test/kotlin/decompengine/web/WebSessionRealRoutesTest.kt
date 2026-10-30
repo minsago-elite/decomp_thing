@@ -208,6 +208,7 @@ class WebSessionRealRoutesTest {
                 Shape("$r/progress-pin", status = 200),
                 Shape("$r/reports/exploration", status = 200),
                 Shape("$r/reports/module-progress", status = 200),
+                Shape("$api/jobs/${job.id}/validation-cases?revision=rev_1", status = 404, code = "REVISION_NOT_FOUND"),
                 Shape("$r/reports/revision-validation", head = true, status = 400, code = "VALIDATION_FAILED"),
                 Shape("$r/validation-history", head = true, status = 200),
                 Shape("$r/source-catalog", status = 503, code = "SOURCE_CATALOG_UNAVAILABLE"),

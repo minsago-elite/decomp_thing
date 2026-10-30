@@ -27,7 +27,8 @@
         "candidateId": "root_111111111111111111111111",
         "sourceSha256": "2222222222222222222222222222222222222222222222222222222222222222",
         "corpusSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        "normalOutcome": "behavior-checked"
+        "normalOutcome": "behavior-checked",
+        "origin": "unknown"
       },
       {
         "ownerKind": "run-failure",
@@ -39,7 +40,8 @@
         "sourceSha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
         "corpusSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
         "normalOutcome": null,
-        "failureKind": "resource-exhausted"
+        "failureKind": "resource-exhausted",
+        "origin": "unknown"
       }
     ],
     "limitations": [

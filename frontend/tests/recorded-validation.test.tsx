@@ -103,6 +103,15 @@ function pinComparison() {
   fireEvent.click(screen.getByRole('button', { name: 'Use selected observation as comparison baseline' }));
 }
 
+it('keeps older v1 validation history inspectable without inventing its origin', async () => {
+  const history = historyFixture();
+  history.data.items.forEach(owner => { delete owner.origin; });
+  const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(response(history));
+  vi.stubGlobal('fetch', fetcher); mount(); await discover();
+  expect(screen.getByText('Unknown')).toBeTruthy();
+  expect(screen.queryByText('This attempt')).toBeNull();
+});
+
 it('compares complete corpus mismatch changes beyond either visible case page', () => {
   const before = comparisonDocument('before', [1, 22]), after = comparisonDocument('after', [22, 61]);
   const first = validationComparisonSnapshot(before.document.data, before.selected);

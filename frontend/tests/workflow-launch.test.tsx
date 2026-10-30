@@ -4,7 +4,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as ClientModule from '../src/api/client';
 import { ApiClientError } from '../src/api/client';
-import type { Bootstrap, Capability, Job, Run, WorkflowStart } from '../src/api/generated';
+import type { Bootstrap, Capability, Job, Run, ValidationCasePlan, WorkflowStart } from '../src/api/generated';
 import { WorkflowLaunch } from '../src/jobs/WorkflowLaunch';
 import type { RuntimeSnapshot } from '../src/session/session';
 
@@ -325,7 +325,7 @@ it('shows each reported harness with its identity and status and never substitut
   mount({ capabilities: harnessBootstrap.capabilities });
   const values = screen.getAllByRole('radio').map(option => option.getAttribute('value'));
   expect(values).toEqual(['workflow-explore-tools', 'workflow-reconstruct-agent-acp', 'workflow-reconstruct-agent-legacy-openai',
-    'workflow-reconstruct-agent-builtin', 'workflow-reconstruct-evidence-only', 'workflow-repair-agent-acp',
+    'workflow-reconstruct-agent-builtin', 'workflow-reconstruct-evidence-only', 'workflow-validate-tools', 'workflow-repair-agent-acp',
     'workflow-repair-agent-legacy-openai', 'workflow-repair-agent-builtin']);
   const facts = (label: string) => document.getElementById(screen.getByLabelText(label).getAttribute('aria-describedby')!)!;
   const current = facts('Reconstruction: configured agent');
@@ -395,6 +395,61 @@ it('shows the whole-plan reconstruction scope and submits only a server-bounded 
   fireEvent.click(screen.getByLabelText('Reconstruction: evidence only'));
   expect(screen.queryByLabelText('Per-module agent context (characters)')).toBeNull();
   expect(screen.getByText('Evidence-only reconstruction uses no agent context budget.')).toBeTruthy();
+});
+
+const casePlan = fixture<ValidationCasePlan>('validation-case-plan');
+
+it('reviews the server-approved cases of the selected revision and submits only their digest', async () => {
+  const revision = casePlan.binding.revisionId;
+  const selected = { ...job, jobId: casePlan.binding.jobId, acceptedRevisionId: null };
+  transport.get.mockImplementation(kind => Promise.resolve(kind === 'runs'
+    ? { data: { items: [{ ...run().data, jobId: selected.jobId, runId: 'run_source', state: 'completed', resultRevisionId: revision }],
+      jobId: selected.jobId, page: { nextCursor: null, limit: 50, snapshotVersion: 'snapshot_1' } } }
+    : { data: casePlan }));
+  transport.post.mockResolvedValue({ data: { ...run().data, jobId: selected.jobId, runId: 'run_validate', workflow: 'validate' } });
+  mount({ capabilities: harnessBootstrap.capabilities, selected });
+  fireEvent.click(screen.getByLabelText('Validation: local tools'));
+  expect(screen.getByText('Select a revision to review the cases a validation of it runs.')).toBeTruthy();
+  fireEvent.change(await screen.findByLabelText<HTMLSelectElement>('Input revision'), { target: { value: revision } });
+  const table = within(await screen.findByRole('table', { name: 'Cases this validation runs' }));
+  expect(table.getAllByRole('row').slice(1).map(row => row.textContent)).toEqual([
+    'defaultserver defaultnone0', 'explore_args_1retained by this revision--count 30', 'explore_stdin_2retained by this revisionrecorded, not displayed17']);
+  expect(transport.get).toHaveBeenCalledWith('validationCasePlan', `/jobs/${selected.jobId}/validation-cases?revision=${revision}`, expect.anything());
+  expect(screen.getByRole('note').textContent).toContain('It is not retargeted when a newer revision is recorded.');
+  // Nothing in the form can edit a case, command or runner setting.
+  expect(within(screen.getByRole('table', { name: 'Cases this validation runs' })).queryAllByRole('textbox')).toHaveLength(0);
+  fireEvent.click(start(/Start Validation/));
+  await waitFor(() => expect(transport.post).toHaveBeenCalledOnce());
+  expect(transport.post.mock.calls[0]?.[3]).toEqual({ workflow: 'validate', inputRevisionId: revision, harnessCapabilityId: null,
+    limits: { wallClockMs: '7200000', idleMs: '1200000', maxOutputBytes: '4294967296', maxToolCalls: '0' },
+    cases: { presetId: 'retained-corpus-v1', corpusSha256: casePlan.corpusSha256 } });
+});
+
+it('keeps a configured validation on its revision and refuses unverifiable or changed cases', async () => {
+  const revision = casePlan.binding.revisionId;
+  const selected = { ...job, jobId: casePlan.binding.jobId, acceptedRevisionId: null };
+  const runs = { data: { items: [{ ...run().data, jobId: selected.jobId, runId: 'run_source', state: 'completed', resultRevisionId: revision }],
+    jobId: selected.jobId, page: { nextCursor: null, limit: 50, snapshotVersion: 'snapshot_1' } } };
+  let plan: unknown = { data: { ...casePlan, state: 'unavailable', reasonCode: 'CASES_UNVERIFIABLE', corpusSha256: null, totalCases: 0, cases: [] } };
+  transport.get.mockImplementation(kind => Promise.resolve(kind === 'runs' ? runs : plan));
+  const { view } = mount({ capabilities: harnessBootstrap.capabilities, selected });
+  fireEvent.click(screen.getByLabelText('Validation: local tools'));
+  fireEvent.change(await screen.findByLabelText<HTMLSelectElement>('Input revision'), { target: { value: revision } });
+  expect(await screen.findByText(/retained cases cannot be verified, so it cannot be validated/)).toBeTruthy();
+  expect(start(/Start Validation/)).toHaveProperty('disabled', true);
+  // A newer accepted revision is reported but never replaces the configured target.
+  plan = { data: casePlan };
+  const newer = 'source_' + '9'.repeat(64);
+  view.rerender(<WorkflowLaunch job={{ ...selected, version: 'job_version_2', acceptedRevisionId: newer }} runtime={runtime(harnessBootstrap.capabilities)}
+    basePath="/nested/" session={session} onRefresh={vi.fn()} onStarted={vi.fn()} />);
+  await waitFor(() => expect(screen.getByRole('note').textContent).toContain(`The job's accepted revision is now ${newer}`));
+  expect(screen.getByLabelText<HTMLSelectElement>('Input revision').value).toBe(revision);
+  transport.post.mockRejectedValueOnce(new ApiClientError('http_error', { status: 409, serverCode: 'VALIDATION_CASES_CHANGED' }));
+  await screen.findByRole('table', { name: 'Cases this validation runs' });
+  const reads = transport.get.mock.calls.filter(call => call[0] === 'validationCasePlan').length;
+  fireEvent.click(start(/Start Validation/));
+  expect(await screen.findByText(/cases changed since you reviewed them/)).toBeTruthy();
+  await waitFor(() => expect(transport.get.mock.calls.filter(call => call[0] === 'validationCasePlan').length).toBe(reads + 1));
 });
 
 it('treats an older producer that omits launch facts like one that reports none', () => {

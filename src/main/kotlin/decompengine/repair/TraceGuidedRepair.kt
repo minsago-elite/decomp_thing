@@ -1361,6 +1361,55 @@ class TraceGuidedRepairLoop private constructor(
         } }
     }
 
+    /**
+     * Validation-only run of the current head: the same graph-owned corpus, contained build and behavior
+     * assessment, and acceptance predicate as [runRepair]'s initial assessment, with no repair iteration.
+     * The agent harness is never invoked. A fully matching head is accepted as an assessed baseline;
+     * compile-only evidence finishes `COMPILE_VALID`; any mismatch or compile failure finishes `REJECTED`.
+     */
+    fun runValidation(
+        projectDir: Path,
+        originalBinary: Path,
+        inputs: List<ProcessInput>,
+        reportsDir: Path = projectDir.resolve("reports"),
+    ): RepairRunOutcome {
+        checkOpen()
+        lastRunFailure = null
+        validationStrategy.requireAvailable()
+        return withProgress(reportsDir) { openGraph(projectDir).use { graph ->
+            val corpus = prepareProjectState(graph, inputs)
+            val run = graph.beginRun(1, limits.wallClockTimeout.toMillis())
+            activeDeadlineNanos = System.nanoTime() + limits.wallClockTimeout.toNanos()
+            var finalReport: BehaviorComparisonReport? = null
+            try {
+                checkRunBudget()
+                val assessment = assess(graph, projectDir, originalBinary, reportsDir, "${run.id}_initial", corpus.inputs)
+                checkRunBudget()
+                when (assessment) {
+                    is RepairAssessment.Valid -> {
+                        graph.acceptAssessedBaseline(assessment.proof, assessment.evidence, ::checkRunBudget)
+                        finalReport = assessment.report
+                    }
+                    is RepairAssessment.CompileOnly -> graph.finishRun(RepairRunStatus.COMPILE_VALID, assessment.evidence)
+                    else -> graph.finishRun(RepairRunStatus.REJECTED, assessment.evidence)
+                }
+            } catch (failure: Exception) {
+                lastRunFailure = failure
+                finishFailedRun(graph, failure)
+            } finally {
+                activeDeadlineNanos = Long.MAX_VALUE
+                progress?.state(graph)
+            }
+            try {
+                graph.synchronizeRepairHistory()
+            } catch (_: Exception) {
+                // As in runRepair, the canonical graph already records the terminal outcome.
+            }
+            history.adoptCanonicalProjection(graph.derivedRepairIterations(), corpus.inputs, graph.snapshot.runs)
+            RepairRunOutcome(emptyList(), finalReport, graph.snapshot.runs.single { it.id == run.id })
+        } }
+    }
+
     private fun checkRunBudget() {
         if (cancellation.isCancellationRequested()) throw RepairTransportCancelledException()
         if (Thread.currentThread().isInterrupted) throw InterruptedException("repair run interrupted")

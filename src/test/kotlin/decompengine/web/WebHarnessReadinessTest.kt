@@ -77,6 +77,8 @@ class WebHarnessReadinessTest {
                 assertEquals(facts.sandbox, updated.sandbox); assertEquals(facts.ghidra, updated.ghidra)
                 assertEquals(result, result.withAgentInspection(WebAgentPreflightSnapshot("failed", "inspection",
                     WebAgentPreflight.REASON_FAILED, "configuration")))
+                assertEquals(readiness.withAgentInspection(null), readiness.withAgentInspection(
+                    WebAgentPreflightSnapshot("failed", "inspection", WebAgentPreflight.REASON_FAILED, "other-config")))
             }
         }
     }

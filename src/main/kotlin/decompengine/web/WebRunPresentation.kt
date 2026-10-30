@@ -52,4 +52,7 @@ internal fun webRunConfiguration(value: decompengine.jobs.WorkflowAttemptConfigu
         put("profileId", reconstruction.profileId); put("profileSha256", reconstruction.profileSha256)
         put("maxContextCharacters", reconstruction.maxContextCharacters?.let { JsonPrimitive(it.toString()) } ?: JsonNull)
     } } ?: JsonNull)
+    put("validation", value.validation?.let { validation -> buildJsonObject {
+        put("presetId", validation.presetId); put("corpusSha256", validation.corpusSha256); put("caseCount", validation.caseCount)
+    } } ?: JsonNull)
 }

@@ -12,7 +12,7 @@ afterEach(cleanup);
 
 it('shows the exact admission record, including harness provenance, as recorded with the attempt', () => {
   const recorded = run('run-configured-agent');
-  render(<RecordedConfiguration run={recorded} />);
+  render(<RecordedConfiguration run={recorded} basePath="/nested/" />);
   const section = within(screen.getByRole('region', { name: 'Recorded configuration' }));
   expect(section.getByText('workflow-reconstruct-agent-acp')).toBeTruthy();
   expect(section.getByText('fixture-agent')).toBeTruthy();
@@ -24,7 +24,7 @@ it('shows the exact admission record, including harness provenance, as recorded 
 
 it('shows a legacy public-settings digest without claiming ACP protocol or SDK provenance', () => {
   const recorded = run('run-configured-legacy');
-  render(<RecordedConfiguration run={recorded} />);
+  render(<RecordedConfiguration run={recorded} basePath="/nested/" />);
   const section = within(screen.getByRole('region', { name: 'Recorded configuration' }));
   expect(section.getByText('legacy-openai-compatible')).toBeTruthy();
   expect(section.getByText('e64b5d550f80dbc059dae755de0c0383f6da7c6b0a45adf516fc32c1e090f7c9')).toBeTruthy();
@@ -34,27 +34,27 @@ it('shows a legacy public-settings digest without claiming ACP protocol or SDK p
 });
 
 it('keeps an attempt without a record distinct from one that never contacts an agent', () => {
-  const { unmount } = render(<RecordedConfiguration run={run('run-completed-unaccepted')} />);
+  const { unmount } = render(<RecordedConfiguration run={run('run-completed-unaccepted')} basePath="/nested/" />);
   expect(screen.getByText(/recorded before admission configuration was retained/)).toBeTruthy();
   unmount();
   const evidence = run('run-configured-agent');
   render(<RecordedConfiguration run={{ ...evidence, harnessCapabilityId: 'evidence-only', configuration: {
     ...evidence.configuration!, optionId: 'workflow-reconstruct-evidence-only', mode: 'evidence-only', contactsAgent: false, harness: null,
-  } }} />);
+  } }} basePath="/nested/" />);
   expect(screen.getByText('No agent harness: this attempt never contacts an agent.')).toBeTruthy();
 });
 
 it('labels omitted older-server configuration as not recorded rather than inventing one', () => {
   const older = (decodeContract(fixture('legacy-run-before-configuration'), { mode: 'response' }) as { data: Run }).data;
   expect(older.configuration).toBeUndefined();
-  render(<RecordedConfiguration run={older} />);
+  render(<RecordedConfiguration run={older} basePath="/nested/" />);
   expect(screen.getByText(/recorded before admission configuration was retained/)).toBeTruthy();
   expect(screen.queryByText('No agent harness: this attempt never contacts an agent.')).toBeNull();
 });
 
 it('shows older-server configuration without inventing a reconstruction profile or budget', () => {
   const older = run('legacy-run-before-reconstruction');
-  render(<RecordedConfiguration run={older} />);
+  render(<RecordedConfiguration run={older} basePath="/nested/" />);
   expect(screen.getByText('fixture-agent')).toBeTruthy();
   expect(screen.queryByText('generated-c-make-v1')).toBeNull();
   expect(screen.queryByText('120000')).toBeNull();
@@ -64,4 +64,12 @@ it('shows older-server configuration without inventing a reconstruction profile 
 it('refuses a recorded harness that disagrees with the harness the attempt submitted', () => {
   expect(() => decodeContract(fixture('invalid-run-configuration-harness-mismatch'), { mode: 'producer' })).toThrow();
   expect(() => decodeContract(fixture('invalid-run-configuration-secret-field'), { mode: 'producer' })).toThrow();
+});
+
+it('shows the validation corpus a validation attempt was admitted with and links its validator results', () => {
+  render(<RecordedConfiguration run={run('run-validation')} basePath="/nested/" />);
+  const section = within(screen.getByRole('region', { name: 'Recorded configuration' }));
+  expect(section.getByText('retained-corpus-v1')).toBeTruthy();
+  expect(section.getByText('f'.repeat(64))).toBeTruthy();
+  expect(section.getByRole('link', { name: "Open this attempt's validator results" }).getAttribute('href')).toMatch(/\/runs\/run_validation_1\/evidence$/);
 });

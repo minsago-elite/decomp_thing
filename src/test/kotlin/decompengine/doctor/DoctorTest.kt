@@ -371,6 +371,29 @@ class DoctorTest {
     }
 
     @Test
+    fun `invalid legacy URL settings do not trigger provider connectivity`() {
+        val temporary = createTempDirectory("doctor-legacy-url-")
+        val doctor = Doctor(
+            environment = mapOf(
+                "ACP_HARNESS" to "legacy-openai",
+                "BASE_URL" to "https://private-user:private-password@example.com/v1",
+                "API_KEY" to "private-api-key",
+                "MODEL" to "model",
+            ),
+            commandProbe = CommandProbe { _, _ -> CommandProbeResult(0, "ok") },
+            connectivityProbe = ConnectivityProbe { _, _ -> error("invalid legacy configuration must not connect") },
+        )
+
+        val report = doctor.inspect(DoctorOptions(temporary.resolve("output")))
+        val rendered = report.checks.joinToString("\n") { "${it.name}: ${it.detail}" }
+
+        assertFalse(report.passed)
+        assertTrue(report.checks.any { it.name == "ACP harness" && !it.passed })
+        assertFalse(report.checks.any { it.name.startsWith("LLM") })
+        assertFalse("private-user" in rendered || "private-password" in rendered || "private-api-key" in rendered)
+    }
+
+    @Test
     fun `default harness fails closed without ACP provisioning and does not request legacy credentials`() {
         val temp = createTempDirectory("doctor-acp-default-")
         val doctor = Doctor(
