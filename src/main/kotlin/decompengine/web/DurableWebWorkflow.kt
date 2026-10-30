@@ -63,7 +63,7 @@ sealed interface DurableWebWorkflowOutcome {
     data class Completed(val candidate: WorkflowCandidate? = null, val usage: WorkflowUsage? = null) : DurableWebWorkflowOutcome
     data class Failed(val reason: WorkflowTerminalReason = WorkflowTerminalReason.FAILED,
         val candidate: WorkflowCandidate? = null, val usage: WorkflowUsage? = null) : DurableWebWorkflowOutcome {
-        init { require(reason in setOf(WorkflowTerminalReason.FAILED, WorkflowTerminalReason.REFUSED, WorkflowTerminalReason.LIMIT_EXHAUSTED)) }
+        init { require(reason in setOf(WorkflowTerminalReason.FAILED, WorkflowTerminalReason.REFUSED, WorkflowTerminalReason.LIMIT_EXHAUSTED, WorkflowTerminalReason.TIMED_OUT)) }
     }
 }
 
@@ -82,7 +82,8 @@ sealed interface DurableWebWorkflowAdmission {
 data class WebReportContext(val reportsDirectory: Path, val artifactPrefix: String = "reports", val runId: String? = null)
 data class WebJobDiagnostic(val jobId: String, val code: String, val message: String)
 data class WebJobPresentation(val job: Job, val snapshot: WorkflowJobSnapshot?, val reports: WebReportContext,
-    val diagnostics: List<WorkflowStoreDiagnostic> = emptyList(), val legacyInterrupted: Boolean = false)
+    val diagnostics: List<WorkflowStoreDiagnostic> = emptyList(), val legacyInterrupted: Boolean = false,
+    val organization: decompengine.jobs.JobOrganization = decompengine.jobs.JobOrganization.DEFAULT)
 sealed interface WebJobInspection {
     data class Available(val presentation: WebJobPresentation) : WebJobInspection
     data class Unavailable(val diagnostic: WebJobDiagnostic) : WebJobInspection

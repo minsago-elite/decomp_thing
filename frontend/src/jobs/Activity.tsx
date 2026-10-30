@@ -9,9 +9,12 @@ import type { ActivityReceiptTime } from './ActivityReceiptAge';
 import { ActivityRow, matchesActivity } from './ActivityRow';
 import type { ActivityGroup } from './ActivityRow';
 import { useBrowserAvailability } from '../session/useBrowserAvailability';
+import { browserCapabilities } from '../shared/browserCapabilities';
 import { createUsageDisplay, isContextUsageUpdate } from './usageDisplay';
 
 import { ActivityHistory } from './ActivityHistory';
+import { ActivityStages } from './ActivityStages';
+import { useIdentityDigests } from './activityCorrelation';
 import { activityWindowLocation, activityWindowSearch, type ActivityNavigation } from './activityNavigation';
 import { runViewPath } from '../app/paths';
 
@@ -38,9 +41,11 @@ export function Activity({ jobId, runId, basePath, navigation }: {
 
 function LiveActivity({ jobId, runId, basePath, windowLinks }: { jobId: string; runId: string; basePath: string; windowLinks: boolean }) {
   const { client, stream } = usePrivateTransport(basePath);
-  const fallback = useRef(false);
+  // Without a readable fetch body the live stream cannot work; poll from the start (#631).
+  const [streamingUnavailable] = useState(() => !browserCapabilities().fetchStreaming);
+  const fallback = useRef(streamingUnavailable);
   const streamFailures = useRef(0);
-  const [periodic, setPeriodic] = useState(false);
+  const [periodic, setPeriodic] = useState(streamingUnavailable);
   const availability = useBrowserAvailability();
   const [retry, setRetry] = useState(0);
   const failures = useRef(0);
@@ -181,6 +186,7 @@ function LiveActivity({ jobId, runId, basePath, windowLinks }: { jobId: string; 
     return () => { controller.abort(); clearTimeout(timer); display.close(); };
   }, [client, stream, jobId, runId, following, reset, availability.online, availability.visible]);
 
+  const identities = useIdentityDigests(snapshot?.run ?? null);
   const visible = rows.filter(event => matchesActivity(event, group, taskDigest));
   return <section aria-labelledby="activity-title">
     <h2 id="activity-title">{copy.retainedActivity}</h2>
@@ -196,7 +202,7 @@ function LiveActivity({ jobId, runId, basePath, windowLinks }: { jobId: string; 
     <button type="button" onClick={() => {
       pageAfter.current = null;
       position.current = { initialized: false, cursor: null, rows: [], last: null };
-      setRows([]); setSnapshot(null); setLastRead(null); setRetry(0); failures.current = 0; streamFailures.current = 0; fallback.current = false; setPeriodic(false); reconcile.current = true; setError(''); setReset(value => value + 1); setFollowing(true);
+      setRows([]); setSnapshot(null); setLastRead(null); setRetry(0); failures.current = 0; streamFailures.current = 0; fallback.current = streamingUnavailable; setPeriodic(streamingUnavailable); reconcile.current = true; setError(''); setReset(value => value + 1); setFollowing(true);
     }}>{copy.readFreshActivityHistory}</button>
     {windowLinks && !following && pageAfter.current && rows.at(-1)?.cursor && pageAfter.current !== rows.at(-1)!.cursor && <p>
       <a href={`${runViewPath(basePath, jobId, runId, 'activity')}${activityWindowSearch({ after: pageAfter.current, through: rows.at(-1)!.cursor!, event: null })}`}>{activityHistoryCopy.save}</a>
@@ -227,9 +233,10 @@ function LiveActivity({ jobId, runId, basePath, windowLinks }: { jobId: string; 
       {snapshot.progress ? <p>{displayMessage(copy.journal, { boundary: snapshot.progress.nextSequence, queue: snapshot.progress.queueDropped, history: snapshot.progress.historyDropped, retained: snapshot.progress.retainedEventCount })}</p>
         : <p>{copy.omissionCountsWereNotSuppliedACompleteHistoryCannotBe}</p>}
     </>}
+    <ActivityStages run={snapshot?.run ?? null} events={rows} onSelectTask={setTaskDigest} />
     {rows.length > 0 && visible.length === 0 && <p>{copy.noMatchingObservationsOnThisPageOtherRetainedPagesHave}</p>}
     <ol aria-label={copy.activityObservations}>
-      {visible.map(event => <ActivityRow key={event.cursor!} event={event} basePath={basePath} />)}
+      {visible.map(event => <ActivityRow key={event.cursor!} event={event} basePath={basePath} identities={identities} onSelectTask={setTaskDigest} />)}
     </ol>
   </section>;
 }

@@ -2,6 +2,7 @@ package decompengine.web
 
 import decompengine.binary.ElfMetadata
 import decompengine.jobs.Job
+import decompengine.jobs.JobOrganization
 import decompengine.jobs.WorkflowStoreDiagnostic
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
@@ -115,10 +116,32 @@ private data class WebPublicJobProjection(
 /** Legacy names/types are compatibility only; the selected source fields are shared with v1. */
 internal fun legacyJobPresentation(job: Job): JsonObject = WebPublicJobProjection.from(job).legacy()
 
-internal fun webJob(job: Job): JsonObject = WebPublicJobProjection.from(job).versioned()
+internal fun webJob(job: Job): JsonObject = withOrganization(WebPublicJobProjection.from(job).versioned(), JobOrganization.DEFAULT, null)
+
+/**
+ * Display organization is part of the public resource and its version, but only once it differs
+ * from the default: records that were never organized keep the exact version they had before
+ * labels/archiving existed. Neither field reaches job.json, workflow state or any evidence hash.
+ */
+private fun withOrganization(versioned: JsonObject, organization: JobOrganization, storageVersion: String?): JsonObject {
+    val fields = versioned.toMutableMap()
+    val baseVersion = storageVersion ?: (fields.getValue("version") as JsonPrimitive).content
+    fields["label"] = organization.label?.let(::JsonPrimitive) ?: JsonNull
+    fields["archived"] = JsonPrimitive(organization.archived)
+    fields["version"] = JsonPrimitive(if (organization.isDefault) baseVersion else "version_" +
+        MessageDigest.getInstance("SHA-256").digest("decomp-job-version-v1\u0000$baseVersion\u0000${organization.digest()}".toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }.take(32))
+    return JsonObject(fields)
+}
 
 internal fun webJob(presentation: WebJobPresentation): JsonObject {
-    val base = webJob(presentation.job)
+    val unorganized = webJobWithoutOrganization(presentation)
+    val storageVersion = (unorganized.getValue("version") as JsonPrimitive).content
+    return withOrganization(unorganized, presentation.organization, storageVersion)
+}
+
+private fun webJobWithoutOrganization(presentation: WebJobPresentation): JsonObject {
+    val base = WebPublicJobProjection.from(presentation.job).versioned()
     val snapshot = presentation.snapshot ?: return base
     val fields = base.toMutableMap()
     fields.remove("version")

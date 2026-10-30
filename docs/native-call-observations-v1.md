@@ -2,7 +2,7 @@
 
 Status: implementation contract; production qualification is incomplete. These are native observations and byte assessments, not oracle identities, scored recovery, or release authority.
 
-The production route requires the retained pinned cc1 profile. Authored ELF controls cannot create the production operation capability. Existing model exporter bytes and invocation encodings remain unchanged. New versions are runtime 8, operation intent 5, and containment definition 5. The fresh cc1 command is `gcc-engine-native-calls`; it does not support resume or an arbitrary collector.
+The production route requires the retained pinned selected cc1 or driver profile. Authored ELF controls cannot create the production operation capability. Existing model exporter bytes and invocation encodings remain unchanged. New versions are runtime 8, operation intent 5, and containment definition 5. The fresh command is `gcc-engine-native-calls <cc1|driver>`; it does not support resume or an arbitrary collector.
 
 ## Output and traversal
 
@@ -197,10 +197,77 @@ The coordinator adds `executeNativeCallObservations(): GccBundledNativeCallOpera
 
 Capture follows existing descriptor types: retained run descriptor, control name and expected identity, captured `GccBundledFullExportSnapshot`, expected native bindings, limits and checkpoint. The resulting `GccBundledNativeCallSnapshot` is byte-assessment evidence. Only the retained coordinator can create the production operation handle.
 
-After proved worker/cgroup absence, capture the unchanged full model, then the exact native directory through pinned descriptors. Require exact membership, private ownership/mount identity, regular single-link files, stable metadata and matching model/input/collector/target bindings. The capture applies the existing stronger aggregate limit: the retained full-model tree (model, sidecars, state and progress) plus native observations and manifest must fit within 1 GiB. Qualification must prove that the actual pinned cc1 artifacts fit this limit. Preserve native-only thunks even when their targets have no current binary backing; exact non-thunk entries still match the admitted model's default-memory census. Recheck model/progress/checkpoint identities before publication. Reuse the linked execution/assessment journal envelope with a new native payload. Publish small immutable binding/result documents pointing to retained scratch evidence. Complete expensive validation and cancellation checks before the durable result marker; once that marker succeeds, return its success without a post-marker cancellation check. They remain unscored, release-ineligible and unqualified for cold recovery. Runtime 8 is rejected by ordinary full-export publication/planning/resume methods. Existing structural bindings, receipt lineage and production replay registry remain unchanged.
+After proved worker/cgroup absence, capture the unchanged full model, then the exact native directory through pinned descriptors. Require exact membership, private ownership/mount identity, regular single-link files, stable metadata and matching model/input/collector/target bindings. The capture applies the existing stronger aggregate limit: the retained full-model tree (model, sidecars, state and progress) plus native observations and manifest must fit within 1 GiB. Qualification must prove that the actual pinned cc1 artifacts fit this limit. Preserve native-only thunks even when their targets have no current binary backing; exact non-thunk entries still match the admitted model's default-memory census. Recheck model/progress/checkpoint identities before publication. Reuse the linked execution/assessment journal envelope with a new native payload. Publish small immutable binding/result documents pointing to retained scratch evidence. Complete expensive validation and cancellation checks before the durable result marker; once that marker succeeds, return its success without a post-marker cancellation check. They remain unscored, release-ineligible and unqualified for cold recovery. Runtime 8 is rejected by ordinary full-export publication/planning/resume methods. The selected driver post-freeze path below extends model provenance and boundary replay; it does not grant call-domain scoring authority.
 
 ## Verification boundary
 
 Real compiled native controls cover repeated/recursive direct calls, zero-call functions and an unowned disassembled call; resolved/unresolved register/memory indirect calls; branch/switch discrimination and separately tagged tails; PLT and `-fno-plt` EXTERNAL/pointer-slot provenance; immediate thunks; RETURN/CALL_RETURN overrides and unsupported boundaries; repeated deterministic collection and unchanged model/progress/checkpoint bytes. Owned capture controls reject substitutions, extra files, malformed coverage, stale destinations, overflow and cancellation without successful publication.
 
 Small authored ELF controls are not production qualification. Production acceptance requires an actual pinned cc1 collection through the normal CLI and independently verified deterministic regeneration. Structural admission, selected independent identities, production replay, scoring and full milestone requirements remain incomplete.
+
+### Selected driver capture
+
+The driver uses the same compiled collector, closed raw observation format,
+serial runtime v8 and fresh intent v5 as cc1. Its retained profile selects the
+independently pinned driver input and target; cross-target input, profile,
+manifest, runtime and CLI substitutions are rejected before execution. Native
+capture remains a separate operation from ordinary full export and cannot resume.
+The contained recovery worker receives no independent call oracle.
+
+Use the `qualify:driver-native-calls` PR label to select normal installed-CLI
+capture. It coexists with `qualify:driver-full-export`. Qualification retains the
+whole raw native stream and manifest, paired model, exporter/runtime/collector
+bindings and execution/assessment lineage. It replays every raw record twice
+against the independently pinned target and model commitments and retains a
+population summary. This checks deterministic byte interpretation, not a second
+execution of the native producer.
+
+The frozen population includes prototype calls, analysis-call candidates and
+direct-tail candidates as distinct categories. Repeated, external, indirect,
+unowned and synthetic-address-space observations keep their original coordinates
+and metadata; none is removed by matching against oracle positives. Consumers
+must retain these distinctions and visible unknowns when mapping to the shared
+call-site contract. Ghidra observations are recovered claims, never oracle truth.
+This driver extension does not close the original cc1 production qualification,
+complete call identity mapping or call-scoring outcomes.
+
+### Post-freeze selected driver replay
+
+For the driver, normal native CLI publication continues after raw capture through
+two additional contained JVMs. The existing selected-boundary worker first
+replays the exact model paired with the native stream. A native operation cannot
+borrow the model or admission capability from another full export. The native
+receipt chain, profile, exporter, loaded target, image base, model bytes and
+output tree are checked by the same structural model-binding policy used by
+ordinary full export. The independent host boundary observation must agree with
+the contained replay before its opaque selected input capability is retained.
+
+Only after this freeze does the independent machine-call worker receive the
+pinned rich ELF and canonical oracle. Its explicit bundled decoder runtime is
+bound to the retained application's bridge, inventory and release archive. It
+receives no recovered model, native observations or recovered function names.
+The launcher protects the original state, model/native reports and completed
+control directories as read-only, retains stable rich/oracle inputs, and proves
+worker/cgroup absence before a bounded descriptor capture. Before START and
+after absence, the host rechecks both raw native files and their paired model.
+Each additional worker has at most five minutes and 4 GiB within the remaining
+original operation deadline; these limits do not establish measured terminal
+CPU, memory or PID counters.
+
+Driver native `result.json` is version 2 and points to the selected boundary
+score, the independent positive report and `native-structural-replay-binding.json`.
+The request, attachment, START authorization, execution and capture documents
+remain separate evidence. The original component report keeps its own false
+completion, negative-completeness and release flags; its authenticated producer
+execution is established by the coordinator-owned operation, not by replacing
+those flags. cc1 retains native result version 1; selected replay is not enabled for that
+target.
+
+The only scored domains remain model provenance, selected function boundaries
+and surviving symbol identities. `CALLS` is unavailable pending the shared
+complete-population projection and independent external composition. Unmatched
+recovered records do not become fabricated facts merely because the positive
+producer lacks a matching observation. The hosted driver native lane retains
+and validates both additional executions and independently replays the selected
+boundary observation. A successful component or local test is not evidence that
+this hosted lane has completed.

@@ -63,6 +63,7 @@ public final class NativeCallCollectorControls {
                 Program program = project.importProgram(Path.of(arguments[5]).toFile());
                 GhidraProject.analyze(program);
                 if (arguments[4].equals("static")) staticControls(program, Path.of(arguments[5]));
+                else if (arguments[4].equals("reference-scan")) referenceScanControls(program, Path.of(arguments[5]));
                 else if (arguments[4].equals("plt") || arguments[4].equals("no-plt")) externalControls(program, Path.of(arguments[5]), arguments[4]);
                 else throw new IllegalArgumentException("unknown control mode");
             } finally {
@@ -330,6 +331,114 @@ public final class NativeCallCollectorControls {
         } finally {
             program.endTransaction(transaction, false);
         }
+    }
+
+    private static void referenceScanControls(Program program, Path input) throws Exception {
+        Address ordinary = symbol(program, "zero_calls");
+        Address jump = symbol(program, "switch_dispatch");
+        require(!instruction(program, ordinary).getFlowType().isCall() && !instruction(program, ordinary).getFlowType().isJump(), "ordinary control must not be a flow instruction");
+        require(instruction(program, jump).getFlowType().isComputed() && instruction(program, jump).getFlowType().isJump(), "jump control must be a computed switch transfer");
+        int transaction = program.startTransaction("authored high reference ordinary instructions");
+        try {
+            var manager = program.getReferenceManager();
+            manager.removeAllReferencesFrom(ordinary, ordinary);
+            manager.removeAllReferencesFrom(jump, jump);
+            // Cross the bundled BigRefList threshold as well as the emitted-record cap.
+            for (int index = 0; index < 1720; index++) manager.addMemoryReference(ordinary, ordinary.add(0x100 + index), RefType.DATA, SourceType.USER_DEFINED, 0);
+            for (int index = 0; index < 65; index++) manager.addMemoryReference(jump, jump.add(0x100 + index), RefType.UNCONDITIONAL_JUMP, SourceType.USER_DEFINED, 0);
+            require(manager.getReferenceCountFrom(ordinary) == 1720 && manager.getReferenceCountFrom(jump) == 65, "high reference controls were not retained completely");
+        } finally { program.endTransaction(transaction, true); }
+        JsonObject document = exportTwice(program, input);
+        Map<String, JsonObject> sites = recordsByAddress(document, "site", "address");
+        require(!sites.containsKey(addressKey(document, ordinary)), "ordinary high reference instruction became a call");
+        require(!sites.containsKey(addressKey(document, jump)), "resolved high reference switch became a call");
+        JsonObject zero = at(recordsByAddress(document, "function-summary", "entry"), document, ordinary);
+        require(zero.get("instructionsVisited").getAsLong() > 0 && zero.get("prototypeCalls").getAsLong() == 0 && zero.get("analysisCallCandidates").getAsLong() == 0, "ordinary high reference instruction lost complete zero-call coverage");
+        JsonObject switchSummary = at(recordsByAddress(document, "function-summary", "entry"), document, symbol(program, "switch_control"));
+        require(switchSummary.get("ordinaryJumpInstructions").getAsLong() >= 2 && switchSummary.get("unresolvedComputedJumps").getAsLong() == 0, "complete jump references did not preserve resolved switch totals");
+
+        // The iterator may return another source after this one. Verify actual bundled iteration
+        // includes a jump before the later call; a classifier cannot stop at that first jump.
+        transaction = program.startTransaction("authored late analyzed call overflow");
+        String overflow;
+        try {
+            var manager = program.getReferenceManager();
+            manager.addMemoryReference(jump, jump.add(0x5000), RefType.UNCONDITIONAL_CALL, SourceType.USER_DEFINED, 0);
+            boolean earlierJump = false; boolean laterCall = false; int visited = 0;
+            var refs = manager.getReferenceIterator(jump);
+            while (refs.hasNext()) {
+                var ref = refs.next(); require(ref != null, "bundled iterator returned null");
+                if (!ref.getFromAddress().equals(jump)) break;
+                visited++;
+                if (ref.getReferenceType().isCall()) laterCall |= earlierJump;
+                if (ref.getReferenceType().isJump()) earlierJump = true;
+            }
+            require(visited == 66 && laterCall, "bundled source iterator did not expose the authored late call");
+            overflow = rejectedReferenceCollection(program, input, MONITOR, "late-call-overflow", "reference count bound");
+            require(overflow.contains("offsetBits=" + String.format("%016x", jump.getOffset())) && overflow.contains("count=66") && overflow.contains("limit=64"), "overflow lacks bounded source/count diagnostics");
+        } finally { program.endTransaction(transaction, false); }
+        referenceOverflowCollection(program, input, symbol(program, "repeated_first"));
+
+        TaskMonitorAdapter cancelled = new TaskMonitorAdapter(true) {
+            int consecutive;
+            @Override public void checkCancelled() throws ghidra.util.exception.CancelledException {
+                if (insideReferenceScan()) { if (++consecutive == 20) throw new ghidra.util.exception.CancelledException(); }
+                else consecutive = 0;
+            }
+        };
+        Path cancelledOutput = root.resolve("reference-scan-cancelled");
+        boolean cancellation = false;
+        try { ExportNativeCallsV1.collect(program, cancelled, arguments(input, root.resolve("reports/program_model.json"), cancelledOutput)); }
+        catch (ghidra.util.exception.CancelledException expected) { cancellation = true; }
+        require(cancellation && !Files.exists(cancelledOutput), "mid-scan cancellation returned or published partial evidence");
+
+        transaction = program.startTransaction("authored same-count iterator mutation");
+        try {
+            boolean[] mutated = {false};
+            TaskMonitorAdapter changing = new TaskMonitorAdapter(true) {
+                int consecutive;
+                @Override public void checkCancelled() {
+                    if (insideReferenceScan()) {
+                        if (++consecutive == 20 && !mutated[0]) {
+                            var manager = program.getReferenceManager();
+                            int before = manager.getReferenceCountFrom(ordinary);
+                            var removed = manager.getReference(ordinary, ordinary.add(0x100), 0);
+                            require(removed != null, "mutation control reference missing");
+                            manager.delete(removed);
+                            manager.addMemoryReference(ordinary, ordinary.add(0x8000), RefType.DATA, SourceType.USER_DEFINED, 0);
+                            require(manager.getReferenceCountFrom(ordinary) == before, "mutation control changed the count");
+                            mutated[0] = true;
+                        }
+                    } else consecutive = 0;
+                }
+            };
+            rejectedReferenceCollection(program, input, changing, "same-count-mutation", "reference enumeration changed");
+            require(mutated[0], "mutation control did not reach the actual iterator scan");
+        } finally { program.endTransaction(transaction, false); }
+        JsonObject evidence = new JsonObject();
+        evidence.addProperty("ordinaryReferenceCount", 1720); evidence.addProperty("jumpReferenceCount", 65);
+        evidence.addProperty("lateCallOverflowDiagnostic", overflow);
+        evidence.addProperty("completeScan", true); evidence.addProperty("sameCountMutationRejected", true);
+        evidence.addProperty("midScanCancellationRejected", true);
+        Files.writeString(root.resolve("reference-scan-controls.json"), evidence.toString());
+        Files.writeString(root.resolve("verified-controls.txt"), "ordinary-high-reference resolved-switch full-source-iterator late-call-overflow bounded-diagnostics same-count-mutation cancellation deterministic model-unchanged\n");
+    }
+
+    private static boolean insideReferenceScan() {
+        return Arrays.stream(Thread.currentThread().getStackTrace()).anyMatch(frame ->
+            frame.getClassName().equals("ExportNativeCallsV1") && frame.getMethodName().equals("scanReferences"));
+    }
+
+    private static String rejectedReferenceCollection(Program program, Path input, TaskMonitor monitor,
+        String name, String expectedReason) throws Exception {
+        Path destination = root.resolve(name);
+        String message = null;
+        try { ExportNativeCallsV1.collect(program, monitor, arguments(input, root.resolve("reports/program_model.json"), destination)); }
+        catch (IllegalStateException expected) { message = expected.getMessage(); }
+        require(message != null && message.contains(expectedReason), "reference control failed for the wrong reason: " + message);
+        require(!Files.exists(destination), "failed reference collection left partial evidence");
+        require(message.length() < 256, "reference failure diagnostic is not bounded");
+        return message;
     }
 
     private static String[] arguments(Path input, Path model, Path output) throws Exception {
