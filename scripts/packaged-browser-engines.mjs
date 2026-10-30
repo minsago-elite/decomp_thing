@@ -216,6 +216,11 @@ async function context(options = {}) {
       const eventTarget = target?.nodeType === 1
         ? { kind: target.localName, id: target.id || null, className: String(target.className ?? '').slice(0, 128) }
         : { kind: target?.nodeName ?? typeof target, nodeType: target?.nodeType ?? null };
+      const headElements = Array.from(document.head?.children ?? []).slice(0, 16).map(element => ({
+        tag: element.localName, name: element.getAttribute('name'), rel: element.getAttribute('rel'),
+        href: location(element.getAttribute('href')), src: location(element.getAttribute('src')),
+      }));
+      const probeName = globalThis.location.search.match(/[?&]__csp_probe=([a-z-]+)/)?.[1] ?? null;
       const at = performance.now();
       const styleOperations = recentStyleOperations.filter(operation => at - operation.at < 1000).slice(-8);
       globalThis.__decompRecordCspViolation(JSON.stringify({
@@ -223,6 +228,7 @@ async function context(options = {}) {
         documentURI: location(event.documentURI), sourceFile: location(event.sourceFile),
         lineNumber: event.lineNumber, columnNumber: event.columnNumber,
         sample: event.sample?.slice(0, 160) ?? null, originalPolicy: event.originalPolicy?.slice(0, 512) ?? null,
+        probeName, eventTimeStamp: event.timeStamp, readyState: document.readyState, headElements,
         eventTarget, inlineStyleState: inlineStyleState(), styleOperations,
       }));
     });
@@ -268,6 +274,55 @@ async function probeNativeControlCsp() {
       }));
       results.push({ name: item.name, documentState, violations: record.csp.slice(before) });
       await page.close();
+    }
+    return results;
+  } finally {
+    await probeContext.close();
+  }
+}
+
+/** Replay the actual packaged HTML shell under its response CSP, with assets isolated by category. */
+async function probeApplicationShellCsp(origin) {
+  const response = await fetch(`${origin}/nested/`, { redirect: 'manual' });
+  assert.ok(response.ok, `Packaged shell probe expected HTTP 200, got ${response.status}`);
+  const policy = response.headers.get('content-security-policy');
+  assert.ok(policy, 'Packaged shell probe requires the actual response CSP');
+  const shell = await response.text();
+  const removeScripts = (html, keep = () => false) => html.replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi,
+    script => keep(script) ? script : '');
+  const removeStylesheets = html => html.replace(/<link\b(?=[^>]*\brel=["']stylesheet["'])[^>]*>/gi, '');
+  const variants = new Map([
+    ['blank', '<!doctype html><html><head></head><body><main>blank CSP probe</main></body></html>'],
+    ['shell-head-only', removeStylesheets(removeScripts(shell))],
+    ['bootstrap-only', removeStylesheets(removeScripts(shell, script => /display-preferences-bootstrap/i.test(script)))],
+    ['module-script-only', removeStylesheets(removeScripts(shell, script => /type=["']module["']/i.test(script)))],
+    ['stylesheet-only', removeScripts(shell)],
+    ['full-shell', shell],
+  ]);
+  const { context: probeContext, record } = await context();
+  try {
+    await probeContext.route(url => url.startsWith(`${origin}/nested/?__csp_probe=`), route => {
+      const name = route.request().url().split('__csp_probe=')[1]?.split('&')[0] ?? '';
+      const body = variants.get(name);
+      if (!body) return route.abort();
+      return route.fulfill({ status: 200, headers: { 'Content-Security-Policy': policy }, contentType: 'text/html; charset=utf-8', body });
+    });
+    const page = await probeContext.newPage();
+    const results = [];
+    for (const [name] of variants) {
+      const before = record.csp.length;
+      await page.goto(`${origin}/nested/?__csp_probe=${name}`);
+      await delay(100);
+      const documentState = await page.evaluate(() => ({
+        readyState: document.readyState,
+        headElements: Array.from(document.head?.children ?? []).map(element => ({
+          tag: element.localName, name: element.getAttribute('name'), rel: element.getAttribute('rel'),
+          href: element.getAttribute('href'), src: element.getAttribute('src'),
+        })),
+        styleElements: document.querySelectorAll('style').length,
+        styleAttributes: document.querySelectorAll('[style]').length,
+      }));
+      results.push({ name, documentState, violations: record.csp.slice(before), exceptions: record.exceptions.slice(-4) });
     }
     return results;
   } finally {
@@ -506,6 +561,7 @@ try {
   const smoked = await smoke(origin, installation.manifest);
   report.smoke = smoked.result;
   report.nativeControlCspProbe = await probeNativeControlCsp();
+  report.applicationShellCspProbe = await probeApplicationShellCsp(origin);
   const audited = await audit(origin, installation.manifest);
   report.audit = audited.result;
   report.auditOrigins = { packaged: origin, fixtures: audited.origin };
