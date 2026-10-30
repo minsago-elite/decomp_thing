@@ -5,6 +5,8 @@ import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.analysis.BundledGhidra
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.StrictJsonLimits
+import decompengine.oracle.externalcalls.StaticMemoryTransferDecoderV1
+import decompengine.oracle.externalcalls.staticMemoryTransferFromBridgeV1
 import decompengine.oracle.fulltree.StableControlFile
 import decompengine.oracle.fulltree.FullTreeFunctionObservationIsolationConfiguration
 import decompengine.oracle.fulltree.FullTreeFunctionObservationRuntimeArtifactRole
@@ -381,6 +383,50 @@ internal class AuthenticatedMachineCallRuntimeV2 private constructor(
     private val loader: MachineCallJarClassLoaderV1,
     private val decoderClass: Class<*>,
 ) : AutoCloseable {
+    /** Uses the same authenticated isolated runtime; no new discovery or classpath is admitted. */
+    fun <T> withStaticMemoryTransferDecoder(consume: (StaticMemoryTransferDecoderV1) -> T): T {
+        val thread = Thread.currentThread()
+        val previous = thread.contextClassLoader
+        thread.contextClassLoader = loader
+        try {
+            val name = "decompengine.ghidra.ByteStaticMemoryTransferDecoderV1"
+            val type = Class.forName(name, false, loader)
+            val recordType = Class.forName("$name\$StaticMemoryTransfer", false, loader)
+            val wrapperType = Class.forName("$name\$DecodeException", false, loader)
+            val refusalType = Class.forName("decompengine.ghidra.ByteInstructionDecoderV1\$DecodeException", false, loader)
+            for (loaded in listOf(type, recordType, wrapperType, refusalType)) {
+                require(loaded.classLoader === loader) { "static memory decoder escaped its isolated loader" }
+                requireLoadedMachineCallBridgeV1(loaded, request.bridgeSnapshot.path, request.bridgeSha256)
+            }
+            require(recordType.isRecord)
+            val decode = type.getMethod("decode", java.lang.Long.TYPE, ByteArray::class.java)
+            require(decode.returnType === recordType) { "static memory decoder return type differs" }
+            type.getMethod("initialize", String::class.java).invoke(null,
+                request.bundleRoot.resolve("ghidra_${BundledGhidra.VERSION}_PUBLIC").toString())
+            val decoder = type.getConstructor(String::class.java).newInstance(request.languageId)
+            return consume(StaticMemoryTransferDecoderV1 { address, bytes ->
+                val owned = bytes.copyOf()
+                val record = try { decode.invoke(decoder, address.toLong(), owned.copyOf()) }
+                catch (failure: InvocationTargetException) {
+                    val direct = failure.cause
+                    // Only the base decoder's authenticated refusal is a recoverable byte refusal.
+                    // The new bridge wraps it once; its own API/second-pass failures stay fatal.
+                    val refusal = if (direct?.javaClass === wrapperType) direct.cause else direct
+                    if (refusal?.javaClass === refusalType && refusal.javaClass.classLoader === loader) {
+                        throw MachineInstructionRefusalV1(requireNotNull(refusal.message))
+                    }
+                    throw failure
+                } ?: throw IllegalArgumentException("static memory decoder returned null")
+                require(record.javaClass === recordType && record.javaClass.classLoader === loader)
+                staticMemoryTransferFromBridgeV1(record).also { result ->
+                    require(result.address == address && result.length <= owned.size && result.bytes.contentEquals(owned.copyOf(result.length))) {
+                        "static memory decoder changed requested address or bytes"
+                    }
+                }
+            })
+        } finally { thread.contextClassLoader = previous }
+    }
+
     fun <T> withDecoder(consume: (MachineInstructionDecoderV1) -> T): T {
         val thread = Thread.currentThread()
         val previous = thread.contextClassLoader

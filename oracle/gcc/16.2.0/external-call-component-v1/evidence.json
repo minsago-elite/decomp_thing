@@ -1,0 +1,124 @@
+{
+  "authority": "component-only",
+  "complete": false,
+  "containmentStatus": "external-owner-required",
+  "counts": {
+    "composedSiteRecords": 15376,
+    "dispositions": {
+      "retained-canonical-target": 11174,
+      "static-import-request-reference": 2932,
+      "unresolved-memory-transfer": 909,
+      "unresolved-slot-without-relocation": 12,
+      "unresolved-source-caller": 335,
+      "unresolved-source-target-exclusion": 11,
+      "unresolved-weak-runtime-target": 3
+    },
+    "namespaceEntries": 151,
+    "sourcePhysicalSites": 15376
+  },
+  "inputs": {
+    "rich": {
+      "bytes": 20713760,
+      "path": "oracle/gcc/16.2.0/artifacts/gcc-driver.full",
+      "sha256": "8009c7cfc4f66017aa932d86a6d4ec7f374e6ab7a01b3ef5ab3d2fcc78c2378b"
+    }
+  },
+  "kind": "retained-external-call-component-evidence",
+  "negativeCompleteness": false,
+  "payloads": {
+    "report": {
+      "bytes": 21981741,
+      "compression": "gzip",
+      "path": "driver-report.json.gz",
+      "sha256": "79ed778678178ab0f3f494c129c8b3ee9edd3049bd82bba9f6666243ea51725b",
+      "storedBytes": 672809,
+      "storedSha256": "4ea97dd6bced3dc7f56d15fcad4eae3383fe3c2ef79844b3e65bc8d88341e7ad"
+    },
+    "request": {
+      "bytes": 2317,
+      "path": "driver-request.json",
+      "sha256": "56eff45e0a5648cf429ddd3de90c1fcdf2ef3a82f039a793e92bf8d8836f80b4"
+    }
+  },
+  "producerJar": {
+    "bytes": 16685301,
+    "path": "build/install/llm_bin_patch/lib/llm-bin-patch-0.1.0.jar",
+    "sha256": "40527269f420a02bd3b6636097a735b62201a73db8679b7aa188f8f5e87961ce"
+  },
+  "releaseEligible": false,
+  "runtime": {
+    "archiveBytes": 569445154,
+    "archiveSha256": "93a5d11a9ad510622acaaf908c556a7b9b764d338e78a7567f3689bf5081fd54",
+    "bridgeSha256": "3b75101db8664856502b609fbd4d4070c90f5e2cf90c4fcf36158c4b32febcee",
+    "bundleManifestSha256": "40bc1a3c090f47e3cd18f2a1e4a95adc7deeb1a5575adfc4c97bdef1837527f5",
+    "languageId": "x86:LE:64:default",
+    "languageVersion": "4.8"
+  },
+  "schemaVersion": 1,
+  "source": {
+    "commit": "47de7b184b61306d1e45276888619d34247101b7",
+    "files": [
+      {
+        "bytes": 17720,
+        "path": "ghidra-bridge/src/main/java/decompengine/ghidra/ByteInstructionDecoderV1.java",
+        "sha256": "ac5df4cedfb3ddd890242f9426b5b5d81a1119c93861a3ce89b43e1ee825b3e2"
+      },
+      {
+        "bytes": 15631,
+        "path": "ghidra-bridge/src/main/java/decompengine/ghidra/ByteStaticMemoryTransferDecoderV1.java",
+        "sha256": "11a5e36cac6c54fc14bee8220f658cd0bb08672fbdc7d02d76e3c617332e2e38"
+      },
+      {
+        "bytes": 42272,
+        "path": "src/main/kotlin/decompengine/oracle/externalcalls/BoundedElfDynamicBindingsV1.kt",
+        "sha256": "bd313d09a57028d1c1f0c66be1b6e364aff9ee946c28e5df21d66ffd4033c25e"
+      },
+      {
+        "bytes": 10503,
+        "path": "src/main/kotlin/decompengine/oracle/externalcalls/ElfRelocationWriteCoverageV1.kt",
+        "sha256": "e854d4d12b163a06adf2614fcc1cff6229c798ef5f4b5ce02186145335b80182"
+      },
+      {
+        "bytes": 56972,
+        "path": "src/main/kotlin/decompengine/oracle/externalcalls/IndependentExternalCallReportV1.kt",
+        "sha256": "e0f7d003929b98e88fa8a4fd7e2bed216c7fe9f00b9107e90cccbd78be1e08bd"
+      },
+      {
+        "bytes": 18717,
+        "path": "src/main/kotlin/decompengine/oracle/externalcalls/IndependentExternalCallWorkerV1.kt",
+        "sha256": "60616253ccfc431490ac5bbb3ecf2077939854b96094b65b2f60f188a7aabefc"
+      },
+      {
+        "bytes": 29853,
+        "path": "src/main/kotlin/decompengine/oracle/externalcalls/IndependentExternalCallsV1.kt",
+        "sha256": "9440dfd01e968e0138ce16dcc270d0db66a908b75784c3ca37900a7ec280b792"
+      },
+      {
+        "bytes": 79347,
+        "path": "src/main/kotlin/decompengine/oracle/fulltree/FullTreeElfLayout.kt",
+        "sha256": "db419f5c23b816c25f876a9b34579436777dec2f89e4dbc646d9f117931c65f3"
+      },
+      {
+        "bytes": 27305,
+        "path": "src/main/kotlin/decompengine/oracle/machinecalls/IndependentMachineCallReportV1.kt",
+        "sha256": "53ebc09cefe1df8ca35224267c31178ab134a9bc034a8d4fdbf56abb7213bcb6"
+      },
+      {
+        "bytes": 44463,
+        "path": "src/main/kotlin/decompengine/oracle/machinecalls/IndependentMachineCallWorkerV1.kt",
+        "sha256": "29b80f8d4b7876c8f447c1371f59a5a9480b8f338efaf2aaccae755fb3f867e0"
+      },
+      {
+        "bytes": 26714,
+        "path": "src/main/kotlin/decompengine/oracle/machinecalls/IndependentMachineCallsV1.kt",
+        "sha256": "fdb39d2c7ce928f3f76496517cd56663cb39f965c3d1c06c9a7b61ec6903c26a"
+      }
+    ],
+    "tree": "2ad2f0da5a6941418ed44fe0a4c8abceca5dde8e"
+  },
+  "sourceEvidence": {
+    "bytes": 3529,
+    "path": "oracle/gcc/16.2.0/machine-call-component-v1/evidence.json",
+    "sha256": "0cc4a3432785ce6b676d4ac0e81342dee7db2782c9f4cbdba2793b9a7d1d1592"
+  }
+}

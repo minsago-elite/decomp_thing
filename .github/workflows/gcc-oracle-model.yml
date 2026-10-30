@@ -316,6 +316,17 @@ jobs:
           echo "DOCKER=$RUNNER_TEMP/docker-client/docker/docker" >> "$GITHUB_ENV"
           echo "DOCKER_HOST=unix://$socket" >> "$GITHUB_ENV"
           echo "DECOMP_TEST_OCI_IMAGE_DIGEST=$observed" >> "$GITHUB_ENV"
+      - name: Fetch recorded component source objects for offline regression controls
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          import subprocess
+          manifests = [Path("oracle/gcc/16.2.0") / kind / "evidence.json"
+                       for kind in ("machine-call-component-v1", "external-call-component-v1")]
+          commits = sorted({json.loads(path.read_bytes())["source"]["commit"] for path in manifests})
+          subprocess.run(["git", "fetch", "--no-tags", "--depth=1", "origin", *commits], check=True)
+          PY
       - name: Test oracle schemas and ELF twin verifier
         env:
           DOCKER: ${{ runner.temp }}/docker-client/docker/docker
