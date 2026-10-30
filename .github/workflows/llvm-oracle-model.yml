@@ -243,6 +243,19 @@ jobs:
             build/test-results/test
             build/reports/junit-signatures
 
+  llvm-required-contract:
+    name: LLVM oracle required-contract
+    if: always() && github.event_name != 'workflow_dispatch'
+    needs:
+      - provenance-artifacts-and-ground-truth
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Require the LLVM oracle model normal verification lane
+        run: |
+          test "${{ needs['provenance-artifacts-and-ground-truth'].result }}" = 'success'
+
   native-runtime-measurement:
     if: github.event_name == 'workflow_dispatch' && inputs.qualification == 'native-runtime-measurement'
     runs-on: ubuntu-24.04
