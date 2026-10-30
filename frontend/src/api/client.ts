@@ -78,8 +78,11 @@ export function createApiClient(options: ClientOptions) {
       controller.signal.addEventListener('abort', stop, { once: true });
     });
     const operation = async (): Promise<ResponseOf<K> | SourceDigestObservation | string | undefined> => {
+      // The document policy is no-referrer, under which Fetch serializes a mutation's Origin as
+      // "null" (Firefox and WebKit follow this; Chromium does not), and the server requires the
+      // exact origin. `origin` sends only the scheme/host/port, never the page path (#631).
       response = await fetcher(url, {
-        method, headers, credentials: 'same-origin', mode: 'same-origin', redirect: 'error',
+        method, headers, credentials: 'same-origin', mode: 'same-origin', redirect: 'error', referrerPolicy: 'origin',
         cache: 'no-store', signal: controller.signal, ...(body === undefined ? {} : { body }),
       });
       if (controller.signal.aborted) {
