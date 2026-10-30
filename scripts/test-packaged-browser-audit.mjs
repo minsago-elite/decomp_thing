@@ -12,8 +12,8 @@ const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const origin = 'http://127.0.0.1:1';
 const base = `${origin}/nested/assets/ui/`;
 const manifest = { buildId: 'b'.repeat(64), files: [{ path: 'index.html' }, { path: 'assets/index-a.js' }, { path: 'assets/index-a.css' },
-  { path: 'assets/Home-a.js' }, { path: 'assets/highlight.worker-a.js' }, { path: 'assets/mark-a.svg' }] };
-const responses = ['assets/index-a.js', 'assets/index-a.css', 'assets/Home-a.js'].map((path) => ({ url: base + path, status: 200 }));
+  { path: 'assets/Home-a.js' }, { path: 'assets/Git-a.js' }, { path: 'assets/highlight.worker-a.js' }, { path: 'assets/mark-a.svg' }] };
+const responses = ['assets/index-a.js', 'assets/index-a.css', 'assets/Home-a.js', 'assets/Git-a.js'].map((path) => ({ url: base + path, status: 200 }));
 const stop = { key: 1, heading: false, target: 'button "Refresh"', focusVisible: true, outlineStyle: 'solid', outlineWidth: 3, contrast: 5.1, inViewport: true, unobscured: true };
 function timingEvidence(cold = 400, feedback = 40, data = 90) {
   return { coldLoad: { samples: 20, median: cold, p95: cold }, routeFeedback: { samples: 50, median: feedback, p95: feedback },
@@ -41,7 +41,7 @@ const verdict = (audit, served = responses) => assertAudit(audit, manifest, serv
 test('a clean audit with every packaged asset and the worker has no failures', () => {
   const audit = clean();
   assert.deepEqual(auditFixtures(repo, manifest.buildId).pages.map(page => page.name), auditPageNames);
-  assert.deepEqual([audit.layout.length, audit.contrast.length, audit.focus.length], [120, 48, 24]);
+  assert.deepEqual([audit.layout.length, audit.contrast.length, audit.focus.length], [130, 52, 26]);
   assert.deepEqual(verdict(audit), []);
 });
 
@@ -165,6 +165,11 @@ test('fixtures bind one job, attempt and revision with long names and a self-con
   assert.equal(new Set(fixtures.pages.map((page) => page.path)).size, fixtures.pages.length);
   const job = fixtures.respond('GET', `/jobs/${fixtures.pages[3].path.split('/').at(-1)}`, 'application/json').document;
   assert.equal(job.data.displayFilename.length, 255);
+  const gitPage = fixtures.pages.find((page) => page.name === 'git workspace');
+  assert.equal(gitPage.path, `/nested/jobs/${job.data.jobId}/git`);
+  assert.equal(gitPage.rendered, 'Source repository');
+  const repositories = fixtures.respond('GET', `/jobs/${job.data.jobId}/repositories`, 'application/json').document;
+  assert.deepEqual(repositories.data, { jobId: job.data.jobId, repositories: [], operations: [] });
   const searchForm = fixtures.pages.find((page) => page.name === 'source search form');
   const searchResults = fixtures.pages.find((page) => page.name === 'source search results');
   assert.ok(searchForm && searchResults);
@@ -287,7 +292,7 @@ test('qualifyAudit prepares every fresh layout/contrast/focus navigation before 
       return current.evaluate(tab, expression);
     },
   }), error => error === completed);
-  assert.deepEqual(counts, { layout: 120, contrast: 48, focus: 48, navigations: 84 });
+  assert.deepEqual(counts, { layout: 130, contrast: 52, focus: 52, navigations: 91 });
 });
 
 test('content checks require visible, distinctive rows rather than an empty or hidden table', () => {
