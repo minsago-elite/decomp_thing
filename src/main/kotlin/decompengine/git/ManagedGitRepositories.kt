@@ -1527,6 +1527,7 @@ class ManagedGitRepositories(
         var switchBranchLock: AutoCloseable? = null
         var publishedCommit: String? = null
         var publicationAttempted = false
+        var terminalPersisted = false
         try {
             if (queued.action in setOf(GitOperationAction.SWITCH, GitOperationAction.WORKTREE_REMOVE,
                     GitOperationAction.MERGE, GitOperationAction.MERGE_ABORT, GitOperationAction.CONFLICT_SAVE, GitOperationAction.CONFLICT_COMPLETE)) {
@@ -1617,7 +1618,11 @@ class ManagedGitRepositories(
             // attached to an operation that restart reconciliation would otherwise skip.
             switchBranchLock?.close()
             switchBranchLock = null
-            synchronized(lock) { current = finish(current, GitOperationState.COMPLETED, null, message, result); persist(directory, current) }
+            synchronized(lock) {
+                current = finish(current, GitOperationState.COMPLETED, null, message, result)
+                persist(directory, current)
+                terminalPersisted = true
+            }
             clearRemoteAudit(current)
         } catch (_: SimulatedGitCrash) {
             synchronized(lock) { active -= queued.operationId }
@@ -1665,12 +1670,20 @@ class ManagedGitRepositories(
                 } else finish(current, state, code, message.take(500))
                 if (current.recoveryRequired && (queued.action == GitOperationAction.WORKTREE_ADD || queued.action in REMOTE_CHANGES ||
                     integrationAuditRecovery(current))) reconciled -= queued.jobId
-                try { persist(directory, current); clearRemoteAudit(current) } catch (_: Exception) { /* reconciled after restart */ }
+                try {
+                    persist(directory, current)
+                    terminalPersisted = current.state.terminal
+                    clearRemoteAudit(current)
+                } catch (_: Exception) { /* reconciled after restart */ }
             }
         } finally {
             try {
                 switchBranchLock?.close()
                 try { GitStorage.deleteTree(staging) } catch (_: Exception) { /* removed by reconciliation */ }
+                if (terminalPersisted && current.state.terminal && !current.recoveryRequired && isConflictLockOperation(queued.action)) {
+                    try { GitStorage.deleteTree(conflictLockStaging(queued.jobId, queued.repositoryId, queued.operationId)) }
+                    catch (_: Exception) { /* retried during reconciliation or operation retirement */ }
+                }
             } finally {
                 synchronized(lock) { active -= queued.operationId; cancellations -= queued.operationId; progress -= queued.operationId }
                 lease?.close()
@@ -1794,14 +1807,27 @@ class ManagedGitRepositories(
         (operation.request as? GitRefRequest)?.let { return reconcileRef(jobId, operation, it) }
         (operation.request as? GitSyncRequest)?.let { return reconcileSync(jobId, operation, it) }
         if (operation.action != GitOperationAction.COMMIT) {
-            // Stage/unstage use the same witnessed Git locks as commits. Reclaim only inodes
-            // proven to belong to this operation; never replay an interrupted index publication.
+            // Stage/unstage and conflict operations use witnessed Git locks. Reclaim only
+            // operation-owned inodes; never replay an interrupted index or conflict publication.
+            val conflictLockOperation = isConflictLockOperation(operation.action)
             val record = repositories(jobId).singleOrNull { it.repositoryId == operation.repositoryId }
+            if (record == null && conflictLockOperation) {
+                return finish(operation, GitOperationState.RECOVERY_REQUIRED, "CONFLICT_REPOSITORY_UNKNOWN",
+                    "Interrupted conflict operation has no registered repository for lock recovery. Inspect the repository and its writers.")
+            }
             if (record != null) {
                 val commonDir = root.resolve(jobId).resolve("git/repositories").resolve(record.repositoryId).resolve(GIT_DIR)
                 val gitDir = if (operation.worktreeId == record.worktreeId) commonDir else commonDir.resolve("worktrees").resolve(operation.worktreeId)
-                GitWorkspaceMutations.reclaimCommitLocks(gitDir,
-                    root.resolve(jobId).resolve("git/staging").resolve(operation.operationId), operation.operationId, commonDir)
+                if (conflictLockOperation) {
+                    val staging = conflictLockStaging(jobId, operation.repositoryId, operation.operationId)
+                    if (conflictLocksRequireReview(gitDir, commonDir, staging, operation.operationId)) {
+                        return finish(operation, GitOperationState.RECOVERY_REQUIRED, "CONFLICT_LOCKS_REQUIRE_REVIEW",
+                            "Interrupted conflict operation has a Git lock whose ownership could not be confirmed. Inspect the repository and its writers.")
+                    }
+                } else {
+                    GitWorkspaceMutations.reclaimCommitLocks(gitDir,
+                        root.resolve(jobId).resolve("git/staging").resolve(operation.operationId), operation.operationId, commonDir)
+                }
             }
             return finish(operation, GitOperationState.INTERRUPTED, "INTERRUPTED",
                 "Interrupted by a server restart. Review the current index before a new request.")
@@ -2151,6 +2177,10 @@ class ManagedGitRepositories(
                 if (operation.state.terminal && !pendingRecovery) {
                     clearRemoteAudit(operation)
                     retireIntegration(operation)
+                    if (isConflictLockOperation(operation.action) && !operation.recoveryRequired) {
+                        try { GitStorage.deleteTree(conflictLockStaging(jobId, operation.repositoryId, operation.operationId)) }
+                        catch (_: Exception) { /* retried by operation retirement */ }
+                    }
                     continue
                 }
                 val staging = directory.resolve("staging").resolve(operation.operationId)
@@ -2295,10 +2325,43 @@ class ManagedGitRepositories(
         if (excess <= 0) return operations
         val directory = root.resolve(jobId).resolve("git").resolve("operations")
         // A recovery-required record awaits an operator and keeps its staging tree; it is never retired.
-        val retired = operations.filter { it.action.workspace && it.state.terminal && it.state != GitOperationState.RECOVERY_REQUIRED }
+        val candidates = operations.filter { it.action.workspace && it.state.terminal && it.state != GitOperationState.RECOVERY_REQUIRED }
             .sortedBy { it.createdAt }.take(excess)
+        val retired = candidates.filter { operation ->
+            if (!isConflictLockOperation(operation.action)) true
+            else try {
+                GitStorage.deleteTree(conflictLockStaging(jobId, operation.repositoryId, operation.operationId))
+                true
+            } catch (_: Exception) { false }
+        }
         retired.forEach { Files.deleteIfExists(directory.resolve("${it.operationId}.json")) }
         return operations - retired.toSet()
+    }
+
+    private fun isConflictLockOperation(action: GitOperationAction): Boolean =
+        action == GitOperationAction.CONFLICT_SAVE || action == GitOperationAction.CONFLICT_COMPLETE
+
+    private fun conflictLockStaging(jobId: String, repositoryId: String, operationId: String): Path =
+        repositoryDirectory(jobId, repositoryId).resolve("staging").resolve(operationId)
+
+    /** Reclaim only witnessed locks; if any lock remains, retain the evidence for operator review. */
+    private fun conflictLocksRequireReview(gitDir: Path, commonDir: Path, staging: Path, operationId: String): Boolean {
+        val refNameFile = staging.resolve("ref-name")
+        val refLock = staging.resolve("ref-lock")
+        val refName = if (Files.exists(refNameFile, NOFOLLOW_LINKS)) {
+            if (!Files.isRegularFile(refNameFile, NOFOLLOW_LINKS)) return true
+            val value = try { GitStorage.read(refNameFile, 4096).toString(Charsets.UTF_8) } catch (_: Exception) { return true }
+            if (!GitRefNames.isObservedRefName(value)) return true
+            value
+        } else {
+            if (Files.exists(refLock, NOFOLLOW_LINKS)) return true
+            null
+        }
+        try { GitWorkspaceMutations.reclaimCommitLocks(gitDir, staging, operationId, commonDir) }
+        catch (_: Exception) { return true }
+        val gitLocks = listOf(gitDir.resolve("index.lock"), gitDir.resolve("HEAD.lock"))
+        return gitLocks.any { Files.exists(it, NOFOLLOW_LINKS) } ||
+            (refName != null && Files.exists(commonDir.resolve("$refName.lock"), NOFOLLOW_LINKS))
     }
 
     private fun operations(jobId: String): List<GitOperationRecord> {
