@@ -145,6 +145,17 @@ internal object GitRefOperations {
         }
     }
 
+    /** Refuse removal when index flags could hide tracked local edits from ordinary status. */
+    fun requireNoHiddenIndexEntries(runner: GitCommandRunner, gitDir: Path, workTree: Path) {
+        val result = runner.run(GitInvocation("ls-files", listOf("-v", "-z"), gitDir = gitDir, workTree = workTree, limits = LIMITS))
+        val hasHiddenEntries = result.stdout.toString(Charsets.ISO_8859_1).split('\u0000').any { entry ->
+            val tag = entry.firstOrNull()
+            tag == 'S' || tag?.isLowerCase() == true
+        }
+        if (hasHiddenEntries) refuse("WORKTREE_DIRTY",
+            "The work tree has tracked files hidden by index flags. Clear the flags and review the files before removal; nothing was discarded.")
+    }
+
     fun addWorktree(runner: GitCommandRunner, commonDir: Path, path: Path, objectId: String, branch: String?) {
         val arguments = listOf("add", "-q") + (if (branch != null) listOf("-b", branch) else listOf("--detach")) + listOf(path.toString(), objectId)
         runner.run(GitInvocation("worktree", arguments, gitDir = commonDir, limits = LIMITS))

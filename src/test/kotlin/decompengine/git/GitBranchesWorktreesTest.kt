@@ -175,6 +175,36 @@ class GitBranchesWorktreesTest {
         refused("WORKTREE_DIRTY", GitRefRequest(GitOperationAction.WORKTREE_REMOVE, linked, guards(linked).second))
         assertEquals("output\n", Files.readString(path.resolve("vendor/result.dat")))
         Files.delete(path.resolve("vendor/result.dat"))
+        // skip-worktree can hide a modified tracked file from status, but removal would delete it.
+        val trackedSource = path.resolve("src/main.c")
+        val originalSource = Files.readString(trackedSource)
+        val hiddenEdit = "int main(void) { return 9; }\n"
+        f.raw("update-index", "--skip-worktree", "--", "src/main.c", worktree = path, gitDir = linkedGit)
+        Files.writeString(trackedSource, hiddenEdit)
+        assertTrue(service.workspace(jobId, repositoryId, linked).observation.status.entries.isEmpty())
+        refused("WORKTREE_DIRTY", GitRefRequest(GitOperationAction.WORKTREE_REMOVE, linked, guards(linked).second))
+        assertEquals(hiddenEdit, Files.readString(trackedSource))
+        f.raw("update-index", "--no-skip-worktree", "--", "src/main.c", worktree = path, gitDir = linkedGit)
+        Files.writeString(trackedSource, originalSource)
+        // Repeat the guard at the destructive boundary if an external writer hides an edit
+        // after the worker's final validation.
+        f.hook = { point ->
+            if (point == GitOperationCrashPoint.BEFORE_PUBLISH) {
+                f.raw("update-index", "--skip-worktree", "--", "src/main.c", worktree = path, gitDir = linkedGit)
+                Files.writeString(trackedSource, hiddenEdit)
+            }
+        }
+        val racedAdmission = service.requestWorkspace(jobId, repositoryId,
+            GitRefRequest(GitOperationAction.WORKTREE_REMOVE, linked, guards(linked).second), "race_key_00000001")
+        assertTrue(service.awaitIdle(60_000))
+        val racedRemoval = service.operation(jobId, repositoryId, racedAdmission.operation.operationId)
+        assertEquals(GitOperationState.FAILED, racedRemoval.state)
+        assertEquals("WORKTREE_DIRTY", racedRemoval.failureCode)
+        assertTrue(path.exists())
+        assertEquals(hiddenEdit, Files.readString(trackedSource))
+        f.hook = {}
+        f.raw("update-index", "--no-skip-worktree", "--", "src/main.c", worktree = path, gitDir = linkedGit)
+        Files.writeString(trackedSource, originalSource)
         f.raw("checkout", "-q", "--detach", worktree = path, gitDir = linkedGit)
         Files.writeString(path.resolve("src/extra.c"), "int extra = 2;\n")
         f.raw("commit", "-q", "-am", "detached only", worktree = path, gitDir = linkedGit)

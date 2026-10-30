@@ -830,6 +830,7 @@ class ManagedGitRepositories(
             GitOperationAction.WORKTREE_REMOVE -> {
                 if (located.primary) GitRefOperations.refuse("WORKTREE_PRIMARY", "The primary work tree cannot be removed.")
                 requireNoLease(located)
+                GitRefOperations.requireNoHiddenIndexEntries(runner, located.gitDir, located.workTree)
                 // Ignored files count too: `git worktree remove` deletes them without --force,
                 // and they are often experiment output. An incomplete status is never clean.
                 if (observation.status.entries.isNotEmpty() || !observation.status.complete) GitRefOperations.refuse("WORKTREE_DIRTY",
@@ -1052,6 +1053,9 @@ class ManagedGitRepositories(
                 objectId
             }
             GitOperationAction.WORKTREE_REMOVE -> {
+                // Recheck immediately before deletion: an external writer may set an index flag
+                // after final request validation and hide a tracked edit from Git's removal check.
+                GitRefOperations.requireNoHiddenIndexEntries(runner, located.gitDir, located.workTree)
                 GitRefOperations.removeWorktree(runner, located.commonDir, located.workTree)
                 crash(GitOperationCrashPoint.AFTER_STAGING)
                 Files.deleteIfExists(repositoryDirectory(operation.jobId, operation.repositoryId).resolve(WORKTREE_RECORDS).resolve("${located.worktreeId}.json"))
