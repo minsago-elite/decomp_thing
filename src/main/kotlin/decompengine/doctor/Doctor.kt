@@ -153,17 +153,37 @@ class Doctor(
                 else "Injected command callbacks receive cooperative before/after checks only.")
             .withToolsOnlyKind(DoctorToolKind.LIMITS)
         if (!options.toolsOnly) {
+            val harnessEnvironment = withHarnessOverride(options.harnessOverride)
+            val selectedHarness = harnessEnvironment["ACP_HARNESS"] ?: "acp"
+            val legacySelected = selectedHarness == "legacy-openai"
             val harnessSelection = runCatching {
-                AcpHarnessFactory.fromEnvironment(withHarnessOverride(options.harnessOverride))
+                AcpHarnessFactory.fromEnvironment(harnessEnvironment)
             }.onFailure { requireDoctorActive(it) }
-            checks += agentHarnessChecks(
-                harnessSelection,
-                options.workflowOverride ?: AcpPreflightWorkflow.ALL,
-                options.showAuthMethods,
-                diagnostic,
-            )
-            if (harnessSelection.getOrNull()?.kind == AcpHarnessKind.LEGACY_OPENAI && !options.showAuthMethods) {
-                checks += llmChecks(diagnostic)
+            if (legacySelected && harnessSelection.isFailure) {
+                if (options.showAuthMethods) {
+                    checks += DoctorCheck(
+                        "ACP authentication methods",
+                        false,
+                        "--auth-methods requires the ACP harness; no login attempted.",
+                    )
+                } else {
+                    checks += DoctorCheck(
+                        "ACP harness",
+                        true,
+                        "Selected legacy-openai (deprecated); migrate to the default ACP harness.",
+                    )
+                    checks += llmChecks(diagnostic, allowConnectivity = false)
+                }
+            } else {
+                checks += agentHarnessChecks(
+                    harnessSelection,
+                    options.workflowOverride ?: AcpPreflightWorkflow.ALL,
+                    options.showAuthMethods,
+                    diagnostic,
+                )
+                if (harnessSelection.getOrNull()?.kind == AcpHarnessKind.LEGACY_OPENAI && !options.showAuthMethods) {
+                    checks += llmChecks(diagnostic)
+                }
             }
         }
         requireDoctorActive()
@@ -342,7 +362,7 @@ class Doctor(
         }
     }
 
-    private fun llmChecks(diagnostic: DoctorDiagnostics): List<DoctorCheck> {
+    private fun llmChecks(diagnostic: DoctorDiagnostics, allowConnectivity: Boolean = true): List<DoctorCheck> {
         val rawBaseUrl = environment["BASE_URL"].orEmpty()
         val baseUrlText = rawBaseUrl.trim()
         val apiKey = environment["API_KEY"].orEmpty()
@@ -362,7 +382,9 @@ class Doctor(
             val supported = reasoning in setOf("none", "minimal", "low", "medium", "high", "xhigh")
             checks += DoctorCheck("reasoning effort", supported, if (supported) "configured as ${diagnostic.projected(rawReasoning, reasoning)}" else "Use none, minimal, low, medium, high, or xhigh.")
         }
-        checks += if (validBaseUrl && apiKey.isNotBlank()) {
+        checks += if (!allowConnectivity) {
+            DoctorCheck("LLM connectivity", false, "Connectivity was not attempted because legacy harness configuration is invalid.")
+        } else if (validBaseUrl && apiKey.isNotBlank()) {
             runCatching { connectivityProbe.check(requireNotNull(baseUrl), apiKey) }.fold(
                 onSuccess = { DoctorCheck("LLM connectivity", true, it) },
                 onFailure = { failure ->
