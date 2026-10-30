@@ -1392,6 +1392,10 @@ class ExternalCallComponentEvidenceTest(unittest.TestCase):
                 next(row for row in inv["programHeaders"] if row["type"] == 1 and
                     row["virtualAddress"] == inv["sections"][8]["address"]).update(fileSize="0x24", memorySize="0x24"),
                 inv["versionRequirements"][0].update(recordOffset=68, auxiliaryOffset=84)),
+            lambda inv: (inv["sections"][8].update(size="0x24"),
+                next(row for row in inv["programHeaders"] if row["type"] == 1 and
+                    row["virtualAddress"] == inv["sections"][8]["address"]).update(fileSize="0x24", memorySize="0x24"),
+                inv["versionRequirements"][0].update(auxiliaryOffset=81)),
             lambda inv: inv["versionRequirements"][0].update(auxiliaryOffset=79),
             lambda inv: inv["versionRequirements"][0].update(auxiliaryOffset=81),
             lambda inv: inv["versionRequirements"][0].update(hash=0),

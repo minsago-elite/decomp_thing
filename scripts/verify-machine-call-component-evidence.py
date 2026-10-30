@@ -887,8 +887,9 @@ def retained_version_records(inventory: dict, sections: dict, input_bytes: int, 
                     bool(row["name"]) and row["hash"] == elf_hash(row["name"]), "retained GNU version identity/hash differs")
             keys.add(key)
             record_end = record_ends[(owner["index"], row["recordOffset"])]
-            require(within(owner, row["recordOffset"], width) and row["recordOffset"] + width <= record_end,
-                    "retained GNU version record bounds differ")
+            require((row["recordOffset"] - owner["offset"]) % 4 == 0 and
+                    within(owner, row["recordOffset"], width) and row["recordOffset"] + width <= record_end,
+                    "retained GNU version record bounds/alignment differs")
             header = (owner["index"], row["recordOffset"])
             if header not in record_headers:
                 storage_ranges.setdefault(owner["index"], []).append((row["recordOffset"], row["recordOffset"] + width))
@@ -909,9 +910,9 @@ def retained_version_records(inventory: dict, sections: dict, input_bytes: int, 
                         offsets == sorted(set(offsets)) and all(b - a >= 8 for a, b in pairwise(offsets)),
                         "retained Verdaux population/order differs")
             for offset in offsets:
-                require(offset >= row["recordOffset"] + width and offset + auxiliary_width <= record_end and
-                        within(owner, offset, auxiliary_width),
-                        "retained GNU version auxiliary bounds/order differs")
+                require((offset - row["recordOffset"]) % 4 == 0 and offset >= row["recordOffset"] + width and
+                        offset + auxiliary_width <= record_end and within(owner, offset, auxiliary_width),
+                        "retained GNU version auxiliary bounds/order/alignment differs")
                 storage_ranges.setdefault(owner["index"], []).append((offset, offset + auxiliary_width))
     require_consistent_byte_ranges(string_ranges, "retained GNU version strings conflict in linked table")
     for ranges in storage_ranges.values():
