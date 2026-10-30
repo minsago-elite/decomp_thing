@@ -234,9 +234,13 @@ data class GitInvocation(
     /** Required by, and only allowed for, the remote transport subcommands. */
     val transport: GitTransportContext? = null,
     val control: GitProcessControl? = null,
+    /** Merge output is diagnostic, not structured data: retain bounded prefixes but drain to exit.
+     * Unlike truncateStdout this never terminates a mutation halfway through index publication. */
+    val drainDiagnostics: Boolean = false,
 ) {
     init {
         require(subcommand in SUBCOMMANDS) { "Git subcommand is not allowlisted" }
+        require(!drainDiagnostics || (subcommand == "merge" && !truncateStdout)) { "Only merge diagnostics may be drained" }
         require(arguments.size <= 256 && arguments.all { it.length <= MAX_ARGUMENT_LENGTH && '\u0000' !in it }) { "Git arguments are unbounded" }
         require(gitDir == null || gitDir.isAbsolute) { "Git directory must be absolute" }
         require(workTree == null || (workTree.isAbsolute && gitDir != null)) { "Git work tree requires an absolute path and Git directory" }
@@ -256,8 +260,7 @@ data class GitInvocation(
             "version", "init", "config", "check-ref-format", "rev-parse", "symbolic-ref", "for-each-ref",
             "status", "read-tree", "fsck", "cat-file", "ls-files", "ls-tree", "check-ignore", "update-ref",
             "log", "diff", "diff-tree", "add", "rm", "reset", "commit", "switch", "worktree", "rev-list", "write-tree", "commit-tree",
-            "fetch", "push", "ls-remote", "merge", "merge-base", "checkout-index",
-            "hash-object", "update-index",
+            "fetch", "push", "ls-remote", "merge", "merge-base", "checkout-index", "check-attr", "hash-object", "update-index",
         )
         val TRANSPORT_SUBCOMMANDS = setOf("fetch", "push", "ls-remote")
         val VARIABLES = setOf("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_AUTHOR_DATE",
@@ -285,7 +288,18 @@ class GitCommandRunner internal constructor(
         addAll(invocation.arguments)
     }
 
-    fun run(invocation: GitInvocation): GitCommandResult {
+    fun run(invocation: GitInvocation): GitCommandResult = execute(invocation)
+
+    /** Drain large structured listings without retaining their complete stdout in memory. The
+     * consumer runs serially on the stdout reader, and its failures terminate the child. */
+    internal fun stream(invocation: GitInvocation, maxBytes: Long, consume: (ByteArray, Int) -> Unit) {
+        require(!invocation.truncateStdout && !invocation.drainDiagnostics && maxBytes in 1..256L * 1024 * 1024)
+        execute(invocation, StreamOutput(maxBytes, consume))
+    }
+
+    private class StreamOutput(val maxBytes: Long, val consume: (ByteArray, Int) -> Unit)
+
+    private fun execute(invocation: GitInvocation, stream: StreamOutput? = null): GitCommandResult {
         val command = argv(invocation)
         val boundedCommand = invocation.limits.maxAddressSpaceBytes?.let { bytes ->
             // Use only the fixed server utility, never repository data or request/PATH lookup.
@@ -310,13 +324,14 @@ class GitCommandRunner internal constructor(
             else Thread.ofVirtual().start {
                 try { process.outputStream.use { it.write(input) } } catch (_: IOException) { /* child exited early */ }
             }
-            val stdout = BoundedCapture(process.inputStream, invocation.limits.maxStdoutBytes)
+            val stdout = BoundedCapture(process.inputStream, invocation.limits.maxStdoutBytes, stream = stream)
             val stderr = BoundedCapture(process.errorStream, invocation.limits.maxStderrBytes, invocation.control?.progress)
             val readers = listOf(Thread.ofVirtual().start(stdout), Thread.ofVirtual().start(stderr))
             val deadline = System.nanoTime() + invocation.limits.timeout.toNanos()
             while (process.isAlive) {
+                stdout.failure?.let { terminate(process); throw it }
                 if (stdout.overflowed && invocation.truncateStdout) break
-                if (stdout.overflowed || stderr.overflowed) {
+                if (!invocation.drainDiagnostics && (stdout.overflowed || stderr.overflowed)) {
                     terminate(process)
                     throw GitCommandException(GitCommandException.Kind.OUTPUT_LIMIT, "Git output exceeded its bound.")
                 }
@@ -337,10 +352,11 @@ class GitCommandRunner internal constructor(
                 terminate(process)
                 throw GitCommandException(GitCommandException.Kind.TIMED_OUT, "Git output did not close within its time bound.")
             }
+            stdout.failure?.let { throw it }
             // The readers can still be draining when the process exits, so only their final state
             // decides truncation. Stderr keeps its own limit either way.
             val truncated = stdout.overflowed && invocation.truncateStdout
-            if (stderr.overflowed || (stdout.overflowed && !truncated)) {
+            if (!invocation.drainDiagnostics && (stderr.overflowed || (stdout.overflowed && !truncated))) {
                 throw GitCommandException(GitCommandException.Kind.OUTPUT_LIMIT, "Git output exceeded its bound.")
             }
             val exit = if (truncated) -1 else process.exitValue()
@@ -348,7 +364,7 @@ class GitCommandRunner internal constructor(
                 throw GitCommandException(GitCommandException.Kind.FAILED, "Git reported a failure.", exit,
                     diagnostic = stderr.bytes().toString(Charsets.UTF_8))
             }
-            return GitCommandResult(exit, stdout.bytes(), stderr.bytes(), truncated)
+            return GitCommandResult(exit, stdout.bytes(), stderr.bytes(), stdout.overflowed)
         } catch (interrupted: InterruptedException) {
             terminate(process)
             Thread.currentThread().interrupt()
@@ -369,9 +385,12 @@ class GitCommandRunner internal constructor(
      * With a [progress] listener it keeps only the tail instead and reports each progress line.
      */
     private class BoundedCapture(private val input: InputStream, private val limit: Int,
-        private val progress: ((String) -> Unit)? = null) : Runnable {
+        private val progress: ((String) -> Unit)? = null, private val stream: StreamOutput? = null) : Runnable {
         private val buffer = java.io.ByteArrayOutputStream()
         private val line = StringBuilder()
+        private var streamedBytes = 0L
+        @Volatile var failure: Exception? = null
+            private set
         @Volatile var overflowed = false
             private set
 
@@ -382,6 +401,14 @@ class GitCommandRunner internal constructor(
                     while (true) {
                         val count = stream.read(chunk)
                         if (count < 0) break
+                        if (this.stream != null) {
+                            streamedBytes += count
+                            if (streamedBytes > this.stream.maxBytes) overflowed = true
+                            if (!overflowed && failure == null) {
+                                try { this.stream.consume(chunk, count) } catch (error: Exception) { failure = error }
+                            }
+                            continue
+                        }
                         synchronized(buffer) {
                             if (progress != null) {
                                 buffer.write(chunk, 0, count)

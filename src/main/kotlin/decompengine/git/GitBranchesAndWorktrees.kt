@@ -55,6 +55,9 @@ data class GitWorktreeRecord(
 /** Workflow attempts of a job and whether each is still active; supplied by the job service. */
 fun interface GitJobActivity {
     fun runs(jobId: String): Map<String, Boolean>
+
+    /** Owners with concurrent workflow admission override this with their admission lock. */
+    fun <T> withStableRuns(jobId: String, block: (Map<String, Boolean>) -> T): T = block(runs(jobId))
 }
 
 internal object GitRefOperations {

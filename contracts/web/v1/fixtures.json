@@ -163,10 +163,6 @@
       "valid": true
     },
     {
-      "file": "fixtures/git-history-many-parents.json",
-      "valid": true
-    },
-    {
       "file": "fixtures/git-diff.json",
       "valid": true
     },
@@ -231,6 +227,15 @@
     {
       "file": "fixtures/request-git-commit.json",
       "valid": true
+    },
+    {
+      "file": "fixtures/request-git-merge-index-commit.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-git-merge-index-selection.json",
+      "valid": false,
+      "reason": "Complete pending-merge index reviews cannot also select individual file IDs."
     },
     {
       "file": "fixtures/request-git-push.json",
@@ -891,6 +896,43 @@
     },
     {
       "file": "fixtures/git-audit.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/request-git-merge.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-request-git-merge-rebase.json",
+      "valid": false,
+      "reason": "Rebase rewrites history; the integration request accepts only fast-forward or merge."
+    },
+    {
+      "file": "fixtures/request-git-merge-abort.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/request-git-conflict-save.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/request-git-conflict-complete.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/git-divergence.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/git-conflicts.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/git-conflict-file.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/git-history-many-parents.json",
       "valid": true
     },
     {

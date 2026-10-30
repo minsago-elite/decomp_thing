@@ -28,6 +28,8 @@ internal class WebGitReads(private val repositories: () -> ManagedGitRepositorie
             "status" -> setOf("worktree", "cursor", "limit")
             "refs" -> setOf("cursor", "limit")
             "remotes" -> emptySet()
+            "divergence" -> setOf("worktree", "tracking")
+            "conflicts" -> setOf("worktree", "offset")
             "audit" -> setOf("limit")
             "history" -> setOf("worktree", "start", "cursor", "limit")
             else -> setOf("worktree", "scope", "commit", "file", "cursor", "limit")
@@ -45,6 +47,14 @@ internal class WebGitReads(private val repositories: () -> ManagedGitRepositorie
                 "history" -> sendWebApiResponse(exchange, 200, "gitHistory", history(jobId, repositoryId, query, limit, worktree))
                 "diff" -> sendWebApiResponse(exchange, 200, "gitDiff", diff(jobId, repositoryId, query, limit, worktree))
                 "remotes" -> sendWebApiResponse(exchange, 200, "gitRemotes", remotes(jobId, repositoryId))
+                "divergence" -> sendWebApiResponse(exchange, 200, "gitDivergence", divergence(jobId, repositoryId, worktree,
+                    query["tracking"]?.takeIf { it.matches(Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}")) }
+                        ?: throw WebAccessDenied(422, "VALIDATION_FAILED", "tracking must name one remote-tracking ref identity.")))
+                "conflicts" -> sendWebApiResponse(exchange, 200, "gitConflicts", conflicts(jobId, repositoryId, worktree,
+                    query["offset"]?.let { value ->
+                        value.takeIf { it.matches(Regex("0|[1-9][0-9]{0,5}")) }?.toInt()?.takeIf { it <= 200_000 }
+                            ?: throw WebAccessDenied(422, "VALIDATION_FAILED", "offset must be an integer from 0 to 200000.")
+                    } ?: 0))
                 "audit" -> sendWebApiResponse(exchange, 200, "gitAudit", buildJsonObject {
                     put("repositoryId", repositoryId)
                     put("entries", JsonArray(repositories().auditLog(jobId, repositoryId, limit)))
@@ -54,6 +64,56 @@ internal class WebGitReads(private val repositories: () -> ManagedGitRepositorie
         } catch (failure: ManagedGitException) {
             throw webGitDenied(failure)
         }
+    }
+
+    /** `G/divergence` (#595): fetched state only; strategies are offered, never chosen. */
+    private fun divergence(jobId: String, repositoryId: String, worktree: String?, tracking: String): JsonObject {
+        val view = repositories().divergence(jobId, repositoryId, worktree, tracking)
+        val (ahead, behind) = view.divergence.ahead to view.divergence.behind
+        val state = when {
+            view.fetchedAt == null -> "unknown"
+            java.time.Duration.between(view.fetchedAt, java.time.Instant.now()) > java.time.Duration.ofHours(1) -> "stale"
+            else -> "current"
+        }
+        fun strategy(name: String, reason: String?) = buildJsonObject {
+            put("strategy", name); put("available", reason == null); put("reason", reason?.let(::JsonPrimitive) ?: JsonNull)
+        }
+        val blocked = when {
+            view.mergeInProgress -> "A merge is in progress. Resolve and commit it, or abort it, first."
+            behind == 0L -> "The branch already contains every commit of this ref."
+            else -> null
+        }
+        return buildJsonObject {
+            put("repositoryId", repositoryId); put("worktreeId", view.worktreeId)
+            put("localRefName", view.localRef); put("localObjectId", view.localObjectId)
+            put("trackingRefId", tracking); put("trackingRefName", view.tracking.name); put("trackingObjectId", view.tracking.objectId)
+            put("remoteId", view.remote?.remoteId?.let(::JsonPrimitive) ?: JsonNull)
+            put("fetchedAt", view.fetchedAt?.toString()?.let(::JsonPrimitive) ?: JsonNull); put("remoteState", state)
+            put("ahead", ahead.toString()); put("behind", behind.toString())
+            put("mergeBaseObjectId", view.divergence.mergeBase?.let(::JsonPrimitive) ?: JsonNull)
+            put("mergeInProgress", view.mergeInProgress)
+            put("strategies", JsonArray(listOf(
+                strategy("fast-forward", blocked ?: if (ahead > 0) "The branch has $ahead local commit(s), so it cannot be fast-forwarded." else null),
+                strategy("merge", blocked ?: if (view.signingRequired) "Policy requires signed commits, and a merge would create an unsigned commit." else null),
+                strategy("rebase", "Rebasing rewrites history and is not supported by the workbench. Use a fast-forward or a merge."))))
+        }
+    }
+
+    /** `G/conflicts` (#597): count- and encoded-byte-bounded live pages covering every path. */
+    private fun conflicts(jobId: String, repositoryId: String, worktree: String?, offset: Int): JsonObject =
+        webGitConflicts(repositoryId, repositories().conflicts(jobId, repositoryId, worktree, offset))
+
+    /** `G/conflicts/{fileId}` (#597): bounded text of each side; binary or large content is honestly unsupported. */
+    fun conflictDetail(exchange: HttpExchange, jobId: String, repositoryId: String, fileId: String) {
+        val query = parseQuery(exchange.requestURI.rawQuery, setOf("worktree"))
+        val worktree = query["worktree"]?.also {
+            if (!it.matches(Regex("worktree_[0-9a-f]{32}"))) throw WebAccessDenied(422, "VALIDATION_FAILED", "worktree must be a registered work-tree identity.")
+        }
+        try {
+            val view = repositories().conflictFile(jobId, repositoryId, worktree, fileId)
+            sendWebApiResponse(exchange, 200, "gitConflictFile",
+                webGitConflictDetail(repositoryId, view, webGitConflictEntry(view.entry, view.worktreeId)))
+        } catch (failure: ManagedGitException) { throw webGitDenied(failure) }
     }
 
     /** `G/remotes` (#585): registered remotes, credential state (never the credential) and tracking refs. */
@@ -79,6 +139,7 @@ internal class WebGitReads(private val repositories: () -> ManagedGitRepositorie
 
     /** `G/worktrees`, `G/worktrees/{id}`, `G/provenance/{objectId}` and `G/exports/{objectId}`. */
     fun nested(exchange: HttpExchange, jobId: String, repositoryId: String, resource: String, item: String?) {
+        if (resource == "conflicts") return conflictDetail(exchange, jobId, repositoryId, checkNotNull(item))
         if (!exchange.requestURI.rawQuery.isNullOrEmpty()) throw WebAccessDenied(400, "VALIDATION_FAILED", "This endpoint does not accept query parameters.")
         val service = repositories()
         try {

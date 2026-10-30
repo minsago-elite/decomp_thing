@@ -37,7 +37,8 @@ internal object GitStorage {
     }
 
     /** Write, force and rename into place; the directory entry is forced afterwards. */
-    fun replaceAtomically(destination: Path, bytes: ByteArray) {
+    fun replaceAtomically(destination: Path, bytes: ByteArray,
+        permissions: Set<java.nio.file.attribute.PosixFilePermission>? = null) {
         val temporary = destination.resolveSibling(".${destination.fileName}.${java.util.UUID.randomUUID()}.tmp")
         try {
             FileChannel.open(temporary, CREATE_NEW, WRITE, NOFOLLOW_LINKS).use { channel ->
@@ -45,6 +46,8 @@ internal object GitStorage {
                 while (buffer.hasRemaining()) channel.write(buffer)
                 channel.force(true)
             }
+            // Applied before the rename, so the destination never appears with other permissions.
+            permissions?.let { Files.setPosixFilePermissions(temporary, it) }
             Files.move(temporary, destination, ATOMIC_MOVE, REPLACE_EXISTING)
             forceDirectory(destination.parent)
         } finally {

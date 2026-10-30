@@ -52,9 +52,9 @@ internal class WebGitController(
         }
         if (workspaceChange && mutation == null) throw WebAccessDenied(405, "METHOD_NOT_ALLOWED", "Repository operations are created with POST.", setOf("POST"))
         val read = parts.size == 5 && !workspaceChange && parts[4] != "worktrees"
-        val nested = parts.size == 6 && parts[4] in setOf("worktrees", "provenance", "exports") ||
+        val nested = parts.size == 6 && parts[4] in setOf("worktrees", "provenance", "exports", "conflicts") ||
             parts.size == 5 && parts[4] == "worktrees"
-        if (!read) requireNoWebApiQuery(exchange)
+        if (!read && !(nested && parts[4] == "conflicts")) requireNoWebApiQuery(exchange)
         if (!(nested && parts[4] == "exports")) requireJsonAccept(exchange)
         if (!jobId.matches(JOB) || (if (read || workspaceChange || nested) listOfNotNull(parts[3], parts.getOrNull(5)?.takeIf { parts[4] == "worktrees" }) else parts.drop(3).filterIndexed { index, _ -> index != 1 }).any { !it.matches(ID) }) {
             throw WebAccessDenied(404, "NOT_FOUND", "The requested repository resource is unavailable.")
@@ -216,7 +216,9 @@ internal fun webGitDenied(failure: ManagedGitException): WebAccessDenied {
         "REPOSITORY_EXISTS", "WORKTREE_BUSY", "IDEMPOTENCY_CONFLICT", "REF_CHANGED", "WORKTREE_CHANGED", "INDEX_CHANGED",
         "SELECTION_CHANGED", "SELECTION_OVERLAP", "CONFLICTED", "NOTHING_TO_COMMIT", "ACTIVE_RUN", "WORKTREE_DIRTY", "BRANCH_EXISTS", "TAG_EXISTS",
         "BRANCH_UNMERGED", "BRANCH_CURRENT", "WORKTREE_UNMERGED", "WORKTREE_PRIMARY", "SWITCH_REFUSED", "REF_CONFLICT",
-        "REMOTE_EXISTS", "NOT_CANCELLABLE" -> WebAccessDenied(409, failure.code, message)
+        "REMOTE_EXISTS", "NOT_CANCELLABLE", "MERGE_IN_PROGRESS", "NOTHING_TO_INTEGRATE", "FAST_FORWARD_UNAVAILABLE", "NO_MERGE",
+        "CONTENT_CHANGED", "DETACHED", "NO_COMMITS", "MERGE_REFUSED", "ABORT_REFUSED" -> WebAccessDenied(409, failure.code, message)
+        "STRATEGY_UNSUPPORTED", "UNSUPPORTED_CONFLICT", "UNRESOLVED_MARKERS" -> WebAccessDenied(422, failure.code, message)
         "TRANSPORT_UNSUPPORTED", "CREDENTIAL_IN_URL", "DESTINATION_NOT_ALLOWED" -> WebAccessDenied(422, failure.code, message)
         "REMOTES_UNAVAILABLE", "HOST_KEY_UNVERIFIED", "CREDENTIAL_UNAVAILABLE" -> WebAccessDenied(503, failure.code, message)
         "QUOTA_EXCEEDED" -> WebAccessDenied(429, "QUOTA_EXCEEDED", message)

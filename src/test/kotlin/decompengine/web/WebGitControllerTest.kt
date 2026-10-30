@@ -312,7 +312,12 @@ class WebGitControllerTest {
         val stagedIds = reviewed.getValue("entries").jsonArray.map { it.jsonObject }.filter { it.getValue("staged").jsonPrimitive.content != "none" }.map { it.getValue("fileId") }
         val commit = buildJsonObject { put("action", "git.commit"); put("worktreeId", reviewed.getValue("worktreeId")); put("guards", commitGuards)
             put("selectedFileIds", JsonArray(stagedIds)); put("message", "Record snapshot ünïcode") }
-        val commitResponse = change(commit, commitGuards.getValue("worktreeVersion").jsonPrimitive.content, "http_commit_intent_1")
+        val commitVersion = commitGuards.getValue("worktreeVersion").jsonPrimitive.content
+        error(change(JsonObject(commit + ("reviewedMergeIndex" to JsonPrimitive(true))), commitVersion, "http_commit_invalid1"), 422, "VALIDATION_FAILED")
+        error(change(JsonObject(commit + ("reviewedMergeIndex" to JsonPrimitive(false))), commitVersion, "http_commit_invalid2"), 422, "VALIDATION_FAILED")
+        error(change(JsonObject(commit + mapOf("reviewedMergeIndex" to JsonPrimitive(true), "selectedFileIds" to JsonArray(emptyList()))),
+            commitVersion, "http_commit_notmerge"), 422, "VALIDATION_FAILED")
+        val commitResponse = change(commit, commitVersion, "http_commit_intent_1")
         data(commitResponse, 202, "operation")
         val committed = f.awaitOperation(commitResponse.headers().firstValue("Location").orElseThrow())
         assertEquals("completed", committed.getValue("state").jsonPrimitive.content, committed.toString())
@@ -328,6 +333,47 @@ class WebGitControllerTest {
         assertEquals(committed.getValue("operationId"), data(replay, 202, "operation")["operationId"])
         assertEquals("true", replay.headers().firstValue("Idempotency-Replayed").orElseThrow())
         error(f.send(headers = mapOf("Cookie" to f.cookie), target = "$base/operations"), 405)
+    }
+
+    @Test fun `pending merge HTTP commit reviews a large complete index without an oversized selection`(): Unit = Fixture().use { f ->
+        val (base, directory) = f.initialized()
+        decompengine.git.GitTestRepositories().use { g ->
+            val workTree = directory.resolve("worktree")
+            val gitDir = directory.resolve("repository.git")
+            fun raw(vararg args: String, expect: Int = 0) = g.git("--git-dir=$gitDir", "--work-tree=$workTree", *args, expect = expect)
+            raw("add", "-A"); raw("commit", "-q", "-m", "base")
+            val branch = raw("symbolic-ref", "HEAD").trim()
+            raw("switch", "-q", "-c", "incoming")
+            repeat(201) { Files.writeString(workTree.resolve("incoming-$it.c"), "int remote_$it;\n") }
+            Files.writeString(workTree.resolve("src/modules/unit.c"), "int main(void) { return 2; }\n")
+            raw("add", "-A"); raw("commit", "-q", "-m", "incoming")
+            val target = raw("rev-parse", "HEAD").trim()
+            raw("switch", "-q", branch.removePrefix("refs/heads/"))
+            val ours = "int main(void) { return 1; }\n"
+            Files.writeString(workTree.resolve("src/modules/unit.c"), ours)
+            raw("add", "-A"); raw("commit", "-q", "-m", "ours")
+            val before = raw("rev-parse", "HEAD").trim()
+            raw("merge", "--no-edit", "incoming", expect = 1)
+            Files.writeString(workTree.resolve("src/modules/unit.c"), ours); raw("add", "src/modules/unit.c")
+            val status = data(f.read("$base/status?limit=200"), 200, "gitStatus")
+            assertTrue(status.getValue("complete").jsonPrimitive.boolean)
+            assertNotEquals(JsonNull, status.getValue("nextCursor"))
+            val last = data(f.read("$base/status?limit=200&cursor=${status.getValue("nextCursor").jsonPrimitive.content}"), 200, "gitStatus")
+            assertEquals(202, status.getValue("entries").jsonArray.size + last.getValue("entries").jsonArray.size)
+            val guards = buildJsonObject {
+                put("repositoryVersion", status.getValue("repositoryVersion")); put("worktreeVersion", status.getValue("worktreeVersion"))
+                put("expectedHeadObjectId", status.getValue("headObjectId")); put("expectedRefId", JsonNull); put("expectedRefObjectId", JsonNull)
+            }
+            val body = buildJsonObject { put("action", "git.commit"); put("worktreeId", status.getValue("worktreeId")); put("guards", guards)
+                put("selectedFileIds", JsonArray(emptyList())); put("reviewedMergeIndex", true); put("message", "Commit the reviewed merge index") }
+            val response = f.send("POST", body.toString(), f.headers(key = "http_large_merge_commit") +
+                ("If-Match" to "\"${guards.getValue("worktreeVersion").jsonPrimitive.content}\""), "$base/operations")
+            data(response, 202, "operation")
+            val result = f.awaitOperation(response.headers().firstValue("Location").orElseThrow())
+            assertEquals("completed", result.getValue("state").jsonPrimitive.content, result.toString())
+            assertEquals(listOf(before, target), raw("rev-list", "--parents", "-n", "1", "HEAD").trim().split(' ').drop(1))
+            assertEquals("int remote_200;\n", raw("show", "HEAD:incoming-200.c"))
+        }
     }
 
     @Test fun `branches, work trees, provenance and exports over HTTP name exact objects`(): Unit = Fixture().use { f ->
@@ -468,6 +514,28 @@ class WebGitControllerTest {
             val capabilities = data(f.read("/workbench/api/v1/bootstrap"), 200, "bootstrap").getValue("capabilities").jsonArray
                 .map { it.jsonObject }.associateBy { it.getValue("id").jsonPrimitive.content }
             assertEquals("supported", capabilities.getValue("git-remotes").getValue("state").jsonPrimitive.content)
+            // Integration reads: an unborn branch has nothing to integrate into, and no merge is in progress.
+            val trackingId = tracking.getValue("trackingRefs").jsonArray.single().jsonObject.getValue("refId").jsonPrimitive.content
+            error(f.read("$base/divergence?tracking=$trackingId"), 409, "NO_COMMITS")
+            error(f.read("$base/divergence"), 422, "VALIDATION_FAILED")
+            val conflicts = data(f.read("$base/conflicts"), 200, "gitConflicts")
+            assertFalse(conflicts.getValue("mergeInProgress").jsonPrimitive.boolean)
+            assertEquals(0, conflicts.getValue("files").jsonArray.size)
+            assertEquals(0, conflicts.getValue("offset").jsonPrimitive.int)
+            assertEquals(0, conflicts.getValue("totalCount").jsonPrimitive.int)
+            assertEquals(JsonNull, conflicts.getValue("nextOffset"))
+            assertEquals(200, data(f.read("$base/conflicts?offset=200"), 200, "gitConflicts").getValue("offset").jsonPrimitive.int)
+            for (offset in listOf("-1", "01", "200001", "999999999999999999999", "bad")) {
+                error(f.read("$base/conflicts?offset=$offset"), 422, "VALIDATION_FAILED")
+            }
+            error(f.read("$base/conflicts/file_${"0".repeat(32)}"), 404, "NOT_FOUND")
+            error(change(mapOf("action" to JsonPrimitive("git.merge"), "trackingRefId" to JsonPrimitive(trackingId),
+                "targetObjectId" to tracking.getValue("trackingRefs").jsonArray.single().jsonObject.getValue("objectId"),
+                "strategy" to JsonPrimitive("rebase")), "http_merge_intent_01"), 422, "VALIDATION_FAILED")
+            error(change(mapOf("action" to JsonPrimitive("git.merge"), "trackingRefId" to JsonPrimitive(trackingId),
+                "targetObjectId" to tracking.getValue("trackingRefs").jsonArray.single().jsonObject.getValue("objectId"),
+                "strategy" to JsonPrimitive("merge")), "http_merge_intent_02"), 409, "NO_COMMITS")
+            error(change(mapOf("action" to JsonPrimitive("git.merge.abort")), "http_abort_intent_01"), 409, "NO_MERGE")
         }
     }
 

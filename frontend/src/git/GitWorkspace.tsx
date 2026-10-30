@@ -4,15 +4,17 @@ import { textMessage } from '../shared/messages';
 import { usePrivateTransport } from '../session/PrivateTransport';
 import { ApiClientError, withApiFailureReference } from '../api/client';
 import type {
-  Capability, GitAudit, GitDiff, GitHistory, GitProvenance, GitRefs, GitRemotes, GitRepositories, GitStatus, GitStatusEntry, GitWorktrees,
+  Capability, GitAudit, GitConflicts, GitDiff, GitHistory, GitProvenance, GitRefs, GitRemotes, GitRepositories, GitStatus, GitStatusEntry, GitWorktrees,
   Operation, RequestData, RequestKind,
 } from '../api/generated';
 import type { BrowserSession } from '../session/session';
 import { apiPath, runPath, sourceDirectoryPath } from '../app/paths';
 import { StateMark, capabilityTone } from '../shared/StateMark';
 import { GitRemotesPanel } from './GitRemotesPanel';
+import { GitIntegrationPanel } from './GitIntegrationPanel';
+import type { IntegrationAction } from './GitIntegrationPanel';
 import type { RemoteAction } from './GitRemotesPanel';
-import { gitRemotesCopy } from '../copy/git';
+import { gitIntegrationCopy, gitRemotesCopy } from '../copy/git';
 
 function sleep(milliseconds: number, signal: AbortSignal) {
   return new Promise<void>((resolve, reject) => {
@@ -38,11 +40,12 @@ interface Loaded {
   history: GitHistory | null;
   remotes: GitRemotes | null;
   audit: GitAudit | null;
+  conflicts: GitConflicts | null;
 }
 
 type Mutation = 'gitStageRequest' | 'gitCommitRequest' | 'gitBranchCreateRequest' | 'gitSwitchRequest' | 'gitBranchDeleteRequest'
   | 'gitTagRequest' | 'gitWorktreeAddRequest' | 'gitWorktreeRemoveRequest' | 'gitRemoteAddRequest' | 'gitRemoteRemoveRequest'
-  | 'gitFetchRequest';
+  | 'gitFetchRequest' | 'gitMergeRequest' | 'gitMergeAbortRequest' | 'gitConflictSaveRequest' | 'gitConflictCompleteRequest';
 
 function short(objectId: string | null): string { return objectId ? objectId.slice(0, 12) : ''; }
 const HEADS = 'refs/heads/';
@@ -73,6 +76,7 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
   const [status, setStatus] = useState('');
   const [busy, setBusy] = useState(false);
   const [worktree, setWorktree] = useState<string | null>(null);
+  const [conflictOffset, setConflictOffset] = useState(0);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [diff, setDiff] = useState<GitDiff | null>(null);
   const [commit, setCommit] = useState<{ objectId: string; diff: GitDiff; provenance: GitProvenance | null; provenanceError: string; provenancePending: boolean } | null>(null);
@@ -80,6 +84,8 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
   const [tagDraft, setTagDraft] = useState<{ target: string; name: string } | null>(null);
   const olderPending = useRef(false);
   const refsPending = useRef(false);
+  const statusPending = useRef(false);
+  const [statusLoading, setStatusLoading] = useState(false);
   const commitRequest = useRef(0);
   const [refresh, setRefresh] = useState(0);
   const active = useRef<AbortController | null>(null);
@@ -101,21 +107,24 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
         const listing = (await client.get('gitRepositories', `/jobs/${jobId}/repositories`, { signal: controller.signal })).data;
         if (listing.jobId !== jobId) throw new ApiClientError('invalid_response');
         const found = listing.repositories[0];
-        if (!found) { setLoaded({ listing, status: null, worktrees: null, refs: null, history: null, remotes: null, audit: null }); return; }
+        if (!found) { setLoaded({ listing, status: null, worktrees: null, refs: null, history: null, remotes: null, audit: null, conflicts: null }); return; }
         const prefix = `/jobs/${jobId}/repositories/${found.repositoryId}`;
         const suffix = worktree ? `?worktree=${worktree}` : '';
-        const [status, worktrees, refs, history, remotes, audit] = await Promise.all([
+        const [status, worktrees, refs, history, remotes, audit, conflicts] = await Promise.all([
           readStatus(prefix, controller.signal),
           client.get('gitWorktrees', `${prefix}/worktrees`, { signal: controller.signal }),
           readRefs(prefix, controller.signal),
           client.get('gitHistory', `${prefix}/history${suffix ? `${suffix}&limit=20` : '?limit=20'}`, { signal: controller.signal }),
           client.get('gitRemotes', `${prefix}/remotes`, { signal: controller.signal }),
           client.get('gitAudit', `${prefix}/audit?limit=50`, { signal: controller.signal }),
+          // Keep status/guards and abort available even if conflict enumeration fails.
+          client.get('gitConflicts', `${prefix}/conflicts${suffix}${conflictOffset ? `${suffix ? '&' : '?'}offset=${conflictOffset}` : ''}`,
+            { signal: controller.signal }).catch(() => null),
         ]);
         if (controller.signal.aborted) return;
         diffGeneration.current++;
         setDiff(null); setCommit(null);
-        setLoaded({ listing, status, worktrees: worktrees.data, refs, history: history.data, remotes: remotes.data, audit: audit.data });
+        setLoaded({ listing, status, worktrees: worktrees.data, refs, history: history.data, remotes: remotes.data, audit: audit.data, conflicts: conflicts?.data ?? null });
         // A selection survives a refresh only while the same file identity is still listed.
         setSelected(previous => new Set([...previous].filter(key => status.entries.some(entry => key.endsWith(`:${entry.fileId}`)))));
       } catch (failure: unknown) {
@@ -123,7 +132,7 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
       }
     })();
     return () => { controller.abort(); diffGeneration.current++; };
-  }, [client, jobId, supported, worktree, refresh]);
+  }, [client, jobId, supported, worktree, refresh, conflictOffset]);
 
   useEffect(() => () => { active.current?.abort(); active.current = null; }, []);
 
@@ -149,10 +158,50 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
       entries.push(...page.entries);
       pages++;
     }
-    return { ...page, entries, complete: page.complete && page.nextCursor === null, nextCursor: null };
+    return { ...page, entries, complete: page.complete && page.nextCursor === null };
   }
 
   const statusData = loaded?.status ?? null;
+
+  /** Continue status under the same anchored snapshot; each request remains bounded to ten pages. */
+  async function moreStatus(cursor: string) {
+    const reviewed = statusData;
+    if (!base || !reviewed || reviewed.nextCursor !== cursor || statusPending.current) return;
+    const generation = diffGeneration.current;
+    const scope = worktree ? `worktree=${worktree}&` : '';
+    const matchesReview = (page: GitStatus) => page.repositoryVersion === reviewed.repositoryVersion
+      && page.worktreeVersion === reviewed.worktreeVersion && page.worktreeId === reviewed.worktreeId
+      && page.headObjectId === reviewed.headObjectId;
+    statusPending.current = true;
+    setStatusLoading(true);
+    try {
+      let page = (await client.get('gitStatus', `${base}/status?${scope}limit=200&cursor=${cursor}`)).data;
+      const entries = [...page.entries];
+      let pages = 1;
+      if (!matchesReview(page)) {
+        if (generation === diffGeneration.current) { setStatus(copy.statusChanged); setRefresh(value => value + 1); }
+        return;
+      }
+      while (page.nextCursor && pages < MAX_STATUS_PAGES) {
+        page = (await client.get('gitStatus', `${base}/status?${scope}limit=200&cursor=${page.nextCursor}`)).data;
+        entries.push(...page.entries);
+        pages++;
+        if (!matchesReview(page)) {
+          if (generation === diffGeneration.current) { setStatus(copy.statusChanged); setRefresh(value => value + 1); }
+          return;
+        }
+      }
+      if (generation !== diffGeneration.current) return;
+      setLoaded(previous => previous?.status?.nextCursor === cursor && matchesReview(previous.status)
+        ? { ...previous, status: { ...page, entries: [...previous.status.entries, ...entries], complete: page.complete && page.nextCursor === null } }
+        : previous);
+    } catch (failure: unknown) {
+      if (generation === diffGeneration.current) setStatus(withApiFailureReference(copy.statusContinuationFailed, failure));
+    } finally {
+      statusPending.current = false;
+      setStatusLoading(false);
+    }
+  }
   const groups = useMemo(() => {
     const entries = statusData?.entries ?? [];
     return {
@@ -195,7 +244,7 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
       return false;
     } finally {
       setRunning(null);
-      if (active.current === controller) { active.current = null; setBusy(false); setRefresh(value => value + 1); }
+      if (active.current === controller) { active.current = null; setBusy(false); setConflictOffset(0); setRefresh(value => value + 1); }
     }
   }
 
@@ -223,6 +272,33 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
         ({ action: 'git.remote.remove', worktreeId, guards: guarded, remoteId: action.remoteId }));
       case 'gitFetchRequest': return act('gitFetchRequest', textMessage(gitRemotesCopy.fetch, { name: action.name }), guarded =>
         ({ action: 'git.fetch', worktreeId, guards: guarded, remoteId: action.remoteId }));
+    }
+  }
+
+  async function readDivergence(trackingRefId: string) {
+    if (!base) return null;
+    try {
+      return (await client.get('gitDivergence', `${base}/divergence?tracking=${trackingRefId}${query ? `&${query}` : ''}`)).data;
+    } catch (failure: unknown) { setStatus(withApiFailureReference(copy.readFailed, failure)); return null; }
+  }
+
+  async function readConflict(fileId: string) {
+    if (!base) return null;
+    try {
+      return (await client.get('gitConflictFile', `${base}/conflicts/${fileId}${query ? `?${query}` : ''}`)).data;
+    } catch (failure: unknown) { setStatus(withApiFailureReference(copy.readFailed, failure)); return null; }
+  }
+
+  function integrationAction(action: IntegrationAction): Promise<boolean> {
+    const worktreeId = statusData?.worktreeId ?? '';
+    switch (action.kind) {
+      case 'gitMergeRequest': return act('gitMergeRequest', action.label, guarded => ({ action: 'git.merge', worktreeId, guards: guarded,
+        trackingRefId: action.trackingRefId, targetObjectId: action.targetObjectId, strategy: action.strategy }));
+      case 'gitMergeAbortRequest': return act('gitMergeAbortRequest', gitIntegrationCopy.abort, guarded => ({ action: 'git.merge.abort', worktreeId, guards: guarded }));
+      case 'gitConflictSaveRequest': return act('gitConflictSaveRequest', gitIntegrationCopy.save, guarded => ({ action: 'git.conflict.save', worktreeId,
+        guards: guarded, fileId: action.fileId, expectedSha256: action.expectedSha256, resolution: action.resolution, content: action.content }));
+      case 'gitConflictCompleteRequest': return act('gitConflictCompleteRequest', gitIntegrationCopy.complete, guarded => ({ action: 'git.conflict.complete',
+        worktreeId, guards: guarded, files: action.files }));
     }
   }
 
@@ -408,6 +484,8 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
       <section aria-labelledby="git-changes-title">
         <h3 id="git-changes-title">{copy.changes}</h3>
         {!statusData.complete && <p role="alert">{copy.incomplete}</p>}
+        {!statusData.complete && statusData.nextCursor !== null && <button type="button" disabled={busy || statusLoading}
+          onClick={() => { void moreStatus(statusData.nextCursor ?? ''); }}>{statusLoading ? copy.statusLoading : copy.moreStatus}</button>}
         {(['staged', 'unstaged', 'untracked', 'conflicted'] as const).map(group => groups[group].length > 0 && <fieldset key={group}>
           <legend>{copy[group]}</legend>
           <ul>{groups[group].map(entry => <li key={`${group}:${entry.fileId}`}>
@@ -436,11 +514,14 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
           {diff.patch.truncated && <p>{copy.truncated}</p>}
         </section>}
       </section>
-      {groups.staged.length > MAX_SELECTION && <p role="alert">{textMessage(copy.commitTooLarge, { max: MAX_SELECTION, count: groups.staged.length })}</p>}
-      <CommitForm staged={groups.staged} parent={statusData.headObjectId}
-        disabled={!writable || !statusData.complete || groups.conflicted.length > 0 || groups.staged.length > MAX_SELECTION}
+      {groups.staged.length > MAX_SELECTION && !loaded.conflicts?.mergeInProgress &&
+        <p role="alert">{textMessage(copy.commitTooLarge, { max: MAX_SELECTION, count: groups.staged.length })}</p>}
+      <CommitForm staged={groups.staged} parent={statusData.headObjectId} merging={loaded.conflicts?.mergeInProgress ?? false}
+        disabled={!writable || !statusData.complete || groups.conflicted.length > 0 ||
+          (groups.staged.length > MAX_SELECTION && !loaded.conflicts?.mergeInProgress)}
         onCommit={message => act('gitCommitRequest', copy.commitAction, guarded => ({ action: 'git.commit', worktreeId, guards: guarded,
-          selectedFileIds: groups.staged.map(entry => entry.fileId), message }))} />
+          ...(loaded.conflicts?.mergeInProgress ? { selectedFileIds: [], reviewedMergeIndex: true as const }
+            : { selectedFileIds: groups.staged.map(entry => entry.fileId) }), message }))} />
       <section aria-labelledby="git-history-title">
         <h3 id="git-history-title">{copy.history}</h3>
         {loaded.history?.entries.length ? <ol aria-label={copy.history}>{loaded.history.entries.map(entry => <li key={entry.objectId}>
@@ -472,6 +553,9 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
             ({ action: 'git.tag', worktreeId, guards: guarded, name, targetObjectId: commit.objectId }))} />
         </section>}
       </section>
+      <GitIntegrationPanel remotes={loaded.remotes} conflicts={loaded.conflicts} writable={writable} onConflictPage={setConflictOffset}
+        destination={{ worktreeId: statusData.worktreeId, headRefName: statusData.headRefName, headObjectId: statusData.headObjectId }}
+        readDivergence={readDivergence} readConflict={readConflict} onAction={integrationAction} />
       <GitRemotesPanel capability={remoting} remotes={loaded.remotes} audit={loaded.audit} writable={writable} running={running}
         onAction={remoteAction} onCancel={operation => { void cancelTransfer(operation); }} />
       <section aria-labelledby="git-branches-title">
@@ -545,14 +629,15 @@ function NameForm({ label, action, disabled, onSubmit, draft }: {
   </form>;
 }
 
-function CommitForm({ staged, parent, disabled, onCommit }: {
-  staged: GitStatusEntry[]; parent: string | null; disabled: boolean; onCommit: (message: string) => Promise<boolean>;
+function CommitForm({ staged, parent, merging, disabled, onCommit }: {
+  staged: GitStatusEntry[]; parent: string | null; merging: boolean; disabled: boolean; onCommit: (message: string) => Promise<boolean>;
 }) {
   const [message, setMessage] = useState('');
   return <section aria-labelledby="git-commit-form-title">
     <h3 id="git-commit-form-title">{copy.commitTitle}</h3>
-    {staged.length === 0 ? <p>{copy.nothingStaged}</p> : <>
-      <p>{copy.commitFiles}</p>
+    {/* A pending merge is committed even when its resolved tree matches the current commit. */}
+    {staged.length === 0 && !merging ? <p>{copy.nothingStaged}</p> : <>
+      {staged.length === 0 ? <p>{copy.mergeUnchanged}</p> : <p>{copy.commitFiles}</p>}
       <ul aria-label={copy.commitFiles}>{staged.map(entry => <li key={entry.fileId}><code>{entry.path}</code> {entry.staged}</li>)}</ul>
       <p>{parent ? textMessage(copy.parent, { object: parent }) : copy.noParent}</p>
       <form onSubmit={event => { event.preventDefault(); if (message.trim()) void onCommit(message).then(done => { if (done) setMessage(''); }); }}>

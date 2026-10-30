@@ -311,36 +311,47 @@ internal object GitRepositoryImport {
 
     /** Bound files, directory prefixes and declared blob bytes before checkout creates anything. */
     fun requireCheckoutBounds(runner: GitCommandRunner, gitDir: Path, objectId: String, limits: GitCheckoutLimits,
-        repositoryBudget: Long = Long.MAX_VALUE) {
-        val listing = try {
-            runner.run(GitInvocation("ls-tree", listOf("-r", "-t", "-l", "-z", "--full-tree", objectId), gitDir = gitDir,
-                limits = GitExecutionLimits(Duration.ofMinutes(2), 32 * 1024 * 1024, 64 * 1024)))
-        } catch (failure: GitCommandException) {
-            when (failure.kind) {
-                GitCommandException.Kind.OUTPUT_LIMIT -> tooLarge()
-                GitCommandException.Kind.FAILED -> corrupt("The repository's HEAD tree could not be read.")
-                else -> throw GitOperationFailure("REPOSITORY_UNAVAILABLE", "The repository could not be checked within its bounds.")
-            }
-        }
+        repositoryBudget: Long = Long.MAX_VALUE) = requireTreeBounds(runner, gitDir, listOf(objectId), limits, repositoryBudget)
+
+    /** Conservative merge budget: the union cannot contain more entries/blob bytes than both
+     * input trees combined. Shared paths are charged twice rather than risking an oversized merge.
+     * This runs at admission and again under the publication lease, before touching the work tree. */
+    fun requireIntegrationBounds(runner: GitCommandRunner, gitDir: Path, before: String, target: String, limits: GitCheckoutLimits) =
+        requireTreeBounds(runner, gitDir, listOf(before, target), limits, Long.MAX_VALUE)
+
+    private fun requireTreeBounds(runner: GitCommandRunner, gitDir: Path, objects: List<String>, limits: GitCheckoutLimits,
+        repositoryBudget: Long) {
         var files = 0
         var directories = 0
         var bytes = 0L
-        for (entry in listing.text.split('\u0000')) {
-            if (entry.isEmpty()) continue
-            val fields = entry.substringBefore('\t').split(' ').filter { it.isNotEmpty() }
-            if (fields.size != 4 || '\t' !in entry) corrupt("The repository's HEAD tree could not be read.")
-            // -t includes each tree path once, even when multiple leaves share that prefix.
-            // Inert gitlinks also create empty directories, so charge them to both entry quotas.
-            if (fields[1] == "tree" || fields[1] == "commit") {
-                if (++directories > limits.maxDirectories) tooLarge()
+        for (objectId in objects) {
+            val listing = try {
+                runner.run(GitInvocation("ls-tree", listOf("-r", "-t", "-l", "-z", "--full-tree", objectId), gitDir = gitDir,
+                    limits = GitExecutionLimits(Duration.ofMinutes(2), 32 * 1024 * 1024, 64 * 1024)))
+            } catch (failure: GitCommandException) {
+                when (failure.kind) {
+                    GitCommandException.Kind.OUTPUT_LIMIT -> tooLarge()
+                    GitCommandException.Kind.FAILED -> corrupt("The repository's HEAD tree could not be read.")
+                    else -> throw GitOperationFailure("REPOSITORY_UNAVAILABLE", "The repository could not be checked within its bounds.")
+                }
             }
-            if (fields[1] != "tree" && ++files > limits.maxFiles) tooLarge()
-            if (fields[1] == "blob") {
-                val size = fields[3].toLongOrNull()?.takeIf { it >= 0 } ?: corrupt("The repository's HEAD tree could not be read.")
-                if (size > repositoryBudget - bytes) throw GitOperationFailure("TRANSFER_LIMIT",
-                    "The clone's checkout exceeds the remaining repository size bound. Nothing was published.")
-                if (size > limits.maxBytes - bytes) tooLarge()
-                bytes += size
+            for (entry in listing.text.split('\u0000')) {
+                if (entry.isEmpty()) continue
+                val fields = entry.substringBefore('\t').split(' ').filter { it.isNotEmpty() }
+                if (fields.size != 4 || '\t' !in entry) corrupt("The repository's HEAD tree could not be read.")
+                // -t includes each tree path once, even when multiple leaves share that prefix.
+                // Inert gitlinks also create empty directories, so charge them to both entry quotas.
+                if (fields[1] == "tree" || fields[1] == "commit") {
+                    if (++directories > limits.maxDirectories) tooLarge()
+                }
+                if (fields[1] != "tree" && ++files > limits.maxFiles) tooLarge()
+                if (fields[1] == "blob") {
+                    val size = fields[3].toLongOrNull()?.takeIf { it >= 0 } ?: corrupt("The repository's HEAD tree could not be read.")
+                    if (size > repositoryBudget - bytes) throw GitOperationFailure("TRANSFER_LIMIT",
+                        "The clone's checkout exceeds the remaining repository size bound. Nothing was published.")
+                    if (size > limits.maxBytes - bytes) tooLarge()
+                    bytes += size
+                }
             }
         }
     }

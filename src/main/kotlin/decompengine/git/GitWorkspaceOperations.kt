@@ -42,19 +42,23 @@ data class GitStageRequest(val worktreeId: String, val guards: GitGuards, val fi
 }
 
 /** Commit exactly the reviewed staged set with the server identity. */
-data class GitCommitRequest(val worktreeId: String, val guards: GitGuards, val fileIds: List<String>, val message: String) : GitRepositoryRequest {
+data class GitCommitRequest(val worktreeId: String, val guards: GitGuards, val fileIds: List<String>, val message: String,
+    /** Explicit review of the complete pending-merge index, bound by guards.worktreeVersion. */
+    val reviewedMergeIndex: Boolean = false) : GitRepositoryRequest {
     override val action get() = GitOperationAction.COMMIT
     override val digest get() = GitStorage.sha256("git.commit\n$worktreeId\n${guards.text}\n${fileIds.joinToString(",")}\n" +
-        GitStorage.sha256(message) + "\n")
+        GitStorage.sha256(message) + "\n" + if (reviewedMergeIndex) "reviewed-merge-index\n" else "")
 }
 
 /**
  * A commit operation read back from its durable record. The message is used only by the process
  * that admitted it; the record retains its digest so a keyed replay still matches exactly.
  */
-data class GitRetainedCommit(val worktreeId: String, val guards: GitGuards, val fileIds: List<String>, val messageSha256: String) : GitRepositoryRequest {
+data class GitRetainedCommit(val worktreeId: String, val guards: GitGuards, val fileIds: List<String>, val messageSha256: String,
+    val reviewedMergeIndex: Boolean = false) : GitRepositoryRequest {
     override val action get() = GitOperationAction.COMMIT
-    override val digest get() = GitStorage.sha256("git.commit\n$worktreeId\n${guards.text}\n${fileIds.joinToString(",")}\n$messageSha256\n")
+    override val digest get() = GitStorage.sha256("git.commit\n$worktreeId\n${guards.text}\n${fileIds.joinToString(",")}\n$messageSha256\n" +
+        if (reviewedMergeIndex) "reviewed-merge-index\n" else "")
 }
 
 /**
@@ -158,11 +162,20 @@ internal object GitWorkspaceMutations {
 
     /** The reviewed selection must be exactly today's staged set: nothing swept in, nothing left out. */
     fun requireStagedSet(record: GitRepositoryRecord, observation: GitWorkspaceObservation, fileIds: List<String>,
-        worktreeId: String = record.worktreeId) {
+        worktreeId: String = record.worktreeId, mergeInProgress: Boolean = false, reviewedMergeIndex: Boolean = false) {
         // A truncated status can hide staged files beyond its bound; never commit an unreviewable index.
         if (!observation.status.complete) refuse("STATUS_INCOMPLETE", "The status is too large to review completely; the staged set cannot be confirmed.")
         if (observation.status.entries.any { it.conflict != null }) refuse("CONFLICTED", "Resolve conflicted files before committing.")
+        if (reviewedMergeIndex) {
+            if (!mergeInProgress || fileIds.isNotEmpty()) refuse("VALIDATION_FAILED",
+                "A complete-index review requires a pending merge and no individual file selection.")
+            // The caller checked guards against this complete observation. Its worktreeVersion
+            // includes every staged blob and mode; no large ID array or partial merge is needed.
+            return
+        }
         val staged = observation.status.entries.filter { it.staged != GitIndexChange.NONE }.map { it.path.fileId(worktreeId) }.toSet()
+        // A pending merge whose resolution matches HEAD is still committed, recording both parents.
+        if (staged.isEmpty() && mergeInProgress && fileIds.isEmpty()) return
         if (staged.isEmpty()) refuse("NOTHING_TO_COMMIT", "No changes are staged.")
         if (staged != fileIds.toSet()) refuse("INDEX_CHANGED", "The staged files differ from the reviewed selection. Review the staged diff again.")
     }
@@ -216,7 +229,10 @@ internal object GitWorkspaceMutations {
                 if (fingerprint != observation.contentFingerprints[entry.path]) {
                     refuse("WORKTREE_CHANGED", "Selected content changed during capture. Read the current status before staging.")
                 }
-                val mode = fingerprint.substringBefore(':')
+                // Managed checkouts materialize tracked symlinks as plain target-text files
+                // (core.symlinks=false). Match Git add: an edit must not silently change their type.
+                val capturedMode = fingerprint.substringBefore(':')
+                val mode = if (entry.indexMode == "120000" && capturedMode in setOf("100644", "100755")) "120000" else capturedMode
                 if (mode !in setOf("100644", "100755", "120000")) {
                     refuse("SELECTION_CHANGED", "A selected path is no longer a file or link. Read the current status before staging.")
                 }
@@ -342,8 +358,9 @@ internal object GitWorkspaceMutations {
         check(observation.objectFormat.objectIdOrNull(tree) != null)
         val identity = mapOf("GIT_AUTHOR_NAME" to policy.identityName, "GIT_AUTHOR_EMAIL" to policy.identityEmail,
             "GIT_COMMITTER_NAME" to policy.identityName, "GIT_COMMITTER_EMAIL" to policy.identityEmail)
-        val parent = observation.head.objectId?.let { listOf("-p", it) } ?: emptyList()
-        val commit = runner.run(GitInvocation("commit-tree", listOf("--no-gpg-sign", tree) + parent +
+        val parents = (listOfNotNull(observation.head.objectId) + GitIntegrations.mergeParents(gitDir, observation.objectFormat))
+            .distinct().flatMap { listOf("-p", it) }
+        val commit = runner.run(GitInvocation("commit-tree", listOf("--no-gpg-sign", tree) + parents +
             listOf("-F", messageFile.toString()), gitDir = gitDir, variables = identity, limits = COMMIT_LIMITS)).text.trim()
         return checkNotNull(observation.objectFormat.objectIdOrNull(commit))
     }

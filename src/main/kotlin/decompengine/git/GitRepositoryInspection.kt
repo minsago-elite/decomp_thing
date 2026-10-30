@@ -82,8 +82,8 @@ object GitConfigurationAudit {
             Files.isRegularFile(attributes, NOFOLLOW_LINKS) && Files.size(attributes) <= 4096) Files.readString(attributes) else null
         when (content) {
             GitManagedLayout.ATTRIBUTES -> Unit
-            // Upgrade only the exact previously audited server layout, never arbitrary attributes.
-            GitManagedLayout.LEGACY_ATTRIBUTES -> GitManagedLayout.upgradeAttributes(gitDir)
+            // Upgrade only exact previously audited server layouts, never arbitrary attributes.
+            GitManagedLayout.LEGACY_ATTRIBUTES, GitManagedLayout.PREVIOUS_ATTRIBUTES -> GitManagedLayout.upgradeAttributes(gitDir)
             else -> throw GitRepositoryException("REPOSITORY_CONFIG_UNTRUSTED",
                 "The managed repository does not neutralize content conversions and diff attributes.")
         }
@@ -99,8 +99,11 @@ object GitConfigurationAudit {
  */
 object GitManagedLayout {
     internal const val LEGACY_ATTRIBUTES = "* -text !eol -crlf -ident -filter !working-tree-encoding\n"
-    // Unspecified diff restores Git's automatic binary detection, overriding source `diff` rules.
-    const val ATTRIBUTES = "* -text !eol -crlf -ident -filter !working-tree-encoding !diff\n"
+    // Previous server layout before marker width was pinned. Recognized only for exact migration.
+    internal const val PREVIOUS_ATTRIBUTES = "* -text !eol -crlf -ident -filter !working-tree-encoding !diff\n"
+    // Unspecified diff restores automatic binary detection; fixed conflict markers bound merge output.
+    // info/attributes has the highest precedence, overriding any source-controlled marker width.
+    const val ATTRIBUTES = "* -text !eol -crlf -ident -filter !working-tree-encoding !diff conflict-marker-size=7\n"
 
     internal fun upgradeAttributes(gitDir: Path) {
         val attributes = gitDir.resolve("info/attributes")
@@ -189,10 +192,10 @@ data class GitWorkspaceObservation(
     val refsTruncated: Boolean,
     val dirty: Boolean,
     /**
-     * Bounded read fingerprint of HEAD and non-ignored status entries, including index blobs,
-     * file modes, size and modification time. It anchors read pagination, not source identity:
-     * edits preserving metadata or beyond the output bound may leave it unchanged.
-     * Mutation/provenance callers need a separately locked content snapshot.
+     * Bounded read fingerprint of HEAD, pending merge parents and non-ignored status entries,
+     * including all index stage blobs/modes and work-tree size/time. It anchors reviews and read
+     * pagination, not source identity: edits preserving metadata or beyond the output bound may
+     * leave it unchanged. Mutation/provenance callers need a separately locked content snapshot.
      */
     val statusDigest: String,
     val status: GitStatusSnapshot = GitStatusSnapshot(emptyList(), true),
@@ -291,10 +294,20 @@ object GitRepositoryInspector {
             val content = linkedMapOf<GitPath, String>()
             val budget = GitWorkspaceContent.Budget()
             val digest = MessageDigest.getInstance("SHA-256").apply {
-                update("git-workspace-status-v2\n${head.state.wireName}\n${head.refName ?: ""}\n${head.objectId ?: ""}\n${status.complete}\n".toByteArray())
+                update("git-workspace-status-v3\n${head.state.wireName}\n${head.refName ?: ""}\n${head.objectId ?: ""}\n${status.complete}\n".toByteArray())
+                // Identical resolved trees can have different merge parents. Bind them even once
+                // the index is clean; conflict guards also retain every unmerged stage below.
+                val mergeHead = gitDir.resolve("MERGE_HEAD")
+                if (Files.exists(mergeHead, NOFOLLOW_LINKS)) {
+                    val parents = try { GitStorage.read(mergeHead, 16 * 1024) } catch (_: java.io.IOException) {
+                        throw GitRepositoryException("REPOSITORY_UNSUPPORTED", "The pending merge metadata could not be read within its bounds.")
+                    }
+                    update(parents)
+                }
+                update(0)
                 for (entry in relevant) {
                     update(entry.path.bytes); update(0)
-                    update("${entry.originalPath?.display ?: ""}\u0000${entry.staged}\u0000${entry.unstaged}\u0000${entry.untracked}\u0000${entry.conflict}\u0000${entry.indexObjectId ?: ""}\u0000${entry.indexMode ?: ""}\u0000${entry.worktreeMode ?: ""}\u0000".toByteArray())
+                    update("${entry.originalPath?.display ?: ""}\u0000${entry.staged}\u0000${entry.unstaged}\u0000${entry.untracked}\u0000${entry.conflict}\u0000${entry.indexObjectId ?: ""}\u0000${entry.indexMode ?: ""}\u0000${entry.worktreeMode ?: ""}\u0000${entry.conflictStageIdentity ?: ""}\u0000".toByteArray())
                     // Re-editing an already modified file need not change its status, size or time.
                     // Bind content as well; metadata alone cannot authorize staging reviewed bytes.
                     val stat = try {

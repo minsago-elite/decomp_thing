@@ -70,7 +70,7 @@ internal class WebGitOperations(private val repositories: () -> ManagedGitReposi
         if (length != null && length.toLong() > MAX_BODY) tooLarge()
         val bytes = exchange.requestBody.use { it.readNBytes(MAX_BODY + 1) }
         if (bytes.size > MAX_BODY) tooLarge()
-        val value = try { OracleJson.parse(bytes, StrictJsonLimits(MAX_BODY, MAX_BODY, 3, 256, 40 * 1024, MAX_BODY, 16)) }
+        val value = try { OracleJson.parse(bytes, StrictJsonLimits(MAX_BODY, MAX_BODY, 4, 1024, MAX_BODY, MAX_BODY, 16)) }
             catch (_: Exception) { throw WebAccessDenied(400, "MALFORMED_JSON", "The repository change must be bounded strict JSON.") }
         val body = value as? JsonObject ?: invalid()
         val action = text(body["action"])
@@ -85,9 +85,14 @@ internal class WebGitOperations(private val repositories: () -> ManagedGitReposi
             "git.worktree.remove" -> setOf("action", "worktreeId", "guards")
             "git.remote.add" -> setOf("action", "worktreeId", "guards", "name", "url")
             "git.remote.remove", "git.fetch" -> setOf("action", "worktreeId", "guards", "remoteId")
+            "git.merge" -> setOf("action", "worktreeId", "guards", "trackingRefId", "targetObjectId", "strategy")
+            "git.merge.abort" -> setOf("action", "worktreeId", "guards")
+            "git.conflict.save" -> setOf("action", "worktreeId", "guards", "fileId", "expectedSha256", "resolution", "content")
+            "git.conflict.complete" -> setOf("action", "worktreeId", "guards", "files")
             else -> invalid()
         }
-        if (body.keys != expected) invalid()
+        val reviewedMergeIndex = action == "git.commit" && body["reviewedMergeIndex"] == JsonPrimitive(true)
+        if (body.keys != expected + if (reviewedMergeIndex) setOf("reviewedMergeIndex") else emptySet()) invalid()
         val worktreeId = id(body["worktreeId"])
         val guards = guards(body["guards"])
         GitOperationAction.entries.singleOrNull { it.wireName == action && it in GitRefRequest.ACTIONS }?.let { kind ->
@@ -108,18 +113,40 @@ internal class WebGitOperations(private val repositories: () -> ManagedGitReposi
             return request to guards
         }
         GitOperationAction.entries.singleOrNull { it.wireName == action && it in GitSyncRequest.ACTIONS }?.let { kind ->
+            fun digest(element: JsonElement?) = text(element).takeIf { it == "absent" || it.matches(Regex("[0-9a-f]{64}")) } ?: invalid()
+            var content: String? = null
             val parameters = when (kind) {
+                GitOperationAction.MERGE -> mapOf("trackingRefId" to id(body["trackingRefId"]),
+                    "targetObjectId" to (objectId(body["targetObjectId"]) ?: invalid()),
+                    "strategy" to (text(body["strategy"]).takeIf { it in setOf("fast-forward", "merge") } ?: invalid()))
+                GitOperationAction.MERGE_ABORT -> emptyMap()
+                GitOperationAction.CONFLICT_SAVE -> {
+                    val resolution = text(body["resolution"]).takeIf { it in setOf("ours", "theirs", "base", "text") } ?: invalid()
+                    content = body["content"].let { if (it == JsonNull) null else text(it) }
+                    if ((resolution == "text") != (content != null)) invalid()
+                    mapOf("fileId" to id(body["fileId"]), "expectedSha256" to digest(body["expectedSha256"]), "resolution" to resolution)
+                }
+                GitOperationAction.CONFLICT_COMPLETE -> {
+                    val files = (body["files"] as? JsonArray)?.takeIf { it.size in 1..200 } ?: invalid()
+                    content = files.joinToString("") { element ->
+                        val file = element as? JsonObject ?: invalid()
+                        if (file.keys != setOf("fileId", "sha256")) invalid()
+                        "${id(file["fileId"])} ${digest(file["sha256"])}\n"
+                    }
+                    emptyMap()
+                }
                 GitOperationAction.REMOTE_ADD -> mapOf(
                     "name" to (text(body["name"]).takeIf { it.matches(Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,63}")) } ?: invalid()),
                     "url" to (text(body["url"]).takeIf { it.length in 1..2048 } ?: invalid()))
                 else -> mapOf("remoteId" to id(body["remoteId"]))
             }
-            return GitSyncRequest(kind, worktreeId, guards, parameters) to guards
+            return GitSyncRequest(kind, worktreeId, guards, parameters, content) to guards
         }
         val files = (body["selectedFileIds"] as? JsonArray)?.map { element ->
             text(element).takeIf { it.matches(Regex("file_[0-9a-f]{32}")) } ?: invalid()
-        }?.takeIf { it.size in 1..200 && it.toSet().size == it.size } ?: invalid()
-        val request = if (action == "git.commit") GitCommitRequest(worktreeId, guards, files, text(body["message"]))
+        }?.takeIf { it.size in (if (action == "git.commit") 0 else 1)..200 && it.toSet().size == it.size } ?: invalid()
+        if (reviewedMergeIndex && files.isNotEmpty()) invalid()
+        val request = if (action == "git.commit") GitCommitRequest(worktreeId, guards, files, text(body["message"]), reviewedMergeIndex)
             else GitStageRequest(worktreeId, guards, files, action == "git.stage")
         return request to guards
     }
@@ -138,9 +165,10 @@ internal class WebGitOperations(private val repositories: () -> ManagedGitReposi
 
     private fun text(value: JsonElement?): String = (value as? JsonPrimitive)?.takeIf { it.isString }?.content ?: invalid()
     private fun id(value: JsonElement?): String = text(value).takeIf { it.matches(Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}")) } ?: invalid()
-    private fun tooLarge(): Nothing = throw WebAccessDenied(413, "BODY_TOO_LARGE", "The repository change exceeds its 64 KiB limit.")
+    private fun tooLarge(): Nothing = throw WebAccessDenied(413, "BODY_TOO_LARGE", "The repository change exceeds its 1 MiB limit.")
     private fun invalid(): Nothing = throw WebAccessDenied(422, "VALIDATION_FAILED",
         "The repository change must contain only a declared action, its work tree, full guards and that action's declared fields.")
 
-    private companion object { const val MAX_BODY = 64 * 1024 }
+    // A conflict resolution carries up to 256 KiB of text, which JSON escaping can expand.
+    private companion object { const val MAX_BODY = 1024 * 1024 }
 }

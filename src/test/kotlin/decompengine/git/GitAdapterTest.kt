@@ -111,6 +111,76 @@ class GitAdapterTest {
         assertFalse(failure.message!!.contains("PRIVATE_CANARY"))
     }
 
+    @Test fun `merge diagnostics drain both streams without killing the mutation`(): Unit = GitTestRepositories().use { f ->
+        val published = f.root.resolve("published")
+        val runner = GitCommandRunner(fakeGit(f.root.resolve("merge-output"),
+            "head -c 2097152 /dev/zero; head -c 2097152 /dev/zero >&2; touch '$published'; exit 1"), f.environment)
+        val result = runner.run(GitInvocation("merge", drainDiagnostics = true, allowedExitCodes = setOf(1),
+            limits = GitExecutionLimits(maxStdoutBytes = 4096, maxStderrBytes = 4096)))
+        assertTrue(published.exists()); assertEquals(1, result.exitCode)
+        assertTrue(result.stdoutTruncated); assertEquals(4096, result.stdout.size)
+        assertEquals(4096, result.diagnostic.length)
+        assertFailsWith<IllegalArgumentException> { GitInvocation("status", drainDiagnostics = true) }
+        assertFailsWith<IllegalArgumentException> { GitInvocation("merge", drainDiagnostics = true, truncateStdout = true) }
+        val slow = GitCommandRunner(fakeGit(f.root.resolve("slow-merge"), "sleep 30"), f.environment)
+        assertEquals(GitCommandException.Kind.TIMED_OUT, assertFailsWith<GitCommandException> {
+            slow.run(GitInvocation("merge", drainDiagnostics = true, limits = GitExecutionLimits(Duration.ofMillis(200))))
+        }.kind)
+    }
+
+    @Test fun `large real merge retains conflict index and abort state beyond diagnostic capture`(): Unit = GitTestRepositories().use { f ->
+        val (gitDir, workTree) = f.managed("large-merge")
+        val paths = (0 until 7000).map { "conflict-${it.toString().padStart(5, '0')}-${"p".repeat(64)}.c" }
+        fun write(text: String) { paths.forEach { Files.writeString(workTree.resolve(it), text) } }
+        write("base\n"); val base = f.commitAll(gitDir, workTree, "base")
+        write("ours\n"); val ours = f.commitAll(gitDir, workTree, "ours")
+        f.git("--git-dir=$gitDir", "--work-tree=$workTree", "reset", "--hard", base)
+        write("theirs\n"); val theirs = f.commitAll(gitDir, workTree, "theirs")
+        f.git("--git-dir=$gitDir", "--work-tree=$workTree", "reset", "--hard", ours)
+        assertTrue(GitIntegrations.merge(f.runner, gitDir, workTree, theirs, GitIntegrationStrategy.MERGE,
+            "large integration", GitRepositoryPolicy()))
+        assertTrue(GitIntegrations.mergeInProgress(gitDir))
+        assertEquals(7000, GitIntegrations.conflicts(f.runner, gitDir, workTree).size)
+        GitIntegrations.abort(f.runner, gitDir, workTree)
+        assertFalse(GitIntegrations.mergeInProgress(gitDir))
+        assertTrue(GitIntegrations.conflicts(f.runner, gitDir, workTree).isEmpty())
+        assertEquals(ours, f.git("--git-dir=$gitDir", "rev-parse", "HEAD").trim())
+        paths.forEach { assertEquals("ours\n", Files.readString(workTree.resolve(it))) }
+    }
+
+    @Test fun `workspace guards bind merge parents and unmerged stages even with unchanged files`(): Unit = GitTestRepositories().use { f ->
+        val (gitDir, workTree) = f.managed("merge-guards")
+        val file = workTree.resolve("main.c")
+        Files.writeString(file, "base\n"); val base = f.commitAll(gitDir, workTree, "base")
+        Files.writeString(file, "ours\n"); val ours = f.commitAll(gitDir, workTree, "ours")
+        f.git("--git-dir=$gitDir", "--work-tree=$workTree", "reset", "--hard", base)
+        Files.writeString(file, "remote one\n"); val target = f.commitAll(gitDir, workTree, "remote one")
+        Files.writeString(file, "remote two\n"); val other = f.commitAll(gitDir, workTree, "remote two")
+        val otherBlob = f.git("--git-dir=$gitDir", "rev-parse", "$other:main.c").trim()
+        f.git("--git-dir=$gitDir", "--work-tree=$workTree", "reset", "--hard", ours)
+        assertTrue(GitIntegrations.merge(f.runner, gitDir, workTree, target, GitIntegrationStrategy.MERGE, "merge", GitRepositoryPolicy()))
+        val reviewed = GitRepositoryInspector.inspect(f.runner, gitDir, workTree)
+        val content = Files.readString(file)
+        // Same HEAD, work-tree bytes/stat and index, but a different pending merge parent.
+        Files.writeString(gitDir.resolve("MERGE_HEAD"), "$other\n")
+        val changedParent = GitRepositoryInspector.inspect(f.runner, gitDir, workTree)
+        assertEquals(reviewed.head, changedParent.head); assertEquals(reviewed.status, changedParent.status)
+        assertNotEquals(reviewed.statusDigest, changedParent.statusDigest)
+        Files.writeString(gitDir.resolve("MERGE_HEAD"), "$target\n")
+        f.runner.run(GitInvocation("update-index", listOf("--index-info"), gitDir = gitDir, workTree = workTree,
+            input = "100644 $otherBlob 3\tmain.c\n".toByteArray()))
+        val changedStage = GitRepositoryInspector.inspect(f.runner, gitDir, workTree)
+        assertEquals(content, Files.readString(file))
+        assertNotEquals(reviewed.status.entries.single().conflictStageIdentity, changedStage.status.entries.single().conflictStageIdentity)
+        assertNotEquals(reviewed.statusDigest, changedStage.statusDigest)
+        // Resolving to ours leaves no staged changes; the merge parent must still affect guards.
+        Files.writeString(file, "ours\n"); f.git("--git-dir=$gitDir", "--work-tree=$workTree", "add", "main.c")
+        val resolved = GitRepositoryInspector.inspect(f.runner, gitDir, workTree)
+        assertTrue(resolved.status.entries.isEmpty())
+        Files.writeString(gitDir.resolve("MERGE_HEAD"), "$other\n")
+        assertNotEquals(resolved.statusDigest, GitRepositoryInspector.inspect(f.runner, gitDir, workTree).statusDigest)
+    }
+
     @Test fun `branch names are validated by local syntax and check-ref-format`(): Unit = GitTestRepositories().use { f ->
         // JSON Schema's character bounds count Unicode code points, not UTF-16 code units.
         val supplementaryBranch = List(4) { "🚀".repeat(49) }.joinToString("/") + "x"

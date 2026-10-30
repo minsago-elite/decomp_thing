@@ -41,6 +41,9 @@ let listing: unknown[];
 let paged: boolean;
 let remoteList: unknown[];
 let operationReads: unknown[];
+let conflictState: { repositoryId: string; worktreeId: string; mergeInProgress: boolean; integration: unknown; files: { fileId: string; path: string }[] };
+let conflictReads = 0;
+let divergenceHead: string;
 let operationOverride: (() => unknown) | null = null;
 let provenanceFails = false;
 let jobFails = false;
@@ -105,6 +108,16 @@ function serve(kind: string, path: string): Promise<unknown> {
       subject: 'Record candidate', refNames: ['refs/tags/v1'], mapping, worktreeDirtyAtCommit: false,
       export: { sha256: 'e'.repeat(64), sizeBytes: 512, files: 1, skippedEntries: 0, verification: 'tree-blob-ids-match' } };
     if (route === `${base}/remotes`) return { repositoryId, configured: true, remotes: remoteList };
+    if (route === `${base}/conflicts`) return { offset: 0, totalCount: conflictState.files.length, nextOffset: null, ...conflictState };
+    if (route === `${base}/conflicts/file_conflict`) return { repositoryId, worktreeId, file: conflictState.files[0],
+      base: 'int a;\n', ours: 'int a = 1;\n', theirs: 'int a = 2;\n', current: '<<<<<<< ours\nint a = 1;\n=======\nint a = 2;\n>>>>>>> theirs\n',
+      currentSha256: (conflictReads++ === 0 ? 'c' : 'd').repeat(64), currentSizeBytes: '60', supported: true, reason: null };
+    if (route === `${base}/divergence`) return { repositoryId, worktreeId, localRefName: 'refs/heads/main', localObjectId: divergenceHead,
+      trackingRefId: 'ref_origin_main', trackingRefName: 'refs/remotes/origin/main', trackingObjectId: other, remoteId: 'remote_1',
+      fetchedAt: null, remoteState: 'unknown', ahead: '1', behind: '2', mergeBaseObjectId: older, mergeInProgress: false, strategies: [
+        { strategy: 'fast-forward', available: false, reason: 'The branch has 1 local commit(s), so it cannot be fast-forwarded.' },
+        { strategy: 'merge', available: true, reason: null },
+        { strategy: 'rebase', available: false, reason: 'Rebasing rewrites history and is not supported by the workbench.' }] };
     if (route === `${base}/audit`) return { repositoryId, entries: [{ at: '2026-10-25T00:00:00Z', action: 'remote.add', operationId: 'operation_0',
       outcome: 'completed', remoteId: 'remote_1', destination: 'https://git.example.org/team/project.git', ref: null, oldObjectId: null,
       newObjectId: null, detail: null }] };
@@ -122,6 +135,9 @@ beforeEach(() => {
   listing = [repository];
   paged = false;
   operationReads = [];
+  conflictState = { repositoryId, worktreeId, mergeInProgress: false, integration: null, files: [] };
+  conflictReads = 0;
+  divergenceHead = head;
   operationOverride = null;
   remoteList = [{ remoteId: 'remote_1', name: 'origin', transport: 'https', display: 'https://git.example.org/team/project.git',
     credential: 'configured', allowed: true, fetchedAt: null, fetchOperationId: null,
@@ -627,6 +643,181 @@ it('explains and disables a commit or selection beyond the 200-file request boun
   expect(screen.getByText(/At most 200 files can be staged or unstaged in one action/)).toBeTruthy();
   expect(screen.getByRole('button', { name: 'Unstage selected' })).toHaveProperty('disabled', true);
 }, 20_000);
+
+it('reviews and commits the complete merge index beyond the ordinary 200-file selection bound', async () => {
+  conflictState = { repositoryId, worktreeId, mergeInProgress: true, integration: null, files: [] };
+  entries = Array.from({ length: 201 }, (_, index) => entry(`file_${index}`, `src/f${index}.c`, 'added', 'none'));
+  transport.post.mockResolvedValueOnce(operation('completed', 'git.commit'));
+  mount();
+  await screen.findByLabelText('Commit message');
+  expect(screen.queryByText(/one commit can include at most 200/)).toBeNull();
+  const commitReview = screen.getByRole('list', { name: 'Exactly these staged files will be committed:' });
+  expect(within(commitReview).getAllByRole('listitem')).toHaveLength(201);
+  expect(screen.getByRole('button', { name: 'Commit staged files' })).toHaveProperty('disabled', false);
+  fireEvent.input(screen.getByLabelText('Commit message'), { target: { value: 'Merge all incoming changes' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Commit staged files' }));
+  await waitFor(() => expect(transport.post).toHaveBeenCalledOnce());
+  expect(transport.post.mock.calls[0]?.[3]).toMatchObject({ action: 'git.commit', selectedFileIds: [], reviewedMergeIndex: true,
+    guards: { worktreeVersion: 'tree_v1' } });
+});
+
+it('continues bounded status pages until a large merge index can be reviewed and committed', async () => {
+  // Small responses still span the ten-page automatic budget, with one more than the ordinary commit limit.
+  const total = 201;
+  const pageSize = 20;
+  entries = Array.from({ length: total }, (_, index) => entry(`file_${index}`, `src/f${index}.c`, 'added', 'none'));
+  conflictState = { repositoryId, worktreeId, mergeInProgress: true, integration: null, files: [] };
+  transport.post.mockResolvedValueOnce(operation('completed', 'git.commit'));
+  transport.get.mockImplementation(async (kind, path) => {
+    if (kind === 'gitStatus') {
+      const cursor = new URLSearchParams(path.split('?')[1] ?? '').get('cursor');
+      const start = Number(cursor ?? 0);
+      const pageEntries = entries.slice(start, start + pageSize);
+      return { data: { ...status(true), entries: pageEntries,
+        nextCursor: start + pageEntries.length < entries.length ? String(start + pageEntries.length) : null } };
+    }
+    return serve(kind, path);
+  });
+  const view = mount();
+  await screen.findByText(/status is incomplete/i);
+  const commitButton = screen.getByRole('button', { name: 'Commit staged files' });
+  expect(commitButton).toHaveProperty('disabled', true);
+  expect(view.container.querySelector('ul[aria-label="Exactly these staged files will be committed:"]')?.querySelectorAll('li')).toHaveLength(200);
+  fireEvent.click(screen.getByRole('button', { name: 'Load more status entries' }));
+  await waitFor(() => expect(commitButton).toHaveProperty('disabled', false));
+  expect(screen.queryByText(/status is incomplete/i)).toBeNull();
+  expect(transport.get.mock.calls.filter(call => call[0] === 'gitStatus')).toHaveLength(11);
+  expect(view.container.querySelector('ul[aria-label="Exactly these staged files will be committed:"]')?.querySelectorAll('li')).toHaveLength(total);
+
+  fireEvent.input(screen.getByLabelText('Commit message'), { target: { value: 'Merge all incoming changes' } });
+  fireEvent.click(commitButton);
+  await waitFor(() => expect(transport.post).toHaveBeenCalledOnce());
+  expect(transport.post.mock.calls[0]?.[3]).toMatchObject({ action: 'git.commit', selectedFileIds: [], reviewedMergeIndex: true,
+    guards: { worktreeVersion: 'tree_v1' } });
+}, 20_000);
+
+it('reviews fetched divergence and offers only reviewed fast-forward or merge, never rebase', async () => {
+  transport.post.mockResolvedValueOnce(operation('completed', 'git.merge'));
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: 'Review divergence' }));
+  expect(await screen.findByText(/1 local commit\(s\) not on the remote; 2 remote commit\(s\) not on your branch/)).toBeTruthy();
+  expect(screen.getByText('Never fetched; state unknown')).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'Fast-forward to the remote commit' })).toHaveProperty('disabled', true);
+  expect(screen.getByRole('button', { name: 'Rebase' })).toHaveProperty('disabled', true);
+  expect(screen.getByText(/Rebasing rewrites history/)).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Merge the remote commit' }));
+  await waitFor(() => expect(transport.post).toHaveBeenCalledOnce());
+  expect(transport.post.mock.calls[0]?.slice(2, 4)).toEqual(['gitMergeRequest', { action: 'git.merge', worktreeId, trackingRefId: 'ref_origin_main',
+    targetObjectId: other, strategy: 'merge',
+    guards: { repositoryVersion: 'repo_v1', worktreeVersion: 'tree_v1', expectedHeadObjectId: head, expectedRefId: null, expectedRefObjectId: null } }]);
+});
+
+it('never shows or acts on a divergence review of another destination', async () => {
+  // The review answers for a HEAD the work tree is no longer on (it moved, or another work tree was chosen).
+  divergenceHead = older;
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: 'Review divergence' }));
+  await waitFor(() => expect(transport.get).toHaveBeenCalledWith('gitDivergence', expect.stringContaining('/divergence?tracking=ref_origin_main')));
+  await new Promise(resolve => setTimeout(resolve, 20));
+  expect(screen.queryByRole('button', { name: 'Merge the remote commit' })).toBeNull();
+  expect(transport.post).not.toHaveBeenCalled();
+});
+
+it('keeps an edited resolution when its save is refused and saves it with the refreshed token', async () => {
+  conflictState = { repositoryId, worktreeId, mergeInProgress: true, integration: null,
+    files: [{ fileId: 'file_conflict', path: 'src/a.c', pathEscaped: false, baseObjectId: older, oursObjectId: head, theirsObjectId: other } as never] };
+  transport.post.mockRejectedValueOnce(new ApiClientError('http_error', { status: 409 }));
+  transport.post.mockResolvedValueOnce(operation('completed', 'git.conflict.save'));
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: 'Review src/a.c' }));
+  fireEvent.input(await screen.findByLabelText('Resolved text'), { target: { value: 'int a = 3;\n' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Save resolution' }));
+  await waitFor(() => expect(conflictReads).toBe(2));
+  expect(await screen.findByLabelText('Resolved text')).toHaveProperty('value', 'int a = 3;\n');
+  fireEvent.click(screen.getByRole('button', { name: 'Save resolution' }));
+  await waitFor(() => expect(transport.post).toHaveBeenCalledTimes(2));
+  expect(transport.post.mock.calls[1]?.[3]).toMatchObject({ action: 'git.conflict.save', expectedSha256: 'd'.repeat(64),
+    resolution: 'text', content: 'int a = 3;\n' });
+});
+
+it('commits a pending merge whose resolution matches the current commit', async () => {
+  conflictState = { repositoryId, worktreeId, mergeInProgress: true, integration: null, files: [] };
+  entries = [];
+  transport.post.mockResolvedValueOnce(operation('completed', 'git.commit'));
+  mount();
+  expect(await screen.findByText(/Committing records the merge with both parents/)).toBeTruthy();
+  fireEvent.input(screen.getByLabelText('Commit message'), { target: { value: 'Merge keeping ours' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Commit staged files' }));
+  await waitFor(() => expect(transport.post).toHaveBeenCalledOnce());
+  expect(transport.post.mock.calls[0]?.[3]).toMatchObject({ action: 'git.commit', selectedFileIds: [], message: 'Merge keeping ours' });
+});
+
+it('navigates live conflict pages without carrying a reviewed selection to another page', async () => {
+  conflictState = { repositoryId, worktreeId, mergeInProgress: true, integration: null,
+    files: [{ fileId: 'file_conflict', path: 'src/a.c' }] };
+  transport.get.mockImplementation((kind, path) => {
+    const [route, query] = path.split('?');
+    if (route === `${base}/conflicts`) {
+      const offset = Number(new URLSearchParams(query).get('offset') ?? 0);
+      return Promise.resolve({ data: { ...conflictState, offset, totalCount: 201, nextOffset: offset === 0 ? 200 : null,
+        files: offset === 0 ? conflictState.files : [{ fileId: 'file_last', path: 'src/z.c' }] } });
+    }
+    return serve(kind, path);
+  });
+  render(<GitWorkspace jobId={jobId} basePath="/workbench" session={session} capabilities={supported} pollIntervalMs={1} />);
+  await screen.findByText('Showing 1 of 201 unresolved paths. Pages reflect the live index; staging a batch refreshes the first page.');
+  fireEvent.click(screen.getByRole('button', { name: 'Review src/a.c' }));
+  await screen.findByRole('group', { name: 'Conflict in src/a.c' });
+  fireEvent.click(screen.getByRole('checkbox', { name: 'Mark src/a.c reviewed' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Next conflicts' }));
+  await screen.findByRole('button', { name: 'Review src/z.c' });
+  expect(transport.get.mock.calls.some(call => call[1] === `${base}/conflicts?offset=200`)).toBe(true);
+  expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Stage reviewed resolutions' }).disabled).toBe(true);
+  expect(screen.queryByRole('group', { name: 'Conflict in src/a.c' })).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: 'Previous conflicts' }));
+  await screen.findByRole('button', { name: 'Review src/a.c' });
+});
+
+it('retains status and explicit abort when conflict enumeration fails', async () => {
+  transport.get.mockImplementation((kind, path) => kind === 'gitConflicts'
+    ? Promise.reject(new ApiClientError('http_error', { status: 503 })) : serve(kind, path));
+  transport.post.mockResolvedValue(operation('completed', 'git.merge.abort'));
+  render(<GitWorkspace jobId={jobId} basePath="/workbench" session={session} capabilities={supported} pollIntervalMs={1} />);
+  await screen.findByText('The conflict list could not be read. Refresh to retry, or explicitly abort an in-progress merge. No conflicts are assumed resolved.');
+  expect(screen.getByRole('heading', { name: 'Source repository' })).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Abort merge' }));
+  await waitFor(() => expect(transport.post).toHaveBeenCalledOnce());
+  expect(transport.post.mock.calls[0]?.[2]).toBe('gitMergeAbortRequest');
+  expect(transport.post.mock.calls[0]?.[3]).toMatchObject({ action: 'git.merge.abort',
+    guards: { repositoryVersion: 'repo_v1', worktreeVersion: 'tree_v1' } });
+});
+
+it('resolves a conflict with a concurrency token, stages only reviewed files and can abort', async () => {
+  conflictState = { repositoryId, worktreeId, mergeInProgress: true, integration: { operationId: 'operation_7', strategy: 'merge',
+    branch: 'refs/heads/main', headBeforeObjectId: head, targetObjectId: other, trackingRefName: 'refs/remotes/origin/main', startedAt: '2026-10-25T00:00:00Z' },
+    files: [{ fileId: 'file_conflict', path: 'src/a.c', pathEscaped: false, baseObjectId: older, oursObjectId: head, theirsObjectId: other } as never] };
+  transport.post.mockResolvedValue(operation('completed', 'git.conflict.save'));
+  mount();
+  expect(await screen.findByText(/Merging refs\/remotes\/origin\/main/)).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'Stage reviewed resolutions' })).toHaveProperty('disabled', true);
+  fireEvent.click(screen.getByRole('button', { name: 'Review src/a.c' }));
+  expect(await screen.findByText('int a = 2;')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Use the remote version' }));
+  await waitFor(() => expect(transport.post).toHaveBeenCalledOnce());
+  expect(transport.post.mock.calls[0]?.slice(2, 4)).toEqual(['gitConflictSaveRequest', expect.objectContaining({ action: 'git.conflict.save',
+    fileId: 'file_conflict', expectedSha256: 'c'.repeat(64), resolution: 'theirs', content: null })]);
+  // The checkbox is enabled again only once the saved file has been read back.
+  await waitFor(() => expect(screen.getByRole('checkbox', { name: 'Mark src/a.c reviewed' })).toHaveProperty('disabled', false));
+  fireEvent.click(screen.getByRole('checkbox', { name: 'Mark src/a.c reviewed' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Stage reviewed resolutions' }));
+  await waitFor(() => expect(transport.post).toHaveBeenCalledTimes(2));
+  // Marked at the digest read after the save, never at the pre-save one.
+  expect(transport.post.mock.calls[1]?.[3]).toMatchObject({ action: 'git.conflict.complete', files: [{ fileId: 'file_conflict', sha256: 'd'.repeat(64) }] });
+  fireEvent.click(screen.getByRole('button', { name: 'Abort merge' }));
+  await waitFor(() => expect(transport.post).toHaveBeenCalledTimes(3));
+  expect(transport.post.mock.calls[2]?.[3]).toMatchObject({ action: 'git.merge.abort' });
+  expect(screen.getByText(/does not commit/)).toBeTruthy();
+});
 
 it('offers cancellation while the first repository is being cloned', async () => {
   listing = [];

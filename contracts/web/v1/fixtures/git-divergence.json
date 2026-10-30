@@ -1,0 +1,38 @@
+{
+  "apiVersion": 1,
+  "kind": "gitDivergence",
+  "requestId": "request_example_1",
+  "data": {
+    "repositoryId": "repository_example_2",
+    "worktreeId": "worktree_example_2",
+    "localRefName": "refs/heads/main",
+    "localObjectId": "0123456789abcdef0123456789abcdef01234567",
+    "trackingRefId": "ref_origin_main",
+    "trackingRefName": "refs/remotes/origin/main",
+    "trackingObjectId": "89abcdef0123456789abcdef0123456789abcdef",
+    "remoteId": "remote_example_1",
+    "fetchedAt": "2026-10-25T00:00:00Z",
+    "remoteState": "current",
+    "ahead": "1",
+    "behind": "2",
+    "mergeBaseObjectId": "fedcba9876543210fedcba9876543210fedcba98",
+    "mergeInProgress": false,
+    "strategies": [
+      {
+        "strategy": "fast-forward",
+        "available": false,
+        "reason": "The branch has 1 local commit(s), so it cannot be fast-forwarded."
+      },
+      {
+        "strategy": "merge",
+        "available": true,
+        "reason": null
+      },
+      {
+        "strategy": "rebase",
+        "available": false,
+        "reason": "Rebasing rewrites history and is not supported by the workbench."
+      }
+    ]
+  }
+}

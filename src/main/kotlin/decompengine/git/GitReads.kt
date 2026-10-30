@@ -84,6 +84,8 @@ data class GitStatusEntry(
     /** Index and work-tree file modes, so a mode-only change is observable too. */
     val indexMode: String? = null,
     val worktreeMode: String? = null,
+    /** All unmerged stage modes/blobs, retained for mutation guards even with identical ours bytes. */
+    val conflictStageIdentity: String? = null,
 )
 
 data class GitStatusSnapshot(val entries: List<GitStatusEntry>, val complete: Boolean)
@@ -203,7 +205,7 @@ object GitReads {
                 'u' -> {
                     val (values, path) = fields(record, 11)
                     entries += GitStatusEntry(GitPath.of(path), null, GitIndexChange.NONE, GitIndexChange.NONE, false, false,
-                        GitConflict.of(values[1]), values[2] != "N...")
+                        GitConflict.of(values[1]), values[2] != "N...", conflictStageIdentity = values.drop(3).joinToString(" "))
                 }
                 '?' -> entries += GitStatusEntry(GitPath.of(record.copyOfRange(2, record.size)), null, GitIndexChange.NONE,
                     GitIndexChange.NONE, untracked = true, ignored = false, conflict = null, submodule = false)

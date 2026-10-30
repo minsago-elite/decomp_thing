@@ -3,7 +3,7 @@ package decompengine.git
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.io.path.exists
-import kotlin.test.Test
+import org.junit.jupiter.api.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -450,6 +450,14 @@ class GitReadsTest {
             GitConfigurationAudit.requireManaged(f.runner, gitDir)
         }.code)
         assertEquals(tampered, Files.readString(attributes), "Unrecognized layouts must not be rewritten")
+    }
+
+    @Test fun `previous server attribute layout upgrades to bounded merge markers`(): Unit = GitTestRepositories().use { f ->
+        val (gitDir, _) = f.managed("marker-attributes")
+        val attributes = gitDir.resolve("info/attributes")
+        Files.writeString(attributes, GitManagedLayout.PREVIOUS_ATTRIBUTES)
+        GitConfigurationAudit.requireManaged(f.runner, gitDir)
+        assertEquals(GitManagedLayout.ATTRIBUTES, Files.readString(attributes))
     }
 
     @Test fun `history preserves more than 64 parents and refuses oversized output explicitly`(): Unit = GitTestRepositories().use { f ->

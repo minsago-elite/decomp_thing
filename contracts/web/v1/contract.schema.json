@@ -2075,6 +2075,9 @@
             "git.fetch",
             "git.push",
             "git.merge",
+            "git.merge.abort",
+            "git.conflict.save",
+            "git.conflict.complete",
             "git.rebase",
             "git.clone",
             "git.init",
@@ -2397,8 +2400,12 @@
             "$ref": "#/definitions/id"
           },
           "maxItems": 200,
-          "minItems": 1,
+          "minItems": 0,
           "uniqueItems": true
+        },
+        "reviewedMergeIndex": {
+          "description": "Explicitly commit the complete pending-merge index reviewed at guards.worktreeVersion; selectedFileIds must be empty.",
+          "const": true
         },
         "message": {
           "type": "string",
@@ -2412,6 +2419,22 @@
         "guards",
         "selectedFileIds",
         "message"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "reviewedMergeIndex"
+            ]
+          },
+          "then": {
+            "properties": {
+              "selectedFileIds": {
+                "maxItems": 0
+              }
+            }
+          }
+        }
       ],
       "additionalProperties": false
     },
@@ -4758,226 +4781,6 @@
       ],
       "additionalProperties": false
     },
-    "resumeRestoration": {
-      "type": "string",
-      "enum": [
-        "agent-session",
-        "project-evidence"
-      ]
-    },
-    "runRecovery": {
-      "type": "object",
-      "properties": {
-        "mode": {
-          "type": "string",
-          "enum": [
-            "retry",
-            "resume"
-          ]
-        },
-        "restores": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/resumeRestoration"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "checkpointSha256": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/sha256"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        }
-      },
-      "required": [
-        "mode",
-        "restores",
-        "checkpointSha256"
-      ],
-      "additionalProperties": false
-    },
-    "attemptControls": {
-      "type": "object",
-      "properties": {
-        "jobId": {
-          "$ref": "#/definitions/id"
-        },
-        "runId": {
-          "$ref": "#/definitions/id"
-        },
-        "runVersion": {
-          "$ref": "#/definitions/version"
-        },
-        "state": {
-          "$ref": "#/definitions/runState"
-        },
-        "inputRevisionId": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/id"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "cancel": {
-          "type": "object",
-          "properties": {
-            "available": {
-              "type": "boolean"
-            },
-            "reason": {
-              "anyOf": [
-                {
-                  "$ref": "#/definitions/cancelReason"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "available",
-            "reason"
-          ],
-          "additionalProperties": false
-        },
-        "retry": {
-          "type": "object",
-          "properties": {
-            "available": {
-              "type": "boolean"
-            },
-            "reason": {
-              "anyOf": [
-                {
-                  "$ref": "#/definitions/recoveryReason"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "available",
-            "reason"
-          ],
-          "additionalProperties": false
-        },
-        "resume": {
-          "type": "object",
-          "properties": {
-            "available": {
-              "type": "boolean"
-            },
-            "reason": {
-              "anyOf": [
-                {
-                  "$ref": "#/definitions/resumeReason"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "available",
-            "reason"
-          ],
-          "additionalProperties": false
-        },
-        "resumeRestores": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/resumeRestoration"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "successorRunId": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/id"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        }
-      },
-      "required": [
-        "jobId",
-        "runId",
-        "runVersion",
-        "state",
-        "inputRevisionId",
-        "cancel",
-        "retry",
-        "resume",
-        "resumeRestores",
-        "successorRunId"
-      ],
-      "additionalProperties": false
-    },
-    "cancelReason": {
-      "type": "string",
-      "enum": [
-        "RECOVERY_REQUIRED",
-        "ATTEMPT_TERMINAL",
-        "CANCEL_PENDING",
-        "SERVICE_STOPPED",
-        "NO_OWNED_WORKER",
-        "RECEIPT_CAPACITY"
-      ]
-    },
-    "recoveryReason": {
-      "type": "string",
-      "enum": [
-        "RECOVERY_REQUIRED",
-        "SERVICE_STOPPED",
-        "ATTEMPT_ACTIVE",
-        "ATTEMPT_COMPLETED",
-        "ATTEMPT_SUPERSEDED",
-        "ACTIVE_RUN",
-        "WORKFLOW_UNAVAILABLE",
-        "INPUT_UNVERIFIED",
-        "UPLOAD_CAPACITY",
-        "CAPACITY_UNAVAILABLE"
-      ]
-    },
-    "resumeReason": {
-      "anyOf": [
-        {
-          "$ref": "#/definitions/recoveryReason"
-        },
-        {
-          "type": "string",
-          "enum": [
-            "RESUME_UNSUPPORTED",
-            "HARNESS_CHANGED",
-            "CHECKPOINT_MISSING",
-            "CHECKPOINT_MISMATCH",
-            "CHECKPOINT_UNVERIFIED",
-            "WORKSPACE_UNVERIFIED",
-            "SESSION_QUARANTINED",
-            "CLEANUP_UNVERIFIED"
-          ]
-        }
-      ]
-    },
     "gitRepositoryInit": {
       "type": "object",
       "properties": {
@@ -6539,6 +6342,818 @@
       ],
       "additionalProperties": false
     },
+    "gitMerge": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "git.merge"
+        },
+        "worktreeId": {
+          "$ref": "#/definitions/id"
+        },
+        "guards": {
+          "$ref": "#/definitions/gitGuards"
+        },
+        "trackingRefId": {
+          "$ref": "#/definitions/id"
+        },
+        "targetObjectId": {
+          "$ref": "#/definitions/objectId"
+        },
+        "strategy": {
+          "type": "string",
+          "enum": [
+            "fast-forward",
+            "merge"
+          ]
+        }
+      },
+      "required": [
+        "action",
+        "worktreeId",
+        "guards",
+        "trackingRefId",
+        "targetObjectId",
+        "strategy"
+      ],
+      "additionalProperties": false
+    },
+    "gitMergeAbort": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "git.merge.abort"
+        },
+        "worktreeId": {
+          "$ref": "#/definitions/id"
+        },
+        "guards": {
+          "$ref": "#/definitions/gitGuards"
+        }
+      },
+      "required": [
+        "action",
+        "worktreeId",
+        "guards"
+      ],
+      "additionalProperties": false
+    },
+    "gitConflictSave": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "git.conflict.save"
+        },
+        "worktreeId": {
+          "$ref": "#/definitions/id"
+        },
+        "guards": {
+          "$ref": "#/definitions/gitGuards"
+        },
+        "fileId": {
+          "$ref": "#/definitions/id"
+        },
+        "expectedSha256": {
+          "$ref": "#/definitions/gitContentDigest"
+        },
+        "resolution": {
+          "type": "string",
+          "enum": [
+            "ours",
+            "theirs",
+            "base",
+            "text"
+          ]
+        },
+        "content": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 262144
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "action",
+        "worktreeId",
+        "guards",
+        "fileId",
+        "expectedSha256",
+        "resolution",
+        "content"
+      ],
+      "additionalProperties": false
+    },
+    "gitConflictComplete": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "git.conflict.complete"
+        },
+        "worktreeId": {
+          "$ref": "#/definitions/id"
+        },
+        "guards": {
+          "$ref": "#/definitions/gitGuards"
+        },
+        "files": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 200,
+          "items": {
+            "type": "object",
+            "properties": {
+              "fileId": {
+                "$ref": "#/definitions/id"
+              },
+              "sha256": {
+                "$ref": "#/definitions/gitContentDigest"
+              }
+            },
+            "required": [
+              "fileId",
+              "sha256"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "action",
+        "worktreeId",
+        "guards",
+        "files"
+      ],
+      "additionalProperties": false
+    },
+    "gitDivergence": {
+      "type": "object",
+      "properties": {
+        "repositoryId": {
+          "$ref": "#/definitions/id"
+        },
+        "worktreeId": {
+          "$ref": "#/definitions/id"
+        },
+        "localRefName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "localObjectId": {
+          "$ref": "#/definitions/objectId"
+        },
+        "trackingRefId": {
+          "$ref": "#/definitions/id"
+        },
+        "trackingRefName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "trackingObjectId": {
+          "$ref": "#/definitions/objectId"
+        },
+        "remoteId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "fetchedAt": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/instant"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "remoteState": {
+          "type": "string",
+          "enum": [
+            "current",
+            "stale",
+            "unknown"
+          ]
+        },
+        "ahead": {
+          "$ref": "#/definitions/uint64"
+        },
+        "behind": {
+          "$ref": "#/definitions/uint64"
+        },
+        "mergeBaseObjectId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/objectId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "mergeInProgress": {
+          "type": "boolean"
+        },
+        "strategies": {
+          "type": "array",
+          "maxItems": 3,
+          "items": {
+            "type": "object",
+            "properties": {
+              "strategy": {
+                "type": "string",
+                "enum": [
+                  "fast-forward",
+                  "merge",
+                  "rebase"
+                ]
+              },
+              "available": {
+                "type": "boolean"
+              },
+              "reason": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 300
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "strategy",
+              "available",
+              "reason"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "repositoryId",
+        "worktreeId",
+        "localRefName",
+        "localObjectId",
+        "trackingRefId",
+        "trackingRefName",
+        "trackingObjectId",
+        "remoteId",
+        "fetchedAt",
+        "remoteState",
+        "ahead",
+        "behind",
+        "mergeBaseObjectId",
+        "mergeInProgress",
+        "strategies"
+      ],
+      "additionalProperties": false
+    },
+    "gitConflicts": {
+      "type": "object",
+      "properties": {
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 200000
+        },
+        "totalCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 200000
+        },
+        "nextOffset": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "repositoryId": {
+          "$ref": "#/definitions/id"
+        },
+        "worktreeId": {
+          "$ref": "#/definitions/id"
+        },
+        "mergeInProgress": {
+          "type": "boolean"
+        },
+        "integration": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "operationId": {
+                  "$ref": "#/definitions/id"
+                },
+                "strategy": {
+                  "type": "string",
+                  "enum": [
+                    "fast-forward",
+                    "merge"
+                  ]
+                },
+                "branch": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 1024
+                },
+                "headBeforeObjectId": {
+                  "$ref": "#/definitions/objectId"
+                },
+                "targetObjectId": {
+                  "$ref": "#/definitions/objectId"
+                },
+                "trackingRefName": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 1024
+                },
+                "startedAt": {
+                  "$ref": "#/definitions/instant"
+                }
+              },
+              "required": [
+                "operationId",
+                "strategy",
+                "branch",
+                "headBeforeObjectId",
+                "targetObjectId",
+                "trackingRefName",
+                "startedAt"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "files": {
+          "type": "array",
+          "maxItems": 200,
+          "items": {
+            "type": "object",
+            "properties": {
+              "fileId": {
+                "$ref": "#/definitions/id"
+              },
+              "path": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+              },
+              "pathEscaped": {
+                "type": "boolean"
+              },
+              "baseObjectId": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/objectId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "oursObjectId": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/objectId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "theirsObjectId": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/objectId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "fileId",
+              "path",
+              "pathEscaped",
+              "baseObjectId",
+              "oursObjectId",
+              "theirsObjectId"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "repositoryId",
+        "worktreeId",
+        "mergeInProgress",
+        "integration",
+        "files",
+        "offset",
+        "totalCount",
+        "nextOffset"
+      ],
+      "additionalProperties": false
+    },
+    "gitConflictFile": {
+      "type": "object",
+      "properties": {
+        "repositoryId": {
+          "$ref": "#/definitions/id"
+        },
+        "worktreeId": {
+          "$ref": "#/definitions/id"
+        },
+        "file": {
+          "type": "object",
+          "properties": {
+            "fileId": {
+              "$ref": "#/definitions/id"
+            },
+            "path": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024
+            },
+            "pathEscaped": {
+              "type": "boolean"
+            },
+            "baseObjectId": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/objectId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "oursObjectId": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/objectId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "theirsObjectId": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/objectId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "fileId",
+            "path",
+            "pathEscaped",
+            "baseObjectId",
+            "oursObjectId",
+            "theirsObjectId"
+          ],
+          "additionalProperties": false
+        },
+        "base": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 262144
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ours": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 262144
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "theirs": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 262144
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "current": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 262144
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "currentSha256": {
+          "$ref": "#/definitions/gitContentDigest"
+        },
+        "currentSizeBytes": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/uint64"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "supported": {
+          "type": "boolean"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 300
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "repositoryId",
+        "worktreeId",
+        "file",
+        "base",
+        "ours",
+        "theirs",
+        "current",
+        "currentSha256",
+        "currentSizeBytes",
+        "supported",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "gitContentDigest": {
+      "type": "string",
+      "pattern": "^(?:absent|[0-9a-f]{64})$"
+    },
+    "resumeRestoration": {
+      "type": "string",
+      "enum": [
+        "agent-session",
+        "project-evidence"
+      ]
+    },
+    "runRecovery": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "retry",
+            "resume"
+          ]
+        },
+        "restores": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/resumeRestoration"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "checkpointSha256": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "mode",
+        "restores",
+        "checkpointSha256"
+      ],
+      "additionalProperties": false
+    },
+    "attemptControls": {
+      "type": "object",
+      "properties": {
+        "jobId": {
+          "$ref": "#/definitions/id"
+        },
+        "runId": {
+          "$ref": "#/definitions/id"
+        },
+        "runVersion": {
+          "$ref": "#/definitions/version"
+        },
+        "state": {
+          "$ref": "#/definitions/runState"
+        },
+        "inputRevisionId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cancel": {
+          "type": "object",
+          "properties": {
+            "available": {
+              "type": "boolean"
+            },
+            "reason": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/cancelReason"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "available",
+            "reason"
+          ],
+          "additionalProperties": false
+        },
+        "retry": {
+          "type": "object",
+          "properties": {
+            "available": {
+              "type": "boolean"
+            },
+            "reason": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/recoveryReason"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "available",
+            "reason"
+          ],
+          "additionalProperties": false
+        },
+        "resume": {
+          "type": "object",
+          "properties": {
+            "available": {
+              "type": "boolean"
+            },
+            "reason": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/resumeReason"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "available",
+            "reason"
+          ],
+          "additionalProperties": false
+        },
+        "resumeRestores": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/resumeRestoration"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "successorRunId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "jobId",
+        "runId",
+        "runVersion",
+        "state",
+        "inputRevisionId",
+        "cancel",
+        "retry",
+        "resume",
+        "resumeRestores",
+        "successorRunId"
+      ],
+      "additionalProperties": false
+    },
+    "cancelReason": {
+      "type": "string",
+      "enum": [
+        "RECOVERY_REQUIRED",
+        "ATTEMPT_TERMINAL",
+        "CANCEL_PENDING",
+        "SERVICE_STOPPED",
+        "NO_OWNED_WORKER",
+        "RECEIPT_CAPACITY"
+      ]
+    },
+    "recoveryReason": {
+      "type": "string",
+      "enum": [
+        "RECOVERY_REQUIRED",
+        "SERVICE_STOPPED",
+        "ATTEMPT_ACTIVE",
+        "ATTEMPT_COMPLETED",
+        "ATTEMPT_SUPERSEDED",
+        "ACTIVE_RUN",
+        "WORKFLOW_UNAVAILABLE",
+        "INPUT_UNVERIFIED",
+        "UPLOAD_CAPACITY",
+        "CAPACITY_UNAVAILABLE"
+      ]
+    },
+    "resumeReason": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/recoveryReason"
+        },
+        {
+          "type": "string",
+          "enum": [
+            "RESUME_UNSUPPORTED",
+            "HARNESS_CHANGED",
+            "CHECKPOINT_MISSING",
+            "CHECKPOINT_MISMATCH",
+            "CHECKPOINT_UNVERIFIED",
+            "WORKSPACE_UNVERIFIED",
+            "SESSION_QUARANTINED",
+            "CLEANUP_UNVERIFIED"
+          ]
+        }
+      ]
+    },
     "queuePosition": {
       "oneOf": [
         {
@@ -7184,30 +7799,6 @@
           "const": 1
         },
         "kind": {
-          "const": "queuePosition"
-        },
-        "requestId": {
-          "$ref": "#/definitions/requestId"
-        },
-        "data": {
-          "$ref": "#/definitions/queuePosition"
-        }
-      },
-      "required": [
-        "apiVersion",
-        "kind",
-        "requestId",
-        "data"
-      ],
-      "additionalProperties": false
-    },
-    {
-      "type": "object",
-      "properties": {
-        "apiVersion": {
-          "const": 1
-        },
-        "kind": {
           "const": "progressPinRequest"
         },
         "data": {
@@ -7423,30 +8014,6 @@
         },
         "data": {
           "$ref": "#/definitions/validationHistory"
-        }
-      },
-      "required": [
-        "apiVersion",
-        "kind",
-        "requestId",
-        "data"
-      ],
-      "additionalProperties": false
-    },
-    {
-      "type": "object",
-      "properties": {
-        "apiVersion": {
-          "const": 1
-        },
-        "kind": {
-          "const": "attemptControls"
-        },
-        "requestId": {
-          "$ref": "#/definitions/requestId"
-        },
-        "data": {
-          "$ref": "#/definitions/attemptControls"
         }
       },
       "required": [
@@ -7949,6 +8516,206 @@
       "required": [
         "apiVersion",
         "kind",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "gitDivergence"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/gitDivergence"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "gitConflicts"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/gitConflicts"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "gitConflictFile"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/gitConflictFile"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "gitMergeRequest"
+        },
+        "data": {
+          "$ref": "#/definitions/gitMerge"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "gitMergeAbortRequest"
+        },
+        "data": {
+          "$ref": "#/definitions/gitMergeAbort"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "gitConflictSaveRequest"
+        },
+        "data": {
+          "$ref": "#/definitions/gitConflictSave"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "gitConflictCompleteRequest"
+        },
+        "data": {
+          "$ref": "#/definitions/gitConflictComplete"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "queuePosition"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/queuePosition"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "attemptControls"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/attemptControls"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
         "data"
       ],
       "additionalProperties": false

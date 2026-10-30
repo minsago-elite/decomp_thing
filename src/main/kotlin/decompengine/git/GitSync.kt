@@ -16,10 +16,12 @@ data class GitSyncRequest(
     val guards: GitGuards,
     val parameters: Map<String, String?> = emptyMap(),
     val content: String? = null,
+    /** Server-retained destination branch for merge admission and crash recovery; never client authority. */
+    val retainedDestinationRef: String? = null,
 ) : GitRepositoryRequest {
     init {
         require(action in ACTIONS)
-        require(parameters.size <= 16 && parameters.all { (key, value) -> key.matches(Regex("[A-Za-z]{1,32}")) && (value == null || value.length <= 2048) })
+        require(parameters.size <= 16 && parameters.all { (key, value) -> key.matches(Regex("[A-Za-z][A-Za-z0-9]{0,31}")) && (value == null || value.length <= 2048) })
     }
 
     val contentSha256: String? get() = content?.let(GitStorage::sha256) ?: parameters["contentSha256"]
@@ -35,7 +37,9 @@ data class GitSyncRequest(
     override fun toString() = "GitSyncRequest(${action.wireName}, $worktreeId)"
 
     companion object {
-        val ACTIONS = setOf(GitOperationAction.REMOTE_ADD, GitOperationAction.REMOTE_REMOVE, GitOperationAction.FETCH)
+        val ACTIONS = setOf(GitOperationAction.REMOTE_ADD, GitOperationAction.REMOTE_REMOVE, GitOperationAction.FETCH,
+            GitOperationAction.MERGE, GitOperationAction.MERGE_ABORT, GitOperationAction.CONFLICT_SAVE, GitOperationAction.CONFLICT_COMPLETE)
+        val REMOTE = setOf(GitOperationAction.REMOTE_ADD, GitOperationAction.REMOTE_REMOVE, GitOperationAction.FETCH)
         /** Actions whose Git process can be cancelled while it runs. */
         val CANCELLABLE = setOf(GitOperationAction.FETCH, GitOperationAction.CLONE)
     }

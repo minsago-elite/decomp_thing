@@ -100,6 +100,9 @@ class ManagedGitRepositoriesTest {
             { service.refs(jobId, "repository_missing", 0, 1) },
             { service.worktrees(jobId, "repository_missing") },
             { service.activeWorker(jobId, "repository_missing") },
+            { service.divergence(jobId, "repository_missing", null, "ref_missing") },
+            { service.conflicts(jobId, "repository_missing", null) },
+            { service.conflictFile(jobId, "repository_missing", null, "file_missing") },
             { service.export(jobId, "repository_missing", "a".repeat(40)) },
             { service.provenance(jobId, "repository_missing", "a".repeat(40)) },
         )) assertEquals("NOT_FOUND", assertFailsWith<ManagedGitException> { read() }.code)
@@ -132,6 +135,9 @@ class ManagedGitRepositoriesTest {
                 { restarted.refs(jobId, operation.repositoryId, 0, 1) },
                 { restarted.worktrees(jobId, operation.repositoryId) },
                 { restarted.activeWorker(jobId, operation.repositoryId) },
+                { restarted.divergence(jobId, operation.repositoryId, null, "ref_missing") },
+                { restarted.conflicts(jobId, operation.repositoryId, null) },
+                { restarted.conflictFile(jobId, operation.repositoryId, null, "file_missing") },
                 { restarted.export(jobId, operation.repositoryId, "a".repeat(40)) },
                 { restarted.provenance(jobId, operation.repositoryId, "a".repeat(40)) },
             )) assertEquals("STORAGE_UNAVAILABLE", assertFailsWith<ManagedGitException> { read() }.code)
