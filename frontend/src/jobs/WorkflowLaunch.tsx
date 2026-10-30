@@ -1,7 +1,7 @@
 import { Fragment } from 'preact';
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { ApiClientError, withApiFailureReference } from '../api/client';
-import type { Capability, ExecutionLimits, HarnessFacts, Job, Run, Workflow, WorkflowLaunch as Launch, WorkflowStart } from '../api/generated';
+import type { Capability, ExecutionLimits, HarnessFacts, Job, ReconstructionScopeFacts, Run, Workflow, WorkflowLaunch as Launch, WorkflowStart } from '../api/generated';
 import { appPath, runPath } from '../app/paths';
 import { launchCopy as copy } from '../copy/launch';
 import { jobCopy } from '../copy/job';
@@ -146,6 +146,22 @@ function Requirement({ option, basePath }: { option: LaunchOption; basePath: str
     : <p>{textMessage(copy.requirementHeading, { text })} <a href={appPath(basePath, '/runtime')}>{copy.openRuntime}</a></p>;
 }
 
+/** Context budgets are whole decimals within the server-reported range. */
+function contextProblem(value: string, range: NonNullable<ReconstructionScopeFacts['contextCharacters']>): string | null {
+  return decimal.exec(value)?.[0] !== value || BigInt(value) < BigInt(range.minimum) || BigInt(value) > BigInt(range.default)
+    ? textMessage(copy.scopeContextInvalid, { minimum: range.minimum, maximum: range.default }) : null;
+}
+
+function ScopeFacts({ scope }: { scope: ReconstructionScopeFacts }) {
+  return <>
+    <p>{message(copy.scopeProfile, { profile: <code>{scope.profileId}</code> })}</p>
+    <p>{copy.scopePlan}</p>
+    <p>{textMessage(copy.scopeBounds, { entities: scope.plannerMaximumEntities, edges: scope.plannerMaximumDependencyEdges,
+      work: scope.plannerMaximumWorkUnits, functions: scope.maximumFunctionsPerModule })}</p>
+    <p>{copy.scopeDependencies}</p>
+  </>;
+}
+
 function OptionFacts({ option }: { option: LaunchOption }) {
   const { launch } = option;
   return <>
@@ -175,6 +191,7 @@ export function WorkflowLaunch({ job, runtime, basePath, session, onRefresh, onS
   const selected = options.find(option => option.id === selectedId && launchStartable(option)) ?? null;
   const [limits, setLimits] = useState<Record<LimitKey, string> | null>(null);
   const [inputRevisionId, setInputRevisionId] = useState<string>('');
+  const [context, setContext] = useState<string>('');
   const [pending, setPending] = useState(false);
   const [notice, setNotice] = useState<{ text: string; refresh: boolean; alert: boolean } | null>(null);
   const [intent, setIntent] = useState<{ signature: string; key: string } | null>(null);
@@ -188,15 +205,22 @@ export function WorkflowLaunch({ job, runtime, basePath, session, onRefresh, onS
   function choose(option: LaunchOption) {
     if (pending) return;
     setSelectedId(option.id); setLimits({ ...option.limits }); setInputRevisionId(''); setNotice(null);
+    setContext(option.launch.reconstruction?.contextCharacters?.default ?? '');
   }
   const values = selected && limits ? limits : null;
   const problems = selected && values ? Object.fromEntries(limitKeys.map(key =>
     [key, limitProblem(key, values[key], selected.limits[key], values)])) as Record<LimitKey, string | null> : null;
   const inputMissing = selected?.launch.input === 'recorded-required' && inputRevisionId === '';
-  const body: WorkflowStart | null = selected && values && problems && limitKeys.every(key => problems[key] === null) && !inputMissing ? {
+  const contextRange = selected?.launch.reconstruction?.contextCharacters ?? null;
+  const scopeProblem = contextRange ? contextProblem(context, contextRange) : null;
+  const body: WorkflowStart | null = selected && values && problems && limitKeys.every(key => problems[key] === null) && !inputMissing
+    && scopeProblem === null ? {
     workflow: selected.workflows[0]!, inputRevisionId: inputRevisionId === '' ? null : inputRevisionId,
     harnessCapabilityId: selected.launch.harnessCapabilityId,
     limits: selected.launch.limitsAdjustable ? { ...values } : { ...selected.limits },
+    // Only submit scope when the server advertises it. Older v1 servers reject even an unknown null field.
+    // The context budget can narrow a reconstruction; the planner keeps every module.
+    ...(contextRange ? { scope: { maxContextCharacters: context } } : {}),
   } : null;
   const signature = body ? JSON.stringify([job.jobId, job.version, body]) : null;
 
@@ -281,6 +305,18 @@ export function WorkflowLaunch({ job, runtime, basePath, session, onRefresh, onS
             </select>
           </>}
         </>}
+        {selected.launch.reconstruction && <>
+          <h4>{copy.scopeHeading}</h4>
+          <ScopeFacts scope={selected.launch.reconstruction} />
+          {contextRange ? <div class="launch-limit">
+            <label for="launch-context">{copy.scopeContext}</label>
+            <input id="launch-context" type="text" inputMode="numeric" autoComplete="off" value={context}
+              aria-invalid={scopeProblem ? 'true' : undefined} aria-describedby="launch-context-help"
+              onInput={event => { setContext(event.currentTarget.value); }} />
+            <p id="launch-context-help" class={scopeProblem ? 'field-error' : undefined}>
+              {scopeProblem ?? textMessage(copy.scopeContextHelp, { minimum: contextRange.minimum, maximum: contextRange.default })}</p>
+          </div> : <p>{copy.scopeNoContext}</p>}
+        </>}
         <h4>{copy.limits}</h4>
         <p>{selected.launch.limitsAdjustable ? copy.limitsAdjustable : copy.limitsFixed}</p>
         {selected.launch.limitsAdjustable ? limitKeys.map(key => <div class="launch-limit" key={key}>
@@ -304,6 +340,8 @@ export function WorkflowLaunch({ job, runtime, basePath, session, onRefresh, onS
           {selected?.launch.harness && <><dt>{copy.summaryHarnessImplementation}</dt><dd>{textMessage(copy.summaryHarnessResolvedAtStart, {
             kind: selected.launch.harness.kind, implementation: selected.launch.harness.implementationId ?? copy.harnessImplementationUnresolved })}</dd></>}
           <dt>{copy.summaryInput}</dt><dd>{body.inputRevisionId ? <code>{body.inputRevisionId}</code> : copy.inputUploaded}</dd>
+          {selected?.launch.reconstruction && <><dt>{copy.summaryScope}</dt><dd>{body.scope
+            ? textMessage(copy.summaryScopeAgent, { characters: body.scope.maxContextCharacters }) : copy.summaryScopeEvidence}</dd></>}
           <dt>{copy.summaryLimits}</dt><dd>{textMessage(copy.summaryLimitValues, { wall: body.limits.wallClockMs, idle: body.limits.idleMs,
             output: body.limits.maxOutputBytes, tools: body.limits.maxToolCalls })}</dd>
         </dl>

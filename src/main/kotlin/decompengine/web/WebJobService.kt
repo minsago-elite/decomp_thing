@@ -1005,6 +1005,8 @@ class WebJobService(
             ?: throw WebJobServiceException("HARNESS_UNAVAILABLE", "The requested harness capability is unavailable.")
         if (!registration.admits(request.limits)) throw WebJobServiceException("WORKFLOW_LIMITS_UNAVAILABLE", "The requested workflow limits are unavailable.")
         requirePrerequisites(registration.adapter, prerequisites)
+        // Scope bounds are server-owned; the effective values are recorded with the attempt below.
+        val configuration = webAttemptConfiguration(registration.adapter, prerequisites, request.scope)
         if (owner == null) throw WebJobServiceException("JOB_NOT_FOUND", "The requested job is unavailable.")
         val view = inspectStoredJob(owner, jobId) as? WorkflowJobInspection.Available
             ?: throw WebJobServiceException("JOB_RECORD_UNAVAILABLE", "The job record is unavailable; inspect its storage diagnostic.")
@@ -1019,7 +1021,7 @@ class WebJobService(
         val job = store.get(jobId)
         val admitted = publishStart(jobId) {
             owner.createIdempotent(jobId, view.snapshot.version,
-                request.copy(configuration = webAttemptConfiguration(registration.adapter, prerequisites)), requestKey, expectedJobVersion)
+                request.copy(configuration = configuration), requestKey, expectedJobVersion)
         }
         if (admitted.replayed) return DurableWebWorkflowStartResult(admitted.attempt, replayed = true)
         return dispatchAdmitted(DurableTask(job, admitted.attempt, registration.adapter, inputSourceTree = inputSourceTree))
@@ -1282,9 +1284,12 @@ class WebJobService(
         if (!decision.registration.admits(predecessor.limits)) {
             throw WebJobServiceException("WORKFLOW_LIMITS_UNAVAILABLE", "The attempt's recorded limits are no longer server-approved.")
         }
+        // Recovery has no caller scope control: preserve an explicit lowering rather than silently
+        // raising its context budget back to the option default. Revalidate it against the current option.
+        val scope = predecessor.scope
         val request = NewWorkflowAttempt(predecessor.workflow, predecessor.limits, predecessor.inputRevisionId,
             decision.registration.harnessCapabilityId, predecessor.runId, recovery = decision.recovery,
-            configuration = webAttemptConfiguration(decision.registration.adapter, prerequisites))
+            configuration = webAttemptConfiguration(decision.registration.adapter, prerequisites, scope), scope = scope)
         val job = store.get(jobId)
         val admitted = publishStart(jobId) {
             owner.createIdempotent(jobId, view.snapshot.version, request, requestKey, expectedRunVersion)

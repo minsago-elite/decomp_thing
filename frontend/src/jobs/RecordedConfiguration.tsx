@@ -22,7 +22,12 @@ export function RecordedConfiguration({ run }: { run: Run }) {
           : configuration.requiredTools.map((tool, index) => <Fragment key={tool}>{index > 0 && ', '}<code>{tool}</code></Fragment>)}</dd>
         <dt>{copy.input}</dt><dd><code>{configuration.input}</code></dd>
         <dt>{copy.limitsAdjustable}</dt><dd>{flag(configuration.limitsAdjustable)}</dd>
-        <dt>{copy.profile}</dt><dd>{code(configuration.profileId)}</dd>
+        <dt>{copy.profile}</dt><dd>{code(configuration.reconstruction?.profileId ?? null)}</dd>
+        {configuration.reconstruction && <>
+          <dt>{copy.profileDigest}</dt><dd><code>{configuration.reconstruction.profileSha256}</code></dd>
+          <dt>{copy.contextBudget}</dt><dd>{configuration.reconstruction.maxContextCharacters === null ? copy.notApplicable
+            : <code>{configuration.reconstruction.maxContextCharacters}</code>}</dd>
+        </>}
       </dl>
       <h3>{copy.harness}</h3>
       {configuration.harness === null ? <p>{copy.noHarness}</p> : <>

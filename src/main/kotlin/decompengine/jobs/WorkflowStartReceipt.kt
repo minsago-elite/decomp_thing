@@ -26,7 +26,7 @@ data class WorkflowStartReceipt(
         require(VERSION.matches(expectedRequestVersion)) { "invalid workflow start request version" }
         require(intentSha256 == workflowStartIntentSha256(expectedRequestVersion, NewWorkflowAttempt(
             attempt.workflow, attempt.limits, attempt.inputRevisionId, attempt.harnessCapabilityId, attempt.previousRunId,
-            attempt.recovery,
+            recovery = attempt.recovery, scope = attempt.scope,
         ))) { "workflow start receipt intent differs from its attempt" }
     }
 
@@ -66,6 +66,8 @@ internal fun workflowStartIntentSha256(expectedRequestVersion: String, request: 
             put("wallClockMs", request.limits.wallClockMs.toString()); put("idleMs", request.limits.idleMs.toString())
             put("maxOutputBytes", request.limits.maxOutputBytes.toString()); put("maxToolCalls", request.limits.maxToolCalls.toString())
         })
+        // Absent for starts without a scope, so receipts recorded before scopes existed keep their digest.
+        request.scope?.let { put("scope", it.encode()) }
     }
     return sha("decomp-workflow-start-intent-v1\u0000".toByteArray(Charsets.US_ASCII) + OracleJson.canonicalBytes(intent))
 }

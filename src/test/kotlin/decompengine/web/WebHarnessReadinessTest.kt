@@ -58,6 +58,30 @@ class WebHarnessReadinessTest {
     }
 
     @Test
+    fun `failed inspection updates only the selected harness independently of aggregate and agent readiness`() {
+        val missing = WebPrerequisite(false, "SANDBOX_HELPER_MISSING", "Unavailable.")
+        val selected = WebHarnessFacts(WebPrerequisite.AVAILABLE, null, selected = true)
+        val other = WebHarnessFacts(WebPrerequisite.AVAILABLE, null)
+        for (state in listOf("supported", "unknown", "unavailable")) {
+            for (agent in listOf(WebPrerequisite.AVAILABLE, missing)) {
+                val facts = WebWorkflowPrerequisites(agent, missing, WebPrerequisite.AVAILABLE,
+                    harnesses = mapOf(WebAgentHarness.ACP to selected, WebAgentHarness.LEGACY_OPENAI to other))
+                val readiness = WebHarnessReadiness(state, if (state == "supported") null else "SANDBOX_HELPER_MISSING",
+                    "Fixture.", configurationIdentity = "configuration", prerequisites = facts)
+                val result = readiness.withAgentInspection(WebAgentPreflightSnapshot("failed", "inspection",
+                    WebAgentPreflight.REASON_FAILED, "configuration"))
+                val updated = checkNotNull(result.prerequisites)
+                assertEquals(WebAgentPreflight.REASON_FAILED, updated.agent.reasonCode)
+                assertEquals(WebAgentPreflight.REASON_FAILED, updated.harness(WebAgentHarness.ACP).reasonCode)
+                assertEquals(other, updated.harnesses[WebAgentHarness.LEGACY_OPENAI])
+                assertEquals(facts.sandbox, updated.sandbox); assertEquals(facts.ghidra, updated.ghidra)
+                assertEquals(result, result.withAgentInspection(WebAgentPreflightSnapshot("failed", "inspection",
+                    WebAgentPreflight.REASON_FAILED, "configuration")))
+            }
+        }
+    }
+
+    @Test
     fun `a hung probe is bounded by the deadline and reported as a timeout`() {
         val release = CountDownLatch(1)
         val projector = WebHarnessReadinessProjector(probe = { release.await(); WebHarnessReadiness("supported", null, "") }, timeoutMillis = 100)

@@ -51,7 +51,8 @@ internal class WebRecoveryController(
                 "WORKFLOW_UNAVAILABLE" -> WebAccessDenied(503, "CAPABILITY_UNAVAILABLE", "The attempt's workflow is unavailable.")
                 "WORKFLOW_PREREQUISITE_UNAVAILABLE" -> WebAccessDenied(503, "CAPABILITY_UNAVAILABLE",
                     "A runtime prerequisite for this workflow is unavailable. ${failure.message}")
-                "WORKFLOW_LIMITS_UNAVAILABLE" -> WebAccessDenied(503, "CAPABILITY_UNAVAILABLE", "The attempt's recorded limits are no longer server-approved.")
+                "WORKFLOW_LIMITS_UNAVAILABLE", "RECONSTRUCTION_SCOPE_UNAVAILABLE" ->
+                    WebAccessDenied(503, "CAPABILITY_UNAVAILABLE", "The attempt's recorded limits or reconstruction scope are no longer server-approved.")
                 "CAPACITY_UNAVAILABLE", "UPLOAD_CAPACITY" ->
                     WebAccessDenied(429, "QUOTA_EXCEEDED", "Workflow admission is at capacity. Inspect current work before a new request.")
                 "SCHEDULING_FAILED" -> WebAccessDenied(503, failure.code, "Scheduling did not finish. Inspect the retained run before retrying.")

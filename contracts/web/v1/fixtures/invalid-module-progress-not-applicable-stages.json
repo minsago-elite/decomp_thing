@@ -1,0 +1,60 @@
+{
+  "apiVersion": 1,
+  "kind": "moduleProgress",
+  "requestId": "request_example_1",
+  "data": {
+    "binding": {
+      "jobId": "1234567890abcdef1234567890abcdef",
+      "runId": "run_explore"
+    },
+    "workflow": "explore",
+    "attemptState": "completed",
+    "attemptVersion": "run_version_2",
+    "state": "not-applicable",
+    "stages": [
+      {
+        "stage": "analysis",
+        "state": "completed",
+        "completedUnits": null,
+        "totalUnits": null,
+        "outcome": null
+      },
+      {
+        "stage": "planning",
+        "state": "completed",
+        "completedUnits": null,
+        "totalUnits": null,
+        "outcome": "plan-recorded"
+      },
+      {
+        "stage": "generation",
+        "state": "active",
+        "completedUnits": "5",
+        "totalUnits": "12",
+        "outcome": null
+      },
+      {
+        "stage": "validation",
+        "state": "pending",
+        "completedUnits": null,
+        "totalUnits": null,
+        "outcome": null
+      },
+      {
+        "stage": "publication",
+        "state": "pending",
+        "completedUnits": null,
+        "totalUnits": null,
+        "outcome": null
+      }
+    ],
+    "plan": null,
+    "lastGeneratedModuleId": null,
+    "unresolved": null,
+    "recovery": null,
+    "limitations": [
+      "Progress comes from this attempt's own retained reports and durable state; it is not validation or acceptance.",
+      "The deterministic planner owns every module boundary. A recovery reuses a module only when the core generator verifies its checkpoint."
+    ]
+  }
+}

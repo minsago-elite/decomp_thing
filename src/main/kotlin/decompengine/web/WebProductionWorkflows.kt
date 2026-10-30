@@ -16,6 +16,8 @@ import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.StrictJsonLimits
 import decompengine.project.ArchivalReconstructionService
 import decompengine.project.GhidraHeadlessProgramModelAnalyzer
+import decompengine.project.ReconstructionAdapters
+import decompengine.project.ReconstructionProfiles
 import decompengine.repair.ModuleRevisionStatus
 import decompengine.repair.RepairPublicationMode
 import decompengine.repair.RepairValidationAssurance
@@ -44,9 +46,12 @@ import java.nio.file.attribute.BasicFileAttributes
 internal interface WebWorkflowEngines {
     /** [activity] is called after each completed exploration sample. */
     fun explore(binary: Path, reportsDirectory: Path, activity: () -> Unit)
-    /** [harness] is the admitted selection for an agent run, null for evidence-only reconstruction. */
+    /**
+     * [harness] is the admitted selection for an agent run, null for evidence-only reconstruction;
+     * [maxContextCharacters] is the admitted per-module context budget for an agent run.
+     */
     fun reconstruct(binary: Path, reportsDirectory: Path, mode: WebReconstructionMode, progress: AgentWorkflowProgress,
-        harness: WebAdmittedHarness? = null)
+        harness: WebAdmittedHarness? = null, maxContextCharacters: Int? = null)
     fun repair(project: Path, binary: Path, reportsDirectory: Path, harness: WebAdmittedHarness): RepairRunStatus
 
     companion object {
@@ -57,11 +62,12 @@ internal interface WebWorkflowEngines {
             }
 
             override fun reconstruct(binary: Path, reportsDirectory: Path, mode: WebReconstructionMode, progress: AgentWorkflowProgress,
-                harness: WebAdmittedHarness?) {
+                harness: WebAdmittedHarness?, maxContextCharacters: Int?) {
                 // The explicit request mode and harness replace the legacy environment choices.
                 var selected = environment + (WEB_RECONSTRUCTION_MODE_KEY to mode.configurationValue)
                 if (harness != null) selected = selected + ("ACP_HARNESS" to harness.selector)
-                val strategy = selectWebReconstructionStrategy(selected, progress)
+                val strategy = selectWebReconstructionStrategy(selected, progress,
+                    maximumContextCharacters = maxContextCharacters ?: WEB_DEFAULT_CONTEXT_CHARACTERS)
                 harness?.requireResolved(strategy.harnessProvenance?.stableDescriptor)
                 Files.createDirectories(reportsDirectory)
                 Files.writeString(reportsDirectory.resolve("reconstruction_harness_selection.json"), renderWebReconstructionHarnessSelection(strategy))
@@ -223,14 +229,25 @@ internal class ReconstructWorkflowAdapter(
 
     init { require(agent == (harness != null)) { "only agent reconstruction names a harness" } }
 
+    // Fixed per option: the agent option uses the default profile; evidence-only selects its own carrier profile.
+    private val profile = ReconstructionProfiles.default.let { base ->
+        if (agent) base else ReconstructionAdapters.resolve(base).evidenceOnlyProfile(base)
+    }
+    override val reconstruction = DurableWebReconstructionScope(profile.id, profile.sha256, profile.budgets.maximumFunctionsPerModule,
+        profile.budgets.plannerMaximumEntities, profile.budgets.plannerMaximumDependencyEdges, profile.budgets.plannerMaximumWorkUnits,
+        if (agent) minOf(WEB_DEFAULT_CONTEXT_CHARACTERS, profile.budgets.reconstructionMaximumContextCharacters) else null,
+        if (agent) WEB_MINIMUM_CONTEXT_CHARACTERS else null)
+
     override fun execute(context: DurableWebWorkflowContext): DurableWebWorkflowOutcome {
         val admitted = harness?.let { WebAdmittedHarness.of(it, context.attempt.configuration?.harness) }
+        // The recorded budget, or the option default for an attempt admitted without a record.
+        val contextBudget = context.attempt.configuration?.reconstruction?.maxContextCharacters?.toInt() ?: reconstruction.defaultContextCharacters
         val meter = WorkflowExecutionMeter(context.reportsDirectory, toolCallsMetered = true)
         val (result, usage) = executor.run(context.attempt.limits, meter) {
             BestEffortProgressJournal(context.reportsDirectory, "reconstruction", sensitiveValues).use { journal ->
                 val progress = MeteredWorkflowProgress(journal, meter)
                 try {
-                    engines.reconstruct(context.job.binaryPath, context.reportsDirectory, mode, progress, admitted)
+                    engines.reconstruct(context.job.binaryPath, context.reportsDirectory, mode, progress, admitted, contextBudget)
                 } catch (failure: Exception) {
                     progress.phase(AgentWorkflowPhase.FAILED)
                     throw failure

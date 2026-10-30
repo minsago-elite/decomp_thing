@@ -52,6 +52,15 @@ it('labels omitted older-server configuration as not recorded rather than invent
   expect(screen.queryByText('No agent harness: this attempt never contacts an agent.')).toBeNull();
 });
 
+it('shows older-server configuration without inventing a reconstruction profile or budget', () => {
+  const older = run('legacy-run-before-reconstruction');
+  render(<RecordedConfiguration run={older} />);
+  expect(screen.getByText('fixture-agent')).toBeTruthy();
+  expect(screen.queryByText('generated-c-make-v1')).toBeNull();
+  expect(screen.queryByText('120000')).toBeNull();
+  expect(screen.queryByText(/recorded before admission configuration was retained/)).toBeNull();
+});
+
 it('refuses a recorded harness that disagrees with the harness the attempt submitted', () => {
   expect(() => decodeContract(fixture('invalid-run-configuration-harness-mismatch'), { mode: 'producer' })).toThrow();
   expect(() => decodeContract(fixture('invalid-run-configuration-secret-field'), { mode: 'producer' })).toThrow();

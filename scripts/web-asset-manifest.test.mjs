@@ -268,7 +268,8 @@ test('only the three fixed built-in prerequisite navigation URLs are reviewed, n
     const anchor = `h("a", { href: "${url}", rel: "noreferrer", children: label });`;
     for (const source of [`import("${url}")`, `new Worker("${url}")`, `<script src="${url}"></script>`,
       `body { background: url("${url}") }`, `fetch("${url}")`, `fetch(\`${url}\`)`,
-      `navigator.sendBeacon("${url}", privateData)`, `h("img", {src: "${url}"})`,
+      `navigator.sendBeacon("${url}", privateData)`, `new WebSocket("${url}")`, `new EventSource("${url}")`,
+      `const image = new Image(); image.src = "${url}"`, `h("img", {src: "${url}"})`,
       `h("script", {src: "${url}"})`, `h("link", {href: "${url}", rel: "stylesheet"})`,
       `h("iframe", {src: "${url}"})`, `const link = "${url}"; h("a", {href: link, rel: "noreferrer"})`,
       `const props = {href: "${url}", rel: "noreferrer"}; h("a", props)`,
@@ -276,6 +277,9 @@ test('only the three fixed built-in prerequisite navigation URLs are reviewed, n
       `h("a", {href: "${url}", rel: "noreferrer", ping: "./beacon"})`,
       `h("a", {href: "${url}", rel: "noreferrer", href: "./overridden"})`,
       `h("a", {href: "${url}", rel: "noreferrer", onClick: handler})`,
+      `h(tag, {href: "${url}", rel: "noreferrer"})`,
+      `h("a", {...props, href: "${url}", rel: "noreferrer"})`,
+      `h("a", {href: "${url}", rel: "noreferrer", children: fetch("${url}")})`,
       `// ${anchor}`, `const markup = '${anchor}';`,
       anchor + `fetch("${url}")`, anchor + `navigator.sendBeacon("${url}", privateData)`,
       anchor + `h("img", {src: "${url}"})`]) {

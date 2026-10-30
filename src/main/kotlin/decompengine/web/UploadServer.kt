@@ -111,6 +111,11 @@ class SourceTreeJobReconstructor(
     }
 }
 
+/** The agent reconstructor's own default; the profile budget caps it further. */
+internal const val WEB_DEFAULT_CONTEXT_CHARACTERS = 120_000
+/** The agent reconstructor's minimum per-module context budget. */
+internal const val WEB_MINIMUM_CONTEXT_CHARACTERS = 4_096
+
 internal enum class WebReconstructionMode(val configurationValue: String) {
     AGENT("agent"),
     EVIDENCE_ONLY("evidence-only"),
@@ -128,6 +133,8 @@ internal fun selectWebReconstructionStrategy(
     environment: Map<String, String>,
     progress: AgentWorkflowProgress = AgentWorkflowProgress.NONE,
     profile: ReconstructionProfile = ReconstructionProfiles.default,
+    /** The admitted per-module context budget; the reconstructor still caps it at the profile budget. */
+    maximumContextCharacters: Int = WEB_DEFAULT_CONTEXT_CHARACTERS,
 ): WebReconstructionStrategy {
     val configuredMode = environment[WEB_RECONSTRUCTION_MODE_ENVIRONMENT] ?: WebReconstructionMode.AGENT.configurationValue
     return when (configuredMode) {
@@ -137,6 +144,7 @@ internal fun selectWebReconstructionStrategy(
                 WebReconstructionMode.AGENT,
                 BoundedLlmModuleReconstructor(
                     selection.createHarness(),
+                    maximumContextCharacters,
                     harnessProvenanceDescriptor = selection.provenance.stableDescriptor,
                     progress = progress,
                 ),

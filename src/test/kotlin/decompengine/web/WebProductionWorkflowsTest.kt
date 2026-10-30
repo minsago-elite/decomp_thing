@@ -555,6 +555,7 @@ class WebProductionWorkflowsTest {
         assertEquals("unavailable", reported.getValue("workflow-reconstruct-agent-legacy-openai").getValue("state").jsonPrimitive.content)
         assertEquals(WebAgentPreflight.REASON_FAILED, reported.getValue("workflow-reconstruct-agent-legacy-openai").getValue("reasonCode").jsonPrimitive.content)
         assertEquals("HARNESS_NOT_CONFIGURED", reported.getValue("workflow-reconstruct-agent-acp").getValue("reasonCode").jsonPrimitive.content)
+        assertEquals(passive.reasonCode, failed.reasonCode, "the independent sandbox failure must be retained")
         // An inspection of a different configuration says nothing about the current agent.
         val foreign = passive.withAgentInspection(WebAgentPreflightSnapshot("failed", "inspection_2", WebAgentPreflight.REASON_FAILED, "other_configuration"))
         assertEquals(passive.prerequisites, foreign.prerequisites)
@@ -877,10 +878,26 @@ class WebProductionWorkflowsTest {
         val failed = service(store, adapters(engines)).use { service ->
             service.initializeExistingStorage()
             service.requestDurableStart(job.id, version(service, job.id), NewWorkflowAttempt(WorkflowKind.RECONSTRUCT,
-                WebWorkflowDefaults.RECONSTRUCT_AGENT, harnessCapabilityId = "agent-acp"), "retry_config_initial",
+                WebWorkflowDefaults.RECONSTRUCT_AGENT, harnessCapabilityId = "agent-acp",
+                scope = WorkflowReconstructionScope(60_000uL)), "retry_config_initial",
                 harnessPrerequisites(acp = ACP_PROVENANCE)).attempt
         }
         assertEquals(WorkflowRunState.FAILED, failed.state)
+        assertEquals(60_000uL, failed.configuration?.reconstruction?.maxContextCharacters)
+        // A changed option must refuse the recorded scope, not silently reset it to a new default.
+        val agent = adapters(engines)[1]
+        val tighter = object : DurableWebWorkflowAdapter by agent {
+            override val reconstruction = assertNotNull(agent.reconstruction).copy(defaultContextCharacters = 50_000)
+        }
+        service(store, listOf(tighter)).use { service ->
+            service.initializeExistingStorage()
+            assertCode("RECONSTRUCTION_SCOPE_UNAVAILABLE") {
+                service.requestDurableRecovery(job.id, failed.runId, failed.version, WorkflowRecoveryMode.RETRY,
+                    null, "retry_scope_refused", harnessPrerequisites(acp = ACP_PROVENANCE))
+            }
+            assertEquals(1, engines.calls.get(), "a refused scope executed an engine")
+            assertEquals(1, service.presentation(job.id).snapshot!!.attempts.size)
+        }
         val changed = ACP_PROVENANCE.copy(configurationSha256 = "b".repeat(64),
             stableDescriptor = ACP_PROVENANCE.stableDescriptor.replace("a".repeat(64), "b".repeat(64)))
         val retried = service(store, adapters(engines)).use { service ->
@@ -899,6 +916,9 @@ class WebProductionWorkflowsTest {
         assertEquals(WorkflowRunState.COMPLETED, retried.state)
         assertEquals(failed.runId, retried.previousRunId)
         assertEquals(WorkflowRecoveryMode.RETRY, retried.recovery?.mode)
+        assertEquals(failed.scope, retried.scope)
+        assertEquals(60_000uL, retried.configuration?.reconstruction?.maxContextCharacters)
+        assertEquals(listOf<Int?>(60_000, 60_000), engines.contexts, "retry raised the explicitly bounded context budget")
         assertEquals("b".repeat(64), retried.configuration?.harness?.configurationSha256)
         assertEquals("b".repeat(64), webRun(retried).getValue("configuration").jsonObject
             .getValue("harness").jsonObject.getValue("configurationSha256").jsonPrimitive.content)
@@ -908,6 +928,7 @@ class WebProductionWorkflowsTest {
             assertEquals(failed.configuration, retained.getValue(failed.runId).configuration)
             assertEquals(retried.configuration, retained.getValue(retried.runId).configuration)
             assertEquals(retried.recovery, retained.getValue(retried.runId).recovery)
+            assertEquals(retried.scope, retained.getValue(retried.runId).scope)
             val replay = service.requestDurableRecovery(job.id, failed.runId, failed.version, WorkflowRecoveryMode.RETRY,
                 null, "retry_config_success", harnessPrerequisites(acp = ACP_PROVENANCE))
             assertTrue(replay.replayed); assertEquals(retried.configuration, replay.attempt.configuration)
@@ -1001,6 +1022,63 @@ class WebProductionWorkflowsTest {
         val unreproducible = WebAdmittedHarness.of(WebAgentHarness.ACP, WorkflowAttemptHarness("acp", "fixture-agent", 1, 1, null, null, false))
         assertFailsWith<WebHarnessConfigurationChanged> { unreproducible.requireResolved(ACP_PROVENANCE.stableDescriptor) }
         assertNull(WebAdmittedHarness.of(WebAgentHarness.ACP, null).expectedDescriptor, "an unchecked admission invented provenance")
+    }
+
+    @Test
+    fun `reconstruction scope is server-bounded, never selects modules and is recorded exactly with the attempt`() = withRoot { root ->
+        val store = JobStore(root); val job = store.createFromUpload("scope.elf", elfFixture())
+        val engines = FakeEngines()
+        val agent = adapters(engines)[1]
+        val scope = assertNotNull(agent.reconstruction)
+        assertEquals(120_000 to 4_096, scope.defaultContextCharacters to scope.minimumContextCharacters)
+        val evidenceScope = assertNotNull(adapters(engines)[2].reconstruction)
+        assertNull(evidenceScope.defaultContextCharacters); assertNotEquals(scope.profileSha256, evidenceScope.profileSha256)
+        val facts = webWorkflowCapabilities(adapters(engines), WebHarnessReadiness("supported", null, "ready", prerequisites = harnessPrerequisites(ACP_PROVENANCE)))
+            .associateBy { it.getValue("id").jsonPrimitive.content }
+        val reported = facts.getValue("workflow-reconstruct-agent-acp").getValue("launch").jsonObject.getValue("reconstruction").jsonObject
+        assertEquals("all-planned", reported.getValue("moduleSelection").jsonPrimitive.content)
+        assertEquals("deterministic", reported.getValue("planner").jsonPrimitive.content)
+        assertEquals("4096", reported.getValue("contextCharacters").jsonObject.getValue("minimum").jsonPrimitive.content)
+        assertEquals(JsonNull, facts.getValue("workflow-explore-tools").getValue("launch").jsonObject.getValue("reconstruction"))
+        assertEquals(JsonNull, facts.getValue("workflow-reconstruct-evidence-only").getValue("launch").jsonObject.getValue("reconstruction")
+            .jsonObject.getValue("contextCharacters"))
+        service(store, adapters(engines)).use { service ->
+            service.initializeExistingStorage()
+            fun start(request: NewWorkflowAttempt, key: String, expected: String = version(service, job.id)) =
+                service.requestDurableStart(job.id, expected, request, key, harnessPrerequisites(ACP_PROVENANCE))
+            val reconstruct = NewWorkflowAttempt(WorkflowKind.RECONSTRUCT, WebWorkflowDefaults.RECONSTRUCT_AGENT, harnessCapabilityId = "agent-acp")
+            listOf(4_095uL, 120_001uL).forEachIndexed { index, value ->
+                assertCode("RECONSTRUCTION_SCOPE_UNAVAILABLE") { start(reconstruct.copy(scope = WorkflowReconstructionScope(value)), "scope_out_of_range_$index") }
+            }
+            assertCode("RECONSTRUCTION_SCOPE_UNAVAILABLE") {
+                start(NewWorkflowAttempt(WorkflowKind.RECONSTRUCT, WebWorkflowDefaults.RECONSTRUCT_EVIDENCE, harnessCapabilityId = EVIDENCE_ONLY_CAPABILITY,
+                    scope = WorkflowReconstructionScope(60_000uL)), "scope_for_evidence_only")
+            }
+            assertCode("RECONSTRUCTION_SCOPE_UNAVAILABLE") {
+                start(NewWorkflowAttempt(WorkflowKind.EXPLORE, WebWorkflowDefaults.EXPLORE, scope = WorkflowReconstructionScope(60_000uL)), "scope_for_exploration")
+            }
+            assertEquals(0, engines.calls.get(), "a refused scope executed an engine")
+            val expected = version(service, job.id)
+            val narrowed = start(reconstruct.copy(scope = WorkflowReconstructionScope(60_000uL)), "scope_narrowed_start", expected).attempt
+            assertEquals(WorkflowAttemptReconstruction(scope.profileId, scope.profileSha256, 60_000uL), narrowed.configuration?.reconstruction)
+            assertEquals(WorkflowReconstructionScope(60_000uL), narrowed.scope)
+            assertEquals("60000", webRun(narrowed).getValue("configuration").jsonObject.getValue("reconstruction").jsonObject
+                .getValue("maxContextCharacters").jsonPrimitive.content)
+            // The same key with a different scope is a different intent.
+            assertCode("IDEMPOTENCY_CONFLICT") { start(reconstruct.copy(scope = WorkflowReconstructionScope(50_000uL)), "scope_narrowed_start", expected) }
+            val defaulted = start(reconstruct, "scope_default_start1").attempt
+            assertEquals(120_000uL, defaulted.configuration?.reconstruction?.maxContextCharacters); assertNull(defaulted.scope)
+            val evidence = start(NewWorkflowAttempt(WorkflowKind.RECONSTRUCT, WebWorkflowDefaults.RECONSTRUCT_EVIDENCE,
+                harnessCapabilityId = EVIDENCE_ONLY_CAPABILITY), "scope_evidence_start").attempt
+            assertEquals(WorkflowAttemptReconstruction(evidenceScope.profileId, evidenceScope.profileSha256, null), evidence.configuration?.reconstruction)
+            assertEquals(listOf(60_000, 120_000, null), engines.contexts, "execution did not run with the recorded budget")
+        }
+        // The scoped receipt validates on reopen and still replays the original attempt.
+        service(store, adapters(engines)).use { service ->
+            service.initializeExistingStorage()
+            val retained = service.presentation(job.id).snapshot!!.attempts.first()
+            assertEquals(WorkflowReconstructionScope(60_000uL), retained.scope)
+        }
     }
 
     @Test
@@ -1099,11 +1177,12 @@ class WebProductionWorkflowsTest {
             calls.incrementAndGet(); this.activity = activity; exploreBody(reportsDirectory)
         }
         val harnesses = mutableListOf<WebAdmittedHarness?>()
+        val contexts = mutableListOf<Int?>()
         /** The descriptor the inert "factory" resolves at execution; null leaves the admitted one unchecked. */
         var resolvedDescriptor: String? = null
         override fun reconstruct(binary: Path, reportsDirectory: Path, mode: WebReconstructionMode, progress: AgentWorkflowProgress,
-            harness: WebAdmittedHarness?) {
-            calls.incrementAndGet(); harnesses += harness
+            harness: WebAdmittedHarness?, maxContextCharacters: Int?) {
+            calls.incrementAndGet(); harnesses += harness; contexts += maxContextCharacters
             resolvedDescriptor?.let { harness?.requireResolved(it) }
             reconstructBody(reportsDirectory, mode, progress)
         }

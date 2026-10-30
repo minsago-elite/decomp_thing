@@ -46,6 +46,7 @@ const responses: Record<string, () => unknown> = {
   validationHistory: () => bound('validation-history', { jobId, runId, revisionId: null }),
   recovery: () => fixture('recovery-empty'),
   progressPin: () => fixture('progress-pin'),
+  moduleProgress: () => bound('module-progress-interrupted', { jobId, runId }),
 };
 
 beforeEach(() => {
@@ -147,6 +148,16 @@ it('has no automated WCAG A/AA violations on the workflow launch form with setti
   await settle();
   expect(screen.getByRole('region', { name: 'Configuration to submit' })).toBeTruthy();
   fireEvent.input(screen.getByLabelText('Wall-clock limit (ms)'), { target: { value: 'invalid' } });
+  await settle();
+  expect(await violations()).toEqual([]);
+});
+
+it('has no automated WCAG A/AA violations on read module progress with a retained plan', async () => {
+  const auth = await session();
+  history.replaceState(null, '', `/nested/jobs/${jobId}/runs/${runId}`);
+  render(<App basePath="/nested" session={auth} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Read module progress' }));
+  await screen.findByRole('list', { name: 'Retained plan and recovery' });
   await settle();
   expect(await violations()).toEqual([]);
 });

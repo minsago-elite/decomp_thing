@@ -51,7 +51,7 @@
         "configurationSha256": null,
         "deprecated": true
       },
-      "profileId": null
+      "reconstruction": null
     }
   }
 }

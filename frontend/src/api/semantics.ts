@@ -1,4 +1,4 @@
-import type { AttemptControls, ContractDocument, Page, RevisionDirectory, Run, SourceChunk, ValidationBytePreview, ValidationCases, ValidationFailure, ValidationHistory, ValidationSummary } from './generated';
+import type { AttemptControls, ContractDocument, ModuleProgress, Page, RevisionDirectory, Run, SourceChunk, ValidationBytePreview, ValidationCases, ValidationFailure, ValidationHistory, ValidationSummary } from './generated';
 import { ApiClientError } from './errors';
 import { normalizeBasePath, validateResourceHref } from '../app/paths';
 import type { ApiResource } from '../app/paths';
@@ -191,6 +191,23 @@ function checkAttemptControls(value: AttemptControls): void {
   requireValue(value.successorRunId !== value.runId);
 }
 
+const MODULE_STAGES = ['analysis', 'planning', 'generation', 'validation', 'publication'] as const;
+
+/** Stages keep their fixed order, never complete out of order and never count past their total. */
+function checkModuleProgress(progress: ModuleProgress): void {
+  const { stages, unresolved, recovery } = progress;
+  if (stages.length > 0) requireValue(stages.every((item, index) => item.stage === MODULE_STAGES[index]));
+  requireValue(stages.every((item, index) => index === 0 || item.state !== 'completed' || stages[index - 1]!.state === 'completed'));
+  requireValue(stages.every(item => item.completedUnits === null || item.totalUnits === null || BigInt(item.completedUnits) <= BigInt(item.totalUnits)));
+  requireValue(progress.lastGeneratedModuleId === null || progress.attemptState === 'running' || progress.attemptState === 'cancelling');
+  if (unresolved !== null) {
+    requireValue(unresolved.moduleCount === null ? unresolved.moduleIds.length === 0
+      : BigInt(unresolved.moduleIds.length) <= BigInt(unresolved.moduleCount)
+        && unresolved.truncated === BigInt(unresolved.moduleCount) > BigInt(unresolved.moduleIds.length));
+  }
+  requireValue(recovery === null || !recovery.eligible || ['failed', 'cancelled', 'interrupted'].includes(progress.attemptState));
+}
+
 function checkSourcePage(items: ReadonlyArray<{ fileId: string; displayName: string }>, totalFiles: number, page: Page, version: string): void {
   requireValue(page.snapshotVersion === version && items.length <= page.limit && items.length <= totalFiles);
   requireValue(new Set(items.map(item => item.fileId)).size === items.length);
@@ -283,6 +300,9 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
     }
     case 'run':
       checkRun(document.data);
+      break;
+    case 'moduleProgress':
+      checkModuleProgress(document.data);
       break;
     case 'attemptControls':
       checkAttemptControls(document.data);

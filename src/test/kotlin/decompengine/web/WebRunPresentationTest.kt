@@ -6,6 +6,25 @@ import java.time.Instant
 import kotlin.test.*
 
 class WebRunPresentationTest {
+    @Test fun `configured responses retain the always-null v1 profile placeholder alongside additive reconstruction facts`() {
+        val reconstruction = WorkflowAttemptReconstruction("generated-c-make-v1", "c".repeat(64), 60_000uL)
+        val configuration = WorkflowAttemptConfiguration("workflow-reconstruct-agent-acp", "agent", false, true,
+            listOf("ghidra", "agent-harness", "c-toolchain"), "none", true,
+            WorkflowAttemptHarness("acp", "fixture-agent", 1, 1, "0.30.1", "a".repeat(64), false), reconstruction)
+        val at = Instant.parse("2026-09-05T00:00:00Z")
+        val run = WorkflowAttempt("run_1", "a".repeat(32), WorkflowKind.RECONSTRUCT,
+            WorkflowRunState.RUNNING, "version_1", at, at, null, null, null, "agent-acp",
+            WorkflowExecutionLimits(60000u, 15000u, 1048576u, 16u), null, null, null, null,
+            configuration = configuration)
+        val dto = webRun(run).getValue("configuration").jsonObject
+        assertEquals(JsonNull, dto.getValue("profileId"), "older v1 clients require this field, but it conveys no profile authority")
+        assertEquals("generated-c-make-v1", dto.getValue("reconstruction").jsonObject.getValue("profileId").jsonPrimitive.content)
+        assertEquals("60000", dto.getValue("reconstruction").jsonObject.getValue("maxContextCharacters").jsonPrimitive.content)
+        val unrecordedProfile = webRunConfiguration(configuration.copy(reconstruction = null))
+        assertEquals(JsonNull, unrecordedProfile.getValue("profileId"))
+        assertEquals(JsonNull, unrecordedProfile.getValue("reconstruction"))
+    }
+
     @Test fun `completed candidate remains unaccepted and usage preserves unsigned precision`() {
         val at = Instant.parse("2026-09-05T00:00:00Z")
         val run = WorkflowAttempt("run_1", "a".repeat(32), WorkflowKind.RECONSTRUCT,

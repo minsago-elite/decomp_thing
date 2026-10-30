@@ -189,6 +189,7 @@ function prerequisiteNavigation(source) {
         const href = attributes.get('href');
         const rel = attributes.get('rel');
         if (href && ts.isStringLiteralLike(href) && prerequisiteNavigationUrls.has(href.text)
+          && source.slice(href.getStart(file) + 1, href.end - 1) === href.text
           && rel && ts.isStringLiteralLike(rel) && rel.text === 'noreferrer') {
           positions.add(href.getStart(file) + 1);
         }

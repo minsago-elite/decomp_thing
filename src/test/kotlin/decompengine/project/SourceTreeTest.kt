@@ -648,7 +648,12 @@ class SourceTreeTest {
     fun `generator emits buildable multi-module tree and provenance manifest`() {
         val project = createTempDirectory("source-tree-")
         val progress = mutableListOf<String>()
-        val manifest = SourceTreeGenerator.generate(model(), project, onModuleProgress = { _, _, module -> progress += module })
+        val manifest = SourceTreeGenerator.generateObserved(model(), project, ReconstructionHostSafetyLimits.DEFAULT, null, null, emptyMap(),
+            null, GeneratedCMakeReconstructionProfile.descriptor, decompengine.agent.AgentWorkflowProgress.NONE,
+            { total -> progress += "start:$total" }) { _, _, module -> progress += module }
+        // Generation start is reported once, before any module finishes.
+        assertEquals("start:2", progress.first()); assertEquals(1, progress.count { it.startsWith("start:") })
+        progress.removeAt(0)
 
         assertTrue(project.resolve("src/modules/parse.c").exists())
         assertTrue(project.resolve("src/modules/render.c").exists())

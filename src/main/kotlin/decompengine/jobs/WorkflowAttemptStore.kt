@@ -72,6 +72,8 @@ data class NewWorkflowAttempt(
     val recovery: WorkflowAttemptRecovery? = null,
     /** Server-derived admission facts; never part of the caller's start intent. */
     val configuration: WorkflowAttemptConfiguration? = null,
+    /** Caller-requested reconstruction scope; part of the start intent when present. */
+    val scope: WorkflowReconstructionScope? = null,
 ) {
     init {
         listOfNotNull(inputRevisionId, harnessCapabilityId, previousRunId).forEach(::requireId)
@@ -90,6 +92,7 @@ data class WorkflowAttempt(
     val recovery: WorkflowAttemptRecovery? = null,
     /** Null for attempts recorded before admission snapshots existed; immutable once recorded. */
     val configuration: WorkflowAttemptConfiguration? = null,
+    val scope: WorkflowReconstructionScope? = null,
 ) {
     val publicationPending: Boolean get() = state == WorkflowRunState.COMPLETED && candidate != null && acceptedRevision == null
 }
@@ -336,7 +339,7 @@ class WorkflowAttemptStore private constructor(
         }
         val initial = WorkflowAttempt(newId("run"), current.jobId, request.workflow, WorkflowRunState.QUEUED, newId("version"),
             clock.instant(), null, null, request.previousRunId, request.inputRevisionId, request.harnessCapabilityId,
-            request.limits, null, null, null, null, recovery = request.recovery, configuration = request.configuration)
+            request.limits, null, null, null, null, recovery = request.recovery, configuration = request.configuration, scope = request.scope)
         val attempt = if (receipt == null) initial else initial.copy(startReceipt = receipt(initial.runId))
         val updated = current.copy(version = newId("version"), attempts = immutable(current.attempts + attempt))
         persist(directory, updated)
@@ -781,6 +784,7 @@ class WorkflowAttemptStore private constructor(
             if (a.progressRetentionPinned) put("progressRetentionPinned", true)
             a.startReceipt?.let { put("startReceipt", it.encode()) }
             a.configuration?.let { put("configuration", it.encode()) }
+            a.scope?.let { put("scope", it.encode()) }
             a.recovery?.let { put("recovery", it.encode()) }
         }
         private fun encodeAcceptance(a: WorkflowAcceptanceReference): JsonObject = buildJsonObject {
@@ -788,7 +792,7 @@ class WorkflowAttemptStore private constructor(
             put("graphNodeId", a.graphNodeId); put("artifactId", a.artifactId); put("artifactSha256", a.artifactSha256)
         }
         private fun parseAttempt(value: JsonElement): WorkflowAttempt {
-            val a = value.asObject().also { JsonObject(it - "progressRetentionPinned" - "startReceipt" - "configuration" - "recovery").keysExactly("runId", "jobId", "workflow", "state", "version", "createdAt", "startedAt", "endedAt", "previousRunId", "inputRevisionId", "harnessCapabilityId", "limits", "terminalReason", "usage", "candidate", "acceptedRevision") }
+            val a = value.asObject().also { JsonObject(it - "progressRetentionPinned" - "startReceipt" - "configuration" - "scope" - "recovery").keysExactly("runId", "jobId", "workflow", "state", "version", "createdAt", "startedAt", "endedAt", "previousRunId", "inputRevisionId", "harnessCapabilityId", "limits", "terminalReason", "usage", "candidate", "acceptedRevision") }
             val limits = a.getValue("limits").asObject().also { it.keysExactly("wallClockMs", "idleMs", "maxOutputBytes", "maxToolCalls") }
             val usage = a.optional("usage")?.asObject()?.also { it.keysExactly("inputTokens", "outputTokens", "cachedInputTokens", "toolCalls", "wallClockMs") }
             val candidate = a.optional("candidate")?.asObject()?.also { it.keysExactly("revisionId", "sourceSha256") }
@@ -800,7 +804,8 @@ class WorkflowAttemptStore private constructor(
                 if ("progressRetentionPinned" in a) a.boolean("progressRetentionPinned") else false,
                 if ("startReceipt" in a) WorkflowStartReceipt.decode(a.getValue("startReceipt").asObject()) else null,
                 recovery = if ("recovery" in a) WorkflowAttemptRecovery.decode(a.getValue("recovery").asObject()) else null,
-                configuration = if ("configuration" in a) WorkflowAttemptConfiguration.decode(a.getValue("configuration").asObject()) else null)
+                configuration = if ("configuration" in a) WorkflowAttemptConfiguration.decode(a.getValue("configuration").asObject()) else null,
+                scope = if ("scope" in a) WorkflowReconstructionScope.decode(a.getValue("scope").asObject()) else null)
         }
         private fun parseAcceptance(value: JsonElement): WorkflowAcceptanceReference {
             val a = value.asObject().also { it.keysExactly("jobId", "runId", "revisionId", "sourceSha256", "graphNodeId", "artifactId", "artifactSha256") }

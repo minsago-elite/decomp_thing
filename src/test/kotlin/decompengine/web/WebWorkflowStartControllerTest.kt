@@ -193,7 +193,11 @@ class WebWorkflowStartControllerTest {
             body.replace("\"60000\"", "\"-1\""), body.replace("\"60000\"", "\"18446744073709551616\""),
             body.replace("\"15000\"", "\"60001\""), body.replace("\"60000\"", "\"0\""),
             body.replace("\"16\"", "\"1e2\""), body.replace("\"limits\":{", "\"limits\":{\"command\":\"private\","),
-            "{\"apiVersion\":1,\"kind\":\"workflowStartRequest\",\"data\":$body}")
+            "{\"apiVersion\":1,\"kind\":\"workflowStartRequest\",\"data\":$body}",
+            // A scope can only carry the bounded context budget: never a module plan, a selection or an unquoted number.
+            body.replace("\"limits\":", "\"scope\":{\"maxContextCharacters\":\"60000\",\"modules\":[\"module_a\"]},\"limits\":"),
+            body.replace("\"limits\":", "\"scope\":{\"maxContextCharacters\":60000},\"limits\":"),
+            body.replace("\"limits\":", "\"scope\":\"all-modules\",\"limits\":"))
         invalid.forEach { error(f.send(body = it), 422, "VALIDATION_FAILED") }
         error(f.send(body = body.replace("\"workflow\":", "\"workflow\":\"build\",\"workflow\":")), 400, "MALFORMED_JSON")
         val malformed = f.memory(body = byteArrayOf(0xc3.toByte(), 0x28)); f.api.route(malformed)

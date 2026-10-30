@@ -562,6 +562,25 @@ object SourceTreeGenerator {
         profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
         progress: AgentWorkflowProgress = AgentWorkflowProgress.NONE,
         onModuleProgress: (completed: Int, total: Int, moduleId: String) -> Unit = { _, _, _ -> },
+    ): SourceTreeManifest = generateObserved(model, projectDir, hostSafetyLimits, planner, reconstructor, overrides,
+        observedBehavior, profile, progress, {}, onModuleProgress)
+
+    /**
+     * [generate] that also reports generation start once, with the planned module count, before the first
+     * module is generated; the public signatures stay unchanged for existing positional callers.
+     */
+    internal fun generateObserved(
+        model: RecoveredProgramModel,
+        projectDir: Path,
+        hostSafetyLimits: ReconstructionHostSafetyLimits,
+        planner: DeterministicModulePlanner?,
+        reconstructor: ModuleReconstructor?,
+        overrides: Map<String, String>,
+        observedBehavior: String?,
+        profile: ReconstructionProfile,
+        progress: AgentWorkflowProgress,
+        onGenerationStart: (total: Int) -> Unit,
+        onModuleProgress: (completed: Int, total: Int, moduleId: String) -> Unit,
     ): SourceTreeManifest {
         hostSafetyLimits.requireAllows(profile.budgets)
         val adapter = ReconstructionAdapters.resolve(profile)
@@ -634,6 +653,7 @@ object SourceTreeGenerator {
         val generationBudgetObservations = mutableListOf<ModuleGenerationBudgetObservation>()
         var generatedSourceBytes = 0L
 
+        onGenerationStart(plan.modules.size)
         moduleDependencyOrder(dependenciesByModule).map(moduleById::getValue).forEachIndexed { index, module ->
             val dependencies = dependenciesByModule.getValue(module.id)
             val dependencyHeaders = dependencies.associate { dependency -> moduleById.getValue(dependency).headerPath to headers.getValue(dependency) }

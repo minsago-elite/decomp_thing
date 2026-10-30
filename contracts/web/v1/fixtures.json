@@ -941,6 +941,62 @@
     {
       "file": "fixtures/invalid-run-interrupted-timed-out.json",
       "valid": false
+    },
+    {
+      "file": "fixtures/request-workflow-start-scope.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/module-progress-generating.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/module-progress-interrupted.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/module-progress-completed.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/module-progress-not-applicable.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-run-configuration-context.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-request-scope-module-plan.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-module-progress-eligible-reason.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-module-progress-compatible-reason.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-module-progress-not-applicable-stages.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-module-progress-missing-stage.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-module-progress-plan-override.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/legacy-run-before-reconstruction.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/legacy-request-before-reconstruction.json",
+      "valid": true
     }
   ]
 }
