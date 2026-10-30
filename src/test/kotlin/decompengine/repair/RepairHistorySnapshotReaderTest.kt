@@ -1076,8 +1076,10 @@ class RepairHistorySnapshotReaderTest {
         assertEquals(RepairHistoryReadStatus.UNAVAILABLE, result.status); assertNull(result.snapshot)
     }
     private fun construct(name: String, vararg arguments: Any): Any =
-        Class.forName("decompengine.repair.$name").declaredConstructors.single().also { it.isAccessible = true }
-            .let { invoke { it.newInstance(*arguments) } }!!
+        Class.forName("decompengine.repair.$name").declaredConstructors.single { constructor ->
+            !constructor.isSynthetic && constructor.parameterCount == arguments.size &&
+                constructor.parameterTypes.indices.all { index -> constructor.parameterTypes[index].isInstance(arguments[index]) }
+        }.also { it.isAccessible = true }.let { invoke { it.newInstance(*arguments) } }!!
     private fun call(target: Any, name: String, vararg arguments: Any): Any? =
         target.javaClass.declaredMethods.single { it.name == name && it.parameterCount == arguments.size }
             .also { it.isAccessible = true }.let { invoke { it.invoke(target, *arguments) } }
