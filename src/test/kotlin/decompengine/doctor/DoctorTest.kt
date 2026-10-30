@@ -388,9 +388,8 @@ class DoctorTest {
         val rendered = report.checks.joinToString("\n") { "${it.name}: ${it.detail}" }
 
         assertFalse(report.passed)
-        assertTrue(report.checks.any { it.name == "ACP harness" && it.passed })
-        assertFalse(report.checks.single { it.name == "LLM connectivity" }.passed)
-        assertTrue(report.checks.single { it.name == "LLM connectivity" }.detail.contains("not attempted"))
+        assertTrue(report.checks.any { it.name == "ACP harness" && !it.passed })
+        assertFalse(report.checks.any { it.name.startsWith("LLM") })
         assertFalse("private-user" in rendered || "private-password" in rendered || "private-api-key" in rendered)
     }
 
