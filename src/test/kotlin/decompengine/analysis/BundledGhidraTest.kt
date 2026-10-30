@@ -158,8 +158,12 @@ class BundledGhidraTest {
         val nativeInterfacesStub = source("ExportNativeInterfacesV1.java", """
             import ghidra.util.task.TaskMonitor;
             public final class ExportNativeInterfacesV1 {
-                public static void collect(Object program, TaskMonitor monitor, String[] args) {}
-                public static void collectWithStagingBudget(Object program, TaskMonitor monitor, String[] args, long limit) {}
+                public static void collect(Object program, TaskMonitor monitor, String[] args) {
+                    ghidra.app.script.GhidraScript.invocations.add("native-interface:" + java.util.Arrays.toString(args));
+                }
+                public static void collectWithStagingBudget(Object program, TaskMonitor monitor, String[] args, long limit) {
+                    ghidra.app.script.GhidraScript.invocations.add("native-interface-budget:" + java.util.Arrays.toString(args));
+                }
             }
         """)
         val inferredInterfacesStub = source("ExportInferredInterfacesV1.java", """
@@ -190,11 +194,13 @@ class BundledGhidraTest {
                 }
                 public static void verify() throws Exception {
                     for (String name : new String[] {"ExportProgramModel.java", "ExportProgramModelOwned.java",
-                            "ExportRecoveredCallSites.java", "ExportDecompiledC.java", "ExportNativeCallsV1.class"}) {
+                            "ExportRecoveredCallSites.java", "ExportDecompiledC.java", "ExportNativeCallsV1.class",
+                            "ExportNativeInterfacesV1.class"}) {
                         prepare(name, "2", "argument with spaces", "--not-an-option");
                         new RunBundledExports().execute();
                         check(BundledGhidraWorker.completed);
-                        String target = name.equals("ExportNativeCallsV1.class") ? "native" : name;
+                        String target = name.equals("ExportNativeCallsV1.class") ? "native" :
+                            name.equals("ExportNativeInterfacesV1.class") ? "native-interface" : name;
                         check(GhidraScript.invocations.equals(java.util.List.of(
                             target + ":[argument with spaces, --not-an-option]")));
                     }

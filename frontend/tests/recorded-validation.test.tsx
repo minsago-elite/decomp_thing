@@ -45,6 +45,24 @@ async function inspect() {
   await screen.findByRole('table', { name: 'Recorded validation cases' });
 }
 
+function expectBoundedTable(name: string) {
+  const region = screen.getByRole('region', { name });
+  expect(region.classList.contains('retained-case-table')).toBe(true);
+  expect(region.tabIndex).toBe(0);
+  expect(region.contains(screen.getByRole('table', { name }))).toBe(true);
+}
+
+it('bounds validation history and case previews in named keyboard-scrollable table regions', async () => {
+  const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(response(historyFixture()))
+    .mockResolvedValueOnce(response(reportFixture()));
+  vi.stubGlobal('fetch', fetcher); mount(); await discover();
+  expectBoundedTable('Recorded validation operations');
+  expect(screen.getByRole('region', { name: 'Recorded validation evidence' }).classList.contains('retained-cases')).toBe(true);
+  await inspect();
+  expectBoundedTable('Recorded validation cases');
+  expect(fetcher).toHaveBeenCalledTimes(2);
+});
+
 type SavedValidation = Pick<Report, 'reportId' | 'binding' | 'summary' | 'validationCases' | 'validationFailure'> & {
   format: string; exportSchemaVersion: number; scope: string; limitations: string[];
 };
@@ -160,6 +178,7 @@ it('pins and compares observations without extra reads and inspects an exact lat
   pinComparison(); expect(fetcher).toHaveBeenCalledTimes(2);
   await inspectComparison('after');
   const table = await screen.findByRole('table', { name: 'Complete-corpus mismatch changes' });
+  expectBoundedTable('Complete-corpus mismatch changes');
   const rows = Array.from(table.querySelectorAll('tbody tr')).map(row => Array.from(row.querySelectorAll('th,td')).slice(0, 2).map(cell => cell.textContent));
   expect(rows).toEqual([['New mismatches', '61'], ['Persistent mismatches', '22'], ['Resolved mismatches', '1']]);
   expect(fetcher).toHaveBeenCalledTimes(3);
