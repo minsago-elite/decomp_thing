@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { act, fireEvent, render, screen } from '@testing-library/preact';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/preact';
 import axe from 'axe-core';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as ClientModule from '../src/api/client';
@@ -142,6 +142,53 @@ it('has no automated WCAG A/AA violations when a job read fails', async () => {
   await screen.findByRole('alert');
   await settle();
   expect(await violations()).toEqual([]);
+});
+
+// Keyboard completion of downloads (#615): attachment links stay native anchors. preact-iso only
+// skips truthy `link.download`, so an empty attribute would turn the download into a route change.
+it('keeps source downloads as native links that the router does not intercept', async () => {
+  const auth = await session();
+  const path = `/nested/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-files/${fileId}`;
+  history.replaceState(null, '', path);
+  render(<App basePath="/nested" session={auth} />);
+  const link = await screen.findByRole('link', { name: 'Download complete recorded input' });
+  expect(link.getAttribute('download')).toBe('Makefile');
+  link.focus();
+  expect(document.activeElement).toBe(link);
+  // fireEvent returns false when a handler called preventDefault (an in-app navigation).
+  expect(fireEvent.click(link)).toBe(true);
+  expect(window.location.pathname).toBe(path);
+  for (const anchor of document.querySelectorAll('a[download]')) expect(anchor.getAttribute('download')).not.toBe('');
+});
+
+// Route changes announce through one heading focus and the document title (#615); the shared
+// loading status is cleared once the view is ready, so it never repeats stale text.
+it('announces each route change once without repeating live-region output', async () => {
+  const auth = await session();
+  history.replaceState(null, '', '/nested/');
+  render(<App basePath="/nested" session={auth} />);
+  await screen.findByRole('heading', { level: 1 });
+  await settle();
+  const status = document.querySelector('main > p.sr-only[role="status"]')!;
+  const focused: string[] = [];
+  const record = (event: FocusEvent) => {
+    if (event.target instanceof HTMLHeadingElement && event.target.tagName === 'H1') focused.push(event.target.textContent ?? '');
+  };
+  document.addEventListener('focusin', record);
+  try {
+    for (const [name, title] of [['Runtime status', 'Runtime status'], ['Upload', 'Upload a binary'], ['Workspace', 'Jobs']] as const) {
+      fireEvent.click(screen.getByRole('link', { name }));
+      await waitFor(() => expect(document.activeElement?.tagName).toBe('H1'));
+      await settle();
+      expect(document.title).toBe(`${title} · Decomp Workbench`);
+      expect(document.activeElement?.tagName).toBe('H1');
+      expect(status.textContent).toBe('');
+    }
+    expect(focused).toHaveLength(3);
+    expect(new Set(focused).size).toBe(3);
+  } finally {
+    document.removeEventListener('focusin', record);
+  }
 });
 
 // Job lifecycle controls (#510, #511, #512) and storage accounting (#506).
