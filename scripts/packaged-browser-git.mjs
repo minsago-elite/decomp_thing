@@ -116,7 +116,7 @@ export async function qualifyGit({ fixture, makeTarget, cdp, evaluate, ready, br
   assert.equal(historyIds.at(-1), fixture.repository.commits.base);
   assert.equal(await evaluate(tab, `!!${button('Older commits')}`), false, 'Exhausted history must not offer another page');
   assert.ok(tab.requests.slice(historyStart).every(request => ['GET', 'HEAD'].includes(request.method)), 'History pagination sent a mutation');
-  assert.equal(tab.requests.slice(historyStart).filter(request => request.url.includes('/history?cursor=')).length, historyPages - 1);
+  assert.equal(tab.requests.slice(historyStart).filter(request => request.hasHistoryCursor).length, historyPages - 1);
   assert.ok(await evaluate(tab, `document.body.innerText.includes('fixture: baseline') && document.body.innerText.includes('Not mapped to a reconstruction revision')`));
   assert.equal(fixture.repository.git('local', ['rev-parse', 'main']).stdout.trim(), fixture.repository.commits.local, 'Import changed the admitted repository');
 

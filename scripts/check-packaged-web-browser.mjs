@@ -245,9 +245,11 @@ async function makeTarget({ cspProbe = false, cacheEnabled = false } = {}) {
       correlateDocumentResponse(state, event.requestId, event.redirectResponse, 'requestWillBeSent.redirectResponse');
     }
     const type = event.type ?? (priorDocument ? 'Document' : undefined);
-    const url = event.request.url.split('#')[0].split('?')[0];
+    const requestUrl = new URL(event.request.url);
+    const url = `${requestUrl.origin}${requestUrl.pathname}`;
     state.requestUrls.set(event.requestId, url);
-    state.requests.push({ method: event.request.method, url, type });
+    state.requests.push({ method: event.request.method, url, type,
+      hasHistoryCursor: requestUrl.pathname.endsWith('/history') && requestUrl.searchParams.has('cursor') });
     if (cacheEnabled) state.cacheRequests.push({ requestId: event.requestId, method: event.request.method, url, type });
     if (type === 'Document') {
       const request = { requestId: event.requestId, sequence: state.documentRequests.length,
