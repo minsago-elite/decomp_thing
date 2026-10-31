@@ -95,6 +95,20 @@ internal object GitIntegrations {
         GitStorage.forceDirectory(gitDir)
     }
 
+    /** Recovery accepts only the exact retained effect, never arbitrary HEAD movement. */
+    fun published(runner: GitCommandRunner, gitDir: Path, integration: GitIntegrationRecord, head: GitHeadObservation): Boolean {
+        if (head.state != GitHeadState.ATTACHED || head.refName != integration.branch || head.objectId == null) return false
+        return when (integration.strategy) {
+            GitIntegrationStrategy.FAST_FORWARD -> head.objectId == integration.target
+            GitIntegrationStrategy.MERGE -> {
+                val parents = runner.run(GitInvocation("rev-list", listOf("--parents", "-n", "1", head.objectId),
+                    gitDir = gitDir, limits = LIMITS)).text.trim().split(' ').drop(1)
+                parents == listOf(integration.headBefore, integration.target)
+            }
+            GitIntegrationStrategy.REBASE -> false
+        }
+    }
+
     fun divergence(runner: GitCommandRunner, commonDir: Path, local: String, tracking: String): GitDivergence {
         val counts = runner.run(GitInvocation("rev-list", listOf("--left-right", "--count", "$local...$tracking"), gitDir = commonDir, limits = LIMITS))
             .text.trim().split(Regex("\\s+"))
@@ -184,7 +198,7 @@ internal object GitIntegrations {
 
     /** Publish only captured reviewed bytes, never ask Git to reopen mutable work-tree paths. */
     fun stageReviewed(runner: GitCommandRunner, gitDir: Path, workTree: Path, format: GitObjectFormat,
-        files: List<Pair<GitPath, GitConflictFiles.Observation>>) {
+        index: Path, files: List<Pair<GitPath, GitConflictFiles.Observation>>) {
         val zero = "0".repeat(checkNotNull(format.hexLength))
         val indexInfo = buildString {
             for ((path, current) in files) {
@@ -200,7 +214,7 @@ internal object GitIntegrations {
             }
         }.toByteArray(Charsets.UTF_8)
         runner.run(GitInvocation("update-index", listOf("-z", "--index-info"), gitDir = gitDir, workTree = workTree,
-            input = indexInfo, limits = LIMITS))
+            variables = mapOf("GIT_INDEX_FILE" to index.toString()), input = indexInfo, limits = LIMITS))
     }
 
     fun utf8(bytes: ByteArray): String? = if (bytes.size > MAX_TEXT_BYTES || bytes.any { it == 0.toByte() }) null else try {

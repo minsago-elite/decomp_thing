@@ -32,7 +32,7 @@ class GitWorkspaceMutationsTest {
             GitRuntime.detect(), { _, run, revision -> GitSourceSnapshot(snapshot, run, revision, "a".repeat(64), commitments) },
             policy = policy, crash = { hook(it) },
             acceptance = { _, revision, _ -> if (accepted && revision == "revision_1") "accepted" to "artifact_1" else "not-evaluated" to null },
-        ).also(opened::add)
+        ).also { it.recover(listOf("0123456789abcdef0123456789abcdef")); opened += it }
         override fun close() { opened.forEach { it.close() }; repositories.close() }
     }
 
@@ -56,6 +56,197 @@ class GitWorkspaceMutationsTest {
         val admission = requestWorkspace(jobId, repositoryId, request, key)
         assertTrue(awaitIdle(60_000))
         return operation(jobId, repositoryId, admission.operation.operationId)
+    }
+
+    @Test fun `staging guards reject equal length preserved mtime edits including already modified files`(): Unit {
+        for (format in listOf(GitObjectFormat.SHA1, GitObjectFormat.SHA256)) for (tracked in listOf(false, true)) Fixture().use { f ->
+            val service = f.open(GitRepositoryPolicy(defaultBranch = "trunk", objectFormat = format))
+            val repositoryId = service.initialized()
+            val gitDir = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
+            val workTree = gitDir.parent.resolve("worktree")
+            if (tracked) f.repositories.commitAll(gitDir, workTree, "baseline")
+            val file = workTree.resolve("src/main.c")
+            Files.writeString(file, "int safe = 1;\n")
+            val (review, guards) = service.guards(repositoryId)
+            val time = Files.getLastModifiedTime(file)
+            val indexBefore = f.repositories.git("--git-dir=$gitDir", "ls-files", "--stage")
+            Files.writeString(file, "int evil = 1;\n")
+            Files.setLastModifiedTime(file, time)
+            assertEquals("WORKTREE_CHANGED", assertFailsWith<ManagedGitException> {
+                service.requestWorkspace(jobId, repositoryId, GitStageRequest(review.record.worktreeId, guards,
+                    review.ids { it.path.exact == "src/main.c" }, true), "preserved_mtime_0001")
+            }.code)
+            assertEquals(indexBefore, f.repositories.git("--git-dir=$gitDir", "ls-files", "--stage"))
+        }
+    }
+
+    @Test fun `staging verifies capture and never indexes bytes written after capture`(): Unit {
+        for (format in listOf(GitObjectFormat.SHA1, GitObjectFormat.SHA256)) for (afterCapture in listOf(false, true)) Fixture().use { f ->
+            val service = f.open(GitRepositoryPolicy(defaultBranch = "trunk", objectFormat = format))
+            val repositoryId = service.initialized()
+            val gitDir = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
+            val file = gitDir.parent.resolve("worktree/src/main.c")
+            Files.writeString(file, "int safe = 1;\n")
+            val (review, guards) = service.guards(repositoryId)
+            val time = Files.getLastModifiedTime(file)
+            var interleaved = false
+            f.hook = { point -> if (point == if (afterCapture) GitOperationCrashPoint.AFTER_WORKSPACE_CAPTURE else GitOperationCrashPoint.AFTER_WORKSPACE_VALIDATION) {
+                interleaved = true
+                Files.writeString(file, "int evil = 1;\n")
+                Files.setLastModifiedTime(file, time)
+            } }
+            val result = service.run(repositoryId, GitStageRequest(review.record.worktreeId, guards,
+                review.ids { it.path.exact == "src/main.c" }, true), "capture_content_0001")
+            assertTrue(interleaved)
+            if (afterCapture) {
+                assertEquals(GitOperationState.COMPLETED, result.state, result.message)
+                assertEquals("int safe = 1;\n", f.repositories.git("--git-dir=$gitDir", "show", ":src/main.c"))
+            } else {
+                assertEquals(GitOperationState.FAILED, result.state, result.message)
+                assertEquals("WORKTREE_CHANGED", result.failureCode)
+                assertEquals("", f.repositories.git("--git-dir=$gitDir", "ls-files", "--stage"))
+            }
+            assertEquals("int evil = 1;\n", Files.readString(file))
+            assertTrue(Files.notExists(gitDir.resolve("index.lock")))
+        }
+    }
+
+    @Test fun `captured index entries preserve literal names executable modes and link bytes`(): Unit = Fixture().use { f ->
+        val service = f.open()
+        val repositoryId = service.initialized()
+        val gitDir = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
+        val workTree = gitDir.parent.resolve("worktree")
+        val literal = "src/literal[\t\n].c"
+        Files.writeString(workTree.resolve(literal), "int literal;\n")
+        Files.setPosixFilePermissions(workTree.resolve(literal), java.nio.file.attribute.PosixFilePermissions.fromString("rwxr-xr-x"))
+        Files.createSymbolicLink(workTree.resolve("src/link.c"), Path.of("../src/main.c"))
+        val (review, guards) = service.guards(repositoryId)
+        val result = service.run(repositoryId, GitStageRequest(review.record.worktreeId, guards,
+            review.ids { it.path.exact in setOf(literal, "src/link.c") }, true), "capture_modes_000001")
+        assertEquals(GitOperationState.COMPLETED, result.state, result.message)
+        assertEquals("int literal;\n", f.repositories.git("--git-dir=$gitDir", "show", ":$literal"))
+        assertEquals("../src/main.c", f.repositories.git("--git-dir=$gitDir", "show", ":src/link.c"))
+        val index = f.repositories.git("--git-dir=$gitDir", "ls-files", "--stage", "-z")
+        assertTrue(index.split('\u0000').single { it.endsWith("\t$literal") }.startsWith("100755 "))
+        assertTrue(index.split('\u0000').single { it.endsWith("\tsrc/link.c") }.startsWith("120000 "))
+        assertEquals("REPOSITORY_UNAVAILABLE", assertFailsWith<GitRepositoryException> {
+            GitWorkspaceContent.fingerprint(workTree, workTree.resolve(literal), GitWorkspaceContent.Budget(4))
+        }.code)
+    }
+
+    @Test fun `external index additions before locked validation preserve an unselected rename descendant`(): Unit {
+        for (format in listOf(GitObjectFormat.SHA1, GitObjectFormat.SHA256)) Fixture().use { f ->
+            val service = f.open(GitRepositoryPolicy(defaultBranch = "trunk", objectFormat = format))
+            val repositoryId = service.initialized()
+            val gitDir = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
+            val workTree = gitDir.parent.resolve("worktree")
+            fun raw(vararg args: String) = f.repositories.git("--git-dir=$gitDir", "--work-tree=$workTree", *args, cwd = workTree)
+            Files.writeString(workTree.resolve("a.c"), "int rename_source;\n")
+            f.repositories.commitAll(gitDir, workTree, "baseline")
+            raw("mv", "a.c", "b.c")
+            val (review, guards) = service.guards(repositoryId)
+            val selection = review.ids { it.path.exact == "b.c" && it.staged == GitIndexChange.RENAMED }
+            assertEquals(1, selection.size)
+            f.hook = { if (it == GitOperationCrashPoint.AFTER_RUNNING) {
+                Files.createDirectory(workTree.resolve("a.c"))
+                Files.writeString(workTree.resolve("a.c/extra.c"), "int unselected;\n")
+                raw("add", "--", "a.c/extra.c")
+            } }
+            val result = service.run(repositoryId, GitStageRequest(review.record.worktreeId, guards, selection, false), "rename_external_0001")
+            assertEquals(GitOperationState.FAILED, result.state, result.message)
+            assertEquals("WORKTREE_CHANGED", result.failureCode)
+            assertEquals(setOf("a.c/extra.c", "b.c", "CMakeLists.txt", "src/main.c", "src/util.c"),
+                raw("ls-files").lines().filter { it.isNotEmpty() }.toSet())
+        }
+    }
+
+    @Test fun `external Git writers cannot change index or parent between validation and mutation`(): Unit {
+        for (format in listOf(GitObjectFormat.SHA1, GitObjectFormat.SHA256)) for (stage in listOf(false, true)) Fixture().use { f ->
+            val service = f.open(GitRepositoryPolicy(defaultBranch = "trunk", objectFormat = format))
+            val repositoryId = service.initialized()
+            val gitDir = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
+            val workTree = gitDir.parent.resolve("worktree")
+            fun raw(vararg args: String, expect: Int = 0) = f.repositories.git("--git-dir=$gitDir", "--work-tree=$workTree", *args, cwd = workTree, expect = expect)
+            Files.writeString(workTree.resolve("a.c"), "int rename_source;\n")
+            val parent = f.repositories.commitAll(gitDir, workTree, "baseline")
+            if (stage) Files.writeString(workTree.resolve("b.c"), "int new_source;\n") else raw("mv", "a.c", "b.c")
+            val (review, guards) = service.guards(repositoryId)
+            val selection = review.ids { it.path.exact == "b.c" }
+            assertEquals(1, selection.size)
+            var attempted = false
+            f.hook = { if (it == GitOperationCrashPoint.AFTER_WORKSPACE_VALIDATION) {
+                attempted = true
+                if (stage) Files.writeString(workTree.resolve("extra.c"), "int unselected;\n") else {
+                    Files.createDirectory(workTree.resolve("a.c"))
+                    Files.writeString(workTree.resolve("a.c/extra.c"), "int unselected;\n")
+                }
+                raw("add", "--", if (stage) "extra.c" else "a.c/extra.c", expect = 128)
+                raw("update-ref", "refs/heads/trunk", parent, parent, expect = 128)
+            } }
+            val result = service.run(repositoryId, GitStageRequest(review.record.worktreeId, guards, selection, stage), "locked_boundary_0001")
+            assertTrue(attempted)
+            assertEquals(GitOperationState.COMPLETED, result.state, result.message)
+            assertEquals(if (stage) "b.c\n" else "", raw("diff", "--cached", "--name-only"))
+            assertEquals(parent, raw("rev-parse", "HEAD").trim())
+            for (lock in listOf("index.lock", "HEAD.lock", "refs/heads/trunk.lock")) assertTrue(Files.notExists(gitDir.resolve(lock)), lock)
+        }
+    }
+
+    @Test fun `interrupted index transactions reclaim only witnessed locks and never replay`(): Unit {
+        for (stage in listOf(false, true)) for (external in listOf(false, true)) Fixture().use { f ->
+            val service = f.open()
+            val repositoryId = service.initialized()
+            val gitDir = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
+            if (!stage) {
+                val (view, guards) = service.guards(repositoryId)
+                service.run(repositoryId, GitStageRequest(view.record.worktreeId, guards,
+                    view.ids { it.path.exact == "src/main.c" }, true), "recovery_setup_0001")
+            }
+            val (review, guards) = service.guards(repositoryId)
+            val before = f.repositories.git("--git-dir=$gitDir", "ls-files", "--stage")
+            val request = GitStageRequest(review.record.worktreeId, guards, review.ids { it.path.exact == "src/main.c" }, stage)
+            f.hook = { if (it == GitOperationCrashPoint.AFTER_WORKSPACE_VALIDATION) throw SimulatedGitCrash() }
+            val admission = service.requestWorkspace(jobId, repositoryId, request, "crash_index_tx_0001")
+            assertTrue(service.awaitIdle(60_000)); service.close(); f.hook = {}
+            val operationId = admission.operation.operationId
+            val staging = Files.createDirectories(f.store.resolve("$jobId/git/staging/$operationId"))
+            val marker = "decomp-operation:$operationId\n"
+            for (name in listOf("index.lock", "HEAD.lock", "ref-lock")) {
+                val witness = Files.writeString(staging.resolve(name), marker)
+                val lock = gitDir.resolve(if (name == "ref-lock") "refs/heads/trunk.lock" else name)
+                if (external && name == "index.lock") Files.writeString(lock, marker) else Files.createLink(lock, witness)
+            }
+            Files.writeString(staging.resolve("ref-name"), "refs/heads/trunk")
+            val restarted = f.open()
+            assertEquals(GitOperationState.INTERRUPTED, restarted.operation(jobId, repositoryId, operationId).state)
+            assertEquals(before, f.repositories.git("--git-dir=$gitDir", "ls-files", "--stage"))
+            assertTrue(Files.notExists(gitDir.resolve("HEAD.lock")))
+            assertTrue(Files.notExists(gitDir.resolve("refs/heads/trunk.lock")))
+            if (external) {
+                assertEquals(marker, Files.readString(gitDir.resolve("index.lock")))
+                Files.delete(gitDir.resolve("index.lock")) // Explicitly release our fixture's external lock.
+            } else assertTrue(Files.notExists(gitDir.resolve("index.lock")))
+            val retried = restarted.run(repositoryId, request, "retry_index_tx_0001")
+            assertEquals(GitOperationState.COMPLETED, retried.state, retried.message)
+        }
+    }
+
+    @Test fun `unstage private index uses the guarded parent rather than mutable HEAD`(): Unit = Fixture().use { f ->
+        val service = f.open()
+        val repositoryId = service.initialized()
+        val gitDir = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
+        val workTree = gitDir.parent.resolve("worktree")
+        val parent = f.repositories.commitAll(gitDir, workTree, "baseline")
+        Files.writeString(workTree.resolve("src/main.c"), "int changed;\n")
+        f.repositories.git("--git-dir=$gitDir", "--work-tree=$workTree", "add", "src/main.c")
+        val (review, _) = service.guards(repositoryId)
+        val entries = GitWorkspaceMutations.select(review.record, review.observation, review.ids { it.path.exact == "src/main.c" }, false)
+        val privateIndex = f.repositories.root.resolve("private-index")
+        Files.copy(gitDir.resolve("index"), privateIndex)
+        f.repositories.git("--git-dir=$gitDir", "--work-tree=$workTree", "commit", "-q", "-m", "external new head")
+        GitWorkspaceMutations.unstage(f.repositories.runner, gitDir, workTree, entries, parent, privateIndex)
+        assertEquals(f.repositories.git("--git-dir=$gitDir", "show", "$parent:src/main.c"),
+            f.repositories.git("--git-dir=$gitDir", "show", ":src/main.c", variables = mapOf("GIT_INDEX_FILE" to privateIndex.toString())))
     }
 
     @Test fun `selected files are staged, unstaged and committed exactly with a validated revision mapping`(): Unit = Fixture().use { f ->

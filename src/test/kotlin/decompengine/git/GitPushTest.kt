@@ -32,9 +32,14 @@ class GitPushTest {
         }
         fun remoteTip(branch: String = "main"): String? =
             repositories.git("--git-dir=$bare", "for-each-ref", "--format=%(objectname)", "refs/heads/$branch").trim().ifEmpty { null }
-        fun open(remotePolicy: GitRemotePolicy = GitRemotePolicy(admittedRoot = admitted)) =
-            ManagedGitRepositories(store, GitRuntime.detect(), { _, _, _ -> error("no snapshots") },
-                policy = GitRepositoryPolicy(defaultBranch = "main"), crash = { hook(it) }, remotePolicy = remotePolicy).also(opened::add)
+        fun open(remotePolicy: GitRemotePolicy = GitRemotePolicy(admittedRoot = admitted)): ManagedGitRepositories {
+            val service = ManagedGitRepositories(store, GitRuntime.detect(), { _, _, _ -> error("no snapshots") },
+                policy = GitRepositoryPolicy(defaultBranch = "main"), crash = { hook(it) }, remotePolicy = remotePolicy)
+            opened += service
+            // Mirror the server startup boundary before asserting post-restart reads.
+            service.recover(listOf("0123456789abcdef0123456789abcdef"))
+            return service
+        }
         override fun close() { opened.forEach { it.close() }; repositories.close() }
     }
 

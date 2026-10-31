@@ -16,6 +16,8 @@ data class GitSyncRequest(
     val guards: GitGuards,
     val parameters: Map<String, String?> = emptyMap(),
     val content: String? = null,
+    /** Server-retained destination branch for merge admission and crash recovery; never client authority. */
+    val retainedDestinationRef: String? = null,
 ) : GitRepositoryRequest {
     init {
         require(action in ACTIONS)
@@ -85,9 +87,17 @@ internal object GitTransfers {
             add("+refs/heads/*:refs/remotes/$name/*")
             if (tags) add("refs/tags/*:refs/tags/*")
         }
-        return runner.run(GitInvocation("fetch", listOf("--no-tags", "--no-recurse-submodules", "--no-write-fetch-head",
+        val result = runner.run(GitInvocation("fetch", listOf("--no-tags", "--no-recurse-submodules", "--no-write-fetch-head",
             "--no-auto-maintenance", "--no-write-commit-graph", "--prune", "--progress", "--", location.url) + refspecs,
             gitDir = gitDir, limits = limits(policy), transport = GitTransports.context(location, policy), control = control))
+        // gitDir is operation-owned staging/quarantine. Reject unsupported name bytes there,
+        // including clone tags, before any objects or refs can be promoted into live storage.
+        val refs = runner.run(GitInvocation("for-each-ref", listOf("--format=%(refname)", "refs/remotes/$name/") +
+            (if (tags) listOf("refs/tags/") else emptyList()), gitDir = gitDir, truncateStdout = true,
+            limits = GitExecutionLimits(Duration.ofSeconds(60), 8 * 1024 * 1024, 64 * 1024)))
+        if (refs.stdoutTruncated) throw GitRepositoryException("REPOSITORY_UNSUPPORTED", "The remote has more refs than the workbench can enumerate.")
+        refText(refs)
+        return result
     }
 
     /**
@@ -193,17 +203,25 @@ internal object GitTransfers {
                 // This listener is private: no packet diagnostics become operation progress.
                 formatLine.find(line)?.groupValues?.get(1)?.let { capability.compareAndSet(null, it) }
             })))
-        val branch = result.text.lineSequence().firstNotNullOfOrNull { line ->
+        val text = refText(result)
+        val branch = text.lineSequence().firstNotNullOfOrNull { line ->
             Regex("^ref: refs/heads/([^\t]+)\tHEAD$").matchEntire(line)?.groupValues?.get(1)
         }
         // SHA-1 is the protocol default when an older server lacks object-format. A detached
         // SHA-256 HEAD also identifies its format through its full advertised object ID.
-        val headId = result.text.lineSequence().map { it.substringBefore('\t') }
+        val headId = text.lineSequence().map { it.substringBefore('\t') }
             .firstOrNull { id -> GitObjectFormat.SHA1.objectIdOrNull(id) != null || GitObjectFormat.SHA256.objectIdOrNull(id) != null }
         val format = capability.get()?.let(GitObjectFormat::fromGit)
             ?: if (headId?.length == GitObjectFormat.SHA256.hexLength) GitObjectFormat.SHA256 else GitObjectFormat.SHA1
         if (format == GitObjectFormat.UNKNOWN) throw GitOperationRefusal("REPOSITORY_UNSUPPORTED", "The remote uses an unsupported object format.")
         return Advertisement(branch, format, headId)
+    }
+
+    /** Ref names are identities, not display text: replacement decoding can merge distinct refs. */
+    private fun refText(result: GitCommandResult): String = try {
+        result.stdout.decodeToString(throwOnInvalidSequence = true)
+    } catch (_: java.nio.charset.CharacterCodingException) {
+        throw GitRepositoryException("REPOSITORY_UNSUPPORTED", "The remote contains a non-UTF-8 ref name. No refs were published to the managed repository.")
     }
 
     /** Partial pack files a stopped transfer can leave behind; refs are only updated after a complete pack. */
@@ -225,7 +243,7 @@ internal object GitTransfers {
         val result = runner.run(GitInvocation("for-each-ref", listOf("--format=%(objectname)%00%(refname)", "refs/remotes/$name/"),
             gitDir = gitDir, truncateStdout = true, limits = GitExecutionLimits(Duration.ofSeconds(60), 8 * 1024 * 1024, 64 * 1024)))
         if (result.stdoutTruncated) throw GitRepositoryException("REPOSITORY_UNSUPPORTED", "The remote has more tracking refs than the workbench can enumerate.")
-        return result.text.lineSequence().filter { it.isNotEmpty() }.map { line ->
+        return refText(result).lineSequence().filter { it.isNotEmpty() }.map { line ->
             val parts = line.split('\u0000')
             GitRefEntry(parts[1], format.objectIdOrNull(parts[0]) ?: throw GitRepositoryException("REPOSITORY_CORRUPT", "A tracking ref is invalid."), null)
         }.toList()
@@ -235,7 +253,7 @@ internal object GitTransfers {
     fun trackingRefs(runner: GitCommandRunner, gitDir: Path, format: GitObjectFormat, name: String): List<GitRefEntry> {
         val result = runner.run(GitInvocation("for-each-ref", listOf("--format=%(objectname)%00%(refname)", "--count=201", "refs/remotes/$name/"),
             gitDir = gitDir))
-        return result.text.lineSequence().filter { it.isNotEmpty() }.mapNotNull { line ->
+        return refText(result).lineSequence().filter { it.isNotEmpty() }.mapNotNull { line ->
             val parts = line.split('\u0000')
             if (parts.size != 2 || !GitRefNames.isObservedRefName(parts[1])) null
             else format.objectIdOrNull(parts[0])?.let { GitRefEntry(parts[1], it, null) }

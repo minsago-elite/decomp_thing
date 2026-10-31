@@ -3,6 +3,26 @@ import { lstat } from 'node:fs/promises';
 import test from 'node:test';
 import { createWebGitFixture } from './web-git-fixtures.mjs';
 import { createFakeGitHubFixture } from './web-github-fixture.mjs';
+import { countGitHistoryReads } from './packaged-browser-git.mjs';
+
+test('packaged history counts all 50 continuation reads using query-redacted browser evidence', () => {
+  const prefix = 'http://127.0.0.1:8080/nested/api/v1/jobs/job/repositories/repository';
+  const firstPage = { method: 'GET', url: `${prefix}/history` };
+  const requests = [firstPage];
+  const historyStart = requests.length;
+  for (let page = 1; page <= 50; page++) {
+    // Mirrors makeTarget: neither the anchored cursor nor any other query is retained.
+    requests.push({ method: 'GET', url: `${prefix}/history?limit=20&cursor=page${page}`.split('?')[0] });
+  }
+  requests.push({ method: 'GET', url: `${prefix}/status` }, { method: 'POST', url: `${prefix}/operations` });
+  const continuations = requests.slice(historyStart);
+  assert.equal(countGitHistoryReads(continuations), 50);
+  assert.equal(countGitHistoryReads(continuations.slice(1)), 49, 'Missing reads must still fail the journey count');
+  assert.equal(countGitHistoryReads([...continuations, firstPage]), 51, 'Duplicate reads must still fail the journey count');
+  assert.equal(countGitHistoryReads([
+    { method: 'POST', url: `${prefix}/history` }, { method: 'GET', url: `${prefix}/history-extra` },
+  ]), 0);
+});
 
 test('independent roots produce the same isolated diverged history and disposable remote', async () => {
   const first = await createWebGitFixture();

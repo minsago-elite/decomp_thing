@@ -245,11 +245,9 @@ async function makeTarget({ cspProbe = false, cacheEnabled = false } = {}) {
       correlateDocumentResponse(state, event.requestId, event.redirectResponse, 'requestWillBeSent.redirectResponse');
     }
     const type = event.type ?? (priorDocument ? 'Document' : undefined);
-    const requestUrl = new URL(event.request.url);
-    const url = `${requestUrl.origin}${requestUrl.pathname}`;
+    const url = event.request.url.split('#')[0].split('?')[0];
     state.requestUrls.set(event.requestId, url);
-    state.requests.push({ method: event.request.method, url, type,
-      hasHistoryCursor: requestUrl.pathname.endsWith('/history') && requestUrl.searchParams.has('cursor') });
+    state.requests.push({ method: event.request.method, url, type });
     if (cacheEnabled) state.cacheRequests.push({ requestId: event.requestId, method: event.request.method, url, type });
     if (type === 'Document') {
       const request = { requestId: event.requestId, sequence: state.documentRequests.length,
@@ -375,7 +373,12 @@ async function qualifyCspDetector() {
 
 async function evaluate(target, expression) {
   const result = await cdp.call('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true }, target.sessionId);
-  if (result.exceptionDetails) throw new Error(`Browser expression failed: ${result.exceptionDetails.text}`);
+  if (result.exceptionDetails) {
+    const details = result.exceptionDetails;
+    const description = details.exception?.description ?? details.exception?.value;
+    const location = `line=${details.lineNumber ?? 'unknown'} column=${details.columnNumber ?? 'unknown'}`;
+    throw new Error(`Browser expression failed: ${details.text} ${location}${description ? `\n${description}` : ''}`);
+  }
   return result.result.value;
 }
 

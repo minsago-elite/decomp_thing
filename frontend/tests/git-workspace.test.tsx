@@ -599,6 +599,36 @@ it('clones a new repository from a remote URL when the job has none', async () =
     { action: 'git.clone', url: 'https://git.example.org/team/project.git', remoteName: 'origin', branch: null }]);
 });
 
+it.each(['detached', 'unsupported'])('recovers a %s clone default with an explicit branch and retains refused input', async reason => {
+  listing = [];
+  transport.post.mockResolvedValueOnce({ data: { ...operation('failed', 'git.clone').data,
+    message: `The remote default is ${reason}; select a supported branch explicitly.` } });
+  mount();
+  const url = await screen.findByLabelText('Remote URL');
+  const branch = screen.getByLabelText('Branch to check out (optional)');
+  fireEvent.input(url, { target: { value: 'admitted:upstream.git' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Clone repository' }));
+  expect(await screen.findByText(new RegExp(`remote default is ${reason}`))).toBeTruthy();
+  expect(transport.post.mock.calls[0]?.[3]).toMatchObject({ branch: null });
+  expect(url).toHaveProperty('value', 'admitted:upstream.git');
+
+  fireEvent.input(branch, { target: { value: 'topic' } });
+  transport.post.mockRejectedValueOnce(new ApiClientError('http_error', { status: 422 }));
+  fireEvent.click(screen.getByRole('button', { name: 'Clone repository' }));
+  await waitFor(() => expect(transport.post).toHaveBeenCalledTimes(2));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Clone repository' })).toHaveProperty('disabled', false));
+  expect(branch).toHaveProperty('value', 'topic');
+  expect(url).toHaveProperty('value', 'admitted:upstream.git');
+
+  transport.post.mockResolvedValueOnce(operation('completed', 'git.clone'));
+  listing = [repository];
+  fireEvent.click(screen.getByRole('button', { name: 'Clone repository' }));
+  await waitFor(() => expect(transport.post).toHaveBeenCalledTimes(3));
+  expect(transport.post.mock.calls[2]?.slice(1, 4)).toEqual([`/jobs/${jobId}/repositories`, 'gitRepositoryCloneRequest',
+    { action: 'git.clone', url: 'admitted:upstream.git', remoteName: 'origin', branch: 'topic' }]);
+  expect(await screen.findByText('Branch main')).toBeTruthy();
+});
+
 it('follows ref pages so every branch stays reachable, and drops a displayed diff when the status is read again', async () => {
   paged = true;
   entries = [entry('file_s', 'src/util.c', 'modified', 'none')];
@@ -637,6 +667,41 @@ it('reviews and commits the complete merge index beyond the ordinary 200-file se
   expect(transport.post.mock.calls[0]?.[3]).toMatchObject({ action: 'git.commit', selectedFileIds: [], reviewedMergeIndex: true,
     guards: { worktreeVersion: 'tree_v1' } });
 });
+
+it('continues bounded status pages until a large merge index can be reviewed and committed', async () => {
+  // Small responses still span the ten-page automatic budget, with one more than the ordinary commit limit.
+  const total = 201;
+  const pageSize = 20;
+  entries = Array.from({ length: total }, (_, index) => entry(`file_${index}`, `src/f${index}.c`, 'added', 'none'));
+  conflictState = { repositoryId, worktreeId, mergeInProgress: true, integration: null, files: [] };
+  transport.post.mockResolvedValueOnce(operation('completed', 'git.commit'));
+  transport.get.mockImplementation(async (kind, path) => {
+    if (kind === 'gitStatus') {
+      const cursor = new URLSearchParams(path.split('?')[1] ?? '').get('cursor');
+      const start = Number(cursor ?? 0);
+      const pageEntries = entries.slice(start, start + pageSize);
+      return { data: { ...status(true), entries: pageEntries,
+        nextCursor: start + pageEntries.length < entries.length ? String(start + pageEntries.length) : null } };
+    }
+    return serve(kind, path);
+  });
+  const view = mount();
+  await screen.findByText(/status is incomplete/i);
+  const commitButton = screen.getByRole('button', { name: 'Commit staged files' });
+  expect(commitButton).toHaveProperty('disabled', true);
+  expect(view.container.querySelector('ul[aria-label="Exactly these staged files will be committed:"]')?.querySelectorAll('li')).toHaveLength(200);
+  fireEvent.click(screen.getByRole('button', { name: 'Load more status entries' }));
+  await waitFor(() => expect(commitButton).toHaveProperty('disabled', false));
+  expect(screen.queryByText(/status is incomplete/i)).toBeNull();
+  expect(transport.get.mock.calls.filter(call => call[0] === 'gitStatus')).toHaveLength(11);
+  expect(view.container.querySelector('ul[aria-label="Exactly these staged files will be committed:"]')?.querySelectorAll('li')).toHaveLength(total);
+
+  fireEvent.input(screen.getByLabelText('Commit message'), { target: { value: 'Merge all incoming changes' } });
+  fireEvent.click(commitButton);
+  await waitFor(() => expect(transport.post).toHaveBeenCalledOnce());
+  expect(transport.post.mock.calls[0]?.[3]).toMatchObject({ action: 'git.commit', selectedFileIds: [], reviewedMergeIndex: true,
+    guards: { worktreeVersion: 'tree_v1' } });
+}, 20_000);
 
 it('reviews fetched divergence and offers only reviewed fast-forward or merge, never rebase', async () => {
   transport.post.mockResolvedValueOnce(operation('completed', 'git.merge'));
@@ -864,6 +929,90 @@ it('requests each older history page once and keeps changed files visible when p
   expect(screen.getByText(/provenance and source export of this commit are unavailable/)).toBeTruthy();
   expect(screen.queryByRole('link', { name: 'Download source export' })).toBeNull();
   expect(screen.getByLabelText('Tag name')).toBeTruthy();
+});
+
+it.each(['success', 'timeout'])('shows paginated commit files and tagging while provenance is pending, then handles %s independently', async outcome => {
+  paged = true;
+  historyPages.first = { entries: [commitSummary(older, 'Previous', true)], nextCursor: null };
+  const gate = deferred();
+  transport.get.mockImplementation(async (kind, path) => {
+    if (kind === 'gitProvenance') {
+      await gate.promise;
+      if (outcome === 'timeout') throw new ApiClientError('timeout');
+    }
+    return serve(kind, path);
+  });
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: `Inspect ${older.slice(0, 12)}` }));
+  await screen.findByText('src/second.c');
+  expect(screen.getByText('src/main.c')).toBeTruthy();
+  expect(screen.getByText('Reading provenance and source export…')).toBeTruthy();
+  expect(screen.queryByRole('link', { name: 'Download source export' })).toBeNull();
+  fireEvent.input(screen.getByLabelText('Tag name'), { target: { value: 'draft-without-export' } });
+  gate.resolve();
+  if (outcome === 'success') await screen.findByRole('link', { name: 'Download source export' });
+  else await screen.findByText(/provenance and source export of this commit are unavailable/);
+  expect(screen.queryByText('Reading provenance and source export…')).toBeNull();
+  expect(screen.getByText('src/main.c')).toBeTruthy();
+  expect(screen.getByLabelText('Tag name')).toHaveProperty('value', 'draft-without-export');
+  expect(transport.post).not.toHaveBeenCalled();
+});
+
+it.each(['refresh', 'worktree change'])('discards a pending provenance result after a %s', async change => {
+  historyPages.first = { entries: [commitSummary(older, 'Previous', true)], nextCursor: null };
+  const gate = deferred();
+  let settled = false;
+  transport.get.mockImplementation(async (kind, path) => {
+    if (kind === 'gitProvenance') { await gate.promise; settled = true; }
+    return serve(kind, path);
+  });
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: `Inspect ${older.slice(0, 12)}` }));
+  await screen.findByLabelText('Tag name');
+  fireEvent.click(screen.getByRole('button', { name: change === 'refresh' ? 'Refresh repository' : `Show ${linkedId}` }));
+  await waitFor(() => expect(screen.queryByLabelText('Tag name')).toBeNull());
+  gate.resolve();
+  await waitFor(() => expect(settled).toBe(true));
+  expect(screen.queryByRole('link', { name: 'Download source export' })).toBeNull();
+  expect(screen.queryByRole('heading', { name: `Commit ${older.slice(0, 12)}` })).toBeNull();
+});
+
+it.each(['primary', 'linked attached', 'linked detached'])('scopes current branch controls to the selected %s tree and identifies branches checked out elsewhere', async selection => {
+  entries = [];
+  transport.get.mockImplementation(async (kind, path) => {
+    if (kind === 'gitStatus' && path.includes(`worktree=${linkedId}`)) return { data: { ...status(false), worktreeId: linkedId,
+      headState: selection === 'linked detached' ? 'detached' : 'attached', headRefName: selection === 'linked detached' ? null : 'refs/heads/topic', headObjectId: other } };
+    if (kind === 'gitWorktrees') return { data: { repositoryId, worktrees: [
+      { worktreeId, primary: true, ownerRunId: null, worktreeVersion: 'tree_v1', headState: 'attached', headRefName: 'refs/heads/main', headObjectId: head, dirty: false },
+      { worktreeId: linkedId, primary: false, ownerRunId: null, worktreeVersion: 'tree_v2', headState: selection === 'linked detached' ? 'detached' : 'attached',
+        headRefName: selection === 'linked detached' ? null : 'refs/heads/topic', headObjectId: other, dirty: false },
+    ] } };
+    return serve(kind, path);
+  });
+  mount();
+  await screen.findByRole('heading', { name: 'Branches and tags' });
+  if (selection !== 'primary') {
+    fireEvent.click(screen.getByRole('button', { name: `Show ${linkedId}` }));
+    await waitFor(() => expect(screen.getByRole('button', { name: `Show ${linkedId}` })).toHaveProperty('disabled', true));
+  }
+  const branches = screen.getByRole('heading', { name: 'Branches and tags' }).closest('section')!;
+  const main = within(branches).getByText('refs/heads/main').closest('li')!;
+  const topic = within(branches).getByText('refs/heads/topic').closest('li')!;
+  const current = selection === 'primary' ? main : selection === 'linked attached' ? topic : null;
+  for (const [row, name] of [[main, 'main'], [topic, 'topic']] as const) {
+    if (row === current) {
+      expect(within(row).getByText('current')).toBeTruthy();
+      expect(within(row).queryByRole('button')).toBeNull();
+      expect(within(row).queryByText('checked out in another work tree')).toBeNull();
+    } else {
+      expect(within(row).queryByText('current')).toBeNull();
+      const elsewhere = row === main || selection === 'primary';
+      expect(!!within(row).queryByText('checked out in another work tree')).toBe(elsewhere);
+      expect(within(row).getByRole('button', { name: `Switch to ${name}` })).toHaveProperty('disabled', elsewhere);
+      expect(within(row).getByRole('button', { name: `Delete ${name}` })).toHaveProperty('disabled', elsewhere);
+    }
+  }
+  expect(transport.post).not.toHaveBeenCalled();
 });
 
 it('reports a failed job read during import instead of stopping silently', async () => {

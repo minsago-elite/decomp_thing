@@ -21,6 +21,7 @@ class GitIntegrationTest {
         var hook: (GitOperationCrashPoint) -> Unit = {}
         val runs = mutableMapOf("run_1" to false)
         var signed = false
+        var checkoutLimits = GitCheckoutLimits()
         var clock: java.time.Clock = java.time.Clock.systemUTC()
         var stable = false
         val leases = GitWorkspaceLeases()
@@ -46,9 +47,12 @@ class GitIntegrationTest {
             repositories.git("-C", seed.toString(), "add", "-A"); repositories.git("-C", seed.toString(), "commit", "-q", "-m", message)
             repositories.git("-C", seed.toString(), "push", "-q", bare.toString(), "main")
         }
-        fun open() = ManagedGitRepositories(store, GitRuntime.detect(), { _, _, _ -> error("no snapshots") },
+        fun open(recover: Boolean = true) = ManagedGitRepositories(store, GitRuntime.detect(), { _, _, _ -> error("no snapshots") },
             policy = GitRepositoryPolicy(defaultBranch = "main", requireSignedCommits = signed), clock = clock, crash = { hook(it) }, activity = activity,
-            remotePolicy = GitRemotePolicy(admittedRoot = admitted), workspaceLeases = leases).also(opened::add)
+            remotePolicy = GitRemotePolicy(admittedRoot = admitted), workspaceLeases = leases, importLimits = checkoutLimits).also {
+                opened += it
+                if (recover) it.recover(listOf("0123456789abcdef0123456789abcdef"))
+            }
         override fun close() { opened.forEach { it.close() }; repositories.close() }
     }
 
@@ -174,7 +178,15 @@ class GitIntegrationTest {
         assertEquals("line one\nresolved two\n", Files.readString(f.workTree().resolve("README.md")))
         val current = service.conflictFile(jobId, repositoryId, null, fileId)
         refused("CONTENT_CHANGED", GitOperationAction.CONFLICT_COMPLETE, content = "$fileId ${detail.currentSha256}\n")
+        val gitDir = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
+        var locksObserved = false
+        f.hook = { point -> if (point == GitOperationCrashPoint.BEFORE_PUBLISH) {
+            locksObserved = Files.exists(gitDir.resolve("index.lock")) && Files.exists(gitDir.resolve("HEAD.lock")) &&
+                Files.exists(gitDir.resolve("refs/heads/main.lock"))
+        } }
         val completed = sync(GitOperationAction.CONFLICT_COMPLETE, content = "$fileId ${current.currentSha256}\n")
+        f.hook = {}
+        assertTrue(locksObserved, "index, HEAD and destination branch were locked")
         assertEquals(GitOperationState.COMPLETED, completed.state, completed.message)
         assertTrue(service.conflicts(jobId, repositoryId, null).files.isEmpty())
         // Completion staged only; the final commit is an explicit, reviewed action.
@@ -188,6 +200,21 @@ class GitIntegrationTest {
         assertEquals(3, parents.size)
         assertFalse(service.conflicts(jobId, repositoryId, null).mergeInProgress)
         assertNull(service.conflicts(jobId, repositoryId, null).integration)
+    }
+
+    @Test fun `conflict save keeps prepared temporary bytes outside the guarded work tree`(): Unit = Fixture().use { f ->
+        Files.writeString(f.seed.resolve(".gitignore"), "!*.tmp\n")
+        f.remoteCommit("reinclude temporary files")
+        f.cloned()
+        val fileId = f.conflictOn("README.md")
+        val detail = service.conflictFile(jobId, repositoryId, null, fileId)
+        val saved = sync(GitOperationAction.CONFLICT_SAVE, mapOf("fileId" to fileId, "expectedSha256" to detail.currentSha256,
+            "resolution" to "text"), "line one\nresolved two\n")
+        assertEquals(GitOperationState.COMPLETED, saved.state, saved.message)
+        assertEquals("line one\nresolved two\n", Files.readString(f.workTree().resolve("README.md")))
+        assertFalse(service.workspace(jobId, repositoryId).observation.status.entries.any {
+            it.untracked && it.path.exact?.endsWith(".tmp") == true
+        })
     }
 
     @Test fun `abort restores the pre-merge state and restarts keep merge state recoverable`(): Unit = Fixture().use { f ->
@@ -243,6 +270,42 @@ class GitIntegrationTest {
         val merged = sync(GitOperationAction.MERGE, merge("merge"))
         assertTrue(merged.message.contains("1 conflicted file"), merged.message)
         return service.conflicts(jobId, repositoryId, null).files.single().path.fileId(service.workspace(jobId, repositoryId).worktreeId)
+    }
+
+    @Test fun `conflict completion rejects an abort between review and Git lock acquisition`() = Fixture().use { f ->
+        f.cloned()
+        val fileId = f.conflictOn("README.md")
+        val detail = service.conflictFile(jobId, repositoryId, null, fileId)
+        sync(GitOperationAction.CONFLICT_SAVE, mapOf("fileId" to fileId, "expectedSha256" to detail.currentSha256,
+            "resolution" to "text"), "line one\nreviewed resolution\n")
+        val current = service.conflictFile(jobId, repositoryId, null, fileId)
+        val gitDir = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
+        f.hook = { if (it == GitOperationCrashPoint.BEFORE_CONFLICT_LOCK) {
+            GitIntegrations.abort(f.repositories.runner, gitDir, f.workTree())
+        } }
+        val completion = sync(GitOperationAction.CONFLICT_COMPLETE, content = "$fileId ${current.currentSha256}\n")
+        f.hook = {}
+        assertEquals(GitOperationState.FAILED, completion.state)
+        assertEquals("WORKTREE_CHANGED", completion.failureCode)
+        assertEquals("line one\nlocal two\n", Files.readString(f.workTree().resolve("README.md")))
+        assertTrue(service.workspace(jobId, repositoryId).observation.status.entries.none { it.staged != GitIndexChange.NONE })
+    }
+
+    @Test fun `conflict save rejects an abort after admission and before Git locks`() = Fixture().use { f ->
+        f.cloned()
+        val fileId = f.conflictOn("README.md")
+        val detail = service.conflictFile(jobId, repositoryId, null, fileId)
+        val gitDir = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
+        f.hook = { if (it == GitOperationCrashPoint.AFTER_STAGING) {
+            GitIntegrations.abort(f.repositories.runner, gitDir, f.workTree())
+        } }
+        val save = sync(GitOperationAction.CONFLICT_SAVE, mapOf("fileId" to fileId,
+            "expectedSha256" to detail.currentSha256, "resolution" to "text"), "obsolete resolution\n")
+        f.hook = {}
+        assertEquals(GitOperationState.FAILED, save.state)
+        assertEquals("WORKTREE_CHANGED", save.failureCode)
+        assertEquals("line one\nlocal two\n", Files.readString(f.workTree().resolve("README.md")))
+        assertFalse(service.conflicts(jobId, repositoryId, null).mergeInProgress)
     }
 
     @Test fun `integration never overwrites ignored local output`(): Unit = Fixture().use { f ->
@@ -307,9 +370,9 @@ class GitIntegrationTest {
             assertTrue(GitIntegrations.mergeInProgress(gitDir), "crash is after ref publication but before metadata cleanup")
             service.close()
             f.hook = { if (secondCrash && it == GitOperationCrashPoint.BEFORE_TERMINAL_PERSIST) throw SimulatedGitCrash() }
-            service = f.open()
+            service = f.open(recover = !secondCrash)
             if (secondCrash) {
-                assertFailsWith<SimulatedGitCrash> { service.operation(jobId, repositoryId, admission.operation.operationId) }
+                assertFailsWith<SimulatedGitCrash> { service.recover(listOf(jobId)) }
                 assertFalse(GitIntegrations.mergeInProgress(gitDir), "cleanup precedes the interrupted recovery persistence")
                 service.close(); f.hook = {}; service = f.open()
             }
@@ -466,25 +529,34 @@ class GitIntegrationTest {
         assertEquals("int util = 4;\n", Files.readString(f.workTree().resolve("util.c")))
     }
 
-    @Test fun `conflict markers of the configured width are never accepted as resolved`(): Unit = Fixture().use { f ->
+    @Test fun `source attributes cannot change the enforced conflict marker width`(): Unit = Fixture().use { f ->
         f.cloned()
         Files.writeString(f.seed.resolve(".gitattributes"), "README.md conflict-marker-size=32\n"); f.remoteCommit("wide markers")
         forward()
         val fileId = f.conflictOn("README.md")
         val detail = service.conflictFile(jobId, repositoryId, null, fileId)
-        assertTrue(checkNotNull(detail.current).lines().any { it.startsWith("<".repeat(32) + " ") }, detail.current)
+        val gitDir = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
+        val width = GitIntegrations.markerSize(f.repositories.runner, gitDir, f.workTree(), "README.md")
+        val text = checkNotNull(detail.current)
+        assertEquals(7, width)
+        assertTrue(text.lines().any { it.startsWith("<".repeat(width) + " ") }, text)
+        assertFalse(text.lines().any { it.startsWith("<".repeat(32) + " ") }, text)
         refused("UNRESOLVED_MARKERS", GitOperationAction.CONFLICT_COMPLETE, content = "$fileId ${detail.currentSha256}\n")
-        assertTrue(GitIntegrations.hasMarkers("a\n" + ">".repeat(32) + " theirs\n", 32))
-        assertFalse(GitIntegrations.hasMarkers("a\n" + "<".repeat(40) + "\n", 32))
+        assertTrue(GitIntegrations.hasMarkers("a\n" + ">".repeat(width) + " theirs\n", width))
     }
 
-    @Test fun `marker widths above 1024 cannot bypass completion`(): Unit = Fixture().use { f ->
+    @Test fun `hostile marker width cannot expand merge output or bypass completion`(): Unit = Fixture().use { f ->
         f.cloned()
-        Files.writeString(f.seed.resolve(".gitattributes"), "README.md conflict-marker-size=2048\n"); f.remoteCommit("very wide markers")
+        Files.writeString(f.seed.resolve(".gitattributes"), "README.md conflict-marker-size=1048576\n"); f.remoteCommit("hostile marker width")
         forward()
         val fileId = f.conflictOn("README.md")
         val detail = service.conflictFile(jobId, repositoryId, null, fileId)
-        assertTrue(checkNotNull(detail.current).startsWith("line one\n" + "<".repeat(2048) + " "))
+        val text = checkNotNull(detail.current)
+        val gitDir = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
+        val width = GitIntegrations.markerSize(f.repositories.runner, gitDir, f.workTree(), "README.md")
+        assertEquals(7, width)
+        assertTrue(text.length < 4096, "bounded conflict output was ${text.length} characters")
+        assertTrue(text.lines().any { it.startsWith("<".repeat(width) + " ") }, text)
         refused("UNRESOLVED_MARKERS", GitOperationAction.CONFLICT_COMPLETE, content = "$fileId ${detail.currentSha256}\n")
         assertEquals(1, service.conflicts(jobId, repositoryId, null).files.size)
         assertFalse(GitIntegrations.hasMarkers("short line", Int.MAX_VALUE))
@@ -554,7 +626,7 @@ class GitIntegrationTest {
         f.hook = { if (it == GitOperationCrashPoint.BEFORE_PUBLISH) Files.writeString(f.workTree().resolve("README.md"), "newer worker bytes\n") }
         val result = sync(GitOperationAction.CONFLICT_SAVE, mapOf("fileId" to fileId, "expectedSha256" to detail.currentSha256,
             "resolution" to "text"), "unpublished resolution\n")
-        assertEquals("CONTENT_CHANGED", result.failureCode)
+        assertEquals("WORKTREE_CHANGED", result.failureCode)
         assertEquals("newer worker bytes\n", Files.readString(f.workTree().resolve("README.md")))
         assertTrue(Files.list(f.workTree()).use { paths -> paths.noneMatch { it.fileName.toString().startsWith(".conflict-") } })
     }
@@ -662,9 +734,9 @@ class GitIntegrationTest {
         assertTrue(service.awaitIdle(60_000))
         assertTrue(Files.exists(evidence), "published result keeps recovery evidence until terminal persistence")
         assertEquals(target, service.workspace(jobId, repositoryId).observation.head.objectId)
-        service.close(); service = f.open()
-        // Reconciliation computes the result, but dies before persisting it. Evidence must still survive.
-        assertFailsWith<SimulatedGitCrash> { service.operation(jobId, repositoryId, admission.operation.operationId) }
+        service.close(); service = f.open(recover = false)
+        // Only startup/mutation authority reconciles; GET must not perform cleanup.
+        assertFailsWith<SimulatedGitCrash> { service.recover(listOf(jobId)) }
         assertTrue(Files.exists(evidence), "a second crash cannot consume the recovery evidence")
         service.close(); f.hook = {}; service = f.open()
         val recovered = service.operation(jobId, repositoryId, admission.operation.operationId)
@@ -697,6 +769,277 @@ class GitIntegrationTest {
         assertEquals(GitOperationState.COMPLETED, service.operation(jobId, repositoryId, abort.operation.operationId).state)
         assertFalse(Files.exists(evidence))
         assertEquals("line one\nlocal two\n", Files.readString(f.workTree().resolve("README.md")))
+    }
+
+    @Test fun `restart never treats unrelated HEAD or branch movement as the reviewed integration`() {
+        for (strategy in listOf("fast-forward", "merge")) {
+            for (movement in listOf("local-commit", "other-branch", "detached", "target-without-merge")) {
+                if (strategy == "fast-forward" && movement == "target-without-merge") continue
+                Fixture().use { f ->
+                    f.cloned()
+                    // Include an old terminal commit: it must not retire this newer uncertain intent.
+                    f.localCommit("local README\n")
+                    Files.writeString(f.seed.resolve("util.c"), "int incoming = 11;\n"); f.remoteCommit("incoming")
+                    fetch()
+                    val target = trackingObject()
+                    // A fast-forward needs a non-divergent branch; the old local commit stays recorded.
+                    val gitDir = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
+                    if (strategy == "fast-forward") {
+                        f.repositories.git("--git-dir=$gitDir", "--work-tree=${f.workTree()}", "reset", "--hard", "$target^")
+                    }
+                    f.hook = { if (it == GitOperationCrashPoint.AFTER_STAGING) throw SimulatedGitCrash() }
+                    val operation = sync(GitOperationAction.MERGE, merge(strategy))
+                    val evidence = f.store.resolve("$jobId/git/repositories/$repositoryId/integrations/${operation.worktreeId}.json")
+                    service.close()
+                    val args = when (movement) {
+                        "local-commit" -> arrayOf("commit", "--allow-empty", "-m", "unrelated local commit")
+                        "other-branch" -> arrayOf("checkout", "-b", "elsewhere", target)
+                        "detached" -> arrayOf("checkout", "--detach", target)
+                        else -> arrayOf("reset", "--hard", target)
+                    }
+                    f.repositories.git("--git-dir=$gitDir", "--work-tree=${f.workTree()}", *args)
+                    val actual = f.repositories.git("--git-dir=$gitDir", "rev-parse", "HEAD").trim()
+                    f.hook = {}
+                    repeat(2) {
+                        service = f.open()
+                        val recovered = service.operation(jobId, repositoryId, operation.operationId)
+                        assertEquals(GitOperationState.RECOVERY_REQUIRED, recovered.state, "$strategy/$movement: ${recovered.message}")
+                        assertEquals("HEAD_MOVED", recovered.failureCode)
+                        assertEquals(actual, service.workspace(jobId, repositoryId).observation.head.objectId)
+                        assertTrue(Files.exists(evidence), "uncertain integration evidence survives repeated restarts")
+                        val (current, currentGuards) = guards()
+                        assertEquals("WORKTREE_BUSY", assertFailsWith<ManagedGitException> {
+                            service.requestWorkspace(jobId, repositoryId, GitSyncRequest(GitOperationAction.MERGE,
+                                current.worktreeId, currentGuards, merge(strategy)), key())
+                        }.code, "a new merge must not overwrite uncertain recovery evidence")
+                        assertTrue(service.auditLog(jobId, repositoryId, 100).none { it["operationId"].toString().trim('"') == operation.operationId })
+                        service.close()
+                    }
+                }
+            }
+        }
+    }
+
+    @Test fun `restart publishes exactly one audit receipt for merges conflicts and aborts before retiring evidence`() {
+        for (kind in listOf("fast-forward", "merge", "conflicted", "abort")) Fixture().use { f ->
+            f.cloned()
+            if (kind == "abort") f.conflictOn("README.md")
+            else {
+                if (kind != "fast-forward") f.localCommit("local README\n")
+                Files.writeString(f.seed.resolve(if (kind == "conflicted") "README.md" else "util.c"), "remote incoming\n")
+                f.remoteCommit("incoming"); fetch()
+            }
+            val (view, g) = guards()
+            val integrationBefore = service.conflicts(jobId, repositoryId, null).integration
+            val before = integrationBefore?.headBefore ?: view.observation.head.objectId
+            val target = integrationBefore?.target ?: trackingObject()
+            val evidence = f.store.resolve("$jobId/git/repositories/$repositoryId/integrations/${view.worktreeId}.json")
+            val action = if (kind == "abort") GitOperationAction.MERGE_ABORT else GitOperationAction.MERGE
+            val parameters = if (kind == "abort") emptyMap() else merge(if (kind == "fast-forward") kind else "merge")
+            f.hook = { if (it == GitOperationCrashPoint.AFTER_PUBLISH) throw SimulatedGitCrash() }
+            val operation = sync(action, parameters)
+            assertTrue(service.auditLog(jobId, repositoryId, 100).none { it["operationId"].toString().trim('"') == operation.operationId })
+            assertTrue(Files.exists(evidence))
+            val published = service.workspace(jobId, repositoryId).observation.head.objectId
+            service.close()
+            // A second crash after audit publication but before terminal persistence must not duplicate it.
+            f.hook = { if (it == GitOperationCrashPoint.BEFORE_TERMINAL_PERSIST) throw SimulatedGitCrash() }
+            service = f.open(recover = false)
+            assertFailsWith<SimulatedGitCrash> { service.recover(listOf(jobId)) }
+            assertTrue(Files.exists(evidence))
+            service.close(); f.hook = {}
+            repeat(2) {
+                service = f.open()
+                val recovered = service.operation(jobId, repositoryId, operation.operationId)
+                assertEquals(if (kind == "conflicted") GitOperationState.RECOVERY_REQUIRED else GitOperationState.COMPLETED, recovered.state, recovered.message)
+                val receipt = service.auditLog(jobId, repositoryId, 100).single { it["operationId"].toString().trim('"') == operation.operationId }
+                assertEquals(if (kind == "abort") "merge.abort" else if (kind == "fast-forward") kind else "merge", receipt["action"].toString().trim('"'))
+                assertEquals(if (kind == "conflicted") "conflicted" else "completed", receipt["outcome"].toString().trim('"'))
+                assertEquals("refs/heads/main", receipt["ref"].toString().trim('"'))
+                assertEquals(if (kind == "abort") target else before, receipt["oldObjectId"].toString().trim('"'))
+                assertEquals(if (kind == "conflicted") target else published, receipt["newObjectId"].toString().trim('"'))
+                if (kind != "abort") assertTrue(receipt["destination"].toString().contains("admitted:upstream.git"))
+                assertEquals(kind == "conflicted", Files.exists(evidence))
+                assertEquals(published, service.workspace(jobId, repositoryId).observation.head.objectId)
+                service.close()
+            }
+        }
+    }
+
+    @Test fun `audit storage failure retains integration evidence and retries only under recovery authority`(): Unit = Fixture().use { f ->
+        f.cloned()
+        Files.writeString(f.seed.resolve("util.c"), "int incoming = 12;\n"); f.remoteCommit("incoming"); fetch()
+        val directory = f.store.resolve("$jobId/git/repositories/$repositoryId")
+        val audit = directory.resolve(GitRemoteStore.AUDIT)
+        val retained = Files.readAllBytes(audit)
+        f.hook = { point -> if (point == GitOperationCrashPoint.AFTER_PUBLISH) {
+            Files.delete(audit); Files.createDirectory(audit)
+        } }
+        val operation = sync(GitOperationAction.MERGE, merge("fast-forward"))
+        assertEquals(GitOperationState.RECOVERY_REQUIRED, operation.state, operation.message)
+        assertEquals("STATE_UNKNOWN", operation.failureCode)
+        val evidence = directory.resolve("integrations/${operation.worktreeId}.json")
+        assertTrue(Files.exists(evidence))
+        service.close(); f.hook = {}; service = f.open()
+        assertEquals("STATE_UNKNOWN", service.operation(jobId, repositoryId, operation.operationId).failureCode)
+        Files.delete(audit); Files.write(audit, retained)
+        // Merely reading after storage repair cannot publish the pending audit.
+        assertEquals("STATE_UNKNOWN", service.operation(jobId, repositoryId, operation.operationId).failureCode)
+        assertTrue(Files.exists(evidence))
+        service.recover(listOf(jobId))
+        assertEquals(GitOperationState.COMPLETED, service.operation(jobId, repositoryId, operation.operationId).state)
+        assertEquals(1, service.auditLog(jobId, repositoryId, 100).count { it["operationId"].toString().trim('"') == operation.operationId })
+        assertFalse(Files.exists(evidence))
+    }
+
+    @Test fun `add-add modify-delete and rename conflicts retain exact stages and abort without losing local source`() {
+        for (kind in listOf("add-add", "modify-delete", "rename-rename")) Fixture().use { f ->
+            f.cloned()
+            val gitDir = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
+            when (kind) {
+                "add-add" -> {
+                    Files.writeString(f.workTree().resolve("added.c"), "local added\n")
+                    Files.writeString(f.seed.resolve("added.c"), "remote added\n")
+                }
+                "modify-delete" -> {
+                    Files.writeString(f.workTree().resolve("README.md"), "local edited\n")
+                    Files.delete(f.seed.resolve("README.md"))
+                }
+                else -> {
+                    f.repositories.git("--git-dir=$gitDir", "--work-tree=${f.workTree()}", "mv", "README.md", "local.md")
+                    f.repositories.git("-C", f.seed.toString(), "mv", "README.md", "remote.md")
+                }
+            }
+            val before = f.repositories.commitAll(gitDir, f.workTree(), "local conflict setup")
+            f.remoteCommit("remote conflict setup"); fetch()
+            val target = trackingObject()
+            f.hook = { if (it == GitOperationCrashPoint.AFTER_PUBLISH) throw SimulatedGitCrash() }
+            val operation = sync(GitOperationAction.MERGE, merge("merge"))
+            service.close(); f.hook = {}; service = f.open()
+            val recovered = service.operation(jobId, repositoryId, operation.operationId)
+            assertEquals("MERGE_IN_PROGRESS", recovered.failureCode, "$kind: ${recovered.message}")
+            val conflicts = service.conflicts(jobId, repositoryId, null)
+            assertEquals(before, conflicts.integration?.headBefore)
+            assertEquals(target, conflicts.integration?.target)
+            assertTrue(conflicts.files.isNotEmpty())
+            when (kind) {
+                "add-add" -> {
+                    val entry = conflicts.files.single()
+                    assertEquals("added.c", entry.path.exact)
+                    assertNull(entry.baseObjectId); assertNotNull(entry.oursObjectId); assertNotNull(entry.theirsObjectId)
+                    val detail = service.conflictFile(jobId, repositoryId, null, entry.path.fileId(conflicts.worktreeId))
+                    assertNull(detail.base); assertEquals("local added\n", detail.ours); assertEquals("remote added\n", detail.theirs)
+                }
+                "modify-delete" -> {
+                    val entry = conflicts.files.single()
+                    assertEquals("README.md", entry.path.exact)
+                    assertNotNull(entry.baseObjectId); assertNotNull(entry.oursObjectId); assertNull(entry.theirsObjectId)
+                    refused("VALIDATION_FAILED", GitOperationAction.CONFLICT_SAVE, mapOf("fileId" to entry.path.fileId(conflicts.worktreeId),
+                        "expectedSha256" to service.conflictFile(jobId, repositoryId, null, entry.path.fileId(conflicts.worktreeId)).currentSha256,
+                        "resolution" to "theirs"))
+                }
+                else -> assertEquals(setOf("README.md", "local.md", "remote.md"), conflicts.files.map { it.path.exact }.toSet())
+            }
+            assertEquals(GitOperationState.COMPLETED, sync(GitOperationAction.MERGE_ABORT).state)
+            assertEquals(before, service.workspace(jobId, repositoryId).observation.head.objectId)
+            assertTrue(service.workspace(jobId, repositoryId).observation.status.entries.none { !it.ignored })
+            assertEquals(1, service.auditLog(jobId, repositoryId, 100).count { it["operationId"].toString().trim('"') == operation.operationId })
+        }
+    }
+
+    @Test fun `merge admission retains destination branch for restart before integration record`() = Fixture().use { f ->
+        f.cloned()
+        f.localCommit("line one\\nlocal two\\n")
+        Files.writeString(f.seed.resolve("README.md"), "line one\\nremote two\\n"); f.remoteCommit("remote edit")
+        fetch()
+        val (view, g) = guards()
+        f.hook = { if (it == GitOperationCrashPoint.AFTER_RUNNING) throw SimulatedGitCrash() }
+        val admission = service.requestWorkspace(jobId, repositoryId, GitSyncRequest(GitOperationAction.MERGE, view.worktreeId,
+            g.copy(expectedRefId = null, expectedRefObjectId = null), merge("merge")), key())
+        val retained = admission.operation.request as GitSyncRequest
+        assertEquals("refs/heads/main", retained.retainedDestinationRef)
+        service.close(); f.hook = {}; service = f.open()
+        val recovered = service.operation(jobId, repositoryId, admission.operation.operationId)
+        assertEquals(GitOperationState.INTERRUPTED, recovered.state, recovered.message)
+        assertEquals("INTERRUPTED", recovered.failureCode)
+    }
+
+    @Test fun `abort recovery uses retained server branch identity when client ref guards are omitted`() {
+        for (retainedIntegration in listOf(true, false)) for (timing in listOf("before", "after", "branch-moved")) Fixture().use { f ->
+            f.cloned(); f.conflictOn("README.md")
+            val (view, g) = guards()
+            val directory = f.store.resolve("$jobId/git/repositories/$repositoryId")
+            if (!retainedIntegration) GitIntegrations.delete(directory, view.worktreeId) // An externally started merge.
+            f.hook = { if (it == if (timing == "before") GitOperationCrashPoint.BEFORE_PUBLISH else GitOperationCrashPoint.AFTER_PUBLISH) throw SimulatedGitCrash() }
+            val operation = run(GitSyncRequest(GitOperationAction.MERGE_ABORT, view.worktreeId,
+                g.copy(expectedRefId = null, expectedRefObjectId = null)))
+            service.close(); f.hook = {}
+            if (timing == "branch-moved") f.repositories.git("--git-dir=${directory.resolve("repository.git")}",
+                "--work-tree=${f.workTree()}", "checkout", "-b", "elsewhere")
+            service = f.open()
+            val recovered = service.operation(jobId, repositoryId, operation.operationId)
+            assertEquals(when (timing) { "before" -> GitOperationState.INTERRUPTED; "after" -> GitOperationState.COMPLETED; else -> GitOperationState.RECOVERY_REQUIRED },
+                recovered.state, "$retainedIntegration/$timing: ${recovered.message}")
+            if (timing == "branch-moved") assertEquals("HEAD_MOVED", recovered.failureCode)
+            val receipts = service.auditLog(jobId, repositoryId, 100).filter { it["operationId"].toString().trim('"') == operation.operationId }
+            assertEquals(if (timing == "after") 1 else 0, receipts.size)
+            if (timing == "after") {
+                assertEquals("refs/heads/main", receipts.single()["ref"].toString().trim('"'))
+                assertEquals(g.expectedHeadObjectId, recovered.resultObjectId)
+                assertEquals("line one\nlocal two\n", Files.readString(f.workTree().resolve("README.md")))
+            }
+        }
+    }
+
+    @Test fun `merge refuses combined file byte and directory quotas before changing the live branch`() {
+        for (bound in listOf("files", "bytes", "directories")) Fixture().use { f ->
+            f.checkoutLimits = when (bound) {
+                "files" -> GitCheckoutLimits(maxFiles = 5)
+                "bytes" -> GitCheckoutLimits(maxBytes = 200)
+                else -> GitCheckoutLimits(maxDirectories = 3)
+            }
+            f.cloned()
+            for ((tree, side) in listOf(f.workTree() to "local", f.seed to "remote")) {
+                if (bound == "bytes") Files.writeString(tree.resolve("$side.c"), "x".repeat(130))
+                else repeat(2) { index ->
+                    val path = if (bound == "directories") "$side$index/source.c" else "$side$index.c"
+                    Files.createDirectories(tree.resolve(path).parent); Files.writeString(tree.resolve(path), "int $side$index;\n")
+                }
+            }
+            val gitDir = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
+            val before = f.repositories.commitAll(gitDir, f.workTree(), "local additions")
+            f.remoteCommit("remote additions"); fetch()
+            val target = trackingObject()
+            // Each individual checkout fits. It is their combined result that exceeds this quota.
+            for (objectId in listOf(before, target)) GitRepositoryImport.requireCheckoutBounds(f.repositories.runner, gitDir, objectId, f.checkoutLimits)
+            refused("REPOSITORY_UNSUPPORTED", GitOperationAction.MERGE, merge("merge"))
+            assertEquals(before, service.workspace(jobId, repositoryId).observation.head.objectId)
+            assertFalse(GitIntegrations.mergeInProgress(gitDir))
+            assertFalse(Files.exists(f.workTree().resolve(if (bound == "bytes") "remote.c" else if (bound == "directories") "remote0" else "remote0.c")))
+            assertNull(service.conflicts(jobId, repositoryId, null).integration)
+        }
+    }
+
+    @Test fun `conflict save flushes file then the pinned rename directory before acknowledging`(): Unit = Fixture().use { f ->
+        val tree = Files.createDirectory(f.repositories.root.resolve("tree"))
+        val source = Files.createDirectory(tree.resolve("src"))
+        val file = Files.writeString(source.resolve("a.c"), "old\n")
+        val outside = Files.createDirectory(f.repositories.root.resolve("outside"))
+        Files.writeString(outside.resolve("a.c"), "OUTSIDE_WORKTREE_MARKER")
+        val retained = f.repositories.root.resolve("retained")
+        val expected = GitConflictFiles.observe(tree, "src/a.c").sha256
+        val order = mutableListOf<String>()
+        GitConflictFiles.replace(tree, "src/a.c", expected, "durable resolution\n".toByteArray(), afterSync = { point ->
+            order += point.name
+            if (point == GitConflictFiles.DurabilityPoint.PREPARED_FILE) assertEquals("old\n", Files.readString(file))
+        }) {
+            order += "guard"
+            Files.move(source, retained); Files.createSymbolicLink(source, outside)
+        }
+        assertEquals(listOf("PREPARED_FILE", "guard", "PUBLISHED_DIRECTORY"), order)
+        assertEquals("durable resolution\n", Files.readString(retained.resolve("a.c")))
+        assertEquals("OUTSIDE_WORKTREE_MARKER", Files.readString(outside.resolve("a.c")))
+        assertTrue(Files.list(retained).use { files -> files.noneMatch { it.fileName.toString().startsWith(".conflict-") } })
     }
 
     @Test fun `symbolic link conflicts remain unsupported even when materialized as plain files`(): Unit = Fixture().use { f ->
@@ -795,6 +1138,108 @@ class GitIntegrationTest {
         assertTrue(service.conflicts(jobId, repositoryId, null).mergeInProgress)
         f.hook = {}
         assertEquals(GitOperationState.COMPLETED, sync(GitOperationAction.MERGE_ABORT).state)
+    }
+
+    @Test fun `restart reclaims witnessed locks from interrupted conflict completion`() = Fixture().use { f ->
+        f.cloned()
+        val fileId = f.conflictOn("README.md")
+        val detail = service.conflictFile(jobId, repositoryId, null, fileId)
+        assertEquals(GitOperationState.COMPLETED, sync(GitOperationAction.CONFLICT_SAVE,
+            mapOf("fileId" to fileId, "expectedSha256" to detail.currentSha256, "resolution" to "text"),
+            "reviewed resolution\n").state)
+        val current = service.conflictFile(jobId, repositoryId, null, fileId)
+        val (view, guard) = guards()
+        f.hook = { if (it == GitOperationCrashPoint.BEFORE_PUBLISH) throw SimulatedGitCrash() }
+        val admission = service.requestWorkspace(jobId, repositoryId, GitSyncRequest(GitOperationAction.CONFLICT_COMPLETE,
+            view.worktreeId, guard, content = "$fileId ${current.currentSha256}\n"), key())
+        assertTrue(service.awaitIdle(60_000))
+        f.hook = {}
+
+        val repositoryGitDir = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
+        val staging = f.store.resolve("$jobId/git/repositories/$repositoryId/staging/${admission.operation.operationId}")
+        val branch = f.repositories.git("--git-dir=$repositoryGitDir", "symbolic-ref", "HEAD").trim()
+        // Recreate the hard links a process death leaves after the test hook unwinds its finally blocks.
+        Files.createDirectories(staging)
+        for (name in listOf("index.lock", "HEAD.lock")) {
+            val witness = staging.resolve(name)
+            Files.deleteIfExists(witness)
+            Files.createFile(witness)
+            Files.writeString(witness, "decomp-operation:${admission.operation.operationId}\n")
+            val lock = repositoryGitDir.resolve(name)
+            assertFalse(Files.exists(lock), "unexpected $name before crash-lock setup")
+            Files.createLink(lock, witness)
+        }
+        Files.writeString(staging.resolve("ref-name"), branch)
+        val refWitness = staging.resolve("ref-lock")
+        Files.deleteIfExists(refWitness)
+        Files.createFile(refWitness)
+        val branchLock = repositoryGitDir.resolve("$branch.lock")
+        assertFalse(Files.exists(branchLock), "unexpected branch lock before crash-lock setup")
+        Files.createLink(branchLock, refWitness)
+
+        service.close(); service = f.open()
+        val recovered = service.operation(jobId, repositoryId, admission.operation.operationId)
+        assertEquals(GitOperationState.INTERRUPTED, recovered.state, recovered.message)
+        assertFalse(Files.exists(repositoryGitDir.resolve("index.lock")))
+        assertFalse(Files.exists(repositoryGitDir.resolve("HEAD.lock")))
+        assertFalse(Files.exists(repositoryGitDir.resolve("$branch.lock")))
+        assertFalse(Files.exists(staging), "recovered operation staging is retired after owned locks are reclaimed")
+        assertTrue(service.conflicts(jobId, repositoryId, null).mergeInProgress)
+    }
+
+    @Test fun `restart reclaims witnessed locks from interrupted conflict save and preserves foreign locks`() {
+        for (foreignLock in listOf(false, true)) Fixture().use { f ->
+            f.cloned()
+            val fileId = f.conflictOn("README.md")
+            val detail = service.conflictFile(jobId, repositoryId, null, fileId)
+            val (view, guard) = guards()
+            f.hook = { if (it == GitOperationCrashPoint.BEFORE_PUBLISH) throw SimulatedGitCrash() }
+            val admission = service.requestWorkspace(jobId, repositoryId, GitSyncRequest(GitOperationAction.CONFLICT_SAVE,
+                view.worktreeId, guard, mapOf("fileId" to fileId, "expectedSha256" to detail.currentSha256, "resolution" to "text"),
+                "reviewed resolution\n"), key())
+            assertTrue(service.awaitIdle(60_000))
+            f.hook = {}
+
+            val repositoryGitDir = f.store.resolve("$jobId/git/repositories/$repositoryId/repository.git")
+            val staging = f.store.resolve("$jobId/git/repositories/$repositoryId/staging/${admission.operation.operationId}")
+            val branch = f.repositories.git("--git-dir=$repositoryGitDir", "symbolic-ref", "HEAD").trim()
+            Files.createDirectories(staging)
+            for (name in listOf("index.lock", "HEAD.lock")) {
+                val witness = staging.resolve(name)
+                Files.deleteIfExists(witness)
+                Files.createFile(witness)
+                Files.writeString(witness, "decomp-operation:${admission.operation.operationId}\n")
+                val lock = repositoryGitDir.resolve(name)
+                assertFalse(Files.exists(lock), "unexpected $name before crash-lock setup")
+                if (foreignLock && name == "index.lock") Files.writeString(lock, "foreign writer\n")
+                else Files.createLink(lock, witness)
+            }
+            Files.writeString(staging.resolve("ref-name"), branch)
+            val refWitness = staging.resolve("ref-lock")
+            Files.deleteIfExists(refWitness)
+            Files.createFile(refWitness)
+            val branchLock = repositoryGitDir.resolve("$branch.lock")
+            assertFalse(Files.exists(branchLock), "unexpected branch lock before crash-lock setup")
+            Files.createLink(branchLock, refWitness)
+
+            service.close(); service = f.open()
+            val recovered = service.operation(jobId, repositoryId, admission.operation.operationId)
+            if (foreignLock) {
+                assertEquals(GitOperationState.RECOVERY_REQUIRED, recovered.state, recovered.message)
+                assertEquals("SAVE_LOCKS_REQUIRE_REVIEW", recovered.failureCode)
+                assertEquals("foreign writer\n", Files.readString(repositoryGitDir.resolve("index.lock")))
+                assertFalse(Files.exists(repositoryGitDir.resolve("HEAD.lock")))
+                assertFalse(Files.exists(repositoryGitDir.resolve("$branch.lock")))
+                assertTrue(Files.exists(staging), "uncertain lock ownership preserves the recovery witnesses")
+            } else {
+                assertEquals(GitOperationState.INTERRUPTED, recovered.state, recovered.message)
+                assertFalse(Files.exists(repositoryGitDir.resolve("index.lock")))
+                assertFalse(Files.exists(repositoryGitDir.resolve("HEAD.lock")))
+                assertFalse(Files.exists(repositoryGitDir.resolve("$branch.lock")))
+                assertFalse(Files.exists(staging), "recovered save staging is retired after owned locks are reclaimed")
+            }
+            assertTrue(service.conflicts(jobId, repositoryId, null).mergeInProgress)
+        }
     }
 
     @Test fun `every published resolution choice recovers and replays as completed`() {

@@ -81,11 +81,13 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
   const [conflictOffset, setConflictOffset] = useState(0);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [diff, setDiff] = useState<GitDiff | null>(null);
-  const [commit, setCommit] = useState<{ objectId: string; diff: GitDiff; provenance: GitProvenance | null; provenanceError: string } | null>(null);
+  const [commit, setCommit] = useState<{ objectId: string; diff: GitDiff; provenance: GitProvenance | null; provenanceError: string; provenancePending: boolean } | null>(null);
   // Refreshing guards unmounts the detail, but a refused tag must remain retryable for the same immutable target.
   const [tagDraft, setTagDraft] = useState<{ target: string; name: string } | null>(null);
   const olderPending = useRef(false);
   const refsPending = useRef(false);
+  const statusPending = useRef(false);
+  const [statusLoading, setStatusLoading] = useState(false);
   const commitRequest = useRef(0);
   const [refresh, setRefresh] = useState(0);
   const active = useRef<AbortController | null>(null);
@@ -158,10 +160,50 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
       entries.push(...page.entries);
       pages++;
     }
-    return { ...page, entries, complete: page.complete && page.nextCursor === null, nextCursor: null };
+    return { ...page, entries, complete: page.complete && page.nextCursor === null };
   }
 
   const statusData = loaded?.status ?? null;
+
+  /** Continue status under the same anchored snapshot; each request remains bounded to ten pages. */
+  async function moreStatus(cursor: string) {
+    const reviewed = statusData;
+    if (!base || !reviewed || reviewed.nextCursor !== cursor || statusPending.current) return;
+    const generation = diffGeneration.current;
+    const scope = worktree ? `worktree=${worktree}&` : '';
+    const matchesReview = (page: GitStatus) => page.repositoryVersion === reviewed.repositoryVersion
+      && page.worktreeVersion === reviewed.worktreeVersion && page.worktreeId === reviewed.worktreeId
+      && page.headObjectId === reviewed.headObjectId;
+    statusPending.current = true;
+    setStatusLoading(true);
+    try {
+      let page = (await client.get('gitStatus', `${base}/status?${scope}limit=200&cursor=${cursor}`)).data;
+      const entries = [...page.entries];
+      let pages = 1;
+      if (!matchesReview(page)) {
+        if (generation === diffGeneration.current) { setStatus(copy.statusChanged); setRefresh(value => value + 1); }
+        return;
+      }
+      while (page.nextCursor && pages < MAX_STATUS_PAGES) {
+        page = (await client.get('gitStatus', `${base}/status?${scope}limit=200&cursor=${page.nextCursor}`)).data;
+        entries.push(...page.entries);
+        pages++;
+        if (!matchesReview(page)) {
+          if (generation === diffGeneration.current) { setStatus(copy.statusChanged); setRefresh(value => value + 1); }
+          return;
+        }
+      }
+      if (generation !== diffGeneration.current) return;
+      setLoaded(previous => previous?.status?.nextCursor === cursor && matchesReview(previous.status)
+        ? { ...previous, status: { ...page, entries: [...previous.status.entries, ...entries], complete: page.complete && page.nextCursor === null } }
+        : previous);
+    } catch (failure: unknown) {
+      if (generation === diffGeneration.current) setStatus(withApiFailureReference(copy.statusContinuationFailed, failure));
+    } finally {
+      statusPending.current = false;
+      setStatusLoading(false);
+    }
+  }
   const groups = useMemo(() => {
     const entries = statusData?.entries ?? [];
     return {
@@ -338,12 +380,17 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
         page = (await client.get('gitDiff', `${path}&cursor=${page.nextCursor}`)).data;
         files.push(...page.files);
       }
-      const provenance = await provenanceRead;
       if (!current()) return;
       const target = `${base}:${objectId}`;
       setTagDraft(previous => previous?.target === target ? previous : { target, name: '' });
-      setCommit({ objectId, diff: { ...page, files, complete: page.complete && page.nextCursor === null }, provenance: provenance.data,
-        provenanceError: provenance.error });
+      // Changed files and immutable-target tagging do not depend on the optional export finishing.
+      setCommit({ objectId, diff: { ...page, files, complete: page.complete && page.nextCursor === null }, provenance: null,
+        provenanceError: '', provenancePending: true });
+      void provenanceRead.then(provenance => {
+        if (!current()) return;
+        setCommit(previous => current() && previous?.objectId === objectId
+          ? { ...previous, provenance: provenance.data, provenanceError: provenance.error, provenancePending: false } : previous);
+      });
     } catch (failure: unknown) { if (current()) setStatus(withApiFailureReference(copy.readFailed, failure)); }
   }
 
@@ -415,8 +462,8 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
         : <p>{importing?.message ?? copy.importUnavailable}</p>}
       <p>{copy.importHelp}</p>
       <h3>{gitRemotesCopy.cloneTitle}</h3>
-      {remoting?.state === 'supported' ? <CloneForm disabled={busy} onClone={(url, remoteName) =>
-        create('gitRepositoryCloneRequest', gitRemotesCopy.cloneAction, { action: 'git.clone', url, remoteName, branch: null })} />
+      {remoting?.state === 'supported' ? <CloneForm disabled={busy} onClone={(url, remoteName, branch) =>
+        create('gitRepositoryCloneRequest', gitRemotesCopy.cloneAction, { action: 'git.clone', url, remoteName, branch })} />
         : <p><StateMark tone={remoting ? capabilityTone(remoting.state) : 'unknown'}>{gitRemotesCopy.unavailable}</StateMark> {remoting?.message ?? gitRemotesCopy.notReported}</p>}
       {running && running.action === 'git.clone' && <p role="status">{running.progress
         ? textMessage(gitRemotesCopy.progress, { phase: running.progress.phase, percent: running.progress.percent === null ? '' : ` ${running.progress.percent}%` })
@@ -457,6 +504,8 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
       <section aria-labelledby="git-changes-title">
         <h3 id="git-changes-title">{copy.changes}</h3>
         {!statusData.complete && <p role="alert">{copy.incomplete}</p>}
+        {!statusData.complete && statusData.nextCursor !== null && <button type="button" disabled={busy || statusLoading}
+          onClick={() => { void moreStatus(statusData.nextCursor ?? ''); }}>{statusLoading ? copy.statusLoading : copy.moreStatus}</button>}
         {(['staged', 'unstaged', 'untracked', 'conflicted'] as const).map(group => groups[group].length > 0 && <fieldset key={group}>
           <legend>{copy[group]}</legend>
           <ul>{groups[group].map(entry => <li key={`${group}:${entry.fileId}`}>
@@ -516,7 +565,7 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
             <p>{commit.provenance.export.verification === 'tree-blob-ids-match' ? copy.exportVerified : copy.exportMismatch}</p>
             {commit.provenance.refNames.length > 0 && <p>{textMessage(copy.refNames, { names: commit.provenance.refNames.join(', ') })}</p>}
             <a href={apiPath(basePath, `${base}/exports/${commit.objectId}`)} download="">{copy.downloadExport}</a>
-          </> : <p role="alert">{commit.provenanceError}</p>}
+          </> : commit.provenancePending ? <p role="status">{copy.provenanceLoading}</p> : <p role="alert">{commit.provenanceError}</p>}
           <NameForm key={tagTarget} label={copy.tagName} action={copy.tagAction} disabled={!writable}
             draft={{ value: tagDraft?.target === tagTarget ? tagDraft.name : '',
               onChange: name => { setTagDraft(previous => previous?.target === tagTarget ? { ...previous, name } : previous); } }}
@@ -537,17 +586,23 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
         <h3 id="git-branches-title">{copy.branches}</h3>
         {dirty && <p>{copy.dirtySwitch}</p>}
         {loaded.refs?.nextCursor && <p>{copy.refsIncomplete}</p>}
-        <ul>{loaded.refs?.refs.map(ref => <li key={ref.refId}>
-          <code>{ref.displayName}</code> <code title={ref.objectId}>{short(ref.objectId)}</code>{ref.current && <> <StateMark tone="settled">{copy.current}</StateMark></>}
-          {ref.kind === 'branch' && !ref.current && <>
-            {' '}<button type="button" disabled={!writable || activeWorker || dirty || !statusData.complete} onClick={() => { void act('gitSwitchRequest', textMessage(copy.switchAction, { name: branch(ref.displayName) }),
+        <ul>{loaded.refs?.refs.map(ref => {
+          // /refs is repository-scoped; its current flag describes only the primary checkout.
+          const current = ref.kind === 'branch' && statusData.headState !== 'detached' && ref.displayName === statusData.headRefName;
+          const elsewhere = ref.kind === 'branch' && (loaded.worktrees?.worktrees.some(tree => tree.worktreeId !== worktreeId &&
+            tree.headState !== 'detached' && tree.headRefName === ref.displayName) ?? false);
+          return <li key={ref.refId}>
+          <code>{ref.displayName}</code> <code title={ref.objectId}>{short(ref.objectId)}</code>{current && <> <StateMark tone="settled">{copy.current}</StateMark></>}
+          {!current && elsewhere && <> <StateMark tone="pending">{copy.checkedOutElsewhere}</StateMark></>}
+          {ref.kind === 'branch' && !current && <>
+            {' '}<button type="button" disabled={!writable || activeWorker || dirty || !statusData.complete || elsewhere} onClick={() => { void act('gitSwitchRequest', textMessage(copy.switchAction, { name: branch(ref.displayName) }),
               guarded => ({ action: 'git.switch', worktreeId, guards: guarded, refId: ref.refId, objectId: ref.objectId })); }}>
               {textMessage(copy.switchAction, { name: branch(ref.displayName) })}</button>
-            {' '}<button type="button" disabled={!writable} onClick={() => { void act('gitBranchDeleteRequest', textMessage(copy.deleteAction, { name: branch(ref.displayName) }),
+            {' '}<button type="button" disabled={!writable || elsewhere} onClick={() => { void act('gitBranchDeleteRequest', textMessage(copy.deleteAction, { name: branch(ref.displayName) }),
               guarded => ({ action: 'git.branch.delete', worktreeId, guards: guarded, refId: ref.refId, expectedObjectId: ref.objectId })); }}>
               {textMessage(copy.deleteAction, { name: branch(ref.displayName) })}</button>
           </>}
-        </li>)}</ul>
+        </li>; })}</ul>
         {loaded.refs?.nextCursor && <button type="button" disabled={busy}
           onClick={() => { void moreRefs(loaded.refs?.nextCursor ?? ''); }}>{copy.moreRefs}</button>}
         {statusData.headObjectId && <>
@@ -562,12 +617,16 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
   </section>;
 }
 
-function CloneForm({ disabled, onClone }: { disabled: boolean; onClone: (url: string, remoteName: string) => Promise<void> }) {
+function CloneForm({ disabled, onClone }: { disabled: boolean; onClone: (url: string, remoteName: string, branch: string | null) => Promise<void> }) {
   const [url, setUrl] = useState('');
   const [remoteName, setRemoteName] = useState('origin');
-  return <form onSubmit={event => { event.preventDefault(); if (url && remoteName) void onClone(url, remoteName); }}>
+  const [branch, setBranch] = useState('');
+  return <form onSubmit={event => { event.preventDefault(); if (url && remoteName) void onClone(url, remoteName, branch || null); }}>
     <label>{gitRemotesCopy.url} <input value={url} maxLength={2048} required autoComplete="off" spellcheck={false} onInput={event => { setUrl(event.currentTarget.value); }} /></label>
     <label>{gitRemotesCopy.cloneRemoteName} <input value={remoteName} pattern="[A-Za-z0-9][A-Za-z0-9._\-]{0,63}" required onInput={event => { setRemoteName(event.currentTarget.value); }} /></label>
+    <label>{gitRemotesCopy.cloneBranch} <input value={branch} autoComplete="off" spellcheck={false}
+      aria-describedby="git-clone-branch-help" onInput={event => { setBranch(event.currentTarget.value); }} /></label>
+    <p id="git-clone-branch-help">{gitRemotesCopy.cloneBranchHelp}</p>
     <button type="submit" disabled={disabled}>{gitRemotesCopy.cloneAction}</button>
     <p>{gitRemotesCopy.urlHelp}</p>
   </form>;
