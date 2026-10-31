@@ -41,6 +41,7 @@ let listing: unknown[];
 let paged: boolean;
 let remoteList: unknown[];
 let operationReads: unknown[];
+let pushState: { fastForward: boolean; unconfirmed: string | null };
 let conflictState: { repositoryId: string; worktreeId: string; mergeInProgress: boolean; integration: unknown; files: { fileId: string; path: string }[] };
 let conflictReads = 0;
 let divergenceHead: string;
@@ -109,6 +110,11 @@ function serve(kind: string, path: string): Promise<unknown> {
       export: { sha256: 'e'.repeat(64), sizeBytes: 512, files: 1, skippedEntries: 0, verification: 'tree-blob-ids-match' } };
     if (route === `${base}/remotes`) return { repositoryId, configured: true, remotes: remoteList };
     if (route === `${base}/conflicts`) return { offset: 0, totalCount: conflictState.files.length, nextOffset: null, ...conflictState };
+    if (route === `${base}/push-preview`) return { repositoryId, worktreeId, remoteId: 'remote_1', destination: 'https://git.example.org/team/project.git',
+      allowed: true, localRefId: 'ref_main', localRefName: 'refs/heads/main', localObjectId: head,
+      remoteBranch: new URLSearchParams(query).get('branch'), expectedRemoteObjectId: older, fetchedAt: '2026-10-25T00:00:00Z', remoteState: 'current',
+      fastForward: pushState.fastForward, commitCount: '1', commits: [{ objectId: head, subject: 'Work in progress' }],
+      unconfirmedPushOperationId: pushState.unconfirmed };
     if (route === `${base}/conflicts/file_conflict`) return { repositoryId, worktreeId, file: conflictState.files[0],
       base: 'int a;\n', ours: 'int a = 1;\n', theirs: 'int a = 2;\n', current: '<<<<<<< ours\nint a = 1;\n=======\nint a = 2;\n>>>>>>> theirs\n',
       currentSha256: (conflictReads++ === 0 ? 'c' : 'd').repeat(64), currentSizeBytes: '60', supported: true, reason: null };
@@ -135,6 +141,7 @@ beforeEach(() => {
   listing = [repository];
   paged = false;
   operationReads = [];
+  pushState = { fastForward: true, unconfirmed: null };
   conflictState = { repositoryId, worktreeId, mergeInProgress: false, integration: null, files: [] };
   conflictReads = 0;
   divergenceHead = head;
@@ -817,6 +824,51 @@ it('resolves a conflict with a concurrency token, stages only reviewed files and
   await waitFor(() => expect(transport.post).toHaveBeenCalledTimes(3));
   expect(transport.post.mock.calls[2]?.[3]).toMatchObject({ action: 'git.merge.abort' });
   expect(screen.getByText(/does not commit/)).toBeTruthy();
+});
+
+it('previews exactly what a push publishes and submits it only on explicit request', async () => {
+  transport.post.mockResolvedValueOnce(operation('completed', 'git.push'));
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: 'Preview push' }));
+  expect(await screen.findByText('This push publishes 1 commit(s):')).toBeTruthy();
+  expect(transport.get).toHaveBeenCalledWith('gitPushPreview', `${base}/push-preview?remote=remote_1&branch=main`);
+  expect(transport.post).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button', { name: 'Push 1 commit(s) to main' }));
+  await waitFor(() => expect(transport.post).toHaveBeenCalledOnce());
+  expect(transport.post.mock.calls[0]?.slice(2, 4)).toEqual(['gitPushRequest', { action: 'git.push', worktreeId, remoteId: 'remote_1',
+    localRefId: 'ref_main', remoteBranch: 'main', localObjectId: head, expectedRemoteObjectId: older,
+    guards: { repositoryVersion: 'repo_v1', worktreeVersion: 'tree_v1', expectedHeadObjectId: head, expectedRefId: null, expectedRefObjectId: null } }]);
+});
+
+it('drops a pending push preview as soon as the selected worktree changes', async () => {
+  let resolve!: (value: unknown) => void;
+  const pending = new Promise(done => { resolve = done; });
+  transport.get.mockImplementation((kind, path) => kind === 'gitPushPreview' ? pending : serve(kind, path));
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: 'Preview push' }));
+  fireEvent.click(screen.getByRole('button', { name: `Show ${linkedId}` }));
+  await waitFor(() => expect(screen.queryByRole('button', { name: 'Preview push' })).toBeNull());
+  resolve(await serve('gitPushPreview', `${base}/push-preview?remote=remote_1&branch=main`));
+  await pending;
+  expect(screen.queryByRole('button', { name: /^Push / })).toBeNull();
+  expect(transport.post).not.toHaveBeenCalled();
+});
+
+it('refuses to offer a non-fast-forward push and asks to reconcile an unconfirmed one', async () => {
+  pushState = { fastForward: false, unconfirmed: null };
+  const view = mount();
+  fireEvent.click(await screen.findByRole('button', { name: 'Preview push' }));
+  expect(await screen.findByText(/would not fast-forward the remote branch/)).toBeTruthy();
+  expect(screen.queryByRole('button', { name: /^Push / })).toBeNull();
+  view.unmount();
+  pushState = { fastForward: true, unconfirmed: 'operation_9' };
+  transport.post.mockResolvedValueOnce(operation('completed', 'git.push.reconcile'));
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: 'Preview push' }));
+  fireEvent.click(await screen.findByRole('button', { name: 'Reconcile with the remote' }));
+  await waitFor(() => expect(transport.post).toHaveBeenCalledOnce());
+  expect(transport.post.mock.calls[0]?.[3]).toMatchObject({ action: 'git.push.reconcile', pushOperationId: 'operation_9' });
+  expect(screen.queryByRole('button', { name: /^Push / })).toBeNull();
 });
 
 it('offers cancellation while the first repository is being cloned', async () => {

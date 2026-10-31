@@ -4,7 +4,7 @@ import { textMessage } from '../shared/messages';
 import { usePrivateTransport } from '../session/PrivateTransport';
 import { ApiClientError, withApiFailureReference } from '../api/client';
 import type {
-  Capability, GitAudit, GitConflicts, GitDiff, GitHistory, GitProvenance, GitRefs, GitRemotes, GitRepositories, GitStatus, GitStatusEntry, GitWorktrees,
+  Capability, GitAudit, GitConflicts, GitDiff, GitPushPreview, GitHistory, GitProvenance, GitRefs, GitRemotes, GitRepositories, GitStatus, GitStatusEntry, GitWorktrees,
   Operation, RequestData, RequestKind,
 } from '../api/generated';
 import type { BrowserSession } from '../session/session';
@@ -12,9 +12,10 @@ import { apiPath, runPath, sourceDirectoryPath } from '../app/paths';
 import { StateMark, capabilityTone } from '../shared/StateMark';
 import { GitRemotesPanel } from './GitRemotesPanel';
 import { GitIntegrationPanel } from './GitIntegrationPanel';
+import { GitPushPanel } from './GitPushPanel';
 import type { IntegrationAction } from './GitIntegrationPanel';
 import type { RemoteAction } from './GitRemotesPanel';
-import { gitIntegrationCopy, gitRemotesCopy } from '../copy/git';
+import { gitIntegrationCopy, gitPushCopy, gitRemotesCopy } from '../copy/git';
 
 function sleep(milliseconds: number, signal: AbortSignal) {
   return new Promise<void>((resolve, reject) => {
@@ -45,7 +46,8 @@ interface Loaded {
 
 type Mutation = 'gitStageRequest' | 'gitCommitRequest' | 'gitBranchCreateRequest' | 'gitSwitchRequest' | 'gitBranchDeleteRequest'
   | 'gitTagRequest' | 'gitWorktreeAddRequest' | 'gitWorktreeRemoveRequest' | 'gitRemoteAddRequest' | 'gitRemoteRemoveRequest'
-  | 'gitFetchRequest' | 'gitMergeRequest' | 'gitMergeAbortRequest' | 'gitConflictSaveRequest' | 'gitConflictCompleteRequest';
+  | 'gitFetchRequest' | 'gitMergeRequest' | 'gitMergeAbortRequest' | 'gitConflictSaveRequest' | 'gitConflictCompleteRequest'
+  | 'gitPushRequest' | 'gitPushReconcileRequest';
 
 function short(objectId: string | null): string { return objectId ? objectId.slice(0, 12) : ''; }
 const HEADS = 'refs/heads/';
@@ -273,6 +275,24 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
       case 'gitFetchRequest': return act('gitFetchRequest', textMessage(gitRemotesCopy.fetch, { name: action.name }), guarded =>
         ({ action: 'git.fetch', worktreeId, guards: guarded, remoteId: action.remoteId }));
     }
+  }
+
+  async function readPushPreview(remoteId: string, remoteBranch: string) {
+    if (!base) return null;
+    try {
+      return (await client.get('gitPushPreview', `${base}/push-preview?remote=${remoteId}&branch=${encodeURIComponent(remoteBranch)}${query ? `&${query}` : ''}`)).data;
+    } catch (failure: unknown) { setStatus(withApiFailureReference(copy.readFailed, failure)); return null; }
+  }
+
+  function push(preview: GitPushPreview) {
+    return act('gitPushRequest', textMessage(gitPushCopy.push, { count: preview.commitCount, branch: preview.remoteBranch }), guarded => ({
+      action: 'git.push', worktreeId: preview.worktreeId, guards: guarded, remoteId: preview.remoteId, localRefId: preview.localRefId,
+      remoteBranch: preview.remoteBranch, localObjectId: preview.localObjectId, expectedRemoteObjectId: preview.expectedRemoteObjectId }));
+  }
+
+  function reconcilePush(pushOperationId: string) {
+    return act('gitPushReconcileRequest', gitPushCopy.reconcile, guarded => ({ action: 'git.push.reconcile',
+      worktreeId: statusData?.worktreeId ?? '', guards: guarded, pushOperationId }));
   }
 
   async function readDivergence(trackingRefId: string) {
@@ -556,6 +576,10 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
       <GitIntegrationPanel remotes={loaded.remotes} conflicts={loaded.conflicts} writable={writable} onConflictPage={setConflictOffset}
         destination={{ worktreeId: statusData.worktreeId, headRefName: statusData.headRefName, headObjectId: statusData.headObjectId }}
         readDivergence={readDivergence} readConflict={readConflict} onAction={integrationAction} />
+      {loaded.listing.jobId === jobId && statusData.worktreeId === (worktree ?? repository.worktreeId) &&
+        <GitPushPanel key={`${jobId}:${statusData.repositoryId}:${statusData.worktreeId}:${statusData.headRefName ?? ''}`}
+          remotes={loaded.remotes} branch={statusData.headState === 'attached' ? statusData.headRefName : null} writable={writable}
+          readPreview={readPushPreview} onPush={push} onReconcile={reconcilePush} />}
       <GitRemotesPanel capability={remoting} remotes={loaded.remotes} audit={loaded.audit} writable={writable} running={running}
         onAction={remoteAction} onCancel={operation => { void cancelTransfer(operation); }} />
       <section aria-labelledby="git-branches-title">

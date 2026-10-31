@@ -57,7 +57,7 @@ internal class WebApiController(
         val path = exchange.requestURI.rawPath
         if (!path.startsWith("${assets.basePath}api/")) return false
         val resource = path.removePrefix(prefix)
-        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs", "recovery", "agent/preflight") || resource.matches(Regex("(?:jobs|uploads)/[^/]+|jobs/[^/]+/runs(?:/[^/]+(?:/reports/(?:exploration|revision-validation)|/validation-history|/source-catalog|/revisions/[^/]+/(?:sources|source-directories/[^/]+|source-files/[^/]+(?:/(?:chunk|content))?)|/snapshot|/events|/progress-pin|/cancel|/recover|/controls|/queue-position)?)?|jobs/[^/]+/artifacts/[^/]+/content|jobs/[^/]+/repositories(?:/[^/]+(?:/operations(?:/[^/]+(?:/cancel)?)?|/(?:status|history|diff|refs|remotes|audit|divergence|conflicts)|/worktrees(?:/[^/]+)?|/(?:provenance|exports|conflicts)/[^/]+)?)?")))) {
+        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs", "recovery", "agent/preflight") || resource.matches(Regex("(?:jobs|uploads)/[^/]+|jobs/[^/]+/runs(?:/[^/]+(?:/reports/(?:exploration|revision-validation)|/validation-history|/source-catalog|/revisions/[^/]+/(?:sources|source-directories/[^/]+|source-files/[^/]+(?:/(?:chunk|content))?)|/snapshot|/events|/progress-pin|/cancel|/recover|/controls|/queue-position)?)?|jobs/[^/]+/artifacts/[^/]+/content|jobs/[^/]+/repositories(?:/[^/]+(?:/operations(?:/[^/]+(?:/cancel)?)?|/(?:status|history|diff|refs|remotes|audit|divergence|conflicts|push-preview)|/worktrees(?:/[^/]+)?|/(?:provenance|exports|conflicts)/[^/]+)?)?")))) {
             try {
                 val policy = if (exchange.requestMethod in setOf("POST", "PUT", "PATCH", "DELETE")) {
                     WebEndpointPolicy.jsonMutation(exchange.requestMethod)
@@ -137,7 +137,7 @@ internal class WebApiController(
                     } finally { exchange.close() }
                 }
                 resource == "agent/preflight" -> agentPreflights.handle(exchange)
-                resource.matches(Regex("jobs/[^/]+/repositories(?:/[^/]+(?:/operations(?:/[^/]+(?:/cancel)?)?|/(?:status|history|diff|refs|remotes|audit|divergence|conflicts)|/worktrees(?:/[^/]+)?|/(?:provenance|exports|conflicts)/[^/]+)?)?")) -> gitRoutes.handle(exchange, resource.split('/'))
+                resource.matches(Regex("jobs/[^/]+/repositories(?:/[^/]+(?:/operations(?:/[^/]+(?:/cancel)?)?|/(?:status|history|diff|refs|remotes|audit|divergence|conflicts|push-preview)|/worktrees(?:/[^/]+)?|/(?:provenance|exports|conflicts)/[^/]+)?)?")) -> gitRoutes.handle(exchange, resource.split('/'))
                 resource.matches(Regex("jobs/[^/]+/runs/[^/]+/cancel")) -> {
                     val parts = resource.split('/')
                     cancellations.handle(exchange, parts[1], parts[3])

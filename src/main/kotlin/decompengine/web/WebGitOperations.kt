@@ -89,6 +89,8 @@ internal class WebGitOperations(private val repositories: () -> ManagedGitReposi
             "git.merge.abort" -> setOf("action", "worktreeId", "guards")
             "git.conflict.save" -> setOf("action", "worktreeId", "guards", "fileId", "expectedSha256", "resolution", "content")
             "git.conflict.complete" -> setOf("action", "worktreeId", "guards", "files")
+            "git.push" -> setOf("action", "worktreeId", "guards", "remoteId", "localRefId", "remoteBranch", "localObjectId", "expectedRemoteObjectId")
+            "git.push.reconcile" -> setOf("action", "worktreeId", "guards", "pushOperationId")
             else -> invalid()
         }
         val reviewedMergeIndex = action == "git.commit" && body["reviewedMergeIndex"] == JsonPrimitive(true)
@@ -120,6 +122,10 @@ internal class WebGitOperations(private val repositories: () -> ManagedGitReposi
                     "targetObjectId" to (objectId(body["targetObjectId"]) ?: invalid()),
                     "strategy" to (text(body["strategy"]).takeIf { it in setOf("fast-forward", "merge") } ?: invalid()))
                 GitOperationAction.MERGE_ABORT -> emptyMap()
+                GitOperationAction.PUSH -> mapOf("remoteId" to id(body["remoteId"]), "localRefId" to id(body["localRefId"]),
+                    "remoteBranch" to (text(body["remoteBranch"]).takeIf { it.length in 1..200 } ?: invalid()),
+                    "localObjectId" to (objectId(body["localObjectId"]) ?: invalid()), "expectedRemoteObjectId" to objectId(body["expectedRemoteObjectId"]))
+                GitOperationAction.PUSH_RECONCILE -> mapOf("pushOperationId" to id(body["pushOperationId"]))
                 GitOperationAction.CONFLICT_SAVE -> {
                     val resolution = text(body["resolution"]).takeIf { it in setOf("ours", "theirs", "base", "text") } ?: invalid()
                     content = body["content"].let { if (it == JsonNull) null else text(it) }

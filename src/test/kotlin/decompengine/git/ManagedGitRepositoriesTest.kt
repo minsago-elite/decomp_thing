@@ -303,16 +303,30 @@ class ManagedGitRepositoriesTest {
         assertFalse(f.store.resolve(jobId).resolve("git/staging").let { it.exists() && Files.list(it).use { s -> s.count() } > 0 })
     }
 
-    @Test fun `restart reconciles every interruption point without exposing or overwriting anything`() {
-        // Only initialization phases; snapshot mapping and remote-audit phases have their own tests.
-        for (point in listOf(GitOperationCrashPoint.AFTER_RUNNING, GitOperationCrashPoint.AFTER_STAGING,
-            GitOperationCrashPoint.BEFORE_PUBLISH, GitOperationCrashPoint.AFTER_PUBLISH)) Fixture().use { f ->
+    @Test fun `restart reconciles every initialization interruption point without exposing or overwriting anything`() {
+        // Init publishes a prepared repository, not a workspace operation or a commit. Keep this
+        // exhaustive so new hooks require an explicit applicability decision. Workspace terminal
+        // persistence and commit publication have their own recovery matrices.
+        val initializationPoints = GitOperationCrashPoint.entries.filter { point ->
+            when (point) {
+                GitOperationCrashPoint.AFTER_RUNNING, GitOperationCrashPoint.AFTER_STAGING,
+                GitOperationCrashPoint.BEFORE_PUBLISH, GitOperationCrashPoint.AFTER_PUBLISH -> true
+                GitOperationCrashPoint.BEFORE_TERMINAL_PERSIST, GitOperationCrashPoint.AFTER_TERMINAL_PERSIST,
+                GitOperationCrashPoint.AFTER_SNAPSHOT_CAPTURE, GitOperationCrashPoint.AFTER_COMMIT_PUBLISH,
+                GitOperationCrashPoint.AFTER_REMOTE_MUTATION, GitOperationCrashPoint.AFTER_REMOTE_AUDIT,
+                GitOperationCrashPoint.AFTER_WORKSPACE_VALIDATION, GitOperationCrashPoint.AFTER_WORKSPACE_CAPTURE,
+                GitOperationCrashPoint.BEFORE_CONFLICT_LOCK -> false
+            }
+        }
+        for (point in initializationPoints) Fixture().use { f ->
             val before = f.tree(f.snapshot)
             f.crashes += point
             val first = f.open()
             val admission = first.request(jobId, GitRepositoryRequest.Init("run_1", "revision_1", null), "crash_request_key_01")
             assertTrue(first.awaitIdle(60_000))
             // The crashed instance still shows a non-terminal record and no half-prepared repository.
+            assertEquals(GitOperationState.RUNNING,
+                first.operation(jobId, admission.operation.repositoryId, admission.operation.operationId).state, point.name)
             if (point != GitOperationCrashPoint.AFTER_PUBLISH) assertTrue(first.listing(jobId).repositories.isEmpty(), point.name)
             first.close()
             f.crashes.clear()

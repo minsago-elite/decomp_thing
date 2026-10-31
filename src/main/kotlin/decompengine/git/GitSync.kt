@@ -38,8 +38,10 @@ data class GitSyncRequest(
 
     companion object {
         val ACTIONS = setOf(GitOperationAction.REMOTE_ADD, GitOperationAction.REMOTE_REMOVE, GitOperationAction.FETCH,
-            GitOperationAction.MERGE, GitOperationAction.MERGE_ABORT, GitOperationAction.CONFLICT_SAVE, GitOperationAction.CONFLICT_COMPLETE)
-        val REMOTE = setOf(GitOperationAction.REMOTE_ADD, GitOperationAction.REMOTE_REMOVE, GitOperationAction.FETCH)
+            GitOperationAction.MERGE, GitOperationAction.MERGE_ABORT, GitOperationAction.CONFLICT_SAVE, GitOperationAction.CONFLICT_COMPLETE,
+            GitOperationAction.PUSH, GitOperationAction.PUSH_RECONCILE)
+        val REMOTE = setOf(GitOperationAction.REMOTE_ADD, GitOperationAction.REMOTE_REMOVE, GitOperationAction.FETCH,
+            GitOperationAction.PUSH, GitOperationAction.PUSH_RECONCILE)
         /** Actions whose Git process can be cancelled while it runs. */
         val CANCELLABLE = setOf(GitOperationAction.FETCH, GitOperationAction.CLONE)
     }

@@ -30,6 +30,7 @@ internal class WebGitReads(private val repositories: () -> ManagedGitRepositorie
             "remotes" -> emptySet()
             "divergence" -> setOf("worktree", "tracking")
             "conflicts" -> setOf("worktree", "offset")
+            "push-preview" -> setOf("worktree", "remote", "branch")
             "audit" -> setOf("limit")
             "history" -> setOf("worktree", "start", "cursor", "limit")
             else -> setOf("worktree", "scope", "commit", "file", "cursor", "limit")
@@ -50,6 +51,10 @@ internal class WebGitReads(private val repositories: () -> ManagedGitRepositorie
                 "divergence" -> sendWebApiResponse(exchange, 200, "gitDivergence", divergence(jobId, repositoryId, worktree,
                     query["tracking"]?.takeIf { it.matches(Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}")) }
                         ?: throw WebAccessDenied(422, "VALIDATION_FAILED", "tracking must name one remote-tracking ref identity.")))
+                "push-preview" -> sendWebApiResponse(exchange, 200, "gitPushPreview", pushPreview(jobId, repositoryId, worktree,
+                    query["remote"]?.takeIf { it.matches(Regex("remote_[0-9a-f]{32}")) }
+                        ?: throw WebAccessDenied(422, "VALIDATION_FAILED", "remote must name one registered remote identity."),
+                    query["branch"]?.also { if (it.length !in 1..200) throw WebAccessDenied(422, "VALIDATION_FAILED", "branch is 1 to 200 characters.") }))
                 "conflicts" -> sendWebApiResponse(exchange, 200, "gitConflicts", conflicts(jobId, repositoryId, worktree,
                     query["offset"]?.let { value ->
                         value.takeIf { it.matches(Regex("0|[1-9][0-9]{0,5}")) }?.toInt()?.takeIf { it <= 200_000 }
@@ -63,6 +68,27 @@ internal class WebGitReads(private val repositories: () -> ManagedGitRepositorie
             }
         } catch (failure: ManagedGitException) {
             throw webGitDenied(failure)
+        }
+    }
+
+    /** `G/push-preview` (#599): what an explicit push would publish, from fetched state only. */
+    private fun pushPreview(jobId: String, repositoryId: String, worktree: String?, remote: String, branch: String?): JsonObject {
+        val view = repositories().pushPreview(jobId, repositoryId, worktree, remote, branch)
+        val state = when {
+            view.fetchedAt == null -> "unknown"
+            java.time.Duration.between(view.fetchedAt, java.time.Instant.now()) > java.time.Duration.ofHours(1) -> "stale"
+            else -> "current"
+        }
+        return buildJsonObject {
+            put("repositoryId", repositoryId); put("worktreeId", repositories().workspace(jobId, repositoryId, worktree).worktreeId)
+            put("remoteId", view.remote.remoteId); put("destination", view.remote.location.display); put("allowed", view.allowed)
+            put("localRefId", webGitRefId(repositoryId, view.localRef)); put("localRefName", view.localRef); put("localObjectId", view.localObjectId)
+            put("remoteBranch", view.remoteBranch)
+            put("expectedRemoteObjectId", view.expectedRemoteObjectId?.let(::JsonPrimitive) ?: JsonNull)
+            put("fetchedAt", view.fetchedAt?.toString()?.let(::JsonPrimitive) ?: JsonNull); put("remoteState", state)
+            put("fastForward", view.fastForward); put("commitCount", view.commitCount.toString())
+            put("commits", JsonArray(view.commits.map { (objectId, subject) -> buildJsonObject { put("objectId", objectId); put("subject", subject) } }))
+            put("unconfirmedPushOperationId", view.unconfirmed?.operationId?.let(::JsonPrimitive) ?: JsonNull)
         }
     }
 
