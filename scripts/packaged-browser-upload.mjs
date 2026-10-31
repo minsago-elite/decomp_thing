@@ -7,11 +7,12 @@ async function readyForUpload(tab, ready) {
   await ready(tab, `location.pathname === '/nested/' &&
     document.body.innerText.includes('Local session connected.') &&
     document.querySelector('section[aria-labelledby="upload-title"] input#binary-file[type="file"]:not(:disabled)') !== null`,
-  'workspace upload control');
+  'upload file picker');
 }
 
 /** Wait for the lazy route, not just the independently rendered session header. */
 export async function selectUploadFixture({ tab, evaluate, ready }) {
+  await readyForUpload(tab, ready);
   await evaluate(tab, `(() => {
     const bytes = new Uint8Array(64); bytes.set([127, 69, 76, 70, 2, 1, 1]);
     const view = new DataView(bytes.buffer); view.setUint16(16, 2, true); view.setUint16(18, 62, true);
@@ -54,7 +55,6 @@ export async function qualifyUpload({ makeTarget, cdp, evaluate, ready, browserO
     };
   })();` }, tab.sessionId);
   await cdp.call('Page.navigate', { url: browserOrigin + '/nested/' }, tab.sessionId);
-  await readyForUpload(tab, ready);
   const selectFixture = () => selectUploadFixture({ tab, evaluate, ready });
   await selectFixture();
   assert.equal(await evaluate(tab, `document.activeElement.id`), 'binary-file');
@@ -159,6 +159,7 @@ export async function qualifyUploadFailures({ makeTarget, cdp, evaluate, ready, 
   await readyForUpload(tab, ready);
   const ids = (await fs.readdir(data)).filter(name => /^[a-f0-9]{32}$/.test(name));
   async function select(size, name) {
+    await readyForUpload(tab, ready);
     await evaluate(tab, `(() => {
       const transfer = new DataTransfer(); transfer.items.add(new File([new Uint8Array(${size})], ${JSON.stringify(name)}));
       const picker = document.querySelector('#binary-file'); picker.files = transfer.files;
@@ -208,6 +209,7 @@ export async function qualifyMeasuredUpload({ makeTarget, cdp, evaluate, ready, 
   }, tab.sessionId);
   const before = (await fs.readdir(data)).filter(name => /^[a-f0-9]{32}$/.test(name));
   await cdp.call('Page.navigate', { url: browserOrigin + '/nested/' }, tab.sessionId);
+  await readyForUpload(tab, ready);
   await readyForUpload(tab, ready);
   await evaluate(tab, `(() => {
     const bytes = new Uint8Array(512 * 1024); bytes.set([127, 69, 76, 70, 2, 1, 1]);

@@ -31,6 +31,9 @@ function fixture({ mountAt = 3, disabled = false, renderSelection = true, enable
     },
     querySelector(selector) {
       if (selector === '#binary-file') return samples >= mountAt ? picker : null;
+      if (selector === 'section[aria-labelledby="upload-title"] input#binary-file[type="file"]:not(:disabled)') {
+        return samples >= mountAt && !picker.disabled ? picker : null;
+      }
       if (selector === 'button[type="submit"]') return samples >= mountAt ? submit : null;
       throw new Error('Unexpected selector: ' + selector);
     },
@@ -50,7 +53,7 @@ function fixture({ mountAt = 3, disabled = false, renderSelection = true, enable
     files = [];
     items = { add: file => { this.files.push(file); } };
   }
-  const context = { document, DataTransfer, File, Event };
+  const context = { document, location: { pathname: '/nested/' }, DataTransfer, File, Event };
   const tab = {};
   const evaluate = async (target, expression) => {
     assert.equal(target, tab);
