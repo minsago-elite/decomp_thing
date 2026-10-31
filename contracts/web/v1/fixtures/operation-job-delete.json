@@ -1,0 +1,19 @@
+{
+  "apiVersion": 1,
+  "kind": "operation",
+  "requestId": "request_job_delete",
+  "data": {
+    "operationId": "jobdel_00112233445566778899aabbccddeeff",
+    "jobId": "1234567890abcdef1234567890abcdef",
+    "repositoryId": null,
+    "worktreeId": null,
+    "action": "job.delete",
+    "state": "completed",
+    "version": "opv3_00112233445566778899aabbccddeeff",
+    "createdAt": "2026-10-25T10:00:00Z",
+    "endedAt": "2026-10-25T10:00:01Z",
+    "resultObjectId": null,
+    "recoveryRequired": false,
+    "message": "The job and its stored files were permanently deleted (20696 bytes in 22 entries). This cannot be undone; only this deletion record is retained."
+  }
+}

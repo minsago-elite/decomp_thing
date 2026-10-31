@@ -210,24 +210,24 @@ describe('form context across reconnect (#629)', () => {
     const auth = await session();
     history.replaceState(null, '', '/nested/');
     render(<App basePath="/nested" session={auth} />);
-    const search = await screen.findByRole<HTMLInputElement>('textbox', { name: 'Filename search' });
+    const search = await screen.findByRole<HTMLInputElement>('textbox', { name: 'Filename or label search' });
     fireEvent.input(search, { target: { value: 'firmware' } });
     // Expiry hides the dashboard; a fresh bootstrap starts a new generation and remounts it.
     await act(async () => { await auth.refresh(); });
     await settle();
-    expect((await screen.findByRole<HTMLInputElement>('textbox', { name: 'Filename search' })).value).toBe('firmware');
+    expect((await screen.findByRole<HTMLInputElement>('textbox', { name: 'Filename or label search' })).value).toBe('firmware');
     expect(window.location.search).toBe('');
     await act(async () => { await auth.logout(); });
     await act(async () => { await auth.refresh(); });
     await settle();
-    expect((await screen.findByRole<HTMLInputElement>('textbox', { name: 'Filename search' })).value).toBe('');
+    expect((await screen.findByRole<HTMLInputElement>('textbox', { name: 'Filename or label search' })).value).toBe('');
   });
 
   it('drops a retained draft when the session is invalidated while another route is open', async () => {
     const auth = await session();
     history.replaceState(null, '', '/nested/');
     render(<App basePath="/nested" session={auth} />);
-    fireEvent.input(await screen.findByRole<HTMLInputElement>('textbox', { name: 'Filename search' }), { target: { value: 'firmware' } });
+    fireEvent.input(await screen.findByRole<HTMLInputElement>('textbox', { name: 'Filename or label search' }), { target: { value: 'firmware' } });
     await settle();
     fireEvent.click(screen.getByRole('link', { name: 'Runtime status' }));
     await screen.findByRole('heading', { level: 1, name: 'Runtime status' });
@@ -236,7 +236,7 @@ describe('form context across reconnect (#629)', () => {
     await act(async () => { await auth.refresh(); });
     fireEvent.click(screen.getByRole('link', { name: 'Workspace' }));
     await settle();
-    expect((await screen.findByRole<HTMLInputElement>('textbox', { name: 'Filename search' })).value).toBe('');
+    expect((await screen.findByRole<HTMLInputElement>('textbox', { name: 'Filename or label search' })).value).toBe('');
   });
 });
 

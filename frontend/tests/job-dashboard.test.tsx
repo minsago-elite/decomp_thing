@@ -92,7 +92,7 @@ it('persists submitted filters in the URL and distinguishes no matches from an e
   render(<Dashboard basePath="" />);
   expect(await screen.findByText('No uploaded jobs yet.')).toBeTruthy();
   const historyLength = history.length;
-  fireEvent.input(screen.getByLabelText('Filename search'), { target: { value: 'my binary' } });
+  fireEvent.input(screen.getByLabelText('Filename or label search'), { target: { value: 'my binary' } });
   fireEvent.change(screen.getByLabelText('Workflow state'), { target: { value: 'failed' } });
   fireEvent.click(screen.getByRole('button', { name: 'Apply filters' }));
   expect(await screen.findByText('No jobs match these filters.')).toBeTruthy();
@@ -207,7 +207,7 @@ it('ignores late results after filter replacement and cancels reads on unmount',
   const view = render(<Dashboard basePath="" />);
   await waitFor(() => expect(transport.get).toHaveBeenCalledOnce());
   const originalSignal = transport.get.mock.calls[0]?.[2].signal as AbortSignal;
-  fireEvent.input(screen.getByLabelText('Filename search'), { target: { value: 'replacement' } });
+  fireEvent.input(screen.getByLabelText('Filename or label search'), { target: { value: 'replacement' } });
   fireEvent.click(screen.getByRole('button', { name: 'Apply filters' }));
   expect(await screen.findByText('program-2.elf')).toBeTruthy();
   expect(originalSignal.aborted).toBe(true);
@@ -303,7 +303,7 @@ it.each(['unavailable', 'unsupported', 'unknown', 'missing', 'empty'] as const)(
       render(<App basePath="/nested" session={session} />);
       expect(await screen.findByRole('heading', { name: selected.displayFilename })).toBeTruthy();
       expect(screen.getByText('Starting exploration, reconstruction, builds, validation or repair is unavailable in this preview.')).toBeTruthy();
-      expect(screen.getAllByRole('button').map(button => button.textContent)).toEqual(['Display preferences', 'Sign out', 'Refresh job']);
+      expect(screen.getAllByRole('button').map(button => button.textContent)).toEqual(['Display preferences', 'Sign out', 'Refresh job', 'Save organization', 'Review what would be deleted']);
       fireEvent.click(screen.getByRole('link', { name: 'View reported workflow availability' }));
       expect(await screen.findByRole('heading', { level: 1, name: 'Runtime status' })).toBeTruthy();
       if (reported === 'empty') expect(screen.getByText('No capabilities reported.')).toBeTruthy();
@@ -317,7 +317,7 @@ it.each(['unavailable', 'unsupported', 'unknown', 'missing', 'empty'] as const)(
           expect(selectedCapability?.textContent).toContain('The selected harness cannot start these workflows.');
         }
       }
-      expect(screen.getAllByRole('button').map(button => button.textContent)).toEqual(['Display preferences', 'Sign out']);
+      expect(screen.getAllByRole('button').map(button => button.textContent)).toEqual(['Display preferences', 'Sign out', 'Read storage and maintenance preview']);
       expect(gateway.bootstrap).toHaveBeenCalledOnce();
       expect(gateway.exchange).not.toHaveBeenCalled();
       expect(gateway.logout).not.toHaveBeenCalled();
