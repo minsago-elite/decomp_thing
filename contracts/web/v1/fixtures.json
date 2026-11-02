@@ -1056,6 +1056,34 @@
     {
       "file": "fixtures/invalid-source-search-gaps-over-scope.json",
       "valid": false
+    },
+    {
+      "file": "fixtures/bootstrap-workflow-launch.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-launch-agent-contact.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-launch-multiple-workflows.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-launch-without-limits.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-launch-contract-version.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-launch-unknown-tool.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/bootstrap-without-launch.json",
+      "valid": true
     }
   ],
   "schema": "contract.schema.json"
