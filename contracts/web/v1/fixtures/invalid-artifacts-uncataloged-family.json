@@ -28,7 +28,10 @@
         "role": "source",
         "derivedFromArtifactId": null,
         "family": "build-contract",
-        "verification": "source-inventory-checked"
+        "verification": "source-inventory-checked",
+        "content": {
+          "projection": "verbatim"
+        }
       }
     ],
     "page": {

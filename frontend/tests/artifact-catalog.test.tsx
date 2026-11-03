@@ -23,6 +23,23 @@ it('builds canonical catalog routes and withholds pages for another selection', 
   expect(() => bindArtifactCatalog({ ...page, page: { ...page.page, limit: 20 } }, jobId, runId, null)).toThrow(ApiClientError);
   const unlabelled = { ...page.items[0]! }; delete unlabelled.family;
   expect(() => bindArtifactCatalog({ ...page, items: [unlabelled] }, jobId, runId, null)).toThrow(ApiClientError);
+  const unprojected = { ...page.items[0]! }; delete unprojected.content;
+  expect(() => bindArtifactCatalog({ ...page, items: [unprojected] }, jobId, runId, null)).toThrow(ApiClientError);
+});
+
+it('labels redacted report downloads and withholds unavailable report projections instead of linking raw bytes', async () => {
+  const partial = fixture('artifacts-job-partial');
+  partial.data.binding.runId = runId; partial.data.page.limit = 50; partial.data.page.nextCursor = null;
+  for (const item of partial.data.items) item.binding.runId = runId;
+  expect(partial.data.items.map(item => item.content?.projection)).toEqual(['redacted', 'unavailable']);
+  vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockResolvedValueOnce(response(partial)));
+  render(<ArtifactCatalog jobId={jobId} runId={runId} revisionId={null} basePath="/" />);
+  fireEvent.click(screen.getByRole('button', { name: 'List retained artifacts' }));
+  expect(await screen.findByText(/^This server-produced report downloads as a redacted copy/u)).toBeTruthy();
+  const withheld = screen.getByText(/^Download withheld:/u);
+  expect(withheld.textContent).toContain('never served unredacted');
+  const links = screen.getAllByRole('link', { name: /^Download /u });
+  expect(links.map(link => link.getAttribute('download'))).toEqual(['exploration.json']);
 });
 
 it('lists artifacts explicitly and distinguishes checked inventories from unvalidated digests with native download links', async () => {

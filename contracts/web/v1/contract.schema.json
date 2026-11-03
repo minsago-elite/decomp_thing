@@ -939,6 +939,23 @@
             "not-verified",
             "source-inventory-checked"
           ]
+        },
+        "content": {
+          "type": "object",
+          "description": "Representation served by contentHref. sha256 and sizeBytes remain the stored-artifact commitment; for redacted report content the content route's ETag, Content-Length and X-Decomp-Content-SHA256 describe the served projection and X-Decomp-Artifact-SHA256 repeats the stored digest. unavailable: the report exceeds its projection limit and content is refused with ARTIFACT_PROJECTION_UNAVAILABLE.",
+          "properties": {
+            "projection": {
+              "enum": [
+                "verbatim",
+                "redacted",
+                "unavailable"
+              ]
+            }
+          },
+          "required": [
+            "projection"
+          ],
+          "additionalProperties": false
         }
       },
       "required": [
@@ -966,6 +983,58 @@
             "properties": {
               "derivedFromArtifactId": {
                 "$ref": "#/definitions/id"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "role": {
+                "const": "raw-evidence"
+              }
+            },
+            "required": [
+              "content"
+            ]
+          },
+          "then": {
+            "properties": {
+              "content": {
+                "properties": {
+                  "projection": {
+                    "enum": [
+                      "redacted",
+                      "unavailable"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "role": {
+                "enum": [
+                  "source",
+                  "archive"
+                ]
+              }
+            },
+            "required": [
+              "content"
+            ]
+          },
+          "then": {
+            "properties": {
+              "content": {
+                "properties": {
+                  "projection": {
+                    "const": "verbatim"
+                  }
+                }
               }
             }
           }

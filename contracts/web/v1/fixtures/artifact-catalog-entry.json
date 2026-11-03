@@ -17,6 +17,9 @@
     "role": "archive",
     "derivedFromArtifactId": null,
     "family": "source-archive",
-    "verification": "not-verified"
+    "verification": "not-verified",
+    "content": {
+      "projection": "verbatim"
+    }
   }
 }

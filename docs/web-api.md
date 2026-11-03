@@ -1727,8 +1727,27 @@ changed bytes return `409 ARTIFACT_CHANGED`.
 `Content-Disposition: attachment; filename="…"; filename*=UTF-8''…`, `no-store`, `nosniff`, frame
 denial and the sandboxed inert CSP. Active content is therefore never served as trusted UI.
 A first pinned pass must reproduce the ID's digest before any header is sent; otherwise
-the response is 409. `ETag` is the strong `"<sha256>"`, and `Accept-Ranges: bytes`,
-`X-Decomp-Artifact-ID` and `X-Decomp-Content-SHA256` repeat that identity. `If-None-Match` uses weak comparison and `If-Match` strong comparison. HEAD performs
+the response is 409. `ETag` is the strong `"<sha256>"` of the bytes actually served, with
+`Accept-Ranges: bytes`. `X-Decomp-Artifact-ID` names the artifact, `X-Decomp-Content-SHA256`
+repeats the served representation's digest, `X-Decomp-Artifact-SHA256` the stored artifact's
+digest (the ID's commitment) and `X-Decomp-Content-Projection` is `verbatim` or `redacted`.
+
+Server-produced report families (exploration report and progress journal) are never served raw.
+Their first pass buffers the stored bytes within the redacted-report limit (64 MiB, the legacy
+report ceiling; progress journals keep their 2 MiB journal read limit) under the shared download
+admission and request cancellation, confirms the stored digest (`409 ARTIFACT_CHANGED` otherwise,
+before any projection) and then serves the shared report projection the legacy report route also
+uses: a progress journal is replayed to its display snapshot, and every report passes the
+download redaction policy below. `ETag`, `Content-Length`, ranges, `If-Range`, `If-Match`,
+`If-None-Match`, HEAD, 304 and 416 all refer to that projection; the stored digest is not a
+validator for it. A report that needs no redaction is byte-identical, so its ETag equals the
+stored digest. A report over its limit, or one that cannot be projected (for example a malformed
+progress journal), returns the fixed non-retryable `409 ARTIFACT_PROJECTION_UNAVAILABLE` with no
+artifact bytes; there is no raw fallback. Catalog and detail descriptors keep the stored
+`sha256`/`sizeBytes` and name the served representation in `content.projection`: `verbatim`
+(source manifest, build contract, source archive), `redacted` or `unavailable` (over the limit).
+A `redacted` report can still be refused if its bytes cannot be projected. Source, manifest,
+build-contract and archive content stays verbatim job content with an unchanged digest-bound stream. `If-None-Match` uses weak comparison and `If-Match` strong comparison. HEAD performs
 the same verification and returns headers only. `If-None-Match` with the current ETag (or
 `*`) returns 304; a non-matching `If-Match` returns 412. A single `bytes=a-b`, `bytes=a-` or
 `bytes=-n` range returns 206 with `Content-Range`. An unsatisfiable range returns 416 with
@@ -1987,8 +2006,9 @@ property names and credential-valued properties recursively, without routing, op
 exemptions. If property names collapse to the same redacted name, the containing object is withheld as `[redacted]`
 rather than silently losing one property. A configured literal still present in JSON serialization punctuation causes
 the whole download to be withheld as JSON `null`. A download is byte-identical when nothing needs redaction. Versioned artifact content
-(`GET J/artifacts/{artifactId}/content`, including the exploration report) is a digest-bound stream of the stored
-bytes the catalog and report descriptors name; it is not rewritten by this policy (integration follow-up). Committed job content (`sourceChunk`, the committed source-tree names in `revisionDirectory`, `revisionSources`, `revisionFile` and `sourceCatalog`, source-file downloads and the exact-byte
+(`GET J/artifacts/{artifactId}/content`) applies the same report projection to the exploration report and progress
+journal families, with validators over the projected bytes and the stored digest in `X-Decomp-Artifact-SHA256`;
+source manifest, build contract and archive families remain verbatim digest-bound streams of the stored bytes. Committed job content (`sourceChunk`, the committed source-tree names in `revisionDirectory`, `revisionSources`, `revisionFile` and `sourceCatalog`, source-file downloads and the exact-byte
 validation output previews in reports) is digest-bound user data, not server configuration, and is served verbatim under job authorization. Progress events
 remain allowlisted projections: journal prose, paths, usage that was not reported and any agent reasoning are never
 requested or displayed (the activity view shows "Not reported").

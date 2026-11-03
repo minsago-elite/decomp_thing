@@ -241,6 +241,8 @@ export const explorationEvidenceCopy = {
   "noNumericSummaryIsAvailableFromTheseReportBytesMissing": "No numeric summary is available from these report bytes. Missing or malformed values are not zero-valued results.",
   "theDigestIdentifiesTheObservedBytesItDoesNotValidate": "The digest identifies the observed bytes; it does not validate the producer's claims. Changed bytes require a refreshed report.",
   "downloadObservedExplorationJSON": "Download observed exploration JSON",
+  "explorationDownloadRedacted": "The download is a redacted copy of this report: credentials, configured secrets and private host paths are replaced, so its bytes can differ from the observed size and SHA-256 above.",
+  "explorationDownloadUnavailable": "Download withheld: this report exceeds the 64 MiB redacted-report limit, and the stored copy is never served unredacted.",
   "explorationObservationsDoNotEstablishAcceptedReconstruction": "Exploration observations do not establish accepted reconstruction.",
   "theReportDoesNotBelongToTheRequestedAttempt": "The report does not belong to the requested attempt.",
   "explorationEvidenceCouldNotBeReadCheckTheSessionAnd": "Exploration evidence could not be read. Check the session and refresh this attempt.",

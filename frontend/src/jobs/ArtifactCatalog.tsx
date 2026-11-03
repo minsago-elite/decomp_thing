@@ -20,7 +20,7 @@ export function artifactCatalogRoute(jobId: string, runId: string, revisionId: s
 /** Withhold a page that is not the exact requested job, attempt and revision selection. */
 export function bindArtifactCatalog(data: Artifacts, jobId: string, runId: string, revisionId: string | null): Artifacts {
   if (data.binding.jobId !== jobId || data.binding.runId !== runId || data.binding.revisionId !== revisionId
-    || data.page.limit !== ARTIFACT_PAGE_LIMIT || data.items.some(item => item.family === undefined || item.verification === undefined)) {
+    || data.page.limit !== ARTIFACT_PAGE_LIMIT || data.items.some(item => item.family === undefined || item.verification === undefined || item.content === undefined)) {
     throw new ApiClientError('invalid_response');
   }
   return data;
@@ -83,9 +83,13 @@ export function ArtifactCatalog({ jobId, runId, revisionId, basePath }: { jobId:
             <dt>{copy.role}</dt><dd>{item.role}</dd>
             <dt>{copy.revision}</dt><dd>{item.binding.revisionId === null ? copy.noRevision : <code>{item.binding.revisionId}</code>}</dd>
           </dl>
-          <p>{copy.downloadCheck}</p>
-          <a href={item.contentHref} download={item.displayName}
-            aria-label={textMessage(copy.download, { name: item.displayName })}>{message(copy.download, { name: <bdi>{item.displayName}</bdi> })}</a>
+          {item.content?.projection === 'unavailable'
+            ? <p class="artifact-projection-unavailable"><strong>{copy.projectionUnavailable}</strong></p>
+            : <>
+              <p>{item.content?.projection === 'redacted' ? copy.projectionRedacted : copy.downloadCheck}</p>
+              <a href={item.contentHref} download={item.displayName}
+                aria-label={textMessage(copy.download, { name: item.displayName })}>{message(copy.download, { name: <bdi>{item.displayName}</bdi> })}</a>
+            </>}
         </li>)}
       </ul>
       <nav aria-label={copy.title}>

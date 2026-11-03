@@ -345,6 +345,7 @@ main a + button, main button + button, main button + a { margin-inline-start: 0.
 .artifact-catalog nav { display: flex; flex-wrap: wrap; gap: .5rem; margin-block: 1rem; }
 .artifact-inventory-checked { border-inline-start: .3rem solid var(--accent); padding-inline-start: .5rem; }
 .artifact-unverified { border-inline-start: .3rem solid var(--focus); padding-inline-start: .5rem; }
+.artifact-projection-unavailable { border-inline-start: .3rem solid var(--focus); padding-inline-start: .5rem; }
 .source-search-form select { display: block; width: 100%; max-width: 100%; min-height: 44px; padding: .4rem; border: 1px solid var(--control-line); border-radius: .3rem; font: inherit; color: inherit; background: var(--surface); }
 .source-diff { min-width: 0; overflow-wrap: anywhere; }
 .source-diff nav, .source-diff-links { display: flex; flex-wrap: wrap; gap: .5rem 1rem; margin-block: 1rem; }

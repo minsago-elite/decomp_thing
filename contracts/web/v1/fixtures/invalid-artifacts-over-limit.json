@@ -32,7 +32,10 @@
         "role": "raw-evidence",
         "derivedFromArtifactId": null,
         "family": "exploration-report",
-        "verification": "not-verified"
+        "verification": "not-verified",
+        "content": {
+          "projection": "redacted"
+        }
       },
       {
         "artifactId": "progress_fedcba9876543210fedcba9876543210_ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
@@ -49,7 +52,10 @@
         "role": "raw-evidence",
         "derivedFromArtifactId": null,
         "family": "progress-journal",
-        "verification": "not-verified"
+        "verification": "not-verified",
+        "content": {
+          "projection": "redacted"
+        }
       }
     ],
     "page": {

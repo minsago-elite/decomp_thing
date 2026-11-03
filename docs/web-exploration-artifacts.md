@@ -17,7 +17,13 @@ bytes under the old descriptor. Old bytes are not retained in a separate blob st
 
 GET/HEAD `/api/v1/jobs/{jobId}/artifacts/{artifactId}/content` requires the existing
 private session policy and rejects query parameters. Both methods resolve and
-verify the digest; HEAD returns the same Content-Length without a body. Range and
+verify the stored digest before sending anything. The body is the shared redacted report
+projection (also served by the legacy report route), so it can differ from the stored bytes the
+descriptor's `sizeBytes` and `sha256` describe. Content-Length, ETag and ranges describe the served
+projection; `X-Decomp-Artifact-SHA256` repeats the stored digest, and `content.projection` in the
+descriptor is `redacted`, or `unavailable` when the stored report exceeds the 64 MiB projection limit
+(content then returns `409 ARTIFACT_PROJECTION_UNAVAILABLE`, never raw bytes). HEAD returns the same
+Content-Length without a body. Range and
 strong-ETag conditional semantics now follow the general artifact reader in
 [web-api.md](web-api.md#attempt-artifact-catalog-and-streamed-downloads).
 Content is served as an application/octet-stream attachment named exploration.json,

@@ -343,11 +343,14 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
   function checkHref(href: string, resource: ApiResource) {
     try { validateResourceHref(basePath, href, resource); } catch { throw new ApiClientError('invalid_response'); }
   }
-  // Catalog entries carry family and verification together; only revision-bound source metadata is verified.
+  // Catalog entries carry family, verification and content together; only revision-bound source metadata is verified.
   function checkCatalogArtifact(item: Artifact) {
     checkHref(item.contentHref, { kind: 'artifact-content', jobId: item.binding.jobId, artifactId: item.artifactId });
     requireValue((item.family === undefined) === (item.verification === undefined));
     if (item.family === undefined) return;
+    // Reports are served only as the redacted projection (or refused); source families are verbatim.
+    const report = item.family === 'exploration-report' || item.family === 'progress-journal';
+    requireValue(item.content !== undefined && (item.content.projection === 'verbatim') !== report);
     requireValue(item.artifactId === `${ARTIFACT_CODES[item.family]}_${item.artifactId.split('_')[1] ?? ''}_${item.sha256}`
       && /^[a-z]+_[a-f0-9]{32}_[a-f0-9]{64}$/u.test(item.artifactId) && item.binding.runId !== null);
     if (item.verification === 'source-inventory-checked') {

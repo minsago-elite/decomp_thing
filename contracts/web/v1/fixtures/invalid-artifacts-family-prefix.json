@@ -32,7 +32,10 @@
         "role": "raw-evidence",
         "derivedFromArtifactId": null,
         "family": "progress-journal",
-        "verification": "not-verified"
+        "verification": "not-verified",
+        "content": {
+          "projection": "redacted"
+        }
       },
       {
         "artifactId": "manifest_0123456789abcdef0123456789abcdef_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -49,7 +52,10 @@
         "role": "source",
         "derivedFromArtifactId": null,
         "family": "source-manifest",
-        "verification": "source-inventory-checked"
+        "verification": "source-inventory-checked",
+        "content": {
+          "projection": "verbatim"
+        }
       },
       {
         "artifactId": "archive_0123456789abcdef0123456789abcdef_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
@@ -66,7 +72,10 @@
         "role": "archive",
         "derivedFromArtifactId": null,
         "family": "source-archive",
-        "verification": "not-verified"
+        "verification": "not-verified",
+        "content": {
+          "projection": "verbatim"
+        }
       }
     ],
     "page": {

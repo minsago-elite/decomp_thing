@@ -1139,6 +1139,14 @@
       "valid": false
     },
     {
+      "file": "fixtures/invalid-artifacts-report-verbatim.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-artifacts-missing-content.json",
+      "valid": false
+    },
+    {
       "file": "fixtures/source-diff-page.json",
       "valid": true
     },

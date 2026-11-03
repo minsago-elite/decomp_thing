@@ -454,6 +454,8 @@ def check_source_search(data: dict) -> None:
 
 ARTIFACT_FAMILY_CODES = {"exploration-report": "exploration", "progress-journal": "progress", "source-manifest": "manifest",
                          "build-contract": "contract", "source-archive": "archive"}
+# Server-produced reports are served only through the shared redacted report projection.
+REDACTED_ARTIFACT_FAMILIES = {"exploration-report", "progress-journal"}
 
 
 def check_artifact_href(item: dict) -> None:
@@ -469,6 +471,11 @@ def check_catalog_artifact(item: dict) -> None:
         raise ValueError("catalog artifact family and verification must appear together")
     if "family" not in item:
         return
+    if "content" not in item:
+        raise ValueError("catalog artifact does not name its served content projection")
+    report = item["family"] in REDACTED_ARTIFACT_FAMILIES
+    if (item["content"]["projection"] == "verbatim") == report:
+        raise ValueError("report artifact content must be redacted or unavailable; source content is verbatim")
     code = ARTIFACT_FAMILY_CODES[item["family"]]
     if not re.fullmatch(re.escape(code) + r"_[a-f0-9]{32}_" + re.escape(item["sha256"]), item["artifactId"]):
         raise ValueError("catalog artifact identity does not bind its family and digest")
