@@ -169,24 +169,30 @@ class CompilerProvisioningControls(unittest.TestCase):
         header = mounted_include / 'stddef.h'
         header.write_bytes(b'authenticated standard header\n')
         unapproved = self.root / 'unapproved/include'
-        stderr = (b'#include <...> search starts here:\n' + str(include).encode() + b'\n' +
+        stderr = (b'#include <...> search starts here:\n' + str(mounted_include).encode() + b'\n' +
+                  str(include).encode() + b'\n' +
                   str(unapproved).encode() + b'\nEnd of search list.\n')
         result = SimpleNamespace(returncode=0, stdout='', stderr=stderr.decode())
         staged = self.executable('runtime/tools/cc')
         prefix = staged.parent
         with patch.object(PROVISIONER.subprocess, 'run', return_value=result) as run:
             evidence = PROVISIONER.staged_compiler_include_search(staged, prefix,
-                ((self.root / 'gcc', self.runtime / 'gcc'), (Path('/usr/include'), self.runtime / 'headers')))
+                ((self.root / 'gcc', self.runtime / 'gcc'), (Path('/usr/include'), self.runtime / 'headers')),
+                mounted_include)
         self.assertEqual(0, evidence['exitCode'])
-        self.assertEqual([str(include), str(unapproved)], evidence['searchPaths'])
-        self.assertEqual([{'searchPath': str(include), 'mountedPath': str(header), 'bytes': len(header.read_bytes()),
+        self.assertEqual([str(mounted_include), str(include), str(unapproved)], evidence['searchPaths'])
+        self.assertEqual([{'searchPath': str(mounted_include), 'mountedPath': str(header), 'bytes': len(header.read_bytes()),
+                           'sha256': hashlib.sha256(header.read_bytes()).hexdigest()},
+                          {'searchPath': str(include), 'mountedPath': str(header), 'bytes': len(header.read_bytes()),
                            'sha256': hashlib.sha256(header.read_bytes()).hexdigest()}], evidence['stddefCandidates'])
         self.assertIn('-B' + str(prefix) + '/', run.call_args.args[0])
+        self.assertIn('-I' + str(mounted_include), run.call_args.args[0])
         no_candidate = SimpleNamespace(returncode=1, stdout='', stderr=(
             '#include <...> search starts here:\n' + str(unapproved) + '\nEnd of search list.\n'))
         with patch.object(PROVISIONER.subprocess, 'run', return_value=no_candidate):
             absent = PROVISIONER.staged_compiler_include_search(staged, prefix,
-                ((self.root / 'gcc', self.runtime / 'gcc'), (Path('/usr/include'), self.runtime / 'headers')))
+                ((self.root / 'gcc', self.runtime / 'gcc'), (Path('/usr/include'), self.runtime / 'headers')),
+                mounted_include)
         self.assertEqual([], absent['stddefCandidates'])
         with self.assertRaisesRegex(ValueError, 'complete include-search list'):
             PROVISIONER.parse_gcc_include_search_paths(b'no compiler diagnostics')

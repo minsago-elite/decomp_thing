@@ -226,14 +226,16 @@ def parse_gcc_include_search_paths(stderr):
     return paths
 
 
-def staged_compiler_include_search(staged_compiler, subprogram_prefix, mounted_roots):
+def staged_compiler_include_search(staged_compiler, subprogram_prefix, mounted_roots, staged_headers_root):
     """Capture bounded search-path evidence from the exact staged compiler bytes."""
     staged_compiler = trusted(staged_compiler)
     subprogram_prefix = trusted(subprogram_prefix)
+    staged_headers_root = trusted(Path(staged_headers_root))
     mounts = tuple((trusted(Path(source)), trusted(Path(destination))) for source, destination in mounted_roots)
     if not mounts or len({source for source, _ in mounts}) != len(mounts) or len({dest for _, dest in mounts}) != len(mounts):
         raise ValueError('compiler include evidence lacks a unique mounted-root inventory')
-    result = subprocess.run([str(staged_compiler), f'-B{subprogram_prefix}/', '-v', '-E', '-x', 'c', '-'],
+    result = subprocess.run([str(staged_compiler), f'-B{subprogram_prefix}/', f'-I{staged_headers_root}',
+                            '-v', '-E', '-x', 'c', '-'],
                             input='#include <stddef.h>\n', text=True, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, timeout=30, check=False,
                             env={'LANG': 'C', 'LC_ALL': 'C', 'TZ': 'UTC', 'PATH': str(subprogram_prefix)})
@@ -242,9 +244,10 @@ def staged_compiler_include_search(staged_compiler, subprogram_prefix, mounted_r
         raise ValueError('compiler include-search output exceeds its byte bound')
     paths = parse_gcc_include_search_paths(stderr)
     candidates = []
+    candidate_roots = (*mounts, (staged_headers_root, staged_headers_root))
     for directory in paths:
         search_root = Path(directory)
-        for source_root, mounted_root in mounts:
+        for source_root, mounted_root in candidate_roots:
             if not search_root.is_relative_to(source_root):
                 continue
             relative = search_root.relative_to(source_root)
@@ -466,7 +469,7 @@ def prepare(args):
         build.append({'source': str(RUNTIME / 'headers'), 'destination': '/usr/include'})
         compiler_include_search = staged_compiler_include_search(
             RUNTIME / 'tools' / 'cc', RUNTIME / 'tools',
-            ((gcc_runtime, RUNTIME / 'gcc'), (Path('/usr/include'), RUNTIME / 'headers')))
+            ((gcc_runtime, RUNTIME / 'gcc'), (Path('/usr/include'), RUNTIME / 'headers')), RUNTIME / 'headers')
         require_compiler_stddef_candidate(compiler_include_search)
         link_parent = None
         for name in ('crt1.o', 'Scrt1.o', 'crti.o', 'crtn.o', 'libc.so', 'libc_nonshared.a'):
