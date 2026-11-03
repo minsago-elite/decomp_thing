@@ -27,6 +27,7 @@ internal class FullRunJournal private constructor(
     private val workflow: String,
     private val firstSequence: Long,
     private val maximumBytes: Long,
+    private val beforeMetadataDirectoryFsync: () -> Unit,
 ) : AutoCloseable {
     private val startedAt = Instant.now().toString()
     private val events = FileChannel.open(directory.resolve("events.jsonl"), CREATE_NEW, WRITE, NOFOLLOW_LINKS)
@@ -97,6 +98,7 @@ internal class FullRunJournal private constructor(
                 channel.force(true)
             }
             Files.move(temporary, directory.resolve("run.json"), ATOMIC_MOVE, REPLACE_EXISTING)
+            beforeMetadataDirectoryFsync()
             FileChannel.open(directory, READ).use { it.force(true) }
         } finally { Files.deleteIfExists(temporary) }
     }
@@ -105,8 +107,26 @@ internal class FullRunJournal private constructor(
     override fun close() {
         if (closed) return
         closed = true
-        try { events.force(true) } finally { events.close() }
-        publishMetadata(if (complete) "closed" else "logging-failed")
+        var failure: Throwable? = null
+        try { events.force(true) } catch (problem: Throwable) { failure = problem }
+        try { events.close() } catch (problem: Throwable) {
+            if (failure == null) failure = problem else failure!!.addSuppressed(problem)
+        }
+        if (failure != null) complete = false
+        try {
+            publishMetadata(if (complete) "closed" else "logging-failed")
+        } catch (problem: Throwable) {
+            complete = false
+            try {
+                // A post-replacement directory fsync failure leaves the replaced metadata visible.
+                // Publish an explicit failure state while preserving the original failure.
+                publishMetadata("logging-failed")
+            } catch (fallback: Throwable) {
+                problem.addSuppressed(fallback)
+            }
+            if (failure == null) failure = problem else failure!!.addSuppressed(problem)
+        }
+        failure?.let { throw it }
     }
 
     companion object {
@@ -117,7 +137,8 @@ internal class FullRunJournal private constructor(
         private val RUN_ID = Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
         fun create(root: Path, runId: String, workflow: String, firstSequence: Long,
-                   maximumBytes: Long = MAXIMUM_RUN_BYTES): FullRunJournal {
+                   maximumBytes: Long = MAXIMUM_RUN_BYTES,
+                   beforeMetadataDirectoryFsync: () -> Unit = {}): FullRunJournal {
             require(RUN_ID.matches(runId))
             require(maximumBytes in 4096..MAXIMUM_RUN_BYTES)
             val runs = root.resolve(DIRECTORY)
@@ -127,7 +148,8 @@ internal class FullRunJournal private constructor(
             require(Files.isDirectory(runs, NOFOLLOW_LINKS)) { "run history directory must not be a link" }
             val directory = Files.createDirectory(runs.resolve(runId),
                 PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")))
-            return FullRunJournal(directory, runId, workflow, firstSequence, maximumBytes)
+            return FullRunJournal(directory, runId, workflow, firstSequence, maximumBytes,
+                beforeMetadataDirectoryFsync)
         }
 
         fun directory(root: Path, runId: String): Path {
@@ -160,6 +182,7 @@ internal data class FullRunJournalWriterHooks(
     val maximumQueuedEvents: Int = 256,
     val beforeAppend: () -> Unit = {},
     val beforeFinalize: () -> Unit = {},
+    val beforeMetadataDirectoryFsync: () -> Unit = {},
 )
 
 /** Bounded mailbox that keeps fsync and serialization off agent/progress callback threads. */
@@ -185,6 +208,9 @@ internal class FullRunJournalWriter(
 
     val directory: Path get() = journal.directory
     val recordingFailure: Throwable? get() = failure.get()
+
+    /** A peer journal failed; the history must not claim the prefix it retained is complete. */
+    fun markIncomplete() = journal.markIncomplete()
 
     /** Never waits for filesystem work. Saturation makes the history explicitly incomplete. */
     fun append(event: JsonObject): Boolean {

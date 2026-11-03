@@ -94,7 +94,8 @@ class AgentProgressJournal private constructor(
             if (recordFullRun) {
                 val hooks = fullRunWriterHooks ?: FullRunJournalWriterHooks()
                 fullRun = FullRunJournalWriter(
-                    FullRunJournal.create(reportsDirectory, runId, workflow, sequence, maximumFullRunBytes),
+                    FullRunJournal.create(reportsDirectory, runId, workflow, sequence, maximumFullRunBytes,
+                        hooks.beforeMetadataDirectoryFsync),
                     hooks.maximumQueuedEvents,
                     hooks.beforeFinalize,
                     hooks.beforeAppend,
@@ -388,6 +389,9 @@ class AgentProgressJournal private constructor(
             }
         } catch (problem: Throwable) {
             failure.compareAndSet(null, problem)
+            try { fullRun?.markIncomplete() } catch (markFailure: Throwable) {
+                failure.compareAndSet(null, markFailure)
+            }
         } finally {
             // The snapshot writer owns final history shutdown and lease retirement. If its caller
             // times out or is interrupted, this finalizer still drains/marks history and retains
@@ -474,8 +478,9 @@ class AgentProgressJournal private constructor(
             workflow: String,
             hooks: FullRunJournalWriterHooks,
             maximumFullRunBytes: Long = FullRunJournal.MAXIMUM_RUN_BYTES,
+            afterSnapshotWrite: () -> Unit = {},
         ): AgentProgressJournal = AgentProgressJournal(
-            reportsDirectory, workflow, emptyList(), 256, 128, 512 * 1024, {}, null, null, true,
+            reportsDirectory, workflow, emptyList(), 256, 128, 512 * 1024, {}, afterSnapshotWrite, null, true,
             maximumFullRunBytes, hooks,
         )
 

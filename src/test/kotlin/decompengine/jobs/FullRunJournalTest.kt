@@ -92,6 +92,33 @@ class FullRunJournalTest {
     }
 
     @Test
+    fun `post replacement directory fsync failure replaces readable complete metadata with failure status`() {
+        val parent = Files.createDirectories(java.nio.file.Path.of("build/test-tmp/run-writer-directory-fsync-failure")
+            .toAbsolutePath())
+        val root = createTempDirectory(parent, "run-writer-")
+        val directoryFsyncs = java.util.concurrent.atomic.AtomicInteger()
+        val failure = IllegalStateException("injected post-replacement directory fsync failure")
+        val id = UUID.randomUUID().toString()
+        val journal = FullRunJournal.create(root, id, "reconstruction", 0,
+            beforeMetadataDirectoryFsync = {
+                if (directoryFsyncs.incrementAndGet() == 2) throw failure
+            })
+        val writer = FullRunJournalWriter(journal)
+        assertTrue(writer.append(event(id, 0)))
+
+        val closeFailure = assertFailsWith<IllegalStateException> { writer.close() }
+        assertEquals("full run journal recording failed", closeFailure.message)
+        assertSame(failure, closeFailure.cause)
+        val metadata = FullRunJournal.metadata(journal.directory)
+        assertEquals("logging-failed", metadata.getValue("state").jsonPrimitive.content)
+        assertEquals(JsonPrimitive(false), metadata.getValue("complete"))
+        FullRunEventReader(journal.directory).use { reader ->
+            assertEquals(0L, reader.next()!!.getValue("sequence").jsonPrimitive.long)
+            assertEquals("logging-failed", reader.verifyEnd().getValue("state").jsonPrimitive.content)
+        }
+    }
+
+    @Test
     fun `full run history survives display eviction and redacts diagnostics`() {
         val root = createTempDirectory("full-run-")
         lateinit var directory: java.nio.file.Path
