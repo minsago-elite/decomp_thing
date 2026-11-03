@@ -243,6 +243,26 @@ describe('log viewer', () => {
     expect(transport.get).toHaveBeenCalledTimes(3);
   });
 
+  it('keeps following a terminal recording across multiple pages until the same digest reaches its tail', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const terminalAttempt = { ...running, state: 'failed' as const, endedAt: fixture.readAt };
+    transport.get.mockResolvedValueOnce({ data: range(1, 500, 3000, { attempt: terminalAttempt }) });
+    mount(); await flush();
+    fireEvent.click(screen.getByRole('button', { name: 'Follow new lines' }));
+
+    for (const first of [501, 1001, 1501, 2001, 2501]) {
+      transport.get.mockResolvedValueOnce({ data: range(first, 500, 3000, { attempt: terminalAttempt }) });
+      await act(async () => { await vi.advanceTimersByTimeAsync(3000); }); await flush();
+      expect(transport.get.mock.calls.at(-1)![1]).toContain(`fromLine=${first}`);
+    }
+
+    expect(screen.getByText(/Showing lines 1001–3000 of 3000/)).toBeTruthy();
+    expect(screen.getByText('The attempt has ended; no new lines are expected.')).toBeTruthy();
+    const completedCalls = transport.get.mock.calls.length;
+    await act(async () => { await vi.advanceTimersByTimeAsync(9000); });
+    expect(transport.get).toHaveBeenCalledTimes(completedCalls);
+  });
+
   it.each(['pause', 'filter'])('invalidates an in-flight follow read on deliberate %s', async action => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     transport.get.mockResolvedValueOnce({ data: range(1, 100, 100, { attempt: running }) });
