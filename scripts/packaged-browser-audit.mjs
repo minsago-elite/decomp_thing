@@ -69,6 +69,19 @@ export function auditFixtures(repo, buildId) {
   const exploration = bound('report-exploration', selected);
   exploration.data.sourceArtifact.binding = selected;
   exploration.data.sourceArtifact.contentHref = `/nested${exploration.data.sourceArtifact.contentHref}`;
+  const chartExpected = {
+    reportId: exploration.data.reportId, jobId, runId, revisionId,
+    chartName: 'Observed output signature counts', tableName: 'Output signature counts reported by the producer',
+    counts: {
+      expanded: exploration.data.summary.expandedOutputSignatures,
+      added: exploration.data.summary.confidence.newOutputSignatureCount,
+      denominator: `Expanded observed signatures: ${exploration.data.summary.confidence.outputSignatureCount}`,
+    },
+    headers: ['Measurement', 'Reported count', 'Denominator / sample'],
+    labels: ['Expanded distinct exit/output signatures', 'New distinct exit/output signatures'],
+    sample: 'The producer’s expanded observation sample',
+    approximation: 'Bar lengths are approximate; the table preserves exact reported counts.',
+  };
   const history = bound('validation-history', { jobId, runId, revisionId: null });
   const sourceSearch = bound('source-search-complete', selected);
   const owner = history.data.items[0];
@@ -141,7 +154,7 @@ export function auditFixtures(repo, buildId) {
       ] }] },
   ];
   return {
-    pages, controls, csrfToken: bootstrap.data.csrfToken, sourceBytes: bytes, sourceName: file.data.item.displayName, runId, runVersion: run.data.version, retriedRunId: retried.data.runId,
+    pages, controls, csrfToken: bootstrap.data.csrfToken, sourceBytes: bytes, sourceName: file.data.item.displayName, runId, runVersion: run.data.version, retriedRunId: retried.data.runId, chartExpected,
     respond(method, pathname, accept) {
       const route = routes.find(([pattern, , verb = 'GET']) => pattern.test(pathname) && (verb === method || (verb === 'GET' && method === 'HEAD')));
       return route ? route[1](accept) : error(404, 'NOT_FOUND');
@@ -158,6 +171,41 @@ export const auditViewports = [
   { name: 'zoom 200% of 1280x800', width: 640, height: 400, deviceScaleFactor: 2, mobile: false },
   { name: 'zoom 400% of 1280x800', width: 320, height: 200, deviceScaleFactor: 4, mobile: false },
 ];
+
+// Capture the approximate graphic and exact identity-bound table from the real packaged page.
+export const measureOutputSignatureChart = `(() => {
+  const text = element => (element?.innerText ?? element?.textContent ?? '').trim().replace(/\\s+/g, ' ');
+  const ids = value => (value ?? '').split(/\\s+/).filter(Boolean);
+  const chart = document.querySelector('.output-signature-chart [role="img"]');
+  const figure = document.querySelector('.output-signature-chart');
+  const region = document.querySelector('[aria-labelledby="output-signature-breadth-title"] .retained-case-table');
+  const table = region?.querySelector('table');
+  const rect = element => {
+    const box = element?.getBoundingClientRect();
+    return box ? { x: box.x, y: box.y, width: box.width, height: box.height, right: box.right, bottom: box.bottom } : null;
+  };
+  const visible = element => !!element && element.checkVisibility()
+    && getComputedStyle(element).visibility === 'visible' && getComputedStyle(element).display !== 'none';
+  const labelledBy = ids(chart?.getAttribute('aria-labelledby'));
+  const describedBy = ids(chart?.getAttribute('aria-describedby'));
+  return {
+    chartPresent: !!chart, chartRole: chart?.getAttribute('role') ?? null,
+    chartVisible: visible(chart), figurePresent: !!figure, figureVisible: visible(figure),
+    chartName: labelledBy.map(id => text(document.getElementById(id))).filter(Boolean).join(' '),
+    chartDescription: describedBy.map(id => text(document.getElementById(id))).filter(Boolean),
+    chartBounds: rect(figure),
+    chartSeries: [...(chart?.querySelectorAll('.output-signature-series') ?? [])].map(series => ({
+      label: text(series.querySelector('span')), bounds: rect(series), svgBounds: rect(series.querySelector('svg')),
+      barWidth: series.querySelector('rect')?.getAttribute('width') ?? null,
+    })),
+    binding: text(document.querySelector('#exploration-report-binding')),
+    region: region ? { name: region.getAttribute('aria-label'), focusable: region.tabIndex === 0, visible: visible(region),
+      bounds: rect(region), clientWidth: region.clientWidth, scrollWidth: region.scrollWidth } : null,
+    caption: text(table?.querySelector('caption')),
+    headers: [...(table?.querySelectorAll('thead th') ?? [])].map(text),
+    rows: [...(table?.querySelectorAll('tbody tr') ?? [])].map(row => [...row.querySelectorAll('th, td')].map(text)),
+  };
+})()`;
 
 // Runs in the page. Regions that require two-dimensional reading may scroll; nothing else may
 // push the page wider than its viewport or hide an action off-screen.
@@ -404,7 +452,7 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
     { name: 'prefers-color-scheme', value: scheme }, { name: 'prefers-reduced-motion', value: 'reduce' }] }, tab.sessionId);
   const tab = await makeTarget();
   await intercept(tab);
-  const layout = []; const contrast = []; const focus = [];
+  const layout = []; const contrast = []; const focus = []; const chart = []; const chartScreenshots = [];
   for (const viewport of auditViewports) {
     await cdp.call('Emulation.setDeviceMetricsOverride', { width: viewport.width, height: viewport.height,
       deviceScaleFactor: viewport.deviceScaleFactor, mobile: viewport.mobile }, tab.sessionId);
@@ -419,10 +467,21 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
         await delay(50);
         const measured = await evaluate(tab, measurePage);
         layout.push({ page: page.name, viewport: viewport.name, scheme, ...measured });
+        if (page.name === 'attempt evidence') chart.push({ page: page.name, viewport: viewport.name, scheme,
+          viewportWidth: viewport.width, ...await evaluate(tab, measureOutputSignatureChart) });
         // Colour does not depend on width; measure it at the two layouts that restyle text.
         if (viewport.width === 1440 || viewport.width === 320 && viewport.deviceScaleFactor === 1) {
           contrast.push({ page: page.name, viewport: viewport.name, scheme, ...await evaluate(tab, measureContrast) });
         }
+      }
+      if (page.name === 'attempt evidence' && (viewport.name === 'desktop 1440x900' || viewport.name === 'zoom 400% of 1280x800')) {
+        await theme(tab, 'light');
+        await delay(50);
+        const name = viewport.name === 'desktop 1440x900'
+          ? 'attempt-evidence-output-signature-chart-desktop.png'
+          : 'attempt-evidence-output-signature-chart-zoom-400.png';
+        await capture(tab, name);
+        chartScreenshots.push(name);
       }
       // Visual evidence: every route at 400% zoom, and the #619 views at every supported size.
       if ((viewport.width === 320 && viewport.deviceScaleFactor === 4) || ['workspace', 'job detail', 'source directory', 'source file'].includes(page.name)) {
@@ -569,7 +628,8 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
     })`);
     feedback.push(timing.focused); data.push(timing.populated);
   }
-  return { fixtures: fixtures.pages.map(({ name, path }) => ({ name, path })), layout, contrast, focus, fulfilled, unmapped, interactions,
+  return { fixtures: fixtures.pages.map(({ name, path }) => ({ name, path })), chartExpected: fixtures.chartExpected,
+    layout, contrast, focus, chart, chartScreenshots, fulfilled, unmapped, interactions,
     workers: { highlightedTokens: highlighted, targets: workers }, keyboard,
     timing: { coldLoad: summary(cold), routeFeedback: summary(feedback), routeData: summary(data), raw: { cold, feedback, data } } };
 }
@@ -602,9 +662,45 @@ export function assertAudit(audit, manifest, responses, origin, budgets = { cold
     return records.filter(entry => entry && typeof entry === 'object');
   };
   const layout = coverage('layout', expected(auditViewports));
+  const chart = coverage('chart', expected(auditViewports).filter(entry => entry.page === 'attempt evidence'));
   const contrast = coverage('contrast', expected(auditViewports.filter(viewport =>
     viewport.width === 1440 || viewport.width === 320 && viewport.deviceScaleFactor === 1)));
   const focus = coverage('focus', expected([null]));
+  const chartExpected = audit.chartExpected;
+  const same = (actual, expected) => JSON.stringify(actual) === JSON.stringify(expected);
+  const requiredChartScreenshots = ['attempt-evidence-output-signature-chart-desktop.png', 'attempt-evidence-output-signature-chart-zoom-400.png'];
+  if (!same(audit.chartScreenshots, requiredChartScreenshots)) failures.push('chart: missing desktop or 400% packaged screenshot evidence');
+  for (const entry of chart) {
+    const where = `${entry.page} @ ${entry.viewport} (${entry.scheme})`;
+    const validRect = box => box && [box.x, box.y, box.width, box.height, box.right, box.bottom].every(Number.isFinite)
+      && box.width > 0 && box.height > 0;
+    if (!chartExpected || !entry.chartPresent || entry.chartRole !== 'img' || !entry.chartVisible || !entry.figurePresent
+      || !entry.figureVisible || entry.chartName !== chartExpected.chartName)
+      failures.push(`${where}: missing or misnamed accessible signature chart`);
+    if (!validRect(entry.chartBounds) || entry.chartBounds.x < -1 || entry.chartBounds.right > entry.viewportWidth + 1)
+      failures.push(`${where}: signature chart has invalid or off-viewport bounds`);
+    const expectedCounts = `Expanded distinct exit/output signatures: ${chartExpected?.counts.expanded}. New distinct exit/output signatures: ${chartExpected?.counts.added}.`;
+    if (!chartExpected || !entry.chartDescription?.includes(entry.binding)
+      || !entry.chartDescription.includes(expectedCounts)
+      || !entry.chartDescription.includes(chartExpected.tableName)
+      || !entry.chartDescription.includes(chartExpected.approximation))
+      failures.push(`${where}: chart description lost its report identity, exact counters, table or approximation note`);
+    if (!chartExpected || !entry.binding.includes(chartExpected.reportId) || !entry.binding.includes(chartExpected.jobId)
+      || !entry.binding.includes(chartExpected.runId) || !entry.binding.includes(chartExpected.revisionId))
+      failures.push(`${where}: chart is not bound to the expected report, job, attempt and revision`);
+    if (!chartExpected || entry.region?.name !== chartExpected.tableName || entry.region?.focusable !== true || entry.region?.visible !== true
+      || !validRect(entry.region?.bounds) || !Number.isFinite(entry.region?.clientWidth) || entry.region.clientWidth <= 0
+      || !Number.isFinite(entry.region?.scrollWidth) || entry.region.scrollWidth < entry.region.clientWidth)
+      failures.push(`${where}: exact table is not in a visible, named, keyboard-scrollable region`);
+    if (!chartExpected || entry.caption !== chartExpected.tableName || !same(entry.headers, chartExpected.headers)
+      || !same(entry.rows, [
+        [chartExpected.labels[0], chartExpected.counts.expanded, chartExpected.sample],
+        [chartExpected.labels[1], chartExpected.counts.added, chartExpected.counts.denominator],
+      ])) failures.push(`${where}: accessible table does not preserve exact producer counters and denominator`);
+    if (entry.chartSeries?.length !== 2 || entry.chartSeries.some(series => !series.label || !validRect(series.bounds)
+      || !validRect(series.svgBounds) || series.barWidth === null))
+      failures.push(`${where}: visual chart series are missing or not rendered`);
+  }
   for (const entry of layout) {
     const where = `${entry.page} @ ${entry.viewport} (${entry.scheme})`;
     if (entry.pageOverflowPx > 1) failures.push(`${where}: page scrolls horizontally by ${entry.pageOverflowPx}px: ${entry.overflow.join('; ')}`);

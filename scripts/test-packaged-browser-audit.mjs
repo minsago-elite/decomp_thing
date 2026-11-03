@@ -4,7 +4,7 @@ import { dirname, resolve } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { runInNewContext } from 'node:vm';
-import { assertAudit, auditContentReady, auditFixtures, auditPageNames, auditPageReady, auditTokenKinds, auditViewports, measureContrast, measureFocus, measurePage, prepareAuditPage, qualifyAudit } from './packaged-browser-audit.mjs';
+import { assertAudit, auditContentReady, auditFixtures, auditPageNames, auditPageReady, auditTokenKinds, auditViewports, measureContrast, measureFocus, measureOutputSignatureChart, measurePage, prepareAuditPage, qualifyAudit } from './packaged-browser-audit.mjs';
 
 // Controls for the packaged audit's own verdict: each injected defect must be reported, so a
 // passing CI audit cannot be a vacuous one.
@@ -23,7 +23,24 @@ function clean() {
   const fixtures = auditFixtures(repo, manifest.buildId);
   const matrix = fixtures.pages.flatMap(({ name: page }) => auditViewports.flatMap(viewport =>
     ['light', 'dark'].map(scheme => ({ page, viewport: viewport.name, scheme }))));
+  const chart = auditViewports.flatMap(viewport => ['light', 'dark'].map(scheme => ({
+    page: 'attempt evidence', viewport: viewport.name, scheme, viewportWidth: viewport.width,
+    chartPresent: true, chartRole: 'img', chartVisible: true, figurePresent: true, figureVisible: true, chartName: fixtures.chartExpected.chartName,
+    chartBounds: { x: 0, y: 0, width: 300, height: 100, right: 300, bottom: 100 },
+    chartSeries: fixtures.chartExpected.labels.map(label => ({ label, bounds: { x: 0, y: 0, width: 300, height: 30, right: 300, bottom: 30 },
+      svgBounds: { x: 0, y: 0, width: 300, height: 14, right: 300, bottom: 14 }, barWidth: '50' })),
+    binding: `${fixtures.chartExpected.reportId} ${fixtures.chartExpected.jobId} ${fixtures.chartExpected.runId} ${fixtures.chartExpected.revisionId}`,
+    chartDescription: [`${fixtures.chartExpected.reportId} ${fixtures.chartExpected.jobId} ${fixtures.chartExpected.runId} ${fixtures.chartExpected.revisionId}`,
+      `Expanded distinct exit/output signatures: ${fixtures.chartExpected.counts.expanded}. New distinct exit/output signatures: ${fixtures.chartExpected.counts.added}.`,
+      fixtures.chartExpected.tableName, fixtures.chartExpected.approximation],
+    region: { name: fixtures.chartExpected.tableName, focusable: true, visible: true, bounds: { x: 0, y: 0, width: 300, height: 100, right: 300, bottom: 100 }, clientWidth: 300, scrollWidth: 300 },
+    caption: fixtures.chartExpected.tableName, headers: fixtures.chartExpected.headers,
+    rows: [[fixtures.chartExpected.labels[0], fixtures.chartExpected.counts.expanded, fixtures.chartExpected.sample],
+      [fixtures.chartExpected.labels[1], fixtures.chartExpected.counts.added, fixtures.chartExpected.counts.denominator]],
+  })));
   return {
+    chartExpected: fixtures.chartExpected, chart,
+    chartScreenshots: ['attempt-evidence-output-signature-chart-desktop.png', 'attempt-evidence-output-signature-chart-zoom-400.png'],
     layout: matrix.map(identity => ({ ...identity, pageOverflowPx: 0, overflow: [], overflowCount: 0, clippedActions: [], smallTargets: [],
       headingWithinWidth: true, navigation: { narrow: true, toggleShown: true, linksShown: false }, animations: 0,
       scrollRegions: [{ fits: true, scrolls: true, focusable: true, named: true }] })),
@@ -41,12 +58,12 @@ const verdict = (audit, served = responses) => assertAudit(audit, manifest, serv
 test('a clean audit with every packaged asset and the worker has no failures', () => {
   const audit = clean();
   assert.deepEqual(auditFixtures(repo, manifest.buildId).pages.map(page => page.name), auditPageNames);
-  assert.deepEqual([audit.layout.length, audit.contrast.length, audit.focus.length], [120, 48, 24]);
+  assert.deepEqual([audit.layout.length, audit.contrast.length, audit.focus.length, audit.chart.length], [120, 48, 24, 10]);
   assert.deepEqual(verdict(audit), []);
 });
 
 test('rejects absent, empty, partial, duplicate and unexpected measurement matrices', () => {
-  for (const kind of ['layout', 'contrast', 'focus']) {
+  for (const kind of ['layout', 'contrast', 'focus', 'chart']) {
     for (const missing of [undefined, null, []]) {
       const audit = clean(); audit[kind] = missing;
       assert.match(verdict(audit).join('\n'), new RegExp(`${kind}: missing`));
@@ -64,9 +81,37 @@ test('rejects absent, empty, partial, duplicate and unexpected measurement matri
       assert.match(verdict(unexpected).join('\n'), new RegExp(`${kind}: unexpected coverage`));
     }
   }
-  const empty = clean(); empty.layout = []; empty.contrast = []; empty.focus = [];
+  const empty = clean(); empty.layout = []; empty.contrast = []; empty.focus = []; empty.chart = [];
   empty.timing = { coldLoad: { p95: null }, routeFeedback: { p95: null }, routeData: { p95: null } };
-  assert.equal(verdict(empty).length, 6, 'the independently reproduced empty/null report must fail');
+  assert.equal(verdict(empty).length, 7, 'the independently reproduced empty/null report must fail');
+});
+
+test('requires the rendered chart identity, exact table and geometry at every viewport and theme', () => {
+  const audit = clean();
+  assert.equal(audit.chart.length, auditViewports.length * 2);
+  for (const [field, value, pattern] of [
+    ['chartName', 'Unlabeled', /misnamed accessible signature chart/],
+    ['binding', 'wrong report', /not bound to the expected report/],
+    ['caption', 'Wrong caption', /accessible table does not preserve/],
+    ['headers', [], /accessible table does not preserve/],
+    ['rows', [], /accessible table does not preserve/],
+  ]) {
+    const changed = clean(); changed.chart[0][field] = value;
+    assert.match(verdict(changed).join('\n'), pattern);
+  }
+  for (const change of [
+    { chartPresent: false }, { chartVisible: false }, { chartRole: 'presentation' },
+    { chartBounds: { x: -3, y: 0, width: 20, height: 10, right: 17, bottom: 10 } },
+    { chartDescription: [] }, { region: { name: 'Unnamed', focusable: false, bounds: null, clientWidth: 0, scrollWidth: 0 } },
+    { chartSeries: [] },
+  ]) {
+    const changed = clean(); Object.assign(changed.chart[0], change);
+    assert.ok(verdict(changed).length > 0, JSON.stringify(change));
+  }
+  const missing = clean(); missing.chart.pop();
+  assert.match(verdict(missing).join('\n'), /chart: missing 1 coverage/);
+  const screenshots = clean(); screenshots.chartScreenshots = [];
+  assert.match(verdict(screenshots).join('\n'), /missing desktop or 400% packaged screenshot evidence/);
 });
 
 test('requires finite, complete timing samples and consistent summaries before budget checks', () => {
@@ -253,7 +298,7 @@ test('preparation refuses missing rendered content or unused read fixtures', asy
 test('qualifyAudit prepares every fresh layout/contrast/focus navigation before measuring', async () => {
   const fixtures = auditFixtures(repo, manifest.buildId);
   let current, page, onRequest;
-  const counts = { layout: 0, contrast: 0, focus: 0, navigations: 0 };
+  const counts = { layout: 0, contrast: 0, focus: 0, chart: 0, navigations: 0 };
   const completed = new Error('stop before worker/browser qualification');
   const cdp = {
     on(event, callback) { if (event === 'Fetch.requestPaused') onRequest = callback; },
@@ -278,6 +323,7 @@ test('qualifyAudit prepares every fresh layout/contrast/focus navigation before 
       if (expression === measurePage) kind = 'layout';
       else if (expression === measureContrast) kind = 'contrast';
       else if (expression === measureFocus) kind = 'focus';
+      else if (expression === measureOutputSignatureChart) kind = 'chart';
       if (kind) {
         assert.equal(await current.evaluate(tab, auditPageReady(page, true)), true, `${kind} measured an empty ${page.name}`);
         assert.deepEqual(current.actions, (page.preparation ?? []).map(step => step.action));
@@ -287,7 +333,7 @@ test('qualifyAudit prepares every fresh layout/contrast/focus navigation before 
       return current.evaluate(tab, expression);
     },
   }), error => error === completed);
-  assert.deepEqual(counts, { layout: 120, contrast: 48, focus: 48, navigations: 84 });
+  assert.deepEqual(counts, { layout: 120, contrast: 48, focus: 48, chart: 10, navigations: 84 });
 });
 
 test('content checks require visible, distinctive rows rather than an empty or hidden table', () => {
