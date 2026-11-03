@@ -299,20 +299,7 @@ class ManagedGitRepositories(
      */
     private fun unchangedInitialization(record: GitRepositoryRecord, workTree: Path): Boolean {
         val expected = record.sourceManifestSha256?.takeIf { record.origin == "initialized" } ?: return false
-        val digests = sortedMapOf<String, String>()
-        Files.walk(workTree).use { paths ->
-            for (path in paths) {
-                GitStorage.checkInterrupted()
-                if (path == workTree) continue
-                val relative = workTree.relativize(path)
-                // The copy never includes these roots, so output written there is not part of the comparison.
-                if (relative.getName(0).toString() in GitTrackingPolicy.UNCOPIED_ROOTS) continue
-                if (Files.isDirectory(path, NOFOLLOW_LINKS)) continue
-                if (!Files.isRegularFile(path, NOFOLLOW_LINKS) || digests.size >= GitSourceCopy.MAX_FILES) return false
-                digests[relative.toString()] = GitSourceCopy.digestOf(path)
-            }
-        }
-        return GitSourceCopy.manifestDigest(digests) == expected
+        return GitSourceCopy.matchesManifest(workTree, expected)
     }
 
     /**
