@@ -430,6 +430,17 @@ reproduce() {
   python3 scripts/verify-gcc-toolchain-reproduction.py --lock oracle/gcc/16.2.0/toolchain-reproduction.json \
     --build-record oracle/gcc/16.2.0/build-record.json < "$evidence/image-inspect.json"
   observed=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[0]["Id"])' "$evidence/image-inspect.json")
+  timeout --signal=TERM --kill-after=5s 120s "$docker_bin" --host "unix://$socket" run --rm \
+    --platform linux/amd64 --network none --read-only --cap-drop ALL \
+    --security-opt no-new-privileges --tmpfs /tmp:rw,nosuid,nodev,noexec \
+    --mount "type=bind,src=$repo,dst=/oracle,readonly" --workdir /oracle \
+    --entrypoint /usr/bin/python3 "$observed" \
+    scripts/verify-gcc-oracle-build-record.py \
+    --source-lock oracle/gcc/16.2.0/source-lock.json \
+    --build-record oracle/gcc/16.2.0/build-record.json \
+    --container-digest "$observed" \
+    --reproduction-lock oracle/gcc/16.2.0/toolchain-reproduction.json \
+    > "$evidence/live-build-record-verification.txt" 2>&1 || die 'contained live GCC build-record verifier failed'
   printf 'GCC_TOOLCHAIN_IMAGE_ID=%s\nDECOMP_TEST_OCI_IMAGE_DIGEST=%s\n' "$observed" "$observed" >> "$GITHUB_ENV"
   printf 'DOCKER=%s\nDOCKER_HOST=unix://%s\n' "$docker_bin" "$socket" >> "$GITHUB_ENV"
 }

@@ -122,6 +122,71 @@ def safe_name(name: str) -> None:
         refuse(f"unsafe tar member path {name!r}")
 
 
+def scan_tar(path: pathlib.Path, *, entry_limit: int = 200000, file_limit: int = 4 * 1024**3) -> None:
+    """Validate raw tar framing and extension sizes before tarfile allocates metadata."""
+    size = path.stat().st_size
+    if size > file_limit:
+        refuse("tar input exceeds stored-byte budget")
+    offset = 0
+    entries = 0
+    metadata = 0
+    extension_chain = 0
+    with path.open("rb") as stream:
+        while offset + 512 <= size:
+            stream.seek(offset)
+            header = stream.read(512)
+            if len(header) != 512:
+                refuse("truncated tar header")
+            if header == b"\0" * 512:
+                return
+            stored_checksum = header[148:156].strip(b" \0")
+            if not stored_checksum or any(c not in b"01234567" for c in stored_checksum):
+                refuse("invalid tar header checksum field")
+            checksum = sum(header[:148]) + 8 * 32 + sum(header[156:])
+            if checksum != int(stored_checksum, 8):
+                refuse("tar header checksum mismatch")
+            raw_size = header[124:136].strip(b" \0")
+            if not raw_size or any(c not in b"01234567" for c in raw_size):
+                refuse("unsupported or invalid tar numeric size")
+            payload_size = int(raw_size, 8)
+            if payload_size > size or offset + 512 + payload_size > size:
+                refuse("tar payload size exceeds admitted file")
+            name = header[:100].split(b"\0", 1)[0]
+            prefix = header[345:500].split(b"\0", 1)[0]
+            full_name = prefix + (b"/" if prefix and name else b"") + name
+            if len(full_name) > 4096 or len(header[157:257].split(b"\0", 1)[0]) > 4096:
+                refuse("tar name or link target exceeds metadata bound")
+            entries += 1
+            if entries > entry_limit:
+                refuse("archive member-count budget exceeded")
+            kind = header[156:157]
+            if kind in (b"x", b"g", b"L", b"K"):
+                extension_chain += 1
+                metadata += payload_size
+                if payload_size > 65536 or metadata > 4 * 1024**2 or extension_chain > 16:
+                    refuse("tar PAX/GNU extension budget exceeded")
+                if kind in (b"x", b"g"):
+                    body = stream.read(payload_size)
+                    pos = 0
+                    while pos < len(body):
+                        space = body.find(b" ", pos)
+                        if space < 0 or space == pos or not body[pos:space].isdigit():
+                            refuse("invalid PAX record length")
+                        record_len = int(body[pos:space])
+                        if record_len <= space - pos + 1 or pos + record_len > len(body):
+                            refuse("PAX record exceeds bounded extension")
+                        record = body[space + 1:pos + record_len]
+                        if not record.endswith(b"\n") or b"=" not in record:
+                            refuse("malformed PAX record")
+                        pos += record_len
+            else:
+                extension_chain = 0
+            padded = ((payload_size + 511) // 512) * 512
+            offset += 512 + padded
+    if offset < size and size - offset >= 512:
+        refuse("tar has malformed trailing framing")
+
+
 def validate_archive_members(tf: tarfile.TarFile, limit: int) -> None:
     count=0
     for member in tf:
@@ -211,6 +276,7 @@ def bounded_stream(path: pathlib.Path, cap: int, source_path: pathlib.Path | Non
 def tar_census(layer_path: pathlib.Path) -> list[dict[str, object]]:
     rows = []
     census_bytes = 0
+    scan_tar(layer_path, entry_limit=100000, file_limit=4 * 1024**3)
     try:
         with tarfile.open(layer_path, mode="r:") as tf:
             for ordinal, m in enumerate(tf):
@@ -253,6 +319,7 @@ def inspect(docker_archive: pathlib.Path, oci_archive: pathlib.Path, out: pathli
     for path in (docker_archive, oci_archive):
         if not path.is_file() or path.is_symlink() or path.stat().st_size > cap:
             refuse(f"missing, linked, or over-limit archive {path.name}")
+        scan_tar(path, entry_limit=200000, file_limit=cap)
     with tarfile.open(docker_archive, "r:") as tf:
         validate_archive_members(tf, 200000)
         manifest_raw = read_member(tf, "manifest.json", 1024 * 1024)
