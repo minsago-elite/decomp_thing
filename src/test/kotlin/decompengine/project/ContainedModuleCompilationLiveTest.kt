@@ -115,13 +115,11 @@ class ContainedModuleCompilationLiveTest {
     fun `real compiler rejection preserves the earlier accepted SourceTree revision and checkpoint`() {
         val fixture = fixture("source-tree-rejection")
         val original = model()
-        val manifest = SourceTreeGenerator.generate(original, fixture.project, profile = fixture.profile,
-            reconstructor = authoredReconstructor())
+        val manifest = fixture.generate(original, authoredReconstructor())
         val accepted = fixture.acceptedRevision(manifest)
         val candidateModel = original.copy(functions = original.functions.map { it.copy(strings = setOf("new recovered evidence")) })
         val rejection = assertFailsWith<ModuleReconstructionRevisionRejectedException> {
-            SourceTreeGenerator.generate(candidateModel, fixture.project, profile = fixture.profile,
-                reconstructor = authoredReconstructor(body = "return missing_live_fixture_value;"))
+            fixture.generate(candidateModel, authoredReconstructor(body = "return missing_live_fixture_value;"))
         }
         assertTrue(rejection.issues.any { it.code == "module-compilation-failed" })
         accepted.forEach { (path, bytes) -> assertContentEquals(bytes, Files.readAllBytes(fixture.project.resolve(path)), path) }
@@ -145,16 +143,14 @@ class ContainedModuleCompilationLiveTest {
     fun `interrupting an observed real compiler restores prior acceptance and removes its processes scope and scratch`() {
         val fixture = fixture("source-tree-cancellation")
         val original = model()
-        val manifest = SourceTreeGenerator.generate(original, fixture.project, profile = fixture.profile,
-            reconstructor = authoredReconstructor())
+        val manifest = fixture.generate(original, authoredReconstructor())
         val accepted = fixture.acceptedRevision(manifest)
         val candidateModel = original.copy(functions = original.functions.map { it.copy(strings = setOf("cancelled recovered revision")) })
         val failure = AtomicReference<Throwable?>()
         val interrupted = AtomicBoolean()
         val thread = Thread({
             try {
-                SourceTreeGenerator.generate(candidateModel, fixture.project, profile = fixture.profile,
-                    reconstructor = authoredReconstructor(body = longCompilerBody()))
+                fixture.generate(candidateModel, authoredReconstructor(body = longCompilerBody()))
             } catch (caught: Throwable) {
                 failure.set(caught)
             } finally {
@@ -182,8 +178,8 @@ class ContainedModuleCompilationLiveTest {
             val attempt = Json.parseToJsonElement(Files.readString(fixture.project.resolve("reports/modules/parse.attempt.json"))).jsonObject
             assertEquals("interrupted", attempt.getValue("status").jsonPrimitive.content)
             assertFalse(Thread.currentThread().isInterrupted, "only the generation worker was interrupted")
-            val resumed = SourceTreeGenerator.generate(original, fixture.project, profile = fixture.profile,
-                reconstructor = ModuleReconstructor { error("the preserved accepted revision must resume without reconstruction dispatch") })
+            val resumed = fixture.generate(original,
+                ModuleReconstructor { error("the preserved accepted revision must resume without reconstruction dispatch") })
             val revalidated = fixture.acceptedRevision(resumed)
             val sourcePath = fixture.path("module-implementation")
             assertContentEquals(accepted.getValue(sourcePath), revalidated.getValue(sourcePath))
@@ -243,6 +239,29 @@ class ContainedModuleCompilationLiveTest {
 
     private class Fixture(val root: Path, val project: Path,
         val runtime: ContainedModuleCompilationRuntimeConfiguration, val profile: ReconstructionProfile) {
+        private var compilerDiagnosticSequence = 0
+
+        fun generate(model: RecoveredProgramModel, reconstructor: ModuleReconstructor): SourceTreeManifest =
+            ContainedModuleCompilationPolicy.withQualificationDiagnosticsObserver(
+                observer = { stdout, stderr ->
+                    val sequence = compilerDiagnosticSequence++
+                    val document = JsonObject(mapOf(
+                        "schemaVersion" to JsonPrimitive(1),
+                        "sequence" to JsonPrimitive(sequence),
+                        "stdoutBytes" to JsonPrimitive(stdout.size),
+                        "stdoutSha256" to JsonPrimitive(sha256(stdout)),
+                        "stdoutBase64" to JsonPrimitive(Base64.getEncoder().encodeToString(stdout)),
+                        "stderrBytes" to JsonPrimitive(stderr.size),
+                        "stderrSha256" to JsonPrimitive(sha256(stderr)),
+                        "stderrBase64" to JsonPrimitive(Base64.getEncoder().encodeToString(stderr)),
+                    ))
+                    Files.write(root.resolve("source-tree-compiler-$sequence.json"), OracleJson.canonicalBytes(document))
+                },
+                action = {
+                    SourceTreeGenerator.generate(model, project, profile = profile, reconstructor = reconstructor)
+                },
+            )
+
         fun path(role: String): String = profile.layout.declaration(role).let { declaration ->
             declaration.materialize(if ("{module}" in declaration.pathTemplate) mapOf("module" to "parse") else emptyMap())
         }

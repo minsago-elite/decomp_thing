@@ -15,6 +15,8 @@ import kotlinx.serialization.json.JsonPrimitive
 /** Exact module-object compilation only. Linking and program behavior retain separate authority. */
 internal object ContainedModuleCompilationPolicy : ModuleCompilationPolicy {
     const val POLICY_ID = "generated-c-contained-module-compilation-v1"
+    private val qualificationDiagnosticsObserver = ThreadLocal<((ByteArray, ByteArray) -> Unit)?>()
+
     override val id = POLICY_ID
     override val legacyFingerprintIdentity = GeneratedCModuleValidation.POLICY_ID
     override fun requireAvailable(profile: ReconstructionProfile) {
@@ -31,7 +33,19 @@ internal object ContainedModuleCompilationPolicy : ModuleCompilationPolicy {
             listOf("-c", sourcePath, "-o", "<owned-module-object>")
     }
     override fun validate(projectDir: Path, sourcePath: String, profile: ReconstructionProfile): ModuleCompilationEvidence =
-        VerifiedContainedModuleCompilation.compile(projectDir, sourcePath, profile)
+        VerifiedContainedModuleCompilation.compile(projectDir, sourcePath, profile, qualificationDiagnosticsObserver.get())
+
+    /** Scoped test observation of compiler bytes already authenticated by the worker result. */
+    internal fun <T> withQualificationDiagnosticsObserver(
+        observer: (stdout: ByteArray, stderr: ByteArray) -> Unit,
+        action: () -> T,
+    ): T {
+        val previous = qualificationDiagnosticsObserver.get()
+        qualificationDiagnosticsObserver.set(observer)
+        return try { action() } finally {
+            if (previous == null) qualificationDiagnosticsObserver.remove() else qualificationDiagnosticsObserver.set(previous)
+        }
+    }
 }
 
 /** A same-process result issued only after real execution, result capture, and owned cleanup. */
