@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'preact/hooks';
+import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import type { Operation, SourceArchive as SourceArchiveStatus } from '../api/generated';
 import { ApiClientError } from '../api/errors';
 import type { SourceSelection } from '../app/paths';
@@ -35,7 +35,8 @@ export function SourceArchive({ selected, basePath, session }: { selected: Sourc
     (await client.get('sourceArchive', archiveStatusRoute(selected), { signal })).data, selected, basePath), setRead), [client, key]);
   const current = refresh > 0 && read ? currentSourceRead(read, key) : refresh > 0 ? { key, state: 'loading' as const } : null;
   const data = current?.state === 'ready' ? current.value : null;
-  useEffect(() => { if (data && focusResult.current) { focusResult.current = false; result.current?.focus(); } }, [data]);
+  // Layout timing: focus lands in the same commit that renders the verified result, not after a later paint.
+  useLayoutEffect(() => { if (data && focusResult.current) { focusResult.current = false; result.current?.focus(); } }, [data]);
   const running = progress?.state === 'running';
   function verify(archiveSha256: string) {
     const csrfToken = session.csrf();
