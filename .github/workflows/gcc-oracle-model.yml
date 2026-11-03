@@ -221,8 +221,8 @@ jobs:
           set -e
           if test "$profile_status" = 0; then
             python3 scripts/run-gcc-behavior-corpus.py \
-              --json-output "$GCC_BUILDER_ROOT/v/e/behavior-corpus-evidence.json"
-            cmp "$GCC_BUILDER_ROOT/v/e/behavior-corpus-evidence.json" \
+              --json-output "$GCC_BUILDER_ROOT/evidence/behavior-corpus-evidence.json"
+            cmp "$GCC_BUILDER_ROOT/evidence/behavior-corpus-evidence.json" \
               oracle/gcc/16.2.0/behavior-corpus-evidence.json
           elif test "$profile_status" = 78; then
             echo '::notice title=GCC behavior evidence not reproduced::The hosted kernel/executor does not match the checked GCC benchmark profile; offline schema/provenance gates and live generic sandbox tests still ran.'
@@ -252,7 +252,10 @@ jobs:
           if-no-files-found: warn
           path: |
             build/g/*/owner.txt
-            build/g/*/v/e
+            build/g/*/evidence
+            build/g/*/owner.json
+            build/g/*/journal.jsonl
+            build/g/*/control
 
   driver-dwarf-interfaces:
     name: Retained GCC driver DWARF interfaces

@@ -376,6 +376,9 @@ class ProductionBackend:
         atomic_json(self.root / "control" / f"manager-receipt-{role}.json", probe)
         inspected = self.authority.inspect(self.root, role, 5)
         require_domain_receipt(inspected, slice_facts, service_facts, token, role)
+        if role == "buildkit":
+            bind_buildkit_config(self.root, service_facts["controlGroup"],
+                                 manifest["identity"]["ownerUid"], manifest["identity"]["ownerGid"])
         receipt = {"ownerToken": token, "role": role, "manager": manager_identity(role),
             "bootId": inspected["bootId"], "slice": slice_name, "unit": service_name,
             "description": description, "objectPath": service_object,
@@ -1457,6 +1460,58 @@ def fixed_socket_inventory(root: Path) -> list[str]:
         "x/containerd/containerd.sock", "x/containerd/containerd.sock.ttrpc", "t/runc-console.sock")]
 
 
+def bind_buildkit_config(root: Path, service_cgroup: str, uid: int, gid: int) -> None:
+    """Bind the fixed worker config to the manager-authenticated service cgroup before child release."""
+    if not isinstance(service_cgroup, str) or not re.fullmatch(r"/[A-Za-z0-9_.@/-]+", service_cgroup) or \
+            ".." in service_cgroup.split("/"):
+        raise Refusal("manager service cgroup cannot be represented in the BuildKit configuration")
+    path = root / "v" / "s" / "buildkitd.toml"
+    try:
+        st = path.lstat()
+        if not stat.S_ISREG(st.st_mode) or path.is_symlink() or st.st_size > 32 * 1024 or \
+                st.st_uid != uid or st.st_gid != gid or st.st_mode & 0o077:
+            raise Refusal("BuildKit config is linked, nonregular, oversized, or not private")
+        parsed = tomllib.loads(path.read_bytes().decode("utf-8", "strict"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise Refusal("BuildKit config is missing or malformed before owner binding") from exc
+    expected = {"worker": {"oci": {"enabled": True, "snapshotter": "native",
+                    "platforms": ["linux/amd64"], "max-parallelism": 1},
+                "containerd": {"enabled": False}},
+                "grpc": {"address": [f"unix://{root}/b.sock"], "uid": os.getuid(), "gid": os.getgid()}}
+    if parsed != expected:
+        raise Refusal("BuildKit config differs from the fixed native-worker profile")
+    content = ("[worker.oci]\n"
+        "  enabled = true\n"
+        "  snapshotter = \"native\"\n"
+        "  platforms = [\"linux/amd64\"]\n"
+        "  max-parallelism = 1\n"
+        f"  defaultCgroupParent = \"{service_cgroup.rstrip('/')}/daemon\"\n"
+        "[worker.containerd]\n"
+        "  enabled = false\n"
+        "[grpc]\n"
+        f"  address = [\"unix://{root}/b.sock\"]\n"
+        f"  uid = {os.getuid()}\n"
+        f"  gid = {os.getgid()}\n").encode("utf-8")
+    temporary = path.with_name(path.name + ".owner-tmp-" + secrets.token_hex(6))
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        view = memoryview(content)
+        while view:
+            amount = os.write(fd, view)
+            if amount <= 0:
+                raise Refusal("short write binding BuildKit cgroup config")
+            view = view[amount:]
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.replace(temporary, path)
+    dfd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(dfd)
+    finally:
+        os.close(dfd)
+
+
 def fixed_launch_profile(root: Path, role: str, token: str, uid: int) -> tuple[list[str], dict[str, str]]:
     if role == "buildkit":
         binary = root / "v/tools/buildkit/bin/buildkitd"
@@ -1480,6 +1535,57 @@ def fixed_launch_profile(root: Path, role: str, token: str, uid: int) -> tuple[l
                   "DOCKER_CONFIG": str(root / "v/docker-config"),
                   "DOCKERD": str(root / "v/tools/docker/dockerd"),
                   "DOCKERD_ROOTLESS_ROOTLESSKIT_STATE_DIR": str(root / "r")}
+
+
+def validate_buildkit_health(workers_raw: bytes, info_raw: bytes) -> dict:
+    try:
+        workers = json.loads(workers_raw)
+        info = json.loads(info_raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise Refusal("BuildKit health response is malformed") from exc
+    rows = workers if isinstance(workers, list) else \
+        workers.get("workers", workers.get("Workers", [])) if isinstance(workers, dict) else []
+    if not isinstance(rows, list) or len(rows) != 1:
+        raise Refusal("BuildKit health response must contain exactly one worker")
+    for worker in rows:
+        labels = worker.get("labels", worker.get("Labels", {})) if isinstance(worker, dict) else {}
+        if not isinstance(labels, dict):
+            raise Refusal("BuildKit worker labels are malformed")
+        executor = worker.get("executor", labels.get("org.mobyproject.buildkit.worker.executor"))
+        snapshotter = worker.get("snapshotter", labels.get("org.mobyproject.buildkit.worker.snapshotter"))
+        process_mode = worker.get("process-mode", labels.get("org.mobyproject.buildkit.worker.oci.process-mode"))
+        platforms = worker.get("platforms", worker.get("Platforms", worker.get("platform", [])))
+        if executor != "oci" or snapshotter != "native" or process_mode != "sandbox" or \
+                not isinstance(platforms, list) or not any(p == "linux/amd64" or
+                    isinstance(p, dict) and p.get("OS", p.get("os")) == "linux" and
+                    p.get("Architecture", p.get("architecture")) == "amd64" for p in platforms):
+            raise Refusal("BuildKit worker is not the admitted OCI/native sandbox for linux/amd64")
+    info_text = json.dumps(info, sort_keys=True).lower()
+    if "v0.20.2" not in info_text or "97437fdd7e32f29bb80288d800cd4ffcb34e1c15" not in info_text:
+        raise Refusal("BuildKit daemon health identity differs from the pinned release")
+    return {"workerCount": len(rows), "executor": "oci", "snapshotter": "native",
+            "processMode": "sandbox", "platform": "linux/amd64", "versionPinned": True}
+
+
+def validate_docker_health(info_raw: bytes, version_raw: bytes, root: Path, socket_path: Path) -> dict:
+    try:
+        info = json.loads(info_raw)
+        version = version_raw.decode("ascii", "strict").strip().split()
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise Refusal("rootless Docker health response is malformed") from exc
+    expected_data = root / "v" / "s" / "docker-data"
+    if not isinstance(info, dict) or info.get("Driver") != "overlay2" or \
+            Path(str(info.get("DockerRootDir", "/"))).resolve() != expected_data.resolve() or \
+            info.get("ServerVersion") != "29.7.2" or version != ["29.7.2", "6a43e3d"]:
+        raise Refusal("rootless Docker health identity differs from the pinned runtime")
+    try:
+        endpoint = socket_path.lstat()
+    except OSError as exc:
+        raise Refusal("rootless Docker health endpoint is unavailable") from exc
+    if not stat.S_ISSOCK(endpoint.st_mode) or endpoint.st_uid != os.getuid():
+        raise Refusal("rootless Docker health endpoint identity is invalid")
+    return {"serverVersion": "29.7.2", "serverCommit": "6a43e3d", "driver": "overlay2",
+            "dataRoot": str(expected_data), "endpointOwner": endpoint.st_uid}
 
 
 def repository_root() -> Path:
@@ -1854,6 +1960,55 @@ class Owner:
                     facts={"health": facts, "execReceiptSha256": hashlib.sha256(
                         json.dumps(record.get("exec", {}), sort_keys=True).encode()).hexdigest()})
 
+    def ready_after_health(self, role: str, *, timeout: float = 60.0) -> dict:
+        if role not in ("buildkit", "rootless") or not isinstance(self.backend, ProductionBackend):
+            raise Refusal("health-bound readiness requires a production-owned role")
+        manifest = self._manifest()
+        if manifest["roles"].get(role, {}).get("status") != "exec-observed":
+            raise Refusal("health-bound readiness requires an exec-observed role")
+        deadline = self.clock() + min(max(timeout, 0.001), 60.0)
+        last_error = "service health was not observed"
+        while self.clock() < deadline:
+            remaining = deadline - self.clock()
+            try:
+                if role == "buildkit":
+                    client = self.root / "v" / "tools" / "buildkit" / "bin" / "buildctl"
+                    endpoint = f"unix://{self.root}/b.sock"
+                    runner = self.backend.runner
+                    status, workers, err = runner.run([str(client), "--addr", endpoint,
+                        "debug", "workers", "--format", "{{json .}}"], min(5.0, remaining))
+                    if status != 0:
+                        raise Refusal(f"BuildKit worker health command failed: {err[:512]!r}")
+                    status, info, err = runner.run([str(client), "--addr", endpoint,
+                        "debug", "info", "--format", "{{json .}}"], min(5.0, remaining))
+                    if status != 0:
+                        raise Refusal(f"BuildKit info health command failed: {err[:512]!r}")
+                    facts = validate_buildkit_health(workers, info)
+                else:
+                    client = self.root / "v" / "tools" / "docker" / "docker"
+                    endpoint = f"unix://{self.root}/d.sock"
+                    env = {"DOCKER_CONFIG": str(self.root / "v" / "docker-config"),
+                           "XDG_RUNTIME_DIR": f"/run/user/{os.getuid()}"}
+                    runner = self.backend.runner
+                    status, info, err = runner.run([str(client), "--host", endpoint,
+                        "info", "--format", "{{json .}}"], min(5.0, remaining), env=env)
+                    if status != 0:
+                        raise Refusal(f"rootless Docker info health command failed: {err[:512]!r}")
+                    status, version, err = runner.run([str(client), "--host", endpoint,
+                        "version", "--format", "{{.Server.Version}} {{.Server.GitCommit}}"],
+                        min(5.0, remaining), env=env)
+                    if status != 0:
+                        raise Refusal(f"rootless Docker version health command failed: {err[:512]!r}")
+                    facts = validate_docker_health(info, version, self.root, self.root / "d.sock")
+            except Refusal as exc:
+                last_error = str(exc)
+                time.sleep(min(0.2, max(0.0, deadline - self.clock())))
+                continue
+            self.backend._verify_live_domain(role, manifest, populated=True)
+            self.ready(role, {"pidfd": True, "identity": True, **facts})
+            return facts
+        raise Refusal(f"bounded {role} health readiness deadline expired: {last_error}")
+
     @staticmethod
     def _all_roles_absence_proved(manifest: dict) -> bool:
         token = manifest.get("ownerToken")
@@ -1979,7 +2134,7 @@ class Owner:
 def cli() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("verb", choices=("reserve", "provision", "launch-buildkit", "launch-rootless",
-        "status", "seal", "stop", "stage-upload", "release", "supervisor",
+        "ready", "status", "seal", "stop", "stage-upload", "release", "supervisor",
         "_inspect-domain", "_kill-domain"))
     parser.add_argument("--role", choices=("buildkit", "rootless"))
     parser.add_argument("--owner-root", type=Path)
@@ -2019,6 +2174,8 @@ def cli() -> int:
             owner.begin_role(role, argv, env, {"gateSeconds": 10, "runtimeSeconds": 1800 if role == "buildkit" else 10800})
         elif args.verb == "status":
             print(json.dumps(owner._manifest(), sort_keys=True))
+        elif args.verb == "ready" and args.role:
+            print(json.dumps(owner.ready_after_health(args.role), sort_keys=True))
         elif args.verb == "seal" and args.role:
             manifest = owner._manifest()
             owner._event(manifest, "sealed", role=args.role, reason="explicit seal")

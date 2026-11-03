@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import socket
 import tempfile
 import time
 import unittest
@@ -228,6 +229,18 @@ class OwnerTest(unittest.TestCase):
         return owner.reserve({"run": "fixture", "revision": "abc"},
             ["/x/d.sock", "/x/r/api.sock"])
 
+    def write_buildkit_config(self):
+        state = self.root / "v" / "s"
+        state.mkdir(parents=True, exist_ok=True)
+        path = state / "buildkitd.toml"
+        path.write_text('[worker.oci]\n  enabled = true\n  snapshotter = "native"\n'
+            '  platforms = ["linux/amd64"]\n  max-parallelism = 1\n'
+            "[worker.containerd]\n  enabled = false\n[grpc]\n"
+            f'  address = ["unix://{self.root}/b.sock"]\n'
+            f"  uid = {os.getuid()}\n  gid = {os.getgid()}\n")
+        path.chmod(0o600)
+        return path
+
     def test_socket_admission_precedes_owner_directory_creation(self):
         owner = owner_module.Owner(self.repo / "build" / "g" / "malformed-journal",
                                    FakeBackend(), test_repo_root=self.repo)
@@ -258,6 +271,37 @@ class OwnerTest(unittest.TestCase):
         short_root = Path("/r/build/g/1234abcd")
         self.assertLessEqual(max(map(len, map(__import__("os").fsencode,
             owner_module.fixed_socket_inventory(short_root)))), 107)
+
+    def test_buildkit_readiness_requires_pinned_sandboxed_worker(self):
+        worker = {"executor": "oci", "snapshotter": "native", "process-mode": "sandbox",
+                  "platforms": ["linux/amd64"]}
+        info = {"version": "v0.20.2", "revision": "97437fdd7e32f29bb80288d800cd4ffcb34e1c15"}
+        facts = owner_module.validate_buildkit_health(json.dumps([worker]).encode(), json.dumps(info).encode())
+        self.assertEqual(facts["workerCount"], 1)
+        worker["process-mode"] = "no-sandbox"
+        with self.assertRaisesRegex(owner_module.Refusal, "not the admitted"):
+            owner_module.validate_buildkit_health(json.dumps([worker]).encode(), json.dumps(info).encode())
+
+    def test_docker_readiness_binds_pinned_server_data_root_and_owned_socket(self):
+        base = ROOT / "build" / "g"
+        base.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=base, prefix="dr-") as temporary:
+            root = Path(temporary) / "job"
+            data = root / "v" / "s" / "docker-data"
+            data.mkdir(parents=True)
+            endpoint = root / "d.sock"
+            server = socket.socket(socket.AF_UNIX)
+            try:
+                server.bind(str(endpoint))
+                info = {"Driver": "overlay2", "DockerRootDir": str(data), "ServerVersion": "29.7.2"}
+                facts = owner_module.validate_docker_health(json.dumps(info).encode(),
+                    b"29.7.2 6a43e3d\n", root, endpoint)
+                self.assertEqual(facts["serverCommit"], "6a43e3d")
+                with self.assertRaisesRegex(owner_module.Refusal, "pinned runtime"):
+                    owner_module.validate_docker_health(json.dumps({**info, "Driver": "vfs"}).encode(),
+                        b"29.7.2 6a43e3d\n", root, endpoint)
+            finally:
+                server.close()
 
     def test_supervisor_child_environment_rejects_ambient_docker_and_rootless_toggles(self):
         owner = self.make_owner(FakeBackend())
@@ -422,6 +466,7 @@ class OwnerTest(unittest.TestCase):
     def test_production_backend_emits_fixed_transient_service_properties(self):
         owner = self.make_owner(FakeBackend())
         manifest = self.reserve(owner)
+        self.write_buildkit_config()
         runner = FakeCommandRunner(manifest["ownerToken"])
         backend = owner_module.ProductionBackend(self.root, runner=runner,
                                                    authority=FakeAuthority())
@@ -472,6 +517,7 @@ class OwnerTest(unittest.TestCase):
     def test_production_gate_rechecks_pinned_manager_and_privileged_cgroup_receipts(self):
         owner = self.make_owner(FakeBackend())
         manifest = self.reserve(owner)
+        self.write_buildkit_config()
         runner = FakeCommandRunner(manifest["ownerToken"])
         backend = owner_module.ProductionBackend(self.root, runner=runner, authority=FakeAuthority())
         receipt = backend.manager_reserve("buildkit", manifest)
@@ -498,6 +544,7 @@ class OwnerTest(unittest.TestCase):
         binary.parent.mkdir(parents=True)
         binary.write_bytes(b"authored unprivileged buildkit executable stub")
         binary.chmod(0o700)
+        config = self.write_buildkit_config()
         runner = FakeCommandRunner(manifest["ownerToken"])
         authority = FakeAuthority(empty=False)
         backend = owner_module.ProductionBackend(self.root, runner=runner, authority=authority,
@@ -523,6 +570,7 @@ class OwnerTest(unittest.TestCase):
         # authority, and authored receipt adapters.
         manifest = owner.begin_role("buildkit", argv, {"HOME": str(self.root / "v/home")},
                                     {"gateSeconds": 10, "runtimeSeconds": 1800})
+        self.assertIn(service_cgroup + "/daemon", config.read_text())
         manifest = owner._manifest()
         authority.empty = True
         owner_module.atomic_json(self.root / "control/stop-receipt-buildkit.json",

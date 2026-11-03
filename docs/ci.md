@@ -146,11 +146,12 @@ the entry points below.
 
 The GCC provenance job now treats image reproduction as a CI candidate using
 the official BuildKit 0.20.2 Linux amd64 bundle, authenticated by its published
-SHA-256 and exact archive size before extraction or execution. The helper owns
-its tools, configs, temp directory, sockets, service state and evidence under a
-mode-0700 directory below `build/gcc-toolchain-reproduction/`. It starts one
-rootful, build-only BuildKit OCI worker with the native snapshotter and normal
-process sandbox, then performs one no-cache solve with the existing pinned
+SHA-256 and exact archive size before extraction or execution. The lifecycle
+owner journals a per-run reservation under `build/g/<run-hash>/`, then owns
+both transient systemd services through pidfd-pinned launch, cgroup kill and
+absence proof. Tools, configs, temp files, sockets and captured evidence remain
+below that private root. It starts one rootful, build-only BuildKit OCI worker
+with the native snapshotter and normal process sandbox, then performs one no-cache solve with the existing pinned
 Dockerfile, frontend, base, platform and `SOURCE_DATE_EPOCH`. Docker archive and
 OCI provenance outputs come from that same solve.
 
@@ -161,10 +162,13 @@ not build or re-export the candidate. The unchanged strict GCC reproduction
 verifier must pass against the actual image inspect result before the workflow
 publishes its image ID to downstream checks. Archive layer bytes, ordered diff
 IDs, raw config and manifest, final-layer tar/header/payload census, provenance
-join, daemon/worker facts, bounded logs and cleanup receipt are retained for 14
-days. The helper applies finite download, readiness, solve, import and cleanup
-budgets, and leaves diagnostics in place when cleanup cannot prove owned process
-and mount absence.
+join, daemon/worker facts, bounded systemd-journal logs and the owner
+manifest/journal/stop receipts are retained for 14 days. Readiness is recorded
+only after the pinned client confirms the exact Docker runtime or the single
+sandboxed OCI/native BuildKit worker, and the owner rechecks live manager/cgroup
+identity. The workflow applies finite download, readiness, solve, import and
+cleanup budgets, and leaves diagnostics in place when cleanup cannot prove
+owned process and mount absence.
 
 The authored `tests/oracle/test_gcc_toolchain_builder.py` controls exercise the
 actual workflow helper call and paired archive parser, including unsafe or

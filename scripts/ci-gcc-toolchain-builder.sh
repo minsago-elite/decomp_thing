@@ -18,7 +18,7 @@ job_root="$build_root/$short_id"
 volume="$job_root/v"
 tools="$volume/tools"
 state="$volume/s"
-evidence="$volume/e"
+evidence="$job_root/evidence"
 docker_bin="$tools/docker/docker"
 daemon_bin="$tools/docker/dockerd"
 buildctl="$tools/buildkit/bin/buildctl"
@@ -43,6 +43,9 @@ validate_socket_inventory() {
 }
 bounded_stream() {
   python3 scripts/ci-gcc-toolchain-archive.py stream "$1" "${2:-67108864}"
+}
+owner_call() {
+  python3 scripts/ci-gcc-toolchain-owner.py "$@"
 }
 need_owned_path() {
   case "$1" in "$job_root"|"$job_root"/*) ;; *) die "path escaped owned root: $1" ;; esac
@@ -135,93 +138,13 @@ with tarfile.open(archive, 'r:gz') as tf:
     tf.extractall(dest, members=members, filter='data')
 PY
 }
-record_process() {
-  local name=$1 pid=$2 exe=$3
-  python3 - "$job_root" "$name" "$pid" "$exe" <<'PY'
-import json, os, pathlib, sys
-root, name, pid, exe = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
-def stat_fields(pid):
-    row = pathlib.Path(f'/proc/{pid}/stat').read_text()
-    tail = row[row.rfind(')') + 2:].split()
-    return {'pgid': int(tail[2]), 'sid': int(tail[3]), 'startTicks': tail[19]}
-fields = stat_fields(pid)
-if pathlib.Path(f'/proc/{pid}/exe').resolve() != pathlib.Path(exe).resolve():
-    raise SystemExit('launched executable identity mismatch')
-record = {'pid': pid, 'startTicks': fields['startTicks'], 'pgid': os.getpgid(pid), 'sid': os.getsid(pid),
-          'exe': str(pathlib.Path(exe).resolve()), 'root': root}
-if record['pgid'] != pid or record['sid'] != pid:
-    raise SystemExit('service process is not the leader of its private session')
-(pathlib.Path(root) / f'{name}.process.json').write_text(json.dumps(record, sort_keys=True)+'\n')
-PY
-}
-stop_process() {
-  local name=$1 file="$job_root/$1.process.json"
-  test -f "$file" || return 0
-  python3 - "$file" "$job_root" <<'PY'
-import json, os, pathlib, signal, subprocess, sys, time
-f, root = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]).resolve()
-d = json.loads(f.read_text())
-if pathlib.Path(d['root']).resolve() != root:
-    raise SystemExit('refuse escaped process record')
-pid = int(d['pid'])
-pgid = int(d['pgid'])
-sid = int(d['sid'])
-def stat_fields(pid):
-    row = pathlib.Path(f'/proc/{pid}/stat').read_text()
-    tail = row[row.rfind(')') + 2:].split()
-    return {'pgid': int(tail[2]), 'sid': int(tail[3]), 'startTicks': tail[19]}
-try:
-    fields = stat_fields(pid)
-except FileNotFoundError:
-    # A vanished leader is acceptable only if its recorded process group is empty.
-    members=[]
-    for entry in pathlib.Path('/proc').iterdir():
-        if not entry.name.isdecimal(): continue
-        try:
-            row=(entry/'stat').read_text(); tail=row[row.rfind(')') + 2:].split()
-            if int(tail[3]) == sid: members.append(entry.name)
-        except (OSError, ValueError, IndexError): pass
-    if members: raise SystemExit('owned leader vanished while service processes remain')
-    f.unlink(); raise SystemExit(0)
-if fields['startTicks'] != str(d['startTicks']) or fields['pgid'] != pgid or fields['sid'] != sid or \
-   pathlib.Path(f'/proc/{pid}/exe').resolve() != pathlib.Path(d['exe']).resolve():
-    raise SystemExit('refuse stale/reused process identity')
-def signal_group(sig):
-    if d['exe'].endswith('/buildkitd'):
-        subprocess.run(['/usr/bin/sudo', '-n', 'kill', f'-{sig}', '--', f'-{pgid}'], check=True)
-    else:
-        os.killpg(pgid, getattr(signal, 'SIG' + sig))
-def group_members():
-    found=[]
-    for entry in pathlib.Path('/proc').iterdir():
-        if not entry.name.isdecimal(): continue
-        try:
-            row=(entry/'stat').read_text(); tail=row[row.rfind(')') + 2:].split()
-            if int(tail[3]) == sid: found.append(int(entry.name))
-        except (OSError, ValueError, IndexError): pass
-    return found
-signal_group('TERM')
-deadline=time.monotonic()+20
-while time.monotonic()<deadline:
-    if not group_members(): break
-    time.sleep(.1)
-else:
-    signal_group('KILL')
-    deadline=time.monotonic()+5
-    while time.monotonic()<deadline:
-        if not group_members(): break
-        time.sleep(.1)
-    else: raise SystemExit('owned process did not terminate')
-if group_members(): raise SystemExit('owned process group remains')
-f.unlink()
-PY
-}
 init() {
   validate_socket_inventory
   if [[ -e "$job_root" ]]; then die "refusing reused/nonempty job root: $job_root"; fi
-  install -d -m 700 "$job_root" "$volume" "$tools" "$state" "$evidence" "$job_root/source" "$job_root/tmp"
+  owner_call reserve
   printf '%s\n' "run=${GITHUB_RUN_ID:-local}" "attempt=${GITHUB_RUN_ATTEMPT:-1}" \
     "revision=$(git rev-parse HEAD)" > "$job_root/owner.txt"
+  install -d -m 700 "$volume" "$tools" "$state" "$job_root/source" "$job_root/tmp"
   if [[ -n "${GITHUB_OUTPUT:-}" ]]; then printf 'job-root=%s\n' "$job_root" >> "$GITHUB_OUTPUT"; fi
   if [[ -n "${GITHUB_ENV:-}" ]]; then printf 'GCC_BUILDER_ROOT=%s\n' "$job_root" >> "$GITHUB_ENV"; fi
   capture_ambient_identity
@@ -279,41 +202,17 @@ start_rootless() {
   clean_environment
   sudo -n loginctl enable-linger "$USER"
   sudo -n systemctl start "user@$(id -u).service"
-  local runtime="/run/user/$(id -u)" rootless="$tools/docker-rootless-extras"
+  local runtime="/run/user/$(id -u)"
   test -d "$runtime"
-  install -d -m 700 "$state/docker-data" "$state/docker-exec" "$state/rootlesskit" "$state/docker-config"
+  install -d -m 700 "$state/docker-data" "$job_root/r" "$job_root/x" "$volume/home" "$volume/docker-config"
   printf '{"features":{"containerd-snapshotter":false}}\n' > "$state/docker-daemon.json"
-  local env_path="$tools/docker:$rootless:/usr/bin:/bin"
-  install -d -m 700 "$volume/home"
-  printf '%q ' "$rootless/dockerd-rootless.sh" --config-file="$state/docker-daemon.json" \
-    --data-root="$state/docker-data" --exec-root="$state/docker-exec" --pidfile="$state/docker.pid" \
-    --host="unix://$socket" --storage-driver=overlay2 --bridge=none --iptables=false \
-    --ip6tables=false --ip-forward=false --ip-masq=false > "$evidence/rootless-dockerd-command.txt"
-  printf 'network=slirp4netns port-driver=builtin disable-host-loopback=true\n' \
-    >> "$evidence/rootless-dockerd-command.txt"
-  mkfifo -m 600 "$evidence/rootless-dockerd.log.pipe"
-  setsid python3 scripts/ci-gcc-toolchain-archive.py stream-file "$evidence/rootless-dockerd.log.pipe" \
-    "$evidence/rootless-dockerd.log" 67108864 >/dev/null 2>&1 &
-  local logger_pid=$!
-  record_process rootless-log "$logger_pid" "$(readlink -f "/proc/$logger_pid/exe")"
-  env -i PATH="$env_path" HOME="$volume/home" USER="$USER" LOGNAME="$USER" LANG=C LC_ALL=C \
-    TMPDIR="$job_root/tmp" DOCKER_CONFIG="$state/docker-config" DOCKERD="$daemon_bin" \
-    XDG_RUNTIME_DIR="$runtime" DOCKERD_ROOTLESS_ROOTLESSKIT_STATE_DIR="$job_root/r" \
-    DOCKERD_ROOTLESS_ROOTLESSKIT_NET=slirp4netns DOCKERD_ROOTLESS_ROOTLESSKIT_PORT_DRIVER=builtin \
-    DOCKERD_ROOTLESS_ROOTLESSKIT_DISABLE_HOST_LOOPBACK=true setsid "$rootless/dockerd-rootless.sh" \
-    --config-file="$state/docker-daemon.json" --data-root="$state/docker-data" \
-    --exec-root="$state/docker-exec" --pidfile="$state/docker.pid" \
-    --host="unix://$socket" --storage-driver=overlay2 --bridge=none --iptables=false \
-    --ip6tables=false --ip-forward=false --ip-masq=false >"$evidence/rootless-dockerd.log.pipe" 2>&1 &
-  local pid=$!
-  record_process rootless "$pid" "$(readlink -f "/proc/$pid/exe")"
+  owner_call launch-rootless
   local deadline
   deadline=$(python3 -c 'import time; print(time.monotonic()+60.0)')
   while :; do
     local remaining
     remaining=$(monotonic_remaining "$deadline")
     (( $(deadline_open "$remaining") )) || break
-    kill -0 "$pid" 2>/dev/null || { tail -n 100 "$evidence/rootless-dockerd.log"; die 'rootless daemon exited early'; }
     if timeout "$(bounded_call_seconds "$remaining")" env -u DOCKER_HOST -u DOCKER_CONTEXT \
       DOCKER_CONFIG="$DOCKER_CONFIG" "$docker_bin" --host "unix://$socket" info \
       --format '{{.ServerVersion}}' >/dev/null 2>&1; then break; fi
@@ -327,6 +226,7 @@ start_rootless() {
   test "$(DOCKER_HOST= DOCKER_CONTEXT= "$docker_bin" --host "unix://$socket" version --format '{{.Server.Version}}')" = 29.7.2
   test "$(DOCKER_HOST= DOCKER_CONTEXT= "$docker_bin" --host "unix://$socket" version --format '{{.Server.GitCommit}}')" = 6a43e3d
   DOCKER_HOST= DOCKER_CONTEXT= "$docker_bin" --host "unix://$socket" version --format '{{json .}}' > "$evidence/docker-version.json"
+  owner_call ready --role rootless > "$evidence/rootless-readiness.json"
 }
 start_buildkit() {
   validate_socket_inventory
@@ -344,39 +244,13 @@ start_buildkit() {
   uid = $(id -u)
   gid = $(id -g)
 EOF
-  printf '%q ' "$buildkitd" --config "$state/buildkitd.toml" --root "$state/buildkit-root" \
-    --addr "unix://$bk_socket" --oci-worker=true --containerd-worker=false \
-    --oci-worker-snapshotter=native --oci-worker-platform=linux/amd64 \
-    --oci-worker-binary "$tools/buildkit/bin/buildkit-runc" --oci-worker-net=host \
-    > "$evidence/buildkitd-command.txt"
-  printf '\n' >> "$evidence/buildkitd-command.txt"
-  mkfifo -m 600 "$evidence/buildkitd.log.pipe"
-  setsid python3 scripts/ci-gcc-toolchain-archive.py stream-file "$evidence/buildkitd.log.pipe" \
-    "$evidence/buildkitd.log" 67108864 >/dev/null 2>&1 &
-  local logger_pid=$!
-  record_process buildkit-log "$logger_pid" "$(readlink -f "/proc/$logger_pid/exe")"
   install -d -m 700 "$state/buildkit-root"
-  buildkitd_argv
-  admit_buildkitd_argv || die 'BuildKit command admission failed'
-  sudo -n bash -c 'pidfile=$1; shift; printf "%s\\n" "$$" > "$pidfile"; exec setsid "$@"' _ \
-    "$state/buildkit.pid" "${BUILDKITD_ARGV[@]}" \
-    >"$evidence/buildkitd.log.pipe" 2>&1 &
-  local pid
-  for _ in $(seq 1 50); do [[ -s "$state/buildkit.pid" ]] && break; sleep .1; done
-  test -s "$state/buildkit.pid" || die 'BuildKit launch did not publish owned PID'
-  pid=$(cat "$state/buildkit.pid")
-  for _ in $(seq 1 50); do
-    actual_exe=$(readlink -f "/proc/$pid/exe" 2>/dev/null) || actual_exe=
-    [[ "$actual_exe" = "$(readlink -f "$buildkitd")" ]] && break
-    sleep .1
-  done
-  record_process buildkit "$pid" "$buildkitd"
+  owner_call launch-buildkit
   local deadline workers info remaining call_timeout
   deadline=$(python3 -c 'import time; print(time.monotonic()+60.0)')
   while :; do
     remaining=$(monotonic_remaining "$deadline")
     (( $(deadline_open "$remaining") )) || break
-    kill -0 "$pid" 2>/dev/null || { tail -n 100 "$evidence/buildkitd.log"; die 'BuildKit exited early'; }
     call_timeout=$(bounded_call_seconds "$remaining")
     if run_worker_call "$call_timeout" debug workers --format '{{json .}}' >"$state/workers.json" 2>/dev/null; then
       remaining=$(monotonic_remaining "$deadline")
@@ -387,25 +261,12 @@ EOF
       python3 scripts/ci-gcc-toolchain-archive.py info "$state/buildkit-info.txt"
       cp "$state/workers.json" "$evidence/buildkit-workers.json"
       cp "$state/buildkit-info.txt" "$evidence/buildkit-info.txt"
+      owner_call ready --role buildkit > "$evidence/buildkit-readiness.json"
       return
     fi
     sleep .2
   done
   die 'BuildKit readiness deadline expired'
-}
-buildkitd_argv() {
-  BUILDKITD_ARGV=("$buildkitd" --config "$state/buildkitd.toml" --root "$state/buildkit-root"
-    --addr "unix://$bk_socket" --oci-worker=true --containerd-worker=false
-    --oci-worker-snapshotter=native --oci-worker-platform=linux/amd64
-    --oci-worker-binary "$tools/buildkit/bin/buildkit-runc" --oci-worker-net=host)
-}
-admit_buildkitd_argv() {
-  local joined=" ${BUILDKITD_ARGV[*]} "
-  [[ "$joined" == *" --oci-worker=true "* && "$joined" == *" --containerd-worker=false "* &&
-     "$joined" == *" --oci-worker-snapshotter=native "* && "$joined" != *"snapshotter=auto"* &&
-     "$joined" != *"snapshotter=overlayfs"* && "$joined" == *" --oci-worker-platform=linux/amd64 "* &&
-     "$joined" == *" --oci-worker-net=host "* && "$joined" == *"unix://$bk_socket"* &&
-     "$joined" == *"$state/buildkit-root"* && "$joined" != *"no-process-sandbox"* ]]
 }
 preflight_recipe() {
   echo '8b0af79ba3426f49ba599eb0c7eea433c62ac5bb6ab5e7797f7d09d978f43543  oracle/gcc/16.2.0/build-toolchain.Dockerfile' | sha256sum --check --strict
@@ -486,10 +347,27 @@ diagnostics() {
   printf 'runner.name=%s runner.os=%s runner.arch=%s ImageOS=%s ImageVersion=%s\n' \
     "${RUNNER_NAME:-unknown}" "${RUNNER_OS:-unknown}" "${RUNNER_ARCH:-unknown}" \
     "${ImageOS:-unknown}" "${ImageVersion:-unknown}" > "$evidence/runner-image.txt"
-  for process_file in "$job_root/buildkit.process.json" "$job_root/rootless.process.json" \
-    "$job_root/buildkit-log.process.json" "$job_root/rootless-log.process.json"; do
-    [[ ! -f "$process_file" ]] || cp "$process_file" "$evidence/$(basename "$process_file")"
-  done
+  if [[ -f "$job_root/owner.json" ]]; then
+    for role in buildkit rootless; do
+      unit=$(python3 - "$job_root/owner.json" "$role" <<'PY'
+import json,pathlib,re,sys
+manifest=json.loads(pathlib.Path(sys.argv[1]).read_bytes())
+record=manifest.get('roles',{}).get(sys.argv[2],{})
+receipt=record.get('receipt',{})
+unit=receipt.get('unit','')
+if unit and re.fullmatch(r'[A-Za-z0-9_.@-]+',unit): print(unit)
+PY
+      )
+      [[ -n "$unit" ]] || continue
+      if [[ "$role" == buildkit ]]; then
+        timeout --signal=TERM --kill-after=2s 30s sudo -n journalctl --unit "$unit" \
+          --no-pager --output=short-precise -n 12000 2>&1 | bounded_stream "$evidence/buildkitd.log" 67108864 || true
+      else
+        timeout --signal=TERM --kill-after=2s 30s journalctl --user --unit "$unit" \
+          --no-pager --output=short-precise -n 12000 2>&1 | bounded_stream "$evidence/rootless-dockerd.log" 67108864 || true
+      fi
+    done
+  fi
   find "$evidence" -type f -printf '%P %s bytes\n' | sort > "$evidence/file-inventory.txt"
   du -sb "$evidence" > "$evidence/evidence-byte-count.txt"
 }
@@ -500,9 +378,17 @@ cleanup() {
     grep -Fqx "run=$run_id" "$job_root/owner.txt" || die 'run ownership marker mismatch'
     grep -Fqx "attempt=$run_attempt" "$job_root/owner.txt" || die 'attempt ownership marker mismatch'
     grep -Fqx "revision=$(git rev-parse HEAD)" "$job_root/owner.txt" || die 'source revision ownership marker mismatch'
+    [[ -f "$job_root/owner.json" && ! -L "$job_root/owner.json" ]] || die 'refuse cleanup without the durable service owner'
   fi
-  if stop_process buildkit; then stop_process buildkit-log || failure=1; else failure=1; fi
-  if stop_process rootless; then stop_process rootless-log || failure=1; else failure=1; fi
+  if [[ -e "$job_root" ]]; then
+    owner_call stop --role buildkit || failure=1
+    owner_call stop --role rootless || failure=1
+    if (( failure == 0 )); then
+      if [[ "${PRIMARY_STATUS:-}" == "success" ]]; then owner_call stage-upload --success || failure=1
+      else owner_call stage-upload || failure=1; fi
+      owner_call release || failure=1
+    fi
+  fi
   if (( failure != 0 )); then echo 'owned cleanup could not prove process absence' >&2; return "$failure"; fi
   if [[ -e "$job_root" ]]; then
     need_owned_path "$job_root"
@@ -517,41 +403,19 @@ for line in pathlib.Path('/proc/self/mountinfo').read_text().splitlines():
     if target==root or target.startswith(root+'/'):
         raise SystemExit('owned mount remains; quarantine retained')
 PY
-    python3 - "$evidence" <<'PY'
-import datetime,glob,json,pathlib,sys
-root=pathlib.Path(sys.argv[1]); processes=[]
-for name in ('buildkit.process.json','rootless.process.json','buildkit-log.process.json','rootless-log.process.json'):
-    path=root/name
-    if not path.is_file(): continue
-    item=json.loads(path.read_text()); sid=int(item['sid']); present=[]
-    for proc in pathlib.Path('/proc').iterdir():
-        if not proc.name.isdecimal(): continue
-        try:
-            fields=(proc/'stat').read_text(); tail=fields[fields.rfind(')') + 2:].split()
-            if int(tail[3])==sid: present.append(proc.name)
-        except (OSError,ValueError,IndexError): pass
-    if present: raise SystemExit('owned process session remains after cleanup: '+name)
-    processes.append({'name':name,'pid':item['pid'],'startTicks':item['startTicks'],'processGroup':item['pgid'],'session':sid,'status':'absent'})
-receipt={'completedUtc':datetime.datetime.now(datetime.timezone.utc).isoformat(),
-    'processes':processes,'mounts':'absent','primaryStatus':__import__('os').environ.get('PRIMARY_STATUS','unknown')}
-(root/'cleanup.json').write_text(json.dumps(receipt,indent=2)+'\n')
-PY
     if [[ -L "$socket" || -L "$bk_socket" ]]; then die 'refuse linked owned socket path'; fi
     if [[ -e "$socket" ]]; then [[ -S "$socket" ]] || die 'unexpected rootless endpoint leaf'; rm -f -- "$socket"; fi
     if [[ -e "$bk_socket" ]]; then [[ -S "$bk_socket" ]] || die 'unexpected BuildKit endpoint leaf'; sudo -n rm -f -- "$bk_socket"; fi
-    for pipe in "$evidence/buildkitd.log.pipe" "$evidence/rootless-dockerd.log.pipe"; do
-      [[ ! -e "$pipe" ]] || { [[ -p "$pipe" ]] || die 'unexpected log pipe leaf'; rm -f -- "$pipe"; }
-    done
     if [[ -e "$state/buildkit-root" ]]; then
       need_owned_path "$state/buildkit-root"
       sudo -n rm -rf -- "$state/buildkit-root"
     fi
-    for item in "$state" "$tools"; do
+    for item in "$state" "$tools" "$volume/docker-config" "$volume/home" "$job_root/r" "$job_root/x"; do
       need_owned_path "$item"
       [[ ! -L "$item" ]] || die 'refuse linked cleanup path'
       [[ ! -e "$item" ]] || rm -rf -- "$item"
     done
-    for item in "$job_root/docker-config" "$job_root/ambient-client"; do
+    for item in "$job_root/ambient-client"; do
       [[ ! -e "$item" ]] || { need_owned_path "$item"; rmdir -- "$item" || die 'private client config is nonempty; cleanup retained'; }
     done
     find "$evidence" -type f -printf '%P %s bytes\n' | sort > "$evidence/file-inventory.txt"
