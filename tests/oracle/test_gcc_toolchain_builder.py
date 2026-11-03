@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import ctypes
+import gzip
 import io
 import json
 import os
@@ -63,12 +64,15 @@ class GccToolchainBuilderTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp.cleanup()
 
-    def make_pair(self, *, unsafe: bool = False, join: bool = True, truncated_layer: bool = False) -> None:
+    def make_pair(self, *, unsafe: bool = False, join: bool = True, truncated_layer: bool = False,
+                  docker_compressed: bool = False, nested_index: bool = False,
+                  attestation_subject: bool = True) -> None:
         config_path = "config.json"
         layer_names = [f"{i}/layer.tar" for i in range(9)]
         manifest = [{"Config": config_path, "RepoTags": ["fixture:1"], "Layers": layer_names}]
         docker_entries = [("manifest.json", json.dumps(manifest).encode()), (config_path, self.config_raw)]
-        docker_entries += list(zip(layer_names, self.layers))
+        docker_layers = [gzip.compress(layer, mtime=0) for layer in self.layers] if docker_compressed else self.layers
+        docker_entries += list(zip(layer_names, docker_layers))
         if truncated_layer:
             docker_entries[-1] = (layer_names[-1], self.layers[-1][:-20])
         if unsafe:
@@ -99,6 +103,8 @@ class GccToolchainBuilderTest(unittest.TestCase):
             "digest": runtime_digest, "size": len(runtime_raw)}, "config": {"digest": "sha256:" + "0" * 64},
             "layers": [{"mediaType": "application/vnd.in-toto+json", "digest": statement_digest,
                 "size": len(statement_raw)}]}
+        if not attestation_subject:
+            attestation.pop("subject")
         att_raw = json.dumps(attestation, sort_keys=True).encode()
         att_digest = "sha256:" + hashlib.sha256(att_raw).hexdigest()
         index = {"schemaVersion": 2, "manifests": [
@@ -108,7 +114,17 @@ class GccToolchainBuilderTest(unittest.TestCase):
              "size": len(att_raw), "annotations": {"vnd.docker.reference.type": "attestation-manifest",
              "vnd.docker.reference.digest": runtime_digest if join else "sha256:" + "f" * 64}},
         ]}
-        archive(self.oci, [("index.json", json.dumps(index).encode()),
+        nested_entries: list[tuple[str, bytes]] = []
+        if nested_index:
+            nested_raw = json.dumps(index, sort_keys=True).encode()
+            nested_digest = "sha256:" + hashlib.sha256(nested_raw).hexdigest()
+            root_index = {"schemaVersion": 2, "manifests": [{
+                "mediaType": "application/vnd.oci.image.index.v1+json", "digest": nested_digest,
+                "size": len(nested_raw)}]}
+            nested_entries.append(("blobs/sha256/" + nested_digest[7:], nested_raw))
+        else:
+            root_index = index
+        archive(self.oci, [("index.json", json.dumps(root_index).encode()), *nested_entries,
             ("blobs/sha256/" + runtime_digest[7:], runtime_raw),
             ("blobs/sha256/" + att_digest[7:], att_raw), *blobs])
 
@@ -255,7 +271,10 @@ admit_buildkitd_argv'''
             self.assertNotEqual(negative.returncode, 0, mutation)
 
     def test_worker_count_snapshotter_platform_version_and_sandbox_refusals(self) -> None:
-        worker = {"ID": "worker0", "Labels": {"org.mobyproject.buildkit.worker.snapshotter": "native"},
+        worker = {"ID": "worker0", "Labels": {
+            "org.mobyproject.buildkit.worker.snapshotter": "native",
+            "org.mobyproject.buildkit.worker.oci.process-mode": "sandbox",
+            "org.mobyproject.buildkit.worker.sandbox": "true"},
             "Platforms": [{"OS": "linux", "Architecture": "amd64"}]}
         info = {"buildkitVersion": {"version": "v0.20.2", "revision": "97437fdd7e32f29bb80288d800cd4ffcb34e1c15"}}
         worker_path = self.root / "workers.json"
@@ -269,7 +288,8 @@ admit_buildkitd_argv'''
                      [{**worker, "Labels": {"org.mobyproject.buildkit.worker.snapshotter": "auto"}}],
                      [{**worker, "Platforms": [{"OS": "linux", "Architecture": "arm64"}]}],
                      [{**worker, "Labels": {"org.mobyproject.buildkit.worker.snapshotter": "native",
-                         "org.mobyproject.buildkit.worker.no-process-sandbox": "true"}}]):
+                         "org.mobyproject.buildkit.worker.oci.process-mode": "no-sandbox",
+                         "org.mobyproject.buildkit.worker.sandbox": "false"}}]):
             self.assertNotEqual(validate(data), 0)
         info_path.write_text(json.dumps(info))
         self.assertEqual(subprocess.run([sys.executable, str(PARSER), "info", str(info_path)], cwd=ROOT).returncode, 0)
@@ -399,7 +419,9 @@ run_worker_call 0.2 debug workers'''
                 shutil.rmtree(runroot)
 
     def test_rootless_executor_info_requires_owned_socket_overlay_and_classic_store_config(self) -> None:
-        job = self.root / "private-run"
+        job = ROOT / "build" / f"sock-{os.getpid()}"
+        if job.exists():
+            shutil.rmtree(job)
         data_root = job / "state/docker-data"
         data_root.mkdir(parents=True)
         endpoint = job / "docker.sock"
@@ -423,6 +445,7 @@ run_worker_call 0.2 debug workers'''
         endpoint.unlink()
         endpoint.write_text("not a socket")
         self.assertNotEqual(subprocess.run(command, cwd=ROOT, capture_output=True).returncode, 0)
+        shutil.rmtree(job)
         self.assertIn('"features":{"containerd-snapshotter":false}', HELPER.read_text())
 
     def test_cleanup_refuses_stale_pid_and_escaped_owner_without_touching_sentinels(self) -> None:
@@ -478,11 +501,14 @@ printf '123456789' | bounded_stream {shlex.quote(str(log))} 4'''
         self.assertIn("byte budget", log.with_suffix(".log.truncated").read_text())
 
     def test_archive_layer_digests_provenance_join_and_census_are_retained(self) -> None:
+        self.make_pair(docker_compressed=True, nested_index=True, attestation_subject=False)
         result = self.run_parser()
         self.assertEqual(result.returncode, 0, result.stderr)
         inventory = json.loads((self.out / "ordered-layers.json").read_text())
         self.assertEqual(len(inventory), 9)
         self.assertEqual(inventory[-1]["ordinal"], 8)
+        self.assertGreater(inventory[-1]["compressedBytes"], 0)
+        self.assertGreater(inventory[-1]["uncompressedBytes"], inventory[-1]["compressedBytes"])
         self.assertEqual(len(json.loads((self.out / "provenance-joins.json").read_text())), 1)
         census = json.loads((self.out / "final-layer-census.json").read_text())
         self.assertEqual(census[0]["payloadSha256"], hashlib.sha256(b"payload-8").hexdigest())
@@ -523,7 +549,7 @@ printf '123456789' | bounded_stream {shlex.quote(str(log))} 4'''
         self.make_pair(join=False)
         result = self.run_parser()
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("does not join", result.stderr)
+        self.assertIn("descriptor does not reference", result.stderr)
 
     def test_same_config_and_created_with_ninth_diff_id_change_is_still_refused(self) -> None:
         sys.path.insert(0, str(ROOT))

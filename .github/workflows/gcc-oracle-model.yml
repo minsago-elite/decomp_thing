@@ -130,6 +130,7 @@ jobs:
   provenance-and-elf-verifier:
     if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-24.04
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -231,6 +232,7 @@ jobs:
         run: python3 scripts/verify-gcc-oracle-artifacts.py oracle/gcc/16.2.0/oracle-manifest.json
       - name: Capture diagnostics and stop owned GCC services
         if: always()
+        timeout-minutes: 5
         env:
           PRIMARY_STATUS: ${{ job.status }}
         run: |

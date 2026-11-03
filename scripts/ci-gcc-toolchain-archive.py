@@ -47,6 +47,107 @@ def digest_stream(stream) -> tuple[str, int]:
     return "sha256:" + h.hexdigest(), count
 
 
+class PrefixReader:
+    def __init__(self, prefix: bytes, source) -> None:
+        self.prefix = bytearray(prefix)
+        self.source = source
+        self.source_bytes = len(prefix)
+
+    def read(self, size: int = -1) -> bytes:
+        if size == 0:
+            return b""
+        if size < 0:
+            prefix = bytes(self.prefix)
+            self.prefix.clear()
+            rest = self.source.read()
+            self.source_bytes += len(rest)
+            return prefix + rest
+        if self.prefix:
+            amount = min(size, len(self.prefix))
+            prefix = bytes(self.prefix[:amount])
+            del self.prefix[:amount]
+            if amount == size:
+                return prefix
+            rest = self.source.read(size - amount)
+            self.source_bytes += len(rest)
+            return prefix + rest
+        data = self.source.read(size)
+        self.source_bytes += len(data)
+        return data
+
+
+def docker_layer_stream(source):
+    prefix = source.read(4)
+    stream = PrefixReader(prefix, source)
+    if prefix.startswith(b"\x1f\x8b"):
+        return stream, gzip.GzipFile(fileobj=stream)
+    if prefix.startswith(b"\x28\xb5\x2f\xfd"):
+        refuse("zstd-compressed Docker layer is unsupported by the pinned verifier")
+    return stream, stream
+
+
+def oci_leaf_manifests(tf: tarfile.TarFile, root_index: dict[str, object], out: pathlib.Path,
+                       max_descriptors: int = 1024, max_total_json: int = 128 * 1024 * 1024,
+                       max_depth: int = 8) -> list[dict[str, object]]:
+    if not isinstance(root_index, dict) or not isinstance(root_index.get("manifests"), list):
+        refuse("OCI root index has no manifest descriptor list")
+    pending = [(descriptor, 0, {}) for descriptor in root_index["manifests"]]
+    visited: set[str] = set()
+    manifests: list[dict[str, object]] = []
+    total_json = 0
+    if not pending:
+        refuse("OCI archive index has no descriptors")
+    (out / "oci-manifests").mkdir(mode=0o700, exist_ok=True)
+    (out / "oci-indexes").mkdir(mode=0o700, exist_ok=True)
+    while pending:
+        descriptor, depth, inherited_annotations = pending.pop()
+        if not isinstance(descriptor, dict):
+            refuse("OCI descriptor is not an object")
+        if depth > max_depth or len(visited) >= max_descriptors:
+            refuse("OCI index depth/descriptor budget exceeded")
+        digest = descriptor.get("digest")
+        if not isinstance(digest, str) or not digest.startswith("sha256:") or len(digest) != 71:
+            refuse("OCI descriptor digest is not a SHA-256 identity")
+        blob_name = "blobs/sha256/" + digest[7:]
+        if digest in visited:
+            refuse("duplicate or cyclic OCI descriptor")
+        visited.add(digest)
+        raw = read_member(tf, blob_name, 64 * 1024 * 1024)
+        if len(raw) != descriptor.get("size") or "sha256:" + hashlib.sha256(raw).hexdigest() != digest:
+            refuse("OCI descriptor digest/size mismatch")
+        total_json += len(raw)
+        if total_json > max_total_json:
+            refuse("OCI descriptor JSON exceeds total byte budget")
+        try:
+            obj = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            refuse("OCI descriptor payload is not valid JSON")
+        annotations = dict(inherited_annotations)
+        own_annotations = descriptor.get("annotations", {})
+        if not isinstance(own_annotations, dict):
+            refuse("OCI descriptor annotations are not an object")
+        annotations.update(own_annotations)
+        if isinstance(obj, dict) and isinstance(obj.get("manifests"), list):
+            (out / "oci-indexes" / (digest[7:] + ".json")).write_bytes(raw)
+            children = obj["manifests"]
+            if not children:
+                refuse("nested OCI index has no descriptors")
+            for child in children:
+                if not isinstance(child, dict):
+                    refuse("nested OCI descriptor is not an object")
+                pending.append((child, depth + 1, annotations))
+        elif isinstance(obj, dict) and isinstance(obj.get("config"), dict) and isinstance(obj.get("layers"), list):
+            leaf_descriptor = dict(descriptor)
+            leaf_descriptor["annotations"] = annotations
+            (out / "oci-manifests" / (digest[7:] + ".json")).write_bytes(raw)
+            manifests.append({"descriptor": leaf_descriptor, "manifest": obj})
+        else:
+            refuse("OCI descriptor is neither an index nor an image manifest")
+    if not manifests:
+        refuse("OCI archive contains no image manifests")
+    return manifests
+
+
 def safe_name(name: str) -> None:
     p = pathlib.PurePosixPath(name)
     if p.is_absolute() or ".." in p.parts or not p.parts:
@@ -69,6 +170,8 @@ def validate_workers(path: pathlib.Path) -> None:
         refuse("BuildKit must expose exactly one worker")
     worker = rows[0]
     labels = worker.get("labels", worker.get("Labels", {}))
+    if not isinstance(labels, dict):
+        refuse("BuildKit worker labels are not an object")
     platforms = worker.get("platforms", worker.get("Platforms", []))
     snapshotter = worker.get("snapshotter", labels.get("org.mobyproject.buildkit.worker.snapshotter"))
     if snapshotter != "native":
@@ -81,10 +184,18 @@ def validate_workers(path: pathlib.Path) -> None:
             admitted = True
     if not admitted:
         refuse("BuildKit worker does not admit linux/amd64")
-    for key, value in labels.items():
-        lowered = str(key).lower() + "=" + str(value).lower()
-        if "sandbox" in lowered and ("no-process" in lowered or "disabled" in lowered or value is True):
-            refuse("BuildKit worker reports process sandbox disabled")
+    process_mode = labels.get("org.mobyproject.buildkit.worker.oci.process-mode")
+    sandbox = labels.get("org.mobyproject.buildkit.worker.sandbox")
+    if process_mode != "sandbox" or str(sandbox).lower() != "true":
+        refuse("BuildKit worker does not report process and executor sandbox labels")
+
+
+def record_launch(path: pathlib.Path, pid: int, exe: pathlib.Path, root: pathlib.Path) -> None:
+    row = pathlib.Path(f"/proc/{pid}/stat").read_text()
+    tail = row[row.rfind(")") + 2:].split()
+    record = {"pid": pid, "startTicks": tail[19], "pgid": pid, "sid": pid,
+              "exe": str(exe.resolve()), "root": str(root.resolve()), "launchPending": True}
+    path.write_text(json.dumps(record, sort_keys=True) + "\n")
 
 
 def validate_info(path: pathlib.Path) -> None:
@@ -207,32 +318,40 @@ def inspect(docker_archive: pathlib.Path, oci_archive: pathlib.Path, out: pathli
             source = tf.extractfile(matches[0])
             if source is None:
                 refuse(f"unreadable layer {name}")
+            compressed_stream, decoded_stream = docker_layer_stream(source)
             h = hashlib.sha256()
             count = 0
+            decoded_count = 0
             destination = final_layer_path.open("wb") if i == 8 else None
             try:
                 while True:
-                    chunk = source.read(1024 * 1024)
+                    chunk = decoded_stream.read(1024 * 1024)
                     if not chunk:
                         break
                     count += len(chunk)
                     h.update(chunk)
+                    decoded_count += len(chunk)
+                    if decoded_count > cap:
+                        refuse("uncompressed Docker layer exceeds byte budget")
                     if destination is not None:
                         destination.write(chunk)
                 if destination is not None:
                     destination.flush()
+            except (gzip.BadGzipFile, EOFError, OSError) as error:
+                refuse(f"invalid or truncated compressed layer stream {name}: {type(error).__name__}")
             finally:
                 if destination is not None:
                     destination.close()
-            if count != matches[0].size:
-                refuse(f"truncated layer {name}")
-            if i == 8 and count < 10240:
+            if compressed_stream.source_bytes != matches[0].size:
+                refuse(f"truncated or trailing compressed layer bytes: {name}")
+            if i == 8 and decoded_count < 10240:
                 refuse("final layer is truncated before tar end blocks")
             digest = "sha256:" + h.hexdigest()
             expected = config["rootfs"]["diff_ids"][i]
             if digest != expected:
                 refuse(f"layer {i} bytes disagree with config diff ID")
-            inventory.append({"ordinal": i, "path": name, "diffId": digest, "bytes": count})
+            inventory.append({"ordinal": i, "path": name, "diffId": digest,
+                "compressedBytes": compressed_stream.source_bytes, "uncompressedBytes": decoded_count})
     (out / "image-config.json").write_bytes(config_raw)
     (out / "docker-manifest.json").write_bytes(manifest_raw)
     (out / "ordered-layers.json").write_text(json.dumps(inventory, indent=2) + "\n")
@@ -242,21 +361,12 @@ def inspect(docker_archive: pathlib.Path, oci_archive: pathlib.Path, out: pathli
         validate_archive_members(tf, 200000)
         index_raw = read_member(tf, "index.json", 1024 * 1024)
         index = json.loads(index_raw)
-        (out / "oci-manifests").mkdir(mode=0o700, exist_ok=True)
         (out / "oci-index.json").write_bytes(index_raw)
-        manifests = []
+        manifests = oci_leaf_manifests(tf, index, out)
         attestations = []
-        for desc in index.get("manifests", []):
-            name = "blobs/sha256/" + desc["digest"].removeprefix("sha256:")
-            raw = read_member(tf, name, 64 * 1024 * 1024)
-            if len(raw) != desc.get("size") or "sha256:" + hashlib.sha256(raw).hexdigest() != desc.get("digest"):
-                refuse("OCI manifest descriptor digest/size mismatch")
-            obj = json.loads(raw)
-            (out / "oci-manifests" / (desc["digest"].removeprefix("sha256:") + ".json")).write_bytes(raw)
-            annotations = desc.get("annotations", {})
-            manifests.append({"descriptor": desc, "manifest": obj})
-            if annotations.get("vnd.docker.reference.type") == "attestation-manifest":
-                attestations.append({"descriptor": desc, "manifest": obj})
+        for item in manifests:
+            if item["descriptor"].get("annotations", {}).get("vnd.docker.reference.type") == "attestation-manifest":
+                attestations.append(item)
         runtime = [item for item in manifests if not item["descriptor"].get("annotations", {}).get("vnd.docker.reference.type")]
         if len(runtime) != 1:
             refuse("OCI archive must contain exactly one runtime manifest")
@@ -285,11 +395,13 @@ def inspect(docker_archive: pathlib.Path, oci_archive: pathlib.Path, out: pathli
                     if uncompressed_digest != inventory[i]["diffId"]:
                         refuse(f"OCI layer {i} does not join Docker archive diff ID")
                 target = item["descriptor"]["digest"]
+                matched_attestations = []
                 for att in attestations:
                     annotation = att["descriptor"].get("annotations", {}).get("vnd.docker.reference.digest")
                     if annotation == target:
+                        matched_attestations.append(att)
                         subject = att["manifest"].get("subject", {})
-                        if subject.get("digest") != target:
+                        if subject and subject.get("digest") != target:
                             refuse("OCI attestation manifest subject does not match runtime manifest")
                         statements=[]
                         (out / "provenance-statements").mkdir(mode=0o700, exist_ok=True)
@@ -314,6 +426,10 @@ def inspect(docker_archive: pathlib.Path, oci_archive: pathlib.Path, out: pathli
                         (out / "provenance-statements.json").write_text(json.dumps(statements, indent=2) + "\n")
                         joins.append({"runtimeManifestDigest": target, "runtimeConfigDigest": cdesc["digest"],
                             "attestationManifestDigest": att["descriptor"]["digest"], "statementSubjectsJoined": True})
+                if not matched_attestations:
+                    refuse("OCI provenance attestation descriptor does not reference runtime manifest")
+                if len(matched_attestations) != len(attestations):
+                    refuse("OCI archive contains an attestation for another runtime manifest")
         if not joins:
             refuse("OCI provenance attestation does not join runtime manifest/config")
     (out / "provenance-joins.json").write_text(json.dumps(joins, indent=2) + "\n")
@@ -338,6 +454,8 @@ if __name__ == "__main__":
         validate_info(pathlib.Path(sys.argv[2]))
     elif len(sys.argv) == 5 and sys.argv[1] == "docker-info":
         validate_docker_info(pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3]), pathlib.Path(sys.argv[4]))
+    elif len(sys.argv) == 6 and sys.argv[1] == "record-launch":
+        record_launch(pathlib.Path(sys.argv[2]), int(sys.argv[3]), pathlib.Path(sys.argv[4]), pathlib.Path(sys.argv[5]))
     elif len(sys.argv) == 4 and sys.argv[1] == "stream":
         bounded_stream(pathlib.Path(sys.argv[2]), int(sys.argv[3]))
     elif len(sys.argv) == 5 and sys.argv[1] == "stream-file":
