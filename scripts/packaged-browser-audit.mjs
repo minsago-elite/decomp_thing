@@ -141,7 +141,7 @@ export function auditFixtures(repo, buildId) {
       ] }] },
   ];
   return {
-    pages, controls, csrfToken: bootstrap.data.csrfToken, sourceBytes: bytes, sourceName: file.data.item.displayName, runId, retriedRunId: retried.data.runId,
+    pages, controls, csrfToken: bootstrap.data.csrfToken, sourceBytes: bytes, sourceName: file.data.item.displayName, runId, runVersion: run.data.version, retriedRunId: retried.data.runId,
     respond(method, pathname, accept) {
       const route = routes.find(([pattern, , verb = 'GET']) => pattern.test(pathname) && (verb === method || (verb === 'GET' && method === 'HEAD')));
       return route ? route[1](accept) : error(404, 'NOT_FOUND');
@@ -182,7 +182,10 @@ export const measurePage = `(() => {
     const outside = box.width > 0 && (box.right > width + 1 || box.left < -1);
     // A bounded local scroller or clipping container need not enlarge the root. Only the
     // named source/table regions may retain horizontal overflow, including hidden overflow.
-    const local = !region && element.clientWidth > 0 && element.scrollWidth > element.clientWidth + 1;
+    // Firefox includes the native file-picker button's intrinsic width in scrollWidth even
+    // when its clipped control box fits; the box itself is still checked for viewport bounds.
+    const clippedFilePicker = element.matches('input[type="file"]') && getComputedStyle(element).overflowX === 'clip';
+    const local = !region && !clippedFilePicker && element.clientWidth > 0 && element.scrollWidth > element.clientWidth + 1;
     if (outside || local) overflow.push(describe(element));
   }
   const actions = [...document.querySelectorAll('button, a[href], input, select, textarea, summary')].filter(shown);
@@ -510,7 +513,7 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
     await ready(tab, `document.body.innerText.includes(${JSON.stringify(done)})`, `${command} by keyboard`);
     const sent = mutations().slice(before);
     assert.equal(sent.length, 1, `${command} must send exactly one command`);
-    assert.ok(sent[0].idempotencyKey && sent[0].ifMatch === `"${'run_version_2'}"` && sent[0].csrf, `${command} lost its identity-bound headers`);
+    assert.ok(sent[0].idempotencyKey && sent[0].ifMatch === `"${fixtures.runVersion}"` && sent[0].csrf, `${command} lost its identity-bound headers`);
     keyboard.steps.push({ result: done, request: { path: sent[0].path, ifMatch: sent[0].ifMatch, idempotencyKey: true, csrf: true } });
   }
   await cdp.call('Browser.setDownloadBehavior', { behavior: 'allowAndName', downloadPath: evidenceDirectory, eventsEnabled: true });
