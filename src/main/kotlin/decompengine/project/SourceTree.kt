@@ -566,7 +566,7 @@ object SourceTreeGenerator {
         reconstructor: ModuleReconstructor? = null,
         overrides: Map<String, String> = emptyMap(),
         observedBehavior: String? = null,
-        profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
+        profile: ReconstructionProfile,
         progress: AgentWorkflowProgress = AgentWorkflowProgress.NONE,
         compilerFeedback: (moduleId: String) -> ModuleCompilerFeedback? = { null },
         onCompilerFeedback: (ModuleCompilerFeedback) -> Unit = {},
