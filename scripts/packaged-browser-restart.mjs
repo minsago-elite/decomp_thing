@@ -225,6 +225,9 @@ export async function qualifyRestart({ fixture, origin, makeTarget, cdp, evaluat
   await follow(old, 'activity after restart');
   assert.deepEqual(await evaluate(old, rows), rowsBefore, 'Activity rows differ after restart');
   await continueFollowing(old, 'activity following after restart');
+  await waitFor(() => hasOpenEventStream(old.eventStreams), 'open foreground activity event stream before backgrounding');
+  const streamsBeforeBackground = [...old.eventStreams.entries()].filter(([, stream]) => stream.open).map(([id]) => id);
+  assert.ok(streamsBeforeBackground.length > 0, 'Background-tab check requires an already-open activity stream');
   assert.equal(await evaluate(old, `fetch('${basePath}/api/v1/jobs/${fixture.jobId}/runs/${RUN}/snapshot').then(r => r.json()).then(b => b.data.throughSequence)`), snapshotBefore);
   assert.deepEqual(await fs.readFile(statePath), stateBefore, 'Reconciliation reads changed workflow-state bytes');
   await captureSafe(old, 'restart-reconciled.png');
@@ -244,11 +247,14 @@ export async function qualifyRestart({ fixture, origin, makeTarget, cdp, evaluat
   await ready(old, `true`, 'hidden tab stream cancellation observation');
   await delay(100);
   assert.equal(hasOpenEventStream(old.eventStreams), false, 'A hidden tab left its activity event stream open');
+  assert.ok(streamsBeforeBackground.every(id => old.eventStreams.get(id)?.open === false),
+    'Every activity stream that was open before backgrounding must close');
   await delay(3000);
   assert.equal(progressReads(old), hiddenReads, 'A hidden tab made progress requests');
   assert.equal(hasOpenEventStream(old.eventStreams), false, 'A hidden tab reopened its activity event stream');
   assert.equal(await evaluate(peer, 'document.visibilityState'), 'visible');
-  evidence.backgroundTab = { hiddenRequests: 0, hiddenNoticeShown: true, foregroundReadsDuringObservation: progressReads(peer) - peerReadsBefore };
+  evidence.backgroundTab = { hiddenRequests: 0, hiddenNoticeShown: true, foregroundReadsDuringObservation: progressReads(peer) - peerReadsBefore,
+    openStreamsBeforeBackground: streamsBeforeBackground.length, allPreviousStreamsClosed: streamsBeforeBackground.every(id => old.eventStreams.get(id)?.open === false) };
 
   await cdp.call('Target.closeTarget', { targetId: peer.targetId });
   await cdp.call('Page.bringToFront', {}, old.sessionId);
