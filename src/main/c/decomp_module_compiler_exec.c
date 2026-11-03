@@ -17,6 +17,15 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+/* Landlock ABI 2/3 rights are stable UAPI bits, but older distro headers omit them.
+   Runtime admission still requires ABI 3 before either bit is used. */
+#ifndef LANDLOCK_ACCESS_FS_REFER
+#define LANDLOCK_ACCESS_FS_REFER (1ULL << 13)
+#endif
+#ifndef LANDLOCK_ACCESS_FS_TRUNCATE
+#define LANDLOCK_ACCESS_FS_TRUNCATE (1ULL << 14)
+#endif
+
 /*
  * A deliberately small, closed exec trampoline.  Policy bytes are authenticated and held
  * stable by the Kotlin worker before launch.  This process validates their framing and the
