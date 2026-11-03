@@ -21,40 +21,110 @@ export async function seedLogs(root) {
   return { ...fixture, log, bytes };
 }
 
+/** Fixed qualifier phases. Failure evidence carries only these labels and bounded counts (#1872). */
+export const LOG_PHASES = Object.freeze(['target', 'route', 'reload', 'initial', 'backward-page', 'released', 'retained-height',
+  'deep-scroll', 'loaded-filter', 'loaded-privacy', 'projection', 'whole-log-search', 'match-jump', 'mounted-replacement',
+  'teardown-warm', 'baseline', 'replacement-cycle', 'memory-budget', 'post-teardown', 'final']);
+const MAX_PHASE_MS = 3_600_000;
+const failures = new WeakMap();
+/** Phase evidence recorded when qualifyLogs threw this error, or null. Never reads the error itself. */
+export function logsFailureEvidence(error) {
+  return (error !== null && typeof error === 'object' && failures.get(error)) || null;
+}
+
 /** Real packaged HTTP/SPA, real recordings, real GC/DOM measurements; no response or timer mocks. */
 export async function qualifyLogs({ fixture, makeTarget, cdp, evaluate, ready, waitFor, browserOrigin }) {
-  const tab = await makeTarget();
+  // In-memory only: no CDP call, network read or expression text is used to record progress.
+  const started = Date.now();
+  const elapsed = since => Math.min(MAX_PHASE_MS, Math.max(0, Math.round(Date.now() - since)));
+  const progress = { active: null, step: 0, completed: [] };
+  let phaseStarted = started;
+  let tab = null;
+  let apiPath = null;
+  const phase = (name, step = 0) => {
+    assert.ok(LOG_PHASES.includes(name) && Number.isSafeInteger(step) && step >= 0 && step < 16);
+    if (progress.active) progress.completed.push({ phase: progress.active, step: progress.step, ms: elapsed(phaseStarted) });
+    if (progress.completed.length > 48) progress.completed.shift();
+    progress.active = name; progress.step = step; phaseStarted = Date.now();
+  };
+  const apiCounts = () => {
+    const result = { logApiRequests: 0, logApiResponses: 0, logApiErrorResponses: 0, logApiCountsIncomplete: 0 };
+    // Bound work as well as output; do not filter/copy arbitrary accumulated network arrays.
+    for (const [list, response] of [[tab?.requests, false], [tab?.responses, true]]) {
+      if (!Array.isArray(list)) continue;
+      if (list.length > 10_000) result.logApiCountsIncomplete = 1;
+      for (let index = 0; index < Math.min(list.length, 10_000); index++) {
+        try {
+          const entry = list[index];
+          if (typeof entry.url !== 'string' || entry.url.length > 8192) { result.logApiCountsIncomplete = 1; continue; }
+          const path = new URL(entry.url).pathname;
+          if (apiPath === null || !(path === apiPath || path.startsWith(apiPath + '/'))) continue;
+          if (response) {
+            result.logApiResponses++;
+            if (!(entry.status >= 200 && entry.status < 300)) result.logApiErrorResponses++;
+          } else result.logApiRequests++;
+        } catch { result.logApiCountsIncomplete = 1; }
+      }
+    }
+    return result;
+  };
+  try {
+    return await qualify();
+  } catch (error) {
+    if (error !== null && typeof error === 'object' && !failures.has(error)) {
+      failures.set(error, Object.freeze({ activePhase: progress.active, activeStep: progress.step, activeMs: elapsed(phaseStarted),
+        totalMs: elapsed(started), completed: Object.freeze(progress.completed.map(entry => Object.freeze({ ...entry }))),
+        ...apiCounts(),
+        exceptions: Array.isArray(tab?.exceptions) ? Math.min(100_000, tab.exceptions.length) : 0 }));
+    }
+    throw error;
+  }
+
+  async function qualify() {
+  phase('target');
+  tab = await makeTarget();
   await cdp.call('Page.bringToFront', {}, tab.sessionId);
   const route = `/nested/jobs/${fixture.jobId}/runs/run_fixture_3/logs`;
   const api = `/nested/api/v1/jobs/${fixture.jobId}/runs/run_fixture_3/logs/build`;
+  apiPath = api;
   const rows = `document.querySelectorAll('.log-row').length`;
   const loaded = `document.querySelector('.log-viewport') !== null`;
   const button = text => `[...document.querySelectorAll('button')].find(b => b.textContent === ${JSON.stringify(text)}).click()`;
   const digest = bytes => createHash('sha256').update(bytes).digest('hex');
+  phase('route');
   await cdp.call('Page.navigate', { url: browserOrigin + route }, tab.sessionId);
   await ready(tab, loaded, 'direct packaged build-log route');
+  phase('reload');
   await cdp.call('Page.reload', {}, tab.sessionId);
   await ready(tab, loaded, 'direct build-log reload');
+  phase('initial');
   assert.equal(await evaluate(tab, 'location.pathname'), route);
   assert.ok(await evaluate(tab, `${rows} > 0 && ${rows} < 60`));
   assert.ok(await evaluate(tab, `document.querySelector('.log-viewport').innerText.includes('[cut at 4096 characters]') && document.querySelector('.log-viewport').innerText.includes('[invalid text replaced]')`));
   // Fill beyond the 2,000-line retention bound through actual backward pages.
   for (let page = 0; page < 5; page++) {
+    phase('backward-page', page);
     await evaluate(tab, button('Load earlier lines'));
     const first = count + 2 - 200 + 1 - (page + 1) * 500;
     await ready(tab, `document.body.innerText.includes('Showing lines ${first}–')`, 'completed backward log capture');
   }
+  phase('released');
   assert.ok(await evaluate(tab, `document.body.innerText.includes('released from memory')`));
+  phase('retained-height');
   const retainedHeight = await evaluate(tab, `document.querySelector('.log-viewport > div').getBoundingClientRect().height`);
   assert.ok(retainedHeight <= 2000 * 20, 'retained virtual height exceeds the production buffer limit');
+  phase('deep-scroll');
   await evaluate(tab, `(() => { const v = document.querySelector('.log-viewport'); v.scrollTop = 30000; v.dispatchEvent(new Event('scroll')); })()`);
   await ready(tab, `document.querySelector('.log-viewport').scrollTop > 10000`, 'real deep scrolling');
+  phase('loaded-filter');
   await evaluate(tab, `(() => { const i = [...document.querySelectorAll('label')].find(l => l.textContent.includes('Find in loaded lines')).querySelector('input'); i.value = 'line-18001 '; i.dispatchEvent(new Event('input', { bubbles: true })); })()`);
   await ready(tab, `document.querySelector('.log-viewport').scrollTop === 0 && ${rows} === 1`, 'deep-scroll filtering keeps match visible');
+  phase('loaded-privacy');
   assert.ok(await evaluate(tab, `document.body.innerText.includes('Lines that are not loaded were not searched.')`));
   assert.equal(await evaluate(tab, 'window.logExecuted === true'), false);
   assert.equal(await evaluate(tab, `document.querySelector('.log-viewport script') !== null`), false);
   assert.equal(await evaluate(tab, `document.querySelector('.log-viewport').innerText.includes(${JSON.stringify(canary)})`), false);
+  phase('projection');
   const projection = await evaluate(tab, `(async () => {
     const range = (await (await fetch('${api}?fromLine=1&limit=2')).json()).data;
     const search = (await (await fetch('${api}?search=${canary}')).json()).data.search;
@@ -65,13 +135,16 @@ export async function qualifyLogs({ fixture, makeTarget, cdp, evaluate, ready, w
   })()`);
   assert.deepEqual(projection, { state: 'available', redacted: true, matchCount: '0', absent: true, parity: true, provenance: true });
 
+  phase('whole-log-search');
   await evaluate(tab, `(() => { const form = document.querySelector('.log-search form'); const i = form.querySelector('input'); i.value = 'line-18001 '; i.dispatchEvent(new Event('input', { bubbles: true })); })()`);
   await evaluate(tab, `document.querySelector('.log-search form').requestSubmit()`);
   await ready(tab, `document.querySelector('.log-matches button')?.textContent === 'Go to line 18001'`, 'literal whole-log UI search');
+  phase('match-jump');
   await evaluate(tab, `document.querySelector('.log-matches button').click()`);
   await ready(tab, `document.querySelector('.log-viewport').innerText.includes('line-18001 ')`, 'source-bound whole-log match jump');
 
   // Replace while mounted too: the digest must replace the retained buffer, not mix recordings.
+  phase('mounted-replacement');
   const replacement = recording(1);
   await fs.writeFile(fixture.log + '.next', replacement, { flag: 'wx', mode: 0o600 });
   await fs.rename(fixture.log + '.next', fixture.log);
@@ -97,10 +170,13 @@ export async function qualifyLogs({ fixture, makeTarget, cdp, evaluate, ready, w
     const dom = await cdp.call('Memory.getDOMCounters', {}, tab.sessionId);
     return { usedSize: heap.usedSize, nodes: dom.nodes, documents: dom.documents, listeners: dom.jsEventListeners };
   };
+  phase('teardown-warm');
   await leave();
+  phase('baseline');
   const baseline = await measure();
   const samples = [];
   for (let generation = 2; generation <= 13; generation++) {
+    phase('replacement-cycle', generation - 2);
     const bytes = recording(generation);
     const next = fixture.log + '.next';
     await fs.writeFile(next, bytes, { flag: 'wx', mode: 0o600 });
@@ -112,16 +188,19 @@ export async function qualifyLogs({ fixture, makeTarget, cdp, evaluate, ready, w
     await leave();
     samples.push(await measure());
   }
+  phase('memory-budget');
   const final = samples.at(-1);
   assert.ok(final.usedSize <= baseline.usedSize + 8 * 1024 * 1024, 'log teardown retained more than 8 MiB above warm baseline');
   assert.ok(final.nodes <= baseline.nodes + 200, 'log teardown retained DOM rows');
   assert.ok(final.listeners <= baseline.listeners + 20, 'log teardown retained listeners');
   // Observe longer than the real follow interval; never change production timers.
+  phase('post-teardown');
   const logRequests = () => tab.requests.filter(r => new URL(r.url).pathname.startsWith(api)).length;
   const afterLeave = logRequests();
   const until = Date.now() + 3500;
   await waitFor(() => Date.now() >= until, 'post-teardown real-timer observation');
   assert.equal(logRequests(), afterLeave, 'log reads continued after unmount');
+  phase('final');
   assert.deepEqual(tab.exceptions, []);
   assert.ok(tab.requests.every(r => ['GET', 'HEAD'].includes(r.method)));
   return { realBackend: true, sourceLines: count + 2, sourceBytes: fixture.bytes.length,
@@ -130,4 +209,5 @@ export async function qualifyLogs({ fixture, makeTarget, cdp, evaluate, ready, w
     memory: { baseline, samples, final, retainedHeapBudgetBytes: 8 * 1024 * 1024 },
     teardownNoFurtherReads: true, terminalRecordingFixture: true,
     limitation: 'Terminal inert attempt: sustained atomic recordings are qualified; live-worker follow qualification remains with progress integration.' };
+  }
 }

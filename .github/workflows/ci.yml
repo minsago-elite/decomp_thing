@@ -75,6 +75,8 @@ jobs:
         run: node --test scripts/test-packaged-browser-structure.mjs
       - name: Verify packaged DevTools target lifecycle controls
         run: node --test scripts/test-packaged-browser-target-lifecycle.mjs
+      - name: Verify packaged logs failure-phase evidence controls
+        run: node --test scripts/test-packaged-browser-logs-phase-evidence.mjs
       - name: Verify bounded archival cleanup controls
         timeout-minutes: 1
         run: python3 -B scripts/test-archival-diagnostics.py --verbose

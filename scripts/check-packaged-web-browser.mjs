@@ -12,7 +12,7 @@ import { seedStructure, qualifyStructure } from './packaged-browser-structure.mj
 import { seedLive, qualifyLive } from './packaged-browser-live.mjs';
 import { seedHistory, qualifyHistory } from './packaged-browser-history.mjs';
 import { seedSources, qualifySources } from './packaged-browser-sources.mjs';
-import { seedLogs, qualifyLogs } from './packaged-browser-logs.mjs';
+import { seedLogs, qualifyLogs, logsFailureEvidence } from './packaged-browser-logs.mjs';
 import { seedLegacy, qualifyLegacy } from './packaged-browser-legacy.mjs';
 import { qualifyUpgrade, qualifyUpgradeCache } from './packaged-browser-upgrade.mjs';
 import { qualifyAudit, assertAudit } from './packaged-browser-audit.mjs';
@@ -1068,6 +1068,8 @@ try {
   report.targetLifecycle = targetLifecycle.toJSON();
   report.contentSecurityPolicy = cspEvidence();
   report.error = safeDiagnostic(error.stack);
+  // Fixed logs phase labels and bounded counts only, captured in memory before the throw (#1872).
+  report.logsFailurePhase = logsFailureEvidence(error);
   report.applicationError = safeDiagnostic(applicationError);
   report.browserError = safeDiagnostic(browserError);
   report.viteError = safeDiagnostic(viteError);
