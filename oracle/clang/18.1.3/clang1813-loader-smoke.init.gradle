@@ -30,6 +30,10 @@ gradle.projectsEvaluated {
     project.kotlin.sourceSets.getByName("clang1813Loader").kotlin.setSrcDirs([
         new File(snapshot, "sources/src/main/kotlin")
     ])
+    // Kotlin resolves the Java ABI from the same captured source closure.
+    project.tasks.named("compileClang1813LoaderKotlin").configure {
+        source(sources.java)
+    }
     // Deliberately closed minimal dependency configuration. No main runtimeClasspath.
     def dependencies = project.configurations.getByName(sources.runtimeClasspathConfigurationName)
     project.dependencies.add(sources.implementationConfigurationName, "org.jetbrains.kotlin:kotlin-stdlib:2.4.0")
