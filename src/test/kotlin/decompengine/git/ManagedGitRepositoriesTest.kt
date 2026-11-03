@@ -236,6 +236,69 @@ class ManagedGitRepositoriesTest {
         }
     }
 
+    private fun withManifestTree(body: (Path) -> Unit) {
+        val root = Files.createTempDirectory(Files.createDirectories(Path.of("build/test-tmp/git-manifest")), "manifest-")
+        try { body(root) } finally { root.toFile().deleteRecursively() }
+    }
+
+    @Test fun `retention manifest prunes uncopied build subtrees before counting or reading`() = withManifestTree { root ->
+        Files.createDirectories(root.resolve("src"))
+        Files.writeString(root.resolve("src/main.c"), "source")
+        Files.createDirectories(root.resolve("build/one/two/three"))
+        Files.writeString(root.resolve("build/one/two/three/huge.o"), "x".repeat(1000))
+        val expected = GitSourceCopy.manifestDigest(mapOf("src/main.c" to GitSourceCopy.digestOf(root.resolve("src/main.c"))))
+        val opened = mutableListOf<Path>()
+        assertTrue(GitSourceCopy.matchesManifest(root, expected, GitCheckoutLimits(1, 16, 1)) { file ->
+            opened.add(file); Files.newInputStream(file, NOFOLLOW_LINKS)
+        })
+        assertEquals(listOf(root.resolve("src/main.c")), opened)
+    }
+
+    @Test fun `retention manifest bounds bytes files directories and depth before extra file reads`() {
+        for (kind in listOf("file-bytes", "total-bytes", "files", "directories", "depth")) withManifestTree { root ->
+            val limits = when (kind) {
+                "files" -> GitCheckoutLimits(1, 16, 100)
+                "directories" -> GitCheckoutLimits(10, 16, 1)
+                else -> GitCheckoutLimits(10, 16, 100)
+            }
+            when (kind) {
+                "file-bytes" -> Files.writeString(root.resolve("large.c"), "x".repeat(17))
+                "total-bytes" -> {
+                    Files.writeString(root.resolve("one.c"), "x".repeat(10))
+                    Files.writeString(root.resolve("two.c"), "y".repeat(10))
+                }
+                "files" -> {
+                    Files.writeString(root.resolve("one.c"), "x")
+                    Files.writeString(root.resolve("two.c"), "y")
+                }
+                "directories" -> { Files.createDirectory(root.resolve("one")); Files.createDirectory(root.resolve("two")) }
+                "depth" -> { var directory = root; repeat(65) { directory = Files.createDirectory(directory.resolve("d")) } }
+            }
+            val opened = mutableListOf<Path>()
+            assertFalse(GitSourceCopy.matchesManifest(root, GitSourceCopy.manifestDigest(emptyMap()), limits) { file ->
+                opened.add(file); Files.newInputStream(file, NOFOLLOW_LINKS)
+            }, kind)
+            assertEquals(if (kind in listOf("total-bytes", "files")) 1 else 0, opened.size, kind)
+        }
+    }
+
+    @Test fun `retention manifest streaming stops at admitted bytes plus one and closes a growing input`() = withManifestTree { root ->
+        val file = root.resolve("main.c")
+        Files.writeString(file, "ab")
+        val expected = GitSourceCopy.manifestDigest(mapOf("main.c" to GitSourceCopy.digestOf(file)))
+        var readBytes = 0
+        var closed = false
+        val growing = object : java.io.ByteArrayInputStream(("ab" + "x".repeat(65536)).toByteArray()) {
+            override fun read(buffer: ByteArray, offset: Int, length: Int): Int = super.read(buffer, offset, length).also {
+                if (it > 0) readBytes += it
+            }
+            override fun close() { closed = true; super.close() }
+        }
+        assertFalse(GitSourceCopy.matchesManifest(root, expected, GitCheckoutLimits(1, 1024, 1)) { growing })
+        assertEquals(3, readBytes)
+        assertTrue(closed)
+    }
+
     @Test fun `a retained snapshot that no longer matches its commitments is never published`(): Unit {
         for (change in listOf("modify", "delete")) Fixture().use { f ->
             if (change == "modify") f.write("src/main file.c", "int main(void) { return 1; }\r\n")
