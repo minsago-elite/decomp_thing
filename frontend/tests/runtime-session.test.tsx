@@ -1,9 +1,10 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { act, render, screen } from '@testing-library/preact';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/preact';
 import { expect, it, vi } from 'vitest';
 import type { Bootstrap } from '../src/api/generated';
 import { ApiClientError } from '../src/api/errors';
+import { formatExactBytes } from '../src/copy/format';
 import Runtime from '../src/routes/Runtime';
 import { createBrowserSession } from '../src/session/session';
 
@@ -110,6 +111,62 @@ it('retains only the last runtime receipt across a transient reconnect read and 
     expect(document.body.textContent).not.toContain(data.csrfToken);
     view.unmount();
   } finally { session.dispose(); vi.restoreAllMocks(); vi.useRealTimers(); }
+});
+
+it('keeps the Runtime retry control focused after a transient session check failure', async () => {
+  const fixture = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/bootstrap.json'), 'utf8')) as { data: Bootstrap };
+  const data = { ...fixture.data, sessionExpiresAt: new Date(Date.now() + 60_000).toISOString() };
+  const gateway = { bootstrap: vi.fn().mockResolvedValueOnce(data).mockRejectedValueOnce(new Error('offline')),
+    exchange: vi.fn(), logout: vi.fn() };
+  const session = createBrowserSession(gateway, '/');
+  try {
+    await session.initialize({ kind: 'absent' });
+    render(<Runtime identity={{ applicationVersion: '0.1.0', uiBuildId: data.uiBuildId }} session={session} />);
+    const check = screen.getByRole('button', { name: 'Check session' });
+    check.focus();
+    expect(document.activeElement).toBe(check);
+    fireEvent.click(check);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(screen.getByText('Previously loaded metadata may be outdated. Refresh to read current details.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Check session' })).toBe(check);
+    expect(document.activeElement).toBe(check);
+    expect(gateway.bootstrap).toHaveBeenCalledTimes(2);
+  } finally { session.dispose(); }
+});
+
+it('discards instance-bound storage and maintenance results when the Runtime server changes', async () => {
+  const fixture = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/bootstrap.json'), 'utf8')) as { data: Bootstrap };
+  const data = { ...fixture.data, sessionExpiresAt: new Date(Date.now() + 60_000).toISOString() };
+  const storage = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/storage-summary.json'), 'utf8')) as { requestId: string; data: { totalBytes: string } };
+  const maintenance = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/maintenance-preview.json'), 'utf8')) as { requestId: string };
+  const responses = new Map([
+    ['/api/v1/storage', storage], ['/api/v1/storage/maintenance-preview', maintenance],
+  ]);
+  const fetcher = vi.fn<typeof fetch>(async input => {
+    const path = new URL(String(input), window.location.origin).pathname;
+    const suffix = path.endsWith('/storage/maintenance-preview') ? '/api/v1/storage/maintenance-preview' : '/api/v1/storage';
+    const document = responses.get(suffix);
+    expect(document).toBeTruthy();
+    return new Response(JSON.stringify(document), { status: 200, headers: {
+      'Content-Type': 'application/json; charset=utf-8', 'X-Request-ID': document!.requestId,
+    } });
+  });
+  vi.stubGlobal('fetch', fetcher);
+  const gateway = { bootstrap: vi.fn().mockResolvedValueOnce(data).mockResolvedValueOnce({ ...data, serverInstanceId: 'server_fixture_2' }),
+    exchange: vi.fn(), logout: vi.fn() };
+  const session = createBrowserSession(gateway, '/');
+  try {
+    await session.initialize({ kind: 'absent' });
+    render(<Runtime identity={{ applicationVersion: '0.1.0', uiBuildId: data.uiBuildId }} session={session} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Read storage and maintenance preview' }));
+    await waitFor(() => expect(screen.getByText('Total').nextElementSibling?.textContent).toBe(formatExactBytes(storage.data.totalBytes)));
+    expect(screen.getByText('Maintenance preview (dry run)')).toBeTruthy();
+    await act(async () => { await session.refresh(); });
+    expect(screen.getByText('server_fixture_2')).toBeTruthy();
+    expect(screen.queryByText(formatExactBytes(storage.data.totalBytes))).toBeNull();
+    expect(screen.queryByText('Maintenance preview (dry run)')).toBeNull();
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  } finally { session.dispose(); }
 });
 
 it('clears retained Runtime facts after a non-transient session refusal', async () => {

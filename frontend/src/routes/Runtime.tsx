@@ -37,7 +37,8 @@ export default function Runtime({ identity, session = null, basePath = '' }: { i
         <h2 id="server-runtime-title">{copy.connectedServer}</h2>
         <MetadataReceipt kind="runtime" receipt={runtimeReceipt} />
         <p>{copy.reportedWhenTheLocalSessionWasCheckedOpeningThisView}</p>
-        {session && (state?.status === 'authenticated' || state?.status === 'checking') &&
+        {session && (state?.status === 'authenticated' || state?.status === 'checking'
+          || state?.status === 'unavailable' && state.reason === 'connection') &&
           <button type="button" disabled={state.status === 'checking'} onClick={() => { void session.refresh(); }}>
             {state.status === 'checking' ? sessionStatusCopy.checkingLocalSession : sessionStatusCopy.checkSession}
           </button>}
@@ -54,7 +55,7 @@ export default function Runtime({ identity, session = null, basePath = '' }: { i
         </dl>
         <SchedulerSummary scheduler={snapshot.runtime.scheduler} />
         <ProgressRetentionSummary retention={snapshot.runtime.progressRetention} />
-        <StorageSummary basePath={basePath} />
+        <StorageSummary key={snapshot.serverInstanceId ?? ''} basePath={basePath} />
         <h3>{copy.workflowCapabilities}</h3>
         {snapshot.capabilities.length === 0 ? <p>{copy.noCapabilitiesReported}</p> : <ul>
           {snapshot.capabilities.map(capability => <li key={capability.id}>
