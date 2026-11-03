@@ -151,7 +151,8 @@ export async function qualifyRestart({ fixture, origin, makeTarget, cdp, evaluat
   assert.equal(old.requests.filter(r => r.method === 'PUT' && r.url === pinUrl).length, 0,
     'The old tab must not write the pin before the deliberate pin action');
   const rowsBefore = await evaluate(old, rows);
-  const snapshotBefore = await evaluate(old, `fetch('${basePath}/api/v1/jobs/${fixture.jobId}/runs/${RUN}/snapshot').then(r => r.json()).then(b => b.data.throughCursor)`);
+  // Cursor epochs are process-local; compare the durable sequence boundary instead.
+  const snapshotBefore = await evaluate(old, `fetch('${basePath}/api/v1/jobs/${fixture.jobId}/runs/${RUN}/snapshot').then(r => r.json()).then(b => b.data.throughSequence)`);
   evidence.phases.push('first-process');
 
   // Graceful SIGTERM-only restart: same installation, data directory and port.
@@ -216,10 +217,10 @@ export async function qualifyRestart({ fixture, origin, makeTarget, cdp, evaluat
   await readPin(old, 'pin policy after restart');
   await follow(old, 'activity after restart');
   assert.deepEqual(await evaluate(old, rows), rowsBefore, 'Activity rows differ after restart');
-  assert.equal(await evaluate(old, `fetch('${basePath}/api/v1/jobs/${fixture.jobId}/runs/${RUN}/snapshot').then(r => r.json()).then(b => b.data.throughCursor)`), snapshotBefore);
+  assert.equal(await evaluate(old, `fetch('${basePath}/api/v1/jobs/${fixture.jobId}/runs/${RUN}/snapshot').then(r => r.json()).then(b => b.data.throughSequence)`), snapshotBefore);
   assert.deepEqual(await fs.readFile(statePath), stateBefore, 'Reconciliation reads changed workflow-state bytes');
   await captureSafe(old, 'restart-reconciled.png');
-  evidence.activityContinuity = { rows: rowsBefore.length, throughCursor: snapshotBefore };
+  evidence.activityContinuity = { rows: rowsBefore.length, throughSequence: snapshotBefore };
   evidence.phases.push('restarted-process');
 
   // Two tabs in one window: only the foreground tab may read; closing it leaves the survivor streaming.
