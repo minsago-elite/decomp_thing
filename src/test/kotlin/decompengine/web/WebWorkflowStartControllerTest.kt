@@ -32,6 +32,7 @@ class WebWorkflowStartControllerTest {
         deferred: Boolean = false,
         val limits: WorkflowExecutionLimits = LIMITS,
         val capability: String? = CAPABILITY,
+        val launch: DurableWebWorkflowLaunch? = null,
         val scheduleFailure: RuntimeException? = null,
         private val deleteRoot: Boolean = true,
     ) : AutoCloseable {
@@ -51,6 +52,7 @@ class WebWorkflowStartControllerTest {
                 override val workflow = WorkflowKind.RECONSTRUCT
                 override val limits = this@Fixture.limits
                 override val harnessCapabilityId = capability
+                override val launch = this@Fixture.launch
                 override fun execute(context: DurableWebWorkflowContext): DurableWebWorkflowOutcome {
                     check(context.attempt.harnessCapabilityId == capability)
                     calls.incrementAndGet()
@@ -85,6 +87,10 @@ class WebWorkflowStartControllerTest {
         fun body() = buildJsonObject {
             put("workflow", "reconstruct"); put("inputRevisionId", JsonNull)
             put("harnessCapabilityId", capability?.let(::JsonPrimitive) ?: JsonNull)
+            launch?.let { selected -> put("launchSelection", buildJsonObject {
+                put("capabilityId", "workflow-reconstruct-${selected.mode.wireName}")
+                put("mode", selected.mode.wireName)
+            }) }
             put("limits", buildJsonObject {
                 put("wallClockMs", limits.wallClockMs.toString()); put("idleMs", limits.idleMs.toString())
                 put("maxOutputBytes", limits.maxOutputBytes.toString()); put("maxToolCalls", limits.maxToolCalls.toString())
@@ -212,6 +218,41 @@ class WebWorkflowStartControllerTest {
         val missing = f.send(target = f.path.replace(f.job.id, "f".repeat(32))); error(missing, 404, "NOT_FOUND")
         assertTrue(f.snapshot().attempts.isEmpty()); assertEquals(0, f.calls.get())
         run(f.send()); assertEquals(1, f.calls.get())
+    }
+
+    @Test
+    fun `launch selection is strict registration-bound and part of read-only idempotent replay`() = Fixture(
+        launch = DurableWebWorkflowLaunch(DurableWebWorkflowMode.AGENT, executesBinary = true, contactsAgent = true,
+            requiredTools = listOf("agent-harness")),
+    ).use { f ->
+        val initial = f.version()
+        val submitted = f.body()
+        val firstResponse = f.send(body = submitted, headers = f.headers(initial))
+        val first = run(firstResponse)
+        val expected = buildJsonObject {
+            put("capabilityId", "workflow-reconstruct-agent"); put("mode", "agent")
+        }
+        assertEquals(expected, first.getValue("launchSelection"))
+        val retained = f.state().readBytes()
+        val replay = f.send(body = submitted, headers = f.headers(initial))
+        assertEquals(first, run(replay)); assertContentEquals(retained, f.state().readBytes())
+        assertEquals("true", replay.headers().firstValue("Idempotency-Replayed").orElseThrow())
+
+        val changedSelection = submitted.replace("workflow-reconstruct-agent", "workflow-reconstruct-tools")
+        error(f.send(body = changedSelection, headers = f.headers(initial)), 409, "IDEMPOTENCY_CONFLICT")
+        val malformed = listOf(
+            submitted.replace("\"mode\":\"agent\"", "\"mode\":\"unknown\""),
+            submitted.replace("\"mode\":\"agent\"", "\"mode\":7"),
+            submitted.replace("workflow-reconstruct-agent", "../private"),
+            submitted.replace(",\"mode\":\"agent\"", ""),
+            submitted.replace("\"mode\":\"agent\"", "\"mode\":\"agent\",\"extra\":true"),
+            submitted.replace("\"launchSelection\":{", "\"launchSelection\":null,\"ignoredSelection\":{"),
+        )
+        malformed.forEach { error(f.send(body = it, headers = f.headers(key = "strict_selection_${malformed.indexOf(it)}_key")), 422, "VALIDATION_FAILED") }
+        val foreign = submitted.replace("workflow-reconstruct-agent", "workflow-reconstruct-evidence")
+        error(f.send(body = foreign, headers = f.headers(key = "selection_foreign_key_1234")), 503, "CAPABILITY_UNAVAILABLE")
+        assertEquals(1, f.calls.get())
+        assertEquals(1, f.snapshot().attempts.size)
     }
 
     @Test

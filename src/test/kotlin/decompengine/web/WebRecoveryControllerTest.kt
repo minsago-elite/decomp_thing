@@ -31,6 +31,7 @@ class WebRecoveryControllerTest {
         registered: Boolean = true,
         @Volatile var deferred: Boolean = false,
         val checkpoints: DurableWebWorkflowCheckpointPolicy? = null,
+        val launch: DurableWebWorkflowLaunch? = null,
         seed: ((WorkflowAttemptStore, String) -> Unit)? = null,
         private val deleteRoot: Boolean = true,
     ) : AutoCloseable {
@@ -62,6 +63,7 @@ class WebRecoveryControllerTest {
                     override val workflow = WorkflowKind.RECONSTRUCT
                     override val limits = LIMITS
                     override val harnessCapabilityId = CAPABILITY
+                    override val launch = this@Fixture.launch
                     override val checkpoints = policy
                     override fun execute(context: DurableWebWorkflowContext): DurableWebWorkflowOutcome {
                         contexts += context
@@ -85,6 +87,7 @@ class WebRecoveryControllerTest {
             "Content-Type" to "application/json", "X-CSRF-Token" to csrf, "If-Match" to "\"$version\"", "Idempotency-Key" to key)
         fun start(key: String = "http_recovery_start_key_1"): String {
             val body = "{\"workflow\":\"reconstruct\",\"inputRevisionId\":null,\"harnessCapabilityId\":\"$CAPABILITY\"," +
+                (launch?.let { "\"launchSelection\":{\"capabilityId\":\"workflow-reconstruct-${it.mode.wireName}\",\"mode\":\"${it.mode.wireName}\"}," } ?: "") +
                 "\"limits\":{\"wallClockMs\":\"60000\",\"idleMs\":\"15000\",\"maxOutputBytes\":\"1048576\",\"maxToolCalls\":\"16\"}}"
             val response = send(body = body, headers = mutation(jobVersion(), key), target = runs)
             check(response.statusCode() == 202) { response.body() }
@@ -186,6 +189,30 @@ class WebRecoveryControllerTest {
             assertTrue(inspected.all { it.predecessor.runId == failed && it.job.id == f.job.id })
             assertEquals(CAPABILITY, resumed.getValue("harnessCapabilityId").jsonPrimitive.content)
         }
+    }
+
+    @Test
+    fun `retry refuses an attempt whose exact launch registration was replaced`() {
+        val root = createTempDirectory("web-recovery-launch-replaced-")
+        var jobId = ""
+        var failedRunId = ""
+        try {
+            Fixture(root = root, deleteRoot = false,
+                launch = DurableWebWorkflowLaunch(DurableWebWorkflowMode.AGENT, true, true, listOf("agent-harness"))).use { f ->
+                jobId = f.job.id
+                failedRunId = f.start()
+                assertEquals(WorkflowLaunchSelection("workflow-reconstruct-agent", "agent"), f.attempt(failedRunId).launchSelection)
+            }
+            Fixture(root = root, reuseJob = jobId, deleteRoot = false,
+                launch = DurableWebWorkflowLaunch(DurableWebWorkflowMode.EVIDENCE_ONLY, true, false, emptyList())).use { f ->
+                val before = f.state().readBytes()
+                assertEquals(control(false, "HARNESS_CHANGED"), f.controls(failedRunId).second.getValue("retry"))
+                error(f.recover(failedRunId, key = "replacement_retry_request_123"), 409, "HARNESS_CHANGED")
+                assertContentEquals(before, f.state().readBytes())
+                assertEquals(1, f.snapshot().attempts.size)
+                assertTrue(f.contexts.isEmpty())
+            }
+        } finally { root.toFile().deleteRecursively() }
     }
 
     @Test

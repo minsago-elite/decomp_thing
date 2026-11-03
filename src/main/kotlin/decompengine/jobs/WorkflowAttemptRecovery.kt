@@ -60,12 +60,13 @@ data class WorkflowAttemptRecovery(
  * version, the mode and the expected input revision. Server-selected limits/harness never make a replay conflict.
  */
 internal fun workflowRecoveryIntentSha256(expectedRunVersion: String, previousRunId: String,
-    mode: WorkflowRecoveryMode, inputRevisionId: String?): String {
+    mode: WorkflowRecoveryMode, inputRevisionId: String?, launchSelection: WorkflowLaunchSelection? = null): String {
     require(VERSION.matches(expectedRunVersion) && VERSION.matches(previousRunId)) { "invalid workflow recovery identity" }
     inputRevisionId?.let { require(VERSION.matches(it)) { "invalid workflow recovery input revision" } }
     val intent = buildJsonObject {
         put("expectedRunVersion", expectedRunVersion); put("previousRunId", previousRunId)
         put("mode", mode.wireName); put("inputRevisionId", inputRevisionId)
+        launchSelection?.let { put("launchSelection", it.encode()) }
     }
     return MessageDigest.getInstance("SHA-256")
         .digest("decomp-workflow-recover-intent-v1\u0000".toByteArray(Charsets.US_ASCII) + OracleJson.canonicalBytes(intent))

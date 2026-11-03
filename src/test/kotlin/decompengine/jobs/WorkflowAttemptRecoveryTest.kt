@@ -82,6 +82,37 @@ class WorkflowAttemptRecoveryTest {
     }
 
     @Test
+    fun `recorded launch selection is preserved through retry and startup recovery`() = withRoot { root ->
+        val job = upload(root)
+        val selected = WorkflowLaunchSelection("workflow-reconstruct-agent", "agent")
+        lateinit var predecessor: WorkflowAttempt
+        lateinit var successor: WorkflowAttempt
+        WorkflowAttemptStore.open(root, CLOCK).use { store ->
+            val created = store.create(job, store.available(job).snapshot.version,
+                NewWorkflowAttempt(WorkflowKind.RECONSTRUCT, LIMITS, launchSelection = selected)).attempt
+            val running = store.transition(job, created.runId, created.version, WorkflowTransition.Start).attempt
+            predecessor = store.transition(job, running.runId, running.version,
+                WorkflowTransition.Finish(WorkflowRunState.FAILED, WorkflowTerminalReason.FAILED)).attempt
+            assertEquals(selected, predecessor.launchSelection)
+            val request = NewWorkflowAttempt(WorkflowKind.RECONSTRUCT, LIMITS, previousRunId = predecessor.runId,
+                recovery = WorkflowAttemptRecovery(WorkflowRecoveryMode.RETRY), launchSelection = selected)
+            successor = store.createIdempotent(job, store.available(job).snapshot.version, request, KEY, predecessor.version).attempt
+            assertEquals(selected, successor.launchSelection)
+            val replay = store.replayRecovery(job, predecessor.runId, predecessor.version, WorkflowRecoveryMode.RETRY, null, KEY)!!
+            assertTrue(replay.replayed); assertEquals(successor, replay.attempt)
+        }
+        WorkflowAttemptStore.open(root, CLOCK).use { store ->
+            val recovered = store.recoverAfterRestart(job) as WorkflowJobInspection.Available
+            assertEquals(WorkflowRunState.INTERRUPTED, recovered.snapshot.latestRun!!.state)
+            assertEquals(selected, recovered.snapshot.latestRun!!.launchSelection)
+            val before = state(root, job).readBytes()
+            assertEquals(successor.runId, store.replayRecovery(job, predecessor.runId, predecessor.version,
+                WorkflowRecoveryMode.RETRY, null, KEY)!!.attempt.runId)
+            assertContentEquals(before, state(root, job).readBytes())
+        }
+    }
+
+    @Test
     fun `invalid persisted or constructed recovery provenance is refused`() = withRoot { root ->
         assertFailsWith<IllegalArgumentException> { WorkflowAttemptRecovery(WorkflowRecoveryMode.RETRY, WorkflowResumeRestoration.PROJECT_EVIDENCE, SHA) }
         assertFailsWith<IllegalArgumentException> { WorkflowAttemptRecovery(WorkflowRecoveryMode.RESUME, WorkflowResumeRestoration.PROJECT_EVIDENCE, null) }

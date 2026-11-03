@@ -129,6 +129,10 @@
       "valid": true
     },
     {
+      "file": "fixtures/invalid-workflow-launch-selection.json",
+      "valid": false
+    },
+    {
       "file": "fixtures/request-workflow-cancel.json",
       "valid": true
     },

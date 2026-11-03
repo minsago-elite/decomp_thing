@@ -13,6 +13,9 @@ internal fun webRun(run: WorkflowAttempt): JsonObject = buildJsonObject {
     nullable("resultRevisionId", run.acceptedRevision?.revisionId ?: run.candidate?.revisionId)
     put("acceptance", if (run.acceptedRevision != null) "accepted" else "not-evaluated")
     nullable("harnessCapabilityId", run.harnessCapabilityId); nullable("terminalReason", run.terminalReason?.name)
+    put("launchSelection", run.launchSelection?.let { selection -> buildJsonObject {
+        put("capabilityId", selection.capabilityId); put("mode", selection.mode)
+    } } ?: JsonNull)
     // Recovery provenance states what a resume restored; a retry restores nothing from its predecessor.
     put("recovery", run.recovery?.let { recovery -> buildJsonObject {
         put("mode", recovery.mode.wireName)

@@ -214,6 +214,14 @@ It requires a canonical job target, no query, one strong job `If-Match`, one
 identity fields must be present as bounded IDs or null; all four limit fields
 must be canonical unsigned decimal strings. Duplicate keys, unknown fields,
 invalid UTF-8, numeric JSON limits and arbitrary command/path fields are refused.
+`launchSelection` is optional for legacy clients. When present it must contain
+exactly the server-issued `capabilityId` and its `mode` (`tools`, `agent`, or
+`evidence-only`); the server matches both against the selected workflow and
+harness registration before admitting work. Run responses expose the recorded
+selection, with `null` marking attempts that predate this field. Retry and
+resume retain a recorded selection and are refused if that registration has
+changed or disappeared. Idempotency binds the selection while old null-selection
+receipts keep their original digest.
 
 An admitted start returns `202 run`, its run `Location` and strong run ETag.
 Replay returns the same retained run identity and current retained run state,
