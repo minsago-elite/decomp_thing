@@ -216,7 +216,7 @@ export function RecordedValidationEvidence({ jobId, runId, basePath, navigation 
   [report, history, selected, jobId, runId]);
   const loading = view?.loading ?? false;
   const flag = (value: boolean | null) => value === null ? copy.notCompared : value ? copy.matches : copy.differs;
-  return <section aria-labelledby="recorded-validation-title">
+  return <section class="retained-cases" aria-labelledby="recorded-validation-title">
     <h2 id="recorded-validation-title">{copy.title}</h2>
     <p>{copy.scope}</p>
     <button type="button" disabled={loading} onClick={() => { void readHistory(); }}>{copy.read}</button>
@@ -228,7 +228,7 @@ export function RecordedValidationEvidence({ jobId, runId, basePath, navigation 
       <ul aria-label={copy.limitations}>{history.limitations.map((text, index) => <li key={index}>{text}</li>)}</ul>
       {history.state === 'recorded' && <>
         <p>{copy.historyPage} {history.page} / {history.totalPages}</p>
-        <div role="region" aria-label={copy.owners} tabIndex={0}>
+        <div class="retained-case-table" role="region" aria-label={copy.owners} tabIndex={0}>
           <table><caption>{copy.owners}</caption><thead><tr>
             <th scope="col">{copy.operation}</th><th scope="col">{copy.candidate}</th><th scope="col">{copy.source}</th><th scope="col">{copy.receipt}</th>
           </tr></thead><tbody>{history.items.map(owner => <tr key={`${owner.ownerKind}:${owner.ownerId}`}>
@@ -322,7 +322,7 @@ export function RecordedValidationEvidence({ jobId, runId, basePath, navigation 
         <dl><dt>{copy.source}</dt><dd><code>{cases.sourceSha256}</code></dd><dt>{copy.corpus}</dt><dd><code>{cases.corpusSha256}</code></dd>
           <dt>{copy.inputs}</dt><dd>{cases.totalInputs}</dd><dt>{copy.matched}</dt><dd>{cases.matchedInputs ?? copy.notCompared}</dd></dl>
         <p>{copy.casePage} {cases.page} / {cases.totalPages}</p>
-        <div role="region" aria-label={copy.cases} tabIndex={0}>
+        <div class="retained-case-table" role="region" aria-label={copy.cases} tabIndex={0}>
           <table><caption>{copy.cases}</caption><thead><tr><th scope="col">{copy.case}</th><th scope="col">{copy.outcome}</th>
             <th scope="col">{copy.exit}</th><th scope="col">{copy.stdout}</th><th scope="col">{copy.stderr}</th><th scope="col">{copy.previews}</th>
           </tr></thead><tbody>{cases.items.map(item => <tr key={item.caseId}>
@@ -375,7 +375,7 @@ function MismatchComparison({ first, second, page, onPageChange, onInspectPage, 
     <dl>{groups.map(([label, ordinals]) => <div key={label}><dt>{label}</dt><dd>{ordinals.length}</dd></div>)}
       <dt>{copy.matchingBoth}</dt><dd>{result.matched}</dd></dl>
     <p>{textMessage(copy.comparisonWindowText, { window: copy.comparisonWindow, page, pages, ordinals: copy.comparisonOrdinals })}</p>
-    <div role="region" aria-label={copy.comparisonDifferences} tabIndex={0}>
+    <div class="retained-case-table" role="region" aria-label={copy.comparisonDifferences} tabIndex={0}>
       <table><caption>{copy.comparisonDifferences}</caption><thead><tr><th scope="col">{copy.outcome}</th>
         <th scope="col">{copy.caseOrdinal}</th><th scope="col">{copy.inspectSelected}</th></tr></thead><tbody>
         {groups.flatMap(([label, ordinals]) => ordinals.slice((page - 1) * 20, page * 20).map(ordinal => <tr key={`${label}:${ordinal}`}>

@@ -9,6 +9,7 @@ import type { ActivityReceiptTime } from './ActivityReceiptAge';
 import { ActivityRow, matchesActivity } from './ActivityRow';
 import type { ActivityGroup } from './ActivityRow';
 import { useBrowserAvailability } from '../session/useBrowserAvailability';
+import { browserCapabilities } from '../shared/browserCapabilities';
 import { createUsageDisplay, isContextUsageUpdate } from './usageDisplay';
 
 import { ActivityHistory } from './ActivityHistory';
@@ -40,9 +41,11 @@ export function Activity({ jobId, runId, basePath, navigation }: {
 
 function LiveActivity({ jobId, runId, basePath, windowLinks }: { jobId: string; runId: string; basePath: string; windowLinks: boolean }) {
   const { client, stream } = usePrivateTransport(basePath);
-  const fallback = useRef(false);
+  // Without a readable fetch body the live stream cannot work; poll from the start (#631).
+  const [streamingUnavailable] = useState(() => !browserCapabilities().fetchStreaming);
+  const fallback = useRef(streamingUnavailable);
   const streamFailures = useRef(0);
-  const [periodic, setPeriodic] = useState(false);
+  const [periodic, setPeriodic] = useState(streamingUnavailable);
   const availability = useBrowserAvailability();
   const [retry, setRetry] = useState(0);
   const failures = useRef(0);
@@ -195,7 +198,7 @@ function LiveActivity({ jobId, runId, basePath, windowLinks }: { jobId: string; 
     <button type="button" onClick={() => {
       pageAfter.current = null;
       position.current = { initialized: false, cursor: null, rows: [], last: null };
-      setRows([]); setSnapshot(null); setLastRead(null); setRetry(0); failures.current = 0; streamFailures.current = 0; fallback.current = false; setPeriodic(false); reconcile.current = true; setError(''); setReset(value => value + 1); setFollowing(true);
+      setRows([]); setSnapshot(null); setLastRead(null); setRetry(0); failures.current = 0; streamFailures.current = 0; fallback.current = streamingUnavailable; setPeriodic(streamingUnavailable); reconcile.current = true; setError(''); setReset(value => value + 1); setFollowing(true);
     }}>{copy.readFreshActivityHistory}</button>
     {windowLinks && !following && pageAfter.current && rows.at(-1)?.cursor && pageAfter.current !== rows.at(-1)!.cursor && <p>
       <a href={`${runViewPath(basePath, jobId, runId, 'activity')}${activityWindowSearch({ after: pageAfter.current, through: rows.at(-1)!.cursor!, event: null })}`}>{activityHistoryCopy.save}</a>

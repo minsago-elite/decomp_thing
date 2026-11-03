@@ -83,7 +83,7 @@ export function JobOrganization({ job, client, basePath, session, onChanged }: {
           onInput={event => setLabel(event.currentTarget.value)} disabled={busy} />
       </label>
       <p id="job-label-help">{copy.labelHelp}</p>
-      <label><input type="checkbox" name="archived" checked={archived} disabled={busy}
+      <label class="job-archive-toggle"><input type="checkbox" name="archived" checked={archived} disabled={busy}
         onChange={event => setArchived(event.currentTarget.checked)} /> {copy.archived}</label>
       <div class="job-actions"><button type="submit" disabled={busy || !available}>{copy.save}</button></div>
     </form>
