@@ -315,7 +315,7 @@ class WebRevisionSourceSearchTest {
             // Dense hits return before find's candidate checkpoint; the between-match check must still stop the page.
             assertEquals("deadline", string(first, "stopReason"))
             val emitted = items(first).map { string(it, "offsetBytes").toInt() }
-            assertTrue(emitted.isNotEmpty() && emitted.size < 100, "the deadline stopped a dense page early: $emitted")
+            assertTrue(emitted.size in 1..3, "the deadline stopped a dense page within its clock budget: $emitted")
             val next = assertNotNull(cursor(first))
             val resume = next.split('_')[2].toInt()
             assertEquals(emitted.last() + needle.length, resume, "resume immediately after the last emitted match")
@@ -339,7 +339,7 @@ class WebRevisionSourceSearchTest {
                 search(engine, query).also { page ->
                     assertEquals("deadline", string(page, "stopReason"))
                     // A page makes bounded progress, then stops on the next check; it does not run to its limit.
-                    assertTrue(items(page).size < 100, "an interrupted page ran to its result limit")
+                    assertTrue(items(page).size in 1..3, "an interrupted page exceeded its bounded progress")
                     assertTrue(Thread.currentThread().isInterrupted)
                     assertNotNull(cursor(page))
                 }
