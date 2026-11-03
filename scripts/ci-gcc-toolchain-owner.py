@@ -872,28 +872,50 @@ def require_domain_receipt(inspected: dict, slice_facts: dict, service_facts: di
         raise Refusal("effective owned slice limits differ from sealed request")
 
 
+def _identity_failure_witness(operation: str, error: BaseException) -> str:
+    """Fixed high-level operation and numeric errno only; no extra identity observation."""
+    allowed = ("STAT_READ", "STAT_PARSE", "EXE_STAT", "EXE_LINK", "STATUS_READ", "UID_PARSE",
+               "CGROUP_READ", "NAMESPACE_STATS", "EXE_HASH_STREAM")
+    label = operation if type(operation) is str and operation in allowed else "OTHER"
+    try:
+        value = error.errno if isinstance(error, OSError) else None
+    except Exception:
+        value = None
+    number = str(value) if type(value) is int and 1 <= value <= 4095 else "NA"
+    return f"identity-read-v1 operation={label} errno={number}"
+
+
 def _read_proc_identity(pid: int) -> dict:
     """Read process identity from the supervisor's own authority context."""
+    operation = "STAT_READ"
     try:
         raw_stat = Path(f"/proc/{pid}/stat").read_text()
+        operation = "STAT_PARSE"
         close = raw_stat.rfind(")")
         fields = raw_stat[close + 2:].split()
         parent_pid = int(fields[1])
         start_ticks = int(fields[19])
+        operation = "EXE_STAT"
         exe = os.stat(f"/proc/{pid}/exe")
+        operation = "EXE_LINK"
         exe_path = os.readlink(f"/proc/{pid}/exe")
+        operation = "STATUS_READ"
         status = Path(f"/proc/{pid}/status").read_text()
+        operation = "UID_PARSE"
         uid_line = next(line for line in status.splitlines() if line.startswith("Uid:"))
         uid = int(uid_line.split()[1])
+        operation = "CGROUP_READ"
         cgroup = Path(f"/proc/{pid}/cgroup").read_text()
+        operation = "NAMESPACE_STATS"
         namespaces = {name: os.stat(f"/proc/{pid}/ns/{name}").st_ino
                       for name in ("mnt", "pid", "user", "net", "ipc", "uts")}
     except (OSError, ValueError, StopIteration, IndexError) as exc:
-        raise Refusal(f"process identity for pinned child {pid} is unknown") from exc
+        raise Refusal(f"process identity for pinned child {pid} is unknown; {_identity_failure_witness(operation, exc)}") from exc
     if exe.st_size > MAX_EXECUTABLE_IDENTITY_BYTES:
         raise Refusal("admitted executable exceeds identity hash budget")
     digest = hashlib.sha256()
     observed = 0
+    operation = "EXE_HASH_STREAM"
     try:
         with open(f"/proc/{pid}/exe", "rb", buffering=0) as executable:
             while True:
@@ -907,7 +929,7 @@ def _read_proc_identity(pid: int) -> dict:
             if observed != exe.st_size:
                 raise Refusal("admitted executable size changed during identity hashing")
     except OSError as exc:
-        raise Refusal("cannot hash the admitted child executable") from exc
+        raise Refusal(f"cannot hash the admitted child executable; {_identity_failure_witness(operation, exc)}") from exc
     return {"pid": pid, "parentPid": parent_pid, "startTicks": start_ticks, "uid": uid, "exe": exe_path,
             "exeDevice": exe.st_dev, "exeInode": exe.st_ino, "exeSha256": digest.hexdigest(),
             "cgroup": cgroup, "namespaces": namespaces}

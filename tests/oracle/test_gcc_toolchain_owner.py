@@ -1754,5 +1754,96 @@ class RootlessHostHelperPathTest(unittest.TestCase):
         self.assertTrue(all('/attacker' not in call.args[0] for call in access.call_args_list))
 
 
+
+class ProcIdentityFailureWitnessTest(unittest.TestCase):
+    def invoke(self, failure_at=None, error=None, parse=None, size=3, content=b'abc'):
+        from contextlib import ExitStack
+        import io
+        trace = []; fields = ['S', '1'] + ['0'] * 17 + ['777']
+        texts = {'/proc/123/stat': '123 (authored process) ' + ' '.join(fields),
+                 '/proc/123/status': 'Uid: 1000 1000 1000 1000', '/proc/123/cgroup': '0::/owned\n'}
+        if parse == 'stat': texts['/proc/123/stat'] = '123 (authored process) S invalid'
+        if parse == 'uid': texts['/proc/123/status'] = 'Uid: invalid'
+        if parse == 'missing-uid': texts['/proc/123/status'] = 'Name: authored'
+        if error is None: error = OSError(13, 'PRIVATE_ERROR_CANARY', '/PRIVATE_PATH_CANARY')
+        metadata = SimpleNamespace(st_dev=1, st_ino=2, st_size=size)
+        def trip(label):
+            trace.append(label)
+            if failure_at == label: raise error
+        def text(path, *args, **kwargs):
+            label = {'stat':'STAT_READ', 'status':'STATUS_READ', 'cgroup':'CGROUP_READ'}[Path(path).name]
+            trip(label); return texts[str(path)]
+        def stat(path, *args, **kwargs):
+            trip('EXE_STAT' if str(path).endswith('/exe') else 'NAMESPACE_STATS')
+            return metadata
+        def link(path, *args, **kwargs): trip('EXE_LINK'); return '/authored/dockerd'
+        class Stream(io.BytesIO):
+            def read(self, count): trip('HASH_READ'); return super().read(count)
+        stream = Stream(content)
+        def opened(*args, **kwargs): trip('HASH_OPEN'); return stream
+        try:
+            with ExitStack() as stack:
+                stack.enter_context(mock.patch.object(Path, 'read_text', text))
+                stack.enter_context(mock.patch.object(owner_module.os, 'stat', side_effect=stat))
+                stack.enter_context(mock.patch.object(owner_module.os, 'readlink', side_effect=link))
+                stack.enter_context(mock.patch('builtins.open', side_effect=opened))
+                value = owner_module._read_proc_identity(123)
+            return value, trace, stream
+        except BaseException as failure:
+            failure.control_trace = trace
+            failure.control_stream = stream
+            raise
+
+    def test_io_failure_witness_retains_cause_and_never_formats_private_data(self):
+        for operation in ['STAT_READ','EXE_STAT','EXE_LINK','STATUS_READ','CGROUP_READ','NAMESPACE_STATS','HASH_OPEN','HASH_READ']:
+            with self.subTest(operation=operation):
+                error = OSError(13, 'PRIVATE_ERROR_CANARY', '/PRIVATE_PATH_CANARY')
+                with self.assertRaises(owner_module.Refusal) as caught: self.invoke(operation,error)
+                failure = caught.exception; expected = 'EXE_HASH_STREAM' if operation.startswith('HASH_') else operation
+                self.assertIn(f'identity-read-v1 operation={expected} errno=13', str(failure))
+                self.assertIs(failure.__cause__, error); self.assertNotIn('PRIVATE_', str(failure))
+                if operation == 'HASH_READ': self.assertTrue(failure.control_stream.closed)
+
+    def test_parse_failures_are_classified_without_inventing_an_errno(self):
+        for mode,operation in [('stat','STAT_PARSE'),('uid','UID_PARSE'),('missing-uid','UID_PARSE')]:
+            with self.subTest(mode=mode):
+                with self.assertRaises(owner_module.Refusal) as caught: self.invoke(parse=mode)
+                self.assertIn(f'identity-read-v1 operation={operation} errno=NA',str(caught.exception))
+                self.assertIsInstance(caught.exception.__cause__,(ValueError,StopIteration,IndexError))
+
+    def test_witness_uses_closed_labels_and_bounded_errno_values(self):
+        for number,expected in [(2,'2'),(3,'3'),(1,'1'),(4095,'4095'),(0,'NA'),(-1,'NA'),(4096,'NA'),(True,'NA')]:
+            error = OSError(); error.errno = number
+            result = owner_module._identity_failure_witness('PRIVATE_LABEL_CANARY',error)
+            self.assertEqual(result,f'identity-read-v1 operation=OTHER errno={expected}')
+            self.assertLess(len(result),96)
+
+    def test_errno_getter_failure_does_not_replace_the_original_refusal(self):
+        class Unreadable(OSError):
+            @property
+            def errno(self): raise RuntimeError('PRIVATE_ERRNO_CANARY')
+        error = Unreadable()
+        with self.assertRaises(owner_module.Refusal) as caught: self.invoke('EXE_STAT',error)
+        self.assertIs(caught.exception.__cause__,error)
+        self.assertIn('identity-read-v1 operation=EXE_STAT errno=NA',str(caught.exception))
+        self.assertNotIn('PRIVATE_',str(caught.exception))
+
+    def test_success_identity_and_existing_observation_order_are_unchanged(self):
+        value,trace,stream = self.invoke()
+        self.assertEqual(value, {'pid':123,'parentPid':1,'startTicks':777,'uid':1000,'exe':'/authored/dockerd',
+            'exeDevice':1,'exeInode':2,'exeSha256':hashlib.sha256(b'abc').hexdigest(),'cgroup':'0::/owned\n',
+            'namespaces':{name:2 for name in ['mnt','pid','user','net','ipc','uts']}})
+        self.assertEqual(trace,['STAT_READ','EXE_STAT','EXE_LINK','STATUS_READ','CGROUP_READ']+['NAMESPACE_STATS']*6+['HASH_OPEN','HASH_READ','HASH_READ'])
+        self.assertTrue(stream.closed)
+
+    def test_existing_hash_budget_and_size_refusals_are_unchanged(self):
+        for size,content,message in [(128*1024*1024+1,b'abc','admitted executable exceeds identity hash budget'),
+                (4,b'abc','admitted executable size changed during identity hashing')]:
+            with self.subTest(size=size):
+                with self.assertRaises(owner_module.Refusal) as caught:self.invoke(size=size,content=content)
+                self.assertEqual(str(caught.exception),message)
+                if size>128*1024*1024:self.assertNotIn('HASH_OPEN',caught.exception.control_trace)
+
+
 if __name__ == "__main__":
     unittest.main()
