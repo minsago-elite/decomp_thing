@@ -296,7 +296,9 @@ class OwnerTest(unittest.TestCase):
             server = socket.socket(socket.AF_UNIX)
             try:
                 server.bind(str(endpoint))
-                info = {"Driver": "overlay2", "DockerRootDir": str(data), "ServerVersion": "29.7.2"}
+                info = {"Driver": "overlay2", "DockerRootDir": str(data), "ServerVersion": "29.7.2",
+                        "MemoryLimit": True, "SwapLimit": True, "CgroupDriver": "systemd",
+                        "CgroupVersion": "2", "SecurityOptions": ["name=rootless"]}
                 facts = owner_module.validate_docker_health(json.dumps(info).encode(),
                     b"29.7.2 6a43e3d\n", root, endpoint)
                 self.assertEqual(facts["serverCommit"], "6a43e3d")

@@ -168,6 +168,8 @@ jobs:
             ${{ steps.gcc-builder-init.outputs.job-root }}/source/gcc-16.2.0.tar.xz
             ${{ steps.gcc-builder-init.outputs.job-root }}/source/gcc-16.2.0.tar.xz.sig
           key: ${{ steps.gcc-source-cache.outputs.cache-primary-key }}
+      - name: Run mandatory-resource admission controls
+        run: python3 -m unittest tests.oracle.test_gcc_mandatory_resources -v
       - name: Run GCC builder command and archive controls
         env:
           TMPDIR: ${{ steps.gcc-builder-init.outputs.job-root }}/tmp

@@ -54,6 +54,10 @@ class Refusal(RuntimeError):
     pass
 
 
+class MandatoryResourceUnsupported(Refusal):
+    """Docker info does not advertise the mandatory resource profile."""
+
+
 class Backend(Protocol):
     def manager_reserve(self, role: str, manifest: dict) -> dict: ...
     def manager_prepare_gate(self, role: str, manifest: dict) -> dict: ...
@@ -1699,8 +1703,19 @@ def validate_docker_health(info_raw: bytes, version_raw: bytes, root: Path, sock
         raise Refusal("rootless Docker health endpoint is unavailable") from exc
     if not stat.S_ISSOCK(endpoint.st_mode) or endpoint.st_uid != os.getuid():
         raise Refusal("rootless Docker health endpoint identity is invalid")
+    security_options = info.get("SecurityOptions")
+    advertised_rootless = isinstance(security_options, list) and all(
+        isinstance(value, str) for value in security_options) and "name=rootless" in security_options
+    mandatory = (info.get("MemoryLimit") is True and info.get("SwapLimit") is True and
+                 info.get("CgroupDriver") == "systemd" and info.get("CgroupVersion") == "2" and
+                 advertised_rootless)
+    if not mandatory:
+        raise MandatoryResourceUnsupported(
+            "rootless Docker lacks mandatory advertised memory/swap or rootless systemd cgroup-v2 capability")
     return {"serverVersion": "29.7.2", "serverCommit": "6a43e3d", "driver": "overlay2",
-            "dataRoot": str(expected_data), "endpointOwner": endpoint.st_uid}
+            "dataRoot": str(expected_data), "endpointOwner": endpoint.st_uid,
+            "advertisedCapabilities": {"memoryLimit": True, "swapLimit": True,
+                "rootless": True, "cgroupDriver": "systemd", "cgroupVersion": "2"}}
 
 
 def repository_root() -> Path:
@@ -2226,6 +2241,8 @@ class Owner:
                     if status != 0:
                         raise Refusal(f"rootless Docker version health command failed: {err[:512]!r}")
                     facts = validate_docker_health(info, version, self.root, self.root / "d.sock")
+            except MandatoryResourceUnsupported:
+                raise
             except Refusal as exc:
                 last_error = str(exc)
                 time.sleep(min(0.2, max(0.0, deadline - self.clock())))

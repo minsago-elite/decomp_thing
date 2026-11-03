@@ -30,7 +30,9 @@ class ArchiveLimitsTest(unittest.TestCase):
             try:
                 server.bind(str(endpoint))
                 info = Path(tmp) / "info.json"
-                info.write_text(json.dumps({"Driver": "overlay2", "DockerRootDir": str(data)}))
+                info.write_text(json.dumps({"Driver": "overlay2", "DockerRootDir": str(data),
+                    "MemoryLimit": True, "SwapLimit": True, "CgroupDriver": "systemd",
+                    "CgroupVersion": "2", "SecurityOptions": ["name=rootless"]}))
                 archive_module.validate_docker_info(info, data, endpoint, job)
                 with self.assertRaisesRegex(SystemExit, "socket path is outside"):
                     archive_module.validate_docker_info(info, data, job / "v/d.sock", job)

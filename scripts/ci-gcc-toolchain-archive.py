@@ -235,6 +235,8 @@ def validate_info(path: pathlib.Path) -> None:
 def validate_docker_info(info_path: pathlib.Path, expected_root: pathlib.Path, socket_path: pathlib.Path,
                          expected_job_root: pathlib.Path) -> None:
     data=json.loads(info_path.read_text())
+    if not isinstance(data, dict):
+        refuse("rootless Docker info is not an object")
     job_root=expected_job_root.resolve()
     if expected_root.resolve() != job_root / "v" / "s" / "docker-data":
         refuse("rootless Docker data root is outside owned job layout")
@@ -252,6 +254,12 @@ def validate_docker_info(info_path: pathlib.Path, expected_root: pathlib.Path, s
         refuse("rootless Docker endpoint is not an owned Unix socket")
     if socket_path.stat().st_uid != os.getuid():
         refuse("rootless Docker socket owner mismatch")
+    security_options=data.get("SecurityOptions")
+    advertised_rootless=isinstance(security_options, list) and all(
+        isinstance(value, str) for value in security_options) and "name=rootless" in security_options
+    if data.get("MemoryLimit") is not True or data.get("SwapLimit") is not True or \
+            data.get("CgroupDriver") != "systemd" or data.get("CgroupVersion") != "2" or not advertised_rootless:
+        refuse("rootless Docker lacks mandatory advertised memory/swap or rootless systemd cgroup-v2 capability")
 
 
 def bounded_stream(path: pathlib.Path, cap: int, source_path: pathlib.Path | None = None) -> None:
