@@ -11,6 +11,7 @@ import kotlin.io.path.readBytes
 internal object GeneratedCModuleValidation : ModuleCompilationPolicy {
     const val POLICY_ID = "generated-c-module-validation-v2"
     override val id: String = POLICY_ID
+    override val providesCompilerFeedback: Boolean = true
 
     override fun command(profile: ReconstructionProfile, sourcePath: String): List<String> {
         val configuration = ProjectBuildConfiguration(

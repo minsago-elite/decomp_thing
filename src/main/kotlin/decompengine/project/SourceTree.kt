@@ -655,7 +655,7 @@ object SourceTreeGenerator {
                 dependencyHeaders, projectDir, observedBehavior, profile = profile, modulePlan = plan,
             )
             val contextFingerprint = if (selectedReconstructor is BoundedLlmModuleReconstructor &&
-                compilationPolicy.id == GeneratedCModuleValidation.POLICY_ID) {
+                compilationPolicy.providesCompilerFeedback) {
                 selectedModuleInputFingerprint(basePromptRequest)
             } else null
             val feedbackSource = projectDir.resolve(module.sourcePath)
