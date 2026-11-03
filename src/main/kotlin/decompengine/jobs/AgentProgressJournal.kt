@@ -60,6 +60,7 @@ class AgentProgressJournal private constructor(
     private val failure = AtomicReference<Throwable?>()
     private val runId = UUID.randomUUID().toString()
     internal val journalRunId: String get() = runId
+    internal val writerAlive: Boolean get() = writer.isAlive
     private var sequence = 0L
     private var queueDropped = 0L
     private var historyDropped = 0L
@@ -427,6 +428,20 @@ class AgentProgressJournal private constructor(
         // that owner alive; another close may wait for its completion without racing cleanup.
         check(!writer.isAlive) { "progress writer did not stop within five seconds" }
         persistenceFailure?.let { throw IllegalStateException("progress journal persistence failed", it) }
+    }
+
+    /** Wait without a timeout when another owner must retain resources until publication stops. */
+    internal fun awaitWriterTermination() {
+        if (Thread.currentThread() === writer) return
+        var interrupted = false
+        while (writer.isAlive) {
+            try {
+                writer.join()
+            } catch (_: InterruptedException) {
+                interrupted = true
+            }
+        }
+        if (interrupted) Thread.currentThread().interrupt()
     }
 
     companion object {

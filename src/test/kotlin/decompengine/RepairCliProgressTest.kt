@@ -3,6 +3,7 @@ package decompengine
 import decompengine.agent.*
 import decompengine.jobs.AgentProgressJournal
 import decompengine.jobs.FullRunEventReader
+import decompengine.jobs.FullRunJournalWriterHooks
 import java.io.ByteArrayOutputStream
 import java.io.OutputStream
 import java.io.PrintStream
@@ -16,6 +17,66 @@ import kotlin.test.*
 import kotlinx.serialization.json.*
 
 class RepairCliProgressTest {
+    @Test
+    fun `exploration report writes activate and preserve the selected input workspace`() {
+        val base = createTempDirectory("exploration-input-workspace-")
+        val output = base.resolve("output")
+        val inputA = base.resolve("a.bin").apply { Files.writeString(this, "input-a") }
+        val inputB = base.resolve("b.bin").apply { Files.writeString(this, "input-b") }
+
+        withExplorationOutputWorkspace(inputA, output) {
+            Files.writeString(output.resolve("exploration.json"), "report-a")
+        }
+        withExplorationOutputWorkspace(inputB, output) {
+            Files.writeString(output.resolve("exploration.json"), "report-b")
+        }
+
+        decompengine.project.ReconstructionOutputWorkspace.open(output, inputA).use {
+            assertEquals("report-a", Files.readString(output.resolve("exploration.json")))
+        }
+        decompengine.project.ReconstructionOutputWorkspace.open(output, inputB).use {
+            assertEquals("report-b", Files.readString(output.resolve("exploration.json")))
+        }
+    }
+
+    @Test
+    fun `workspace lease outlives a timed out full history writer`() {
+        val base = createTempDirectory("reconstruction-workspace-retirement-")
+        val output = base.resolve("output")
+        val inputA = base.resolve("a.bin").apply { Files.writeString(this, "input-a") }
+        val inputB = base.resolve("b.bin").apply { Files.writeString(this, "input-b") }
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val progress = ReconstructionCliProgress.open(
+            output, emptyList(), PrintStream(ByteArrayOutputStream()), inputPath = inputA,
+            fullRunWriterHooks = FullRunJournalWriterHooks(beforeAppend = {
+                entered.countDown()
+                while (release.count > 0) try { release.await() } catch (_: InterruptedException) { /* Controlled noninterruptible append. */ }
+            }),
+        )
+        try {
+            progress.phase(AgentWorkflowPhase.ANALYZING)
+            assertTrue(entered.await(5, TimeUnit.SECONDS), "full-history append did not enter its controlled stall")
+            progress.close() // The bounded five-second close reports through the best-effort wrapper.
+            assertFailsWith<decompengine.project.ReconstructionOutputBusyException> {
+                decompengine.project.ReconstructionOutputWorkspace.open(output, inputB)
+            }
+            release.countDown()
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+            var switched = false
+            while (System.nanoTime() < deadline && !switched) {
+                try {
+                    decompengine.project.ReconstructionOutputWorkspace.open(output, inputB).use { switched = true }
+                } catch (_: decompengine.project.ReconstructionOutputBusyException) {
+                    Thread.sleep(10)
+                }
+            }
+            assertTrue(switched, "workspace ownership was not retired after both progress writers stopped")
+        } finally {
+            release.countDown()
+        }
+    }
+
     @Test
     fun `cli history is input-bound and records analysis context`() {
         val root = createTempDirectory("reconstruction-history-context-")
@@ -312,7 +373,9 @@ class RepairCliProgressTest {
                 withReconstructionCliProgress(root, output = output) { progress ->
                     progress.phase(AgentWorkflowPhase.ANALYZING)
                     assertTrue(entered.await(5, TimeUnit.SECONDS))
-                    if (!unavailable) repeat(1000) { progress.phase(AgentWorkflowPhase.BUILD_VALIDATING) }
+                    // Exceed the bounded display mailboxes while leaving the separate full-history
+                    // writer below its queue limit; overload behavior is covered by its own tests.
+                    if (!unavailable) repeat(160) { progress.phase(AgentWorkflowPhase.BUILD_VALIDATING) }
                     published.countDown()
                     if (unavailable) throw sentinel
                 }
@@ -335,7 +398,20 @@ class RepairCliProgressTest {
             output.close()
         }
         assertNotNull(AgentProgressJournal.read(root))
-        AgentProgressJournal(root, "reconstruction").use { it.phase(AgentWorkflowPhase.COMPLETED) }
+        awaitProgressJournal(root).use { it.phase(AgentWorkflowPhase.COMPLETED) }
+    }
+
+    private fun awaitProgressJournal(root: Path): AgentProgressJournal {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30)
+        while (System.nanoTime() < deadline) {
+            try {
+                return AgentProgressJournal(root, "reconstruction")
+            } catch (failure: IllegalArgumentException) {
+                assertEquals("another workflow owns the progress journal", failure.message)
+                Thread.sleep(10)
+            }
+        }
+        return AgentProgressJournal(root, "reconstruction")
     }
 
     private fun event(sequence: Long, phase: String) = buildJsonObject {

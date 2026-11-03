@@ -18,6 +18,7 @@ import decompengine.mvp.BinaryRunnerService
 import decompengine.acp.AcpHarnessFactory
 import decompengine.project.GeneratedCMakeReconstructionProfile
 import decompengine.project.ReconstructionProfiles
+import decompengine.project.ReconstructionOutputWorkspace
 import decompengine.project.ArchivalReconstructionService
 import decompengine.project.BoundedLlmModuleReconstructor
 import decompengine.project.ReconstructionAdapters
@@ -355,13 +356,21 @@ private fun runExplore(args: List<String>) {
             add(CandidateInput("seed_stdin_$seedIndex", CandidateSource.SEED, stdin = value.toByteArray()))
         }
     }
-    val report = AutomaticExplorer().explore(binary, seeds, reports)
+    val binaryPath = checkNotNull(binary)
+    val reportsPath = checkNotNull(reports)
+    val report = withExplorationOutputWorkspace(binaryPath, reportsPath) {
+        AutomaticExplorer().explore(binaryPath, seeds, reportsPath)
+    }
     println(
         "exploration generated ${report.candidates.size} input(s), discovered " +
             "${report.coverage.newSignatures.size} new output signature(s), uncalibrated exploration heuristic=${"%.4f".format(Locale.ROOT, report.confidence.score)}",
     )
     println("report: ${report.reportPath}")
 }
+
+/** Activate the selected input before exploration writes its input-bound report. */
+internal fun <T> withExplorationOutputWorkspace(binaryPath: Path, reportsPath: Path, action: () -> T): T =
+    ReconstructionOutputWorkspace.open(reportsPath, binaryPath).use { action() }
 
 private fun exploreUsageError(message: String): Nothing {
     System.err.println(message)
