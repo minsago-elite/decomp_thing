@@ -105,6 +105,29 @@ class AnalysisTimingRecordTest {
         }
     }
 
+    @Test
+    fun `sidecar publication preserves caller cancellation interrupts`() {
+        val executor = Executors.newSingleThreadExecutor()
+        val blocked = CountDownLatch(1)
+        executor.submit { blocked.await() }
+        val directory = Path.of("build", "analysis-timing-interrupted-${System.nanoTime()}")
+        try {
+            val record = AnalysisTimingRecord(
+                directory, "full", "a".repeat(64), null, timingConfigurationSha256(listOf("fixture")),
+                publicationExecutor = executor,
+                publicationWaitMillis = 5_000,
+            )
+            Thread.currentThread().interrupt()
+            record.publish(success = true)
+            assertTrue(Thread.currentThread().isInterrupted, "diagnostic publication must retain caller cancellation")
+            assertFalse(Files.exists(directory))
+        } finally {
+            Thread.interrupted() // Do not pass the test-owned cancellation to the next test.
+            executor.shutdownNow()
+            blocked.countDown()
+        }
+    }
+
     private fun newRecord(directory: java.nio.file.Path) =
         AnalysisTimingRecord(directory, "full", "a".repeat(64), null, timingConfigurationSha256(listOf("fixture")))
 

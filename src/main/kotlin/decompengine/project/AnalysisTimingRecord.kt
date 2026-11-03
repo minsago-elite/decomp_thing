@@ -197,6 +197,7 @@ internal class AnalysisTimingRecord(
             publication?.get(publicationWaitMillis, TimeUnit.MILLISECONDS)
         }.onFailure { failure ->
             if (failure is TimeoutException) publication?.cancel(true)
+            if (failure is InterruptedException) Thread.currentThread().interrupt()
         }
     }
 
