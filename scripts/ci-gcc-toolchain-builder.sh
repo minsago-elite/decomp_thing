@@ -222,6 +222,8 @@ init() {
   install -d -m 700 "$job_root" "$volume" "$tools" "$state" "$evidence" "$job_root/source" "$job_root/tmp"
   printf '%s\n' "run=${GITHUB_RUN_ID:-local}" "attempt=${GITHUB_RUN_ATTEMPT:-1}" \
     "revision=$(git rev-parse HEAD)" > "$job_root/owner.txt"
+  if [[ -n "${GITHUB_OUTPUT:-}" ]]; then printf 'job-root=%s\n' "$job_root" >> "$GITHUB_OUTPUT"; fi
+  if [[ -n "${GITHUB_ENV:-}" ]]; then printf 'GCC_BUILDER_ROOT=%s\n' "$job_root" >> "$GITHUB_ENV"; fi
   capture_ambient_identity
   clean_environment
 }
@@ -321,7 +323,7 @@ start_rootless() {
   local info="$evidence/docker-info.json"
   timeout --signal=TERM --kill-after=5s 30s env -u DOCKER_HOST -u DOCKER_CONTEXT \
     DOCKER_CONFIG="$DOCKER_CONFIG" "$docker_bin" --host "unix://$socket" info --format '{{json .}}' > "$info"
-  python3 scripts/ci-gcc-toolchain-archive.py docker-info "$info" "$state/docker-data" "$socket"
+  python3 scripts/ci-gcc-toolchain-archive.py docker-info "$info" "$state/docker-data" "$socket" "$job_root"
   test "$(DOCKER_HOST= DOCKER_CONTEXT= "$docker_bin" --host "unix://$socket" version --format '{{.Server.Version}}')" = 29.7.2
   test "$(DOCKER_HOST= DOCKER_CONTEXT= "$docker_bin" --host "unix://$socket" version --format '{{.Server.GitCommit}}')" = 6a43e3d
   DOCKER_HOST= DOCKER_CONTEXT= "$docker_bin" --host "unix://$socket" version --format '{{json .}}' > "$evidence/docker-version.json"

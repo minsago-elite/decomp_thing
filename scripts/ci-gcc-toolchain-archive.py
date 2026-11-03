@@ -232,8 +232,14 @@ def validate_info(path: pathlib.Path) -> None:
         refuse("BuildKit daemon version/revision mismatch")
 
 
-def validate_docker_info(info_path: pathlib.Path, expected_root: pathlib.Path, socket_path: pathlib.Path) -> None:
+def validate_docker_info(info_path: pathlib.Path, expected_root: pathlib.Path, socket_path: pathlib.Path,
+                         expected_job_root: pathlib.Path) -> None:
     data=json.loads(info_path.read_text())
+    job_root=expected_job_root.resolve()
+    if expected_root.resolve() != job_root / "v" / "s" / "docker-data":
+        refuse("rootless Docker data root is outside owned job layout")
+    if socket_path.resolve() != job_root / "d.sock":
+        refuse("rootless Docker socket path is outside owned job layout")
     if data.get("Driver") != "overlay2":
         refuse("rootless Docker storage driver is not overlay2")
     if pathlib.Path(data.get("DockerRootDir", "/")).resolve() != expected_root.resolve():
@@ -246,8 +252,6 @@ def validate_docker_info(info_path: pathlib.Path, expected_root: pathlib.Path, s
         refuse("rootless Docker endpoint is not an owned Unix socket")
     if socket_path.stat().st_uid != os.getuid():
         refuse("rootless Docker socket owner mismatch")
-    if socket_path.parent.resolve() != expected_root.resolve().parents[1]:
-        refuse("rootless Docker socket escaped owned job root")
 
 
 def bounded_stream(path: pathlib.Path, cap: int, source_path: pathlib.Path | None = None) -> None:
@@ -525,8 +529,9 @@ if __name__ == "__main__":
         validate_workers(pathlib.Path(sys.argv[2]))
     elif len(sys.argv) == 3 and sys.argv[1] == "info":
         validate_info(pathlib.Path(sys.argv[2]))
-    elif len(sys.argv) == 5 and sys.argv[1] == "docker-info":
-        validate_docker_info(pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3]), pathlib.Path(sys.argv[4]))
+    elif len(sys.argv) == 6 and sys.argv[1] == "docker-info":
+        validate_docker_info(pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3]), pathlib.Path(sys.argv[4]),
+                             pathlib.Path(sys.argv[5]))
     elif len(sys.argv) == 4 and sys.argv[1] == "stream":
         bounded_stream(pathlib.Path(sys.argv[2]), int(sys.argv[3]))
     elif len(sys.argv) == 5 and sys.argv[1] == "stream-file":
@@ -534,4 +539,4 @@ if __name__ == "__main__":
     elif len(sys.argv) == 6 and sys.argv[1] == "inspect":
         inspect(pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3]), pathlib.Path(sys.argv[4]), int(sys.argv[5]))
     else:
-        refuse("usage: ci-gcc-toolchain-archive.py {inspect DOCKER-TAR OCI-TAR EVIDENCE CAP|workers JSON|info JSON|docker-info JSON ROOT SOCKET}")
+        refuse("usage: ci-gcc-toolchain-archive.py {inspect DOCKER-TAR OCI-TAR EVIDENCE CAP|workers JSON|info JSON|docker-info JSON DATA-ROOT SOCKET JOB-ROOT}")

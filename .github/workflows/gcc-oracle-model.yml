@@ -148,28 +148,29 @@ jobs:
       - name: Verify source provenance metadata
         run: python3 scripts/verify-gcc-oracle-source.py --metadata-only
       - name: Initialize private GCC builder workspace
+        id: gcc-builder-init
         run: bash scripts/ci-gcc-toolchain-builder.sh init
       - name: Restore locked GCC source artifacts
         id: gcc-source-cache
         uses: actions/cache/restore@v6
         with:
           path: |
-            ${{ github.workspace }}/build/gcc-toolchain-reproduction/${{ github.run_id }}-${{ github.run_attempt }}/source/gcc-16.2.0.tar.xz
-            ${{ github.workspace }}/build/gcc-toolchain-reproduction/${{ github.run_id }}-${{ github.run_attempt }}/source/gcc-16.2.0.tar.xz.sig
+            ${{ steps.gcc-builder-init.outputs.job-root }}/source/gcc-16.2.0.tar.xz
+            ${{ steps.gcc-builder-init.outputs.job-root }}/source/gcc-16.2.0.tar.xz.sig
           key: gcc-source-v1-${{ runner.os }}-${{ hashFiles('oracle/gcc/16.2.0/source-lock.json') }}
       - name: Fetch and fully verify the pinned source release
-        run: python3 scripts/fetch-gcc-oracle-source.py "$GITHUB_WORKSPACE/build/gcc-toolchain-reproduction/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/source"
+        run: python3 scripts/fetch-gcc-oracle-source.py "$GCC_BUILDER_ROOT/source"
       - name: Save authenticated GCC source artifacts
         if: steps.gcc-source-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v6
         with:
           path: |
-            ${{ github.workspace }}/build/gcc-toolchain-reproduction/${{ github.run_id }}-${{ github.run_attempt }}/source/gcc-16.2.0.tar.xz
-            ${{ github.workspace }}/build/gcc-toolchain-reproduction/${{ github.run_id }}-${{ github.run_attempt }}/source/gcc-16.2.0.tar.xz.sig
+            ${{ steps.gcc-builder-init.outputs.job-root }}/source/gcc-16.2.0.tar.xz
+            ${{ steps.gcc-builder-init.outputs.job-root }}/source/gcc-16.2.0.tar.xz.sig
           key: ${{ steps.gcc-source-cache.outputs.cache-primary-key }}
       - name: Run GCC builder command and archive controls
         env:
-          TMPDIR: ${{ github.workspace }}/build/gcc-toolchain-reproduction/${{ github.run_id }}-${{ github.run_attempt }}/tmp
+          TMPDIR: ${{ steps.gcc-builder-init.outputs.job-root }}/tmp
         run: |
           install -d -m 700 "$TMPDIR"
           python3 -m unittest tests.oracle.test_gcc_toolchain_builder -v
@@ -192,7 +193,7 @@ jobs:
           PY
       - name: Test oracle schemas and ELF twin verifier
         env:
-          TMPDIR: ${{ github.workspace }}/build/gcc-toolchain-reproduction/${{ github.run_id }}-${{ github.run_attempt }}/tmp
+          TMPDIR: ${{ steps.gcc-builder-init.outputs.job-root }}/tmp
         run: |
           oracle_tests=()
           for path in tests/oracle/test_*.py; do
@@ -212,7 +213,7 @@ jobs:
             --evidence oracle/gcc/16.2.0/behavior-corpus-evidence.json
       - name: Verify checked executable behavior evidence
         env:
-          TMPDIR: ${{ github.workspace }}/build/gcc-toolchain-reproduction/${{ github.run_id }}-${{ github.run_attempt }}/tmp
+          TMPDIR: ${{ steps.gcc-builder-init.outputs.job-root }}/tmp
         run: |
           set +e
           python3 scripts/check-gcc-behavior-executor.py
@@ -220,8 +221,8 @@ jobs:
           set -e
           if test "$profile_status" = 0; then
             python3 scripts/run-gcc-behavior-corpus.py \
-              --json-output "$GITHUB_WORKSPACE/build/gcc-toolchain-reproduction/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/evidence/behavior-corpus-evidence.json"
-            cmp "$GITHUB_WORKSPACE/build/gcc-toolchain-reproduction/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/evidence/behavior-corpus-evidence.json" \
+              --json-output "$GCC_BUILDER_ROOT/v/e/behavior-corpus-evidence.json"
+            cmp "$GCC_BUILDER_ROOT/v/e/behavior-corpus-evidence.json" \
               oracle/gcc/16.2.0/behavior-corpus-evidence.json
           elif test "$profile_status" = 78; then
             echo '::notice title=GCC behavior evidence not reproduced::The hosted kernel/executor does not match the checked GCC benchmark profile; offline schema/provenance gates and live generic sandbox tests still ran.'
@@ -250,8 +251,8 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
           path: |
-            build/gcc-toolchain-reproduction/*/owner.txt
-            build/gcc-toolchain-reproduction/*/evidence
+            build/g/*/owner.txt
+            build/g/*/v/e
 
   driver-dwarf-interfaces:
     name: Retained GCC driver DWARF interfaces

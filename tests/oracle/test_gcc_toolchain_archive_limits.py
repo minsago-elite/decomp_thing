@@ -3,7 +3,9 @@ from __future__ import annotations
 import gzip
 import importlib.util
 import io
+import json
 from pathlib import Path
+import socket
 import tempfile
 import unittest
 
@@ -16,6 +18,27 @@ spec.loader.exec_module(archive_module)
 
 
 class ArchiveLimitsTest(unittest.TestCase):
+    def test_docker_info_binds_data_root_and_socket_to_owned_job_layout(self):
+        base = ROOT / "build/g"
+        base.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=base, prefix="di-") as tmp:
+            job = Path(tmp) / "job"
+            data = job / "v/s/docker-data"
+            data.mkdir(parents=True)
+            endpoint = job / "d.sock"
+            server = socket.socket(socket.AF_UNIX)
+            try:
+                server.bind(str(endpoint))
+                info = Path(tmp) / "info.json"
+                info.write_text(json.dumps({"Driver": "overlay2", "DockerRootDir": str(data)}))
+                archive_module.validate_docker_info(info, data, endpoint, job)
+                with self.assertRaisesRegex(SystemExit, "socket path is outside"):
+                    archive_module.validate_docker_info(info, data, job / "v/d.sock", job)
+                with self.assertRaisesRegex(SystemExit, "data root is outside"):
+                    archive_module.validate_docker_info(info, job / "v/docker-data", endpoint, job)
+            finally:
+                server.close()
+
     def test_small_expansion_budget_refuses_compressed_overflow(self):
         stream = io.BytesIO(gzip.compress(b"A" * 4096, mtime=0))
         with self.assertRaisesRegex(SystemExit, "expanded layer exceeds"):

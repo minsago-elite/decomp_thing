@@ -168,6 +168,16 @@ class GccToolchainBuilderTest(unittest.TestCase):
         self.assertIn("test_gcc_toolchain_builder", workflow)
         self.assertIn("GCC_TOOLCHAIN_IMAGE_ID", HELPER.read_text())
 
+    def test_workflow_uses_and_retains_the_owned_builder_layout(self):
+        workflow = WORKFLOW.read_text()
+        helper = HELPER.read_text()
+        self.assertIn("id: gcc-builder-init", workflow)
+        self.assertIn("steps.gcc-builder-init.outputs.job-root", workflow)
+        self.assertIn("build/g/*/v/e", workflow)
+        self.assertNotIn("build/gcc-toolchain-reproduction/", workflow)
+        self.assertIn("GCC_BUILDER_ROOT=%s", helper)
+        self.assertIn('"$socket" "$job_root"', helper)
+
     def test_generated_socket_inventory_accepts_107_and_rejects_108_bytes(self):
         suffixes = ("/d.sock", "/b.sock", "/r/api.sock", "/x/containerd/containerd.sock",
                     "/x/containerd/containerd.sock.ttrpc", "/t/runc-console.sock")
