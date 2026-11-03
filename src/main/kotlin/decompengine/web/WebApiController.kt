@@ -429,6 +429,8 @@ internal class WebApiController(
             resource.matches(Regex("jobs/[^/]+/repositories")) -> setOf("GET", "POST")
             resource.matches(Regex("jobs/[^/]+/repositories/[^/]+(?:/operations/[^/]+)?")) -> setOf("GET")
             resource.matches(Regex("jobs/[^/]+/runs/[^/]+/progress-pin")) -> setOf("GET", "PUT")
+            resource.matches(Regex("jobs/[^/]+/runs")) ->
+                if (runCatching { jobs.durableStartRouteAvailable(resource.split('/')[1]) }.getOrDefault(false)) setOf("GET", "POST") else setOf("GET")
             else -> return failure
         }
         return WebAccessDenied(405, failure.code, failure.message ?: "The endpoint does not support this method.",

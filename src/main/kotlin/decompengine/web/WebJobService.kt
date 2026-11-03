@@ -514,7 +514,8 @@ class WebJobService(
         } catch (failure: Throwable) {
             attemptReadLifetime.write { attempts = null }
             try { acquired.close() } catch (cleanup: Throwable) { failure.addSuppressed(cleanup) }
-            val reported = if (recoveryCompleted) {
+            // A store failure already marked outcome-unknown carries the same uncertainty; keep its code.
+            val reported = if (recoveryCompleted && !(failure is WorkflowStoreException && failure.outcomeUnknown)) {
                 val code = when (failure) {
                     is WebJobServiceException -> failure.code
                     is WorkflowStoreException -> failure.code
