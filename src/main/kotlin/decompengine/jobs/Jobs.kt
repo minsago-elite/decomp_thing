@@ -473,7 +473,13 @@ class JobStore internal constructor(
             // and page budgets cannot be exceeded while waiting for the final size revalidation.
             decompengine.repair.hashStableRegularFile(root, "$jobId/$relativePath", { size -> authorized = size; declaredSize(size) },
                 { _, total -> require(total <= authorized) { "artifact grew while it was read" } },
-                cancellationCheck, consumeBytes = consume)
+                cancellationCheck,
+                // Descriptor pinning contains the path, not the inode: refuse a second name (hard link to bytes
+                // owned elsewhere) before any byte is declared or consumed, as the bounded readers do.
+                validateMetadata = { descriptor ->
+                    if (descriptor.identity.linkCount != 1) throw JobStoreException("artifact has more than one filesystem name")
+                },
+                consumeBytes = consume)
         } catch (_: IOException) {
             throw JobStoreException("artifact is unavailable or its path changed")
         }

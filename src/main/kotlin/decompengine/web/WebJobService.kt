@@ -300,7 +300,11 @@ class WebJobService(
     // Conservatively invalidate in-flight rows on any legacy admission; retain no per-job history.
     private var legacyListingEpoch = Any()
     private val uploads = mutableMapOf<Thread, CountDownLatch>()
-    private val uploadStorage = WebUploadStorage(store.storageRoot, maximumRetainedStorageBytes)
+    /** Excludes other writers inside the store root (the listener's audit log) during upload accounting. */
+    @Volatile internal var storageWriterExclusion: (() -> Long) -> Long = { measure -> measure() }
+    private val uploadStorage = WebUploadStorage(store.storageRoot, maximumRetainedStorageBytes, measure = {
+        storageWriterExclusion { decompengine.jobs.RetainedStorageUsage.measure(store.storageRoot, maximumRetainedStorageBytes).logicalBytes }
+    })
     private val sourceCatalogEvidence = WebSourceCatalogEvidence(sourceProfiles, ::readSourceCatalogInput, ::readArtifact)
     private val programStructureCache = WebProgramStructureCache()
 

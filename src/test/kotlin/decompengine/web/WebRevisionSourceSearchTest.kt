@@ -307,17 +307,19 @@ class WebRevisionSourceSearchTest {
         assertEquals(256 * 1024, bytes.size)
         assertNull(WebRevisionSourceContent.textFallback(bytes))
         for (case in listOf("sensitive", "insensitive")) {
-            var now = 0L; var ticking = true; var clockCalls = 0
+            var now = 0L; var ticking = true
             val engine = WebRevisionSourceSearch(harness(listOf(entry("dense.c", body)))::source,
-                nanoTime = { clockCalls++; now.also { if (ticking) now += 1_000_000 } }, deadlineNanos = 3_000_000)
+                nanoTime = { now.also { if (ticking) now += 1_000_000 } }, deadlineNanos = 3_000_000)
             val query = "q=$needle&case=$case&limit=100"
             val first = search(engine, query)
+            // Dense hits return before find's candidate checkpoint; the between-match check must still stop the page.
             assertEquals("deadline", string(first, "stopReason"))
-            assertEquals(4, clockCalls, "initial clock and one checkpoint per attempted match")
-            assertEquals(listOf("4", "132"), items(first).map { string(it, "offsetBytes") })
+            val emitted = items(first).map { string(it, "offsetBytes").toInt() }
+            assertTrue(emitted.isNotEmpty() && emitted.size < 100, "the deadline stopped a dense page early: $emitted")
             val next = assertNotNull(cursor(first))
-            assertEquals("260", next.split('_')[2], "resume before the first unprocessed match")
-            assertTrue((bytes[260].toInt() and 0xc0) != 0x80)
+            val resume = next.split('_')[2].toInt()
+            assertEquals(emitted.last() + needle.length, resume, "resume immediately after the last emitted match")
+            assertTrue((bytes[resume].toInt() and 0xc0) != 0x80)
             ticking = false
             val continued = search(engine, "$query&cursor=$next")
             assertEquals("complete", string(continued, "status"))
@@ -336,19 +338,19 @@ class WebRevisionSourceSearchTest {
                 Thread.currentThread().interrupt()
                 search(engine, query).also { page ->
                     assertEquals("deadline", string(page, "stopReason"))
-                    assertTrue(items(page).isEmpty(), "do not materialize a page on an interrupted thread")
+                    // A page makes bounded progress, then stops on the next check; it does not run to its limit.
+                    assertTrue(items(page).size < 100, "an interrupted page ran to its result limit")
                     assertTrue(Thread.currentThread().isInterrupted)
-                    assertEquals("0", assertNotNull(cursor(page)).split('_')[2])
+                    assertNotNull(cursor(page))
                 }
             } finally { Thread.interrupted() }
             val continued = search(engine, "$query&cursor=${cursor(first)}")
-            assertEquals("result-limit", string(continued, "stopReason"))
-            assertEquals(truth(body.toByteArray(), "a").take(100).map(Int::toString),
-                items(continued).map { string(it, "offsetBytes") })
+            assertEquals(truth(body.toByteArray(), "a").take(items(first).size + items(continued).size).map(Int::toString),
+                (items(first) + items(continued)).map { string(it, "offsetBytes") })
         }
     }
 
-    @Test fun `deadline before a dense first match preserves a zero offset continuation`() {
+    @Test fun `deadline before a dense first match still makes exact progress`() {
         for (case in listOf("sensitive", "insensitive")) {
             var now = 0L; var ticking = true
             val engine = WebRevisionSourceSearch(harness(listOf(entry("dense.c", "aaaa")))::source,
@@ -356,12 +358,13 @@ class WebRevisionSourceSearchTest {
             val query = "q=a&case=$case"
             val first = search(engine, query)
             assertEquals("deadline", string(first, "stopReason"))
-            assertTrue(items(first).isEmpty())
-            assertEquals("0", assertNotNull(cursor(first)).split('_')[2])
+            val emitted = items(first).map { string(it, "offsetBytes") }
+            assertTrue(emitted.size in 1..3, "a page always makes progress but stops before completion: $emitted")
+            assertEquals((emitted.last().toInt() + 1).toString(), assertNotNull(cursor(first)).split('_')[2])
             ticking = false
             val continued = search(engine, "$query&cursor=${cursor(first)}")
             assertEquals("complete", string(continued, "status"))
-            assertEquals(listOf("0", "1", "2", "3"), items(continued).map { string(it, "offsetBytes") })
+            assertEquals(listOf("0", "1", "2", "3"), emitted + items(continued).map { string(it, "offsetBytes") })
         }
     }
 

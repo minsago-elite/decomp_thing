@@ -408,13 +408,13 @@ class WebApiControllerTest {
             val safeLine = redacted.getValue("lines").jsonArray.single().jsonObject.getValue("text").jsonPrimitive.content
             assertEquals("password=[redacted] [redacted] [private-path]", safeLine)
             assertEquals("1", redacted.getValue("redactedLines").jsonPrimitive.content)
-            val safeDownload = request(server, "$path/content", headers = headers + ("Accept" to "text/plain"))
-            assertEquals(200, safeDownload.statusCode())
-            assertTrue(safeDownload.body().endsWith(safeLine + "\n"))
-            assertEquals(safeDownload.body().toByteArray(Charsets.UTF_8).size.toString(),
-                safeDownload.headers().firstValue("Content-Length").orElseThrow())
+            val listenerDownload = request(server, "$path/content", headers = headers + ("Accept" to "text/plain"))
+            assertEquals(200, listenerDownload.statusCode())
+            assertTrue(listenerDownload.body().endsWith(safeLine + "\n"))
+            assertEquals(listenerDownload.body().toByteArray(Charsets.UTF_8).size.toString(),
+                listenerDownload.headers().firstValue("Content-Length").orElseThrow())
             for (secret in listOf("hunter2", "LogCanary0123456789abcdef", "/home/redaction-canary/private.c")) {
-                assertFalse(safeDownload.body().contains(secret), secret)
+                assertFalse(listenerDownload.body().contains(secret), secret)
             }
 
             // Credential syntax and private paths must be absent in all authenticated projections,

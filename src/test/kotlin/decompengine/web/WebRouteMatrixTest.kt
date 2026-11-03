@@ -110,6 +110,32 @@ class WebRouteMatrixTest {
         "$R/revisions/{revisionId}/source-files/{fileId}/content" to
             Live(setOf("GET", "HEAD"), Outcome(404, "SOURCE_FILE_NOT_FOUND"), Query.ROUTE_SPECIFIC, media = OCTETS),
         "$J/artifacts/{artifactId}/content" to Live(setOf("GET", "HEAD"), Outcome(200, OCTETS), media = OCTETS),
+        // Routes registered by the D constituents (#1711 capacity, #1704 support export, #1697 structure,
+        // #1707 diffs, #1698 catalog, #1712 archive). The inert fixture has no persisted revision.
+        "/api/v1/capacity" to Live(setOf("GET", "HEAD"), Outcome(200, "capacity")),
+        "/api/v1/support-export" to Live(setOf("GET"), Outcome(400, "VALIDATION_FAILED"), Query.ROUTE_SPECIFIC),
+        "$R/revisions/{revisionId}/functions" to Live(setOf("GET", "HEAD"), Outcome(404, "REVISION_NOT_FOUND"), Query.ROUTE_SPECIFIC),
+        "$R/revisions/{revisionId}/modules" to Live(setOf("GET", "HEAD"), Outcome(404, "REVISION_NOT_FOUND"), Query.ROUTE_SPECIFIC),
+        "$R/revisions/{revisionId}/modules/{moduleId}" to
+            Live(setOf("GET", "HEAD"), Outcome(404, "REVISION_NOT_FOUND"), Query.ROUTE_SPECIFIC),
+        "$R/revisions/{revisionId}/functions/{entityId}" to
+            Live(setOf("GET", "HEAD"), Outcome(404, "REVISION_NOT_FOUND"), Query.ROUTE_SPECIFIC),
+        "$R/revisions/{revisionId}/globals/{entityId}" to
+            Live(setOf("GET", "HEAD"), Outcome(404, "REVISION_NOT_FOUND"), Query.ROUTE_SPECIFIC),
+        "$R/revisions/{revisionId}/types/{entityId}" to
+            Live(setOf("GET", "HEAD"), Outcome(404, "REVISION_NOT_FOUND"), Query.ROUTE_SPECIFIC),
+        "$R/revisions/{revisionId}/source-diff" to Live(setOf("GET", "HEAD"), Outcome(422, "VALIDATION_FAILED"), Query.ROUTE_SPECIFIC),
+        "$R/revisions/{revisionId}/source-diff/file" to
+            Live(setOf("GET", "HEAD"), Outcome(422, "VALIDATION_FAILED"), Query.ROUTE_SPECIFIC),
+        "$R/revisions/{revisionId}/source-diff/patch" to
+            Live(setOf("GET", "HEAD"), Outcome(422, "VALIDATION_FAILED"), Query.ROUTE_SPECIFIC, media = OCTETS),
+        "$J/artifacts" to Live(setOf("GET", "HEAD"), Outcome(200, "artifacts"), Query.ROUTE_SPECIFIC),
+        "$J/artifacts/{artifactId}" to Live(setOf("GET", "HEAD"), Outcome(200, "artifact")),
+        "$R/revisions/{revisionId}/source-archive" to Live(setOf("GET", "HEAD"), Outcome(404, "REVISION_NOT_FOUND")),
+        "$R/revisions/{revisionId}/archive-verifications" to
+            Live(setOf("POST"), mutationRefusal = Outcome(400, "INVALID_IDEMPOTENCY_KEY")),
+        "$R/revisions/{revisionId}/archive-verifications/{operationId}" to
+            Live(setOf("GET", "HEAD"), Outcome(404, "REVISION_NOT_FOUND")),
     )
 
     /** Documented statuses that this matrix cannot produce without a fault injector, and where they are owned. */
@@ -237,7 +263,7 @@ class WebRouteMatrixTest {
         stream.body().close()
         assertEquals(200, stream.statusCode())
         assertEquals("text/event-stream; charset=utf-8", stream.headers().firstValue("Content-Type").orElse(null))
-        assertEquals(before, storageDigest(), "matrix probes must not change stored job bytes")
+        assertStorageUnchanged(before, "matrix probes must not change stored job bytes")
     }
 
     @Test
@@ -356,7 +382,7 @@ class WebRouteMatrixTest {
                 413, "BODY_TOO_LARGE", "$method $path oversized body")
         }
         // Agent preflight leaves storage untouched; the inert inspector only fails its own snapshot.
-        assertEquals(before, storageDigest(), "refused contract inputs must not change stored job bytes")
+        assertStorageUnchanged(before, "refused contract inputs must not change stored job bytes")
     }
 
     // ---- fixture, transport and contract helpers ----
@@ -368,6 +394,7 @@ class WebRouteMatrixTest {
             .replace("{revisionId}", "revision_missing").replace("{fileId}", "file_missing")
             .replace("{directoryId}", "root").replace("{repositoryId}", "repository_missing")
             .replace("{worktreeId}", "worktree_missing").replace("{operationId}", "operation_missing")
+            .replace("{moduleId}", "module_missing").replace("{entityId}", "entity_missing")
     }
 
     private class Session(val cookie: Map<String, String>, private val csrf: String) {
@@ -478,12 +505,27 @@ class WebRouteMatrixTest {
 
     private fun storageDigest(): Map<String, String> = Files.walk(root).use { paths ->
         paths.filter(Files::isRegularFile).toList().associate { file ->
-            root.relativize(file).toString() to MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(file))
-                .joinToString("") { "%02x".format(it) }
+            val relative = root.relativize(file).toString()
+            // The append-only audit segment is kept as text so probes can be checked to only append to it.
+            relative to if (relative == AUDIT_SEGMENT) Files.readString(file)
+                else MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(file)).joinToString("") { "%02x".format(it) }
+        }
+    }
+
+    /**
+     * Refused and accepted sensitive requests are durably audited (#521), so the audit segment may only gain
+     * appended entries. Every other stored byte, including the audit loss marker, must be unchanged.
+     */
+    private fun assertStorageUnchanged(before: Map<String, String>, message: String) {
+        val after = storageDigest()
+        assertEquals(before - AUDIT_SEGMENT, after - AUDIT_SEGMENT, message)
+        before[AUDIT_SEGMENT]?.let { prior ->
+            assertTrue(after[AUDIT_SEGMENT]?.startsWith(prior) == true, "$message: audit history was rewritten")
         }
     }
 
     companion object {
+        private const val AUDIT_SEGMENT = ".web-audit/current.jsonl"
         private const val JSON = "application/json"
         private const val OCTETS = "application/octet-stream"
         private const val TEXT = "text/plain"

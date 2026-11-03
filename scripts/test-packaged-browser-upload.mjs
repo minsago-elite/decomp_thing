@@ -27,9 +27,7 @@ after(() => fs.rm(data, { recursive: true, force: true }));
 
 const entries = { qualifyUpload, qualifyUploadFailures, qualifyMeasuredUpload };
 const picker = '<input id="binary-file" type="file">';
-// The authenticated form renders its request limit guidance (Upload.tsx) before the picker is usable.
-const guidance = '<p id="upload-guidance">Choose a binary. The complete request limit is 33554432 bytes, including multipart overhead.</p>';
-const panel = content => `<section aria-labelledby="upload-title"><h2 id="upload-title">Upload a binary</h2>${guidance}${content}</section>`;
+const panel = content => `<section aria-labelledby="upload-title"><h2 id="upload-title">Upload a binary</h2>${content}</section>`;
 const bannerOnly = `document.body.innerText.includes('Local session connected.')`;
 
 function fixture(t, { markup = '', route = '/nested/', connected = true, onTick = () => {}, evaluateFailure } = {}) {

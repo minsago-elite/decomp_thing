@@ -174,8 +174,8 @@ export function SourceDiff({ selected, basePath, search }: { selected: SourceSel
           return <li key={`${item.baseFile?.fileId}/${item.headFile?.fileId}`} data-diff-status={item.status}>
             <p><strong class={`source-diff-status source-diff-status-${item.status}`}>{copy.diffStatus[item.status]}</strong>{' '}
               {item.status === 'renamed' ? <><bdi>{item.baseFile!.displayName}</bdi> → <bdi>{name}</bdi></> : <bdi>{name}</bdi>}</p>
-            <p>{copy.diffBase}: {fileFacts(item.baseFile)}</p>
-            <p>{copy.diffHead}: {fileFacts(item.headFile)}</p>
+            <p>{message(copy.diffSideFacts, { side: copy.diffBase, facts: fileFacts(item.baseFile) })}</p>
+            <p>{message(copy.diffSideFacts, { side: copy.diffHead, facts: fileFacts(item.headFile) })}</p>
             <p><a href={sourceFileDiffPath(basePath, selected, { base, baseFileId: item.baseFile?.fileId ?? null, headFileId: item.headFile?.fileId ?? null,
               pin: { metadataVersion: data.metadataVersion, baseMetadataVersion: data.baseMetadataVersion } })}
               aria-label={textMessage(copy.diffOpenEntry, { path: name })}>{copy.diffOpenEntryShort}</a></p>
@@ -243,8 +243,8 @@ export function SourceFileDiff({ selected, basePath, search }: { selected: Sourc
     {data && <>
       <p><strong class={`source-diff-status source-diff-status-${data.status}`}>{copy.diffStatus[data.status]}</strong>
         {data.status === 'renamed' && <> <bdi>{data.baseFile!.displayName}</bdi> → <bdi>{data.headFile!.displayName}</bdi></>}</p>
-      <p>{copy.diffBase}: {fileFacts(data.baseFile)}</p>
-      <p>{copy.diffHead}: {fileFacts(data.headFile)}</p>
+      <p>{message(copy.diffSideFacts, { side: copy.diffBase, facts: fileFacts(data.baseFile) })}</p>
+      <p>{message(copy.diffSideFacts, { side: copy.diffHead, facts: fileFacts(data.headFile) })}</p>
       <FileLinks selected={selected} base={chosen.base} data={data} baseFile={data.baseFile} headFile={data.headFile} basePath={basePath} />
       <p role="status">{data.representation === 'text'
         ? message(copy.diffHunkWindow, { from: data.hunks.length ? data.hunkOffset + 1 : 0, to: data.hunkOffset + data.hunks.length, total: data.totalHunks,
@@ -256,7 +256,7 @@ export function SourceFileDiff({ selected, basePath, search }: { selected: Sourc
         pin: { metadataVersion: data.metadataVersion, baseMetadataVersion: data.baseMetadataVersion } }))} download="">{copy.diffPatch}</a> {copy.diffPatchNotice}</p>}
       {data.hunks.map((item, index) => <div class="source-diff-hunk" key={`${data.hunkOffset + index}`}>
         {item.unchangedBefore > 0 && <p class="source-diff-omitted">{message(copy.diffOmitted, { count: item.unchangedBefore })}</p>}
-        <p class="source-diff-header"><code>{`@@ -${item.baseStart},${item.baseCount} +${item.headStart},${item.headCount} @@`}</code></p>
+        <p class="source-diff-header"><code>{textMessage(copy.diffHunkHeader, { baseStart: item.baseStart, baseCount: item.baseCount, headStart: item.headStart, headCount: item.headCount })}</code></p>
         <div class="source-rows" role="region" aria-label={textMessage(copy.diffHunkLabel, { index: data.hunkOffset + index + 1, baseStart: item.baseStart, headStart: item.headStart })} tabIndex={0}>
           {item.lines.map((line, row) => <div class={`source-diff-row source-diff-${line.kind}`} key={row}>
             <span class="source-position">{line.baseLine !== null && <span class="sr-only">{copy.diffBaseLineShort} </span>}{lineLabel(line.baseLine)}</span>

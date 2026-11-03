@@ -26,6 +26,35 @@ class WebAuditLogTest {
         WebAuditActor.browserSession(session), WebAuditAction.RUN_CANCEL,
         WebAuditTarget(job, runId, "version_1", "version_2"), outcome, status, reason, "0f3c2b1a-1111-4222-8333-944455556666")
 
+    @Test fun `store accounting excludes audit appends until it finishes`() {
+        val root = root("exclusion")
+        try {
+            val log = WebAuditLog(root, clock)
+            assertEquals(1, log.cancel()?.sequence)
+            val segment = root.resolve(".web-audit/current.jsonl")
+            val inside = java.util.concurrent.CountDownLatch(1)
+            val release = java.util.concurrent.CountDownLatch(1)
+            val sizes = mutableListOf<Long>()
+            val accounting = Thread {
+                log.excludingAppends {
+                    sizes += Files.size(segment)
+                    inside.countDown()
+                    release.await()
+                    sizes += Files.size(segment)
+                }
+            }.apply { start() }
+            assertTrue(inside.await(10, java.util.concurrent.TimeUnit.SECONDS))
+            val appended = java.util.concurrent.CompletableFuture.supplyAsync { log.cancel()?.sequence }
+            Thread.sleep(200)
+            assertFalse(appended.isDone, "an audit append ran during store accounting")
+            release.countDown()
+            accounting.join(10_000)
+            assertEquals(2L, appended.get(10, java.util.concurrent.TimeUnit.SECONDS))
+            assertEquals(1, sizes.distinct().size, "the accounted audit segment changed mid-walk")
+            assertTrue(Files.size(segment) > sizes.first(), "the deferred append completed after accounting")
+        } finally { root.toFile().deleteRecursively() }
+    }
+
     @Test fun `entries are durable, attributed by digest and resume their sequence after reopen`() {
         val root = root("durable")
         try {

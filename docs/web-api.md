@@ -142,7 +142,7 @@ internal storage optimization and must not merge identity, permissions or histor
 | `GET /api/v1/jobs` | `200 jobs` | Bounded cursor/filter query; #162 |
 | `GET`, `HEAD /api/v1/recovery` | `200 recovery` | Private, bounded, display-only recovery-file summary; no query parameters |
 | `GET`, `HEAD /api/v1/capacity` | `200 capacity` | Aggregate limits, occupancy and outcome counts; no query; #208/#591 |
-| `GET /api/v1/support-export?scope=server` or `?scope=job&jobId={jobId}` | `200 supportExport` | Explicitly scoped redacted diagnostic export; no default scope; audited; #177/#522 |
+| `GET /api/v1/support-export` | `200 supportExport` | Required query `scope=server` or `scope=job&jobId={jobId}`; explicitly scoped redacted diagnostic export; no default scope; audited; #177/#522 |
 | `GET /api/v1/uploads/{uploadId}` | `200 uploadProgress` | Ephemeral session-bound transfer bytes and publication phase; #169 |
 | `POST /api/v1/jobs` | `201 job`, `Location: J` | Multipart, upload limits, idempotency; #162 |
 | `GET J` | `200 job`, ETag | Snapshot read; #159/#160 |
@@ -177,7 +177,8 @@ internal storage optimization and must not merge identity, permissions or histor
 | `GET`, `HEAD R/revisions/{revisionId}/source-files/{fileId}/chunk` | `200 sourceChunk` | Digest-verified bounded UTF-8 or hex ranges of a committed input; #490, #545 |
 | `GET`, `HEAD R/revisions/{revisionId}/source-files/{fileId}/content` | `200 application/octet-stream` | Complete authorized input download, at most 8 MiB; #491, #545 |
 | `GET`, `HEAD R/revisions/{revisionId}/functions` | `200 functionInventory` | Bounded, signed, filtered/sorted pages of the manifest-committed program model; explicit model/plan states; [program structure](web-program-structure.md); #534, #536 |
-| `GET`, `HEAD R/revisions/{revisionId}/modules`, `R/revisions/{revisionId}/modules/{moduleId}` | `200 moduleInventory`, `200 moduleDetail` | Recorded totals/diagnostics and module pages; owned-entity pages with revision source links; #535 |
+| `GET`, `HEAD R/revisions/{revisionId}/modules` | `200 moduleInventory` | Recorded totals/diagnostics and module pages; #535 |
+| `GET`, `HEAD R/revisions/{revisionId}/modules/{moduleId}` | `200 moduleDetail` | One recorded module with owned-entity pages and revision source links; #535 |
 | `GET`, `HEAD R/revisions/{revisionId}/{functions,globals,types}/{entityId}` | `200 entityDetail` | Bounded entity facts, cross-links and unrecorded fact families; optional `structureVersion` pin; #539, #540 |
 | `GET J/revisions`, `GET V` | `200 revisions`, `200 revision` | Immutable source/acceptance bindings; #165/#199 |
 | `GET V/sources`, `GET V/sources/{fileId}` | `200 files`, `200 file` | Bounded tree/page/read; #165/#188/#189 |
@@ -185,7 +186,8 @@ internal storage optimization and must not merge identity, permissions or histor
 | `GET`, `HEAD R/revisions/{revisionId}/source-diff/file` | `200 sourceFileDiff` | One classified pair (`baseFileId` and/or `headFileId`), bounded hunk pages and explicit binary/oversize/budget states; #550 |
 | `GET`, `HEAD R/revisions/{revisionId}/source-diff/patch` | `200 application/octet-stream` | Complete unified diff of one text comparison, no Range or conditional headers; #550 |
 | `GET`, `HEAD R/revisions/{revisionId}/source-search` | `200 sourceSearch` | Explicit revision and query/byte/result/deadline bounds over canonical inputs; replaces the reserved `V/search`; #547, #548 |
-| `GET`, `HEAD J/artifacts`, `J/artifacts/{artifactId}` | `200 artifacts`, `200 artifact` | Fixed attempt families; optional `runId`, with `revisionId` only together with `runId`; #551 |
+| `GET`, `HEAD J/artifacts` | `200 artifacts` | Fixed attempt families; optional `runId`, with `revisionId` only together with `runId`; #551 |
+| `GET`, `HEAD J/artifacts/{artifactId}` | `200 artifact` | One cataloged artifact descriptor; #551 |
 | `GET`/`HEAD J/artifacts/{artifactId}/content` | `200`, `206`, `304` bytes | Digest-bound pinned stream, single byte range, strong ETag preconditions; #552 |
 | `GET`, `HEAD R/revisions/{revisionId}/source-archive` | `200 sourceArchive` | Revision, recorded build, acceptance, archive digest, verification state and Git mapping before download; #554, #556 |
 | `POST R/revisions/{revisionId}/archive-verifications` | `202 operation`, `Location` | Strict `archiveVerificationRequest` with the displayed digest, session/Origin/CSRF, `Idempotency-Key`; no binary execution; replaces the reserved `V/archive-verifications`; #555 |

@@ -378,7 +378,8 @@ internal class WebApiController(
                     sendWebApiResponse(exchange, 200, "sourceArchive", archives().status(assets.basePath, parts[1], parts[3], parts[5],
                         session.sessionId, webExchangeCancellation(exchange)))
                 }
-                resource.matches(Regex("jobs/[^/]+/runs/[^/]+/revisions/[^/]+/archive-verifications")) && exchange.requestMethod == "POST" -> {
+                resource.matches(Regex("jobs/[^/]+/runs/[^/]+/revisions/[^/]+/archive-verifications")) -> {
+                    // Method refusal (405 with Allow: POST) comes from the mutation policy, not a fall-through 404.
                     val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.jsonMutation("POST")))
                     requireJsonAccept(exchange); requireNoWebApiQuery(exchange)
                     val key = singleUploadHeader(exchange, "Idempotency-Key")

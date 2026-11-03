@@ -10,19 +10,12 @@ async function readJobRecord(path) {
   }
 }
 
-/** SessionStatus can settle before the lazy upload form has its authenticated limits. */
+/** SessionStatus can settle before the lazy upload form has its authenticated limits (#1697 predicate). */
 export const uploadFormReady = `document.body.innerText.includes('Local session connected.') &&
   document.querySelector('#upload-guidance')?.textContent.includes('The complete request limit is 33554432 bytes') &&
   document.querySelector('#binary-file:not(:disabled)') !== null`;
 
-/** Wait for the lazy route, authenticated session, limits and enabled upload control under one ready deadline. */
-async function waitForUploadControl(tab, ready, label = 'workspace upload control') {
-  await ready(tab, `location.pathname === '/nested/' &&
-    document.querySelector('section[aria-labelledby="upload-title"] input#binary-file[type="file"]:not(:disabled)') !== null &&
-    (${uploadFormReady})`, label);
-}
-
-/** Wait for Preact to commit this exact selection, not just the file-input change event. */
+/** Committed selection predicate (#1697); the qualify flows use the equivalent #1758 selection wait. */
 export function uploadSubmitReady(label) {
   return `(() => {
     const picker = document.querySelector('#binary-file');
@@ -30,6 +23,13 @@ export function uploadSubmitReady(label) {
     return picker?.files?.[0]?.name === 'inert-browser-fixture.elf' &&
       submit?.textContent === ${JSON.stringify(label)} && !submit.disabled;
   })()`;
+}
+
+/** Wait for the lazy route, authenticated session and enabled upload control. */
+async function waitForUploadControl(tab, ready, label = 'workspace upload control') {
+  await ready(tab, `location.pathname === '/nested/' &&
+    document.body.innerText.includes('Local session connected.') &&
+    document.querySelector('section[aria-labelledby="upload-title"] input#binary-file[type="file"]:not(:disabled)') !== null`, label);
 }
 
 /** Wait for the upload control, then select the isolated non-executable fixture. */
@@ -76,10 +76,9 @@ export async function qualifyUpload({ makeTarget, cdp, evaluate, ready, browserO
       return response;
     };
   })();` }, tab.sessionId);
-  await cdp.call('Page.navigate', { url: `${browserOrigin}/nested/` }, tab.sessionId);
+  await cdp.call('Page.navigate', { url: browserOrigin + '/nested/' }, tab.sessionId);
   const selectFixture = () => selectUploadFixture({ tab, evaluate, ready });
   await selectFixture();
-  await ready(tab, uploadSubmitReady('Upload binary'), 'selected fixture and enabled upload');
   assert.equal(await evaluate(tab, `document.activeElement.id`), 'binary-file');
   await evaluate(tab, `[...document.querySelectorAll('button')].find(button => button.textContent === 'Upload binary').focus()`);
   await cdp.call('Page.bringToFront', {}, tab.sessionId);
@@ -103,10 +102,9 @@ export async function qualifyUpload({ makeTarget, cdp, evaluate, ready, browserO
     void cdp.call('Page.handleJavaScriptDialog', { accept: true }, tab.sessionId);
   }, tab.sessionId);
   await cdp.call('Page.reload', {}, tab.sessionId);
-  await ready(tab, `document.body.innerText.includes('An unconfirmed upload is retained') && (${uploadFormReady})`, 'retry ticket and authenticated upload form restored after reload');
+  await ready(tab, `document.body.innerText.includes('An unconfirmed upload is retained') && document.body.innerText.includes('Local session connected.')`, 'retry ticket and session restored after reload');
   assert.equal(await evaluate(tab, 'window.__uploadProof().requests'), 0, 'Reload must not retry automatically');
   await selectFixture();
-  await ready(tab, uploadSubmitReady('Retry this upload'), 'reselected fixture and enabled retry');
   await evaluate(tab, `[...document.querySelectorAll('button')].find(button => button.textContent === 'Retry this upload').click()`);
   await ready(tab, `location.pathname === '/nested/jobs/${ids[0]}' && document.body.innerText.includes('inert-browser-fixture.elf')`, 'retry recovers durable job route');
   assert.deepEqual(await evaluate(tab, 'window.__uploadProof()'), { requests: 1, sameKey: true, hidden: true });
@@ -117,7 +115,7 @@ export async function qualifyUpload({ makeTarget, cdp, evaluate, ready, browserO
   assert.deepEqual(files.sort(), ['input.elf', 'job.json', 'upload-receipt.json']);
   assert.equal(await evaluate(tab, 'localStorage.length + sessionStorage.length'), 0);
   assert.deepEqual(tab.exceptions, []);
-  assert.ok(tab.requests.every(request => ['GET', 'HEAD'].includes(request.method) || request.url === `${browserOrigin}/nested/api/v1/jobs`));
+  assert.ok(tab.requests.every(request => ['GET', 'HEAD'].includes(request.method) || request.url === browserOrigin + '/nested/api/v1/jobs'));
   await cdp.call('Page.reload', {}, tab.sessionId);
   await ready(tab, `document.body.innerText.includes('inert-browser-fixture.elf')`, 'published job survives browser reload');
   const metadata = await evaluate(tab, `(async () => {
@@ -155,7 +153,7 @@ export async function qualifyUpload({ makeTarget, cdp, evaluate, ready, browserO
   assert.deepEqual((await fs.readdir(data)).filter(name => /^[a-f0-9]{32}$/.test(name)), ids);
   assert.deepEqual((await fs.readdir(join(data, ids[0]))).sort(), files.sort());
   for (const [name, bytes] of retainedFiles) assert.deepEqual(await fs.readFile(join(data, ids[0], name)), bytes,
-    `Metadata views changed the uploaded job: ${name}`);
+    'Metadata views changed the uploaded job: ' + name);
   assert.equal(await evaluate(tab, 'localStorage.length + sessionStorage.length'), 0);
   assert.deepEqual(tab.exceptions, []);
   return { keyboardSubmit: true, publicationResponseLost: true, reloadRecovery: true, sameKeyRetry: true, jobsCreated: 1,
@@ -183,7 +181,7 @@ export async function qualifyUploadFailures({ makeTarget, cdp, evaluate, ready, 
       return original.apply(this, arguments);
     };
   })();` }, tab.sessionId);
-  await cdp.call('Page.navigate', { url: `${browserOrigin}/nested/` }, tab.sessionId);
+  await cdp.call('Page.navigate', { url: browserOrigin + '/nested/' }, tab.sessionId);
   const ids = (await fs.readdir(data)).filter(name => /^[a-f0-9]{32}$/.test(name));
   async function select(size, name) {
     await waitForUploadControl(tab, ready);
@@ -192,7 +190,7 @@ export async function qualifyUploadFailures({ makeTarget, cdp, evaluate, ready, 
       const picker = document.querySelector('#binary-file'); picker.files = transfer.files;
       picker.dispatchEvent(new Event('change', { bubbles: true }));
     })()`);
-    await ready(tab, `document.body.innerText.includes(${JSON.stringify(`Selected: ${name}`)}) && document.querySelector('button[type="submit"]')?.disabled === false`, 'upload selection rendered');
+    await ready(tab, `document.body.innerText.includes(${JSON.stringify('Selected: ' + name)}) && document.querySelector('button[type="submit"]')?.disabled === false`, 'upload selection rendered');
   }
   async function button(label) {
     await evaluate(tab, `[...document.querySelectorAll('button')].find(button => button.textContent === ${JSON.stringify(label)}).click()`);
@@ -235,7 +233,7 @@ export async function qualifyMeasuredUpload({ makeTarget, cdp, evaluate, ready, 
     }
   }, tab.sessionId);
   const before = (await fs.readdir(data)).filter(name => /^[a-f0-9]{32}$/.test(name));
-  await cdp.call('Page.navigate', { url: `${browserOrigin}/nested/` }, tab.sessionId);
+  await cdp.call('Page.navigate', { url: browserOrigin + '/nested/' }, tab.sessionId);
   await waitForUploadControl(tab, ready);
   await evaluate(tab, `(() => {
     const bytes = new Uint8Array(512 * 1024); bytes.set([127, 69, 76, 70, 2, 1, 1]);
@@ -264,7 +262,7 @@ export async function qualifyMeasuredUpload({ makeTarget, cdp, evaluate, ready, 
   await evaluate(tab, `[...document.querySelectorAll('button')].find(button => button.textContent === 'Retry this upload').click()`);
   await ready(tab, `location.pathname.startsWith('/nested/jobs/') && document.body.innerText.includes('measured-inert.elf')`, 'measured upload publication');
   const id = await evaluate(tab, 'location.pathname.split("/").at(-1)');
-  const record = await readJobRecord(join(data, id, 'job.json'));
+  const record = JSON.parse(await fs.readFile(join(data, id, 'job.json'), 'utf8'));
   assert.equal(record.status, 'uploaded');
   assert.ok(keys.length === 2 && typeof keys[0] === 'string' && keys[0] === keys[1], 'Cancellation retry must preserve the idempotency key');
   assert.equal(await evaluate(tab, 'localStorage.length + sessionStorage.length'), 0);

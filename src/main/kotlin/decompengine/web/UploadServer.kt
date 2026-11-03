@@ -288,6 +288,7 @@ class UploadServer(
         requestDiagnosticOutput = requestDiagnosticOutput)
     private val jobMutations = WebJobMutationBoundary(access, jobs)
     internal val audit = WebAuditLog(dataDir, prepareStorage = ownership::ensureLockFile)
+    init { jobs.storageWriterExclusion = { measure -> audit.excludingAppends(measure) } }
     private val auditRecorder = WebAuditRecorder(access, audit)
     private val legacySessions = WebSessionController(access)
     // A stream that outlives stop's bounded wait releases store ownership when it finally ends.

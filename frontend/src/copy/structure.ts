@@ -42,6 +42,7 @@ export const structureCopy = {
     'limit-exceeded': 'The module plan exceeds this reader\'s limits, so ownership is not recorded for any entity.',
   },
   reason: 'Reason code: {code}',
+  labeledValue: '{label}: {value}',
   assessment: {
     unassessed: 'Recovery assessment: unassessed. The producer records extraction labels only.',
     'not-recorded': 'Recovery assessment: not recorded.',

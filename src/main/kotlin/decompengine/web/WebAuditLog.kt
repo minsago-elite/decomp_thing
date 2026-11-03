@@ -217,6 +217,12 @@ internal class WebAuditLog(
     private var directoryIdentity: Any? = null
     private var knownLoss = false
 
+    /**
+     * Runs [action] while no audit entry can be appended. Audit segments live inside the job store, and an
+     * entry is appended after its response is sent; store-wide accounting must not observe that write mid-walk.
+     */
+    fun <T> excludingAppends(action: () -> T): T = synchronized(lock) { action() }
+
     fun record(
         actor: WebAuditActor,
         action: WebAuditAction,

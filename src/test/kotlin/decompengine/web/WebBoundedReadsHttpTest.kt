@@ -40,7 +40,10 @@ class WebBoundedReadsHttpTest {
 
     private fun digest(): Map<String, String> = Files.walk(root).use { paths ->
         paths.filter { Files.isRegularFile(it) && it.fileName.toString() != ".web-owner.lock" }.toList().associate { file ->
-            root.relativize(file).toString() to MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(file)).joinToString("") { "%02x".format(it) }
+            val relative = root.relativize(file).toString()
+            // The append-only audit segment is retained as text so restoration can check it is a prefix.
+            relative to if (relative == ".web-audit/current.jsonl") Files.readString(file)
+                else MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(file)).joinToString("") { "%02x".format(it) }
         }
     }
 
@@ -48,7 +51,15 @@ class WebBoundedReadsHttpTest {
 
     private fun assertStorageRestored(names: Set<String>, bytes: Map<String, String>) {
         assertEquals(names, entries(), "an upload left a staging, job or nested storage entry")
-        assertEquals(bytes, digest(), "an upload changed stored bytes")
+        val current = digest()
+        // Refused uploads are durably audited (#521): the listener's audit segment may only grow by
+        // appended entries. Every other stored byte, including the audit loss marker, must be unchanged.
+        val segment = ".web-audit/current.jsonl"
+        assertEquals(bytes - segment, current - segment, "an upload changed stored bytes")
+        if (segment in bytes) {
+            val before = bytes.getValue(segment); val after = current.getValue(segment)
+            assertTrue(after.startsWith(before), "an upload rewrote existing audit history")
+        }
     }
 
     private fun awaitCondition(label: String, condition: () -> Boolean) {
@@ -64,6 +75,8 @@ class WebBoundedReadsHttpTest {
     @Test
     fun `storage baseline rejects stranded staging nested entries and changed bytes`() {
         val input = Files.write(Files.createDirectories(root.resolve("fixture-job")).resolve("input.elf"), elfFixture())
+        val audit = Files.writeString(Files.createDirectories(root.resolve(".web-audit")).resolve("current.jsonl"), "{\"sequence\":1}\n")
+        val marker = Files.writeString(audit.resolveSibling("incomplete"), "0")
         val names = entries()
         val bytes = digest()
         val stranded = Files.createDirectories(root.resolve(".upload-stream-v1-123"))
@@ -76,6 +89,15 @@ class WebBoundedReadsHttpTest {
         Files.write(input, byteArrayOf(1, 2, 3))
         assertFailsWith<AssertionError> { assertStorageRestored(names, bytes) }
         Files.write(input, elfFixture())
+        assertStorageRestored(names, bytes)
+        // Audit history may only be appended; a rewrite or a changed loss marker is still a change.
+        Files.writeString(audit, "{\"sequence\":9}\n")
+        assertFailsWith<AssertionError> { assertStorageRestored(names, bytes) }
+        Files.writeString(audit, "{\"sequence\":1}\n")
+        Files.writeString(marker, "1")
+        assertFailsWith<AssertionError> { assertStorageRestored(names, bytes) }
+        Files.writeString(marker, "0")
+        Files.writeString(audit, "{\"sequence\":1}\n{\"sequence\":2}\n")
         assertStorageRestored(names, bytes)
     }
 

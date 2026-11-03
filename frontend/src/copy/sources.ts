@@ -182,6 +182,8 @@ export const sourceCopy = {
   compareRevisions: 'Compare with another revision',
   diffRevisions: 'Compared revisions',
   diffBase: 'Base', diffHead: 'Compared revision',
+  diffSideFacts: '{side}: {facts}',
+  diffHunkHeader: '@@ -{baseStart},{baseCount} +{headStart},{headCount} @@',
   diffBoundary: 'Change status comes from recorded paths and digests of the two exact revisions. It does not verify compilation, behavior or accepted reconstruction.',
   diffChoose: 'Choose a base revision',
   diffChooseNotice: 'Pick another retained revision of this job. The comparison always names both exact attempts and revisions.',
