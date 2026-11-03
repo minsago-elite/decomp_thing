@@ -116,6 +116,13 @@ export async function qualifyRestart({ fixture, origin, makeTarget, cdp, evaluat
     assert.equal(result.body.kind, 'progressPin');
     return result.body.data;
   };
+  const readRunFromServer = async (tab, runId) => {
+    const result = await evaluate(tab, `fetch(${JSON.stringify(`${basePath}/api/v1/jobs/${fixture.jobId}/runs/${runId}`)}, { credentials: 'same-origin' })
+      .then(async response => ({ status: response.status, body: await response.json() }))`);
+    assert.equal(result.status, 200, `Attempt ${runId} read did not reach the real server`);
+    assert.equal(result.body.kind, 'run');
+    return result.body.data;
+  };
 
   // Phase A: first JVM, one explicit bootstrap, a populated attempt page, and followed activity.
   const first = await waitFor(() => findBootstrap(readOutput(), origin), 'first local bootstrap handoff');
@@ -254,7 +261,39 @@ export async function qualifyRestart({ fixture, origin, makeTarget, cdp, evaluat
   assertOnlyPinWrites(old.requests, pinUrl, putsBefore + 1, `${origin}${basePath}/api/v1/session`, 3);
   assert.deepEqual([...old.exceptions, ...other.exceptions], []);
   await captureSafe(other, 'restart-stale-control.png');
+  // A stale run control must not cancel a different attempt. The request reaches the
+  // real cancellation endpoint, but carries run_fixture_3's version for run_fixture_4.
+  const otherRunId = 'run_fixture_4';
+  const otherRunBefore = await readRunFromServer(other, otherRunId);
+  assert.notEqual(otherRunBefore.version, secondWindowPolicy.version,
+    'Cross-attempt cancellation requires distinct attempt versions');
+  const stateBeforeCrossAttemptCancel = await fs.readFile(statePath);
+  const cancelUrl = `${origin}${basePath}/api/v1/jobs/${fixture.jobId}/runs/${otherRunId}/cancel`;
+  const cancelRequestStart = other.requests.length;
+  const crossAttemptCancel = await evaluate(other, `(async () => {
+    const bootstrap = await fetch(${JSON.stringify(`${basePath}/api/v1/bootstrap`)}, { credentials: 'same-origin' }).then(r => r.json());
+    const response = await fetch(${JSON.stringify(cancelUrl)}, { method: 'POST', credentials: 'same-origin', headers: {
+      'Content-Type': 'application/json', 'X-CSRF-Token': bootstrap.data.csrfToken,
+      'If-Match': ${JSON.stringify(`"${secondWindowPolicy.version}"`)}, 'Idempotency-Key': crypto.randomUUID()
+    }, body: JSON.stringify({ action: 'cancel' }) });
+    return { status: response.status, body: await response.json() };
+  })()`);
+  assert.equal(crossAttemptCancel.status, 412, 'A stale control must not cancel another attempt');
+  assert.match(JSON.stringify(crossAttemptCancel.body), /VERSION_CONFLICT/);
+  const crossAttemptRequests = other.requests.slice(cancelRequestStart).filter(r => r.url === cancelUrl && r.method === 'POST');
+  assert.equal(crossAttemptRequests.length, 1, 'Expected exactly one cross-attempt cancellation request');
+  assert.equal(crossAttemptRequests[0].ifMatch, `"${secondWindowPolicy.version}"`,
+    'Cross-attempt cancellation did not carry the stale version of the first attempt');
+  assert.equal(other.responses.filter(r => r.url === cancelUrl && r.status === 412).length, 1,
+    'The cancellation endpoint did not return an actual 412');
+  assert.deepEqual(await fs.readFile(statePath), stateBeforeCrossAttemptCancel,
+    'A refused cross-attempt cancellation changed durable workflow state');
+  const otherRunAfter = await readRunFromServer(other, otherRunId);
+  assert.deepEqual({ version: otherRunAfter.version, state: otherRunAfter.state },
+    { version: otherRunBefore.version, state: otherRunBefore.state }, 'The other attempt changed after cancellation refusal');
   evidence.staleControl = { first: { puts: 1, status: 200 }, second: { puts: 1, status: 412, retries: 0, crossAttemptWrites: 0, ifMatchBoundToStaleVersion: true }, mutation: 'progress-pin',
+    crossAttemptCancellation: { targetRunId: otherRunId, requestCount: 1, status: 412,
+      ifMatchBoundToDifferentAttempt: true, workflowStateUnchanged: true, targetAttemptUnchanged: true },
     liveWorkerCancellationOrApprovalCovered: false };
   await cdp.call('Target.closeTarget', { targetId: other.targetId });
   evidence.requests = { restarted: summarizeRequests(old.requests), staleWindow: summarizeRequests(other.requests) };
