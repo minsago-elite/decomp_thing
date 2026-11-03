@@ -70,6 +70,11 @@ class OwnerTest(unittest.TestCase):
             owner.reserve({}, ["x" * 108])
         self.assertFalse(self.root.exists())
 
+    def test_exact_107_byte_socket_path_is_admitted(self):
+        owner = self.make_owner(FakeBackend())
+        owner.reserve({}, ["x" * 107])
+        self.assertEqual(owner._manifest()["socketPaths"], ["x" * 107])
+
     def test_durable_intent_precedes_manager_reservation_and_missing_receipt_fails(self):
         backend = FakeBackend(fail_reserve=True)
         owner = self.make_owner(backend)

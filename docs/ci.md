@@ -120,6 +120,24 @@ controls with fake curl and forbidden runtime/extraction commands. This caches
 archive bytes only; current qualification reports still require fresh execution.
 The original native mount-event refusal and cleanup gates remain unwaived.
 
+#### GCC builder repair implementation checkpoint
+
+The local repair candidate adds streaming gzip layer verification, bounded raw
+tar framing checks, nested OCI-index traversal, default attestation handling,
+explicit sandbox-label admission, socket-path admission, and a journaled owner
+state model with injected authored adapters for tests. The contained live
+build-record verifier is again ordered after the unchanged strict reproduction
+verifier and before image-ID publication.
+
+This checkpoint is **not wired or qualified for hosted execution**. The
+production transient systemd manager, privileged cgroup/pidfd identity and
+absence adapter is still fail-closed, the active scratch and cleanup budgets
+are not implemented end to end, and the workflow still uses its earlier
+service lifecycle ordering. No local daemon, manager, cgroup or privileged
+trial is evidence for those missing gates. The candidate must not be treated as
+ready for ordinary Actions qualification until the implementation and complete
+workflow-stage controls cover those gaps.
+
 Hosted workflows additionally prepare fixtures and run credential-free
 preflights, frontend/browser jobs and separate contract/oracle workflows through
 the entry points below.
