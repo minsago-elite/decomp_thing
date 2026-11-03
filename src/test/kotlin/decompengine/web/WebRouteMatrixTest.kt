@@ -69,14 +69,17 @@ class WebRouteMatrixTest {
         "/api/v1/jobs" to Live(setOf("GET", "POST"), Outcome(200, "jobs"), Query.PAGED,
             mutationType = "multipart/form-data; boundary=route_matrix"),
         "/api/v1/recovery" to Live(setOf("GET", "HEAD"), Outcome(200, "recovery")),
-        "/api/v1/storage" to Live(setOf("GET"), Outcome(200, "storageSummary")),
-        "/api/v1/storage/maintenance-preview" to Live(setOf("GET"), Outcome(200, "maintenancePreview")),
         "/api/v1/uploads/{uploadId}" to Live(setOf("GET"), Outcome(404, "NOT_FOUND")),
         "/api/v1/agent/preflight" to Live(setOf("GET", "POST"), Outcome(200, "agentPreflight")),
-        "$J" to Live(setOf("GET", "PATCH", "DELETE"), Outcome(200, "job"),
+        // Keep Allow assertions aligned with the documented organization and deletion
+        // mutations on the job resource, even though this matrix probes GET as its
+        // representative fixture read.
+        "$J" to Live(setOf("DELETE", "GET", "PATCH"), Outcome(200, "job"),
             mutationRefusal = Outcome(428, "PRECONDITION_REQUIRED")),
         "$J/deletion-preview" to Live(setOf("GET"), Outcome(200, "jobDeletionPreview")),
         "$J/operations/{operationId}" to Live(setOf("GET"), Outcome(404, "NOT_FOUND")),
+        "/api/v1/storage" to Live(setOf("GET"), Outcome(200, "storageSummary")),
+        "/api/v1/storage/maintenance-preview" to Live(setOf("GET"), Outcome(200, "maintenancePreview")),
         "$J/runs" to Live(setOf("GET"), Outcome(200, "runs"), Query.PAGED),
         "$J/repositories" to Live(setOf("GET", "POST"), Outcome(200, "gitRepositories"),
             mutationRefusal = Outcome(428, "PRECONDITION_REQUIRED")),
