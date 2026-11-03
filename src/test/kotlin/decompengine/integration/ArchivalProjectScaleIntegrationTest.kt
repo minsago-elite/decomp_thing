@@ -64,6 +64,10 @@ class ArchivalProjectScaleIntegrationTest {
             if (id == "large_project_mtu") {
                 assertEquals(fixture["expectedTranslationUnitCount"]!!.jsonPrimitive.content.toInt(), translationUnits.size)
                 assertEquals(6, fixture["expectedModuleCountMinimum"]!!.jsonPrimitive.content.toInt())
+                assertEquals(
+                    fixture["linkOrder"]!!.jsonArray.map { it.jsonPrimitive.content },
+                    translationUnits.map { it.fileName.toString() },
+                )
                 assertTrue(fixture["inputSurfaces"]!!.jsonArray.map { it.jsonPrimitive.content }.contains("multiple-translation-units"))
                 assertTrue(sourceFiles.any { it.fileName.toString() == "shared.h" })
             }
@@ -73,6 +77,7 @@ class ArchivalProjectScaleIntegrationTest {
                 val metadata = ElfMetadataReader.read(binary.readBytes())
                 assertEquals("ELF64", metadata.format)
                 assertEquals("x86-64", metadata.machine)
+                assertEquals(if (binaryEntry["pie"]!!.jsonPrimitive.content.toBoolean()) "shared" else "executable", metadata.objectType)
                 val symbols = command(listOf("nm", binary.toString())).second
                 if (binaryEntry["symbols"]!!.jsonPrimitive.content == "present") assertTrue(symbols.contains(" main"))
                 else assertFalse(symbols.contains(" main"))
