@@ -37,6 +37,19 @@ private val diagnosticExecutor = java.util.concurrent.ThreadPoolExecutor(
     java.util.concurrent.ThreadPoolExecutor.DiscardPolicy(),
 )
 
+/** Finite private listing refusal stages; never include caller or persisted values. */
+internal enum class WebListingRefusalBoundary(val label: String) {
+    WORKFLOW_EPOCH("workflow_epoch"), SERVICE_EPOCH("service_epoch"),
+    WORKFLOW_CAPTURE("workflow_capture"), LEGACY_METADATA("legacy_metadata"),
+    ELF_CATEGORIES("elf_categories"), ORGANIZATION("organization"),
+    WORKFLOW_VERSION("workflow_version"), REPORT_CONTEXT("report_context"),
+}
+
+internal fun recordWebListingRefusal(boundary: WebListingRefusalBoundary, output: (String) -> Unit) {
+    val line = "web-listing-refusal boundary=${boundary.label}"
+    diagnosticExecutor.execute { try { output(line) } catch (_: Exception) { } }
+}
+
 internal fun recordWebRequestFailure(
     requestId: String,
     status: Int,

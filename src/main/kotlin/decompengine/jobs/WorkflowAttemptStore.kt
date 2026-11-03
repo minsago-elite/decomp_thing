@@ -178,12 +178,15 @@ class WorkflowAttemptStore private constructor(
      * callbacks must only capture bounded metadata/presentation, never mutate or publish it.
      */
     internal fun <T> inspectForListing(jobId: String, read: (String, Int) -> ByteArray,
-        present: (WorkflowJobInspection.Available) -> T): T {
+        onEpochRefusal: () -> Unit = {}, present: (WorkflowJobInspection.Available) -> T): T {
         val epoch = listingEpoch(jobId)
         val directory = root.resolve(jobId)
         if (!Files.isDirectory(directory, NOFOLLOW_LINKS)) fail("JOB_NOT_FOUND", "The job storage directory is missing or invalid.")
         val result = present(inspectRecord(jobId, directory) { path, maximum -> read("$jobId/${path.fileName}", maximum) })
-        if (epoch !== listingEpoch(jobId)) fail("JOB_RECORD_UNAVAILABLE", "The job changed during listing capture; refresh its state.")
+        if (epoch !== listingEpoch(jobId)) {
+            try { onEpochRefusal() } catch (_: Exception) { }
+            fail("JOB_RECORD_UNAVAILABLE", "The job changed during listing capture; refresh its state.")
+        }
         return result
     }
 
@@ -193,6 +196,12 @@ class WorkflowAttemptStore private constructor(
         requireJobId(jobId)
         val stripe = (jobId.hashCode() and Int.MAX_VALUE) % stripes.size
         stripes[stripe].withLock { ensureOpen(); listingEpochs[stripe] }
+    }
+
+    /** Caller holds the matching stripe through withJob. */
+    private fun invalidateListingEpoch(jobId: String) {
+        val stripe = (jobId.hashCode() and Int.MAX_VALUE) % stripes.size
+        listingEpochs[stripe] = Any()
     }
 
     /** Read-side transaction: callers may read bounded local evidence, never wait on network delivery.
@@ -210,15 +219,24 @@ class WorkflowAttemptStore private constructor(
      */
     internal fun expireProgressJournal(jobId: String, runId: String, protectedFromRetention: Boolean,
         retention: java.time.Duration = AgentProgressJournalRetention.DEFAULT_TERMINAL_RETENTION,
-        fault: (ProgressRetentionFaultPoint) -> Unit = {}): ProgressRetentionResult = withJob(jobId) { directory ->
+        fault: (ProgressRetentionFaultPoint) -> Unit = {}): ProgressRetentionResult = withJob(jobId, readOnly = true) { directory ->
         val attempt = available(jobId, directory).snapshot.attempts.singleOrNull { it.runId == runId }
             ?: fail("RUN_NOT_FOUND", "The requested attempt does not belong to this job.")
-        if (protectedFromRetention || attempt.progressRetentionPinned) ProgressRetentionResult.RETAINED else try {
-            AgentProgressJournalMaintenance.expire(root, attempt, clock.instant(), retention, fault)
-        } catch (failure: Exception) {
-            throw WorkflowStoreException("PROGRESS_RETENTION_FAILED",
-                "Progress retention did not finish. Preserve the journal and pending retention file, then retry maintenance with storage ownership.",
-                outcomeUnknown = true, cause = failure)
+        if (protectedFromRetention || attempt.progressRetentionPinned) ProgressRetentionResult.RETAINED else {
+            val now = clock.instant()
+            if (AgentProgressJournalMaintenance.retainWithoutFilesystem(attempt, now, retention)) {
+                ProgressRetentionResult.RETAINED
+            } else try {
+                AgentProgressJournalMaintenance.expire(root, attempt, now, retention, fault)
+            } catch (failure: Exception) {
+                throw WorkflowStoreException("PROGRESS_RETENTION_FAILED",
+                    "Progress retention did not finish. Preserve the journal and pending retention file, then retry maintenance with storage ownership.",
+                    outcomeUnknown = true, cause = failure)
+            } finally {
+                // Once eligibility permits filesystem maintenance, its outcome may be mutating or
+                // uncertain. Preserve the ordinary command epoch even on failure/partial publish.
+                invalidateListingEpoch(jobId)
+            }
         }
     }
 
@@ -678,7 +696,7 @@ class WorkflowAttemptStore private constructor(
             try { operation(directory) } finally {
                 // Invalidate even a failed/uncertain command, and conservatively include colliding
                 // jobs. Read-only status/replay calls do not invalidate concurrent listing rows.
-                if (!readOnly) listingEpochs[stripe] = Any()
+                if (!readOnly) invalidateListingEpoch(jobId)
             }
         }
     }

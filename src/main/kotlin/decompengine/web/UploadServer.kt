@@ -280,7 +280,7 @@ class UploadServer(
         progressRetentionIntervalMs = if (uiMode == WebUiMode.SPA) 1000 else null,
         durableAdapters = durableAdapters ?: if (uiMode == WebUiMode.SPA) productionDurableWebWorkflows(sensitiveValues = sensitiveValues) else emptyList(),
         shutdownTimeoutMs = 5000, failureDiagnostic = { diagnostic(it, "Background operation failed") },
-        sourceProfiles = admittedSourceProfiles)
+        sourceProfiles = admittedSourceProfiles, listingRefusalDiagnosticOutput = requestDiagnosticOutput)
     private val sourceEvidence = WebSourceEvidence(store, admittedSourceProfiles, jobs::readArtifact)
     private val archiveEvidence = WebArchiveEvidence(store, sourceEvidence, jobs::readArtifact)
     private val access = LocalWebAccess(LocalWebAccessConfiguration(webOrigin(host, server.address.port), basePath,

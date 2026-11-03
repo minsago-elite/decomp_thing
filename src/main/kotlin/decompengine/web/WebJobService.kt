@@ -259,6 +259,7 @@ class WebJobService(
     progressRetentionIntervalMs: Long? = null,
     private val sourceProfiles: List<decompengine.project.ReconstructionProfile> = defaultWebSourceProfiles(),
     retentionHolds: List<JobRetentionHold> = emptyList(),
+    private val listingRefusalDiagnosticOutput: (String) -> Unit = {},
 ) : AutoCloseable {
     private data class Registration(val adapter: DurableWebWorkflowAdapter, val limits: decompengine.jobs.WorkflowExecutionLimits,
         val harnessCapabilityId: String?) {
@@ -600,6 +601,7 @@ class WebJobService(
             if (failure != null || owner !== attempts || task !== active[jobId] || epoch !== legacyListingEpoch) {
                 // Do not retry physical reads outside the original listing budget. In particular,
                 // never combine newly queued legacy metadata with a pre-admission task observation.
+                recordWebListingRefusal(WebListingRefusalBoundary.SERVICE_EPOCH, listingRefusalDiagnosticOutput)
                 WebJobInspection.Unavailable(publicWebDiagnostic(jobId, "JOB_RECORD_UNAVAILABLE"))
             } else inspection
         }
@@ -610,15 +612,20 @@ class WebJobService(
         failure?.let { return WebJobInspection.Unavailable(it) }
         if (!jobId.matches(Regex("[0-9a-f]{32}")) || owner == null) return WebJobInspection.Unavailable(
             WebJobDiagnostic(jobId, "JOB_NOT_FOUND", "The requested job is unavailable."))
+        var boundary = WebListingRefusalBoundary.WORKFLOW_CAPTURE
         fun present(inspected: WorkflowJobInspection): WebJobInspection {
             if (inspected is WorkflowJobInspection.Unavailable) return WebJobInspection.Unavailable(
                 publicWebDiagnostic(jobId, inspected.diagnostic.code))
             val snapshot = (inspected as? WorkflowJobInspection.Available)?.snapshot
+            boundary = WebListingRefusalBoundary.LEGACY_METADATA
             val raw = if (read == null) store.get(jobId) else store.getForListing(jobId, read)
+            boundary = WebListingRefusalBoundary.ELF_CATEGORIES
             requirePublicElfCategories(raw.metadata)
+            boundary = WebListingRefusalBoundary.ORGANIZATION
             val organizations = decompengine.jobs.JobOrganizationStore(store.storageRoot, organizationWriter)
             val organization = if (read == null) organizations.read(jobId) else organizations.read(jobId, read)
             if (snapshot != null && snapshot.attempts.isNotEmpty()) {
+                boundary = WebListingRefusalBoundary.WORKFLOW_VERSION
                 require(snapshot.version.matches(Regex("version_[a-f0-9]{32}"))) { "Invalid stored workflow version" }
             }
             val latest = snapshot?.latestRun
@@ -632,6 +639,7 @@ class WebJobService(
                     raw.copy(status = "failed", statusMessage = "Historical legacy work was interrupted; its workflow identity is unknown.")
                 else -> raw
             }
+            boundary = WebListingRefusalBoundary.REPORT_CONTEXT
             val reports = latest?.let { context(jobId, it.runId) }
                 ?: WebReportContext(store.storageRoot.resolve(jobId).resolve("reports"))
             return WebJobInspection.Available(WebJobPresentation(job, snapshot, reports,
@@ -639,10 +647,13 @@ class WebJobService(
                     .map { publicWorkflowDiagnostic(it.code) }, legacyInterrupted, organization))
         }
         return try {
-            if (read == null) present(owner.inspect(jobId)) else owner.inspectForListing(jobId, read, ::present)
+            if (read == null) present(owner.inspect(jobId)) else owner.inspectForListing(jobId, read,
+                onEpochRefusal = { boundary = WebListingRefusalBoundary.WORKFLOW_EPOCH }, present = ::present)
         } catch (failure: WorkflowStoreException) {
+            recordWebListingRefusal(boundary, listingRefusalDiagnosticOutput)
             WebJobInspection.Unavailable(publicWebDiagnostic(jobId, failure.code))
         } catch (_: Exception) {
+            recordWebListingRefusal(boundary, listingRefusalDiagnosticOutput)
             WebJobInspection.Unavailable(publicWebDiagnostic(jobId, "JOB_RECORD_UNAVAILABLE"))
         }
     }
