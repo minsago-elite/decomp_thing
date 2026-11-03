@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import hashlib
 import json
+import os
 from pathlib import Path
 import tempfile
 import time
@@ -76,17 +77,23 @@ class FakeCommandRunner:
             prefix = "dgb" if self.role == "buildkit" else "dgr"
             cgroup = f"/system.slice/{unit}" if is_slice else f"/system.slice/{prefix}{self.token}.slice/{unit}"
             inactive = unit in self.stopped
-            values = [unit, f"decomp-gcc-owner:{self.token}:{self.role}", "inactive" if inactive else "active",
-                      "dead" if inactive else ("active" if is_slice else "running"), "invocation-fixture", cgroup,
-                      "" if is_slice else f"{prefix}{self.token}.slice"]
-            return 0, ("\n".join(values) + "\n").encode(), b""
+            values = [
+                ("Slice", "" if is_slice else f"{prefix}{self.token}.slice"),
+                ("ControlGroup", cgroup),
+                ("InvocationID", "invocation-fixture"),
+                ("SubState", "dead" if inactive else ("active" if is_slice else "running")),
+                ("ActiveState", "inactive" if inactive else "active"),
+                ("Description", f"decomp-gcc-owner:{self.token}:{self.role}"),
+                ("Id", unit),
+            ]
+            return 0, ("\n".join(f"{name}={value}" for name, value in values) + "\n").encode(), b""
         if "StopUnit" in argv:
             self.stopped.add(argv[-2])
             return 0, b'{"type":"o","data":"/org/freedesktop/systemd1/job/78"}', b""
         if "StartTransientUnit" in argv:
-            return 0, b'{"type":"o","data":"/org/freedesktop/systemd1/job/77"}', b""
+            return 0, b'{"type":"o","data":["/org/freedesktop/systemd1/job/77"]}', b""
         if "GetUnit" in argv:
-            return 0, b'{"type":"o","data":"/org/freedesktop/systemd1/unit/fixture"}', b""
+            return 0, b'{"type":"o","data":["/org/freedesktop/systemd1/unit/fixture"]}', b""
         return 1, b"", b"unrecognized authored fixture argv"
 
 
@@ -359,6 +366,34 @@ class OwnerTest(unittest.TestCase):
         self.assertEqual(type(backend).__name__, "ProductionBackend")
         self.assertNotIn("backend", owner_module.cli.__code__.co_varnames)
 
+    def test_capability_admission_checks_hierarchy_not_root_cgroup_files(self):
+        class HierarchyOnlyAuthority:
+            def capabilities(self, root, role, timeout):
+                # Root cgroups do not expose cgroup.events/cgroup.kill; those
+                # controls are checked after the owned slice has been created.
+                return {"unified": True, "controllers": ["memory", "pids"],
+                        "events": False, "cgroupKill": False, "userManager": True}
+
+        caps = owner_module.require_capabilities(HierarchyOnlyAuthority(), self.root, "buildkit")
+        self.assertTrue(caps["unified"])
+        self.assertFalse(caps["events"])
+        self.assertFalse(caps["cgroupKill"])
+
+    def test_owned_cgroup_kill_control_must_exist_and_be_openable_for_write(self):
+        cgroup = self.repo / "cgroup"
+        cgroup.mkdir()
+        directory_fd = os.open(cgroup, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            with self.assertRaisesRegex(owner_module.Refusal, "cgroup.kill"):
+                owner_module.require_cgroup_kill(directory_fd)
+            control = cgroup / "cgroup.kill"
+            control.write_bytes(b"")
+            control.chmod(0o200)
+            owner_module.require_cgroup_kill(directory_fd)
+            self.assertTrue(control.exists())
+        finally:
+            os.close(directory_fd)
+
     def test_production_backend_emits_fixed_transient_service_properties(self):
         owner = self.make_owner(FakeBackend())
         manifest = self.reserve(owner)
@@ -376,6 +411,16 @@ class OwnerTest(unittest.TestCase):
                          "SendSIGKILL", "RuntimeMaxUSec", "RemainAfterExit"):
             self.assertIn(required, joined)
         self.assertEqual(receipt["device"], 4)
+
+    def test_busctl_object_path_uses_the_json_argument_array(self):
+        self.assertEqual(owner_module.ProductionBackend._busctl_object_path(
+            b'{"type":"o","data":["/org/freedesktop/systemd1/job/77"]}',
+            "/org/freedesktop/systemd1/job/", "fixture"),
+            "/org/freedesktop/systemd1/job/77")
+        with self.assertRaises(owner_module.Refusal):
+            owner_module.ProductionBackend._busctl_object_path(
+                b'{"type":"o","data":"/org/freedesktop/systemd1/job/77"}',
+                "/org/freedesktop/systemd1/job/", "fixture")
 
     def test_production_gate_rechecks_pinned_manager_and_privileged_cgroup_receipts(self):
         owner = self.make_owner(FakeBackend())

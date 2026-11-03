@@ -187,12 +187,8 @@ class LinuxAuthority:
         cgroup = Path("/sys/fs/cgroup")
         try:
             controllers_path = cgroup / "cgroup.controllers"
-            events_path = cgroup / "cgroup.events"
-            kill_path = cgroup / "cgroup.kill"
             controllers = controllers_path.read_text().split()
             unified = controllers_path.is_file() and cgroup.is_dir()
-            events = events_path.is_file()
-            kill = kill_path.exists()
             boot_id = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
         except OSError as exc:
             raise Refusal(f"cannot inspect cgroup-v2 capabilities: {exc}") from exc
@@ -201,8 +197,11 @@ class LinuxAuthority:
             runtime = Path(f"/run/user/{os.getuid()}")
             user_manager = (runtime.is_dir() and not runtime.is_symlink() and
                 (runtime / "bus").is_socket())
-        return {"unified": unified, "controllers": controllers, "events": events,
-                "cgroupKill": kill, "bootId": boot_id, "userManager": user_manager}
+        # cgroup.events and cgroup.kill are not exposed on the hierarchy root.
+        # Their availability is authenticated against the owned slice after
+        # systemd creates it, before the gated supervisor can start.
+        return {"unified": unified, "controllers": controllers,
+                "bootId": boot_id, "userManager": user_manager}
 
     def inspect(self, root: Path, role: str, timeout: float) -> dict:
         return self._call("_inspect-domain", root, role, timeout)
@@ -250,19 +249,42 @@ class ProductionBackend:
             argv.append("--user")
         else:
             argv += ["--system"]
-        argv += ["show", "--no-pager", "--value", "--property=Id,Description,ActiveState,SubState,InvocationID,ControlGroup,Slice", unit]
+        argv += ["show", "--no-pager", "--property=Id,Description,ActiveState,SubState,InvocationID,ControlGroup,Slice", unit]
         env = ({"XDG_RUNTIME_DIR": f"/run/user/{os.getuid()}"} if manager == "user" else None)
         status, out, err = self.runner.run(argv, min(5.0, timeout), env=env)
         if status != 0:
             raise Refusal(f"cannot read exact transient unit receipt: {err[:2048].decode(errors='replace')}")
-        values = out.decode("utf-8", "strict").splitlines()
-        if len(values) != 7:
-            raise Refusal("systemd show receipt has an unexpected field count")
-        return dict(zip(("id", "description", "active", "sub", "invocation", "controlGroup", "slice"), values))
+        names = {"Id": "id", "Description": "description", "ActiveState": "active",
+                 "SubState": "sub", "InvocationID": "invocation", "ControlGroup": "controlGroup",
+                 "Slice": "slice"}
+        parsed = {}
+        try:
+            for line in out.decode("utf-8", "strict").splitlines():
+                name, separator, value = line.partition("=")
+                if not separator or name not in names or names[name] in parsed:
+                    raise ValueError("unknown, malformed, or duplicate systemd property")
+                parsed[names[name]] = value
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise Refusal("systemd show receipt has malformed named properties") from exc
+        if set(parsed) != set(names.values()):
+            raise Refusal("systemd show receipt is missing a required named property")
+        return parsed
 
     @staticmethod
     def _busctl_property(name: str, signature: str, *values: str) -> list[str]:
         return [name, signature, *values]
+
+    @staticmethod
+    def _busctl_object_path(payload: bytes, prefix: str, operation: str) -> str:
+        try:
+            result = json.loads(payload)
+            data = result["data"]
+            if result.get("type") != "o" or not isinstance(data, list) or len(data) != 1 or \
+                    not isinstance(data[0], str) or not data[0].startswith(prefix):
+                raise ValueError("unexpected object-path reply")
+            return data[0]
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise Refusal(f"systemd {operation} returned a malformed object path") from exc
 
     def _start_transient(self, role: str, unit: str, properties: list[list[str]], timeout: float) -> str:
         flattened = [v for prop in properties for v in prop]
@@ -270,26 +292,13 @@ class ProductionBackend:
                 "org.freedesktop.systemd1.Manager", "StartTransientUnit", "ssa(sv)a(sa(sv))",
                 unit, "fail", str(len(properties)), *flattened, "0"]
         out = self._run(role, args, timeout)
-        try:
-            result = json.loads(out)
-            path = result["data"]
-            if not isinstance(path, str) or not path.startswith("/org/freedesktop/systemd1/job/"):
-                raise ValueError("bad job path")
-            return path
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise Refusal("StartTransientUnit returned malformed job object path") from exc
+        return self._busctl_object_path(out, "/org/freedesktop/systemd1/job/", "StartTransientUnit")
 
     def _get_unit_object_path(self, role: str, unit: str) -> str:
         args = ["call", "org.freedesktop.systemd1", "/org/freedesktop/systemd1",
                 "org.freedesktop.systemd1.Manager", "GetUnit", "s", unit]
-        try:
-            result = json.loads(self._run(role, args, 5))
-            path = result["data"]
-            if not isinstance(path, str) or not path.startswith("/org/freedesktop/systemd1/unit/"):
-                raise ValueError("bad unit object path")
-            return path
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise Refusal("systemd GetUnit returned a malformed object path") from exc
+        return self._busctl_object_path(self._run(role, args, 5),
+            "/org/freedesktop/systemd1/unit/", "GetUnit")
 
     def _systemd_version(self, role: str) -> int:
         manager = manager_identity(role)
@@ -709,15 +718,26 @@ def require_capabilities(authority: LinuxAuthority, root: Path, role: str) -> di
     if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
         raise Refusal("pidfd open/send-signal operations are unavailable")
     caps = authority.capabilities(root, role, 5)
-    if caps.get("unified") is not True or caps.get("cgroupKill") is not True:
-        raise Refusal("unified cgroup v2 and cgroup.kill are required")
+    if caps.get("unified") is not True:
+        raise Refusal("unified cgroup v2 is required")
     if not {"memory", "pids"}.issubset(set(caps.get("controllers", []))):
         raise Refusal("memory and pids controllers are required")
-    if caps.get("events") is not True:
-        raise Refusal("cgroup.events is required")
     if role == "rootless" and caps.get("userManager") is not True:
         raise Refusal("an existing authenticated user manager is required")
     return caps
+
+
+def require_cgroup_kill(directory_fd: int) -> None:
+    """Require the writable cgroup.kill control on an authenticated owned cgroup."""
+    try:
+        fd = os.open("cgroup.kill", os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=directory_fd)
+    except OSError as exc:
+        raise Refusal("owned cgroup lacks a writable cgroup.kill control") from exc
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise Refusal("owned cgroup.kill control is not a regular kernel control file")
+    finally:
+        os.close(fd)
 
 
 def read_json_bounded(path: Path, limit: int) -> dict:
@@ -1032,6 +1052,7 @@ def supervisor_main(root: Path, role: str) -> None:
         if os.write(gate_write, b"1") != 1:
             raise Refusal("short supervisor gate release")
         os.close(gate_write)
+        gate_write = None
         deadline = time.monotonic() + 10
         selector = selectors.DefaultSelector()
         selector.register(exec_read, selectors.EVENT_READ)
@@ -1102,7 +1123,8 @@ def supervisor_main(root: Path, role: str) -> None:
              "pidfdHeld": True, "cgroupNodes": nodes}, limit=32 * 1024,
             owner=(manifest["identity"]["ownerUid"], manifest["identity"]["ownerGid"]))
     finally:
-        os.close(gate_write)
+        if gate_write is not None:
+            os.close(gate_write)
         os.close(exec_read)
         if pidfd is not None:
             os.close(pidfd)
@@ -1293,6 +1315,10 @@ def inspect_domain_local(root: Path, role: str) -> dict:
         raise Refusal("service cgroup is outside the exact owner slice")
     slice_fd = _open_cgroup_path(slice_cg)
     try:
+        # These controls exist on normal non-root cgroups, not at the v2
+        # hierarchy root. Verify them on the manager-authenticated slice before
+        # releasing the gated supervisor.
+        require_cgroup_kill(slice_fd)
         service_fd = _open_cgroup_path(service_cg)
         try:
             slice_stat = os.fstat(slice_fd)
