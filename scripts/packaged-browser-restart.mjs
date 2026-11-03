@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
+import { seedHistory } from './packaged-browser-history.mjs';
 
 const RUN = 'run_fixture_3';
 const MAX_REPORT_BYTES = 512 * 1024;
@@ -73,6 +74,17 @@ export function assertOnlyPinWrites(requests, pinUrl, expectedPuts, sessionUrl =
 
 export const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 
+/** Restart qualification needs an actively-following page; keep its journal below the UI's 200-row cap. */
+export async function seedRestart(root) {
+  const fixture = await seedHistory(root);
+  const progress = JSON.parse(fixture.progress);
+  progress.events = progress.events.slice(0, 40);
+  progress.nextSequence = progress.events.at(-1).sequence + 1;
+  fixture.progress = JSON.stringify(progress);
+  await fs.writeFile(fixture.progressPath, fixture.progress, { mode: 0o600 });
+  return fixture;
+}
+
 export async function qualifyRestart({ fixture, origin, makeTarget, cdp, evaluate, ready, waitFor, delay, readOutput, restartApplication,
   captureSafe, sensitiveValues }) {
   const basePath = '/nested';
@@ -101,8 +113,11 @@ export async function qualifyRestart({ fixture, origin, makeTarget, cdp, evaluat
     await ready(tab, `document.querySelector('section[aria-label="Progress retention"]') !== null`, label);
   };
   const follow = async (tab, label) => {
+    await evaluate(tab, `([...document.querySelectorAll('a')].find(a => a.textContent.trim() === 'Activity') ??
+      [...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'Activity')).click()`);
+    await ready(tab, `document.querySelector('section[aria-labelledby="activity-title"]') !== null`, label + ' view');
     await evaluate(tab, `${button('Follow activity')}.click()`);
-    await ready(tab, `(${rows}).length === 200`, label);
+    await ready(tab, `(${rows}).length > 0 && document.body.innerText.includes('Following retained activity.')`, label);
   };
   const readPin = async (tab, label, expected = 'Progress history is not pinned.') => {
     await ready(tab, `[...document.querySelectorAll('button')].some(b => b.textContent === 'Read progress pin' && !b.disabled)`, label + ' controls');
@@ -196,9 +211,22 @@ export async function qualifyRestart({ fixture, origin, makeTarget, cdp, evaluat
   const peer = track(await makeTarget());
   await openRun(peer, 'second tab attempt');
   await follow(peer, 'second tab activity');
+  const oldWindow = await cdp.call('Browser.getWindowForTarget', { targetId: old.targetId });
+  const peerWindow = await cdp.call('Browser.getWindowForTarget', { targetId: peer.targetId });
+  assert.equal(oldWindow.windowId, peerWindow.windowId, 'Background observation requires two tabs in the same browser window');
+  await cdp.call('Target.activateTarget', { targetId: peer.targetId });
   await cdp.call('Page.bringToFront', {}, peer.sessionId);
-  await ready(old, `document.visibilityState === 'hidden' && document.body.innerText.includes('Background tab: activity reads are suspended.')`,
-    'hidden tab suspension (fail closed if the tab is not hidden)');
+  try {
+    await ready(old, `document.visibilityState === 'hidden'`, 'hidden tab state (fail closed if the page is not hidden)');
+  } catch (error) {
+    const [oldVisibility, peerVisibility] = await Promise.all([
+      evaluate(old, 'document.visibilityState'), evaluate(peer, 'document.visibilityState'),
+    ]);
+    throw new Error(`Background activation did not hide the original page (old=${oldVisibility}, peer=${peerVisibility}, ` +
+      `oldWindow=${oldWindow.windowId}, peerWindow=${peerWindow.windowId})`, { cause: error });
+  }
+  await ready(old, `document.body.innerText.includes('Background tab: activity reads are suspended.')`,
+    'hidden activity suspension notice');
   const hiddenReads = progressReads(old);
   const peerReadsBefore = progressReads(peer);
   await delay(3000);
@@ -215,11 +243,12 @@ export async function qualifyRestart({ fixture, origin, makeTarget, cdp, evaluat
   assert.ok(old.streams > streamsBefore, 'Survivor did not reopen its activity stream');
   const original = fixture.progress;
   const appended = JSON.parse(original);
-  appended.events.push({ ...appended.events[0], sequence: 205, text: 'Synthetic private streamed content' });
-  appended.nextSequence = 206;
+  const streamedSequence = appended.nextSequence;
+  appended.events.push({ ...appended.events[0], sequence: streamedSequence, text: 'Synthetic private streamed content' });
+  appended.nextSequence = streamedSequence + 1;
   try {
     await publishAtomically(fixture.progressPath, JSON.stringify(appended));
-    await ready(old, `(${rows}).includes('Sequence 205')`, 'survivor streamed appended observation');
+    await ready(old, `(${rows}).includes(${JSON.stringify(`Sequence ${streamedSequence}`)})`, 'survivor streamed appended observation');
     assert.equal(await evaluate(old, `document.body.innerText.includes('Synthetic private streamed content')`), false);
     await evaluate(old, `${button('Pause activity')}.click()`);
   } finally {

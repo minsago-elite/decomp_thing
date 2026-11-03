@@ -13,7 +13,7 @@ import { seedHistory, qualifyHistory } from './packaged-browser-history.mjs';
 import { seedLegacy, qualifyLegacy } from './packaged-browser-legacy.mjs';
 import { qualifyUpgrade, qualifyUpgradeCache } from './packaged-browser-upgrade.mjs';
 import { qualifyAudit, assertAudit } from './packaged-browser-audit.mjs';
-import { qualifyRestart, assertGracefulShutdown, scrubTokens, boundReport } from './packaged-browser-restart.mjs';
+import { seedRestart, qualifyRestart, assertGracefulShutdown, scrubTokens, boundReport } from './packaged-browser-restart.mjs';
 
 // Test driver only: the application is launched with a separate Node-free PATH.
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -496,7 +496,7 @@ try {
   const { manifest, data } = installation;
   const legacyFixture = values.mode === 'legacy' ? await seedLegacy(data) : null;
   const historyFixture = values.mode === 'history' ? await seedHistory(data) : null;
-  const restartFixture = values.mode === 'restart' ? await seedHistory(data) : null;
+  const restartFixture = values.mode === 'restart' ? await seedRestart(data) : null;
   const scaleFixture = values.mode === 'scale' ? await seedScale(data) : null;
   const liveFixture = values.mode === 'live' ? await seedLive(data) : null;
   const populated = !!(historyFixture || restartFixture || scaleFixture || liveFixture);
@@ -520,7 +520,7 @@ try {
 
   // Chrome places SingletonSocket under TMPDIR. Keep it short enough even on hosted
   // runners whose checkout path is /home/runner/work/<repo>/<repo>.
-  browserTmp = await fs.mkdtemp(join(repo, '.ct-'));
+  browserTmp = await fs.mkdtemp(join(values['work-parent'], '.ct-'));
   report.browserTempDirectory = browserTmp;
   await fs.mkdir(profile);
   browser = startOwned(chromeBinary, ['--headless=new', '--disable-gpu', ...(values['no-sandbox'] ? ['--no-sandbox'] : []), '--no-first-run', '--no-default-browser-check', '--disable-background-networking', '--disable-extensions', '--disable-default-apps', '--disable-sync', '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1', `--user-data-dir=${profile}`, 'about:blank'], {
