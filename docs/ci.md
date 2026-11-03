@@ -124,6 +124,44 @@ Hosted workflows additionally prepare fixtures and run credential-free
 preflights, frontend/browser jobs and separate contract/oracle workflows through
 the entry points below.
 
+### GCC toolchain reproduction candidate
+
+The GCC provenance job now treats image reproduction as a CI candidate using
+the official BuildKit 0.20.2 Linux amd64 bundle, authenticated by its published
+SHA-256 and exact archive size before extraction or execution. The helper owns
+its tools, configs, temp directory, sockets, service state and evidence under a
+mode-0700 directory below `build/gcc-toolchain-reproduction/`. It starts one
+rootful, build-only BuildKit OCI worker with the native snapshotter and normal
+process sandbox, then performs one no-cache solve with the existing pinned
+Dockerfile, frontend, base, platform and `SOURCE_DATE_EPOCH`. Docker archive and
+OCI provenance outputs come from that same solve.
+
+The Docker archive is retained and parsed without extraction before it is
+loaded into a separate pinned rootless Docker 29.7.2 executor. That daemon uses
+overlay2 for execution and explicitly selects the classic image store. It does
+not build or re-export the candidate. The unchanged strict GCC reproduction
+verifier must pass against the actual image inspect result before the workflow
+publishes its image ID to downstream checks. Archive layer bytes, ordered diff
+IDs, raw config and manifest, final-layer tar/header/payload census, provenance
+join, daemon/worker facts, bounded logs and cleanup receipt are retained for 14
+days. The helper applies finite download, readiness, solve, import and cleanup
+budgets, and leaves diagnostics in place when cleanup cannot prove owned process
+and mount absence.
+
+The authored `tests/oracle/test_gcc_toolchain_builder.py` controls exercise the
+actual workflow helper call and paired archive parser, including unsafe or
+oversized input, layer-digest and provenance-join refusal, and a changed ninth
+diff ID with otherwise locked image configuration. These are deterministic
+source/wiring controls; they do not qualify hosted kernel capabilities or prove
+why earlier AWS and Azure outputs diverged. The expected reproduction remains
+`sha256:807f16e03368e1e0ff3c904f21f1a13c260d78a8b7226a52284a2ee68a4d1511`;
+historical origin `sha256:510c510f300d811df22c7769633575a94939073b529a73125bf96cfb96dc7248`
+remains a separate provenance identity. A changed output, capability failure,
+incomplete diagnostic or cleanup uncertainty fails this candidate and returns
+to issue #87 without lock or recipe changes. Ordinary Actions evidence from
+both naturally observed fleet classes, all existing downstream checks and the
+full live acceptance remain required before issue or milestone closure.
+
 Gradle also builds the embedded frontend. CI provisions the exact Node 24.20.0 /
 npm 11.19.0 distribution using `scripts/install-frontend-node.sh`; the installer
 checks the reviewed official archive digest and repository version pins. Local

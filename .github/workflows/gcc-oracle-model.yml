@@ -146,220 +146,41 @@ jobs:
             slirp4netns=1.2.1-1build2 uidmap
       - name: Verify source provenance metadata
         run: python3 scripts/verify-gcc-oracle-source.py --metadata-only
+      - name: Initialize private GCC builder workspace
+        run: bash scripts/ci-gcc-toolchain-builder.sh init
       - name: Restore locked GCC source artifacts
         id: gcc-source-cache
         uses: actions/cache/restore@v6
         with:
           path: |
-            ${{ runner.temp }}/gcc-oracle-source/gcc-16.2.0.tar.xz
-            ${{ runner.temp }}/gcc-oracle-source/gcc-16.2.0.tar.xz.sig
+            ${{ github.workspace }}/build/gcc-toolchain-reproduction/${{ github.run_id }}-${{ github.run_attempt }}/source/gcc-16.2.0.tar.xz
+            ${{ github.workspace }}/build/gcc-toolchain-reproduction/${{ github.run_id }}-${{ github.run_attempt }}/source/gcc-16.2.0.tar.xz.sig
           key: gcc-source-v1-${{ runner.os }}-${{ hashFiles('oracle/gcc/16.2.0/source-lock.json') }}
       - name: Fetch and fully verify the pinned source release
-        run: python3 scripts/fetch-gcc-oracle-source.py "$RUNNER_TEMP/gcc-oracle-source"
+        run: python3 scripts/fetch-gcc-oracle-source.py "$GITHUB_WORKSPACE/build/gcc-toolchain-reproduction/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/source"
       - name: Save authenticated GCC source artifacts
         if: steps.gcc-source-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v6
         with:
           path: |
-            ${{ runner.temp }}/gcc-oracle-source/gcc-16.2.0.tar.xz
-            ${{ runner.temp }}/gcc-oracle-source/gcc-16.2.0.tar.xz.sig
+            ${{ github.workspace }}/build/gcc-toolchain-reproduction/${{ github.run_id }}-${{ github.run_attempt }}/source/gcc-16.2.0.tar.xz
+            ${{ github.workspace }}/build/gcc-toolchain-reproduction/${{ github.run_id }}-${{ github.run_attempt }}/source/gcc-16.2.0.tar.xz.sig
           key: ${{ steps.gcc-source-cache.outputs.cache-primary-key }}
-      - name: Capture GCC reproduction builder identity
+      - name: Run GCC builder command and archive controls
+        env:
+          TMPDIR: ${{ github.workspace }}/build/gcc-toolchain-reproduction/${{ github.run_id }}-${{ github.run_attempt }}/tmp
         run: |
-          mkdir -p build/gcc-toolchain-reproduction-diagnostics
-          diagnostics=build/gcc-toolchain-reproduction-diagnostics
-          {
-            printf 'runner.os=%s\nrunner.arch=%s\nrunner.name=%s\nImageOS=%s\nImageVersion=%s\n' \
-              '${{ runner.os }}' '${{ runner.arch }}' '${{ runner.name }}' \
-              "${ImageOS:-unknown}" "${ImageVersion:-unknown}"
-            printf 'sourceRevision=%s\n' "$(git rev-parse HEAD)"
-            sha256sum \
-              .github/workflows/gcc-oracle-model.yml \
-              oracle/gcc/16.2.0/build-toolchain.Dockerfile \
-              oracle/gcc/16.2.0/toolchain-reproduction.json \
-              oracle/gcc/16.2.0/build-record.json
-            uname -a
-            cat /etc/os-release
-            printf '\n--- docker version ---\n'
-            docker version --format '{{json .}}' || true
-            printf '\n--- docker info ---\n'
-            docker info --format 'server={{.ServerVersion}} driver={{.Driver}} os={{.OperatingSystem}} kernel={{.KernelVersion}} arch={{.Architecture}} name={{.Name}}' || true
-            printf '\n--- buildx version ---\n'
-            docker buildx version || true
-            printf '\n--- buildx builder ---\n'
-            docker buildx inspect --bootstrap || true
-          } >"$diagnostics/builder.txt" 2>&1
-          cat "$diagnostics/builder.txt"
-          docker info --format '{{json .}}' >"$diagnostics/docker-info.json" 2>"$diagnostics/docker-info.stderr" || true
+          install -d -m 700 "$TMPDIR"
+          python3 -m unittest tests.oracle.test_gcc_toolchain_builder -v
+      - name: Authenticate the pinned Docker executor and BuildKit bundle
+        run: bash scripts/ci-gcc-toolchain-builder.sh authenticate
+      - name: Start the owned rootless behavior executor
+        run: bash scripts/ci-gcc-toolchain-builder.sh start-rootless
       - name: Reproduce and verify the recorded toolchain image
-        run: |
-          set -o pipefail
-          diagnostics=build/gcc-toolchain-reproduction-diagnostics
-          echo '8b0af79ba3426f49ba599eb0c7eea433c62ac5bb6ab5e7797f7d09d978f43543  oracle/gcc/16.2.0/build-toolchain.Dockerfile' \
-            | sha256sum --check --strict
-          docker buildx build \
-            --no-cache \
-            --platform linux/amd64 \
-            --build-arg SOURCE_DATE_EPOCH=1786060800 \
-            --load \
-            --tag decomp-gcc-oracle-toolchain:16.2.0 \
-            --file oracle/gcc/16.2.0/build-toolchain.Dockerfile \
-            --progress=plain \
-            oracle/gcc/16.2.0 2>&1 | tee "$diagnostics/build.log"
-          observed="$(docker image inspect --format '{{.Id}}' decomp-gcc-oracle-toolchain:16.2.0)"
-          echo "recorded origin image: sha256:510c510f300d811df22c7769633575a94939073b529a73125bf96cfb96dc7248"
-          echo "reproduced image: $observed"
-          docker image inspect decomp-gcc-oracle-toolchain:16.2.0 \
-            | tee "$diagnostics/image-inspect.json"
-          docker history --no-trunc --format '{{json .}}' \
-            decomp-gcc-oracle-toolchain:16.2.0 >"$diagnostics/image-history.jsonl" || true
-          python3 scripts/verify-gcc-toolchain-reproduction.py \
-            --lock oracle/gcc/16.2.0/toolchain-reproduction.json \
-            --build-record oracle/gcc/16.2.0/build-record.json \
-            <"$diagnostics/image-inspect.json"
-          echo "GCC_TOOLCHAIN_IMAGE_ID=$observed" >> "$GITHUB_ENV"
-          docker run --rm \
-            --platform linux/amd64 \
-            --network none \
-            --read-only \
-            --cap-drop ALL \
-            --security-opt no-new-privileges \
-            --tmpfs /tmp:rw,nosuid,nodev,noexec \
-            --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/oracle,readonly" \
-            --workdir /oracle \
-            --entrypoint /usr/bin/python3 \
-            "$observed" \
-            scripts/verify-gcc-oracle-build-record.py \
-            --source-lock oracle/gcc/16.2.0/source-lock.json \
-            --build-record oracle/gcc/16.2.0/build-record.json \
-            --container-digest "$observed" \
-            --reproduction-lock oracle/gcc/16.2.0/toolchain-reproduction.json
-      - name: Retain GCC toolchain reproduction diagnostics
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: gcc-toolchain-reproduction-diagnostics
-          retention-days: 14
-          if-no-files-found: warn
-          path: build/gcc-toolchain-reproduction-diagnostics
-      - name: Authenticate the behavior-corpus control client
-        run: |
-          install -d "$RUNNER_TEMP/docker-client"
-          curl --fail --silent --show-error --location \
-            --retry 3 --retry-all-errors --retry-max-time 300 \
-            --connect-timeout 15 --max-time 180 \
-            https://download.docker.com/linux/static/stable/x86_64/docker-29.7.2.tgz \
-            --output "$RUNNER_TEMP/docker-client/docker-29.7.2.tgz"
-          echo "803d433f226db4776e1768fd319fc6c6e4935a456acf84fcc0080818b854bc8f  $RUNNER_TEMP/docker-client/docker-29.7.2.tgz" \
-            | sha256sum --check --strict
-          tar --extract --gzip \
-            --file "$RUNNER_TEMP/docker-client/docker-29.7.2.tgz" \
-            --directory "$RUNNER_TEMP/docker-client"
-          echo "e45381109c685311cf84c5e33a1aca7da81d6b55c0f9aed74091fc08c3a94f13  $RUNNER_TEMP/docker-client/docker/docker" \
-            | sha256sum --check --strict
-          test "$(stat --format='%s' "$RUNNER_TEMP/docker-client/docker/docker")" = 42677472
-          test "$("$RUNNER_TEMP/docker-client/docker/docker" --version)" = \
-            'Docker version 29.7.2, build a7dcaa6'
-          test "$("$RUNNER_TEMP/docker-client/docker/dockerd" --version)" = \
-            'Docker version 29.7.2, build 6a43e3d'
-          curl --fail --silent --show-error --location \
-            --retry 3 --retry-all-errors --retry-max-time 300 \
-            --connect-timeout 15 --max-time 180 \
-            https://download.docker.com/linux/static/stable/x86_64/docker-rootless-extras-29.7.2.tgz \
-            --output "$RUNNER_TEMP/docker-client/docker-rootless-extras-29.7.2.tgz"
-          echo "15a5cb81f2c5cf15ea21427f2e8241eac0deb2221175f993b5e76926e705ec6a  $RUNNER_TEMP/docker-client/docker-rootless-extras-29.7.2.tgz" \
-            | sha256sum --check --strict
-          tar --extract --gzip \
-            --file "$RUNNER_TEMP/docker-client/docker-rootless-extras-29.7.2.tgz" \
-            --directory "$RUNNER_TEMP/docker-client"
-          rootless="$RUNNER_TEMP/docker-client/docker-rootless-extras"
-          echo "98f07e783dd6b3cd236c7865d1dce7937e645ec74a0fe2971725449af074f466  $rootless/rootlesskit" \
-            | sha256sum --check --strict
-          echo "904c9b9e35f6927c0a5e65afb4d35b6bc9eb1278c878044501281fc728c9be46  $rootless/dockerd-rootless.sh" \
-            | sha256sum --check --strict
-          echo "1c9f0dc93ebb3d75255254ec760d26a912affba7f329ab8abffe8e25eb0b3f94  $rootless/dockerd-rootless-setuptool.sh" \
-            | sha256sum --check --strict
-          test "$(stat --format='%s' "$rootless/rootlesskit")" = 23922644
-          test "$(stat --format='%s' "$rootless/dockerd-rootless.sh")" = 10532
-          test "$("$rootless/rootlesskit" --version)" = \
-            'rootlesskit version 3.0.2'
-          bash -n \
-            "$rootless/dockerd-rootless.sh" \
-            "$rootless/dockerd-rootless-setuptool.sh"
-          sudo install -m 0755 "$rootless/rootlesskit" /usr/bin/rootlesskit
-          test "$(sha256sum /usr/bin/rootlesskit | cut -d' ' -f1)" = \
-            98f07e783dd6b3cd236c7865d1dce7937e645ec74a0fe2971725449af074f466
-          test "$(command -v slirp4netns)" = /usr/bin/slirp4netns
-          test "$(dpkg-query --show --showformat='${Version}' slirp4netns)" = \
-            1.2.1-1build2
-          test "$(slirp4netns --version | head -n 1)" = \
-            'slirp4netns version 1.2.1'
-      - name: Start the pinned rootless generic behavior executor
-        run: |
-          docker image save decomp-gcc-oracle-toolchain:16.2.0 \
-            --output "$RUNNER_TEMP/gcc-oracle-image.tar"
-          sudo loginctl enable-linger "$USER"
-          sudo systemctl start "user@$(id -u).service"
-          runtime_directory="/run/user/$(id -u)"
-          test -d "$runtime_directory"
-          install -d -m 700 \
-            "$RUNNER_TEMP/rootless-data" \
-            "$RUNNER_TEMP/rootless-exec" \
-            "$RUNNER_TEMP/rootless-state"
-          export PATH="$RUNNER_TEMP/docker-client/docker:/usr/bin:$PATH"
-          export XDG_RUNTIME_DIR="$runtime_directory"
-          export DOCKERD_ROOTLESS_ROOTLESSKIT_STATE_DIR="$RUNNER_TEMP/rootless-state"
-          export DOCKERD_ROOTLESS_ROOTLESSKIT_NET=slirp4netns
-          export DOCKERD_ROOTLESS_ROOTLESSKIT_PORT_DRIVER=builtin
-          export DOCKERD_ROOTLESS_ROOTLESSKIT_DISABLE_HOST_LOOPBACK=true
-          socket="$runtime_directory/decomp-behavior-docker.sock"
-          "$RUNNER_TEMP/docker-client/docker-rootless-extras/dockerd-rootless.sh" \
-            --data-root="$RUNNER_TEMP/rootless-data" \
-            --exec-root="$RUNNER_TEMP/rootless-exec" \
-            --pidfile="$RUNNER_TEMP/rootless-dockerd.pid" \
-            --host="unix://$socket" \
-            --storage-driver=overlay2 \
-            --bridge=none \
-            --iptables=false \
-            --ip6tables=false \
-            --ip-forward=false \
-            --ip-masq=false \
-            >"$RUNNER_TEMP/rootless-dockerd.log" 2>&1 &
-          echo "$!" > "$RUNNER_TEMP/rootless-wrapper.pid"
-          ready=false
-          for attempt in $(seq 1 60); do
-            if DOCKER_HOST="unix://$socket" \
-              "$RUNNER_TEMP/docker-client/docker/docker" info >/dev/null 2>&1; then
-              ready=true
-              break
-            fi
-            if ! kill -0 "$(cat "$RUNNER_TEMP/rootless-wrapper.pid")" 2>/dev/null; then
-              break
-            fi
-            sleep 1
-          done
-          if test "$ready" != true; then
-            sed -n '1,240p' "$RUNNER_TEMP/rootless-dockerd.log"
-            exit 1
-          fi
-          server_version="$(DOCKER_HOST="unix://$socket" \
-            "$RUNNER_TEMP/docker-client/docker/docker" version \
-              --format '{{.Server.Version}}')"
-          echo "rootless Docker server version: $server_version"
-          test "$server_version" = 29.7.2
-          DOCKER_HOST="unix://$socket" \
-            "$RUNNER_TEMP/docker-client/docker/docker" image load \
-              --input "$RUNNER_TEMP/gcc-oracle-image.tar"
-          observed="$(DOCKER_HOST="unix://$socket" \
-            "$RUNNER_TEMP/docker-client/docker/docker" image inspect \
-              --format '{{.Id}}' decomp-gcc-oracle-toolchain:16.2.0)"
-          test "$observed" = "$GCC_TOOLCHAIN_IMAGE_ID"
-          echo "DOCKER=$RUNNER_TEMP/docker-client/docker/docker" >> "$GITHUB_ENV"
-          echo "DOCKER_HOST=unix://$socket" >> "$GITHUB_ENV"
-          echo "DECOMP_TEST_OCI_IMAGE_DIGEST=$observed" >> "$GITHUB_ENV"
+        run: bash scripts/ci-gcc-toolchain-builder.sh reproduce
       - name: Test oracle schemas and ELF twin verifier
         env:
-          DOCKER: ${{ runner.temp }}/docker-client/docker/docker
+          TMPDIR: ${{ github.workspace }}/build/gcc-toolchain-reproduction/${{ github.run_id }}-${{ github.run_attempt }}/tmp
         run: |
           oracle_tests=()
           for path in tests/oracle/test_*.py; do
@@ -378,6 +199,8 @@ jobs:
             --corpus oracle/gcc/16.2.0/behavior-corpus.json \
             --evidence oracle/gcc/16.2.0/behavior-corpus-evidence.json
       - name: Verify checked executable behavior evidence
+        env:
+          TMPDIR: ${{ github.workspace }}/build/gcc-toolchain-reproduction/${{ github.run_id }}-${{ github.run_attempt }}/tmp
         run: |
           set +e
           python3 scripts/check-gcc-behavior-executor.py
@@ -385,8 +208,8 @@ jobs:
           set -e
           if test "$profile_status" = 0; then
             python3 scripts/run-gcc-behavior-corpus.py \
-              --json-output "$RUNNER_TEMP/behavior-corpus-evidence.json"
-            cmp "$RUNNER_TEMP/behavior-corpus-evidence.json" \
+              --json-output "$GITHUB_WORKSPACE/build/gcc-toolchain-reproduction/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/evidence/behavior-corpus-evidence.json"
+            cmp "$GITHUB_WORKSPACE/build/gcc-toolchain-reproduction/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/evidence/behavior-corpus-evidence.json" \
               oracle/gcc/16.2.0/behavior-corpus-evidence.json
           elif test "$profile_status" = 78; then
             echo '::notice title=GCC behavior evidence not reproduced::The hosted kernel/executor does not match the checked GCC benchmark profile; offline schema/provenance gates and live generic sandbox tests still ran.'
@@ -395,12 +218,27 @@ jobs:
           fi
       - name: Verify checked-in production oracle pair
         run: python3 scripts/verify-gcc-oracle-artifacts.py oracle/gcc/16.2.0/oracle-manifest.json
-      - name: Stop the isolated behavior executor
+      - name: Capture diagnostics and stop owned GCC services
         if: always()
+        env:
+          PRIMARY_STATUS: ${{ job.status }}
         run: |
-          if test -f "$RUNNER_TEMP/rootless-wrapper.pid"; then
-            kill "$(cat "$RUNNER_TEMP/rootless-wrapper.pid")" 2>/dev/null || true
-          fi
+          set +e
+          bash scripts/ci-gcc-toolchain-builder.sh diagnostics
+          diagnostics_status=$?
+          bash scripts/ci-gcc-toolchain-builder.sh cleanup
+          cleanup_status=$?
+          test "$diagnostics_status" = 0 && test "$cleanup_status" = 0
+      - name: Retain GCC toolchain reproduction diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: gcc-toolchain-reproduction-diagnostics
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            build/gcc-toolchain-reproduction/*/owner.txt
+            build/gcc-toolchain-reproduction/*/evidence
 
   driver-dwarf-interfaces:
     name: Retained GCC driver DWARF interfaces
