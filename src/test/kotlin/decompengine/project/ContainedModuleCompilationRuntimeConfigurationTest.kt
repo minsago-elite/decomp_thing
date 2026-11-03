@@ -58,6 +58,31 @@ class ContainedModuleCompilationRuntimeConfigurationTest {
     }
 
     @Test
+    fun `current runtime pins the trampoline inside one authenticated compiler mount`() {
+        val current = JsonObject(valid() + mapOf(
+            "schemaVersion" to JsonPrimitive(2),
+            "compilerExecHelper" to JsonObject(mapOf(
+                "source" to JsonPrimitive("/opt/module-compiler/bin/decomp-module-compiler-exec"),
+                "path" to JsonPrimitive("/opt/module-compiler/bin/decomp-module-compiler-exec"),
+                "sha256" to JsonPrimitive(DIGEST),
+            )),
+        ))
+        val parsed = parse(current)
+        assertEquals(Path.of("/opt/module-compiler/bin/decomp-module-compiler-exec"), parsed.compilerExecHelperPath)
+        assertEquals(DIGEST, parsed.compilerExecHelperSha256)
+        assertEquals(Path.of("/opt/module-compiler"), parsed.compilerRuntimeExecuteRoot)
+        assertNotEquals(parse(valid()).configurationSha256, parsed.configurationSha256)
+        reject(current + ("compilerExecHelper" to JsonObject(mapOf(
+            "source" to JsonPrimitive("/opt/unmounted/helper"), "path" to JsonPrimitive("/opt/unmounted/helper"),
+            "sha256" to JsonPrimitive(DIGEST),
+        ))))
+        reject(current + ("compilerExecHelper" to JsonObject(mapOf(
+            "source" to JsonPrimitive("/opt/module-compiler/bin/helper"), "path" to JsonPrimitive("/opt/module-compiler/bin/other"),
+            "sha256" to JsonPrimitive(DIGEST),
+        ))))
+    }
+
+    @Test
     fun `unknown missing and duplicate fields cannot introduce launch authority`() {
         val document = valid()
         listOf("command", "environment", "skipContainment", "providerClass").forEach { field ->

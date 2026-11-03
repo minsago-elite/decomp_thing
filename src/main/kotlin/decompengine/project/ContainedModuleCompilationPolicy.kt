@@ -115,7 +115,13 @@ internal class VerifiedContainedModuleCompilation private constructor(private va
                         sourcePath, snapshot.inputs, configuration.compilerExecutable, configuration.compilerSha256,
                         borrowed.path.resolve("reports"), minOf(profile.budgets.buildWallClockMillis, ContainedModuleCompilerRequest.MAXIMUM_WALL_MILLIS),
                         minOf(profile.budgets.buildMaximumOutputBytes, ContainedModuleCompilerRequest.MAXIMUM_OUTPUT_BYTES),
-                        profileRecord = OracleJson.parse(profile.canonicalJson().toByteArray()) as JsonObject)
+                        profileRecord = OracleJson.parse(profile.canonicalJson().toByteArray()) as JsonObject,
+                        schemaVersion = 2, trampolinePath = configuration.compilerExecHelperPath,
+                        trampolineSha256 = configuration.compilerExecHelperSha256,
+                        runtimeReadRoots = (configuration.isolation.systemLibraryMounts + configuration.compilerRuntimeMounts)
+                            .map { it.destination },
+                        runtimeExecuteRoots = listOf(configuration.compilerRuntimeExecuteRoot),
+                        runtimeExecuteFiles = configuration.compilerRuntimeExecuteFiles)
                 }
                 require(request.snapshotSha256 == snapshotSha)
                 LinuxFilesystemSyscalls.openRoot(temporary).use { directory ->
@@ -153,6 +159,7 @@ internal class VerifiedContainedModuleCompilation private constructor(private va
                                 acquired.requireCurrentOperationRunRootAfterScopeAttachment(rootToken)
                                 snapshot.requireCurrent { deadline.requireCurrent() }
                                 configuration.verifyCompilerInput()
+                                configuration.verifyCompilerExecHelper()
                                 checkCancellation()
                                 deadline.requireCurrent()
                                 attachment = receipt.canonicalBytes

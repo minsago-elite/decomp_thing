@@ -158,6 +158,37 @@ def copy_module_worker_classpath(entries, destination, expected_uid=None):
     return {'schemaVersion': 1, 'entries': installed}
 
 
+def copy_pinned_module_exec_helper(value, expected_digest, build_root, destination, expected_uid):
+    """Install the exact user-built helper as a root-owned immutable runtime file."""
+    source = worker_path(value, build_root)
+    if source.stat(follow_symlinks=False).st_mode & 0o111 == 0:
+        raise ValueError('module compiler trampoline must be executable')
+    digest = hashlib.sha256()
+    with open_worker_file(source, 16 * 1024 * 1024, expected_uid) as input_file:
+        before = os.fstat(input_file.fileno())
+        if before.st_mode & 0o111 == 0:
+            raise ValueError('module compiler trampoline lost executable mode')
+        target = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o500)
+        with os.fdopen(target, 'wb') as output:
+            count = 0
+            while chunk := input_file.read(128 * 1024):
+                count += len(chunk)
+                if count > before.st_size or count > 16 * 1024 * 1024:
+                    raise ValueError('module compiler trampoline grew during copy')
+                digest.update(chunk)
+                output.write(chunk)
+            if (count != before.st_size or file_version(os.fstat(input_file.fileno())) != file_version(before) or
+                    file_version(source.stat(follow_symlinks=False)) != file_version(before) or source.resolve(strict=True) != source):
+                raise ValueError('module compiler trampoline changed during privileged copy')
+            output.flush()
+            os.fsync(output.fileno())
+    if digest.hexdigest() != expected_digest:
+        destination.unlink(missing_ok=True)
+        raise ValueError('module compiler trampoline differs from its explicit content pin')
+    destination.chmod(0o555)
+    return {'source': str(source), 'destination': str(destination), 'bytes': count, 'sha256': expected_digest}
+
+
 def command(args, *, input_text=None):
     result = subprocess.run(args, input=input_text, text=True, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, timeout=30, check=True)
@@ -304,6 +335,12 @@ def prepare(args):
             worker_manifest_path = RUNTIME / 'module-worker-classpath.json'
             worker_manifest_path.write_text(json.dumps(worker_manifest, sort_keys=True) + '\n')
             worker_manifest_path.chmod(0o444)
+            (RUNTIME / 'tools').mkdir(mode=0o755)
+            module_helper = copy_pinned_module_exec_helper(args.module_compiler_exec_helper,
+                args.module_compiler_exec_helper_sha256, Path(__file__).resolve().parents[1] / 'build',
+                RUNTIME / 'tools' / 'decomp-module-compiler-exec', args.uid)
+        else:
+            module_helper = None
         tools = {}
         names = {'make': 'make', 'compiler': 'gcc', 'linker': 'ld', 'assembler': 'as',
                  'shell': 'dash', 'find': 'find', 'mkdir': 'mkdir'}
@@ -389,7 +426,8 @@ def prepare(args):
                    'runtimeBytes': copier.bytes, 'sourceTmpfs': plan['sourceTmpfs'], 'outputTmpfs': plan['outputTmpfs']}
         if worker is not None:
             summary.update({'moduleWorkerManifest': str(RUNTIME / 'module-worker-classpath.json'),
-                            'moduleWorkerEntries': len(worker), 'moduleWorkerBytes': sum(entry['bytes'] for entry in worker)})
+                            'moduleWorkerEntries': len(worker), 'moduleWorkerBytes': sum(entry['bytes'] for entry in worker),
+                            'moduleCompilerExecHelper': module_helper})
         print(json.dumps(summary))
     except BaseException as failure:
         try:
@@ -409,6 +447,8 @@ def main():
     parser.add_argument('--gate-helper')
     parser.add_argument('--gate-sha256')
     parser.add_argument('--module-worker-classpath', help='optional pinned JAR manifest under checkout/build for contained module qualification')
+    parser.add_argument('--module-compiler-exec-helper', help='pinned native Landlock trampoline under checkout/build')
+    parser.add_argument('--module-compiler-exec-helper-sha256', help='full SHA-256 of the native trampoline')
     args = parser.parse_args()
     if os.geteuid() != 0 or not re.fullmatch(r'[A-Za-z0-9_.-]{1,128}', args.run_id):
         parser.error('requires an explicit root operator invocation and portable CI run identity')
@@ -417,6 +457,11 @@ def main():
     else:
         if any(value is None for value in (args.uid, args.gid, args.gate_helper, args.gate_sha256)):
             parser.error('prepare requires uid, gid, gate-helper and gate-sha256')
+        if (args.module_worker_classpath is None) != (args.module_compiler_exec_helper is None) or \
+                (args.module_compiler_exec_helper is None) != (args.module_compiler_exec_helper_sha256 is None):
+            parser.error('module worker qualification requires both compiler trampoline path and digest')
+        if args.module_compiler_exec_helper_sha256 is not None and not re.fullmatch('[0-9a-f]{64}', args.module_compiler_exec_helper_sha256):
+            parser.error('module compiler trampoline digest must be a full SHA-256 value')
         if not re.fullmatch('[0-9a-f]{64}', args.gate_sha256):
             parser.error('gate-sha256 must be the full helper content digest')
         prepare(args)

@@ -37,7 +37,12 @@ internal class ContainedModuleCompilationRuntimeConfiguration private constructo
     val isolation: FullTreeFunctionObservationIsolationConfiguration get() = declaration.isolation
     val compilerExecutable: Path get() = declaration.compilerExecutable
     val compilerSha256: String get() = declaration.compilerSha256
+    val compilerExecHelperSource: Path? get() = declaration.compilerExecHelperSource
+    val compilerExecHelperPath: Path? get() = declaration.compilerExecHelperPath
+    val compilerExecHelperSha256: String? get() = declaration.compilerExecHelperSha256
     val compilerRuntimeMounts: List<FullTreeFunctionObservationRuntimeMount> get() = declaration.compilerRuntimeMounts
+    val compilerRuntimeExecuteRoot: Path get() = declaration.compilerRuntimeExecuteRoot
+    val compilerRuntimeExecuteFiles: List<Path> get() = declaration.compilerRuntimeExecuteFiles
     val scratchMount: Path get() = declaration.scratchMount
     val scratchPolicy: FullTreeDiskScratchPolicy get() = declaration.scratchPolicy
     val managerControlGroup: String get() = declaration.managerControlGroup
@@ -47,6 +52,10 @@ internal class ContainedModuleCompilationRuntimeConfiguration private constructo
         compilerExecutable, compilerSha256, executable = true,
     )
 
+    fun verifyCompilerExecHelper(): KotlinSystemdCgroupCommandInput = verifyPinnedFile(
+        requireNotNull(compilerExecHelperSource), requireNotNull(compilerExecHelperSha256), executable = true,
+    )
+
     /** Parsed data is deliberately not an executable runtime configuration. */
     internal class Declaration internal constructor(
         val configurationRecord: JsonObject,
@@ -54,14 +63,34 @@ internal class ContainedModuleCompilationRuntimeConfiguration private constructo
         val isolation: FullTreeFunctionObservationIsolationConfiguration,
         val compilerExecutable: Path,
         val compilerSha256: String,
+        val compilerExecHelperSource: Path?,
+        val compilerExecHelperPath: Path?,
+        val compilerExecHelperSha256: String?,
         compilerRuntimeMounts: List<FullTreeFunctionObservationRuntimeMount>,
         val scratchMount: Path,
         val scratchPolicy: FullTreeDiskScratchPolicy,
         val managerControlGroup: String,
     ) {
         val compilerRuntimeMounts: List<FullTreeFunctionObservationRuntimeMount> = java.util.List.copyOf(compilerRuntimeMounts)
+        val compilerRuntimeExecuteRoot: Path = this.compilerRuntimeMounts.single { mount ->
+            compilerExecutable != mount.source && compilerExecutable.startsWith(mount.source) && mount.source == mount.destination
+        }.destination
+        val compilerRuntimeExecuteFiles: List<Path> get() {
+            val hostInterpreter = when (System.getProperty("os.arch")) {
+                "amd64", "x86_64" -> Path.of("/lib64/ld-linux-x86-64.so.2")
+                "aarch64", "arm64" -> Path.of("/lib/ld-linux-aarch64.so.1")
+                else -> throw IllegalArgumentException("module compiler has no reviewed ELF interpreter mapping")
+            }.toRealPath()
+            val candidates = isolation.systemLibraryMounts.filter { hostInterpreter.startsWith(it.source) }
+            val mount = candidates.firstOrNull { it.source == it.destination } ?: candidates.singleOrNull()
+                ?: throw IllegalArgumentException("module compiler ELF interpreter is outside authenticated system libraries")
+            val result = mount.destination.resolve(mount.source.relativize(hostInterpreter))
+            require(result.isAbsolute && result.startsWith(mount.destination))
+            return listOf(result)
+        }
         val configurationSha256: String = sha256(OracleJson.canonicalBytes(JsonObject(mapOf(
-            "provider" to JsonPrimitive("contained-generated-c-module-runtime-v1"),
+            "provider" to JsonPrimitive(if (configurationRecord["schemaVersion"] == JsonPrimitive(1))
+                "contained-generated-c-module-runtime-v1" else "contained-generated-c-module-runtime-v2"),
             "configuration" to configurationRecord,
             "isolationConfigurationSha256" to JsonPrimitive(isolation.canonicalSha256),
         )), CONFIG_LIMITS))
@@ -111,6 +140,10 @@ internal class ContainedModuleCompilationRuntimeConfiguration private constructo
             requireRootOwned(path, directory = false)
             val bytes = readStableRegularFile(requireNotNull(path.parent), path.fileName.toString(), MAXIMUM_CONFIG_BYTES.toLong()).bytes
             val declaration = parse(bytes)
+            require(declaration.compilerExecHelperSource != null && declaration.compilerExecHelperPath != null &&
+                declaration.compilerExecHelperSha256 != null) {
+                "current contained module compiler runtime requires the pinned Landlock trampoline"
+            }
             val isolation = declaration.isolation
             (listOf(isolation.javaRuntime) + isolation.systemLibraryMounts + declaration.compilerRuntimeMounts).forEach { mount ->
                 require(calculateFullTreeObservationRuntimeManifestSha256(mount.source) == mount.expectedManifestSha256) {
@@ -125,6 +158,8 @@ internal class ContainedModuleCompilationRuntimeConfiguration private constructo
                 isolation.scopeInspectorExecutable to isolation.expectedScopeInspectorSha256,
                 isolation.systemdBusControllerExecutable to isolation.expectedSystemdBusControllerSha256,
             ).forEach { (executable, digest) -> verifyPinnedFile(executable, digest, executable = true) }
+            verifyPinnedFile(requireNotNull(declaration.compilerExecHelperSource),
+                requireNotNull(declaration.compilerExecHelperSha256), executable = true)
             isolation.workerClassPath.forEach { verifyPinnedFile(it.path, it.expectedSha256, executable = false) }
             // The scratch root belongs to the service UID, unlike its root-owned ancestors.
             // Its live owner, mount flags, ext4 capacity and exclusive use are checked at acquire.
@@ -134,14 +169,20 @@ internal class ContainedModuleCompilationRuntimeConfiguration private constructo
         internal fun parse(bytes: ByteArray): Declaration {
             val document = OracleJson.parse(bytes, CONFIG_LIMITS) as? JsonObject
                 ?: throw IllegalArgumentException("contained module compiler configuration must be an object")
-            document.exact(ROOT_FIELDS, "runtime")
-            require(document.integer("schemaVersion") == 1L) { "unsupported contained module compiler runtime schema" }
+            val schemaVersion = document.integer("schemaVersion").toInt()
+            require(schemaVersion in 1..2) { "unsupported contained module compiler runtime schema" }
+            document.exact(if (schemaVersion == 1) ROOT_FIELDS_V1 else ROOT_FIELDS_V2, "runtime")
             val profileId = document.text("profileId")
             requireRegisteredProfile(profileId)
             val isolation = parseIsolation(document.objectField("isolation"))
             val compiler = document.objectField("compiler").also { it.exact(setOf("path", "sha256"), "compiler") }
             val compilerPath = compiler.path("path")
             val compilerSha256 = compiler.digest("sha256")
+            val helper = if (schemaVersion == 2) document.objectField("compilerExecHelper")
+                .also { it.exact(setOf("source", "path", "sha256"), "compiler exec trampoline") } else null
+            val helperSource = helper?.path("source")
+            val helperPath = helper?.path("path")
+            val helperSha256 = helper?.digest("sha256")
             val mounts = document.mounts("compilerRuntimeMounts")
             val scratch = document.path("scratchMount")
             val managerControlGroup = document.path("managerControlGroup").toString()
@@ -190,9 +231,19 @@ internal class ContainedModuleCompilationRuntimeConfiguration private constructo
             require(compilerMount != null && compilerMount.source == compilerMount.destination) {
                 "compiler executable must belong to exactly one same-path compiler runtime tree"
             }
+            if (schemaVersion == 2) {
+                require(mounts.singleOrNull { mount ->
+                    helperSource!!.startsWith(mount.source) && helperPath!!.startsWith(mount.destination) &&
+                        mount.source.resolve(mount.destination.relativize(helperPath)) == helperSource
+                } != null) { "compiler trampoline must belong to exactly one authenticated runtime mount" }
+                require(helperSource != compilerPath && helperPath != compilerPath) {
+                    "compiler trampoline and compiler executable must be distinct"
+                }
+            }
             // Curated headers and compiler internals may retain their toolchain's compiled-in
             // lookup paths through explicit aliases. The executable's own path stays canonical.
-            return Declaration(document, profileId, isolation, compilerPath, compilerSha256, mounts, scratch,
+            return Declaration(document, profileId, isolation, compilerPath, compilerSha256, helperSource, helperPath,
+                helperSha256, mounts, scratch,
                 scratchPolicy, managerControlGroup)
         }
 
@@ -327,8 +378,9 @@ internal class ContainedModuleCompilationRuntimeConfiguration private constructo
         private val BROAD_DIRECTORIES = setOf("/", "/usr", "/bin", "/sbin", "/usr/bin", "/usr/sbin", "/lib", "/lib64",
             "/usr/lib", "/usr/lib64", "/usr/libexec", "/etc", "/var", "/run", "/home", "/root", "/opt", "/tmp").mapTo(hashSetOf(), Path::of)
         private val LOADER_DIRECTORIES = setOf(Path.of("/lib64"), Path.of("/usr/lib64"))
-        private val ROOT_FIELDS = setOf("schemaVersion", "profileId", "isolation", "compiler", "compilerRuntimeMounts",
+        private val ROOT_FIELDS_V1 = setOf("schemaVersion", "profileId", "isolation", "compiler", "compilerRuntimeMounts",
             "scratchMount", "scratchPolicy", "managerControlGroup")
+        private val ROOT_FIELDS_V2 = ROOT_FIELDS_V1 + "compilerExecHelper"
         private val SCRATCH_FIELDS = setOf("requiredAvailableBytes", "maximumFilesystemBytes", "requiredAvailableInodes", "maximumFilesystemInodes")
         private val ISOLATION_FIELDS = setOf("javaExecutable", "javaRuntime", "systemLibraryMounts", "bubblewrapExecutable",
             "resourceLimiterExecutable", "scopeSupervisorExecutable", "scopeInspectorExecutable", "systemdBusControllerExecutable",

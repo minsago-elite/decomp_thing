@@ -23,6 +23,9 @@ internal object ContainedModuleCompilationProof {
         val request = verified.request
         val result = verified.result
         val profile = request.profile
+        require(evidence.liveAuthority == null || request.schemaVersion == 2) {
+            "historical module compiler proof cannot carry live acceptance authority"
+        }
         require(evidence.sourceSha256 == request.sourceSha256 &&
             evidence.command == ContainedModuleCompilationPolicy.command(profile, request.sourcePath) &&
             evidence.outcome == if (result.outcome == "compiled-object") "passed" else "failed") {
@@ -49,6 +52,21 @@ internal object ContainedModuleCompilationProof {
         val runtime = ContainedModuleCompilationRuntimeConfiguration.parse(bytes(proof.objectField("runtimeConfiguration")))
         require(runtime.profileId == request.profileId && runtime.compilerExecutable == request.compilerPath &&
             runtime.compilerSha256 == request.compilerSha256) { "module compiler request differs from its configured profile or compiler" }
+        if (request.schemaVersion == 2) {
+            val roots = (runtime.isolation.systemLibraryMounts + runtime.compilerRuntimeMounts).map { it.destination }.distinct().sortedBy { it.toString() }
+            require(request.trampolinePath == runtime.compilerExecHelperPath &&
+                request.trampolineSha256 == runtime.compilerExecHelperSha256 &&
+                request.runtimeReadRoots == roots && request.runtimeExecuteRoots == listOf(runtime.compilerRuntimeExecuteRoot) &&
+                request.runtimeExecuteFiles == runtime.compilerRuntimeExecuteFiles) {
+                "module compiler read-boundary request differs from its pinned runtime"
+            }
+        } else {
+            require(runtime.compilerExecHelperPath == null && runtime.compilerExecHelperSha256 == null &&
+                request.trampolinePath == null && request.trampolineSha256 == null && request.runtimeReadRoots.isEmpty() &&
+                request.runtimeExecuteRoots.isEmpty() && request.runtimeExecuteFiles.isEmpty()) {
+                "historical module compiler proof cannot claim a Landlock boundary"
+            }
+        }
         val common = mapOf("profileId" to request.profileId, "profileSha256" to request.profileSha256,
             "sourceSha256" to request.sourceSha256, "snapshotSha256" to request.snapshotSha256,
             "runtimeConfigurationSha256" to runtime.configurationSha256)

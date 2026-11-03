@@ -22,13 +22,17 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
-./gradlew --no-daemon --console=plain -I "$init" moduleCompilerDeploymentManifest buildAcpGateHelper verifyAcpGateHelper
+./gradlew --no-daemon --console=plain -I "$init" moduleCompilerDeploymentManifest buildAcpGateHelper verifyAcpGateHelper buildModuleCompilerExecHelper
 helper="$project_root/build/native/acp/decomp-acp-gate-helper"
 helper_sha="$(sha256sum "$helper")"
 helper_sha="${helper_sha%% *}"
+module_exec_helper="$project_root/build/native/module-compiler/decomp-module-compiler-exec"
+module_exec_helper_sha="$(sha256sum "$module_exec_helper")"
+module_exec_helper_sha="${module_exec_helper_sha%% *}"
 sudo -n python3 scripts/ci-prepare-generated-c-validation.py prepare \
   --run-id "$qualification_identity" --uid "$(id -u)" --gid "$(id -g)" \
   --gate-helper "$helper" --gate-sha256 "$helper_sha" \
+  --module-compiler-exec-helper "$module_exec_helper" --module-compiler-exec-helper-sha256 "$module_exec_helper_sha" \
   --module-worker-classpath "$qualification_root/worker-classpath.json" \
   > "$qualification_root/operator-provisioning.json"
 provisioned=true

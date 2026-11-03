@@ -44,11 +44,12 @@ allprojects {
             }
         }
         tasks.register('moduleCompilerWriteConfig', JavaExec) {
-            dependsOn tasks.named('testClasses'), tasks.named('stageOracleNativeLibraries')
+            dependsOn tasks.named('testClasses'), tasks.named('stageOracleNativeLibraries'), tasks.named('buildModuleCompilerExecHelper')
             classpath = sourceSets.test.runtimeClasspath
             mainClass = 'decompengine.project.ContainedModuleCompilationQualificationCli'
             systemProperty 'java.io.tmpdir', file('build/module-compilation-qualification/tmp').absolutePath
             systemProperty 'decompengine.oracle.nativeLibraryDirectory', file('build/native/oracle').absolutePath
+            systemProperty 'decompengine.module.compiler.execHelper', file('build/native/module-compiler/decomp-module-compiler-exec').absolutePath
             doFirst {
                 args 'write-config', file('build/module-compilation-qualification/config').absolutePath
             }
@@ -72,7 +73,7 @@ allprojects {
             }
         }
         tasks.register('moduleCompilationLiveQualification', Test) {
-            dependsOn tasks.named('testClasses'), tasks.named('generateAcpGateHelperChecksum'), tasks.named('stageOracleNativeLibraries'), tasks.named('moduleCompilerLiveInventory'), tasks.named('moduleCompilerLivePreflight')
+            dependsOn tasks.named('testClasses'), tasks.named('generateAcpGateHelperChecksum'), tasks.named('stageOracleNativeLibraries'), tasks.named('buildModuleCompilerExecHelper'), tasks.named('moduleCompilerLiveInventory'), tasks.named('moduleCompilerLivePreflight')
             outputs.upToDateWhen { false }
             outputs.doNotCacheIf('hosted compiler authority must execute in this attempt') { true }
             testClassesDirs = sourceSets.test.output.classesDirs
@@ -84,6 +85,7 @@ allprojects {
             systemProperty 'decompengine.oracle.nativeLibraryDirectory', file('build/native/oracle').absolutePath
             systemProperty 'decompengine.acp.gateHelperExecutable', file('build/native/acp/decomp-acp-gate-helper').absolutePath
             systemProperty 'decompengine.acp.gateHelperChecksum', file('build/native/acp/decomp-acp-gate-helper.sha256').absolutePath
+            systemProperty 'decompengine.module.compiler.execHelper', file('build/native/module-compiler/decomp-module-compiler-exec').absolutePath
             environment 'GENERATED_C_MODULE_COMPILE_REQUIRE', 'true'
             environment 'DECOMP_REQUIRE_LIVE_ACP_CONTRACT', '1'
             environment 'DECOMP_ACP_PARENT_SECRET_CANARY', 'decomp-acp-parent-secret-canary-must-not-cross-the-sandbox'

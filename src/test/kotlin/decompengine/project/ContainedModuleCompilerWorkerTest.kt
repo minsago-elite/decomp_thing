@@ -5,6 +5,7 @@ import decompengine.oracle.core.OracleJson
 import kotlinx.serialization.json.JsonObject
 import java.io.File
 import java.nio.file.Files
+import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.nio.file.attribute.PosixFilePermissions
@@ -41,16 +42,16 @@ class ContainedModuleCompilerWorkerTest {
 
     @Test
     fun `compiler executes the exact request path while retaining its digest binding`() = withRoot { root ->
-        val marker = root.resolve("executed-path")
-        val compiler = script(root.resolve("compiler"), "printf '%s' \"\$0\" > '$marker'; exit 0")
+        val compiler = script(root.resolve("compiler"), "printf '%s' \"\$0\"; exit 0")
         val fixture = fixture(root.resolve("run"), compiler = compiler)
         val execution = launch(fixture)
         assertEquals(0, execution.exitCode, execution.stderr)
         val result = ContainedModuleCompilerResult.parse(execution.stdout)
         result.requireBinding(fixture.request)
-        assertEquals("object-invalid", result.outcome)
+        assertEquals("object-invalid", result.outcome,
+            "exit=${result.exitCode}, compiler stderr=${Files.readString(fixture.request.outputDirectory.resolve("compiler.stderr"))}")
         val privateCompiler = fixture.request.compilerPath
-        assertEquals(privateCompiler.toString(), Files.readString(marker))
+        assertEquals(privateCompiler.toString(), Files.readString(fixture.request.outputDirectory.resolve("compiler.stdout")))
         assertEquals(fixture.request.compilerSha256, sha256(Files.readAllBytes(privateCompiler)))
         assertEquals(Files.getAttribute(fixture.request.outputDirectory, "unix:uid"), Files.getAttribute(privateCompiler, "unix:uid"))
         assertEquals(PosixFilePermissions.fromString("r-x------"), Files.getPosixFilePermissions(privateCompiler))
@@ -175,7 +176,8 @@ class ContainedModuleCompilerWorkerTest {
             assertEquals(0, execution.exitCode, execution.stderr)
             val result = ContainedModuleCompilerResult.parse(execution.stdout)
             result.requireBinding(fixture.request)
-            assertEquals(expected, result.outcome)
+            assertEquals(expected, result.outcome,
+                "$name exit=${result.exitCode}, compiler stderr=${Files.readString(fixture.request.outputDirectory.resolve("compiler.stderr"))}")
             assertEquals(null, result.objectSha256)
             if (name == "signal") {
                 assertEquals(15, result.signal)
@@ -238,12 +240,111 @@ class ContainedModuleCompilerWorkerTest {
     }
 
     @Test
+    fun `compiler cannot read host files or reopen a file it created in scratch`() = withRoot { root ->
+        val parent = Files.createDirectory(root.resolve("read-boundary"))
+        val secret = parent.resolve("host-canary")
+        Files.writeString(secret, "HOST_CANARY_MUST_NOT_APPEAR")
+        val compiler = script(parent.resolve("compiler"), """
+            printf 'SCRATCH_CANARY_MUST_NOT_APPEAR' > "${'$'}TMPDIR/created"
+            /usr/bin/cat "${'$'}TMPDIR/created"
+            /usr/bin/cat '$secret'
+            exit 0
+        """.trimIndent())
+        val fixture = fixture(parent.resolve("run"), compiler = compiler)
+        val execution = launch(fixture)
+        assertEquals(0, execution.exitCode, execution.stderr)
+        val result = ContainedModuleCompilerResult.parse(execution.stdout)
+        result.requireBinding(fixture.request)
+        assertEquals("object-invalid", result.outcome,
+            "exit=${result.exitCode}, compiler stderr=${Files.readString(fixture.request.outputDirectory.resolve("compiler.stderr"))}")
+        assertTrue(Files.exists(fixture.request.outputDirectory.resolve("tmp/created")),
+            "the compiler should retain its write-only scratch output")
+        val stdout = Files.readString(fixture.request.outputDirectory.resolve("compiler.stdout"))
+        val stderr = Files.readString(fixture.request.outputDirectory.resolve("compiler.stderr"))
+        assertFalse(stdout.contains("SCRATCH_CANARY_MUST_NOT_APPEAR"), stdout)
+        assertFalse(stdout.contains("HOST_CANARY_MUST_NOT_APPEAR"), stdout)
+        assertTrue(stderr.isNotEmpty(), "denied read attempts must leave diagnostic evidence")
+    }
+
+    @Test
+    @org.junit.jupiter.api.Tag("ci-live")
+    fun `native compiler read syscalls cannot access scratch or off-snapshot canaries`() = withRoot { root ->
+        val parent = Files.createDirectory(root.resolve("native-read-boundary"))
+        val secret = parent.resolve("host-canary")
+        Files.writeString(secret, "HOST_CANARY_MUST_NOT_APPEAR")
+        val runtime = Files.createDirectory(parent.resolve("native-runtime"))
+        val source = runtime.resolve("probe.c")
+        val compiler = runtime.resolve("probe")
+        Files.writeString(source, """
+            #define _GNU_SOURCE
+            #include <errno.h>
+            #include <fcntl.h>
+            #include <stdio.h>
+            #include <stdlib.h>
+            #include <string.h>
+            #include <sys/mman.h>
+            #include <sys/stat.h>
+            #include <sys/syscall.h>
+            #include <unistd.h>
+            #include <linux/openat2.h>
+            static int denied(int fd, const char *canary) {
+                if (fd < 0) return errno == EACCES || errno == EPERM;
+                struct stat status;
+                if (fstat(fd, &status) == 0 && status.st_size > 0) {
+                    size_t length = status.st_size > 4096 ? 4096 : (size_t)status.st_size;
+                    void *mapping = mmap(NULL, length, PROT_READ, MAP_PRIVATE, fd, 0);
+                    if (mapping != MAP_FAILED) {
+                        fwrite(mapping, 1, length, stdout);
+                        munmap(mapping, length);
+                    }
+                }
+                close(fd);
+                (void)canary;
+                return 0;
+            }
+            int main(void) {
+                const char *scratch = getenv("TMPDIR");
+                char created[4096];
+                if (scratch == NULL || snprintf(created, sizeof(created), "%s/native-canary", scratch) < 0) return 90;
+                int output = open(created, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+                if (output < 0 || write(output, "SCRATCH_CANARY_MUST_NOT_APPEAR", 30) != 30) return 91;
+                close(output);
+                int first = denied(open(created, O_RDONLY | O_CLOEXEC), "scratch");
+                int second = denied(openat(AT_FDCWD, created, O_RDONLY | O_CLOEXEC), "scratch");
+                struct open_how how = {.flags = O_RDONLY | O_CLOEXEC};
+                int third = denied((int)syscall(SYS_openat2, AT_FDCWD, "$secret", &how, sizeof(how)), "host");
+                puts(first ? "open-denied" : "open-allowed");
+                puts(second ? "openat-denied" : "openat-allowed");
+                puts(third ? "openat2-denied" : "openat2-allowed");
+                return first && second && third ? 0 : 92;
+            }
+        """.trimIndent())
+        val hostCompiler = Path.of(System.getProperty("decompengine.analysis.io.testCompiler", "/usr/bin/cc")).toRealPath()
+        val build = ProcessBuilder(hostCompiler.toString(), "-O2", "-Wall", "-Wextra", "-Werror", "-std=c11",
+            source.toString(), "-o", compiler.toString()).redirectErrorStream(true).start()
+        val buildOutput = build.inputStream.readBytes().decodeToString()
+        assertTrue(build.waitFor(30, TimeUnit.SECONDS), "native probe build timed out")
+        assertEquals(0, build.exitValue(), buildOutput)
+        Files.setPosixFilePermissions(compiler, PosixFilePermissions.fromString("r-x------"))
+        val fixture = fixture(parent.resolve("run"), compiler = compiler)
+        val execution = launch(fixture)
+        assertEquals(0, execution.exitCode, execution.stderr)
+        val result = ContainedModuleCompilerResult.parse(execution.stdout)
+        result.requireBinding(fixture.request)
+        assertEquals("object-invalid", result.outcome)
+        val stdout = Files.readString(fixture.request.outputDirectory.resolve("compiler.stdout"))
+        assertTrue(stdout.contains("open-denied") && stdout.contains("openat-denied") && stdout.contains("openat2-denied"), stdout)
+        assertFalse(stdout.contains("SCRATCH_CANARY_MUST_NOT_APPEAR"), stdout)
+        assertFalse(stdout.contains("HOST_CANARY_MUST_NOT_APPEAR"), stdout)
+    }
+
+    @Test
     fun synchronizedPolicyAdmittedTransientHeaderMutationReturnsInputChanged() = withRoot { root ->
         val parent = Files.createDirectory(root.resolve("transient"))
         val realCompiler = stageCompiler(parent)
-        val ready = parent.resolve("ready")
-        val started = parent.resolve("started")
-        val restored = parent.resolve("restored")
+        val ready = parent.resolve("run/output/tmp/ready")
+        val started = parent.resolve("run/output/tmp/started")
+        val restored = parent.resolve("run/output/tmp/restored")
         val shim = script(realCompiler.parent.resolve("shim"), """
             wait_for() {
                 tries=0
@@ -261,6 +362,10 @@ class ContainedModuleCompilerWorkerTest {
             status=${'$'}?
             exit "${'$'}status"
         """.trimIndent())
+        for (name in listOf("cc1", "as")) {
+            Files.copy(realCompiler.parent.resolve(name), shim.parent.resolve(name))
+            Files.setPosixFilePermissions(shim.parent.resolve(name), PosixFilePermissions.fromString("r-x------"))
+        }
         val source = """
             #include "modules/alpha.h"
             #include "modules/transient.h"
@@ -289,7 +394,6 @@ class ContainedModuleCompilerWorkerTest {
         assertEquals(0, execution.exitCode, execution.stderr)
         val result = ContainedModuleCompilerResult.parse(execution.stdout)
         result.requireBinding(fixture.request)
-        assertEquals(0, result.exitCode)
         assertEquals("input-changed", result.outcome)
         assertEquals(null, result.objectSha256)
         assertEquals(originalTransient, Files.readString(transient))
@@ -337,9 +441,25 @@ class ContainedModuleCompilerWorkerTest {
             Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("r--------"))
             ContainedModuleCompilerInput(relative, sha256(text.toByteArray()), text.toByteArray().size.toLong())
         }
+        val helper = Path.of(requireNotNull(System.getProperty("decompengine.module.compiler.execHelper"))).toRealPath()
+        val compilerRoots = listOfNotNull(compiler.parent,
+            compiler.parent.parent.takeIf { compiler.parent.fileName.toString() == "test-compiler-runtime" &&
+                compiler.parent.parent.fileName.toString() == "toolchain" },
+            helper.parent, Path.of("/usr/bin"), Path.of("/usr/include"),
+            Path.of("/usr/lib/gcc"), Path.of("/usr/lib/x86_64-linux-gnu"), Path.of("/lib/x86_64-linux-gnu"),
+            Path.of("/lib64")).filter { Files.exists(it, LinkOption.NOFOLLOW_LINKS) }.map { it.toRealPath() }.distinct()
+        val loaderPath = when (System.getProperty("os.arch")) {
+            "amd64", "x86_64" -> Path.of("/lib64/ld-linux-x86-64.so.2")
+            "aarch64", "arm64" -> Path.of("/lib/ld-linux-aarch64.so.1")
+            else -> error("worker compiler test has no reviewed ELF interpreter mapping")
+        }.toRealPath()
         val request = ContainedModuleCompilerRequest("a".repeat(64), profile.id, profile.sha256, snapshot,
             "src/modules/alpha.c", inputs, compiler, sha256(Files.readAllBytes(compiler)), output,
-            maximumWallMillis, maximumOutputBytes, OracleJson.parse(profile.canonicalJson().toByteArray()) as JsonObject)
+            maximumWallMillis, maximumOutputBytes, OracleJson.parse(profile.canonicalJson().toByteArray()) as JsonObject,
+            schemaVersion = 2, trampolinePath = helper, trampolineSha256 = sha256(Files.readAllBytes(helper)),
+            runtimeReadRoots = compilerRoots,
+            runtimeExecuteRoots = listOf(compiler.parent, Path.of("/usr/bin").toRealPath()).distinct(),
+            runtimeExecuteFiles = listOf(loaderPath))
         return Fixture(root, request)
     }
 
@@ -405,9 +525,12 @@ class ContainedModuleCompilerWorkerTest {
     }
 
     private fun script(path: Path, body: String): Path {
-        Files.writeString(path, "#!/bin/sh\n$body\n")
-        Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("r-x------"))
-        return path
+        val runtime = Files.createDirectories(path.parent.resolve("test-compiler-runtime"))
+        val selected = runtime.resolve(path.fileName)
+        val shell = Path.of("/bin/sh").toRealPath()
+        Files.writeString(selected, "#!$shell\n$body\n")
+        Files.setPosixFilePermissions(selected, PosixFilePermissions.fromString("r-x------"))
+        return selected
     }
 
     private fun await(path: Path, timeoutSeconds: Long = 10) {

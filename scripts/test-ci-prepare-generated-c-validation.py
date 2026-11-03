@@ -160,7 +160,28 @@ class CompilerProvisioningControls(unittest.TestCase):
 
     def args(self):
         return SimpleNamespace(uid=1000, gid=1000, module_worker_classpath=None,
+                               module_compiler_exec_helper=None, module_compiler_exec_helper_sha256=None,
                                run_id='fixture-run', gate_helper='unused', gate_sha256='0' * 64)
+
+    def test_pinned_module_trampoline_is_copied_only_after_identity_and_digest_recheck(self):
+        build_root = ROOT / 'build'
+        source = build_root / 'task-tmp' / f'module-helper-{self.root.name}'
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(b'fixed native helper bytes')
+        source.chmod(0o555)
+        self.addCleanup(source.unlink, missing_ok=True)
+        target_dir = self.runtime / 'tools'
+        target_dir.mkdir(parents=True)
+        expected = hashlib.sha256(source.read_bytes()).hexdigest()
+        installed = target_dir / 'decomp-module-compiler-exec'
+        result = PROVISIONER.copy_pinned_module_exec_helper(str(source), expected, build_root, installed, os.getuid())
+        self.assertEqual(source.read_bytes(), installed.read_bytes())
+        self.assertEqual(0o555, stat.S_IMODE(installed.stat().st_mode))
+        self.assertEqual(expected, result['sha256'])
+        rejected = target_dir / 'substituted-helper'
+        with self.assertRaises(ValueError):
+            PROVISIONER.copy_pinned_module_exec_helper(str(source), '0' * 64, build_root, rejected, os.getuid())
+        self.assertFalse(rejected.exists())
 
     def test_discovers_and_copies_exact_subprograms_from_both_gcc_layouts(self):
         for layout in ('lib', 'libexec'):

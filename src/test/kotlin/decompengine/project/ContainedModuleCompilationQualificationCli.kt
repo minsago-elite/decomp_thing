@@ -81,6 +81,10 @@ object ContainedModuleCompilationQualificationCli {
             compilerRecord.path("destination") == GeneratedCRepairRuntimeConfiguration.TOOL_DIRECTORY.resolve("cc")) {
             "installed compiler is not the existing provisioner's pinned compiler"
         }
+        val compilerExecHelper = runtimeRoot.resolve("tools/decomp-module-compiler-exec")
+        requireTrusted(compilerExecHelper, directory = false)
+        require(Files.isExecutable(compilerExecHelper)) { "installed module compiler Landlock helper is not executable" }
+        val compilerExecHelperDestination = compilerExecHelper
         val buildMounts = plan["buildRuntimeMounts"] as? JsonArray ?: error("installed build runtime must be an array")
         require(buildMounts.size in 1..48)
         val selected = buildMounts.map { value ->
@@ -177,8 +181,10 @@ object ContainedModuleCompilationQualificationCli {
             "maximumFilesystemInodes" to JsonPrimitive(capacity.totalInodes)))
         require(capacity.availableBytes >= workerBytes + 128L * 1024 * 1024 && capacity.availableInodes >= 8192)
         return listOf(GeneratedCMakeReconstructionProfile.PROFILE_ID, GeneratedCNinjaReconstructionProfile.PROFILE_ID).associateWith { profile ->
-            JsonObject(mapOf("schemaVersion" to JsonPrimitive(1), "profileId" to JsonPrimitive(profile), "isolation" to isolation,
+            JsonObject(mapOf("schemaVersion" to JsonPrimitive(2), "profileId" to JsonPrimitive(profile), "isolation" to isolation,
                 "compiler" to JsonObject(mapOf("path" to JsonPrimitive(compiler.toString()), "sha256" to JsonPrimitive(digest(compiler)))),
+                "compilerExecHelper" to JsonObject(mapOf("source" to JsonPrimitive(compilerExecHelper.toString()),
+                    "path" to JsonPrimitive(compilerExecHelperDestination.toString()), "sha256" to JsonPrimitive(digest(compilerExecHelper)))),
                 "compilerRuntimeMounts" to compilerMounts, "scratchMount" to JsonPrimitive(scratch.toString()), "scratchPolicy" to policy,
                 "managerControlGroup" to JsonPrimitive(managerGroup))).also {
                 ContainedModuleCompilationRuntimeConfiguration.parse(OracleJson.canonicalBytes(it, limits))

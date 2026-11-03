@@ -51,6 +51,9 @@ object ContainedModuleCompilerWorker {
         requireContainedModuleCompilerProfile(request.profile)
         // Nondumpable processes can have root-owned /proc entries; ask libc for the effective UID.
         val currentUid = CompilerWorkerProtection.currentUid()
+        require(request.schemaVersion == 2 && request.trampolinePath != null && request.trampolineSha256 != null) {
+            "module compiler execution requires the current Landlock trampoline request"
+        }
         requireOwnedDirectory(request.snapshotRoot, currentUid)
         requireOwnedDirectory(request.outputDirectory, currentUid)
         require(Files.list(request.outputDirectory).use { !it.findAny().isPresent }) { "module compiler output directory must initially be empty" }
@@ -67,6 +70,16 @@ object ContainedModuleCompilerWorker {
             val pinnedByPath = pinned.associateBy { it.path }
             GeneratedCSourceHeaderPolicy.requireAllowedStreaming(request.sourcePath, request.inputs.map { it.path },
                 read = { path -> pinnedByPath.getValue(path).bytes() })
+            StableControlFile.open(request.trampolinePath, MAXIMUM_COMPILER_BYTES, "module compiler Landlock trampoline").use { trampoline ->
+                trampoline.requireSingleLink("module compiler Landlock trampoline")
+                require(trampoline.authenticatedSha256 == request.trampolineSha256) {
+                    "module compiler Landlock trampoline digest differs"
+                }
+                val trampolineIdentity = Files.readAttributes(request.trampolinePath, "unix:mode", LinkOption.NOFOLLOW_LINKS)
+                require((trampolineIdentity.getValue("mode") as Number).toInt() and 0x49 != 0) {
+                    "module compiler Landlock trampoline is not executable"
+                }
+            }
             // The controller binds its authenticated owned executable snapshot at this exact
             // runtime path. Scratch stays noexec; no foreign namespace UID becomes trusted.
             StableControlFile.open(request.compilerPath, MAXIMUM_COMPILER_BYTES, "pinned module compiler").use { compiler ->
@@ -74,13 +87,27 @@ object ContainedModuleCompilerWorker {
                 require(compiler.authenticatedSha256 == request.compilerSha256) { "module compiler executable digest differs" }
                 val scratch = Files.createDirectory(request.outputDirectory.resolve("tmp"),
                     PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")))
+                val outputObject = request.outputDirectory.resolve(ContainedModuleCompilerRequest.OBJECT_FILE)
+                FileChannel.open(outputObject, setOf(StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE,
+                    LinkOption.NOFOLLOW_LINKS), PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")))
+                    .use { it.force(true) }
+                val policyPath = request.outputDirectory.resolve("landlock-policy.bin")
+                val policyBytes = ContainedModuleLandlockPolicy.forRequest(request, scratch)
+                writeCompilerLog(policyPath, policyBytes)
+                val policyGuard = StableControlFile.open(policyPath, 1024L * 1024, "module compiler Landlock policy")
+                try {
+                    policyGuard.requireSingleLink("module compiler Landlock policy")
+                    require(policyGuard.authenticatedSha256 == sha256(policyBytes)) {
+                        "module compiler Landlock policy changed during publication"
+                    }
                 val environment = mapOf("LANG" to "C", "LC_ALL" to "C", "TZ" to "UTC", "PATH" to request.compilerPath.parent.toString(),
                     "TMPDIR" to scratch.toString(), "HOME" to scratch.toString(), "SOURCE_DATE_EPOCH" to "0")
                 CompilerWorkerProtection.requireNotDumpable()
                 namespace.requireUnchanged()
                 var terminal: LinuxBoundedSessionResult? = null
                 var outcome = try {
-                    terminal = LinuxBoundedSessionProcess.execute(LinuxBoundedSessionCommand(request.command, environment,
+                    terminal = LinuxBoundedSessionProcess.execute(LinuxBoundedSessionCommand(
+                        listOf(request.trampolinePath.toString(), policyPath.toString(), "--") + request.command, environment,
                         workingDirectory = Path.of("/"), timeout = Duration.ofMillis(request.maximumWallMillis),
                         maximumStdoutBytes = (request.maximumOutputBytes / 2).toInt(),
                         maximumStderrBytes = (request.maximumOutputBytes - request.maximumOutputBytes / 2).toInt()))
@@ -102,6 +129,7 @@ object ContainedModuleCompilerWorker {
                 }
                 CompilerWorkerProtection.requireNotDumpable()
                 try {
+                    policyGuard.verifyUnchanged("module compiler Landlock policy after execution")
                     pinned.forEach { it.verifyUnchanged() }
                     verifySnapshotInventory(request)
                     namespace.requireUnchanged()
@@ -131,6 +159,8 @@ object ContainedModuleCompilerWorker {
                 val stdout = terminal?.stdout ?: ByteArray(0)
                 val stderr = terminal?.stderr ?: ByteArray(0)
                 requireOwnedDirectory(request.outputDirectory, currentUid)
+                policyGuard.close()
+                Files.delete(policyPath)
                 writeCompilerLog(request.outputDirectory.resolve(ContainedModuleCompilerRequest.STDOUT_FILE), stdout)
                 writeCompilerLog(request.outputDirectory.resolve(ContainedModuleCompilerRequest.STDERR_FILE), stderr)
                 // Keep the entire namespace history alive through result artifact capture, not
@@ -145,6 +175,10 @@ object ContainedModuleCompilerWorker {
                 return ContainedModuleCompilerResult(request.sha256, request.nonce, request.profileId, request.profileSha256,
                     request.snapshotSha256, request.sourceSha256, request.compilerSha256, outcome, terminal?.exitCode, terminal?.signal,
                     sha256(stdout), stdout.size.toLong(), sha256(stderr), stderr.size.toLong(), objectSha256, objectBytes)
+                } finally {
+                    policyGuard.close()
+                    Files.deleteIfExists(policyPath)
+                }
             }
         } finally {
             try { pinned.asReversed().forEach { it.close() } } finally { namespace.close() }

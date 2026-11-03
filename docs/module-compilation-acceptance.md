@@ -49,11 +49,32 @@ base terminal-runtime provider. Calls without aliases keep their original runtim
 The worker acquires the ordinary `StableControlFile` kernel lease on the exact owned
 inode at the original compiler path through result capture. Scratch remains noexec,
 no writable executable mount is added, and no arbitrary foreign owner is trusted.
-The request and complete command, including argv[0], profile flags and `-B` toolchain
-closure, remain unchanged. Host staging must itself support execution or the attempt
-fails closed; the bounded staging file is removed only before launch or after proven
-process/scope absence. Resource limits are not raised. No old proof recreates a live
-permit. The worker retains the raw
+
+Live compiler requests use schema v2 and pin a root-owned native Landlock trampoline,
+its digest, and the exact mounted runtime read roots. Historical v1 request bytes remain
+decodable, but the worker cannot execute them and historical proofs cannot gain live
+authority from them. The trampoline checks every rule target's type and device/inode,
+requires Landlock ABI 3 or newer, applies `no_new_privs`, enforces the policy, installs
+the process restrictions, and then `execve`s the compiler in the same bounded session.
+Any setup failure stops before compiler execution.
+
+The compiler can read each authenticated snapshot file individually; snapshot
+directories grant enumeration only. Pinned runtime directories grant read access, while
+execute permission is limited to the compiler tool directory containing the pinned
+compiler and its configured compiler subprograms, plus the exact pinned ELF interpreter
+file. Reports, request files, the worker
+runtime and procfs are not readable. The pre-created
+single-linked `module.o` inode is writable and truncatable; it receives a narrow read
+exception because GNU `as` opens this output read/write. The compiler receives that
+inode on descriptor 3. Scratch permits creation, writing and removal but no file reads
+or execution, including reopening a file the compiler created itself. The v2 command
+adds fixed `-pipe` and writes to `/proc/self/fd/3`; there is no readable-temporary
+fallback. Existing source-policy checks, leases, namespace monitoring, object checks,
+resource limits and cleanup remain in force.
+
+Host staging must itself support execution or the attempt fails closed; the bounded
+staging file is removed only before launch or after proven process/scope absence.
+Resource limits are not raised. No old proof recreates a live permit. The worker retains the raw
 exit or signal, bounded diagnostic hashes, and a regular ELF `ET_REL` object's bytes
 and hash. Timeout/output failures have no claimed raw exit status; empty retained logs
 in those cases mean no captured bytes were available, not that nothing was emitted.
@@ -92,8 +113,9 @@ runs in the compiler lane; every other ACP control retains the no-skip contract.
 The workflow uses the existing installed Java,
 generated-C runtime, and ext4 scratch helpers. New project artifacts and reports remain
 under `build/module-compilation-qualification` and `build/reports`. Its required tests
-exercise valid compilation, source/header binding, rejection rollback, real compiler
-cancellation, historical replay separation, and a handled task-limit refusal. A fresh compiled-method inventory must exactly match the XML class/method results,
+exercise valid compilation, native off-snapshot and scratch read refusal, source/header
+binding, rejection rollback, real compiler cancellation, historical replay separation,
+and a handled task-limit refusal. A fresh compiled-method inventory must exactly match the XML class/method results,
 with no omitted, skipped, duplicated, failed, or cached controls. Missing
 configured authority fails the lane. Local protocol and
 worker tests are useful implementation evidence; they do not replace that hosted run.
