@@ -198,6 +198,62 @@ def command(args, *, input_text=None):
     return result.stdout.strip()
 
 
+def parse_gcc_include_search_paths(stderr):
+    if not isinstance(stderr, bytes) or len(stderr) > 1024 * 1024:
+        raise ValueError('compiler include-search diagnostics exceed their byte bound')
+    text = stderr.decode('utf-8', errors='strict')
+    start = '#include <...> search starts here:'
+    end = 'End of search list.'
+    if text.count(start) != 1 or text.count(end) != 1:
+        raise ValueError('compiler did not report one complete include-search list')
+    lines = text.splitlines()
+    first = lines.index(start)
+    last = lines.index(end)
+    if last <= first:
+        raise ValueError('compiler include-search list is malformed')
+    paths = []
+    for line in lines[first + 1:last]:
+        value = line.strip()
+        if value.endswith(' (framework directory)'):
+            value = value.removesuffix(' (framework directory)')
+        path = Path(value)
+        if not value or not path.is_absolute() or str(path) != value or any(ord(c) < 32 for c in value):
+            raise ValueError('compiler include-search path is not canonical and absolute')
+        paths.append(value)
+    if not paths or len(paths) != len(set(paths)):
+        raise ValueError('compiler include-search inventory is empty or duplicated')
+    return paths
+
+
+def staged_compiler_include_search(staged_compiler, subprogram_prefix, approved_include_roots):
+    """Capture bounded search-path evidence from the exact staged compiler bytes."""
+    staged_compiler = trusted(staged_compiler)
+    subprogram_prefix = trusted(subprogram_prefix)
+    approved = tuple(trusted(Path(root)) for root in approved_include_roots)
+    if not approved or len(approved) != len(set(approved)):
+        raise ValueError('compiler include evidence lacks a unique approved-root inventory')
+    result = subprocess.run([str(staged_compiler), f'-B{subprogram_prefix}/', '-v', '-E', '-x', 'c', '-'],
+                            input='#include <stddef.h>\n', text=True, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, timeout=30, check=False,
+                            env={'LANG': 'C', 'LC_ALL': 'C', 'TZ': 'UTC', 'PATH': str(subprogram_prefix)})
+    stderr = result.stderr.encode('utf-8')
+    if len(result.stdout.encode('utf-8')) > 1024 * 1024:
+        raise ValueError('compiler include-search output exceeds its byte bound')
+    paths = parse_gcc_include_search_paths(stderr)
+    candidates = []
+    for directory in paths:
+        search_root = Path(directory)
+        if not any(search_root.is_relative_to(root) for root in approved):
+            continue
+        path = search_root / 'stddef.h'
+        if path.is_file():
+            data = path.read_bytes()
+            candidates.append({'path': str(path), 'resolvedPath': str(path.resolve(strict=True)),
+                               'bytes': len(data), 'sha256': hashlib.sha256(data).hexdigest()})
+    return {'exitCode': result.returncode, 'searchPaths': paths, 'stddefCandidates': candidates,
+            'diagnosticsBytes': len(stderr), 'diagnosticsSha256': hashlib.sha256(stderr).hexdigest()}
+
+
 def trusted(path):
     path = path.resolve(strict=True)
     for item in (path, *path.parents):
@@ -355,6 +411,8 @@ def prepare(args):
         subprograms, subprogram_mounts = copy_compiler_subprograms(gcc, copier)
         gcc_runtime = trusted(Path(command([str(gcc), '-print-libgcc-file-name'])).parent)
         copier.copy(gcc_runtime, RUNTIME / 'gcc')
+        compiler_include_search = staged_compiler_include_search(
+            RUNTIME / 'tools' / 'cc', RUNTIME / 'tools', (gcc_runtime, Path('/usr/include')))
         build = [{'source': str(RUNTIME / 'gcc'), 'destination': str(gcc_runtime)}] + subprogram_mounts
         # The qualification image retains the fixed fixture headers and the additional stdlib
         # header used by module compilation controls. A deployment supplies its own reviewed closure.
@@ -424,7 +482,8 @@ def prepare(args):
                 'sourceTmpfs': str(MOUNTS / 'source'), 'outputTmpfs': str(MOUNTS / 'output')}
         (RUNTIME / 'runtime-plan.json').write_text(json.dumps(plan, sort_keys=True) + '\n')
         summary = {'runtimePlan': str(RUNTIME / 'runtime-plan.json'), 'runtimeEntries': copier.entries,
-                   'runtimeBytes': copier.bytes, 'sourceTmpfs': plan['sourceTmpfs'], 'outputTmpfs': plan['outputTmpfs']}
+                   'runtimeBytes': copier.bytes, 'sourceTmpfs': plan['sourceTmpfs'], 'outputTmpfs': plan['outputTmpfs'],
+                   'compilerIncludeSearch': compiler_include_search}
         if worker is not None:
             summary.update({'moduleWorkerManifest': str(RUNTIME / 'module-worker-classpath.json'),
                             'moduleWorkerEntries': len(worker), 'moduleWorkerBytes': sum(entry['bytes'] for entry in worker),

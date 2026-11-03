@@ -158,6 +158,32 @@ class CompilerProvisioningControls(unittest.TestCase):
         path.chmod(0o555)
         return path
 
+    def test_compiler_include_search_evidence_is_bounded_and_pins_stddef(self):
+        include = self.root / 'gcc/include'
+        include.mkdir(parents=True)
+        header = include / 'stddef.h'
+        header.write_bytes(b'authenticated standard header\n')
+        stderr = (b'#include <...> search starts here:\n' + str(include).encode() +
+                  b'\nEnd of search list.\n')
+        result = SimpleNamespace(returncode=0, stdout='', stderr=stderr.decode())
+        staged = self.executable('runtime/tools/cc')
+        prefix = staged.parent
+        with patch.object(PROVISIONER.subprocess, 'run', return_value=result) as run:
+            evidence = PROVISIONER.staged_compiler_include_search(staged, prefix,
+                (self.root / 'gcc', Path('/usr/include')))
+        self.assertEqual(0, evidence['exitCode'])
+        self.assertEqual([str(include)], evidence['searchPaths'])
+        self.assertEqual([{'path': str(header), 'resolvedPath': str(header), 'bytes': len(header.read_bytes()),
+                           'sha256': hashlib.sha256(header.read_bytes()).hexdigest()}], evidence['stddefCandidates'])
+        self.assertIn('-B' + str(prefix) + '/', run.call_args.args[0])
+        with self.assertRaisesRegex(ValueError, 'complete include-search list'):
+            PROVISIONER.parse_gcc_include_search_paths(b'no compiler diagnostics')
+        with self.assertRaisesRegex(ValueError, 'canonical and absolute'):
+            PROVISIONER.parse_gcc_include_search_paths(
+                b'#include <...> search starts here:\nrelative/include\nEnd of search list.\n')
+        with self.assertRaisesRegex(ValueError, 'byte bound'):
+            PROVISIONER.parse_gcc_include_search_paths(b'x' * (1024 * 1024 + 1))
+
     def args(self):
         return SimpleNamespace(uid=1000, gid=1000, module_worker_classpath=None,
                                module_compiler_exec_helper=None, module_compiler_exec_helper_sha256=None,
