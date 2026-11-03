@@ -23,8 +23,12 @@ def record(invocation, duration, *, input_hash="a" * 64, complete=True, truncate
         "exporterSha256": "e" * 64,
         "terminalStatus": "succeeded",
         "workerTerminalStatus": "succeeded",
-        "spans": [{"phase": "analysis", "clockDomain": "parent-monotonic", "startOffsetNanos": 0,
-                   "durationNanos": duration, "status": "succeeded"}],
+        "spans": [
+            {"phase": "analysis", "clockDomain": "parent-monotonic", "startOffsetNanos": 0,
+             "durationNanos": duration, "status": "succeeded"},
+            {"phase": "process-launch-request-to-worker-entry-frame", "clockDomain": "parent-monotonic",
+             "startOffsetNanos": 1, "durationNanos": duration // 4, "status": "succeeded"},
+        ],
         "workerSpans": [{"phase": "analysis", "clockDomain": "worker-monotonic", "startOffsetNanos": 0,
                          "durationNanos": duration // 2, "status": "completed"}],
         "coverage": {"complete": complete, "missingPhases": [] if complete else ["export"], "truncated": truncated},
@@ -61,6 +65,8 @@ class AnalysisTimingSummaryTest(unittest.TestCase):
         self.assertEqual(parent["phases"]["analysis"],
                          {"samples": 2, "minNanos": 10, "medianNanos": 20.0, "maxNanos": 30})
         self.assertEqual(worker["phases"]["analysis"]["maxNanos"], 15)
+        self.assertEqual(parent["phases"]["process-launch-request-to-worker-entry-frame"],
+                         {"samples": 2, "minNanos": 2, "medianNanos": 4.5, "maxNanos": 7})
         self.assertEqual(by_key[("f" * 64, "parent-monotonic")]["invocations"], 1)
 
     def test_rejects_incomplete_or_truncated_coverage(self):

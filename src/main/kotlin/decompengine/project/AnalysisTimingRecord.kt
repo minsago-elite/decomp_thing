@@ -76,7 +76,7 @@ internal class AnalysisTimingRecord(
             put("clockDomain", "parent-monotonic")
             put("startOffsetNanos", launchRequestedAtNanos - startedAtNanos)
             put("durationNanos", receivedAtNanos - launchRequestedAtNanos)
-            put("status", "observed")
+            put("status", "succeeded")
         }
     }
 
