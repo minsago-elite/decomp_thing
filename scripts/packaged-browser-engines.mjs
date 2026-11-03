@@ -5,7 +5,7 @@ import { promises as fs, readFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
-import { assertAudit, auditFixtures, auditViewports, measureContrast, measureFocus, measurePage } from './packaged-browser-audit.mjs';
+import { assertAudit, auditFixtures, auditViewports, measureContrast, measureFocus, measureOutputSignatureChart, measurePage } from './packaged-browser-audit.mjs';
 import { isPlaywrightScreenshotCspViolation, openEngineAuditPage, serveEngineAuditFixtures } from './packaged-browser-engine-adapter.mjs';
 
 // Cross-engine packaged smoke and audit (#631). The DevTools-based check-packaged-web-browser.mjs
@@ -538,7 +538,7 @@ async function auditWithFixtures(origin, fixtures, fulfilled, unmapped) {
       throw failure;
     }
   };
-  const layout = []; const contrast = []; const focus = [];
+  const layout = []; const contrast = []; const focus = []; const chart = []; const chartScreenshots = [];
   for (const viewport of auditViewports) {
     const { context: created, record } = await context({ viewport: { width: viewport.width, height: viewport.height },
       deviceScaleFactor: viewport.deviceScaleFactor, ...(values.engine === 'firefox' ? {} : { isMobile: viewport.mobile }) });
@@ -578,8 +578,21 @@ async function auditWithFixtures(origin, fixtures, fulfilled, unmapped) {
           })
           : null;
         layout.push({ page: page.name, viewport: viewport.name, scheme, ...measured, ...(overflowDiagnostics ? { overflowDiagnostics } : {}) });
+        if (page.name === 'attempt evidence') chart.push({ page: page.name, viewport: viewport.name, scheme,
+          viewportWidth: viewport.width, ...await target.evaluate(measureOutputSignatureChart) });
         if (viewport.width === 1440 || (viewport.width === 320 && viewport.deviceScaleFactor === 1))
           contrast.push({ page: page.name, viewport: viewport.name, scheme, ...await target.evaluate(measureContrast) });
+      }
+      if (page.name === 'attempt evidence' && (viewport.name === 'desktop 1440x900' || viewport.name === 'zoom 400% of 1280x800')) {
+        await target.emulateMedia({ colorScheme: 'light', reducedMotion: 'reduce' });
+        const phase = `screenshot:${viewport.name}:attempt evidence`;
+        await target.evaluate((value) => { globalThis.__decompAuditPhase = value; }, phase);
+        const name = viewport.name === 'desktop 1440x900'
+          ? 'attempt-evidence-output-signature-chart-desktop.png'
+          : 'attempt-evidence-output-signature-chart-zoom-400.png';
+        try { await target.screenshot({ path: join(root, name) }); }
+        finally { await target.evaluate(() => { globalThis.__decompAuditPhase = null; }).catch(() => undefined); }
+        chartScreenshots.push(name);
       }
       if (viewport.deviceScaleFactor === 4 || ['job detail', 'source file'].includes(page.name)) {
         const phase = `screenshot:${viewport.name}:${page.name}`;
@@ -685,7 +698,8 @@ async function auditWithFixtures(origin, fixtures, fulfilled, unmapped) {
     return { samples: list.length, median: at(0.5), p95: at(0.95) }; };
   const workerTargets = records.flatMap((record) => record.workers ?? []);
   const responses = records.flatMap((record) => record.responses);
-  const result = { fixtures: fixtures.pages.map(({ name, path }) => ({ name, path })), layout, contrast, focus, fulfilled, unmapped, interactions,
+  const result = { fixtures: fixtures.pages.map(({ name, path }) => ({ name, path })), chartExpected: fixtures.chartExpected,
+    layout, contrast, focus, chart, chartScreenshots, fulfilled, unmapped, interactions,
     workers: { highlightedTokens,
       targets: workerTargets.map((worker) => ({ ...worker, responses: responses.filter((response) => response.url === worker.url) })) },
     keyboard, timing: { coldLoad: summary(cold), routeFeedback: summary(feedback), routeData: summary(data), raw: { cold, feedback, data } } };
