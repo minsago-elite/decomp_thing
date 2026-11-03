@@ -416,8 +416,11 @@ function Entity({ selected, basePath, kind, selector, search }: {
       <References title={copy.referencedBy} value={entity.referencedBy} basePath={basePath} selected={selected} version={data.structureVersion} />
       <section>
         <h3>{copy.collisionsTitle}</h3>
-        {entity.collisions.total === 0 ? <p>{copy.noCollisions}</p> : <ul>{entity.collisions.items.map(item => <li key={`${item.kind}/${item.entityId}`}>
-          {item.kind}: <EntityName basePath={basePath} selected={selected} entity={item} version={data.structureVersion} /> (<code>{item.entityId}</code>)</li>)}</ul>}
+        {entity.collisions.total === 0 ? <p>{copy.noCollisions}</p> : <>
+          <ul>{entity.collisions.items.map(item => <li key={`${item.kind}/${item.entityId}`}>
+            {item.kind}: <EntityName basePath={basePath} selected={selected} entity={item} version={data.structureVersion} /> (<code>{item.entityId}</code>)</li>)}</ul>
+          {entity.collisions.total > entity.collisions.items.length && <p>{message(copy.boundedList, { shown: entity.collisions.items.length, total: entity.collisions.total })}</p>}
+        </>}
       </section>
     </>}
   </Frame>;

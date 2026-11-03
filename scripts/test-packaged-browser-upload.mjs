@@ -5,6 +5,8 @@ import { resolve, join } from 'node:path';
 import test, { after } from 'node:test';
 import vm from 'node:vm';
 import { qualifyUpload, qualifyUploadFailures, qualifyMeasuredUpload } from './packaged-browser-upload.mjs';
+import { runInNewContext } from 'node:vm';
+import { uploadFormReady, uploadSubmitReady } from './packaged-browser-upload.mjs';
 
 // Use the already locked frontend DOM dependency; these controls launch no browser or JVM.
 const { JSDOM } = createRequire(new URL('../frontend/package.json', import.meta.url))('jsdom');
@@ -25,7 +27,9 @@ after(() => fs.rm(data, { recursive: true, force: true }));
 
 const entries = { qualifyUpload, qualifyUploadFailures, qualifyMeasuredUpload };
 const picker = '<input id="binary-file" type="file">';
-const panel = content => `<section aria-labelledby="upload-title"><h2 id="upload-title">Upload a binary</h2>${content}</section>`;
+// The authenticated form renders its request limit guidance (Upload.tsx) before the picker is usable.
+const guidance = '<p id="upload-guidance">Choose a binary. The complete request limit is 33554432 bytes, including multipart overhead.</p>';
+const panel = content => `<section aria-labelledby="upload-title"><h2 id="upload-title">Upload a binary</h2>${guidance}${content}</section>`;
 const bannerOnly = `document.body.innerText.includes('Local session connected.')`;
 
 function fixture(t, { markup = '', route = '/nested/', connected = true, onTick = () => {}, evaluateFailure } = {}) {
@@ -153,4 +157,44 @@ test('existing ready preserves unrelated expression failure before file assignme
   await assert.rejects(qualifyUpload(f.args), error => error === failure);
   assert.equal(f.state.elapsed, 0);
   assert.equal(f.state.fixtureEvaluations, 0);
+});
+
+
+function page({ connected = true, limits = true, picker = true, selected = true,
+  disabled = false, label = 'Upload binary', button = true } = {}) {
+  const input = picker ? { files: selected ? [{ name: 'inert-browser-fixture.elf' }] : [] } : null;
+  const submit = button ? { disabled, textContent: label } : null;
+  return { body: { innerText: connected ? 'Local session connected.' : 'Connecting…' },
+    querySelector: (selector) => ({
+      '#upload-guidance': limits ? { textContent: 'The complete request limit is 33554432 bytes, including multipart overhead.' } : null,
+      '#binary-file:not(:disabled)': input,
+      '#binary-file': input,
+      '.upload-panel button[type="submit"]': submit,
+    })[selector] ?? null };
+}
+const ready = (expression, options) => Boolean(runInNewContext(expression, { document: page(options) }));
+
+test('packaged upload waits for authenticated form limits, not just the shell session notice', () => {
+  for (const options of [{ connected: false }, { limits: false }, { picker: false }]) {
+    assert.equal(ready(uploadFormReady, options), false);
+  }
+  assert.equal(ready(uploadFormReady), true);
+});
+
+test('upload submission waits through missing, uncommitted, disabled and replaced form states', () => {
+  const expression = uploadSubmitReady('Upload binary');
+  for (const options of [{ picker: false }, { selected: false }, { button: false },
+    { disabled: true }, { label: 'Retry this upload' }]) {
+    assert.equal(ready(expression, options), false);
+  }
+  assert.equal(ready(expression), true);
+});
+
+test('retry readiness requires the restored fixture and enabled retry button without submitting', () => {
+  const expression = uploadSubmitReady('Retry this upload');
+  for (const options of [{ selected: false }, { disabled: true }, { button: false }]) {
+    assert.equal(ready(expression, { label: 'Retry this upload', ...options }), false);
+  }
+  assert.equal(ready(expression), false);
+  assert.equal(ready(expression, { label: 'Retry this upload' }), true);
 });

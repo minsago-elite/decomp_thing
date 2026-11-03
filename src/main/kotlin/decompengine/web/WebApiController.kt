@@ -100,6 +100,7 @@ internal class WebApiController(
         "jobs/[^/]+/runs/[^/]+/cancel",
         "jobs/[^/]+/runs/[^/]+/recover",
         "jobs/[^/]+/runs/[^/]+/controls",
+        "jobs/[^/]+/runs/[^/]+/queue-position",
         "jobs/[^/]+/artifacts/[^/]+/content",
         "jobs/[^/]+/runs/[^/]+/queue-position",
         "jobs/[^/]+/repositories(?:/[^/]+(?:/operations/[^/]+)?)?",

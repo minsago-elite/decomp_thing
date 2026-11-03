@@ -134,6 +134,43 @@ it('shows entity facts with bounded previews, revision-scoped cross links and un
   } finally { view.unmount(); second.dispose(); }
 });
 
+it.each([0, 1, 20])('discloses a bounded collision subset even when only %i items fit', async shown => {
+  const auth = await session();
+  const detail = fixture<EntityDetail>('entity-detail-function');
+  const peer = detail.entity!.collisions.items[0]!;
+  const items = Array.from({ length: shown }, (_, index) => ({ ...peer, entityId: `collision_${index}` }));
+  detail.entity!.collisions = { total: 22, items };
+  transport.get.mockResolvedValue({ data: detail });
+  history.replaceState(null, '', `${revision}/functions/${detail.entity!.selector}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    const heading = await screen.findByRole('heading', { name: copy.collisionsTitle, level: 3 });
+    const collisions = within(heading.closest('section')!);
+    expect(collisions.getByText(`Showing ${shown} of 22.`)).toBeTruthy();
+    expect(collisions.queryAllByRole('listitem')).toHaveLength(shown);
+    expect(collisions.queryByText(copy.noCollisions)).toBeNull();
+    for (const link of collisions.queryAllByRole('link')) {
+      expect(link.getAttribute('href')).toContain(`?structureVersion=${detail.structureVersion}`);
+    }
+  } finally { auth.dispose(); }
+});
+
+it.each([0, 1])('does not report omissions for a complete collision list of %i items', async total => {
+  const auth = await session();
+  const detail = fixture<EntityDetail>('entity-detail-function');
+  detail.entity!.collisions = { total, items: detail.entity!.collisions.items.slice(0, total) };
+  transport.get.mockResolvedValue({ data: detail });
+  history.replaceState(null, '', `${revision}/functions/${detail.entity!.selector}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    const heading = await screen.findByRole('heading', { name: copy.collisionsTitle, level: 3 });
+    const collisions = within(heading.closest('section')!);
+    expect(collisions.queryByText(/^Showing/)).toBeNull();
+    expect(collisions.queryAllByRole('listitem')).toHaveLength(total);
+    expect(collisions.queryByText(copy.noCollisions) !== null).toBe(total === 0);
+  } finally { auth.dispose(); }
+});
+
 it('refuses a response from a different structure version than the pinned link', async () => {
   const auth = await session();
   const detail = fixture<EntityDetail>('entity-detail-global');
