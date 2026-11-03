@@ -48,6 +48,14 @@ it('lists versioned retained regression inputs as display-only cases without obs
   expect(screen.getByText(/No observation record is retained/)).toBeTruthy();
 });
 
+it('rejects observations that try to join a retained input identity', () => {
+  const value = { ...report(1), schema: 'decomp-exploration', schemaVersion: 2, state: 'complete',
+    retainedInputs: [{ id: 'regression_a', args: ['known'], stdinHex: '00ff' }], retainedInputsOmitted: 0,
+    observations: [...report(1).observations, { candidateId: 'retained:regression_a', signature: '0::', exitCode: 0,
+      stdoutHex: '', stderrHex: '', networkIsolated: true }] };
+  expect(() => parseRetainedCases(JSON.stringify(value), 2)).toThrow();
+});
+
 it('accepts bounded display rows with the producer maximum retained corpus omission count', () => {
   const retainedInputs = Array.from({ length: MAX_RETAINED_CASES - 1 }, (_, index) => ({
     id: `regression_${index}`, args: [], stdinHex: '',

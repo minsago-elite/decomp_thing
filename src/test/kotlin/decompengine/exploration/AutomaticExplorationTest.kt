@@ -255,6 +255,17 @@ class AutomaticExplorationTest {
     }
 
     @Test
+    fun `retained rows fit the remaining serialized report byte budget`() {
+        val base = "x".repeat(900_000)
+        val retained = listOf(ProcessInput("large", emptyList(), ByteArray(100_000)))
+
+        val bounded = requireNotNull(boundedExplorationRetainedInputs(retained, 1, base))
+
+        assertTrue(bounded.rows.isEmpty())
+        assertEquals(1, bounded.omitted)
+    }
+
+    @Test
     fun `exploration report round trips all non NUL JSON control characters in arguments`() {
         val tempParent = java.nio.file.Path.of("build", "test-work", "exploration-json-controls").createDirectories()
         val tempDir = java.nio.file.Files.createTempDirectory(tempParent, "case-")

@@ -59,12 +59,13 @@ export function parseRetainedCases(input: string, producerSchemaVersion: 2 | nul
   if (!Array.isArray(candidates) || !Array.isArray(observations) || candidates.length > MAX_RETAINED_CASES
     || observations.length > MAX_RETAINED_CASES || root.candidateCount !== candidates.length) invalid();
   const ids = new Set<string>();
+  const candidateIds = new Set<string>();
   const sources = new Set<string>();
   const inputs: RetainedCase[] = candidates.map((item: unknown) => {
     const value = record(item); exact(value, candidateFields);
     const id = text(value.id, 128); const source = text(value.source, 128);
     if (!id || !source || ids.has(id) || !Array.isArray(value.args) || value.args.length > MAX_ARGUMENTS) invalid();
-    ids.add(id); sources.add(source);
+    ids.add(id); candidateIds.add(id); sources.add(source);
     const args = value.args.map((arg: unknown) => text(arg));
     return { id, source, args: Object.freeze(args), stdinHex: hex(value.stdinHex), observation: null };
   });
@@ -93,14 +94,14 @@ export function parseRetainedCases(input: string, producerSchemaVersion: 2 | nul
     const value = record(item); exact(value, observationFields);
     const id = text(value.candidateId, 128);
     const exitCode = value.exitCode;
-    if (!ids.has(id) || byId.has(id) || typeof exitCode !== 'number' || !Number.isSafeInteger(exitCode)
+    if (!candidateIds.has(id) || byId.has(id) || typeof exitCode !== 'number' || !Number.isSafeInteger(exitCode)
       || exitCode < -2147483648 || exitCode > 2147483647 || typeof value.networkIsolated !== 'boolean') invalid();
     const stdoutHex = hex(value.stdoutHex); const stderrHex = hex(value.stderrHex);
     if (value.signature !== `${exitCode}:${stdoutHex}:${stderrHex}`) invalid();
     byId.set(id, Object.freeze({ exitCode, stdoutHex, stderrHex, networkIsolated: value.networkIsolated }));
   }
   return Object.freeze({
-    cases: Object.freeze(inputs.map(value => Object.freeze({ ...value, observation: value.observation ?? byId.get(value.id) ?? null }))),
+    cases: Object.freeze(inputs.map(value => Object.freeze({ ...value, observation: candidateIds.has(value.id) ? byId.get(value.id) ?? null : null }))),
     sources: Object.freeze([...sources].sort()), observationCount: observations.length, retainedInputsOmitted,
   });
 }

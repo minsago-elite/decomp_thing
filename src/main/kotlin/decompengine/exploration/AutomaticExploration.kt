@@ -518,9 +518,9 @@ private fun hashObservationInput(path: Path): String {
     return digest.digest().toHex()
 }
 
-private fun ExplorationReport.toJson(): String = """
+private fun ExplorationReport.toJson(): String {
+    val base = """
 {
-  ${if (displayOnlyRetainedInputs == null) "" else "\"schema\": \"decomp-exploration\",\n  \"schemaVersion\": 2,\n  \"state\": \"complete\","}
   "candidateCount": ${candidates.size},
   "coverageIncreased": ${coverage.increased},
   "baselineOutputSignatures": ${coverage.baselineSignatures.size},
@@ -542,32 +542,45 @@ ${candidates.joinToString(",\n") { it.toJson().prependIndent("    ") }}
   ],
   "observations": [
 ${coverage.observations.joinToString(",\n") { it.toJson().prependIndent("    ") }}
-  ]${displayOnlyRetainedInputs?.let { retained ->
-      val bounded = boundedExplorationRetainedInputs(retained, (1000 - candidates.size).coerceAtLeast(0))
-      ",\n  \"retainedInputs\": [\n" + bounded.included.joinToString(",\n") { it.toJson().prependIndent("    ") } +
-          "\n  ],\n  \"retainedInputsOmitted\": ${bounded.omitted}"
-  } ?: ""}
+  ]
 }
 """.trimIndent() + "\n"
+    val retained = displayOnlyRetainedInputs ?: return base
+    val prefix = base.removeSuffix("}\n")
+    val bounded = boundedExplorationRetainedInputs(retained, (1000 - candidates.size).coerceAtLeast(0), prefix)
+        ?: return base
+    return prefix + ",\n  \"schema\": \"decomp-exploration\",\n  \"schemaVersion\": 2,\n  \"state\": \"complete\",\n" +
+        "  \"retainedInputs\": [\n" + bounded.rows.joinToString(",\n") +
+        "\n  ],\n  \"retainedInputsOmitted\": ${bounded.omitted}\n}\n"
+}
 
-private data class BoundedExplorationRetainedInputs(val included: List<ProcessInput>, val omitted: Int)
+internal data class BoundedExplorationRetainedInputs(val rows: List<String>, val omitted: Int)
 
-private fun boundedExplorationRetainedInputs(inputs: List<ProcessInput>, maximumCases: Int): BoundedExplorationRetainedInputs {
-    var bytes = 0L
-    val included = ArrayList<ProcessInput>()
+internal fun boundedExplorationRetainedInputs(inputs: List<ProcessInput>, maximumCases: Int, basePrefix: String): BoundedExplorationRetainedInputs? {
+    val reportLimitBytes = 1_048_576L
+    val fieldPrefix = ",\n  \"schema\": \"decomp-exploration\",\n  \"schemaVersion\": 2,\n  \"state\": \"complete\",\n  \"retainedInputs\": [\n"
+    val fieldSuffix = "\n  ],\n  \"retainedInputsOmitted\": "
+    val fixedBytes = basePrefix.toByteArray(Charsets.UTF_8).size.toLong() +
+        fieldPrefix.toByteArray(Charsets.UTF_8).size + fieldSuffix.toByteArray(Charsets.UTF_8).size +
+        "${inputs.size}\n}\n".toByteArray(Charsets.UTF_8).size
+    if (fixedBytes > reportLimitBytes) return null
+    var rowBytes = 0L
+    val rows = ArrayList<String>()
     val includedIds = HashSet<String>()
     for (input in inputs) {
         val idBytes = input.id.toByteArray(Charsets.UTF_8).size
         if (input.id.isEmpty() || idBytes > 128 || input.args.size > 256 ||
             input.args.any { it.toByteArray(Charsets.UTF_8).size > 8192 } || input.stdin.size > 262_144) continue
-        val estimate = input.id.length.toLong() * 6 + input.args.sumOf { it.length.toLong() * 6 + 4 } + input.stdin.size.toLong() * 2 + 128
-        if (included.size == maximumCases) break
-        if (estimate > 262_144L - bytes) continue
         if (!includedIds.add(input.id)) continue
-        included += input
-        bytes += estimate
+        if (rows.size == maximumCases) continue
+        val row = input.toJson().prependIndent("    ")
+        val rowByteCount = row.toByteArray(Charsets.UTF_8).size.toLong()
+        val separatorBytes = if (rows.isEmpty()) 0L else ",\n".toByteArray(Charsets.UTF_8).size.toLong()
+        if (fixedBytes + rowBytes + separatorBytes + rowByteCount > reportLimitBytes) continue
+        rows += row
+        rowBytes += separatorBytes + rowByteCount
     }
-    return BoundedExplorationRetainedInputs(included, inputs.size - included.size)
+    return BoundedExplorationRetainedInputs(rows, inputs.size - rows.size)
 }
 
 private fun ProcessInput.toJson(): String = """
