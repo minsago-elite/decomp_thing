@@ -285,6 +285,7 @@ class ContainedModuleCompilerWorkerTest {
             #include <sys/mman.h>
             #include <sys/stat.h>
             #include <sys/syscall.h>
+#include <sys/wait.h>
             #include <unistd.h>
             #include <linux/openat2.h>
             static int denied(int fd, const char *canary) {
@@ -302,7 +303,19 @@ class ContainedModuleCompilerWorkerTest {
                 (void)canary;
                 return 0;
             }
-            int main(void) {
+            static int child_checks(const char *host, const char *scratchFile) {
+                int host_fd = open(host, O_RDONLY | O_CLOEXEC);
+                int scratch_fd = openat(AT_FDCWD, scratchFile, O_RDONLY | O_CLOEXEC);
+                int ok = (host_fd < 0 && (errno == EACCES || errno == EPERM)) &&
+                    (scratch_fd < 0 && (errno == EACCES || errno == EPERM));
+                if (host_fd >= 0) close(host_fd);
+                if (scratch_fd >= 0) close(scratch_fd);
+                return ok;
+            }
+            int main(int argc, char **argv) {
+                if (argc == 4 && strcmp(argv[1], "--child") == 0) {
+                    return child_checks(argv[2], argv[3]) ? 0 : 93;
+                }
                 const char *scratch = getenv("TMPDIR");
                 char created[4096];
                 if (scratch == NULL || snprintf(created, sizeof(created), "%s/native-canary", scratch) < 0) return 90;
@@ -313,10 +326,21 @@ class ContainedModuleCompilerWorkerTest {
                 int second = denied(openat(AT_FDCWD, created, O_RDONLY | O_CLOEXEC), "scratch");
                 struct open_how how = {.flags = O_RDONLY | O_CLOEXEC};
                 int third = denied((int)syscall(SYS_openat2, AT_FDCWD, "$secret", &how, sizeof(how)), "host");
+                pid_t child = fork();
+                if (child == 0) {
+                    if (setsid() < 0) _exit(94);
+                    char *const child_argv[] = {argv[0], "--child", (char *)"$secret", created, NULL};
+                    execv(argv[0], child_argv);
+                    _exit(95);
+                }
+                int child_status = 0;
+                int child_ok = child > 0 && waitpid(child, &child_status, 0) == child &&
+                    WIFEXITED(child_status) && WEXITSTATUS(child_status) == 0;
                 puts(first ? "open-denied" : "open-allowed");
                 puts(second ? "openat-denied" : "openat-allowed");
                 puts(third ? "openat2-denied" : "openat2-allowed");
-                return first && second && third ? 0 : 92;
+                puts(child_ok ? "fork-exec-setsid-denied" : "fork-exec-setsid-allowed");
+                return first && second && third && child_ok ? 0 : 92;
             }
         """.trimIndent())
         val hostCompiler = Path.of(System.getProperty("decompengine.analysis.io.testCompiler", "/usr/bin/cc")).toRealPath()
@@ -334,6 +358,7 @@ class ContainedModuleCompilerWorkerTest {
         assertEquals("object-invalid", result.outcome)
         val stdout = Files.readString(fixture.request.outputDirectory.resolve("compiler.stdout"))
         assertTrue(stdout.contains("open-denied") && stdout.contains("openat-denied") && stdout.contains("openat2-denied"), stdout)
+        assertTrue(stdout.contains("fork-exec-setsid-denied"), stdout)
         assertFalse(stdout.contains("SCRATCH_CANARY_MUST_NOT_APPEAR"), stdout)
         assertFalse(stdout.contains("HOST_CANARY_MUST_NOT_APPEAR"), stdout)
     }
