@@ -55,7 +55,6 @@ export async function qualifyUpload({ makeTarget, cdp, evaluate, ready, browserO
     };
   })();` }, tab.sessionId);
   await cdp.call('Page.navigate', { url: browserOrigin + '/nested/' }, tab.sessionId);
-  await readyPicker(ready, tab, 'workspace upload control');
   const selectFixture = () => selectUploadFixture({ tab, evaluate, ready });
   await selectFixture();
   assert.equal(await evaluate(tab, `document.activeElement.id`), 'binary-file');
