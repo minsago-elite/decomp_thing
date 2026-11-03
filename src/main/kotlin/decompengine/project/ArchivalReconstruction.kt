@@ -208,9 +208,11 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
             limits.wallClockTimeout.toNanos(), "Ghidra program recovery", parentDeadline,
             AnalysisDeadline.RECOVERY_TIMEOUT_ADVICE,
         )
+        var timingStarted = false
         return try {
             val result = timing.measure("analysis-invocation") { deadline.enforceDuring("Ghidra program recovery") {
             deadline.checkpoint("before export preparation")
+            timingStarted = true
             val reports = workDir.resolve("reports").createDirectories()
             val scripts = workDir.resolve("scripts").createDirectories()
             deadline.checkpoint("before reading export scripts")
@@ -245,12 +247,13 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
                 )),
             )
             deadline.checkpoint("before constructing export command")
-            val command = timing.measure("bundle-verification-and-command-preparation") {
-                commandFactory(GhidraInvocation(project, "archival_reconstruction", binaryPath, scripts, postScripts), deadline::checkpoint)
+            val command = timing.measure("worker-command-preparation") {
+                commandFactory(GhidraInvocation(project, "archival_reconstruction", binaryPath, scripts, postScripts,
+                    timing.invocationId, { verify -> timing.measure("bundle-verification", verify) }), deadline::checkpoint)
             }
             deadline.checkpoint("after constructing export command")
             val exitCode = timing.measure("worker-process-lifecycle") {
-                executeExport(command, workDir, reports, deadline, listOfNotNull(modelCandidate, callCandidate))
+                executeExport(command, workDir, reports, deadline, listOfNotNull(modelCandidate, callCandidate), timing)
             }
             deadline.checkpoint("before export result validation")
             require(exitCode == 0) {
@@ -305,7 +308,7 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
             timing.publish(true)
             result
         } catch (failure: Throwable) {
-            timing.publish(false)
+            if (timingStarted) timing.publish(false)
             throw failure
         }
     }
@@ -316,13 +319,16 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
         reports: Path,
         deadline: AnalysisDeadline,
         outputCandidates: List<Path>,
+        timing: AnalysisTimingRecord,
     ): Int {
         val remainingNanosAtLaunch = deadline.remainingNanos("before worker launch")
-        val process = processLaunch.start(
-            deadline::checkpoint,
-            { processStarter(command, workDir) },
-            { lateProcess -> stopLateExportProcess(lateProcess, limits.terminationGrace, processLaunch, outputCandidates) },
-        )
+        val process = timing.measure("native-process-launch-envelope") {
+            processLaunch.start(
+                deadline::checkpoint,
+                { processStarter(command, workDir) },
+                { lateProcess -> stopLateExportProcess(lateProcess, limits.terminationGrace, processLaunch, outputCandidates) },
+            )
+        }
         val processTree = processTreeFactory(process, limits.terminationGrace)
         val taskSettlements = ArrayList<AtomicBoolean>()
         val captureSettlements = ArrayList<AtomicBoolean>()
@@ -337,6 +343,7 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
         var primaryFailure: Throwable? = null
         fun publishDiagnostics(stdoutBytes: ByteArray, stderrBytes: ByteArray, beforeWrite: () -> Unit = {}) {
             beforeWrite()
+            timing.captureWorkerTelemetry(stdoutBytes, diagnosticsExceeded.get())
             reports.resolve("ghidra_stdout.log").writeBytes(stdoutBytes)
             beforeWrite()
             reports.resolve("ghidra_stderr.log").writeBytes(stderrBytes)
@@ -358,8 +365,10 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
             if (requiresLaunchPermit) {
                 // A newly started bundled worker stays inert until its handle is owned here.
                 // The two-byte permit fits in the fresh stdin pipe without a child-side read.
-                process.outputStream.write(byteArrayOf('1'.code.toByte(), '\n'.code.toByte()))
-                process.outputStream.flush()
+                timing.measure("parent-launch-permit-publication") {
+                    process.outputStream.write(byteArrayOf('1'.code.toByte(), '\n'.code.toByte()))
+                    process.outputStream.flush()
+                }
             }
             process.outputStream.close()
             val memoryMonitorFinished = AtomicBoolean(false)

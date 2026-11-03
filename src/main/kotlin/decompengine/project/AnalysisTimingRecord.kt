@@ -7,6 +7,8 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.charset.StandardCharsets
+import java.util.TreeMap
 import java.util.UUID
 import kotlin.io.path.createDirectories
 
@@ -18,11 +20,17 @@ internal class AnalysisTimingRecord(
     private val configurationSha256: String,
 ) {
     private val startedAtNanos = System.nanoTime()
-    private val invocationId = UUID.randomUUID().toString()
+    val invocationId = UUID.randomUUID().toString()
     private val spans = mutableListOf<JsonObject>()
+    private val workerSpans = mutableListOf<JsonObject>()
     private var inputSha256: String? = null
     private var exporterSha256: String? = null
     private var terminalStatus = "incomplete"
+    private var workerTerminalStatus: String? = null
+    private var telemetryTruncated = false
+    private var telemetryError: String? = null
+    private val openWorkerSpans = TreeMap<String, Long>()
+    private var nextWorkerSequence = 0L
 
     @Synchronized
     fun bind(inputSha256: String? = this.inputSha256, exporterSha256: String? = this.exporterSha256) {
@@ -53,6 +61,82 @@ internal class AnalysisTimingRecord(
         }
     }
 
+    /** Parse a bounded, framed worker timing stream without allowing telemetry to affect execution. */
+    @Synchronized
+    fun captureWorkerTelemetry(stdout: ByteArray, truncated: Boolean) {
+        telemetryTruncated = telemetryTruncated || truncated
+        val prefix = "DECOMP_ANALYSIS_TIMING_V1 "
+        var count = 0
+        for (line in stdout.toString(StandardCharsets.UTF_8).lineSequence()) {
+            if (!line.startsWith(prefix)) continue
+            if (workerTerminalStatus != null) {
+                telemetryError = "worker timing frame followed the terminal marker"
+                return
+            }
+            if (line.length > 256 || ++count > 64) {
+                telemetryTruncated = true
+                telemetryError = "worker timing frame bound exceeded"
+                return
+            }
+            val fields = line.removePrefix(prefix).split(' ')
+            if (fields.size != 5 || fields[0] != invocationId) {
+                telemetryError = "worker timing frame is malformed or belongs to another invocation"
+                return
+            }
+            val sequence = fields[1].toLongOrNull()
+            val elapsedNanos = fields[4].toLongOrNull()
+            if (sequence != nextWorkerSequence || elapsedNanos == null || elapsedNanos < 0L) {
+                telemetryError = "worker timing sequence or monotonic offset is invalid"
+                return
+            }
+            nextWorkerSequence++
+            when (fields[2]) {
+                "begin" -> {
+                    if ((!isWorkerPhase(fields[3])) || openWorkerSpans.putIfAbsent(fields[3], elapsedNanos) != null) {
+                        telemetryError = "worker timing phase begin is invalid or duplicated"
+                        return
+                    }
+                }
+                "end" -> {
+                    val began = openWorkerSpans.remove(fields[3])
+                    if (began == null || elapsedNanos < began) {
+                        telemetryError = "worker timing phase end has no valid begin"
+                        return
+                    }
+                    workerSpans += buildJsonObject {
+                        put("phase", fields[3])
+                        put("clockDomain", "worker-monotonic")
+                        put("startOffsetNanos", began)
+                        put("durationNanos", elapsedNanos - began)
+                        put("status", "completed")
+                    }
+                }
+                "terminal" -> {
+                    if (fields[3] !in setOf("succeeded", "failed") || workerTerminalStatus != null ||
+                        (fields[3] == "succeeded" && openWorkerSpans.isNotEmpty())) {
+                        telemetryError = "worker terminal timing marker is invalid"
+                        return
+                    }
+                    openWorkerSpans.forEach { (phase, began) ->
+                        workerSpans += buildJsonObject {
+                            put("phase", phase)
+                            put("clockDomain", "worker-monotonic")
+                            put("startOffsetNanos", began)
+                            put("durationNanos", (elapsedNanos - began).coerceAtLeast(0L))
+                            put("status", "incomplete")
+                        }
+                    }
+                    openWorkerSpans.clear()
+                    workerTerminalStatus = fields[3]
+                }
+                else -> {
+                    telemetryError = "worker timing event type is unsupported"
+                    return
+                }
+            }
+        }
+    }
+
     @Synchronized
     fun publish(success: Boolean) {
         terminalStatus = if (success) "succeeded" else "failed"
@@ -68,11 +152,19 @@ internal class AnalysisTimingRecord(
             put("parentTotalElapsedNanos", (System.nanoTime() - startedAtNanos).coerceAtLeast(0L))
             put("terminalStatus", terminalStatus)
             put("spans", JsonArray(spans.toList()))
+            put("workerTerminalStatus", workerTerminalStatus ?: "missing")
+            put("workerSpans", JsonArray(workerSpans.toList()))
             put("coverage", buildJsonObject {
-                put("complete", false)
-                put("missingPhases", JsonArray(listOf(
-                    "worker-entry", "application-initialization", "project-import-analysis", "exporter",
-                ).map(::JsonPrimitive)))
+                val expected = setOf("worker-entry-to-parent-permit", "application-initialization",
+                    "project-import-analysis-pre-script")
+                val observed = workerSpans.map { (it["phase"] as JsonPrimitive).content }.toSet()
+                val missing = (expected + if (workerSpans.none { (it["phase"] as JsonPrimitive).content.startsWith("exporter:") }) {
+                    setOf("exporter-inclusive")
+                } else emptySet()) - observed
+                put("complete", missing.isEmpty() && workerTerminalStatus != null && telemetryError == null && !telemetryTruncated)
+                put("missingPhases", JsonArray(missing.sorted().map(::JsonPrimitive)))
+                put("truncated", telemetryTruncated)
+                telemetryError?.let { put("collectionError", it) }
             })
         }
         runCatching {
@@ -83,6 +175,14 @@ internal class AnalysisTimingRecord(
                 it.newLine()
             }
         }
+    }
+
+    private companion object {
+        fun isWorkerPhase(phase: String): Boolean = phase in setOf("worker-entry-to-parent-permit",
+            "application-initialization", "project-import-analysis-pre-script") ||
+            phase in setOf("exporter:ExportProgramModel.java", "exporter:ExportProgramModelOwned.java",
+                "exporter:ExportRecoveredCallSites.java", "exporter:ExportDecompiledC.java",
+                "exporter:ExportNativeCallsV1.class", "exporter:ExportNativeInterfacesV1.class")
     }
 }
 

@@ -14,9 +14,11 @@ import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 import org.junit.jupiter.api.Assumptions.assumeTrue
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.int
@@ -76,6 +78,17 @@ class ReferencedDataBytesRealGhidraTest {
         source.toFile().delete()
         val model = GhidraHeadlessProgramModelAnalyzer(limits = GhidraProgramModelExportLimits(Duration.ofMinutes(2)))
             .analyze(binary, root.resolve("analysis"))
+        val fullTiming = timingRecord(root.resolve("analysis/reports/analysis-timings"))
+        assertEquals("succeeded", fullTiming.getValue("terminalStatus").jsonPrimitive.content)
+        assertEquals("succeeded", fullTiming.getValue("workerTerminalStatus").jsonPrimitive.content)
+        assertEquals("true", fullTiming.getValue("coverage").jsonObject.getValue("complete").jsonPrimitive.content)
+        val fullWorkerPhases = fullTiming.getValue("workerSpans").jsonArray.map {
+            it.jsonObject.getValue("phase").jsonPrimitive.content
+        }.toSet()
+        assertTrue("worker-entry-to-parent-permit" in fullWorkerPhases)
+        assertTrue("application-initialization" in fullWorkerPhases)
+        assertTrue("project-import-analysis-pre-script" in fullWorkerPhases)
+        assertTrue(fullWorkerPhases.any { it.startsWith("exporter:") })
         assertEquals(4, model.schemaVersion)
         model.globals.forEach { global ->
             val evidence = requireNotNull(global.byteEvidence)
@@ -97,6 +110,10 @@ class ReferencedDataBytesRealGhidraTest {
             limits = GhidraProgramModelExportLimits(Duration.ofMinutes(2)),
             recoveryMode = GhidraProgramModelRecoveryMode.PLANNING)
         val planning = planningAnalyzer.analyze(binary, planningWork)
+        val planningTiming = timingRecord(planningWork.resolve("reports/analysis-timings"))
+        assertNotEquals(fullTiming.getValue("analysisInvocationId").jsonPrimitive.content,
+            planningTiming.getValue("analysisInvocationId").jsonPrimitive.content)
+        assertEquals("true", planningTiming.getValue("coverage").jsonObject.getValue("complete").jsonPrimitive.content)
         assertEquals(4, planning.schemaVersion)
         assertEquals(model.globals.associate { it.id to it.byteEvidence }, planning.globals.associate { it.id to it.byteEvidence },
             "planning and full exports must retain identical windows")
@@ -138,6 +155,10 @@ class ReferencedDataBytesRealGhidraTest {
         resumed.globals.forEach { global ->
             assertTrue(resumedPrompt.contains(ReferencedDataByteEvidenceJson.render(requireNotNull(global.byteEvidence))))
         }
+        val afterResume = timingRecords(planningWork.resolve("reports/analysis-timings"))
+        assertEquals(2, afterResume.size, "resumed analysis must append a distinct immutable timing record")
+        assertEquals(2, afterResume.map { it.getValue("analysisInvocationId").jsonPrimitive.content }.toSet().size)
+        assertTrue(afterResume.all { it.getValue("coverage").jsonObject.getValue("complete").jsonPrimitive.content == "true" })
 
         // A valid same-size byte edit cannot reuse the original checkpoint's fragment commitment.
         val beforeHex = "\"hex\":\"${expected.getValue("half_value")}\""
@@ -165,6 +186,11 @@ class ReferencedDataBytesRealGhidraTest {
         assertTrue(refusalDiagnostics.any {
             it.contains("planning batch checkpoint does not authenticate its fragment: $checkpointName")
         }, refusalDiagnostics.joinToString("\n") { it.takeLast(4096) })
+        val afterRefusal = timingRecords(planningWork.resolve("reports/analysis-timings"))
+        assertEquals(3, afterRefusal.size, "failed resumed analysis must retain its own terminal timing record")
+        assertEquals(3, afterRefusal.map { it.getValue("analysisInvocationId").jsonPrimitive.content }.toSet().size)
+        val failureTiming = afterRefusal.single { it.getValue("terminalStatus").jsonPrimitive.content == "failed" }
+        assertEquals("failed", failureTiming.getValue("workerTerminalStatus").jsonPrimitive.content)
         assertContentEquals(resumedBytes, planningModelPath.readBytes(), "refusal preserves the prior complete model")
         assertContentEquals(retainedState, statePath.readBytes())
         retainedBatches.forEach { (path, bytes) ->
@@ -184,4 +210,16 @@ class ReferencedDataBytesRealGhidraTest {
         assertEquals(0, process.exitValue(), output)
         return output
     }
+
+    private fun timingRecord(directory: Path): kotlinx.serialization.json.JsonObject {
+        val records = timingRecords(directory)
+        assertEquals(1, records.size, "expected one immutable analysis timing record")
+        return records.single()
+    }
+
+    private fun timingRecords(directory: Path): List<kotlinx.serialization.json.JsonObject> =
+        Files.list(directory).use { paths ->
+            paths.filter { it.fileName.toString().endsWith(".json") }.sorted()
+                .map { Json.parseToJsonElement(it.readText()).jsonObject }.toList()
+        }
 }
