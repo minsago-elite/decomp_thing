@@ -1603,6 +1603,117 @@ def repository_root() -> Path:
     return root
 
 
+def _upload_inventory(base: Path, *, success: bool, budget: int, output: Path) -> tuple[list[dict], int]:
+    """Hash a bounded, fd-rooted inventory of flat controls or parser evidence."""
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    root_fd: int | None = None
+    opened_dirs: list[int] = []
+    files: list[dict] = []
+    total = 0
+    dirs_seen = 0
+    try:
+        root_fd = os.open(base, directory_flags)
+        root_st = os.fstat(root_fd)
+        if not stat.S_ISDIR(root_st.st_mode):
+            raise Refusal("upload base is not a regular owned directory")
+        # Keep only the exact parser output directories. Failure/control staging stays flat.
+        with os.scandir(root_fd) as entries:
+            for entry in entries:
+                if len(files) + dirs_seen >= MAX_FILES + 2:
+                    raise Refusal("bounded upload manifest entry budget exceeded")
+                name = entry.name
+                if name in (".", ".."):
+                    raise Refusal("invalid upload entry name")
+                entry_st = entry.stat(follow_symlinks=False)
+                if stat.S_ISDIR(entry_st.st_mode):
+                    if not success or name not in ("oci-manifests", "provenance-statements"):
+                        raise Refusal("upload input contains an unsupported directory")
+                    dirs_seen += 1
+                    if dirs_seen > 2:
+                        raise Refusal("bounded upload directory budget exceeded")
+                    child_fd = os.open(name, directory_flags, dir_fd=root_fd)
+                    opened_dirs.append(child_fd)
+                    child_st = os.fstat(child_fd)
+                    if not stat.S_ISDIR(child_st.st_mode) or (child_st.st_dev, child_st.st_ino) != (entry_st.st_dev, entry_st.st_ino):
+                        raise Refusal("upload directory changed during inventory")
+                    with os.scandir(child_fd) as children:
+                        for child in children:
+                            if len(files) + dirs_seen >= MAX_FILES + 2:
+                                raise Refusal("bounded upload manifest entry budget exceeded")
+                            child_entry_st = child.stat(follow_symlinks=False)
+                            if not stat.S_ISREG(child_entry_st.st_mode) or child_entry_st.st_nlink != 1:
+                                raise Refusal("upload input is not an unlinked regular file")
+                            _hash_upload_entry(child_fd, child.name, child_entry_st, base,
+                                              f"{name}/{child.name}", files, budget, total)
+                            total += child_entry_st.st_size
+                elif stat.S_ISREG(entry_st.st_mode):
+                    if entry_st.st_nlink != 1:
+                        raise Refusal("upload input is not an unlinked regular file")
+                    if (base / name) == output:
+                        continue
+                    _hash_upload_entry(root_fd, name, entry_st, base, name, files, budget, total)
+                    total += entry_st.st_size
+                else:
+                    raise Refusal("upload input is not a regular owned file")
+        if dirs_seen > 2 or len(files) > MAX_FILES:
+            raise Refusal("bounded upload manifest budget exceeded")
+        if success and dirs_seen != 2:
+            raise Refusal("upload input is missing a required parser directory")
+        files.sort(key=lambda item: item["path"])
+        return files, total
+    except OSError as exc:
+        raise Refusal("upload inventory could not be safely read: " + type(exc).__name__) from exc
+    finally:
+        close_error = None
+        for fd in reversed(opened_dirs):
+            try:
+                os.close(fd)
+            except OSError as exc:
+                close_error = close_error or exc
+        if root_fd is not None:
+            try:
+                os.close(root_fd)
+            except OSError as exc:
+                close_error = close_error or exc
+        if close_error is not None:
+            raise Refusal("upload inventory descriptor close failed") from close_error
+
+
+def _hash_upload_entry(parent_fd: int, name: str, before: os.stat_result, base: Path,
+                       relative: str, files: list[dict], budget: int, total: int) -> None:
+    if before.st_size < 0 or total + before.st_size > budget or len(files) >= MAX_FILES:
+        raise Refusal("bounded upload manifest budget exceeded")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0)
+    fd = os.open(name, flags, dir_fd=parent_fd)
+    try:
+        opened = os.fstat(fd)
+        identity = (before.st_dev, before.st_ino, before.st_size, before.st_nlink)
+        if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1 or \
+                (opened.st_dev, opened.st_ino, opened.st_size, opened.st_nlink) != identity:
+            raise Refusal("upload file changed during inventory")
+        digest = hashlib.sha256()
+        observed = 0
+        while observed < before.st_size:
+            block = os.read(fd, min(1024 * 1024, before.st_size - observed + 1))
+            if not block:
+                raise Refusal("upload file shrank during hashing")
+            observed += len(block)
+            if observed > before.st_size:
+                raise Refusal("upload file grew during hashing")
+            digest.update(block)
+        if os.read(fd, 1):
+            raise Refusal("upload file grew during hashing")
+        after = os.fstat(fd)
+        if (after.st_dev, after.st_ino, after.st_size, after.st_nlink) != identity:
+            raise Refusal("upload file changed during hashing")
+        files.append({"path": str((base / relative).relative_to(base.parent)),
+                      "bytes": observed, "sha256": digest.hexdigest()})
+    except OSError as exc:
+        raise Refusal("upload file could not be safely read: " + type(exc).__name__) from exc
+    finally:
+        os.close(fd)
+
+
 def atomic_json(path: Path, value: dict, *, limit: int = MAX_JOURNAL,
                 owner: tuple[int, int] | None = None) -> None:
     raw = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
@@ -2111,19 +2222,7 @@ class Owner:
         out = self.root / "control" / "upload-manifest.json"
         base = self.root / ("evidence" if success else "control")
         budget = 13 * 1024**3 if success else 32 * 1024**2
-        files: list[dict] = []
-        total = 0
-        for path in sorted(base.iterdir()):
-            st = path.lstat()
-            if path.is_symlink() or not path.is_file():
-                raise Refusal("upload input is not a regular owned file")
-            if path == out:
-                continue
-            total += st.st_size
-            if total > budget or len(files) >= MAX_FILES:
-                raise Refusal("bounded upload manifest budget exceeded")
-            files.append({"path": str(path.relative_to(self.root)), "bytes": st.st_size,
-                          "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
+        files, total = _upload_inventory(base, success=success, budget=budget, output=out)
         atomic_json(out, {"files": files, "bytes": total, "success": success}, limit=4 * 1024 * 1024)
         return out
 

@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import secrets
 import tempfile
 import time
 import unittest
@@ -953,6 +954,240 @@ class OwnerTest(unittest.TestCase):
         backend = owner_module.ProductionBackend(self.root, runner=FakeProfileRunner(), authority=FakeAuthority())
         with self.assertRaisesRegex(owner_module.Refusal, "profile is not present"):
             backend.manager_prepare_gate("rootless", manifest)
+
+class UploadStageTest(unittest.TestCase):
+    def setUp(self):
+        owner_fixture_root = ROOT / "build/pr-merge-audit/1866-nested-evidence-inventory/tests/owner-fixtures"
+        owner_fixture_root.mkdir(parents=True, exist_ok=True)
+        self.temp = tempfile.TemporaryDirectory(dir=owner_fixture_root, prefix="stage-")
+        self.repo = Path(self.temp.name) / "repo"
+        self.repo.mkdir()
+        self.root = self.repo / "build" / "g" / "owned"
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def make_owner(self, backend=None):
+        return owner_module.Owner(self.root, backend, test_repo_root=self.repo)
+
+    def completed_no_launch_owner(self, backend=None):
+        backend = backend or FakeBackend()
+        owner_root = self.repo / "build" / "g" / ("owned-" + secrets.token_hex(4))
+        owner = owner_module.Owner(owner_root, backend, test_repo_root=self.repo)
+        owner.reserve({"run": "fixture", "revision": "abc"}, ["/x/d.sock", "/x/r.sock"])
+        owner.seal_stop("buildkit")
+        owner.seal_stop("rootless")
+        return owner
+
+    def test_actual_parser_nested_evidence_reaches_actual_stage_upload(self):
+        fixture_path = ROOT / "tests/oracle/test_gcc_toolchain_builder.py"
+        fixture_spec = importlib.util.spec_from_file_location("gcc_parser_fixture", fixture_path)
+        fixture_module = importlib.util.module_from_spec(fixture_spec)
+        fixture_spec.loader.exec_module(fixture_module)
+        fixture_module.ARTIFACTS = ROOT / "build/pr-merge-audit/1866-nested-evidence-inventory/tests/parser-fixtures"
+        fixture_module.ARTIFACTS.mkdir(parents=True, exist_ok=True)
+        fixture = object.__new__(fixture_module.GccToolchainBuilderTest)
+        fixture.setUp()
+        try:
+            parser_path = ROOT / "scripts/ci-gcc-toolchain-archive.py"
+            parser_spec = importlib.util.spec_from_file_location("gcc_archive_parser", parser_path)
+            parser = importlib.util.module_from_spec(parser_spec)
+            parser_spec.loader.exec_module(parser)
+            owner = self.completed_no_launch_owner()
+            evidence = owner.root / "evidence"
+            input_hashes = {path: hashlib.sha256(path.read_bytes()).hexdigest()
+                            for path in (fixture.docker, fixture.oci)}
+            parser.inspect(fixture.docker, fixture.oci, evidence, 4 * 1024 * 1024)
+            self.assertEqual(input_hashes, {path: hashlib.sha256(path.read_bytes()).hexdigest()
+                                            for path in (fixture.docker, fixture.oci)})
+            self.assertTrue((evidence / "oci-manifests").is_dir())
+            self.assertTrue((evidence / "provenance-statements").is_dir())
+            staged = owner.stage_upload(success=True)
+            rows = json.loads(staged.read_text())["files"]
+            self.assertIn("evidence/oci-manifests/" + next((evidence / "oci-manifests").iterdir()).name,
+                          [row["path"] for row in rows])
+            self.assertIn("evidence/provenance-statements/" + next((evidence / "provenance-statements").iterdir()).name,
+                          [row["path"] for row in rows])
+            self.assertEqual(sum(row["bytes"] for row in rows), json.loads(staged.read_text())["bytes"])
+            for row in rows:
+                source = evidence / row["path"].removeprefix("evidence/")
+                self.assertEqual(source.stat().st_size, row["bytes"])
+                self.assertEqual(hashlib.sha256(source.read_bytes()).hexdigest(), row["sha256"])
+        finally:
+            fixture.tearDown()
+
+    def test_stage_upload_accepts_exact_two_directories_and_refuses_unknown_or_deep(self):
+        for invalid in ("unknown", "deeper"):
+            owner = self.completed_no_launch_owner()
+            evidence = owner.root / "evidence"
+            evidence.mkdir(exist_ok=True)
+            (evidence / "top.json").write_bytes(b"top")
+            (evidence / "oci-manifests").mkdir()
+            (evidence / "provenance-statements").mkdir()
+            if invalid == "unknown":
+                (evidence / "mystery").mkdir()
+            else:
+                (evidence / "oci-manifests" / "deep").mkdir()
+            with self.assertRaises(owner_module.Refusal):
+                owner.stage_upload(success=True)
+        owner = self.completed_no_launch_owner()
+        evidence = owner.root / "evidence"
+        evidence.mkdir(exist_ok=True)
+        (evidence / "top.json").write_bytes(b"top")
+        with self.assertRaisesRegex(owner_module.Refusal, "missing a required parser directory"):
+            owner.stage_upload(success=True)
+        for dirname, filename, payload in (("oci-manifests", "sha.json", b"manifest"),
+                                            ("provenance-statements", "statement.json", b"statement")):
+            (evidence / dirname).mkdir()
+            (evidence / dirname / filename).write_bytes(payload)
+        rows = json.loads(owner.stage_upload(success=True).read_text())["files"]
+        self.assertEqual([row["path"] for row in rows], [
+            "evidence/oci-manifests/sha.json", "evidence/provenance-statements/statement.json", "evidence/top.json"])
+        self.assertEqual({row["path"]: row["sha256"] for row in rows}["evidence/top.json"], hashlib.sha256(b"top").hexdigest())
+
+    def test_stage_upload_refuses_symlinks_hardlinks_and_sparse_overbudget_before_hash(self):
+        for kind in ("symlink-dir", "symlink-file", "hardlink", "sparse"):
+            owner = self.completed_no_launch_owner()
+            evidence = owner.root / "evidence"
+            evidence.mkdir(exist_ok=True)
+            canary = self.repo / "outside-canary"
+            canary.write_bytes(b"never read")
+            if kind == "symlink-dir":
+                (evidence / "oci-manifests").symlink_to(self.repo, target_is_directory=True)
+            elif kind == "symlink-file":
+                (evidence / "escape").symlink_to(canary)
+            elif kind == "hardlink":
+                (evidence / "payload").write_bytes(b"x")
+                os.link(evidence / "payload", evidence / "alias")
+            else:
+                with (evidence / "large").open("wb") as stream:
+                    stream.seek(13 * 1024**3)
+                    stream.write(b"x")
+            with self.assertRaises(owner_module.Refusal):
+                owner.stage_upload(success=True)
+            self.assertTrue(canary.exists())
+
+    def test_failure_control_staging_remains_flat_only(self):
+        owner = self.completed_no_launch_owner()
+        control = owner.root / "control"
+        (control / "ordinary.txt").write_text("control")
+        result = owner.stage_upload(success=False)
+        self.assertEqual(json.loads(result.read_text())["files"][0]["path"], "control/ordinary.txt")
+        (control / "nested").mkdir()
+        with self.assertRaises(owner_module.Refusal):
+            owner.stage_upload(success=False)
+
+
+    def test_stage_upload_preopen_file_count_and_cumulative_byte_bounds(self):
+        owner = self.completed_no_launch_owner()
+        evidence = owner.root / "evidence"
+        (evidence / "a").write_bytes(b"a")
+        (evidence / "b").write_bytes(b"b")
+        self.assertEqual(owner_module.MAX_FILES, 128)
+        real_hash_entry = owner_module._hash_upload_entry
+        with mock.patch.object(owner_module, "MAX_FILES", 0), mock.patch.object(
+                owner_module, "_hash_upload_entry", wraps=real_hash_entry) as hash_entry:
+            with self.assertRaisesRegex(owner_module.Refusal, "budget"):
+                owner.stage_upload(success=True)
+            hash_entry.assert_called_once()
+        owner = self.completed_no_launch_owner()
+        evidence = owner.root / "evidence"
+        with (evidence / "sparse").open("wb") as stream:
+            stream.seek(13 * 1024**3)
+            stream.write(b"x")
+        with mock.patch.object(owner_module, "_hash_upload_entry", wraps=real_hash_entry) as hash_entry:
+            with self.assertRaisesRegex(owner_module.Refusal, "budget"):
+                owner.stage_upload(success=True)
+            hash_entry.assert_called_once()
+
+    def test_inventory_closes_root_and_nested_directory_fds_after_refusal(self):
+        owner = self.completed_no_launch_owner()
+        evidence = owner.root / "evidence"
+        (evidence / "oci-manifests").mkdir()
+        (evidence / "provenance-statements").mkdir()
+        target = self.repo / "outside-canary"
+        target.write_bytes(b"not read")
+        (evidence / "oci-manifests" / "escape").symlink_to(target)
+        real_open = os.open
+        opened = []
+        def record_open(*args, **kwargs):
+            fd = real_open(*args, **kwargs)
+            opened.append(fd)
+            return fd
+        with mock.patch.object(owner_module.os, "open", side_effect=record_open):
+            with self.assertRaises(owner_module.Refusal):
+                owner.stage_upload(success=True)
+        self.assertGreaterEqual(len(opened), 2)
+        for fd in opened:
+            with self.assertRaises(OSError):
+                os.fstat(fd)
+        self.assertTrue(target.exists())
+
+    def test_stream_growth_shrink_and_io_failure_refuse_and_close_file_fd(self):
+        for mode in ("growth", "shrink", "io"):
+            owner = self.completed_no_launch_owner()
+            path = owner.root / "evidence" / "payload"
+            path.write_bytes(b"ab")
+            parent_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            before = path.stat(follow_symlinks=False)
+            closed = []
+            real_open = os.open
+            real_close = os.close
+            def record_open(*args, **kwargs):
+                fd = real_open(*args, **kwargs)
+                if args[0] == "payload":
+                    closed.append(fd)
+                return fd
+            def controlled_read(fd, count):
+                if mode == "growth":
+                    return b"abc"
+                if mode == "shrink":
+                    return b""
+                raise OSError("authored read failure")
+            try:
+                with mock.patch.object(owner_module.os, "open", side_effect=record_open), \
+                     mock.patch.object(owner_module.os, "read", side_effect=controlled_read):
+                    with self.assertRaises(owner_module.Refusal):
+                        owner_module._hash_upload_entry(parent_fd, "payload", before, path.parent,
+                                                        "payload", [], 32, 0)
+                self.assertEqual(len(closed), 1)
+                with self.assertRaises(OSError):
+                    os.fstat(closed[0])
+            finally:
+                real_close(parent_fd)
+
+    def test_file_replaced_by_fifo_is_opened_nonblocking_and_refused(self):
+        owner = self.completed_no_launch_owner()
+        path = owner.root / "evidence" / "payload"
+        path.write_bytes(b"ab")
+        before = path.stat(follow_symlinks=False)
+        path.unlink()
+        os.mkfifo(path)
+        parent_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        real_open = os.open
+        opened = []
+        def guarded_open(name, flags, *args, **kwargs):
+            if name == "payload":
+                self.assertTrue(flags & os.O_NONBLOCK, "substituted FIFO must never block inventory")
+            fd = real_open(name, flags, *args, **kwargs)
+            opened.append(fd)
+            return fd
+        try:
+            with mock.patch.object(owner_module.os, "open", side_effect=guarded_open):
+                with self.assertRaises(owner_module.Refusal):
+                    owner_module._hash_upload_entry(parent_fd, "payload", before, path.parent,
+                                                    "payload", [], 32, 0)
+            self.assertEqual(len(opened), 1)
+            with self.assertRaises(OSError):
+                os.fstat(opened[0])
+        finally:
+            os.close(parent_fd)
+
+    def test_stage_upload_preserves_absence_state_precondition(self):
+        owner = self.make_owner(FakeBackend())
+        owner.reserve({"run": "fixture", "revision": "abc"}, ["/x/d.sock", "/x/r.sock"])
+        with self.assertRaisesRegex(owner_module.Refusal, "complete process absence proof"):
+            owner.stage_upload(success=True)
 
 
 if __name__ == "__main__":
