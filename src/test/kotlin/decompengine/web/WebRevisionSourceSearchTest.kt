@@ -106,6 +106,9 @@ class WebRevisionSourceSearchTest {
         val report = WebRevisionSourceFile(GeneratedFileEvidence("A/report.json", "e".repeat(64), "fixture",
             roles = setOf(ProjectFileRole.VIEWABLE), contentKind = ProjectContentKind.UTF8_TEXT), null)
         harness.snapshot = WebRevisionSourceSnapshot(legacy.reference, legacy.manifestSha256, legacy.descriptorSha256, legacy.files + report)
+        // Nullable manifest-only sizes must never acquire search admission or become a zero-byte charge.
+        assertFailsWith<IllegalArgumentException> { sourceSearchReadReservation(report) }
+        assertEquals(legacy.files[0].sizeBytes!! + 1, sourceSearchReadReservation(legacy.files[0]))
         val matches = all(WebRevisionSourceSearch(harness::source), "q=needle&limit=1")
         assertEquals(listOf("Makefile", "src/a.c"), matches.map { string(it, "displayName") })
         for ((index, item) in matches.withIndex()) {

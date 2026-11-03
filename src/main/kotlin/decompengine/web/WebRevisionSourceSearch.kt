@@ -102,10 +102,10 @@ private fun invalidCursor(): Nothing = invalidSourceSearchCursor()
 
 /** The pinned reader requires a positive limit and may read one extra byte to detect growth. */
 internal fun sourceSearchReadReservation(file: WebRevisionSourceFile): Long {
-    // Searched files are committed source inputs; manifest-only entries carry no size and are never read.
-    val size = checkNotNull(file.sizeBytes) { "source search reads only sized source inputs" }
-    require(size in 0..WebRevisionSourceContent.MAXIMUM_FILE_BYTES)
-    return maxOf(1L, size) + 1
+    require(file.committedInput) { "Source search requires a committed input size." }
+    val committedSize = requireNotNull(file.sizeBytes) { "Source search requires a committed input size." }
+    require(committedSize in 0..WebRevisionSourceContent.MAXIMUM_FILE_BYTES)
+    return maxOf(1L, committedSize) + 1
 }
 
 /**
