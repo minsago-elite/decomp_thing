@@ -96,7 +96,8 @@ class GhidraExportBudgetBindingTest {
 
     @Test
     fun `worker telemetry does not extend the live stdout diagnostic budget`() {
-        val root = createTempDirectory("export-budget-telemetry-diagnostics-")
+        val parent = java.nio.file.Files.createDirectories(java.nio.file.Path.of("build/test-tmp"))
+        val root = createTempDirectory(parent, "export-budget-telemetry-diagnostics-")
         try {
             val input = root.resolve("authored-input.txt").also { it.writeText("Authored local export input\n") }
             val work = root.resolve("analysis")
