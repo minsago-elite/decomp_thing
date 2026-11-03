@@ -22,6 +22,18 @@ data class ModuleCompilerFeedback(
     val diagnostics: String,
 )
 
+/** Binds the retained, bounded prompt text; the full compiler-output digest stays in compilation evidence. */
+internal fun retainedModuleCompilerFeedback(
+    moduleId: String,
+    sourceSha256: String,
+    contextSha256: String,
+    diagnostics: String,
+): ModuleCompilerFeedback {
+    val bytes = diagnostics.toByteArray(Charsets.UTF_8)
+    require(bytes.size <= 32_768) { "retained compiler diagnostics exceed their bound" }
+    return ModuleCompilerFeedback(moduleId, sourceSha256, contextSha256, sha256(bytes), diagnostics)
+}
+
 internal class ModuleCompilerFeedbackStore(
     private val root: Path,
     private val inputSha256: String,

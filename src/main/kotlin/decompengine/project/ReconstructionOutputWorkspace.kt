@@ -36,8 +36,10 @@ internal class ReconstructionOutputWorkspace private constructor(
         val current = readObject(root.resolve(ACTIVE))?.let {
             require(it.keys == setOf("schemaVersion", "inputSha256") && it["schemaVersion"] == JsonPrimitive(1))
             it.getValue("inputSha256").jsonPrimitive.content.also { key -> require(HASH.matches(key)) }
-        } ?: inferInput() ?: if (!hasActiveIdentity && !Files.exists(cacheRoot(), NOFOLLOW_LINKS) &&
-            archiveEntries == listOf("exploration.json")) inputSha256 else null
+        } ?: inferInput() ?: if (
+            !hasActiveIdentity && !Files.exists(cacheRoot(), NOFOLLOW_LINKS) &&
+            "exploration.json" in archiveEntries && archiveEntries.none(INITIAL_RECONSTRUCTION_OUTPUTS::contains)
+        ) inputSha256 else null
         if (current == inputSha256) {
             writeActive()
             return
@@ -169,6 +171,9 @@ internal class ReconstructionOutputWorkspace private constructor(
         internal const val ACTIVE = ".reconstruction-active-input.json"
         internal const val SWITCH = ".reconstruction-input-switch.json"
         internal const val CACHE = "input-cache"
+        private val INITIAL_RECONSTRUCTION_OUTPUTS = setOf(
+            "analysis", "source-tree", "source-tree.zip", "reconstruction.json", "reconstruction_progress.json",
+        )
         internal val ENTRIES = listOf("analysis", "source-tree", "source-tree.zip", "reconstruction.json", "reconstruction_progress.json", "exploration.json", ModuleObservedBehavior.FILE_NAME, "agent-progress.json", FullRunJournal.DIRECTORY, ModuleCompilerFeedbackStore.DIRECTORY)
         private val HASH = Regex("[0-9a-f]{64}")
         private val KEY = Regex("[0-9a-f]{64}|unidentified-[0-9a-f-]{36}")

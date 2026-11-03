@@ -867,11 +867,10 @@ object SourceTreeGenerator {
                     validation.also { validation ->
                         if (!validation.passed && contextFingerprint != null) {
                             runCatching {
-                                onCompilerFeedback(ModuleCompilerFeedback(
+                                onCompilerFeedback(retainedModuleCompilerFeedback(
                                     moduleId = module.id,
                                     sourceSha256 = validation.sourceSha256,
                                     contextSha256 = requireNotNull(contextFingerprint),
-                                    diagnosticsSha256 = validation.diagnosticsSha256,
                                     diagnostics = validation.diagnosticsPrefix,
                                 ))
                             }

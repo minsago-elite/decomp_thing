@@ -79,16 +79,26 @@ class ReconstructionOutputWorkspaceTest {
         val b = base.resolve("b").apply { writeText("input-b") }
         val aHash = sha256(a.readBytes())
         root.resolve("exploration.json").apply { parent.createDirectories(); writeText("exploration-a") }
+        root.resolve("agent-progress.json").writeText("progress-a")
+        root.resolve("run-history/a/events.jsonl").apply { parent.createDirectories(); writeText("history-a") }
 
         ReconstructionOutputWorkspace.open(root, a).use {
             assertEquals("exploration-a", root.resolve("exploration.json").readText())
+            assertEquals("progress-a", root.resolve("agent-progress.json").readText())
+            assertEquals("history-a", root.resolve("run-history/a/events.jsonl").readText())
         }
         ReconstructionOutputWorkspace.open(root, b).use {
             assertFalse(root.resolve("exploration.json").exists())
+            assertFalse(root.resolve("agent-progress.json").exists())
+            assertFalse(root.resolve("run-history").exists())
             assertEquals("exploration-a", root.resolve("input-cache/$aHash/exploration.json").readText())
+            assertEquals("progress-a", root.resolve("input-cache/$aHash/agent-progress.json").readText())
+            assertEquals("history-a", root.resolve("input-cache/$aHash/run-history/a/events.jsonl").readText())
         }
         ReconstructionOutputWorkspace.open(root, a).use {
             assertEquals("exploration-a", root.resolve("exploration.json").readText())
+            assertEquals("progress-a", root.resolve("agent-progress.json").readText())
+            assertEquals("history-a", root.resolve("run-history/a/events.jsonl").readText())
         }
     }
 
