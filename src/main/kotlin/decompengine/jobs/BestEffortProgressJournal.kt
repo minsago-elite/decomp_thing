@@ -2,6 +2,7 @@ package decompengine.jobs
 
 import decompengine.agent.*
 import java.nio.file.Path
+import java.util.concurrent.atomic.AtomicBoolean
 
 /** Owns an optional display journal without making it part of workflow success. */
 internal class BestEffortProgressJournal(
@@ -14,15 +15,31 @@ internal class BestEffortProgressJournal(
     private val onUnavailable: () -> Unit = {
         ProgressWarnings.journalUnavailable()
     },
+    private val fullRunWriterHooks: FullRunJournalWriterHooks? = null,
 ) : AgentWorkflowProgress, AutoCloseable {
     private var failed = false
+    private val warningIssued = AtomicBoolean(false)
     private var journal: AgentProgressJournal? = null
     internal val journalRunId: String? get() = journal?.journalRunId
 
     init {
         observe {
-            journal = AgentProgressJournal(reportsDirectory, workflow, sensitiveValues, onPhase = onPhase,
+            journal = if (fullRunWriterHooks != null) {
+                require(recordFullRun) { "full-run writer hooks require full-history recording" }
+                AgentProgressJournal.withFullRunWriterHooks(
+                    reportsDirectory, workflow, fullRunWriterHooks, maximumFullRunBytes,
+                )
+            } else AgentProgressJournal(reportsDirectory, workflow, sensitiveValues, onPhase = onPhase,
                 recordFullRun = recordFullRun, maximumFullRunBytes = maximumFullRunBytes)
+        }
+    }
+
+    private fun warnUnavailableOnce() {
+        if (!warningIssued.compareAndSet(false, true)) return
+        try {
+            onUnavailable()
+        } catch (warningFailure: Exception) {
+            if (warningFailure is InterruptedException) Thread.currentThread().interrupt()
         }
     }
 
@@ -30,16 +47,13 @@ internal class BestEffortProgressJournal(
         if (failed && !evenIfFailed) return
         try {
             action()
+            if (journal?.persistenceFailure != null) warnUnavailableOnce()
         } catch (failure: Exception) {
             if (failure is InterruptedException) Thread.currentThread().interrupt()
             if (!failed) {
                 failed = true
                 // A warning sink is another display observer, never workflow authority.
-                try {
-                    onUnavailable()
-                } catch (warningFailure: Exception) {
-                    if (warningFailure is InterruptedException) Thread.currentThread().interrupt()
-                }
+                warnUnavailableOnce()
             }
         }
     }

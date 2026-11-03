@@ -36,8 +36,9 @@ class FullRunJournalTest {
             writer.append(event(id, 3)) // bounded queue overflow; the record is not silently claimed complete
         } finally {
             release.countDown()
-            writer.close()
         }
+        val closeFailure = assertFailsWith<IllegalStateException> { writer.close() }
+        assertEquals("full run journal recording failed", closeFailure.message)
         val metadata = FullRunJournal.metadata(journal.directory)
         assertEquals("logging-failed", metadata.getValue("state").jsonPrimitive.content)
         assertEquals(JsonPrimitive(false), metadata.getValue("complete"))
@@ -45,6 +46,47 @@ class FullRunJournalTest {
             var count = 0
             while (reader.next() != null) count++
             assertEquals(3, count)
+            assertEquals("logging-failed", reader.verifyEnd().getValue("state").jsonPrimitive.content)
+        }
+    }
+
+    @Test
+    fun `append failure is reported after bounded writer drains and marks history incomplete`() {
+        val parent = Files.createDirectories(java.nio.file.Path.of("build/test-tmp/run-writer-append-failure")
+            .toAbsolutePath())
+        val root = createTempDirectory(parent, "run-writer-")
+        val journal = FullRunJournal.create(root, UUID.randomUUID().toString(), "reconstruction", 0)
+        val writer = FullRunJournalWriter(journal, beforeAppend = { error("private append detail") })
+        assertTrue(writer.append(event(journal.directory.fileName.toString(), 0)))
+
+        val failure = assertFailsWith<IllegalStateException> { writer.close() }
+        assertEquals("full run journal recording failed", failure.message)
+        assertEquals("logging-failed", FullRunJournal.metadata(journal.directory)
+            .getValue("state").jsonPrimitive.content)
+        assertFalse(journal.directory.resolve("run.json").toFile().readText().contains("private append detail"))
+        FullRunEventReader(journal.directory).use { reader ->
+            assertNull(reader.next())
+            assertEquals("logging-failed", reader.verifyEnd().getValue("state").jsonPrimitive.content)
+        }
+    }
+
+    @Test
+    fun `finalization failure reaches close and never claims complete history`() {
+        val parent = Files.createDirectories(java.nio.file.Path.of("build/test-tmp/run-writer-finalize-failure")
+            .toAbsolutePath())
+        val root = createTempDirectory(parent, "run-writer-")
+        val journal = FullRunJournal.create(root, UUID.randomUUID().toString(), "reconstruction", 0)
+        val id = journal.directory.fileName.toString()
+        val writer = FullRunJournalWriter(journal, beforeFinalize = { error("private finalization detail") })
+        assertTrue(writer.append(event(id, 0)))
+
+        val failure = assertFailsWith<IllegalStateException> { writer.close() }
+        assertEquals("full run journal recording failed", failure.message)
+        val metadata = FullRunJournal.metadata(journal.directory)
+        assertEquals("logging-failed", metadata.getValue("state").jsonPrimitive.content)
+        assertEquals(JsonPrimitive(false), metadata.getValue("complete"))
+        FullRunEventReader(journal.directory).use { reader ->
+            assertEquals(0, reader.next()!!.getValue("sequence").jsonPrimitive.int)
             assertEquals("logging-failed", reader.verifyEnd().getValue("state").jsonPrimitive.content)
         }
     }

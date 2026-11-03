@@ -15,7 +15,8 @@ import java.nio.file.StandardOpenOption.*
 import java.nio.file.attribute.PosixFilePermissions
 import java.time.Instant
 import java.util.concurrent.ArrayBlockingQueue
-import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.serialization.json.*
 
@@ -154,84 +155,121 @@ internal class FullRunJournal private constructor(
     }
 }
 
+/** Test-only boundaries for verifying asynchronous write and finalization failures. */
+internal data class FullRunJournalWriterHooks(
+    val maximumQueuedEvents: Int = 256,
+    val beforeAppend: () -> Unit = {},
+    val beforeFinalize: () -> Unit = {},
+)
+
 /** Bounded mailbox that keeps fsync and serialization off agent/progress callback threads. */
 internal class FullRunJournalWriter(
     private val journal: FullRunJournal,
     maximumQueuedEvents: Int = 256,
+    private val beforeFinalize: () -> Unit = {},
     private val beforeAppend: () -> Unit = {},
 ) : AutoCloseable {
     private sealed interface Item {
         data class Event(val value: JsonObject) : Item
-        data object End : Item
     }
 
     private val gate = Object()
     private val queue = ArrayBlockingQueue<Item>(maximumQueuedEvents.also { require(it in 1..4096) })
-    private val overflowed = AtomicBoolean(false)
     private val failure = AtomicReference<Throwable?>()
+    private val completed = CountDownLatch(1)
     private var accepting = true
-    private var closed = false
     private val writer = Thread(::writeLoop, "decomp-full-run-${journal.directory.fileName}").apply {
         isDaemon = true
         start()
     }
 
     val directory: Path get() = journal.directory
+    val recordingFailure: Throwable? get() = failure.get()
 
     /** Never waits for filesystem work. Saturation makes the history explicitly incomplete. */
-    fun append(event: JsonObject) {
+    fun append(event: JsonObject): Boolean {
         synchronized(gate) {
-            if (!accepting) return
+            if (!accepting) return false
             if (!queue.offer(Item.Event(event))) {
                 accepting = false
-                overflowed.set(true)
+                failure.compareAndSet(null, IllegalStateException("full run journal queue saturated"))
+                return false
             }
+            return true
         }
     }
 
     private fun writeLoop() {
         try {
             while (true) {
-                when (val item = queue.take()) {
-                    Item.End -> break
-                    is Item.Event -> if (failure.get() == null) {
-                        try {
-                            beforeAppend()
-                            journal.append(item.value)
-                        } catch (problem: Throwable) {
-                            failure.compareAndSet(null, problem)
-                            synchronized(gate) { accepting = false }
-                        }
+                val item = try {
+                    queue.poll(100, TimeUnit.MILLISECONDS)
+                } catch (problem: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    failure.compareAndSet(null, problem)
+                    synchronized(gate) { accepting = false }
+                    queue.clear()
+                    null
+                }
+                if (item == null) {
+                    val done = synchronized(gate) { !accepting && queue.isEmpty() }
+                    if (done) break
+                    if (Thread.currentThread().isInterrupted) break
+                    continue
+                }
+                if (item is Item.Event) {
+                    try {
+                        beforeAppend()
+                        journal.append(item.value)
+                    } catch (problem: Throwable) {
+                        failure.compareAndSet(null, problem)
+                        synchronized(gate) { accepting = false }
+                        queue.clear()
+                        break
                     }
                 }
             }
-        } catch (interrupted: InterruptedException) {
-            Thread.currentThread().interrupt()
-            failure.compareAndSet(null, interrupted)
         } finally {
-            if (overflowed.get() || failure.get() != null) journal.markIncomplete()
-            runCatching { journal.close() }
+            if (failure.get() != null) {
+                try { journal.markIncomplete() } catch (problem: Throwable) {
+                    failure.compareAndSet(null, problem)
+                }
+            }
+            try {
+                beforeFinalize()
+            } catch (problem: Throwable) {
+                failure.compareAndSet(null, problem)
+                try { journal.markIncomplete() } catch (markFailure: Throwable) {
+                    failure.compareAndSet(null, markFailure)
+                }
+            }
+            try {
+                journal.close()
+            } catch (problem: Throwable) {
+                failure.compareAndSet(null, problem)
+            } finally {
+                completed.countDown()
+            }
         }
     }
 
     override fun close() {
         synchronized(gate) {
-            if (closed) return
-            closed = true
             accepting = false
         }
         var interrupted = Thread.interrupted()
         try {
-            var sent = false
-            while (!sent) {
-                try { queue.put(Item.End); sent = true } catch (_: InterruptedException) { interrupted = true }
-            }
-            while (writer.isAlive) {
-                try { writer.join() } catch (_: InterruptedException) { interrupted = true }
+            while (completed.count > 0) {
+                try {
+                    completed.await()
+                } catch (_: InterruptedException) {
+                    interrupted = true
+                }
             }
         } finally {
             if (interrupted) Thread.currentThread().interrupt()
         }
+        failure.get()?.let { throw IllegalStateException("full run journal recording failed", it) }
     }
 }
 

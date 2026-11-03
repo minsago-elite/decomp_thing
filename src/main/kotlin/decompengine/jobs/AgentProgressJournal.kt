@@ -37,6 +37,7 @@ class AgentProgressJournal private constructor(
     private val beforeSnapshotEncode: (() -> Unit)?,
     private val recordFullRun: Boolean,
     private val maximumFullRunBytes: Long,
+    private val fullRunWriterHooks: FullRunJournalWriterHooks? = null,
 ) : AgentWorkflowProgress, AutoCloseable {
     constructor(
         reportsDirectory: Path,
@@ -68,6 +69,7 @@ class AgentProgressJournal private constructor(
     private val writer: Thread
     private var fullRun: FullRunJournalWriter? = null
     internal val fullRunDirectory: Path? get() = fullRun?.directory
+    internal val persistenceFailure: Throwable? get() = failure.get() ?: fullRun?.recordingFailure
 
     init {
         require(workflow.matches(Regex("[a-z][a-z0-9-]{0,63}"))) { "invalid progress workflow" }
@@ -88,9 +90,15 @@ class AgentProgressJournal private constructor(
                 previous.getValue("events").jsonArray.forEach { retained.add(replayProgressRecord(it.jsonObject)) }
                 while (retained.size > maximumEvents) { retained.removeFirst(); historyDropped++ }
             }
-            if (recordFullRun) fullRun = FullRunJournalWriter(
-                FullRunJournal.create(reportsDirectory, runId, workflow, sequence, maximumFullRunBytes),
-            )
+            if (recordFullRun) {
+                val hooks = fullRunWriterHooks ?: FullRunJournalWriterHooks()
+                fullRun = FullRunJournalWriter(
+                    FullRunJournal.create(reportsDirectory, runId, workflow, sequence, maximumFullRunBytes),
+                    hooks.maximumQueuedEvents,
+                    hooks.beforeFinalize,
+                    hooks.beforeAppend,
+                )
+            }
             requireSequenceCapacity()
             writer = Thread(::writeLoop, "decomp-progress-$workflow").apply { isDaemon = true }
             startedWriter = writer
@@ -100,8 +108,13 @@ class AgentProgressJournal private constructor(
             synchronized(monitor) { closed = true; monitor.notifyAll() }
             // A started writer keeps ownership until its own final publication is over.
             if (startedWriter?.isAlive != true) {
-                runCatching { fullRun?.close() }
-                writerLease.close()
+                try {
+                    fullRun?.close()
+                } catch (cleanup: Throwable) {
+                    problem.addSuppressed(cleanup)
+                } finally {
+                    writerLease.close()
+                }
             }
             throw problem
         }
@@ -373,11 +386,18 @@ class AgentProgressJournal private constructor(
                 afterSnapshotWrite?.invoke()
             }
         } catch (problem: Throwable) {
-            failure.set(problem)
+            failure.compareAndSet(null, problem)
         } finally {
-            // Close may already have exhausted its join budget. The writer still retires
-            // its own lease once no further snapshot can be published.
-            try { writerLease.close() } catch (problem: Throwable) { failure.compareAndSet(null, problem) }
+            // The snapshot writer owns final history shutdown and lease retirement. If its caller
+            // times out or is interrupted, this finalizer still drains/marks history and retains
+            // ownership until both publications have stopped.
+            try {
+                fullRun?.close()
+            } catch (problem: Throwable) {
+                failure.compareAndSet(null, problem)
+            } finally {
+                try { writerLease.close() } catch (problem: Throwable) { failure.compareAndSet(null, problem) }
+            }
         }
     }
 
@@ -397,12 +417,16 @@ class AgentProgressJournal private constructor(
 
     override fun close() {
         synchronized(monitor) { closed = true; monitor.notifyAll() }
-        writer.join(5_000)
-        // Do not release a lock while a live writer could still publish a snapshot.
+        try {
+            writer.join(5_000)
+        } catch (interrupted: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw interrupted
+        }
+        // The writer, not this caller, owns both finalization and the lease. A timeout leaves
+        // that owner alive; another close may wait for its completion without racing cleanup.
         check(!writer.isAlive) { "progress writer did not stop within five seconds" }
-        writerLease.close()
-        fullRun?.close()
-        failure.get()?.let { throw IllegalStateException("progress journal persistence failed", it) }
+        persistenceFailure?.let { throw IllegalStateException("progress journal persistence failed", it) }
     }
 
     companion object {
@@ -427,6 +451,17 @@ class AgentProgressJournal private constructor(
         ): AgentProgressJournal = AgentProgressJournal(
             reportsDirectory, workflow, emptyList(), 256, maximumQueuedEvents, maximumSnapshotBytes, {},
             afterSnapshotWrite, beforeSnapshotEncode, false, FullRunJournal.MAXIMUM_RUN_BYTES,
+        )
+
+        /** Test-only full-history writer controls; production always uses its fixed bounded defaults. */
+        internal fun withFullRunWriterHooks(
+            reportsDirectory: Path,
+            workflow: String,
+            hooks: FullRunJournalWriterHooks,
+            maximumFullRunBytes: Long = FullRunJournal.MAXIMUM_RUN_BYTES,
+        ): AgentProgressJournal = AgentProgressJournal(
+            reportsDirectory, workflow, emptyList(), 256, 128, 512 * 1024, {}, null, null, true,
+            maximumFullRunBytes, hooks,
         )
 
         const val FILE_NAME = "agent-progress.json"
