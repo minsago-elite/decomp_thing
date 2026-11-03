@@ -139,7 +139,157 @@ export function assertStructureSourceLink(href, { revision, browserOrigin, snaps
   ], 'Source link must carry exactly the originating source and metadata pins');
 }
 
-export async function qualifyStructure({ fixture, makeTarget, cdp, evaluate, ready, browserOrigin }) {
+/** Fixed Structure module-body stages. Observation labels only, never a cause (#1879). */
+export const STRUCTURE_BODY_STAGES = Object.freeze(['before-lookup', 'lookup', 'body-call', 'body-decode', 'source-link', 'after-source-link']);
+const BODY_OUTCOMES = Object.freeze(['not-called', 'pending', 'resolved', 'rejected']);
+const MAX_TRACKED = 64;
+const MAX_COUNT = 100_000;
+const MAX_MS = 3_600_000;
+const MAX_BYTES = 2 ** 31;
+const MODULE_DETAIL = /\/api\/v1\/jobs\/[^/]+\/runs\/[^/]+\/revisions\/[^/]+\/modules\/[^/]+$/;
+const structureFailures = new WeakMap();
+/** Body-read observations recorded when qualifyStructure threw this error, or null. Never reads the error itself. */
+export function structureFailureEvidence(error) {
+  return (error !== null && typeof error === 'object' && structureFailures.get(error)) || null;
+}
+
+/**
+ * In-memory observations of already-emitted module-detail events. Adds no CDP call, wait or retry, and
+ * persists no request/session ids, URLs or payloads: only fixed labels, booleans and bounded numbers.
+ */
+function moduleBodyObserver() {
+  let incomplete = false;
+  const started = performance.now();
+  const clamp = (value, max) => {
+    if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) { incomplete = true; return null; }
+    if (value > max) { incomplete = true; return max; }
+    return Math.round(value);
+  };
+  const elapsed = (from, to = performance.now()) => from === null || to === null ? null : clamp(to - from, MAX_MS);
+  const increment = (value) => { if (value >= MAX_COUNT) { incomplete = true; return MAX_COUNT; } return value + 1; };
+  const counts = { moduleRequests: 0, moduleResponses: 0, moduleOkResponses: 0 };
+  const entries = new Map();
+  const routeResponses = new Map();
+  let stage = 'before-lookup', selected = null, origin = null;
+  const bump = (name) => { counts[name] = increment(counts[name]); };
+  const route = (url) => {
+    if (typeof url !== 'string' || url.length > 8192) { incomplete = true; return null; }
+    const parsed = new URL(url);
+    return parsed.origin === origin && MODULE_DETAIL.test(parsed.pathname) ? parsed.pathname : null;
+  };
+  const entry = (requestId, create) => {
+    if (typeof requestId !== 'string' || requestId.length === 0 || requestId.length > 256) { incomplete = true; return null; }
+    if (entries.has(requestId) || !create) return entries.get(requestId) ?? null;
+    if (entries.size >= MAX_TRACKED) { incomplete = true; return null; }
+    const value = { responseAt: null, status: null, servedFromCache: false, fromDiskCache: false, fromServiceWorker: false,
+      finishedAt: null, encodedDataLength: null, failed: false, canceled: false };
+    entries.set(requestId, value);
+    return value;
+  };
+  const guarded = (listener) => (event) => { try { listener(event); } catch { incomplete = true; } };
+  return {
+    attach(cdp, sessionId, browserOrigin) {
+      origin = new URL(browserOrigin).origin;
+      cdp.on('Network.requestWillBeSent', guarded((event) => {
+        if (route(event.request.url) !== null) { bump('moduleRequests'); entry(event.requestId, true); }
+      }), sessionId);
+      cdp.on('Network.responseReceived', guarded((event) => {
+        const path = route(event.response.url);
+        if (path === null) return;
+        bump('moduleResponses');
+        const status = event.response.status;
+        if (status === 200) bump('moduleOkResponses');
+        if (routeResponses.has(path) || routeResponses.size < MAX_TRACKED) routeResponses.set(path, increment(routeResponses.get(path) ?? 0));
+        else incomplete = true;
+        const value = entry(event.requestId, true);
+        if (!value) return;
+        value.responseAt = performance.now();
+        if (Number.isSafeInteger(status) && status >= 0 && status < 1000) value.status = status;
+        else { value.status = null; incomplete = true; }
+        value.fromDiskCache = event.response.fromDiskCache === true;
+        value.fromServiceWorker = event.response.fromServiceWorker === true;
+      }), sessionId);
+      cdp.on('Network.requestServedFromCache', guarded((event) => {
+        const value = entry(event.requestId, false);
+        if (value) value.servedFromCache = true;
+      }), sessionId);
+      cdp.on('Network.loadingFinished', guarded((event) => {
+        const value = entry(event.requestId, false);
+        if (!value) return;
+        value.finishedAt = performance.now();
+        const length = event.encodedDataLength;
+        value.encodedDataLength = clamp(length, MAX_BYTES);
+      }), sessionId);
+      cdp.on('Network.loadingFailed', guarded((event) => {
+        const value = entry(event.requestId, false);
+        if (!value) return;
+        value.failed = true;
+        value.canceled = event.canceled === true;
+      }), sessionId);
+    },
+    stage(name) {
+      assert.ok(STRUCTURE_BODY_STAGES.includes(name));
+      stage = name;
+    },
+    /** Remembers which already-observed response the qualifier selected; the id and route stay in memory. */
+    select(requestId, path) {
+      const value = entry(requestId, false);
+      if (!value || !routeResponses.has(path)) incomplete = true;
+      selected = { value, sameRouteResponses: routeResponses.get(path) ?? 0,
+        calledAt: null, settledAt: null, finishedBeforeCall: null, outcome: 'not-called' };
+    },
+    /** Observes the one existing body call; the same promise outcome and error object propagate. */
+    bodyCall(call) {
+      if (selected) {
+        selected.calledAt = performance.now();
+        selected.finishedBeforeCall = selected.value ? selected.value.finishedAt !== null : null;
+        selected.outcome = 'pending';
+      }
+      const record = (outcome) => { if (selected) { selected.outcome = outcome; selected.settledAt = performance.now(); } };
+      let pending;
+      try { pending = call(); } catch (error) { record('rejected'); throw error; }
+      return pending.then((value) => { record('resolved'); return value; }, (error) => { record('rejected'); throw error; });
+    },
+    snapshot() {
+      const value = selected?.value ?? null;
+      const totalMs = elapsed(started);
+      const responseToBodyCallMs = value?.responseAt != null && selected?.calledAt != null ? elapsed(value.responseAt, selected.calledAt) : null;
+      const bodyCallMs = selected?.calledAt != null ? elapsed(selected.calledAt, selected.settledAt ?? performance.now()) : null;
+      const detail = selected && Object.freeze({
+        observationAvailable: value !== null,
+        sameRouteResponses: selected.sameRouteResponses,
+        responseObserved: value?.responseAt != null,
+        status: value?.status ?? null,
+        servedFromCache: value?.servedFromCache ?? false,
+        fromDiskCache: value?.fromDiskCache ?? false,
+        fromServiceWorker: value?.fromServiceWorker ?? false,
+        loadingFinished: value?.finishedAt != null,
+        finishedBeforeBodyCall: selected.finishedBeforeCall,
+        loadingFailed: value?.failed ?? false,
+        loadingCanceled: value?.canceled ?? false,
+        encodedDataLength: value?.encodedDataLength ?? null,
+        responseToBodyCallMs, bodyCallMs,
+        bodyOutcome: BODY_OUTCOMES.includes(selected.outcome) ? selected.outcome : 'not-called',
+      });
+      return Object.freeze({ stage, totalMs, ...counts, trackedRequests: entries.size, trackedRoutes: routeResponses.size, trackedIncomplete: incomplete, selected: detail });
+    },
+  };
+}
+
+export async function qualifyStructure(context) {
+  const observer = moduleBodyObserver();
+  try {
+    return await qualify(context, observer);
+  } catch (error) {
+    if (error !== null && typeof error === 'object' && !structureFailures.has(error)) {
+      try { structureFailures.set(error, observer.snapshot()); }
+      catch { /* Evidence never replaces the original failure. */ }
+    }
+    throw error;
+  }
+}
+
+async function qualify({ fixture, makeTarget, cdp, evaluate, ready, browserOrigin }, observer) {
   const tab = await makeTarget();
   await cdp.call('Performance.enable', {}, tab.sessionId);
   const inventoryReads = [];
@@ -155,6 +305,7 @@ export async function qualifyStructure({ fixture, makeTarget, cdp, evaluate, rea
     const url = new URL(event.request.url);
     if (/\/api\/v1\/jobs\/[^/]+\/runs\/[^/]+\/revisions\/[^/]+\/functions$/.test(url.pathname)) inventoryReads.push(url.searchParams.get('limit'));
   }, tab.sessionId);
+  observer.attach(cdp, tab.sessionId, browserOrigin);
   let peakBrowserHeapBytes = 0;
   const heap = async () => {
     const metrics = (await cdp.call('Performance.getMetrics', {}, tab.sessionId)).metrics;
@@ -213,13 +364,20 @@ export async function qualifyStructure({ fixture, makeTarget, cdp, evaluate, rea
   const owned = Math.min(24, OWNED - Math.floor(99998 / 24) * 24);
   assert.equal(await evaluate(tab, `document.querySelectorAll('table tbody tr').length`), owned);
   const implementation = await evaluate(tab, `[...document.querySelectorAll('a')].find(a => a.textContent === 'src/modules/${module}.c')?.getAttribute('href')`);
-  const requestId = moduleResponses.get(`/nested/api/v1/jobs/${fixture.jobId}/runs/${fixture.runId}/revisions/${fixture.revisionId}/modules/${module}`);
+  observer.stage('lookup');
+  const modulePath = `/nested/api/v1/jobs/${fixture.jobId}/runs/${fixture.runId}/revisions/${fixture.revisionId}/modules/${module}`;
+  const requestId = moduleResponses.get(modulePath);
   assert.ok(requestId, 'Missing originating module detail response');
+  observer.select(requestId, modulePath);
+  observer.stage('body-call');
   // Rendering has completed, so the response body consumed by the UI is available without another API read.
-  const response = await cdp.call('Network.getResponseBody', { requestId }, tab.sessionId);
+  const response = await observer.bodyCall(() => cdp.call('Network.getResponseBody', { requestId }, tab.sessionId));
+  observer.stage('body-decode');
   const snapshot = JSON.parse(response.base64Encoded ? Buffer.from(response.body, 'base64').toString('utf8') : response.body).data;
   assert.equal(snapshot.module.moduleId, module);
+  observer.stage('source-link');
   assertStructureSourceLink(implementation, { revision, browserOrigin, snapshot });
+  observer.stage('after-source-link');
   await cdp.call('Page.navigate', { url: browserOrigin + `${revision}/modules` }, tab.sessionId);
   await ready(tab, `document.body.innerText.includes('Showing 1–100 of ${fixture.modules} modules.') && document.querySelector('table caption')?.textContent === 'Recorded totals'`, 'module inventory with recorded totals');
   assert.ok(await evaluate(tab, `[...document.querySelectorAll('dt')].find(dt => dt.textContent === 'Names shared by several functions or globals')?.nextElementSibling.textContent === '1'`));

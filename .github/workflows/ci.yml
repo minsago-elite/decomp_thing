@@ -72,7 +72,7 @@ jobs:
       - name: Verify packaged upload route readiness controls
         run: node scripts/test-packaged-browser-upload.mjs
       - name: Verify packaged structure evidence controls
-        run: node --test scripts/test-packaged-browser-structure.mjs
+        run: node --test scripts/test-packaged-browser-structure.mjs scripts/test-packaged-browser-structure-body-evidence.mjs
       - name: Verify packaged DevTools target lifecycle controls
         run: node --test scripts/test-packaged-browser-target-lifecycle.mjs
       - name: Verify packaged browser target setup integration

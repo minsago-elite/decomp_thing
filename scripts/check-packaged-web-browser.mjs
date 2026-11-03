@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { qualifyUpload, qualifyUploadFailures, qualifyMeasuredUpload } from './packaged-browser-upload.mjs';
 import { seedScale, qualifyScale, dashboardFiltersWithSnapshot } from './packaged-browser-scale.mjs';
-import { seedStructure, qualifyStructure } from './packaged-browser-structure.mjs';
+import { seedStructure, qualifyStructure, structureFailureEvidence } from './packaged-browser-structure.mjs';
 import { seedLive, qualifyLive } from './packaged-browser-live.mjs';
 import { seedHistory, qualifyHistory } from './packaged-browser-history.mjs';
 import { seedSources, qualifySources } from './packaged-browser-sources.mjs';
@@ -1150,6 +1150,8 @@ try {
   report.error = safeDiagnostic(error.stack);
   // Fixed logs phase labels and bounded counts only, captured in memory before the throw (#1872).
   report.logsFailurePhase = logsFailureEvidence(error);
+  // Fixed Structure body-read facts only; observations, not a cause (#1879).
+  report.structureFailurePhase = structureFailureEvidence(error);
   report.applicationError = safeDiagnostic(applicationError);
   report.browserError = safeDiagnostic(browserError);
   report.viteError = safeDiagnostic(viteError);
