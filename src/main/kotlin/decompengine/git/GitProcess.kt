@@ -194,7 +194,7 @@ data class GitInvocation(
     val limits: GitExecutionLimits = GitExecutionLimits(),
     /** Bounded standard input, written once and closed; null keeps stdin closed. */
     val input: ByteArray? = null,
-    /** Additional variables from a fixed allowlist (commit identity and dates only). */
+    /** Additional server-owned variables from a fixed allowlist (identity, dates and private index). */
     val variables: Map<String, String> = emptyMap(),
 ) {
     init {
@@ -214,10 +214,10 @@ data class GitInvocation(
         val SUBCOMMANDS = setOf(
             "version", "init", "config", "check-ref-format", "rev-parse", "symbolic-ref", "for-each-ref",
             "status", "read-tree", "fsck", "cat-file", "ls-files", "ls-tree", "check-ignore", "update-ref",
-            "log", "diff", "diff-tree",
+            "log", "diff", "diff-tree", "add", "rm", "reset", "commit", "write-tree", "commit-tree", "hash-object", "update-index",
         )
         val VARIABLES = setOf("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_AUTHOR_DATE",
-            "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_COMMITTER_DATE")
+            "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_COMMITTER_DATE", "GIT_INDEX_FILE")
     }
 }
 

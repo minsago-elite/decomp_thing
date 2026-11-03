@@ -553,6 +553,14 @@ internal object LinuxFilesystemSyscalls {
         "open workspace directory",
     )
 
+    fun openDirectoryAt(parentFd: Int, name: ByteArray): LinuxDescriptor = openDescriptor(
+        parentFd,
+        name,
+        O_RDONLY or O_DIRECTORY or O_NOFOLLOW or O_CLOEXEC,
+        0,
+        "open workspace directory",
+    )
+
     fun openAbsolutePathOrNull(path: Path): LinuxDescriptor? = try {
         openDescriptor(
             AT_FDCWD,
@@ -589,8 +597,38 @@ internal object LinuxFilesystemSyscalls {
         if (failure.errno == ENOENT) null else throw failure
     }
 
+    fun openPathAtOrNull(parentFd: Int, name: ByteArray): LinuxDescriptor? = try {
+        openDescriptor(
+            parentFd,
+            name,
+            O_PATH or O_NOFOLLOW or O_CLOEXEC,
+            0,
+            "inspect filesystem entry",
+        )
+    } catch (failure: LinuxSyscallException) {
+        if (failure.errno == ENOENT) null else throw failure
+    }
+
     /** Opens one existing regular file below an already-pinned directory without following links. */
     fun openRegularFileAtOrNull(parentFd: Int, name: String): LinuxDescriptor? {
+        requireDescriptorRelativeName(name)
+        val opened = try {
+            openDescriptor(
+                parentFd,
+                name,
+                O_PATH or O_NOFOLLOW or O_CLOEXEC,
+                0,
+                "open descriptor-relative regular file",
+            )
+        } catch (failure: LinuxSyscallException) {
+            if (failure.errno == ENOENT) return null
+            throw failure
+        }
+        return authenticateNamedRegularFile(parentFd, name, opened, "descriptor-relative regular file")
+    }
+
+    /** Byte-preserving counterpart for Git paths that are not valid UTF-8. */
+    fun openRegularFileAtOrNull(parentFd: Int, name: ByteArray): LinuxDescriptor? {
         requireDescriptorRelativeName(name)
         val opened = try {
             openDescriptor(
@@ -1227,6 +1265,25 @@ internal object LinuxFilesystemSyscalls {
         }
     }
 
+    private fun openDescriptor(parentFd: Int, path: ByteArray, flags: Int, mode: Int, operation: String): LinuxDescriptor {
+        requireDescriptorRelativeName(path)
+        val nativePath = Memory(path.size.toLong() + 1)
+        try {
+            nativePath.write(0, path, 0, path.size)
+            nativePath.setByte(path.size.toLong(), 0)
+            val fd = retryOnInterrupted(operation) { libc.openat(parentFd, nativePath, flags, mode).toLong() }.toInt()
+            if (fd < 0) throw syscallFailure(operation)
+            return try {
+                LinuxDescriptor(fd, identity(fd))
+            } catch (failure: Throwable) {
+                close(fd)
+                throw failure
+            }
+        } finally {
+            nativePath.close()
+        }
+    }
+
     /** Reopens only the kernel-pinned object, never the mutable name that originally selected it. */
     private fun reopenRegularFile(
         authorized: LinuxDescriptor,
@@ -1262,11 +1319,27 @@ internal object LinuxFilesystemSyscalls {
         name: String,
         opened: LinuxDescriptor,
         description: String,
+    ): LinuxDescriptor = authenticateNamedRegularFile(opened, description) {
+        openPathAtOrNull(parentFd, name)
+    }
+
+    private fun authenticateNamedRegularFile(
+        parentFd: Int,
+        name: ByteArray,
+        opened: LinuxDescriptor,
+        description: String,
+    ): LinuxDescriptor = authenticateNamedRegularFile(opened, description) {
+        openPathAtOrNull(parentFd, name)
+    }
+
+    private inline fun authenticateNamedRegularFile(
+        opened: LinuxDescriptor,
+        description: String,
+        openNamed: () -> LinuxDescriptor?,
     ): LinuxDescriptor = try {
         val openedBefore = identity(opened.fd)
         requireRegularIdentity(opened.identity, openedBefore, "authenticate $description")
-        val named = openPathAtOrNull(parentFd, name)
-            ?: throw IOException("$description disappeared while it was authenticated")
+        val named = openNamed() ?: throw IOException("$description disappeared while it was authenticated")
         named.use {
             val namedIdentity = identity(named.fd)
             val openedAfter = identity(opened.fd)
@@ -1288,6 +1361,14 @@ internal object LinuxFilesystemSyscalls {
 
     private fun requireDescriptorRelativeName(name: String) {
         require(name.isNotEmpty() && name != "." && name != ".." && '/' !in name && '\u0000' !in name) {
+            "descriptor-relative regular-file name is invalid"
+        }
+    }
+
+    private fun requireDescriptorRelativeName(name: ByteArray) {
+        require(name.isNotEmpty() && name.none { it == 0.toByte() } && name.none { it == '/'.code.toByte() } &&
+            !name.contentEquals(byteArrayOf('.'.code.toByte())) &&
+            !name.contentEquals(byteArrayOf('.'.code.toByte(), '.'.code.toByte()))) {
             "descriptor-relative regular-file name is invalid"
         }
     }
@@ -1410,6 +1491,7 @@ internal object LinuxFilesystemSyscalls {
     private interface LibC : Library {
         fun syscall(number: NativeLong, directoryFd: NativeLong, path: String, how: Pointer, size: NativeLong): NativeLong
         fun openat(directoryFd: Int, path: String, flags: Int, mode: Int): Int
+        fun openat(directoryFd: Int, path: Pointer, flags: Int, mode: Int): Int
         fun close(fd: Int): Int
         fun read(fd: Int, buffer: Pointer, count: NativeLong): NativeLong
         fun write(fd: Int, buffer: Pointer, count: NativeLong): NativeLong
