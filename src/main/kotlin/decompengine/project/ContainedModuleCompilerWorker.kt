@@ -62,6 +62,8 @@ object ContainedModuleCompilerWorker {
         try {
             verifySnapshotInventory(request)
             request.inputs.forEach { input -> pinned += PinnedCompilerInput.open(request.snapshotRoot, input, currentUid) }
+            GeneratedCSourceHeaderPolicy.requireAllowed(request.sourcePath,
+                pinned.associate { it.path to it.bytes() })
             // The controller binds its authenticated owned executable snapshot at this exact
             // runtime path. Scratch stays noexec; no foreign namespace UID becomes trusted.
             StableControlFile.open(request.compilerPath, MAXIMUM_COMPILER_BYTES, "pinned module compiler").use { compiler ->
@@ -151,6 +153,16 @@ private class PinnedCompilerInput private constructor(
     private val root: Path, private val input: ContainedModuleCompilerInput,
     private val uid: Int, private val file: StableControlFile?, private val emptyIdentity: Map<String, Any>?,
 ) : AutoCloseable {
+    val path: String get() = input.path
+
+    fun bytes(): ByteArray {
+        val content = file?.readExactly(0, input.bytes.toInt(), "module compiler snapshot ${input.path}") ?: ByteArray(0)
+        require(content.size.toLong() == input.bytes && sha256(content) == input.sha256) {
+            "module compiler snapshot digest differs: ${input.path}"
+        }
+        return content
+    }
+
     fun verifyUnchanged() {
         val path = root.resolve(input.path)
         requireOwnedRegularFile(path, uid)

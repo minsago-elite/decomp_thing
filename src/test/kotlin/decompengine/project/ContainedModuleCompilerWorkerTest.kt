@@ -58,6 +58,28 @@ class ContainedModuleCompilerWorkerTest {
     }
 
     @Test
+    fun `direct worker refuses transient source or transitive header includes before compiler launch`() = withRoot { root ->
+        val cases = listOf(
+            "#include \"/tmp/transient-reports.h\"\nint alpha(void) { return 1; }" to "int alpha(void);\n",
+            "#include \"modules/alpha.h\"\nint alpha(void) { return 1; }" to
+                "#ifndef ALPHA_H\n#define ALPHA_H\n#include \"/tmp/transient-tmp.h\"\n#endif\n",
+        )
+        for ((index, pair) in cases.withIndex()) {
+            val (source, header) = pair
+            val marker = root.resolve("compiler-launched-$index")
+            val compiler = script(root.resolve("compiler-$index"), "printf launched > '$marker'; exit 0")
+            val fixture = fixture(root.resolve("fixture-$index"), compiler = compiler, source = source,
+                headerSource = header)
+            val execution = launch(fixture)
+            assertTrue(execution.exitCode != 0)
+            assertTrue(execution.stderr.contains("generated-C source policy"), execution.stderr)
+            assertTrue(execution.stdout.isEmpty())
+            assertFalse(Files.exists(marker), "compiler started before direct-worker source policy refusal")
+            assertFalse(Files.exists(fixture.request.outputDirectory.resolve("tmp")))
+        }
+    }
+
+    @Test
     @org.junit.jupiter.api.Tag("ci-live")
     fun `host root compiler is materialized without trusting its foreign namespace owner`() = withRoot { root ->
         val compiler = Path.of(System.getProperty("decompengine.analysis.io.testCompiler", "/usr/bin/cc")).toRealPath()
@@ -168,7 +190,7 @@ class ContainedModuleCompilerWorkerTest {
 
     @Test
     fun `changed source compiler digest unexpected file symlink and hardlink never reach compiler execution`() = withRoot { root ->
-        for (kind in listOf("source", "compiler", "compiler-writable", "compiler-hardlink", "unexpected", "symlink", "hardlink", "stale-object")) {
+        for (kind in listOf("source", "header", "compiler", "compiler-writable", "compiler-hardlink", "unexpected", "symlink", "hardlink", "stale-object")) {
             val parent = Files.createDirectory(root.resolve(kind))
             val marker = parent.resolve("launched")
             val compiler = script(parent.resolve("compiler"), "printf launched > '$marker'; exit 0")
@@ -178,6 +200,11 @@ class ContainedModuleCompilerWorkerTest {
                 "source" -> {
                     Files.setPosixFilePermissions(source, PosixFilePermissions.fromString("rw-------"))
                     Files.writeString(source, "changed source\n")
+                }
+                "header" -> {
+                    val header = fixture.request.snapshotRoot.resolve("include/modules/alpha.h")
+                    Files.setPosixFilePermissions(header, PosixFilePermissions.fromString("rw-------"))
+                    Files.writeString(header, "changed header bytes\n")
                 }
                 "compiler" -> {
                     Files.setPosixFilePermissions(compiler, PosixFilePermissions.fromString("rwx------"))
@@ -210,104 +237,22 @@ class ContainedModuleCompilerWorkerTest {
     }
 
     @Test
-    fun `synchronized transient header shadow header and sidecar changes refuse a successful compiler`() = withRoot { root ->
-        for (kind in listOf("header", "shadow", "sidecar")) {
-            val parent = Files.createDirectory(root.resolve(kind))
-            val realCompiler = stageCompiler(parent)
-            val sidecar = if (kind == "sidecar") precompiledHeader(parent, realCompiler) else null
-            val ready = parent.resolve("ready")
-            val proceed = parent.resolve("proceed")
-            val compiled = parent.resolve("compiled")
-            val restored = parent.resolve("restored")
-            val shim = script(realCompiler.parent.resolve("shim"), """
-                wait_for() {
-                    tries=0
-                    while [ ! -e "${'$'}1" ]; do
-                        tries=${'$'}((tries + 1))
-                        [ "${'$'}tries" -le 1000 ] || exit 125
-                        /usr/bin/sleep 0.01
-                    done
-                }
-                printf ready > '$ready'
-                wait_for '$proceed'
-                '$realCompiler' "${'$'}@"
-                status=${'$'}?
-                printf compiled > '$compiled'
-                wait_for '$restored'
-                exit "${'$'}status"
-            """.trimIndent())
-            val source = """
-                #include "modules/alpha.h"
-                #if __has_include("modules/transient.h")
-                #include "modules/transient.h"
-                #endif
-                #ifdef TRANSIENT_PCH
-                #pragma message("transient-sidecar-consumed")
-                #endif
-                int alpha(void) { return 7; }
-            """.trimIndent() + "\n"
-            val fixture = fixture(parent.resolve("run"), compiler = shim, source = source)
-            // The shadow search directory exists before the first inventory/watch registration.
-            Files.createDirectories(fixture.request.snapshotRoot.resolve("src/modules/modules"))
-            val relative = when (kind) {
-                "header" -> "include/modules/transient.h"
-                "shadow" -> "src/modules/modules/alpha.h"
-                else -> "include/modules/alpha.h.gch"
-            }
-            val transient = fixture.request.snapshotRoot.resolve(relative)
-            val execution = launch(fixture) {
-                try {
-                    await(ready)
-                    // A pragma message is a note (not a -Werror diagnostic). Require its retained
-                    // marker below to prove each transient compiler-search input was consumed.
-                    if (sidecar != null) Files.copy(sidecar, transient)
-                    else Files.writeString(transient, "#pragma message(\"transient-$kind-consumed\")\nint alpha(void);\n")
-                    Files.writeString(proceed, "go")
-                    await(compiled)
-                    Files.delete(transient)
-                } finally {
-                    // A failed assertion/setup must not strand a gated native child when the
-                    // worker is torn down. The shim also has its own finite wait ceiling.
-                    Files.writeString(proceed, "go")
-                    Files.writeString(restored, "restored")
-                }
-            }
-            assertEquals(0, execution.exitCode, execution.stderr)
-            val result = ContainedModuleCompilerResult.parse(execution.stdout)
-            result.requireBinding(fixture.request)
-            assertEquals(0, result.exitCode, "$kind compiler must have succeeded before refusal")
-            assertEquals("input-changed", result.outcome)
-            assertEquals(null, result.objectSha256)
-            assertTrue(Files.size(fixture.request.outputDirectory.resolve("module.o")) >= 52)
-            assertTrue(Files.readString(fixture.request.outputDirectory.resolve("compiler.stderr"))
-                .contains("transient-$kind-consumed"), "$kind was not consumed by the compiler")
-            assertFalse(Files.exists(transient))
-            verifyLogs(fixture, result)
-        }
-    }
-
-    private fun precompiledHeader(parent: Path, compiler: Path): Path {
-        val header = Files.writeString(parent.resolve("pch.h"), "#define TRANSIENT_PCH 1\nint alpha(void);\n")
-        val output = parent.resolve("pch.gch")
-        val diagnostics = parent.resolve("pch.log")
-        val process = ProcessBuilder(compiler.toString(), "-B${compiler.parent}/", "-std=c11", "-g", "-Wall", "-Wextra", "-Werror",
-            "-x", "c-header", header.toString(), "-o", output.toString())
-            .redirectErrorStream(true).redirectOutput(diagnostics.toFile()).start()
-        process.outputStream.close()
-        try {
-            assertTrue(process.waitFor(10, TimeUnit.SECONDS), "sidecar fixture compilation timed out")
-            assertTrue(Files.size(diagnostics) <= 65536)
-            assertEquals(0, process.exitValue(), Files.readString(diagnostics))
-        } finally {
-            if (process.isAlive) { process.destroyForcibly(); process.waitFor(5, TimeUnit.SECONDS) }
-        }
-        return output
-    }
-
-    private fun await(path: Path) {
-        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
-        while (!Files.exists(path) && System.nanoTime() < deadline) Thread.sleep(10)
-        assertTrue(Files.exists(path), "compiler handshake timed out: $path")
+    fun `compiler include probes are refused before an authenticated compiler can launch`() = withRoot { root ->
+        val marker = root.resolve("compiler-launched")
+        val compiler = script(root.resolve("compiler"), "printf launched > '$marker'; exit 0")
+        val fixture = fixture(root.resolve("run"), compiler = compiler, source = """
+            #include "modules/alpha.h"
+            #if __has_include("modules/transient.h")
+            #include "modules/transient.h"
+            #endif
+            int alpha(void) { return 7; }
+        """.trimIndent() + "\n")
+        val execution = launch(fixture)
+        assertTrue(execution.exitCode != 0)
+        assertTrue(execution.stderr.contains("unsupported preprocessing operator"), execution.stderr)
+        assertTrue(execution.stdout.isEmpty())
+        assertFalse(Files.exists(marker), "unsupported include probe launched the compiler")
+        assertFalse(Files.exists(fixture.request.outputDirectory.resolve("tmp")))
     }
 
     private data class Fixture(val root: Path, val request: ContainedModuleCompilerRequest)
@@ -316,12 +261,13 @@ class ContainedModuleCompilerWorkerTest {
     private fun fixture(root: Path, profile: ReconstructionProfile = ReconstructionProfiles.default,
         compiler: Path = stageCompiler(root),
         source: String = "#include \"modules/alpha.h\"\n#include \"alpha_internal.h\"\nint alpha(void) { return VALUE; }\n",
+        headerSource: String = "int alpha(void);\n",
         maximumWallMillis: Long = 10000, maximumOutputBytes: Long = 65536): Fixture {
         Files.createDirectories(root)
         Files.setPosixFilePermissions(root, PosixFilePermissions.fromString("rwx------"))
         val snapshot = Files.createDirectory(root.resolve("snapshot"))
         val output = Files.createDirectory(root.resolve("output"))
-        val content = mapOf("src/modules/alpha.c" to source, "include/modules/alpha.h" to "int alpha(void);\n",
+        val content = mapOf("src/modules/alpha.c" to source, "include/modules/alpha.h" to headerSource,
             "src/modules/alpha_internal.h" to "#define VALUE 7\n", "include/decomp_types.h" to "")
         val inputs = content.map { (relative, text) ->
             val path = snapshot.resolve(relative)

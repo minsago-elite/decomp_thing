@@ -81,6 +81,7 @@ internal class ContainedModuleCompilationSnapshot private constructor(
                 require(total <= ContainedModuleCompilerRequest.MAXIMUM_TOTAL_INPUT_BYTES) { "module compiler snapshot exceeds aggregate bound" }
                 bytes
             }
+            GeneratedCSourceHeaderPolicy.requireAllowed(sourcePath, contents)
             return ContainedModuleCompilationSnapshot(projectDir, sourcePath, profile, inventory, contents).also { it.requireCurrent(progress) }
         }
 

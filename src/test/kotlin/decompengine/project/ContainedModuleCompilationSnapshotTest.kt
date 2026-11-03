@@ -39,6 +39,17 @@ class ContainedModuleCompilationSnapshotTest {
         assertFailsWith<IllegalArgumentException> { ContainedModuleCompilationSnapshot.capture(root, sourcePath, profile) }
     }
 
+    @Test fun `host snapshot refuses an off inventory candidate include before compiler launch`() {
+        prepare()
+        write(sourcePath, """#include "/tmp/reports/transient.h"
+            int parser(void) { return 1; }
+        """.trimIndent())
+        val refusal = assertFailsWith<IllegalArgumentException> {
+            ContainedModuleCompilationSnapshot.capture(root, sourcePath, profile)
+        }
+        kotlin.test.assertTrue(refusal.message.orEmpty().contains("absolute or traversing include"), refusal.message)
+    }
+
     @Test fun `undeclared shadow headers precompiled sidecars and changed inventory fail closed`() {
         prepare()
         val captured = ContainedModuleCompilationSnapshot.capture(root, sourcePath, profile)
