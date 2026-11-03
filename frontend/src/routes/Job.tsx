@@ -9,6 +9,8 @@ import type { BrowserSession, RuntimeSnapshot } from '../session/session';
 import { useSession } from '../session/useSession';
 import { JobSummary } from '../jobs/JobSummary';
 import { WorkflowAvailability } from '../jobs/WorkflowAvailability';
+import { WorkflowLaunch } from '../jobs/WorkflowLaunch';
+import { useLocation } from 'preact-iso/router';
 import { GitRepositoryPanel } from '../jobs/GitRepositoryPanel';
 import { receive } from '../shared/receiptTime';
 import type { ReceiptTime } from '../shared/receiptTime';
@@ -22,6 +24,7 @@ import { panelBoundaryCopy } from '../copy/shell';
 
 function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session }: { jobId: string; basePath: string; runtime: RuntimeSnapshot; runtimeReceipt: ReceiptTime | undefined; session: BrowserSession }) {
   const { client } = usePrivateTransport(basePath);
+  const location = useLocation();
   const binding = useMemo(() => ({ client, basePath, jobId }), [client, basePath, jobId]);
   const [stored, setStored] = useState<{ binding: typeof binding; data: Received<JobData> | null; error: string; loading: boolean }>(
     { binding, data: null, error: '', loading: true });
@@ -84,10 +87,12 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session }: { job
       </dl>
       <p>{copy.completionIsAnAttemptOutcomeOnlyTheRecordedAcceptedRevision}</p>
       <p>{copy.theAttemptPageRetainsItsExactIdentityAsNewerWork}</p>
-      <p>{copy.startingExplorationReconstructionBuildsValidationOrRepairIsUnavailableIn}</p>
       <PanelBoundary name={panelBoundaryCopy.names.workflowAvailability}>
         <WorkflowAvailability runtime={runtime} {...(runtimeReceipt ? { receipt: runtimeReceipt } : {})} />
       </PanelBoundary>
+      <WorkflowLaunch key={`${job.jobId}/${job.version}`} job={job} runtime={runtime} basePath={basePath} session={session}
+        onRefresh={() => { setRefresh(value => value + 1); }}
+        onStarted={path => { if (location.url) location.route(path); else window.location.assign(path); }} />
       <GitRepositoryPanel job={job} capabilities={runtime.capabilities} basePath={basePath} session={session} />
       <a href={appPath(basePath, '/runtime')}>{copy.viewReportedWorkflowAvailability}</a>
       <JobOrganization job={job} client={client} basePath={basePath} session={session}

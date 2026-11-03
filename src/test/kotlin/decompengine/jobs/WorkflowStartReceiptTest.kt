@@ -35,6 +35,12 @@ import kotlin.test.assertTrue
 @ExtendWith(RecoveryMatrixEvidence::class)
 class WorkflowStartReceiptTest {
     @Test
+    fun `legacy start intent retains its fixed pre-selection digest`() {
+        assertEquals("841d046279a020d42fc074918a2fa7c1e91f4c2d1eeadd6a0c230414b5eb229d",
+            workflowStartIntentSha256("version_legacy_1", REQUEST))
+    }
+
+    @Test
     fun `one atomic admission retains a hashed job key and replay precedes stale CAS`() = withRoot { root ->
         val job = upload(root)
         WorkflowAttemptStore.open(root, CLOCK).use { store ->
@@ -107,6 +113,7 @@ class WorkflowStartReceiptTest {
                 REQUEST.copy(limits = LIMITS.copy(idleMs = 15_001uL)),
                 REQUEST.copy(limits = LIMITS.copy(maxOutputBytes = 1_048_577uL)),
                 REQUEST.copy(limits = LIMITS.copy(maxToolCalls = 17uL)),
+                REQUEST.copy(launchSelection = WorkflowLaunchSelection("workflow-explore-tools", "tools")),
             )
             val before = state(root, job).readBytes()
             variants.forEach { changed ->
@@ -115,6 +122,42 @@ class WorkflowStartReceiptTest {
             assertCode("IDEMPOTENCY_CONFLICT") { store.createIdempotent(job, "version_stale", REQUEST, KEY, "version_different_request") }
             assertContentEquals(before, state(root, job).readBytes())
             assertEquals(1, store.available(job).snapshot.attempts.size)
+        }
+    }
+
+    @Test
+    fun `selection is durably retained and binds idempotency while null legacy stays omitted`() = withRoot { root ->
+        val job = upload(root)
+        val selected = WorkflowLaunchSelection("workflow-reconstruct-agent", "agent")
+        val request = REQUEST.copy(launchSelection = selected)
+        lateinit var runId: String
+        WorkflowAttemptStore.open(root, CLOCK).use { store ->
+            val version = store.available(job).snapshot.version
+            val created = store.createIdempotent(job, version, request, KEY)
+            runId = created.attempt.runId
+            assertEquals(selected, created.attempt.launchSelection)
+            assertEquals(selected, created.attempt.startReceipt?.launchSelection)
+            assertTrue(state(root, job).readText().contains("\"launchSelection\": {\n        \"capabilityId\""))
+            val before = state(root, job).readBytes()
+            val replay = store.replayStart(job, request, KEY, version)!!
+            assertTrue(replay.replayed); assertEquals(selected, replay.attempt.launchSelection)
+            assertCode("IDEMPOTENCY_CONFLICT") {
+                store.replayStart(job, request.copy(launchSelection = WorkflowLaunchSelection("workflow-reconstruct-tools", "tools")), KEY, version)
+            }
+            assertContentEquals(before, state(root, job).readBytes())
+
+            val started = store.transition(job, created.attempt.runId, created.attempt.version, WorkflowTransition.Start)
+            val ended = store.transition(job, started.attempt.runId, started.attempt.version,
+                WorkflowTransition.Finish(WorkflowRunState.FAILED, WorkflowTerminalReason.FAILED))
+            val legacy = store.create(job, ended.snapshot.version, REQUEST).attempt
+            assertNull(legacy.launchSelection)
+        }
+        WorkflowAttemptStore.open(root, CLOCK).use { store ->
+            assertEquals(selected, store.available(job).snapshot.attempts.single { it.runId == runId }.launchSelection)
+            assertNull(store.available(job).snapshot.latestRun!!.launchSelection)
+            val original = state(root, job).readText()
+            state(root, job).writeText(original.replace("\"mode\": \"agent\"", "\"mode\": \"unknown\""))
+            assertTrue(store.inspect(job) is WorkflowJobInspection.Unavailable)
         }
     }
 

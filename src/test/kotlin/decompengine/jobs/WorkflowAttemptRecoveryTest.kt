@@ -22,6 +22,12 @@ import kotlin.test.assertTrue
 @ExtendWith(RecoveryMatrixEvidence::class)
 class WorkflowAttemptRecoveryTest {
     @Test
+    fun `legacy recovery intent keeps its fixed pre-selection digest`() {
+        assertEquals("435d8872b6905a732a552f058b54ff7b0c5b2ec6d68e2ea20cc45b47ab479146",
+            workflowRecoveryIntentSha256("version_legacy_1", "run_legacy_1", WorkflowRecoveryMode.RETRY, null))
+    }
+
+    @Test
     fun `retry and resume records survive reopen and replay before every CAS guard`() = withRoot { root ->
         val job = upload(root)
         lateinit var retry: WorkflowAttempt
@@ -78,6 +84,76 @@ class WorkflowAttemptRecoveryTest {
             assertCode("INVALID_PREVIOUS_RUN") { store.createIdempotent(job, store.available(job).snapshot.version,
                 retry.copy(previousRunId = completed.runId), "operator_third_key_12345", completed.version) }
             assertEquals(2, store.available(job).snapshot.attempts.size)
+        }
+    }
+
+    @Test
+    fun `recorded launch selection is preserved through retry and startup recovery`() = withRoot { root ->
+        val job = upload(root)
+        val selected = WorkflowLaunchSelection("workflow-reconstruct-agent", "agent")
+        lateinit var predecessor: WorkflowAttempt
+        lateinit var successor: WorkflowAttempt
+        WorkflowAttemptStore.open(root, CLOCK).use { store ->
+            val created = store.create(job, store.available(job).snapshot.version,
+                NewWorkflowAttempt(WorkflowKind.RECONSTRUCT, LIMITS, launchSelection = selected)).attempt
+            val running = store.transition(job, created.runId, created.version, WorkflowTransition.Start).attempt
+            predecessor = store.transition(job, running.runId, running.version,
+                WorkflowTransition.Finish(WorkflowRunState.FAILED, WorkflowTerminalReason.FAILED)).attempt
+            assertEquals(selected, predecessor.launchSelection)
+            val request = NewWorkflowAttempt(WorkflowKind.RECONSTRUCT, LIMITS, previousRunId = predecessor.runId,
+                recovery = WorkflowAttemptRecovery(WorkflowRecoveryMode.RETRY), launchSelection = selected)
+            successor = store.createIdempotent(job, store.available(job).snapshot.version, request, KEY, predecessor.version).attempt
+            assertEquals(selected, successor.launchSelection)
+            val replay = store.replayRecovery(job, predecessor.runId, predecessor.version, WorkflowRecoveryMode.RETRY, null, KEY)!!
+            assertTrue(replay.replayed); assertEquals(successor, replay.attempt)
+        }
+        WorkflowAttemptStore.open(root, CLOCK).use { store ->
+            val recovered = store.recoverAfterRestart(job) as WorkflowJobInspection.Available
+            assertEquals(WorkflowRunState.INTERRUPTED, recovered.snapshot.latestRun!!.state)
+            assertEquals(selected, recovered.snapshot.latestRun!!.launchSelection)
+            val before = state(root, job).readBytes()
+            assertEquals(successor.runId, store.replayRecovery(job, predecessor.runId, predecessor.version,
+                WorkflowRecoveryMode.RETRY, null, KEY)!!.attempt.runId)
+            assertContentEquals(before, state(root, job).readBytes())
+        }
+    }
+
+    @Test
+    fun `selected retry and resume retain selection in successor and receipt without changing recovery intent`() = withRoot { root ->
+        val job = upload(root)
+        val selected = WorkflowLaunchSelection("workflow-reconstruct-agent", "agent")
+        WorkflowAttemptStore.open(root, CLOCK).use { store ->
+            val first = store.create(job, store.available(job).snapshot.version,
+                NewWorkflowAttempt(WorkflowKind.RECONSTRUCT, LIMITS, launchSelection = selected)).attempt
+            val failed = store.transition(job, first.runId, first.version, WorkflowTransition.Start).let { started ->
+                store.transition(job, started.attempt.runId, started.attempt.version,
+                    WorkflowTransition.Finish(WorkflowRunState.FAILED, WorkflowTerminalReason.FAILED)).attempt
+            }
+            val retryRequest = NewWorkflowAttempt(WorkflowKind.RECONSTRUCT, LIMITS, previousRunId = failed.runId,
+                recovery = WorkflowAttemptRecovery(WorkflowRecoveryMode.RETRY), launchSelection = selected)
+            val retry = store.createIdempotent(job, store.available(job).snapshot.version, retryRequest, KEY, failed.version).attempt
+            assertEquals(selected, retry.launchSelection)
+            val retryReceipt = checkNotNull(retry.startReceipt)
+            assertEquals(selected, retryReceipt.launchSelection)
+            assertEquals(workflowRecoveryIntentSha256(failed.version, failed.runId, WorkflowRecoveryMode.RETRY, null),
+                retryReceipt.intentSha256)
+
+            val retryFailed = store.transition(job, retry.runId, retry.version, WorkflowTransition.Finish(
+                WorkflowRunState.FAILED, WorkflowTerminalReason.FAILED)).attempt
+            val resumeRequest = NewWorkflowAttempt(WorkflowKind.RECONSTRUCT, LIMITS, previousRunId = retryFailed.runId,
+                recovery = WorkflowAttemptRecovery(WorkflowRecoveryMode.RESUME, WorkflowResumeRestoration.AGENT_SESSION, SHA),
+                launchSelection = selected)
+            val resume = store.createIdempotent(job, store.available(job).snapshot.version, resumeRequest,
+                "selected_resume_request_1234", retryFailed.version).attempt
+            assertEquals(selected, resume.launchSelection)
+            val resumeReceipt = checkNotNull(resume.startReceipt)
+            assertEquals(selected, resumeReceipt.launchSelection)
+            assertEquals(workflowRecoveryIntentSha256(retryFailed.version, retryFailed.runId, WorkflowRecoveryMode.RESUME, null),
+                resumeReceipt.intentSha256)
+            val replay = store.replayRecovery(job, retryFailed.runId, retryFailed.version, WorkflowRecoveryMode.RESUME, null,
+                "selected_resume_request_1234")!!
+            assertTrue(replay.replayed)
+            assertEquals(resume, replay.attempt)
         }
     }
 

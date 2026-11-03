@@ -1146,6 +1146,13 @@ class WebJobService(
         // The harness is an explicit choice: an unnamed or unknown option never falls back to another one.
         val registration = registrations[request.workflow to request.harnessCapabilityId]
             ?: throw WebJobServiceException("HARNESS_UNAVAILABLE", "The requested harness capability is unavailable.")
+        request.launchSelection?.let { selected ->
+            val launch = registration.adapter.launch
+            if (launch == null || selected.capabilityId != webWorkflowCapabilityId(registration.adapter) ||
+                selected.mode != launch.mode.wireName) {
+                throw WebJobServiceException("LAUNCH_SELECTION_UNAVAILABLE", "The selected workflow capability is unavailable.")
+            }
+        }
         if (!registration.admits(request.limits)) throw WebJobServiceException("WORKFLOW_LIMITS_UNAVAILABLE", "The requested workflow limits are unavailable.")
         requirePrerequisites(registration.adapter, prerequisites)
         if (owner == null) throw WebJobServiceException("JOB_NOT_FOUND", "The requested job is unavailable.")
@@ -1351,7 +1358,14 @@ class WebJobService(
         // attempt under the workflow's sole current option, except that a different agent is never
         // substituted for one the user chose; resume can never continue under another harness.
         val sole = registrationFor(predecessor.workflow, null)
-        val registration = registrations[predecessor.workflow to predecessor.harnessCapabilityId]
+        val registration = if (predecessor.launchSelection != null) {
+            registrations[predecessor.workflow to predecessor.harnessCapabilityId]
+                ?.takeIf { registered -> registered.adapter.launch?.let { launch ->
+                    webWorkflowCapabilityId(registered.adapter) == predecessor.launchSelection.capabilityId &&
+                        launch.mode.wireName == predecessor.launchSelection.mode
+                } == true }
+                ?: return refuse("HARNESS_CHANGED")
+        } else registrations[predecessor.workflow to predecessor.harnessCapabilityId]
             ?: sole?.takeIf { mode == WorkflowRecoveryMode.RESUME || it.adapter.launch?.contactsAgent != true }
             ?: return refuse(if (mode == WorkflowRecoveryMode.RESUME && registrations.keys.any { it.first == predecessor.workflow })
                 "HARNESS_CHANGED" else "WORKFLOW_UNAVAILABLE")
@@ -1429,7 +1443,7 @@ class WebJobService(
             throw WebJobServiceException("WORKFLOW_LIMITS_UNAVAILABLE", "The attempt's recorded limits are no longer server-approved.")
         }
         val request = NewWorkflowAttempt(predecessor.workflow, predecessor.limits, predecessor.inputRevisionId,
-            decision.registration.harnessCapabilityId, predecessor.runId, decision.recovery)
+            decision.registration.harnessCapabilityId, predecessor.runId, decision.recovery, predecessor.launchSelection)
         val job = store.get(jobId)
         val admitted = publishStart(jobId) {
             owner.createIdempotent(jobId, view.snapshot.version, request, requestKey, expectedRunVersion)

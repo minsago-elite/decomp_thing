@@ -13,10 +13,12 @@ data class WorkflowStartReceipt(
     val requestKeyDigest: String,
     val expectedRequestVersion: String,
     val intentSha256: String,
+    val launchSelection: WorkflowLaunchSelection? = null,
 ) {
     internal fun encode(): JsonObject = buildJsonObject {
         put("runId", runId); put("requestKeyDigest", requestKeyDigest)
         put("expectedRequestVersion", expectedRequestVersion); put("intentSha256", intentSha256)
+        launchSelection?.let { put("launchSelection", it.encode()) }
     }
 
     internal fun validate(attempt: WorkflowAttempt) {
@@ -24,21 +26,25 @@ data class WorkflowStartReceipt(
             "invalid workflow start receipt identity"
         }
         require(VERSION.matches(expectedRequestVersion)) { "invalid workflow start request version" }
+        require(launchSelection == attempt.launchSelection) { "workflow start receipt selection differs from its attempt" }
         require(intentSha256 == workflowStartIntentSha256(expectedRequestVersion, NewWorkflowAttempt(
             attempt.workflow, attempt.limits, attempt.inputRevisionId, attempt.harnessCapabilityId, attempt.previousRunId,
-            attempt.recovery,
+            attempt.recovery, attempt.launchSelection,
         ))) { "workflow start receipt intent differs from its attempt" }
     }
 
     companion object {
         internal fun decode(value: JsonObject): WorkflowStartReceipt {
-            require(value.keys == setOf("runId", "requestKeyDigest", "expectedRequestVersion", "intentSha256")) {
+            val required = setOf("runId", "requestKeyDigest", "expectedRequestVersion", "intentSha256")
+            require(value.keys == required || value.keys == required + "launchSelection") {
                 "invalid workflow start receipt fields"
             }
             fun string(name: String): String = (value.getValue(name) as? JsonPrimitive)
                 ?.takeIf(JsonPrimitive::isString)?.content ?: error("workflow start receipt string required")
             return WorkflowStartReceipt(string("runId"), string("requestKeyDigest"),
-                string("expectedRequestVersion"), string("intentSha256"))
+                string("expectedRequestVersion"), string("intentSha256"),
+                if ("launchSelection" in value) WorkflowLaunchSelection.decode(value.getValue("launchSelection") as? JsonObject
+                    ?: error("workflow start receipt selection object required")) else null)
         }
     }
 }
@@ -56,12 +62,14 @@ internal fun workflowStartIntentSha256(expectedRequestVersion: String, request: 
     require(VERSION.matches(expectedRequestVersion)) { "invalid workflow start request version" }
     // A recovery command has its own closed intent; a plain start's existing digest is unchanged.
     request.recovery?.let { recovery ->
-        return workflowRecoveryIntentSha256(expectedRequestVersion, checkNotNull(request.previousRunId), recovery.mode, request.inputRevisionId)
+        return workflowRecoveryIntentSha256(expectedRequestVersion, checkNotNull(request.previousRunId), recovery.mode,
+            request.inputRevisionId)
     }
     val intent = buildJsonObject {
         put("expectedRequestVersion", expectedRequestVersion)
         put("workflow", request.workflow.wireName); put("inputRevisionId", request.inputRevisionId)
         put("harnessCapabilityId", request.harnessCapabilityId); put("previousRunId", request.previousRunId)
+        request.launchSelection?.let { put("launchSelection", it.encode()) }
         put("limits", buildJsonObject {
             put("wallClockMs", request.limits.wallClockMs.toString()); put("idleMs", request.limits.idleMs.toString())
             put("maxOutputBytes", request.limits.maxOutputBytes.toString()); put("maxToolCalls", request.limits.maxToolCalls.toString())

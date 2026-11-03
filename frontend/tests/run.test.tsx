@@ -705,3 +705,69 @@ it('retains recorded harness context on a same-attempt transient read and clears
     expect(fetch).toHaveBeenCalledTimes(3);
   } finally { auth.dispose(); }
 });
+
+it('renders the persisted launch selection after a reload without consulting current capabilities', async () => {
+  const auth = await session();
+  const selection = { capabilityId: 'workflow-reconstruct-agent', mode: 'agent' as const };
+  const fetch = await recordedRunTransport(auth, { ...sample, launchSelection: selection }, { ...sample, launchSelection: selection });
+  history.replaceState(null, '', `/nested/jobs/${sample.jobId}/runs/${sample.runId}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    expect(await screen.findByText('workflow-reconstruct-agent')).toBeTruthy();
+    expect(screen.getByText('Recorded launch option').nextElementSibling?.textContent).toBe('workflow-reconstruct-agent');
+    expect(screen.getByText('Recorded launch mode').nextElementSibling?.textContent).toBe('configured agent (agent)');
+    expect(screen.queryByText(/explicitly started in evidence-only mode/)).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh attempt' }));
+    await waitFor(() => expect(transport.get).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.queryByText(/^Refreshing attempt/)).toBeNull());
+    expect(screen.getByText('Recorded launch option').nextElementSibling?.textContent).toBe('workflow-reconstruct-agent');
+    expect(transport.get.mock.calls.map(call => call[0])).toEqual(['run', 'run']);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  } finally { auth.dispose(); }
+});
+
+it('shows evidence-only limitations for an attempt recorded in that mode', async () => {
+  const auth = await session();
+  await recordedRunTransport(auth, { ...sample, launchSelection: { capabilityId: 'workflow-reconstruct-evidence-only', mode: 'evidence-only' } });
+  history.replaceState(null, '', `/nested/jobs/${sample.jobId}/runs/${sample.runId}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    expect(await screen.findByText('workflow-reconstruct-evidence-only')).toBeTruthy();
+    expect(screen.getByText('Recorded launch mode').nextElementSibling?.textContent).toBe('evidence only (evidence-only)');
+    expect(screen.getByRole('note').textContent).toMatch(/unresolved stubs.*never substituted for an unavailable agent/);
+  } finally { auth.dispose(); }
+});
+
+it.each([['absent', undefined], ['null', null]] as const)('labels a legacy %s launch selection as unrecorded', async (_label, recorded) => {
+  const auth = await session();
+  const legacy: Run = { ...sample };
+  if (recorded === undefined) delete legacy.launchSelection; else legacy.launchSelection = recorded;
+  await recordedRunTransport(auth, legacy);
+  history.replaceState(null, '', `/nested/jobs/${sample.jobId}/runs/${sample.runId}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    expect(await screen.findByText('Recorded launch option')).toBeTruthy();
+    for (const label of ['Recorded launch option', 'Recorded launch mode']) {
+      expect(screen.getByText(label).nextElementSibling?.textContent).toBe('Unrecorded: this attempt predates launch option recording');
+    }
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.queryByText(/explicitly started in evidence-only mode/)).toBeNull();
+  } finally { auth.dispose(); }
+});
+
+it.each([
+  ['an unknown mode', { capabilityId: 'workflow-reconstruct-agent', mode: 'fallback' }],
+  ['a missing mode', { capabilityId: 'workflow-reconstruct-agent' }],
+  ['an invalid identity', { capabilityId: '/private/option', mode: 'agent' }],
+  ['a string', 'workflow-reconstruct-agent'],
+] as const)('rejects a launch selection with %s through the actual decoder', async (_label, value) => {
+  const auth = await session();
+  await recordedRunTransport(auth, { ...sample, launchSelection: value as unknown as Run['launchSelection'] });
+  history.replaceState(null, '', `/nested/jobs/${sample.jobId}/runs/${sample.runId}`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    expect(await screen.findByRole('alert')).toBeTruthy();
+    expect(screen.queryByText('Recorded launch option')).toBeNull();
+    await expect(transport.get.mock.results[0]?.value).rejects.toMatchObject({ code: 'invalid_response' });
+  } finally { auth.dispose(); }
+});

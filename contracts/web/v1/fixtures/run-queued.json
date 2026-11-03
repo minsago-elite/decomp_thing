@@ -16,6 +16,10 @@
     "resultRevisionId": null,
     "acceptance": "not-evaluated",
     "harnessCapabilityId": "harness_acp",
+    "launchSelection": {
+      "capabilityId": "workflow-reconstruct-agent",
+      "mode": "agent"
+    },
     "terminalReason": null,
     "usage": null,
     "limits": {
