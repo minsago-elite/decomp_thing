@@ -1698,5 +1698,61 @@ class TransientStartObservationTest(unittest.TestCase):
         self.assertEqual(len(f.starts), 2)
         self.assertEqual(len(f.queries), 1)
 
+
+class RootlessHostHelperPathTest(unittest.TestCase):
+    def contract(self, role="rootless"):
+        fixture = OwnerTest('test_supervisor_child_environment_rejects_ambient_docker_and_rootless_toggles')
+        fixture.setUp()
+        self.addCleanup(fixture.tearDown)
+        owner = fixture.make_owner(FakeBackend())
+        manifest = fixture.reserve(owner)
+        relative = 'v/tools/docker-rootless-extras/dockerd-rootless.sh' if role == 'rootless' else 'v/tools/buildkit/bin/buildkitd'
+        executable = fixture.root / relative
+        executable.parent.mkdir(parents=True)
+        executable.write_bytes(b'authored executable fixture; never executed')
+        executable.chmod(0o700)
+        argv, env = owner_module.fixed_launch_profile(fixture.root, role, manifest['ownerToken'], 1000)
+        manifest['roles'][role] = {'intent': {'argv': argv, 'env': env,
+            'launcherSha256': hashlib.sha256(executable.read_bytes()).hexdigest()}}
+        return fixture, manifest, owner_module._fixed_child(manifest, role)
+
+    def test_pinned_launcher_sysctl_name_resolves_in_the_trusted_host_sbin(self):
+        import shutil
+        fixture, _, (_, env, _, _) = self.contract()
+        # Fake every executable filesystem access. No host helper is inspected or run.
+        with mock.patch.object(shutil, '_access_check', side_effect=lambda path, mode: path == '/usr/sbin/sysctl') as access:
+            self.assertEqual(shutil.which('sysctl', path=env['PATH']), '/usr/sbin/sysctl')
+        self.assertEqual([call.args[0] for call in access.call_args_list], [
+            str(fixture.root / 'v/tools/docker-rootless-extras/sysctl'),
+            str(fixture.root / 'v/tools/docker/sysctl'), '/usr/bin/sysctl', '/bin/sysctl', '/usr/sbin/sysctl'])
+
+    def test_bundle_tool_precedence_and_fixed_path_ignore_the_ambient_environment(self):
+        import shutil
+        fixture, manifest, (_, env, _, _) = self.contract()
+        with mock.patch.dict(os.environ, {'PATH': '/attacker:/usr/local/sbin'}, clear=False):
+            actual = owner_module._fixed_child(manifest, 'rootless')[1]
+        self.assertEqual(actual, env)
+        self.assertEqual(env['PATH'].split(':'), [str(fixture.root / 'v/tools/docker-rootless-extras'),
+            str(fixture.root / 'v/tools/docker'), '/usr/bin', '/bin', '/usr/sbin'])
+        pinned = str(fixture.root / 'v/tools/docker-rootless-extras/rootlesskit')
+        with mock.patch.object(shutil, '_access_check', side_effect=lambda path, mode: path in (pinned, '/usr/sbin/rootlesskit')):
+            self.assertEqual(shutil.which('rootlesskit', path=env['PATH']), pinned)
+        manifest['roles']['rootless']['intent']['env']['PATH'] = '/attacker'
+        with self.assertRaisesRegex(owner_module.Refusal, 'unapproved variable'):
+            owner_module._fixed_child(manifest, 'rootless')
+
+    def test_buildkit_environment_does_not_gain_sbin(self):
+        fixture, _, (_, env, _, _) = self.contract('buildkit')
+        self.assertEqual(env['PATH'], '/usr/bin:/bin')
+        self.assertEqual(env, {'PATH': '/usr/bin:/bin', 'LANG': 'C', 'LC_ALL': 'C', 'HOME': str(fixture.root / 'v/home')})
+
+    def test_an_absent_helper_does_not_resolve_through_ambient_search_paths(self):
+        import shutil
+        _, _, (_, env, _, _) = self.contract()
+        with mock.patch.dict(os.environ, {'PATH': '/attacker'}), mock.patch.object(shutil, '_access_check', return_value=False) as access:
+            self.assertIsNone(shutil.which('sysctl', path=env['PATH']))
+        self.assertTrue(all('/attacker' not in call.args[0] for call in access.call_args_list))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -943,7 +943,9 @@ def _fixed_child(manifest: dict, role: str) -> tuple[list[str], dict[str, str], 
         expected_exe = str(root / "v" / "tools" / "docker-rootless-extras" / "rootlesskit")
         expected_sha = PINNED_TOOL_HASHES["rootlesskit"]
     rootless_tools = root / "v" / "tools" / "docker-rootless-extras"
-    safe_env = {"PATH": (f"{rootless_tools}:{root}/v/tools/docker:/usr/bin:/bin"
+    # The pinned rootless launcher invokes sysctl by name through nsenter.
+    # Its trusted host location is /usr/sbin; keep this addition role-local.
+    safe_env = {"PATH": (f"{rootless_tools}:{root}/v/tools/docker:/usr/bin:/bin:/usr/sbin"
                          if role == "rootless" else "/usr/bin:/bin"),
                 "LANG": "C", "LC_ALL": "C"}
     if role == "rootless":
