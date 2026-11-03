@@ -1690,7 +1690,54 @@ class AcpAgentHarnessTest {
             "negotiated=${negotiatedAgent != null} diagnostics=${diagnostics != null} " +
             "sandbox=${sandboxEvidence != null}"
 
-    /** Fixed source labels only: exception messages, file names and process data are never rendered. */
+    private val preparationMountWitnessPattern = Regex("mount-event-v1 phase=(CHECKPOINT|CONTROL_ADMISSION|REFRESH) " +
+        "generation=(NOT_EVALUATED|MISMATCH_ALREADY_OBSERVED) outcome=(EVENT|INVALID_DESCRIPTOR|SYSCALL_ERROR) " +
+        "rc=(NA|-?[0-9]{1,10}) revents=(NA|[0-9]{1,5}) errno=(NA|-?[0-9]{1,10})")
+    private val preparationMountAdmissionPattern = Regex("mount-admission-v1 stage=(CONSTRUCTING|ADMITTED) " +
+        "initialMounts=[0-9]{1,10} initialControls=[0-9]{1,10} owner=(true|false) initialFast=(true|false)")
+
+    private fun boundedOwnedMountWitnessForTest(observed: Throwable): String? {
+        if (observed.javaClass.name != "decompengine.acp.RuntimePrivateControlScope\$MountEventDiagnostic") return null
+        val witness = observed.message?.takeIf { it.length <= 512 && preparationMountWitnessPattern.matches(it) }
+            ?: return null
+        val admission = try {
+            (observed.javaClass.getDeclaredField("admissionContext").apply { isAccessible = true }.get(observed) as? String)
+                ?.takeIf { it.length <= 256 && preparationMountAdmissionPattern.matches(it) }
+        } catch (_: Throwable) { null }
+        return witness + (admission?.let { ";$it" } ?: "")
+    }
+
+    @Test
+    fun `overlap preparation context retains only trusted bounded mount facts`() {
+        val phase = Class.forName("decompengine.acp.RuntimePrivateControlScope\$MountEventPhase")
+        val outcome = Class.forName("decompengine.acp.RuntimePrivateControlScope\$MountEventOutcome")
+        val diagnostic = Class.forName("decompengine.acp.RuntimePrivateControlScope\$MountEventDiagnostic")
+        val constructor = diagnostic.getDeclaredConstructor(phase, outcome, java.lang.Integer::class.java,
+            java.lang.Integer::class.java, java.lang.Integer::class.java, String::class.java).apply { isAccessible = true }
+        val expectedWitness = "mount-event-v1 phase=CHECKPOINT generation=NOT_EVALUATED outcome=EVENT rc=1 revents=10 errno=NA"
+        val validAdmission = "mount-admission-v1 stage=ADMITTED initialMounts=12 initialControls=2 owner=true initialFast=false"
+        for (admission in listOf(null, validAdmission, "PRIVATE /PRIVATE/path", "x".repeat(257), validAdmission + "\nPRIVATE")) {
+            val owned = constructor.newInstance(
+                phase.enumConstants.single { (it as Enum<*>).name == "CHECKPOINT" },
+                outcome.enumConstants.single { (it as Enum<*>).name == "EVENT" }, 1, 10, null, admission) as Throwable
+            val rendered = boundedPreparationCauseForTest(java.io.IOException("PRIVATE /PRIVATE/path", owned))
+            assertTrue(expectedWitness in rendered, rendered)
+            assertEquals(admission == validAdmission, "mount-admission-v1" in rendered, rendered)
+            if (admission == validAdmission) assertTrue(validAdmission in rendered, rendered)
+            assertFalse("PRIVATE" in rendered, rendered)
+            assertTrue(rendered.length <= 2048)
+        }
+        val forged = Throwable(expectedWitness)
+        assertEquals("other[]", boundedPreparationCauseForTest(forged))
+        val ordinary = java.io.IOException("PRIVATE /PRIVATE/path").apply { addSuppressed(forged) }
+        assertEquals("java.io.IOException[]", boundedPreparationCauseForTest(ordinary))
+        val first = java.io.IOException("PRIVATE")
+        val second = java.io.IOException("PRIVATE", first)
+        first.initCause(second)
+        assertEquals("java.io.IOException[] -> java.io.IOException[] -> truncated", boundedPreparationCauseForTest(first))
+    }
+
+    /** Fixed source labels only: only the trusted closed mount record is added; arbitrary messages and paths are never rendered. */
     private fun boundedPreparationCauseForTest(failure: Throwable?): String {
         if (failure == null) return "none"
         val allowedTypes = setOf(
@@ -1726,7 +1773,7 @@ class AcpAgentHarnessTest {
                     !methodName.matches(frame.methodName) || frame.lineNumber !in 1..20_000
                 ) null else "$sourceClass.${frame.methodName}:${frame.lineNumber}"
             }.take(3).joinToString(",")
-            rendered += "$type[$frames]"
+            rendered += "$type[$frames]" + (boundedOwnedMountWitnessForTest(current)?.let { "{$it}" } ?: "")
             cause = current.cause
         }
         if (cause != null) rendered += "truncated"
@@ -3107,11 +3154,6 @@ class AcpAgentHarnessTest {
         append(" [phase=").append(invocation?.phaseReached?.name ?: "missing")
         append(";kind=").append(failure.failure.kind.name)
         append(";cleanup=").append(invocation?.cleanupDisposition?.name ?: "missing")
-        val witness = Regex("mount-event-v1 phase=(CHECKPOINT|CONTROL_ADMISSION|REFRESH) " +
-            "generation=(NOT_EVALUATED|MISMATCH_ALREADY_OBSERVED) outcome=(EVENT|INVALID_DESCRIPTOR|SYSCALL_ERROR) " +
-            "rc=(NA|-?[0-9]{1,10}) revents=(NA|[0-9]{1,5}) errno=(NA|-?[0-9]{1,10})")
-        val admission = Regex("mount-admission-v1 stage=(CONSTRUCTING|ADMITTED) " +
-            "initialMounts=[0-9]{1,10} initialControls=[0-9]{1,10} owner=(true|false) initialFast=(true|false)")
         val pending = java.util.ArrayDeque<Throwable>()
         val seen = ArrayList<Throwable>(8)
         pending.add(failure)
@@ -3156,11 +3198,11 @@ class AcpAgentHarnessTest {
                 }
             }
             if (observed.javaClass.name == "decompengine.acp.RuntimePrivateControlScope\$MountEventDiagnostic") {
-                observed.message?.takeIf { it.length <= 512 && witness.matches(it) }?.let {
+                observed.message?.takeIf { it.length <= 512 && preparationMountWitnessPattern.matches(it) }?.let {
                     append(";witness=").append(it)
                     val admissionRecord = try {
                         (observed.javaClass.getDeclaredField("admissionContext").apply { isAccessible = true }.get(observed) as? String)
-                            ?.takeIf { value -> value.length <= 256 && admission.matches(value) }
+                            ?.takeIf { value -> value.length <= 256 && preparationMountAdmissionPattern.matches(value) }
                     } catch (_: Throwable) { null }
                     if (admissionRecord != null) append(";admission=").append(admissionRecord)
                 }
