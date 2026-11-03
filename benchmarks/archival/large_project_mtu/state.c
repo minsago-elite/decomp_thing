@@ -1,5 +1,9 @@
-/* SPDX-License-Identifier: CC0-1.0 */
-#include "project.h"
+#include "shared.h"
 
-project_state shared_state = { .accumulated = 2, .visits = 1 };
-int project_bias = 7;
+int archive_bias = 7;
+archive_state shared_archive_state = { 2, 0 };
+
+int store_state_bias(archive_state *state) {
+    state->runs++;
+    return state->adjustment;
+}

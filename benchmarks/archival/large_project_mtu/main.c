@@ -1,20 +1,20 @@
-/* SPDX-License-Identifier: CC0-1.0 */
-#include "project.h"
-
+#include "shared.h"
 #include <stdio.h>
-#include <stdlib.h>
+#include <string.h>
 
 int main(int argc, char **argv) {
-    char input[64];
-    int value;
-    if (argc > 1) {
-        value = parse_value(argv[1]);
-    } else if (fgets(input, sizeof(input), stdin) != NULL) {
-        value = parse_value(input);
-    } else {
-        value = 1;
+    char value[128] = {0};
+    if (argc >= 3 && strcmp(argv[1], "--file") == 0) {
+        FILE *input = fopen(argv[2], "r");
+        if (input == NULL || fgets(value, sizeof(value), input) == NULL) return 4;
+        fclose(input);
+    } else if (argc > 1) {
+        snprintf(value, sizeof(value), "%s", argv[1]);
+    } else if (fgets(value, sizeof(value), stdin) == NULL) {
+        strcpy(value, "default");
     }
-    shared_state.visits++;
-    shared_state.accumulated += render_value(value) + read_value();
-    return report_value(measure_value((int)shared_state.accumulated));
+    value[strcspn(value, "\r\n")] = '\0';
+    printf("%s:%d\n", value, archive_bias + store_state_bias(&shared_archive_state) +
+        parse_3() + render_4() + store_5() + util_6());
+    return argc > 3 ? 3 : 0;
 }

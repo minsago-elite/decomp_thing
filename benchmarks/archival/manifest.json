@@ -31,27 +31,35 @@
     },
     {
       "id": "large_project_mtu",
+      "source": "large_project_mtu/main.c",
+      "sourceSha256": "035e3ddce8a13a0c30a8e4d74d43e37957d45404d2b6b99614be8b08fe83008d",
       "sourceFiles": [
-        {"path":"large_project_mtu/main.c","sha256":"23c5dd3503eb1131a6c14f3e1c660c90e46f98857e853226f00c3988327c77ff","kind":"translation-unit"},
-        {"path":"large_project_mtu/parse.c","sha256":"72fd808662f9ed2036202f8c0e7e620b56e39c4af7d867193121021d1b5723f4","kind":"translation-unit"},
-        {"path":"large_project_mtu/render.c","sha256":"9ca0d3ff52ea53e8d9c00fbe8f067c91f5459aac91ba04fc8b1efd6d15f6b7fd","kind":"translation-unit"},
-        {"path":"large_project_mtu/state.c","sha256":"9ba3045d1404543cdd75202d6ba69b8b34742a665584418815896a0ef71dd97a","kind":"translation-unit"},
-        {"path":"large_project_mtu/io.c","sha256":"0ff5563f54e97eebafeeb2e170c6811c3cdb19243705df3d015bb688e2b7339d","kind":"translation-unit"},
-        {"path":"large_project_mtu/measure.c","sha256":"f3372529741a5d0b3364fe8d873866cb4ff44a5dd21e8be5519f7fa75eabd776","kind":"translation-unit"},
-        {"path":"large_project_mtu/report.c","sha256":"81481856cc5ed94e248cacfa6385887c00ee907cf84de5293ecb625519de1e34","kind":"translation-unit"},
-        {"path":"large_project_mtu/project.h","sha256":"fd953081d51b2645f019292fbda4eeca111a2950b9b213ef88a8029fd38d197e","kind":"shared-header"}
+        {"path":"large_project_mtu/main.c","sha256":"035e3ddce8a13a0c30a8e4d74d43e37957d45404d2b6b99614be8b08fe83008d"},
+        {"path":"large_project_mtu/state.c","sha256":"1b66cb7713a74c3f7d43f9bf72790d9a88627aa24aa7b4597fb1b76c4564babe"},
+        {"path":"large_project_mtu/parser.c","sha256":"da4e4d7d78a76b52ee47aed7368e9e03be89ac7d59eec4710851e2ae743397be"},
+        {"path":"large_project_mtu/renderer.c","sha256":"de64e0af480cedac5f115e41807b4dc987b1e172a39d1caa8dcda13f7deddbdd"},
+        {"path":"large_project_mtu/store.c","sha256":"fb98fd78a3e67e7aa400b9769675d7792db61debc48443e45a0e3f3394a99be6"},
+        {"path":"large_project_mtu/util.c","sha256":"ed5e77f1b047aaa845edb0c27b07f1d3b891557ef4a9fd6a12d369fe6ff6cb1d"},
+        {"path":"large_project_mtu/shared.h","sha256":"003300a0139b9f9296fcfafa7916c0f9b5e6f91f8b88c13fe19066a6e7c95bfb"}
       ],
-      "translationUnitCount": 7,
-      "linkOrder": ["main.c", "parse.c", "render.c", "state.c", "io.c", "measure.c", "report.c"],
-      "compilerVariants": ["gcc -std=c11 -O2 -fPIE -pie -Wl,--build-id=none", "strip --strip-all"],
-      "compiler": "16.2.1_p20260926 (GCC)",
+      "translationUnits": [
+        "large_project_mtu/main.c",
+        "large_project_mtu/state.c",
+        "large_project_mtu/parser.c",
+        "large_project_mtu/renderer.c",
+        "large_project_mtu/store.c",
+        "large_project_mtu/util.c"
+      ],
+      "linkOrder": ["main.c", "state.c", "parser.c", "renderer.c", "store.c", "util.c"],
+      "compilerVariants": ["gcc -Wall -Wextra -std=c11 -O2 -fPIE -pie -Wl,--build-id=none; sources in linkOrder"],
       "binaries": [
-        {"path":"binaries/linux-x86_64/large_project_mtu-symbols","sha256":"a908caa6051f93dc88e579f5ca0f8d8b9d5654338257384a7be3d254eddd3e8e","symbols":"present","optimization":"O2","pie":true},
-        {"path":"binaries/linux-x86_64/large_project_mtu-stripped","sha256":"75586772462bf24efa9fbe90140d1c4cf633f132ae5c8eda6456dc3eb430d5ab","symbols":"stripped","optimization":"O2","pie":true}
+        {"path":"binaries/linux-x86_64/large_project_mtu-symbols","sha256":"5327dd3bcb325d2de8851e01624b0c1321c9c8f4971bfbecb080447b8f2f2650","symbols":"present","optimization":"O2","pie":true},
+        {"path":"binaries/linux-x86_64/large_project_mtu-stripped","sha256":"940ea9fd464d194b3e3ea9e8cfaac9ae084afb5fe12fc4b14ca933a0d9819ea7","symbols":"stripped","optimization":"O2","pie":true}
       ],
-      "inputSurfaces": ["argv", "stdin", "libc", "shared-global-state", "cross-translation-unit-calls"],
-      "expectedFunctionCountMinimum": 6,
-      "expectedModuleCountMinimum": 7
+      "inputSurfaces": ["argv", "stdin", "file", "libc", "shared-global-state", "multiple-translation-units"],
+      "expectedFunctionCountMinimum": 50,
+      "expectedModuleCountMinimum": 6,
+      "expectedTranslationUnitCount": 6
     }
   ]
 }
