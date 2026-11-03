@@ -40,6 +40,7 @@ internal class ContainedModuleCompilationRuntimeConfiguration private constructo
     val compilerExecHelperSource: Path? get() = declaration.compilerExecHelperSource
     val compilerExecHelperPath: Path? get() = declaration.compilerExecHelperPath
     val compilerExecHelperSha256: String? get() = declaration.compilerExecHelperSha256
+    val compilerInternalIncludePath: Path? get() = declaration.compilerInternalIncludePath
     val compilerRuntimeMounts: List<FullTreeFunctionObservationRuntimeMount> get() = declaration.compilerRuntimeMounts
     val compilerRuntimeExecuteRoot: Path get() = declaration.compilerRuntimeExecuteRoot
     val compilerRuntimeExecuteFiles: List<Path> get() = declaration.compilerRuntimeExecuteFiles
@@ -66,6 +67,7 @@ internal class ContainedModuleCompilationRuntimeConfiguration private constructo
         val compilerExecHelperSource: Path?,
         val compilerExecHelperPath: Path?,
         val compilerExecHelperSha256: String?,
+        val compilerInternalIncludePath: Path?,
         compilerRuntimeMounts: List<FullTreeFunctionObservationRuntimeMount>,
         val scratchMount: Path,
         val scratchPolicy: FullTreeDiskScratchPolicy,
@@ -90,7 +92,8 @@ internal class ContainedModuleCompilationRuntimeConfiguration private constructo
         }
         val configurationSha256: String = sha256(OracleJson.canonicalBytes(JsonObject(mapOf(
             "provider" to JsonPrimitive(if (configurationRecord["schemaVersion"] == JsonPrimitive(1))
-                "contained-generated-c-module-runtime-v1" else "contained-generated-c-module-runtime-v2"),
+                "contained-generated-c-module-runtime-v1" else if (configurationRecord["schemaVersion"] == JsonPrimitive(2))
+                    "contained-generated-c-module-runtime-v2" else "contained-generated-c-module-runtime-v3"),
             "configuration" to configurationRecord,
             "isolationConfigurationSha256" to JsonPrimitive(isolation.canonicalSha256),
         )), CONFIG_LIMITS))
@@ -160,6 +163,12 @@ internal class ContainedModuleCompilationRuntimeConfiguration private constructo
             ).forEach { (executable, digest) -> verifyPinnedFile(executable, digest, executable = true) }
             verifyPinnedFile(requireNotNull(declaration.compilerExecHelperSource),
                 requireNotNull(declaration.compilerExecHelperSha256), executable = true)
+            declaration.compilerInternalIncludePath?.let { destination ->
+                val mount = declaration.compilerRuntimeMounts.single { destination.startsWith(it.destination) }
+                val source = mount.source.resolve(mount.destination.relativize(destination))
+                requireRootOwned(source, directory = true)
+                requireRootOwned(source.resolve("stddef.h"), directory = false)
+            }
             isolation.workerClassPath.forEach { verifyPinnedFile(it.path, it.expectedSha256, executable = false) }
             // The scratch root belongs to the service UID, unlike its root-owned ancestors.
             // Its live owner, mount flags, ext4 capacity and exclusive use are checked at acquire.
@@ -170,19 +179,20 @@ internal class ContainedModuleCompilationRuntimeConfiguration private constructo
             val document = OracleJson.parse(bytes, CONFIG_LIMITS) as? JsonObject
                 ?: throw IllegalArgumentException("contained module compiler configuration must be an object")
             val schemaVersion = document.integer("schemaVersion").toInt()
-            require(schemaVersion in 1..2) { "unsupported contained module compiler runtime schema" }
-            document.exact(if (schemaVersion == 1) ROOT_FIELDS_V1 else ROOT_FIELDS_V2, "runtime")
+            require(schemaVersion in 1..3) { "unsupported contained module compiler runtime schema" }
+            document.exact(when (schemaVersion) { 1 -> ROOT_FIELDS_V1; 2 -> ROOT_FIELDS_V2; else -> ROOT_FIELDS_V3 }, "runtime")
             val profileId = document.text("profileId")
             requireRegisteredProfile(profileId)
             val isolation = parseIsolation(document.objectField("isolation"))
             val compiler = document.objectField("compiler").also { it.exact(setOf("path", "sha256"), "compiler") }
             val compilerPath = compiler.path("path")
             val compilerSha256 = compiler.digest("sha256")
-            val helper = if (schemaVersion == 2) document.objectField("compilerExecHelper")
+            val helper = if (schemaVersion >= 2) document.objectField("compilerExecHelper")
                 .also { it.exact(setOf("source", "path", "sha256"), "compiler exec trampoline") } else null
             val helperSource = helper?.path("source")
             val helperPath = helper?.path("path")
             val helperSha256 = helper?.digest("sha256")
+            val compilerInternalIncludePath = if (schemaVersion == 3) document.path("compilerInternalIncludePath") else null
             val mounts = document.mounts("compilerRuntimeMounts")
             val scratch = document.path("scratchMount")
             val managerControlGroup = document.path("managerControlGroup").toString()
@@ -231,7 +241,7 @@ internal class ContainedModuleCompilationRuntimeConfiguration private constructo
             require(compilerMount != null && compilerMount.source == compilerMount.destination) {
                 "compiler executable must belong to exactly one same-path compiler runtime tree"
             }
-            if (schemaVersion == 2) {
+            if (schemaVersion >= 2) {
                 require(mounts.singleOrNull { mount ->
                     helperSource!!.startsWith(mount.source) && helperPath!!.startsWith(mount.destination) &&
                         mount.source.resolve(mount.destination.relativize(helperPath)) == helperSource
@@ -240,10 +250,20 @@ internal class ContainedModuleCompilationRuntimeConfiguration private constructo
                     "compiler trampoline and compiler executable must be distinct"
                 }
             }
+            if (schemaVersion == 3) {
+                val internalInclude = requireNotNull(compilerInternalIncludePath)
+                val mount = mounts.singleOrNull { internalInclude.startsWith(it.destination) }
+                    ?: throw IllegalArgumentException("compiler internal include path is outside authenticated runtime mounts")
+                val source = mount.source.resolve(mount.destination.relativize(internalInclude))
+                require(source.startsWith(mount.source) && source != mount.source && source.fileName == Path.of("include") &&
+                    mount.source.resolve(mount.destination.relativize(internalInclude)) == source) {
+                    "compiler internal include path is not a declared include directory"
+                }
+            }
             // Curated headers and compiler internals may retain their toolchain's compiled-in
             // lookup paths through explicit aliases. The executable's own path stays canonical.
             return Declaration(document, profileId, isolation, compilerPath, compilerSha256, helperSource, helperPath,
-                helperSha256, mounts, scratch,
+                helperSha256, compilerInternalIncludePath, mounts, scratch,
                 scratchPolicy, managerControlGroup)
         }
 
@@ -381,6 +401,7 @@ internal class ContainedModuleCompilationRuntimeConfiguration private constructo
         private val ROOT_FIELDS_V1 = setOf("schemaVersion", "profileId", "isolation", "compiler", "compilerRuntimeMounts",
             "scratchMount", "scratchPolicy", "managerControlGroup")
         private val ROOT_FIELDS_V2 = ROOT_FIELDS_V1 + "compilerExecHelper"
+        private val ROOT_FIELDS_V3 = ROOT_FIELDS_V2 + "compilerInternalIncludePath"
         private val SCRATCH_FIELDS = setOf("requiredAvailableBytes", "maximumFilesystemBytes", "requiredAvailableInodes", "maximumFilesystemInodes")
         private val ISOLATION_FIELDS = setOf("javaExecutable", "javaRuntime", "systemLibraryMounts", "bubblewrapExecutable",
             "resourceLimiterExecutable", "scopeSupervisorExecutable", "scopeInspectorExecutable", "systemdBusControllerExecutable",

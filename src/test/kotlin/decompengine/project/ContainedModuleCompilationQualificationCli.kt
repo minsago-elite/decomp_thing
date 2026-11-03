@@ -100,6 +100,14 @@ object ContainedModuleCompilationQualificationCli {
             headers.path("destination") == Path.of("/usr/include")) {
             "installed compiler internals or header aliases differ from the reviewed closure"
         }
+        val compilerInternalIncludeSource = gcc.path("source").resolve("include")
+        val compilerInternalIncludeDestination = gcc.path("destination").resolve("include")
+        requireTrusted(compilerInternalIncludeSource, directory = true)
+        val internalStddef = compilerInternalIncludeSource.resolve("stddef.h")
+        requireTrusted(internalStddef, directory = false)
+        require(Files.isRegularFile(internalStddef, LinkOption.NOFOLLOW_LINKS)) {
+            "provisioned GCC runtime lacks its authenticated stddef.h"
+        }
         val manifestCache = mutableMapOf<Path, String>()
         fun mount(source: Path, destination: Path = source): JsonObject = JsonObject(mapOf(
             "source" to JsonPrimitive(source.toString()), "destination" to JsonPrimitive(destination.toString()),
@@ -181,10 +189,11 @@ object ContainedModuleCompilationQualificationCli {
             "maximumFilesystemInodes" to JsonPrimitive(capacity.totalInodes)))
         require(capacity.availableBytes >= workerBytes + 128L * 1024 * 1024 && capacity.availableInodes >= 8192)
         return listOf(GeneratedCMakeReconstructionProfile.PROFILE_ID, GeneratedCNinjaReconstructionProfile.PROFILE_ID).associateWith { profile ->
-            JsonObject(mapOf("schemaVersion" to JsonPrimitive(2), "profileId" to JsonPrimitive(profile), "isolation" to isolation,
+            JsonObject(mapOf("schemaVersion" to JsonPrimitive(3), "profileId" to JsonPrimitive(profile), "isolation" to isolation,
                 "compiler" to JsonObject(mapOf("path" to JsonPrimitive(compiler.toString()), "sha256" to JsonPrimitive(digest(compiler)))),
                 "compilerExecHelper" to JsonObject(mapOf("source" to JsonPrimitive(compilerExecHelper.toString()),
                     "path" to JsonPrimitive(compilerExecHelperDestination.toString()), "sha256" to JsonPrimitive(digest(compilerExecHelper)))),
+                "compilerInternalIncludePath" to JsonPrimitive(compilerInternalIncludeDestination.toString()),
                 "compilerRuntimeMounts" to compilerMounts, "scratchMount" to JsonPrimitive(scratch.toString()), "scratchPolicy" to policy,
                 "managerControlGroup" to JsonPrimitive(managerGroup))).also {
                 ContainedModuleCompilationRuntimeConfiguration.parse(OracleJson.canonicalBytes(it, limits))

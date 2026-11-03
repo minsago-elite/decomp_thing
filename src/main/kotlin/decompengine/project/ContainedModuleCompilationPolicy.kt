@@ -27,9 +27,11 @@ internal object ContainedModuleCompilationPolicy : ModuleCompilationPolicy {
         }
     }
     override fun historicalCommand(profile: ReconstructionProfile, sourcePath: String) = GeneratedCModuleValidation.command(profile, sourcePath)
-    override fun command(profile: ReconstructionProfile, sourcePath: String): List<String> {
+    override fun command(profile: ReconstructionProfile, sourcePath: String): List<String> = command(profile, sourcePath, null)
+    internal fun command(profile: ReconstructionProfile, sourcePath: String, compilerInternalIncludePath: Path?): List<String> {
         profile.layout.declaration("module-implementation").moduleIdForPath(sourcePath)
         return listOf("authenticated-profile-compiler") + profile.adapterConfiguration.getValue("compiler-flags") +
+            (compilerInternalIncludePath?.let { listOf("-isystem", it.toString()) } ?: emptyList()) +
             listOf("-c", sourcePath, "-o", "<owned-module-object>")
     }
     override fun validate(projectDir: Path, sourcePath: String, profile: ReconstructionProfile): ModuleCompilationEvidence =
@@ -126,17 +128,20 @@ internal class VerifiedContainedModuleCompilation private constructor(private va
                         }
                         LinuxFilesystemSyscalls.synchronize(directory)
                     }
-                    ContainedModuleCompilerRequest(nonce, profile.id, profile.sha256, borrowed.path.resolve("state/snapshot"),
+                    val created = ContainedModuleCompilerRequest(nonce, profile.id, profile.sha256, borrowed.path.resolve("state/snapshot"),
                         sourcePath, snapshot.inputs, configuration.compilerExecutable, configuration.compilerSha256,
                         borrowed.path.resolve("reports"), minOf(profile.budgets.buildWallClockMillis, ContainedModuleCompilerRequest.MAXIMUM_WALL_MILLIS),
                         minOf(profile.budgets.buildMaximumOutputBytes, ContainedModuleCompilerRequest.MAXIMUM_OUTPUT_BYTES),
                         profileRecord = OracleJson.parse(profile.canonicalJson().toByteArray()) as JsonObject,
-                        schemaVersion = 2, trampolinePath = configuration.compilerExecHelperPath,
+                        schemaVersion = 3, trampolinePath = configuration.compilerExecHelperPath,
                         trampolineSha256 = configuration.compilerExecHelperSha256,
                         runtimeReadRoots = (configuration.isolation.systemLibraryMounts + configuration.compilerRuntimeMounts)
                             .map { it.destination },
                         runtimeExecuteRoots = listOf(configuration.compilerRuntimeExecuteRoot),
-                        runtimeExecuteFiles = configuration.compilerRuntimeExecuteFiles)
+                        runtimeExecuteFiles = configuration.compilerRuntimeExecuteFiles,
+                        compilerInternalIncludePath = configuration.compilerInternalIncludePath)
+                    require(created.compilerInternalIncludePath != null) { "current module compiler runtime lacks its authenticated GCC internal include path" }
+                    created
                 }
                 require(request.snapshotSha256 == snapshotSha)
                 LinuxFilesystemSyscalls.openRoot(temporary).use { directory ->
@@ -253,7 +258,7 @@ internal class VerifiedContainedModuleCompilation private constructor(private va
                 removeOwnedModuleCompilerRequestDirectory(temporary)
                 val worker = checkNotNull(workerResult)
                 val proof = JsonObject(mapOf(
-                    "schemaVersion" to JsonPrimitive(2), "provider" to JsonPrimitive("contained-module-compilation-v2"),
+                    "schemaVersion" to JsonPrimitive(3), "provider" to JsonPrimitive("contained-module-compilation-v3"),
                     "scope" to JsonPrimitive("module-object"), "policyId" to JsonPrimitive(ContainedModuleCompilationPolicy.POLICY_ID),
                     "profileId" to JsonPrimitive(profile.id), "profileSha256" to JsonPrimitive(profile.sha256),
                     "sourceSha256" to JsonPrimitive(request.sourceSha256), "snapshotSha256" to JsonPrimitive(request.snapshotSha256),
@@ -265,7 +270,8 @@ internal class VerifiedContainedModuleCompilation private constructor(private va
                     "attachment" to OracleJson.parseCanonical(checkNotNull(attachment)), "execution" to OracleJson.parseCanonical(execution.canonicalBytes),
                     "diskLease" to OracleJson.parseCanonical(diskBytes), "cleanup" to JsonObject(listOf("processesAbsent", "unitAbsent", "cgroupAbsent",
                         "scratchRemoved", "leaseReleased").associateWith { JsonPrimitive(true) })))
-                val evidence = ModuleCompilationEvidence(request.sourceSha256, ContainedModuleCompilationPolicy.command(profile, sourcePath),
+                val evidence = ModuleCompilationEvidence(request.sourceSha256, ContainedModuleCompilationPolicy.command(profile, sourcePath,
+                    request.compilerInternalIncludePath),
                     if (worker.outcome == "compiled-object") "passed" else "failed", worker.exitCode,
                     ContainedModuleCompilationProof.diagnosticsSha256(worker), worker.stdoutBytes + worker.stderrBytes, proof,
                     if (worker.outcome == "compiled-object") VerifiedContainedModuleCompilation(sha256(OracleJson.canonicalBytes(proof)), snapshot) else null)

@@ -30,11 +30,11 @@ internal object ContainedModuleCompilationProof {
         val request = verified.request
         val result = verified.result
         val profile = request.profile
-        require(evidence.liveAuthority == null || request.schemaVersion == 2) {
+        require(evidence.liveAuthority == null || request.schemaVersion >= 2) {
             "historical module compiler proof cannot carry live acceptance authority"
         }
         require(evidence.sourceSha256 == request.sourceSha256 &&
-            evidence.command == ContainedModuleCompilationPolicy.command(profile, request.sourcePath) &&
+            evidence.command == ContainedModuleCompilationPolicy.command(profile, request.sourcePath, request.compilerInternalIncludePath) &&
             evidence.outcome == if (result.outcome == "compiled-object") "passed" else "failed") {
             "module compilation evidence differs from its exact source, command, or result"
         }
@@ -49,25 +49,34 @@ internal object ContainedModuleCompilationProof {
         // Callers can supply constructed JSON, so charge the same aggregate bounds as serialized evidence.
         val proof = OracleJson.parseCanonical(OracleJson.canonicalBytes(record, LIMITS), LIMITS) as JsonObject
         val version = proof.number("schemaVersion")
-        require(version == 1L || version == 2L) { "unsupported contained module compilation proof" }
-        proof.exact(PROOF_FIELDS + if (version == 2L) setOf("runtimeClosure") else emptySet(), "proof")
+        require(version in 1L..3L) { "unsupported contained module compilation proof" }
+        proof.exact(PROOF_FIELDS + if (version >= 2L) setOf("runtimeClosure") else emptySet(), "proof")
         require(proof.text("provider") == "contained-module-compilation-v$version" &&
             proof.text("scope") == "module-object" && proof.text("policyId") == ContainedModuleCompilationPolicy.POLICY_ID) {
             "unsupported contained module compilation proof"
         }
         val request = ContainedModuleCompilerRequest.parse(bytes(proof.objectField("request")))
+        require(when (version) {
+            1L -> request.schemaVersion == 1
+            2L -> request.schemaVersion in 1..2
+            else -> request.schemaVersion == 3
+        }) { "module compiler proof and request versions differ" }
         val result = ContainedModuleCompilerResult.parse(bytes(proof.objectField("result")))
         result.requireBinding(request)
         val runtime = ContainedModuleCompilationRuntimeConfiguration.parse(bytes(proof.objectField("runtimeConfiguration")))
         require(runtime.profileId == request.profileId && runtime.compilerExecutable == request.compilerPath &&
             runtime.compilerSha256 == request.compilerSha256) { "module compiler request differs from its configured profile or compiler" }
-        if (request.schemaVersion == 2) {
+        if (request.schemaVersion >= 2) {
             val roots = (runtime.isolation.systemLibraryMounts + runtime.compilerRuntimeMounts).map { it.destination }.distinct().sortedBy { it.toString() }
             require(request.trampolinePath == runtime.compilerExecHelperPath &&
                 request.trampolineSha256 == runtime.compilerExecHelperSha256 &&
                 request.runtimeReadRoots == roots && request.runtimeExecuteRoots == listOf(runtime.compilerRuntimeExecuteRoot) &&
                 request.runtimeExecuteFiles == runtime.compilerRuntimeExecuteFiles) {
                 "module compiler read-boundary request differs from its pinned runtime"
+            }
+            if (request.schemaVersion == 3) require(runtime.configurationRecord["schemaVersion"] == JsonPrimitive(3) &&
+                request.compilerInternalIncludePath == runtime.compilerInternalIncludePath) {
+                "module compiler internal include path differs from the versioned runtime configuration"
             }
         } else {
             require(runtime.compilerExecHelperPath == null && runtime.compilerExecHelperSha256 == null &&
@@ -103,7 +112,7 @@ internal object ContainedModuleCompilationProof {
             command.terminalResourcePolicySha256 == ContainedCommandTerminalResourceEvidence.policySha256) {
             "module compiler command differs from its exact control and terminal policy"
         }
-        if (version == 2L) {
+        if (version >= 2L) {
             require(command.fileDescriptorPolicy == ContainedCommandFileDescriptorPolicy.MODULE_COMPILATION &&
                 command.retainedInputVisibilitySha256 == null) {
                 "module compiler command lacks the fixed file-descriptor policy or substitutes selected visibility"
@@ -130,9 +139,9 @@ internal object ContainedModuleCompilationProof {
         }
         val attachment = proof.objectField("attachment")
         val execution = proof.objectField("execution")
-        attachment.exact(ATTACHMENT_FIELDS + if (version == 2L) setOf("fileDescriptorLimits") else emptySet(), "attachment")
+        attachment.exact(ATTACHMENT_FIELDS + if (version >= 2L) setOf("fileDescriptorLimits") else emptySet(), "attachment")
         execution.exact(EXECUTION_FIELDS, "execution")
-        val executionVersion = if (version == 2L) 5 else 3
+        val executionVersion = if (version >= 2L) 5 else 3
         require(attachment["schemaVersion"] == JsonPrimitive(executionVersion) &&
             attachment.text("provider") == "kotlin-lease-contained-command-attachment-v$executionVersion" &&
             execution["schemaVersion"] == JsonPrimitive(executionVersion) &&
@@ -159,8 +168,8 @@ internal object ContainedModuleCompilationProof {
             identity.number("mode") == 448L && identity.number("linkCount") >= 2L) {
             "module compiler control identity differs from its disk lease"
         }
-        verifyResources(command, attachment, execution, request, version == 2L)
-        if (version == 2L) verifyRuntimeClosure(proof.objectField("runtimeClosure"), runtime, request, command,
+        verifyResources(command, attachment, execution, request, version >= 2L)
+        if (version >= 2L) verifyRuntimeClosure(proof.objectField("runtimeClosure"), runtime, request, command,
             requestPath, run, control, lease, attachment, execution)
         ContainedCommandTerminalResourceEvidence.verifyExecution(bytes(execution), bytes(attachment))
         val outcome = execution.objectField("outcome")
@@ -243,8 +252,8 @@ internal object ContainedModuleCompilationProof {
         require(ownedExecutableCount != 2 || runtime.compilerExecHelperPath != null) {
             "two executable aliases require the configured compiler trampoline"
         }
-        require(!(ownedExecutableCount == 1 && request.schemaVersion == 2 && runtime.compilerExecHelperPath != null)) {
-            "schema-v2 module compiler runtime requires both owned executable aliases"
+        require(!(ownedExecutableCount == 1 && request.schemaVersion >= 2 && runtime.compilerExecHelperPath != null)) {
+            "current module compiler runtime requires both owned executable aliases"
         }
         closure.exact(RUNTIME_FIELDS + if (ownedExecutableCount > 0) setOf("baseRuntimeProvider", "executableAliases") else emptySet(), "runtime closure")
         if (ownedExecutableCount > 0) require(closure.text("baseRuntimeProvider") == "kotlin-lease-contained-command-runtime-v5") {
@@ -274,6 +283,10 @@ internal object ContainedModuleCompilationProof {
         }
         val requestInput = inputs[0] as? JsonObject ?: throw IllegalArgumentException("module compiler request input must be an object")
         val compilerInput = inputs[1] as? JsonObject ?: throw IllegalArgumentException("module compiler executable input must be an object")
+        if (request.schemaVersion == 3) require(runtime.compilerInternalIncludePath == request.compilerInternalIncludePath &&
+            runtime.configurationRecord["schemaVersion"] == JsonPrimitive(3)) {
+            "module compiler runtime closure does not bind its GCC internal include path"
+        }
         fun input(path: Path, size: Long, digest: String) = JsonObject(mapOf("path" to JsonPrimitive(path.toString()),
             "bytes" to JsonPrimitive(size), "sha256" to JsonPrimitive(digest)))
         require(requestInput == input(requestPath, request.canonicalBytes.size.toLong(), request.sha256)) {
@@ -302,7 +315,7 @@ internal object ContainedModuleCompilationProof {
                 val helperBytes = (inputs[3] as? JsonObject
                     ?: throw IllegalArgumentException("module compiler trampoline input must be an object")).number("bytes")
                 val trampolineSnapshot = requestPath.parent.resolve("trampoline")
-                require(request.schemaVersion == 2 && helperBytes in 1..64L * 1024 * 1024 &&
+                require(request.schemaVersion >= 2 && helperBytes in 1..64L * 1024 * 1024 &&
                     inputs[3] == input(helperPath, helperBytes, helperSha256) &&
                     inputs[4] == input(trampolineSnapshot, helperBytes, helperSha256)) {
                     "module compiler trampoline snapshots differ from their configured path, pin, or ordered private paths"

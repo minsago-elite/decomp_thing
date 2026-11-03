@@ -83,6 +83,25 @@ class ContainedModuleCompilationRuntimeConfigurationTest {
     }
 
     @Test
+    fun `runtime v3 binds an internal include directory beneath the declared GCC mount`() {
+        val current = JsonObject(valid() + mapOf(
+            "schemaVersion" to JsonPrimitive(3),
+            "compilerExecHelper" to JsonObject(mapOf(
+                "source" to JsonPrimitive("/opt/module-compiler/bin/decomp-module-compiler-exec"),
+                "path" to JsonPrimitive("/opt/module-compiler/bin/decomp-module-compiler-exec"),
+                "sha256" to JsonPrimitive(DIGEST),
+            )),
+            "compilerInternalIncludePath" to JsonPrimitive("/opt/module-compiler/lib/gcc/x86_64-linux-gnu/13/include"),
+        ))
+        val parsed = parse(current)
+        assertEquals(Path.of("/opt/module-compiler/lib/gcc/x86_64-linux-gnu/13/include"), parsed.compilerInternalIncludePath)
+        assertNotEquals(parse(JsonObject(valid() + ("schemaVersion" to JsonPrimitive(2)) +
+            ("compilerExecHelper" to current.getValue("compilerExecHelper")))).configurationSha256, parsed.configurationSha256)
+        reject(current + ("compilerInternalIncludePath" to JsonPrimitive("/outside/gcc/include")))
+        reject(current + ("compilerInternalIncludePath" to JsonPrimitive("/opt/module-compiler/not-an-include")))
+    }
+
+    @Test
     fun `unknown missing and duplicate fields cannot introduce launch authority`() {
         val document = valid()
         listOf("command", "environment", "skipContainment", "providerClass").forEach { field ->

@@ -15,6 +15,32 @@ import kotlinx.serialization.json.JsonPrimitive
 
 class ContainedModuleCompilerProtocolTest {
     @Test
+    fun `request v3 binds the authenticated GCC internal include directory into compiler arguments`() {
+        val profile = ReconstructionProfiles.default
+        val include = Path.of("/opt/compiler/lib/gcc/x86_64-linux-gnu/13/include")
+        val current = ContainedModuleCompilerRequest("3".repeat(64), profile.id, profile.sha256, root.resolve("snapshot"),
+            source.path, listOf(source, header), Path.of("/opt/compiler/bin/cc"), "4".repeat(64), root.resolve("output"),
+            1000, 65536, profileRecord = profileRecord(profile), schemaVersion = 3,
+            trampolinePath = Path.of("/opt/compiler/bin/decomp-module-compiler-exec"), trampolineSha256 = "5".repeat(64),
+            runtimeReadRoots = listOf(Path.of("/opt/compiler"), Path.of("/lib64")),
+            runtimeExecuteRoots = listOf(Path.of("/opt/compiler")),
+            runtimeExecuteFiles = listOf(Path.of("/lib64/ld-linux-x86-64.so.2")), compilerInternalIncludePath = include)
+        val parsed = ContainedModuleCompilerRequest.parse(current.canonicalBytes)
+        assertEquals(include, parsed.compilerInternalIncludePath)
+        assertContentEquals(current.canonicalBytes, parsed.canonicalBytes)
+        assertEquals(listOf("-isystem", include.toString()), current.command.windowed(2).first { it.first() == "-isystem" })
+        assertFailsWith<IllegalArgumentException> {
+            ContainedModuleCompilerRequest("3".repeat(64), profile.id, profile.sha256, root.resolve("snapshot"),
+                source.path, listOf(source, header), Path.of("/opt/compiler/bin/cc"), "4".repeat(64), root.resolve("output"),
+                1000, 65536, profileRecord = profileRecord(profile), schemaVersion = 3,
+                trampolinePath = Path.of("/opt/compiler/bin/decomp-module-compiler-exec"), trampolineSha256 = "5".repeat(64),
+                runtimeReadRoots = listOf(Path.of("/opt/compiler"), Path.of("/lib64")),
+                runtimeExecuteRoots = listOf(Path.of("/opt/compiler")),
+                runtimeExecuteFiles = listOf(Path.of("/lib64/ld-linux-x86-64.so.2")), compilerInternalIncludePath = Path.of("/outside/include"))
+        }
+    }
+
+    @Test
     fun `request binds exact registered profiles immutable sorted snapshots and absolute derived arguments`() {
         for (profile in ReconstructionProfiles.builtIn) {
             val inputs = mutableListOf(header, source)

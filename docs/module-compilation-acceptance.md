@@ -52,8 +52,12 @@ The worker acquires the ordinary `StableControlFile` kernel lease on the exact o
 inode at the original compiler path through result capture. Scratch remains noexec,
 no writable executable mount is added, and no arbitrary foreign owner is trusted.
 
-Live compiler requests use schema v2 and pin a root-owned native Landlock trampoline,
-its digest, and the exact mounted runtime read roots. Historical v1 request bytes remain
+Live compiler requests use schema v3 and pin a root-owned native Landlock trampoline,
+its digest, the exact mounted runtime read roots, and the selected GCC internal include
+directory. The backend adds that authenticated sandbox destination as a fixed `-isystem`
+argument, so relocated GCC can find its own `stddef.h` without widening filesystem access.
+Runtime configuration and proof v3 bind that mapping; schemas v1 and v2 retain their
+historical command and bytes. Historical request bytes remain
 decodable, but the worker cannot execute them and historical proofs cannot gain live
 authority from them. The trampoline checks every rule target's type and device/inode,
 requires Landlock ABI 3 or newer, applies `no_new_privs`, enforces the policy, installs
