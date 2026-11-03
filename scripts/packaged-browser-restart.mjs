@@ -106,6 +106,13 @@ export async function qualifyRestart({ fixture, origin, makeTarget, cdp, evaluat
     await evaluate(tab, `${button('Read progress pin')}.click()`);
     await ready(tab, `document.body.innerText.includes(${JSON.stringify(expected)})`, label);
   };
+  const readPinFromServer = async tab => {
+    const result = await evaluate(tab, `fetch(${JSON.stringify(`${basePath}/api/v1/jobs/${fixture.jobId}/runs/${RUN}/progress-pin`)}, { credentials: 'same-origin' })
+      .then(async response => ({ status: response.status, body: await response.json() }))`);
+    assert.equal(result.status, 200, 'Progress pin read did not reach the real server');
+    assert.equal(result.body.kind, 'progressPin');
+    return result.body.data;
+  };
 
   // Phase A: first JVM, one explicit bootstrap, a populated attempt page, and followed activity.
   const first = await waitFor(() => findBootstrap(readOutput(), origin), 'first local bootstrap handoff');
@@ -216,6 +223,10 @@ export async function qualifyRestart({ fixture, origin, makeTarget, cdp, evaluat
   await openRun(other, 'second window attempt');
   await readPin(old, 'first window policy');
   await readPin(other, 'second window policy');
+  const firstWindowPolicy = await readPinFromServer(old);
+  const secondWindowPolicy = await readPinFromServer(other);
+  assert.equal(firstWindowPolicy.version, secondWindowPolicy.version, 'Both windows must start from the same pin version');
+  assert.equal(firstWindowPolicy.pinned, false);
   for (const tab of [old, other]) assert.equal(await evaluate(tab, 'document.visibilityState'), 'visible',
     'Two visible windows are required for the stale-control scenario (fail closed)');
   const putsBefore = old.requests.filter(r => r.method === 'PUT').length;
@@ -223,6 +234,9 @@ export async function qualifyRestart({ fixture, origin, makeTarget, cdp, evaluat
   await ready(old, `document.body.innerText.includes('Progress history is pinned.')`, 'first window pin');
   const pinSucceeded = old.responses.filter(r => r.url === pinUrl && r.status === 200).length;
   assert.ok(pinSucceeded >= 1);
+  const currentPolicy = await readPinFromServer(old);
+  assert.equal(currentPolicy.pinned, true);
+  assert.notEqual(currentPolicy.version, secondWindowPolicy.version, 'The first window mutation must advance the version');
   const staleBefore = other.requests.length;
   await evaluate(other, `${button('Pin progress history')}.click()`);
   await ready(other, `document.body.innerText.includes('The attempt changed')`, 'stale second window rejection');
@@ -230,11 +244,13 @@ export async function qualifyRestart({ fixture, origin, makeTarget, cdp, evaluat
   const staleRequests = other.requests.slice(staleBefore);
   assertOnlyPinWrites(staleRequests, pinUrl, 1);
   assert.equal(staleRequests.length, 1, 'Stale rejection triggered an automatic retry or follow-up request');
+  assert.equal(staleRequests[0].ifMatch, `"${secondWindowPolicy.version}"`, "The stale write did not use the second window original If-Match version");
+  assert.notEqual(secondWindowPolicy.version, currentPolicy.version);
   assert.equal(other.responses.filter(r => r.url === pinUrl && r.status === 412).length, 1, 'Expected one actual 412 response');
   assertOnlyPinWrites(old.requests, pinUrl, putsBefore + 1, `${origin}${basePath}/api/v1/session`, 3);
   assert.deepEqual([...old.exceptions, ...other.exceptions], []);
   await captureSafe(other, 'restart-stale-control.png');
-  evidence.staleControl = { first: { puts: 1, status: 200 }, second: { puts: 1, status: 412, retries: 0, crossAttemptWrites: 0 }, mutation: 'progress-pin',
+  evidence.staleControl = { first: { puts: 1, status: 200 }, second: { puts: 1, status: 412, retries: 0, crossAttemptWrites: 0, ifMatchBoundToStaleVersion: true }, mutation: 'progress-pin',
     liveWorkerCancellationOrApprovalCovered: false };
   await cdp.call('Target.closeTarget', { targetId: other.targetId });
   evidence.requests = { restarted: summarizeRequests(old.requests), staleWindow: summarizeRequests(other.requests) };

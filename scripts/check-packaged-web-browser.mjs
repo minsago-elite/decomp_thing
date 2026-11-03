@@ -264,7 +264,8 @@ async function makeTarget({ cspProbe = false, cacheEnabled = false, newWindow = 
     const type = event.type ?? (priorDocument ? 'Document' : undefined);
     const url = event.request.url.split('#')[0].split('?')[0];
     state.requestUrls.set(event.requestId, url);
-    state.requests.push({ method: event.request.method, url, type });
+    const ifMatch = Object.entries(event.request.headers ?? {}).find(([name]) => name.toLowerCase() === 'if-match')?.[1] ?? null;
+    state.requests.push({ method: event.request.method, url, type, ...(ifMatch === null ? {} : { ifMatch }) });
     if (cacheEnabled) state.cacheRequests.push({ requestId: event.requestId, method: event.request.method, url, type });
     if (type === 'Document') {
       const request = { requestId: event.requestId, sequence: state.documentRequests.length,
