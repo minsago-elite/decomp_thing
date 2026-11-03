@@ -71,9 +71,8 @@ class WebRouteMatrixTest {
         "/api/v1/recovery" to Live(setOf("GET", "HEAD"), Outcome(200, "recovery")),
         "/api/v1/uploads/{uploadId}" to Live(setOf("GET"), Outcome(404, "NOT_FOUND")),
         "/api/v1/agent/preflight" to Live(setOf("GET", "POST"), Outcome(200, "agentPreflight")),
-        // Keep Allow assertions aligned with the documented organization and deletion
-        // mutations on the job resource, even though this matrix probes GET as its
-        // representative fixture read.
+        // Keep Allow assertions aligned with documented organization and deletion
+        // mutations while retaining the mutation refusal check from the log branch.
         "$J" to Live(setOf("DELETE", "GET", "PATCH"), Outcome(200, "job"),
             mutationRefusal = Outcome(428, "PRECONDITION_REQUIRED")),
         "$J/deletion-preview" to Live(setOf("GET"), Outcome(200, "jobDeletionPreview")),
