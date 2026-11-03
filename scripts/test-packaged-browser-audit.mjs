@@ -319,13 +319,14 @@ test('evidence fixtures preserve attempt identity, validation owner commitments 
   assert.equal(receipt.validationCases.graphSha256, history.graphSha256);
 });
 
-function geometryModel({ exempt = false, overflow = 'auto', outsideChild = false, visible = true } = {}) {
+function geometryModel({ exempt = false, overflow = 'auto', outsideChild = false, visible = true,
+  filePicker = false, filePickerOutside = false } = {}) {
   const selectors = '.source-rows, .retained-case-table';
-  const node = (name, right = 300) => ({
+  const node = (name, right = 300, left = 0) => ({
     tagName: name.toUpperCase(), id: '', classList: [], textContent: name, tabIndex: 0,
     clientWidth: 300, scrollWidth: 300,
     closest: () => null, getClientRects: () => [{}], checkVisibility: () => visible, matches: () => false,
-    getBoundingClientRect: () => ({ left: 0, right, width: right, height: 32 }),
+    getBoundingClientRect: () => ({ left, right, width: right - left, height: 32 }),
     getAttribute: () => 'Named table',
   });
   const container = node('div');
@@ -335,11 +336,20 @@ function geometryModel({ exempt = false, overflow = 'auto', outsideChild = false
     container.closest = selector => selector === selectors ? container : null;
     child.closest = container.closest;
   }
+  const picker = filePicker ? node('input', filePickerOutside ? 400 : 257, 63) : null;
+  if (picker) {
+    picker.id = 'binary-file'; picker.type = 'file'; picker.clientWidth = 194; picker.scrollWidth = 320;
+    picker.matches = selector => selector === 'input[type="file"]';
+  }
   const heading = node('h1'); const toggle = node('button');
   const document = {
     scrollingElement: { clientWidth: 320, scrollWidth: 320 },
-    body: { querySelectorAll: () => [container, child, heading] },
-    querySelectorAll: selector => selector === selectors && exempt ? [container] : [],
+    body: { querySelectorAll: () => picker ? [picker] : [container, child, heading] },
+    querySelectorAll(selector) {
+      if (selector === selectors && exempt) return [container];
+      if (filePicker && selector.includes('input')) return [picker];
+      return [];
+    },
     querySelector(selector) {
       if (selector === '.navigation-toggle') return toggle;
       if (selector === 'main h1') return heading;
@@ -368,6 +378,15 @@ test('measurement and verdict reject bounded non-exempt scrolling and clipping w
   assert.equal(measured.overflowCount, 0);
   const audit = clean(); Object.assign(audit.layout[0], measured);
   assert.deepEqual(verdict(audit), []);
+});
+
+test('clipped native file-picker internals do not masquerade as page overflow or hide an off-screen control', () => {
+  const contained = geometryModel({ filePicker: true, overflow: 'clip' });
+  assert.equal(contained.overflowCount, 0);
+  assert.equal(contained.clippedActions.length, 0);
+  const outside = geometryModel({ filePicker: true, filePickerOutside: true, overflow: 'clip' });
+  assert.equal(outside.overflowCount, 1);
+  assert.equal(outside.clippedActions.length, 1);
 });
 
 test('closed disclosure content with client rects is not measured as visible overflow', () => {

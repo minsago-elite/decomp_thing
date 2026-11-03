@@ -62,7 +62,11 @@ jobs:
       - name: Verify packaged upgrade and cache evidence controls
         run: node scripts/test-packaged-browser-upgrade.mjs
       - name: Verify packaged accessibility and asset audit controls
-        run: node scripts/test-packaged-browser-audit.mjs
+        run: |
+          node scripts/test-packaged-browser-audit.mjs
+          node scripts/test-browser-engine-input.mjs
+          node scripts/test-packaged-browser-engine-adapter.mjs
+          node --check scripts/packaged-browser-engines.mjs
       - name: Verify packaged upload route readiness controls
         run: node scripts/test-packaged-browser-upload.mjs
       - name: Verify bounded archival cleanup controls
