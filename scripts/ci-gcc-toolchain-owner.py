@@ -92,6 +92,18 @@ def canonical_root(repo: Path, run_id: str, attempt: str, job: str, revision: st
     return root / "build" / "g" / short
 
 
+def repository_root() -> Path:
+    try:
+        raw = subprocess.check_output(["git", "rev-parse", "--show-toplevel"], stderr=subprocess.DEVNULL,
+                                      timeout=5, text=True)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise Refusal("cannot determine repository root") from exc
+    root = Path(raw.strip()).resolve(strict=True)
+    if (root / "build").is_symlink() or (root / "build" / "g").is_symlink():
+        raise Refusal("owned build directory may not be a symlink")
+    return root
+
+
 def atomic_json(path: Path, value: dict, *, limit: int = MAX_JOURNAL) -> None:
     raw = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
     if len(raw) > limit:
@@ -115,10 +127,12 @@ def atomic_json(path: Path, value: dict, *, limit: int = MAX_JOURNAL) -> None:
 
 
 class Owner:
-    def __init__(self, root: Path, backend: Backend | None = None, *, clock=time.monotonic):
+    def __init__(self, root: Path, backend: Backend | None = None, *, clock=time.monotonic,
+                 test_repo_root: Path | None = None):
         self.root = root
         self.backend = backend or ProductionBackend()
         self.clock = clock
+        self._test_repo_root = test_repo_root
         self.manifest_path = root / "owner.json"
         self.journal_path = root / "journal.jsonl"
 
@@ -156,6 +170,10 @@ class Owner:
         atomic_json(self.manifest_path, manifest)
 
     def reserve(self, identity: dict, socket_paths: list[str]) -> dict:
+        repo = self._test_repo_root.resolve(strict=True) if self._test_repo_root is not None else repository_root()
+        expected_parent = repo / "build" / "g"
+        if self.root.parent != expected_parent or not self.root.is_absolute():
+            raise Refusal("owner root is not the fixed repository build/g location")
         if self.root.exists() or self.root.is_symlink():
             raise Refusal("exclusive owner root already exists")
         for item in socket_paths:
@@ -296,18 +314,21 @@ def cli() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("verb", choices=("reserve", "provision", "launch-buildkit", "launch-rootless",
         "status", "seal", "stop", "stage-upload", "release", "supervisor"))
-    parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--role", choices=("buildkit", "rootless"))
     parser.add_argument("--success", action="store_true")
     args = parser.parse_args()
-    owner = Owner(args.root)
     try:
+        repo = repository_root()
+        run = os.environ.get("GITHUB_RUN_ID", "local")
+        attempt = os.environ.get("GITHUB_RUN_ATTEMPT", "1")
+        job = os.environ.get("GITHUB_JOB", "provenance")
+        revision = subprocess.check_output(["git", "rev-parse", "HEAD"], timeout=5, text=True).strip()
+        root = canonical_root(repo, run, attempt, job, revision)
+        owner = Owner(root)
         if args.verb in ("reserve", "provision"):
-            paths = [str(args.root / suffix) for suffix in ("d.sock", "b.sock", "r/api.sock",
+            paths = [str(root / suffix) for suffix in ("d.sock", "b.sock", "r/api.sock",
                 "x/containerd/containerd.sock", "x/containerd/containerd.sock.ttrpc", "t/runc-console.sock")]
-            owner.reserve({"run": os.environ.get("GITHUB_RUN_ID", "local"),
-                "attempt": os.environ.get("GITHUB_RUN_ATTEMPT", "1"), "job": os.environ.get("GITHUB_JOB", "local"),
-                "revision": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()}, paths)
+            owner.reserve({"run": run, "attempt": attempt, "job": job, "revision": revision}, paths)
         elif args.verb == "status":
             print(json.dumps(owner._manifest(), sort_keys=True))
         elif args.verb == "seal" and args.role:

@@ -460,10 +460,9 @@ def inspect(docker_archive: pathlib.Path, oci_archive: pathlib.Path, out: pathli
                     if raw_digest != desc.get("digest"):
                         refuse("OCI layer bytes disagree with descriptor")
                     raw, _ = member_stream(tf, desc, cap)
-                    if "gzip" in str(desc.get("mediaType", "")):
-                        raw = gzip.GzipFile(fileobj=raw)
-                    uncompressed_digest, _ = digest_stream(raw)
-                    if uncompressed_digest != inventory[i]["diffId"]:
+                    uncompressed_digest, expanded = hash_decoded(raw, str(desc.get("mediaType", "")),
+                        int(inventory[i]["decodedBytes"]))
+                    if expanded != inventory[i]["decodedBytes"] or uncompressed_digest != inventory[i]["diffId"]:
                         refuse(f"OCI layer {i} does not join Docker archive diff ID")
                 target = item["descriptor"]["digest"]
                 for att in attestations:
@@ -474,6 +473,14 @@ def inspect(docker_archive: pathlib.Path, oci_archive: pathlib.Path, out: pathli
                                 subject.get("size") != item["descriptor"].get("size") or
                                 subject.get("mediaType") != item["descriptor"].get("mediaType")):
                             refuse("OCI attestation manifest subject does not match runtime manifest")
+                        att_config = att["manifest"].get("config", {})
+                        if not isinstance(att_config, dict) or not att_config.get("digest") or \
+                                not isinstance(att_config.get("size"), int):
+                            refuse("OCI attestation config descriptor is missing")
+                        cfg_stream, _ = member_stream(tf, att_config, 1024 * 1024)
+                        cfg_digest, cfg_size = digest_stream(cfg_stream)
+                        if cfg_digest != att_config.get("digest") or cfg_size != att_config.get("size"):
+                            refuse("OCI attestation config bytes disagree with descriptor")
                         statements=[]
                         (out / "provenance-statements").mkdir(mode=0o700, exist_ok=True)
                         for layer in att["manifest"].get("layers", []):

@@ -50,7 +50,12 @@ class OwnerTest(unittest.TestCase):
         root = ROOT / "build/pr-merge-audit/gcc-native-builder-repair-implementation/tests"
         root.mkdir(parents=True, exist_ok=True)
         self.temp = tempfile.TemporaryDirectory(dir=root, prefix="owner-")
-        self.root = Path(self.temp.name) / "owned"
+        self.repo = Path(self.temp.name) / "repo"
+        self.repo.mkdir()
+        self.root = self.repo / "build" / "g" / "owned"
+
+    def make_owner(self, backend=None):
+        return owner_module.Owner(self.root, backend, test_repo_root=self.repo)
 
     def tearDown(self):
         self.temp.cleanup()
@@ -60,14 +65,14 @@ class OwnerTest(unittest.TestCase):
             ["/x/d.sock", "/x/r/api.sock"])
 
     def test_socket_admission_precedes_owner_directory_creation(self):
-        owner = owner_module.Owner(self.root, FakeBackend())
+        owner = self.make_owner(FakeBackend())
         with self.assertRaises(owner_module.Refusal):
             owner.reserve({}, ["x" * 108])
         self.assertFalse(self.root.exists())
 
     def test_durable_intent_precedes_manager_reservation_and_missing_receipt_fails(self):
         backend = FakeBackend(fail_reserve=True)
-        owner = owner_module.Owner(self.root, backend)
+        owner = self.make_owner(backend)
         self.reserve(owner)
         with self.assertRaisesRegex(owner_module.Refusal, "denial"):
             owner.begin_role("buildkit", ["/pinned/buildkitd"], {"PATH": "/bin"}, {"seconds": 2})
@@ -79,7 +84,7 @@ class OwnerTest(unittest.TestCase):
 
     def test_unknown_domain_absence_never_becomes_success(self):
         backend = FakeBackend(empty=False)
-        owner = owner_module.Owner(self.root, backend)
+        owner = self.make_owner(backend)
         self.reserve(owner)
         owner.begin_role("buildkit", ["/pinned/buildkitd"], {"PATH": "/bin"}, {"seconds": 2})
         owner.ready("buildkit", {"pidfd": "test-pidfd", "identity": {"exe": "/pinned/buildkitd"}})
