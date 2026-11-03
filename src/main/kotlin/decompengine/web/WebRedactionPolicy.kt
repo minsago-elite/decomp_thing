@@ -88,6 +88,57 @@ internal class WebRedactionPolicy private constructor(
         return if (text(text) == text) bytes else text(text).toByteArray(Charsets.UTF_8)
     }
 
+    /** Server-produced JSON reports never use the generic document's binary pass-through branch. */
+    internal fun reportDocument(bytes: ByteArray, limits: decompengine.oracle.core.StrictJsonLimits): ByteArray {
+        if (bytes.isEmpty()) return bytes
+        val parsed = decompengine.oracle.core.OracleJson.parse(bytes, limits)
+        val safe = documentJson(parsed)
+        // Strict parsing already validated UTF-8. Keep the original representation when it is safe.
+        if (safe == parsed && !leaksLiteral(bytes.toString(Charsets.UTF_8))) {
+            if (bytes.size > limits.maximumCanonicalBytes)
+                throw decompengine.oracle.core.StrictJsonException("report projection exceeds its output byte limit")
+            return bytes
+        }
+        // Reuse JsonElement's leaf escaping and exact numeric tokens, while bounding the
+        // assembled compact representation before appending any token to the output buffer.
+        val output = java.io.ByteArrayOutputStream()
+        fun punctuation(value: Int) {
+            if (output.size() >= limits.maximumCanonicalBytes)
+                throw decompengine.oracle.core.StrictJsonException("report projection exceeds its output byte limit")
+            output.write(value)
+        }
+        fun token(value: String) {
+            val encoded = value.toByteArray(Charsets.UTF_8)
+            if (encoded.size > limits.maximumCanonicalBytes - output.size())
+                throw decompengine.oracle.core.StrictJsonException("report projection exceeds its output byte limit")
+            output.write(encoded)
+        }
+        fun encode(value: JsonElement) {
+            when (value) {
+                is JsonObject -> {
+                    punctuation('{'.code)
+                    value.entries.forEachIndexed { index, (key, child) ->
+                        if (index != 0) punctuation(','.code)
+                        token(JsonPrimitive(key).toString()); punctuation(':'.code); encode(child)
+                    }
+                    punctuation('}'.code)
+                }
+                is JsonArray -> {
+                    punctuation('['.code)
+                    value.forEachIndexed { index, child ->
+                        if (index != 0) punctuation(','.code)
+                        encode(child)
+                    }
+                    punctuation(']'.code)
+                }
+                is JsonPrimitive -> token(value.toString())
+            }
+        }
+        encode(safe)
+        val serialized = output.toByteArray()
+        return if (leaksLiteral(serialized.toString(Charsets.UTF_8))) "null".toByteArray() else serialized
+    }
+
     /** Persisted prose: every configured sensitive value (including short ones) plus this policy. */
     fun diagnostic(value: String, maximumCharacters: Int = 480): String {
         require(maximumCharacters >= 0)

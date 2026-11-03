@@ -2529,3 +2529,12 @@ First pages, including empty results, have a signed zero-offset return cursor. A
 the existing session, normalized query, limit, HMAC and process-local expiry checks. Current and
 previous tokens do not rescan storage or execute workflows. Snapshot count/byte/scan/admission
 limits remain unchanged; invalid, expired and evicted cursors retain explicit error responses.
+
+
+Server-produced report content is projected only after strict UTF-8/JSON validation. In addition to the
+64 MiB exploration / 2 MiB progress byte ceilings, projection admits at most 32 container levels,
+100,000 JSON value nodes and 1 MiB per decoded string; total decoded strings and encoded projection
+must fit the family byte ceiling. Empty reports stay empty. Malformed, over-budget or unprojectable
+reports are refused as `ARTIFACT_PROJECTION_UNAVAILABLE` before artifact validators or content bytes
+are sent, on legacy and v1 routes. The stored artifact identity stays unchanged. These limits do not
+apply to authorized committed source/manifests/contracts/archive content served verbatim.

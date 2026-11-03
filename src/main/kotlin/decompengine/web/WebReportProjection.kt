@@ -19,10 +19,24 @@ internal object WebReportProjection {
 
     fun limit(progress: Boolean): Long = if (progress) AgentProgressJournal.MAXIMUM_READ_BYTES.toLong() else MAXIMUM_REPORT_BYTES
 
-    /** Progress journals are replayed to their display snapshot first; every report then passes [WebRedactionPolicy.document]. */
+    /** Progress journals are replayed to their display snapshot first; every report then passes the strict, bounded JSON redaction boundary. */
     fun project(progress: Boolean, bytes: ByteArray, policy: WebRedactionPolicy): ByteArray {
-        require(bytes.size <= limit(progress)) { "report exceeds its projection limit" }
-        return policy.document(if (progress) progressJournalProjection(bytes) else bytes)
+        return try {
+            val maximumBytes = limit(progress).toInt()
+            require(bytes.size <= maximumBytes) { "report exceeds its projection limit" }
+            val limits = decompengine.oracle.core.StrictJsonLimits(
+                maximumInputBytes = maximumBytes,
+                maximumCanonicalBytes = maximumBytes,
+                maximumDepth = 32,
+                maximumNodes = 100_000,
+                maximumStringBytes = minOf(1024 * 1024, maximumBytes),
+                maximumTotalStringBytes = maximumBytes,
+            )
+            policy.reportDocument(if (progress) progressJournalProjection(bytes) else bytes, limits)
+        } catch (failure: Exception) {
+            if (failure is java.util.concurrent.CancellationException || failure is InterruptedException) throw failure
+            webArtifactProjectionUnavailable()
+        }
     }
 
     /** Descriptor state for a stored file of [size] bytes in [family]. */

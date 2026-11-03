@@ -103,6 +103,67 @@ class WebArtifactReportProjectionTest {
         put("cases", buildJsonArray { repeat(8) { add("case $it") } })
     }.toString().toByteArray()
 
+    @Test fun `malformed UTF-8 reports refuse before validators or bytes on both routes`() {
+        val unicode = "테스트비밀토큰-12345678"
+        val policy = WebRedactionPolicy.create(mapOf("API_TOKEN" to unicode), emptyList(), emptyList())
+        val tails = listOf("{\"apiKey\":\"synthetic-credential-9f3a7b1c\"}",
+            "{\"diagnostic\":\"/home/synthetic/private\"}", unicode)
+        for (tail in tails) {
+            val malformed = byteArrayOf(0xff.toByte()) + tail.toByteArray()
+            val failure = assertFailsWith<WebAccessDenied> { WebReportProjection.project(false, malformed, policy) }
+            assertEquals(409, failure.status)
+            assertEquals("ARTIFACT_PROJECTION_UNAVAILABLE", failure.code)
+            withFixture { fixture ->
+                Files.write(fixture.reports.resolve("exploration.json"), malformed)
+                val href = catalog(fixture).getValue("exploration-report").text("contentHref")
+                val response = get(fixture, href, octets)
+                assertError(response, 409, "ARTIFACT_PROJECTION_UNAVAILABLE")
+                for (name in listOf("ETag", "X-Decomp-Artifact-SHA256", "X-Decomp-Content-SHA256", "X-Decomp-Content-Projection"))
+                    assertNull(header(response, name), name)
+                assertFalse(String(response.body()).contains(tail))
+                val legacy = legacyDownload(fixture, "exploration.json")
+                assertEquals(409, legacy.statusCode())
+                assertNull(header(legacy, "ETag"))
+                assertFalse(String(legacy.body()).contains(tail))
+            }
+        }
+    }
+
+    @Test fun `report JSON depth node string and output budgets refuse without stack exhaustion`() {
+        val baseline = WebRedactionPolicy.BASELINE
+        val excessive = listOf(
+            "[".repeat(5000) + "0" + "]".repeat(5000),
+            "[" + "0,".repeat(100_000) + "0]",
+            "\"" + "x".repeat(1024 * 1024 + 1) + "\"",
+        )
+        for (text in excessive) {
+            val failure = assertFailsWith<WebAccessDenied> { WebReportProjection.project(false, text.toByteArray(), baseline) }
+            assertEquals(409, failure.status)
+            assertEquals("ARTIFACT_PROJECTION_UNAVAILABLE", failure.code)
+        }
+        // Strings containing bracket syntax do not count as nested containers; clean bytes are preserved.
+        val clean = "{\"summary\":\"" + "[".repeat(128) + "\"}"
+        assertContentEquals(clean.toByteArray(), WebReportProjection.project(false, clean.toByteArray(), baseline))
+        val precise = "{\"precise\":0.123456789012345678901,\"apiKey\":\"private\"}"
+        val projected = String(WebReportProjection.project(false, precise.toByteArray(), baseline))
+        assertTrue(projected.contains("0.123456789012345678901"), projected)
+        assertFalse(projected.contains("private"), projected)
+        // The bounded encoder refuses an expanded projection before returning oversized bytes.
+        val limits = decompengine.oracle.core.StrictJsonLimits(maximumInputBytes = 64, maximumCanonicalBytes = 8)
+        assertFailsWith<decompengine.oracle.core.StrictJsonException> {
+            baseline.reportDocument("{\"apiKey\":\"x\"}".toByteArray(), limits)
+        }
+        assertFailsWith<decompengine.oracle.core.StrictJsonException> {
+            baseline.reportDocument("\"123456789\"".toByteArray(), limits)
+        }
+        withFixture { fixture ->
+            Files.write(fixture.reports.resolve("exploration.json"), excessive.first().toByteArray())
+            val href = catalog(fixture).getValue("exploration-report").text("contentHref")
+            assertError(get(fixture, href, octets), 409, "ARTIFACT_PROJECTION_UNAVAILABLE")
+            assertEquals(409, legacyDownload(fixture, "exploration.json").statusCode())
+        }
+    }
+
     @Test fun `report content serves the redacted projection under projected validators while identity stays the stored commitment`() = withFixture { fixture ->
         val stored = privateReport(fixture)
         Files.write(fixture.reports.resolve("exploration.json"), stored)
