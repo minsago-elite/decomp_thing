@@ -164,6 +164,11 @@ jobs:
             ${{ runner.temp }}/gcc-oracle-source/gcc-16.2.0.tar.xz
             ${{ runner.temp }}/gcc-oracle-source/gcc-16.2.0.tar.xz.sig
           key: ${{ steps.gcc-source-cache.outputs.cache-primary-key }}
+      - name: Set up pinned Docker engine for toolchain reproduction
+        uses: docker/setup-docker-action@v5
+        with:
+          version: v29.7.2
+          set-host: true
       - name: Capture GCC reproduction builder identity
         run: |
           mkdir -p build/gcc-toolchain-reproduction-diagnostics
