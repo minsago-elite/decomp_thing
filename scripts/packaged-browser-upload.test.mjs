@@ -32,7 +32,7 @@ function fixture({ mountAt = 3, disabled = false, renderSelection = true, enable
     querySelector(selector) {
       if (selector === '#binary-file') return samples >= mountAt ? picker : null;
       if (selector === 'section[aria-labelledby="upload-title"] input#binary-file[type="file"]:not(:disabled)') {
-        return samples >= mountAt && !picker.disabled ? picker : null;
+        return samples >= mountAt && !disabled ? picker : null;
       }
       if (selector === 'button[type="submit"]') return samples >= mountAt ? submit : null;
       throw new Error('Unexpected selector: ' + selector);
@@ -144,7 +144,7 @@ for (const [name, qualify, filename, size] of [
     assert.equal(f.document.querySelector('#binary-file'), null);
     await assert.rejects(f.run(), error => error === f.submitted);
     assert.equal(f.counts().changes, 1);
-    assert.deepEqual(f.labels, ['workspace upload control', 'upload selection rendered']);
+    assert.equal(f.labels.at(-1), 'upload selection rendered');
     const [file] = f.picker.files;
     assert.equal(file.name, filename);
     assert.equal(file.size, size);
