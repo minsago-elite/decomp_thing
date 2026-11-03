@@ -10,7 +10,7 @@ on:
       operation:
         description: Manual GCC evidence capture
         type: choice
-        options: [driver-dwarf-interfaces, cc1-runtime-diagnostics, cc1-full-export, cc1-native-calls, cc1-analysis-throughput, cc1-engine-cli]
+        options: [driver-dwarf-interfaces, driver-interface-observations, cc1-runtime-diagnostics, cc1-full-export, cc1-native-calls, cc1-analysis-throughput, cc1-engine-cli]
         default: driver-dwarf-interfaces
 
 concurrency:
@@ -18,6 +18,15 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  driver-interface-observations:
+    # #1756: one explicit installed pinned-driver raw recovery capture; no PR label auto-selection.
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'driver-interface-observations'
+    uses: ./.github/workflows/gcc-cc1-full-export.yml
+    permissions:
+      contents: read
+    with:
+      capture-mode: driver-interface-observations
+
   cc1-runtime-diagnostics:
     if: github.event_name == 'workflow_dispatch' && inputs.operation == 'cc1-runtime-diagnostics'
     uses: ./.github/workflows/gcc-cc1-full-export.yml

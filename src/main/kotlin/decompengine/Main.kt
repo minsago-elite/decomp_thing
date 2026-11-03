@@ -57,6 +57,9 @@ fun main(args: Array<String>) {
         "gcc-engine-full-export" -> runGccEngineFullExport(args.drop(1))
         "gcc-engine-runtime-diagnostic" -> runGccEngineCommand(args.drop(1), fullRecoveryExport = true, runtimeDiagnostics = true)
         "gcc-engine-native-calls" -> runGccEngineCommand(args.drop(1), fullRecoveryExport = false, nativeCallObservations = true)
+        "gcc-engine-interface-observations" -> runGccEngineCommand(args.drop(1), fullRecoveryExport = false, nativeInterfaceObservations = true)
+        "gcc-engine-global-type-observations" -> runGccEngineCommand(args.drop(1), fullRecoveryExport = false,
+            nativeInterfaceObservations = true, nativeGlobalTypeObservations = true)
         "llvm-native-runtime-measurement" -> runLlvmNativeRuntimeMeasurement(args.drop(1))
         "web" -> runWeb(args.drop(1))
         null, "help", "--help", "-h" -> printHelp()
@@ -132,21 +135,27 @@ private fun runGccEngineFullExport(args: List<String>) {
 }
 
 private fun runGccEngineCommand(args: List<String>, fullRecoveryExport: Boolean,
-    runtimeDiagnostics: Boolean = false, nativeCallObservations: Boolean = false) {
+    runtimeDiagnostics: Boolean = false, nativeCallObservations: Boolean = false,
+    nativeInterfaceObservations: Boolean = false, nativeGlobalTypeObservations: Boolean = false) {
     val options = try {
         decompengine.oracle.gcc.GccBundledCliOptions.parse(args, fullRecoveryExport = fullRecoveryExport,
-            runtimeDiagnostics = runtimeDiagnostics, nativeCallObservations = nativeCallObservations)
+            runtimeDiagnostics = runtimeDiagnostics, nativeCallObservations = nativeCallObservations,
+            nativeInterfaceObservations = nativeInterfaceObservations,
+            nativeGlobalTypeObservations = nativeGlobalTypeObservations)
     } catch (failure: IllegalArgumentException) {
         System.err.println(failure.message)
         val command = when {
+            nativeGlobalTypeObservations -> "gcc-engine-global-type-observations"
+            nativeInterfaceObservations -> "gcc-engine-interface-observations"
             nativeCallObservations -> "gcc-engine-native-calls"
             runtimeDiagnostics -> "gcc-engine-runtime-diagnostic"
             fullRecoveryExport -> "gcc-engine-full-export"
             else -> "gcc-engine-plan"
         }
-        val resumeOption = if (fullRecoveryExport || nativeCallObservations) "" else " [--resume-after-checkpoint <multiple-of-512>]"
+        val resumeOption = if (fullRecoveryExport || nativeCallObservations || nativeInterfaceObservations || nativeGlobalTypeObservations) "" else " [--resume-after-checkpoint <multiple-of-512>]"
         val engines = decompengine.oracle.gcc.GccBundledCliOptions.engineUsage(fullRecoveryExport = fullRecoveryExport,
-            runtimeDiagnostics = runtimeDiagnostics, nativeCallObservations = nativeCallObservations)
+            runtimeDiagnostics = runtimeDiagnostics, nativeCallObservations = nativeCallObservations,
+            nativeInterfaceObservations = nativeInterfaceObservations)
         System.err.println("usage: llm_bin_patch $command $engines <stripped-binary> " +
             "--profile <file> --ghidra-archive <file> --output <empty-private-directory> --scratch <provisioned-mount>$resumeOption")
         kotlin.system.exitProcess(2)
@@ -156,6 +165,8 @@ private fun runGccEngineCommand(args: List<String>, fullRecoveryExport: Boolean,
     println("operation result: $result")
     if (runtimeDiagnostics) {
         println("Diagnostic execution journal retained; no qualification, scoring, or release authority is emitted.")
+    } else if (nativeInterfaceObservations) {
+        println("Complete raw interface observations and their provenance are retained; ABI scoring remains unavailable.")
     } else if (nativeCallObservations) {
         println("Native call observations and model provenance are retained in the result; structural scoring remains unavailable.")
     } else if (fullRecoveryExport) {
@@ -967,6 +978,7 @@ private fun printHelp() {
           llm_bin_patch gcc-engine-runtime-diagnostic cc1 <stripped-binary> --profile <file> --ghidra-archive <file> --output <empty-private-directory> --scratch <provisioned-mount>
           llm_bin_patch gcc-engine-full-export <cc1|driver> <stripped-binary> --profile <file> --ghidra-archive <file> --output <empty-private-directory> --scratch <provisioned-mount>
           llm_bin_patch gcc-engine-native-calls <cc1|driver> <stripped-binary> --profile <file> --ghidra-archive <file> --output <empty-private-directory> --scratch <provisioned-mount>
+          llm_bin_patch gcc-engine-interface-observations driver <stripped-binary> --profile <file> --ghidra-archive <file> --output <empty-private-directory> --scratch <provisioned-mount>
           llm_bin_patch llvm-native-runtime-measurement [--listener-continuity] <oci-layout> <fixed-client> <empty-config> <private-socket> <fresh-output>
           llm_bin_patch web [--host 127.0.0.1] [--port 8000] [--listen-backlog 64] [--data-dir .decomp_engine/jobs] [--ui legacy|spa] [--base-path /] [--dev-frontend-origin http://127.0.0.1:5173] [--git-import-root <directory>]
 
@@ -981,6 +993,7 @@ private fun printHelp() {
           gcc-engine-runtime-diagnostic retains a diagnostic execution journal without qualification, scoring, or release authority.
           gcc-engine-full-export runs a fresh contained full-recovery export and emits an authenticated structural profile binding; it does not score or certify structural truth.
           gcc-engine-native-calls retains native call observations alongside an unchanged full model; results remain unscored and release-ineligible.
+          gcc-engine-interface-observations retains complete raw listing and inferred observations; ABI scoring remains unavailable.
           --resume-after-checkpoint <multiple-of-512> interrupts and resumes within this process; it is not cold recovery.
           Scratch defaults: 8 GiB available / 64 GiB maximum filesystem, 32768 available / 1000000 maximum inodes.
           Override with --scratch-min-bytes, --scratch-max-bytes, --scratch-min-inodes, --scratch-max-inodes.
