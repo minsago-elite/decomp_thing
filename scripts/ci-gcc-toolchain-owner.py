@@ -974,27 +974,59 @@ def await_stable_exec(inspect: Any, alive: Any, role: str, expected_exe: str,
     raise Refusal("authenticated stable executable was not observed before deadline")
 
 
+def _read_thread_group_children(parent: int, task_budget: int) -> tuple[list[int], int]:
+    """Bounded candidate union, not an atomic process snapshot or absence proof."""
+    if task_budget <= 0 or task_budget > 1024:
+        raise Refusal("RootlessKit task census exceeds fixed task budget")
+    children: set[int] = set()
+    tasks_seen = 0
+    byte_count = 0
+    try:
+        with os.scandir(f"/proc/{parent}/task") as tasks:
+            for task in tasks:
+                if tasks_seen >= task_budget:
+                    raise Refusal("RootlessKit task census exceeds fixed task budget")
+                if not re.fullmatch(r"[1-9][0-9]{0,19}", task.name) or not task.is_dir(follow_symlinks=False):
+                    raise Refusal("RootlessKit task directory is malformed")
+                tasks_seen += 1
+                raw = bytearray()
+                with open(f"/proc/{parent}/task/{task.name}/children", "rb", buffering=0) as source:
+                    while True:
+                        block = source.read(4096 - byte_count + 1)
+                        if not block:
+                            break
+                        byte_count += len(block)
+                        if byte_count > 4096:
+                            raise Refusal("RootlessKit child list exceeds bound")
+                        raw.extend(block)
+                for item in raw.split():
+                    if not re.fullmatch(rb"[1-9][0-9]{0,19}", item):
+                        raise Refusal("RootlessKit child list is malformed")
+                    children.add(int(item))
+                    if len(children) > 256:
+                        raise Refusal("RootlessKit descendant census exceeds fixed node budget")
+    except OSError as exc:
+        raise Refusal("RootlessKit child tree is inaccessible") from exc
+    if tasks_seen == 0:
+        raise Refusal("RootlessKit task census is empty")
+    return sorted(children), tasks_seen
+
+
 def _find_authenticated_dockerd(rootlesskit_pid: int, root: Path, cgroup: str, deadline: float) -> tuple[int, int, dict]:
     expected = root / "v" / "tools" / "docker" / "dockerd"
     expected_sha = PINNED_TOOL_HASHES["dockerd"]
     while time.monotonic() < deadline:
         stack = [(rootlesskit_pid, 0)]
         seen: set[int] = set()
+        tasks_seen = 0
         while stack:
             parent, depth = stack.pop()
             if depth >= 8 or parent in seen:
                 continue
             seen.add(parent)
-            try:
-                raw_children = Path(f"/proc/{parent}/task/{parent}/children").read_bytes()
-            except OSError as exc:
-                raise Refusal("RootlessKit child tree is inaccessible") from exc
-            if len(raw_children) > 4096:
-                raise Refusal("RootlessKit child list exceeds bound")
-            try:
-                children = [int(item) for item in raw_children.split()]
-            except ValueError as exc:
-                raise Refusal("RootlessKit child list is malformed") from exc
+            # Go launchers can create children from any thread, not just the group leader.
+            children, task_count = _read_thread_group_children(parent, 1024 - tasks_seen)
+            tasks_seen += task_count
             if len(seen) + len(children) > 256:
                 raise Refusal("RootlessKit descendant census exceeds fixed node budget")
             for pid in children:

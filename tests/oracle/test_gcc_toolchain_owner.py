@@ -1254,5 +1254,156 @@ class BusctlArgumentBoundaryTest(unittest.TestCase):
             self.backend(runner)._run("rootless", ["call", "fixture"], 2)
 
 
+class ThreadChildCensusTest(unittest.TestCase):
+    class Entry:
+        def __init__(self, name, directory=True):
+            self.name = str(name)
+            self.directory = directory
+        def is_dir(self, *, follow_symlinks):
+            if follow_symlinks:
+                raise AssertionError("task directory links must not be followed")
+            return self.directory
+
+    class Tasks:
+        def __init__(self, entries):
+            self.entries = entries
+            self.closed = False
+        def __enter__(self):
+            return iter(self.entries)
+        def __exit__(self, *args):
+            self.closed = True
+
+    def fixture(self, groups, lists, *, identities=None, pinned_change=False, short_reads=False):
+        import io
+        import contextlib
+        root = ROOT / "build/test-tmp/gcc-thread-candidates"
+        now = [0.0]
+        opened, directories, closed, pidfds = [], [], [], []
+        reads = []
+        def children_path(path):
+            return str(path)
+        def scanner(path):
+            parent = int(str(path).split('/')[2])
+            entries = [e if isinstance(e, self.Entry) else self.Entry(e) for e in groups[parent]]
+            value = self.Tasks(entries); directories.append(value); return value
+        def source(path, *args, **kwargs):
+            key = children_path(path)
+            payload = lists[key]
+            if isinstance(payload, Exception):
+                raise payload
+            class Stream(io.BytesIO):
+                def read(self, size=-1):
+                    reads.append(size)
+                    self.test.assertGreater(size, 0)
+                    self.test.assertLessEqual(size, 4097)
+                    return super().read(min(size,1) if short_reads else size)
+            value = Stream(payload);value.test = self;opened.append(value);return value
+        def old_read(path):
+            payload = lists[str(path)]
+            if isinstance(payload, Exception):raise payload
+            return payload
+        calls = {}
+        def identity(pid):
+            calls[pid] = calls.get(pid, 0) + 1
+            value = {"pid":pid,"parentPid":100 if pid==200 else 200,"uid":os.getuid(),
+                "cgroup":"0::/owned\n","startTicks":pid,"exeDevice":1,"exeInode":pid,
+                "namespaces":{"mnt":5},"exe":str(root / "v/tools/docker/dockerd") if pid==300 else "/pinned/intermediate",
+                "exeSha256":owner_module.PINNED_TOOL_HASHES["dockerd"] if pid==300 else "x"}
+            value.update((identities or {}).get(pid, {}))
+            if pid==300 and calls[pid]>1 and pinned_change:value['startTicks']+=1
+            return value
+        def pin(pid, flags):
+            pidfds.append((pid, flags));return 777
+        def sleep(delay):
+            self.assertEqual(delay,0.025);now[0]+=delay
+        poller=mock.Mock();poller.poll.return_value=[]
+        stack=contextlib.ExitStack()
+        stack.enter_context(mock.patch.object(owner_module.os,'scandir',side_effect=scanner))
+        stack.enter_context(mock.patch('builtins.open',side_effect=source))
+        stack.enter_context(mock.patch.object(owner_module.Path,'read_bytes',old_read))
+        stack.enter_context(mock.patch.object(owner_module,'_read_proc_identity',side_effect=identity))
+        stack.enter_context(mock.patch.object(owner_module.os,'pidfd_open',side_effect=pin))
+        stack.enter_context(mock.patch.object(owner_module.os,'close',side_effect=closed.append))
+        stack.enter_context(mock.patch.object(owner_module.select,'poll',return_value=poller))
+        stack.enter_context(mock.patch.object(owner_module.time,'monotonic',side_effect=lambda:now[0]))
+        stack.enter_context(mock.patch.object(owner_module.time,'sleep',side_effect=sleep))
+        return stack, root, opened, directories, closed, pidfds, reads
+
+    @staticmethod
+    def graph():
+        return {100:[100,101],200:[200,201]}, {
+            '/proc/100/task/100/children':b'', '/proc/100/task/101/children':b'200 ',
+            '/proc/200/task/200/children':b'', '/proc/200/task/201/children':b'300 '}
+
+    def test_nonleader_children_at_both_levels_reach_the_authenticated_dockerd(self):
+        groups, lists = self.graph()
+        stack,root,opened,dirs,closed,pidfds,reads = self.fixture(groups,lists)
+        with stack:
+            pid,fd,identity = owner_module._find_authenticated_dockerd(100,root,'/owned',0.05)
+        self.assertEqual((pid,fd),(300,777))
+        self.assertEqual(identity['startTicks'],300)
+        self.assertEqual(pidfds,[(300,0)])
+        self.assertEqual(closed,[])
+        self.assertTrue(all(x.closed for x in opened+dirs))
+
+    def test_thread_union_byte_node_and_directory_bounds(self):
+        cases=[({100:[100,101]}, {'/proc/100/task/100/children':b'200 ', '/proc/100/task/101/children':b'200 300 '}, None),
+               ({100:[100]}, {'/proc/100/task/100/children':b'1'*4097}, 'child list exceeds'),
+               ({100:[100,101]}, {'/proc/100/task/100/children':b' '*4096, '/proc/100/task/101/children':b'1'}, 'child list exceeds'),
+               ({100:[100]}, {'/proc/100/task/100/children':b' '.join(str(x).encode() for x in range(1,258))}, 'node budget'),
+               ({100:[self.Entry('not-a-tid')]}, {}, 'directory is malformed'),
+               ({100:[self.Entry(100,False)]}, {}, 'directory is malformed'),
+               ({100:[]}, {}, 'census is empty'),
+               ({100:[100]}, {'/proc/100/task/100/children':b'-1 '}, 'list is malformed')]
+        for groups,lists,refusal in cases:
+            stack,root,opened,dirs,closed,pidfds,reads=self.fixture(groups,lists,short_reads=True)
+            with stack:
+                if refusal:
+                    with self.assertRaisesRegex(owner_module.Refusal,refusal):owner_module._read_thread_group_children(100,1024)
+                else:self.assertEqual(owner_module._read_thread_group_children(100,1024),([200,300],2))
+            self.assertTrue(all(x.closed for x in opened+dirs))
+            self.assertEqual(pidfds,[])
+
+    def test_task_limit_is_shared_by_the_whole_candidate_traversal(self):
+        groups,lists=self.graph()
+        groups[100]=[100,101]+list(range(1000,2021))
+        for tid in groups[100]:lists.setdefault(f'/proc/100/task/{tid}/children',b'')
+        stack,root,opened,dirs,closed,pidfds,reads=self.fixture(groups,lists)
+        with stack:
+            with self.assertRaisesRegex(owner_module.Refusal,'task budget'):
+                owner_module._find_authenticated_dockerd(100,root,'/owned',0.05)
+        self.assertEqual(len(opened),1024)
+        self.assertTrue(all(x.closed for x in opened+dirs))
+        self.assertEqual(pidfds,[])
+
+    def test_inaccessible_thread_and_wrong_ancestry_uid_or_cgroup_refuse(self):
+        for kind in ['unreadable','parent','uid','cgroup']:
+            groups,lists=self.graph();identities={}
+            if kind=='unreadable':lists['/proc/100/task/101/children']=OSError('authored vanished task')
+            else:identities[200]={'parentPid':999} if kind=='parent' else {'uid':os.getuid()+1} if kind=='uid' else {'cgroup':'0::/elsewhere\n'}
+            stack,root,opened,dirs,closed,pidfds,reads=self.fixture(groups,lists,identities=identities)
+            with stack:
+                with self.assertRaises(owner_module.Refusal):owner_module._find_authenticated_dockerd(100,root,'/owned',0.05)
+            self.assertTrue(all(x.closed for x in opened+dirs))
+            self.assertEqual(pidfds,[])
+
+    def test_pidfd_identity_mismatch_keeps_the_existing_refusal_and_close(self):
+        groups,lists=self.graph()
+        stack,root,opened,dirs,closed,pidfds,reads=self.fixture(groups,lists,pinned_change=True)
+        with stack:
+            with self.assertRaisesRegex(owner_module.Refusal,'identity changed during pidfd'):
+                owner_module._find_authenticated_dockerd(100,root,'/owned',0.05)
+        self.assertEqual(pidfds,[(300,0)])
+        self.assertEqual(closed,[777])
+
+    def test_missing_candidate_retains_the_existing_exec_deadline(self):
+        stack,root,opened,dirs,closed,pidfds,reads=self.fixture({100:[100]},{'/proc/100/task/100/children':b''})
+        with stack:
+            with self.assertRaisesRegex(owner_module.Refusal,'exec deadline'):
+                owner_module._find_authenticated_dockerd(100,root,'/owned',0.05)
+        self.assertEqual(pidfds,[])
+        self.assertTrue(all(x.closed for x in opened+dirs))
+
+
 if __name__ == "__main__":
     unittest.main()
