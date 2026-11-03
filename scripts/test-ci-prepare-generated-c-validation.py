@@ -173,6 +173,8 @@ class CompilerProvisioningControls(unittest.TestCase):
         (self.runtime / 'headers').mkdir(parents=True)
         header = mounted_include / 'stddef.h'
         header.write_bytes(b'authenticated standard header\n')
+        stdarg = mounted_include / 'stdarg.h'
+        stdarg.write_bytes(b'authenticated GCC builtin header\n')
         unapproved = self.root / 'unapproved/include'
         stderr = (b'#include <...> search starts here:\n' + str(mounted_include).encode() + b'\n' +
                   str(include).encode() + b'\n' +
@@ -190,6 +192,11 @@ class CompilerProvisioningControls(unittest.TestCase):
                            'sha256': hashlib.sha256(header.read_bytes()).hexdigest()},
                           {'searchPath': str(include), 'mountedPath': str(header), 'bytes': len(header.read_bytes()),
                            'sha256': hashlib.sha256(header.read_bytes()).hexdigest()}], evidence['stddefCandidates'])
+        self.assertEqual([{'searchPath': str(mounted_include), 'mountedPath': str(stdarg), 'bytes': len(stdarg.read_bytes()),
+                           'sha256': hashlib.sha256(stdarg.read_bytes()).hexdigest()},
+                          {'searchPath': str(include), 'mountedPath': str(stdarg), 'bytes': len(stdarg.read_bytes()),
+                           'sha256': hashlib.sha256(stdarg.read_bytes()).hexdigest()}], evidence['stdargCandidates'])
+        PROVISIONER.require_compiler_builtin_header_candidate(evidence, mounted_include, 'stdarg.h')
         self.assertIn('-B' + str(prefix) + '/', run.call_args.args[0])
         self.assertIn('-I' + str(mounted_include), run.call_args.args[0])
         no_candidate = SimpleNamespace(returncode=1, stdout='', stderr=(
@@ -199,6 +206,8 @@ class CompilerProvisioningControls(unittest.TestCase):
                 ((self.root / 'gcc', self.runtime / 'gcc'), (Path('/usr/include'), self.runtime / 'headers')),
                 mounted_include)
         self.assertEqual([], absent['stddefCandidates'])
+        with self.assertRaisesRegex(ValueError, 'authenticated readable GCC builtin stdarg.h'):
+            PROVISIONER.require_compiler_builtin_header_candidate(absent, mounted_include, 'stdarg.h')
         with self.assertRaisesRegex(ValueError, 'complete include-search list'):
             PROVISIONER.parse_gcc_include_search_paths(b'no compiler diagnostics')
         with self.assertRaisesRegex(ValueError, 'canonical and absolute'):
@@ -254,6 +263,38 @@ class CompilerProvisioningControls(unittest.TestCase):
         headers.mkdir(parents=True)
         with self.assertRaisesRegex(ValueError, 'one pinned GCC builtin stddef'):
             PROVISIONER.preserve_compiler_builtin_headers([str(elsewhere)], gcc_runtime, headers, PROVISIONER.Copier())
+
+    def test_compiler_builtin_include_tree_is_copied_to_the_authenticated_b_prefix(self):
+        gcc_runtime = self.root / 'gcc'
+        source = gcc_runtime / 'include'
+        source.mkdir(parents=True)
+        (source / 'stdarg.h').write_bytes(b'pinned builtin stdarg bytes\n')
+        (source / 'stddef.h').write_bytes(b'pinned builtin stddef bytes\n')
+        tools = self.runtime / 'tools'
+        tools.mkdir(parents=True)
+        copier = PROVISIONER.Copier()
+
+        destination = PROVISIONER.copy_compiler_builtin_include_directory(source, gcc_runtime, tools, copier)
+
+        self.assertEqual(b'pinned builtin stdarg bytes\n', (destination / 'stdarg.h').read_bytes())
+        self.assertEqual(0o444, stat.S_IMODE((destination / 'stdarg.h').stat().st_mode))
+        self.assertEqual(3, copier.entries)
+        with self.assertRaisesRegex(ValueError, 'destination already exists'):
+            PROVISIONER.copy_compiler_builtin_include_directory(source, gcc_runtime, tools, copier)
+
+    def test_compiler_builtin_include_tree_refuses_unpinned_roots_and_missing_stdarg(self):
+        gcc_runtime = self.root / 'gcc'
+        source = gcc_runtime / 'include'
+        source.mkdir(parents=True)
+        tools = self.runtime / 'tools'
+        tools.mkdir(parents=True)
+        outside = self.root / 'outside/include'
+        outside.mkdir(parents=True)
+        with self.assertRaisesRegex(ValueError, 'pinned include subtree'):
+            PROVISIONER.copy_compiler_builtin_include_directory(
+                outside, gcc_runtime, tools, PROVISIONER.Copier())
+        with self.assertRaisesRegex(ValueError, 'lacks a regular stdarg.h'):
+            PROVISIONER.copy_compiler_builtin_include_directory(source, gcc_runtime, tools, PROVISIONER.Copier())
 
     def args(self):
         return SimpleNamespace(uid=1000, gid=1000, module_worker_classpath=None,
