@@ -15,13 +15,17 @@ internal object ReconstructionExplorationInput {
             if (Thread.interrupted()) throw InterruptedException("reconstruction exploration read cancelled")
         }
         checkCancellation()
-        val relative = "exploration.json"
+        val moduleScoped = Files.exists(outputDir.resolve(ModuleObservedBehavior.FILE_NAME), LinkOption.NOFOLLOW_LINKS)
+        val relative = if (moduleScoped) ModuleObservedBehavior.FILE_NAME else "exploration.json"
         if (!Files.exists(outputDir.resolve(relative), LinkOption.NOFOLLOW_LINKS)) return null
-        val maximumBytes = minOf(MAXIMUM_HOST_BYTES, maximumCharacters.toLong() * 4)
+        // The envelope is a bounded corpus; only selected cases enter the module's prompt budget.
+        val maximumBytes = if (moduleScoped) ModuleObservedBehavior.MAXIMUM_BYTES.toLong()
+            else minOf(MAXIMUM_HOST_BYTES, maximumCharacters.toLong() * 4)
         val bytes = readStableRegularFile(outputDir, relative, maximumBytes,
             cancellationCheck = ::checkCancellation).bytes
         val text = bytes.decodeToString(throwOnInvalidSequence = true)
-        require(text.length <= maximumCharacters) {
+        if (moduleScoped) ModuleObservedBehavior.parse(text)
+        else require(text.length <= maximumCharacters) {
             "exploration evidence exceeds $maximumCharacters reconstruction context characters"
         }
         checkCancellation()

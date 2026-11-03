@@ -102,6 +102,8 @@ class GccBundledGhidraDeploymentReferenceTest {
         val deployment = GccBundledGhidraDeploymentReference.open()
         try {
             val reference = deployment.reference
+            assertEquals("0ee91d684d310357363cbf8516b2dc65b5f56c4b38c62d4c9e09304eb3ecafaf", reference.exporterSha256,
+                "retained profile-17 admissions must continue loading their exact approved exporter")
             assertTrue(deployment.bundleRoot.isAbsolute)
             assertTrue(reference.entries.values.any { it.kind == "file" && it.bytes == 0L })
             assertEquals(BRIDGE, reference.classPath.first())

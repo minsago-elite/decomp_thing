@@ -65,14 +65,18 @@ class FullTreeFunctionObservationTest(unittest.TestCase):
             },
             offset=0x220,
         )
-        die = SimpleNamespace(
-            attributes={"DW_AT_call_origin": SimpleNamespace(value=0x220)},
-            get_DIE_from_attribute=lambda _: origin,
-            offset=0x330,
-        )
-        result = _target(die, SimpleNamespace(), 0, (), (object, object, lambda _: None))
-        self.assertEqual("virtual-unresolved", result["kind"])
-        self.assertIsNone(result["functionId"])
+        for tag, key in (("DW_TAG_call_site", "DW_AT_call_origin"),
+                         ("DW_TAG_GNU_call_site", "DW_AT_abstract_origin")):
+            with self.subTest(tag=tag):
+                die = SimpleNamespace(
+                    tag=tag,
+                    attributes={key: SimpleNamespace(value=0x220)},
+                    get_DIE_from_attribute=lambda attribute: origin if attribute == key else None,
+                    offset=0x330,
+                )
+                result = _target(die, SimpleNamespace(), 0, (), (object, object, lambda _: None))
+                self.assertEqual("virtual-unresolved", result["kind"])
+                self.assertIsNone(result["functionId"])
 
     def test_exact_indirect_address_expression_produces_a_bounded_target_set(self) -> None:
         from elftools.dwarf.structs import DWARFStructs
@@ -81,14 +85,21 @@ class FullTreeFunctionObservationTest(unittest.TestCase):
             little_endian=True, dwarf_format=32, address_size=8, dwarf_version=5
         )
         expression = b"\x03" + (0x1234).to_bytes(8, "little")
-        die = SimpleNamespace(
-            attributes={"DW_AT_call_target": SimpleNamespace(value=expression)},
-            cu=SimpleNamespace(structs=structs),
-            offset=0x330,
-        )
-        result = _target(die, SimpleNamespace(), 0, ((0x1000, 0x2000),), (object, object, lambda _: None))
-        self.assertEqual("indirect-proven", result["kind"])
-        self.assertEqual(["function-rva-0x1234"], result["provenFunctionIds"])
+        for tag, key in (("DW_TAG_call_site", "DW_AT_call_target"),
+                         ("DW_TAG_GNU_call_site", "DW_AT_GNU_call_site_target")):
+            for clobbered in (False, True):
+                with self.subTest(tag=tag, clobbered=clobbered):
+                    die = SimpleNamespace(
+                        tag=tag,
+                        attributes={key + ("_clobbered" if clobbered else ""): SimpleNamespace(value=expression)},
+                        cu=SimpleNamespace(structs=structs),
+                        offset=0x330,
+                    )
+                    result = _target(die, SimpleNamespace(), 0, ((0x1000, 0x2000),), (object, object, lambda _: None))
+                    self.assertEqual("indirect-unresolved" if clobbered else "indirect-proven", result["kind"])
+                    self.assertEqual([] if clobbered else ["function-rva-0x1234"], result["provenFunctionIds"])
+                    self.assertEqual("call-target-clobbered-expression" if clobbered else "call-target-expression",
+                                     result["targetEvidence"])
 
     def test_three_shard_calls_preserve_tail_virtual_indirect_external_and_alias_evidence(self) -> None:
         with tempfile.TemporaryDirectory(prefix="full-tree-call-fixture-") as temporary:

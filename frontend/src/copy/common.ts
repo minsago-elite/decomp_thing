@@ -2,6 +2,8 @@ import type { Job } from '../api/generated';
 
 export const commonCopy = {
   "bytes": "{value} bytes",
+  "labeledValue": "{label}: {value}",
+  "utcTimestamp": "{time} UTC",
   "failureReference": "{message} Reference ID: {reference}."
 } as const;
 

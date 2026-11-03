@@ -883,7 +883,7 @@ private fun doctorUsageError(message: String, toolsOnly: Boolean): Nothing {
 
 internal const val WEB_USAGE =
     "usage: llm_bin_patch web [--host 127.0.0.1] [--port 8000] [--listen-backlog 64] [--data-dir .decomp_engine/jobs] " +
-        "[--ui legacy|spa] [--base-path /] [--dev-frontend-origin http://127.0.0.1:5173]"
+        "[--ui legacy|spa] [--base-path /] [--dev-frontend-origin http://127.0.0.1:5173] [--git-import-root <directory>]"
 
 internal data class WebCliOptions(
     val host: String = "127.0.0.1",
@@ -893,6 +893,7 @@ internal data class WebCliOptions(
     val uiMode: WebUiMode = WebUiMode.LEGACY,
     val basePath: String = "/",
     val devFrontendOrigin: String? = null,
+    val gitImportRoot: Path? = null,
 )
 
 internal sealed interface WebCliInvocation {
@@ -908,7 +909,7 @@ internal fun parseWebCliArguments(args: List<String>): WebCliInvocation {
     while (index < args.size) {
         val option = args[index]
         if (option == "--help" || option == "-h") return WebCliInvocation.Help
-        val known = option in setOf("--host", "--port", "--listen-backlog", "--data-dir", "--ui", "--base-path", "--dev-frontend-origin")
+        val known = option in setOf("--host", "--port", "--listen-backlog", "--data-dir", "--ui", "--base-path", "--dev-frontend-origin", "--git-import-root")
         if (!known) return WebCliInvocation.Invalid("unknown web argument: ${cliOperatorText(option)}")
         val value = args.getOrNull(index + 1) ?: return WebCliInvocation.Invalid("$option requires a value")
         options = when (option) {
@@ -926,6 +927,9 @@ internal fun parseWebCliArguments(args: List<String>): WebCliInvocation {
                 else -> return WebCliInvocation.Invalid("--ui must be legacy or spa")
             })
             "--base-path" -> options.copy(basePath = value)
+            "--git-import-root" -> options.copy(gitImportRoot = try { Path.of(value).toAbsolutePath() } catch (_: java.nio.file.InvalidPathException) {
+                return WebCliInvocation.Invalid("--git-import-root is not a valid path")
+            })
             else -> options.copy(devFrontendOrigin = value)
         }
         index += 2
@@ -973,10 +977,11 @@ private fun runWeb(args: List<String>) {
         decompengine.web.startWebServerWithShutdownHook { cancellation ->
             UploadServer(host, options.port, options.dataDir, uiMode = uiMode, basePath = basePath,
                 devFrontendOrigin = options.devFrontendOrigin, listenBacklog = options.listenBacklog,
-                startupCancellation = cancellation)
+                startupCancellation = cancellation, gitImportRoot = options.gitImportRoot)
         }
     } catch (failure: Exception) {
-        System.err.println(webStartupRefusal(failure, host, options.port) ?: throw failure)
+        System.err.println(decompengine.web.webStorageStartupGuidance(failure)
+            ?: webStartupRefusal(failure, host, options.port) ?: throw failure)
         kotlin.system.exitProcess(2)
     }
     val urlHost = if (':' in host && !host.startsWith('[')) "[$host]" else host
@@ -1005,7 +1010,7 @@ private fun printHelp() {
           llm_bin_patch gcc-engine-native-calls <cc1|driver> <stripped-binary> --profile <file> --ghidra-archive <file> --output <empty-private-directory> --scratch <provisioned-mount>
           llm_bin_patch llvm-native-runtime-measurement [--listener-continuity] <oci-layout> <fixed-client> <empty-config> <private-socket> <fresh-output>
           llm_bin_patch --version
-          llm_bin_patch web [--host 127.0.0.1] [--port 8000] [--listen-backlog 64] [--data-dir .decomp_engine/jobs] [--ui legacy|spa] [--base-path /] [--dev-frontend-origin http://127.0.0.1:5173]
+          llm_bin_patch web [--host 127.0.0.1] [--port 8000] [--listen-backlog 64] [--data-dir .decomp_engine/jobs] [--ui legacy|spa] [--base-path /] [--dev-frontend-origin http://127.0.0.1:5173] [--git-import-root <directory>]
 
         Agent harness selection for doctor, patch, reconstruction, and repair:
           --harness acp            use the ACP agent provisioned by ACP_CONFIG_FILE (default)

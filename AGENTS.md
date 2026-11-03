@@ -15,6 +15,18 @@
 - Create or update a GitHub issue when new roadmap work is discovered. Do not add planning checklists to `ROADMAP.md`; it is retained only as a deprecated migration pointer.
 - Files under `roadmap/` are historical design and benchmark context, not live project status, unless an active issue explicitly references them.
 
+## Agent Orchestration and Model Routing
+
+- Fetch and integrate the latest upstream state before implementation so branches do not drift unnecessarily. Keep pull requests ready for review when their implementation is ready.
+- Use the orchestration tools for provider- or model-specific work. Discover supported identifiers and options before delegation. Do not silently substitute a different provider or model when the requested one is unavailable; report the limitation and continue only with independent work.
+- For backend work, use Claude Opus 5.5 for substantial planning, Codex `gpt-6.1-sol` as the technical middle layer for design decisions, integration and review, and Codex `gpt-6-luna` for implementation.
+- Delegate hard backend tasks with detailed implementation decisions to Fable or Astra when those agents are available. Keep the work focused on a concrete acceptance boundary and retain exact-source test and review evidence.
+- For frontend work, use Claude Opus 5.5 through Claude Code at low effort for planning and implementation direction. Use Claude Sonnet 5.5 only when a second frontend implementation or review pass is useful. Preserve this UI routing unless the user explicitly authorizes an exception.
+- Fan out independent work when requested or when it shortens the critical path. Give every implementation agent explicit file or module ownership and acceptance criteria, tell agents they share the repository, and require them to accommodate others' changes without reverting them.
+- Delegate high-detail or high-impact work to the requested planning and review models before implementation. Verify the resulting artifacts and evidence before landing them.
+- Commit focused checkpoints frequently and push them to the intended pull request. Do not merge while required checks are failing or pending or while Codex review threads remain unresolved.
+- Do not delegate external messages, merges, publication or other irreversible actions unless the user has authorized that action.
+
 ## CI and Pull Requests
 
 - Prefer GitHub Actions for primary verification and qualification. Use short local checks for fast feedback when practical.
@@ -23,10 +35,21 @@
 - Do not request review from the Codex code review bot; it is added automatically when a commit is pushed to a ready pull request.
 - Do not merge a pull request while required CI checks fail or are pending, or until all Codex code review bot reviews are resolved.
 - For privileged commands on local hosts, use `doas` instead of `sudo`.
-- Any of this may be waived or overridden by an explicit user request.
+
+- Any repository procedure may be waived or overridden by an explicit user request.
 
 ## Repository Sanity Checks
 
 - Milestone sanity checks cover every repository milestone.
 - Before continuing planned work, verify the relevant milestone and issue status, dependencies, acceptance criteria, and current evidence.
 - Check that closed issues have evidence matching their full acceptance criteria and intended scope; reopen or correct closure metadata when they were closed improperly.
+
+## Milestone Completion Orchestration
+
+- The active project goal is to finish every open milestone, prioritizing remaining UI milestone work and backend completion. Before implementation, audit all milestones and issues against the repository sanity checks above; work from GitHub's current scope and acceptance criteria, not assumptions.
+- Use the T3 orchestration tools for delegated work when available. Check `orchestrator_capabilities` before the first delegation and use only listed provider/model identifiers and supported options. If a requested model/provider is unavailable, report that and do not silently substitute.
+- Backend: use Codex `gpt-6.1-sol` as the technical middle layer/reviewer, Claude Opus 5.5 for planning where useful, and Codex `gpt-6-luna` for implementation tasks. Keep Ghidra bundled through Java APIs, isolated worker execution, and authenticated oracle boundaries.
+- Frontend/UI: use Claude Opus 5.5 with low effort for planning and implementation direction; use Claude Sonnet 5.5 only where useful and available. Do not substitute backend model routing for UI work.
+- Keep delegated tasks scoped to explicit milestone/issue acceptance criteria. Review delegated changes and evidence before landing them. Commit frequently at meaningful checkpoints, referencing the relevant issue, and push when practical.
+- Preserve the repository rule against creating files or directories outside its root; do not create worktrees unless that rule is explicitly overridden.
+- `CLAUDE.md` must remain a symlink to `AGENTS.md` so Claude Code follows the same repository instructions.

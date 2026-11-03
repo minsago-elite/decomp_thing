@@ -75,7 +75,25 @@ export const assetRecoveryNoticeCopy = {
   "anApplicationFileCouldNotBeLoadedTheServerMay": "An application file could not be loaded. The server may have updated, or the connection may have been interrupted. Copy any unsaved input before reloading.",
   "useYourBrowserSReloadActionToRequestTheCurrent": "Use your browser’s Reload action to request the current version.",
   "reloading": "Reloading…",
-  "reloadApplication": "Reload application"
+  "reloadApplication": "Reload application",
+  reloadDidNotHelp: 'Reloading in this tab did not load a different build. Your browser or a proxy may still be serving a cached page. Use your browser’s hard reload or clear this site’s cached files, then open the workbench again.'
+} as const;
+
+export const buildMismatchCopy = {
+  title: 'The local server runs a different application version',
+  explanation: 'This page is build {page}; the server reports build {server}. Reload to use the matching version. Copy any unsaved input first; unconfirmed attempt commands stay retained for explicit replay.',
+} as const;
+
+export const panelBoundaryCopy = {
+  title: '{panel} could not be displayed',
+  explanation: 'The rest of this page is still available. Your work remains on the server.',
+  tryAgain: 'Show this section again',
+  names: {
+    upload: 'Upload', dashboard: 'Uploaded jobs', workflowAvailability: 'Workflow availability',
+    attemptControls: 'Attempt actions', progressPin: 'Progress pin', activity: 'Activity',
+    exploration: 'Exploration evidence', validation: 'Validation evidence',
+    sourcePreview: 'Source preview', digestCheck: 'Download digest check',
+  },
 } as const;
 
 export const lazyRouteCopy = {

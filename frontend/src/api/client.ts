@@ -33,7 +33,7 @@ export function createApiClient(options: ClientOptions) {
     || !Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > MAX_JSON_BYTES) throw new ApiClientError('invalid_request');
   const fetcher = options.fetch ?? globalThis.fetch.bind(globalThis);
 
-  async function request<K extends ResponseKind>(kind: K | null, path: string, method: 'GET' | 'HEAD' | 'POST' | 'PUT' | 'DELETE', body: string | FormData | undefined, settings: MutationOptions, session = false, upload = false, artifact?: Artifact, sourceHead?: SourceDigestExpectation): Promise<ResponseOf<K> | SourceDigestObservation | string | undefined> {
+  async function request<K extends ResponseKind>(kind: K | null, path: string, method: 'GET' | 'HEAD' | 'POST' | 'PUT' | 'PATCH' | 'DELETE', body: string | FormData | undefined, settings: MutationOptions, session = false, upload = false, artifact?: Artifact, sourceHead?: SourceDigestExpectation): Promise<ResponseOf<K> | SourceDigestObservation | string | undefined> {
     let url: string;
     try { url = apiPath(basePath, path); } catch { throw new ApiClientError('invalid_request'); }
     if (session && path !== '/session') throw new ApiClientError('invalid_request');
@@ -78,8 +78,11 @@ export function createApiClient(options: ClientOptions) {
       controller.signal.addEventListener('abort', stop, { once: true });
     });
     const operation = async (): Promise<ResponseOf<K> | SourceDigestObservation | string | undefined> => {
+      // The document policy is no-referrer, under which Fetch serializes a mutation's Origin as
+      // "null" (Firefox and WebKit follow this; Chromium does not), and the server requires the
+      // exact origin. `origin` sends only the scheme/host/port, never the page path (#631).
       response = await fetcher(url, {
-        method, headers, credentials: 'same-origin', mode: 'same-origin', redirect: 'error',
+        method, headers, credentials: 'same-origin', mode: 'same-origin', redirect: 'error', referrerPolicy: 'origin',
         cache: 'no-store', signal: controller.signal, ...(body === undefined ? {} : { body }),
       });
       if (controller.signal.aborted) {
@@ -159,9 +162,11 @@ export function createApiClient(options: ClientOptions) {
         || (requestKind === 'agentPreflightRequest' && kind !== 'agentPreflight')) throw new ApiClientError('invalid_request');
       return await request(kind, path, 'POST', encodeRequest(requestKind, data), settings, session) as ResponseOf<K>;
     },
-    async put<K extends ResponseKind, Q extends RequestKind>(kind: K, path: string, requestKind: Q, data: RequestData<Q>, settings: MutationOptions = {}): Promise<ResponseOf<K>> {
-      if (requestKind === 'agentPreflightRequest') throw new ApiClientError('invalid_request');
-      return await request(kind, path, 'PUT', encodeRequest(requestKind, data), settings) as ResponseOf<K>;
+    /** PUT by default; PATCH/DELETE carry only their closed job organization/deletion bodies. */
+    async put<K extends ResponseKind, Q extends RequestKind>(kind: K, path: string, requestKind: Q, data: RequestData<Q>, settings: MutationOptions = {}, method: 'PUT' | 'PATCH' | 'DELETE' = 'PUT'): Promise<ResponseOf<K>> {
+      if (requestKind === 'agentPreflightRequest' || (method !== 'PUT') !== /^job(Organization|Deletion)Request$/.test(requestKind)
+        || (method === 'PATCH') !== (requestKind === 'jobOrganizationRequest')) throw new ApiClientError('invalid_request');
+      return await request(kind, path, method, encodeRequest(requestKind, data), settings) as ResponseOf<K>;
     },
     async upload(file: File, settings: MutationOptions): Promise<ResponseOf<'job'>> {
       const body = new FormData();

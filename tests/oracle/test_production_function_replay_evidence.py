@@ -28,6 +28,104 @@ def _sha(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+class FunctionReplayProjectionBudgetTest(unittest.TestCase):
+    """Small untrusted inputs must not expand into unbounded derived reports."""
+
+    def _inputs(self, field: str, text: str) -> tuple[dict, dict, dict]:
+        digest = "0" * 64
+        aliases = [{"name": f"alias-{i}", "availability": {"stripped": "surviving"}}
+                   for i in range(256)]
+        identifier = text if field == "oracleId" else "excluded"
+        exclusion = {"kind": "compiler-generated", "reason": text if field == "reason" else "excluded"}
+        function = {"id": identifier, "rva": "0x10", "aliases": aliases, "exclusion": exclusion}
+        found = {"id": text if field == "recoveredId" else "found", "address": "0x10",
+                 "name": text if field == "recoveredName" else "found", "extractionStatus": "recovered"}
+        counts = {key: 0 for key in ("referenceCount", "rawRecoveredCount", "scoredRecoveredCount",
+            "ignoredExcludedCount", "exactMatches", "nearMisses", "truePositives", "falsePositives",
+            "falseNegatives", "nearMissDistanceBytes")}
+        counts.update(rawRecoveredCount=1, ignoredExcludedCount=1)
+        model = {"inputSha256": digest, "functions": [found]}
+        oracle = {"artifacts": {"stripped": {"inputSha256": digest}}, "functions": [function]}
+        observation = {"twin": "stripped", "selectedModelImageBase": "0x0", "inputSha256": digest,
+            "nearMissBytes": 4, "excludedFunctions": [
+                {"oracleId": identifier, "rva": "0x10", "aliases": aliases, **exclusion}],
+            "recoveredOutcomeCounts": {"recovered": 1, "partial": 0, "failed": 0, "synthetic": 0},
+            "result": {"exactMatches": [], "nearMisses": [], "falsePositives": [], "falseNegatives": [],
+                "ignoredExcludedRecoveries": [{"recoveredRva": "0x10", "recoveredId": found["id"],
+                    "recoveredName": found["name"], "recoveredStatus": "recovered", "oracleId": identifier,
+                    "exclusionKind": exclusion["kind"], "exclusionReason": exclusion["reason"]}],
+                "boundaries": counts}}
+        # Exercise the actual strict input reader with distinct decoded objects.
+        return tuple(verifier._json(_json_bytes(value)) for value in (model, oracle, observation))
+
+    def test_repeated_reasons_and_identities_reject_before_projection_expansion(self) -> None:
+        for field in ("reason", "recoveredName", "recoveredId", "oracleId"):
+            with self.subTest(field=field):
+                inputs = self._inputs(field, "x" * 1024)
+                self.assertLess(sum(len(_json_bytes(value)) for value in inputs), 96 * 1024)
+                with patch.object(verifier, "MAX_DECODED_BYTES", 256 * 1024):
+                    with self.assertRaisesRegex(verifier.EvidenceError, "byte budget"):
+                        verifier.rederive_measurements(*inputs)
+
+    def test_projection_charges_escaped_utf8_bytes_not_character_count(self) -> None:
+        for text in ("\x00" * 256, "\U0001f600" * 384, '"' * 768):
+            with self.subTest(text=repr(text[:1])):
+                inputs = self._inputs("reason", text)
+                # The whole projection fits with ASCII of the same character
+                # count; escaped or multibyte repetitions must not get that cost.
+                ascii_measurements = verifier.rederive_measurements(*self._inputs("reason", "x" * len(text)))
+                self.assertLess(len(_json_bytes(ascii_measurements)), 384 * 1024)
+                with patch.object(verifier, "MAX_DECODED_BYTES", 384 * 1024):
+                    with self.assertRaisesRegex(verifier.EvidenceError, "byte budget"):
+                        verifier.rederive_measurements(*inputs)
+
+    def test_projection_has_an_aggregate_node_budget(self) -> None:
+        inputs = self._inputs("reason", "small")
+        with patch.object(verifier, "MAX_CANONICAL_NODES", 1024):
+            with self.assertRaisesRegex(verifier.EvidenceError, "node budget"):
+                verifier.rederive_measurements(*inputs)
+
+    def test_tiny_claim_rejects_large_derived_document_before_encoding(self) -> None:
+        repeated = {"reason": "x" * (1024 * 1024)}
+        measurements = {"symbols": [repeated] * 256}
+        original = json.JSONEncoder.iterencode
+        encoded_projection = []
+
+        def observe(encoder, value, *args, **kwargs):
+            if value is measurements:
+                encoded_projection.append(value)
+            return original(encoder, value, *args, **kwargs)
+
+        with patch.object(json.JSONEncoder, "iterencode", observe):
+            with self.assertRaisesRegex(verifier.EvidenceError, "byte budget"):
+                verifier.verify_accuracy({"score": {"measurements": {}}}, measurements)
+        self.assertEqual([], encoded_projection)
+
+    def test_canonical_budget_matches_exact_legacy_bytes_at_the_ceiling(self) -> None:
+        for value in ({}, [], {"empty": [{}, []]}, {"é": ["\x00\b\t\n\f\r\\\"\U0001f600", None, True, False,
+                    123, -123, 0.25], "nested": {"key": "value"}}):
+            with self.subTest(value=value):
+                expected = _json_bytes(value)
+                budget = verifier._CanonicalBudget()
+                budget.add(value)
+                self.assertEqual(len(expected), budget.bytes + 1)
+                with patch.object(verifier, "MAX_DECODED_BYTES", len(expected)):
+                    self.assertEqual(expected, verifier._canonical(value))
+                with patch.object(verifier, "MAX_DECODED_BYTES", len(expected) - 1):
+                    with self.assertRaisesRegex(verifier.EvidenceError, "byte budget"):
+                        verifier._canonical(value)
+
+    def test_canonicalization_enforces_nodes_and_depth_before_encoding(self) -> None:
+        with patch.object(verifier, "MAX_CANONICAL_NODES", 10):
+            with self.assertRaisesRegex(verifier.EvidenceError, "node budget"):
+                verifier._canonical([None] * 10)
+        nested = []
+        for _ in range(65):
+            nested = [nested]
+        with self.assertRaisesRegex(verifier.EvidenceError, "depth"):
+            verifier._canonical(nested)
+
+
 class ProductionFunctionReplayEvidenceTest(unittest.TestCase):
     """Retained-byte controls establish offline consistency, never live admission."""
 

@@ -23,6 +23,9 @@ class WebCliTest {
             "--data-dir", "jobs", "--ui", "spa", "--base-path", "/app/", "--dev-frontend-origin", "http://127.0.0.1:5173"))
         assertEquals(WebCliInvocation.Serve(WebCliOptions("::1", 0, 8, Path.of("jobs"), WebUiMode.SPA, "/app/",
             "http://127.0.0.1:5173")), selected)
+        val gitRoot = Path.of("repository").toAbsolutePath()
+        val withGitImport = parseWebCliArguments(listOf("--git-import-root", "repository")) as WebCliInvocation.Serve
+        assertEquals(gitRoot, withGitImport.options.gitImportRoot)
     }
 
     @Test

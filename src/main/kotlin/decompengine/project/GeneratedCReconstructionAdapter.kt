@@ -82,6 +82,7 @@ internal object GeneratedCReconstructionAdapter : ReconstructionAdapter {
         }
     }
 
+    override fun moduleContext(request: ModuleReconstructionRequest): ModulePromptContext = GeneratedCModuleContext.select(request)
     override fun modulePrompt(request: ModuleReconstructionRequest): ModulePromptContent = GeneratedCModulePrompt.render(request)
     override fun defaultReconstructor(): ModuleReconstructor = EvidenceModuleReconstructor()
     override fun assess(module: PlannedModule, model: RecoveredProgramModel, generator: String, source: String): List<ModuleReconstructionIssue> =
