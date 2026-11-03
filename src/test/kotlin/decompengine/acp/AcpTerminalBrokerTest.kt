@@ -15,6 +15,7 @@ import decompengine.agent.AgentOperation
 import decompengine.agent.AgentWorkspaceRoot
 import java.io.IOException
 import java.nio.file.Files
+import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.Path
 import java.security.MessageDigest
 import java.time.Duration
@@ -22,12 +23,14 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
 
@@ -220,80 +223,80 @@ class AcpTerminalBrokerTest {
     fun `kill is idempotent while release and cross-session ids are strict`() {
         runBlocking {
         val fixture = terminalFixture(mode = "terminal-sleep")
-        val broker = broker(fixture, AcpTerminalAuditRecorder())
-        broker.bindSession(SESSION)
-        val terminalId = broker.create(
-            SESSION,
-            fixture.command,
-            fixture.args,
-            fixture.root.path.toString(),
-            emptyList(),
-            null,
-        ).terminalId
-        broker.observeToolCall(SESSION, terminalUpdate("tool-1", terminalId))
+        withOwnedTerminalFixture(fixture) { broker ->
+            // The outer prepared/admitted fixture initializes the native boundary before these
+            // exact population baselines. Every injected refusal still performs one create only.
+            requireFailedCreateFixtureCleanup()
+            broker.bindSession(SESSION)
+            val terminalId = broker.create(
+                SESSION,
+                fixture.command,
+                fixture.args,
+                fixture.root.path.toString(),
+                emptyList(),
+                null,
+            ).terminalId
+            broker.observeToolCall(SESSION, terminalUpdate("tool-1", terminalId))
 
-        broker.kill(SESSION, terminalId)
-        broker.kill(SESSION, terminalId)
-        broker.release(SESSION, terminalId)
-        assertFailsWith<AcpExpectedError> { broker.output(SESSION, terminalId) }
-        broker.close()
-        fixture.boundary.close()
+            broker.kill(SESSION, terminalId)
+            broker.kill(SESSION, terminalId)
+            broker.release(SESSION, terminalId)
+            assertFailsWith<AcpExpectedError> { broker.output(SESSION, terminalId) }
+        }
 
         // A forged create must latch the broker failure before policy validation or launch. The
         // production raw-frame guard provides the corresponding pre-SDK-dispatch guarantee.
         val crossSessionCreateFixture = terminalFixture(mode = "terminal-sleep")
         val crossSessionCreateAudit = AcpTerminalAuditRecorder()
-        val crossSessionCreateBroker = broker(crossSessionCreateFixture, crossSessionCreateAudit)
-        crossSessionCreateBroker.bindSession(SESSION)
-        assertFailsWith<AcpProtocolFailure> {
-            crossSessionCreateBroker.create(
-                "other-session",
-                crossSessionCreateFixture.command,
-                crossSessionCreateFixture.args,
-                crossSessionCreateFixture.root.path.toString(),
-                emptyList(),
-                null,
-            )
+        withOwnedTerminalFixture(crossSessionCreateFixture, crossSessionCreateAudit) { crossSessionCreateBroker ->
+            crossSessionCreateBroker.bindSession(SESSION)
+            assertFailsWith<AcpProtocolFailure> {
+                crossSessionCreateBroker.create(
+                    "other-session",
+                    crossSessionCreateFixture.command,
+                    crossSessionCreateFixture.args,
+                    crossSessionCreateFixture.root.path.toString(),
+                    emptyList(),
+                    null,
+                )
+            }
+            assertFailsWith<AcpProtocolFailure> {
+                crossSessionCreateBroker.create(
+                    SESSION,
+                    crossSessionCreateFixture.command,
+                    crossSessionCreateFixture.args,
+                    crossSessionCreateFixture.root.path.toString(),
+                    emptyList(),
+                    null,
+                )
+            }
+            assertTrue(crossSessionCreateAudit.snapshot().any {
+                it.reason == AcpTerminalAuditReason.CROSS_SESSION
+            })
+            assertTrue(crossSessionCreateFixture.boundary.evidence(crossSessionCreateFixture.policy).launches.isEmpty())
         }
-        assertFailsWith<AcpProtocolFailure> {
-            crossSessionCreateBroker.create(
-                SESSION,
-                crossSessionCreateFixture.command,
-                crossSessionCreateFixture.args,
-                crossSessionCreateFixture.root.path.toString(),
-                emptyList(),
-                null,
-            )
-        }
-        assertTrue(crossSessionCreateAudit.snapshot().any {
-            it.reason == AcpTerminalAuditReason.CROSS_SESSION
-        })
-        assertTrue(crossSessionCreateFixture.boundary.evidence(crossSessionCreateFixture.policy).launches.isEmpty())
-        crossSessionCreateBroker.close()
-        crossSessionCreateFixture.boundary.close()
 
         // A cross-session reference is a fatal protocol violation. Verify it on a separate
         // session instead of incorrectly expecting later callbacks to recover from that failure.
         val crossSessionFixture = terminalFixture(mode = "terminal-sleep")
-        val crossSessionBroker = broker(crossSessionFixture, AcpTerminalAuditRecorder())
-        crossSessionBroker.bindSession(SESSION)
-        val crossSessionTerminal = crossSessionBroker.create(
-            SESSION,
-            crossSessionFixture.command,
-            crossSessionFixture.args,
-            crossSessionFixture.root.path.toString(),
-            emptyList(),
-            null,
-        ).terminalId
-        crossSessionBroker.observeToolCall(SESSION, terminalUpdate("tool-cross", crossSessionTerminal))
-        assertFailsWith<AcpProtocolFailure> {
-            crossSessionBroker.output("other-session", crossSessionTerminal)
+        withOwnedTerminalFixture(crossSessionFixture) { crossSessionBroker ->
+            crossSessionBroker.bindSession(SESSION)
+            val crossSessionTerminal = crossSessionBroker.create(
+                SESSION,
+                crossSessionFixture.command,
+                crossSessionFixture.args,
+                crossSessionFixture.root.path.toString(),
+                emptyList(),
+                null,
+            ).terminalId
+            crossSessionBroker.observeToolCall(SESSION, terminalUpdate("tool-cross", crossSessionTerminal))
+            assertFailsWith<AcpProtocolFailure> {
+                crossSessionBroker.output("other-session", crossSessionTerminal)
+            }
+            assertFailsWith<AcpProtocolFailure> {
+                crossSessionBroker.output(SESSION, crossSessionTerminal)
+            }
         }
-        assertFailsWith<AcpProtocolFailure> {
-            crossSessionBroker.output(SESSION, crossSessionTerminal)
-        }
-        crossSessionBroker.close()
-        crossSessionFixture.boundary.close()
         }
     }
 
@@ -631,6 +634,127 @@ class AcpTerminalBrokerTest {
         boundedAuditFixture.boundary.close()
         assertNotNull(first)
         }
+    }
+
+    /** Fixture ownership begins before broker admission or the first create can throw. */
+    private suspend fun <T> withOwnedTerminalFixture(
+        fixture: TerminalFixture,
+        audit: AcpTerminalAuditRecorder = AcpTerminalAuditRecorder(),
+        operation: suspend (AcpTerminalBroker) -> T,
+    ): T {
+        var ownedBroker: AcpTerminalBroker? = null
+        var primaryFailure: Throwable? = null
+        try {
+            val opened = broker(fixture, audit)
+            ownedBroker = opened
+            return operation(opened)
+        } catch (failure: Throwable) {
+            primaryFailure = failure
+            throw failure
+        } finally {
+            var retainedFailure = primaryFailure
+            fun retainCleanupFailure(failure: Throwable) {
+                val retained = retainedFailure
+                if (retained == null) retainedFailure = failure
+                else if (retained !== failure) retained.addSuppressed(failure)
+            }
+            try { ownedBroker?.close() } catch (failure: Throwable) { retainCleanupFailure(failure) }
+            try { fixture.boundary.close() } catch (failure: Throwable) { retainCleanupFailure(failure) }
+            retainedFailure?.let { failure ->
+                // This reads only the already-captured, closed diagnostic projection. Diagnostic
+                // failure cannot replace the original refusal or any retained cleanup failure.
+                runCatching { failure.addSuppressed(TerminalFixtureAuditFailure(audit.launchFailureContext())) }
+                if (primaryFailure == null) throw failure
+            }
+        }
+    }
+
+    /** Stackless display data only; never copies private exception messages or runtime values. */
+    private class TerminalFixtureAuditFailure(message: String) : RuntimeException(message, null, false, false)
+
+    private suspend fun requireFailedCreateFixtureCleanup() {
+        val registry = Class.forName("decompengine.acp.LinuxBubblewrapBoundaryKt")
+            .getDeclaredField("ACTIVE_PRIVATE_CONTROLS").apply { isAccessible = true }.get(null) as Set<*>
+        val controlField = LinuxBubblewrapBoundary::class.java.getDeclaredField("controlDirectory").apply { isAccessible = true }
+        val controlPath = Class.forName("decompengine.acp.PinnedControlDirectory")
+            .getDeclaredMethod("getPath").apply { isAccessible = true }
+        fun registeredControls(): List<Any?> = synchronized(registry) { registry.toList() }
+        fun descriptorCount(): Long = Files.list(Path.of("/proc/self/fd")).use { it.count() }
+
+        suspend fun requireCleanup(throwAssertion: Boolean, failCleanup: Boolean) {
+            val baselineControls = registeredControls()
+            val baselineDescriptors = descriptorCount()
+            val createAttempts = AtomicInteger()
+            val controlCloses = AtomicInteger()
+            val injectedRefusal = IOException("private launch refusal sentinel")
+            val injectedCleanup = IOException("injected owned control close failure")
+            val injectedAssertion = AssertionError("injected fixture assertion failure")
+            val audit = AcpTerminalAuditRecorder()
+            var selectedControl: Any? = null
+            var selectedPath: Path? = null
+            var originalFailure: Throwable? = null
+            val fixture = terminalFixture(
+                mode = "terminal-sleep",
+                launchHook = AcpSandboxLaunchHook { stage ->
+                    if (stage == AcpSandboxLaunchStage.BEFORE_SCOPE_START) {
+                        createAttempts.incrementAndGet()
+                        throw injectedRefusal
+                    }
+                },
+                cleanupHook = AcpSandboxCleanupHook { stage ->
+                    if (stage == AcpSandboxCleanupStage.CONTROL_DIRECTORY) {
+                        controlCloses.incrementAndGet()
+                        if (failCleanup) throw injectedCleanup
+                    }
+                },
+            )
+            suspend fun executeOwnedFixture() = withOwnedTerminalFixture(fixture, audit) { owned ->
+                // Inspect the exact control only after the fixture is finally-owned.
+                selectedControl = checkNotNull(controlField.get(fixture.boundary))
+                selectedPath = controlPath.invoke(selectedControl) as Path
+                assertTrue(selectedControl in registeredControls())
+                owned.bindSession(SESSION)
+                try {
+                    if (throwAssertion) throw injectedAssertion
+                    owned.create(SESSION, fixture.command, fixture.args, fixture.root.path.toString(), emptyList(), null)
+                } catch (failure: Throwable) {
+                    originalFailure = failure
+                    throw failure
+                }
+            }
+            val failure = if (throwAssertion) {
+                assertFailsWith<AssertionError> { executeOwnedFixture() }
+            } else {
+                assertFailsWith<AcpExpectedError> { executeOwnedFixture() }
+            }
+            assertSame(originalFailure, failure, "fixture cleanup must preserve the original throwable object")
+            if (throwAssertion) assertSame(injectedAssertion, failure)
+            else assertEquals("terminal sandbox failed safely", failure.message)
+            assertEquals(if (throwAssertion) 0 else 1, createAttempts.get(), "create refusal must not be retried")
+            assertEquals(1, controlCloses.get(), "the fixture must attempt its exact boundary close once")
+            assertTrue(fixture.boundary.evidence(fixture.policy).launches.isEmpty(), "refusal must not commit a launch")
+            assertTrue(Files.notExists(checkNotNull(selectedPath), NOFOLLOW_LINKS), "owned control must be absent after cleanup")
+            assertFalse(selectedControl in registeredControls(), "owned control must leave the registry after deletion proof")
+            assertEquals(baselineControls, registeredControls(), "fixture must restore exact prior control membership")
+            assertEquals(baselineDescriptors, descriptorCount(), "fixture must restore exact prior descriptor population")
+
+            val diagnostic = failure.suppressed.filterIsInstance<TerminalFixtureAuditFailure>().single()
+            assertEquals(audit.launchFailureContext(), diagnostic.message)
+            assertTrue(diagnostic.stackTrace.isEmpty())
+            assertTrue(checkNotNull(diagnostic.message).length <= 4096)
+            assertFalse(checkNotNull(diagnostic.message).contains(checkNotNull(injectedRefusal.message)))
+            if (!throwAssertion) {
+                assertTrue(checkNotNull(diagnostic.message).contains("site=SANDBOX_LAUNCH"))
+                assertEquals(1, audit.snapshot().count { it.reason == AcpTerminalAuditReason.LAUNCH_FAILED })
+            }
+            val cleanupFailures = failure.suppressed.filterIsInstance<AcpCleanupProofFailure>()
+            if (failCleanup) assertSame(injectedCleanup, cleanupFailures.single().cause)
+            else assertTrue(cleanupFailures.isEmpty())
+        }
+
+        requireCleanup(throwAssertion = false, failCleanup = false)
+        requireCleanup(throwAssertion = false, failCleanup = true)
+        requireCleanup(throwAssertion = true, failCleanup = true)
     }
 
     private fun broker(
