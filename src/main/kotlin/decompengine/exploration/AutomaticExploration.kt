@@ -470,21 +470,10 @@ class AutomaticExplorer(
         displayOnlyRetainedInputs: List<ProcessInput>? = null,
     ): ExplorationReport {
         require(seedInputs.isNotEmpty()) { "at least one seed input is required" }
+        // Retained inputs are optional display data. Do not let a row that cannot fit this
+        // presentation contract prevent candidate generation or authoritative repair work.
         displayOnlyRetainedInputs?.let { inputs ->
-            require(inputs.map { it.id }.distinct().size == inputs.size) { "retained exploration inputs need unique IDs" }
-            var retainedBytes = 0L
-            inputs.forEach { input ->
-                require(input.id.isNotEmpty() && input.id.toByteArray(Charsets.UTF_8).size <= 128 && input.args.size <= 256 &&
-                    input.args.all { it.toByteArray(Charsets.UTF_8).size <= 8192 }) {
-                    "retained exploration input exceeds the report source bounds"
-                }
-                retainedBytes = Math.addExact(retainedBytes, input.stdin.size.toLong() + input.id.toByteArray(Charsets.UTF_8).size)
-                input.args.forEach { retainedBytes = Math.addExact(retainedBytes, it.toByteArray(Charsets.UTF_8).size.toLong()) }
-                require(retainedBytes <= 1_048_576L) { "retained exploration inputs exceed the report source byte bound" }
-            }
-            require(inputs.size <= 10_000) {
-                "retained exploration inputs exceed the report source bounds"
-            }
+            require(inputs.size <= 10_000) { "retained exploration corpus exceeds its source contract" }
         }
         val observationInputSha256 = moduleObservationAttributor?.let { hashObservationInput(binaryPath) }
         val expanded = proposeExplorationInputs(seedInputs,
@@ -566,9 +555,15 @@ private data class BoundedExplorationRetainedInputs(val included: List<ProcessIn
 private fun boundedExplorationRetainedInputs(inputs: List<ProcessInput>, maximumCases: Int): BoundedExplorationRetainedInputs {
     var bytes = 0L
     val included = ArrayList<ProcessInput>()
+    val includedIds = HashSet<String>()
     for (input in inputs) {
+        val idBytes = input.id.toByteArray(Charsets.UTF_8).size
+        if (input.id.isEmpty() || idBytes > 128 || input.args.size > 256 ||
+            input.args.any { it.toByteArray(Charsets.UTF_8).size > 8192 } || input.stdin.size > 262_144) continue
         val estimate = input.id.length.toLong() * 6 + input.args.sumOf { it.length.toLong() * 6 + 4 } + input.stdin.size.toLong() * 2 + 128
-        if (included.size == maximumCases || estimate > 262_144L - bytes) break
+        if (included.size == maximumCases) break
+        if (estimate > 262_144L - bytes) continue
+        if (!includedIds.add(input.id)) continue
         included += input
         bytes += estimate
     }

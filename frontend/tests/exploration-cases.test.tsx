@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/preact
 import { beforeEach, expect, it, vi } from 'vitest';
 import type { Artifact } from '../src/api/generated';
 import { ExplorationCases } from '../src/jobs/ExplorationCases';
-import { bytePreview, MAX_RETAINED_CASES, parseRetainedCases, textPreview } from '../src/jobs/explorationCases';
+import { bytePreview, MAX_RETAINED_CASES, MAX_RETAINED_CORPUS, parseRetainedCases, textPreview } from '../src/jobs/explorationCases';
 
 const transport = vi.hoisted(() => ({ readArtifactText: vi.fn<(artifact: Artifact, expected: { jobId: string; runId: string }, options: { signal: AbortSignal }) => Promise<string>>() }));
 vi.mock('../src/api/client', () => ({ createApiClient: () => transport }));
@@ -46,6 +46,19 @@ it('lists versioned retained regression inputs as display-only cases without obs
   expect(screen.getByText('Showing 1 of 1 matching retained cases, page 1. Filters cover this artifact only.')).toBeTruthy();
   fireEvent.click(screen.getByRole('button', { name: 'Inspect case "retained:regression_a"' }));
   expect(screen.getByText(/No observation record is retained/)).toBeTruthy();
+});
+
+it('accepts bounded display rows with the producer maximum retained corpus omission count', () => {
+  const retainedInputs = Array.from({ length: MAX_RETAINED_CASES - 1 }, (_, index) => ({
+    id: `regression_${index}`, args: [], stdinHex: '',
+  }));
+  const omitted = MAX_RETAINED_CORPUS - retainedInputs.length;
+  const value = { ...report(1), schema: 'decomp-exploration', schemaVersion: 2, state: 'complete',
+    retainedInputs, retainedInputsOmitted: omitted };
+  const parsed = parseRetainedCases(JSON.stringify(value), 2);
+  expect(parsed.cases).toHaveLength(MAX_RETAINED_CASES);
+  expect(parsed.retainedInputsOmitted).toBe(omitted);
+  expect(() => parseRetainedCases(JSON.stringify({ ...value, retainedInputsOmitted: omitted + 1 }), 2)).toThrow();
 });
 
 it('refuses duplicate, orphan, cross-paired and unsupported observation records', () => {

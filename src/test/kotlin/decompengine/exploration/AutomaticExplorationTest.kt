@@ -231,6 +231,30 @@ class AutomaticExplorationTest {
     }
 
     @Test
+    fun `unrenderable retained regression inputs are omitted without aborting exploration`() {
+        val tempDir = createTempDirectory("exploration-retained-omit-")
+        val binary = compileBranchingProgram(tempDir)
+        val seed = listOf(CandidateInput("empty", CandidateSource.SEED))
+        val retained = listOf(
+            ProcessInput("oversized-arguments", List(257) { "x" }, byteArrayOf()),
+            ProcessInput("oversized-argument", listOf("x".repeat(8193)), byteArrayOf()),
+            ProcessInput("x".repeat(129), listOf("known"), byteArrayOf()),
+            ProcessInput("visible", listOf("known"), byteArrayOf(0, -1)),
+        )
+
+        val report = AutomaticExplorer(angrExplorer = FakeAngrExplorer()).explore(
+            binary, seed, tempDir.resolve("reports"), retained,
+        )
+
+        assertTrue(report.coverage.observations.isNotEmpty())
+        val json = Json.parseToJsonElement(report.reportPath.readText()).jsonObject
+        assertEquals(1, json.getValue("retainedInputs").jsonArray.size)
+        assertEquals("visible", json.getValue("retainedInputs").jsonArray.single().jsonObject
+            .getValue("id").jsonPrimitive.content)
+        assertEquals(3, json.getValue("retainedInputsOmitted").jsonPrimitive.content.toInt())
+    }
+
+    @Test
     fun `exploration report round trips all non NUL JSON control characters in arguments`() {
         val tempParent = java.nio.file.Path.of("build", "test-work", "exploration-json-controls").createDirectories()
         val tempDir = java.nio.file.Files.createTempDirectory(tempParent, "case-")

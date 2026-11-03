@@ -3,6 +3,7 @@ import { ApiClientError } from '../api/errors';
 
 export const CASE_PAGE_SIZE = 20;
 export const MAX_RETAINED_CASES = 1000;
+export const MAX_RETAINED_CORPUS = 10_000;
 export const MAX_RETAINED_JSON_NODES = 100_000;
 const MAX_ARGUMENTS = 256;
 const MAX_SOURCES = 64;
@@ -71,9 +72,9 @@ export function parseRetainedCases(input: string, producerSchemaVersion: 2 | nul
   if (producerSchemaVersion === 2) {
     if (!Array.isArray(root.retainedInputs) || root.retainedInputs.length > MAX_RETAINED_CASES
       || !Number.isSafeInteger(root.retainedInputsOmitted) || (root.retainedInputsOmitted as number) < 0
-      || (root.retainedInputsOmitted as number) > MAX_RETAINED_CASES
+      || (root.retainedInputsOmitted as number) > MAX_RETAINED_CORPUS
       || candidates.length + root.retainedInputs.length > MAX_RETAINED_CASES
-      || root.retainedInputs.length + (root.retainedInputsOmitted as number) > MAX_RETAINED_CASES) invalid();
+      || root.retainedInputs.length + (root.retainedInputsOmitted as number) > MAX_RETAINED_CORPUS) invalid();
     retainedInputsOmitted = root.retainedInputsOmitted as number;
     for (const item of root.retainedInputs) {
       const value = record(item); exact(value, ['id', 'args', 'stdinHex']);
