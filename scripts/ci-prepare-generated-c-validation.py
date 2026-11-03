@@ -258,6 +258,30 @@ def staged_compiler_include_search(staged_compiler, subprogram_prefix, mounted_r
             'diagnosticsBytes': len(stderr), 'diagnosticsSha256': hashlib.sha256(stderr).hexdigest()}
 
 
+def preserve_compiler_builtin_headers(dependencies, gcc_runtime, headers_root, copier):
+    """Expose GCC's required builtin stddef header through the declared /usr/include alias."""
+    gcc_runtime = trusted(Path(gcc_runtime))
+    headers_root = Path(headers_root)
+    target = headers_root / 'stddef.h'
+    if target.exists():
+        if target.is_symlink() or not target.is_file():
+            raise ValueError('authenticated stddef header destination is not a regular file')
+        return
+    candidates = []
+    for value in dependencies:
+        source = Path(value)
+        if source.name != 'stddef.h':
+            continue
+        resolved = trusted(source)
+        if resolved.is_relative_to(gcc_runtime):
+            candidates.append(resolved)
+    if len(set(candidates)) != 1:
+        raise ValueError('compiler dependency closure lacks one pinned GCC builtin stddef header')
+    copier.copy(candidates[0], target)
+    if target.is_symlink() or not target.is_file():
+        raise ValueError('authenticated stddef header copy is not a regular file')
+
+
 def trusted(path):
     path = path.resolve(strict=True)
     for item in (path, *path.parents):
@@ -428,10 +452,13 @@ def prepare(args):
                 copier.copy(path, RUNTIME / 'headers' / path.relative_to('/usr/include'))
             elif not path.resolve().is_relative_to(gcc_runtime):
                 raise ValueError(f'unsupported compiler header authority: {path}')
+        preserve_compiler_builtin_headers(headers, gcc_runtime, RUNTIME / 'headers', copier)
         build.append({'source': str(RUNTIME / 'headers'), 'destination': '/usr/include'})
         compiler_include_search = staged_compiler_include_search(
             RUNTIME / 'tools' / 'cc', RUNTIME / 'tools',
             ((gcc_runtime, RUNTIME / 'gcc'), (Path('/usr/include'), RUNTIME / 'headers')))
+        if compiler_include_search['exitCode'] != 0 or not compiler_include_search['stddefCandidates']:
+            raise ValueError('registered compiler has no authenticated readable stddef include candidate')
         link_parent = None
         for name in ('crt1.o', 'Scrt1.o', 'crti.o', 'crtn.o', 'libc.so', 'libc_nonshared.a'):
             path = Path(command([str(gcc), f'-print-file-name={name}'])).absolute().resolve()

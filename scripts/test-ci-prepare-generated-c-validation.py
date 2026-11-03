@@ -180,6 +180,12 @@ class CompilerProvisioningControls(unittest.TestCase):
         self.assertEqual([{'searchPath': str(include), 'mountedPath': str(header), 'bytes': len(header.read_bytes()),
                            'sha256': hashlib.sha256(header.read_bytes()).hexdigest()}], evidence['stddefCandidates'])
         self.assertIn('-B' + str(prefix) + '/', run.call_args.args[0])
+        no_candidate = SimpleNamespace(returncode=1, stdout='', stderr=(
+            '#include <...> search starts here:\n' + str(unapproved) + '\nEnd of search list.\n'))
+        with patch.object(PROVISIONER.subprocess, 'run', return_value=no_candidate):
+            absent = PROVISIONER.staged_compiler_include_search(staged, prefix,
+                ((self.root / 'gcc', self.runtime / 'gcc'), (Path('/usr/include'), self.runtime / 'headers')))
+        self.assertEqual([], absent['stddefCandidates'])
         with self.assertRaisesRegex(ValueError, 'complete include-search list'):
             PROVISIONER.parse_gcc_include_search_paths(b'no compiler diagnostics')
         with self.assertRaisesRegex(ValueError, 'canonical and absolute'):
@@ -187,6 +193,35 @@ class CompilerProvisioningControls(unittest.TestCase):
                 b'#include <...> search starts here:\nrelative/include\nEnd of search list.\n')
         with self.assertRaisesRegex(ValueError, 'byte bound'):
             PROVISIONER.parse_gcc_include_search_paths(b'x' * (1024 * 1024 + 1))
+
+    def test_compiler_builtin_stddef_is_materialized_under_the_authenticated_include_alias(self):
+        gcc_runtime = self.root / 'gcc'
+        builtin = gcc_runtime / 'include/stddef.h'
+        builtin.parent.mkdir(parents=True)
+        builtin.write_bytes(b'pinned GCC builtin stddef bytes\n')
+        headers = self.runtime / 'headers'
+        headers.mkdir(parents=True)
+        copier = PROVISIONER.Copier()
+
+        PROVISIONER.preserve_compiler_builtin_headers([str(builtin)], gcc_runtime, headers, copier)
+
+        installed = headers / 'stddef.h'
+        self.assertEqual(builtin.read_bytes(), installed.read_bytes())
+        self.assertEqual(0o444, stat.S_IMODE(installed.stat().st_mode))
+        self.assertEqual(1, copier.entries)
+        PROVISIONER.preserve_compiler_builtin_headers([str(builtin)], gcc_runtime, headers, copier)
+        self.assertEqual(1, copier.entries)
+
+    def test_compiler_builtin_stddef_requires_one_pinned_header_under_gcc_runtime(self):
+        gcc_runtime = self.root / 'gcc'
+        gcc_runtime.mkdir()
+        elsewhere = self.root / 'other/include/stddef.h'
+        elsewhere.parent.mkdir(parents=True)
+        elsewhere.write_bytes(b'not in GCC runtime')
+        headers = self.runtime / 'headers'
+        headers.mkdir(parents=True)
+        with self.assertRaisesRegex(ValueError, 'one pinned GCC builtin stddef'):
+            PROVISIONER.preserve_compiler_builtin_headers([str(elsewhere)], gcc_runtime, headers, PROVISIONER.Copier())
 
     def args(self):
         return SimpleNamespace(uid=1000, gid=1000, module_worker_classpath=None,
