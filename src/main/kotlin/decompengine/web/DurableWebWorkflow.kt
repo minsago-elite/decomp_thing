@@ -82,12 +82,18 @@ sealed interface DurableWebWorkflowAdmission {
 data class WebReportContext(val reportsDirectory: Path, val artifactPrefix: String = "reports", val runId: String? = null)
 data class WebJobDiagnostic(val jobId: String, val code: String, val message: String)
 data class WebJobPresentation(val job: Job, val snapshot: WorkflowJobSnapshot?, val reports: WebReportContext,
-    val diagnostics: List<WorkflowStoreDiagnostic> = emptyList(), val legacyInterrupted: Boolean = false)
+    val diagnostics: List<WorkflowStoreDiagnostic> = emptyList(), val legacyInterrupted: Boolean = false,
+    val organization: decompengine.jobs.JobOrganization = decompengine.jobs.JobOrganization.DEFAULT)
 sealed interface WebJobInspection {
     data class Available(val presentation: WebJobPresentation) : WebJobInspection
     data class Unavailable(val diagnostic: WebJobDiagnostic) : WebJobInspection
 }
-class WebJobServiceException(val code: String, message: String, cause: Throwable? = null) : RuntimeException(message, cause)
+class WebJobServiceException(
+    val code: String,
+    message: String,
+    cause: Throwable? = null,
+    val recoveryMayHaveChanged: Boolean = false,
+) : RuntimeException(message, cause)
 
 /** Parse once before namespace selection; normalization must never change the selected authority. */
 internal fun canonicalReportSegments(path: String): List<String> {
