@@ -23,6 +23,15 @@
 - Do not request review from the Codex code review bot; it is added automatically when a commit is pushed to a ready pull request.
 - Do not merge a pull request while required CI checks fail or are pending, or until all Codex code review bot reviews are resolved.
 - For privileged commands on local hosts, use `doas` instead of `sudo`.
+
+## Agent Orchestration
+
+- Use the orchestration tools for delegated model work. Do not silently substitute a different provider or model when the requested one is unavailable; report the limitation and keep work on tasks that do not depend on it.
+- For backend work, use Opus 5.5 for planning and architecture, Sol 6.1 as the integration and review layer between planning and implementation, and Luna for implementation. Prefer Sol 6.1 through orchestration tools over Codex for backend analysis and decisions.
+- For frontend work, use Opus 5.5 through Claude Code at low reasoning as the lead for planning and implementation direction. Route to Sonnet 5.5 only when a second implementation pass or review is useful. Luna may implement a bounded frontend task when the Opus-led direction is clear.
+- Give each delegated implementation a concrete scope, acceptance criteria, and file ownership. Tell workers that other changes may be in progress; they must preserve and accommodate those changes rather than reverting them.
+- Delegate high-detail or high-impact work to the requested planning/review models before implementation. Keep implementation ownership explicit, verify the resulting artifact, and commit at meaningful checkpoints.
+- Do not delegate external messages, merges, publication, or other irreversible actions unless the user has authorized that action.
 - Any of this may be waived or overridden by an explicit user request.
 
 ## Repository Sanity Checks
