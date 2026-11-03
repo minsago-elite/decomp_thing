@@ -10,6 +10,8 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import decompengine.validation.ProcessInput
+import decompengine.oracle.core.OracleJson
+import decompengine.web.webExplorationReport
 import kotlin.io.path.createDirectories
 import kotlin.io.path.createTempDirectory
 import kotlin.io.path.exists
@@ -256,13 +258,41 @@ class AutomaticExplorationTest {
 
     @Test
     fun `retained rows fit the remaining serialized report byte budget`() {
-        val base = "x".repeat(900_000)
+        val base = "{\"padding\":\"${"x".repeat(900_000)}\"}\n"
         val retained = listOf(ProcessInput("large", emptyList(), ByteArray(100_000)))
 
-        val bounded = requireNotNull(boundedExplorationRetainedInputs(retained, 1, base))
+        val bounded = requireNotNull(boundedExplorationRetainedInputs(retained, 1, base.removeSuffix("}\n")))
 
         assertTrue(bounded.rows.isEmpty())
         assertEquals(1, bounded.omitted)
+    }
+
+    @Test
+    fun `retained rows stay within the whole report JSON node budget`() {
+        val tempDir = createTempDirectory("exploration-retained-node-budget-")
+        val binary = compileBranchingProgram(tempDir)
+        val seed = listOf(CandidateInput("empty", CandidateSource.SEED))
+        val noSymbolicCandidates = object : AngrExplorer {
+            override fun generate(binaryPath: java.nio.file.Path): List<CandidateInput> = emptyList()
+        }
+        val retained = (0 until 390).map { index ->
+            ProcessInput("retained_$index", List(256) { "" }, byteArrayOf())
+        }
+
+        val report = AutomaticExplorer(angrExplorer = noSymbolicCandidates, maxCandidates = 1)
+            .explore(binary, seed, tempDir.resolve("reports"), retained)
+        val bytes = report.reportPath.toFile().readBytes()
+        val parsed = OracleJson.parse(bytes).jsonObject
+        val rows = parsed.getValue("retainedInputs").jsonArray
+
+        assertTrue(rows.isNotEmpty())
+        assertTrue(rows.size < retained.size, "the node budget must omit some otherwise displayable rows")
+        assertEquals(retained.size, rows.size + parsed.getValue("retainedInputsOmitted").jsonPrimitive.content.toInt())
+        assertEquals(
+            "available",
+            webExplorationReport("job_node_budget", "run_node_budget", bytes)
+                .getValue("state").jsonPrimitive.content,
+        )
     }
 
     @Test

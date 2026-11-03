@@ -5,6 +5,8 @@ import decompengine.project.ModuleObservedBehavior
 import decompengine.project.ModuleObservedCase
 import decompengine.project.ModuleObservationAttribution
 import decompengine.project.writeProjectEvidenceAtomically
+import decompengine.oracle.core.OracleJson
+import decompengine.oracle.core.StrictJsonLimits
 import decompengine.validation.ProcessInput
 import decompengine.validation.SandboxRunner
 import kotlinx.serialization.json.Json
@@ -558,12 +560,25 @@ internal data class BoundedExplorationRetainedInputs(val rows: List<String>, val
 
 internal fun boundedExplorationRetainedInputs(inputs: List<ProcessInput>, maximumCases: Int, basePrefix: String): BoundedExplorationRetainedInputs? {
     val reportLimitBytes = 1_048_576L
+    val reportNodeLimit = StrictJsonLimits().maximumNodes
     val fieldPrefix = ",\n  \"schema\": \"decomp-exploration\",\n  \"schemaVersion\": 2,\n  \"state\": \"complete\",\n  \"retainedInputs\": [\n"
     val fieldSuffix = "\n  ],\n  \"retainedInputsOmitted\": "
     val fixedBytes = basePrefix.toByteArray(Charsets.UTF_8).size.toLong() +
         fieldPrefix.toByteArray(Charsets.UTF_8).size + fieldSuffix.toByteArray(Charsets.UTF_8).size +
         "${inputs.size}\n}\n".toByteArray(Charsets.UTF_8).size
     if (fixedBytes > reportLimitBytes) return null
+    val nodeBudgetSkeleton = basePrefix + fieldPrefix + fieldSuffix + "${inputs.size}\n}\n"
+    var nodeCount = try {
+        val limits = StrictJsonLimits(
+            maximumInputBytes = reportLimitBytes.toInt(),
+            maximumNodes = reportNodeLimit,
+        )
+        countExplorationJsonNodes(OracleJson.parse(nodeBudgetSkeleton.toByteArray(Charsets.UTF_8), limits))
+    } catch (_: Exception) {
+        // If the existing report already consumes the whole reader budget, omit the optional
+        // retained-input section instead of publishing a versioned report the reader rejects.
+        return null
+    }
     var rowBytes = 0L
     val rows = ArrayList<String>()
     val includedIds = HashSet<String>()
@@ -571,16 +586,28 @@ internal fun boundedExplorationRetainedInputs(inputs: List<ProcessInput>, maximu
         val idBytes = input.id.toByteArray(Charsets.UTF_8).size
         if (input.id.isEmpty() || idBytes > 128 || input.args.size > 256 ||
             input.args.any { it.toByteArray(Charsets.UTF_8).size > 8192 } || input.stdin.size > 262_144) continue
-        if (!includedIds.add(input.id)) continue
+        if (input.id in includedIds) continue
         if (rows.size == maximumCases) continue
         val row = input.toJson().prependIndent("    ")
         val rowByteCount = row.toByteArray(Charsets.UTF_8).size.toLong()
         val separatorBytes = if (rows.isEmpty()) 0L else ",\n".toByteArray(Charsets.UTF_8).size.toLong()
         if (fixedBytes + rowBytes + separatorBytes + rowByteCount > reportLimitBytes) continue
+        // Each retained row contributes an object, id string, args array, stdinHex string, and
+        // one string node for each argument. Keys do not count toward StrictJsonLimits nodes.
+        val rowNodes = 4L + input.args.size
+        if (rowNodes > reportNodeLimit - nodeCount) continue
         rows += row
         rowBytes += separatorBytes + rowByteCount
+        nodeCount += rowNodes.toInt()
+        includedIds.add(input.id)
     }
     return BoundedExplorationRetainedInputs(rows, inputs.size - rows.size)
+}
+
+private fun countExplorationJsonNodes(value: kotlinx.serialization.json.JsonElement): Int = when (value) {
+    is kotlinx.serialization.json.JsonObject -> 1 + value.values.sumOf(::countExplorationJsonNodes)
+    is kotlinx.serialization.json.JsonArray -> 1 + value.sumOf(::countExplorationJsonNodes)
+    else -> 1
 }
 
 private fun ProcessInput.toJson(): String = """
