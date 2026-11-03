@@ -223,7 +223,7 @@ class ManagedGitRepositoriesTest {
         stash("older_saved_work")
         stash("newer_saved_work")
         val currentStash = f.repositories.git("--git-dir=$gitDir", "rev-parse", "refs/stash").trim()
-        assertEquals(2, f.repositories.git("--git-dir=$gitDir", "stash", "list").lineSequence().count { it.isNotBlank() })
+        assertEquals(2, f.repositories.git("--git-dir=$gitDir", "--work-tree=$workTree", "stash", "list").lineSequence().count { it.isNotBlank() })
         // Deliberately let the remote-tracking ref contain only the current stash tip. That does not
         // prove the older reflog entry is preserved remotely.
         f.repositories.git("--git-dir=$gitDir", "update-ref", "refs/remotes/origin/trunk", currentStash)
@@ -274,7 +274,7 @@ class ManagedGitRepositoriesTest {
         f.repositories.git("--git-dir=$gitDir", "--work-tree=$workTree", "stash", "push", "--message=fixture-only")
         assertEquals(listOf(GitRetentionReason.UNPUSHED_COMMITS), service.retentionHolds(jobId))
         // This mutation is fixture setup only; production retention remains read-only.
-        f.repositories.git("--git-dir=$gitDir", "stash", "clear")
+        f.repositories.git("--git-dir=$gitDir", "--work-tree=$workTree", "stash", "clear")
         assertTrue(service.retentionHolds(jobId).isEmpty(), "explicit fixture clear removes the stash hold")
         service.close()
     }
