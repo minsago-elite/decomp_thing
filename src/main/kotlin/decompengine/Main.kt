@@ -408,22 +408,29 @@ private fun runRepair(args: List<String>) {
     val reportsDir = decompengine.repair.repairReportsDirectory(projectDirectory, reports)
     val environment = System.getenv()
     val exitCode = runRepairCliAction(environment.values) { redactor ->
-        val regressionInputs = if (exploreInputs) {
-            val exploration = AutomaticExplorer().explore(
-                originalBinary,
-                listOf(CandidateInput("seed_default", CandidateSource.SEED)),
-                reportsDir,
-            )
-            renderRepairExplorationSummary(exploration.candidates.size, exploration.coverage.expandedSignatures.size, redactor)
-            exploration.candidates.map(CandidateInput::toProcessInput)
-        } else {
-            listOf(ProcessInput("default"))
-        }
         val configuration = prepareRepairCliConfiguration(reportsDir.resolve("repair_history.json"), harnessOverride)
         val result = SecureRepairRuntime.open(configuration).use { runtime ->
             renderWorkflowProvenance(WorkflowCliCommand.REPAIR, runtime.harnessProvenance, redactor, System.err)
             RepairCliProgress(reportsDir).use {
-                runtime.runRepair(projectDirectory, originalBinary, regressionInputs, reportsDir, maxIterations)
+                if (exploreInputs) {
+                    val snapshot = runtime.prepareExploration(projectDirectory, originalBinary)
+                    val exploration = AutomaticExplorer().explore(
+                        originalBinary,
+                        listOf(CandidateInput("seed_default", CandidateSource.SEED)),
+                        reportsDir,
+                    )
+                    renderRepairExplorationSummary(
+                        exploration.candidates.size, exploration.coverage.expandedSignatures.size, redactor,
+                    )
+                    runtime.runRepair(
+                        projectDirectory, originalBinary, exploration.candidates.map(CandidateInput::toProcessInput),
+                        reportsDir, maxIterations, snapshot,
+                    )
+                } else {
+                    runtime.runRepair(
+                        projectDirectory, originalBinary, listOf(ProcessInput("default")), reportsDir, maxIterations,
+                    )
+                }
             }
         }
         renderRepairPresentation(presentRepairOutcome(result), environment.values)
