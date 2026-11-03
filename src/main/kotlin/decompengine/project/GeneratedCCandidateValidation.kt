@@ -414,15 +414,17 @@ internal object GeneratedCSourceHeaderPolicy {
                     val quoted = include.groupValues[1].takeIf { it.isNotEmpty() }
                     val angled = include.groupValues[2].takeIf { it.isNotEmpty() }
                     val nameText = quoted ?: angled ?: reject(path, "empty include operand")
-                    if (nameText.startsWith('/') || nameText.contains('\\') || nameText.split('/').any { it == ".." || it.isEmpty() || it == "." }) {
-                        reject(path, "absolute or traversing include is unsupported")
+                    if (nameText.startsWith('/') || nameText.contains('\\')) {
+                        reject(path, "absolute or platform-specific include path is unsupported")
                     }
                     val candidates = buildList {
                         if (quoted != null) {
                             val parent = path.substringBeforeLast('/', "")
-                            add(if (parent.isEmpty()) nameText else "$parent/$nameText")
+                            add(resolveInclude(parent, nameText)
+                                ?: reject(path, "quoted include escapes the authenticated project"))
                         }
-                        add("include/$nameText")
+                        add(resolveInclude("include", nameText)
+                            ?: reject(path, "include escapes the authenticated project"))
                     }
                     if (candidates.none { it in inventory } && nameText !in systemHeaders) {
                         reject(path, "include is outside the authenticated snapshot: $nameText")
@@ -608,6 +610,19 @@ internal object GeneratedCSourceHeaderPolicy {
             if (Thread.currentThread().isInterrupted) throw InterruptedException("generated-C source policy cancelled")
             progress()
         }
+    }
+
+    /** Resolve a literal include against one registered project search root without escaping it. */
+    private fun resolveInclude(base: String, include: String): String? {
+        val components = base.split('/').filter { it.isNotEmpty() }.toMutableList()
+        for (component in include.split('/')) {
+            when (component) {
+                "", "." -> if (component.isEmpty()) return null
+                ".." -> if (components.isEmpty()) return null else components.removeAt(components.lastIndex)
+                else -> components += component
+            }
+        }
+        return components.takeIf { it.isNotEmpty() }?.joinToString("/")
     }
 
     private fun normalizeInventoryPath(path: String): String {
