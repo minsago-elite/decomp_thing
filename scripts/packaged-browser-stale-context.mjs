@@ -40,7 +40,7 @@ export async function qualifyStaleContext({ fixture, tab, cdp, evaluate, ready, 
     { name: 'run', route: `/nested/jobs/${fixture.jobId}/runs/run_fixture_3`, ready: `document.body.innerText.includes('run_fixture_3')`,
       apiPath: `/nested/api/v1/jobs/${fixture.jobId}/runs/run_fixture_3`, receipt: 'Attempt metadata', target: 'dl.job-facts dd', retry: 'Refresh attempt' },
     { name: 'runHistory', route: `/nested/jobs/${fixture.jobId}/runs`, ready: `document.querySelector('ul[aria-label="Recorded attempts"] a[href$="/run_fixture_54"]')`,
-      apiPath: `/nested/api/v1/jobs/${fixture.jobId}/runs`, receipt: 'Attempt history', target: 'ul[aria-label="Recorded attempts"] li a', retry: 'Refresh history' },
+      apiPath: `/nested/api/v1/jobs/${fixture.jobId}/runs`, receipt: 'Attempt history', target: 'ul[aria-label="Recorded attempts"] li a', retry: 'Retry this page' },
     { name: 'runtime', route: '/nested/runtime', ready: `document.querySelector('#server-runtime-title')`,
       apiPath: '/nested/api/v1/bootstrap', receipt: 'Runtime report', target: '#server-runtime-title', retry: 'Check session' },
   ];

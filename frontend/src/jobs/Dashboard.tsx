@@ -336,7 +336,7 @@ export function Dashboard({ basePath, draftOwner = null }: { basePath: string; d
     ? filtered
       ? copy.thePreviousFilteredResultHadNoMatchesCurrentResultsAre
       : copy.thePreviousLibrarySnapshotWasEmptyCurrentResultsAreUnknown
-    : copy.previouslyLoadedRowsAreShownBelowTheirStateMayBe;
+    : '';
   const loadingStatus = retainedEmpty ? copy.loadingJobsThePreviousEmptyResultMayBeOutdated
     : data ? copy.loadingJobsPreviouslyLoadedRowsRemainBelow : copy.loadingJobs;
   return <section aria-labelledby="job-library-title">
