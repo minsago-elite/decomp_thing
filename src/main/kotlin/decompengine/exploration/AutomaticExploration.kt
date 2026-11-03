@@ -423,6 +423,7 @@ data class ExplorationReport(
     val confidence: ConfidenceScore,
     val reportPath: Path,
     val angrDiagnostics: AngrDiagnostics? = null,
+    val displayOnlyRetainedInputs: List<ProcessInput>? = null,
 )
 
 /**
@@ -462,8 +463,29 @@ class AutomaticExplorer(
     private val maxCandidates: Int = 192,
     private val moduleObservationAttributor: ModuleObservationAttributor? = null,
 ) {
-    fun explore(binaryPath: Path, seedInputs: List<CandidateInput>, reportsDir: Path): ExplorationReport {
+    fun explore(
+        binaryPath: Path,
+        seedInputs: List<CandidateInput>,
+        reportsDir: Path,
+        displayOnlyRetainedInputs: List<ProcessInput>? = null,
+    ): ExplorationReport {
         require(seedInputs.isNotEmpty()) { "at least one seed input is required" }
+        displayOnlyRetainedInputs?.let { inputs ->
+            require(inputs.map { it.id }.distinct().size == inputs.size) { "retained exploration inputs need unique IDs" }
+            var retainedBytes = 0L
+            inputs.forEach { input ->
+                require(input.id.isNotEmpty() && input.id.toByteArray(Charsets.UTF_8).size <= 128 && input.args.size <= 256 &&
+                    input.args.all { it.toByteArray(Charsets.UTF_8).size <= 8192 }) {
+                    "retained exploration input exceeds the report source bounds"
+                }
+                retainedBytes = Math.addExact(retainedBytes, input.stdin.size.toLong() + input.id.toByteArray(Charsets.UTF_8).size)
+                input.args.forEach { retainedBytes = Math.addExact(retainedBytes, it.toByteArray(Charsets.UTF_8).size.toLong()) }
+                require(retainedBytes <= 1_048_576L) { "retained exploration inputs exceed the report source byte bound" }
+            }
+            require(inputs.size <= 10_000) {
+                "retained exploration inputs exceed the report source bounds"
+            }
+        }
         val observationInputSha256 = moduleObservationAttributor?.let { hashObservationInput(binaryPath) }
         val expanded = proposeExplorationInputs(seedInputs,
             angr = { angrExplorer.generate(binaryPath) },
@@ -482,7 +504,8 @@ class AutomaticExplorer(
         }
         val confidence = ConfidenceScorer.score(expanded, coverageReport, sandboxed = true)
         reportsDir.createDirectories()
-        val report = ExplorationReport(expanded, coverageReport, confidence, reportPath, angrExplorer.diagnostics)
+        val report = ExplorationReport(expanded, coverageReport, confidence, reportPath, angrExplorer.diagnostics,
+            displayOnlyRetainedInputs?.map { ProcessInput(it.id, it.args.toList(), it.stdin.copyOf()) })
         reportPath.writeText(report.toJson())
         if (moduleObservationAttributor != null) {
             require(observationInputSha256 == hashObservationInput(binaryPath)) { "exploration input changed while observing module cases" }
@@ -508,6 +531,7 @@ private fun hashObservationInput(path: Path): String {
 
 private fun ExplorationReport.toJson(): String = """
 {
+  ${if (displayOnlyRetainedInputs == null) "" else "\"schema\": \"decomp-exploration\",\n  \"schemaVersion\": 2,\n  \"state\": \"complete\","}
   "candidateCount": ${candidates.size},
   "coverageIncreased": ${coverage.increased},
   "baselineOutputSignatures": ${coverage.baselineSignatures.size},
@@ -529,9 +553,35 @@ ${candidates.joinToString(",\n") { it.toJson().prependIndent("    ") }}
   ],
   "observations": [
 ${coverage.observations.joinToString(",\n") { it.toJson().prependIndent("    ") }}
-  ]
+  ]${displayOnlyRetainedInputs?.let { retained ->
+      val bounded = boundedExplorationRetainedInputs(retained, (1000 - candidates.size).coerceAtLeast(0))
+      ",\n  \"retainedInputs\": [\n" + bounded.included.joinToString(",\n") { it.toJson().prependIndent("    ") } +
+          "\n  ],\n  \"retainedInputsOmitted\": ${bounded.omitted}"
+  } ?: ""}
 }
 """.trimIndent() + "\n"
+
+private data class BoundedExplorationRetainedInputs(val included: List<ProcessInput>, val omitted: Int)
+
+private fun boundedExplorationRetainedInputs(inputs: List<ProcessInput>, maximumCases: Int): BoundedExplorationRetainedInputs {
+    var bytes = 0L
+    val included = ArrayList<ProcessInput>()
+    for (input in inputs) {
+        val estimate = input.id.length.toLong() * 6 + input.args.sumOf { it.length.toLong() * 6 + 4 } + input.stdin.size.toLong() * 2 + 128
+        if (included.size == maximumCases || estimate > 262_144L - bytes) break
+        included += input
+        bytes += estimate
+    }
+    return BoundedExplorationRetainedInputs(included, inputs.size - included.size)
+}
+
+private fun ProcessInput.toJson(): String = """
+{
+  "id": "${id.escapeJson()}",
+  "args": [${args.joinToString(", ") { "\"${it.escapeJson()}\"" }}],
+  "stdinHex": "${stdin.toHex()}"
+}
+""".trimIndent()
 
 private fun AngrDiagnostics.toJson(): String = """
 {

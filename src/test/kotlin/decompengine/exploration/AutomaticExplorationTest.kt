@@ -205,6 +205,32 @@ class AutomaticExplorationTest {
     }
 
     @Test
+    fun `retained regression inputs are display only and do not affect exploration score`() {
+        val tempDir = createTempDirectory("exploration-retained-display-")
+        val binary = compileBranchingProgram(tempDir)
+        val seed = listOf(CandidateInput("empty", CandidateSource.SEED))
+        val explorer = AutomaticExplorer(angrExplorer = FakeAngrExplorer())
+        val ordinary = explorer.explore(binary, seed, tempDir.resolve("ordinary"))
+        val retained = (0..1000).map { index ->
+            ProcessInput(if (index == 0) "retained_case" else "retained_$index", listOf("known"), byteArrayOf(0, -1))
+        }
+        val withRetained = explorer.explore(binary, seed, tempDir.resolve("with-retained"), retained)
+        assertEquals(ordinary.candidates, withRetained.candidates)
+        assertEquals(ordinary.coverage, withRetained.coverage)
+        assertEquals(ordinary.confidence, withRetained.confidence)
+        val report = Json.parseToJsonElement(withRetained.reportPath.readText()).jsonObject
+        assertEquals("decomp-exploration", report.getValue("schema").jsonPrimitive.content)
+        assertEquals(2, report.getValue("schemaVersion").jsonPrimitive.content.toInt())
+        val retainedRows = report.getValue("retainedInputs").jsonArray
+        assertTrue(retainedRows.size + report.getValue("candidates").jsonArray.size <= 1000)
+        assertEquals(retained.size - retainedRows.size, report.getValue("retainedInputsOmitted").jsonPrimitive.content.toInt())
+        val item = retainedRows.first().jsonObject
+        assertEquals("retained_case", item.getValue("id").jsonPrimitive.content)
+        assertEquals("known", item.getValue("args").jsonArray.single().jsonPrimitive.content)
+        assertEquals("00ff", item.getValue("stdinHex").jsonPrimitive.content)
+    }
+
+    @Test
     fun `exploration report round trips all non NUL JSON control characters in arguments`() {
         val tempParent = java.nio.file.Path.of("build", "test-work", "exploration-json-controls").createDirectories()
         val tempDir = java.nio.file.Files.createTempDirectory(tempParent, "case-")

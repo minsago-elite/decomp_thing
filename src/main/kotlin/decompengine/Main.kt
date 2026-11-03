@@ -418,6 +418,7 @@ private fun runRepair(args: List<String>) {
                         originalBinary,
                         listOf(CandidateInput("seed_default", CandidateSource.SEED)),
                         reportsDir,
+                        displayOnlyRetainedInputs = snapshot.inputs,
                     )
                     renderRepairExplorationSummary(
                         exploration.candidates.size, exploration.coverage.expandedSignatures.size, redactor,

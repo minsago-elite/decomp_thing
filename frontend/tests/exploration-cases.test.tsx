@@ -27,6 +27,27 @@ it('joins the exact retained identities and leaves missing observations explicit
   expect(parsed.sources).toEqual(['SEED']);
 });
 
+it('lists versioned retained regression inputs as display-only cases without observations', async () => {
+  const value = { ...report(1), schema: 'decomp-exploration', schemaVersion: 2, state: 'complete',
+    retainedInputs: [{ id: 'regression_a', args: ['known'], stdinHex: '00ff' }], retainedInputsOmitted: 2 };
+  const parsed = parseRetainedCases(JSON.stringify(value), 2);
+  expect(parsed.cases.map(item => [item.id, item.source, item.observation])).toEqual([
+    ['case_0', 'SEED', expect.objectContaining({ exitCode: 124 })],
+    ['retained:regression_a', 'RETAINED_REGRESSION', null],
+  ]);
+  expect(parsed.retainedInputsOmitted).toBe(2);
+  transport.readArtifactText.mockResolvedValue(JSON.stringify(value));
+  render(<ExplorationCases artifact={artifact} jobId="job_example" runId="run_example" basePath="/nested" producerSchemaVersion={2} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Read retained case details' }));
+  expect(await screen.findByText('1 retained regression input(s) are shown for inspection only; they were not run by this exploration.')).toBeTruthy();
+  expect(screen.getByText('2 retained regression input(s) were omitted by the display budget. Download the report artifact for its bounded record.')).toBeTruthy();
+  const retained = screen.getByRole<HTMLOptionElement>('option', { name: '"RETAINED_REGRESSION"' });
+  fireEvent.change(screen.getByRole('combobox', { name: 'Filter reported source' }), { target: { value: retained.value } });
+  expect(screen.getByText('Showing 1 of 1 matching retained cases, page 1. Filters cover this artifact only.')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Inspect case "retained:regression_a"' }));
+  expect(screen.getByText(/No observation record is retained/)).toBeTruthy();
+});
+
 it('refuses duplicate, orphan, cross-paired and unsupported observation records', () => {
   const changes: Array<(value: ReturnType<typeof report>) => void> = [
     value => { value.candidates.push({ ...value.candidates[0]! }); value.candidateCount++; },

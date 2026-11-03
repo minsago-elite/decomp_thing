@@ -76,6 +76,17 @@ used test-only --no-sandbox; no fixture execution or acceptance attestation occu
 
 ## Observation failures
 
+Repair CLI exploration can also emit success schema `decomp-exploration` version 2.
+It keeps generated candidates and their observations in the existing fields and adds a
+separate `retainedInputs` list for the graph-bound regression inputs that were available
+before exploration. These rows have no observation in this exploration and are never
+added to the candidate set, mutation expansion, coverage counts or confidence score.
+The producer retains at most 1,000 rows and 256 KiB of estimated display data; the
+`retainedInputsOmitted` count makes any remainder explicit. The viewer assigns stable
+`retained:<input-id>` display identities, filters them under the separate
+`RETAINED_REGRESSION` source, and continues to expose only a deliberate read of the
+same attempt-bound artifact. This is input inspection, not execution or validation.
+
 When candidate observation throws an exception, automatic exploration can retain
 `schema: "decomp-exploration-failure"`, `schemaVersion: 1` at its existing
 `exploration.json` path. The original exception is rethrown immediately: no later
