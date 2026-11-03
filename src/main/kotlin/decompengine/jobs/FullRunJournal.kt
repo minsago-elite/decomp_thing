@@ -6,6 +6,7 @@ import decompengine.project.sha256
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
+import java.nio.channels.OverlappingFileLockException
 import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.Path
@@ -19,6 +20,11 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.serialization.json.*
+
+/** A live writer holds the per-run finalization lock while publishing terminal metadata. */
+internal class FullRunJournalFinalizationInProgressException : IllegalStateException(
+    "run history finalization is in progress",
+)
 
 /** Complete, redacted observation history. This log never grants source/checkpoint authority. */
 internal class FullRunJournal private constructor(
@@ -123,53 +129,60 @@ internal class FullRunJournal private constructor(
             try { events.close() } catch (problem: Throwable) {
                 if (failure == null) failure = problem else failure!!.addSuppressed(problem)
             }
-            if (failure != null) complete = false
-            val marker = directory.resolve(".finalization-in-progress")
-            var markerCreated = false
+            val lockChannel = FileChannel.open(directory.resolve(FINALIZATION_LOCK), READ, WRITE, NOFOLLOW_LINKS)
+            val finalizationLock = lockChannel.lock()
             try {
-                if (Files.exists(marker, NOFOLLOW_LINKS)) {
-                    require(Files.isRegularFile(marker, NOFOLLOW_LINKS) &&
-                        Files.newInputStream(marker, READ, NOFOLLOW_LINKS).use { it.readNBytes(2) }
-                            .contentEquals(byteArrayOf(1))) { "invalid journal finalization marker" }
-                } else {
-                    Files.write(marker, byteArrayOf(1), CREATE_NEW, WRITE, NOFOLLOW_LINKS)
-                }
-                FileChannel.open(marker, WRITE, NOFOLLOW_LINKS).use { it.force(true) }
-                syncDirectory(directory)
-                markerCreated = true
-            } catch (problem: Throwable) {
-                complete = false
-                if (failure == null) failure = problem else failure!!.addSuppressed(problem)
-            }
-            var failureStateDurable = false
-            var terminalStateDurable = false
-            if (markerCreated) {
+                if (failure != null) complete = false
+                val marker = directory.resolve(FINALIZATION_MARKER)
+                var markerCreated = false
                 try {
-                    publishMetadata(if (complete) "closed" else "logging-failed")
-                    failureStateDurable = true
+                    if (Files.exists(marker, NOFOLLOW_LINKS)) {
+                        require(Files.isRegularFile(marker, NOFOLLOW_LINKS) &&
+                            Files.newInputStream(marker, READ, NOFOLLOW_LINKS).use { it.readNBytes(2) }
+                                .contentEquals(byteArrayOf(1))) { "invalid journal finalization marker" }
+                    } else {
+                        Files.write(marker, byteArrayOf(1), CREATE_NEW, WRITE, NOFOLLOW_LINKS)
+                    }
+                    FileChannel.open(marker, WRITE, NOFOLLOW_LINKS).use { it.force(true) }
+                    syncDirectory(directory)
+                    markerCreated = true
                 } catch (problem: Throwable) {
                     complete = false
                     if (failure == null) failure = problem else failure!!.addSuppressed(problem)
-                    try {
-                        publishMetadata("logging-failed")
-                        failureStateDurable = true
-                    } catch (fallback: Throwable) { problem.addSuppressed(fallback) }
                 }
-                // The marker is a durable veto. Metadata publication has already fsynced this
-                // directory. Unlinking the marker is the final filesystem operation: if that unlink
-                // is lost on a crash, readers reject the history (a safe false negative).
-                if (failureStateDurable) {
+                var failureStateDurable = false
+                var terminalStateDurable = false
+                if (markerCreated) {
                     try {
-                        Files.delete(marker)
-                        terminalStateDurable = true
+                        publishMetadata(if (complete) "closed" else "logging-failed")
+                        failureStateDurable = true
                     } catch (problem: Throwable) {
                         complete = false
                         if (failure == null) failure = problem else failure!!.addSuppressed(problem)
+                        try {
+                            publishMetadata("logging-failed")
+                            failureStateDurable = true
+                        } catch (fallback: Throwable) { problem.addSuppressed(fallback) }
+                    }
+                    // The marker is a durable veto. Metadata publication has already fsynced this
+                    // directory. Unlink it while still holding the lock, so readers never see an
+                    // unlocked marker during a successful finalization. If unlink durability is
+                    // lost in a crash, readers reject the resurrected marker after the lock drops.
+                    if (failureStateDurable) {
+                        try {
+                            Files.delete(marker)
+                            terminalStateDurable = true
+                        } catch (problem: Throwable) {
+                            complete = false
+                            if (failure == null) failure = problem else failure!!.addSuppressed(problem)
+                        }
                     }
                 }
+                closed = markerCreated && failureStateDurable && terminalStateDurable
+                failure?.let { throw it }
+            } finally {
+                try { finalizationLock.release() } finally { lockChannel.close() }
             }
-            closed = markerCreated && failureStateDurable && terminalStateDurable
-            failure?.let { throw it }
         } finally {
             if (interrupted) Thread.currentThread().interrupt()
         }
@@ -179,6 +192,8 @@ internal class FullRunJournal private constructor(
         const val DIRECTORY = "run-history"
         const val MAXIMUM_RECORD_BYTES = 64 * 1024
         const val MAXIMUM_RUN_BYTES = 256L * 1024 * 1024
+        private const val FINALIZATION_LOCK = ".finalization.lock"
+        private const val FINALIZATION_MARKER = ".finalization-in-progress"
         private const val ZERO_HASH = "0000000000000000000000000000000000000000000000000000000000000000"
         private val RUN_ID = Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
@@ -202,6 +217,9 @@ internal class FullRunJournal private constructor(
             FileChannel.open(root, READ, NOFOLLOW_LINKS).use { it.force(true) }
             val directory = Files.createDirectory(runs.resolve(runId),
                 PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")))
+            FileChannel.open(directory.resolve(FINALIZATION_LOCK), CREATE_NEW, WRITE, NOFOLLOW_LINKS).use {
+                it.force(true)
+            }
             beforeParentDirectoryFsync(runs)
             FileChannel.open(runs, READ, NOFOLLOW_LINKS).use { it.force(true) }
             return FullRunJournal(directory, runId, workflow, firstSequence, maximumBytes,
@@ -217,8 +235,28 @@ internal class FullRunJournal private constructor(
         }
 
         fun metadata(directory: Path): JsonObject {
-            require(!Files.exists(directory.resolve(".finalization-in-progress"), NOFOLLOW_LINKS)) {
-                "run history finalization is indeterminate"
+            val marker = directory.resolve(FINALIZATION_MARKER)
+            if (Files.exists(marker, NOFOLLOW_LINKS)) {
+                val lockPath = directory.resolve(FINALIZATION_LOCK)
+                var finalizationIsActive = false
+                if (Files.isRegularFile(lockPath, NOFOLLOW_LINKS)) {
+                    FileChannel.open(lockPath, READ, NOFOLLOW_LINKS).use { channel ->
+                        try {
+                            val lock = channel.tryLock(0L, Long.MAX_VALUE, true)
+                            if (lock == null) {
+                                finalizationIsActive = true
+                            } else {
+                                lock.release()
+                            }
+                        } catch (_: OverlappingFileLockException) {
+                            finalizationIsActive = true
+                        }
+                    }
+                }
+                if (finalizationIsActive) throw FullRunJournalFinalizationInProgressException()
+                // Recheck after probing the lock: a successful finalizer unlinks the veto marker
+                // before dropping its lock, so a concurrent reader can safely proceed to metadata.
+                require(!Files.exists(marker, NOFOLLOW_LINKS)) { "run history finalization is indeterminate" }
             }
             val path = directory.resolve("run.json")
             require(Files.isRegularFile(path, NOFOLLOW_LINKS) && Files.size(path) <= 16 * 1024)

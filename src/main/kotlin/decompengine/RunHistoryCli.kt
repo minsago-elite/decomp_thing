@@ -2,6 +2,7 @@ package decompengine
 
 import decompengine.jobs.FullRunEventReader
 import decompengine.jobs.FullRunJournal
+import decompengine.jobs.FullRunJournalFinalizationInProgressException
 import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.Path
@@ -32,14 +33,24 @@ internal fun runRunHistory(args: List<String>) {
         }
         val directory = resolveRunHistoryDirectory(root, args.getOrNull(2)) ?: error("no recorded runs")
         val follow = args[0] == "follow"
-        FullRunEventReader(directory).use { reader ->
+        val reader = if (follow) {
+            retryWhileFinalizing({ Thread.sleep(200) }) { FullRunEventReader(directory) }
+        } else {
+            FullRunEventReader(directory)
+        }
+        reader.use {
             while (true) {
                 val event = reader.next()
                 if (event != null) {
                     println(event)
                     continue
                 }
-                val state = FullRunJournal.metadata(directory).getValue("state").jsonPrimitive.content
+                val metadata = if (follow) {
+                    retryWhileFinalizing({ Thread.sleep(200) }) { FullRunJournal.metadata(directory) }
+                } else {
+                    FullRunJournal.metadata(directory)
+                }
+                val state = metadata.getValue("state").jsonPrimitive.content
                 if (!follow || state != "running") {
                     // A terminal metadata publication follows the event append. An earlier EOF
                     // is not stable while the writer is active, so drain the now-closed tail.
@@ -69,6 +80,17 @@ internal fun resolveRunHistoryDirectory(root: Path, runId: String?): Path? =
 
 internal fun drainRunHistoryTail(reader: FullRunEventReader, consume: (JsonObject) -> Unit) {
     while (true) consume(reader.next() ?: break)
+}
+
+/** Follow retries only a marker whose owner still holds the finalization lock. */
+internal fun <T> retryWhileFinalizing(pause: () -> Unit, observe: () -> T): T {
+    while (true) {
+        try {
+            return observe()
+        } catch (_: FullRunJournalFinalizationInProgressException) {
+            pause()
+        }
+    }
 }
 
 /** Lists valid runs while keeping incomplete/crashed neighbors from hiding healthy histories. */
