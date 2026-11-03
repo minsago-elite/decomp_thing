@@ -206,6 +206,156 @@ class ManagedGitRepositoriesTest {
         assertTrue(codes().isEmpty())
     }
 
+    @Test fun `stash reflog protects older saved work when the current tip is remotely contained`() : Unit = Fixture().use { f ->
+        val service = f.open()
+        val completed = service.settle(service.request(jobId, GitRepositoryRequest.Init("run_1", "revision_1", null), "stash_retention_request_01"))
+        val directory = f.repositoryDirectory(completed.repositoryId)
+        val gitDir = directory.resolve("repository.git")
+        val workTree = directory.resolve("worktree")
+        val baseline = f.repositories.commitAll(gitDir, workTree, "remote baseline")
+        f.repositories.git("--git-dir=$gitDir", "update-ref", "refs/remotes/origin/trunk", baseline)
+        assertTrue(service.retentionHolds(jobId).isEmpty(), "clean remotely contained baseline remains expendable")
+
+        fun stash(name: String) {
+            Files.writeString(workTree.resolve("src/main file.c"), "int $name;\n")
+            f.repositories.git("--git-dir=$gitDir", "--work-tree=$workTree", "stash", "push", "--include-untracked", "--message=$name")
+        }
+        stash("older_saved_work")
+        stash("newer_saved_work")
+        val currentStash = f.repositories.git("--git-dir=$gitDir", "rev-parse", "refs/stash").trim()
+        assertEquals(2, f.repositories.git("--git-dir=$gitDir", "stash", "list").lineSequence().count { it.isNotBlank() })
+        // Deliberately let the remote-tracking ref contain only the current stash tip. That does not
+        // prove the older reflog entry is preserved remotely.
+        f.repositories.git("--git-dir=$gitDir", "update-ref", "refs/remotes/origin/trunk", currentStash)
+        val before = f.storageTree()
+        assertEquals(listOf(GitRetentionReason.UNPUSHED_COMMITS), service.retentionHolds(jobId))
+        assertEquals(before, f.storageTree(), "retention observation must not mutate source, metadata, or repository bytes")
+        service.close()
+    }
+
+    @Test fun `stash ref-only and reflog-only metadata retain storage`() {
+        for (reflogOnly in listOf(false, true)) Fixture().use { f ->
+            val service = f.open()
+            val completed = service.settle(service.request(jobId, GitRepositoryRequest.Init("run_1", "revision_1", null),
+                if (reflogOnly) "stash_reflog_only_key_01" else "stash_ref_only_key_001"))
+            val directory = f.repositoryDirectory(completed.repositoryId)
+            val gitDir = directory.resolve("repository.git")
+            val workTree = directory.resolve("worktree")
+            val baseline = f.repositories.commitAll(gitDir, workTree, "remote baseline")
+            f.repositories.git("--git-dir=$gitDir", "update-ref", "refs/remotes/origin/trunk", baseline)
+            if (reflogOnly) {
+                Files.writeString(workTree.resolve("src/main file.c"), "int reflog_only_saved_work;\n")
+                f.repositories.git("--git-dir=$gitDir", "--work-tree=$workTree", "stash", "push", "--message=reflog-only")
+                Files.delete(gitDir.resolve("refs/stash"))
+                assertTrue(Files.exists(gitDir.resolve("logs/refs/stash")), "the reflog remains after removing the loose ref")
+            } else {
+                val ref = gitDir.resolve("refs/stash")
+                Files.createDirectories(ref.parent)
+                Files.writeString(ref, "$baseline\n")
+                assertFalse(Files.exists(gitDir.resolve("logs/refs/stash")), "fixture creates a ref without a reflog")
+            }
+            val before = f.storageTree()
+            assertEquals(listOf(GitRetentionReason.UNPUSHED_COMMITS), service.retentionHolds(jobId))
+            assertEquals(before, f.storageTree())
+            service.close()
+        }
+    }
+
+    @Test fun `explicit fixture stash clear removes the hold and missing stash adds none`() : Unit = Fixture().use { f ->
+        val service = f.open()
+        val completed = service.settle(service.request(jobId, GitRepositoryRequest.Init("run_1", "revision_1", null), "stash_clear_request_01"))
+        val directory = f.repositoryDirectory(completed.repositoryId)
+        val gitDir = directory.resolve("repository.git")
+        val workTree = directory.resolve("worktree")
+        val baseline = f.repositories.commitAll(gitDir, workTree, "remote baseline")
+        f.repositories.git("--git-dir=$gitDir", "update-ref", "refs/remotes/origin/trunk", baseline)
+        assertTrue(service.retentionHolds(jobId).isEmpty(), "missing stash metadata adds no hold")
+        Files.writeString(workTree.resolve("src/main file.c"), "int saved_before_clear;\n")
+        f.repositories.git("--git-dir=$gitDir", "--work-tree=$workTree", "stash", "push", "--message=fixture-only")
+        assertEquals(listOf(GitRetentionReason.UNPUSHED_COMMITS), service.retentionHolds(jobId))
+        // This mutation is fixture setup only; production retention remains read-only.
+        f.repositories.git("--git-dir=$gitDir", "stash", "clear")
+        assertTrue(service.retentionHolds(jobId).isEmpty(), "explicit fixture clear removes the stash hold")
+        service.close()
+    }
+
+    @Test fun `failed or malformed stash query fails closed as unreadable`() {
+        val cases = listOf("printf 'malformed\\n'; exit 0" to "malformed",
+            "exit 2" to "failure")
+        for ((response, suffix) in cases) Fixture().use { f ->
+            val completed = f.open().use { service ->
+                service.settle(service.request(jobId, GitRepositoryRequest.Init("run_1", "revision_1", null), "stash_bad_query_$suffix"))
+            }
+            val directory = f.repositoryDirectory(completed.repositoryId)
+            val gitDir = directory.resolve("repository.git")
+            val workTree = directory.resolve("worktree")
+            val baseline = f.repositories.commitAll(gitDir, workTree, "remote baseline")
+            f.repositories.git("--git-dir=$gitDir", "update-ref", "refs/remotes/origin/trunk", baseline)
+            Files.writeString(workTree.resolve("src/main file.c"), "int stash_query_failure;\n")
+            f.repositories.git("--git-dir=$gitDir", "--work-tree=$workTree", "stash", "push", "--message=query-failure")
+            val actual = (GitRuntime.detect() as GitAvailability.Available)
+            val executable = f.repositories.root.resolve("git-response-$suffix")
+            val gitPath = actual.executable.toString().replace("'", "'\\''")
+            val script = "#!/bin/sh\ncase \" \$* \" in *\" reflog exists refs/stash \"*) $response;; *) exec '$gitPath' \"\$@\";; esac\n"
+            Files.writeString(executable, script)
+            Files.setPosixFilePermissions(executable, PosixFilePermissions.fromString("rwx------"))
+            val service = f.open(availability = GitAvailability.Available(executable, actual.version!!))
+            assertEquals(listOf(GitRetentionReason.UNREADABLE), service.retentionHolds(jobId), suffix)
+            service.close()
+        }
+    }
+
+    @Test fun `stash metadata is retained when Git reports no usable ref or reflog`() : Unit = Fixture().use { f ->
+        val completed = f.open().use { service ->
+            service.settle(service.request(jobId, GitRepositoryRequest.Init("run_1", "revision_1", null), "stash_metadata_exists_01"))
+        }
+        val directory = f.repositoryDirectory(completed.repositoryId)
+        val gitDir = directory.resolve("repository.git")
+        val baseline = f.repositories.commitAll(gitDir, directory.resolve("worktree"), "remote baseline")
+        f.repositories.git("--git-dir=$gitDir", "update-ref", "refs/remotes/origin/trunk", baseline)
+        // A regular orphan log, including an empty one, must survive an ambiguous Git absence.
+        val log = gitDir.resolve("logs/refs/stash")
+        Files.createDirectories(log.parent)
+        Files.writeString(log, "")
+        val actual = GitRuntime.detect() as GitAvailability.Available
+        val executable = f.repositories.root.resolve("git-ambiguous-stash-absence")
+            val gitPath = actual.executable.toString().replace("'", "'\\''")
+            val script = "#!/bin/sh\ncase \" \$* \" in *\" --format=%(refname) refs/stash \"*) exit 0;; *\" reflog exists refs/stash \"*) exit 1;; *) exec '$gitPath' \"\$@\";; esac\n"
+        Files.writeString(executable, script)
+        Files.setPosixFilePermissions(executable, PosixFilePermissions.fromString("rwx------"))
+        val before = f.storageTree()
+        f.open(availability = GitAvailability.Available(executable, actual.version)).use { service ->
+            assertEquals(listOf(GitRetentionReason.UNPUSHED_COMMITS), service.retentionHolds(jobId))
+        }
+        assertEquals(before, f.storageTree())
+    }
+
+
+    @Test fun `reflog invocation is closed to stash exists and retains bounded complete output`() : Unit = Fixture().use { f ->
+        val runner = f.repositories.runner
+        val invocation = GitInvocation("reflog", listOf("exists", "refs/stash"),
+            allowedExitCodes = setOf(0, 1), limits = GitExecutionLimits(java.time.Duration.ofSeconds(20), 4096, 16 * 1024,
+                maxAddressSpaceBytes = 512L * 1024 * 1024))
+        val argv = runner.argv(invocation)
+        assertEquals(listOf("reflog", "exists", "refs/stash"), argv.takeLast(3))
+        assertEquals(20L, invocation.limits.timeout.seconds)
+        assertFalse(invocation.truncateStdout)
+        assertEquals(4096, invocation.limits.maxStdoutBytes)
+        assertEquals(16 * 1024, invocation.limits.maxStderrBytes)
+        assertEquals(512L * 1024 * 1024, invocation.limits.maxAddressSpaceBytes)
+        for (arguments in listOf(listOf("drop", "refs/stash"), listOf("expire", "--all"),
+            listOf("show", "refs/stash"), listOf("exists", "refs/heads/main"))) {
+            assertFailsWith<IllegalArgumentException> { GitInvocation("reflog", arguments) }
+        }
+        assertFailsWith<IllegalArgumentException> { GitInvocation("reflog", listOf("exists", "refs/stash")) }
+        assertFailsWith<IllegalArgumentException> {
+            GitInvocation("reflog", listOf("exists", "refs/stash"), allowedExitCodes = setOf(0, 1, 2))
+        }
+        assertFailsWith<IllegalArgumentException> {
+            GitInvocation("reflog", listOf("exists", "refs/stash"), allowedExitCodes = setOf(0, 1), truncateStdout = true)
+        }
+    }
+
     @Test fun `retention checks ignored unborn source changes against the initialization manifest`() {
         for (change in listOf("modify", "add", "delete")) Fixture().use { f ->
             f.write(".gitignore", "*\n")

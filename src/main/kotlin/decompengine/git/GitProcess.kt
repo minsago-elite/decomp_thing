@@ -199,12 +199,16 @@ data class GitInvocation(
         require(gitDir == null || gitDir.isAbsolute) { "Git directory must be absolute" }
         require(workTree == null || (workTree.isAbsolute && gitDir != null)) { "Git work tree requires an absolute path and Git directory" }
         require(allowedExitCodes.isNotEmpty() && allowedExitCodes.all { it in 0..255 })
+        if (subcommand == "reflog") {
+            require(arguments == listOf("exists", "refs/stash")) { "Only stash reflog existence checks are allowlisted" }
+            require(allowedExitCodes == setOf(0, 1) && !truncateStdout) { "Stash reflog checks must use closed exits and complete output" }
+        }
     }
 
     companion object {
         val SUBCOMMANDS = setOf(
             "version", "init", "config", "check-ref-format", "rev-parse", "symbolic-ref", "for-each-ref",
-            "status", "read-tree", "fsck", "cat-file", "ls-files", "ls-tree", "check-ignore", "update-ref",
+            "status", "read-tree", "fsck", "cat-file", "ls-files", "ls-tree", "check-ignore", "update-ref", "reflog",
         )
     }
 }
