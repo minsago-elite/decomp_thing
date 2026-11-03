@@ -73,6 +73,12 @@ class WebAdmissionBoundsTest {
         }
     }
 
+    private fun awaitRequestPoolSaturation(server: UploadServer) {
+        val deadline = System.nanoTime() + 20_000_000_000L
+        while (!server.requestPoolSaturatedForTest() && System.nanoTime() < deadline) Thread.sleep(10)
+        assertTrue(server.requestPoolSaturatedForTest(), "the HTTP request worker pool and queue did not saturate")
+    }
+
     private fun awaitServing(port: Int) {
         val deadline = System.nanoTime() + 20_000_000_000L
         var last: Raw
@@ -155,6 +161,7 @@ class WebAdmissionBoundsTest {
             assertEquals(401, get(port).status, "an idle server answers normally")
             saturate(server)
             awaitOccupied(server)
+            awaitRequestPoolSaturation(server)
             for (attempt in 1..3) {
                 val response = get(port)
                 assertEquals(429, response.status, "attempt $attempt under overload: ${response.failure}")

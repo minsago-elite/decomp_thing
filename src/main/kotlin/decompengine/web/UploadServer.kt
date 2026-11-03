@@ -360,6 +360,10 @@ class UploadServer(
     internal fun admissionSnapshot() = AdmissionSnapshot(requestExecutor.activeCount, requestExecutor.queue.size, overloadResponders.activeCount)
     val browserOrigin: String = devFrontendOrigin ?: webOrigin(host, serverPort)
 
+    /** In-module coordination for deterministic bounded-admission tests; not part of the HTTP API. */
+    internal fun requestPoolSaturatedForTest(): Boolean =
+        requestExecutor.activeCount == requestExecutor.maximumPoolSize && requestExecutor.queue.remainingCapacity() == 0
+
     /** The CLI calls this explicitly; no HTTP route can issue a local link. */
     fun issueBrowserBootstrap(): WebBootstrapToken {
         return access.issueBootstrap()
@@ -909,7 +913,7 @@ class UploadServer(
             if (failure.code == "RECOVERY_INSPECTION_BUSY") null else throw failure
         }
         exchange.sendHtml(200, renderDashboardDocument(
-            rows.jobs,
+            rows.jobs.map(::displayJob),
             rows.unavailable,
             recovery,
         ))
@@ -978,6 +982,9 @@ class UploadServer(
         }
     }
 
+    /** Redact display metadata, never rendered HTML/scripts or digest-bound committed source. */
+    private fun displayJob(job: Job): Job = job.copy(filename = redaction.text(job.filename))
+
     private fun diagnostic(failure: Exception, fallback: String): String =
         redaction.diagnostic(failure.message ?: fallback, maximumCharacters = 480)
 
@@ -1013,7 +1020,7 @@ class UploadServer(
             repairEvidenceArtifactStates(jobId, reports, history, it)
         } }
         val recordedView = if (legacyOnly) null else recordedRepairEvidenceView(jobId, reports, recorded, artifacts, page, query.validationCasePageNumber)
-        exchange.sendHtml(200, renderJobDocument(view.job, reports, view.diagnostics, source.getOrNull(), source.isFailure,
+        exchange.sendHtml(200, renderJobDocument(displayJob(view.job), reports, view.diagnostics, source.getOrNull(), source.isFailure,
             progressSnapshot = progress,
             explorationReport = readLegacyJsonReport(jobId, reports, LegacyJsonReport.EXPLORATION),
             repairHistory = repairHistory,
@@ -1226,7 +1233,7 @@ class UploadServer(
         val text = source.text(normalized)
         val currentBuild = runCatching { archiveEvidence.read(jobId, reportPrefix = context.artifactPrefix) }.getOrNull()
         exchange.sendHtml(200, renderSourceFile(
-            jobs.get(jobId),
+            displayJob(jobs.get(jobId)),
             normalized,
             text,
             context,
