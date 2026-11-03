@@ -34,6 +34,7 @@ export function createBrowserSession(gateway: SessionGateway, basePath: string) 
   let queuedBootstrapToken: string | null = null;
   let queuedConnection: Promise<void> | null = null;
   let generation = 0;
+  let lastRevalidationAt = Number.NEGATIVE_INFINITY;
   let previousInstanceId: string | null | undefined;
   let controller: AbortController | null = null;
   let expiry: ReturnType<typeof setTimeout> | null = null;
@@ -154,6 +155,25 @@ export function createBrowserSession(gateway: SessionGateway, basePath: string) 
       if (!signal.aborted) authenticated(bootstrap);
     }, 'read');
   }
+  function revalidate(): Promise<void> {
+    if (fragmentBlocked || disposed || pending) return Promise.resolve();
+    const connectionUnavailable = state.status === 'unavailable' && state.reason === 'connection';
+    if (state.status !== 'authenticated' && !connectionUnavailable) return Promise.resolve();
+    const now = Date.now();
+    if (now - lastRevalidationAt < 5_000) return Promise.resolve();
+    lastRevalidationAt = now;
+    // Unlike an explicit refresh, this background GET does not publish `checking`
+    // or discard the current CSRF/session view before the server confirms a change.
+    const request = run(async (signal) => {
+      const bootstrap = await gateway.bootstrap(signal);
+      if (!signal.aborted) authenticated(bootstrap);
+    }, 'read');
+    return request.then(() => {
+      // A failed connection check must not suppress a later activity recovery or
+      // connectivity event that can now reach the server.
+      if (state.status === 'unavailable' && state.reason === 'connection') lastRevalidationAt = Number.NEGATIVE_INFINITY;
+    });
+  }
   function connect(fragment: BootstrapFragment): Promise<void> {
     if (fragment.kind === 'absent' || disposed) return Promise.resolve();
     // A URL we could not scrub blocks every older completion and future read.
@@ -229,6 +249,7 @@ export function createBrowserSession(gateway: SessionGateway, basePath: string) 
     },
     connect,
     refresh,
+    revalidate,
     csrf: () => state.status === 'authenticated' ? csrfToken : null,
     logout(): Promise<void> {
       if (pending || state.status !== 'authenticated' || csrfToken === null) return pending ?? Promise.resolve();

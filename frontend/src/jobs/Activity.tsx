@@ -1,7 +1,7 @@
 import { activityCopy as copy, activityHistoryCopy } from '../copy/attempt';
 import { message as displayMessage } from '../shared/messages';
-import { usePrivateTransport } from '../session/PrivateTransport';
-import { useEffect, useRef, useState } from 'preact/hooks';
+import { PrivateSessionContext, usePrivateTransport } from '../session/PrivateTransport';
+import { useContext, useEffect, useRef, useState } from 'preact/hooks';
 import { ApiClientError, withApiFailureReference } from '../api/client';
 import type { Snapshot, WebEvent } from '../api/generated';
 import { ActivityReceiptAge } from './ActivityReceiptAge';
@@ -40,6 +40,7 @@ export function Activity({ jobId, runId, basePath, navigation }: {
 }
 
 function LiveActivity({ jobId, runId, basePath, windowLinks }: { jobId: string; runId: string; basePath: string; windowLinks: boolean }) {
+  const session = useContext(PrivateSessionContext);
   const { client, stream } = usePrivateTransport(basePath);
   // Without a readable fetch body the live stream cannot work; poll from the start (#631).
   const [streamingUnavailable] = useState(() => !browserCapabilities().fetchStreaming);
@@ -102,7 +103,9 @@ function LiveActivity({ jobId, runId, basePath, windowLinks }: { jobId: string; 
       const acknowledged = items.length > 0 && added.length === 0 ? previous.cursor : cursor ?? previous.cursor;
       const acceptedPosition = { initialized: true, cursor: acknowledged, rows: next, last };
       position.current = acceptedPosition;
+      const recovered = failures.current > 0;
       setRetry(0); failures.current = 0;
+      if (recovered) void session?.revalidate();
       display.update({ position: acceptedPosition, receipt: { at: new Date().toISOString(), monotonicMs: performance.now(), wallClockMs: Date.now() } },
         readingStream && added.length > 0 && next.length < capacity && items.length === 1 && items.every(isContextUsageUpdate));
       if (next.length === capacity) { setFollowing(false); return false; }
@@ -154,7 +157,8 @@ function LiveActivity({ jobId, runId, basePath, windowLinks }: { jobId: string; 
           void poll();
           return;
         }
-        const transient = failure instanceof ApiClientError && (failure.code === 'network_error' || failure.code === 'timeout' || failure.status === 502 || failure.status === 504);
+        const transient = failure instanceof ApiClientError && (failure.code === 'network_error' || failure.code === 'timeout'
+          || failure.status === 502 || failure.status === 503 || failure.status === 504);
         if (transient && readingStream && ++streamFailures.current >= 2) {
           fallback.current = true; setPeriodic(true);
         }
@@ -164,6 +168,7 @@ function LiveActivity({ jobId, runId, basePath, windowLinks }: { jobId: string; 
           timer = setTimeout(() => { void poll(); }, delay);
           return;
         }
+        if (transient && failures.current >= 4) void session?.revalidate();
         if (failure instanceof ApiClientError && (failure.status === 401 || failure.status === 403)) {
           position.current = { initialized: false, cursor: null, rows: [], last: null }; setRows([]); setSnapshot(null); setLastRead(null);
         }

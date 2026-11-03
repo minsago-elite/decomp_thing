@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import { act, cleanup, render, screen } from '@testing-library/preact';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as ClientModule from '../src/api/client';
+import { ApiClientError } from '../src/api/errors';
 import type { Bootstrap, Run } from '../src/api/generated';
 import { App } from '../src/app/App';
 import { SessionStatus } from '../src/session/SessionStatus';
@@ -117,4 +118,42 @@ it('retains the selected run URL and rejects a late obsolete run read after an a
   ]);
   expect(transport.get.mock.calls[1]![2].signal.aborted).toBe(false);
   expect(gateway.bootstrap).toHaveBeenCalledTimes(2); noMutations(gateway);
+});
+
+it('revalidates the server instance after connectivity returns with jitter and a session-level throttle', async () => {
+  vi.spyOn(Math, 'random').mockReturnValue(0);
+  const { session, gateway, data } = setup();
+  await session.initialize({ kind: 'absent' });
+  render(<App basePath="/nested" session={session} />); await settle();
+
+  Object.defineProperty(navigator, 'onLine', { configurable: true, value: false });
+  await act(async () => { window.dispatchEvent(new Event('offline')); await Promise.resolve(); });
+  gateway.bootstrap.mockResolvedValueOnce({ ...data, serverInstanceId: 'server_fixture_after_outage' });
+  Object.defineProperty(navigator, 'onLine', { configurable: true, value: true });
+  await act(async () => { window.dispatchEvent(new Event('online')); await Promise.resolve(); });
+  await act(async () => { await vi.advanceTimersByTimeAsync(249); });
+  expect(gateway.bootstrap).toHaveBeenCalledOnce();
+  await act(async () => { await vi.advanceTimersByTimeAsync(1); await Promise.resolve(); });
+  expect(gateway.bootstrap).toHaveBeenCalledTimes(2);
+  expect(screen.getByText(notice)).toBeTruthy();
+
+  Object.defineProperty(navigator, 'onLine', { configurable: true, value: false });
+  await act(async () => { window.dispatchEvent(new Event('offline')); await Promise.resolve(); });
+  Object.defineProperty(navigator, 'onLine', { configurable: true, value: true });
+  await act(async () => { window.dispatchEvent(new Event('online')); await vi.advanceTimersByTimeAsync(1250); });
+  expect(gateway.bootstrap).toHaveBeenCalledTimes(2);
+  noMutations(gateway);
+});
+
+it('allows a new revalidation immediately after the previous connectivity check failed', async () => {
+  const { session, gateway, data } = setup();
+  await session.initialize({ kind: 'absent' });
+  gateway.bootstrap.mockRejectedValueOnce(new ApiClientError('network_error'));
+  await session.revalidate();
+  expect(session.snapshot()).toMatchObject({ status: 'unavailable', reason: 'connection' });
+  gateway.bootstrap.mockResolvedValueOnce({ ...data, serverInstanceId: 'server_fixture_after_recovery' });
+  await session.revalidate();
+  expect(session.snapshot()).toMatchObject({ status: 'authenticated', serverChanged: true });
+  expect(gateway.bootstrap).toHaveBeenCalledTimes(3);
+  noMutations(gateway);
 });
