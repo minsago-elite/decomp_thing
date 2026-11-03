@@ -1,6 +1,6 @@
 import { activityReceiptAgeCopy as copy, receiptAge } from '../copy/attempt';
 import { message as displayMessage } from '../shared/messages';
-import { formatExactTimestamp } from './metadataFormat';
+import { formatExactTimestamp } from '../copy/format';
 import { useReceiptAge } from '../shared/useReceiptAge';
 import type { ReceiptTime } from '../shared/receiptTime';
 

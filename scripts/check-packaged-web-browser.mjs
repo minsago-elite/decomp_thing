@@ -12,6 +12,7 @@ import { seedLive, qualifyLive } from './packaged-browser-live.mjs';
 import { seedHistory, qualifyHistory } from './packaged-browser-history.mjs';
 import { seedLegacy, qualifyLegacy } from './packaged-browser-legacy.mjs';
 import { qualifyUpgrade, qualifyUpgradeCache } from './packaged-browser-upgrade.mjs';
+import { qualifyAudit, assertAudit } from './packaged-browser-audit.mjs';
 
 // Test driver only: the application is launched with a separate Node-free PATH.
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -28,9 +29,10 @@ const { values } = parseArgs({ options: {
   help: { type: 'boolean', default: false },
 } });
 if (values.help) {
-  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|metadata|history|scale|live|proxy|upgrade|legacy] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
+  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|metadata|history|scale|live|proxy|upgrade|legacy|audit] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
   console.log('public: packaged home/Runtime/recovery; session: public plus local session journey; upload: session plus inert upload and lost-response retry; history: session plus preseeded inert multi-page attempts; scale: session plus 10,000 persisted jobs and keyboard pagination; proxy: real Vite HMR and session journey against packaged JVM; upgrade: previous JVM to current JVM on one origin with an old tab.');
   console.log('legacy: inert legacy HTML/polling with explicit test-owned state edits; no workflow execution.');
+  console.log('audit: every route at 1440x900, 390x844, 320px and 200%/400% zoom in light/dark themes with contract-fixture API reads fulfilled in DevTools; measures reflow, text/focus contrast, target size, reduced motion, every packaged asset under CSP and navigation timing budgets.');
   console.log('metadata: session plus one inert header upload/retry, real packaged job metadata, maximum uint64 address, and simulated malformed-response recovery; no workflow execution or upload quota/scale measurement.');
   console.log('live: session plus authored inert job changes and real background listing reads; preserves focused row order and applies new jobs on explicit refresh.');
   console.log('upgrade requires --previous-archive and distinct manifest builds with the old Runtime chunk absent from --archive. Its previous extraction is always removed before the current extraction, even with --keep-workdir.');
@@ -44,7 +46,7 @@ for (const option of ['archive', 'chrome', 'java-home', 'python']) {
   assert.ok(values[option] && isAbsolute(values[option]), `--${option} must name an absolute existing path; see --help`);
   await fs.access(values[option]);
 }
-assert.ok(['public', 'session', 'upload', 'metadata', 'history', 'scale', 'live', 'proxy', 'upgrade', 'legacy'].includes(values.mode), '--mode must be public, session, upload, metadata, history, scale, live, proxy, upgrade or legacy');
+assert.ok(['public', 'session', 'upload', 'metadata', 'history', 'scale', 'live', 'proxy', 'upgrade', 'legacy', 'audit'].includes(values.mode), '--mode must be public, session, upload, metadata, history, scale, live, proxy, upgrade, legacy or audit');
 if (values.mode === 'upgrade') {
   assert.ok(values['previous-archive'] && isAbsolute(values['previous-archive']), 'upgrade requires --previous-archive as an absolute existing ZIP path');
   await fs.access(values['previous-archive']);
@@ -120,13 +122,22 @@ class Protocol {
     this.pending = new Map();
     this.listeners = new Map();
     socket.addEventListener('message', ({ data }) => {
-      const message = JSON.parse(data);
+      let message;
+      try { message = JSON.parse(data); }
+      catch (error) {
+        const failure = new Error('Chrome DevTools returned invalid JSON', { cause: error });
+        for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(failure); }
+        this.pending.clear();
+        socket.close();
+        return;
+      }
       if (message.id) {
         const pending = this.pending.get(message.id);
         if (!pending) return;
         clearTimeout(pending.timer);
         this.pending.delete(message.id);
-        message.error ? pending.reject(new Error(message.error.message)) : pending.resolve(message.result);
+        if (message.error) pending.reject(new Error(message.error.message));
+        else pending.resolve(message.result);
       } else {
         for (const listener of this.listeners.get(`${message.sessionId ?? ''}:${message.method}`) ?? []) listener(message.params);
       }
@@ -189,7 +200,8 @@ async function connectDevTools(url, timeoutMs = 15000) {
         clearTimeout(timer);
         socket.removeEventListener('open', opened);
         socket.removeEventListener('error', failed);
-        error ? reject(error) : resolve();
+        if (error) reject(error);
+        else resolve();
       };
       const opened = () => finish();
       const failed = () => finish(new Error('Chrome DevTools connection failed'));
@@ -209,8 +221,13 @@ function responseHeader(response, name) {
   return value === undefined ? null : String(value);
 }
 
+function urlPath(value) {
+  try { return new URL(value).pathname; }
+  catch { return null; }
+}
+
 function responseSummary(response, source) {
-  return { responseRoute: new URL(response.url.split('#')[0].split('?')[0]).pathname,
+  return { responseRoute: urlPath(response.url.split('#')[0].split('?')[0]),
     status: response.status, contentSecurityPolicy: responseHeader(response, 'content-security-policy'), source };
 }
 
@@ -247,7 +264,7 @@ async function makeTarget({ cspProbe = false, cacheEnabled = false } = {}) {
     if (cacheEnabled) state.cacheRequests.push({ requestId: event.requestId, method: event.request.method, url, type });
     if (type === 'Document') {
       const request = { requestId: event.requestId, sequence: state.documentRequests.length,
-        route: new URL(url).pathname, method: event.request.method, status: null,
+        route: urlPath(url), method: event.request.method, status: null,
         contentSecurityPolicy: null, source: null, failure: null };
       state.documentRequests.push(request);
       state.pendingDocumentRequests.set(event.requestId, request);
@@ -334,6 +351,12 @@ function cspEvidence() {
     target.unresolvedDocumentRequests.map((request) => ({ targetIndex, ...request })));
   const orphanDocumentResponses = inspectedTargets.flatMap((target, targetIndex) =>
     target.orphanDocumentResponses.map((response) => ({ targetIndex, ...response })));
+  const invalidDocumentUrls = [
+    ...documentRequests.filter((request) => request.route === null || request.responseRoute === null)
+      .map(({ sequence, route, responseRoute }) => ({ sequence, route, responseRoute })),
+    ...orphanDocumentResponses.filter((response) => response.responseRoute === null)
+      .map(({ targetIndex, responseRoute }) => ({ targetIndex, responseRoute })),
+  ];
   return safeEvidence({
     inspectedTargets,
     attachedTargetCount: inspectedTargets.length,
@@ -344,6 +367,7 @@ function cspEvidence() {
     unresolvedDocumentRequests,
     orphanDocumentResponseCount: orphanDocumentResponses.length,
     orphanDocumentResponses,
+    invalidDocumentUrls,
     missingPolicyDocuments: documentPolicies.filter((response) => !response.contentSecurityPolicy),
     unsafePolicyDocuments: documentPolicies.filter((response) => /'unsafe-(?:inline|eval)'/.test(response.contentSecurityPolicy ?? '')),
     violationCount: productTargets.reduce((count, target) => count + targetCspViolationCount(target), 0),
@@ -369,7 +393,11 @@ async function qualifyCspDetector() {
 
 async function evaluate(target, expression) {
   const result = await cdp.call('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true }, target.sessionId);
-  if (result.exceptionDetails) throw new Error(`Browser expression failed: ${result.exceptionDetails.text}`);
+  if (result.exceptionDetails) {
+    const exception = result.exceptionDetails.exception;
+    const detail = exception?.description ?? exception?.value ?? result.exceptionDetails.text;
+    throw new Error(`Browser expression failed: ${result.exceptionDetails.text}: ${detail}`);
+  }
   return result.result.value;
 }
 
@@ -393,8 +421,13 @@ async function prepareArchive(archivePath) {
   const archiveSha256 = await fileHash(archivePath);
   work = await fs.mkdtemp(join(values['work-parent'], 'packaged-browser-work-'));
   report.workDirectory = work;
-  const setup = JSON.parse(execFileSync(values.python, [installHelper, 'prepare', '--archive', archivePath,
-    '--work', work, '--owner-token', ownerToken], { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 }));
+  let setup;
+  try {
+    setup = JSON.parse(execFileSync(values.python, [installHelper, 'prepare', '--archive', archivePath,
+      '--work', work, '--owner-token', ownerToken], { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 }));
+  } catch (error) {
+    throw new Error('Packaged archive preparation failed or returned invalid JSON', { cause: error });
+  }
   const before = await snapshot(setup.app);
   const bins = join(work, 'launcher tools');
   const working = join(work, 'unrelated working directory');
@@ -479,7 +512,9 @@ try {
   report.origin = origin;
   browserOrigin ??= origin;
 
-  browserTmp = await fs.mkdtemp(join(repo, 'build/ct-'));
+  // Chrome places SingletonSocket under TMPDIR. Keep it short enough even on hosted
+  // runners whose checkout path is /home/runner/work/<repo>/<repo>.
+  browserTmp = await fs.mkdtemp(join(repo, '.ct-'));
   report.browserTempDirectory = browserTmp;
   await fs.mkdir(profile);
   browser = startOwned(chromeBinary, ['--headless=new', '--disable-gpu', ...(values['no-sandbox'] ? ['--no-sandbox'] : []), '--no-first-run', '--no-default-browser-check', '--disable-background-networking', '--disable-extensions', '--disable-default-apps', '--disable-sync', '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1', `--user-data-dir=${profile}`, 'about:blank'], {
@@ -617,6 +652,15 @@ try {
       recoveredCurrentBuild: true, mutationRequests: 0, noticeTitleWithinViewport: true, reloadControlWithinViewport: true });
     report.requests.upgrade = tab.requests;
     report.requests.upgradeCacheWarm = cacheProbe.requests;
+    report.jobDataCreated = false;
+  }
+  if (values.mode === 'audit') {
+    report.audit = await qualifyAudit({ origin, repo, manifest, evidenceDirectory: root, cdp, makeTarget, evaluate, ready, capture, delay });
+    await delay(100); // Drain resource events from the last measured target.
+    report.auditVerdict = assertAudit(report.audit, manifest, targets.filter((target) => !target.cspProbe).flatMap((target) => target.responses), origin);
+    assert.deepEqual(report.auditVerdict.failures, [], `Packaged audit failures:\n${report.auditVerdict.failures.join('\n')}`);
+    assert.ok(targets.filter((target) => !target.cspProbe).every((target) => target.requests.every((entry) => entry.url.startsWith(origin + '/') || entry.url.startsWith('data:'))), 'Audit fetched an external dependency');
+    assert.equal(await fs.stat(data).then(() => true, () => false), false, 'Fixture-backed audit created job data');
     report.jobDataCreated = false;
   }
   if (values.mode === 'public' || values.mode === 'session' || values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'history' || values.mode === 'scale' || values.mode === 'live') {
@@ -806,7 +850,7 @@ try {
     }
     await ready(authenticated, `document.body.innerText.includes('${libraryText}')`, 'persistent job library');
     await evaluate(authenticated, `(() => {
-      const field = [...document.querySelectorAll('label')].find(label => label.textContent.startsWith('Filename search')).querySelector('input');
+      const field = [...document.querySelectorAll('label')].find(label => label.textContent.startsWith('Filename or label search')).querySelector('input');
       field.value = 'absent fixture'; field.dispatchEvent(new Event('input', { bubbles: true }));
     })()`);
     await evaluate(authenticated, `[...document.querySelectorAll('button')].find(button => button.textContent === 'Apply filters').click()`);
@@ -1019,6 +1063,8 @@ try {
     'A packaged Document request did not receive a correlated response');
   assert.deepEqual(report.contentSecurityPolicy.orphanDocumentResponses, [],
     'A packaged Document response did not correlate to its request');
+  assert.deepEqual(report.contentSecurityPolicy.invalidDocumentUrls, [],
+    'A packaged Document request or response had an invalid URL');
   if (values.mode !== 'proxy') assert.deepEqual(report.contentSecurityPolicy.missingPolicyDocuments, [],
     'A packaged production Document response omitted CSP');
   assert.deepEqual(report.contentSecurityPolicy.unsafePolicyDocuments, [],

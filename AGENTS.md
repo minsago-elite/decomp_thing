@@ -30,3 +30,13 @@
 - Milestone sanity checks cover every repository milestone.
 - Before continuing planned work, verify the relevant milestone and issue status, dependencies, acceptance criteria, and current evidence.
 - Check that closed issues have evidence matching their full acceptance criteria and intended scope; reopen or correct closure metadata when they were closed improperly.
+
+## Milestone Completion Orchestration
+
+- The active project goal is to finish every open milestone, prioritizing remaining UI milestone work and backend completion. Before implementation, audit all milestones and issues against the repository sanity checks above; work from GitHub's current scope and acceptance criteria, not assumptions.
+- Use the T3 orchestration tools for delegated work when available. Check `orchestrator_capabilities` before the first delegation and use only listed provider/model identifiers and supported options. If a requested model/provider is unavailable, report that and do not silently substitute.
+- Backend: use Codex `gpt-6.1-sol` as the technical middle layer/reviewer, Claude Opus 5.5 for planning where useful, and Codex `gpt-6-luna` for implementation tasks. Keep Ghidra bundled through Java APIs, isolated worker execution, and authenticated oracle boundaries.
+- Frontend/UI: use Claude Opus 5.5 with low effort for planning and implementation direction; use Claude Sonnet 5.5 only where useful and available. Do not substitute backend model routing for UI work.
+- Keep delegated tasks scoped to explicit milestone/issue acceptance criteria. Review delegated changes and evidence before landing them. Commit frequently at meaningful checkpoints, referencing the relevant issue, and push when practical.
+- Preserve the repository rule against creating files or directories outside its root; do not create worktrees unless that rule is explicitly overridden.
+- `CLAUDE.md` must remain a symlink to `AGENTS.md` so Claude Code follows the same repository instructions.

@@ -17,6 +17,7 @@ export const stopOutcomeCopy = {
 
 export const attemptOutcomeCopy = {
   stopReason: 'Stop reason',
+  stopDescription: '{label}. {detail} {recordedCode}',
   recordedCode: 'Recorded code {code}.',
   usageSource: 'Source: the attempt\'s terminal receipt, recorded at {time}. Provider measurement time: Not reported. Missing counters remain unknown.',
   usageWhileActive: 'Usage is recorded with the attempt\'s terminal receipt; none is available before the attempt ends.',

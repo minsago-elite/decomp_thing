@@ -24,6 +24,7 @@ internal class WebApiController(
     private val agentPreflight: WebAgentPreflight = WebAgentPreflight { error("No agent preflight is configured.") },
     audit: WebAuditLog? = null,
     private val capacity: (() -> JsonObject)? = null,
+    private val git: WebGitCapability = WebGitCapability.detect(),
     private val readExplorationArtifact: (String, String, Long) -> decompengine.repair.StableRegularFile = jobs::readArtifact,
 ) {
     private val auditRecorder = WebAuditRecorder(access, audit)
@@ -39,6 +40,7 @@ internal class WebApiController(
     private val cancellations = WebCancellationController(jobMutations, assets.basePath)
     private val recoveries = WebRecoveryController(jobs, jobMutations, assets.basePath)
     private val agentPreflights = WebAgentPreflightController(access, agentPreflight, assets.basePath)
+    private val gitRoutes = WebGitController(access, jobs, jobMutations, git, assets.basePath)
     private val runPages = WebRunPages { jobId ->
         when (val inspection = jobs.inspectDurableJob(jobId)) {
             is decompengine.jobs.WorkflowJobInspection.Available -> inspection.snapshot
@@ -50,11 +52,13 @@ internal class WebApiController(
     private val revisionSourcePages = WebRevisionSourcePages(jobs::readRevisionSources)
     private val revisionDirectoryPages = WebRevisionDirectoryPages(jobs::readRevisionSources)
     private val revisionFileMetadata = WebRevisionFileMetadata(jobs::readRevisionFileMetadata)
+    private val revisionSourceSearch = WebRevisionSourceSearch(jobs::searchRevisionSources)
     private val revisionValidationReports = WebRevisionValidationReports(jobs::readRecordedValidationReport)
     private val eventStream = WebEventStream(access, streamResources, progressPages, read = { jobId, runId ->
         readWebProgress(jobs, jobId, runId).second
-    }, clock = clock)
+    }, clock = clock, deleted = { jobId -> jobs.deletedJob(jobId) != null })
     private val jobPages = WebJobPages(jobs::collectionRecords, checkpointedSource = jobs::collectionRecordsWithProgress)
+    private val lifecycle = WebJobLifecycleController(access, jobs, jobMutations, assets.basePath, jobPages::invalidate)
 
     fun route(exchange: HttpExchange): Boolean {
         val path = exchange.requestURI.rawPath
@@ -72,7 +76,7 @@ internal class WebApiController(
     private fun dispatch(exchange: HttpExchange): Boolean {
         val path = exchange.requestURI.rawPath
         val resource = path.removePrefix(prefix)
-        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs", "recovery", "agent/preflight", "support-export", "capacity") || resource.matches(Regex("(?:jobs|uploads)/[^/]+|jobs/[^/]+/runs(?:/[^/]+(?:/reports/(?:exploration|revision-validation)|/validation-history|/source-catalog|/revisions/[^/]+/(?:sources|source-directories/[^/]+|source-files/[^/]+(?:/(?:chunk|content))?)|/snapshot|/events|/progress-pin|/cancel|/recover|/controls|/queue-position)?)?|jobs/[^/]+/artifacts/[^/]+/content")))) {
+        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs", "recovery", "agent/preflight", "storage", "storage/maintenance-preview", "support-export", "capacity") || resource.matches(Regex("(?:jobs|uploads)/[^/]+|jobs/[^/]+/(?:deletion-preview|operations/[^/]+|repositories(?:/[^/]+(?:/operations/[^/]+)?)?)|jobs/[^/]+/runs(?:/[^/]+(?:/reports/(?:exploration|revision-validation)|/validation-history|/source-catalog|/revisions/[^/]+/(?:sources|source-search|source-directories/[^/]+|source-files/[^/]+(?:/(?:chunk|content))?)|/snapshot|/events|/progress-pin|/cancel|/recover|/controls|/queue-position)?)?|jobs/[^/]+/artifacts/[^/]+/content")))) {
             try {
                 val policy = if (exchange.requestMethod in setOf("POST", "PUT", "PATCH", "DELETE")) {
                     WebEndpointPolicy.jsonMutation(exchange.requestMethod)
@@ -138,6 +142,7 @@ internal class WebApiController(
                         throw WebAccessDenied(400, "UNSUPPORTED_HEADER", "This bounded artifact endpoint does not support Range or conditional requests.")
                     }
                     val parts = resource.split('/')
+                    jobs.downloadLease(parts[1]).use {
                     val bytes = WebExplorationArtifact.read(jobs, parts[1], parts[3], WebRedactionPolicy.of(exchange)::document)
                     webApiHeaders(exchange, UUID.randomUUID().toString())
                     exchange.responseHeaders.set("Content-Type", "application/octet-stream")
@@ -150,6 +155,7 @@ internal class WebApiController(
                             exchange.responseBody.use { it.write(bytes) }
                         }
                     } finally { exchange.close() }
+                    }
                 }
                 resource == "agent/preflight" -> agentPreflights.handle(exchange)
                 resource == "capacity" -> {
@@ -164,6 +170,13 @@ internal class WebApiController(
                     sendWebApiResponse(exchange, 200, "supportExport",
                         supportExport.build(WebSupportExportScope.parse(exchange.requestURI.rawQuery)))
                 }
+                resource == "storage" || resource == "storage/maintenance-preview" -> lifecycle.storage(exchange, resource != "storage")
+                resource.matches(Regex("jobs/[^/]+/deletion-preview")) -> lifecycle.deletionPreview(exchange, resource.split('/')[1])
+                resource.matches(Regex("jobs/[^/]+/operations/[^/]+")) -> {
+                    val parts = resource.split('/')
+                    lifecycle.operation(exchange, parts[1], parts[3])
+                }
+                resource.matches(Regex("jobs/[^/]+/repositories(?:/[^/]+(?:/operations/[^/]+)?)?")) -> gitRoutes.handle(exchange, resource.split('/'))
                 resource.matches(Regex("jobs/[^/]+/runs/[^/]+/cancel")) -> {
                     val parts = resource.split('/')
                     cancellations.handle(exchange, parts[1], parts[3])
@@ -235,7 +248,7 @@ internal class WebApiController(
                         val query = WebSourceChunkQuery.parse(exchange.requestURI.rawQuery)
                         val content = jobs.readRevisionSourceFile(parts[1], parts[3], parts[5], parts[7], WebSourceReadPurpose.PREVIEW, query.metadataVersion)
                         sendWebApiResponse(exchange, 200, "sourceChunk", content.chunk(query))
-                    } else {
+                    } else jobs.downloadLease(parts[1]).use {
                         val metadataVersion = parseWebSourceDownloadVersion(exchange.requestURI.rawQuery)
                         if (!acceptsWebMediaType(exchange, "application/octet-stream")) {
                             throw WebAccessDenied(406, "NOT_ACCEPTABLE", "This endpoint returns application/octet-stream.")
@@ -264,6 +277,13 @@ internal class WebApiController(
                     val parts = resource.split('/')
                     sendWebApiResponse(exchange, 200, "revisionDirectory", revisionDirectoryPages.page(session.sessionId,
                         parts[1], parts[3], parts[5], parts[7], exchange.requestURI.rawQuery))
+                }
+                resource.matches(Regex("jobs/[^/]+/runs/[^/]+/revisions/[^/]+/source-search")) -> {
+                    val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.privateRead(allowHead = true)))
+                    requireJsonAccept(exchange)
+                    val parts = resource.split('/')
+                    sendWebApiResponse(exchange, 200, "sourceSearch",
+                        revisionSourceSearch.search(session.sessionId, parts[1], parts[3], parts[5], exchange.requestURI.rawQuery))
                 }
                 resource.matches(Regex("jobs/[^/]+/runs/[^/]+/revisions/[^/]+/sources")) -> {
                     val session = checkNotNull(access.authorize(exchange, WebEndpointPolicy.privateRead(allowHead = true)))
@@ -339,11 +359,18 @@ internal class WebApiController(
                     requireJsonAccept(exchange)
                     sendWebApiResponse(exchange, 200, "bootstrap", bootstrap(credentials))
                 }
+                exchange.requestMethod == "PATCH" -> lifecycle.patch(exchange, resource.removePrefix("jobs/"))
+                exchange.requestMethod == "DELETE" -> lifecycle.delete(exchange, resource.removePrefix("jobs/"))
                 else -> {
+                    if (exchange.requestMethod != "GET") {
+                        access.authorize(exchange, WebEndpointPolicy.transport(setOf("GET", "PATCH", "DELETE")))
+                    }
                     access.authorize(exchange, WebEndpointPolicy.privateRead())
                     requireNoWebApiQuery(exchange)
                     requireJsonAccept(exchange)
-                    val value = webJob(jobs.presentation(resource.removePrefix("jobs/")))
+                    val selected = resource.removePrefix("jobs/")
+                    if (jobs.deletedJob(selected) != null) throw WebAccessDenied(410, "RESOURCE_GONE", "This job was deleted. Only its deletion record is retained.")
+                    val value = webJob(jobs.presentation(selected))
                     val etag = "\"${value.getValue("version").let { (it as JsonPrimitive).content }}\""
                     exchange.responseHeaders.set("ETag", etag)
                     if (exchange.requestHeaders.getFirst("If-None-Match") == etag) {
@@ -369,6 +396,10 @@ internal class WebApiController(
             if (failure.code == "RECOVERY_REQUIRED" && uncertain != null && uncertain.jobId.matches(Regex("[a-f0-9]{32}"))) {
                 exchange.responseHeaders.set("Location", "${assets.basePath}api/v1/jobs/${uncertain.jobId}")
                 access.sendDenied(exchange, WebAccessDenied(409, "RECOVERY_REQUIRED", publicWebDiagnosticMessage(failure.code)))
+            } else if (failure.code == "UPLOAD_KEY_RETIRED") {
+                access.sendDenied(exchange, WebAccessDenied(410, "RESOURCE_GONE", "The job created with this upload key was deleted. Upload again with a new key."))
+            } else if (failure.code in setOf("JOB_NOT_FOUND", "RUN_NOT_FOUND") && deletedJobResource(resource)) {
+                access.sendDenied(exchange, WebAccessDenied(410, "RESOURCE_GONE", "This job was deleted. Only its deletion record is retained."))
             } else {
                 val status = if (failure.code in setOf("JOB_NOT_FOUND", "RUN_NOT_FOUND")) 404 else if (failure.code == "ARTIFACT_CHANGED") 409 else 503
                 access.sendDenied(exchange, WebAccessDenied(status, if (status == 404) "NOT_FOUND" else publicWebDiagnosticCode(failure.code),
@@ -377,7 +408,8 @@ internal class WebApiController(
         } catch (_: decompengine.jobs.ArtifactChangedException) {
             access.sendDenied(exchange, WebAccessDenied(409, "ARTIFACT_CHANGED", publicWebDiagnosticMessage("ARTIFACT_CHANGED")))
         } catch (_: JobStoreException) {
-            access.sendDenied(exchange, WebAccessDenied(404, "NOT_FOUND", "The requested job is unavailable."))
+            access.sendDenied(exchange, if (deletedJobResource(resource)) WebAccessDenied(410, "RESOURCE_GONE", "This job was deleted. Only its deletion record is retained.")
+                else WebAccessDenied(404, "NOT_FOUND", "The requested job is unavailable."))
         } catch (_: Exception) {
             if (exchange.responseCode != -1) exchange.close()
             else access.sendDenied(exchange, WebAccessDenied(500, "INTERNAL_ERROR", "The request could not be completed."))
@@ -407,7 +439,7 @@ internal class WebApiController(
         put("workflows", JsonArray(emptyList()))
         put("agentContractVersion", JsonNull)
         put("limits", JsonNull)
-    }, harnessCapability()))
+    }, harnessCapability()) + git.capabilities())
 
     // Configured ceilings for the API profile; unavailable resources remain
     // unavailable until their adapters enforce these limits and are enabled.
@@ -417,7 +449,8 @@ internal class WebApiController(
         put("downloadIdleMs", "120000")
         put("maxJsonBytes", "1048576")
         put("maxUploadBytes", StreamingMultipartUpload.MAX_REQUEST_BYTES.toString())
-        put("maxSourceChunkBytes", "0")
+        // The chunk reader enforces 4..131072 bytes per range over digest-verified inputs of at most 8 MiB.
+        put("maxSourceChunkBytes", WebRevisionSourceContent.MAXIMUM_CHUNK_BYTES.toString())
         put("maxLogChunkBytes", "0")
         put("maxEventCount", "1024")
         put("maxEventBytes", "2097152")
@@ -438,7 +471,7 @@ internal class WebApiController(
             "aarch64", "arm64" -> "aarch64"
             else -> "unknown"
         })
-        put("gitVersion", JsonNull)
+        put("gitVersion", git.versionJson())
         put("scheduler", webSchedulerSnapshot(jobs.schedulerSnapshot()))
         put("progressRetention", webProgressRetentionStatus(jobs.progressRetentionStatus()))
     }
@@ -455,6 +488,12 @@ internal class WebApiController(
             put("agentContractVersion", JsonNull)
             put("limits", JsonNull)
         }
+    }
+
+    /** Reached only after a handler authorized the session and a service read found no job. */
+    private fun deletedJobResource(resource: String): Boolean {
+        val jobId = Regex("jobs/([0-9a-f]{32})(?:/.*)?").matchEntire(resource)?.groupValues?.get(1) ?: return false
+        return try { jobs.deletedJob(jobId) != null } catch (_: Exception) { false }
     }
 
     private fun singleUploadHeader(exchange: HttpExchange, name: String): String? {

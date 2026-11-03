@@ -1,6 +1,7 @@
 // View-scoped interface copy; protocol values and DOM identities stay in their components.
 
 export const runHistoryCopy = {
+  thisJobWasDeleted: "This job was deleted. Its attempt history was removed and cannot be recovered.",
   "state": "Attempt state: {state}. Acceptance: {acceptance}.",
   "pageCount": "{count} attempts on this page.",
   "newestRecordedAttemptsFirstThisListIsNotACount": "Newest recorded attempts first. This list is not a count of accepted reconstructions.",
