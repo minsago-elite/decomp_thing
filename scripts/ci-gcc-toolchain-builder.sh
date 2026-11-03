@@ -6,28 +6,41 @@ export PATH=/usr/bin:/bin
 
 repo="$(git rev-parse --show-toplevel)"
 repo="$(realpath -e "$repo")"
-build_root="$repo/build/gcc-toolchain-reproduction"
+build_root="$repo/build/g"
 [[ ! -L "$repo/build" && ! -L "$build_root" ]] || { echo 'refuse linked repository build root' >&2; exit 1; }
 canonical_build_root="$(realpath -m "$build_root")"
 [[ "$canonical_build_root" == "$repo"/* ]] || { echo 'refuse build root outside repository' >&2; exit 1; }
 run_id="${GITHUB_RUN_ID:-local}"
 run_attempt="${GITHUB_RUN_ATTEMPT:-1}"
 [[ "$run_id" =~ ^[A-Za-z0-9._-]{1,80}$ && "$run_attempt" =~ ^[0-9]{1,8}$ ]] || { echo 'invalid owned run identity' >&2; exit 1; }
-job_root="$build_root/$run_id-$run_attempt"
-tools="$job_root/tools"
-state="$job_root/state"
-evidence="$job_root/evidence"
+short_id="$(printf '%s\0%s\0%s\0%s\0%s' "$run_id" "$run_attempt" "${GITHUB_JOB:-provenance}" "$(git rev-parse HEAD)" "$repo" | sha256sum | cut -c1-8)"
+job_root="$build_root/$short_id"
+volume="$job_root/v"
+tools="$volume/tools"
+state="$volume/s"
+evidence="$volume/e"
 docker_bin="$tools/docker/docker"
+daemon_bin="$tools/docker/dockerd"
 buildctl="$tools/buildkit/bin/buildctl"
 buildkitd="$tools/buildkit/bin/buildkitd"
-socket="$job_root/docker.sock"
-bk_socket="$job_root/buildkit.sock"
+socket="$job_root/d.sock"
+bk_socket="$job_root/b.sock"
 tag=decomp-gcc-oracle-toolchain:16.2.0
 docker_hash=803d433f226db4776e1768fd319fc6c6e4935a456acf84fcc0080818b854bc8f
 rootless_hash=15a5cb81f2c5cf15ea21427f2e8241eac0deb2221175f993b5e76926e705ec6a
 buildkit_hash=f64589601e0f06164041dc6be45ed259cffb67539130e434d236551d63ab6030
 
 die() { echo "gcc-builder: $*" >&2; exit 1; }
+validate_socket_inventory() {
+  local path
+  # These are the only filesystem sockets enabled by this helper and pinned tools.
+  # Validate the longest generated endpoints before creating owner intent or a service.
+  for path in "$socket" "$bk_socket" "$job_root/r/api.sock" \
+    "$job_root/x/containerd/containerd.sock" "$job_root/x/containerd/containerd.sock.ttrpc" \
+    "$job_root/t/runc-console.sock"; do
+    (( ${#path} <= 107 )) || die "generated Unix socket path exceeds 107 bytes: $path"
+  done
+}
 bounded_stream() {
   python3 scripts/ci-gcc-toolchain-archive.py stream "$1" "${2:-67108864}"
 }
@@ -39,12 +52,17 @@ need_owned_path() {
 }
 clean_environment() {
   unset DOCKER_HOST DOCKER_CONTEXT BUILDKIT_HOST BUILDKIT_DEBUG_FORCE_OVERLAY_DIFF \
-    BUILDKIT_DEBUG_FORCE_NETWORK_DRIVER BUILDKIT_DISABLE_CACHE_EXPORTS || true
-  export DOCKER_CONFIG="$job_root/docker-config"
+    BUILDKIT_DEBUG_FORCE_NETWORK_DRIVER BUILDKIT_DISABLE_CACHE_EXPORTS DOCKERD \
+    _DOCKERD_ROOTLESS_CHILD _DOCKERD_ROOTLESS_SELINUX ROOTLESSKIT_FLAGS \
+    ROOTLESSKIT_DETACH_NETNS LD_PRELOAD LD_LIBRARY_PATH PYTHONPATH BASH_ENV ENV SHELLOPTS || true
+  export DOCKER_CONFIG="$volume/docker-config"
   install -d -m 700 "$DOCKER_CONFIG"
 }
 monotonic_remaining() {
   python3 -c 'import sys,time; print(max(0.0, float(sys.argv[1])-time.monotonic()))' "$1"
+}
+deadline_open() {
+  python3 -c 'import sys; print(1 if float(sys.argv[1]) > 0 else 0)' "$1"
 }
 bounded_call_seconds() {
   python3 -c 'import sys; print(min(5.0, float(sys.argv[1])))' "$1"
@@ -199,8 +217,9 @@ f.unlink()
 PY
 }
 init() {
+  validate_socket_inventory
   if [[ -e "$job_root" ]]; then die "refusing reused/nonempty job root: $job_root"; fi
-  install -d -m 700 "$job_root" "$tools" "$state" "$evidence" "$job_root/source" "$job_root/tmp"
+  install -d -m 700 "$job_root" "$volume" "$tools" "$state" "$evidence" "$job_root/source" "$job_root/tmp"
   printf '%s\n' "run=${GITHUB_RUN_ID:-local}" "attempt=${GITHUB_RUN_ATTEMPT:-1}" \
     "revision=$(git rev-parse HEAD)" > "$job_root/owner.txt"
   capture_ambient_identity
@@ -224,7 +243,7 @@ authenticate() {
   local rootless="$tools/docker-rootless-extras"
   check_executable "$docker_bin" 42677472 e45381109c685311cf84c5e33a1aca7da81d6b55c0f9aed74091fc08c3a94f13
   test "$($docker_bin --version)" = 'Docker version 29.7.2, build a7dcaa6'
-  test "$("$tools/docker/docker/dockerd" --version)" = 'Docker version 29.7.2, build 6a43e3d'
+  test "$("$daemon_bin" --version)" = 'Docker version 29.7.2, build 6a43e3d'
   check_executable "$rootless/rootlesskit" 23922644 98f07e783dd6b3cd236c7865d1dce7937e645ec74a0fe2971725449af074f466
   check_executable "$rootless/dockerd-rootless.sh" 10532 904c9b9e35f6927c0a5e65afb4d35b6bc9eb1278c878044501281fc728c9be46
   echo "1c9f0dc93ebb3d75255254ec760d26a912affba7f329ab8abffe8e25eb0b3f94  $rootless/dockerd-rootless-setuptool.sh" | sha256sum --check --status
@@ -239,7 +258,7 @@ authenticate() {
   test "$("$buildctl" --version)" = 'buildctl github.com/moby/buildkit v0.20.2 97437fdd7e32f29bb80288d800cd4ffcb34e1c15'
   {
     printf 'docker-cli=%s\n' "$($docker_bin --version)"
-    printf 'docker-daemon=%s\n' "$("$tools/docker/docker/dockerd" --version)"
+    printf 'docker-daemon=%s\n' "$("$daemon_bin" --version)"
     printf 'rootlesskit=%s\n' "$("$rootless/rootlesskit" --version)"
     printf 'buildkitd=%s\n' "$("$buildkitd" --version)"
     printf 'buildctl=%s\n' "$("$buildctl" --version)"
@@ -250,10 +269,11 @@ authenticate() {
     printf 'rootless-archive-bytes=%s\nrootless-archive-sha256=%s\n' \
       "$(stat -c %s "$tools/rootless.tgz")" "$(sha256sum "$tools/rootless.tgz" | cut -d' ' -f1)"
   } > "$evidence/tool-versions-and-archive.txt"
-  sha256sum "$docker_bin" "$tools/docker/docker/dockerd" "$rootless/rootlesskit" \
+  sha256sum "$docker_bin" "$daemon_bin" "$rootless/rootlesskit" \
     "$buildkitd" "$buildctl" "$tools/buildkit/bin/buildkit-runc" > "$evidence/executable-sha256.txt"
 }
 start_rootless() {
+  validate_socket_inventory
   clean_environment
   sudo -n loginctl enable-linger "$USER"
   sudo -n systemctl start "user@$(id -u).service"
@@ -261,9 +281,8 @@ start_rootless() {
   test -d "$runtime"
   install -d -m 700 "$state/docker-data" "$state/docker-exec" "$state/rootlesskit" "$state/docker-config"
   printf '{"features":{"containerd-snapshotter":false}}\n' > "$state/docker-daemon.json"
-  export XDG_RUNTIME_DIR="$runtime" DOCKERD_ROOTLESS_ROOTLESSKIT_STATE_DIR="$state/rootlesskit"
-  export DOCKERD_ROOTLESS_ROOTLESSKIT_NET=slirp4netns DOCKERD_ROOTLESS_ROOTLESSKIT_PORT_DRIVER=builtin
-  export DOCKERD_ROOTLESS_ROOTLESSKIT_DISABLE_HOST_LOOPBACK=true
+  local env_path="$tools/docker:$rootless:/usr/bin:/bin"
+  install -d -m 700 "$volume/home"
   printf '%q ' "$rootless/dockerd-rootless.sh" --config-file="$state/docker-daemon.json" \
     --data-root="$state/docker-data" --exec-root="$state/docker-exec" --pidfile="$state/docker.pid" \
     --host="unix://$socket" --storage-driver=overlay2 --bridge=none --iptables=false \
@@ -275,7 +294,11 @@ start_rootless() {
     "$evidence/rootless-dockerd.log" 67108864 >/dev/null 2>&1 &
   local logger_pid=$!
   record_process rootless-log "$logger_pid" "$(readlink -f "/proc/$logger_pid/exe")"
-  PATH="$tools/docker:$rootless:/usr/bin:/bin" setsid "$rootless/dockerd-rootless.sh" \
+  env -i PATH="$env_path" HOME="$volume/home" USER="$USER" LOGNAME="$USER" LANG=C LC_ALL=C \
+    TMPDIR="$job_root/tmp" DOCKER_CONFIG="$state/docker-config" DOCKERD="$daemon_bin" \
+    XDG_RUNTIME_DIR="$runtime" DOCKERD_ROOTLESS_ROOTLESSKIT_STATE_DIR="$job_root/r" \
+    DOCKERD_ROOTLESS_ROOTLESSKIT_NET=slirp4netns DOCKERD_ROOTLESS_ROOTLESSKIT_PORT_DRIVER=builtin \
+    DOCKERD_ROOTLESS_ROOTLESSKIT_DISABLE_HOST_LOOPBACK=true setsid "$rootless/dockerd-rootless.sh" \
     --config-file="$state/docker-daemon.json" --data-root="$state/docker-data" \
     --exec-root="$state/docker-exec" --pidfile="$state/docker.pid" \
     --host="unix://$socket" --storage-driver=overlay2 --bridge=none --iptables=false \
@@ -287,14 +310,14 @@ start_rootless() {
   while :; do
     local remaining
     remaining=$(monotonic_remaining "$deadline")
-    (( $(python3 -c 'import sys; print(float(sys.argv[1]) > 0)' "$remaining") )) || break
+    (( $(deadline_open "$remaining") )) || break
     kill -0 "$pid" 2>/dev/null || { tail -n 100 "$evidence/rootless-dockerd.log"; die 'rootless daemon exited early'; }
     if timeout "$(bounded_call_seconds "$remaining")" env -u DOCKER_HOST -u DOCKER_CONTEXT \
       DOCKER_CONFIG="$DOCKER_CONFIG" "$docker_bin" --host "unix://$socket" info \
       --format '{{.ServerVersion}}' >/dev/null 2>&1; then break; fi
     sleep .2
   done
-  (( $(python3 -c 'import sys; print(float(sys.argv[1]) > 0)' "$(monotonic_remaining "$deadline")") )) || die 'rootless readiness deadline expired'
+  (( $(deadline_open "$(monotonic_remaining "$deadline")") )) || die 'rootless readiness deadline expired'
   local info="$evidence/docker-info.json"
   timeout --signal=TERM --kill-after=5s 30s env -u DOCKER_HOST -u DOCKER_CONTEXT \
     DOCKER_CONFIG="$DOCKER_CONFIG" "$docker_bin" --host "unix://$socket" info --format '{{json .}}' > "$info"
@@ -304,6 +327,7 @@ start_rootless() {
   DOCKER_HOST= DOCKER_CONTEXT= "$docker_bin" --host "unix://$socket" version --format '{{json .}}' > "$evidence/docker-version.json"
 }
 start_buildkit() {
+  validate_socket_inventory
   clean_environment
   cat > "$state/buildkitd.toml" <<EOF
 [worker.oci]
@@ -349,12 +373,12 @@ EOF
   deadline=$(python3 -c 'import time; print(time.monotonic()+60.0)')
   while :; do
     remaining=$(monotonic_remaining "$deadline")
-    (( $(python3 -c 'import sys; print(float(sys.argv[1]) > 0)' "$remaining") )) || break
+    (( $(deadline_open "$remaining") )) || break
     kill -0 "$pid" 2>/dev/null || { tail -n 100 "$evidence/buildkitd.log"; die 'BuildKit exited early'; }
     call_timeout=$(bounded_call_seconds "$remaining")
     if run_worker_call "$call_timeout" debug workers --format '{{json .}}' >"$state/workers.json" 2>/dev/null; then
       remaining=$(monotonic_remaining "$deadline")
-      (( $(python3 -c 'import sys; print(float(sys.argv[1]) > 0)' "$remaining") )) || break
+      (( $(deadline_open "$remaining") )) || break
       call_timeout=$(bounded_call_seconds "$remaining")
       if ! run_worker_call "$call_timeout" debug info --format '{{json .}}' >"$state/buildkit-info.txt" 2>/dev/null; then sleep .2; continue; fi
       python3 scripts/ci-gcc-toolchain-archive.py workers "$state/workers.json"

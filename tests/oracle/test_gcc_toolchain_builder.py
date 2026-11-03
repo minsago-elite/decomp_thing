@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import ctypes
+import gzip
 import io
 import json
 import os
@@ -45,7 +46,9 @@ def archive(path: Path, entries: list[tuple[str, bytes]]) -> None:
 
 class GccToolchainBuilderTest(unittest.TestCase):
     def setUp(self) -> None:
-        self.temp = tempfile.TemporaryDirectory(dir=ROOT / "build", prefix="gcc-builder-test-")
+        test_root = ROOT / "build/pr-merge-audit/gcc-native-builder-repair-implementation/tests"
+        test_root.mkdir(parents=True, exist_ok=True)
+        self.temp = tempfile.TemporaryDirectory(dir=test_root, prefix="gcc-builder-test-")
         self.root = Path(self.temp.name)
         self.out = self.root / "evidence"
         self.out.mkdir(mode=0o700)
@@ -65,12 +68,13 @@ class GccToolchainBuilderTest(unittest.TestCase):
 
     def make_pair(self, *, unsafe: bool = False, join: bool = True, truncated_layer: bool = False) -> None:
         config_path = "config.json"
-        layer_names = [f"{i}/layer.tar" for i in range(9)]
+        layer_names = [f"{i}/layer.tar.gz" for i in range(9)]
         manifest = [{"Config": config_path, "RepoTags": ["fixture:1"], "Layers": layer_names}]
         docker_entries = [("manifest.json", json.dumps(manifest).encode()), (config_path, self.config_raw)]
-        docker_entries += list(zip(layer_names, self.layers))
+        stored_layers = [gzip.compress(layer, mtime=0) for layer in self.layers]
+        docker_entries += list(zip(layer_names, stored_layers))
         if truncated_layer:
-            docker_entries[-1] = (layer_names[-1], self.layers[-1][:-20])
+            docker_entries[-1] = (layer_names[-1], stored_layers[-1][:-20])
         if unsafe:
             docker_entries.append(("../../outside", b"must-not-extract"))
         archive(self.docker, docker_entries)
@@ -80,11 +84,11 @@ class GccToolchainBuilderTest(unittest.TestCase):
         config_blob = self.config_raw
         blobs.append(("blobs/sha256/" + config_digest[7:], config_blob))
         runtime_layers = []
-        for layer in self.layers:
-            digest = "sha256:" + hashlib.sha256(layer).hexdigest()
-            runtime_layers.append({"mediaType": "application/vnd.oci.image.layer.v1.tar", "digest": digest,
-                "size": len(layer)})
-            blobs.append(("blobs/sha256/" + digest[7:], layer))
+        for layer, stored in zip(self.layers, stored_layers):
+            digest = "sha256:" + hashlib.sha256(stored).hexdigest()
+            runtime_layers.append({"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip", "digest": digest,
+                "size": len(stored)})
+            blobs.append(("blobs/sha256/" + digest[7:], stored))
         runtime = {"schemaVersion": 2, "config": {"mediaType": "application/vnd.oci.image.config.v1+json",
             "digest": config_digest, "size": len(config_blob)}, "layers": runtime_layers}
         runtime_raw = json.dumps(runtime, sort_keys=True).encode()
@@ -95,8 +99,11 @@ class GccToolchainBuilderTest(unittest.TestCase):
         statement_raw = json.dumps(statement, sort_keys=True).encode()
         statement_digest = "sha256:" + hashlib.sha256(statement_raw).hexdigest()
         blobs.append(("blobs/sha256/" + statement_digest[7:], statement_raw))
-        attestation = {"schemaVersion": 2, "subject": {"mediaType": "application/vnd.oci.image.manifest.v1+json",
-            "digest": runtime_digest, "size": len(runtime_raw)}, "config": {"digest": "sha256:" + "0" * 64},
+        att_config = b'{"mediaType":"application/vnd.oci.image.config.v1+json"}'
+        att_config_digest = "sha256:" + hashlib.sha256(att_config).hexdigest()
+        blobs.append(("blobs/sha256/" + att_config_digest[7:], att_config))
+        attestation = {"schemaVersion": 2, "config": {"mediaType": "application/vnd.oci.image.config.v1+json",
+            "digest": att_config_digest, "size": len(att_config)},
             "layers": [{"mediaType": "application/vnd.in-toto+json", "digest": statement_digest,
                 "size": len(statement_raw)}]}
         att_raw = json.dumps(attestation, sort_keys=True).encode()
@@ -108,7 +115,12 @@ class GccToolchainBuilderTest(unittest.TestCase):
              "size": len(att_raw), "annotations": {"vnd.docker.reference.type": "attestation-manifest",
              "vnd.docker.reference.digest": runtime_digest if join else "sha256:" + "f" * 64}},
         ]}
-        archive(self.oci, [("index.json", json.dumps(index).encode()),
+        nested_raw = json.dumps({"schemaVersion": 2, "manifests": index["manifests"]}, sort_keys=True).encode()
+        nested_digest = "sha256:" + hashlib.sha256(nested_raw).hexdigest()
+        outer = {"schemaVersion": 2, "manifests": [{"mediaType": "application/vnd.oci.image.index.v1+json",
+            "digest": nested_digest, "size": len(nested_raw)}]}
+        archive(self.oci, [("index.json", json.dumps(outer).encode()),
+            ("blobs/sha256/" + nested_digest[7:], nested_raw),
             ("blobs/sha256/" + runtime_digest[7:], runtime_raw),
             ("blobs/sha256/" + att_digest[7:], att_raw), *blobs])
 

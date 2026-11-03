@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import gzip
+import zlib
 import json
 import pathlib
 import os
@@ -47,6 +48,74 @@ def digest_stream(stream) -> tuple[str, int]:
     return "sha256:" + h.hexdigest(), count
 
 
+def decoded_chunks(stream, media_type: str, limit: int):
+    """Yield bounded decoded layer bytes without allowing zlib to expand a bomb."""
+    magic = stream.read(2)
+    if media_type.endswith("+gzip") or "gzip" in media_type:
+        if magic != b"\x1f\x8b":
+            refuse("gzip layer media type disagrees with stored bytes")
+        decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
+        pending = magic
+        produced = 0
+        members = 0
+        while True:
+            data = pending or stream.read(65536)
+            pending = b""
+            if not data:
+                break
+            while data:
+                block = decoder.decompress(data, min(65536, limit - produced + 1))
+                data = decoder.unconsumed_tail
+                if block:
+                    produced += len(block)
+                    if produced > limit:
+                        refuse("expanded layer exceeds active output budget")
+                    yield block
+                if decoder.eof:
+                    members += 1
+                    if members > 16:
+                        refuse("too many concatenated gzip members")
+                    rest = decoder.unused_data
+                    if not rest:
+                        rest = stream.read(1)
+                        if not rest:
+                            return
+                        rest += stream.read(65535)
+                    if rest[:2] != b"\x1f\x8b":
+                        refuse("trailing bytes after gzip member")
+                    decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
+                    data = rest
+                elif not data:
+                    break
+        if not decoder.eof:
+            refuse("truncated gzip layer")
+        return
+    if magic[:1] == b"\x1f":
+        refuse("compressed layer has unsupported or contradictory media type")
+    if magic:
+        yield magic
+    used = len(magic)
+    while True:
+        block = stream.read(65536)
+        if not block:
+            break
+        used += len(block)
+        if used > limit:
+            refuse("expanded layer exceeds active output budget")
+        yield block
+
+
+def hash_decoded(stream, media_type: str, limit: int, destination=None) -> tuple[str, int]:
+    digest = hashlib.sha256()
+    count = 0
+    for block in decoded_chunks(stream, media_type, limit):
+        count += len(block)
+        digest.update(block)
+        if destination is not None:
+            destination.write(block)
+    return "sha256:" + digest.hexdigest(), count
+
+
 def safe_name(name: str) -> None:
     p = pathlib.PurePosixPath(name)
     if p.is_absolute() or ".." in p.parts or not p.parts:
@@ -70,9 +139,13 @@ def validate_workers(path: pathlib.Path) -> None:
     worker = rows[0]
     labels = worker.get("labels", worker.get("Labels", {}))
     platforms = worker.get("platforms", worker.get("Platforms", []))
+    executor = worker.get("executor", labels.get("org.mobyproject.buildkit.worker.executor"))
     snapshotter = worker.get("snapshotter", labels.get("org.mobyproject.buildkit.worker.snapshotter"))
-    if snapshotter != "native":
-        refuse("BuildKit worker snapshotter is not native")
+    process_mode = worker.get("process-mode", labels.get("org.mobyproject.buildkit.worker.oci.process-mode"))
+    if executor != "oci" or snapshotter != "native":
+        refuse("BuildKit worker executor/snapshotter is not the pinned OCI/native pair")
+    if process_mode != "sandbox":
+        refuse("BuildKit worker process sandbox is absent or disabled")
     admitted = False
     for platform in platforms:
         if platform == "linux/amd64" or (isinstance(platform, dict) and
@@ -81,10 +154,8 @@ def validate_workers(path: pathlib.Path) -> None:
             admitted = True
     if not admitted:
         refuse("BuildKit worker does not admit linux/amd64")
-    for key, value in labels.items():
-        lowered = str(key).lower() + "=" + str(value).lower()
-        if "sandbox" in lowered and ("no-process" in lowered or "disabled" in lowered or value is True):
-            refuse("BuildKit worker reports process sandbox disabled")
+    if worker.get("platform", worker.get("platforms")) is None:
+        refuse("BuildKit worker platform is missing")
 
 
 def validate_info(path: pathlib.Path) -> None:
@@ -207,32 +278,42 @@ def inspect(docker_archive: pathlib.Path, oci_archive: pathlib.Path, out: pathli
             source = tf.extractfile(matches[0])
             if source is None:
                 refuse(f"unreadable layer {name}")
-            h = hashlib.sha256()
-            count = 0
+            magic = source.read(2)
+            source.close()
+            codec = "gzip" if magic == b"\x1f\x8b" else "tar"
+            source = tf.extractfile(matches[0])
+            if source is None:
+                refuse(f"unreadable layer {name}")
+            stored_hash = hashlib.sha256()
+            stored_count = 0
             destination = final_layer_path.open("wb") if i == 8 else None
             try:
                 while True:
                     chunk = source.read(1024 * 1024)
                     if not chunk:
                         break
-                    count += len(chunk)
-                    h.update(chunk)
-                    if destination is not None:
-                        destination.write(chunk)
+                    stored_count += len(chunk)
+                    stored_hash.update(chunk)
+                decoded_source = tf.extractfile(matches[0])
+                if decoded_source is None:
+                    refuse(f"unreadable layer {name}")
+                diff_id, count = hash_decoded(decoded_source, "gzip" if codec == "gzip" else "", cap, destination)
                 if destination is not None:
                     destination.flush()
             finally:
                 if destination is not None:
                     destination.close()
-            if count != matches[0].size:
+            if stored_count != matches[0].size:
                 refuse(f"truncated layer {name}")
             if i == 8 and count < 10240:
                 refuse("final layer is truncated before tar end blocks")
-            digest = "sha256:" + h.hexdigest()
+            digest = diff_id if stored_count else "sha256:" + hashlib.sha256(b"").hexdigest()
             expected = config["rootfs"]["diff_ids"][i]
             if digest != expected:
                 refuse(f"layer {i} bytes disagree with config diff ID")
-            inventory.append({"ordinal": i, "path": name, "diffId": digest, "bytes": count})
+            inventory.append({"ordinal": i, "path": name, "storedBytes": stored_count,
+                "storedSha256": "sha256:" + stored_hash.hexdigest(), "diffId": digest,
+                "decodedBytes": count, "codec": codec})
     (out / "image-config.json").write_bytes(config_raw)
     (out / "docker-manifest.json").write_bytes(manifest_raw)
     (out / "ordered-layers.json").write_text(json.dumps(inventory, indent=2) + "\n")
@@ -246,17 +327,50 @@ def inspect(docker_archive: pathlib.Path, oci_archive: pathlib.Path, out: pathli
         (out / "oci-index.json").write_bytes(index_raw)
         manifests = []
         attestations = []
-        for desc in index.get("manifests", []):
+        seen_descriptors: dict[str, tuple[int, str]] = {}
+        active: set[str] = set()
+        visited: set[str] = set()
+
+        def visit(desc: dict[str, object], depth: int = 0) -> None:
+            if depth > 4 or len(visited) >= 64:
+                refuse("OCI index graph depth/node budget exceeded")
+            digest = desc.get("digest")
+            size = desc.get("size")
+            media_type = desc.get("mediaType")
+            if not isinstance(digest, str) or not digest.startswith("sha256:") or len(digest) != 71 or \
+                    any(c not in "0123456789abcdef" for c in digest[7:]) or \
+                    not isinstance(size, int) or size <= 0 or size > cap or not isinstance(media_type, str):
+                refuse("invalid OCI descriptor")
+            prior = seen_descriptors.get(digest)
+            if prior and prior != (size, media_type):
+                refuse("conflicting OCI descriptor declarations")
+            seen_descriptors[digest] = (size, media_type)
+            if digest in active:
+                refuse("OCI descriptor graph cycle")
+            if digest in visited:
+                refuse("ambiguous repeated OCI descriptor path")
+            name = "blobs/sha256/" + digest[7:]
             name = "blobs/sha256/" + desc["digest"].removeprefix("sha256:")
-            raw = read_member(tf, name, 64 * 1024 * 1024)
-            if len(raw) != desc.get("size") or "sha256:" + hashlib.sha256(raw).hexdigest() != desc.get("digest"):
+            raw = read_member(tf, name, min(cap, 16 * 1024 * 1024))
+            if len(raw) != size or "sha256:" + hashlib.sha256(raw).hexdigest() != digest:
                 refuse("OCI manifest descriptor digest/size mismatch")
             obj = json.loads(raw)
-            (out / "oci-manifests" / (desc["digest"].removeprefix("sha256:") + ".json")).write_bytes(raw)
+            visited.add(digest)
+            if media_type in ("application/vnd.oci.image.index.v1+json", "application/vnd.docker.distribution.manifest.list.v2+json"):
+                active.add(digest)
+                for child in obj.get("manifests", []):
+                    visit(child, depth + 1)
+                active.remove(digest)
+                return
+            if media_type not in ("application/vnd.oci.image.manifest.v1+json", "application/vnd.docker.distribution.manifest.v2+json"):
+                refuse("unsupported OCI descriptor media type")
+            (out / "oci-manifests" / (digest[7:] + ".json")).write_bytes(raw)
             annotations = desc.get("annotations", {})
             manifests.append({"descriptor": desc, "manifest": obj})
             if annotations.get("vnd.docker.reference.type") == "attestation-manifest":
                 attestations.append({"descriptor": desc, "manifest": obj})
+        for desc in index.get("manifests", []):
+            visit(desc)
         runtime = [item for item in manifests if not item["descriptor"].get("annotations", {}).get("vnd.docker.reference.type")]
         if len(runtime) != 1:
             refuse("OCI archive must contain exactly one runtime manifest")
@@ -289,7 +403,9 @@ def inspect(docker_archive: pathlib.Path, oci_archive: pathlib.Path, out: pathli
                     annotation = att["descriptor"].get("annotations", {}).get("vnd.docker.reference.digest")
                     if annotation == target:
                         subject = att["manifest"].get("subject", {})
-                        if subject.get("digest") != target:
+                        if subject and (subject.get("digest") != target or
+                                subject.get("size") != item["descriptor"].get("size") or
+                                subject.get("mediaType") != item["descriptor"].get("mediaType")):
                             refuse("OCI attestation manifest subject does not match runtime manifest")
                         statements=[]
                         (out / "provenance-statements").mkdir(mode=0o700, exist_ok=True)
