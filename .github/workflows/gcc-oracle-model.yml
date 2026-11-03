@@ -190,6 +190,7 @@ jobs:
             docker buildx inspect --bootstrap || true
           } >"$diagnostics/builder.txt" 2>&1
           cat "$diagnostics/builder.txt"
+          docker info --format '{{json .}}' >"$diagnostics/docker-info.json" 2>"$diagnostics/docker-info.stderr" || true
       - name: Reproduce and verify the recorded toolchain image
         run: |
           set -o pipefail
