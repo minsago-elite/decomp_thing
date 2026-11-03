@@ -168,8 +168,16 @@
       "reason": "Generated-C adapter-owned compiler deployment configuration for the closed Make and Ninja profile registrations."
     },
     {
+      "path": "src/main/kotlin/decompengine/project/ContainedModuleCompilationSnapshot.kt",
+      "reason": "Generated-C module compiler snapshot capture and authenticated input inventory for registered Make and Ninja profiles."
+    },
+    {
       "path": "src/main/kotlin/decompengine/project/ContainedModuleCompilerProtocol.kt",
       "reason": "Generated-C adapter-owned source/header compilation protocol derives fixed flags and declared layout paths from its selected profile."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/ContainedModuleCompilerWorker.kt",
+      "reason": "Generated-C module compiler worker validates only the authenticated source/header snapshot before its registered compiler launch."
     }
   ],
   "allowances": [
