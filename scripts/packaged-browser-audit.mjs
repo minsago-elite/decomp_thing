@@ -322,6 +322,10 @@ export const measureFocus = `(async () => {
   const [low, high] = outline && adjacent ? [luminance(outline), luminance(adjacent)].sort((a, b) => a - b) : [0, 0];
   return {
     key: ids.get(element), heading: element.matches('main h1'),
+    // Numeric layout facts only; keep the original sample and verdict, without scrolling or extra waits.
+    geometry: { left: box.left, top: box.top, right: box.right, bottom: box.bottom,
+      width: box.width, height: box.height, viewportWidth: innerWidth, viewportHeight: innerHeight,
+      scrollX, scrollY },
     target: element.tagName.toLowerCase() + (element.id ? '#' + element.id : '') + ' ' + JSON.stringify((element.getAttribute('aria-label') || element.textContent || '').trim().slice(0, 40)),
     focusVisible: element.matches(':focus-visible'), outlineStyle: style.outlineStyle, outlineWidth: parseFloat(style.outlineWidth),
     contrast: outline && adjacent ? Number(((high + 0.05) / (low + 0.05)).toFixed(3)) : null,
