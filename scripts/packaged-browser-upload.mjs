@@ -25,16 +25,17 @@ export function uploadSubmitReady(label) {
   })()`;
 }
 
-/** Wait for the lazy route, authenticated session and enabled upload control. */
-async function waitForUploadControl(tab, ready, label = 'workspace upload control') {
+// The connected shell can render before the lazy Home route mounts its upload panel.
+async function readyForUpload(tab, ready) {
   await ready(tab, `location.pathname === '/nested/' &&
     document.body.innerText.includes('Local session connected.') &&
-    document.querySelector('section[aria-labelledby="upload-title"] input#binary-file[type="file"]:not(:disabled)') !== null`, label);
+    document.querySelector('section[aria-labelledby="upload-title"] input#binary-file[type="file"]:not(:disabled)') !== null`,
+  'workspace upload control');
 }
 
-/** Wait for the upload control, then select the isolated non-executable fixture. */
+/** Wait for the lazy route, then select the isolated, non-executable fixture. */
 export async function selectUploadFixture({ tab, evaluate, ready }) {
-  await waitForUploadControl(tab, ready);
+  await readyForUpload(tab, ready);
   await evaluate(tab, `(() => {
     const bytes = new Uint8Array(64); bytes.set([127, 69, 76, 70, 2, 1, 1]);
     const view = new DataView(bytes.buffer); view.setUint16(16, 2, true); view.setUint16(18, 62, true);
@@ -184,7 +185,7 @@ export async function qualifyUploadFailures({ makeTarget, cdp, evaluate, ready, 
   await cdp.call('Page.navigate', { url: browserOrigin + '/nested/' }, tab.sessionId);
   const ids = (await fs.readdir(data)).filter(name => /^[a-f0-9]{32}$/.test(name));
   async function select(size, name) {
-    await waitForUploadControl(tab, ready);
+    await readyForUpload(tab, ready);
     await evaluate(tab, `(() => {
       const transfer = new DataTransfer(); transfer.items.add(new File([new Uint8Array(${size})], ${JSON.stringify(name)}));
       const picker = document.querySelector('#binary-file'); picker.files = transfer.files;
@@ -234,7 +235,7 @@ export async function qualifyMeasuredUpload({ makeTarget, cdp, evaluate, ready, 
   }, tab.sessionId);
   const before = (await fs.readdir(data)).filter(name => /^[a-f0-9]{32}$/.test(name));
   await cdp.call('Page.navigate', { url: browserOrigin + '/nested/' }, tab.sessionId);
-  await waitForUploadControl(tab, ready);
+  await readyForUpload(tab, ready);
   await evaluate(tab, `(() => {
     const bytes = new Uint8Array(512 * 1024); bytes.set([127, 69, 76, 70, 2, 1, 1]);
     const view = new DataView(bytes.buffer); view.setUint16(16, 2, true); view.setUint16(18, 62, true);
