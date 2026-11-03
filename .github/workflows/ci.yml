@@ -60,7 +60,9 @@ jobs:
           npm --prefix frontend ci --ignore-scripts --no-audit --no-fund
           python3 -m pip install --requirement requirements/oracle-generation.txt
       - name: Verify packaged upgrade, cache and live storage evidence controls
-        run: node --test scripts/test-packaged-browser-upgrade.mjs scripts/test-packaged-browser-live.mjs
+        run: |
+          node --test scripts/test-packaged-browser-upgrade.mjs scripts/test-packaged-browser-live.mjs
+          node --test scripts/packaged-browser-live.test.mjs
       - name: Verify packaged accessibility and asset audit controls
         run: |
           node scripts/test-packaged-browser-audit.mjs

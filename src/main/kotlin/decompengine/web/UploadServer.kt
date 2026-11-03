@@ -435,6 +435,8 @@ class UploadServer(
         val finished = java.util.concurrent.atomic.AtomicBoolean(false)
         // A slow or vanished client cannot keep a worker, a staged upload or a read descriptor past this point.
         // Streaming downloads renew it while they make progress, up to the deadline's absolute lifetime.
+        // This schedules exchange closure, not worker interruption. An ordinary refusal already
+        // draining an incomplete body can retain its worker/socket beyond this deadline (open #589).
         val deadline = WebRequestDeadline(requestDeadlines, AutoCloseable {
             if (!finished.get()) { capacity.requestDeadlineClosures.incrementAndGet(); exchange.close() }
         }, if (upload) limits.uploadDeadlineMs else limits.requestDeadlineMs)

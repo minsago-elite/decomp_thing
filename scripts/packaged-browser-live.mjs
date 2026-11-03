@@ -34,14 +34,21 @@ export async function seedLive(root) {
 
 const ownerLocks = ['.web-owner.lock', '.workflow-owner.lock'];
 
+// Session exchanges legitimately create the server-owned audit directory. Keep an
+// exact root inventory; do not ignore dotfiles or relax the owner/job checks.
+export async function assertLiveStorageInventory(root, jobs) {
+  assert.deepEqual((await fs.readdir(root)).sort(),
+    ['.web-audit', ...ownerLocks, ...jobs.map(job => job.id)].sort());
+  const audit = await fs.lstat(join(root, '.web-audit'));
+  assert.ok(audit.isDirectory() && !audit.isSymbolicLink(), 'Audit storage must be a real directory');
+}
+
 /** Recognize only the listener's known storage metadata, without ignoring arbitrary hidden entries. */
 export async function inspectLiveStorage(root, jobs) {
-  assert.deepEqual((await fs.readdir(root)).sort(), ['.web-audit', ...ownerLocks, ...jobs.map(job => job.id)].sort());
+  await assertLiveStorageInventory(root, jobs);
   const owners = await Promise.all(ownerLocks.map(name => fs.lstat(join(root, name))));
   for (const owner of owners) assert.ok(owner.isFile() && !owner.isSymbolicLink());
   const auditRoot = join(root, '.web-audit');
-  const directory = await fs.lstat(auditRoot);
-  assert.ok(directory.isDirectory() && !directory.isSymbolicLink(), 'Audit storage must be a real directory');
   const names = (await fs.readdir(auditRoot)).sort();
   assert.deepEqual(names, ['current.jsonl', 'incomplete']);
   const audit = [];

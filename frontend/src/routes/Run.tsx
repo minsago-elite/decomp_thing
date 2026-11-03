@@ -27,10 +27,10 @@ import { PanelBoundary } from '../shared/PanelBoundary';
 import { panelBoundaryCopy } from '../copy/shell';
 import { canRetainMetadata, isDeletedJob, metadataFailureKind } from '../shared/retainMetadata';
 import { onLibraryChange } from '../jobs/libraryChannel';
-import { attemptOutcomeCopy as outcomeCopy, stopOutcomeCopy } from '../copy/attemptOutcome';
-import { QueuePosition } from '../jobs/QueuePosition';
 import { registerContractExtension } from '../api/decode';
 import { lazyContractSchema } from '../api/generated-schema-lazy';
+import { attemptOutcomeCopy as outcomeCopy, stopOutcomeCopy } from '../copy/attemptOutcome';
+import { QueuePosition } from '../jobs/QueuePosition';
 
 // Contracts decoded only by lazily loaded routes stay out of the initial bundle.
 registerContractExtension(lazyContractSchema);

@@ -58,6 +58,29 @@ class WebRedactionPolicyTest {
         assertEquals("Context tokens: 5", policy.text("Context tokens: 5"))
     }
 
+    @Test fun `quoted credential assignments consume escaped quotes and long or truncated values`() {
+        val assignments = listOf(
+            """password="alpha\"bravo"""" to "alpha",
+            """token='alpha\'bravo'""" to "bravo",
+            "password=\"${"x".repeat(4096)}\"" to "x".repeat(32),
+            """secret="${"a\\\"".repeat(2048)}end"""" to "end",
+            "password=\"unfinished credential" to "unfinished",
+            "token='unfinished\\" to "unfinished",
+        )
+        for ((assignment, secretPart) in assignments) {
+            val prefix = assignment.substringBefore('=') + "="
+            val safe = policy.text(assignment)
+            assertEquals(prefix + "[redacted]", safe, assignment.take(80))
+            assertEquals(safe, policy.text(safe))
+            val document = buildJsonObject { put("note", assignment) }.toString().toByteArray()
+            val download = Json.parseToJsonElement(policy.document(document).decodeToString()).jsonObject
+            assertEquals(safe, download.getValue("note").jsonPrimitive.content)
+            assertFalse(download.toString().contains(secretPart))
+        }
+        // A truncated assignment stops at the line boundary, not at the end of the document.
+        assertEquals("password=[redacted]\npublic note", policy.text("password=\"unfinished\npublic note"))
+    }
+
     @Test fun `redaction is stable when reapplied and never leaves a configured literal`() {
         val inputs = listOf("Authorization: Bearer $canary", "x${canary}y /home/a/b token=$canary", "[redacted]X")
         for (input in inputs) {
@@ -171,6 +194,17 @@ class WebRedactionPolicyTest {
         // This exemption is confined to authorized committed source; diagnostics are still redacted.
         assertFalse(publicWebApiData("report", committed, policy).toString().contains(canary))
         assertFalse(publicWebApiData("error", committed, policy).toString().contains("/tmp/example"))
+    }
+
+    @Test fun `committed source search snippets preserve text and code point positions`() {
+        val snippet = buildJsonObject {
+            put("before", "/tmp/x "); put("match", "needle"); put("after", " token=authored")
+            put("column", 8); put("beforeTruncated", false)
+        }
+        val result = buildJsonObject { put("matches", buildJsonArray { add(snippet) }) }
+        assertEquals(result, publicWebApiData("sourceSearch", result, policy))
+        // The regression must include content that generic structural redaction would change.
+        assertFalse(result == policy.json(result))
     }
 
     @Test fun `redacted near-limit names remain bounded without truncating secret replacements`() {
