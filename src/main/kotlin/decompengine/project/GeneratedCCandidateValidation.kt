@@ -417,17 +417,18 @@ internal object GeneratedCSourceHeaderPolicy {
                     if (nameText.startsWith('/') || nameText.contains('\\')) {
                         reject(path, "absolute or platform-specific include path is unsupported")
                     }
-                    val candidates = buildList {
-                        if (quoted != null) {
-                            val parent = path.substringBeforeLast('/', "")
-                            add(resolveInclude(parent, nameText)
-                                ?: reject(path, "quoted include escapes the authenticated project"))
+                    val sourceCandidate = if (quoted != null) {
+                        val parent = path.substringBeforeLast('/', "")
+                        resolveInclude(parent, nameText)
+                            ?: reject(path, "quoted include escapes the authenticated project")
+                    } else null
+                    val admittedBySourceDirectory = sourceCandidate?.let { it in inventory } == true
+                    if (!admittedBySourceDirectory) {
+                        val includeCandidate = resolveInclude("include", nameText)
+                            ?: reject(path, "include escapes the authenticated project")
+                        if (includeCandidate !in inventory && nameText !in systemHeaders) {
+                            reject(path, "include is outside the authenticated snapshot: $nameText")
                         }
-                        add(resolveInclude("include", nameText)
-                            ?: reject(path, "include escapes the authenticated project"))
-                    }
-                    if (candidates.none { it in inventory } && nameText !in systemHeaders) {
-                        reject(path, "include is outside the authenticated snapshot: $nameText")
                     }
                 }
                 "ifndef" -> {

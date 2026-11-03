@@ -123,6 +123,24 @@ class GeneratedCSourceHeaderPolicyTest {
     }
 
     @Test
+    fun `relative include may normalize within snapshot but may not escape project`() {
+        val source = "#include \"../../include/decomp_types.h\"\nint parser(void) { return 0; }\n"
+        val inputs = mapOf(
+            "src/modules/parser.c" to source.toByteArray(),
+            "include/decomp_types.h" to "typedef int decomp_type;\n".toByteArray(),
+        )
+        GeneratedCSourceHeaderPolicy.requireAllowed("src/modules/parser.c", inputs)
+
+        for (include in listOf("\"../../../reports/tmp/input.h\"", "<../../reports/tmp/input.h>")) {
+            val escaping = inputs + ("src/modules/parser.c" to
+                "#include $include\nint parser(void) { return 0; }\n".toByteArray())
+            assertFailsWith<IllegalArgumentException> {
+                GeneratedCSourceHeaderPolicy.requireAllowed("src/modules/parser.c", escaping)
+            }
+        }
+    }
+
+    @Test
     fun `streaming policy reads one authenticated member at a time`() {
         val files = mapOf(
             "src/modules/parser.c" to "int parser(void) { return 0; }\n".toByteArray(),
