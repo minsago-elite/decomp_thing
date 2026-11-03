@@ -516,13 +516,18 @@ try {
   const origin = await launchApplication(installation, '0', values.mode === 'proxy' ? browserOrigin : undefined);
   report.origin = origin;
   browserOrigin ??= origin;
+  const observeNativeVisibility = values.mode === 'restart';
+  if (observeNativeVisibility && !process.env.DISPLAY) {
+    throw new Error('restart mode requires a real X display; run it under xvfb-run rather than emulating visibility');
+  }
+  report.browserDisplayMode = observeNativeVisibility ? 'headful-x11' : 'headless';
 
   // Chrome places SingletonSocket under TMPDIR. Keep it short enough even on hosted
   // runners whose checkout path is /home/runner/work/<repo>/<repo>.
   browserTmp = await fs.mkdtemp(join(repo, '.ct-'));
   report.browserTempDirectory = browserTmp;
   await fs.mkdir(profile);
-  browser = startOwned(chromeBinary, ['--headless=new', '--disable-gpu', ...(values['no-sandbox'] ? ['--no-sandbox'] : []), '--no-first-run', '--no-default-browser-check', '--disable-background-networking', '--disable-extensions', '--disable-default-apps', '--disable-sync', '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1', `--user-data-dir=${profile}`, 'about:blank'], {
+  browser = startOwned(chromeBinary, [...(observeNativeVisibility ? [] : ['--headless=new']), '--disable-gpu', ...(values['no-sandbox'] ? ['--no-sandbox'] : []), '--no-first-run', '--no-default-browser-check', '--disable-background-networking', '--disable-extensions', '--disable-default-apps', '--disable-sync', '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1', `--user-data-dir=${profile}`, 'about:blank'], {
     env: { ...process.env, TMPDIR: browserTmp }, stdio: ['ignore', 'ignore', 'pipe'],
   });
   browser.stderr.on('data', (chunk) => { browserError = (browserError + chunk).slice(-1048576); });

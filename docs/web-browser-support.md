@@ -154,9 +154,13 @@ SIGTERM-only restart on the same installation, data directory and port. The old 
 private attempt state without replaying mutations; a fresh one-time bootstrap must observe the new
 `serverInstanceId` while retaining the same workflow state, pin policy and activity cursor.
 
+Restart mode runs pinned Chrome headfully on an Xvfb display so foregrounding the peer can create a
+real page visibility transition. The mode refuses to start without `DISPLAY`; it does not override
+the page's visibility state. Other packaged-browser modes remain headless.
+
 The two-tab journey checks that a hidden tab stops progress requests, the surviving tab continues
 streaming after its peer closes, and a stale progress-pin control receives one real `If-Match` 412
 without retry or writes to another attempt. Reports and screenshots stay in `build/packaged-browser-*`,
 are bounded and scrub bootstrap tokens. The CI evidence is one pinned Chromium run; it does not cover
 live-worker cancellation or approval, restart during a running workflow, or other browsers. The mode
-fails if headless Chromium cannot provide the visibility conditions required by the scenario.
+fails if Chromium on the virtual display cannot provide the visibility conditions required by the scenario.

@@ -171,6 +171,7 @@ jobs:
           sudo apt-get update
           mapfile -t web_browser_dependencies < "$RUNNER_TEMP/web-test-browser/deb.deps"
           sudo apt-get satisfy -y --no-install-recommends "${web_browser_dependencies[@]}"
+          sudo apt-get install -y --no-install-recommends xvfb
           python3 -m pip install --requirement requirements/oracle-generation.txt
       - name: Record browser pin and check driver lifecycle
         run: |
@@ -248,7 +249,7 @@ jobs:
             --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode scale --no-sandbox
       - name: Exercise same-origin JVM restart and two-tab stale progress pin
         run: |
-          node scripts/check-packaged-web-browser.mjs \
+          xvfb-run -a node scripts/check-packaged-web-browser.mjs \
             --archive "$WEB_TEST_ARCHIVE" \
             --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
             --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode restart --no-sandbox
