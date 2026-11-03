@@ -16,7 +16,7 @@ export async function seedHistory(root) {
   const at = new Date(Date.now() - 300_000).toISOString();
   const job = { id: jobId, filename: 'synthetic-history.elf', status: 'uploaded', created_at: at, updated_at: at,
     size_bytes: 64, binary_path: join(directory, 'input.elf'), metadata: { format: 'ELF64', endianness: 'little',
-      elf_version: 1, os_abi: 'System V', object_type: 'EXEC', machine: 'x86-64', entry_point: 0,
+      elf_version: 1, os_abi: 'System V', object_type: 'executable', machine: 'x86-64', entry_point: 0,
       elf_header_size: 64, program_header_count: 0, section_header_count: 0, section_name_table_index: 0 } };
   const jobBytes = JSON.stringify(job);
   const attempts = Array.from({ length: 55 }, (_, index) => {

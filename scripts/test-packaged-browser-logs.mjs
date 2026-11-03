@@ -4,6 +4,23 @@ import { resolve, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { seedLogs } from './packaged-browser-logs.mjs';
+import { seedHistory } from './packaged-browser-history.mjs';
+
+test('history fixture uses canonical ELF metadata for its generated executable header', async () => {
+  const parent = resolve(dirname(fileURLToPath(import.meta.url)), '../build/test-tmp/packaged-history');
+  await fs.mkdir(parent, { recursive: true });
+  const root = await fs.mkdtemp(join(parent, 'fixture-'));
+  try {
+    const fixture = await seedHistory(join(root, 'data'));
+    const job = JSON.parse(await fs.readFile(join(fixture.directory, 'job.json'), 'utf8'));
+    assert.equal(fixture.retained['input.elf'].readUInt16LE(16), 2, 'fixture input must have ELF ET_EXEC type');
+    assert.equal(job.metadata.object_type, 'executable');
+    assert.ok(['relocatable', 'executable', 'shared', 'core'].includes(job.metadata.object_type));
+    const state = JSON.parse(await fs.readFile(join(fixture.directory, 'workflow-state.json'), 'utf8'));
+    assert.match(state.version, /^version_[a-f0-9]{32}$/);
+    assert.ok(state.attempts.every(run => /^version_[a-f0-9]{32}$/.test(run.version)));
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
 
 test('log qualification seeds bounded hostile recordings and valid attempt identity without execution', async () => {
   const parent = resolve(dirname(fileURLToPath(import.meta.url)), '../build/test-tmp/packaged-logs');
