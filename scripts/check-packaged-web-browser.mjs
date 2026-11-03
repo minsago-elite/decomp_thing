@@ -851,7 +851,18 @@ try {
       assert.equal(apiProof.buildId, manifest.buildId);
       report.backendBootstrap = apiProof;
     }
-    await ready(authenticated, `document.body.innerText.includes('${libraryText}')`, 'persistent job library');
+    try {
+      await ready(authenticated, `document.body.innerText.includes('${libraryText}')`, 'persistent job library');
+    } catch (failure) {
+      // Keep the bounded route/status evidence when a seeded library fails to load.
+      // Do not retain response bodies, request identifiers, or the bootstrap token.
+      const visible = await evaluate(authenticated, `({ pathname: location.pathname,
+        alerts: [...document.querySelectorAll('[role="alert"]')].map(node => node.innerText.slice(0, 240)),
+        libraryVisible: document.body.innerText.includes(${JSON.stringify(libraryText)}) })`).catch(() => null);
+      const requests = authenticated.requests.slice(-12).map(({ method, url }) => ({ method, route: urlPath(url) }));
+      const responses = authenticated.responses.slice(-12).map(({ url, status }) => ({ route: urlPath(url), status }));
+      throw new Error(`Persistent job library diagnostic: ${JSON.stringify({ visible, requests, responses })}`, { cause: failure });
+    }
     await evaluate(authenticated, `(() => {
       const field = [...document.querySelectorAll('label')].find(label => label.textContent.startsWith('Filename or label search')).querySelector('input');
       field.value = 'absent fixture'; field.dispatchEvent(new Event('input', { bubbles: true }));
