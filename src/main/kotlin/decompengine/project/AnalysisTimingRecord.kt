@@ -45,6 +45,7 @@ internal class AnalysisTimingRecord(
     private var exporterSha256: String? = null
     private var terminalStatus = "incomplete"
     private var workerTerminalStatus: String? = null
+    private var workerEntryFrameObserved = false
     private var telemetryTruncated = false
     private var telemetryError: String? = null
     private val openWorkerSpans = TreeMap<String, Long>()
@@ -56,6 +57,27 @@ internal class AnalysisTimingRecord(
     fun bind(inputSha256: String? = this.inputSha256, exporterSha256: String? = this.exporterSha256) {
         this.inputSha256 = inputSha256
         this.exporterSha256 = exporterSha256
+    }
+
+    /** Record the parent-clock envelope from requesting launch to receiving the worker's entry frame. */
+    @Synchronized
+    fun workerEntryFrameReceived(launchRequestedAtNanos: Long, receivedAtNanos: Long) {
+        if (workerEntryFrameObserved) {
+            telemetryError = "duplicate parent worker-entry frame observation"
+            return
+        }
+        if (launchRequestedAtNanos < startedAtNanos || receivedAtNanos < launchRequestedAtNanos) {
+            telemetryError = "parent worker-entry frame interval is invalid"
+            return
+        }
+        workerEntryFrameObserved = true
+        spans += buildJsonObject {
+            put("phase", "process-launch-request-to-worker-entry-frame")
+            put("clockDomain", "parent-monotonic")
+            put("startOffsetNanos", launchRequestedAtNanos - startedAtNanos)
+            put("durationNanos", receivedAtNanos - launchRequestedAtNanos)
+            put("status", "observed")
+        }
     }
 
     fun <T> measure(phase: String, action: () -> T): T {
@@ -187,8 +209,10 @@ internal class AnalysisTimingRecord(
                 val missing = (expected + if (workerSpans.none { (it["phase"] as JsonPrimitive).content.startsWith("exporter:") }) {
                     setOf("exporter-inclusive")
                 } else emptySet()) - observed
-                put("complete", missing.isEmpty() && workerTerminalStatus != null && telemetryError == null && !telemetryTruncated)
-                put("missingPhases", JsonArray(missing.sorted().map(::JsonPrimitive)))
+                val parentMissing = if (workerEntryFrameObserved) emptySet() else setOf("process-launch-request-to-worker-entry-frame")
+                val allMissing = missing + parentMissing
+                put("complete", allMissing.isEmpty() && workerTerminalStatus != null && telemetryError == null && !telemetryTruncated)
+                put("missingPhases", JsonArray(allMissing.sorted().map(::JsonPrimitive)))
                 put("truncated", telemetryTruncated)
                 telemetryError?.let { put("collectionError", it) }
             })

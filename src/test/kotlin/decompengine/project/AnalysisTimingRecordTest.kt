@@ -28,6 +28,8 @@ class AnalysisTimingRecordTest {
         val workflowRunId = "12345678-1234-1234-1234-123456789abc"
         val record = newRecord(directory, workflowRunId)
         record.measure("worker-process-lifecycle") { Unit }
+        val launchRequestedAt = System.nanoTime()
+        record.workerEntryFrameReceived(launchRequestedAt, launchRequestedAt + 10L)
         val phases = listOf(
             "worker-entry-to-parent-permit",
             "application-initialization",
@@ -51,6 +53,11 @@ class AnalysisTimingRecordTest {
         assertEquals("succeeded", document.getValue("terminalStatus").jsonPrimitive.content)
         assertEquals("succeeded", document.getValue("workerTerminalStatus").jsonPrimitive.content)
         assertEquals(4, document.getValue("workerSpans").jsonArray.size)
+        val startupEnvelope = document.getValue("spans").jsonArray.single { span ->
+            span.jsonObject.getValue("phase").jsonPrimitive.content == "process-launch-request-to-worker-entry-frame"
+        }.jsonObject
+        assertEquals("parent-monotonic", startupEnvelope.getValue("clockDomain").jsonPrimitive.content)
+        assertEquals(10L, startupEnvelope.getValue("durationNanos").jsonPrimitive.content.toLong())
         val coverage = document.getValue("coverage").jsonObject
         assertEquals("true", coverage.getValue("complete").jsonPrimitive.content)
         assertEquals(0, coverage.getValue("missingPhases").jsonArray.size)
@@ -69,6 +76,9 @@ class AnalysisTimingRecordTest {
         val firstDocument = Json.parseToJsonElement(directory.toFile().listFiles().orEmpty().single().readText()).jsonObject
         assertEquals("true", firstDocument.getValue("coverage").jsonObject.getValue("truncated").jsonPrimitive.content)
         assertEquals("false", firstDocument.getValue("coverage").jsonObject.getValue("complete").jsonPrimitive.content)
+        assertTrue(firstDocument.getValue("coverage").jsonObject.getValue("missingPhases").jsonArray.any {
+            it.jsonPrimitive.content == "process-launch-request-to-worker-entry-frame"
+        })
 
         val second = newRecord(directory)
         second.captureWorkerTelemetry("DECOMP_ANALYSIS_TIMING_V1 00000000-0000-0000-0000-000000000000 0 begin application-initialization 1\n"

@@ -353,6 +353,7 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
         timing: AnalysisTimingRecord,
     ): Int {
         val remainingNanosAtLaunch = deadline.remainingNanos("before worker launch")
+        val launchRequestedAtNanos = System.nanoTime()
         val process = timing.measure("native-process-launch-envelope") {
             processLaunch.start(
                 deadline::checkpoint,
@@ -451,6 +452,7 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
             }
             fun captureStdout(stream: java.io.InputStream): CompletableFuture<ByteArray> {
                 val finished = AtomicBoolean(false)
+                val entryFrameRecorded = AtomicBoolean(false)
                 taskSettlements += finished
                 captureSettlements += finished
                 return CompletableFuture.supplyAsync({
@@ -466,6 +468,13 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
                             val bytes = line.toByteArray()
                             val framed = lineIsTelemetryCandidate && bytes.size in marker.size..256 &&
                                 bytes.copyOfRange(0, marker.size).contentEquals(marker)
+                            if (framed && !entryFrameRecorded.get() && isWorkerEntryTimingFrame(bytes, timing.invocationId) &&
+                                entryFrameRecorded.compareAndSet(false, true)) {
+                                // This is a parent-clock launch-to-frame envelope. It includes
+                                // process creation, JVM bootstrap, scheduling, pipe delivery and
+                                // reader scheduling; it is not reported as pure JVM startup.
+                                timing.workerEntryFrameReceived(launchRequestedAtNanos, System.nanoTime())
+                            }
                             if (framed && telemetrySize + bytes.size <= MAX_WORKER_TIMING_BYTES) {
                                 telemetry.write(bytes)
                                 telemetrySize += bytes.size
@@ -748,6 +757,13 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
             cleanupFailure?.let { throw it }
 
         }
+    }
+
+    private fun isWorkerEntryTimingFrame(frame: ByteArray, invocationId: String): Boolean {
+        val fields = frame.toString(Charsets.US_ASCII).trimEnd('\r', '\n').split(' ')
+        return fields.size == 6 && fields[0] == "DECOMP_ANALYSIS_TIMING_V1" && fields[1] == invocationId &&
+            fields[2] == "0" && fields[3] == "begin" && fields[4] == "worker-entry-to-parent-permit" &&
+            (fields[5].toLongOrNull() ?: -1L) >= 0L
     }
 
     private fun readStableProgramModel(path: Path, deadline: AnalysisDeadline): ByteArray {
