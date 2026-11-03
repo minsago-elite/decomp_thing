@@ -316,6 +316,33 @@ class ProductionBackend:
             raise Refusal("transient unit identity does not bind the reserved owner")
         return facts
 
+    def _await_service_active(self, role: str, unit: str, description: str,
+                              slice_name: str, deadline: float) -> dict[str, str]:
+        """Observe this start request within its original budget; never re-enqueue it."""
+        observed: dict[str, str] = {}
+        while True:
+            remaining = deadline - self.clock()
+            if remaining <= 0:
+                break
+            facts = self._show(role, unit, min(5.0, remaining))
+            if self.clock() >= deadline:
+                break
+            if facts["id"] != unit or facts["description"] != description or facts["slice"] != slice_name:
+                raise Refusal("starting service identity does not bind the reserved owner")
+            for field in ("invocation", "controlGroup"):
+                if field in observed and observed[field] != facts[field]:
+                    raise Refusal("starting service generation or cgroup changed")
+                if facts[field]:
+                    observed[field] = facts[field]
+            if facts["active"] == "active":
+                if facts["sub"] not in ("start", "running") or not facts["invocation"] or not facts["controlGroup"]:
+                    raise Refusal("active owner supervisor has incomplete execution identity")
+                return facts
+            if facts["active"] != "activating" or facts["sub"] != "start":
+                raise Refusal("gated owner supervisor did not enter its expected start state")
+            time.sleep(min(0.025, max(0.0, deadline - self.clock())))
+        raise Refusal("gated owner supervisor activation deadline expired")
+
     def manager_reserve(self, role: str, manifest: dict) -> dict:
         token = manifest.get("ownerToken")
         if not isinstance(token, str) or not re.fullmatch(r"[0-9a-f]{32}", token):
@@ -360,10 +387,10 @@ class ProductionBackend:
             self._busctl_property("PrivateMounts", "b", "true" if role == "buildkit" else "false"),
             self._busctl_property("ExecStart", "a(sasb)", *exec_values),
         ]
+        service_deadline = self.clock() + 5
         service_job = self._start_transient(role, service_name, props_service, 5)
-        service_facts = self._facts(role, service_name, description)
-        if service_facts["active"] != "active" or service_facts["sub"] not in ("start", "running"):
-            raise Refusal("gated owner supervisor is not active")
+        service_facts = self._await_service_active(role, service_name, description,
+                                                  slice_name, service_deadline)
         if service_facts["slice"] != slice_name:
             raise Refusal("service was not placed in the exact owned slice")
         slice_object = self._get_unit_object_path(role, slice_name)
@@ -1014,43 +1041,64 @@ def _read_thread_group_children(parent: int, task_budget: int) -> tuple[list[int
     return sorted(children), tasks_seen
 
 
-def _find_authenticated_dockerd(rootlesskit_pid: int, root: Path, cgroup: str, deadline: float) -> tuple[int, int, dict]:
+def _find_authenticated_dockerd(rootlesskit_pid: int, root: Path, cgroup: str, deadline: float, *,
+                                rootlesskit_pidfd: int) -> tuple[int, int, dict]:
     expected = root / "v" / "tools" / "docker" / "dockerd"
     expected_sha = PINNED_TOOL_HASHES["dockerd"]
+    root_poller = select.poll()
+    root_poller.register(rootlesskit_pidfd, select.POLLIN)
     while time.monotonic() < deadline:
+        if root_poller.poll(0):
+            raise Refusal("pinned RootlessKit exited during descendant discovery")
         stack = [(rootlesskit_pid, 0)]
         seen: set[int] = set()
         tasks_seen = 0
-        while stack:
-            parent, depth = stack.pop()
-            if depth >= 8 or parent in seen:
-                continue
-            seen.add(parent)
-            # Go launchers can create children from any thread, not just the group leader.
-            children, task_count = _read_thread_group_children(parent, 1024 - tasks_seen)
-            tasks_seen += task_count
-            if len(seen) + len(children) > 256:
-                raise Refusal("RootlessKit descendant census exceeds fixed node budget")
-            for pid in children:
-                child = _read_proc_identity(pid)
-                if child["parentPid"] != parent or child["uid"] != os.getuid() or \
-                        child["cgroup"].splitlines().count(f"0::{cgroup}") != 1:
-                    raise Refusal("RootlessKit descendant escaped parent or owned cgroup")
-                if child["exe"] == str(expected) and child["exeSha256"] == expected_sha:
-                    first = os.pidfd_open(pid, 0)
-                    pinned = _read_proc_identity(pid)
-                    poller = select.poll()
-                    poller.register(first, select.POLLIN)
-                    if pinned["startTicks"] != child["startTicks"] or \
-                            pinned["exeDevice"] != child["exeDevice"] or pinned["exeInode"] != child["exeInode"] or \
-                            pinned["parentPid"] != parent or pinned["cgroup"] != child["cgroup"] or \
-                            pinned["uid"] != child["uid"] or pinned["namespaces"] != child["namespaces"] or \
-                            poller.poll(0):
-                        os.close(first)
-                        raise Refusal("dockerd identity changed during pidfd acquisition")
-                    return pid, first, pinned
-                stack.append((pid, depth + 1))
-        time.sleep(0.025)
+        observing_descendant = False
+        try:
+            while stack:
+                parent, depth = stack.pop()
+                if depth >= 8 or parent in seen:
+                    continue
+                seen.add(parent)
+                # Go launchers can create children from any thread, not just the group leader.
+                observing_descendant = parent != rootlesskit_pid
+                children, task_count = _read_thread_group_children(parent, 1024 - tasks_seen)
+                tasks_seen += task_count
+                if len(seen) + len(children) > 256:
+                    raise Refusal("RootlessKit descendant census exceeds fixed node budget")
+                for pid in children:
+                    observing_descendant = True
+                    child = _read_proc_identity(pid)
+                    if child["parentPid"] != parent or child["uid"] != os.getuid() or \
+                            child["cgroup"].splitlines().count(f"0::{cgroup}") != 1:
+                        raise Refusal("RootlessKit descendant escaped parent or owned cgroup")
+                    if child["exe"] == str(expected) and child["exeSha256"] == expected_sha:
+                        first = os.pidfd_open(pid, 0)
+                        try:
+                            pinned = _read_proc_identity(pid)
+                            poller = select.poll()
+                            poller.register(first, select.POLLIN)
+                            if pinned["startTicks"] != child["startTicks"] or \
+                                    pinned["exeDevice"] != child["exeDevice"] or pinned["exeInode"] != child["exeInode"] or \
+                                    pinned["parentPid"] != parent or pinned["cgroup"] != child["cgroup"] or \
+                                    pinned["uid"] != child["uid"] or pinned["namespaces"] != child["namespaces"] or \
+                                    poller.poll(0):
+                                raise Refusal("dockerd identity changed during pidfd acquisition")
+                            if root_poller.poll(0):
+                                raise Refusal("pinned RootlessKit exited during descendant discovery")
+                        except BaseException:
+                            os.close(first)
+                            raise
+                        return pid, first, pinned
+                    stack.append((pid, depth + 1))
+        except (Refusal, ProcessLookupError) as exc:
+            # A disappearing setup descendant invalidates this whole candidate pass.
+            # Root census, permission, malformed, ancestry and generation failures still refuse.
+            cause = exc.__cause__ if isinstance(exc, Refusal) else exc
+            if not observing_descendant or not isinstance(cause, OSError) or \
+                    cause.errno not in (errno.ENOENT, errno.ESRCH):
+                raise
+        time.sleep(min(0.025, max(0.0, deadline - time.monotonic())))
     raise Refusal("authenticated dockerd descendant was not observed before the exec deadline")
 
 
@@ -1200,7 +1248,7 @@ def supervisor_main(root: Path, role: str) -> None:
             "pidfdHeld": True, "identity": after, "daemonCgroup": service_cgroup.rstrip("/") + "/daemon"}
         if role == "rootless":
             dockerd_pid, dockerd_pidfd, dockerd_identity = _find_authenticated_dockerd(
-                pid, root, expected_cgroup, min(deadline, time.monotonic() + 10))
+                pid, root, expected_cgroup, min(deadline, time.monotonic() + 10), rootlesskit_pidfd=pidfd)
             exec_receipt["authenticatedDescendants"] = [{**dockerd_identity,
                 "pidfdHeld": True}]
         atomic_json(root / "control" / f"exec-observed-{role}.json", exec_receipt, limit=32 * 1024,

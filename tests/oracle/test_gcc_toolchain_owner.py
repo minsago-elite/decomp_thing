@@ -1339,7 +1339,7 @@ class ThreadChildCensusTest(unittest.TestCase):
         groups, lists = self.graph()
         stack,root,opened,dirs,closed,pidfds,reads = self.fixture(groups,lists)
         with stack:
-            pid,fd,identity = owner_module._find_authenticated_dockerd(100,root,'/owned',0.05)
+            pid,fd,identity = owner_module._find_authenticated_dockerd(100,root,'/owned',0.05,rootlesskit_pidfd=666)
         self.assertEqual((pid,fd),(300,777))
         self.assertEqual(identity['startTicks'],300)
         self.assertEqual(pidfds,[(300,0)])
@@ -1371,7 +1371,7 @@ class ThreadChildCensusTest(unittest.TestCase):
         stack,root,opened,dirs,closed,pidfds,reads=self.fixture(groups,lists)
         with stack:
             with self.assertRaisesRegex(owner_module.Refusal,'task budget'):
-                owner_module._find_authenticated_dockerd(100,root,'/owned',0.05)
+                owner_module._find_authenticated_dockerd(100,root,'/owned',0.05,rootlesskit_pidfd=666)
         self.assertEqual(len(opened),1024)
         self.assertTrue(all(x.closed for x in opened+dirs))
         self.assertEqual(pidfds,[])
@@ -1383,7 +1383,7 @@ class ThreadChildCensusTest(unittest.TestCase):
             else:identities[200]={'parentPid':999} if kind=='parent' else {'uid':os.getuid()+1} if kind=='uid' else {'cgroup':'0::/elsewhere\n'}
             stack,root,opened,dirs,closed,pidfds,reads=self.fixture(groups,lists,identities=identities)
             with stack:
-                with self.assertRaises(owner_module.Refusal):owner_module._find_authenticated_dockerd(100,root,'/owned',0.05)
+                with self.assertRaises(owner_module.Refusal):owner_module._find_authenticated_dockerd(100,root,'/owned',0.05,rootlesskit_pidfd=666)
             self.assertTrue(all(x.closed for x in opened+dirs))
             self.assertEqual(pidfds,[])
 
@@ -1392,7 +1392,7 @@ class ThreadChildCensusTest(unittest.TestCase):
         stack,root,opened,dirs,closed,pidfds,reads=self.fixture(groups,lists,pinned_change=True)
         with stack:
             with self.assertRaisesRegex(owner_module.Refusal,'identity changed during pidfd'):
-                owner_module._find_authenticated_dockerd(100,root,'/owned',0.05)
+                owner_module._find_authenticated_dockerd(100,root,'/owned',0.05,rootlesskit_pidfd=666)
         self.assertEqual(pidfds,[(300,0)])
         self.assertEqual(closed,[777])
 
@@ -1400,7 +1400,7 @@ class ThreadChildCensusTest(unittest.TestCase):
         stack,root,opened,dirs,closed,pidfds,reads=self.fixture({100:[100]},{'/proc/100/task/100/children':b''})
         with stack:
             with self.assertRaisesRegex(owner_module.Refusal,'exec deadline'):
-                owner_module._find_authenticated_dockerd(100,root,'/owned',0.05)
+                owner_module._find_authenticated_dockerd(100,root,'/owned',0.05,rootlesskit_pidfd=666)
         self.assertEqual(pidfds,[])
         self.assertTrue(all(x.closed for x in opened+dirs))
 
@@ -1503,6 +1503,200 @@ class FailedServiceTeardownTest(unittest.TestCase):
                 with self.assertRaises(owner_module.Refusal):backend.manager_stop(f.role,f.receipt,10)
             self.assertEqual(f.io.calls,[])
 
+
+
+
+class StartupDiscoveryRaceTest(unittest.TestCase):
+    def fixture(self, **options):
+        fixture = ThreadChildCensusTest('test_nonleader_children_at_both_levels_reach_the_authenticated_dockerd')
+        groups, lists = fixture.graph()
+        return fixture.fixture(groups, lists, **options)
+
+    def discover(self, root):
+        return owner_module._find_authenticated_dockerd(100, root, '/owned', 0.05, rootlesskit_pidfd=666)
+
+    @staticmethod
+    def gone(number=2):
+        failure = owner_module.Refusal('authored descendant identity unavailable')
+        failure.__cause__ = OSError(number, 'authored process disappearance')
+        return failure
+
+    def test_disappearing_setup_child_restarts_a_complete_observation_pass(self):
+        stack, root, opened, dirs, closed, pidfds, reads = self.fixture()
+        with stack:
+            identity = owner_module._read_proc_identity.side_effect
+            calls = [0]
+            def inspect(pid):
+                if pid == 200:
+                    calls[0] += 1
+                    if calls[0] == 1: raise self.gone()
+                return identity(pid)
+            with mock.patch.object(owner_module, '_read_proc_identity', side_effect=inspect):
+                self.assertEqual(self.discover(root)[:2], (300, 777))
+            self.assertEqual(sum(str(c.args[0]) == '/proc/100/task' for c in owner_module.os.scandir.call_args_list), 2)
+            self.assertEqual(owner_module.time.sleep.call_count, 1)
+
+    def test_disappearing_pinned_candidate_closes_its_pidfd_before_rediscovery(self):
+        stack, root, opened, dirs, closed, pidfds, reads = self.fixture()
+        with stack:
+            identity = owner_module._read_proc_identity.side_effect
+            calls = [0]
+            def inspect(pid):
+                if pid == 300:
+                    calls[0] += 1
+                    if calls[0] == 2: raise self.gone(3)
+                return identity(pid)
+            with mock.patch.object(owner_module, '_read_proc_identity', side_effect=inspect):
+                self.assertEqual(self.discover(root)[:2], (300, 777))
+            self.assertEqual(closed, [777])
+            self.assertEqual(pidfds, [(300, 0), (300, 0)])
+
+    def test_permission_io_and_untyped_refusals_never_become_rediscovery(self):
+        for error in [self.gone(13), self.gone(5), owner_module.Refusal('identity changed')]:
+            with self.subTest(error=error):
+                stack, root, *_ = self.fixture()
+                with stack, mock.patch.object(owner_module, '_read_proc_identity', side_effect=error):
+                    with self.assertRaises(owner_module.Refusal) as caught: self.discover(root)
+                    self.assertIs(caught.exception, error)
+                    owner_module.time.sleep.assert_not_called()
+
+    def test_persistent_disappearance_does_not_renew_the_exec_deadline(self):
+        stack, root, *_ = self.fixture()
+        with stack, mock.patch.object(owner_module, '_read_proc_identity', side_effect=self.gone()):
+            with self.assertRaisesRegex(owner_module.Refusal, 'exec deadline'): self.discover(root)
+            self.assertEqual(owner_module.time.sleep.call_count, 2)
+
+    def test_dead_original_root_pidfd_refuses_before_any_candidate_read(self):
+        stack, root, *_ = self.fixture()
+        class Poll:
+            def register(self, fd, events): self.fd = fd
+            def poll(self, timeout): return [(self.fd, 1)] if self.fd == 666 else []
+        with stack, mock.patch.object(owner_module.select, 'poll', side_effect=Poll):
+            with self.assertRaisesRegex(owner_module.Refusal, 'pinned RootlessKit exited'): self.discover(root)
+            owner_module.os.scandir.assert_not_called()
+
+    def test_root_census_disappearance_remains_a_refusal(self):
+        stack, root, *_ = self.fixture()
+        with stack, mock.patch.object(owner_module.os, 'scandir', side_effect=FileNotFoundError(2, 'authored root gone')):
+            with self.assertRaises(owner_module.Refusal): self.discover(root)
+            owner_module.time.sleep.assert_not_called()
+
+    def test_changed_pinned_identity_is_not_retried(self):
+        stack, root, opened, dirs, closed, *_ = self.fixture(pinned_change=True)
+        with stack:
+            with self.assertRaisesRegex(owner_module.Refusal, 'identity changed'): self.discover(root)
+            owner_module.time.sleep.assert_not_called()
+        self.assertEqual(closed, [777])
+
+    def test_pidfd_open_disappearance_restarts_without_an_unowned_close(self):
+        stack, root, opened, dirs, closed, *_ = self.fixture()
+        calls = [0]
+        def pin(pid, flags):
+            calls[0] += 1
+            if calls[0] == 1: raise ProcessLookupError(3, 'authored candidate exited')
+            return 777
+        with stack, mock.patch.object(owner_module.os, 'pidfd_open', side_effect=pin):
+            self.assertEqual(self.discover(root)[:2], (300, 777))
+        self.assertEqual(closed, [])
+
+
+class TransientStartObservationTest(unittest.TestCase):
+    def fixture(self, states, *, queue_time=2.0, query_time=0.2):
+        import contextlib
+        token = 'a' * 32
+        slice_name, service = owner_module.unit_names('buildkit', token)
+        description = f'decomp-gcc-owner:{token}:buildkit'
+        slice_group = f'/system.slice/{slice_name}'
+        group = f'{slice_group}/{service}'
+        clock = FakeClock()
+        backend = object.__new__(owner_module.ProductionBackend)
+        backend.root = ROOT / 'build/test-tmp/transient-start-observation'
+        backend.clock = clock
+        backend.tool_hashes = owner_module.PINNED_TOOL_HASHES
+        backend._systemd_version = mock.Mock(return_value=255)
+        backend._get_unit_object_path = mock.Mock(side_effect=lambda role, unit: '/org/freedesktop/systemd1/unit/' + unit)
+        starts, queries, writes = [], [], []
+        def start(role, unit, properties, timeout):
+            starts.append((unit, timeout))
+            if unit == service: clock.sleep(queue_time)
+            return f'/org/freedesktop/systemd1/job/{len(starts)}'
+        backend._start_transient = mock.Mock(side_effect=start)
+        def show(role, unit, timeout=5.0):
+            facts = {'id':unit, 'description':description, 'active':'active', 'sub':'active' if unit==slice_name else 'running',
+                     'invocation':'generation', 'controlGroup':slice_group if unit==slice_name else group,
+                     'slice':'' if unit==slice_name else slice_name}
+            if unit == service:
+                queries.append(timeout)
+                clock.sleep(min(query_time, timeout))
+                facts.update(states[min(len(queries)-1, len(states)-1)])
+            return facts
+        backend._show = mock.Mock(side_effect=show)
+        inspection = {'ownerToken':token, 'role':'buildkit', 'bootId':'boot', 'currentBootId':'boot',
+                      'sliceControlGroup':slice_group, 'serviceControlGroup':group,
+                      'sliceDevice':4, 'sliceInode':5, 'serviceDevice':4, 'serviceInode':6,
+                      'limits':{'memory.max':str(4*1024**3), 'memory.swap.max':'0', 'pids.max':'1024'},
+                      'populated':1, 'allDescendantsEmpty':False}
+        backend.authority = SimpleNamespace(inspect=mock.Mock(return_value=inspection))
+        stack = contextlib.ExitStack()
+        stack.enter_context(mock.patch.object(owner_module, 'require_capabilities', return_value={'authored':True}))
+        stack.enter_context(mock.patch.object(owner_module, 'repository_root', return_value=ROOT))
+        stack.enter_context(mock.patch.object(owner_module, 'bind_buildkit_config'))
+        stack.enter_context(mock.patch.object(owner_module, 'atomic_json', side_effect=lambda path, value, **kw:writes.append((path.name, value))))
+        stack.enter_context(mock.patch.object(owner_module.time, 'sleep', side_effect=clock.sleep))
+        return SimpleNamespace(stack=stack, backend=backend, manifest={'ownerToken':token,'identity':{'ownerUid':1001,'ownerGid':1001}},
+                               starts=starts, queries=queries, writes=writes, clock=clock)
+
+    def test_pending_service_is_observed_until_active_without_reenqueuing(self):
+        f = self.fixture([{'active':'activating','sub':'start'}, {}])
+        with f.stack: receipt = f.backend.manager_reserve('buildkit', f.manifest)
+        self.assertEqual(receipt['invocationId'], 'generation')
+        self.assertEqual(len(f.starts), 2)
+        self.assertEqual(len(f.queries), 2)
+        self.assertLess(f.queries[1], f.queries[0])
+        self.assertLessEqual(f.queries[0], 3.0)
+
+    def test_pending_state_cannot_renew_the_start_request_budget(self):
+        f = self.fixture([{'active':'activating','sub':'start'}], query_time=1.0)
+        with f.stack:
+            with self.assertRaisesRegex(owner_module.Refusal, 'activation deadline'): f.backend.manager_reserve('buildkit', f.manifest)
+        self.assertLessEqual(f.clock(), 5.0)
+        self.assertGreater(len(f.queries), 1)
+        self.assertEqual(len(f.starts), 2)
+        self.assertTrue(all(0 < n <= 3 for n in f.queries))
+
+    def test_failed_or_other_pending_state_is_not_readiness(self):
+        for state in [{'active':'failed','sub':'failed'}, {'active':'activating','sub':'start-post'}]:
+            f = self.fixture([state])
+            with f.stack:
+                with self.assertRaises(owner_module.Refusal): f.backend.manager_reserve('buildkit', f.manifest)
+            self.assertEqual(len(f.queries), 1)
+
+    def test_pending_foreign_unit_or_slice_refuses_immediately(self):
+        for field in ['id','description','slice']:
+            f = self.fixture([{'active':'activating','sub':'start',field:'foreign'}])
+            with f.stack:
+                with self.assertRaisesRegex(owner_module.Refusal, 'reserved owner'): f.backend.manager_reserve('buildkit', f.manifest)
+            self.assertEqual(len(f.queries), 1)
+
+    def test_generation_change_while_starting_refuses(self):
+        for field, value in [('invocation','changed'),('controlGroup','changed'),('invocation',''),('controlGroup','')]:
+            f = self.fixture([{'active':'activating','sub':'start'}, {field:value}])
+            with f.stack:
+                with self.assertRaisesRegex(owner_module.Refusal, 'generation or cgroup changed'): f.backend.manager_reserve('buildkit', f.manifest)
+            self.assertEqual(len(f.queries), 2)
+
+    def test_active_reply_at_the_original_deadline_is_not_admitted(self):
+        f = self.fixture([{}], queue_time=4.5, query_time=0.5)
+        with f.stack:
+            with self.assertRaisesRegex(owner_module.Refusal, 'activation deadline'): f.backend.manager_reserve('buildkit', f.manifest)
+        self.assertEqual(f.clock(), 5.0)
+
+    def test_already_active_service_preserves_the_immediate_path(self):
+        f = self.fixture([{}])
+        with f.stack: receipt = f.backend.manager_reserve('buildkit', f.manifest)
+        self.assertEqual(receipt['effectiveLimits']['memory.swap.max'], '0')
+        self.assertEqual(len(f.starts), 2)
+        self.assertEqual(len(f.queries), 1)
 
 if __name__ == "__main__":
     unittest.main()
