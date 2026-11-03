@@ -40,7 +40,7 @@ TRANSITIONS = {
     "domain-reserved": {"child-gated", "sealed"},
     "child-gated": {"exec-observed", "sealed"},
     "exec-observed": {"ready", "sealed"},
-    "ready": {"sealed"},
+    "ready": {"launch-intent", "sealed"},
     "sealed": {"stopped"},
     "stopped": {"absence-proved"},
     "absence-proved": {"launch-intent", "released"},
@@ -249,26 +249,13 @@ class ProductionBackend:
             argv.append("--user")
         else:
             argv += ["--system"]
-        argv += ["show", "--no-pager", "--property=Id,Description,ActiveState,SubState,InvocationID,ControlGroup,Slice", unit]
+        argv += ["show", "--no-pager", "--full",
+                 "--property=Id,Description,ActiveState,SubState,InvocationID,ControlGroup,Slice", unit]
         env = ({"XDG_RUNTIME_DIR": f"/run/user/{os.getuid()}"} if manager == "user" else None)
         status, out, err = self.runner.run(argv, min(5.0, timeout), env=env)
         if status != 0:
             raise Refusal(f"cannot read exact transient unit receipt: {err[:2048].decode(errors='replace')}")
-        names = {"Id": "id", "Description": "description", "ActiveState": "active",
-                 "SubState": "sub", "InvocationID": "invocation", "ControlGroup": "controlGroup",
-                 "Slice": "slice"}
-        parsed = {}
-        try:
-            for line in out.decode("utf-8", "strict").splitlines():
-                name, separator, value = line.partition("=")
-                if not separator or name not in names or names[name] in parsed:
-                    raise ValueError("unknown, malformed, or duplicate systemd property")
-                parsed[names[name]] = value
-        except (UnicodeDecodeError, ValueError) as exc:
-            raise Refusal("systemd show receipt has malformed named properties") from exc
-        if set(parsed) != set(names.values()):
-            raise Refusal("systemd show receipt is missing a required named property")
-        return parsed
+        return parse_systemd_unit_properties(out)
 
     @staticmethod
     def _busctl_property(name: str, signature: str, *values: str) -> list[str]:
@@ -489,14 +476,19 @@ class ProductionBackend:
             raise Refusal("reserved gated child is missing from its cgroup domain")
 
     def manager_stop(self, role: str, receipt: dict, timeout: float) -> dict:
-        deadline = min(self.clock() + timeout, self.clock() + 180)
+        start = self.clock()
+        deadline = min(start + max(0.001, timeout), start + 180)
         request = self.root / "control" / f"stop-request-{role}.json"
         if not request.exists():
             atomic_json(request, {"ownerToken": receipt["ownerToken"], "role": role,
                                  "deadlineMonotonic": deadline})
         stop_path = self.root / "control" / f"stop-receipt-{role}.json"
-        while self.clock() < deadline and not stop_path.exists():
-            time.sleep(min(0.05, max(0, deadline - self.clock())))
+        # Preserve time for the privileged emergency cgroup kill even if the
+        # supervisor is dead or cannot publish its clean-stop receipt.
+        kill_reserve = min(5.0, max(0.001, (deadline - start) * 0.4))
+        supervisor_deadline = deadline - kill_reserve
+        while self.clock() < supervisor_deadline and not stop_path.exists():
+            time.sleep(min(0.05, max(0, supervisor_deadline - self.clock())))
         child_path = self.root / "control" / f"child-ready-{role}.json"
         if not child_path.is_file():
             raise Refusal("missing blocked-child receipt; domain state is unknown")
@@ -526,6 +518,9 @@ class ProductionBackend:
         if killed.get("ownerToken") != receipt["ownerToken"] or killed.get("role") != role or killed.get("empty") is not True:
             raise Refusal("owned slice cgroup.kill receipt did not prove empty subtree")
         if stop_receipt is None:
+            atomic_json(self.root / "control" / f"stop-emergency-kill-{role}.json",
+                {"ownerToken": receipt["ownerToken"], "role": role,
+                 "reason": "supervisor stop receipt missing", "killReceipt": killed}, limit=16 * 1024)
             raise Refusal("missing supervisor stop receipt after emergency cgroup.kill; quarantine required")
         return {"ownerToken": receipt["ownerToken"], "role": role, "manager": receipt["manager"],
                 "bootId": receipt["bootId"], "unit": receipt["unit"], "slice": receipt["slice"],
@@ -712,6 +707,75 @@ def unit_names(role: str, token: str) -> tuple[str, str]:
     if prefix is None:
         raise Refusal("unknown service role")
     return f"{prefix}{token}.slice", f"{prefix}{token}-{role}.service"
+
+
+SYSTEMD_UNIT_PROPERTIES = {
+    "Id": "id", "Description": "description", "ActiveState": "active",
+    "SubState": "sub", "InvocationID": "invocation", "ControlGroup": "controlGroup",
+    "Slice": "slice",
+}
+
+
+def parse_systemd_unit_properties(payload: bytes) -> dict[str, str]:
+    parsed = {}
+    try:
+        for line in payload.decode("utf-8", "strict").splitlines():
+            name, separator, value = line.partition("=")
+            if not separator or name not in SYSTEMD_UNIT_PROPERTIES or \
+                    SYSTEMD_UNIT_PROPERTIES[name] in parsed:
+                raise ValueError("unknown, malformed, or duplicate systemd property")
+            parsed[SYSTEMD_UNIT_PROPERTIES[name]] = value
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise Refusal("systemd show receipt has malformed named properties") from exc
+    if set(parsed) != set(SYSTEMD_UNIT_PROPERTIES.values()):
+        raise Refusal("systemd show receipt is missing a required named property")
+    return parsed
+
+
+def query_manager_unit(role: str, owner_uid: int, owner_gid: int, unit: str) -> dict[str, str]:
+    manager = manager_identity(role)
+    argv = ["/usr/bin/systemctl", "--user" if manager == "user" else "--system",
+            "show", "--no-pager", "--full",
+            "--property=Id,Description,ActiveState,SubState,InvocationID,ControlGroup,Slice", unit]
+    env = {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}
+    if manager == "user":
+        env["XDG_RUNTIME_DIR"] = f"/run/user/{owner_uid}"
+    try:
+        result = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, env=env, close_fds=True, timeout=3, check=False,
+            user=owner_uid if manager == "user" else 0,
+            group=owner_gid if manager == "user" else 0,
+            extra_groups=[])
+    except (OSError, subprocess.TimeoutExpired, TypeError, ValueError) as exc:
+        raise Refusal("cannot query current systemd unit identity in privileged cleanup") from exc
+    if result.returncode != 0 or len(result.stdout) > 16 * 1024 or len(result.stderr) > 4096:
+        raise Refusal("current systemd unit query failed or exceeded its output bound")
+    return parse_systemd_unit_properties(result.stdout)
+
+
+def require_manager_reservation_binding(receipt: dict, role: str, manifest: dict,
+                                       slice_facts: dict[str, str],
+                                       service_facts: dict[str, str]) -> None:
+    token = manifest.get("ownerToken")
+    expected_slice, expected_service = unit_names(role, token)
+    description = f"decomp-gcc-owner:{token}:{role}"
+    if receipt.get("ownerToken") != token or receipt.get("role") != role or \
+            receipt.get("manager") != manager_identity(role) or receipt.get("slice") != expected_slice or \
+            receipt.get("unit") != expected_service or receipt.get("description") != description:
+        raise Refusal("manager receipt does not bind the fixed owner reservation")
+    if slice_facts.get("id") != expected_slice or slice_facts.get("description") != description or \
+            slice_facts.get("active") != "active" or not slice_facts.get("controlGroup") or \
+            not slice_facts.get("invocation"):
+        raise Refusal("current systemd slice identity does not bind the owner reservation")
+    if service_facts.get("id") != expected_service or service_facts.get("description") != description or \
+            service_facts.get("slice") != expected_slice or service_facts.get("active") != "active" or \
+            not service_facts.get("controlGroup") or not service_facts.get("invocation"):
+        raise Refusal("current systemd service identity does not bind the owner reservation")
+    if receipt.get("sliceControlGroup") != slice_facts["controlGroup"] or \
+            receipt.get("controlGroup") != service_facts["controlGroup"] or \
+            receipt.get("sliceInvocationId") != slice_facts["invocation"] or \
+            receipt.get("invocationId") != service_facts["invocation"]:
+        raise Refusal("manager receipt target differs from current systemd unit identity")
 
 
 def require_capabilities(authority: LinuxAuthority, root: Path, role: str) -> dict:
@@ -1319,6 +1383,14 @@ def inspect_domain_local(root: Path, role: str) -> dict:
     expected_slice, expected_service = unit_names(role, token)
     if receipt.get("slice") != expected_slice or receipt.get("unit") != expected_service:
         raise Refusal("manager receipt unit names mismatch")
+    identity = manifest.get("identity")
+    owner_uid = identity.get("ownerUid") if isinstance(identity, dict) else None
+    owner_gid = identity.get("ownerGid") if isinstance(identity, dict) else None
+    if type(owner_uid) is not int or owner_uid < 0 or type(owner_gid) is not int or owner_gid < 0:
+        raise Refusal("owner identity is incomplete for privileged manager revalidation")
+    slice_facts = query_manager_unit(role, owner_uid, owner_gid, expected_slice)
+    service_facts = query_manager_unit(role, owner_uid, owner_gid, expected_service)
+    require_manager_reservation_binding(receipt, role, manifest, slice_facts, service_facts)
     slice_cg = receipt.get("sliceControlGroup")
     service_cg = receipt.get("controlGroup")
     if not isinstance(slice_cg, str) or not isinstance(service_cg, str) or not service_cg.startswith(slice_cg.rstrip("/") + "/"):
@@ -1782,6 +1854,31 @@ class Owner:
                     facts={"health": facts, "execReceiptSha256": hashlib.sha256(
                         json.dumps(record.get("exec", {}), sort_keys=True).encode()).hexdigest()})
 
+    @staticmethod
+    def _all_roles_absence_proved(manifest: dict) -> bool:
+        token = manifest.get("ownerToken")
+        roles = manifest.get("roles")
+        if not isinstance(roles, dict):
+            return False
+        for role in ("buildkit", "rootless"):
+            record = roles.get(role)
+            if not isinstance(record, dict) or record.get("status") != "absence-proved":
+                return False
+            if record.get("neverLaunched") is True:
+                continue
+            receipt = record.get("receipt")
+            stopped = record.get("stopReceipt")
+            if not isinstance(receipt, dict) or receipt.get("ownerToken") != token or \
+                    receipt.get("role") != role or not isinstance(stopped, dict) or \
+                    stopped.get("ownerToken") != token or stopped.get("role") != role or \
+                    stopped.get("cgroupEmpty") is not True:
+                return False
+        return True
+
+    def _mark_absence_if_all_roles_proved(self, manifest: dict) -> None:
+        if manifest.get("state") == "stopped" and self._all_roles_absence_proved(manifest):
+            self._event(manifest, "absence-proved", roles=("buildkit", "rootless"))
+
     def seal_stop(self, role: str, *, timeout: float = 180.0) -> dict:
         start = self.clock()
         deadline = start + min(max(timeout, 0.001), 180.0)
@@ -1799,9 +1896,9 @@ class Owner:
                     self._event(manifest, "sealed", role=role, reason="never-launched role finalized")
                 if manifest["state"] == "sealed":
                     self._event(manifest, "stopped", role=role, neverLaunched=True)
-                    self._event(manifest, "absence-proved", role=role, neverLaunched=True)
             else:
                 self._role_event(manifest, role, role_record, "never-launched absence")
+            self._mark_absence_if_all_roles_proved(manifest)
             return manifest
         receipt = role_record.get("receipt")
         if not receipt:
@@ -1836,13 +1933,18 @@ class Owner:
         role_record["stopReceipt"] = result
         if manifest["state"] == "sealed":
             self._event(manifest, "stopped", role=role, stopReceipt=result)
-            self._event(manifest, "absence-proved", role=role, cgroupEmpty=True)
+        self._mark_absence_if_all_roles_proved(manifest)
         return manifest
 
     def stage_upload(self, *, success: bool) -> Path:
         manifest = self._manifest()
-        if manifest["state"] != "absence-proved":
+        if manifest["state"] != "absence-proved" or not self._all_roles_absence_proved(manifest):
             raise Refusal("upload staging requires complete process absence proof")
+        for role in ("buildkit", "rootless"):
+            record = manifest["roles"][role]
+            if record.get("neverLaunched") is not True and not self.backend.domain_empty(
+                    role, record["receipt"], 5):
+                raise Refusal("upload staging recheck found a populated or unknown owner cgroup")
         out = self.root / "control" / "upload-manifest.json"
         base = self.root / ("evidence" if success else "control")
         budget = 13 * 1024**3 if success else 32 * 1024**2

@@ -365,6 +365,27 @@ class OwnerTest(unittest.TestCase):
         with self.assertRaisesRegex(owner_module.Refusal, "sequence/token mismatch"):
             owner._manifest()
 
+    def test_owner_can_launch_second_role_after_first_role_is_ready(self):
+        owner = self.make_owner(FakeBackend())
+        self.reserve(owner)
+        owner.begin_role("buildkit", ["/pinned/buildkitd"], {}, {"seconds": 1})
+        owner.ready("buildkit", {"pidfd": "buildkit", "identity": {"exe": "/pinned/buildkitd"}})
+        owner.begin_role("rootless", ["/pinned/dockerd-rootless.sh"], {}, {"seconds": 1})
+        owner.ready("rootless", {"pidfd": "rootless", "identity": {"exe": "/pinned/rootlesskit"}})
+        manifest = owner._manifest()
+        self.assertEqual(manifest["state"], "ready")
+        self.assertEqual(manifest["roles"]["buildkit"]["status"], "ready")
+        self.assertEqual(manifest["roles"]["rootless"]["status"], "ready")
+
+    def test_global_absence_requires_both_roles_and_bound_stop_receipts(self):
+        token = "a" * 32
+        self.assertFalse(owner_module.Owner._all_roles_absence_proved({"ownerToken": token, "roles": {
+            "buildkit": {"status": "ready"},
+            "rootless": {"status": "absence-proved", "neverLaunched": True}}}))
+        self.assertTrue(owner_module.Owner._all_roles_absence_proved({"ownerToken": token, "roles": {
+            "buildkit": {"status": "absence-proved", "neverLaunched": True},
+            "rootless": {"status": "absence-proved", "neverLaunched": True}}}))
+
     def test_production_backend_cannot_be_replaced_through_environment(self):
         backend = owner_module.ProductionBackend(ROOT)
         self.assertEqual(type(backend).__name__, "ProductionBackend")
@@ -426,6 +447,28 @@ class OwnerTest(unittest.TestCase):
                 b'{"type":"o","data":"/org/freedesktop/systemd1/job/77"}',
                 "/org/freedesktop/systemd1/job/", "fixture")
 
+    def test_privileged_cgroup_target_must_match_current_systemd_control_groups(self):
+        token = "a" * 32
+        slice_name, service_name = owner_module.unit_names("buildkit", token)
+        description = f"decomp-gcc-owner:{token}:buildkit"
+        slice_group = f"/system.slice/{slice_name}"
+        service_group = f"{slice_group}/{service_name}"
+        receipt = {"ownerToken": token, "role": "buildkit", "manager": "system",
+            "slice": slice_name, "unit": service_name, "description": description,
+            "sliceControlGroup": slice_group, "controlGroup": service_group,
+            "sliceInvocationId": "slice-invocation", "invocationId": "service-invocation"}
+        manifest = {"ownerToken": token}
+        slice_facts = {"id": slice_name, "description": description, "active": "active",
+            "controlGroup": slice_group, "invocation": "slice-invocation"}
+        service_facts = {"id": service_name, "description": description, "active": "active",
+            "slice": slice_name, "controlGroup": service_group, "invocation": "service-invocation"}
+        owner_module.require_manager_reservation_binding(receipt, "buildkit", manifest,
+            slice_facts, service_facts)
+        forged = {**receipt, "controlGroup": "/system.slice/unrelated.service"}
+        with self.assertRaisesRegex(owner_module.Refusal, "current systemd unit identity"):
+            owner_module.require_manager_reservation_binding(forged, "buildkit", manifest,
+                slice_facts, service_facts)
+
     def test_production_gate_rechecks_pinned_manager_and_privileged_cgroup_receipts(self):
         owner = self.make_owner(FakeBackend())
         manifest = self.reserve(owner)
@@ -486,6 +529,7 @@ class OwnerTest(unittest.TestCase):
             {"ownerToken": manifest["ownerToken"], "role": "buildkit", "daemonEmpty": True,
              "pidfdHeld": True, "cgroupNodes": 2})
         stopped = owner.seal_stop("buildkit")
+        stopped = owner.seal_stop("rootless")
         self.assertEqual(stopped["state"], "absence-proved")
         self.assertTrue(stopped["roles"]["buildkit"]["stopReceipt"]["killReceipt"]["empty"])
         released = backend.release_domains(stopped, 60)
@@ -549,6 +593,7 @@ class OwnerTest(unittest.TestCase):
             {"ownerToken": manifest["ownerToken"], "role": "rootless", "daemonEmpty": True,
              "pidfdHeld": True, "cgroupNodes": 2})
         stopped = owner.seal_stop("rootless")
+        stopped = owner.seal_stop("buildkit")
         released = backend.release_domains(stopped, 60)
         profile_name = "decomp-gcc-owner-" + manifest["ownerToken"]
         self.assertNotIn(profile_name, profile_runner.profiles)
@@ -564,6 +609,37 @@ class OwnerTest(unittest.TestCase):
         with self.assertRaisesRegex(owner_module.Refusal, "lacks supervisor and complete cgroup-kill receipts"):
             owner.seal_stop("buildkit")
         self.assertNotEqual(owner._manifest()["state"], "absence-proved")
+
+    def test_missing_supervisor_receipt_still_runs_emergency_cgroup_kill(self):
+        owner = self.make_owner(FakeBackend())
+        manifest = self.reserve(owner)
+
+        class KillRecordingAuthority(FakeAuthority):
+            def __init__(self):
+                super().__init__()
+                self.kill_calls = []
+
+            def kill(self, root, role, timeout):
+                self.kill_calls.append((role, timeout))
+                return super().kill(root, role, timeout)
+
+        authority = KillRecordingAuthority()
+        receipt = {"ownerToken": manifest["ownerToken"], "role": "buildkit", "manager": "system",
+                   "bootId": "boot-fixture", "unit": "test.service", "slice": "test.slice",
+                   "invocationId": "invocation-fixture", "controlGroup": "/test/service"}
+        owner_module.atomic_json(self.root / "control/manager-receipt-buildkit.json", receipt)
+        owner_module.atomic_json(self.root / "control/child-ready-buildkit.json",
+            {"ownerToken": manifest["ownerToken"], "role": "buildkit", "pid": 123, "pidfdHeld": True})
+        backend = owner_module.ProductionBackend(self.root,
+            runner=FakeCommandRunner(manifest["ownerToken"]), authority=authority,
+            test_repo_root=self.repo)
+        with self.assertRaisesRegex(owner_module.Refusal, "after emergency cgroup.kill"):
+            backend.manager_stop("buildkit", receipt, timeout=0.25)
+        self.assertEqual(len(authority.kill_calls), 1)
+        emergency = owner_module.read_json_bounded(
+            self.root / "control/stop-emergency-kill-buildkit.json", 16 * 1024)
+        self.assertEqual(emergency["ownerToken"], manifest["ownerToken"])
+        self.assertTrue(emergency["killReceipt"]["empty"])
 
     def test_command_runner_rejects_unlisted_binary_without_launch(self):
         runner = owner_module.CommandRunner()
