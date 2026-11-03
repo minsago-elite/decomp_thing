@@ -340,7 +340,7 @@ function Preview({ label, value }: { label: string; value: { recorded: boolean; 
     <h3>{label}</h3>
     {value.preview ? <>
       <pre class="structure-preview">{value.preview.text}</pre>
-      <p>{value.preview.truncated ? message(copy.textTruncated, { shown: [...value.preview.text].length, total: value.preview.characters })
+      <p>{value.preview.truncated ? message(copy.textTruncated, { shown: value.preview.text.length, total: value.preview.characters })
         : message(copy.textComplete, { total: value.preview.characters })}</p>
     </> : <p>{copy.textNotRecorded}</p>}
   </section>;

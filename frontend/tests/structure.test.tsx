@@ -128,7 +128,7 @@ it('shows entity facts with bounded previews, revision-scoped cross links and un
   history.replaceState(null, '', `${revision}/functions/fn_0000000000401100`);
   const view = render(<App basePath="/nested" session={second} />);
   try {
-    await screen.findByText('Preview of the first 2048 of 5000 characters. Open the generated source to inspect the complete reconstruction.');
+    await screen.findByText('Preview of the first 2048 of 5000 displayed characters, after redaction. Open the generated source to inspect the complete reconstruction.');
     expect(screen.getAllByRole('link', { name: 'helper' }).map(link => link.getAttribute('href'))).toContain(
       `${revision}/globals/global_0000000000404000?structureVersion=${truncated.structureVersion}`);
   } finally { view.unmount(); second.dispose(); }
@@ -323,4 +323,20 @@ it('round-trips inventory selections and builds exact bounded API routes', () =>
     expect(() => functionLocation(search)).toThrow();
   }
   expect(() => structureReadRoute(selected, 'functions', '../x')).toThrow();
+});
+
+
+it('uses identical count units for non-BMP structure preview text and its advertised total', async () => {
+  const auth = await session();
+  const detail = fixture<EntityDetail>('entity-detail-function');
+  const value = detail.entity!.texts.find(text => text.field === 'decompiledC')!;
+  const text = '🧪'.repeat(1023) + 'x';
+  value.preview = { text, characters: '5000', truncated: true };
+  transport.get.mockResolvedValue({ data: detail });
+  history.replaceState(null, '', `${revision}/functions/fn_0000000000401100`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    const expected = copy.textTruncated.replace('{shown}', String(text.length)).replace('{total}', '5000');
+    await screen.findByText(expected);
+  } finally { auth.dispose(); }
 });
