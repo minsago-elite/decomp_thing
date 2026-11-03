@@ -10,7 +10,7 @@ import { join } from 'node:path';
 // response is a schema fixture the SPA validates exactly as it would a server response.
 
 export const auditPageNames = ['workspace', 'upload', 'runtime', 'job detail', 'attempt history',
-  'attempt overview', 'attempt activity', 'attempt evidence', 'source directory', 'source search form', 'source search results', 'source file'];
+  'attempt overview', 'attempt activity', 'attempt evidence', 'source directory', 'source search form', 'source search results', 'source file', 'structure functions'];
 export const auditTokenKinds = ['plain', 'keyword', 'string', 'comment', 'number'];
 
 const fixtureRoot = (repo) => join(repo, 'contracts/web/v1/fixtures');
@@ -71,6 +71,8 @@ export function auditFixtures(repo, buildId) {
   exploration.data.sourceArtifact.contentHref = `/nested${exploration.data.sourceArtifact.contentHref}`;
   const history = bound('validation-history', { jobId, runId, revisionId: null });
   const sourceSearch = bound('source-search-complete', selected);
+  // The lazily loaded Structure route reads the recorded function inventory for this revision.
+  const functions = bound('function-inventory', selected);
   const owner = history.data.items[0];
   const validation = bound('report-normal-cases', { jobId, runId, revisionId: owner.candidateId });
   const routes = [
@@ -93,6 +95,7 @@ export function auditFixtures(repo, buildId) {
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/validation-history$`), () => ok(history)],
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/reports/revision-validation$`), () => ok(validation)],
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-search$`), () => ok(sourceSearch)],
+    [new RegExp(`^/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/functions$`), () => ok(functions)],
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-directories/${id}$`), () => ok(directory)],
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-files/${id}/chunk$`), () => ok(chunk)],
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-files/${id}$`), () => ok(file)],
@@ -117,6 +120,7 @@ export function auditFixtures(repo, buildId) {
     { action: `Inspect cases: ${owner.ownerKind} ${owner.ownerId}`, reads: [`${api}/reports/revision-validation`],
       content: [{ selector: '[aria-label="Recorded validation cases"] tbody', text: validation.data.validationCases.items[0].caseId }] },
   ];
+  const inventoryRange = `Showing 1–${functions.data.items.length} of ${functions.data.matchedFunctions} matching functions (${functions.data.totalFunctions} recorded).`;
   // Unknown paths are a server 404 document, not an SPA view, so the router's not-found view
   // stays covered by the component accessibility gate.
   const pages = [
@@ -138,6 +142,12 @@ export function auditFixtures(repo, buildId) {
         { selector: '.source-token-string', text: '"/very/deep/source/tree' },
         { selector: '.source-token-comment', text: 'Synthetic audit source' },
         { selector: '.source-token-number', text: '0x00' },
+      ] }] },
+    // The inventory loads on navigation; the explicit refresh proves a fresh bound read and a re-rendered table.
+    { name: 'structure functions', path: `${base}/revisions/${revisionId}/functions`, rendered: inventoryRange,
+      preparation: [{ action: 'Refresh from the first page', reads: [`${api}/revisions/${revisionId}/functions`], content: [
+        { selector: '.structure-view [role="status"]', text: inventoryRange },
+        { selector: '.structure-view tbody', text: functions.data.items.at(-1).address },
       ] }] },
   ];
   return {

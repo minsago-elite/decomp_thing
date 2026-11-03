@@ -41,7 +41,7 @@ const verdict = (audit, served = responses) => assertAudit(audit, manifest, serv
 test('a clean audit with every packaged asset and the worker has no failures', () => {
   const audit = clean();
   assert.deepEqual(auditFixtures(repo, manifest.buildId).pages.map(page => page.name), auditPageNames);
-  assert.deepEqual([audit.layout.length, audit.contrast.length, audit.focus.length], [120, 48, 24]);
+  assert.deepEqual([audit.layout.length, audit.contrast.length, audit.focus.length], [130, 52, 26]);
   assert.deepEqual(verdict(audit), []);
 });
 
@@ -287,7 +287,7 @@ test('qualifyAudit prepares every fresh layout/contrast/focus navigation before 
       return current.evaluate(tab, expression);
     },
   }), error => error === completed);
-  assert.deepEqual(counts, { layout: 120, contrast: 48, focus: 48, navigations: 84 });
+  assert.deepEqual(counts, { layout: 130, contrast: 52, focus: 52, navigations: 91 });
 });
 
 test('content checks require visible, distinctive rows rather than an empty or hidden table', () => {
@@ -297,6 +297,21 @@ test('content checks require visible, distinctive rows rather than an empty or h
     const document = { querySelectorAll: () => [{ textContent, getClientRects: () => visible ? [{}] : [] }] };
     assert.equal(runInNewContext(auditContentReady(checks), { document }), expected);
   }
+});
+
+test('structure fixture is the bound function-inventory contract fixture behind the lazy Structure route', () => {
+  const fixtures = auditFixtures(repo, manifest.buildId);
+  const page = fixtures.pages.find(page => page.name === 'structure functions');
+  assert.ok(page && page.path.endsWith('/functions'));
+  const [step] = page.preparation;
+  assert.deepEqual(step.reads, [page.path.slice('/nested'.length)]);
+  const document = fixtures.respond('GET', step.reads[0], 'application/json').document;
+  assert.equal(document.kind, 'functionInventory');
+  const [, jobId, runId, revisionId] = /^\/jobs\/([^/]+)\/runs\/([^/]+)\/revisions\/([^/]+)\/functions$/.exec(step.reads[0]);
+  assert.deepEqual(document.data.binding, { jobId, runId, revisionId });
+  assert.equal(runId, fixtures.runId);
+  assert.ok(step.content.some(check => check.text === page.rendered));
+  assert.ok(step.content.some(check => document.data.items.some(item => item.address === check.text)));
 });
 
 test('evidence fixtures preserve attempt identity, validation owner commitments and deployment path', () => {
