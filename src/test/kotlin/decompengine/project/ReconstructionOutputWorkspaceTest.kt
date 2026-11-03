@@ -55,18 +55,23 @@ class ReconstructionOutputWorkspaceTest {
         ReconstructionOutputWorkspace.open(root, a).use {
             root.resolve("agent-progress.json").writeText("progress-a")
             root.resolve("run-history/a").createDirectories().resolve("events.jsonl").writeText("history-a")
+            root.resolve(ModuleCompilerFeedbackStore.DIRECTORY).createDirectory().resolve("parse.json").writeText("feedback-a")
         }
         ReconstructionOutputWorkspace.open(root, b).use {
             assertFalse(root.resolve("agent-progress.json").exists())
             assertFalse(root.resolve("run-history").exists())
+            assertFalse(root.resolve(ModuleCompilerFeedbackStore.DIRECTORY).exists())
             root.resolve("agent-progress.json").writeText("progress-b")
             root.resolve("run-history/b").createDirectories().resolve("events.jsonl").writeText("history-b")
+            root.resolve(ModuleCompilerFeedbackStore.DIRECTORY).createDirectory().resolve("parse.json").writeText("feedback-b")
         }
         ReconstructionOutputWorkspace.open(root, a).use {
             assertEquals("progress-a", root.resolve("agent-progress.json").readText())
             assertEquals("history-a", root.resolve("run-history/a/events.jsonl").readText())
+            assertEquals("feedback-a", root.resolve("${ModuleCompilerFeedbackStore.DIRECTORY}/parse.json").readText())
             assertEquals("progress-b", root.resolve("input-cache/$bHash/agent-progress.json").readText())
             assertEquals("history-b", root.resolve("input-cache/$bHash/run-history/b/events.jsonl").readText())
+            assertEquals("feedback-b", root.resolve("input-cache/$bHash/${ModuleCompilerFeedbackStore.DIRECTORY}/parse.json").readText())
             assertEquals(aHash, it.inputSha256)
         }
     }
