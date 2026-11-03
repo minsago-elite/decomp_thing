@@ -7,6 +7,7 @@ import gzip
 import json
 import pathlib
 import os
+import re
 import stat
 import sys
 import tarfile
@@ -97,6 +98,8 @@ def oci_leaf_manifests(tf: tarfile.TarFile, root_index: dict[str, object], out: 
     total_json = 0
     if not pending:
         refuse("OCI archive index has no descriptors")
+    if len(pending) > max_descriptors:
+        refuse("OCI index descriptor-count budget exceeded")
     (out / "oci-manifests").mkdir(mode=0o700, exist_ok=True)
     (out / "oci-indexes").mkdir(mode=0o700, exist_ok=True)
     while pending:
@@ -106,14 +109,17 @@ def oci_leaf_manifests(tf: tarfile.TarFile, root_index: dict[str, object], out: 
         if depth > max_depth or len(visited) >= max_descriptors:
             refuse("OCI index depth/descriptor budget exceeded")
         digest = descriptor.get("digest")
-        if not isinstance(digest, str) or not digest.startswith("sha256:") or len(digest) != 71:
+        if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
             refuse("OCI descriptor digest is not a SHA-256 identity")
+        size = descriptor.get("size")
+        if not isinstance(size, int) or isinstance(size, bool) or size < 0 or size > 64 * 1024 * 1024:
+            refuse("OCI descriptor size is outside its integer byte limit")
         blob_name = "blobs/sha256/" + digest[7:]
         if digest in visited:
             refuse("duplicate or cyclic OCI descriptor")
         visited.add(digest)
         raw = read_member(tf, blob_name, 64 * 1024 * 1024)
-        if len(raw) != descriptor.get("size") or "sha256:" + hashlib.sha256(raw).hexdigest() != digest:
+        if len(raw) != size or "sha256:" + hashlib.sha256(raw).hexdigest() != digest:
             refuse("OCI descriptor digest/size mismatch")
         total_json += len(raw)
         if total_json > max_total_json:
@@ -132,6 +138,8 @@ def oci_leaf_manifests(tf: tarfile.TarFile, root_index: dict[str, object], out: 
             children = obj["manifests"]
             if not children:
                 refuse("nested OCI index has no descriptors")
+            if len(visited) + len(pending) + len(children) > max_descriptors:
+                refuse("OCI index descriptor-count budget exceeded")
             for child in children:
                 if not isinstance(child, dict):
                     refuse("nested OCI descriptor is not an object")

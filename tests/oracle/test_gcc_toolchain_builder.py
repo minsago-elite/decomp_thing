@@ -514,6 +514,18 @@ printf '123456789' | bounded_stream {shlex.quote(str(log))} 4'''
         self.assertEqual(census[0]["payloadSha256"], hashlib.sha256(b"payload-8").hexdigest())
         self.assertTrue((self.out / "final-layer.tar").is_file())
 
+    def test_nested_oci_index_descriptor_queue_is_bounded_before_expansion(self) -> None:
+        self.make_pair()
+        nested = json.dumps({"schemaVersion": 2, "manifests": [{}] * 1025}, sort_keys=True).encode()
+        nested_digest = "sha256:" + hashlib.sha256(nested).hexdigest()
+        root = {"schemaVersion": 2, "manifests": [{"mediaType": "application/vnd.oci.image.index.v1+json",
+            "digest": nested_digest, "size": len(nested)}]}
+        archive(self.oci, [("index.json", json.dumps(root).encode()),
+            ("blobs/sha256/" + nested_digest[7:], nested)])
+        result = self.run_parser()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("descriptor-count budget", result.stderr)
+
     def test_duplicate_final_tar_entries_are_preserved_and_header_or_payload_drift_refuses(self) -> None:
         duplicate = tar_bytes([("usr/duplicate", b"first"), ("usr/duplicate", b"second")])
         self.layers[8] = duplicate
