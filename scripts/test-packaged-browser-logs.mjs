@@ -19,6 +19,8 @@ test('log qualification seeds bounded hostile recordings and valid attempt ident
     assert.ok(bytes.includes(Buffer.from('z'.repeat(5000))));
     const state = JSON.parse(await fs.readFile(join(fixture.directory, 'workflow-state.json'), 'utf8'));
     assert.equal(state.jobId, fixture.jobId);
+    assert.match(state.version, /^version_[a-f0-9]{32}$/);
+    assert.ok(state.attempts.every(run => /^version_[a-f0-9]{32}$/.test(run.version)));
     assert.equal(state.attempts.find(run => run.runId === 'run_fixture_3').state, 'completed');
     assert.ok(fixture.log.includes('/reports/runs/run_fixture_3/source-tree/reports/build.log'));
     assert.ok(bytes.includes(Buffer.from('api_key=synthetic-log-credential-0123456789')));
