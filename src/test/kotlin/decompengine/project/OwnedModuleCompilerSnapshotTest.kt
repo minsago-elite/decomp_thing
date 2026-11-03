@@ -2,6 +2,7 @@ package decompengine.project
 
 import decompengine.oracle.fulltree.ContainedCommandExecutableAlias
 import decompengine.oracle.fulltree.KotlinSystemdCgroupCommandInput
+import decompengine.oracle.fulltree.containedCommandRuntimeProvider
 import decompengine.oracle.fulltree.requireContainedCommandExecutableAliases
 import java.nio.file.Files
 import java.nio.file.Path
@@ -63,24 +64,57 @@ class OwnedModuleCompilerSnapshotTest {
     }
 
     @Test
+    fun `compiler and trampoline aliases are bounded ordered and separately versioned`() = fixture { root ->
+        val compiler = compiler()
+        val compilerCopy = materializeOwnedModuleCompilerSnapshot(compiler, root.resolve("compiler"))
+        val trampoline = executable("/usr/bin/true")
+        val trampolineCopy = materializeOwnedModuleCompilerSnapshot(trampoline, root.resolve("trampoline"),
+            label = "module compiler Landlock trampoline")
+        val aliases = listOf(
+            ContainedCommandExecutableAlias(compilerCopy.path, compiler.path),
+            ContainedCommandExecutableAlias(trampolineCopy.path, trampoline.path),
+        )
+        requireContainedCommandExecutableAliases(listOf(compiler, compilerCopy, trampoline, trampolineCopy), aliases)
+        assertEquals("kotlin-lease-contained-command-runtime-v3", containedCommandRuntimeProvider(
+            "kotlin-lease-contained-command-runtime-v3", emptyList()))
+        assertEquals("kotlin-lease-contained-command-runtime-owned-executable-v1", containedCommandRuntimeProvider(
+            "kotlin-lease-contained-command-runtime-v3", aliases.take(1)))
+        assertEquals("kotlin-lease-contained-command-runtime-owned-executable-v2", containedCommandRuntimeProvider(
+            "kotlin-lease-contained-command-runtime-v3", aliases))
+        assertFails { requireContainedCommandExecutableAliases(listOf(compiler, compilerCopy, trampoline, trampolineCopy),
+            aliases + aliases.first()) }
+        assertFails { requireContainedCommandExecutableAliases(listOf(compiler, compilerCopy, trampoline, trampolineCopy),
+            listOf(aliases.first(), aliases[1].copy(destination = aliases.first().destination.resolve("nested")))) }
+        assertFails { containedCommandRuntimeProvider("base", aliases + aliases.first()) }
+    }
+
+    @Test
     fun `normal completion removes the real staged compiler before its request directory and refuses unknown residue`() = fixture { root ->
         val privateMode = PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------"))
         val complete = Files.createDirectory(root.resolve("complete"), privateMode)
         Files.writeString(complete.resolve("request.json"), "authenticated request fixture")
         materializeOwnedModuleCompilerSnapshot(compiler(), complete.resolve("compiler"))
+        materializeOwnedModuleCompilerSnapshot(executable("/usr/bin/true"), complete.resolve("trampoline"),
+            label = "module compiler Landlock trampoline")
         removeOwnedModuleCompilerRequestDirectory(complete)
         assertFalse(Files.exists(complete), "normal cleanup must remove the executable before deleting its parent")
 
         val unexpected = Files.createDirectory(root.resolve("unexpected"), privateMode)
         Files.writeString(unexpected.resolve("request.json"), "authenticated request fixture")
         materializeOwnedModuleCompilerSnapshot(compiler(), unexpected.resolve("compiler"))
+        materializeOwnedModuleCompilerSnapshot(executable("/usr/bin/true"), unexpected.resolve("trampoline"),
+            label = "module compiler Landlock trampoline")
         Files.writeString(unexpected.resolve("not-owned-by-cleanup"), "preserve")
         assertFails { removeOwnedModuleCompilerRequestDirectory(unexpected) }
         assertEquals("preserve", Files.readString(unexpected.resolve("not-owned-by-cleanup")))
     }
 
     private fun compiler(): KotlinSystemdCgroupCommandInput {
-        val path = Path.of(System.getProperty("decompengine.analysis.io.testCompiler", "/usr/bin/cc")).toRealPath()
+        return executable(System.getProperty("decompengine.analysis.io.testCompiler", "/usr/bin/cc"))
+    }
+
+    private fun executable(value: String): KotlinSystemdCgroupCommandInput {
+        val path = Path.of(value).toRealPath()
         assertEquals(0, Files.getAttribute(path, "unix:uid"))
         return KotlinSystemdCgroupCommandInput(path, Files.size(path), sha256(Files.readAllBytes(path)))
     }

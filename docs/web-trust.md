@@ -115,9 +115,16 @@ to the packaged shell's data-URL SVG favicon and the legacy stylesheet's data-UR
 SVG texture, while ordinary images remain same-origin. `worker-src 'self'` and
 `font-src 'self'` are the upper bounds for statically bundled worker and font
 outputs covered by the packaged asset inventory; blob workers, downloaded code,
-and remote fonts remain denied. The current production bundle emits no worker or
-downloadable font, but keeping those directives aligned with the packaging
-contract permits only future reviewed, manifest-owned same-origin outputs.
+and remote fonts remain denied. The production bundle emits one module worker
+(source highlighting, started only by an explicit action) and no downloadable font;
+typography uses system fonts. Keeping those directives aligned with the packaging
+contract permits only reviewed, manifest-owned same-origin outputs. The packaged
+`--mode audit` browser check (#633) serves the application under `/nested/` with
+this policy enforced, opens every SPA route and starts the highlight worker, then
+requires every JavaScript and stylesheet asset in the packaged manifest (and any
+font it declares) to have loaded with HTTP 200 from `/nested/assets/ui/`, the
+worker target to have attached at its packaged URL, and zero CSP violations across
+all four browser signals.
 
 SPA and legacy application documents, including rendered HTML error pages,
 receive that application policy; legacy pages authorize only their inventoried

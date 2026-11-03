@@ -1,0 +1,76 @@
+name: GCC signed source qualification
+
+on:
+  pull_request:
+    types: [labeled]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gcc-signed-source-${{ github.event.pull_request.head.sha || github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  signed-source:
+    if: github.event_name == 'workflow_dispatch' || (github.event.label.name == 'qualify:gcc-signed-source' && github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      GRADLE_USER_HOME: ${{ github.workspace }}/build/gradle-user-home
+      NPM_CONFIG_CACHE: ${{ github.workspace }}/build/npm-download-cache
+      TMPDIR: ${{ github.workspace }}/build/task-tmp
+      EXPECTED_SOURCE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+      DECOMP_GCC_SIGNED_SOURCE_ARCHIVE: ${{ github.workspace }}/build/gcc-signed-source-inputs/gcc-16.2.0.tar.xz
+      DECOMP_GCC_SIGNED_SOURCE_SIGNATURE: ${{ github.workspace }}/build/gcc-signed-source-inputs/gcc-16.2.0.tar.xz.sig
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          submodules: recursive
+      - name: Prepare workspace-owned temporary directories
+        run: mkdir -p build/task-tmp build/gcc-signed-source-qualification
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: ./.github/actions/setup-gradle-compiler-cache
+        with:
+          cache-read-only: 'true'
+      - name: Install the pinned build-only frontend toolchain
+        run: |
+          bash scripts/install-frontend-node.sh "$GITHUB_WORKSPACE/build/frontend-node"
+          echo "$GITHUB_WORKSPACE/build/frontend-node/bin" >> "$GITHUB_PATH"
+      - name: Restore only workspace-owned exact source files
+        id: source-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ${{ github.workspace }}/build/gcc-signed-source-inputs/gcc-16.2.0.tar.xz
+            ${{ github.workspace }}/build/gcc-signed-source-inputs/gcc-16.2.0.tar.xz.sig
+          key: gcc-signed-source-workspace-v1-${{ hashFiles('oracle/gcc/16.2.0/source-lock.json', 'scripts/ci-fetch-gcc-signed-source.py') }}
+      - name: Fetch missing canonical bytes under finite transport bounds
+        env:
+          GCC_SOURCE_CACHE_HIT: ${{ steps.source-cache.outputs.cache-hit || 'false' }}
+        run: python3 scripts/ci-fetch-gcc-signed-source.py
+      - name: Verify exact Kotlin authority and fail on missing or skipped tests
+        run: python3 scripts/validate-gcc-signed-source.py
+      - name: Save only the files reauthenticated by the successful Kotlin run
+        if: success() && steps.source-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ${{ github.workspace }}/build/gcc-signed-source-inputs/gcc-16.2.0.tar.xz
+            ${{ github.workspace }}/build/gcc-signed-source-inputs/gcc-16.2.0.tar.xz.sig
+          key: gcc-signed-source-workspace-v1-${{ hashFiles('oracle/gcc/16.2.0/source-lock.json', 'scripts/ci-fetch-gcc-signed-source.py') }}
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: gcc-signed-source-${{ github.event.pull_request.head.sha || github.sha }}
+          path: |
+            build/gcc-signed-source-qualification
+            build/test-results/gccSignedSourceQualification
+            build/reports/tests/gccSignedSourceQualification
+          if-no-files-found: error
+          retention-days: 14

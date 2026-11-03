@@ -26,7 +26,9 @@
     "scripts/generate-gcc-behavior-corpus.py",
     "scripts/generate-gcc-compiler-engine-build-records.py",
     "scripts/run-gcc-behavior-corpus.py",
-    "scripts/verify-gcc-oracle-source.py"
+    "scripts/verify-gcc-oracle-source.py",
+    ".github/workflows/gcc-signed-source.yml",
+    "scripts/ci-fetch-gcc-signed-source.py"
   ],
   "adapterFiles": [
     {
@@ -166,8 +168,16 @@
       "reason": "Generated-C adapter-owned compiler deployment configuration for the closed Make and Ninja profile registrations."
     },
     {
+      "path": "src/main/kotlin/decompengine/project/ContainedModuleCompilationSnapshot.kt",
+      "reason": "Generated-C module compiler snapshot capture and authenticated input inventory for registered Make and Ninja profiles."
+    },
+    {
       "path": "src/main/kotlin/decompengine/project/ContainedModuleCompilerProtocol.kt",
       "reason": "Generated-C adapter-owned source/header compilation protocol derives fixed flags and declared layout paths from its selected profile."
+    },
+    {
+      "path": "src/main/kotlin/decompengine/project/ContainedModuleCompilerWorker.kt",
+      "reason": "Generated-C module compiler worker validates only the authenticated source/header snapshot before its registered compiler launch."
     }
   ],
   "allowances": [
@@ -406,8 +416,8 @@
       "path": "src/test/kotlin/decompengine/project/ContainedModuleCompilerWorkerTest.kt",
       "rule": "benchmark-target",
       "fragment": "\"cc1\"",
-      "count": 1,
-      "reason": "Names an actual configured compiler subprocess for tool staging or cancellation observation; does not select a benchmark corpus or grant acceptance authority."
+      "count": 2,
+      "reason": "Names the actual configured compiler subprocess for tool staging, discovery and cancellation observation; does not select a benchmark corpus or grant acceptance authority."
     }
   ],
   "benchmarkCatalog": "oracle/gcc/reconstruction-neutrality-identities.json"

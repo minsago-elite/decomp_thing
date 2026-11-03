@@ -18,6 +18,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.jsonObject
 
 internal class GccDriverStructuralProfileException(message: String, cause: Throwable? = null) :
     IllegalArgumentException(message, cause)
@@ -102,7 +103,31 @@ internal class GccDriverStructuralInputsV1 private constructor(
         val receiptLineage = GccDriverStructuralFullExportReceiptLineageV1.validate(
             operation, compilerEngineProfileSha256, engineId,
         )
-        val snapshot = operation.snapshot
+        bindCapturedModel(operation.snapshot, operation.intentBytes, receiptLineage.canonicalBytes)
+    }
+
+    /** The native operation owns this same full model; no separate export can supply its mapping. */
+    internal fun bindNativeModel(operation: GccBundledNativeCallOperation): GccDriverStructuralFullExportBindingV2 =
+        translateProfileFailure {
+            require(engineId == "driver" && operation.snapshot.target.engineId == engineId) {
+                "selected native structural replay requires the pinned driver operation"
+            }
+            val native = OracleJson.parseCanonical(GccNativeCallReceiptLineage.createBinding(operation)).jsonObject
+            require(native["compilerEngineProfileSha256"] == JsonPrimitive(compilerEngineProfileSha256)) {
+                "native model binding differs from the retained structural profile"
+            }
+            val lineage = JsonObject(native.getValue("receiptLineage").jsonObject + mapOf(
+                "engineId" to JsonPrimitive(engineId),
+                "compilerEngineProfileSha256" to JsonPrimitive(compilerEngineProfileSha256),
+            ))
+            bindCapturedModel(operation.model, operation.intentBytes, OracleJson.canonicalBytes(lineage))
+        }
+
+    private fun bindCapturedModel(
+        snapshot: GccBundledFullExportSnapshot,
+        intentBytes: ByteArray,
+        receiptLineageBytes: ByteArray,
+    ): GccDriverStructuralFullExportBindingV2 = translateProfileFailure {
         require(snapshot.inputSha256 == strippedBinary.sha256 && snapshot.inputBytes == strippedBinary.bytes) {
             "GCC full export input differs from the authenticated stripped $engineId"
         }
@@ -131,7 +156,7 @@ internal class GccDriverStructuralInputsV1 private constructor(
             require(loadFullExportAuthority(root, runtimeProfile.suite.analysis.exporterSha256,
                 runtimeProfile.suite.analysis.ghidraArchive.sha256, parallel) == fullExportProfileSha256
             ) { "GCC full-export authority changed after structural profile admission" }
-            val intent = OracleJson.parseCanonical(operation.intentBytes) as JsonObject
+            val intent = OracleJson.parseCanonical(intentBytes) as JsonObject
             require(intent["plannerProfile"] == OracleJson.parseCanonical(runtimeProfile.policyBytes())) {
                 "GCC full-export intent planner profile differs from the retained compiler-engine profile"
             }
@@ -187,7 +212,7 @@ internal class GccDriverStructuralInputsV1 private constructor(
                 programModelBytes = snapshot.programModelBytes,
                 outputTreeSha256 = snapshot.outputTreeSha256,
                 functionCount = snapshot.functionCount,
-                receiptLineageBytes = receiptLineage.canonicalBytes,
+                receiptLineageBytes = receiptLineageBytes,
             )
         }
     }

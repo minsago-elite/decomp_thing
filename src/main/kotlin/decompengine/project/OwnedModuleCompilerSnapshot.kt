@@ -10,6 +10,7 @@ import java.nio.file.Path
 internal fun materializeOwnedModuleCompilerSnapshot(
     input: KotlinSystemdCgroupCommandInput,
     destination: Path,
+    label: String = "module compiler snapshot",
     checkpoint: () -> Unit = {},
 ): KotlinSystemdCgroupCommandInput {
     require(input.bytes in 1..MAXIMUM_MODULE_COMPILER_SNAPSHOT_BYTES)
@@ -21,9 +22,9 @@ internal fun materializeOwnedModuleCompilerSnapshot(
             "module compiler snapshot requires a single-linked host-root executable without untrusted writes"
         }
     }
-    StableControlFile.openWithCheckpoint(input.path, input.bytes, "module compiler snapshot source") { checkpoint() }.use { source ->
-        source.requireSingleLink("module compiler snapshot source")
-        require(source.size == input.bytes && source.authenticatedSha256 == input.sha256) { "module compiler snapshot source digest differs" }
+    StableControlFile.openWithCheckpoint(input.path, input.bytes, "$label source") { checkpoint() }.use { source ->
+        source.requireSingleLink("$label source")
+        require(source.size == input.bytes && source.authenticatedSha256 == input.sha256) { "$label source digest differs" }
         LinuxFilesystemSyscalls.openRoot(destination.parent).use { parent ->
             require(parent.identity.isDirectory && parent.identity.mode and 0x3f == 0) {
                 "compiler snapshot parent must be private"
@@ -32,7 +33,7 @@ internal fun materializeOwnedModuleCompilerSnapshot(
                 var offset = 0L
                 while (offset < source.size) {
                     checkpoint()
-                    val bytes = source.readExactly(offset, minOf(65536L, source.size - offset).toInt(), "module compiler snapshot")
+                    val bytes = source.readExactly(offset, minOf(65536L, source.size - offset).toInt(), label)
                     LinuxFilesystemSyscalls.write(output, bytes, checkpoint)
                     offset += bytes.size
                 }
@@ -44,12 +45,12 @@ internal fun materializeOwnedModuleCompilerSnapshot(
         source.verifyUnchanged("module compiler snapshot source after copy")
     }
     require(destination.toRealPath() == destination && Files.isExecutable(destination)) {
-        "module compiler snapshot requires an executable host staging filesystem, never executable scratch"
+        "$label requires an executable host staging filesystem, never executable scratch"
     }
-    StableControlFile.openWithCheckpoint(destination, input.bytes, "owned module compiler snapshot") { checkpoint() }.use { snapshot ->
-        snapshot.requireSingleLink("owned module compiler snapshot")
-        require(snapshot.size == input.bytes && snapshot.authenticatedSha256 == input.sha256) { "owned compiler snapshot digest differs" }
-        snapshot.verifyUnchanged("owned module compiler snapshot after materialization")
+    StableControlFile.openWithCheckpoint(destination, input.bytes, "owned $label") { checkpoint() }.use { snapshot ->
+        snapshot.requireSingleLink("owned $label")
+        require(snapshot.size == input.bytes && snapshot.authenticatedSha256 == input.sha256) { "owned $label digest differs" }
+        snapshot.verifyUnchanged("owned $label after materialization")
     }
     return KotlinSystemdCgroupCommandInput(destination, input.bytes, input.sha256)
 }
@@ -58,6 +59,7 @@ internal fun materializeOwnedModuleCompilerSnapshot(
 internal fun removeOwnedModuleCompilerRequestDirectory(directory: Path) {
     Files.delete(directory.resolve("request.json"))
     Files.delete(directory.resolve("compiler"))
+    Files.delete(directory.resolve("trampoline"))
     Files.delete(directory)
 }
 

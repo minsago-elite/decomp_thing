@@ -349,7 +349,7 @@ class ContainedModuleCompilationProofTest {
             JsonArray(listOf(change(alias, "source", JsonPrimitive("/tmp/unbound/compiler")))),
             JsonArray(listOf(change(alias, "destination", JsonPrimitive("/opt/other/compiler")))),
             JsonArray(listOf(change(alias, "extra", JsonPrimitive(true)))))) {
-            reject2(rehash2(changeNested(proof, "runtimeClosure", "executableAliases", invalid)), "executable alias differs")
+            reject2(rehash2(changeNested(proof, "runtimeClosure", "executableAliases", invalid)), "executable aliases differ")
         }
         val inputs = closure.getValue("readOnlyInputs") as JsonArray
         for (population in listOf(inputs.dropLast(1), inputs + inputs.last())) {

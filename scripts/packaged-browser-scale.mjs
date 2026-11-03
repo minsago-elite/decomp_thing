@@ -87,7 +87,7 @@ export async function qualifyScale({ fixture, makeTarget, cdp, evaluate, ready, 
     createdAfter: '2026-01-01T00:00:00.420000000Z', createdBefore: '2026-01-01T09:00:00.420000001+09:00' };
   await evaluate(tab, `(() => {
     const values = ${JSON.stringify(filters)};
-    const fields = { search: 'Filename search', status: 'Workflow state', limit: 'Jobs per page', createdAfter: 'Created at or after', createdBefore: 'Created before' };
+    const fields = { search: 'Filename or label search', status: 'Workflow state', limit: 'Jobs per page', createdAfter: 'Created at or after', createdBefore: 'Created before' };
     for (const [key, label] of Object.entries(fields)) {
       const field = [...document.querySelectorAll('label')].find(item => item.textContent.startsWith(label)).querySelector('input, select');
       field.value = values[key]; field.dispatchEvent(new Event(field.tagName === 'SELECT' ? 'change' : 'input', { bubbles: true }));
@@ -160,8 +160,8 @@ export async function qualifyScale({ fixture, makeTarget, cdp, evaluate, ready, 
   const ax = (await cdp.call('Accessibility.getFullAXTree', {}, tab.sessionId)).nodes.filter(node => !node.ignored);
   const named = (role, name) => ax.filter(node => node.role?.value === role && node.name?.value === name);
   assert.equal(ax.filter(node => node.role?.value === 'main').length, 1);
-  for (const name of ['Filename search', 'Created at or after', 'Created before']) assert.equal(named('textbox', name).length, 1);
-  for (const name of ['Workflow state', 'Sort by', 'Jobs per page']) assert.equal(named('combobox', name).length, 1);
+  for (const name of ['Filename or label search', 'Created at or after', 'Created before']) assert.equal(named('textbox', name).length, 1);
+  for (const name of ['Workflow state', 'Sort by', 'Archived jobs', 'Jobs per page']) assert.equal(named('combobox', name).length, 1);
   for (const name of ['Apply filters', 'Reset filters', 'Refresh jobs', 'Previous page', 'Next page']) assert.equal(named('button', name).length, 1);
   assert.equal(named('list', 'Uploaded jobs').length, 1);
   const readsBeforeInvalid = tab.requests.filter(request => request.url.endsWith('/api/v1/jobs')).length;

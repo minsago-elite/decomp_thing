@@ -13,6 +13,7 @@ import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.time.Duration
+import java.util.Base64
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
@@ -437,6 +438,7 @@ class ContainedModuleCompilationLiveTest {
         var extraHeaders: List<String> = emptyList()
         private val captured = linkedMapOf<String, List<ContainedModuleCompilerInput>>()
         private var scopeQuery = 0
+        private var compilerDiagnosticSequence = 0
         fun path(role: String): String = profile.layout.declaration(role).let { declaration ->
             declaration.materialize(if ("{module}" in declaration.pathTemplate) mapOf("module" to "parse") else emptyMap())
         }
@@ -494,19 +496,39 @@ class ContainedModuleCompilationLiveTest {
         }
         fun generate(model: RecoveredProgramModel, reconstructor: ModuleReconstructor, label: String): SourceTreeManifest {
             cell.stage(label)
-            return SourceTreeGenerator.generate(model, project, profile = profile, reconstructor = reconstructor,
-                progress = object : decompengine.agent.AgentWorkflowProgress by decompengine.agent.AgentWorkflowProgress.NONE {
-                    override fun phase(phase: decompengine.agent.AgentWorkflowPhase, taskId: String?, acceptedRevisionSha256: String?) {
-                        if (phase == decompengine.agent.AgentWorkflowPhase.BUILD_VALIDATING) captureInputs(label)
+            return ContainedModuleCompilationPolicy.withQualificationDiagnosticsObserver(
+                observer = { stdout, stderr ->
+                    val sequence = compilerDiagnosticSequence++
+                    val name = "$label-compiler-$sequence.diagnostics.json"
+                    val bytes = OracleJson.canonicalBytes(JsonObject(mapOf(
+                        "schemaVersion" to JsonPrimitive(1),
+                        "sequence" to JsonPrimitive(sequence),
+                        "stdoutBytes" to JsonPrimitive(stdout.size),
+                        "stdoutSha256" to JsonPrimitive(sha256(stdout)),
+                        "stdoutBase64" to JsonPrimitive(Base64.getEncoder().encodeToString(stdout)),
+                        "stderrBytes" to JsonPrimitive(stderr.size),
+                        "stderrSha256" to JsonPrimitive(sha256(stderr)),
+                        "stderrBase64" to JsonPrimitive(Base64.getEncoder().encodeToString(stderr)),
+                    )))
+                    Files.write(root.resolve(name), bytes, java.nio.file.StandardOpenOption.CREATE_NEW)
+                    cell.retain(name, bytes)
+                },
+                action = {
+                    SourceTreeGenerator.generate(model, project, profile = profile, reconstructor = reconstructor,
+                        progress = object : decompengine.agent.AgentWorkflowProgress by decompengine.agent.AgentWorkflowProgress.NONE {
+                            override fun phase(phase: decompengine.agent.AgentWorkflowPhase, taskId: String?, acceptedRevisionSha256: String?) {
+                                if (phase == decompengine.agent.AgentWorkflowPhase.BUILD_VALIDATING) captureInputs(label)
+                            }
+                        }).also { manifest ->
+                        val source = manifest.files.single { it.path == path("module-implementation") }
+                        val checkpoint = Json.parseToJsonElement(Files.readString(project.resolve(path("module-evidence")))).jsonObject
+                        val evidence = ModuleCompilationEvidence.decode(checkpoint.getValue("compilation").jsonObject, 7, profile,
+                            source.path, checkpoint.getValue("sourceSha256").jsonPrimitive.content, accepted = true)
+                        verifyCapturedInputs(label, evidence)
+                        cell.retain("$label/evidence.json", evidence.toJson().toByteArray())
                     }
-                }).also { manifest ->
-                    val source = manifest.files.single { it.path == path("module-implementation") }
-                    val checkpoint = Json.parseToJsonElement(Files.readString(project.resolve(path("module-evidence")))).jsonObject
-                    val evidence = ModuleCompilationEvidence.decode(checkpoint.getValue("compilation").jsonObject, 7, profile,
-                        source.path, checkpoint.getValue("sourceSha256").jsonPrimitive.content, accepted = true)
-                    verifyCapturedInputs(label, evidence)
-                    cell.retain("$label/evidence.json", evidence.toJson().toByteArray())
                 }
+            )
         }
         fun retainRevision(label: String, expected: Map<String, ByteArray>): Map<String, ByteArray> = expected.mapValues { (relative, original) ->
             val actual = ContainedModuleCompilationHostedSupport.readRegular(project.resolve(relative), 4 * 1024 * 1024)

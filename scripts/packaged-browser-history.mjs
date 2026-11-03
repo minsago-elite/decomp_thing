@@ -161,7 +161,9 @@ export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready
   assert.equal(await evaluate(tab, `document.activeElement.tagName`), 'SELECT');
   assert.equal(await evaluate(tab, `document.querySelector('ol[aria-label="Activity observations"] a').getAttribute('href')`), `${path}/run_fixture_3`);
   await evaluate(tab, `document.querySelector('ol[aria-label="Activity observations"] summary').click()`);
-  assert.ok(await evaluate(tab, `document.body.innerText.includes('${'a'.repeat(64)}') && document.body.innerText.includes('Task, session and revision evidence pages are not available')`));
+  // Correlation rows render when their disclosure opens, and each reference states why it is or is not linked.
+  await ready(tab, `document.body.innerText.includes('${'a'.repeat(64)}') && document.body.innerText.includes('Each one states whether this view links it')
+    && document.body.innerText.includes('No session evidence page is published.')`, 'activity correlation details');
   await evaluate(tab, `(() => { const control = document.querySelector('.activity-filters input'); control.value = 'task_even'; control.dispatchEvent(new Event('input', { bubbles: true })); })()`);
   await ready(tab, `(${activityRows}).length === 0 && document.body.innerText.includes('Other retained pages have not been searched.')`, 'activity task filter with no match');
   assert.equal(progressRequests(), atBound, 'Local filters must not restart or advance polling');

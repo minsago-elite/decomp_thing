@@ -30,6 +30,9 @@ internal object ContainedModuleCompilationProof {
         val request = verified.request
         val result = verified.result
         val profile = request.profile
+        require(evidence.liveAuthority == null || request.schemaVersion == 2) {
+            "historical module compiler proof cannot carry live acceptance authority"
+        }
         require(evidence.sourceSha256 == request.sourceSha256 &&
             evidence.command == ContainedModuleCompilationPolicy.command(profile, request.sourcePath) &&
             evidence.outcome == if (result.outcome == "compiled-object") "passed" else "failed") {
@@ -58,6 +61,21 @@ internal object ContainedModuleCompilationProof {
         val runtime = ContainedModuleCompilationRuntimeConfiguration.parse(bytes(proof.objectField("runtimeConfiguration")))
         require(runtime.profileId == request.profileId && runtime.compilerExecutable == request.compilerPath &&
             runtime.compilerSha256 == request.compilerSha256) { "module compiler request differs from its configured profile or compiler" }
+        if (request.schemaVersion == 2) {
+            val roots = (runtime.isolation.systemLibraryMounts + runtime.compilerRuntimeMounts).map { it.destination }.distinct().sortedBy { it.toString() }
+            require(request.trampolinePath == runtime.compilerExecHelperPath &&
+                request.trampolineSha256 == runtime.compilerExecHelperSha256 &&
+                request.runtimeReadRoots == roots && request.runtimeExecuteRoots == listOf(runtime.compilerRuntimeExecuteRoot) &&
+                request.runtimeExecuteFiles == runtime.compilerRuntimeExecuteFiles) {
+                "module compiler read-boundary request differs from its pinned runtime"
+            }
+        } else {
+            require(runtime.compilerExecHelperPath == null && runtime.compilerExecHelperSha256 == null &&
+                request.trampolinePath == null && request.trampolineSha256 == null && request.runtimeReadRoots.isEmpty() &&
+                request.runtimeExecuteRoots.isEmpty() && request.runtimeExecuteFiles.isEmpty()) {
+                "historical module compiler proof cannot claim a Landlock boundary"
+            }
+        }
         val common = mapOf("profileId" to request.profileId, "profileSha256" to request.profileSha256,
             "sourceSha256" to request.sourceSha256, "snapshotSha256" to request.snapshotSha256,
             "runtimeConfigurationSha256" to runtime.configurationSha256)
@@ -217,15 +235,25 @@ internal object ContainedModuleCompilationProof {
     private fun verifyRuntimeClosure(closure: JsonObject, runtime: ContainedModuleCompilationRuntimeConfiguration.Declaration,
         request: ContainedModuleCompilerRequest, command: KotlinContainedCommandRequest, requestPath: Path, run: Path,
         control: Path, lease: FullTreeDiskScratchEvidence, attachment: JsonObject, execution: JsonObject) {
-        val ownedExecutable = closure["provider"] == JsonPrimitive("kotlin-lease-contained-command-runtime-owned-executable-v1")
-        closure.exact(RUNTIME_FIELDS + if (ownedExecutable) setOf("baseRuntimeProvider", "executableAliases") else emptySet(), "runtime closure")
-        if (ownedExecutable) require(closure.text("baseRuntimeProvider") == "kotlin-lease-contained-command-runtime-v5") {
+        val ownedExecutableCount = when (closure["provider"]) {
+            JsonPrimitive("kotlin-lease-contained-command-runtime-owned-executable-v1") -> 1
+            JsonPrimitive("kotlin-lease-contained-command-runtime-owned-executable-v2") -> 2
+            else -> 0
+        }
+        require(ownedExecutableCount != 2 || runtime.compilerExecHelperPath != null) {
+            "two executable aliases require the configured compiler trampoline"
+        }
+        require(!(ownedExecutableCount == 1 && request.schemaVersion == 2 && runtime.compilerExecHelperPath != null)) {
+            "schema-v2 module compiler runtime requires both owned executable aliases"
+        }
+        closure.exact(RUNTIME_FIELDS + if (ownedExecutableCount > 0) setOf("baseRuntimeProvider", "executableAliases") else emptySet(), "runtime closure")
+        if (ownedExecutableCount > 0) require(closure.text("baseRuntimeProvider") == "kotlin-lease-contained-command-runtime-v5") {
             "module compiler executable alias must retain the v5 base runtime"
         }
         require(sha256(bytes(closure)) == attachment.text("runtimeClosureSha256")) {
             "module compiler runtime closure digest differs from its attachment"
         }
-        require((ownedExecutable || closure.text("provider") == "kotlin-lease-contained-command-runtime-v5") &&
+        require((ownedExecutableCount > 0 || closure.text("provider") == "kotlin-lease-contained-command-runtime-v5") &&
             closure.text("configurationSha256") == runtime.isolation.canonicalSha256 &&
             closure.text("deploymentClosureSha256") == runtime.configurationSha256 &&
             closure.text("keeperEntryPoint") == KotlinContainedCommandKeeper::class.java.name &&
@@ -241,8 +269,8 @@ internal object ContainedModuleCompilationProof {
         )) })
         require(closure["runtimeMounts"] == mounts) { "module compiler runtime mounts differ from their ordered configuration" }
         val inputs = closure.arrayField("readOnlyInputs")
-        require(inputs.size == if (ownedExecutable) 3 else 2) {
-            "module compiler runtime requires exactly its private request, configured compiler and declared executable snapshot"
+        require(inputs.size == when (ownedExecutableCount) { 0 -> 2; 1 -> 3; else -> 5 }) {
+            "module compiler runtime requires exactly its private request and ordered configured executable snapshots"
         }
         val requestInput = inputs[0] as? JsonObject ?: throw IllegalArgumentException("module compiler request input must be an object")
         val compilerInput = inputs[1] as? JsonObject ?: throw IllegalArgumentException("module compiler executable input must be an object")
@@ -257,15 +285,40 @@ internal object ContainedModuleCompilationProof {
             compilerInput == input(runtime.compilerExecutable, compilerBytes, runtime.compilerSha256)) {
             "module compiler retained executable differs from its configured identity or size bound"
         }
-        if (ownedExecutable) {
+        if (ownedExecutableCount > 0) {
             val snapshotPath = requestPath.parent.resolve("compiler")
             require(compilerBytes <= 64L * 1024 * 1024 && inputs[2] == input(snapshotPath, compilerBytes, runtime.compilerSha256)) {
                 "module compiler executable snapshot differs from its exact private path or configured pin"
             }
-            require(closure.arrayField("executableAliases") == JsonArray(listOf(JsonObject(mapOf(
+            val expectedAliases = mutableListOf(JsonObject(mapOf(
                 "source" to JsonPrimitive(snapshotPath.toString()),
                 "destination" to JsonPrimitive(runtime.compilerExecutable.toString()),
-            ))))) { "module compiler executable alias differs from its pinned snapshot and configured destination" }
+            )))
+            if (ownedExecutableCount == 2) {
+                val helperPath = requireNotNull(runtime.compilerExecHelperPath) {
+                    "two executable aliases require the configured compiler trampoline"
+                }
+                val helperSha256 = requireNotNull(runtime.compilerExecHelperSha256)
+                val helperBytes = (inputs[3] as? JsonObject
+                    ?: throw IllegalArgumentException("module compiler trampoline input must be an object")).number("bytes")
+                val trampolineSnapshot = requestPath.parent.resolve("trampoline")
+                require(request.schemaVersion == 2 && helperBytes in 1..64L * 1024 * 1024 &&
+                    inputs[3] == input(helperPath, helperBytes, helperSha256) &&
+                    inputs[4] == input(trampolineSnapshot, helperBytes, helperSha256)) {
+                    "module compiler trampoline snapshots differ from their configured path, pin, or ordered private paths"
+                }
+                expectedAliases += JsonObject(mapOf(
+                    "source" to JsonPrimitive(trampolineSnapshot.toString()),
+                    "destination" to JsonPrimitive(helperPath.toString()),
+                ))
+            }
+            require(closure.arrayField("executableAliases") == JsonArray(expectedAliases)) {
+                "module compiler executable aliases differ from their ordered pinned snapshots and configured destinations"
+            }
+        } else if (runtime.compilerExecHelperPath != null) {
+            require(request.schemaVersion < 2) {
+                "module compiler trampoline runtime requires both owned executable aliases"
+            }
         }
         require(closure.text("controlDirectory") == control.toString() && closure.text("writableRoot") == run.toString()) {
             "module compiler runtime paths differ from the disk lease"

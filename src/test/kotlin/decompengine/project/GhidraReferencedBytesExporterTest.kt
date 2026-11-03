@@ -52,6 +52,7 @@ class GhidraReferencedBytesExporterTest {
             "-J-Djna.tmpdir=$temporary", "-J-XX:-UsePerfData", "-proc:none",
             "-cp", classpath, "-d", classes.toString(),
             repository.resolve("src/main/resources/ghidra_scripts/ExportProgramModel.java").toString(),
+            repository.resolve("src/main/resources/ghidra_scripts/ExportRecoveredCallSites.java").toString(),
             repository.resolve("src/test/resources/ghidra/ReferencedBytesProbe.java").toString(),
             repository.resolve("src/test/resources/ghidra/ControlledByteListingProbe.java").toString()))
         run("probe", listOf(javaBin.resolve("java").toString(), "-Djava.io.tmpdir=$temporary", "-Duser.home=$home", "-Djava.util.prefs.userRoot=$home/prefs",

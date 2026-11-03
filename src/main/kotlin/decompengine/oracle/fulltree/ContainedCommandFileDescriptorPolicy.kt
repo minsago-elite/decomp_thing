@@ -3,6 +3,7 @@ package decompengine.oracle.fulltree
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.StrictJsonLimits
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -160,11 +161,24 @@ internal fun containedCommandFileDescriptorRuntimeBytes(value: JsonObject): Byte
         "terminalResourcePolicySha256", "fileDescriptorAdmission")
     val optional = setOf("interruptionPolicySha256", "controlDirectory", "writableRoot", "readOnlyControlDirectories",
         "readOnlyStateDirectory", "readOnlyReportsDirectory", "operationWallDeadline", "retainedInputVisibility")
-    val ownedExecutable = value["provider"] == JsonPrimitive("kotlin-lease-contained-command-runtime-owned-executable-v1")
-    val fields = required + if (ownedExecutable) setOf("baseRuntimeProvider", "executableAliases") else emptySet()
+    val provider = value["provider"]
+    val ownedExecutableCount = when (provider) {
+        JsonPrimitive("kotlin-lease-contained-command-runtime-owned-executable-v1") -> 1
+        JsonPrimitive("kotlin-lease-contained-command-runtime-owned-executable-v2") -> 2
+        else -> 0
+    }
+    val fields = required + if (ownedExecutableCount > 0) setOf("baseRuntimeProvider", "executableAliases") else emptySet()
     require(value.keys.containsAll(fields) && (value.keys - fields).all { it in optional })
-    if (ownedExecutable) {
+    if (ownedExecutableCount > 0) {
         require(value["baseRuntimeProvider"] == JsonPrimitive("kotlin-lease-contained-command-runtime-v5"))
+        val aliases = value["executableAliases"] as? JsonArray
+            ?: throw IllegalArgumentException("owned executable runtime aliases must be an array")
+        require(aliases.size == ownedExecutableCount && aliases.all { alias ->
+            val fields = alias as? JsonObject ?: return@all false
+            fields.keys == setOf("source", "destination") &&
+                (fields["source"] as? JsonPrimitive)?.isString == true &&
+                (fields["destination"] as? JsonPrimitive)?.isString == true
+        }) { "owned executable runtime alias count or shape is invalid" }
     } else require(value["provider"] == JsonPrimitive("kotlin-lease-contained-command-runtime-v5"))
     return OracleJson.canonicalBytes(value, FD_RUNTIME_LIMITS)
 }

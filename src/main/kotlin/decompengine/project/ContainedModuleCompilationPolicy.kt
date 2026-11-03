@@ -15,6 +15,8 @@ import kotlinx.serialization.json.JsonPrimitive
 /** Exact module-object compilation only. Linking and program behavior retain separate authority. */
 internal object ContainedModuleCompilationPolicy : ModuleCompilationPolicy {
     const val POLICY_ID = "generated-c-contained-module-compilation-v1"
+    private val qualificationDiagnosticsObserver = ThreadLocal<((ByteArray, ByteArray) -> Unit)?>()
+
     override val id = POLICY_ID
     override val legacyFingerprintIdentity = GeneratedCModuleValidation.POLICY_ID
     override fun requireAvailable(profile: ReconstructionProfile) {
@@ -31,7 +33,19 @@ internal object ContainedModuleCompilationPolicy : ModuleCompilationPolicy {
             listOf("-c", sourcePath, "-o", "<owned-module-object>")
     }
     override fun validate(projectDir: Path, sourcePath: String, profile: ReconstructionProfile): ModuleCompilationEvidence =
-        VerifiedContainedModuleCompilation.compile(projectDir, sourcePath, profile)
+        VerifiedContainedModuleCompilation.compile(projectDir, sourcePath, profile, qualificationDiagnosticsObserver.get())
+
+    /** Scoped test observation of compiler bytes already authenticated by the worker result. */
+    internal fun <T> withQualificationDiagnosticsObserver(
+        observer: (stdout: ByteArray, stderr: ByteArray) -> Unit,
+        action: () -> T,
+    ): T {
+        val previous = qualificationDiagnosticsObserver.get()
+        qualificationDiagnosticsObserver.set(observer)
+        return try { action() } finally {
+            if (previous == null) qualificationDiagnosticsObserver.remove() else qualificationDiagnosticsObserver.set(previous)
+        }
+    }
 }
 
 /** A same-process result issued only after real execution, result capture, and owned cleanup. */
@@ -55,7 +69,13 @@ internal class VerifiedContainedModuleCompilation private constructor(private va
     }
 
     companion object {
-        fun compile(projectDir: Path, sourcePath: String, profile: ReconstructionProfile): ModuleCompilationEvidence {
+        /**
+         * Optional caller-owned capture for qualification diagnostics. It receives only the
+         * already bounded bytes whose lengths and digests were authenticated against the worker
+         * result. A sink failure aborts before live acceptance authority is issued.
+         */
+        fun compile(projectDir: Path, sourcePath: String, profile: ReconstructionProfile,
+            diagnosticsObserver: ((stdout: ByteArray, stderr: ByteArray) -> Unit)? = null): ModuleCompilationEvidence {
             checkCancellation()
             val deadline = ContainedCommandOperationDeadline(moduleCompilerOperationWallMillis(profile))
             requireContainedModuleCompilerProfile(profile)
@@ -77,6 +97,7 @@ internal class VerifiedContainedModuleCompilation private constructor(private va
                 PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")))
             val requestPath = temporary.resolve("request.json")
             val executableSnapshotPath = temporary.resolve("compiler")
+            val trampolineSnapshotPath = temporary.resolve("trampoline")
             var launched = false
             var absenceProved = true
             var lease: FullTreeDiskScratchLease? = null
@@ -85,6 +106,7 @@ internal class VerifiedContainedModuleCompilation private constructor(private va
             var rootRemoved = false
             var releaseAttempted = false
             var primaryFailure: Throwable? = null
+            var capturedDiagnostics: Pair<ByteArray, ByteArray>? = null
             try {
                 val acquired = FullTreeDiskScratchAuthority.acquireDedicatedFilesystem(configuration.scratchMount,
                     FullTreeDiskScratchOperation(nonce, intentSha, "module-compile", configuration.configurationSha256), configuration.scratchPolicy)
@@ -108,7 +130,13 @@ internal class VerifiedContainedModuleCompilation private constructor(private va
                         sourcePath, snapshot.inputs, configuration.compilerExecutable, configuration.compilerSha256,
                         borrowed.path.resolve("reports"), minOf(profile.budgets.buildWallClockMillis, ContainedModuleCompilerRequest.MAXIMUM_WALL_MILLIS),
                         minOf(profile.budgets.buildMaximumOutputBytes, ContainedModuleCompilerRequest.MAXIMUM_OUTPUT_BYTES),
-                        profileRecord = OracleJson.parse(profile.canonicalJson().toByteArray()) as JsonObject)
+                        profileRecord = OracleJson.parse(profile.canonicalJson().toByteArray()) as JsonObject,
+                        schemaVersion = 2, trampolinePath = configuration.compilerExecHelperPath,
+                        trampolineSha256 = configuration.compilerExecHelperSha256,
+                        runtimeReadRoots = (configuration.isolation.systemLibraryMounts + configuration.compilerRuntimeMounts)
+                            .map { it.destination },
+                        runtimeExecuteRoots = listOf(configuration.compilerRuntimeExecuteRoot),
+                        runtimeExecuteFiles = configuration.compilerRuntimeExecuteFiles)
                 }
                 require(request.snapshotSha256 == snapshotSha)
                 LinuxFilesystemSyscalls.openRoot(temporary).use { directory ->
@@ -128,6 +156,14 @@ internal class VerifiedContainedModuleCompilation private constructor(private va
                     val executableSnapshot = materializeOwnedModuleCompilerSnapshot(compilerInput, executableSnapshotPath) {
                         checkCancellation(); deadline.requireCurrent()
                     }
+                    val trampolineInput = configuration.verifyCompilerExecHelper()
+                    require(configuration.compilerExecHelperSource == configuration.compilerExecHelperPath) {
+                        "contained module compiler trampoline must use one same-path authenticated runtime source"
+                    }
+                    val trampolineSnapshot = materializeOwnedModuleCompilerSnapshot(trampolineInput, trampolineSnapshotPath,
+                        label = "module compiler Landlock trampoline") {
+                        checkCancellation(); deadline.requireCurrent()
+                    }
                     snapshot.requireCurrent { deadline.requireCurrent() }
                     deadline.requireCurrent()
                     checkCancellation()
@@ -138,7 +174,8 @@ internal class VerifiedContainedModuleCompilation private constructor(private va
                             "${configuration.managerControlGroup.trimEnd('/')}/app.slice/$unit", nonce,
                             containedModuleCompilerCommand(configuration.isolation, requestPath, request),
                             mapOf("LANG" to "C.UTF-8", "LC_ALL" to "C.UTF-8", "TZ" to "UTC"),
-                            listOf(KotlinSystemdCgroupCommandInput(requestPath, request.canonicalBytes.size.toLong(), request.sha256), compilerInput, executableSnapshot),
+                            listOf(KotlinSystemdCgroupCommandInput(requestPath, request.canonicalBytes.size.toLong(), request.sha256),
+                                compilerInput, executableSnapshot, trampolineInput, trampolineSnapshot),
                             configuration.compilerRuntimeMounts,
                             KotlinSystemdCgroupCommandResources(deadline.remainingWholeSecondsMillis(60_000), 512L * 1024 * 1024,
                                 128, ContainedModuleCompilerRequest.MAXIMUM_OBJECT_BYTES,
@@ -147,13 +184,17 @@ internal class VerifiedContainedModuleCompilation private constructor(private va
                                 acquired.requireCurrentOperationRunRootAfterScopeAttachment(rootToken)
                                 snapshot.requireCurrent { deadline.requireCurrent() }
                                 configuration.verifyCompilerInput()
+                                configuration.verifyCompilerExecHelper()
                                 checkCancellation()
                                 deadline.requireCurrent()
                                 attachment = receipt.canonicalBytes
                             }, controlDirectoryName = moduleCompileControl(request.nonce),
                             readOnlyStateDirectory = checkNotNull(stateIdentity), operationDeadline = deadline,
                             requireTerminalResourceEventProof = true,
-                            executableSnapshots = listOf(ContainedCommandExecutableAlias(executableSnapshot.path, compilerInput.path)))
+                            executableSnapshots = listOf(
+                                ContainedCommandExecutableAlias(executableSnapshot.path, compilerInput.path),
+                                ContainedCommandExecutableAlias(trampolineSnapshot.path, trampolineInput.path),
+                            ))
                     } catch (failure: KotlinSystemdCgroupCommandExecutionException) {
                         // Polling sleeps clear interruption before the launcher wraps it. Keep that
                         // cancellation visible while allowing owned cleanup to run without a set flag.
@@ -191,6 +232,7 @@ internal class VerifiedContainedModuleCompilation private constructor(private va
                             stderr.size.toLong() == worker.stderrBytes && sha256(stderr) == worker.stderrSha256) {
                             "module compiler diagnostic capture differs from its result"
                         }
+                        capturedDiagnostics = stdout to stderr
                         worker.objectSha256?.let { expected ->
                             val objectBytes = readOwnedFile(directory, "reports/${ContainedModuleCompilerRequest.OBJECT_FILE}",
                                 ContainedModuleCompilerRequest.MAXIMUM_OBJECT_BYTES.toInt())
@@ -231,6 +273,13 @@ internal class VerifiedContainedModuleCompilation private constructor(private va
                 snapshot.requireCurrent { deadline.requireCurrent() }
                 deadline.requireCurrent()
                 checkCancellation()
+                capturedDiagnostics?.let { (stdout, stderr) ->
+                    diagnosticsObserver?.invoke(stdout.copyOf(), stderr.copyOf())
+                }
+                // Diagnostic collection is not part of acceptance authority. A slow or failing
+                // sink must not mint a permit after the operation's deadline or cancellation.
+                deadline.requireCurrent()
+                checkCancellation()
                 evidence.liveAuthority?.let { token ->
                     ModuleCompilerLiveAdmissions.register(token, sha256(OracleJson.canonicalBytes(proof)))
                 }
@@ -265,6 +314,7 @@ internal class VerifiedContainedModuleCompilation private constructor(private va
                 if (!launched || absenceProved) {
                     cleanup { Files.deleteIfExists(requestPath) }
                     cleanup { Files.deleteIfExists(executableSnapshotPath) }
+                    cleanup { Files.deleteIfExists(trampolineSnapshotPath) }
                     cleanup { Files.deleteIfExists(temporary) }
                 }
                 if (!failedBeforeCleanup) primaryFailure?.let { throw it }

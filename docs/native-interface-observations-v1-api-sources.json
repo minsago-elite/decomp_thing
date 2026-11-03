@@ -1,0 +1,281 @@
+{
+  "apiSources": [
+    {
+      "entry": "ghidra/program/model/listing/FunctionManager.java",
+      "entrySha256": "c8c64ffb7f08064fdbe219a4f58ea35f95be30961f531535e8cf34e50e669b35",
+      "lineRanges": [
+        {
+          "firstLine": 123,
+          "lastLine": 127
+        },
+        {
+          "firstLine": 157,
+          "lastLine": 165
+        },
+        {
+          "firstLine": 216,
+          "lastLine": 224
+        }
+      ],
+      "note": "Complete census includes external functions; getFunctions(true) alone does not.",
+      "sourceArchive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip"
+    },
+    {
+      "entry": "ghidra/program/model/listing/Function.java",
+      "entrySha256": "bdd9ec371c5eb83e0437e0df96db9d338392ef1dc69f71f24c9799a6bd0049a9",
+      "lineRanges": [
+        {
+          "firstLine": 180,
+          "lastLine": 196
+        },
+        {
+          "firstLine": 239,
+          "lastLine": 258
+        },
+        {
+          "firstLine": 487,
+          "lastLine": 506
+        },
+        {
+          "firstLine": 568,
+          "lastLine": 575
+        },
+        {
+          "firstLine": 608,
+          "lastLine": 643
+        }
+      ],
+      "note": "Raw listing signature getters. DEFAULT source, false varargs and zero parameters do not establish a known ABI signature.",
+      "sourceArchive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip"
+    },
+    {
+      "entry": "ghidra/program/model/listing/Parameter.java",
+      "entrySha256": "1fca1a278deb9dc8dcd1841f09b51c5a27a7c1ef745f4bef40a12b5ed554ece6",
+      "lineRanges": [
+        {
+          "firstLine": 25,
+          "lastLine": 64
+        }
+      ],
+      "note": "Ordinals, automatic parameter kind, forced-indirect, original formal datatype versus effective datatype.",
+      "sourceArchive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip"
+    },
+    {
+      "entry": "ghidra/program/model/listing/Variable.java",
+      "entrySha256": "816f6a9696c7cfbce9e34df3671c6783a7c6e50ae0f56440fa870fcf6a7cfb97",
+      "lineRanges": [
+        {
+          "firstLine": 35,
+          "lastLine": 41
+        },
+        {
+          "firstLine": 113,
+          "lastLine": 127
+        },
+        {
+          "firstLine": 154,
+          "lastLine": 158
+        }
+      ],
+      "note": "Raw effective datatype, source and storage getters.",
+      "sourceArchive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip"
+    },
+    {
+      "entry": "ghidra/program/model/listing/VariableStorage.java",
+      "entrySha256": "3a02bd80a45cfee177827e25634d08208bdbdd4bf91fd17e09132bc6431c4d45",
+      "lineRanges": [
+        {
+          "firstLine": 28,
+          "lastLine": 32
+        },
+        {
+          "firstLine": 40,
+          "lastLine": 73
+        },
+        {
+          "firstLine": 177,
+          "lastLine": 181
+        },
+        {
+          "firstLine": 352,
+          "lastLine": 369
+        },
+        {
+          "firstLine": 372,
+          "lastLine": 428
+        }
+      ],
+      "note": "Ordered pieces and byte-size sum; preserve BAD, UNASSIGNED and VOID distinctly.",
+      "sourceArchive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip"
+    },
+    {
+      "entry": "ghidra/program/model/data/DataType.java",
+      "entrySha256": "81630a754bacada4808721259625802e34ea333a4c21523504529075d72a2dd1",
+      "lineRanges": [
+        {
+          "firstLine": 178,
+          "lastLine": 200
+        },
+        {
+          "firstLine": 233,
+          "lastLine": 253
+        },
+        {
+          "firstLine": 256,
+          "lastLine": 275
+        },
+        {
+          "firstLine": 277,
+          "lastLine": 300
+        },
+        {
+          "firstLine": 552,
+          "lastLine": 561
+        }
+      ],
+      "note": "Root metadata only. Raw length, aligned length, alignment and definition status do not provide compound layout closure.",
+      "sourceArchive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip"
+    },
+    {
+      "entry": "ghidra/program/model/data/AbstractIntegerDataType.java",
+      "entrySha256": "6fd1336d687ddc24acecf613ea20dbab6eb1751903087a4b5c12331c74179827",
+      "lineRanges": [
+        {
+          "firstLine": 89,
+          "lastLine": 96
+        }
+      ],
+      "note": "Signedness comes only from this directly typed native API.",
+      "sourceArchive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip"
+    },
+    {
+      "entry": "ghidra/program/model/data/Undefined.java",
+      "entrySha256": "b10627f00bc0d02acb721211ed24267d24b3f938523cccd483e5302951ceb0a5",
+      "lineRanges": [
+        {
+          "firstLine": 60,
+          "lastLine": 87
+        }
+      ],
+      "note": "Native undefined-state test, including default datatypes and undefined arrays.",
+      "sourceArchive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip"
+    },
+    {
+      "entry": "ghidra/program/model/listing/AutoParameterType.java",
+      "entrySha256": "b4be7bf3512964819e6b26a5c0c3d7b769986f7683c6c697c9e8503f70132203",
+      "lineRanges": [
+        {
+          "firstLine": 20,
+          "lastLine": 35
+        }
+      ],
+      "note": "Automatic THIS and RETURN_STORAGE_PTR kinds.",
+      "sourceArchive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip"
+    },
+    {
+      "entry": "ghidra/program/model/pcode/Varnode.java",
+      "entrySha256": "e75bd933d5dbdccd083df886876cf6f5e33fb7a39f5851c1356b35009f39c1f7",
+      "lineRanges": [
+        {
+          "firstLine": 74,
+          "lastLine": 96
+        }
+      ],
+      "note": "Exact native storage address and byte size, without parsing display text.",
+      "sourceArchive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip"
+    },
+    {
+      "entry": "ghidra/program/model/address/AddressFactory.java",
+      "entrySha256": "c10b57a73df490612e2afce2bc42fe086c17901131a017e237455bca8224a3c4",
+      "lineRanges": [
+        {
+          "firstLine": 68,
+          "lastLine": 95
+        }
+      ],
+      "note": "All spaces includes analysis spaces; physical count is not the complete inventory count.",
+      "sourceArchive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip"
+    },
+    {
+      "entry": "ghidra/program/model/address/AddressSpace.java",
+      "entrySha256": "1c009f935de164af991749e384089557464f877c8b4c383ce0668ec90e24fe4f",
+      "lineRanges": [
+        {
+          "firstLine": 28,
+          "lastLine": 65
+        }
+      ],
+      "note": "Pinned native space type codes include TYPE_UNKNOWN14 (actual HASH) and TYPE_NONE15.",
+      "sourceArchive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip"
+    },
+    {
+      "entry": "ghidra/program/database/function/FunctionDB.java",
+      "entrySha256": "565d9d3bcc61f377d64434bbc5d25790a923463a5cae03e106c80abb88fe5b66",
+      "lineRanges": [
+        {
+          "firstLine": 1120,
+          "lastLine": 1136
+        },
+        {
+          "firstLine": 1182,
+          "lastLine": 1217
+        }
+      ],
+      "note": "Pinned thunk auto-count getter delegates to total parameter count. Retain raw count independently of per-parameter automatic flags.",
+      "sourceArchive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip"
+    },
+    {
+      "entry": "ghidra/program/database/function/ParameterDB.java",
+      "entrySha256": "ee58b36b3232b90266548844698e5516c919dc19a3fb2dad9ba6ca39bb8a5fc0",
+      "lineRanges": [
+        {
+          "firstLine": 45,
+          "lastLine": 82
+        }
+      ],
+      "note": "Formal versus effective datatype implementation for forced-indirect parameters.",
+      "sourceArchive": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip"
+    },
+    {
+      "entry": "ghidra/framework/model/DomainObject.java",
+      "entrySha256": "3cca4d06eb256013c3af5af721d06a204fa195e84b22dd578ae8cfba6a35f39e",
+      "lineRanges": [
+        {
+          "firstLine": 381,
+          "lastLine": 393
+        }
+      ],
+      "note": "Program modification number used to reject a changing listing snapshot even when the function census is unchanged.",
+      "sourceArchive": "Ghidra/Framework/Project/lib/Project-src.zip"
+    }
+  ],
+  "bundledVersion": "12.1.3",
+  "configuredArchiveSha256": "93a5d11a9ad510622acaaf908c556a7b9b764d338e78a7567f3689bf5081fd54",
+  "kind": "native-interface-pinned-api-source-census-v1",
+  "processorProfileFiles": [
+    {
+      "bytes": 5390,
+      "path": "Ghidra/Processors/x86/data/languages/x86.ldefs",
+      "sha256": "5d8311a8a38cc55072b250d2610ac98a5970d3e2233c97edaf21f551052eb4a0"
+    },
+    {
+      "bytes": 7474,
+      "path": "Ghidra/Processors/x86/data/languages/x86-64-win.cspec",
+      "sha256": "fc40214ffcad2080f8b468bad6738254eabeabd54231d96efe2d88cd04f19d53"
+    }
+  ],
+  "schemaVersion": 1,
+  "scope": "Review locators for recovered listing observations and authored controls; no production or oracle authority.",
+  "sourceArchives": [
+    {
+      "bytes": 3407294,
+      "path": "Ghidra/Framework/SoftwareModeling/lib/SoftwareModeling-src.zip",
+      "sha256": "fed5e47f0578b04597ead75fef77e2316a0458b9dbeeb1eb2cfa3d01472411b3"
+    },
+    {
+      "bytes": 822733,
+      "path": "Ghidra/Framework/Project/lib/Project-src.zip",
+      "sha256": "c8c9a9e6997f84a40e93ef1230e10d99b5f53ceb984ed57646b04f1549ef7f59"
+    }
+  ]
+}

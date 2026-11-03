@@ -158,9 +158,60 @@ class CompilerProvisioningControls(unittest.TestCase):
         path.chmod(0o555)
         return path
 
+    def test_compiler_include_search_evidence_is_bounded_and_pins_stddef(self):
+        include = self.root / 'gcc/include'
+        include.mkdir(parents=True)
+        mounted_include = self.runtime / 'gcc/include'
+        mounted_include.mkdir(parents=True)
+        (self.runtime / 'headers').mkdir(parents=True)
+        header = mounted_include / 'stddef.h'
+        header.write_bytes(b'authenticated standard header\n')
+        unapproved = self.root / 'unapproved/include'
+        stderr = (b'#include <...> search starts here:\n' + str(include).encode() + b'\n' +
+                  str(unapproved).encode() + b'\nEnd of search list.\n')
+        result = SimpleNamespace(returncode=0, stdout='', stderr=stderr.decode())
+        staged = self.executable('runtime/tools/cc')
+        prefix = staged.parent
+        with patch.object(PROVISIONER.subprocess, 'run', return_value=result) as run:
+            evidence = PROVISIONER.staged_compiler_include_search(staged, prefix,
+                ((self.root / 'gcc', self.runtime / 'gcc'), (Path('/usr/include'), self.runtime / 'headers')))
+        self.assertEqual(0, evidence['exitCode'])
+        self.assertEqual([str(include), str(unapproved)], evidence['searchPaths'])
+        self.assertEqual([{'searchPath': str(include), 'mountedPath': str(header), 'bytes': len(header.read_bytes()),
+                           'sha256': hashlib.sha256(header.read_bytes()).hexdigest()}], evidence['stddefCandidates'])
+        self.assertIn('-B' + str(prefix) + '/', run.call_args.args[0])
+        with self.assertRaisesRegex(ValueError, 'complete include-search list'):
+            PROVISIONER.parse_gcc_include_search_paths(b'no compiler diagnostics')
+        with self.assertRaisesRegex(ValueError, 'canonical and absolute'):
+            PROVISIONER.parse_gcc_include_search_paths(
+                b'#include <...> search starts here:\nrelative/include\nEnd of search list.\n')
+        with self.assertRaisesRegex(ValueError, 'byte bound'):
+            PROVISIONER.parse_gcc_include_search_paths(b'x' * (1024 * 1024 + 1))
+
     def args(self):
         return SimpleNamespace(uid=1000, gid=1000, module_worker_classpath=None,
+                               module_compiler_exec_helper=None, module_compiler_exec_helper_sha256=None,
                                run_id='fixture-run', gate_helper='unused', gate_sha256='0' * 64)
+
+    def test_pinned_module_trampoline_is_copied_only_after_identity_and_digest_recheck(self):
+        build_root = ROOT / 'build'
+        source = build_root / 'task-tmp' / f'module-helper-{self.root.name}'
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(b'fixed native helper bytes')
+        source.chmod(0o555)
+        self.addCleanup(source.unlink, missing_ok=True)
+        target_dir = self.runtime / 'tools'
+        target_dir.mkdir(parents=True)
+        expected = hashlib.sha256(source.read_bytes()).hexdigest()
+        installed = target_dir / 'decomp-module-compiler-exec'
+        result = PROVISIONER.copy_pinned_module_exec_helper(str(source), expected, build_root, installed, os.getuid())
+        self.assertEqual(source.read_bytes(), installed.read_bytes())
+        self.assertEqual(0o555, stat.S_IMODE(installed.stat().st_mode))
+        self.assertEqual(expected, result['sha256'])
+        rejected = target_dir / 'substituted-helper'
+        with self.assertRaises(ValueError):
+            PROVISIONER.copy_pinned_module_exec_helper(str(source), '0' * 64, build_root, rejected, os.getuid())
+        self.assertFalse(rejected.exists())
 
     def test_discovers_and_copies_exact_subprograms_from_both_gcc_layouts(self):
         for layout in ('lib', 'libexec'):

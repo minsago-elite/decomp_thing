@@ -1,5 +1,6 @@
 import type { Report, ValidationOwner } from '../api/generated';
 import { decodeResponse } from '../api/decode';
+import { validationExportLimitations } from '../copy/attempt';
 
 export const MAX_VALIDATION_EXPORT_BYTES = 192 * 1024;
 
@@ -39,11 +40,7 @@ export function validationPageDownload(report: Report, selected: SelectedValidat
     const encoder = new TextEncoder(), cases = value.validationCases, failure = value.validationFailure;
     const text = JSON.stringify({ format: 'decomp-recorded-validation-observation', exportSchemaVersion: 1,
       scope: cases ? 'selected-case-page' : 'selected-failure-diagnostic',
-      limitations: ['This export contains the selected observation only, not a complete receipt or every case page.',
-        'A compact full-corpus mismatch index may be included; unselected case details and full outputs are not included.',
-        'Output previews are bounded prefixes; comparison flags describe the retained full-byte observations.',
-        'Failure labels and completed-pair counts are producer reports, not inferred per-case outcomes.',
-        'This export grants no acceptance, authentication, containment or equivalence qualification.'],
+      limitations: validationExportLimitations,
       reportId: value.reportId, binding: value.binding, producerSchemaVersion: value.producerSchemaVersion,
       authority: value.authority, acceptance: value.acceptance, summary: value.summary,
       validationCases: cases ?? null, validationFailure: failure ?? null }, null, 2) + '\n';

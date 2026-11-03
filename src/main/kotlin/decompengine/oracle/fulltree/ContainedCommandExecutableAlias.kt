@@ -14,7 +14,17 @@ internal fun requireContainedCommandExecutableAliases(
     inputs: List<KotlinSystemdCgroupCommandInput>,
     aliases: List<ContainedCommandExecutableAlias>,
 ) {
-    require(aliases.size <= 1) { "contained command permits at most one pinned executable alias" }
+    require(aliases.size <= 2) { "contained command permits at most two pinned executable aliases" }
+    require(aliases.map { it.source }.distinct().size == aliases.size) { "executable aliases have duplicate runtime sources" }
+    require(aliases.map { it.destination }.distinct().size == aliases.size) { "executable aliases have duplicate destinations" }
+    for (leftIndex in aliases.indices) for (rightIndex in leftIndex + 1 until aliases.size) {
+        val left = aliases[leftIndex]
+        val right = aliases[rightIndex]
+        require(left.source != right.destination && left.destination != right.source &&
+            !left.destination.startsWith(right.destination) && !right.destination.startsWith(left.destination)) {
+            "executable aliases have chained or overlapping destinations"
+        }
+    }
     aliases.forEach { alias ->
         require(alias.source != alias.destination) { "executable snapshot must differ from its runtime source" }
         val source = inputs.single { it.path == alias.source }
@@ -30,3 +40,12 @@ internal fun requireContainedCommandExecutableAliases(
         }
     }
 }
+
+/** Keep historical runtime-closure names byte-stable as alias cardinality grows. */
+internal fun containedCommandRuntimeProvider(baseProvider: String, aliases: List<ContainedCommandExecutableAlias>): String =
+    when (aliases.size) {
+        0 -> baseProvider
+        1 -> "kotlin-lease-contained-command-runtime-owned-executable-v1"
+        2 -> "kotlin-lease-contained-command-runtime-owned-executable-v2"
+        else -> throw IllegalArgumentException("contained command permits at most two pinned executable aliases")
+    }

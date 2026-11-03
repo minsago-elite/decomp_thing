@@ -63,8 +63,10 @@ fixture family, and no live remote or production workflow is qualified here.
 
 ## Git adapter extension contract
 
-The current production v1 dispatcher has no managed repository/worktree Git
-operations. The [architecture](web-architecture.md) and
+The server-owned process adapter now exists in `decompengine.git` (see
+[Server-owned Git adapter](web-api.md#server-owned-git-adapter)); its Kotlin tests
+build their own temporary repositories rather than these Node fixtures. The
+[architecture](web-architecture.md) and
 [versioned API contract](web-api.md#git-object-and-revision-binding) define the
 implementation boundary below. The fixture factories above supply isolated
 histories and a fake provider for that work; current schema availability does not

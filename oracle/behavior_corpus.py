@@ -634,7 +634,10 @@ def _read_regular_snapshot(
     require_executable: bool = False,
 ) -> bytes:
     descriptor: int | None = None
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    # A FIFO must not block before fstat can reject its type. O_NONBLOCK does
+    # not change regular-file reads, and the descriptor identity checks below
+    # still guard every byte read (including a pathname substitution at open).
+    flags = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(path, flags)
         before = os.fstat(descriptor)

@@ -337,6 +337,32 @@ class ContainedCommandFileDescriptorPolicyTest {
     }
 
     @Test
+    fun `runtime serializer preserves one-alias v1 and requires exactly two aliases for v2`() {
+        val base = runtime(request())
+        fun owned(provider: String, aliases: JsonArray) = JsonObject(base + mapOf(
+            "provider" to JsonPrimitive(provider),
+            "baseRuntimeProvider" to JsonPrimitive("kotlin-lease-contained-command-runtime-v5"),
+            "executableAliases" to aliases,
+        ))
+        fun alias(source: String, destination: String) = JsonObject(mapOf(
+            "source" to JsonPrimitive(source), "destination" to JsonPrimitive(destination)))
+        val one = owned("kotlin-lease-contained-command-runtime-owned-executable-v1",
+            JsonArray(listOf(alias("/private/compiler", "/runtime/compiler"))))
+        val two = owned("kotlin-lease-contained-command-runtime-owned-executable-v2", JsonArray(listOf(
+            alias("/private/compiler", "/runtime/compiler"), alias("/private/trampoline", "/runtime/trampoline"))))
+        assertContentEquals(OracleJson.canonicalBytes(one), containedCommandFileDescriptorRuntimeBytes(one))
+        assertContentEquals(OracleJson.canonicalBytes(two), containedCommandFileDescriptorRuntimeBytes(two))
+        assertFails { containedCommandFileDescriptorRuntimeBytes(owned(
+            "kotlin-lease-contained-command-runtime-owned-executable-v1", JsonArray(emptyList()))) }
+        assertFails { containedCommandFileDescriptorRuntimeBytes(owned(
+            "kotlin-lease-contained-command-runtime-owned-executable-v1", JsonArray(listOf(
+                alias("/private/compiler", "/runtime/compiler"), alias("/private/trampoline", "/runtime/trampoline"))))) }
+        val oneAliasOnly = owned("kotlin-lease-contained-command-runtime-owned-executable-v2",
+            JsonArray(listOf(alias("/private/compiler", "/runtime/compiler"))))
+        assertFails { containedCommandFileDescriptorRuntimeBytes(oneAliasOnly) }
+    }
+
+    @Test
     fun `execution runtime accessor snapshots constructor bytes and returns defensive copies`() {
         val receipt = byteArrayOf(1, 2, 3)
         val runtime = containedCommandFileDescriptorRuntimeBytes(runtime(request()))
