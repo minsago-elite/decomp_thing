@@ -1,6 +1,7 @@
 export const logCopy = {
   title: 'Build log',
   boundary: 'The recorded build log of this attempt, as plain text. Credentials and private host paths are redacted (policy {policy}); the download applies the same policy. Log text does not establish validation or acceptance.',
+  redactionPolicy: 'web-log-v1',
   loading: 'Reading the build log.',
   missing: 'This attempt has no recorded build log yet.',
   checkAgain: 'Check again',

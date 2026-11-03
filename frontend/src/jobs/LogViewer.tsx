@@ -180,7 +180,7 @@ export function LogViewer({ jobId, runId, basePath }: { jobId: string; runId: st
   const meta = buffer?.meta;
   return <section aria-labelledby="log-title" aria-busy={status.state === 'loading'}>
     <h2 id="log-title">{copy.title}</h2>
-    <p>{displayMessage(copy.boundary, { policy: <code>web-log-v1</code> })}</p>
+    <p>{displayMessage(copy.boundary, { policy: <code>{copy.redactionPolicy}</code> })}</p>
     {status.state === 'loading' && <p role="status">{copy.loading}</p>}
     {status.state === 'missing' && <>
       <p role="status">{copy.missing}</p>
