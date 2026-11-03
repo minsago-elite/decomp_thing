@@ -1098,6 +1098,20 @@ class AcpAgentHarnessTest {
             assertEquals(0, result.build.returnCode)
             assertTrue(requireNotNull(result.bundle.audit).unresolvedEntityIds.isEmpty())
             assertTrue(requireNotNull(harness.latestAcpExecutionEvidence()).sandboxEvidence.networkIsolated)
+            val filesystemAudit = harness.latestFilesystemAudit()
+            assertEquals(List(5) { "fs/read_text_file" } + List(2) { "fs/write_text_file" },
+                filesystemAudit.map { it.method })
+            assertTrue(filesystemAudit.take(5).all {
+                it.outcome == AcpFilesystemAuditOutcome.DENIED && it.reason == AcpFilesystemAuditReason.CAPABILITY_DISABLED
+            }, "inline interfaces, owned source and unrelated reports must not be readable")
+            val deniedBuildWrite = filesystemAudit[5]
+            assertEquals("Makefile", assertNotNull(deniedBuildWrite.policyPath).relativePath)
+            assertEquals(AcpFilesystemAuditOutcome.DENIED, deniedBuildWrite.outcome)
+            assertEquals(AcpFilesystemAuditReason.POLICY_DENIED, deniedBuildWrite.reason)
+            val ownedSourceWrite = filesystemAudit[6]
+            assertEquals(implementationPath, assertNotNull(ownedSourceWrite.policyPath).relativePath)
+            assertEquals(AcpFilesystemAuditOutcome.ALLOWED, ownedSourceWrite.outcome)
+            assertEquals(AcpFilesystemAuditReason.COMPLETED, ownedSourceWrite.reason)
             val extracted = temp.resolve("${base.id}-extracted")
             ArchivalBundleVerifier.extractAndVerify(result.bundle.archivePath, extracted, profile = profile)
             val rebuilt = ReconstructionAdapters.resolve(profile).build(extracted, profile)

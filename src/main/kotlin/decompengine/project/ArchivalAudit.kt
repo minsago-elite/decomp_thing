@@ -20,6 +20,13 @@ import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.util.Locale
 
+/** Fingerprint contracts are versioned with the built-in reconstruction request contract. */
+internal fun archivedModuleInputFingerprintProvider(reconstructorIdentity: String): String =
+    if (reconstructorIdentity.matches(Regex(
+        "agent:.*:context-[1-9][0-9]*:factory-(?:[0-9a-f]{64}|unbound):v4",
+        RegexOption.DOT_MATCHES_ALL,
+    ))) "module-reconstruction-input-v3" else "module-reconstruction-input-v2"
+
 private const val MAXIMUM_AUDIT_REPORT_DEPTH = 32
 private const val MAXIMUM_AUDIT_REPORT_SCAN_ENTRIES = 1_000_000
 private val REPAIR_ATOMIC_TEMPORARY_NAME =
@@ -438,6 +445,7 @@ object ArchivalProjectAuditor {
         val fallbackSourcePaths = linkedMapOf<String, String>()
         val acceptedSourcePaths = linkedMapOf<String, String>()
         val acceptedInputFingerprints = linkedMapOf<String, String>()
+        val acceptedInputFingerprintProviders = linkedMapOf<String, String>()
         val plannedModuleEntityIds = linkedMapOf<String, List<String>>()
         val repairState = lazy {
             verifiedAuditRepairLineage(projectDir, profile, manifest, manifestSizes, totalBytes, effectiveLimits).also {
@@ -544,6 +552,8 @@ object ArchivalProjectAuditor {
                     }
                     require(checkpoint.string("sourceSha256") == hashes.getValue(source)) { "module checkpoint does not bind the current source" }
                     acceptedInputFingerprints[identifier] = checkpoint.string("fingerprint")
+                    acceptedInputFingerprintProviders[identifier] =
+                        archivedModuleInputFingerprintProvider(checkpoint.string("reconstructorIdentity"))
                     val compilation = checkpoint.getValue("compilation").jsonObject
                     require(compilation.string("sourceSha256") == hashes.getValue(source)) { "compiler evidence does not bind the current source" }
                     require(compilation.string("outcome") == "passed" && compilation.getValue("returnCode") == JsonPrimitive(0)) {
@@ -675,7 +685,8 @@ object ArchivalProjectAuditor {
                             revision.string("sourcePath") == (acceptedSourcePaths[id] ?: fallbackSourcePaths.getValue(id)) &&
                             revision.string("sourceSha256") == checkpoint.string("sourceSha256") &&
                             revision.string("inputFingerprint") == checkpoint.string("fingerprint") &&
-                            revision.string("inputFingerprintProvider") == "module-reconstruction-input-v2" &&
+                            revision.string("inputFingerprintProvider") ==
+                                archivedModuleInputFingerprintProvider(checkpoint.string("reconstructorIdentity")) &&
                             revision.string("inputBinarySha256") == model.inputSha256 &&
                             revision.getValue("modelSchemaVersion") == JsonPrimitive(model.schemaVersion) &&
                             revision.string("checkpointPath") == checkpointPath &&
@@ -723,7 +734,7 @@ object ArchivalProjectAuditor {
                     require(revision.string("sourcePath") == source &&
                         revision.string("sourceSha256") == moduleRevisions.getValue(id) &&
                         revision.string("inputFingerprint") == acceptedInputFingerprints.getValue(id) &&
-                        revision.string("inputFingerprintProvider") == "module-reconstruction-input-v2" &&
+                        revision.string("inputFingerprintProvider") == acceptedInputFingerprintProviders.getValue(id) &&
                         revision.string("inputBinarySha256") == model.inputSha256 &&
                         revision.getValue("modelSchemaVersion") == JsonPrimitive(model.schemaVersion) &&
                         revision.string("checkpointPath") == checkpoint &&

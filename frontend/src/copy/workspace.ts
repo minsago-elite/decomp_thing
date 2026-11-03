@@ -15,6 +15,8 @@ export const dashboardCopy = {
   "allStates": "All states",
   "createdAtOrAfter": "Created at or after",
   "createdBefore": "Created before",
+  createdAfterExample: '2026-09-05T00:00:00Z',
+  createdBeforeExample: '2026-09-06T00:00:00Z',
   "sortBy": "Sort by",
   "archivedJobs": "Archived jobs",
   "hideArchived": "Hidden",

@@ -1,5 +1,6 @@
 package decompengine.oracle.gcc
 
+import decompengine.oracle.fulltree.ContainedCommandOperationDeadline
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.StrictJsonLimits
@@ -432,12 +433,13 @@ class GccDriverStructuralProfileTest {
             ))
             val execution = OracleJson.canonicalBytes(JsonObject(executionFields +
                 ("executionSha256" to JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(executionFields))))))
+            val deadline = ContainedCommandOperationDeadline(60_000)
             assertFailsWith<IllegalStateException> {
-                GccBundledStructuralReplayOperation(driver, exported, request, capture, attachment, execution, Any())
+                GccBundledStructuralReplayOperation(driver, exported, request, capture, attachment, execution, deadline, Any())
             }
             val permit = Class.forName("decompengine.oracle.gcc.GCC_BUNDLED_PREPARED_OPERATION_PERMIT")
                 .getDeclaredField("INSTANCE").also { it.isAccessible = true }.get(null)
-            val operation = GccBundledStructuralReplayOperation(driver, exported, request, capture, attachment, execution, permit)
+            val operation = GccBundledStructuralReplayOperation(driver, exported, request, capture, attachment, execution, deadline, permit)
             val verified = StructuralReplayAdapterRegistry.production.admitSelectedBoundary(operation)
             assertEquals(exported.programModelSha256, verified.programModelSha256)
             assertEquals(setOf(StructuralReplayDomainV1.MODEL_PROVENANCE, StructuralReplayDomainV1.FUNCTION_BOUNDARIES,
@@ -462,6 +464,17 @@ class GccDriverStructuralProfileTest {
             assertEquals(JsonPrimitive(false), accuracy["benchmarkAccepted"])
             assertEquals(JsonPrimitive(6), accuracyScore.getValue("measurements").jsonObject
                 .getValue("survivingSymbolIdentity").jsonObject["population"])
+            val selectedAssessment = StructuralProductionReplayContract.assessSelectedFunctions(verified)
+            val selected = OracleJson.parseCanonical(selectedAssessment,
+                StructuralProductionReplayContract.FUNCTION_ACCURACY_LIMITS).jsonObject
+            assertEquals(JsonPrimitive("passive-derived-overlay"), selected["authority"])
+            assertEquals(JsonPrimitive("unassessed"), selected["recoveryAssessmentState"])
+            assertEquals(JsonPrimitive(exported.programModelSha256),
+                selected.getValue("bindings").jsonObject["programModelSha256"])
+            assertEquals(JsonPrimitive(OracleArtifacts.sha256(score)),
+                selected.getValue("bindings").jsonObject["selectedBoundaryScoreSha256"])
+            selectedAssessment[0] = 0
+            assertTrue(StructuralProductionReplayContract.assessSelectedFunctions(verified)[0] != 0.toByte())
             accuracyBytes[0] = 0
             assertTrue(GccDriverProductionFunctionAccuracyV1.create(verified)[0] != 0.toByte())
             score[0] = 0
@@ -473,17 +486,31 @@ class GccDriverStructuralProfileTest {
             val other = driver.captureFullExport(fullOperation(driver, fullSnapshot(driver, otherModel)))
             assertFailsWith<IllegalArgumentException> {
                 StructuralReplayAdapterRegistry.production.admitSelectedBoundary(
-                    GccBundledStructuralReplayOperation(driver, other, request, capture, attachment, execution, permit))
+                    GccBundledStructuralReplayOperation(driver, other, request, capture, attachment, execution, deadline, permit))
             }
             assertFailsWith<IllegalArgumentException> {
                 StructuralReplayAdapterRegistry.production.admitSelectedBoundary(
-                    GccBundledStructuralReplayOperation(profile(), exported, request, capture, attachment, execution, permit))
+                    GccBundledStructuralReplayOperation(profile(), exported, request, capture, attachment, execution, deadline, permit))
             }
             val changed = observation.copyOf().also { it[0] = 0 }
             assertFailsWith<IllegalArgumentException> {
                 StructuralReplayAdapterRegistry.production.admitSelectedBoundary(GccBundledStructuralReplayOperation(
                     driver, exported, request, GccBundledStructuralReplayCapture(changed, metadata, "{}\n".toByteArray()),
-                    attachment, execution, permit))
+                    attachment, execution, deadline, permit))
+            }
+            var clockNanos = 0L
+            val expiring = ContainedCommandOperationDeadline(2_000) { clockNanos }
+            val expiredOperation = GccBundledStructuralReplayOperation(driver, exported, request, capture,
+                attachment, execution, expiring, permit)
+            clockNanos = 2_000_000_000L
+            assertFailsWith<IllegalStateException> {
+                StructuralReplayAdapterRegistry.production.admitSelectedBoundary(expiredOperation)
+            }
+            Thread.currentThread().interrupt()
+            try {
+                assertFailsWith<InterruptedException> { operation.requireCurrent() }
+            } finally {
+                Thread.interrupted()
             }
         } finally {
             directory.toFile().deleteRecursively()

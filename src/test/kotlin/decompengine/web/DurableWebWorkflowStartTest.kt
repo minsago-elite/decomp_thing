@@ -9,6 +9,7 @@ import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Clock
+import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
 import java.util.concurrent.Executors
@@ -163,6 +164,89 @@ class DurableWebWorkflowStartTest {
                     assertIs<WebQueuePosition.NotQueued>(service.queuePosition(jobs[0].id, first.attempt.runId)).state)
                 assertCode("RUN_NOT_FOUND") { service.queuePosition(jobs[1].id, first.attempt.runId) }
             } finally { release.countDown() }
+        }
+    }
+
+    @Test
+    fun `sole queued task removed during snapshot never escapes as an exception`() {
+        val sampling = CountDownLatch(1); val removed = CountDownLatch(1)
+        val pool = Executors.newSingleThreadExecutor()
+        // Model the same legal dequeue after size=1 that breaks Kotlin toList's singleton path.
+        val queue = object : ArrayBlockingQueue<Runnable>(1) {
+            private fun awaitRemoval() {
+                sampling.countDown()
+                check(removed.await(5, TimeUnit.SECONDS))
+            }
+            override val size: Int get() = super.size.also { awaitRemoval() }
+            override fun <T> toArray(array: Array<T>): Array<T> {
+                awaitRemoval()
+                return super.toArray(array)
+            }
+        }
+        val task = Runnable { error("observation must not execute tasks") }
+        queue.add(task)
+        val dequeue = pool.submit {
+            check(sampling.await(5, TimeUnit.SECONDS))
+            try { assertSame(task, queue.remove()) } finally { removed.countDown() }
+        }
+        try {
+            assertTrue(snapshotWebWorkflowQueue(queue).isEmpty())
+            dequeue.get(5, TimeUnit.SECONDS)
+        } finally { removed.countDown(); pool.shutdownNow() }
+    }
+
+    @Test
+    fun `queue observer completes while unrelated work holds the service monitor`() = withRoot { root ->
+        val store = JobStore(root); val job = store.createFromUpload("observer.elf", elfFixture())
+        val other = store.createFromUpload("foreign-observer.elf", elfFixture())
+        val queued = mutableListOf<Runnable>()
+        service(store, executor = Executor(queued::add)).use { service ->
+            service.initializeExistingStorage()
+            val run = service.requestDurableStart(job.id, version(service, job.id), REQUEST, KEY).attempt
+            val held = CountDownLatch(1); val release = CountDownLatch(1)
+            val pool = Executors.newFixedThreadPool(2)
+            val holder = pool.submit {
+                synchronized(service) { held.countDown(); check(release.await(10, TimeUnit.SECONDS)) }
+            }
+            try {
+                assertTrue(held.await(5, TimeUnit.SECONDS))
+                val sample = pool.submit<WebQueuePosition> { service.queuePosition(job.id, run.runId) }
+                assertEquals("EXTERNAL_EXECUTOR", assertIs<WebQueuePosition.Unavailable>(sample.get(5, TimeUnit.SECONDS)).reasonCode)
+                val foreign = pool.submit { assertCode("RUN_NOT_FOUND") { service.queuePosition(other.id, run.runId) } }
+                foreign.get(5, TimeUnit.SECONDS)
+                assertEquals(1L, release.count, "monitor must still be held when observation completes")
+            } finally { release.countDown(); holder.get(5, TimeUnit.SECONDS); pool.shutdownNow() }
+        }
+    }
+
+    @Test
+    fun `queue observer preserves initialization shutdown and absent-storage guards`() = withRoot { root ->
+        val absent = root.resolve("absent-observer")
+        val service = service(JobStore(absent))
+        assertCode("SERVICE_NOT_INITIALIZED") { service.queuePosition("f".repeat(32), "run_unknown") }
+        service.use {
+            service.initializeExistingStorage()
+            assertCode("JOB_NOT_FOUND") { service.queuePosition("f".repeat(32), "run_unknown") }
+            assertFalse(Files.exists(absent), "an observer must not acquire storage")
+        }
+        assertCode("SERVICE_STOPPED") { service.queuePosition("f".repeat(32), "run_unknown") }
+        assertFalse(Files.exists(absent), "a stopped observer must not reacquire storage")
+    }
+
+    @Test
+    fun `queue observer refuses a job quarantined by uncertain terminal publication`() = withRoot { root ->
+        val store = JobStore(root); val job = store.createFromUpload("quarantined-observer.elf", elfFixture())
+        val queued = mutableListOf<Runnable>(); val armed = AtomicBoolean()
+        service(store, listOf(adapter { armed.set(true); DurableWebWorkflowOutcome.Completed() }), Executor(queued::add),
+            fault = WorkflowStoreFaultInjector {
+                if (it == WorkflowStoreFaultPoint.AFTER_RENAME && armed.compareAndSet(true, false))
+                    throw IOException("authored terminal publication failure")
+            }).use { service ->
+            service.initializeExistingStorage()
+            val run = service.requestDurableStart(job.id, version(service, job.id), REQUEST, KEY).attempt
+            assertIs<WebQueuePosition.Unavailable>(service.queuePosition(job.id, run.runId))
+            assertCode("RECOVERY_REQUIRED") { queued.single().run() }
+            assertCode("RECOVERY_REQUIRED") { service.queuePosition(job.id, run.runId) }
         }
     }
 

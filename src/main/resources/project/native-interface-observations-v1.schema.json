@@ -1,0 +1,679 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/minsago-elite/decomp_thing/native-interface-observations-v1.schema.json",
+  "title": "Recovered native listing-interface observations (no oracle or scoring authority)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "addressSpaces",
+    "bindings",
+    "policy",
+    "records",
+    "schemaVersion",
+    "summary"
+  ],
+  "properties": {
+    "addressSpaces": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "$ref": "#/$defs/addressSpace"
+      },
+      "minItems": 1
+    },
+    "bindings": {
+      "$ref": "#/$defs/bindings"
+    },
+    "policy": {
+      "const": "ghidra-native-interface-observations-v1"
+    },
+    "records": {
+      "type": "array",
+      "maxItems": 655360,
+      "items": {
+        "oneOf": [
+          {
+            "$ref": "#/$defs/function"
+          },
+          {
+            "$ref": "#/$defs/type"
+          }
+        ]
+      }
+    },
+    "schemaVersion": {
+      "const": 1
+    },
+    "summary": {
+      "$ref": "#/$defs/summary"
+    }
+  },
+  "$defs": {
+    "address": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/locatedAddress"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "no-address"
+            }
+          }
+        }
+      ]
+    },
+    "locatedAddress": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "spaceIndex",
+        "offsetBits"
+      ],
+      "properties": {
+        "spaceIndex": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "offsetBits": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{16}$"
+        },
+        "kind": {
+          "const": "address"
+        }
+      }
+    },
+    "addressSpace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "index",
+        "name",
+        "type",
+        "sizeBits",
+        "addressableUnitSize",
+        "overlay",
+        "signedOffsets"
+      ],
+      "properties": {
+        "index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "type": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 15
+        },
+        "sizeBits": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64
+        },
+        "addressableUnitSize": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        },
+        "overlay": {
+          "type": "boolean"
+        },
+        "signedOffsets": {
+          "type": "boolean"
+        }
+      }
+    },
+    "bindings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "collectorSha256",
+        "compilerSpecId",
+        "ghidraArchiveSha256",
+        "imageBase",
+        "inputSha256",
+        "languageId",
+        "programModelBytes",
+        "programModelExporterSha256",
+        "programModelSha256"
+      ],
+      "properties": {
+        "collectorSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "compilerSpecId": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "ghidraArchiveSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "imageBase": {
+          "$ref": "#/$defs/locatedAddress"
+        },
+        "inputSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "languageId": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "programModelBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 536870912
+        },
+        "programModelExporterSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "programModelSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "storage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "size",
+        "autoStorage",
+        "autoParameterType",
+        "forcedIndirect",
+        "varnodes"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "assigned",
+            "bad",
+            "unassigned",
+            "void",
+            "absent"
+          ]
+        },
+        "size": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 2147483647
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "autoStorage": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "autoParameterType": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 4096
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "forcedIndirect": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "varnodes": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "address",
+              "size"
+            ],
+            "properties": {
+              "address": {
+                "$ref": "#/$defs/locatedAddress"
+              },
+              "size": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 2147483647
+              }
+            }
+          }
+        }
+      }
+    },
+    "parameter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ordinal",
+        "name",
+        "source",
+        "autoParameter",
+        "autoParameterType",
+        "forcedIndirect",
+        "formalType",
+        "effectiveType",
+        "storage"
+      ],
+      "properties": {
+        "ordinal": {
+          "type": "integer",
+          "minimum": -1,
+          "maximum": 1023
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 4096
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source": {
+          "anyOf": [
+            {
+              "enum": [
+                "DEFAULT",
+                "ANALYSIS",
+                "AI",
+                "IMPORTED",
+                "USER_DEFINED"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "autoParameter": {
+          "type": "boolean"
+        },
+        "autoParameterType": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 4096
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "forcedIndirect": {
+          "type": "boolean"
+        },
+        "formalType": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 524287
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "effectiveType": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 524287
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "storage": {
+          "$ref": "#/$defs/storage"
+        }
+      }
+    },
+    "function": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "recordKind",
+        "entry",
+        "name",
+        "isExternal",
+        "isThunk",
+        "immediateThunkTarget",
+        "signatureSource",
+        "convention",
+        "varArgs",
+        "customStorage",
+        "parameterCount",
+        "autoParameterCount",
+        "return",
+        "parameters",
+        "highFunction"
+      ],
+      "properties": {
+        "recordKind": {
+          "const": "function"
+        },
+        "entry": {
+          "$ref": "#/$defs/locatedAddress"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "isExternal": {
+          "type": "boolean"
+        },
+        "isThunk": {
+          "type": "boolean"
+        },
+        "immediateThunkTarget": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/locatedAddress"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "signatureSource": {
+          "enum": [
+            "DEFAULT",
+            "ANALYSIS",
+            "AI",
+            "IMPORTED",
+            "USER_DEFINED"
+          ]
+        },
+        "convention": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "name",
+            "resolvedModel",
+            "state"
+          ],
+          "properties": {
+            "name": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 4096
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "resolvedModel": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 4096
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "state": {
+              "enum": [
+                "unknown",
+                "default",
+                "named-resolved",
+                "named-unresolved"
+              ]
+            }
+          }
+        },
+        "varArgs": {
+          "type": "boolean"
+        },
+        "customStorage": {
+          "type": "boolean"
+        },
+        "parameterCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1024
+        },
+        "autoParameterCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1024
+        },
+        "return": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/parameter"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "parameters": {
+          "type": "array",
+          "maxItems": 1024,
+          "items": {
+            "$ref": "#/$defs/parameter"
+          }
+        },
+        "highFunction": {
+          "const": "not-captured"
+        }
+      }
+    },
+    "type": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "recordKind",
+        "ordinal",
+        "kind",
+        "nativeClass",
+        "name",
+        "path",
+        "length",
+        "alignedLength",
+        "alignment",
+        "undefined",
+        "notYetDefined",
+        "signedness",
+        "layout",
+        "typeClosure"
+      ],
+      "properties": {
+        "recordKind": {
+          "const": "type"
+        },
+        "ordinal": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 524287
+        },
+        "kind": {
+          "enum": [
+            "void",
+            "undefined",
+            "integer",
+            "float",
+            "pointer",
+            "array",
+            "structure",
+            "union",
+            "enum",
+            "typedef",
+            "function-definition",
+            "other"
+          ]
+        },
+        "nativeClass": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "path": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "length": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        "alignedLength": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        "alignment": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        "undefined": {
+          "type": "boolean"
+        },
+        "notYetDefined": {
+          "type": "boolean"
+        },
+        "signedness": {
+          "anyOf": [
+            {
+              "enum": [
+                "signed",
+                "unsigned"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "layout": {
+          "const": "not-captured"
+        },
+        "typeClosure": {
+          "const": "not-captured"
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "coverage",
+        "functions",
+        "internalFunctions",
+        "externalFunctions",
+        "thunks",
+        "parameters",
+        "autoParameters",
+        "types",
+        "storageVarnodes",
+        "highFunction",
+        "typeClosure",
+        "abiClassification"
+      ],
+      "properties": {
+        "coverage": {
+          "const": "all-currently-listed-internal-and-external-functions"
+        },
+        "functions": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 131072
+        },
+        "internalFunctions": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 131072
+        },
+        "externalFunctions": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 131072
+        },
+        "thunks": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 131072
+        },
+        "parameters": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "autoParameters": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "types": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 524288
+        },
+        "storageVarnodes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "highFunction": {
+          "const": "not-captured"
+        },
+        "typeClosure": {
+          "const": "not-captured"
+        },
+        "abiClassification": {
+          "const": "not-captured"
+        }
+      }
+    }
+  }
+}
