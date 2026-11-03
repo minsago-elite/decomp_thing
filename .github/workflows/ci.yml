@@ -60,7 +60,9 @@ jobs:
           npm --prefix frontend ci --ignore-scripts --no-audit --no-fund
           python3 -m pip install --requirement requirements/oracle-generation.txt
       - name: Verify packaged upgrade and cache evidence controls
-        run: node scripts/test-packaged-browser-upgrade.mjs
+        run: |
+          node scripts/test-packaged-browser-upgrade.mjs
+          node --test scripts/packaged-browser-restart.test.mjs
       - name: Verify packaged accessibility and asset audit controls
         run: |
           node scripts/test-packaged-browser-audit.mjs
@@ -179,6 +181,7 @@ jobs:
           "$RUNNER_TEMP/web-test-browser/chrome" --version | tee build/packaged-web-ci/browser-version.txt
           python3 scripts/test-packaged-browser-install.py
           node --check scripts/check-packaged-web-browser.mjs
+          node --check scripts/packaged-browser-restart.mjs
           node --test scripts/packaged-browser-upload.test.mjs
       - name: Build archives and verify browser expiry and distribution contents
         env:
@@ -250,6 +253,12 @@ jobs:
             --archive "$WEB_TEST_ARCHIVE" \
             --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
             --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode scale --no-sandbox
+      - name: Exercise same-origin JVM restart and two-tab stale progress pin
+        run: |
+          node scripts/check-packaged-web-browser.mjs \
+            --archive "$WEB_TEST_ARCHIVE" \
+            --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
+            --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode restart --no-sandbox
       - name: Audit packaged routes for reflow, contrast, focus, assets under CSP and timing
         run: |
           node scripts/check-packaged-web-browser.mjs \

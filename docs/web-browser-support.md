@@ -145,3 +145,10 @@ and run `--mode upgrade` with the HTTP cache enabled against two complete distin
 The cache-observation helper and its controls exist, but no CI job builds a second package. The
 missing implementation and the unexecuted two-package qualification are separate gaps; existing
 asset/API recovery checks do not close either one.
+
+
+## Restart and two-tab qualification (`--mode restart`)
+
+The packaged Chromium mode covers the remaining browser journeys for [#525](https://github.com/minsago-elite/decomp_thing/issues/525) and [#526](https://github.com/minsago-elite/decomp_thing/issues/526). It seeds an inert retained run, restarts the packaged JVM with SIGTERM on the same port and data directory, then checks explicit session re-entry, durable state reconciliation, background-tab request suspension, survivor streaming and stale progress-pin rejection with an actual 412 response. The run records a sanitized report and screenshots in `packaged-web-verification`.
+
+This mode does not start a workflow worker, test cancel/approve against live work, or restart while an attempt is running. It qualifies the pinned Chromium build only. A passing run is packaged-browser evidence and still needs exact-head review and issue-criteria reconciliation before #525 or #526 can close.
