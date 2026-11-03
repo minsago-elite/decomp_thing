@@ -8,8 +8,16 @@ import kotlinx.serialization.json.put
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.charset.StandardCharsets
+import java.nio.file.AtomicMoveNotSupportedException
+import java.nio.file.StandardCopyOption
 import java.util.TreeMap
 import java.util.UUID
+import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Future
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 import kotlin.io.path.createDirectories
 
 /** Diagnostic-only monotonic timings. This record is deliberately separate from cache and archive state. */
@@ -17,8 +25,16 @@ internal class AnalysisTimingRecord(
     private val directory: Path,
     private val recoveryMode: String,
     private val analysisToolSha256: String,
+    private val profileSha256: String?,
     private val configurationSha256: String,
+    private val publicationExecutor: ExecutorService = SIDECAR_PUBLICATION_EXECUTOR,
+    private val publicationWaitMillis: Long = DEFAULT_PUBLICATION_WAIT_MILLIS,
 ) {
+    init {
+        require(profileSha256 == null || profileSha256.matches(Regex("[0-9a-f]{64}")))
+        require(publicationWaitMillis in 0..5_000)
+    }
+
     private val startedAtNanos = System.nanoTime()
     val invocationId = UUID.randomUUID().toString()
     private val spans = mutableListOf<JsonObject>()
@@ -31,6 +47,8 @@ internal class AnalysisTimingRecord(
     private var telemetryError: String? = null
     private val openWorkerSpans = TreeMap<String, Long>()
     private var nextWorkerSequence = 0L
+    private var lastWorkerElapsedNanos: Long? = null
+    private var workerTerminalElapsedNanos: Long? = null
 
     @Synchronized
     fun bind(inputSha256: String? = this.inputSha256, exporterSha256: String? = this.exporterSha256) {
@@ -85,11 +103,14 @@ internal class AnalysisTimingRecord(
             }
             val sequence = fields[1].toLongOrNull()
             val elapsedNanos = fields[4].toLongOrNull()
-            if (sequence != nextWorkerSequence || elapsedNanos == null || elapsedNanos < 0L) {
+            val priorElapsed = lastWorkerElapsedNanos
+            if (sequence != nextWorkerSequence || elapsedNanos == null || elapsedNanos < 0L ||
+                (priorElapsed != null && elapsedNanos < priorElapsed)) {
                 telemetryError = "worker timing sequence or monotonic offset is invalid"
                 return
             }
             nextWorkerSequence++
+            lastWorkerElapsedNanos = elapsedNanos
             when (fields[2]) {
                 "begin" -> {
                     if ((!isWorkerPhase(fields[3])) || openWorkerSpans.putIfAbsent(fields[3], elapsedNanos) != null) {
@@ -128,6 +149,7 @@ internal class AnalysisTimingRecord(
                     }
                     openWorkerSpans.clear()
                     workerTerminalStatus = fields[3]
+                    workerTerminalElapsedNanos = elapsedNanos
                 }
                 else -> {
                     telemetryError = "worker timing event type is unsupported"
@@ -142,10 +164,10 @@ internal class AnalysisTimingRecord(
         terminalStatus = if (success) "succeeded" else "failed"
         val document = buildJsonObject {
             put("schemaVersion", 1)
-            put("runId", invocationId)
             put("analysisInvocationId", invocationId)
             put("recoveryMode", recoveryMode)
             put("analysisToolSha256", analysisToolSha256)
+            profileSha256?.let { put("profileSha256", it) }
             put("configurationSha256", configurationSha256)
             inputSha256?.let { put("inputSha256", it) }
             exporterSha256?.let { put("exporterSha256", it) }
@@ -153,6 +175,7 @@ internal class AnalysisTimingRecord(
             put("terminalStatus", terminalStatus)
             put("spans", JsonArray(spans.toList()))
             put("workerTerminalStatus", workerTerminalStatus ?: "missing")
+            workerTerminalElapsedNanos?.let { put("workerTerminalElapsedNanos", it) }
             put("workerSpans", JsonArray(workerSpans.toList()))
             put("coverage", buildJsonObject {
                 val expected = setOf("worker-entry-to-parent-permit", "application-initialization",
@@ -167,17 +190,44 @@ internal class AnalysisTimingRecord(
                 telemetryError?.let { put("collectionError", it) }
             })
         }
+        val encoded = document.toString() + "\n"
+        var publication: Future<*>? = null
         runCatching {
+            publication = publicationExecutor.submit { publishAtomically(encoded) }
+            publication?.get(publicationWaitMillis, TimeUnit.MILLISECONDS)
+        }.onFailure { failure ->
+            if (failure is TimeoutException) publication?.cancel(true)
+        }
+    }
+
+    private fun publishAtomically(encoded: String) {
+        var staging: Path? = null
+        try {
             directory.createDirectories()
-            val path = directory.resolve("$invocationId.json")
-            Files.newOutputStream(path, java.nio.file.StandardOpenOption.CREATE_NEW, java.nio.file.StandardOpenOption.WRITE).bufferedWriter().use {
-                it.write(document.toString())
-                it.newLine()
+            val target = directory.resolve("$invocationId.json")
+            staging = Files.createTempFile(directory, ".$invocationId-", ".tmp")
+            Files.newBufferedWriter(staging, StandardCharsets.UTF_8).use { writer ->
+                writer.write(encoded)
             }
+            try {
+                Files.move(staging, target, StandardCopyOption.ATOMIC_MOVE)
+            } catch (_: AtomicMoveNotSupportedException) {
+                Files.move(staging, target)
+            }
+            staging = null
+        } finally {
+            staging?.let { runCatching { Files.deleteIfExists(it) } }
         }
     }
 
     private companion object {
+        const val DEFAULT_PUBLICATION_WAIT_MILLIS = 250L
+        val SIDECAR_PUBLICATION_EXECUTOR: ExecutorService = ThreadPoolExecutor(
+            1, 1, 0L, TimeUnit.MILLISECONDS, ArrayBlockingQueue(32), { task ->
+                Thread(task, "analysis-timing-sidecar-publisher").apply { isDaemon = true }
+            }, ThreadPoolExecutor.AbortPolicy(),
+        )
+
         fun isWorkerPhase(phase: String): Boolean = phase in setOf("worker-entry-to-parent-permit",
             "application-initialization", "project-import-analysis-pre-script") ||
             phase in setOf("exporter:ExportProgramModel.java", "exporter:ExportProgramModelOwned.java",

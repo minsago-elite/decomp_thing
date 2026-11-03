@@ -85,6 +85,7 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
     private val processTreeFactory: (Process, Duration) -> ExportProcessTree,
     private val streamCloseSubmitter: (Runnable) -> CompletableFuture<*> = { task -> CompletableFuture.runAsync(task) },
     private val analysisTaskExecutor: Executor = ForkJoinPool.commonPool(),
+    private val timingProfileSha256: String? = null,
 ) : ExportBudgetedProgramModelAnalyzer {
     internal constructor(
         commandFactory: (GhidraInvocation) -> List<String>,
@@ -132,7 +133,25 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
             processTreeFactory = processTreeFactory,
             streamCloseSubmitter = streamCloseSubmitter,
             analysisTaskExecutor = analysisTaskExecutor,
+            timingProfileSha256 = timingProfileSha256,
         )
+
+    internal fun withTimingProfileSha256(profileSha256: String): GhidraHeadlessProgramModelAnalyzer {
+        require(profileSha256.matches(Regex("[0-9a-f]{64}"))) { "reconstruction timing profile identity must be SHA-256" }
+        return GhidraHeadlessProgramModelAnalyzer(
+            commandFactory = commandFactory,
+            limits = limits,
+            analysisToolSha256 = analysisToolSha256,
+            recoveryMode = recoveryMode,
+            processStarter = processStarter,
+            requiresLaunchPermit = requiresLaunchPermit,
+            processLaunch = processLaunch,
+            processTreeFactory = processTreeFactory,
+            streamCloseSubmitter = streamCloseSubmitter,
+            analysisTaskExecutor = analysisTaskExecutor,
+            timingProfileSha256 = profileSha256,
+        )
+    }
 
     internal fun withProcessLifecycleForTests(
         controller: BoundedAnalysisProcessLaunch,
@@ -148,6 +167,7 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
         processTreeFactory = treeFactory,
         streamCloseSubmitter = streamCloseSubmitter,
         analysisTaskExecutor = analysisTaskExecutor,
+        timingProfileSha256 = timingProfileSha256,
     )
 
     internal fun withStreamCloseSubmitterForTests(
@@ -163,6 +183,7 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
         processTreeFactory = processTreeFactory,
         streamCloseSubmitter = submitter,
         analysisTaskExecutor = analysisTaskExecutor,
+        timingProfileSha256 = timingProfileSha256,
     )
 
     internal fun withAnalysisTaskExecutorForTests(executor: Executor): GhidraHeadlessProgramModelAnalyzer =
@@ -177,6 +198,7 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
             processTreeFactory = processTreeFactory,
             streamCloseSubmitter = streamCloseSubmitter,
             analysisTaskExecutor = executor,
+            timingProfileSha256 = timingProfileSha256,
         )
 
     override fun analyze(binaryPath: Path, workDir: Path): RecoveredProgramModel =
@@ -198,6 +220,7 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
     ): Pair<RecoveredProgramModel, RecoveredCallSiteReceipt?> {
         val timing = AnalysisTimingRecord(
             workDir.resolve("reports/analysis-timings"), recoveryMode.wireName, analysisToolSha256,
+            timingProfileSha256,
             timingConfigurationSha256(listOf(
                 limits.wallClockTimeout.toNanos().toString(), limits.terminationGrace.toNanos().toString(),
                 limits.maximumResidentBytes.toString(), limits.maximumProgramModelBytes.toString(),
@@ -343,7 +366,6 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
         var primaryFailure: Throwable? = null
         fun publishDiagnostics(stdoutBytes: ByteArray, stderrBytes: ByteArray, beforeWrite: () -> Unit = {}) {
             beforeWrite()
-            timing.captureWorkerTelemetry(stdoutBytes, diagnosticsExceeded.get())
             reports.resolve("ghidra_stdout.log").writeBytes(stdoutBytes)
             beforeWrite()
             reports.resolve("ghidra_stderr.log").writeBytes(stderrBytes)
@@ -359,6 +381,11 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
                     "\"diagnosticLimitExceeded\":${diagnosticsExceeded.get()}}\n",
             )
             diagnosticsPublished = true
+        }
+        fun retainStdoutDiagnostics(bytes: ByteArray): ByteArray {
+            if (bytes.size <= limits.maximumDiagnosticBytesPerStream) return bytes
+            diagnosticsExceeded.set(true)
+            return bytes.copyOf(limits.maximumDiagnosticBytesPerStream)
         }
         try {
             deadline.checkpoint("after worker launch")
@@ -393,17 +420,18 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
                     memoryMonitorFinished.set(true)
                 }
             }, analysisTaskExecutor).also(tasks::add)
-            fun capture(stream: java.io.InputStream): CompletableFuture<ByteArray> {
+            fun capture(stream: java.io.InputStream, telemetryAllowance: Int = 0): CompletableFuture<ByteArray> {
                 val finished = AtomicBoolean(false)
                 taskSettlements += finished
                 captureSettlements += finished
                 return CompletableFuture.supplyAsync({
                     try {
-                        val bytes = stream.readNBytes(limits.maximumDiagnosticBytesPerStream + 1)
-                        if (bytes.size > limits.maximumDiagnosticBytesPerStream) {
+                        val maximum = limits.maximumDiagnosticBytesPerStream + telemetryAllowance
+                        val bytes = stream.readNBytes(maximum + 1)
+                        if (bytes.size > maximum) {
                             diagnosticsExceeded.set(true)
                             processTree.terminate()
-                            bytes.copyOf(limits.maximumDiagnosticBytesPerStream)
+                            bytes.copyOf(maximum)
                         } else bytes
                     } catch (failure: Throwable) {
                         taskFailures.add(failure)
@@ -413,7 +441,7 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
                     }
                 }, analysisTaskExecutor).also(tasks::add)
             }
-            val stdoutTask = capture(process.inputStream).also { stdout = it }
+            val stdoutTask = capture(process.inputStream, MAX_WORKER_TIMING_BYTES).also { stdout = it }
             val stderrTask = capture(process.errorStream).also { stderr = it }
             val completed = try {
                 process.waitFor(deadline.remainingNanosOrZero(), TimeUnit.NANOSECONDS)
@@ -434,10 +462,12 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
                     }
                 }
             }
-            val stdoutBytes = await(stdoutTask)
+            val capturedStdout = await(stdoutTask)
+            val (stdoutBytes, workerTelemetry) = separateWorkerTelemetry(capturedStdout)
+            timing.captureWorkerTelemetry(workerTelemetry, diagnosticsExceeded.get())
             val stderrBytes = await(stderrTask)
             await(memoryMonitor)
-            publishDiagnostics(stdoutBytes, stderrBytes)
+            publishDiagnostics(retainStdoutDiagnostics(stdoutBytes), stderrBytes)
             if (memoryExceeded.get()) throw GhidraAnalysisException(
                 "Ghidra program recovery exceeded ${limits.maximumResidentBytes} resident bytes; " +
                     "rerun with the same output directory to resume durable function checkpoints",
@@ -618,10 +648,12 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
                             }
                         }
                     }
-                    val stdoutBytes = duringCleanup { stdoutTask.get(it, TimeUnit.NANOSECONDS) }
+                    val capturedStdout = duringCleanup { stdoutTask.get(it, TimeUnit.NANOSECONDS) }
+                    val (stdoutBytes, workerTelemetry) = separateWorkerTelemetry(capturedStdout)
+                    timing.captureWorkerTelemetry(workerTelemetry, diagnosticsExceeded.get())
                     val stderrBytes = duringCleanup { stderrTask.get(it, TimeUnit.NANOSECONDS) }
                     // Each attempt opens fresh streams; an interrupt-closed channel is never reused.
-                    duringCleanup { publishDiagnostics(stdoutBytes, stderrBytes) { remainingCleanup() } }
+                    duringCleanup { publishDiagnostics(retainStdoutDiagnostics(stdoutBytes), stderrBytes) { remainingCleanup() } }
                 }
             }
             val usagePath = reports.resolve("ghidra_resource_usage.json")
@@ -652,6 +684,27 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
     }
 
     companion object {
+        private const val MAX_WORKER_TIMING_BYTES = 16 * 256 + 1
+
+        private fun separateWorkerTelemetry(bytes: ByteArray): Pair<ByteArray, ByteArray> {
+            val text = bytes.toString(Charsets.UTF_8)
+            val diagnostics = StringBuilder()
+            val telemetry = StringBuilder()
+            var start = 0
+            while (start < text.length) {
+                val newline = text.indexOf('\n', start)
+                val end = if (newline < 0) text.length else newline
+                val line = text.substring(start, end)
+                val framed = line.startsWith("DECOMP_ANALYSIS_TIMING_V1 ") && line.length <= 256
+                val target = if (framed) telemetry else diagnostics
+                target.append(line)
+                if (newline >= 0) target.append('\n')
+                if (newline < 0) break
+                start = newline + 1
+            }
+            return diagnostics.toString().toByteArray(Charsets.UTF_8) to telemetry.toString().toByteArray(Charsets.UTF_8)
+        }
+
         private val EXPORT_PROCESS_LAUNCH = BoundedAnalysisProcessLaunch()
         private val MODEL_ACQUISITION = BoundedProgramModelAcquisitionProcess()
 
@@ -951,9 +1004,12 @@ class ArchivalReconstructionService(
         val observedBehavior = ReconstructionExplorationInput.read(
             outputDir, profile.budgets.reconstructionMaximumContextCharacters,
         )
-        val selectedAnalyzer = (analyzer as? ExportBudgetedProgramModelAnalyzer)
+        val budgetedAnalyzer = (analyzer as? ExportBudgetedProgramModelAnalyzer)
             ?.withExportBudgets(profile.budgets)
             ?: analyzer
+        val selectedAnalyzer = (budgetedAnalyzer as? GhidraHeadlessProgramModelAnalyzer)
+            ?.withTimingProfileSha256(profile.sha256)
+            ?: budgetedAnalyzer
         adapter.diagnostics.prepare(profile)
         progress.phase(AgentWorkflowPhase.ANALYZING)
         val model = selectedAnalyzer.analyze(binaryPath, outputDir.resolve("analysis"))

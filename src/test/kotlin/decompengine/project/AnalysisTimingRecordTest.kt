@@ -5,7 +5,10 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.nio.charset.StandardCharsets
-import kotlin.io.path.createTempDirectory
+import java.nio.file.Files
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import kotlin.io.path.readText
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -16,7 +19,7 @@ import kotlin.test.assertTrue
 class AnalysisTimingRecordTest {
     @Test
     fun `complete correlated worker phase stream is retained in a fresh sidecar`() {
-        val directory = createTempDirectory("analysis-timing-record-").resolve("timings")
+        val directory = Files.createTempDirectory(java.nio.file.Path.of("build"), "analysis-timing-record-").resolve("timings")
         val record = newRecord(directory)
         record.measure("worker-process-lifecycle") { Unit }
         val phases = listOf(
@@ -48,7 +51,7 @@ class AnalysisTimingRecordTest {
 
     @Test
     fun `truncated or mismatched worker telemetry remains incomplete without failing analysis`() {
-        val directory = createTempDirectory("analysis-timing-incomplete-").resolve("timings")
+        val directory = Files.createTempDirectory(java.nio.file.Path.of("build"), "analysis-timing-incomplete-").resolve("timings")
         val first = newRecord(directory)
         first.captureWorkerTelemetry(frame(first, 0, "begin", "application-initialization", 1L)
             .toByteArray(StandardCharsets.UTF_8), truncated = true)
@@ -71,8 +74,31 @@ class AnalysisTimingRecordTest {
         assertFalse(documents.any { it.getValue("workerTerminalStatus").jsonPrimitive.content == "succeeded" })
     }
 
+    @Test
+    fun `blocked sidecar publisher cannot hold analysis completion`() {
+        val executor = Executors.newSingleThreadExecutor()
+        val blocked = CountDownLatch(1)
+        executor.submit { blocked.await() }
+        val directory = java.nio.file.Path.of("build", "analysis-timing-blocked-${System.nanoTime()}")
+        try {
+            val record = AnalysisTimingRecord(
+                directory, "full", "a".repeat(64), null, timingConfigurationSha256(listOf("fixture")),
+                publicationExecutor = executor,
+                publicationWaitMillis = 25,
+            )
+            val started = System.nanoTime()
+            record.publish(success = false)
+            val elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)
+            assertTrue(elapsedMillis < 1_000, "sidecar publisher blocked for ${elapsedMillis}ms")
+            assertFalse(Files.exists(directory))
+        } finally {
+            blocked.countDown()
+            executor.shutdownNow()
+        }
+    }
+
     private fun newRecord(directory: java.nio.file.Path) =
-        AnalysisTimingRecord(directory, "full", "a".repeat(64), timingConfigurationSha256(listOf("fixture")))
+        AnalysisTimingRecord(directory, "full", "a".repeat(64), null, timingConfigurationSha256(listOf("fixture")))
 
     private fun frame(record: AnalysisTimingRecord, sequence: Int, event: String, phase: String, elapsed: Long) =
         "DECOMP_ANALYSIS_TIMING_V1 ${record.invocationId} $sequence $event $phase $elapsed"
