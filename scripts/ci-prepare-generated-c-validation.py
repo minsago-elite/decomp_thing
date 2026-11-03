@@ -217,7 +217,8 @@ def parse_gcc_include_search_paths(stderr):
         if value.endswith(' (framework directory)'):
             value = value.removesuffix(' (framework directory)')
         path = Path(value)
-        if not value or not path.is_absolute() or str(path) != value or any(ord(c) < 32 for c in value):
+        if (not value or not path.is_absolute() or str(path) != value or '//' in value or
+                any(part in ('.', '..') for part in path.parts) or any(ord(c) < 32 for c in value)):
             raise ValueError('compiler include-search path is not canonical and absolute')
         paths.append(value)
     if not paths or len(paths) != len(set(paths)):
@@ -225,13 +226,13 @@ def parse_gcc_include_search_paths(stderr):
     return paths
 
 
-def staged_compiler_include_search(staged_compiler, subprogram_prefix, approved_include_roots):
+def staged_compiler_include_search(staged_compiler, subprogram_prefix, mounted_roots):
     """Capture bounded search-path evidence from the exact staged compiler bytes."""
     staged_compiler = trusted(staged_compiler)
     subprogram_prefix = trusted(subprogram_prefix)
-    approved = tuple(trusted(Path(root)) for root in approved_include_roots)
-    if not approved or len(approved) != len(set(approved)):
-        raise ValueError('compiler include evidence lacks a unique approved-root inventory')
+    mounts = tuple((trusted(Path(source)), trusted(Path(destination))) for source, destination in mounted_roots)
+    if not mounts or len({source for source, _ in mounts}) != len(mounts) or len({dest for _, dest in mounts}) != len(mounts):
+        raise ValueError('compiler include evidence lacks a unique mounted-root inventory')
     result = subprocess.run([str(staged_compiler), f'-B{subprogram_prefix}/', '-v', '-E', '-x', 'c', '-'],
                             input='#include <stddef.h>\n', text=True, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, timeout=30, check=False,
@@ -243,13 +244,16 @@ def staged_compiler_include_search(staged_compiler, subprogram_prefix, approved_
     candidates = []
     for directory in paths:
         search_root = Path(directory)
-        if not any(search_root.is_relative_to(root) for root in approved):
-            continue
-        path = search_root / 'stddef.h'
-        if path.is_file():
-            data = path.read_bytes()
-            candidates.append({'path': str(path), 'resolvedPath': str(path.resolve(strict=True)),
-                               'bytes': len(data), 'sha256': hashlib.sha256(data).hexdigest()})
+        for source_root, mounted_root in mounts:
+            if not search_root.is_relative_to(source_root):
+                continue
+            relative = search_root.relative_to(source_root)
+            mounted_path = mounted_root / relative / 'stddef.h'
+            if mounted_path.is_file() and not mounted_path.is_symlink():
+                data = mounted_path.read_bytes()
+                candidates.append({'searchPath': str(search_root), 'mountedPath': str(mounted_path),
+                                   'bytes': len(data), 'sha256': hashlib.sha256(data).hexdigest()})
+            break
     return {'exitCode': result.returncode, 'searchPaths': paths, 'stddefCandidates': candidates,
             'diagnosticsBytes': len(stderr), 'diagnosticsSha256': hashlib.sha256(stderr).hexdigest()}
 
@@ -411,8 +415,6 @@ def prepare(args):
         subprograms, subprogram_mounts = copy_compiler_subprograms(gcc, copier)
         gcc_runtime = trusted(Path(command([str(gcc), '-print-libgcc-file-name'])).parent)
         copier.copy(gcc_runtime, RUNTIME / 'gcc')
-        compiler_include_search = staged_compiler_include_search(
-            RUNTIME / 'tools' / 'cc', RUNTIME / 'tools', (gcc_runtime, Path('/usr/include')))
         build = [{'source': str(RUNTIME / 'gcc'), 'destination': str(gcc_runtime)}] + subprogram_mounts
         # The qualification image retains the fixed fixture headers and the additional stdlib
         # header used by module compilation controls. A deployment supplies its own reviewed closure.
@@ -427,6 +429,9 @@ def prepare(args):
             elif not path.resolve().is_relative_to(gcc_runtime):
                 raise ValueError(f'unsupported compiler header authority: {path}')
         build.append({'source': str(RUNTIME / 'headers'), 'destination': '/usr/include'})
+        compiler_include_search = staged_compiler_include_search(
+            RUNTIME / 'tools' / 'cc', RUNTIME / 'tools',
+            ((gcc_runtime, RUNTIME / 'gcc'), (Path('/usr/include'), RUNTIME / 'headers')))
         link_parent = None
         for name in ('crt1.o', 'Scrt1.o', 'crti.o', 'crtn.o', 'libc.so', 'libc_nonshared.a'):
             path = Path(command([str(gcc), f'-print-file-name={name}'])).absolute().resolve()

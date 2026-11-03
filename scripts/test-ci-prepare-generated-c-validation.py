@@ -161,19 +161,23 @@ class CompilerProvisioningControls(unittest.TestCase):
     def test_compiler_include_search_evidence_is_bounded_and_pins_stddef(self):
         include = self.root / 'gcc/include'
         include.mkdir(parents=True)
-        header = include / 'stddef.h'
+        mounted_include = self.runtime / 'gcc/include'
+        mounted_include.mkdir(parents=True)
+        (self.runtime / 'headers').mkdir(parents=True)
+        header = mounted_include / 'stddef.h'
         header.write_bytes(b'authenticated standard header\n')
-        stderr = (b'#include <...> search starts here:\n' + str(include).encode() +
-                  b'\nEnd of search list.\n')
+        unapproved = self.root / 'unapproved/include'
+        stderr = (b'#include <...> search starts here:\n' + str(include).encode() + b'\n' +
+                  str(unapproved).encode() + b'\nEnd of search list.\n')
         result = SimpleNamespace(returncode=0, stdout='', stderr=stderr.decode())
         staged = self.executable('runtime/tools/cc')
         prefix = staged.parent
         with patch.object(PROVISIONER.subprocess, 'run', return_value=result) as run:
             evidence = PROVISIONER.staged_compiler_include_search(staged, prefix,
-                (self.root / 'gcc', Path('/usr/include')))
+                ((self.root / 'gcc', self.runtime / 'gcc'), (Path('/usr/include'), self.runtime / 'headers')))
         self.assertEqual(0, evidence['exitCode'])
-        self.assertEqual([str(include)], evidence['searchPaths'])
-        self.assertEqual([{'path': str(header), 'resolvedPath': str(header), 'bytes': len(header.read_bytes()),
+        self.assertEqual([str(include), str(unapproved)], evidence['searchPaths'])
+        self.assertEqual([{'searchPath': str(include), 'mountedPath': str(header), 'bytes': len(header.read_bytes()),
                            'sha256': hashlib.sha256(header.read_bytes()).hexdigest()}], evidence['stddefCandidates'])
         self.assertIn('-B' + str(prefix) + '/', run.call_args.args[0])
         with self.assertRaisesRegex(ValueError, 'complete include-search list'):
