@@ -32,10 +32,12 @@ internal class ReconstructionOutputWorkspace private constructor(
     private fun activate() {
         recoverSwitch()
         val archiveEntries = presentEntries(root)
+        val hasActiveIdentity = Files.exists(root.resolve(ACTIVE), NOFOLLOW_LINKS)
         val current = readObject(root.resolve(ACTIVE))?.let {
             require(it.keys == setOf("schemaVersion", "inputSha256") && it["schemaVersion"] == JsonPrimitive(1))
             it.getValue("inputSha256").jsonPrimitive.content.also { key -> require(HASH.matches(key)) }
-        } ?: inferInput()
+        } ?: inferInput() ?: if (!hasActiveIdentity && !Files.exists(cacheRoot(), NOFOLLOW_LINKS) &&
+            archiveEntries == listOf("exploration.json")) inputSha256 else null
         if (current == inputSha256) {
             writeActive()
             return
@@ -62,7 +64,7 @@ internal class ReconstructionOutputWorkspace private constructor(
     }
 
     private fun inferInput(): String? {
-        val identities = listOf("analysis/reports/program_model.json", "source-tree/reports/program_model.json", "reconstruction.json")
+        val identities = (listOf("analysis/reports/program_model.json", "source-tree/reports/program_model.json", "reconstruction.json")
             .mapNotNull { relative ->
                 var path = root
                 for (part in Path.of(relative)) {
@@ -72,8 +74,22 @@ internal class ReconstructionOutputWorkspace private constructor(
                 if (!Files.isRegularFile(path, NOFOLLOW_LINKS)) return@mapNotNull null
                 val prefix = Files.newInputStream(path, READ, NOFOLLOW_LINKS).use { it.readNBytes(4096) }.toString(Charsets.UTF_8)
                 Regex("\"inputSha256\"\\s*:\\s*\"([0-9a-f]{64})\"").find(prefix)?.groupValues?.get(1)
-            }.distinct()
+            } + inferObservationInput()?.let(::listOf).orEmpty()).distinct()
         return identities.singleOrNull()
+    }
+
+    /** Module observations carry their input identity; opaque exploration reports do not. */
+    private fun inferObservationInput(): String? {
+        val path = root.resolve(ModuleObservedBehavior.FILE_NAME)
+        if (!Files.exists(path, NOFOLLOW_LINKS)) return null
+        require(!Files.isSymbolicLink(path) && Files.isRegularFile(path, NOFOLLOW_LINKS)) {
+            "module observations must be an ordinary file"
+        }
+        val bytes = Files.newInputStream(path, READ, NOFOLLOW_LINKS).use {
+            it.readNBytes(ModuleObservedBehavior.MAXIMUM_BYTES + 1)
+        }
+        require(bytes.size <= ModuleObservedBehavior.MAXIMUM_BYTES) { "module observations exceed their input identity bound" }
+        return ModuleObservedBehavior.parse(bytes.toString(Charsets.UTF_8)).inputSha256
     }
 
     private fun recoverSwitch() {

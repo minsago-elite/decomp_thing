@@ -54,6 +54,45 @@ class ReconstructionOutputWorkspaceTest {
     }
 
     @Test
+    fun `module observation identity routes the initial handoff to its input`() {
+        val base = createTempDirectory("input-observation-identity-")
+        val root = base.resolve("output")
+        val a = base.resolve("a").apply { writeText("input-a") }
+        val b = base.resolve("b").apply { writeText("input-b") }
+        val aHash = sha256(a.readBytes())
+        ModuleObservedBehavior.write(root, aHash, emptyList())
+
+        ReconstructionOutputWorkspace.open(root, b).use {
+            assertFalse(root.resolve(ModuleObservedBehavior.FILE_NAME).exists())
+            assertTrue(root.resolve("input-cache/$aHash/${ModuleObservedBehavior.FILE_NAME}").exists())
+        }
+        ReconstructionOutputWorkspace.open(root, a).use {
+            assertEquals(aHash, ModuleObservedBehavior.parse(root.resolve(ModuleObservedBehavior.FILE_NAME).readText()).inputSha256)
+        }
+    }
+
+    @Test
+    fun `unscoped initial exploration is bound to first activated input and isolated on switch`() {
+        val base = createTempDirectory("input-unscoped-exploration-")
+        val root = base.resolve("output")
+        val a = base.resolve("a").apply { writeText("input-a") }
+        val b = base.resolve("b").apply { writeText("input-b") }
+        val aHash = sha256(a.readBytes())
+        root.resolve("exploration.json").apply { parent.createDirectories(); writeText("exploration-a") }
+
+        ReconstructionOutputWorkspace.open(root, a).use {
+            assertEquals("exploration-a", root.resolve("exploration.json").readText())
+        }
+        ReconstructionOutputWorkspace.open(root, b).use {
+            assertFalse(root.resolve("exploration.json").exists())
+            assertEquals("exploration-a", root.resolve("input-cache/$aHash/exploration.json").readText())
+        }
+        ReconstructionOutputWorkspace.open(root, a).use {
+            assertEquals("exploration-a", root.resolve("exploration.json").readText())
+        }
+    }
+
+    @Test
     fun `progress snapshot and full run history follow the selected input`() {
         val base = createTempDirectory("input-history-")
         val root = base.resolve("output")

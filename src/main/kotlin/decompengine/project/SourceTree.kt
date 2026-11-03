@@ -24,6 +24,7 @@ import decompengine.agent.AgentWorkflowProgress
 import decompengine.agent.receiptCommitmentBytes
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
@@ -31,6 +32,7 @@ import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 import java.nio.file.AtomicMoveNotSupportedException
 import java.io.IOException
 import java.io.InterruptedIOException
@@ -85,6 +87,16 @@ data class ModuleReconstructionIssue(
     val message: String,
     val entityIds: List<String>,
 )
+
+/** Cached execution belongs to the checkpoint's historical prompt identity. */
+internal fun requestForCheckpointReconciliation(
+    request: ModuleReconstructionRequest,
+    checkpointFingerprint: String,
+    checkpointReused: Boolean,
+): ModuleReconstructionRequest = if (checkpointReused &&
+    request.sessionEvidenceFingerprint != checkpointFingerprint) {
+    request.copy(sessionEvidenceFingerprint = checkpointFingerprint)
+} else request
 
 fun interface ModuleReconstructor {
     fun reconstruct(request: ModuleReconstructionRequest): ReconstructedModule
@@ -883,6 +895,8 @@ object SourceTreeGenerator {
                     workflowOrigin = workflowOrigin,
                     preDispatchObservedBehavior = if (workflowOrigin == "pre-dispatch-context-budget-fallback")
                         ModuleObservationRetention.retain(request) else null,
+                    preDispatchCompilerFeedback = if (workflowOrigin == "pre-dispatch-context-budget-fallback" &&
+                        priorCompilerDiagnostics != null) recordedCompilerFeedback else null,
                     reconstructorIdentity = cacheIdentity,
                     promptSha256 = attempted.promptSha256,
                     promptCharacters = attempted.promptCharacters,
@@ -924,8 +938,9 @@ object SourceTreeGenerator {
             if (checkpoint.executionEvidencePath == null) configuredExecutionEvidenceFile?.deleteIfExists()
             attemptPath.deleteIfExists()
             projectDir.resolve("reports/modules/${module.id}.attempt.execution.json").deleteIfExists()
+            val reconciliationRequest = requestForCheckpointReconciliation(request, checkpoint.fingerprint, cached != null)
             selectedReconstructor.reconcileSessionCheckpoint(
-                request, checkpoint.accepted, checkpoint.sourceSha256,
+                reconciliationRequest, checkpoint.accepted, checkpoint.sourceSha256,
                 checkpoint.executionRequestSha256, checkpoint.executionEvidenceSha256,
             )
             val normalizedSource = sourcePath.readText()
@@ -1193,6 +1208,7 @@ object SourceTreeGenerator {
         val generator: String,
         val workflowOrigin: String = "reconstructor-return",
         val preDispatchObservedBehavior: String? = null,
+        val preDispatchCompilerFeedback: ModuleCompilerFeedback? = null,
         val reconstructorIdentity: String,
         val promptSha256: String,
         val promptCharacters: Int?,
@@ -1221,6 +1237,19 @@ object SourceTreeGenerator {
             require(preDispatchObservedBehavior == null ||
                 workflowOrigin == "pre-dispatch-context-budget-fallback") {
                 "retained pre-dispatch prompt input requires an undispatched fallback"
+            }
+            require(preDispatchCompilerFeedback == null ||
+                workflowOrigin == "pre-dispatch-context-budget-fallback") {
+                "retained pre-dispatch compiler feedback requires an undispatched fallback"
+            }
+            preDispatchCompilerFeedback?.let { feedback ->
+                require(feedback.moduleId.matches(Regex("[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}")) &&
+                    listOf(feedback.sourceSha256, feedback.contextSha256, feedback.diagnosticsSha256)
+                        .all { it.matches(Regex("[0-9a-f]{64}")) } &&
+                    feedback.diagnostics.toByteArray(Charsets.UTF_8).size <= 32_768 &&
+                    sha256(feedback.diagnostics.toByteArray(Charsets.UTF_8)) == feedback.diagnosticsSha256) {
+                    "retained pre-dispatch compiler feedback is invalid"
+                }
             }
             requireRetainableModuleObservation(preDispatchObservedBehavior)
             require(schemaVersion < 5 || !accepted ||
@@ -1289,6 +1318,14 @@ object SourceTreeGenerator {
             if (schemaVersion >= 6 && workflowOrigin == "pre-dispatch-context-budget-fallback") {
                 append("\n  \"preDispatchObservedBehavior\": ")
                 append(preDispatchObservedBehavior?.let { kotlinx.serialization.json.JsonPrimitive(it) } ?: JsonNull).append(',')
+                append("\n  \"preDispatchCompilerFeedback\": ")
+                append(preDispatchCompilerFeedback?.let { feedback -> buildJsonObject {
+                    put("moduleId", feedback.moduleId)
+                    put("sourceSha256", feedback.sourceSha256)
+                    put("contextSha256", feedback.contextSha256)
+                    put("diagnosticsSha256", feedback.diagnosticsSha256)
+                    put("diagnostics", feedback.diagnostics)
+                } } ?: JsonNull).append(',')
             }
             append("\n  \"reconstructorIdentity\": \"").append(reconstructorIdentity.jsonEscape()).append("\",")
             append("\n  \"promptSha256\": \"").append(promptSha256).append("\",")
@@ -1365,6 +1402,15 @@ object SourceTreeGenerator {
                 generator = root.getValue("generator").jsonPrimitive.content,
                 workflowOrigin = optionalString("workflowOrigin") ?: "reconstructor-return",
                 preDispatchObservedBehavior = optionalString("preDispatchObservedBehavior"),
+                preDispatchCompilerFeedback = root["preDispatchCompilerFeedback"]?.takeUnless { it is JsonNull }?.jsonObject?.let {
+                    ModuleCompilerFeedback(
+                        it.getValue("moduleId").jsonPrimitive.content,
+                        it.getValue("sourceSha256").jsonPrimitive.content,
+                        it.getValue("contextSha256").jsonPrimitive.content,
+                        it.getValue("diagnosticsSha256").jsonPrimitive.content,
+                        it.getValue("diagnostics").jsonPrimitive.content,
+                    )
+                },
                 reconstructorIdentity = root.getValue("reconstructorIdentity").jsonPrimitive.content,
                 promptSha256 = root.getValue("promptSha256").jsonPrimitive.content,
                 promptCharacters = root["promptCharacters"]?.jsonPrimitive?.intOrNull,

@@ -46,6 +46,28 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class SourceTreeTest {
     @Test
+    fun `cached checkpoint reconciliation uses cached prompt fingerprint only on reuse`() {
+        val model = oneModuleModel()
+        val module = DeterministicModulePlanner().plan(model).modules.single()
+        val request = ModuleReconstructionRequest(
+            module = module,
+            model = model,
+            sharedHeader = "",
+            moduleHeader = "",
+            privateHeader = "",
+            dependencyHeaders = emptyMap(),
+            workspaceRoot = Path.of("build/test-work/reconciliation-fingerprint"),
+            sessionEvidenceFingerprint = "a".repeat(64),
+        )
+        val cachedFingerprint = "b".repeat(64)
+
+        assertEquals(cachedFingerprint,
+            requestForCheckpointReconciliation(request, cachedFingerprint, checkpointReused = true).sessionEvidenceFingerprint)
+        assertEquals(request.sessionEvidenceFingerprint,
+            requestForCheckpointReconciliation(request, cachedFingerprint, checkpointReused = false).sessionEvidenceFingerprint)
+    }
+
+    @Test
     fun `inactive unowned build definitions survive both profile selections`(): Unit {
         for (profile in ReconstructionProfiles.builtIn) {
             val previous = ReconstructionProfiles.builtIn.single { it.id != profile.id }
