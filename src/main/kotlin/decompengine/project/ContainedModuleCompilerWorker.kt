@@ -62,8 +62,11 @@ object ContainedModuleCompilerWorker {
         try {
             verifySnapshotInventory(request)
             request.inputs.forEach { input -> pinned += PinnedCompilerInput.open(request.snapshotRoot, input, currentUid) }
-            GeneratedCSourceHeaderPolicy.requireAllowed(request.sourcePath,
-                pinned.associate { it.path to it.bytes() })
+            // Keep authenticated membership from the request manifest, but stream each pinned
+            // member through the source policy instead of retaining the aggregate byte map.
+            val pinnedByPath = pinned.associateBy { it.path }
+            GeneratedCSourceHeaderPolicy.requireAllowedStreaming(request.sourcePath, request.inputs.map { it.path },
+                read = { path -> pinnedByPath.getValue(path).bytes() })
             // The controller binds its authenticated owned executable snapshot at this exact
             // runtime path. Scratch stays noexec; no foreign namespace UID becomes trusted.
             StableControlFile.open(request.compilerPath, MAXIMUM_COMPILER_BYTES, "pinned module compiler").use { compiler ->

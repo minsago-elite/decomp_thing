@@ -13,7 +13,7 @@ class GeneratedCSourceHeaderPolicyTest {
                 #include <stddef.h>
                 #include <stdint.h>
                 #include "modules/parser.h"
-                int parser(void) { const char *s = \"#include <not-a-header>\"; return (int)sizeof(*s); }
+                int parser(void) { const char *s = "#include <not-a-header>"; return (int)sizeof(*s); }
             """.trimIndent().toByteArray(),
             "include/modules/parser.h" to """
                 #ifndef DECOMP_MODULES_PARSER_H
@@ -48,6 +48,8 @@ class GeneratedCSourceHeaderPolicyTest {
             "int parser(void) { __asm__(\"label: .incbin \\\"/tmp/transient.bin\\\"\"); return 0; }",
             """int parser(void) { __asm__("\056incbin \"/tmp/transient.bin\""); return 0; }""",
             "int parser(void) { __asm__(\".incbin \\\"/tmp/transient.bin\\\"\"); return 0; }",
+            "int parser(void) { asm(\"nop\"); return 0; }",
+            "int parser(void) { __asm__ volatile (\"nop\"); return 0; }",
         )
         for (source in cases) {
             val inputs = baseline + ("src/modules/parser.c" to source.toByteArray())
@@ -71,7 +73,7 @@ class GeneratedCSourceHeaderPolicyTest {
         val good = mapOf(
             "src/modules/parser.c" to """
                 /* #include \"/tmp/no.h\" */
-                const char *text = \"_Pragma(\\\"x\\\") #include <missing.h>\";
+                const char *text = "_Pragma(\"x\") #include <missing.h>";
                 int parser(void) { return text[0]; }
             """.trimIndent().toByteArray(),
             "include/modules/parser.h" to "#ifndef P\n#define P\n#endif\n".toByteArray(),
@@ -81,11 +83,55 @@ class GeneratedCSourceHeaderPolicyTest {
             "#incl\\\nude \"/tmp/transient.h\"",
             "??=include <../../tmp/transient.h>",
             "%:include MACRO_HEADER",
+            "#/*\n*/include \"/tmp/transient.h\"",
+            "#include \\\n\"/tmp/transient.h\"",
+            "#\nint parser(void) { return 0; }",
         )) {
             val inputs = good + ("src/modules/parser.c" to "$directive\nint parser(void) { return 0; }".toByteArray())
             assertFailsWith<IllegalArgumentException> {
                 GeneratedCSourceHeaderPolicy.requireAllowed("src/modules/parser.c", inputs)
             }
         }
+    }
+
+    @Test
+    fun `quote and angle includes follow the authenticated compiler search order`() {
+        val source = """
+            #include "local.h"
+            #include <public.h>
+            int parser(void) { return 0; }
+        """.trimIndent()
+        val admitted = mapOf(
+            "src/modules/parser.c" to source.toByteArray(),
+            "src/modules/local.h" to "int local(void);\n".toByteArray(),
+            "include/public.h" to "int public(void);\n".toByteArray(),
+        )
+        GeneratedCSourceHeaderPolicy.requireAllowed("src/modules/parser.c", admitted)
+
+        val sourceOnly = admitted - "include/public.h"
+        assertFailsWith<IllegalArgumentException> {
+            GeneratedCSourceHeaderPolicy.requireAllowed("src/modules/parser.c", sourceOnly)
+        }
+        val angleCannotUseSourceDirectory = source.replace("<public.h>", "<local.h>")
+        assertFailsWith<IllegalArgumentException> {
+            GeneratedCSourceHeaderPolicy.requireAllowed(
+                "src/modules/parser.c", sourceOnly + ("src/modules/parser.c" to angleCannotUseSourceDirectory.toByteArray()),
+            )
+        }
+    }
+
+    @Test
+    fun `streaming policy reads one authenticated member at a time`() {
+        val files = mapOf(
+            "src/modules/parser.c" to "int parser(void) { return 0; }\n".toByteArray(),
+            "include/modules/parser.h" to "int parser(void);\n".toByteArray(),
+        )
+        var reads = 0
+        val reader: (String) -> ByteArray = { path ->
+            reads++
+            files.getValue(path)
+        }
+        GeneratedCSourceHeaderPolicy.requireAllowedStreaming("src/modules/parser.c", files.keys, reader)
+        assertEquals(files.size, reads)
     }
 }

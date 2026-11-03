@@ -6,6 +6,7 @@ import kotlinx.serialization.json.JsonObject
 import java.io.File
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.StandardCopyOption
 import java.nio.file.attribute.PosixFilePermissions
 import java.util.concurrent.TimeUnit
 import kotlin.test.Test
@@ -237,6 +238,65 @@ class ContainedModuleCompilerWorkerTest {
     }
 
     @Test
+    fun synchronizedPolicyAdmittedTransientHeaderMutationReturnsInputChanged() = withRoot { root ->
+        val parent = Files.createDirectory(root.resolve("transient"))
+        val realCompiler = stageCompiler(parent)
+        val ready = parent.resolve("ready")
+        val started = parent.resolve("started")
+        val restored = parent.resolve("restored")
+        val shim = script(realCompiler.parent.resolve("shim"), """
+            wait_for() {
+                tries=0
+                while [ ! -e "${'$'}1" ]; do
+                    tries=${'$'}((tries + 1))
+                    [ "${'$'}tries" -le 1000 ] || exit 125
+                    /usr/bin/sleep 0.01
+                done
+            }
+            printf ready > '$ready'
+            /usr/bin/sleep 0.1
+            printf started > '$started'
+            wait_for '$restored'
+            '$realCompiler' "${'$'}@"
+            status=${'$'}?
+            exit "${'$'}status"
+        """.trimIndent())
+        val source = """
+            #include "modules/alpha.h"
+            #include "modules/transient.h"
+            int alpha(void) { return 7; }
+        """.trimIndent() + "\n"
+        val originalTransient = "int alpha(void);\n"
+        val fixture = fixture(parent.resolve("run"), compiler = shim, source = source,
+            extraContent = mapOf("include/modules/transient.h" to originalTransient), maximumWallMillis = 30_000)
+        val transient = fixture.request.snapshotRoot.resolve("include/modules/transient.h")
+        fun replaceInput(content: String) {
+            val replacement = Files.createTempFile(transient.parent, "replacement-", ".h")
+            Files.writeString(replacement, content)
+            Files.setPosixFilePermissions(replacement, PosixFilePermissions.fromString("r--------"))
+            Files.move(replacement, transient, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+        }
+        val execution = launch(fixture) {
+            try {
+                await(ready)
+                replaceInput("int beta(void);\n")
+                await(started)
+                replaceInput(originalTransient)
+            } finally {
+                Files.writeString(restored, "restored")
+            }
+        }
+        assertEquals(0, execution.exitCode, execution.stderr)
+        val result = ContainedModuleCompilerResult.parse(execution.stdout)
+        result.requireBinding(fixture.request)
+        assertEquals(0, result.exitCode)
+        assertEquals("input-changed", result.outcome)
+        assertEquals(null, result.objectSha256)
+        assertEquals(originalTransient, Files.readString(transient))
+        verifyLogs(fixture, result)
+    }
+
+    @Test
     fun `compiler include probes are refused before an authenticated compiler can launch`() = withRoot { root ->
         val marker = root.resolve("compiler-launched")
         val compiler = script(root.resolve("compiler"), "printf launched > '$marker'; exit 0")
@@ -262,13 +322,14 @@ class ContainedModuleCompilerWorkerTest {
         compiler: Path = stageCompiler(root),
         source: String = "#include \"modules/alpha.h\"\n#include \"alpha_internal.h\"\nint alpha(void) { return VALUE; }\n",
         headerSource: String = "int alpha(void);\n",
+        extraContent: Map<String, String> = emptyMap(),
         maximumWallMillis: Long = 10000, maximumOutputBytes: Long = 65536): Fixture {
         Files.createDirectories(root)
         Files.setPosixFilePermissions(root, PosixFilePermissions.fromString("rwx------"))
         val snapshot = Files.createDirectory(root.resolve("snapshot"))
         val output = Files.createDirectory(root.resolve("output"))
         val content = mapOf("src/modules/alpha.c" to source, "include/modules/alpha.h" to headerSource,
-            "src/modules/alpha_internal.h" to "#define VALUE 7\n", "include/decomp_types.h" to "")
+            "src/modules/alpha_internal.h" to "#define VALUE 7\n", "include/decomp_types.h" to "") + extraContent
         val inputs = content.map { (relative, text) ->
             val path = snapshot.resolve(relative)
             Files.createDirectories(path.parent)
@@ -347,6 +408,12 @@ class ContainedModuleCompilerWorkerTest {
         Files.writeString(path, "#!/bin/sh\n$body\n")
         Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("r-x------"))
         return path
+    }
+
+    private fun await(path: Path, timeoutSeconds: Long = 10) {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds)
+        while (!Files.exists(path) && System.nanoTime() < deadline) Thread.sleep(10)
+        assertTrue(Files.exists(path), "compiler handshake timed out: $path")
     }
 
     private fun stageCompiler(root: Path): Path {
