@@ -1318,6 +1318,7 @@ class TraceGuidedRepairLoop private constructor(
         validationStrategy.requireAvailable()
         val binarySha256 = captureExplorationBinarySha256(originalBinary, resourceBudget.maximumSourceBytes)
         return openGraph(projectDir).use { graph ->
+            graph.enableRunContract()
             val corpus = graph.retainRegressionInputs(history.retainedInputs())
             graph.synchronizeRepairHistory()
             history.adoptCanonicalProjection(graph.derivedRepairIterations(), corpus.inputs, graph.snapshot.runs)
@@ -1351,20 +1352,30 @@ class TraceGuidedRepairLoop private constructor(
                 explorationSnapshot.projectPath == projectDir.toAbsolutePath().normalize().pathString) {
                 "retained exploration snapshot is bound to a different project or format"
             }
-            val currentBinarySha256 = captureExplorationBinarySha256(originalBinary, resourceBudget.maximumSourceBytes)
-            require(currentBinarySha256 == explorationSnapshot.originalBinarySha256) {
-                "retained exploration snapshot is stale for the selected original binary"
-            }
         }
         return withProgress(reportsDir) { openGraph(projectDir).use { graph ->
-            explorationSnapshot?.let(graph::requireCurrentExplorationSnapshot)
+            val expectedOriginalBinarySha256 = explorationSnapshot?.let { snapshot ->
+                graph.requireCurrentExplorationSnapshot(snapshot)
+                val beforeMutation = captureExplorationBinarySha256(originalBinary, resourceBudget.maximumSourceBytes)
+                require(beforeMutation == snapshot.originalBinarySha256) {
+                    "retained exploration snapshot is stale for the selected original binary"
+                }
+                beforeMutation
+            }
             val corpus = prepareProjectState(graph, inputs)
+            if (expectedOriginalBinarySha256 != null) {
+                val beforeRunAdmission = captureExplorationBinarySha256(originalBinary, resourceBudget.maximumSourceBytes)
+                require(beforeRunAdmission == expectedOriginalBinarySha256) {
+                    "original binary changed before the snapshot-bound repair run was admitted"
+                }
+            }
             val run = graph.beginRun(maxIterations, limits.wallClockTimeout.toMillis())
             activeDeadlineNanos = System.nanoTime() + limits.wallClockTimeout.toNanos()
             var finalReport: BehaviorComparisonReport? = null
             try {
                 checkRunBudget()
-                var assessment = assess(graph, projectDir, originalBinary, reportsDir, "${run.id}_initial", corpus.inputs)
+                var assessment = assess(graph, projectDir, originalBinary, reportsDir, "${run.id}_initial", corpus.inputs,
+                    expectedOriginalBinarySha256 = expectedOriginalBinarySha256)
                 checkRunBudget()
                 if (assessment is RepairAssessment.Valid) {
                     graph.acceptAssessedBaseline(assessment.proof, assessment.evidence, ::checkRunBudget)
@@ -1381,7 +1392,8 @@ class TraceGuidedRepairLoop private constructor(
                         execution.use {
                             try {
                                 val after = assess(graph, projectDir, originalBinary, reportsDir,
-                                    "iteration_${request.iterationIndex}", corpus.inputs, execution.attempt)
+                                    "iteration_${request.iterationIndex}", corpus.inputs, execution.attempt,
+                                    expectedOriginalBinarySha256)
                                 checkRunBudget()
                                 when {
                                     introducesRetainedRegression(assessment, after) -> execution.reject(RepairEvidence(
@@ -1786,6 +1798,7 @@ class TraceGuidedRepairLoop private constructor(
         label: String,
         regressionInputs: List<ProcessInput>,
         attempt: ModuleRevisionAttempt? = null,
+        expectedOriginalBinarySha256: String? = null,
     ): RepairAssessment {
         checkRunBudget()
         val corpus = graph.retainedRegressionCorpus()
@@ -1795,7 +1808,8 @@ class TraceGuidedRepairLoop private constructor(
         val invocation = graph.validationInvocation(attempt)
         val request = RepairCandidateValidationRequest(projectDir, sources, repairCandidateSourceSha256(sources),
             snapshot.profileId, snapshot.profileSha256, snapshot.indexSha256, originalBinary, corpus.inputs, corpus.sha256,
-            reportsDir, label, resourceBudget, activeDeadlineNanos, cancellation, invocation)
+            reportsDir, label, resourceBudget, activeDeadlineNanos, cancellation, invocation,
+            expectedOriginalBinarySha256)
         progress?.state(graph, decompengine.agent.AgentWorkflowPhase.BUILD_VALIDATING, attempt?.id)
         val outcome = try {
             validationStrategy.validateCandidate(request)
@@ -1808,10 +1822,22 @@ class TraceGuidedRepairLoop private constructor(
             throw failure
         }
         checkRunBudget()
+        if (expectedOriginalBinarySha256 != null) {
+            require(captureExplorationBinarySha256(
+                originalBinary ?: error("snapshot validation requires an original binary"),
+                resourceBudget.maximumSourceBytes,
+            ) == expectedOriginalBinarySha256) {
+                "original binary changed during snapshot-bound candidate validation"
+            }
+        }
         val proof = outcome.proof
         require(proof.sourceRevisionSha256 == request.sourceRevisionSha256 && proof.profileSha256 == request.profileSha256 &&
             proof.indexSha256 == request.indexSha256 && proof.regressionCorpusSha256 == request.regressionCorpusSha256 &&
             proof.cleanupVerified) { "validation proof is incomplete or bound to a different source/profile/corpus" }
+        require(request.expectedOriginalBinarySha256 == null ||
+            proof.originalBinarySha256 == request.expectedOriginalBinarySha256) {
+            "validation proof is bound to a different original binary than the exploration snapshot"
+        }
         require(allowTestOnlyValidation || proof.assurance == RepairValidationAssurance.STRICT_CONTAINED)
         if (originalBinary != null) graph.bindOriginalBinary(requireNotNull(proof.originalBinarySha256) {
             "validation proof lacks original binary identity"

@@ -78,6 +78,26 @@ class RepairRunSemanticsTest {
     }
 
     @Test
+    fun `exploration run refuses a binary changed during candidate validation`() {
+        lateinit var original: Path
+        val fixture = fixture("pass0", "pass1", afterValidation = { source ->
+            if (source == "pass0") original.writeText("changed during validation")
+        })
+        original = fixture.original
+        val session = SecureRepairSession(fixture.loop, "test-harness")
+        val snapshot = session.prepareExploration(fixture.root, fixture.original)
+
+        val outcome = session.runRepair(fixture.root, fixture.original, inputs, fixture.root.resolve("reports"), 1, snapshot)
+        assertEquals(RepairRunStatus.VALIDATION_FAILED, outcome.runState.status)
+        assertTrue(fixture.seenSources.isEmpty(), "a changed input must not trigger an agent repair")
+        ModuleRevisionGraph.open(fixture.root, profile).use { graph ->
+            assertNull(graph.snapshot.fullyAcceptedHeadId)
+            assertTrue(graph.snapshot.nodes.none { it.status == ModuleRevisionStatus.ACCEPTED })
+        }
+        session.close()
+    }
+
+    @Test
     fun `throwing repair progress warnings preserve workflow failure interruption and existing owner`(): Unit {
         val parent = Path.of("build/test-tmp/repair-progress-warning").toAbsolutePath().normalize()
         Files.createDirectories(parent)
@@ -584,8 +604,10 @@ class RepairRunSemanticsTest {
         val historyPath = fixture.root.resolve("reports/repair_history.json")
         val legacyHistory = "{\"schemaVersion\":2,\"regressionInputs\":[],\"iterations\":[]}\n".toByteArray()
         historyPath.writeBytes(legacyHistory)
+        SecureRepairSession(fixture.loop, "test-harness").use { session ->
+            session.prepareExploration(fixture.root, fixture.original)
+        }
         ModuleRevisionGraph.open(fixture.root, profile).use { graph ->
-            graph.enableRunContract()
             assertEquals(ModuleRevisionStatus.LEGACY_UNVERIFIED, graph.snapshot.nodes.last().status)
             assertNull(graph.snapshot.fullyAcceptedHeadId)
             assertEquals("pass1", fixture.root.resolve("code.c").readText())
