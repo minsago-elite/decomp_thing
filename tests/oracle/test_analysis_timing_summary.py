@@ -39,7 +39,9 @@ def write_record(directory, name, value):
 
 class AnalysisTimingSummaryTest(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
+        local_tmp = Path(__file__).resolve().parents[2] / "build" / "analysis-timing-summary-tests"
+        local_tmp.mkdir(parents=True, exist_ok=True)
+        self.temporary = tempfile.TemporaryDirectory(dir=local_tmp)
         self.root = Path(self.temporary.name)
 
     def tearDown(self):

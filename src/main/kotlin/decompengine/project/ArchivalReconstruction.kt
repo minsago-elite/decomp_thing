@@ -420,13 +420,13 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
                     memoryMonitorFinished.set(true)
                 }
             }, analysisTaskExecutor).also(tasks::add)
-            fun capture(stream: java.io.InputStream, telemetryAllowance: Int = 0): CompletableFuture<ByteArray> {
+            fun capture(stream: java.io.InputStream): CompletableFuture<ByteArray> {
                 val finished = AtomicBoolean(false)
                 taskSettlements += finished
                 captureSettlements += finished
                 return CompletableFuture.supplyAsync({
                     try {
-                        val maximum = limits.maximumDiagnosticBytesPerStream + telemetryAllowance
+                        val maximum = limits.maximumDiagnosticBytesPerStream
                         val bytes = stream.readNBytes(maximum + 1)
                         if (bytes.size > maximum) {
                             diagnosticsExceeded.set(true)
@@ -441,7 +441,71 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
                     }
                 }, analysisTaskExecutor).also(tasks::add)
             }
-            val stdoutTask = capture(process.inputStream, MAX_WORKER_TIMING_BYTES).also { stdout = it }
+            fun captureStdout(stream: java.io.InputStream): CompletableFuture<ByteArray> {
+                val finished = AtomicBoolean(false)
+                taskSettlements += finished
+                captureSettlements += finished
+                return CompletableFuture.supplyAsync({
+                    try {
+                        val diagnostics = java.io.ByteArrayOutputStream()
+                        val telemetry = java.io.ByteArrayOutputStream()
+                        val line = java.io.ByteArrayOutputStream()
+                        val marker = "DECOMP_ANALYSIS_TIMING_V1 ".toByteArray(Charsets.US_ASCII)
+                        var lineIsTelemetryCandidate = true
+                        var diagnosticsSize = 0
+                        var telemetrySize = 0
+                        fun emitLine() {
+                            val bytes = line.toByteArray()
+                            val framed = lineIsTelemetryCandidate && bytes.size in marker.size..256 &&
+                                bytes.copyOfRange(0, marker.size).contentEquals(marker)
+                            if (framed && telemetrySize + bytes.size <= MAX_WORKER_TIMING_BYTES) {
+                                telemetry.write(bytes)
+                                telemetrySize += bytes.size
+                            } else {
+                                val room = (limits.maximumDiagnosticBytesPerStream - diagnosticsSize).coerceAtLeast(0)
+                                diagnostics.write(bytes, 0, minOf(room, bytes.size))
+                                diagnosticsSize += bytes.size
+                                if (bytes.size > room) {
+                                    diagnosticsExceeded.set(true)
+                                    processTree.terminate()
+                                }
+                            }
+                            line.reset()
+                            lineIsTelemetryCandidate = true
+                        }
+                        while (true) {
+                            val value = stream.read()
+                            if (value < 0) break
+                            line.write(value)
+                            if (lineIsTelemetryCandidate) {
+                                val current = line.toByteArray()
+                                val compared = minOf(current.size, marker.size)
+                                if (!current.copyOfRange(0, compared).contentEquals(marker.copyOfRange(0, compared))) {
+                                    lineIsTelemetryCandidate = false
+                                }
+                                if (current.size > 256) lineIsTelemetryCandidate = false
+                            }
+                            if (value == '\n'.code) emitLine()
+                            if (!lineIsTelemetryCandidate && diagnosticsSize + line.size() > limits.maximumDiagnosticBytesPerStream) {
+                                diagnosticsExceeded.set(true)
+                                processTree.terminate()
+                                break
+                            }
+                        }
+                        if (line.size() > 0) emitLine()
+                        val combined = java.io.ByteArrayOutputStream(diagnostics.size() + telemetry.size())
+                        combined.write(telemetry.toByteArray())
+                        combined.write(diagnostics.toByteArray())
+                        combined.toByteArray()
+                    } catch (failure: Throwable) {
+                        taskFailures.add(failure)
+                        throw failure
+                    } finally {
+                        finished.set(true)
+                    }
+                }, analysisTaskExecutor).also(tasks::add)
+            }
+            val stdoutTask = captureStdout(process.inputStream).also { stdout = it }
             val stderrTask = capture(process.errorStream).also { stderr = it }
             val completed = try {
                 process.waitFor(deadline.remainingNanosOrZero(), TimeUnit.NANOSECONDS)
