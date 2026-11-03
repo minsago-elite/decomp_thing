@@ -1,0 +1,18 @@
+{
+  "apiVersion": 1,
+  "kind": "queuePosition",
+  "requestId": "request_queue_1",
+  "data": {
+    "jobId": "1234567890abcdef1234567890abcdef",
+    "runId": "run_queued_1",
+    "sampledAt": "2026-09-05T00:00:02Z",
+    "state": "queued",
+    "source": "web-workflow-executor",
+    "approximate": true,
+    "position": "3",
+    "ahead": "2",
+    "queuedTasks": "5",
+    "activeWorkers": "2",
+    "workerLimit": "2"
+  }
+}

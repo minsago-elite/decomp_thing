@@ -92,7 +92,8 @@ destination after the common denied treatment; it does not bypass access control
 Unsupported route capabilities show an explanatory view with a Runtime link, rather than fabricated
 empty data or an execution button that cannot work. Unknown routes show **Page not found** and Jobs;
 unknown `/api/**`, asset or download routes never receive the SPA shell. Legacy route migration and
-old source/artifact links follow the parity contract and [#230](https://github.com/minsago-elite/decomp_thing/issues/230).
+old source/artifact links follow the parity contract and [#230](https://github.com/minsago-elite/decomp_thing/issues/230);
+the per-route outcomes are in [legacy migration](web-legacy-migration.md#route-matrix).
 The singular browser `artifact` prefix keeps detail HTML disjoint from the legacy
 `J/artifacts/{path}` attachment route. The plural catalog has no path suffix.
 

@@ -335,3 +335,41 @@ the selected function admission does not authorize global or type scoring, and
 the repository has no checked benchmark production global/type oracle,
 identity-map replay, or score. Consequently this slice does
 not establish the #682 production outcome or downstream #45/#46 qualification.
+
+
+## Selected function assessment overlay
+
+`StructuralSelectedFunctionAssessmentV1` is a separate, versioned projection
+of selected function starts and surviving symbol names onto the complete
+captured model census. It does not add those measurements to the twenty v1
+structural dimensions or interpret them as overall recovery.
+
+The existing host-owned admission derives the overlay from its captured model
+bytes and independently replayed boundary score. `assessSelectedFunctions`
+accepts only the existing `VerifiedStructuralInputsV1` capability and returns
+a defensive copy of the retained bytes. It takes no replacement model, receipt,
+identity map or caller-authored assessment. Stored overlay bytes are explicitly
+`passive-derived-overlay` evidence and cannot reconstruct the live capability.
+
+The overlay binds the exact model, schema, input, boundary score, observation,
+full-export provenance and replay evidence. Every model function, global and
+type appears under its exact typed `(kind, id)` key with its extraction status
+and an overall recovery assessment of `unassessed`. Function-start and
+surviving-name measurements are separately scoped and point into the complete
+retained observation. Raw recovered rows, excluded recoveries, excluded oracle
+functions, oracle-only functions and all surviving aliases remain visible;
+entity counts and alias measurement counts retain their different units.
+Zero-denominator ratios are null. Calibration is unavailable, probability is
+null, and completion and release eligibility remain false.
+
+This producer contract does not yet change model serialization, source-tree
+confidence, audit aggregation or UI rendering. Those consumers must preserve
+the same scope and complete census when they are connected to this evidence.
+
+The original owned operation deadline and cancellation state are checked after
+each codec stage, during new projection work, and immediately before overlay
+and result publication. Existing bounded model parsing/canonical comparison,
+accuracy derivation and structural observation rendering do not provide an
+internal deadline callback. Cancellation within those codecs remains a tracked
+resource requirement under #40, with regeneration dependency context in #683;
+the stage checks do not establish codec preemption or hard host resource limits.

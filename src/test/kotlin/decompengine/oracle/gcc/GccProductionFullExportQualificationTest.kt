@@ -13,6 +13,10 @@ import decompengine.oracle.fulltree.StableControlFile
 import decompengine.oracle.fulltree.FullTreeDiskScratchEvidence
 import decompengine.oracle.fulltree.KotlinContainedCommandRequest
 import decompengine.oracle.fulltree.KotlinSystemdCgroupCommandResources
+import decompengine.oracle.structural.CanonicalProgramModelStreaming
+import decompengine.oracle.structural.StructuralBoundaryReplayWorkerV1
+import decompengine.oracle.structural.StructuralProductionReplayContract
+import decompengine.oracle.structural.StructuralSelectedFunctionAssessmentV1
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.nio.file.Files
@@ -23,6 +27,7 @@ import java.nio.file.StandardOpenOption.READ
 import java.nio.file.StandardOpenOption.WRITE
 import java.nio.file.attribute.PosixFilePermissions
 import java.security.MessageDigest
+import java.util.Locale
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -1103,10 +1108,10 @@ class GccProductionFullExportQualificationTest {
 
             val resultBytes = readStable(output.resolve("result.json"), MAXIMUM_RESULT_BYTES)
             val result = OracleJson.parseCanonical(resultBytes).jsonObject
-            assertEquals(if (engine == "driver") RESULT_KEYS + setOf("boundaryScore", "functionAccuracy") else RESULT_KEYS, result.keys)
-            assertEquals(if (engine == "driver") "gcc-bundled-cli-full-export-result-v3" else "gcc-bundled-cli-full-export-result-v2",
+            assertEquals(if (engine == "driver") RESULT_KEYS + setOf("boundaryScore", "functionAccuracy", "selectedFunctionAssessment") else RESULT_KEYS, result.keys)
+            assertEquals(if (engine == "driver") "gcc-bundled-cli-full-export-result-v4" else "gcc-bundled-cli-full-export-result-v2",
                 result.requiredText("provider"))
-            assertEquals(if (engine == "driver") 3L else 2L, result.getValue("schemaVersion").jsonPrimitive.long)
+            assertEquals(if (engine == "driver") 4L else 2L, result.getValue("schemaVersion").jsonPrimitive.long)
             assertFalse(result.getValue("complete").jsonPrimitive.boolean)
             assertFalse(result.getValue("scored").jsonPrimitive.boolean)
             assertFalse(result.getValue("releaseEligible").jsonPrimitive.boolean)
@@ -1317,11 +1322,79 @@ class GccProductionFullExportQualificationTest {
                     OracleJson.parse(observationBytes, TREE_MANIFEST_LIMITS).jsonObject)
                 assertEquals(independentlyDerived, measurements)
                 publish(captured.resolve(GccDriverProductionFunctionAccuracyV1.SCORE_NAME), accuracyBytes)
+                val selectedPointer = result.getValue("selectedFunctionAssessment").jsonObject
+                assertEquals(setOf("path", "sha256", "bytes", "scope"), selectedPointer.keys)
+                assertEquals(StructuralSelectedFunctionAssessmentV1.SCOPE, selectedPointer.requiredText("scope"))
+                val selectedPath = Path.of(selectedPointer.requiredText("path"))
+                assertEquals(output.resolve(GccBundledFullExportCliResultV2.SELECTED_FUNCTION_ASSESSMENT_NAME), selectedPath)
+                val selectedBytes = readStable(selectedPath, StructuralSelectedFunctionAssessmentV1.MAXIMUM_BYTES)
+                assertEquals(selectedPointer.requiredText("sha256"), OracleArtifacts.sha256(selectedBytes))
+                assertEquals(selectedPointer.getValue("bytes").jsonPrimitive.long, selectedBytes.size.toLong())
+                // Recreate the passive overlay from the actual retained model and admitted report.
+                // This checks byte identity without manufacturing a production capability in a fixture.
+                assertContentEquals(StructuralSelectedFunctionAssessmentV1.derive(capturedModel, scoreBytes), selectedBytes)
+                val selected = OracleJson.parseCanonical(selectedBytes,
+                    StructuralProductionReplayContract.FUNCTION_ACCURACY_LIMITS).jsonObject
+                assertEquals(setOf("provider", "schemaVersion", "scope", "authority", "recoveryAssessmentState",
+                    "complete", "releaseEligible", "calibration", "unavailableDomains", "bindings", "entities",
+                    "oracleOnlyFunctions", "excludedOracleFunctions", "sourceObservation", "measurements", "ratios", "population"),
+                    selected.keys)
+                assertEquals("structural-selected-function-assessment-v1", selected.requiredText("provider"))
+                assertEquals(1L, selected.getValue("schemaVersion").jsonPrimitive.long)
+                assertEquals(StructuralSelectedFunctionAssessmentV1.SCOPE, selected.requiredText("scope"))
+                assertEquals("passive-derived-overlay", selected.requiredText("authority"))
+                assertEquals("unassessed", selected.requiredText("recoveryAssessmentState"))
+                assertFalse(selected.getValue("complete").jsonPrimitive.boolean)
+                assertFalse(selected.getValue("releaseEligible").jsonPrimitive.boolean)
+                assertEquals(JsonObject(mapOf("state" to JsonPrimitive("uncalibrated"), "probability" to JsonNull)),
+                    selected.getValue("calibration"))
+                assertEquals(listOf("interfaces", "calls", "globals", "types", "calibration"),
+                    selected.getValue("unavailableDomains").jsonArray.map { it.jsonPrimitive.content })
+                assertEquals(score.getValue("boundaryObservation"), selected.getValue("sourceObservation"))
+                assertEquals(measurements, selected.getValue("measurements"))
+                val selectedBindings = selected.getValue("bindings").jsonObject
+                val sharedBindingFields = setOf("profileId", "inputSha256", "programModelSha256", "programModelBytes",
+                    "fullExportBindingSha256", "functionOracleSha256", "boundaryObservationSha256", "replayRequestSha256",
+                    "replayAttachmentSha256", "replayExecutionSha256", "replayCaptureSha256", "replayMetadataSha256")
+                assertEquals(sharedBindingFields + setOf("modelSchemaVersion", "selectedBoundaryScoreSha256"), selectedBindings.keys)
+                for (field in sharedBindingFields) assertEquals(score.getValue(field), selectedBindings.getValue(field), field)
+                assertEquals(OracleArtifacts.sha256(scoreBytes), selectedBindings.requiredText("selectedBoundaryScoreSha256"))
+                val model = CanonicalProgramModelStreaming.readCanonical(capturedModel,
+                    StructuralBoundaryReplayWorkerV1.MODEL_LIMITS).model
+                assertEquals(model.schemaVersion.toLong(), selectedBindings.getValue("modelSchemaVersion").jsonPrimitive.long)
+                val expectedEntities = buildMap {
+                    model.functions.forEach { put("function" to it.id, it.status.name.lowercase(Locale.ROOT)) }
+                    model.globals.forEach { put("global" to it.id, it.status.name.lowercase(Locale.ROOT)) }
+                    model.types.forEach { put("type" to it.id, it.status.name.lowercase(Locale.ROOT)) }
+                }
+                val selectedEntities = selected.getValue("entities").jsonArray.map { it.jsonObject }
+                assertEquals(expectedEntities.size, selectedEntities.size)
+                assertEquals(expectedEntities, selectedEntities.associate {
+                    (it.requiredText("kind") to it.requiredText("id")) to it.requiredText("extractionStatus")
+                })
+                for (entity in selectedEntities) {
+                    assertEquals(setOf("kind", "id", "extractionStatus", "recoveryAssessment", "functionStart", "survivingSymbolRows"), entity.keys)
+                    assertEquals("unassessed", entity.requiredText("recoveryAssessment"))
+                    if (entity.requiredText("kind") == "function") {
+                        assertEquals(setOf("outcome", "sourcePartition", "sourceIndex"), entity.getValue("functionStart").jsonObject.keys)
+                    } else {
+                        assertEquals(JsonNull, entity.getValue("functionStart"))
+                        assertTrue(entity.getValue("survivingSymbolRows").jsonArray.isEmpty())
+                    }
+                }
+                assertEquals(JsonObject(mapOf(
+                    "unit" to JsonPrimitive("model-entities"), "modelEntityCount" to JsonPrimitive(expectedEntities.size),
+                    "functionCount" to JsonPrimitive(model.functions.size), "globalCount" to JsonPrimitive(model.globals.size),
+                    "typeCount" to JsonPrimitive(model.types.size), "unassessedEntityCount" to JsonPrimitive(expectedEntities.size),
+                    "functionsWithScopedFindings" to JsonPrimitive(model.functions.size),
+                )), selected.getValue("population"))
+                publish(captured.resolve(GccBundledFullExportCliResultV2.SELECTED_FUNCTION_ASSESSMENT_NAME), selectedBytes)
                 mapOf(
                     "boundaryObservationSha256" to JsonPrimitive(OracleArtifacts.sha256(observationBytes)),
                     "boundaryBindingSha256" to JsonPrimitive(OracleArtifacts.sha256(boundaryBytes)),
                     "productionBoundaryScoreSha256" to JsonPrimitive(OracleArtifacts.sha256(scoreBytes)),
                     "productionFunctionAccuracySha256" to JsonPrimitive(OracleArtifacts.sha256(accuracyBytes)),
+                    "selectedFunctionAssessmentSha256" to JsonPrimitive(OracleArtifacts.sha256(selectedBytes)),
                 )
             } else emptyMap()
             val throughputFields = if (engine == "cc1") {
@@ -1371,7 +1444,7 @@ class GccProductionFullExportQualificationTest {
                 "benchmarkAccepted" to JsonPrimitive(false),
                 "releaseEligible" to JsonPrimitive(false),
                 "limitation" to JsonPrimitive(if (engine == "driver")
-                    "live contained driver export with admitted selected function-boundary and surviving-symbol scores; full structural scoring and release eligibility remain open"
+                    "live contained driver export with admitted selected function findings and a complete unassessed model census; interfaces, calls, globals, types, calibration, full recovery, and release eligibility remain unavailable"
                     else "live contained export only; independent identity replay and production scoring remain open"),
             ) + boundaryFields + throughputFields)
             publish(evidenceRoot.resolve("qualification.json"), OracleJson.canonicalBytes(summary))

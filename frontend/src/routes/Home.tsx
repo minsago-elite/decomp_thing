@@ -1,4 +1,5 @@
-import { homeCopy as copy } from '../copy/shell';
+import { homeCopy as copy, panelBoundaryCopy } from '../copy/shell';
+import { PanelBoundary } from '../shared/PanelBoundary';
 import type { BrowserSession } from '../session/session';
 import { useSession } from '../session/useSession';
 import { Upload } from '../jobs/Upload';
@@ -10,8 +11,8 @@ export default function Home({ basePath = '', session = null }: { basePath?: str
       <p class="eyebrow">{copy.reconstructionWorkspace}</p>
       <h1 id="workspace-title">{copy.yourWorkWithItsEvidence}</h1>
       <p class="lead">{copy.reviewReconstructedSourceInspectValidationEvidenceAndFollowEachRevision}</p>
-      {session && <Upload basePath={basePath} session={session} />}
-      {state?.status === 'authenticated' ? <Dashboard key={state.generation} basePath={basePath} /> : <div class="notice" aria-labelledby="availability-title">
+      {session && <PanelBoundary name={panelBoundaryCopy.names.upload}><Upload basePath={basePath} session={session} /></PanelBoundary>}
+      {state?.status === 'authenticated' ? <PanelBoundary name={panelBoundaryCopy.names.dashboard}><Dashboard key={state.generation} basePath={basePath} draftOwner={session} /></PanelBoundary> : <div class="notice" aria-labelledby="availability-title">
         <h2 id="availability-title">{copy.theWorkbenchShellIsReady}</h2>
         <p>{copy.connectALocalSessionToBrowseUploadedJobsThePublic}</p>
         <p>{copy.existingCommandLineWorkflowsRemainAvailable}</p>

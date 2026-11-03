@@ -32,7 +32,7 @@ internal data class ModulePromptEvidence(
     val observed: String, val text: String,
 )
 
-internal fun modulePromptEvidence(request: ModuleReconstructionRequest): ModulePromptEvidence {
+internal fun modulePromptEvidence(request: ModuleReconstructionRequest, legacy: Boolean = false): ModulePromptEvidence {
     val target = request.module.sourcePath
     val layout = request.profile.layout
     val implementation = layout.declaration("module-implementation")
@@ -64,7 +64,24 @@ internal fun modulePromptEvidence(request: ModuleReconstructionRequest): ModuleP
     require(contextPaths.distinct().size == contextPaths.size && target !in contextPaths) {
         "module reconstruction context paths must be distinct from each other and the editable target"
     }
-    val prompt = ReconstructionAdapters.resolve(request.profile).modulePrompt(request)
+    val adapter = ReconstructionAdapters.resolve(request.profile)
+    if (!legacy) {
+        val selected = adapter.moduleContext(request)
+        val evidence = buildString {
+            append(selected.prompt.evidence)
+            append("\n\nRequired interface snapshots (complete authorized interface context; files are not readable):")
+            selected.interfaces.toSortedMap().forEach { (path, content) ->
+                append("\n\n--- ").append(path).append(" ---\n").append(content)
+            }
+        }
+        val observed = selectModuleObservedBehavior(request.observedBehavior, request.module, request.model)
+        val text = decompengine.agent.renderAgentPrompt(selected.prompt.objective, listOf(
+            decompengine.agent.AgentContextInput("recovered-module-evidence", evidence),
+            decompengine.agent.AgentContextInput("observed-behavior", observed),
+        ))
+        return ModulePromptEvidence(selected.prompt.objective, evidence, selected.interfaces, observed, text)
+    }
+    val prompt = adapter.modulePrompt(request)
     val objective = prompt.objective
     val evidence = prompt.evidence
     val files = linkedMapOf(
@@ -119,7 +136,7 @@ internal fun requireRetainableModuleObservation(observed: String?) {
 /** Original renderer inputs; repaired headers are deliberately not consulted. */
 internal class ProfileModulePromptInputs(
     private val model: RecoveredProgramModel,
-    plan: ModulePlan,
+    private val plan: ModulePlan,
     private val profile: ReconstructionProfile,
 ) {
     private val adapter = ReconstructionAdapters.resolve(profile)
@@ -139,11 +156,17 @@ internal class ProfileModulePromptInputs(
             modules.getValue(moduleId), model, sharedHeader, headers.getValue(moduleId),
             privateHeaders.getValue(moduleId), dependencies.getValue(moduleId).associate { dependency ->
                 modules.getValue(dependency).headerPath to headers.getValue(dependency)
-            }, projectDir, observedBehavior = observedBehavior, profile = profile,
+            }, projectDir, observedBehavior = observedBehavior, profile = profile, modulePlan = plan,
         )
     }
 
-    fun fingerprint(request: ModuleReconstructionRequest): String {
+    fun requestFromRetainedObservation(
+        moduleId: String, projectDir: java.nio.file.Path, observedBehavior: String?, legacy: Boolean,
+    ): ModuleReconstructionRequest = request(moduleId, projectDir,
+        ModuleObservationRetention.replay(observedBehavior, modules.getValue(moduleId), model, legacy))
+
+    fun fingerprint(request: ModuleReconstructionRequest, legacy: Boolean = false): String {
+        if (!legacy) return selectedModuleInputFingerprint(request)
         val localFingerprint = SourceTreeGenerator.moduleFingerprint(
             request.module, model, request.sharedHeader, request.moduleHeader, request.privateHeader,
             request.dependencyHeaders, request.observedBehavior, profile.sha256, adapter.compilation.id,
@@ -152,3 +175,10 @@ internal class ProfileModulePromptInputs(
             interfaceFingerprints.getValue(request.module.id)).toByteArray(Charsets.UTF_8))
     }
 }
+
+/** Exactly the selected, dispatched context; unrelated project entities cannot invalidate it. */
+internal fun selectedModuleInputFingerprint(request: ModuleReconstructionRequest): String = sha256(
+    ("module-reconstruction-input-v3\n" + request.model.inputSha256 + "\n" + request.model.schemaVersion + "\n" +
+        request.profile.sha256 + "\n" + ReconstructionAdapters.resolve(request.profile).compilation.id + "\n" +
+        modulePromptEvidence(request).text).toByteArray(Charsets.UTF_8),
+)

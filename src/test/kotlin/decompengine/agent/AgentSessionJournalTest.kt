@@ -37,6 +37,35 @@ class AgentSessionJournalTest {
     }
 
     @Test
+    fun `write-only journal reconciliation and acceptance retain source identity without readable context`() {
+        val fixture = fixture()
+        val request = fixture.request(fixture.continuation(), read = false)
+        val path = AgentWorkspacePath(fixture.root.id, "module.c")
+        assertFalse(request.accessPolicy.allows(path, AgentOperation.READ_FILE))
+        AgentSessionJournal.open(request.sessionContinuation!!).use { journal ->
+            journal.reconcileWorkspace(request.workspaceRoots)
+            journal.processStarting(AgentExecutionRequestBinding.capture(request).requestSha256)
+            journal.chooseSession(identity, true)
+            journal.sessionReady("write-only-session", false)
+            journal.promptStarting()
+            journal.finishTurn(receipt(request), true)
+        }
+        Files.writeString(fixture.source, "accepted replacement")
+        val revision = sha(Files.readAllBytes(fixture.source))
+        val accepted = fixture.continuation(accepted = revision)
+        AgentSessionJournal.recordAcceptance(accepted, listOf(fixture.root),
+            AgentExecutionRequestBinding.capture(request).requestSha256, "c".repeat(64), revision)
+        AgentSessionJournal.open(accepted).use { journal ->
+            journal.reconcileWorkspace(request.workspaceRoots)
+            assertEquals(revision, journal.acceptedRevisionSha256)
+        }
+        Files.writeString(fixture.source, "unexpected host edit")
+        AgentSessionJournal.open(accepted).use { journal ->
+            assertFailsWith<IllegalStateException> { journal.reconcileWorkspace(request.workspaceRoots) }
+        }
+    }
+
+    @Test
     fun `completed conversation loads after reopening and accepted publication is idempotent`() {
         val fixture = fixture()
         val request = fixture.request(fixture.continuation())
@@ -254,10 +283,11 @@ class AgentSessionJournalTest {
                 mapOf(AgentWorkspacePath(root.id, "module.c") to sha(Files.readAllBytes(source))),
                 accepted, policy,
             )
-        fun request(continuation: AgentSessionContinuation) = AgentExecutionRequest(
+        fun request(continuation: AgentSessionContinuation, read: Boolean = true) = AgentExecutionRequest(
             "reconstruct module", listOf(root),
             accessPolicy = AgentAccessPolicy(listOf(AgentPathRule(
-                AgentWorkspacePath(root.id, "module.c"), setOf(AgentOperation.READ_FILE, AgentOperation.WRITE_FILE),
+                AgentWorkspacePath(root.id, "module.c"), setOf(AgentOperation.WRITE_FILE) +
+                    if (read) setOf(AgentOperation.READ_FILE) else emptySet(),
             ))),
             sessionContinuation = continuation,
         )

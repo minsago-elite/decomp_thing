@@ -4,8 +4,6 @@ import decompengine.acp.LinuxFileIdentity
 import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.acp.permissions
 import decompengine.oracle.fulltree.ContainedCommandOperationDeadline
-import decompengine.oracle.fulltree.OracleNativeLibraries
-import decompengine.oracle.fulltree.isolatedObservationJvmTemporaryArguments
 import decompengine.oracle.core.DescriptorBoundAtomicStateFile
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.oracle.core.OracleJson
@@ -13,6 +11,7 @@ import decompengine.oracle.structural.StructuralBoundaryReplayRequestV1
 import decompengine.oracle.structural.StructuralBoundaryReplayWorkerV1
 import decompengine.oracle.structural.StructuralProductionReplayContract
 import decompengine.oracle.structural.StructuralReplayAdapterRegistry
+import decompengine.oracle.structural.StructuralSelectedFunctionAssessmentV1
 import decompengine.oracle.structural.VerifiedStructuralInputsV1
 import decompengine.oracle.structural.FrozenNativeRecoveredCallPopulationV1
 import decompengine.oracle.structural.StructuralSelectedBoundaryProjectionV1
@@ -40,6 +39,8 @@ import decompengine.oracle.fulltree.KotlinSystemdCgroupCommandInput
 import decompengine.oracle.fulltree.KotlinSystemdCgroupCommandLauncher
 import decompengine.oracle.fulltree.KotlinSystemdCgroupCommandResources
 import decompengine.oracle.fulltree.calculateFullTreeObservationRuntimeManifestSha256
+import decompengine.oracle.fulltree.OracleNativeLibraries
+import decompengine.oracle.fulltree.isolatedObservationJvmTemporaryArguments
 import java.nio.file.Path
 
 private object GCC_BUNDLED_PREPARED_OPERATION_PERMIT
@@ -134,16 +135,22 @@ internal class GccBundledStructuralReplayOperation(
     val capture: GccBundledStructuralReplayCapture,
     attachmentBytes: ByteArray,
     executionBytes: ByteArray,
+    private val deadline: ContainedCommandOperationDeadline,
     constructionPermit: Any,
 ) {
     private val attachment = attachmentBytes.copyOf()
     private val execution = executionBytes.copyOf()
     val attachmentBytes: ByteArray get() = attachment.copyOf()
     val executionBytes: ByteArray get() = execution.copyOf()
+    fun requireCurrent() {
+        if (Thread.currentThread().isInterrupted) throw InterruptedException("structural replay admission interrupted")
+        deadline.requireCurrent()
+    }
     init {
         check(constructionPermit === GCC_BUNDLED_PREPARED_OPERATION_PERMIT) {
             "structural replay requires retained live coordinator ownership"
         }
+        requireCurrent()
     }
 }
 
@@ -699,7 +706,10 @@ internal class GccBundledPreparedOperation internal constructor(
             )))
             LinuxFilesystemSyscalls.openRoot(cli.options.output).use { output ->
                 cli.requireCurrent()
-                decompengine.oracle.core.DescriptorBoundAtomicStateFile.publishNoReplace(output, "result.json", document, 256 * 1024)
+                decompengine.oracle.core.DescriptorBoundAtomicStateFile.publishNoReplace(
+                    output, "result.json", document, 256 * 1024,
+                    beforePublication = deadline::requireCurrent,
+                )
                 cli.requireCurrent()
             }
             inputs.verify("after CLI result publication")
@@ -842,7 +852,7 @@ internal class GccBundledPreparedOperation internal constructor(
                 publish("structural-replay-capture.json", captured.assessmentBytes)
                 completedControls[controlName] = checkNotNull(execution.controlDirectoryIdentity)
                 val replay = GccBundledStructuralReplayOperation(profile, authenticated, request, captured,
-                    checkNotNull(attachmentBytes), execution.canonicalBytes, GCC_BUNDLED_PREPARED_OPERATION_PERMIT)
+                    checkNotNull(attachmentBytes), execution.canonicalBytes, deadline, GCC_BUNDLED_PREPARED_OPERATION_PERMIT)
                 StructuralReplayAdapterRegistry.production.admitSelectedBoundary(replay).also { deadline.requireCurrent() }
             }
         } catch (failure: Throwable) {
@@ -952,10 +962,19 @@ internal class GccBundledPreparedOperation internal constructor(
                         GccDriverProductionFunctionAccuracyV1.SCORE_NAME,
                         GccDriverProductionFunctionAccuracyV1.create(verified),
                         GccBundledStructuralReplayOutputCapture.MAXIMUM_OBSERVATION_BYTES)
+                    val selectedAssessment = StructuralProductionReplayContract.assessSelectedFunctions(verified)
+                    if (Thread.currentThread().isInterrupted) throw InterruptedException("selected assessment publication interrupted")
+                    deadline.requireCurrent()
+                    cli.requireCurrent()
+                    DescriptorBoundAtomicStateFile.publishManifestNoReplace(output,
+                        GccBundledFullExportCliResultV2.SELECTED_FUNCTION_ASSESSMENT_NAME,
+                        selectedAssessment,
+                        StructuralSelectedFunctionAssessmentV1.MAXIMUM_BYTES)
                 }
                 inputs.verify("after full-export binding publication")
                 journal.verify("after full-export binding publication")
                 lease.requireCurrentOperationRunRootAfterCgroupAbsence(runRoot)
+                if (Thread.currentThread().isInterrupted) throw InterruptedException("full-export result publication interrupted")
                 deadline.requireCurrent()
                 DescriptorBoundAtomicStateFile.publishNoReplace(output, "result.json", resultBytes, 256 * 1024)
                 cli.requireCurrent()

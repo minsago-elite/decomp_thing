@@ -172,8 +172,10 @@ class AgentExecutionRequest(
         }
         val rootIds = this.workspaceRoots.mapTo(mutableSetOf()) { it.id }
         sessionContinuation?.let { continuation ->
-            require(continuation.workspaceFiles.keys.all { accessPolicy.allows(it, AgentOperation.READ_FILE) }) {
-                "session inventory requires explicit workspace read authority"
+            require(continuation.workspaceFiles.keys.all {
+                accessPolicy.allows(it, AgentOperation.READ_FILE) || accessPolicy.allows(it, AgentOperation.WRITE_FILE)
+            }) {
+                "session inventory requires explicit workspace read or write authority"
             }
             require(this.workspaceRoots.none { continuation.directory.startsWith(it.path) }) {
                 "session journal must be outside agent workspace roots"
@@ -436,3 +438,18 @@ private fun <T> immutableSet(values: Collection<T>): Set<T> =
 
 private fun <K, V> immutableMap(values: Map<K, V>): Map<K, V> =
     Collections.unmodifiableMap(LinkedHashMap(values))
+
+/** Exact text framing used by ACP; workflows may budget it before constructing a request. */
+internal fun renderAgentPrompt(objective: String, contextInputs: Collection<AgentContextInput>): String = buildString {
+    appendLine(objective)
+    if (contextInputs.isNotEmpty()) {
+        appendLine()
+        appendLine("Context inputs (immutable):")
+        contextInputs.forEach { context ->
+            append("--- ").append(context.id).append(" [").append(context.mediaType).append(']')
+            context.description?.let { append(" — ").append(it) }
+            appendLine()
+            appendLine(context.content)
+        }
+    }
+}
