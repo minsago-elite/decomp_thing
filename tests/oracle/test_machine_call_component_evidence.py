@@ -19,6 +19,8 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location("machine_call_evidence", ROOT / "scripts/verify-machine-call-component-evidence.py")
+if SPEC is None or SPEC.loader is None:
+    raise ImportError("cannot load offline machine-call evidence verifier")
 VERIFY = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(VERIFY)
 
