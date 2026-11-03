@@ -174,7 +174,8 @@ it('clears connection-retained Runtime facts when another tab invalidates the se
     expect(screen.queryByText('server_fixture_1')).toBeNull();
     expect(screen.queryByLabelText('Runtime report')).toBeNull();
     expect(screen.queryByText(/Previously loaded metadata may be outdated/)).toBeNull();
-    expect(session.snapshot()).toMatchObject({ status: 'required', reason: 'session-changed' });
+    expect(session.snapshot()).toMatchObject({ status: 'unavailable', reason: 'connection' });
+    expect(session.snapshot()).not.toHaveProperty('runtime');
     expect(gateway.bootstrap).toHaveBeenCalledTimes(2);
   } finally { session.dispose(); }
 });

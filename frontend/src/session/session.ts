@@ -51,7 +51,8 @@ export function createBrowserSession(gateway: SessionGateway, basePath: string) 
       // logout must still erase it, without changing authorization or starting any request.
       notifyInvalidated(true);
       if (state.status === 'unavailable' && state.reason === 'connection' && state.runtime) {
-        publish({ status: 'required', reason: 'session-changed' });
+        publish({ status: 'unavailable', reason: 'connection',
+          ...('referenceId' in state && state.referenceId ? { referenceId: state.referenceId } : {}) });
       }
       return;
     }
