@@ -7,6 +7,8 @@ import { message as displayMessage } from '../shared/messages';
 import { canRetainMetadata } from '../shared/retainMetadata';
 import { usePrivateTransport } from '../session/PrivateTransport';
 import { ActivityRow } from './ActivityRow';
+import { ActivityStages } from './ActivityStages';
+import { useIdentityDigests } from './activityCorrelation';
 import { activityWindowCapacity, activityWindowLocation, activityWindowPageLimit, activityWindowSearch,
   appendActivityWindowPage, invalidActivityWindow, type ActivityNavigation, type ActivityWindow } from './activityNavigation';
 
@@ -66,6 +68,7 @@ export function ActivityHistory({ jobId, runId, basePath, navigation, window }: 
     return () => { controller.abort(); };
   }, [binding, client, jobId, runId, retry]);
   const path = runViewPath(basePath, jobId, runId, 'activity');
+  const identities = useIdentityDigests(state.snapshot?.run ?? null);
   return <section aria-labelledby="activity-history-title" aria-busy={state.loading}>
     <h2 id="activity-history-title">{copy.title}</h2>
     <p>{copy.boundary}</p>
@@ -76,9 +79,10 @@ export function ActivityHistory({ jobId, runId, basePath, navigation, window }: 
     {state.error && <p role="alert">{state.error}</p>}
     {(state.loading || state.error) && state.rows.length > 0 && <p>{copy.stale}</p>}
     {state.snapshot && <p>{displayMessage(copy.snapshot, { state: state.snapshot.run.state, acceptance: state.snapshot.run.acceptance })}</p>}
+    {state.rows.length > 0 && <ActivityStages run={state.snapshot?.run ?? null} events={state.rows} />}
     <ol aria-label={copy.observations}>
       {state.rows.map(event => <ActivityRow key={event.cursor!} event={event} basePath={basePath}
-        selected={window.event === event.cursor}
+        selected={window.event === event.cursor} identities={identities}
         inspectionHref={`${path}${activityWindowSearch({ ...window, event: event.cursor })}`} />)}
     </ol>
   </section>;

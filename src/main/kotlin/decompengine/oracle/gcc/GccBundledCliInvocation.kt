@@ -26,8 +26,8 @@ internal data class GccBundledCliOptions(
     companion object {
         fun engineUsage(fullRecoveryExport: Boolean, runtimeDiagnostics: Boolean = false,
             nativeCallObservations: Boolean = false): String = when {
-            runtimeDiagnostics || nativeCallObservations -> "cc1"
-            fullRecoveryExport -> "<cc1|driver>"
+            runtimeDiagnostics -> "cc1"
+            fullRecoveryExport || nativeCallObservations -> "<cc1|driver>"
             else -> "<cc1|lto1>"
         }
 
@@ -65,11 +65,11 @@ internal data class GccBundledCliOptions(
                 "full-recovery structural export requires cc1 or driver"
             }
             require(!runtimeDiagnostics || positionals[0] == "cc1") { "runtime diagnostics require cc1" }
-            require(positionals[0] != "driver" || fullRecoveryExport) {
-                "driver admission requires a fresh full-recovery export"
+            require(positionals[0] != "driver" || fullRecoveryExport || nativeCallObservations) {
+                "driver admission requires a fresh full-recovery or native-call export"
             }
-            require(!nativeCallObservations || positionals[0] == "cc1") {
-                "native call observations are currently supported only for cc1"
+            require(!nativeCallObservations || positionals[0] in setOf("cc1", "driver")) {
+                "native call observations require cc1 or driver"
             }
             fun path(value: String) = Path.of(value).toAbsolutePath().normalize()
             fun required(name: String) = path(requireNotNull(values[name]) { "$name is required" })

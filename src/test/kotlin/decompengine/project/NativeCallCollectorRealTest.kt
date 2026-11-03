@@ -12,6 +12,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
 import org.junit.jupiter.api.Assumptions.assumeTrue
@@ -41,6 +42,14 @@ class NativeCallCollectorRealTest {
         root.resolve("mips-input").also { Files.write(it, byteArrayOf(0x0c, 0, 4, 4, 0, 0, 0, 0)) }
     }
 
+    @Test
+    fun `real bundled iterator scans ordinary high reference sources and rejects late call overflow`() = withRealControl("reference-scan") { root ->
+        val assembly = copyResource("control-calls.s", root)
+        root.resolve("calls").also { binary ->
+            run(root, listOf("cc", "-nostdlib", "-no-pie", "-Wl,--build-id=none", "-o", binary.toString(), assembly.toString()), "compile-elf", Duration.ofSeconds(30))
+        }
+    }
+
     private fun withRealControl(mode: String, prepareInput: (Path) -> Path) {
         assumeTrue(System.getenv("RUN_REAL_GHIDRA_NATIVE_CALLS") == "true", "bundled native collector controls are opt-in")
         val repository = Path.of("").toAbsolutePath().normalize()
@@ -59,6 +68,7 @@ class NativeCallCollectorRealTest {
         assertTrue(jars.isNotEmpty(), "bundled Ghidra jars missing")
         val source = copyResource("NativeCallCollectorControls.java", root)
         val collector = repository.resolve("ghidra-bridge/src/main/java/ExportNativeCallsV1.java")
+        val interfaceCollector = repository.resolve("ghidra-bridge/src/main/java/ExportNativeInterfacesV1.java")
         val exporter = repository.resolve("src/main/resources/ghidra_scripts/ExportProgramModel.java")
         val dispatch = repository.resolve("ghidra-bridge/src/main/java/RunBundledExports.java")
         val worker = repository.resolve("ghidra-bridge/src/main/java/decompengine/ghidra/BundledGhidraWorker.java")
@@ -67,7 +77,7 @@ class NativeCallCollectorRealTest {
         val classpath = jars.joinToString(System.getProperty("path.separator"))
         val javaBin = Path.of(System.getProperty("java.home"), "bin")
         val javaProperties = listOf("-Djava.io.tmpdir=$temporary", "-Djna.tmpdir=$temporary", "-Duser.home=$home", "-Djava.awt.headless=true", "-XX:-UsePerfData")
-        run(root, listOf(javaBin.resolve("javac").toString()) + javaProperties.map { "-J$it" } + listOf("-proc:none", "-cp", classpath, "-d", classes.toString(), source.toString(), collector.toString(), exporter.toString(), dispatch.toString(), worker.toString()), "compile-controls", Duration.ofSeconds(45))
+        run(root, listOf(javaBin.resolve("javac").toString()) + javaProperties.map { "-J$it" } + listOf("-proc:none", "-cp", classpath, "-d", classes.toString(), source.toString(), collector.toString(), interfaceCollector.toString(), exporter.toString(), dispatch.toString(), worker.toString()), "compile-controls", Duration.ofSeconds(45))
         val input = prepareInput(root)
         run(root, listOf(javaBin.resolve("java").toString(), "-Xmx1g") + javaProperties + listOf("-cp", "$classes${System.getProperty("path.separator")}$classpath", "NativeCallCollectorControls", release.toString(), root.toString(), collector.toString(), exporter.toString(), mode, input.toString()), "native-control", Duration.ofSeconds(120))
         assertTrue(Files.readString(root.resolve("verified-controls.txt")).contains("model-unchanged"))
@@ -110,6 +120,18 @@ class NativeCallCollectorRealTest {
         assertFalse(receipt.authoritativeOracleEvidence)
         assertFalse(receipt.recoveredModelScored)
         assertFalse(receipt.releaseEligible)
+        if (mode == "reference-scan") {
+            val controls = Json.parseToJsonElement(Files.readString(root.resolve("reference-scan-controls.json"))) as JsonObject
+            assertEquals(1720L, controls.getValue("ordinaryReferenceCount").jsonPrimitive.long)
+            assertEquals(65L, controls.getValue("jumpReferenceCount").jsonPrimitive.long)
+            for (field in listOf("completeScan", "sameCountMutationRejected", "midScanCancellationRejected"))
+                assertTrue(controls.getValue(field).jsonPrimitive.boolean)
+            val failure = controls.getValue("lateCallOverflowDiagnostic").jsonPrimitive.content
+            assertTrue(failure.contains("count=66") && failure.contains("limit=64") && failure.contains("offsetBits="))
+            val sites = observed.filterIsInstance<NativeCallSiteRecordV1>()
+            assertEquals(sites.sumOf { it.references.size.toLong() }, receipt.scanSummary.directReferences)
+            assertEquals(sites.sumOf { site -> site.referenceNeighborhoods.sumOf { it.references.size.toLong() } }, receipt.scanSummary.neighborhoodReferences)
+        }
     }
 
     private fun copyResource(name: String, root: Path): Path = root.resolve(name).also { path ->

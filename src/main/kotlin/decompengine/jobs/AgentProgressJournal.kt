@@ -158,7 +158,13 @@ class AgentProgressJournal private constructor(
                             event.costAmount?.let { put("reportedCostAmount", it.toString()) }
                             event.costCurrency?.let { put("reportedCostCurrency", redactor.text(it)) }
                         }
-                        is AgentMessageEvent -> {
+                        is AgentMessageEvent -> if (event.role == AgentMessageRole.THOUGHT) {
+                            // Private reasoning is neither buffered, measured nor committed. The record
+                            // only marks that the provider sent a reasoning update in this position.
+                            put("role", "thought")
+                            put("completed", event.completed)
+                            put("textOmitted", true)
+                        } else {
                             val messageIdDigest = digest(event.messageId)
                             val messageKey = event.role.name + ":" + messageIdDigest
                             put("messageIdSha256", messageIdDigest)

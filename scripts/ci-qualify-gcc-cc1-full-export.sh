@@ -2,12 +2,12 @@
 set -euo pipefail
 
 if (($# > 1)); then
-  echo 'usage: scripts/ci-qualify-gcc-cc1-full-export.sh [qualification|cc1-runtime-diagnostics|cc1-native-calls]' >&2
+  echo 'usage: scripts/ci-qualify-gcc-cc1-full-export.sh [qualification|cc1-runtime-diagnostics|cc1-native-calls|driver-native-calls]' >&2
   exit 64
 fi
 mode="${1:-qualification}"
 case "$mode" in
-  qualification|cc1-runtime-diagnostics|cc1-native-calls) ;;
+  qualification|cc1-runtime-diagnostics|cc1-native-calls|driver-native-calls) ;;
   *) echo 'unknown full-export capture mode' >&2; exit 64 ;;
 esac
 
@@ -16,10 +16,11 @@ case "$DECOMP_GCC_CLI_FULL_EXPORT_ENGINE" in
   cc1|driver) ;;
   *) echo 'full-export qualification requires cc1 or driver' >&2; exit 64 ;;
 esac
-if [[ "$mode" != qualification && "$DECOMP_GCC_CLI_FULL_EXPORT_ENGINE" != cc1 ]]; then
-  echo "$mode requires cc1" >&2
-  exit 64
-fi
+case "$mode:$DECOMP_GCC_CLI_FULL_EXPORT_ENGINE" in
+  qualification:*|cc1-runtime-diagnostics:cc1|cc1-native-calls:cc1|driver-native-calls:driver) ;;
+  driver-native-calls:*) echo "$mode requires driver" >&2; exit 64 ;;
+  *) echo "$mode requires cc1" >&2; exit 64 ;;
+esac
 export DECOMP_GCC_CLI_EXPORT_BINARY="${DECOMP_GCC_CLI_EXPORT_BINARY:-${DECOMP_GCC_CLI_CC1_BINARY:-}}"
 export DECOMP_GCC_CLI_EXPORT_SCRATCH="${DECOMP_GCC_CLI_EXPORT_SCRATCH:-${DECOMP_GCC_CLI_CC1_FRESH_SCRATCH:-}}"
 
@@ -36,9 +37,9 @@ unset DECOMP_REQUIRE_GCC_CLI_FULL_EXPORT DECOMP_REQUIRE_GCC_RUNTIME_DIAGNOSTICS 
 if [[ "$mode" == cc1-runtime-diagnostics ]]; then
   export DECOMP_REQUIRE_GCC_RUNTIME_DIAGNOSTICS=true
   selected_test='decompengine.oracle.gcc.GccProductionFullExportQualificationTest.live cc1 runtime diagnostics retain bounded logs and available operation evidence'
-elif [[ "$mode" == cc1-native-calls ]]; then
+elif [[ "$mode" == cc1-native-calls || "$mode" == driver-native-calls ]]; then
   export DECOMP_REQUIRE_GCC_NATIVE_CALLS=true
-  selected_test='decompengine.oracle.gcc.GccProductionFullExportQualificationTest.live cc1 native call observations retain profile-bound capture evidence'
+  selected_test='decompengine.oracle.gcc.GccProductionFullExportQualificationTest.live selected GCC native call observations retain profile-bound capture evidence'
 else
   export DECOMP_REQUIRE_GCC_CLI_FULL_EXPORT=true
   selected_test='decompengine.oracle.gcc.GccProductionFullExportQualificationTest.live selected GCC full export retains its profile-bound model and receipt evidence'

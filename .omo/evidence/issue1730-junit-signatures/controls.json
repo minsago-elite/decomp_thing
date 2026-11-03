@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "javac": "/opt/openjdk-bin-21.0.12.1_p1/bin/javac",
+  "status": "passed",
+  "testsRun": 16,
+  "declaredControls": [
+    "__main__.CompiledSignatureControls.test_all_supported_nonvoid_ordinary_methods_are_rejected",
+    "__main__.CompiledSignatureControls.test_annotation_nodes_and_depth_are_bounded",
+    "__main__.CompiledSignatureControls.test_class_byte_method_and_report_budgets_fail_closed",
+    "__main__.CompiledSignatureControls.test_cli_retains_failure_evidence_and_nonzero_exit",
+    "__main__.CompiledSignatureControls.test_composed_annotation_cycle_propagates_test_marker_once",
+    "__main__.CompiledSignatureControls.test_directory_depth_is_bounded_before_filesystem_recursion",
+    "__main__.CompiledSignatureControls.test_empty_missing_linked_and_duplicate_roots_fail",
+    "__main__.CompiledSignatureControls.test_evidence_is_deterministic_and_binds_exact_compiled_bytes",
+    "__main__.CompiledSignatureControls.test_invalid_constant_pool_reference_fails",
+    "__main__.CompiledSignatureControls.test_linked_class_and_inconsistent_binary_name_fail",
+    "__main__.CompiledSignatureControls.test_malformed_method_descriptor_and_utf8_fail",
+    "__main__.CompiledSignatureControls.test_oversized_class_rejected_before_reading_body",
+    "__main__.CompiledSignatureControls.test_truncation_header_constant_pool_and_last_attribute_fail",
+    "__main__.CompiledSignatureControls.test_unsupported_class_version_and_pool_tag_fail",
+    "__main__.CompiledSignatureControls.test_valid_dynamic_factory_return_types_remain_exempt",
+    "__main__.CompiledSignatureControls.test_valid_void_parameterized_repeated_and_template_methods"
+  ],
+  "failures": [],
+  "errors": [],
+  "skipped": []
+}

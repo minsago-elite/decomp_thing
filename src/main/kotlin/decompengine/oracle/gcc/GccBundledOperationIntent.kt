@@ -34,9 +34,9 @@ internal class GccBundledOperationIntent(
     init {
         require(operationId.matches(Regex("[0-9a-f]{64}"))) { "GCC bundled operation ID is invalid" }
         require(engineId in setOf("driver", "cc1", "lto1")) { "GCC bundled engine ID is invalid" }
-        require(engineId != "driver" || (bundledRuntime.invocationVersion == 5 &&
+        require(engineId != "driver" || (bundledRuntime.invocationVersion in setOf(5, 8) &&
             runKind == GccCompilerEngineContainmentRunKind.FRESH_CONTROL && plannerProfile != null)) {
-            "GCC driver requires retained full-recovery export in a fresh uninterrupted operation"
+            "GCC driver requires retained full-recovery or native-call export in a fresh uninterrupted operation"
         }
         require(bundledRuntime.invocationVersion in 1..3 || bundledRuntime.invocationVersion in 5..8) {
             "fresh operation intent cannot select the resume-only runtime"

@@ -1,0 +1,521 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "provider",
+    "schemaVersion",
+    "binding",
+    "sources",
+    "oracleSites",
+    "recoveredSites",
+    "exclusions",
+    "coverageGaps"
+  ],
+  "properties": {
+    "provider": {
+      "const": "structural-call-population-input-v1"
+    },
+    "schemaVersion": {
+      "const": 1
+    },
+    "binding": {
+      "$ref": "#/$defs/Binding"
+    },
+    "sources": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Source"
+      },
+      "maxItems": 256
+    },
+    "oracleSites": {
+      "type": "array",
+      "items": {
+        "allOf": [
+          {
+            "$ref": "#/$defs/Site"
+          },
+          {
+            "properties": {
+              "state": {
+                "enum": [
+                  "observable",
+                  "oracle-unobservable"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "maxItems": 100000
+    },
+    "recoveredSites": {
+      "type": "array",
+      "items": {
+        "allOf": [
+          {
+            "$ref": "#/$defs/Site"
+          },
+          {
+            "properties": {
+              "state": {
+                "enum": [
+                  "recovered",
+                  "recovered-unknown"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "maxItems": 100000
+    },
+    "exclusions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Exclusion"
+      },
+      "maxItems": 100000
+    },
+    "coverageGaps": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/CoverageGap"
+      },
+      "maxItems": 100000
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:decompengine:structural-call-population-input-v1",
+  "$defs": {
+    "Identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$"
+    },
+    "Digest": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "Coordinate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "space",
+        "offset"
+      ],
+      "properties": {
+        "space": {
+          "$ref": "#/$defs/Identifier"
+        },
+        "offset": {
+          "type": "string",
+          "pattern": "^0x(?:0|[1-9a-f][0-9a-f]{0,15})$"
+        }
+      }
+    },
+    "RawReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sourceId",
+        "recordId"
+      ],
+      "properties": {
+        "sourceId": {
+          "$ref": "#/$defs/Identifier"
+        },
+        "recordId": {
+          "$ref": "#/$defs/Identifier"
+        }
+      }
+    },
+    "Observations": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/RawReference"
+      },
+      "maxItems": 100000,
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "Target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "id"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "function",
+            "external"
+          ]
+        },
+        "id": {
+          "$ref": "#/$defs/Identifier"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "external"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^ext-[a-f0-9]{64}$"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "Site": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "callerId",
+        "rawOwner",
+        "instruction",
+        "return",
+        "category",
+        "state",
+        "targets",
+        "observations"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Identifier"
+        },
+        "callerId": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/Identifier"
+            }
+          ]
+        },
+        "rawOwner": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/Coordinate"
+            }
+          ]
+        },
+        "instruction": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/Coordinate"
+            }
+          ]
+        },
+        "return": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/Coordinate"
+            }
+          ]
+        },
+        "category": {
+          "enum": [
+            "internal",
+            "external",
+            "indirect",
+            "unknown"
+          ]
+        },
+        "state": {
+          "enum": [
+            "observable",
+            "oracle-unobservable",
+            "recovered",
+            "recovered-unknown"
+          ]
+        },
+        "targets": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Target"
+              },
+              "maxItems": 16,
+              "minItems": 1,
+              "uniqueItems": true
+            }
+          ]
+        },
+        "observations": {
+          "$ref": "#/$defs/Observations"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "enum": [
+                  "oracle-unobservable",
+                  "recovered-unknown"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "targets": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "targets": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Target"
+                },
+                "maxItems": 16,
+                "minItems": 1,
+                "uniqueItems": true
+              },
+              "category": {
+                "enum": [
+                  "internal",
+                  "external",
+                  "indirect"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "category": {
+                "const": "internal"
+              },
+              "targets": {
+                "type": "array"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "targets": {
+                "type": "array",
+                "items": {
+                  "allOf": [
+                    {
+                      "$ref": "#/$defs/Target"
+                    },
+                    {
+                      "properties": {
+                        "kind": {
+                          "const": "function"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "maxItems": 1,
+                "minItems": 1,
+                "uniqueItems": true
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "category": {
+                "const": "external"
+              },
+              "targets": {
+                "type": "array"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "targets": {
+                "type": "array",
+                "items": {
+                  "allOf": [
+                    {
+                      "$ref": "#/$defs/Target"
+                    },
+                    {
+                      "properties": {
+                        "kind": {
+                          "const": "external"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "maxItems": 1,
+                "minItems": 1,
+                "uniqueItems": true
+              }
+            }
+          }
+        }
+      ]
+    },
+    "Source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "role",
+        "sha256",
+        "bytes",
+        "policySha256",
+        "recordIds"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Identifier"
+        },
+        "role": {
+          "enum": [
+            "oracle",
+            "recovered"
+          ]
+        },
+        "sha256": {
+          "$ref": "#/$defs/Digest"
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1073741824
+        },
+        "policySha256": {
+          "$ref": "#/$defs/Digest"
+        },
+        "recordIds": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Identifier"
+          },
+          "maxItems": 100000,
+          "uniqueItems": true
+        }
+      }
+    },
+    "Binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "inputSha256",
+        "programModelSha256",
+        "boundaryObservationSha256",
+        "externalNamespaceSha256"
+      ],
+      "properties": {
+        "inputSha256": {
+          "$ref": "#/$defs/Digest"
+        },
+        "programModelSha256": {
+          "$ref": "#/$defs/Digest"
+        },
+        "boundaryObservationSha256": {
+          "$ref": "#/$defs/Digest"
+        },
+        "externalNamespaceSha256": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/Digest"
+            }
+          ]
+        }
+      }
+    },
+    "Exclusion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "side",
+        "ownerId",
+        "observations"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Identifier"
+        },
+        "side": {
+          "enum": [
+            "oracle",
+            "recovered"
+          ]
+        },
+        "ownerId": {
+          "$ref": "#/$defs/Identifier"
+        },
+        "observations": {
+          "$ref": "#/$defs/Observations"
+        }
+      }
+    },
+    "CoverageGap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "sourceId",
+        "callerId",
+        "reason"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Identifier"
+        },
+        "sourceId": {
+          "$ref": "#/$defs/Identifier"
+        },
+        "callerId": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/Identifier"
+            }
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        }
+      }
+    }
+  }
+}
