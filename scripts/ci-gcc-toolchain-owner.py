@@ -239,7 +239,8 @@ class ProductionBackend:
             env = {"XDG_RUNTIME_DIR": runtime}
         else:
             env = None
-        status, out, err = self.runner.run(argv + args, min(5.0, timeout), env=env)
+        # ExecStart arguments are D-Bus data, including launcher options such as env -i.
+        status, out, err = self.runner.run(argv + ["--"] + args, min(5.0, timeout), env=env)
         if status != 0:
             raise Refusal(f"{manager} systemd manager call failed: {err[:2048].decode(errors='replace')}")
         return out

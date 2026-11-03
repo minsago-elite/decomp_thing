@@ -1190,5 +1190,69 @@ class UploadStageTest(unittest.TestCase):
             owner.stage_upload(success=True)
 
 
+class BusctlArgumentBoundaryTest(unittest.TestCase):
+    class RecordingRunner:
+        def __init__(self, status=0):
+            self.status = status
+            self.calls = []
+
+        def run(self, argv, timeout, *, input_data=None, env=None):
+            import getopt
+            self.calls.append((list(argv), timeout, env))
+            bus = argv.index("/usr/bin/busctl")
+            # Model the getopt_long option permutation in systemd v255 busctl.
+            # No executable, manager, process, namespace or host query is run.
+            with mock.patch.dict(os.environ, {}, clear=True):
+                try:
+                    _, tail = getopt.gnu_getopt(argv[bus + 1:], "hH:M:qjl",
+                                                ["json=", "timeout=", "user", "system"])
+                except getopt.GetoptError as exc:
+                    return 1, b"", str(exc).encode()
+            self.tail = tail
+            if self.status:
+                return self.status, b"", b"authored manager refusal"
+            return 0, b'{"type":"o","data":["/org/freedesktop/systemd1/job/77"]}', b""
+
+    def backend(self, runner):
+        return owner_module.ProductionBackend(ROOT / "build/test-tmp/gcc-busctl-fixture",
+            runner=runner, authority=FakeAuthority(), test_repo_root=ROOT)
+
+    def test_transient_exec_arguments_are_not_busctl_options(self):
+        for role in ("rootless", "buildkit"):
+            runner = self.RecordingRunner()
+            backend = self.backend(runner)
+            command = ["/usr/bin/env", "-i", "PATH=/usr/bin:/bin", "/usr/bin/python3",
+                       "owner.py", "supervisor", "--owner-root", "fixture", "--role", role]
+            prop = backend._busctl_property("ExecStart", "a(sasb)", "1", command[0],
+                                            str(len(command)), *command, "false")
+            self.assertEqual(backend._start_transient(role, "fixture.service", [prop], 3.5),
+                             "/org/freedesktop/systemd1/job/77")
+            self.assertEqual(runner.tail, ["call", "org.freedesktop.systemd1",
+                "/org/freedesktop/systemd1", "org.freedesktop.systemd1.Manager", "StartTransientUnit",
+                "ssa(sv)a(sa(sv))", "fixture.service", "fail", "1", *prop, "0"])
+            self.assertIn("-i", runner.tail)
+            self.assertIn("--owner-root", runner.tail)
+
+    def test_manager_flags_environment_deadline_and_argument_tail_stay_exact(self):
+        for role, scope in (("rootless", "--user"), ("buildkit", "--system")):
+            runner = self.RecordingRunner()
+            backend = self.backend(runner)
+            args = ["call", "org.freedesktop.systemd1", "/org/freedesktop/systemd1",
+                    "org.freedesktop.systemd1.Manager", "StopUnit", "ss", "fixture.service", "fail"]
+            original = list(args)
+            backend._run(role, args, 3.5)
+            argv, timeout, env = runner.calls[0]
+            prefix = [] if role == "rootless" else ["/usr/bin/sudo", "-n"]
+            self.assertEqual(argv, prefix + ["/usr/bin/busctl", "--json=short", "--timeout=3s", scope, "--"] + original)
+            self.assertEqual(args, original)
+            self.assertEqual(timeout, 3.5)
+            self.assertEqual(env, {"XDG_RUNTIME_DIR": f"/run/user/{os.getuid()}"} if role == "rootless" else None)
+
+    def test_manager_failure_still_refuses_with_original_classification(self):
+        runner = self.RecordingRunner(status=1)
+        with self.assertRaisesRegex(owner_module.Refusal, "user systemd manager call failed: authored manager refusal"):
+            self.backend(runner)._run("rootless", ["call", "fixture"], 2)
+
+
 if __name__ == "__main__":
     unittest.main()
