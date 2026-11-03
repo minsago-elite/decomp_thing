@@ -1,0 +1,69 @@
+[
+    {
+        "Id": "sha256:807f16e03368e1e0ff3c904f21f1a13c260d78a8b7226a52284a2ee68a4d1511",
+        "RepoTags": [
+            "decomp-gcc-oracle-toolchain:16.2.0"
+        ],
+        "RepoDigests": [],
+        "Parent": "",
+        "Comment": "buildkit.dockerfile.v0",
+        "Created": "2026-08-07T00:00:00Z",
+        "DockerVersion": "",
+        "Author": "",
+        "Config": {
+            "Hostname": "",
+            "Domainname": "",
+            "User": "",
+            "AttachStdin": false,
+            "AttachStdout": false,
+            "AttachStderr": false,
+            "Tty": false,
+            "OpenStdin": false,
+            "StdinOnce": false,
+            "Env": [
+                "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "GPG_KEYS=B215C1633BCA0477615F1B35A5B3A004745C015A \tB3C42148A44E6983B3E4CC0793FA9B1AB75C61B8 \t90AA470469D3965A87A5DCB494D03953902C9419 \t80F98B2E0DAB6C8281BDF541A7C8C3B2F71EDF1C \t7F74F97C103468EE5D750B583AB00996FC26A641 \t33C235A34C46AA3FFB293709A328C3A2C3C45C06 \tD3A93CAD751C2AF4F8C7AD516C35B99309B5FA62",
+                "GCC_MIRRORS=https://ftpmirror.gnu.org/gcc \t\thttps://mirrors.kernel.org/gnu/gcc \t\thttps://bigsearcher.com/mirrors/gcc/releases \t\thttp://www.netgull.com/gcc/releases \t\thttps://ftpmirror.gnu.org/gcc \t\thttps://sourceware.org/pub/gcc/releases \t\tftp://ftp.gnu.org/gnu/gcc",
+                "GCC_VERSION=16.2.0"
+            ],
+            "Cmd": [
+                "bash"
+            ],
+            "Image": "",
+            "Volumes": null,
+            "WorkingDir": "",
+            "Entrypoint": null,
+            "OnBuild": null,
+            "Labels": null
+        },
+        "Architecture": "amd64",
+        "Os": "linux",
+        "Size": 1561406743,
+        "GraphDriver": {
+            "Data": {
+                "LowerDir": "/var/lib/docker/overlay2/e3cbf1ca2f5185ec0bcd5202ce38a5ea8ef4d696020b3d13386f4172f95e5df4/diff:/var/lib/docker/overlay2/f37c07201b569f96cfa81fef5ec854e5fc913eb6352532b89440c8140e8f7b27/diff:/var/lib/docker/overlay2/f886aeed688a31abfc550b722b3189bf2cf8108a1cff3fcaec640cac06d3c2d5/diff:/var/lib/docker/overlay2/7dbad8d7c65a52368bebaacb82d4f977ef0ec59ca57cf561207ab4dd7c29f196/diff:/var/lib/docker/overlay2/78daa6793fed5759a2ad04fe174de406ffc08730f77861dc50eb328e99f2b257/diff:/var/lib/docker/overlay2/e764bba0411ff40496cfe43a6f96d806ca9f8852d11090b4f4fd34701d84bc74/diff:/var/lib/docker/overlay2/026f40abba3be53973651eedb07ee0af78b370e9966162a6de7592b47d8974a3/diff:/var/lib/docker/overlay2/e2c3c43b6b9d6cd1e6d1cc3c2669a486eacc9cdcdb05876defedc4c274ef5681/diff",
+                "MergedDir": "/var/lib/docker/overlay2/99ehttx69audvdhd9gz2jvowj/merged",
+                "UpperDir": "/var/lib/docker/overlay2/99ehttx69audvdhd9gz2jvowj/diff",
+                "WorkDir": "/var/lib/docker/overlay2/99ehttx69audvdhd9gz2jvowj/work"
+            },
+            "Name": "overlay2"
+        },
+        "RootFS": {
+            "Type": "layers",
+            "Layers": [
+                "sha256:31631a95db7cd650d1c826f269b9e93b57d9f418128bf7c5499b4403be4d44d0",
+                "sha256:7c367ef8c1ea18872336c6bc0672b2ff7fee5dc56c055ce54e62f2ccfde4f847",
+                "sha256:144ea2bdbdf828c7c9867865b4eeffc5ec977e8e686cdfd1e240a890e9d4cf8e",
+                "sha256:758a60093d45fcab0f50466c34253fcdaea5dbb0bacd6495bda7d4e8d90e61d6",
+                "sha256:bd3697430d9c1e3d4cf6044fed4feb40ddfbec5d01420b2fd6d9565779423d99",
+                "sha256:c103436de306bfcb20eb5265f729760010d0c7bfdd10c937664882ecc1d8db5d",
+                "sha256:91b571880d8f2325dfaf81992875cbdaceefe7110cc448ff3271e9ae82606dff",
+                "sha256:13edf68405b45fb51540a7cea394c1b6856ee27cb4fadc2f6738896d1529b0e8",
+                "sha256:fc0f59678a37682ac1b60b253df3dc1383cded10a10f3d83372b13b67a3a7321"
+            ]
+        },
+        "Metadata": {
+            "LastTagTime": "2026-11-03T06:26:09.814599596Z"
+        }
+    }
+]

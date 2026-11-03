@@ -276,6 +276,153 @@ preflight_recipe() {
   (( free_kb >= 12582912 )) || die 'less than 12 GiB free for bounded native solve/export'
   sha256sum .github/workflows/gcc-oracle-model.yml oracle/gcc/16.2.0/{build-toolchain.Dockerfile,toolchain-reproduction.json,build-record.json,source-lock.json} > "$evidence/source-hashes.txt"
 }
+capture_toolchain_inspect() {
+  local inspect_api=1.49
+  local version_file="$evidence/image-inspect-api-version.json"
+  local inspect_file="$evidence/image-inspect.json"
+  local provenance_file="$evidence/image-inspect-api-provenance.json"
+  local fingerprint_file="$evidence/executable-sha256.txt"
+  local source_file="$evidence/source-hashes.txt"
+  local admission version_hash fingerprint_hash source_hash
+
+  rm -f -- "$version_file" "$inspect_file" "$provenance_file"
+  timeout --signal=TERM --kill-after=5s 30s env -u DOCKER_HOST -u DOCKER_CONTEXT \
+    DOCKER_CONFIG="$DOCKER_CONFIG" DOCKER_API_VERSION="$inspect_api" \
+    "$docker_bin" --host "unix://$socket" version --format '{{json .}}' > "$version_file"
+  admission=$(python3 - "$version_file" "$inspect_api" "$fingerprint_file" "$docker_bin" "$source_file" <<'PYVERSION'
+import hashlib, json, pathlib, re, sys
+def bounded(path, limit):
+    with pathlib.Path(path).open('rb') as stream:
+        raw = stream.read(limit + 1)
+    if not raw or len(raw) > limit:
+        raise SystemExit('inspect metadata empty or exceeds bound')
+    return raw
+def pairs(items):
+    result = {}
+    for key, value in items:
+        if key in result:
+            raise ValueError('duplicate JSON key')
+        result[key] = value
+    return result
+def invalid_constant(value):
+    raise ValueError('invalid JSON constant')
+raw = bounded(sys.argv[1], 65536)
+try:
+    doc = json.loads(raw, object_pairs_hook=pairs, parse_constant=invalid_constant)
+except (ValueError, UnicodeDecodeError):
+    raise SystemExit('invalid inspect API version metadata')
+def obj(parent, key):
+    value = parent.get(key) if isinstance(parent, dict) else None
+    if not isinstance(value, dict):
+        raise SystemExit('missing version object')
+    return value
+def api(value):
+    if not isinstance(value, str) or not re.fullmatch(r'(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})', value):
+        raise SystemExit('malformed API version')
+    return tuple(map(int, value.split('.')))
+client = obj(doc, 'Client'); server = obj(doc, 'Server')
+if client.get('Version') != '29.7.2' or client.get('GitCommit') != 'a7dcaa6':
+    raise SystemExit('pinned client identity mismatch')
+if server.get('Version') != '29.7.2' or server.get('GitCommit') != '6a43e3d':
+    raise SystemExit('pinned server identity mismatch')
+selected = api(sys.argv[2]); effective = api(client.get('ApiVersion'))
+minimum = api(server.get('MinAPIVersion')); maximum = api(server.get('ApiVersion'))
+if effective != selected:
+    raise SystemExit('effective client API mismatch')
+if not minimum <= selected <= maximum:
+    raise SystemExit('selected API outside observed server range')
+fingerprints = bounded(sys.argv[3], 65536)
+try:
+    records = [re.fullmatch(r'([0-9a-f]{64}) [ *]([^\x00]+)', line) for line in fingerprints.decode('utf-8').splitlines()]
+except UnicodeDecodeError:
+    raise SystemExit('malformed retained fingerprint record')
+if not records or any(record is None for record in records):
+    raise SystemExit('malformed retained fingerprint record')
+matches = [record.group(1) for record in records if record.group(2) == sys.argv[4]]
+if matches != ['e45381109c685311cf84c5e33a1aca7da81d6b55c0f9aed74091fc08c3a94f13']:
+    raise SystemExit('retained client fingerprint does not match the locked pin exactly once')
+source = bounded(sys.argv[5], 65536)
+print(' '.join(hashlib.sha256(value).hexdigest() for value in (raw, fingerprints, source)))
+PYVERSION
+  )
+  [[ "$admission" =~ ^[0-9a-f]{64}\ [0-9a-f]{64}\ [0-9a-f]{64}$ ]] || die 'invalid inspect preflight byte binding'
+  read -r version_hash fingerprint_hash source_hash <<< "$admission"
+  timeout --signal=TERM --kill-after=5s 30s env -u DOCKER_HOST -u DOCKER_CONTEXT \
+    DOCKER_CONFIG="$DOCKER_CONFIG" DOCKER_API_VERSION="$inspect_api" \
+    "$docker_bin" --host "unix://$socket" image inspect "$tag" > "$inspect_file"
+  python3 - "$inspect_file" "$version_file" "$provenance_file" "$docker_bin" \
+    "unix://$socket" "$DOCKER_CONFIG" "$inspect_api" "$fingerprint_file" \
+    "${GITHUB_RUN_ID:-local}" "${GITHUB_RUN_ATTEMPT:-1}" "$source_file" "$tag" \
+    "$version_hash" "$fingerprint_hash" "$source_hash" <<'PYPROVENANCE'
+import hashlib, json, pathlib, sys
+def bounded(path, limit):
+    with pathlib.Path(path).open('rb') as stream:
+        raw = stream.read(limit + 1)
+    if not raw or len(raw) > limit:
+        raise SystemExit('inspect metadata empty or exceeds bound')
+    return raw
+def pairs(items):
+    result = {}
+    for key, value in items:
+        if key in result:
+            raise ValueError('duplicate JSON key')
+        result[key] = value
+    return result
+def invalid_constant(value):
+    raise ValueError('invalid JSON constant')
+inspect, version, output = map(pathlib.Path, sys.argv[1:4])
+raw = bounded(inspect, 16 * 1024 * 1024)
+version_raw = bounded(version, 65536)
+fingerprints = bounded(sys.argv[8], 65536)
+source = bounded(sys.argv[11], 65536)
+for value, expected in zip((version_raw, fingerprints, source), sys.argv[13:16], strict=True):
+    if hashlib.sha256(value).hexdigest() != expected:
+        raise SystemExit('inspect preflight bytes changed during capture')
+try:
+    doc = json.loads(raw, object_pairs_hook=pairs, parse_constant=invalid_constant)
+    version_doc = json.loads(version_raw, object_pairs_hook=pairs, parse_constant=invalid_constant)
+except (ValueError, UnicodeDecodeError):
+    raise SystemExit('invalid inspect capture metadata')
+if not isinstance(doc, list) or len(doc) != 1 or not isinstance(doc[0], dict):
+    raise SystemExit('inspect response must be one image object')
+def retained_file(path, value):
+    return {'path': str(path), 'sha256': hashlib.sha256(value).hexdigest(), 'bytes': len(value)}
+client = version_doc['Client']; server = version_doc['Server']
+record = {
+    'schema': 'gcc-inspect-api-provenance/v1',
+    'classification': 'request enforced by command environment plus pinned CLI source; not wire-observed',
+    'inputAuthority': 'fingerprint and source records are inherited mutable metadata; no fresh executable authentication or generation/receipt continuity is established',
+    'selectedApi': sys.argv[7], 'effectiveApiObservedByVersionCall': client['ApiVersion'],
+    'observedServerApiRange': {'minimum': server['MinAPIVersion'], 'maximum': server['ApiVersion']},
+    'versionIdentities': {'clientVersion': client['Version'], 'clientBuild': client['GitCommit'], 'serverVersion': server['Version'], 'serverBuild': server['GitCommit']},
+    'versionFile': retained_file(version, version_raw), 'inspectFile': retained_file(inspect, raw),
+    'client': {'path': sys.argv[4], 'lockedExpectedSha256': 'e45381109c685311cf84c5e33a1aca7da81d6b55c0f9aed74091fc08c3a94f13', 'fingerprintRecord': retained_file(sys.argv[8], fingerprints)},
+    'sourceHashRecord': retained_file(sys.argv[11], source),
+    'ownedHost': sys.argv[5], 'privateDockerConfig': sys.argv[6],
+    'inspectArgv': [sys.argv[4], '--host', sys.argv[5], 'image', 'inspect', sys.argv[12]],
+    'versionArgv': [sys.argv[4], '--host', sys.argv[5], 'version', '--format', '{{json .}}'],
+    'runBinding': {'runId': sys.argv[9], 'attempt': sys.argv[10]},
+    'inspectTimeout': {'signal': 'TERM', 'killAfterSeconds': 5, 'timeoutSeconds': 30},
+    'strictVerifierInput': 'complete unmodified image-inspect.json bytes',
+}
+tmp = output.with_name(output.name + '.tmp')
+created = False
+try:
+    with tmp.open('x', encoding='utf-8') as stream:
+        created = True
+        stream.write(json.dumps(record, sort_keys=True, separators=(',', ':')) + '\n')
+        stream.flush()
+    tmp.replace(output)
+except BaseException:
+    if created:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+    raise
+PYPROVENANCE
+}
+
 reproduce() {
   clean_environment
   preflight_recipe
@@ -286,8 +433,7 @@ reproduce() {
   timeout --signal=TERM --kill-after=15s 600s python3 scripts/ci-gcc-toolchain-archive.py inspect "$archive" "$oci" "$evidence" 4294967296
   timeout --signal=TERM --kill-after=10s 120s "$docker_bin" --host "unix://$socket" image load --input "$archive" \
     >"$evidence/docker-load.txt" 2>&1
-  timeout --signal=TERM --kill-after=5s 30s env -u DOCKER_HOST -u DOCKER_CONTEXT \
-    DOCKER_CONFIG="$DOCKER_CONFIG" "$docker_bin" --host "unix://$socket" image inspect "$tag" > "$evidence/image-inspect.json"
+  capture_toolchain_inspect
   timeout --signal=TERM --kill-after=5s 30s env -u DOCKER_HOST -u DOCKER_CONTEXT \
     DOCKER_CONFIG="$DOCKER_CONFIG" "$docker_bin" --host "unix://$socket" history --no-trunc \
     --format '{{json .}}' "$tag" > "$evidence/image-history.jsonl"

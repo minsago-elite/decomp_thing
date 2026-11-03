@@ -327,6 +327,275 @@ class GccNamedOciSolveAdmissionTest(unittest.TestCase):
         self.assertNotIn("FAKE_LAUNCH", result.stdout)
 
 
+class GccInspectApiContractTest(unittest.TestCase):
+    """Fixed-lock consumer checks with actual producer bodies and inert effect boundaries."""
+
+    def setUp(self):
+        from tests.oracle.gcc_inspect_controls import run_control
+        self.run_control = run_control
+        root = Path(os.environ.get("GCC_INSPECT_TMP", ROOT / "build/test-tmp/gcc-inspect-api"))
+        root.mkdir(parents=True, exist_ok=True)
+        self.tmp = Path(tempfile.mkdtemp(prefix="inspect-", dir=root)).resolve()
+        self.fixtures = ROOT / "tests/oracle/fixtures/gcc-inspect-api"
+        self.helper = Path(os.environ.get("GCC_INSPECT_BUILDER", HELPER))
+        self.index = 0
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp)
+
+    def _case(self, options=None, *, reproduce=False, source=None):
+        self.index += 1
+        return self.run_control(self.tmp / str(self.index), ROOT, self.helper, self.fixtures,
+                                options=options, reproduce=reproduce, source=source)
+
+    def _consumer(self, raw, *, file=False):
+        # The same guarded Python entrypoint executes the unchanged strict CLI in a child.
+        import base64
+        from tests.oracle import gcc_inspect_controls as control
+        case = self.tmp / ("consumer-" + str(self.index)); self.index += 1; case.mkdir()
+        candidate = case / "inspect.json"; candidate.write_bytes(raw)
+        context = case / "context.json"
+        context.write_text(json.dumps({"root": str(case), "repo": str(ROOT), "log": str(case / "calls.jsonl")}))
+        argv = ["/usr/bin/python3", "-I", "-B", str(Path(control.__file__).resolve()), "python", str(context),
+                "scripts/verify-gcc-toolchain-reproduction.py", "--lock", "oracle/gcc/16.2.0/toolchain-reproduction.json",
+                "--build-record", "oracle/gcc/16.2.0/build-record.json"]
+        if file: argv += ["--inspect-json", str(candidate)]
+        return subprocess.run(argv, cwd=ROOT, input=None if file else raw, capture_output=True, timeout=10)
+
+    @staticmethod
+    def _encoded(raw):
+        import base64
+        return base64.b64encode(raw).decode()
+
+    def _version(self, update):
+        value = json.loads((self.fixtures / "current-docker-version.json").read_bytes())
+        value["Client"]["ApiVersion"] = "1.49"
+        update(value)
+        return {"version_bytes": self._encoded(json.dumps(value).encode()), "derive_api": False}
+
+    @staticmethod
+    def _clients(records):
+        return [row for row in records if row["kind"] == "client"]
+
+    def _assert_capture_calls(self, records, evidence):
+        client = str(evidence.parent / "tools/docker/docker")
+        calls = self._clients(records)
+        relevant = [row for row in calls if "version" in row["argv"] or "inspect" in row["argv"]]
+        self.assertEqual([row["argv"] for row in relevant], [
+            ["--host", "unix:///owned/service.sock", "version", "--format", "{{json .}}"],
+            ["--host", "unix:///owned/service.sock", "image", "inspect", "decomp-gcc-oracle-toolchain:16.2.0"],
+        ])
+        for row in relevant:
+            self.assertEqual(row["executable"], client)
+            self.assertEqual(row["environment"], {"DOCKER_CONFIG": "/private/docker-config", "DOCKER_API_VERSION": "1.49"})
+        timeouts = [row["argv"] for row in records if row["kind"] == "timeout" and "env" in row["argv"] and ("version" in row["argv"] or "inspect" in row["argv"])]
+        self.assertEqual(timeouts, [["--signal=TERM", "--kill-after=5s", "30s", "env", "-u", "DOCKER_HOST", "-u", "DOCKER_CONTEXT",
+                                    "DOCKER_CONFIG=/private/docker-config", "DOCKER_API_VERSION=1.49", client, *row["argv"]] for row in relevant])
+        self.assertFalse(any(row["kind"] == "unwrapped-env" for row in records))
+
+    def test_fixed_lock_current_is_red_and_historical_stdin_and_file_are_green(self):
+        current = (self.fixtures / "current-image-inspect.json").read_bytes()
+        red = self._consumer(current)
+        self.assertNotEqual(red.returncode, 0)
+        self.assertIn(b"configSha256 mismatch", red.stderr)
+        self.assertIn(b"ee682c2852cca4a6d7d5ff9642ddb1a48aa1bb654d1271a762a85e437016cc5c", red.stderr)
+        for file in [False, True]:
+            result = self._consumer((self.fixtures / "historical-image-inspect.json").read_bytes(), file=file)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(b"sha256:807f16e03368e1e0ff3c904f21f1a13c260d78a8b7226a52284a2ee68a4d1511", result.stdout)
+            self.assertIn(b"sha256:510c510f300d811df22c7769633575a94939073b529a73125bf96cfb96dc7248", result.stdout)
+
+    def test_actual_capture_preserves_raw_bytes_and_records_exact_invocations(self):
+        result, evidence, records = self._case()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self._assert_capture_calls(records, evidence)
+        self.assertEqual(len(self._clients(records)), 2)
+        raw = (evidence / "image-inspect.json").read_bytes()
+        self.assertEqual(raw, (self.fixtures / "historical-image-inspect.json").read_bytes())
+        self.assertEqual(self._consumer(raw).returncode, 0)
+        sidecar = json.loads((evidence / "image-inspect-api-provenance.json").read_bytes())
+        self.assertEqual(sidecar["selectedApi"], "1.49")
+        self.assertEqual(sidecar["effectiveApiObservedByVersionCall"], "1.49")
+        self.assertIn("not wire-observed", sidecar["classification"])
+        self.assertIn("inherited mutable metadata", sidecar["inputAuthority"])
+        self.assertIn("no fresh executable authentication", sidecar["inputAuthority"])
+        self.assertNotIn("authenticatedFingerprintSha256", sidecar["client"])
+        for name, record in [("image-inspect.json", sidecar["inspectFile"]), ("image-inspect-api-version.json", sidecar["versionFile"]),
+                             ("executable-sha256.txt", sidecar["client"]["fingerprintRecord"]), ("source-hashes.txt", sidecar["sourceHashRecord"])]:
+            data = (evidence / name).read_bytes()
+            self.assertEqual(record, {"path": str(evidence / name), "sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data)})
+
+    def test_missing_malformed_unsupported_and_failed_capture_refuse_without_stale_success(self):
+        updates = [lambda d: d.pop("Client"), lambda d: d.pop("Server"), lambda d: d.__setitem__("Server", None),
+                   lambda d: d["Client"].pop("ApiVersion"), lambda d: d["Client"].__setitem__("ApiVersion", "1.55"),
+                   lambda d: d["Server"].pop("MinAPIVersion"), lambda d: d["Server"].__setitem__("MinAPIVersion", "1.50"),
+                   lambda d: d["Server"].__setitem__("ApiVersion", "1.48"), lambda d: d["Client"].__setitem__("GitCommit", "wrong"),
+                   lambda d: d["Server"].__setitem__("GitCommit", "wrong"), lambda d: d["Client"].__setitem__("Version", 29)]
+        cases = [self._version(update) for update in updates]
+        for bad in [None, 1.49, "1.x", "01.49", "1.049", "1.49.0", "1.99999", "-1.49", "1.49 "]:
+            cases.append(self._version(lambda d, bad=bad: d["Client"].__setitem__("ApiVersion", bad)))
+        for raw in [b"", b"{", b'{"Client":{},"Client":{}}', b'{"Client":NaN}', b" " * 65537]:
+            cases.append({"version_bytes": self._encoded(raw), "derive_api": False})
+        cases.append({"version_exit": True})
+        for options in cases:
+            with self.subTest(options=options.keys()):
+                result, evidence, records = self._case(options)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(len(self._clients(records)), 1)
+                self.assertFalse((evidence / "image-inspect.json").exists())
+                self.assertFalse((evidence / "image-inspect-api-provenance.json").exists())
+        for options in [{"inspect_exit": True}, {"inspect_bytes": self._encoded(b'[{"Id":1,"Id":2}]')},
+                        {"inspect_bytes": self._encoded(b"[NaN]")}, {"inspect_bytes": self._encoded(b"[]")},
+                        {"inspect_bytes": self._encoded(b"")}, {"inspect_bytes": self._encoded(b" " * (16 * 1024 * 1024 + 1))}]:
+            result, evidence, records = self._case(options)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(len(self._clients(records)), 2)
+            self.assertFalse((evidence / "image-inspect-api-provenance.json").exists())
+
+    def test_preflight_record_replacements_including_valid_same_length_bytes_refuse(self):
+        doc = json.loads((self.fixtures / "current-docker-version.json").read_bytes())
+        doc["Client"]["ApiVersion"] = "1.49"
+        before = json.dumps(doc).encode(); doc["Client"]["ApiVersion"] = "1.55"
+        after = json.dumps(doc).encode(); self.assertEqual(len(before), len(after))
+        valid_different = before + b" "
+        replacements = [("image-inspect-api-version.json", after), ("image-inspect-api-version.json", valid_different),
+                        ("executable-sha256.txt", b"changed retained record\n"), ("source-hashes.txt", b"changed source record\n")]
+        for name, raw in replacements:
+            with self.subTest(name=name):
+                result, evidence, records = self._case({"replace_during_inspect": {name: self._encoded(raw)}}, reproduce=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(b"preflight bytes changed", result.stderr)
+                self.assertFalse((evidence / "image-inspect-api-provenance.json").exists())
+                self.assertFalse(any(row["kind"] in {"strict", "live-sentinel"} for row in records))
+
+    def test_fingerprint_schema_exact_pin_and_source_raw_byte_binding(self):
+        from tests.oracle.gcc_inspect_controls import CLIENT_PIN
+        for kind in ["missing", "duplicate", "malformed", "wrong-pin", "oversized"]:
+            next_client = self.tmp / str(self.index + 1) / "tools/docker/docker"
+            line = f"{CLIENT_PIN}  {next_client}\n".encode()
+            raw = {"missing": b"", "duplicate": line * 2, "malformed": b"not a fingerprint\n",
+                   "wrong-pin": line.replace(CLIENT_PIN.encode(), b"0" * 64), "oversized": b" " * 65537}[kind]
+            result, evidence, records = self._case({"fingerprint_bytes": self._encoded(raw)})
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(len(self._clients(records)), 1)
+            self.assertFalse((evidence / "image-inspect-api-provenance.json").exists())
+        digests = []
+        for raw in [b"source\n", b"source\r\n"]:
+            result, evidence, _ = self._case({"source_bytes": self._encoded(raw)})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            digest = json.loads((evidence / "image-inspect-api-provenance.json").read_bytes())["sourceHashRecord"]["sha256"]
+            self.assertEqual(digest, hashlib.sha256(raw).hexdigest()); digests.append(digest)
+        self.assertNotEqual(*digests)
+
+    def test_actual_bounded_reader_requests_limit_plus_one_before_parsing(self):
+        import ast
+        from io import BytesIO
+        from types import SimpleNamespace
+        source = self.helper.read_text()
+        for label in ["PYVERSION", "PYPROVENANCE"]:
+            body = source.split("<<'" + label + "'\n", 1)[1].split("\n" + label, 1)[0]
+            declaration = next(node for node in ast.parse(body).body if isinstance(node, ast.FunctionDef) and node.name == "bounded")
+            for size, succeeds in [(0, False), (8, True), (9, False)]:
+                reads = []
+                class Reader(BytesIO):
+                    def read(self, count=-1): reads.append(count); return super().read(count)
+                fake_path = SimpleNamespace(open=lambda mode: Reader(b"x" * size))
+                namespace = {"pathlib": SimpleNamespace(Path=lambda path: fake_path)}
+                exec(compile(ast.Module(body=[declaration], type_ignores=[]), "<actual-bounded-reader>", "exec"), namespace)
+                if succeeds: self.assertEqual(namespace["bounded"]("fixture", 8), b"x" * 8)
+                else:
+                    with self.assertRaises(SystemExit): namespace["bounded"]("fixture", 8)
+                self.assertEqual(reads, [9])
+
+    def test_sidecar_failures_and_existing_temporary_file_never_publish_success(self):
+        for failure in ["open", "write", "flush", "replace"]:
+            result, evidence, records = self._case({"sidecar_failure": failure}, reproduce=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse((evidence / "image-inspect-api-provenance.json").exists())
+            self.assertFalse(any(row["kind"] in {"strict", "live-sentinel"} for row in records))
+        result, evidence, _ = self._case({"leftover_tmp": True})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((evidence / "image-inspect-api-provenance.json").exists())
+        self.assertEqual((evidence / "image-inspect-api-provenance.json.tmp").read_bytes(), b"earlier-unknown-control")
+
+    def test_actual_reproduce_capture_count_strict_order_and_no_publication(self):
+        for kind in ["current", "historical"]:
+            result, evidence, records = self._case({"inspect_kind": kind}, reproduce=True)
+            self.assertNotEqual(result.returncode, 0)
+            self._assert_capture_calls(records, evidence)
+            events = [row["kind"] for row in records if row["kind"] in {"strict", "live-sentinel"}]
+            self.assertEqual(events, ["strict"] if kind == "current" else ["strict", "live-sentinel"])
+            if kind == "current": self.assertIn(b"configSha256 mismatch", result.stderr)
+            self.assertFalse((evidence.parent / "GITHUB_ENV").exists())
+
+    def test_nested_shell_and_python_guards_refuse_before_external_dispatch(self):
+        source = self.helper.read_text()
+        prefix = "  local inspect_api=1.49"
+        probes = ["/usr/bin/docker version", 'x=$(/usr/bin/docker version)', 'admission=$(/usr/bin/docker version)', 'X=1 /usr/bin/docker version',
+                  'timeout --signal=TERM --kill-after=5s 30s env /usr/bin/docker version',
+                  'python3 -c \'import subprocess; subprocess.run(["/usr/bin/docker", "version"])\'']
+        for probe in probes:
+            mutated = source.replace(prefix, prefix + "\n  " + probe, 1)
+            result, _, records = self._case(source=mutated)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse(self._clients(records))
+            self.assertTrue(b"refused" in result.stderr or b"unexpected" in result.stderr)
+        nested = source.replace('import hashlib, json, pathlib, re, sys',
+                                'import hashlib, json, pathlib, re, sys\nimport subprocess\nsubprocess.run(["/usr/bin/docker", "version"])', 1)
+        result, _, records = self._case(source=nested)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b'network/process/native boundary refused', result.stderr)
+        self.assertEqual(len(self._clients(records)), 1)
+
+    def test_real_consumer_preserves_all_config_identity_and_serialization_negatives(self):
+        historical = json.loads((self.fixtures / "historical-image-inspect.json").read_bytes())
+        changes = {"Env": ["DIFFERENT=1"], "Cmd": ["different"], "Domainname": "changed", "Hostname": "changed",
+                   "Image": "changed", "User": "changed", "WorkingDir": "/changed", "AttachStderr": True,
+                   "AttachStdin": True, "AttachStdout": True, "OpenStdin": True, "StdinOnce": True, "Tty": True,
+                   "Entrypoint": ["changed"], "Labels": {"changed": "1"}, "OnBuild": ["changed"], "Volumes": {"/changed": {}},
+                   "StopSignal": "SIGTERM", "ExposedPorts": {"80/tcp": {}}, "ArgsEscaped": True,
+                   "Healthcheck": {"Test": ["CMD", "x"]}, "Shell": ["/bin/sh"], "UnknownNonempty": "changed"}
+        for key, value in changes.items():
+            candidate = json.loads(json.dumps(historical)); candidate[0]["Config"][key] = value
+            result = self._consumer(json.dumps(candidate).encode())
+            self.assertNotEqual(result.returncode, 0, key); self.assertIn(b"configSha256 mismatch", result.stderr)
+        candidate = json.loads(json.dumps(historical)); candidate[0]["Config"]["Env"].reverse()
+        self.assertNotEqual(self._consumer(json.dumps(candidate).encode()).returncode, 0)
+        mutations = [lambda d: d[0].pop("Config"), lambda d: d[0].__setitem__("Config", {}), lambda d: d[0]["Config"].pop("User"),
+                     lambda d: d[0].__setitem__("Id", "sha256:" + "0" * 64), lambda d: d[0].__setitem__("Created", "2026-01-01T00:00:00Z"),
+                     lambda d: d[0].__setitem__("Architecture", "arm64"), lambda d: d[0].__setitem__("Os", "windows"),
+                     lambda d: d[0]["RootFS"]["Layers"].pop(), lambda d: d[0]["RootFS"]["Layers"].reverse()]
+        mutations += [lambda d, i=i: d[0]["RootFS"]["Layers"].__setitem__(i, "sha256:" + "0" * 64) for i in range(9)]
+        for mutate in mutations:
+            candidate = json.loads(json.dumps(historical)); mutate(candidate)
+            self.assertNotEqual(self._consumer(json.dumps(candidate).encode()).returncode, 0)
+        current = json.loads((self.fixtures / "current-image-inspect.json").read_bytes())
+        for api in ["1.50", "1.51", "1.55"]:
+            candidate = json.loads(json.dumps(current))
+            if api != "1.55":
+                for key, value in {"Cmd": None, "Entrypoint": None, "Env": None, "Labels": None, "OnBuild": None, "User": "", "Volumes": None, "WorkingDir": ""}.items():
+                    if candidate[0]["Config"].get(key) is None: candidate[0]["Config"][key] = value
+            result = self._consumer(json.dumps(candidate).encode())
+            self.assertNotEqual(result.returncode, 0); self.assertIn(b"configSha256 mismatch", result.stderr)
+
+    def test_omitted_nested_config_fields_change_the_consequent_image_digest(self):
+        raw = (self.fixtures / "current-image-config.json").read_bytes()
+        self.assertEqual(hashlib.sha256(raw).hexdigest(), "807f16e03368e1e0ff3c904f21f1a13c260d78a8b7226a52284a2ee68a4d1511")
+        config = json.loads(raw)
+        canonical = lambda value: json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+        baseline = hashlib.sha256(canonical(config)).hexdigest()
+        historical = json.loads((self.fixtures / "historical-image-inspect.json").read_bytes())
+        for key, value in [("Hostname", "changed"), ("Tty", True), ("AttachStdin", True), ("AttachStdout", True), ("AttachStderr", True), ("NewRawField", "changed")]:
+            changed = json.loads(json.dumps(config)); changed["config"][key] = value
+            self.assertEqual(changed["config"][key], value)
+            self.assertEqual({k: v for k, v in changed.items() if k != "config"}, {k: v for k, v in config.items() if k != "config"})
+            digest = hashlib.sha256(canonical(changed)).hexdigest(); self.assertNotEqual(digest, baseline)
+            candidate = json.loads(json.dumps(historical)); candidate[0]["Id"] = "sha256:" + digest
+            result = self._consumer(json.dumps(candidate).encode())
+            self.assertNotEqual(result.returncode, 0); self.assertIn(b"imageDigest", result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
 
