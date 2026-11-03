@@ -25,7 +25,8 @@ class AnalysisTimingRecordTest {
             Files.createTempDirectory(
                 Path.of("build", "analysis-timing-tests").createDirectories(), "analysis-timing-record-",
             ).resolve("timings")
-        val record = newRecord(directory)
+        val workflowRunId = "12345678-1234-1234-1234-123456789abc"
+        val record = newRecord(directory, workflowRunId)
         record.measure("worker-process-lifecycle") { Unit }
         val phases = listOf(
             "worker-entry-to-parent-permit",
@@ -46,6 +47,7 @@ class AnalysisTimingRecordTest {
 
         val file = directory.toFile().listFiles().orEmpty().single()
         val document = Json.parseToJsonElement(file.readText()).jsonObject
+        assertEquals(workflowRunId, document.getValue("workflowRunId").jsonPrimitive.content)
         assertEquals("succeeded", document.getValue("terminalStatus").jsonPrimitive.content)
         assertEquals("succeeded", document.getValue("workerTerminalStatus").jsonPrimitive.content)
         assertEquals(4, document.getValue("workerSpans").jsonArray.size)
@@ -128,8 +130,9 @@ class AnalysisTimingRecordTest {
         }
     }
 
-    private fun newRecord(directory: java.nio.file.Path) =
-        AnalysisTimingRecord(directory, "full", "a".repeat(64), null, timingConfigurationSha256(listOf("fixture")))
+    private fun newRecord(directory: java.nio.file.Path, workflowRunId: String? = null) =
+        AnalysisTimingRecord(directory, "full", "a".repeat(64), null, timingConfigurationSha256(listOf("fixture")),
+            workflowRunId = workflowRunId)
 
     private fun frame(record: AnalysisTimingRecord, sequence: Int, event: String, phase: String, elapsed: Long) =
         "DECOMP_ANALYSIS_TIMING_V1 ${record.invocationId} $sequence $event $phase $elapsed"

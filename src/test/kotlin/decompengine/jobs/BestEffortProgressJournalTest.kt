@@ -12,8 +12,22 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
 
 class BestEffortProgressJournalTest {
+    @Test
+    fun `workflow run id is exposed for diagnostic sidecar correlation`() {
+        val reports = createTempDirectory("progress-run-correlation-")
+        val progress = BestEffortProgressJournal(reports, "reconstruction")
+        val runId = kotlin.test.assertNotNull(progress.workflowRunId)
+        assertTrue(runId.matches(Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")))
+        progress.close()
+        val snapshot = AgentProgressJournal.read(reports)!!
+        assertEquals(runId, snapshot.getValue("events").jsonArray.first().jsonObject.getValue("runId").jsonPrimitive.content)
+    }
+
     @Test
     fun `throwing unavailable warnings preserve original failure interruption and journal owner`(): Unit {
         val parent = java.nio.file.Files.createDirectories(java.nio.file.Path.of("build/test-tmp/progress-warning").toAbsolutePath())

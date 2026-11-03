@@ -86,6 +86,7 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
     private val streamCloseSubmitter: (Runnable) -> CompletableFuture<*> = { task -> CompletableFuture.runAsync(task) },
     private val analysisTaskExecutor: Executor = ForkJoinPool.commonPool(),
     private val timingProfileSha256: String? = null,
+    private val timingWorkflowRunId: String? = null,
 ) : ExportBudgetedProgramModelAnalyzer {
     internal constructor(
         commandFactory: (GhidraInvocation) -> List<String>,
@@ -134,10 +135,12 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
             streamCloseSubmitter = streamCloseSubmitter,
             analysisTaskExecutor = analysisTaskExecutor,
             timingProfileSha256 = timingProfileSha256,
+            timingWorkflowRunId = timingWorkflowRunId,
         )
 
-    internal fun withTimingProfileSha256(profileSha256: String): GhidraHeadlessProgramModelAnalyzer {
+    internal fun withTimingProfileSha256(profileSha256: String, workflowRunId: String? = null): GhidraHeadlessProgramModelAnalyzer {
         require(profileSha256.matches(Regex("[0-9a-f]{64}"))) { "reconstruction timing profile identity must be SHA-256" }
+        require(workflowRunId == null || workflowRunId.matches(Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")))
         return GhidraHeadlessProgramModelAnalyzer(
             commandFactory = commandFactory,
             limits = limits,
@@ -150,6 +153,7 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
             streamCloseSubmitter = streamCloseSubmitter,
             analysisTaskExecutor = analysisTaskExecutor,
             timingProfileSha256 = profileSha256,
+            timingWorkflowRunId = workflowRunId,
         )
     }
 
@@ -168,6 +172,7 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
         streamCloseSubmitter = streamCloseSubmitter,
         analysisTaskExecutor = analysisTaskExecutor,
         timingProfileSha256 = timingProfileSha256,
+        timingWorkflowRunId = timingWorkflowRunId,
     )
 
     internal fun withStreamCloseSubmitterForTests(
@@ -184,6 +189,7 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
         streamCloseSubmitter = submitter,
         analysisTaskExecutor = analysisTaskExecutor,
         timingProfileSha256 = timingProfileSha256,
+        timingWorkflowRunId = timingWorkflowRunId,
     )
 
     internal fun withAnalysisTaskExecutorForTests(executor: Executor): GhidraHeadlessProgramModelAnalyzer =
@@ -199,6 +205,7 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
             streamCloseSubmitter = streamCloseSubmitter,
             analysisTaskExecutor = executor,
             timingProfileSha256 = timingProfileSha256,
+            timingWorkflowRunId = timingWorkflowRunId,
         )
 
     override fun analyze(binaryPath: Path, workDir: Path): RecoveredProgramModel =
@@ -226,6 +233,7 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
                 limits.maximumResidentBytes.toString(), limits.maximumProgramModelBytes.toString(),
                 limits.maximumDiagnosticBytesPerStream.toString(), includeCallSites.toString(),
             )),
+            workflowRunId = timingWorkflowRunId,
         )
         val deadline = AnalysisDeadline.start(
             limits.wallClockTimeout.toNanos(), "Ghidra program recovery", parentDeadline,
@@ -1072,7 +1080,7 @@ class ArchivalReconstructionService(
             ?.withExportBudgets(profile.budgets)
             ?: analyzer
         val selectedAnalyzer = (budgetedAnalyzer as? GhidraHeadlessProgramModelAnalyzer)
-            ?.withTimingProfileSha256(profile.sha256)
+            ?.withTimingProfileSha256(profile.sha256, progress.workflowRunId)
             ?: budgetedAnalyzer
         adapter.diagnostics.prepare(profile)
         progress.phase(AgentWorkflowPhase.ANALYZING)

@@ -27,11 +27,13 @@ internal class AnalysisTimingRecord(
     private val analysisToolSha256: String,
     private val profileSha256: String?,
     private val configurationSha256: String,
+    private val workflowRunId: String? = null,
     private val publicationExecutor: ExecutorService = SIDECAR_PUBLICATION_EXECUTOR,
     private val publicationWaitMillis: Long = DEFAULT_PUBLICATION_WAIT_MILLIS,
 ) {
     init {
         require(profileSha256 == null || profileSha256.matches(Regex("[0-9a-f]{64}")))
+        require(workflowRunId == null || workflowRunId.matches(Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")))
         require(publicationWaitMillis in 0..5_000)
     }
 
@@ -165,6 +167,7 @@ internal class AnalysisTimingRecord(
         val document = buildJsonObject {
             put("schemaVersion", 1)
             put("analysisInvocationId", invocationId)
+            workflowRunId?.let { put("workflowRunId", it) }
             put("recoveryMode", recoveryMode)
             put("analysisToolSha256", analysisToolSha256)
             profileSha256?.let { put("profileSha256", it) }

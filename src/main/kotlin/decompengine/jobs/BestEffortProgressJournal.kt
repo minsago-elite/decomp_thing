@@ -16,6 +16,7 @@ internal class BestEffortProgressJournal(
     private var failed = false
     private var journal: AgentProgressJournal? = null
     internal val journalRunId: String? get() = journal?.journalRunId
+    override val workflowRunId: String? get() = journal?.workflowRunId
 
     init {
         observe { journal = AgentProgressJournal(reportsDirectory, workflow, sensitiveValues, onPhase = onPhase) }
