@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { assertGracefulShutdown, assertOnlyPinWrites, boundReport, findBootstrap, publishAtomically, scrubTokens, summarizeRequests } from './packaged-browser-restart.mjs';
+import { assertGracefulShutdown, assertOnlyPinWrites, boundReport, findBootstrap, isProgressReadUrl, publishAtomically, scrubTokens, summarizeRequests } from './packaged-browser-restart.mjs';
 
 const origin = 'http://127.0.0.1:4000';
 
@@ -49,6 +49,13 @@ test('only pin PUTs to the selected attempt are accepted mutations', () => {
   assert.throws(() => assertOnlyPinWrites([{ method: 'POST', url: session }], pin, 0, session, 0));
   assert.throws(() => assertOnlyPinWrites([{ method: 'DELETE', url: pin }], pin, 0, session, 0));
   assert.deepEqual(summarizeRequests([get, { method: 'PUT', url: pin }]), { total: 2, methods: { GET: 1, PUT: 1 }, mutations: [{ method: 'PUT', url: pin }] });
+});
+
+test('counts progress reads with cursor queries without matching unrelated routes', () => {
+  assert.equal(isProgressReadUrl(`${origin}/nested/api/v1/jobs/j/runs/r/events?after=204&limit=200`), true);
+  assert.equal(isProgressReadUrl(`${origin}/nested/api/v1/jobs/j/runs/r/snapshot?revision=1`), true);
+  assert.equal(isProgressReadUrl(`${origin}/nested/api/v1/jobs?cursor=events`), false);
+  assert.equal(isProgressReadUrl('/nested/api/v1/jobs/j/runs/r/events?after=204'), false);
 });
 
 test('publishes by atomic rename and leaves no temporary file', async () => {

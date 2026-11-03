@@ -57,6 +57,15 @@ export function summarizeRequests(requests) {
   return { total: requests.length, methods, mutations: requests.filter(r => !['GET', 'HEAD'].includes(r.method)) };
 }
 
+export function isProgressReadUrl(value) {
+  try {
+    const path = new URL(value).pathname;
+    return path.endsWith('/events') || path.endsWith('/snapshot');
+  } catch {
+    return false;
+  }
+}
+
 /** Only the known session exchanges and progress-pin PUTs may mutate in this fixture. */
 export function assertOnlyPinWrites(requests, pinUrl, expectedPuts, sessionUrl = null, expectedSessionPosts = 0) {
   const mutations = requests.filter(r => !['GET', 'HEAD'].includes(r.method));
@@ -91,7 +100,7 @@ export async function qualifyRestart({ fixture, origin, makeTarget, cdp, evaluat
     }, tab.sessionId);
     return tab;
   };
-  const progressReads = tab => tab.requests.filter(r => r.url.endsWith('/events') || r.url.endsWith('/snapshot')).length;
+  const progressReads = tab => tab.requests.filter(r => isProgressReadUrl(r.url)).length;
   const openRun = async (tab, label) => {
     await cdp.call('Page.navigate', { url: origin + runPath }, tab.sessionId);
     await cdp.call('Page.bringToFront', {}, tab.sessionId);
