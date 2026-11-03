@@ -404,7 +404,8 @@ internal class WebApiController(
         val methods = when {
             resource == "jobs" || resource == "agent/preflight" -> setOf("GET", "POST")
             resource.matches(Regex("jobs/[^/]+/repositories")) -> setOf("GET", "POST")
-            resource.matches(Regex("jobs/[^/]+/runs")) -> setOf("GET", "POST")
+            resource.matches(Regex("jobs/[^/]+/runs")) ->
+                if (failure.allowedMethods == setOf("GET")) setOf("GET") else setOf("GET", "POST")
             resource.matches(Regex("jobs/[^/]+/repositories/[^/]+(?:/operations/[^/]+)?")) -> setOf("GET")
             resource.matches(Regex("jobs/[^/]+/runs/[^/]+/progress-pin")) -> setOf("GET", "PUT")
             else -> return failure
