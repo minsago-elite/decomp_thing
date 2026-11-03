@@ -161,7 +161,17 @@ class LlvmToolchainReproductionTest {
         assertFalse(llvm.contains("python3 scripts/verify-toolchain-reproduction.py"))
         assertFalse(llvm.contains("tests.oracle.test_stable_toolchain_reproduction"))
 
-        assertTrue(gcc.contains("python3 scripts/verify-gcc-toolchain-reproduction.py"))
+        val gccBuilder = Path.of("scripts/ci-gcc-toolchain-builder.sh").readText()
+        assertTrue(gcc.contains("run: bash scripts/ci-gcc-toolchain-builder.sh reproduce"))
+        assertTrue(gccBuilder.contains("reproduce) reproduce ;;"))
+        val reproduceStart = gccBuilder.indexOf("\nreproduce() {\n")
+        val reproduceEnd = gccBuilder.indexOf("\nbuild_solve_argv() {", reproduceStart)
+        assertTrue(reproduceStart >= 0 && reproduceEnd > reproduceStart)
+        val gccReproduce = gccBuilder.substring(reproduceStart, reproduceEnd)
+        assertTrue(gccReproduce.lineSequence().any {
+            it.startsWith("  python3 scripts/verify-gcc-toolchain-reproduction.py --lock oracle/gcc/16.2.0/toolchain-reproduction.json ")
+        })
+        assertTrue(gccReproduce.contains("--build-record oracle/gcc/16.2.0/build-record.json < \"\$evidence/image-inspect.json\""))
         assertTrue(gcc.contains("tests/oracle/test_stable_toolchain_reproduction.py"))
         assertFalse(gcc.contains("tests.oracle.test_stable_toolchain_reproduction"))
 
