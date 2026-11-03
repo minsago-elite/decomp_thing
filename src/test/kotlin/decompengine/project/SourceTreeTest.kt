@@ -9,6 +9,7 @@ import decompengine.agent.AgentHarness
 import decompengine.agent.AgentOperation
 import decompengine.agent.AgentStopReason
 import decompengine.agent.AgentWorkspacePath
+import decompengine.agent.AgentWorkflowProgress
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.nio.file.Files
@@ -1447,7 +1448,16 @@ class SourceTreeTest {
             override fun cacheIdentity(): String = "agent-free"
         }
 
-        SourceTreeGenerator.generate(input, project, reconstructor = refusing)
+        val reused = mutableListOf<Pair<String, String>>()
+        val progress = object : AgentWorkflowProgress by AgentWorkflowProgress.NONE {
+            override fun checkpointReused(moduleId: String, sourceSha256: String) {
+                reused += moduleId to sourceSha256
+            }
+        }
+
+        SourceTreeGenerator.generate(input, project, reconstructor = refusing, progress = progress)
+        assertEquals(listOf("parse"), reused.map { it.first })
+        assertTrue(reused.single().second.matches(Regex("[0-9a-f]{64}")))
     }
 
     @Test

@@ -57,6 +57,7 @@ class FullRunJournalTest {
             maximumQueuedEvents = 2, recordFullRun = true).use { journal ->
             directory = journal.fullRunDirectory!!
             repeat(40) { journal.phase(AgentWorkflowPhase.AGENT_RUNNING, "module-$it") }
+            journal.checkpointReused("private-module-id", "a".repeat(64))
             journal.diagnostic("failure private-credential")
             journal.phase(AgentWorkflowPhase.UNRESOLVED)
         }
@@ -65,9 +66,13 @@ class FullRunJournalTest {
             while (true) events += reader.next() ?: break
             assertEquals(JsonPrimitive(true), reader.verifyEnd()["complete"])
         }
-        assertEquals(43, events.size)
+        assertEquals(44, events.size)
         assertEquals(events.indices.map(Int::toLong), events.map { it.getValue("sequence").jsonPrimitive.long })
         assertFalse(directory.resolve("events.jsonl").readText().contains("private-credential"))
+        val reuse = events.single { it.getValue("kind").jsonPrimitive.content == "module_checkpoint_reused" }
+        assertEquals("a".repeat(64), reuse.getValue("sourceSha256").jsonPrimitive.content)
+        assertEquals(64, reuse.getValue("moduleIdSha256").jsonPrimitive.content.length)
+        assertFalse(directory.resolve("events.jsonl").readText().contains("private-module-id"))
         assertTrue(AgentProgressJournal.read(root)!!.getValue("truncated").jsonPrimitive.boolean)
     }
 

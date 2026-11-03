@@ -772,6 +772,7 @@ object SourceTreeGenerator {
                     ) &&
                     (if (checkpoint.accepted) checkpoint.hasCurrentModuleAcceptance() else !checkpoint.retryable)
             }
+            if (cached != null) progress.checkpointReused(module.id, cached.sourceSha256)
             val checkpoint = cached ?: run {
                 val previousAccepted = verifiedPreviousAcceptance
                 val previousSource = previousAccepted?.let { sourcePath.readText() }

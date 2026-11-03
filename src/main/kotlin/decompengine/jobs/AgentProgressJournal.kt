@@ -290,6 +290,15 @@ class AgentProgressJournal private constructor(
         enqueue("run_context") { put("inputSha256", inputSha256); put("profileSha256", profileSha256) }
     }
 
+    override fun checkpointReused(moduleId: String, sourceSha256: String) {
+        require(moduleId.isNotBlank() && moduleId.length <= 4096)
+        require(sourceSha256.matches(Regex("[0-9a-f]{64}")))
+        enqueue("module_checkpoint_reused") {
+            put("moduleIdSha256", digest(moduleId))
+            put("sourceSha256", sourceSha256)
+        }
+    }
+
     /** Bounded, redacted diagnostic observation; it is never used as workflow authority. */
     internal fun diagnostic(message: String) = enqueue("diagnostic") { put("text", redactor.text(message, 2048)) }
 

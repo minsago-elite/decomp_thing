@@ -67,6 +67,9 @@ internal class BestEffortProgressJournal(
     override fun runContext(inputSha256: String, profileSha256: String) =
         observe { journal?.runContext(inputSha256, profileSha256) }
 
+    override fun checkpointReused(moduleId: String, sourceSha256: String) =
+        observe { journal?.checkpointReused(moduleId, sourceSha256) }
+
     fun diagnostic(message: String) = observe { journal?.diagnostic(message) }
 
     override fun close() {

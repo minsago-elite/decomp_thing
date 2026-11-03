@@ -12,6 +12,9 @@ interface AgentWorkflowProgress {
     /** Bind observation history to the immutable analysis inputs; never grants acceptance authority. */
     fun runContext(inputSha256: String, profileSha256: String) = Unit
 
+    /** Record an exact checkpoint cache hit for diagnostic run-history accounting only. */
+    fun checkpointReused(moduleId: String, sourceSha256: String) = Unit
+
     companion object {
         val NONE = object : AgentWorkflowProgress {
             override fun beginTask(taskId: String, request: AgentExecutionRequest) = AgentTaskProgress.NONE
