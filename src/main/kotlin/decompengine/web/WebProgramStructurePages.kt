@@ -143,7 +143,8 @@ internal class WebProgramStructurePages(
         }
     }
 
-    fun module(owner: String, jobId: String, runId: String, revisionId: String, selector: String, rawQuery: String?): JsonObject {
+    fun module(owner: String, jobId: String, runId: String, revisionId: String, selector: String, rawQuery: String?,
+        policy: WebRedactionPolicy = WebRedactionPolicy.BASELINE): JsonObject {
         val query = parse(rawQuery, setOf("kind"))
         val kind = when (query.fields["kind"] ?: "functions") {
             "functions" -> WebStructureKind.FUNCTION; "globals" -> WebStructureKind.GLOBAL; "types" -> WebStructureKind.TYPE
@@ -169,7 +170,7 @@ internal class WebProgramStructurePages(
                     put("cycle", bounded(module.cycle.filter { it != module.id }, 20) { buildJsonObject {
                         put("moduleId", it); put("selector", it.takeIf(::addressable)?.let(::JsonPrimitive) ?: JsonNull)
                     } })
-                    put("boundaryEvidence", bounded(module.boundaryEvidence, 20) { text(WebStructureText.of(it, 256)) })
+                    put("boundaryEvidence", bounded(module.boundaryEvidence, 20) { text(WebStructureText.of(it, 256, policy)) })
                 }.let(::JsonObject))
                 val table = index.table(kind)
                 val ids = when (kind) {
@@ -202,7 +203,8 @@ internal class WebProgramStructurePages(
         }
     }
 
-    fun entity(kind: WebStructureKind, jobId: String, runId: String, revisionId: String, selector: String, rawQuery: String?): JsonObject {
+    fun entity(kind: WebStructureKind, jobId: String, runId: String, revisionId: String, selector: String, rawQuery: String?,
+        policy: WebRedactionPolicy = WebRedactionPolicy.BASELINE): JsonObject {
         val query = parse(rawQuery, emptySet(), paged = false)
         return read(jobId, runId, revisionId) { index, readModel ->
             pinned(index, query)
@@ -211,7 +213,7 @@ internal class WebProgramStructurePages(
                 val table = index.table(kind)
                 val row = table.index[selector]?.takeIf { addressable(selector) } ?: throw WebAccessDenied(404,
                     "ENTITY_NOT_FOUND", "The requested ${kind.wire} is not recorded in this revision's program model.")
-                val fields = readWebStructureEntity(readModel(), table.offsets[row])
+                val fields = readWebStructureEntity(readModel(), table.offsets[row], policy = policy)
                 put("entity", fitDetail(JsonObject(entityItem(index, table, row) + detail(index, table, row, fields))))
             }.let(::JsonObject)
         }

@@ -531,11 +531,14 @@ internal object WebProgramStructureBuilder {
 internal class WebStructureText(val text: String, val characters: Long, val truncated: Boolean) {
     companion object {
         const val PREVIEW_CHARACTERS = 2048
-        fun of(value: String, limit: Int = PREVIEW_CHARACTERS): WebStructureText {
-            if (value.length <= limit) return WebStructureText(value, value.length.toLong(), false)
+        fun of(value: String, limit: Int = PREVIEW_CHARACTERS,
+            policy: WebRedactionPolicy = WebRedactionPolicy.BASELINE): WebStructureText {
+            // Redact the complete recorded value before a bounded prefix can hide its literal.
+            val public = policy.text(value)
+            if (public.length <= limit) return WebStructureText(public, public.length.toLong(), false)
             var end = limit
-            if (value[end - 1].isHighSurrogate()) end--
-            return WebStructureText(value.substring(0, end), value.length.toLong(), true)
+            if (public[end - 1].isHighSurrogate()) end--
+            return WebStructureText(public.substring(0, end), public.length.toLong(), true)
         }
     }
 }
@@ -547,7 +550,8 @@ internal class WebStructureEntityFields(
     val byteEvidence: String?,
 )
 
-internal fun readWebStructureEntity(bytes: ByteArray, offset: Long, maximumStrings: Int = 20): WebStructureEntityFields {
+internal fun readWebStructureEntity(bytes: ByteArray, offset: Long, maximumStrings: Int = 20,
+    policy: WebRedactionPolicy = WebRedactionPolicy.BASELINE): WebStructureEntityFields {
     require(offset in 0 until bytes.size)
     val texts = LinkedHashMap<String, WebStructureText?>()
     val strings = ArrayList<WebStructureText>()
@@ -560,14 +564,14 @@ internal fun readWebStructureEntity(bytes: ByteArray, offset: Long, maximumStrin
             require(token == JsonToken.FIELD_NAME)
             when (val key = parser.currentName()) {
                 "prototype", "type", "declaration", "decompiledC", "initializer" -> texts[key] = when (parser.nextToken()) {
-                    JsonToken.VALUE_STRING -> WebStructureText.of(parser.text)
+                    JsonToken.VALUE_STRING -> WebStructureText.of(parser.text, policy = policy)
                     JsonToken.VALUE_NULL -> null
                     else -> error("Recorded text field is invalid.")
                 }
                 "strings" -> {
                     require(parser.nextToken() == JsonToken.START_ARRAY)
                     while (parser.nextToken() != JsonToken.END_ARRAY) {
-                        if (strings.size < maximumStrings) strings += WebStructureText.of(parser.text, 256)
+                        if (strings.size < maximumStrings) strings += WebStructureText.of(parser.text, 256, policy)
                     }
                 }
                 "byteEvidence" -> {

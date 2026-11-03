@@ -121,6 +121,49 @@ class WebProgramStructureTest {
     private fun JsonObject.text(name: String) = getValue(name).jsonPrimitive.contentOrNull
     private fun next(page: JsonObject) = page.getValue("page").jsonObject.text("nextCursor")
 
+    @Test fun `structure previews redact complete configured credentials before any prefix is bounded`() {
+        val stringSecret = "StringCredential9".repeat(40).take(512)
+        val textSecret = "BodyCredential8".repeat(300).take(4096)
+        val boundarySecret = "BoundaryCredential7".repeat(40).take(512)
+        val policy = WebRedactionPolicy.create(mapOf("API_TOKEN" to stringSecret, "AUTH_TOKEN" to textSecret,
+            "SECRET_VALUE" to boundarySecret), emptyList(), emptyList())
+        val function = RecoveredFunction("fn_0000000000401000", "public", 0x401000u,
+            "public $textSecret suffix", "body $textSecret suffix", strings = setOf("recorded $stringSecret suffix"))
+        val global = RecoveredGlobal("global_0000000000404000", "public", 0x404000u,
+            "type $textSecret suffix", "init $textSecret suffix")
+        val type = RecoveredType("type_${"c".repeat(64)}", "declaration $textSecret suffix", 0x405000u)
+        val revision = Revision(model(listOf(function), listOf(global), listOf(type)),
+            plan(planned("core", listOf(function.id), listOf(global.id), listOf(type.id),
+                listOf("boundary $boundarySecret suffix"))), listOf("core"))
+        val before = revision.records.mapValues { sha(it.value) }
+        for ((kind, selector) in listOf(WebStructureKind.FUNCTION to function.id, WebStructureKind.GLOBAL to global.id,
+                WebStructureKind.TYPE to type.id)) {
+            val response = policy.json(revision.pages.entity(kind, jobId, runId, revisionId, selector, null, policy)).jsonObject
+            assertContract("entityDetail", response)
+            for (secret in listOf(stringSecret, textSecret)) assertFalse(response.toString().contains(secret.take(128)), response.toString())
+            val entity = response.getValue("entity").jsonObject
+            for (field in entity.getValue("texts").jsonArray) {
+                val preview = field.jsonObject.getValue("preview").jsonObject
+                assertTrue(preview.text("text")!!.contains(WebRedactionPolicy.SECRET_MARK))
+                assertEquals(preview.text("text")!!.length.toString(), preview.text("characters"))
+                assertFalse(preview.getValue("truncated").jsonPrimitive.boolean)
+            }
+            if (kind == WebStructureKind.FUNCTION) {
+                val preview = entity.getValue("strings").jsonObject.items().single()
+                assertEquals("recorded ${WebRedactionPolicy.SECRET_MARK} suffix", preview.text("text"))
+                assertFalse(preview.getValue("truncated").jsonPrimitive.boolean)
+            }
+        }
+        val module = policy.json(revision.pages.module("owner", jobId, runId, revisionId, "core", null, policy)).jsonObject
+        assertContract("moduleDetail", module)
+        assertFalse(module.toString().contains(boundarySecret.take(128)), module.toString())
+        val evidence = module.getValue("module").jsonObject.getValue("boundaryEvidence").jsonObject.items().single()
+        assertEquals("boundary ${WebRedactionPolicy.SECRET_MARK} suffix", evidence.text("text"))
+        assertEquals(evidence.text("text")!!.length.toString(), evidence.text("characters"))
+        assertFalse(evidence.getValue("truncated").jsonPrimitive.boolean)
+        assertEquals(before, revision.records.mapValues { sha(it.value) }, "redaction must not rewrite committed model/plan bytes")
+    }
+
     @Test fun `functions keep recorded identity exact addresses ownership and evidence references`() {
         val revision = standard()
         val page = revision.pages.functions("owner", jobId, runId, revisionId, null)
