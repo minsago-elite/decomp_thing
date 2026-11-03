@@ -2,6 +2,18 @@
 
 export { activityReceiptAgeCopy, receiptAge } from './receiptAge';
 
+/**
+ * Limitations written into the exported validation record. They describe a versioned file format,
+ * so they stay stable record text even when interface copy is translated.
+ */
+export const validationExportLimitations = [
+  'This export contains the selected observation only, not a complete receipt or every case page.',
+  'A compact full-corpus mismatch index may be included; unselected case details and full outputs are not included.',
+  'Output previews are bounded prefixes; comparison flags describe the retained full-byte observations.',
+  'Failure labels and completed-pair counts are producer reports, not inferred per-case outcomes.',
+  'This export grants no acceptance, authentication, containment or equivalence qualification.',
+] as const;
+
 export const recordedValidationCopy = {
   savedSelectionInvalid: 'This saved validation selection is invalid. No validation read was made. Read validation evidence to select a current observation.',
   savedSelectionUnavailable: 'This exact saved validation selection could not be restored. No different observation was substituted. Read validation evidence to select a current observation.',
@@ -46,6 +58,9 @@ export const recordedValidationCopy = {
   noCases: 'Verified case details are unavailable for this receipt. No case result is inferred.',
   bytes: 'Observed bytes', prefix: 'Prefix bytes', truncated: 'Prefix truncated.', complete: 'Complete output prefix.',
   hex: 'Hexadecimal prefix', text: 'Escaped UTF-8 prefix', empty: 'Empty observed output',
+  previewSize: '{bytes}: {total}. {prefix}: {prefixBytes}. {completeness}', previewPart: '{title}: {part}',
+  ownerAction: '{action}: {kind} {owner}', ordinalAction: '{action}: {ordinal}',
+  comparisonFacts: '{population}: {total}. {policy}: {value}.', comparisonWindowText: '{window} {page} / {pages}. {ordinals}',
   noText: 'No UTF-8 text preview is available; inspect the hexadecimal prefix.',
   inspectFailure: 'Inspect failure', failureTitle: 'Recorded failed operation',
   failureScope: 'These producer diagnostics identify an enclosing operation. They do not establish an individual child-process outcome, successful case comparisons, process absence or independent cleanup verification.',
@@ -296,6 +311,7 @@ export const explorationCasesCopy = {
 } as const;
 
 export const runCopy = {
+  thisJobWasDeleted: "This attempt’s job was deleted. Its files were removed and cannot be recovered.",
   attemptViews: 'Attempt views', overviewView: 'Overview', activityView: 'Activity', evidenceView: 'Evidence',
   activityTitle: 'Attempt activity', evidenceTitle: 'Attempt evidence',
   "wallClockLimit": "{value} milliseconds",

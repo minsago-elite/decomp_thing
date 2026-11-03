@@ -1,0 +1,96 @@
+{
+  "authority": "component-only",
+  "complete": false,
+  "containmentStatus": "external-owner-required",
+  "counts": {
+    "canonicalFunctions": 12844,
+    "instructionAttempts": 223963,
+    "physicalCallSites": 15376,
+    "positiveInternalCallSites": 11174,
+    "rawFunctionSymbols": 4069,
+    "roots": 3430,
+    "rootsWithTraversalStops": 695,
+    "rootsWithUnresolvedOwnership": 12,
+    "unresolvedCallSites": 4202
+  },
+  "inputs": {
+    "artifactManifest": {
+      "bytes": 60269,
+      "path": "oracle/gcc/16.2.0/oracle-manifest.json",
+      "sha256": "c9e21c5a6422c65572ee4c4de5578107b82ae92b6730536c4fc76490fe2ecad9"
+    },
+    "canonicalOracle": {
+      "bytes": 12558460,
+      "path": "oracle/gcc/16.2.0/function-recovery-oracle.json",
+      "sha256": "b49b8a72a96580bd8727d9dc530753f40f78185a656f472ebe83a7a1f6fc9aae"
+    },
+    "rich": {
+      "bytes": 20713760,
+      "path": "oracle/gcc/16.2.0/artifacts/gcc-driver.full",
+      "sha256": "8009c7cfc4f66017aa932d86a6d4ec7f374e6ab7a01b3ef5ab3d2fcc78c2378b"
+    }
+  },
+  "kind": "retained-machine-call-component-evidence",
+  "negativeCompleteness": false,
+  "payloads": {
+    "report": {
+      "bytes": 19116784,
+      "compression": "gzip",
+      "path": "driver-report.json.gz",
+      "sha256": "d9afc3bbdfff322e5d1112d77a7dce23c033d05642ff1cb03e934660a7a3110e",
+      "storedBytes": 641922,
+      "storedSha256": "7e4dc6d305447fd734a46fea058605812d304e095d7c34b5bfc5bc56309b7f71"
+    },
+    "request": {
+      "bytes": 1723,
+      "path": "driver-request.json",
+      "sha256": "836809dd40e4f1c909e93e87c48490d6cc029d346335da51bff01bad391c24f8"
+    }
+  },
+  "producerJar": {
+    "bytes": 15235420,
+    "path": "build/install/llm_bin_patch/lib/llm-bin-patch-0.1.0.jar",
+    "sha256": "692734bc271bfca459fa2b7196008925a6ca89a13a77a3f1880571df4f374eeb"
+  },
+  "releaseEligible": false,
+  "runtime": {
+    "archiveBytes": 569445154,
+    "archiveSha256": "93a5d11a9ad510622acaaf908c556a7b9b764d338e78a7567f3689bf5081fd54",
+    "bridgeSha256": "997ed3d92607ad2343a687b23d4fb54e83771736a9a819022b54100219316f7c",
+    "bundleManifestSha256": "6a5dd7e8d8d734336349bb0d4d96fb367bfad0c41cb051f27f87b2e02803906c",
+    "languageId": "x86:LE:64:default",
+    "languageVersion": "4.8"
+  },
+  "schemaVersion": 1,
+  "source": {
+    "commit": "98597c5f1c2c5865d75a1338761af1715bc8ce77",
+    "files": [
+      {
+        "bytes": 17720,
+        "path": "ghidra-bridge/src/main/java/decompengine/ghidra/ByteInstructionDecoderV1.java",
+        "sha256": "ac5df4cedfb3ddd890242f9426b5b5d81a1119c93861a3ce89b43e1ee825b3e2"
+      },
+      {
+        "bytes": 74162,
+        "path": "src/main/kotlin/decompengine/oracle/fulltree/FullTreeElfLayout.kt",
+        "sha256": "e590bb3069f8affd6d43faac1f3a7210e5adfb9471777d205978eec8c370ac05"
+      },
+      {
+        "bytes": 26984,
+        "path": "src/main/kotlin/decompengine/oracle/machinecalls/IndependentMachineCallReportV1.kt",
+        "sha256": "b82d17a5eb0efb9ce5d92d17dca21b5a07fb33cd1137025b619e9d311785f7ec"
+      },
+      {
+        "bytes": 29354,
+        "path": "src/main/kotlin/decompengine/oracle/machinecalls/IndependentMachineCallWorkerV1.kt",
+        "sha256": "a99b153c0b1e6a4fe05b5d89ba6e17f8db488ea7ed77c00fcec3338a14134f5b"
+      },
+      {
+        "bytes": 26732,
+        "path": "src/main/kotlin/decompengine/oracle/machinecalls/IndependentMachineCallsV1.kt",
+        "sha256": "e659d0ec16f30cf1d48ed30200f22a652e7e89c9d98c607412e764d80e68d5c6"
+      }
+    ],
+    "tree": "7dc2316e9f0d8d4a014feed10e4a0892c3ec7af5"
+  }
+}

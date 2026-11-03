@@ -69,7 +69,11 @@ export async function qualifyUpload({ makeTarget, cdp, evaluate, ready, browserO
   const publishedFiles = await fs.readdir(join(data, ids[0]));
   assert.deepEqual(publishedFiles.sort(), ['input.elf', 'job.json', 'upload-receipt.json']);
   const retainedFiles = new Map(await Promise.all(publishedFiles.map(async name => [name, await fs.readFile(join(data, ids[0], name))])));
-  assert.ok(tab.requests.every(request => !/^\/nested\/api\/v1\/jobs\/[0-9a-f]{32}$/.test(new URL(request.url).pathname)),
+  const requestPaths = tab.requests.map(({ url }) => {
+    try { return new URL(url).pathname; } catch { return null; }
+  });
+  assert.ok(requestPaths.every(path => path !== null), 'Every captured browser request must have a valid absolute URL');
+  assert.ok(requestPaths.every(path => !/^\/nested\/api\/v1\/jobs\/[0-9a-f]{32}$/.test(path)),
     'The file baseline must precede every job metadata view');
   assert.equal(await evaluate(tab, 'sessionStorage.length'), 1);
   cdp.on('Page.javascriptDialogOpening', () => {

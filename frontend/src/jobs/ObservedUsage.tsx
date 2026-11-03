@@ -1,6 +1,6 @@
 import { observedUsageCopy as copy } from '../copy/attempt';
 import { message as displayMessage } from '../shared/messages';
-import { formatExactTimestamp } from './metadataFormat';
+import { formatExactTimestamp } from '../copy/format';
 import type { ProgressObservation } from '../api/generated';
 
 /** Convert the producer's nonnegative H/M/S duration subset without floating-point rounding. */

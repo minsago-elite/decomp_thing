@@ -107,8 +107,20 @@ class WebAccessDenied internal constructor(
     val allowedMethods: Set<String> = emptySet(),
     internal val clearCookie: Boolean = false,
     internal val eventGap: JsonObject? = null,
+    internal val details: List<WebErrorDetail> = emptyList(),
 ) : RuntimeException(message) {
-    init { require(eventGap == null || (status == 410 && code == "EVENT_GAP")) }
+    init {
+        require(eventGap == null || (status == 410 && code == "EVENT_GAP"))
+        require(details.size <= 32)
+    }
+}
+
+/** Field-level or policy detail: a JSON pointer plus fixed code/message, never a rejected value. */
+internal data class WebErrorDetail(val pointer: String, val code: String, val message: String) {
+    init {
+        require(pointer.length <= 256 && (pointer.isEmpty() || pointer.startsWith("/")))
+        require(code.matches(Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}")) && message.length <= 500)
+    }
 }
 
 /** These return values deliberately redact their printable representation. Never serialize them wholesale. */
@@ -281,7 +293,9 @@ class LocalWebAccess(
                 put("message", failure.message)
                 failure.eventGap?.let { put("recovery", it) }
                 put("retryable", failure.status == 429)
-                put("details", JsonArray(emptyList()))
+                put("details", JsonArray(failure.details.map { detail -> buildJsonObject {
+                    put("pointer", detail.pointer); put("code", detail.code); put("message", detail.message)
+                } }))
                 put("retryAfterMs", if (failure.status == 429) JsonPrimitiveRetry else JsonNull)
             })
         }.toString().toByteArray()

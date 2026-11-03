@@ -1,0 +1,7 @@
+{
+  "apiVersion": 1,
+  "kind": "jobOrganizationRequest",
+  "data": {
+    "label": "bad\u0007label"
+  }
+}

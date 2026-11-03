@@ -37,6 +37,44 @@ class WebJobPagesTest {
         assertEquals(listOf("z"), ids(pages.page("owner", query, null)))
     }
 
+    @Test fun `a deletion during collection is never published through a new snapshot`() {
+        val records = mutableListOf(row("b"), row("a"))
+        var scans = 0
+        lateinit var pages: WebJobPages
+        pages = WebJobPages({
+            scans++
+            val rows = records.toList()
+            sequence {
+                for ((index, item) in rows.withIndex()) {
+                    yield(item)
+                    // The first scan has already collected "b" when another request deletes it.
+                    if (scans == 1 && index == 0) { records.removeAt(0); pages.invalidate() }
+                }
+            }
+        })
+        val page = pages.page("owner", WebJobQuery(limit = 1), null)
+        assertEquals(2, scans, "the stale collection is discarded and the library read again")
+        assertEquals(listOf("a"), ids(page))
+        assertEquals(JsonNull, page.getValue("page").jsonObject.getValue("nextCursor"))
+    }
+
+    @Test fun `continuous invalidation ends in a bounded busy refusal`() {
+        lateinit var pages: WebJobPages
+        pages = WebJobPages({ sequence { yield(row("a")); pages.invalidate() } })
+        val refusal = assertFailsWith<WebAccessDenied> { pages.page("owner", WebJobQuery(), null) }
+        assertEquals(503, refusal.status); assertEquals("LISTING_BUSY", refusal.code)
+    }
+
+    @Test fun `pending deletion resumes rotate past the last attempted operation`() {
+        val pending = listOf("jobdel_b", "jobdel_a", "jobdel_c")
+        assertEquals("jobdel_a", nextPendingDeletion(pending, null))
+        assertEquals("jobdel_b", nextPendingDeletion(pending, "jobdel_a"))
+        assertEquals("jobdel_c", nextPendingDeletion(pending, "jobdel_b"))
+        assertEquals("jobdel_a", nextPendingDeletion(pending, "jobdel_c"), "wraps instead of starving later operations")
+        assertEquals("jobdel_c", nextPendingDeletion(listOf("jobdel_a", "jobdel_c"), "jobdel_b"))
+        assertNull(nextPendingDeletion(emptyList(), "jobdel_a"))
+    }
+
     @Test fun `cursor binds session normalized filters limit signature and expiry`() {
         var clock = 0L
         val pages = WebJobPages({ sequenceOf(row("a"), row("b")) }, { clock })

@@ -12,9 +12,14 @@ import decompengine.analysis.GhidraPostScript
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
+import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 import java.time.Duration
+import java.util.LinkedHashSet
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.Executor
+import java.util.concurrent.ForkJoinPool
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
@@ -76,13 +81,18 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
     private val recoveryMode: GhidraProgramModelRecoveryMode,
     private val processStarter: (List<String>, Path) -> Process,
     private val requiresLaunchPermit: Boolean,
+    private val processLaunch: BoundedAnalysisProcessLaunch,
+    private val processTreeFactory: (Process, Duration) -> ExportProcessTree,
+    private val streamCloseSubmitter: (Runnable) -> CompletableFuture<*> = { task -> CompletableFuture.runAsync(task) },
+    private val analysisTaskExecutor: Executor = ForkJoinPool.commonPool(),
 ) : ExportBudgetedProgramModelAnalyzer {
     internal constructor(
         commandFactory: (GhidraInvocation) -> List<String>,
         limits: GhidraProgramModelExportLimits = GhidraProgramModelExportLimits(),
         analysisToolSha256: String = UNAUTHENTICATED_ANALYSIS_TOOL_SHA256,
         recoveryMode: GhidraProgramModelRecoveryMode = GhidraProgramModelRecoveryMode.FULL,
-    ) : this({ invocation, _ -> commandFactory(invocation) }, limits, analysisToolSha256, recoveryMode, ::startExportProcess, false)
+    ) : this({ invocation, _ -> commandFactory(invocation) }, limits, analysisToolSha256, recoveryMode, ::startExportProcess, false,
+        EXPORT_PROCESS_LAUNCH, ::ExportProcessTree)
 
     internal constructor(
         commandFactory: (GhidraInvocation) -> List<String>,
@@ -90,7 +100,8 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
         processStarter: (List<String>, Path) -> Process,
         requiresLaunchPermit: Boolean = false,
     ) : this({ invocation, _ -> commandFactory(invocation) }, limits,
-        UNAUTHENTICATED_ANALYSIS_TOOL_SHA256, GhidraProgramModelRecoveryMode.FULL, processStarter, requiresLaunchPermit)
+        UNAUTHENTICATED_ANALYSIS_TOOL_SHA256, GhidraProgramModelRecoveryMode.FULL, processStarter, requiresLaunchPermit,
+        EXPORT_PROCESS_LAUNCH, ::ExportProcessTree)
 
     constructor(
         limits: GhidraProgramModelExportLimits = GhidraProgramModelExportLimits(),
@@ -98,7 +109,7 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
         recoveryMode: GhidraProgramModelRecoveryMode = GhidraProgramModelRecoveryMode.FULL,
     ) : this({ invocation, checkpoint ->
         BundledGhidra.locate().analysisCommandForOwnedLaunch(invocation, checkpoint)
-    }, limits, analysisToolSha256, recoveryMode, ::startExportProcess, true)
+    }, limits, analysisToolSha256, recoveryMode, ::startExportProcess, true, EXPORT_PROCESS_LAUNCH, ::ExportProcessTree)
 
     init {
         require(analysisToolSha256.matches(Regex("[0-9a-f]{64}"))) {
@@ -117,6 +128,55 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
             recoveryMode = recoveryMode,
             processStarter = processStarter,
             requiresLaunchPermit = requiresLaunchPermit,
+            processLaunch = processLaunch,
+            processTreeFactory = processTreeFactory,
+            streamCloseSubmitter = streamCloseSubmitter,
+            analysisTaskExecutor = analysisTaskExecutor,
+        )
+
+    internal fun withProcessLifecycleForTests(
+        controller: BoundedAnalysisProcessLaunch,
+        treeFactory: (Process, Duration) -> ExportProcessTree,
+    ): GhidraHeadlessProgramModelAnalyzer = GhidraHeadlessProgramModelAnalyzer(
+        commandFactory = commandFactory,
+        limits = limits,
+        analysisToolSha256 = analysisToolSha256,
+        recoveryMode = recoveryMode,
+        processStarter = processStarter,
+        requiresLaunchPermit = requiresLaunchPermit,
+        processLaunch = controller,
+        processTreeFactory = treeFactory,
+        streamCloseSubmitter = streamCloseSubmitter,
+        analysisTaskExecutor = analysisTaskExecutor,
+    )
+
+    internal fun withStreamCloseSubmitterForTests(
+        submitter: (Runnable) -> CompletableFuture<*>,
+    ): GhidraHeadlessProgramModelAnalyzer = GhidraHeadlessProgramModelAnalyzer(
+        commandFactory = commandFactory,
+        limits = limits,
+        analysisToolSha256 = analysisToolSha256,
+        recoveryMode = recoveryMode,
+        processStarter = processStarter,
+        requiresLaunchPermit = requiresLaunchPermit,
+        processLaunch = processLaunch,
+        processTreeFactory = processTreeFactory,
+        streamCloseSubmitter = submitter,
+        analysisTaskExecutor = analysisTaskExecutor,
+    )
+
+    internal fun withAnalysisTaskExecutorForTests(executor: Executor): GhidraHeadlessProgramModelAnalyzer =
+        GhidraHeadlessProgramModelAnalyzer(
+            commandFactory = commandFactory,
+            limits = limits,
+            analysisToolSha256 = analysisToolSha256,
+            recoveryMode = recoveryMode,
+            processStarter = processStarter,
+            requiresLaunchPermit = requiresLaunchPermit,
+            processLaunch = processLaunch,
+            processTreeFactory = processTreeFactory,
+            streamCloseSubmitter = streamCloseSubmitter,
+            analysisTaskExecutor = executor,
         )
 
     override fun analyze(binaryPath: Path, workDir: Path): RecoveredProgramModel =
@@ -145,13 +205,14 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
             val reports = workDir.resolve("reports").createDirectories()
             val scripts = workDir.resolve("scripts").createDirectories()
             deadline.checkpoint("before reading export scripts")
-            val scriptBytes = javaClass.getResourceAsStream("/ghidra_scripts/ExportProgramModel.java")
-                ?.use { it.readBytes() } ?: error("bundled ExportProgramModel.java is missing")
+            val scriptBytes = javaClass.getResourceAsStream("/ghidra_scripts/ExportProgramModelOwned.java")
+                ?.use { it.readBytes() } ?: error("bundled ExportProgramModelOwned.java is missing")
             deadline.checkpoint("after reading export script")
-            scripts.resolve("ExportProgramModel.java").writeBytes(scriptBytes)
+            scripts.resolve("ExportProgramModelOwned.java").writeBytes(scriptBytes)
             deadline.checkpoint("after writing export script")
             val exporterSha256 = sha256(scriptBytes)
             val output = reports.resolve("program_model.json")
+            val modelCandidate = uniqueExportCandidate(output, "model")
             val callOutput = reports.resolve("program_model_calls.json")
             val callScriptBytes = if (includeCallSites) {
                 require(!Files.exists(callOutput, LinkOption.NOFOLLOW_LINKS)) { "call-site output already exists" }
@@ -159,38 +220,45 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
                     ?.use { it.readBytes() } ?: error("bundled ExportRecoveredCallSites.java is missing")
             } else null
             deadline.checkpoint("after preparing call-site script")
+            val callCandidate = callScriptBytes?.let { uniqueExportCandidate(callOutput, "calls") }
             callScriptBytes?.let { scripts.resolve("ExportRecoveredCallSites.java").writeBytes(it) }
             deadline.checkpoint("before creating export project")
             val project = workDir.resolve("ghidra_project").createDirectories()
-            val postScripts = listOf(GhidraPostScript("ExportProgramModel.java", listOf(
+            val postScripts = listOf(GhidraPostScript("ExportProgramModelOwned.java", listOf(
                 exporterSha256, analysisToolSha256, recoveryMode.wireName, output.toAbsolutePath().normalize().pathString,
+                OWNED_MODEL_CANDIDATE_ARGUMENT,
+                modelCandidate.toAbsolutePath().normalize().pathString,
             ))) + if (callScriptBytes == null) emptyList() else listOf(
                 GhidraPostScript("ExportRecoveredCallSites.java", listOf(
-                    sha256(callScriptBytes), analysisToolSha256, output.toAbsolutePath().normalize().pathString,
-                    callOutput.toAbsolutePath().normalize().pathString,
+                    sha256(callScriptBytes), analysisToolSha256, modelCandidate.toAbsolutePath().normalize().pathString,
+                    checkNotNull(callCandidate).toAbsolutePath().normalize().pathString,
                 )),
             )
             deadline.checkpoint("before constructing export command")
             val command = commandFactory(GhidraInvocation(project, "archival_reconstruction", binaryPath, scripts, postScripts), deadline::checkpoint)
             deadline.checkpoint("after constructing export command")
-            val exitCode = executeExport(command, workDir, reports, deadline)
+            val exitCode = executeExport(command, workDir, reports, deadline,
+                listOfNotNull(modelCandidate, callCandidate))
             deadline.checkpoint("before export result validation")
             require(exitCode == 0) {
                 "Ghidra program recovery failed with exit code $exitCode; see ${reports.resolve("ghidra_stderr.log")}"
             }
-            val modelBytes = readStableProgramModel(output, deadline)
+            val modelBytes = readStableProgramModel(modelCandidate, deadline)
             val model = ProgramModelJson.readCanonical(modelBytes, deadline::checkpoint)
             deadline.checkpoint("after canonical model validation")
             val calls = callScriptBytes?.let { script ->
                 val callLimits = RecoveredCallSiteLimits()
+                val callCandidatePath = checkNotNull(callCandidate)
                 fun requireRemainingTime() {
                     deadline.checkpoint("during call-site export validation")
                 }
                 requireRemainingTime()
-                require(Files.isRegularFile(callOutput, LinkOption.NOFOLLOW_LINKS)) { "call-site export did not produce a regular file" }
+                require(Files.isRegularFile(callCandidatePath, LinkOption.NOFOLLOW_LINKS)) {
+                    "call-site export did not produce a regular candidate"
+                }
                 val digest = MessageDigest.getInstance("SHA-256")
                 var bytes = 0L
-                Files.newInputStream(callOutput, java.nio.file.StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS).use { stream ->
+                Files.newInputStream(callCandidatePath, java.nio.file.StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS).use { stream ->
                     val buffer = ByteArray(64 * 1024)
                     while (true) {
                         requireRemainingTime()
@@ -202,24 +270,39 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
                     }
                 }
                 RecoveredCallSites.read(
-                    callOutput, digest.digest().joinToString("") { "%02x".format(it) },
+                    callCandidatePath, digest.digest().joinToString("") { "%02x".format(it) },
                     RecoveredCallSiteBindings(model.inputSha256, sha256(modelBytes), sha256(script), analysisToolSha256),
                     callLimits,
                 ) { requireRemainingTime() }.also { requireRemainingTime() }
             }
-            deadline.checkpoint("before returning exported model")
-            model to calls
+            deadline.checkpoint("before publishing validated export candidates")
+            deadline.checkpoint("before publishing validated program model")
+            moveExportCandidate(modelCandidate, output)
+            if (callCandidate != null) {
+                deadline.checkpoint("before publishing validated call-site evidence")
+                moveExportCandidate(callCandidate, callOutput)
+            }
+            model to calls?.copy(path = callOutput.toAbsolutePath().normalize())
         }
     }
 
-    private fun executeExport(command: List<String>, workDir: Path, reports: Path, deadline: AnalysisDeadline): Int {
+    private fun executeExport(
+        command: List<String>,
+        workDir: Path,
+        reports: Path,
+        deadline: AnalysisDeadline,
+        outputCandidates: List<Path>,
+    ): Int {
         val remainingNanosAtLaunch = deadline.remainingNanos("before worker launch")
-        val process = EXPORT_PROCESS_LAUNCH.start(
+        val process = processLaunch.start(
             deadline::checkpoint,
             { processStarter(command, workDir) },
-            { lateProcess -> stopLateExportProcess(lateProcess, limits.terminationGrace) },
+            { lateProcess -> stopLateExportProcess(lateProcess, limits.terminationGrace, processLaunch, outputCandidates) },
         )
-        val processTree = ExportProcessTree(process, limits.terminationGrace)
+        val processTree = processTreeFactory(process, limits.terminationGrace)
+        val taskSettlements = ArrayList<AtomicBoolean>()
+        val captureSettlements = ArrayList<AtomicBoolean>()
+        val taskFailures = ConcurrentLinkedQueue<Throwable>()
         val peakResidentBytes = AtomicLong(0)
         val memoryExceeded = AtomicBoolean(false)
         val diagnosticsExceeded = AtomicBoolean(false)
@@ -255,26 +338,48 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
                 process.outputStream.flush()
             }
             process.outputStream.close()
-            val memoryMonitor = CompletableFuture.runAsync {
-                while (process.isAlive) {
-                    val observed = residentBytes(process)
-                    peakResidentBytes.accumulateAndGet(observed, ::maxOf)
-                    if (observed > limits.maximumResidentBytes) {
-                        memoryExceeded.set(true)
-                        processTree.terminate()
-                        break
+            val memoryMonitorFinished = AtomicBoolean(false)
+            taskSettlements += memoryMonitorFinished
+            captureSettlements += memoryMonitorFinished
+            val memoryMonitor = CompletableFuture.runAsync({
+                try {
+                    while (process.isAlive) {
+                        val observed = processTree.residentBytes()
+                        peakResidentBytes.accumulateAndGet(observed, ::maxOf)
+                        if (observed > limits.maximumResidentBytes) {
+                            memoryExceeded.set(true)
+                            processTree.terminate()
+                            break
+                        }
+                        Thread.sleep(25)
                     }
-                    Thread.sleep(25)
+                } catch (failure: Throwable) {
+                    taskFailures.add(failure)
+                    throw failure
+                } finally {
+                    memoryMonitorFinished.set(true)
                 }
-            }.also(tasks::add)
-            fun capture(stream: java.io.InputStream): CompletableFuture<ByteArray> = CompletableFuture.supplyAsync {
-                val bytes = stream.readNBytes(limits.maximumDiagnosticBytesPerStream + 1)
-                if (bytes.size > limits.maximumDiagnosticBytesPerStream) {
-                    diagnosticsExceeded.set(true)
-                    processTree.terminate()
-                    bytes.copyOf(limits.maximumDiagnosticBytesPerStream)
-                } else bytes
-            }.also(tasks::add)
+            }, analysisTaskExecutor).also(tasks::add)
+            fun capture(stream: java.io.InputStream): CompletableFuture<ByteArray> {
+                val finished = AtomicBoolean(false)
+                taskSettlements += finished
+                captureSettlements += finished
+                return CompletableFuture.supplyAsync({
+                    try {
+                        val bytes = stream.readNBytes(limits.maximumDiagnosticBytesPerStream + 1)
+                        if (bytes.size > limits.maximumDiagnosticBytesPerStream) {
+                            diagnosticsExceeded.set(true)
+                            processTree.terminate()
+                            bytes.copyOf(limits.maximumDiagnosticBytesPerStream)
+                        } else bytes
+                    } catch (failure: Throwable) {
+                        taskFailures.add(failure)
+                        throw failure
+                    } finally {
+                        finished.set(true)
+                    }
+                }, analysisTaskExecutor).also(tasks::add)
+            }
             val stdoutTask = capture(process.inputStream).also { stdout = it }
             val stderrTask = capture(process.errorStream).also { stderr = it }
             val completed = try {
@@ -337,6 +442,8 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
             throw reported
         } finally {
             var cleanupFailure: Throwable? = null
+            var cleanupProblem: Throwable? = null
+            var quarantineRequired = false
             var cleanupInterrupted = Thread.interrupted()
             fun cleanup(action: () -> Unit) {
                 try { action() } catch (failure: Throwable) {
@@ -344,8 +451,110 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
                     if (previous == null) cleanupFailure = failure else previous.addSuppressed(failure)
                 }
             }
-            cleanup { processTree.terminate() }
-            if (primaryFailure != null && !diagnosticsPublished) {
+            fun recordCleanupFailure(failure: Throwable) {
+                if (cleanupProblem == null) cleanupProblem = failure
+                quarantineRequired = true
+                val previous = primaryFailure ?: cleanupFailure
+                if (previous == null) cleanupFailure = failure
+                else if (previous !== failure) previous.addSuppressed(failure)
+            }
+            val reportedTaskFailures = java.util.Collections.newSetFromMap(
+                java.util.IdentityHashMap<Throwable, Boolean>(),
+            )
+            fun preserveTaskFailures() {
+                taskFailures.forEach { failure ->
+                    if (!reportedTaskFailures.add(failure)) return@forEach
+                    val previous = primaryFailure ?: cleanupFailure
+                    val captured = GhidraAnalysisException("Ghidra export monitor/capture task failed", failure)
+                    if (previous == null) cleanupFailure = captured
+                    else if (previous !== failure && previous.cause !== failure) previous.addSuppressed(captured)
+                }
+            }
+            val treeResult = runCatching { processTree.terminate() }.getOrElse { failure ->
+                ExportProcessCleanupResult(false, failure)
+            }
+            if (!treeResult.confirmedAbsent) {
+                val failure = GhidraAnalysisException(
+                    buildString {
+                        append("Ghidra export cleanup could not prove absence of its retained process/handle inventory")
+                        treeResult.diagnostic?.let { append(": ").append(it) }
+                    },
+                    treeResult.failure,
+                )
+                recordCleanupFailure(failure)
+            } else if (treeResult.failure != null) {
+                recordCleanupFailure(treeResult.failure)
+            }
+            preserveTaskFailures()
+            // Cancelling a CompletableFuture that is still queued marks the future done without
+            // running its body/finally settlement acknowledgement. Stop the owned process and
+            // close its streams, then let every submitted task settle inside the original window.
+            // A queued or running task that still has not acknowledged settlement at cutoff is
+            // retained and quarantined by the same fail-closed path below.
+            val streamCloseFailures = ConcurrentLinkedQueue<Throwable>()
+            val streamSettlements = ArrayList<AtomicBoolean>()
+            listOf(process.inputStream, process.errorStream, process.outputStream).forEach { stream ->
+                val settled = AtomicBoolean(false)
+                streamSettlements += settled
+                taskSettlements += settled
+                val closeTask = try { streamCloseSubmitter(Runnable {
+                    try { stream.close() } catch (failure: Throwable) {
+                        streamCloseFailures.add(failure)
+                        throw failure
+                    } finally {
+                        settled.set(true)
+                    }
+                }) } catch (failure: Throwable) {
+                    // A rejected close task leaves settlement unknown even if another actor later
+                    // closes the stream. Record it now and keep trying the other owned streams.
+                    recordCleanupFailure(GhidraAnalysisException(
+                        "Ghidra export cleanup could not submit a bounded stream close",
+                        failure,
+                    ))
+                    return@forEach
+                }
+                tasks.add(closeTask)
+            }
+            var taskCleanupInterrupted = false
+            while (taskSettlements.any { !it.get() }) {
+                val remaining = processTree.remainingCleanupNanosOrNull() ?: 0L
+                if (remaining == 0L) break
+                try {
+                    TimeUnit.NANOSECONDS.sleep(minOf(remaining, TimeUnit.MILLISECONDS.toNanos(25)))
+                } catch (_: InterruptedException) {
+                    taskCleanupInterrupted = true
+                }
+            }
+            val allSettlementsConfirmed = taskSettlements.all { it.get() }
+            preserveTaskFailures()
+            val captureTasksConfirmed = captureSettlements.all { it.get() }
+            val streamClosuresConfirmed = streamSettlements.all { it.get() }
+            if (!captureTasksConfirmed) {
+                recordCleanupFailure(GhidraAnalysisException(
+                    "Ghidra export cleanup could not prove bounded capture/monitor completion within its original window",
+                ))
+            }
+            if (!streamClosuresConfirmed) {
+                recordCleanupFailure(GhidraAnalysisException(
+                    "Ghidra export cleanup could not prove bounded stream closure within its original window",
+                ))
+            }
+            streamCloseFailures.forEach { failure ->
+                recordCleanupFailure(GhidraAnalysisException("Ghidra export stream closure failed", failure))
+            }
+            if (quarantineRequired && cleanupProblem != null) {
+                val retained = ExportProcessCleanupOwner(
+                    processTree = processTree,
+                    process = process,
+                    tasks = tasks.toList(),
+                    taskSettlements = taskSettlements.toList(),
+                    taskFailures = taskFailures,
+                    streams = listOf(process.inputStream, process.errorStream, process.outputStream),
+                    outputCandidates = outputCandidates,
+                )
+                processLaunch.quarantineUnconfirmedCleanup(checkNotNull(cleanupProblem), process, retained)
+            }
+            if (treeResult.confirmedAbsent && allSettlementsConfirmed && primaryFailure != null && !diagnosticsPublished) {
                 val stdoutTask = stdout
                 val stderrTask = stderr
                 if (stdoutTask != null && stderrTask != null) cleanup {
@@ -382,10 +591,6 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
                     duringCleanup { publishDiagnostics(stdoutBytes, stderrBytes) { remainingCleanup() } }
                 }
             }
-            tasks.forEach { task -> cleanup { task.cancel(true) } }
-            cleanup { process.inputStream.close() }
-            cleanup { process.errorStream.close() }
-            cleanup { process.outputStream.close() }
             val usagePath = reports.resolve("ghidra_resource_usage.json")
             if (primaryFailure is InterruptedException && !Files.exists(usagePath, LinkOption.NOFOLLOW_LINKS)) {
                 cleanup {
@@ -401,29 +606,16 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
                     )
                 }
             }
+            if (taskCleanupInterrupted || treeResult.failure is InterruptedException) cleanupInterrupted = true
             if (cleanupInterrupted) Thread.currentThread().interrupt()
             cleanupFailure?.let { throw it }
+
         }
     }
 
     private fun readStableProgramModel(path: Path, deadline: AnalysisDeadline): ByteArray {
         return MODEL_ACQUISITION.read(path, path.toAbsolutePath().normalize().parent,
             limits.maximumProgramModelBytes, limits.maximumResidentBytes, deadline)
-    }
-
-    private fun residentBytes(process: Process): Long {
-        val handles = process.toHandle().descendants().toList() + process.toHandle()
-        return handles.distinctBy { it.pid() }.sumOf { handle ->
-            runCatching {
-                Files.readAllLines(Path.of("/proc/${handle.pid()}/status"))
-                    .firstOrNull { it.startsWith("VmRSS:") }
-                    ?.split(Regex("\\s+"))
-                    ?.getOrNull(1)
-                    ?.toLong()
-                    ?.let { Math.multiplyExact(it, 1024L) }
-                    ?: 0L
-            }.getOrDefault(0L)
-        }
     }
 
     companion object {
@@ -443,49 +635,249 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
     }
 }
 
-/** One invocation-wide cleanup window shared by every process-tree stop and diagnostic drain. */
-private class ExportProcessTree(
+internal data class ExportProcessCleanupResult(
+    val confirmedAbsent: Boolean,
+    val failure: Throwable?,
+    val diagnostic: String? = null,
+)
+
+/** References retained after unresolved cleanup prevent another launch from assuming capacity. */
+internal data class ExportProcessCleanupOwner(
+    val processTree: ExportProcessTree,
+    val process: Process,
+    val tasks: List<CompletableFuture<*>>,
+    val taskSettlements: List<AtomicBoolean>,
+    val taskFailures: ConcurrentLinkedQueue<Throwable>,
+    val streams: List<AutoCloseable>,
+    val outputCandidates: List<Path>,
+)
+
+private const val OWNED_MODEL_CANDIDATE_ARGUMENT = "owned-model-candidate-v1"
+        internal val EXPORT_CANDIDATE_NONCE = System.nanoTime().toULong().toString(16)
+        internal val EXPORT_CANDIDATE_SEQUENCE = AtomicLong()
+
+private fun uniqueExportCandidate(target: Path, kind: String): Path {
+    require(kind.matches(Regex("[a-z]+")))
+    val sequence = EXPORT_CANDIDATE_SEQUENCE.updateAndGet(Math::incrementExact)
+    val candidate = target.resolveSibling(".${target.fileName}-$kind-$EXPORT_CANDIDATE_NONCE-${sequence.toString(16)}.candidate")
+    require(!Files.exists(candidate, LinkOption.NOFOLLOW_LINKS)) { "export candidate path already exists" }
+    return candidate
+}
+
+private fun moveExportCandidate(candidate: Path, target: Path) {
+    try {
+        Files.move(candidate, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+    } catch (unsupported: java.nio.file.AtomicMoveNotSupportedException) {
+        Files.move(candidate, target, StandardCopyOption.REPLACE_EXISTING)
+    }
+}
+
+/** One invocation-wide grace + force/wait window; only the retained observations are covered. */
+internal class ExportProcessTree(
     private val process: Process,
     private val gracefulTermination: Duration,
+    private val nanoTime: () -> Long = System::nanoTime,
+    private val sleepNanos: (Long) -> Unit = { TimeUnit.NANOSECONDS.sleep(it) },
+    private val descendantObservation: (ProcessHandle, (ProcessHandle) -> Unit) -> Unit = { root, retain ->
+        root.descendants().use { stream -> stream.forEach { retain(it) } }
+    },
 ) {
     private var terminationStartedNanos: Long? = null
+    private var result: ExportProcessCleanupResult? = null
+    private var rootHandle: ProcessHandle? = null
+    private val observedHandles = LinkedHashSet<ProcessHandle>()
+    private var observationFailure: Throwable? = null
+
+    /** Monitoring and cleanup share identities, limits and sticky observation failures. */
+    fun residentBytes(): Long {
+        val handles = synchronized(this) {
+            // A monitor queued behind termination must not change a cached absence proof.
+            // terminate() has already made the final bounded observations in that case.
+            if (result == null) observe("while monitoring resident memory")
+            observationFailure?.let { throw it }
+            listOfNotNull(rootHandle) + observedHandles.toList()
+        }
+        return handles.distinctBy { it.pid() }.sumOf { handle ->
+            runCatching {
+                Files.readAllLines(Path.of("/proc/${handle.pid()}/status"))
+                    .firstOrNull { it.startsWith("VmRSS:") }
+                    ?.split(Regex("\\s+"))
+                    ?.getOrNull(1)
+                    ?.toLong()
+                    ?.let { Math.multiplyExact(it, 1024L) }
+                    ?: 0L
+            }.getOrDefault(0L)
+        }
+    }
+
+    // Called only under this inventory's monitor/termination lock. Retain each yielded
+    // identity before any later stream error, including observations made before cleanup.
+    private fun observe(stage: String) {
+        try {
+            val root = rootHandle ?: process.toHandle().also { rootHandle = it }
+            descendantObservation(root) { handle ->
+                if (!observedHandles.contains(handle)) {
+                    if (observedHandles.size + 1 >= MAXIMUM_RETAINED_HANDLES) {
+                        throw IllegalStateException("Ghidra export process inventory exceeded $MAXIMUM_RETAINED_HANDLES retained handles")
+                    }
+                    // ProcessHandle equality, not PID alone, distinguishes reused identities.
+                    // Only never-observed descendants remain outside this retained inventory.
+                    observedHandles.add(handle)
+                }
+            }
+        } catch (failure: Throwable) {
+            if (observationFailure == null) observationFailure = GhidraAnalysisException(
+                "Ghidra export process observation failed $stage", failure,
+            ) else if (observationFailure !== failure) observationFailure?.addSuppressed(failure)
+        }
+    }
 
     @Synchronized
-    fun terminate() {
-        val started = terminationStartedNanos ?: System.nanoTime().also { terminationStartedNanos = it }
-        val handles = (process.toHandle().descendants().toList().asReversed() + process.toHandle()).distinct()
-        handles.forEach { if (it.isAlive) it.destroy() }
-        handles.forEach { handle ->
-            val remaining = remainingNanos(started, gracefulTermination.toNanos())
-            if (handle.isAlive && remaining > 0) {
-                runCatching { handle.onExit().get(remaining, TimeUnit.NANOSECONDS) }
+    fun terminate(): ExportProcessCleanupResult {
+        var interrupted = Thread.interrupted()
+        try {
+            return terminateObserved {
+                interrupted = true
+                Thread.interrupted()
+            }
+        } finally {
+            if (interrupted) Thread.currentThread().interrupt()
+        }
+    }
+
+    private fun terminateObserved(onWaitInterrupted: () -> Unit): ExportProcessCleanupResult {
+        result?.let { return it }
+        val started = terminationStartedNanos ?: nanoTime().also { terminationStartedNanos = it }
+        val graceNanos = gracefulTermination.toNanos()
+        fun knownHandles(): List<ProcessHandle> = observedHandles.toList()
+        fun aliveOrUnknown(): Boolean {
+            var alive = false
+            try { alive = process.isAlive || alive } catch (failure: Throwable) {
+                observationFailure = observationFailure ?: failure
+            }
+            val root = rootHandle
+            if (root != null) try { alive = root.isAlive || alive } catch (failure: Throwable) {
+                observationFailure = observationFailure ?: failure
+            }
+            for (handle in knownHandles()) try { alive = handle.isAlive || alive } catch (failure: Throwable) {
+                observationFailure = observationFailure ?: failure
+            }
+            return alive || observationFailure != null
+        }
+        fun signal(force: Boolean) {
+            knownHandles().asReversed().forEach { handle ->
+                try { if (handle.isAlive) { if (force) handle.destroyForcibly() else handle.destroy() } }
+                catch (failure: Throwable) { observationFailure = observationFailure ?: failure }
+            }
+            val root = rootHandle
+            var rootAlive: Boolean? = null
+            if (root != null) try { rootAlive = root.isAlive } catch (failure: Throwable) {
+                observationFailure = observationFailure ?: failure
+            }
+            // A ProcessHandle can report native exit before its owning Process acknowledges exit.
+            // Do not signal that already-absent process through the stale Java view; waitFor below
+            // settles the acknowledgement inside this same bounded cleanup window.
+            if (rootAlive != false) try {
+                if (process.isAlive) { if (force) process.destroyForcibly() else process.destroy() }
+            } catch (failure: Throwable) { observationFailure = observationFailure ?: failure }
+            if (rootAlive == true && root != null) try {
+                if (force) root.destroyForcibly() else root.destroy()
+            } catch (failure: Throwable) { observationFailure = observationFailure ?: failure }
+        }
+        fun remaining(allowance: Long): Long {
+            val elapsed = nanoTime() - started
+            return if (elapsed < 0 || elapsed >= allowance) 0L else allowance - elapsed
+        }
+        fun waitPhase(allowance: Long): Boolean {
+            while (true) {
+                observe("while reconciling retained descendants")
+                if (!aliveOrUnknown()) return true
+                val remaining = remaining(allowance)
+                if (remaining == 0L) return false
+                val pollNanos = minOf(remaining, POLL_NANOS)
+                val waitStarted = nanoTime()
+                try {
+                    // ProcessHandle can observe native exit before ProcessImpl acknowledges it.
+                    // Wait through the owned Process API inside this same cleanup window before
+                    // treating a still-reported Java process as a retained live owner.
+                    if (process.isAlive && process.waitFor(pollNanos, TimeUnit.NANOSECONDS)) continue
+                    val elapsed = nanoTime() - waitStarted
+                    val elapsedNanos = if (elapsed < 0) 0L else elapsed
+                    if (elapsedNanos < pollNanos) sleepNanos(pollNanos - elapsedNanos)
+                } catch (_: InterruptedException) {
+                    // Interrupted waiting says nothing about the retained process inventory.
+                    // Continue observing within the same window and restore interruption on exit.
+                    onWaitInterrupted()
+                }
             }
         }
-        handles.forEach { if (it.isAlive) it.destroyForcibly() }
-        handles.forEach { handle ->
-            val remaining = remainingCleanupNanos(started)
-            if (handle.isAlive && remaining > 0) {
-                runCatching { handle.onExit().get(remaining, TimeUnit.NANOSECONDS) }
-            }
+
+        observe("before graceful termination")
+        signal(force = false)
+        val gracefullyAbsent = waitPhase(graceNanos)
+        if (!gracefullyAbsent) {
+            observe("before forced termination")
+            signal(force = true)
         }
+        val cleanupAllowance = saturatingAdd(graceNanos, FORCE_EXIT_WAIT_NANOS)
+        val confirmed = if (gracefullyAbsent && observationFailure == null) true else
+            waitPhase(cleanupAllowance) && observationFailure == null
+        if (!confirmed) {
+            // Make one final independent Process + root/retained-handle observation at the cutoff.
+            observe("at the cleanup cutoff")
+        }
+        val stillObservedAlive = aliveOrUnknown()
+        val cleanupFailure = observationFailure
+        val liveHandles = LinkedHashSet<String>()
+        fun describe(role: String, handle: ProcessHandle) {
+            val executable = runCatching { handle.info().command().orElse(null) }
+                .getOrNull()?.substringAfterLast('/')?.take(80)
+            liveHandles.add("$role=${handle.pid()}${executable?.let { "($it)" }.orEmpty()}")
+        }
+        runCatching { process.isAlive }.getOrDefault(false).takeIf { it }?.let {
+            rootHandle?.let { describe("process", it) }
+        }
+        rootHandle?.let { handle ->
+            if (runCatching { handle.isAlive }.getOrDefault(false)) describe("root", handle)
+        }
+        knownHandles().forEach { handle ->
+            if (runCatching { handle.isAlive }.getOrDefault(false)) describe("descendant", handle)
+        }
+        val cleanupDiagnostic = when {
+            cleanupFailure != null -> "process observation failed: ${cleanupFailure.message ?: cleanupFailure.javaClass.simpleName}"
+            liveHandles.isNotEmpty() -> "live identities at cleanup cutoff: ${liveHandles.joinToString()}"
+            !confirmed || stillObservedAlive -> "process absence was not confirmed within the cleanup allowance"
+            else -> null
+        }
+        val result = ExportProcessCleanupResult(
+            confirmedAbsent = confirmed && !stillObservedAlive && cleanupFailure == null,
+            failure = cleanupFailure,
+            diagnostic = cleanupDiagnostic,
+        )
+        this.result = result
+        return result
     }
 
     @Synchronized
     fun remainingCleanupNanosOrNull(): Long? {
         val started = terminationStartedNanos ?: return null
-        return remainingNanos(started, gracefulTermination.toNanos() + FORCE_EXIT_WAIT_NANOS)
-    }
-
-    private fun remainingCleanupNanos(started: Long): Long =
-        remainingNanos(started, gracefulTermination.toNanos() + FORCE_EXIT_WAIT_NANOS)
-
-    private fun remainingNanos(started: Long, allowance: Long): Long {
-        val elapsed = System.nanoTime() - started
+        val elapsed = nanoTime() - started
+        val allowance = saturatingAdd(gracefulTermination.toNanos(), FORCE_EXIT_WAIT_NANOS)
         return if (elapsed < 0 || elapsed >= allowance) 0L else allowance - elapsed
     }
 
+    internal fun retainedHandleCount(): Int = synchronized(this) { observedHandles.size + if (rootHandle == null) 0 else 1 }
+
+    private fun saturatingAdd(start: Long, vararg nanos: Long): Long {
+        var value = start
+        for (amount in nanos) value = if (Long.MAX_VALUE - value < amount) Long.MAX_VALUE else value + amount
+        return value
+    }
+
     private companion object {
+        const val MAXIMUM_RETAINED_HANDLES = 32
         val FORCE_EXIT_WAIT_NANOS: Long = TimeUnit.SECONDS.toNanos(5)
+        val POLL_NANOS: Long = TimeUnit.MILLISECONDS.toNanos(25)
     }
 }
 
@@ -597,7 +989,12 @@ class ArchivalReconstructionService(
 private fun startExportProcess(command: List<String>, workDir: Path): Process =
     ProcessBuilder(command).directory(workDir.toFile()).start()
 
-private fun stopLateExportProcess(process: Process, terminationGrace: Duration) {
+private fun stopLateExportProcess(
+    process: Process,
+    terminationGrace: Duration,
+    processLaunch: BoundedAnalysisProcessLaunch,
+    outputCandidates: List<Path>,
+) {
     val interruptedOnEntry = Thread.interrupted()
     var failure: Throwable? = null
     fun cleanup(action: () -> Unit) {
@@ -607,12 +1004,39 @@ private fun stopLateExportProcess(process: Process, terminationGrace: Duration) 
         }
     }
     try {
-        cleanup { ExportProcessTree(process, terminationGrace).terminate() }
+        val processTree = ExportProcessTree(process, terminationGrace)
+        val result = try { processTree.terminate() } catch (caught: Throwable) {
+            ExportProcessCleanupResult(false, caught)
+        }
+        if (!result.confirmedAbsent) cleanup {
+            throw GhidraAnalysisException(
+                buildString {
+                    append("late Ghidra export cleanup could not prove absence of its retained process/handle inventory")
+                    result.diagnostic?.let { append(": ").append(it) }
+                },
+                result.failure,
+            )
+        }
         cleanup { process.outputStream.close() }
         cleanup { process.inputStream.close() }
         cleanup { process.errorStream.close() }
         if (process.isAlive) cleanup { throw GhidraAnalysisException("late export worker did not stop within its cleanup allowance") }
-        failure?.let { throw it }
+        failure?.let {
+            processLaunch.quarantineUnconfirmedCleanup(
+                it,
+                process,
+                ExportProcessCleanupOwner(
+                    processTree = processTree,
+                    process = process,
+                    tasks = emptyList(),
+                    taskSettlements = emptyList(),
+                    taskFailures = ConcurrentLinkedQueue(),
+                    streams = listOf(process.inputStream, process.errorStream, process.outputStream),
+                    outputCandidates = outputCandidates,
+                ),
+            )
+            throw it
+        }
     } finally {
         if (interruptedOnEntry) Thread.currentThread().interrupt()
     }

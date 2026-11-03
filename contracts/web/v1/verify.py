@@ -342,6 +342,59 @@ def check_source_chunk(data: dict) -> None:
             raise ValueError("UTF-8 source end line is inconsistent")
 
 
+def check_job_label(label) -> None:
+    if isinstance(label, str) and (label.strip() != label or any(ord(c) < 32 or ord(c) == 127 or ord(c) in (0x2028, 0x2029) for c in label)):
+        raise ValueError("a job label must be printable and unpadded")
+def check_source_search(data: dict) -> None:
+    page, limits, scope, progress, query = data["page"], data["limits"], data["scope"], data["progress"], data["query"]
+    items = data["items"]
+    if page["snapshotVersion"] != data["metadataVersion"] or page["limit"] != limits["maxResults"] or len(items) > page["limit"]:
+        raise ValueError("source search page does not match its captured metadata or result bound")
+    complete = data["status"] == "complete"
+    if complete != (data["stopReason"] is None) or complete != (page["nextCursor"] is None):
+        raise ValueError("source search completeness, stop reason and continuation disagree")
+    if (progress["remainingFiles"] == 0) != complete or progress["remainingFiles"] > scope["searchableFiles"]:
+        raise ValueError("source search remaining file count disagrees with completeness")
+    if scope["searchableFiles"] + scope["notViewable"] + scope["declaredBinary"] + scope["tooLarge"] != scope["filesInScope"]:
+        raise ValueError("source search scope counts do not partition the files in scope")
+    # A page that stops inside a file counts that file as both scanned and remaining.
+    if progress["unsearchableText"] > progress["scannedFiles"] or \
+            progress["scannedFiles"] + progress["unavailableFiles"] + progress["remainingFiles"] > scope["searchableFiles"] + (0 if complete else 1) or \
+            int(progress["scannedBytes"]) > int(limits["maxScannedBytes"]):
+        raise ValueError("source search progress exceeds its scope or byte bound")
+    gaps = data["coverageGaps"]
+    if gaps["unsearchableText"] < progress["unsearchableText"] or gaps["unavailableFiles"] < progress["unavailableFiles"] or \
+            gaps["unsearchableText"] + gaps["unavailableFiles"] > scope["searchableFiles"]:
+        raise ValueError("source search cumulative coverage gaps disagree with this page or scope")
+    identifier = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+    if query["match"] == "symbol" and identifier.fullmatch(query["text"]) is None:
+        raise ValueError("symbol search requires an identifier query")
+    seen, previous = set(), None
+    for item in items:
+        line, column = int(item["line"]), int(item["column"])
+        offset, line_offset = int(item["offsetBytes"]), int(item["lineOffsetBytes"])
+        if line < 1 or column < 1 or line_offset > offset or (line == 1) != (line_offset == 0):
+            raise ValueError("source search position is inconsistent")
+        if any("\n" in item[key] for key in ("before", "match", "after")):
+            raise ValueError("source search context crosses a line")
+        before, after = len(item["before"]), len(item["after"])
+        if before > 80 or after > 80 or (item["truncatedBefore"] and before != 80) or (item["truncatedAfter"] and after != 80) or \
+                (column - 1 < before) or (not item["truncatedBefore"] and column - 1 != before):
+            raise ValueError("source search context bounds are inconsistent")
+        if (query["caseSensitive"] and item["match"] != query["text"]) or len(item["match"]) != len(query["text"]):
+            raise ValueError("source search match does not represent its query")
+        if query["match"] == "symbol" and (re.search(r"[A-Za-z0-9_]$", item["before"]) or re.match(r"[A-Za-z0-9_]", item["after"])):
+            raise ValueError("symbol match is not bounded by non-identifier characters")
+        key = item["displayName"].encode("utf-16-be", "surrogatepass")
+        if previous is not None and previous["fileId"] == item["fileId"]:
+            if previous["displayName"] != item["displayName"] or offset < int(previous["offsetBytes"]) + len(previous["match"].encode("utf-8")):
+                raise ValueError("source search matches in one file overlap or are out of order")
+        elif item["fileId"] in seen or (previous is not None and previous["displayName"].encode("utf-16-be", "surrogatepass") >= key):
+            raise ValueError("source search files are repeated or out of canonical order")
+        seen.add(item["fileId"])
+        previous = item
+
+
 def check_semantics(document: dict) -> None:
     """Check relationships JSON Schema cannot express with portable draft-07."""
     kind = document["kind"]
@@ -394,6 +447,8 @@ def check_semantics(document: dict) -> None:
         check_directory(data)
     elif kind == "sourceChunk":
         check_source_chunk(data)
+    elif kind == "sourceSearch":
+        check_source_search(data)
     elif kind == "revisionFile":
         path = data["item"]["displayName"]
         for part in path.split("/"):
@@ -401,6 +456,15 @@ def check_semantics(document: dict) -> None:
                 raise ValueError("invalid recorded source path component")
         if (data["parentDirectoryId"] == "root") != ("/" not in path):
             raise ValueError("recorded source parent is inconsistent")
+    elif kind == "jobDeletionPreview":
+        if data["deletable"] != (len(data["protections"]) == 0):
+            raise ValueError("a deletion preview is deletable exactly when no protection applies")
+        check_job_label(data["label"])
+    elif kind == "storageSummary":
+        if data["complete"] and data["uninspectedEntries"] != "0":
+            raise ValueError("a complete storage summary cannot have uninspected entries")
+    elif kind in ("job", "jobOrganizationRequest"):
+        check_job_label(data.get("label"))
     elif kind == "recovery":
         candidates = data["retainedUploadStages"] + data["retainedMetadataFiles"]
         if candidates > 128 or candidates > data["scannedEntries"] or int(data["observedBytes"]) > 67108864:
@@ -519,6 +583,22 @@ def check_semantics(document: dict) -> None:
                 raise ValueError("Git mapping cannot invent acceptance without evidence")
         if length is not None and any(len(oid) != length for oid in object_ids if oid is not None):
             raise ValueError("Git object ID is not full length for its repository format")
+        state, head_ref = data["headState"], data["headRefId"]
+        expected_head = {
+            "attached": (True, True, True),
+            "unborn": (True, False, False),
+            "detached": (False, True, False),
+        }[state]
+        observed_head = (data["headRefName"] is not None, data["headObjectId"] is not None, head_ref is not None)
+        if observed_head != expected_head:
+            raise ValueError("Git HEAD state disagrees with its branch, object and ref fields")
+        if head_ref is not None and not any(
+            ref["refId"] == head_ref and ref["objectId"] == data["headObjectId"] and ref["displayName"] == data["headRefName"]
+            for ref in data["refs"]
+        ):
+            raise ValueError("an attached HEAD must name a listed ref at the observed object")
+        if len({ref["refId"] for ref in data["refs"]}) != len(data["refs"]):
+            raise ValueError("Git refs must be unique")
 
 
 def check_run_lifecycle_controls(validate) -> int:
