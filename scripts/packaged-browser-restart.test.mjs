@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { assertGracefulShutdown, assertOnlyPinWrites, boundReport, findBootstrap, hasOpenEventStream, isProgressReadUrl, matchingResponse, publishAtomically, scrubTokens, summarizeRequests } from './packaged-browser-restart.mjs';
+import { assertGracefulShutdown, bootstrapHashExpression, assertOnlyPinWrites, boundReport, findBootstrap, hasOpenEventStream, isProgressReadUrl, matchingResponse, publishAtomically, scrubTokens, summarizeRequests } from './packaged-browser-restart.mjs';
 
 const origin = 'http://127.0.0.1:4000';
 
@@ -84,4 +84,9 @@ test('publishes by atomic rename and leaves no temporary file', async () => {
     assert.equal(await readFile(path, 'utf8'), 'new');
     assert.deepEqual(await readdir(directory), ['agent-progress.json']);
   } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('applies a bootstrap token only as an in-page hash assignment', () => {
+  assert.equal(bootstrapHashExpression('abc_-9'), 'location.hash = "#bootstrap=abc_-9"');
+  assert.throws(() => bootstrapHashExpression('a"; alert(1)'));
 });

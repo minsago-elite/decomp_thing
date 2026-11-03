@@ -21,6 +21,12 @@ export function findBootstrap(output, origin) {
   return url ? { url, token: url.slice(prefix.length) } : null;
 }
 
+/** In-page expression that applies a bootstrap token through the document's hash-change path. */
+export const bootstrapHashExpression = token => {
+  assert.match(token, /^[A-Za-z0-9_-]+$/, 'Bootstrap token is malformed');
+  return `location.hash = ${JSON.stringify('#bootstrap=' + token)}`;
+};
+
 /** Graceful means exactly one SIGTERM, then a normal JVM exit; never a kill escalation. */
 export function assertGracefulShutdown({ signalsSent, exitCode, signalCode }) {
   assert.deepEqual(signalsSent, ['SIGTERM'], 'Restart must send exactly one SIGTERM and no other signal');
@@ -207,11 +213,15 @@ export async function qualifyRestart({ fixture, origin, makeTarget, cdp, evaluat
   const second = await waitFor(() => findBootstrap(readOutput(), origin), 'fresh local bootstrap handoff');
   assert.notEqual(second.token, first.token, 'Restart reused the previous bootstrap token');
   sensitiveValues.push(second.token);
-  await cdp.call('Page.navigate', { url: first.url }, old.sessionId);
-  await ready(old, `document.body.innerText.includes('This sign-in link is no longer available.')`, 'consumed first-process link denial');
-  assert.equal(await evaluate(old, 'location.hash'), '');
+  // Denial uses a separate target so the original document keeps its session and prior instance identity.
+  const denial = track(await makeTarget());
+  await cdp.call('Page.navigate', { url: first.url }, denial.sessionId);
+  await ready(denial, `document.body.innerText.includes('This sign-in link is no longer available.')`, 'consumed first-process link denial');
+  assert.equal(await evaluate(denial, 'location.hash'), '');
+  await cdp.call('Target.closeTarget', { targetId: denial.targetId });
   evidence.consumedOldLinkDenied = true;
-  await cdp.call('Page.navigate', { url: second.url }, old.sessionId);
+  // Apply the fresh link to the existing document through its hash-change path.
+  await evaluate(old, bootstrapHashExpression(second.token));
   await ready(old, `document.body.innerText.includes('Local session connected.')`, 'fresh explicit session');
   await ready(old, `document.body.innerText.includes('Application instance changed.')`,
     'visible server-restart state after fresh authentication');
@@ -306,7 +316,7 @@ export async function qualifyRestart({ fixture, origin, makeTarget, cdp, evaluat
   assert.equal(staleRequests.length, 1, 'Stale rejection triggered an automatic retry or follow-up request');
   const stalePut = staleRequests.find(r => r.method === 'PUT' && r.url === pinUrl);
   assert.equal(matchingResponse(stalePut, other.responses)?.status, 412, 'Expected the stale PUT to receive an actual HTTP 412 response');
-  assertOnlyPinWrites(old.requests, pinUrl, putsBefore + 1, `${origin}${basePath}/api/v1/session`, 3);
+  assertOnlyPinWrites(old.requests, pinUrl, putsBefore + 1, `${origin}${basePath}/api/v1/session`, 2);
   assert.deepEqual([...old.exceptions, ...other.exceptions], []);
   await captureSafe(other, 'restart-stale-control.png');
   evidence.staleControl = { first: { puts: 1, status: 200 }, second: { puts: 1, status: 412, retries: 0, crossAttemptWrites: 0 }, mutation: 'progress-pin',
