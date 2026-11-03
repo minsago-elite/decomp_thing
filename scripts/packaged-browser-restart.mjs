@@ -57,11 +57,18 @@ export function summarizeRequests(requests) {
   return { total: requests.length, methods, mutations: requests.filter(r => !['GET', 'HEAD'].includes(r.method)) };
 }
 
-/** Every progress-pin write must be a PUT to the one selected attempt; nothing else may mutate. */
-export function assertOnlyPinWrites(requests, pinUrl, expectedPuts) {
+/** Only the known session exchanges and progress-pin PUTs may mutate in this fixture. */
+export function assertOnlyPinWrites(requests, pinUrl, expectedPuts, sessionUrl = null, expectedSessionPosts = 0) {
   const mutations = requests.filter(r => !['GET', 'HEAD'].includes(r.method));
-  assert.ok(mutations.every(r => r.method === 'PUT' && r.url === pinUrl), `Unexpected mutation outside the selected attempt: ${JSON.stringify(mutations)}`);
-  assert.equal(mutations.length, expectedPuts, `Expected ${expectedPuts} pin PUT request(s), saw ${mutations.length}`);
+  const pinWrites = mutations.filter(r => r.method === 'PUT' && r.url === pinUrl);
+  const sessionPosts = mutations.filter(r => r.method === 'POST' && sessionUrl !== null && r.url === sessionUrl);
+  assert.ok(mutations.every(r => (r.method === 'PUT' && r.url === pinUrl) ||
+    (r.method === 'POST' && sessionUrl !== null && r.url === sessionUrl)),
+  `Unexpected mutation outside the selected attempt and session exchange: ${JSON.stringify(mutations)}`);
+  assert.equal(pinWrites.length, expectedPuts, `Expected ${expectedPuts} pin PUT request(s), saw ${pinWrites.length}`);
+  assert.equal(sessionPosts.length, expectedSessionPosts,
+    `Expected ${expectedSessionPosts} explicit session exchange(s), saw ${sessionPosts.length}`);
+  assert.equal(mutations.length, expectedPuts + expectedSessionPosts, 'Unexpected mutation count');
 }
 
 export const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -222,7 +229,7 @@ export async function qualifyRestart({ fixture, origin, makeTarget, cdp, evaluat
   assertOnlyPinWrites(staleRequests, pinUrl, 1);
   assert.equal(staleRequests.length, 1, 'Stale rejection triggered an automatic retry or follow-up request');
   assert.equal(other.responses.filter(r => r.url === pinUrl && r.status === 412).length, 1, 'Expected one actual 412 response');
-  assertOnlyPinWrites(old.requests, pinUrl, putsBefore + 1);
+  assertOnlyPinWrites(old.requests, pinUrl, putsBefore + 1, `${origin}${basePath}/api/v1/session`, 3);
   assert.deepEqual([...old.exceptions, ...other.exceptions], []);
   await captureSafe(other, 'restart-stale-control.png');
   evidence.staleControl = { first: { puts: 1, status: 200 }, second: { puts: 1, status: 412, retries: 0, crossAttemptWrites: 0 }, mutation: 'progress-pin',
