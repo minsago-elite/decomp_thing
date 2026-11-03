@@ -12,6 +12,8 @@ class GeneratedCSourceHeaderPolicyTest {
             "src/modules/parser.c" to """
                 #include <stddef.h>
                 #include <stdint.h>
+                #include <stdio.h>
+                #include <stdlib.h>
                 #include "modules/parser.h"
                 int parser(void) { const char *s = "#include <not-a-header>"; return (int)sizeof(*s); }
             """.trimIndent().toByteArray(),

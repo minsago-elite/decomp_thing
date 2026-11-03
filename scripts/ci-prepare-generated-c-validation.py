@@ -26,6 +26,7 @@ MAX_WORKER_MANIFEST_BYTES = 256 * 1024
 FIXTURE_SOURCE = '''#include <stdio.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdlib.h>
 int main(int argc, char **argv) {
     (void)argv;
     printf("args=%d\\n", argc - 1);

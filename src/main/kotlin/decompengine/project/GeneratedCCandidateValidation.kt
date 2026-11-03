@@ -328,10 +328,10 @@ internal object GeneratedCCandidateValidation {
  * Closed input-affecting source policy for the authenticated module compiler snapshot.
  * This deliberately does not interpret the C program or ask the compiler what it read: it
  * admits only literal includes whose target is in the supplied immutable inventory, plus the
- * two standard headers used by the registered generated-C fixtures.
+ * reviewed standard headers retained by the registered generated-C runtime.
  */
 internal object GeneratedCSourceHeaderPolicy {
-    private val systemHeaders = setOf("stddef.h", "stdint.h")
+    private val systemHeaders = setOf("stddef.h", "stdint.h", "stdio.h", "stdlib.h")
     private val directive = Regex("^\\s*(?:#|%:)\\s*([A-Za-z_][A-Za-z_0-9]*)(.*)$")
     private val guardName = Regex("^\\s*([A-Za-z_][A-Za-z_0-9]*)\\s*$")
     private val includeOperand = Regex("^\\s*(?:\"([^\"\\\\\\r\\n]+)\"|<([^<>\\r\\n]+)>)\\s*$")
