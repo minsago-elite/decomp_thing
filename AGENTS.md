@@ -18,12 +18,14 @@
 ## Agent Orchestration and Model Routing
 
 - Fetch and integrate the latest upstream state before implementation so branches do not drift unnecessarily. Keep pull requests ready for review when their implementation is ready.
-- Use the orchestration tools for provider- or model-specific work. Do not silently substitute a different provider or model when the requested one is unavailable; report the limitation and continue only with independent work.
-- For backend work, use Opus 5.5 for substantial planning, Luna for implementation, and Sol 6.1 as the technical middle layer for design decisions, integration, and review. Prefer Sol 6.1 through the orchestration tools rather than implementing backend changes directly with Codex.
+- Use the orchestration tools for provider- or model-specific work. Discover supported identifiers and options before delegation. Do not silently substitute a different provider or model when the requested one is unavailable; report the limitation and continue only with independent work.
+- For backend work, use Claude Opus 5.5 for substantial planning, Codex `gpt-6.1-sol` as the technical middle layer for design decisions, integration and review, and Codex `gpt-6-luna` for implementation.
 - Delegate hard backend tasks with detailed implementation decisions to Fable or Astra when those agents are available. Keep the work focused on a concrete acceptance boundary and retain exact-source test and review evidence.
-- For frontend work, use Opus 5.5 through Claude Code at low reasoning. Use Sonnet 5.5 only when a second frontend implementation or review pass is useful.
-- Fan out independent work when requested or when it shortens the critical path. Give every agent explicit file or module ownership, tell agents they share the repository, and require them to accommodate others' changes without reverting them.
+- For frontend work, use Claude Opus 5.5 through Claude Code at low effort for planning and implementation direction. Use Claude Sonnet 5.5 only when a second frontend implementation or review pass is useful. Preserve this UI routing unless the user explicitly authorizes an exception.
+- Fan out independent work when requested or when it shortens the critical path. Give every implementation agent explicit file or module ownership and acceptance criteria, tell agents they share the repository, and require them to accommodate others' changes without reverting them.
+- Delegate high-detail or high-impact work to the requested planning and review models before implementation. Verify the resulting artifacts and evidence before landing them.
 - Commit focused checkpoints frequently and push them to the intended pull request. Do not merge while required checks are failing or pending or while Codex review threads remain unresolved.
+- Do not delegate external messages, merges, publication or other irreversible actions unless the user has authorized that action.
 
 ## CI and Pull Requests
 
@@ -34,15 +36,7 @@
 - Do not merge a pull request while required CI checks fail or are pending, or until all Codex code review bot reviews are resolved.
 - For privileged commands on local hosts, use `doas` instead of `sudo`.
 
-## Agent Orchestration
-
-- Use the orchestration tools for delegated model work. Do not silently substitute a different provider or model when the requested one is unavailable; report the limitation and keep work on tasks that do not depend on it.
-- For backend work, use Opus 5.5 for planning and architecture, Sol 6.1 as the integration and review layer between planning and implementation, and Luna for implementation. Prefer Sol 6.1 through orchestration tools over Codex for backend analysis and decisions.
-- For frontend work, use Opus 5.5 through Claude Code at low reasoning as the lead for planning and implementation direction. Route to Sonnet 5.5 only when a second implementation pass or review is useful. Luna may implement a bounded frontend task when the Opus-led direction is clear.
-- Give each delegated implementation a concrete scope, acceptance criteria, and file ownership. Tell workers that other changes may be in progress; they must preserve and accommodate those changes rather than reverting them.
-- Delegate high-detail or high-impact work to the requested planning/review models before implementation. Keep implementation ownership explicit, verify the resulting artifact, and commit at meaningful checkpoints.
-- Do not delegate external messages, merges, publication, or other irreversible actions unless the user has authorized that action.
-- Any of this may be waived or overridden by an explicit user request.
+- Any repository procedure may be waived or overridden by an explicit user request.
 
 ## Repository Sanity Checks
 
