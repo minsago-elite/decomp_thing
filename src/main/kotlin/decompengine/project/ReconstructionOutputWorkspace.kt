@@ -153,7 +153,7 @@ internal class ReconstructionOutputWorkspace private constructor(
         internal const val ACTIVE = ".reconstruction-active-input.json"
         internal const val SWITCH = ".reconstruction-input-switch.json"
         internal const val CACHE = "input-cache"
-        internal val ENTRIES = listOf("analysis", "source-tree", "source-tree.zip", "reconstruction.json", "reconstruction_progress.json", "exploration.json", "agent-progress.json", FullRunJournal.DIRECTORY, ModuleCompilerFeedbackStore.DIRECTORY)
+        internal val ENTRIES = listOf("analysis", "source-tree", "source-tree.zip", "reconstruction.json", "reconstruction_progress.json", "exploration.json", ModuleObservedBehavior.FILE_NAME, "agent-progress.json", FullRunJournal.DIRECTORY, ModuleCompilerFeedbackStore.DIRECTORY)
         private val HASH = Regex("[0-9a-f]{64}")
         private val KEY = Regex("[0-9a-f]{64}|unidentified-[0-9a-f-]{36}")
         private val OWNERS = mutableSetOf<Any>()

@@ -3,10 +3,14 @@ package decompengine.project
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption.ATOMIC_MOVE
+import decompengine.testing.recoveryMatrixTempDirectory as createTempDirectory
+import decompengine.testing.RecoveryMatrixEvidence
+import org.junit.jupiter.api.extension.ExtendWith
 import kotlinx.serialization.json.*
 import kotlin.io.path.*
 import kotlin.test.*
 
+@ExtendWith(RecoveryMatrixEvidence::class)
 class ReconstructionOutputWorkspaceTest {
     @Test
     fun `different binaries preserve active results and switch back to original receipt paths`() {
@@ -18,17 +22,22 @@ class ReconstructionOutputWorkspaceTest {
             root.resolve("analysis").createDirectory().resolve("marker").writeText("analysis-a")
             root.resolve("source-tree").createDirectory().resolve("marker").writeText("source-a")
             root.resolve("source-tree.zip").writeText("archive-a")
+            root.resolve(ModuleObservedBehavior.FILE_NAME).writeText("observations-a")
         }
         ReconstructionOutputWorkspace.open(root, b).use {
             assertFalse(root.resolve("source-tree").exists())
+            assertFalse(root.resolve(ModuleObservedBehavior.FILE_NAME).exists())
             root.resolve("source-tree").createDirectory().resolve("marker").writeText("source-b")
             root.resolve("source-tree.zip").writeText("archive-b")
+            root.resolve(ModuleObservedBehavior.FILE_NAME).writeText("observations-b")
         }
         ReconstructionOutputWorkspace.open(root, a).use {
             assertEquals("analysis-a", root.resolve("analysis/marker").readText())
             assertEquals("source-a", root.resolve("source-tree/marker").readText())
             assertEquals("archive-a", root.resolve("source-tree.zip").readText())
+            assertEquals("observations-a", root.resolve(ModuleObservedBehavior.FILE_NAME).readText())
             assertEquals("archive-b", root.resolve("input-cache/${sha256(b.readBytes())}/source-tree.zip").readText())
+            assertEquals("observations-b", root.resolve("input-cache/${sha256(b.readBytes())}/${ModuleObservedBehavior.FILE_NAME}").readText())
         }
     }
 

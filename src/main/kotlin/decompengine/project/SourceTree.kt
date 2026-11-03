@@ -659,11 +659,19 @@ object SourceTreeGenerator {
                 selectedModuleInputFingerprint(basePromptRequest)
             } else null
             val feedbackSource = projectDir.resolve(module.sourcePath)
-            val priorCompilerDiagnostics = contextFingerprint?.let { expectedContext ->
-                runCatching { compilerFeedback(module.id) }.getOrNull()?.takeIf {
-                    it.contextSha256 == expectedContext && feedbackSource.exists() &&
-                        it.sourceSha256 == sha256(feedbackSource.readBytes())
-                }?.diagnostics
+            val recordedCompilerFeedback = contextFingerprint?.let { expectedContext ->
+                runCatching { compilerFeedback(module.id) }.getOrNull()?.takeIf { it.contextSha256 == expectedContext }
+            }
+            val currentSourceSha256 = feedbackSource.takeIf { it.exists() }?.let { sha256(it.readBytes()) }
+            val priorCompilerDiagnostics = recordedCompilerFeedback?.takeIf {
+                it.sourceSha256 == currentSourceSha256
+            }?.diagnostics
+            // Retain the old dispatched prompt identity for cache comparison only. Diagnostics
+            // tied to a failed source are never passed to a new attempt after source correction.
+            val retainedFeedbackFingerprint = recordedCompilerFeedback?.takeIf {
+                currentSourceSha256 != null && it.sourceSha256 != currentSourceSha256
+            }?.let { feedback ->
+                selectedModuleInputFingerprint(basePromptRequest.copy(compilerDiagnostics = feedback.diagnostics))
             }
             val promptRequest = basePromptRequest.copy(compilerDiagnostics = priorCompilerDiagnostics)
             val localFingerprint = moduleFingerprint(
@@ -752,7 +760,8 @@ object SourceTreeGenerator {
             val cached = recordedCheckpoint?.takeIf { checkpoint ->
                 checkpoint.schemaVersion == 6 && checkpoint.inputBinarySha256 == model.inputSha256 &&
                     checkpoint.modelSchemaVersion == model.schemaVersion && checkpoint.profileSha256 == profile.sha256 &&
-                    checkpoint.fingerprint == fingerprint &&
+                    (checkpoint.fingerprint == fingerprint ||
+                        checkpoint.accepted && checkpoint.fingerprint == retainedFeedbackFingerprint) &&
                     sourcePath.exists() &&
                     sha256(sourcePath.readBytes()) == checkpoint.sourceSha256 &&
                     checkpoint.reconstructorIdentity == cacheIdentity &&

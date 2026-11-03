@@ -19,26 +19,18 @@ internal fun runRunHistory(args: List<String>) {
         require(Files.isDirectory(root, NOFOLLOW_LINKS) && Files.isDirectory(runs, NOFOLLOW_LINKS)) {
             "output directory has no complete run history"
         }
-        val metadata = Files.newDirectoryStream(runs).use { entries ->
-            val found = mutableListOf<Pair<Path, JsonObject>>()
-            for (path in entries) {
-                require(found.size < 10_000) { "run listing exceeds its entry limit" }
-                val directory = FullRunJournal.directory(root, path.fileName.toString())
-                found += directory to FullRunJournal.metadata(directory)
-            }
-            found.sortedBy { it.second.getValue("startedAt").jsonPrimitive.content }
-        }
         if (args[0] == "list") {
             require(args.size == 2)
+            val (metadata, incomplete) = listRunHistory(root)
             metadata.forEach { (_, value) ->
                 println(listOf("runId", "startedAt", "workflow", "state").joinToString(" ") {
                     value.getValue(it).jsonPrimitive.content
                 } + " " + (value["lastPhase"]?.jsonPrimitive?.content ?: "-"))
             }
+            if (incomplete > 0) System.err.println("Run history: ignored $incomplete incomplete entries.")
             return
         }
-        val directory = args.getOrNull(2)?.let { FullRunJournal.directory(root, it) }
-            ?: metadata.lastOrNull()?.first ?: error("no recorded runs")
+        val directory = resolveRunHistoryDirectory(root, args.getOrNull(2)) ?: error("no recorded runs")
         val follow = args[0] == "follow"
         FullRunEventReader(directory).use { reader ->
             while (true) {
@@ -49,6 +41,11 @@ internal fun runRunHistory(args: List<String>) {
                 }
                 val state = FullRunJournal.metadata(directory).getValue("state").jsonPrimitive.content
                 if (!follow || state != "running") {
+                    // A terminal metadata publication follows the event append. An earlier EOF
+                    // is not stable while the writer is active, so drain the now-closed tail.
+                    if (state != "running") {
+                        drainRunHistoryTail(reader, ::println)
+                    }
                     val end = reader.verifyEnd()
                     System.err.println("run history: state=${end.getValue("state").jsonPrimitive.content}; observation replay only")
                     break
@@ -64,4 +61,31 @@ internal fun runRunHistory(args: List<String>) {
         System.err.println("Run history could not be read or verified. Check the command, run id, file integrity, and permissions.")
         kotlin.system.exitProcess(2)
     }
+}
+
+internal fun resolveRunHistoryDirectory(root: Path, runId: String?): Path? =
+    if (runId != null) FullRunJournal.directory(root, runId)
+    else listRunHistory(root).first.lastOrNull()?.first
+
+internal fun drainRunHistoryTail(reader: FullRunEventReader, consume: (JsonObject) -> Unit) {
+    while (true) consume(reader.next() ?: break)
+}
+
+/** Lists valid runs while keeping incomplete/crashed neighbors from hiding healthy histories. */
+internal fun listRunHistory(root: Path): Pair<List<Pair<Path, JsonObject>>, Int> {
+    val runs = root.resolve(FullRunJournal.DIRECTORY)
+    val found = mutableListOf<Pair<Path, JsonObject>>()
+    var incomplete = 0
+    Files.newDirectoryStream(runs).use { entries ->
+        for (path in entries) {
+            if (found.size + incomplete >= 10_000) error("run listing exceeds its entry limit")
+            try {
+                val directory = FullRunJournal.directory(root, path.fileName.toString())
+                found += directory to FullRunJournal.metadata(directory)
+            } catch (_: Exception) {
+                incomplete++
+            }
+        }
+    }
+    return found.sortedBy { it.second.getValue("startedAt").jsonPrimitive.content } to incomplete
 }

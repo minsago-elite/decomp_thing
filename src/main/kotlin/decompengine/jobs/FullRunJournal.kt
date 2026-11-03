@@ -14,6 +14,9 @@ import java.nio.file.StandardCopyOption.REPLACE_EXISTING
 import java.nio.file.StandardOpenOption.*
 import java.nio.file.attribute.PosixFilePermissions
 import java.time.Instant
+import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.serialization.json.*
 
 /** Complete, redacted observation history. This log never grants source/checkpoint authority. */
@@ -64,6 +67,9 @@ internal class FullRunJournal private constructor(
             throw failure
         }
     }
+
+    @Synchronized
+    fun markIncomplete() { complete = false }
 
     private fun publishMetadata(state: String) {
         val metadata = buildJsonObject {
@@ -144,6 +150,87 @@ internal class FullRunJournal private constructor(
             require(value.getValue("state").jsonPrimitive.content in setOf("running", "closed", "logging-failed"))
             value["lastPhase"]?.let { require(it.jsonPrimitive.content.matches(Regex("[a-z_]{1,64}"))) }
             return value
+        }
+    }
+}
+
+/** Bounded mailbox that keeps fsync and serialization off agent/progress callback threads. */
+internal class FullRunJournalWriter(
+    private val journal: FullRunJournal,
+    maximumQueuedEvents: Int = 256,
+    private val beforeAppend: () -> Unit = {},
+) : AutoCloseable {
+    private sealed interface Item {
+        data class Event(val value: JsonObject) : Item
+        data object End : Item
+    }
+
+    private val gate = Object()
+    private val queue = ArrayBlockingQueue<Item>(maximumQueuedEvents.also { require(it in 1..4096) })
+    private val overflowed = AtomicBoolean(false)
+    private val failure = AtomicReference<Throwable?>()
+    private var accepting = true
+    private var closed = false
+    private val writer = Thread(::writeLoop, "decomp-full-run-${journal.directory.fileName}").apply {
+        isDaemon = true
+        start()
+    }
+
+    val directory: Path get() = journal.directory
+
+    /** Never waits for filesystem work. Saturation makes the history explicitly incomplete. */
+    fun append(event: JsonObject) {
+        synchronized(gate) {
+            if (!accepting) return
+            if (!queue.offer(Item.Event(event))) {
+                accepting = false
+                overflowed.set(true)
+            }
+        }
+    }
+
+    private fun writeLoop() {
+        try {
+            while (true) {
+                when (val item = queue.take()) {
+                    Item.End -> break
+                    is Item.Event -> if (failure.get() == null) {
+                        try {
+                            beforeAppend()
+                            journal.append(item.value)
+                        } catch (problem: Throwable) {
+                            failure.compareAndSet(null, problem)
+                            synchronized(gate) { accepting = false }
+                        }
+                    }
+                }
+            }
+        } catch (interrupted: InterruptedException) {
+            Thread.currentThread().interrupt()
+            failure.compareAndSet(null, interrupted)
+        } finally {
+            if (overflowed.get() || failure.get() != null) journal.markIncomplete()
+            runCatching { journal.close() }
+        }
+    }
+
+    override fun close() {
+        synchronized(gate) {
+            if (closed) return
+            closed = true
+            accepting = false
+        }
+        var interrupted = Thread.interrupted()
+        try {
+            var sent = false
+            while (!sent) {
+                try { queue.put(Item.End); sent = true } catch (_: InterruptedException) { interrupted = true }
+            }
+            while (writer.isAlive) {
+                try { writer.join() } catch (_: InterruptedException) { interrupted = true }
+            }
+        } finally {
+            if (interrupted) Thread.currentThread().interrupt()
         }
     }
 }

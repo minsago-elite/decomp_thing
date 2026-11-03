@@ -1,9 +1,13 @@
 package decompengine.project
 
 import java.nio.file.Files
+import decompengine.testing.recoveryMatrixTempDirectory as createTempDirectory
+import decompengine.testing.RecoveryMatrixEvidence
 import kotlin.io.path.*
 import kotlin.test.*
+import org.junit.jupiter.api.extension.ExtendWith
 
+@ExtendWith(RecoveryMatrixEvidence::class)
 class ModuleCompilerFeedbackTest {
     @Test
     fun `feedback is private and bound to input profile source and context`() {
@@ -31,4 +35,5 @@ class ModuleCompilerFeedbackTest {
         record.writeText("x".repeat(70_000))
         assertFailsWith<IllegalArgumentException> { store.read("core") }
     }
+
 }

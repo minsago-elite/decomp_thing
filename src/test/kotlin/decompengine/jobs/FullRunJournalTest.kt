@@ -3,13 +3,52 @@ package decompengine.jobs
 import decompengine.agent.AgentWorkflowPhase
 import java.nio.file.Files
 import java.util.UUID
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlinx.serialization.json.*
-import kotlin.io.path.createTempDirectory
+import decompengine.testing.recoveryMatrixTempDirectory as createTempDirectory
+import decompengine.testing.RecoveryMatrixEvidence
+import org.junit.jupiter.api.extension.ExtendWith
 import kotlin.io.path.readText
 import kotlin.io.path.writeText
 import kotlin.test.*
 
+@ExtendWith(RecoveryMatrixEvidence::class)
 class FullRunJournalTest {
+    @Test
+    fun `full history fsync runs away from producers and bounded overflow is explicit`() {
+        val root = createTempDirectory("run-writer-isolation-")
+        val journal = FullRunJournal.create(root, UUID.randomUUID().toString(), "reconstruction", 0)
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val writer = FullRunJournalWriter(journal, maximumQueuedEvents = 2) {
+            entered.countDown()
+            release.await(5, TimeUnit.SECONDS)
+        }
+        val id = journal.directory.fileName.toString()
+        try {
+            writer.append(event(id, 0))
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            val producerReturned = CountDownLatch(1)
+            Thread { writer.append(event(id, 1)); producerReturned.countDown() }.start()
+            assertTrue(producerReturned.await(1, TimeUnit.SECONDS), "producer waited on a blocked history write")
+            writer.append(event(id, 2))
+            writer.append(event(id, 3)) // bounded queue overflow; the record is not silently claimed complete
+        } finally {
+            release.countDown()
+            writer.close()
+        }
+        val metadata = FullRunJournal.metadata(journal.directory)
+        assertEquals("logging-failed", metadata.getValue("state").jsonPrimitive.content)
+        assertEquals(JsonPrimitive(false), metadata.getValue("complete"))
+        FullRunEventReader(journal.directory).use { reader ->
+            var count = 0
+            while (reader.next() != null) count++
+            assertEquals(3, count)
+            assertEquals("logging-failed", reader.verifyEnd().getValue("state").jsonPrimitive.content)
+        }
+    }
+
     @Test
     fun `full run history survives display eviction and redacts diagnostics`() {
         val root = createTempDirectory("full-run-")

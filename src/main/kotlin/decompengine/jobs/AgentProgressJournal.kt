@@ -66,7 +66,7 @@ class AgentProgressJournal private constructor(
     private var dirty = false
     private val writerLease: AgentProgressJournalLease
     private val writer: Thread
-    private var fullRun: FullRunJournal? = null
+    private var fullRun: FullRunJournalWriter? = null
     internal val fullRunDirectory: Path? get() = fullRun?.directory
 
     init {
@@ -88,7 +88,9 @@ class AgentProgressJournal private constructor(
                 previous.getValue("events").jsonArray.forEach { retained.add(replayProgressRecord(it.jsonObject)) }
                 while (retained.size > maximumEvents) { retained.removeFirst(); historyDropped++ }
             }
-            if (recordFullRun) fullRun = FullRunJournal.create(reportsDirectory, runId, workflow, sequence, maximumFullRunBytes)
+            if (recordFullRun) fullRun = FullRunJournalWriter(
+                FullRunJournal.create(reportsDirectory, runId, workflow, sequence, maximumFullRunBytes),
+            )
             requireSequenceCapacity()
             writer = Thread(::writeLoop, "decomp-progress-$workflow").apply { isDaemon = true }
             startedWriter = writer
