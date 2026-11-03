@@ -35,6 +35,8 @@ class AgentProgressJournal private constructor(
     private val onPhase: (AgentWorkflowPhase) -> Unit,
     private val afterSnapshotWrite: (() -> Unit)?,
     private val beforeSnapshotEncode: (() -> Unit)?,
+    private val recordFullRun: Boolean,
+    private val maximumFullRunBytes: Long,
 ) : AgentWorkflowProgress, AutoCloseable {
     constructor(
         reportsDirectory: Path,
@@ -44,8 +46,10 @@ class AgentProgressJournal private constructor(
         maximumQueuedEvents: Int = 128,
         maximumSnapshotBytes: Int = 512 * 1024,
         onPhase: (AgentWorkflowPhase) -> Unit = {},
+        recordFullRun: Boolean = false,
+        maximumFullRunBytes: Long = FullRunJournal.MAXIMUM_RUN_BYTES,
     ) : this(reportsDirectory, workflow, sensitiveValues, maximumEvents, maximumQueuedEvents,
-        maximumSnapshotBytes, onPhase, null, null)
+        maximumSnapshotBytes, onPhase, null, null, recordFullRun, maximumFullRunBytes)
 
     private val monitor = Object()
     private val queue = ArrayDeque<JsonObject>()
@@ -62,11 +66,14 @@ class AgentProgressJournal private constructor(
     private var dirty = false
     private val writerLease: AgentProgressJournalLease
     private val writer: Thread
+    private var fullRun: FullRunJournal? = null
+    internal val fullRunDirectory: Path? get() = fullRun?.directory
 
     init {
         require(workflow.matches(Regex("[a-z][a-z0-9-]{0,63}"))) { "invalid progress workflow" }
         require(maximumEvents in 1..1024 && maximumQueuedEvents in 1..1024)
         require(maximumSnapshotBytes in 4096..MAXIMUM_READ_BYTES)
+        require(maximumFullRunBytes in 4096..FullRunJournal.MAXIMUM_RUN_BYTES)
         Files.createDirectories(reportsDirectory)
         writerLease = requireNotNull(AgentProgressJournalLease.tryAcquire(reportsDirectory) {
             FileChannel.open(reportsDirectory.resolve("agent-progress.lock"), CREATE, WRITE, NOFOLLOW_LINKS)
@@ -81,6 +88,7 @@ class AgentProgressJournal private constructor(
                 previous.getValue("events").jsonArray.forEach { retained.add(replayProgressRecord(it.jsonObject)) }
                 while (retained.size > maximumEvents) { retained.removeFirst(); historyDropped++ }
             }
+            if (recordFullRun) fullRun = FullRunJournal.create(reportsDirectory, runId, workflow, sequence, maximumFullRunBytes)
             requireSequenceCapacity()
             writer = Thread(::writeLoop, "decomp-progress-$workflow").apply { isDaemon = true }
             startedWriter = writer
@@ -89,7 +97,10 @@ class AgentProgressJournal private constructor(
         } catch (problem: Throwable) {
             synchronized(monitor) { closed = true; monitor.notifyAll() }
             // A started writer keeps ownership until its own final publication is over.
-            if (startedWriter?.isAlive != true) writerLease.close()
+            if (startedWriter?.isAlive != true) {
+                runCatching { fullRun?.close() }
+                writerLease.close()
+            }
             throw problem
         }
     }
@@ -272,6 +283,9 @@ class AgentProgressJournal private constructor(
         onPhase(observation.phase)
     }
 
+    /** Bounded, redacted diagnostic observation; it is never used as workflow authority. */
+    internal fun diagnostic(message: String) = enqueue("diagnostic") { put("text", redactor.text(message, 2048)) }
+
     private fun enqueue(kind: String, preserveTerminal: Boolean = false, body: JsonObjectBuilder.() -> Unit) = synchronized(monitor) {
         check(!closed) { "progress journal is closed" }
         failure.get()?.let { throw IllegalStateException("progress journal persistence failed", it) }
@@ -284,6 +298,7 @@ class AgentProgressJournal private constructor(
             put("kind", kind)
             body()
         }
+        fullRun?.append(record)
         if (queue.size < maximumQueuedEvents) {
             queue.add(record)
         } else if (preserveTerminal) {
@@ -370,6 +385,7 @@ class AgentProgressJournal private constructor(
         // Do not release a lock while a live writer could still publish a snapshot.
         check(!writer.isAlive) { "progress writer did not stop within five seconds" }
         writerLease.close()
+        fullRun?.close()
         failure.get()?.let { throw IllegalStateException("progress journal persistence failed", it) }
     }
 
@@ -380,7 +396,8 @@ class AgentProgressJournal private constructor(
             workflow: String,
             afterSnapshotWrite: () -> Unit,
         ): AgentProgressJournal = AgentProgressJournal(
-            reportsDirectory, workflow, emptyList(), 256, 128, 512 * 1024, {}, afterSnapshotWrite, null,
+            reportsDirectory, workflow, emptyList(), 256, 128, 512 * 1024, {}, afterSnapshotWrite, null, false,
+            FullRunJournal.MAXIMUM_RUN_BYTES,
         )
 
         /** Controlled cut/publication boundaries for producer-isolation qualification. */
@@ -393,7 +410,7 @@ class AgentProgressJournal private constructor(
             maximumQueuedEvents: Int = 128,
         ): AgentProgressJournal = AgentProgressJournal(
             reportsDirectory, workflow, emptyList(), 256, maximumQueuedEvents, maximumSnapshotBytes, {},
-            afterSnapshotWrite, beforeSnapshotEncode,
+            afterSnapshotWrite, beforeSnapshotEncode, false, FullRunJournal.MAXIMUM_RUN_BYTES,
         )
 
         const val FILE_NAME = "agent-progress.json"
