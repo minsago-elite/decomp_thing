@@ -196,11 +196,20 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
         includeCallSites: Boolean,
         parentDeadline: AnalysisDeadline?,
     ): Pair<RecoveredProgramModel, RecoveredCallSiteReceipt?> {
+        val timing = AnalysisTimingRecord(
+            workDir.resolve("reports/analysis-timings"), recoveryMode.wireName, analysisToolSha256,
+            timingConfigurationSha256(listOf(
+                limits.wallClockTimeout.toNanos().toString(), limits.terminationGrace.toNanos().toString(),
+                limits.maximumResidentBytes.toString(), limits.maximumProgramModelBytes.toString(),
+                limits.maximumDiagnosticBytesPerStream.toString(), includeCallSites.toString(),
+            )),
+        )
         val deadline = AnalysisDeadline.start(
             limits.wallClockTimeout.toNanos(), "Ghidra program recovery", parentDeadline,
             AnalysisDeadline.RECOVERY_TIMEOUT_ADVICE,
         )
-        return deadline.enforceDuring("Ghidra program recovery") {
+        return try {
+            val result = timing.measure("analysis-invocation") { deadline.enforceDuring("Ghidra program recovery") {
             deadline.checkpoint("before export preparation")
             val reports = workDir.resolve("reports").createDirectories()
             val scripts = workDir.resolve("scripts").createDirectories()
@@ -211,6 +220,7 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
             scripts.resolve("ExportProgramModelOwned.java").writeBytes(scriptBytes)
             deadline.checkpoint("after writing export script")
             val exporterSha256 = sha256(scriptBytes)
+            timing.bind(exporterSha256 = exporterSha256)
             val output = reports.resolve("program_model.json")
             val modelCandidate = uniqueExportCandidate(output, "model")
             val callOutput = reports.resolve("program_model_calls.json")
@@ -235,18 +245,24 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
                 )),
             )
             deadline.checkpoint("before constructing export command")
-            val command = commandFactory(GhidraInvocation(project, "archival_reconstruction", binaryPath, scripts, postScripts), deadline::checkpoint)
+            val command = timing.measure("bundle-verification-and-command-preparation") {
+                commandFactory(GhidraInvocation(project, "archival_reconstruction", binaryPath, scripts, postScripts), deadline::checkpoint)
+            }
             deadline.checkpoint("after constructing export command")
-            val exitCode = executeExport(command, workDir, reports, deadline,
-                listOfNotNull(modelCandidate, callCandidate))
+            val exitCode = timing.measure("worker-process-lifecycle") {
+                executeExport(command, workDir, reports, deadline, listOfNotNull(modelCandidate, callCandidate))
+            }
             deadline.checkpoint("before export result validation")
             require(exitCode == 0) {
                 "Ghidra program recovery failed with exit code $exitCode; see ${reports.resolve("ghidra_stderr.log")}"
             }
-            val modelBytes = readStableProgramModel(modelCandidate, deadline)
-            val model = ProgramModelJson.readCanonical(modelBytes, deadline::checkpoint)
+            val (modelBytes, model) = timing.measure("canonical-model-validation") {
+                val bytes = readStableProgramModel(modelCandidate, deadline)
+                bytes to ProgramModelJson.readCanonical(bytes, deadline::checkpoint)
+            }
+            timing.bind(inputSha256 = model.inputSha256)
             deadline.checkpoint("after canonical model validation")
-            val calls = callScriptBytes?.let { script ->
+            val calls = timing.measure("call-site-validation") { callScriptBytes?.let { script ->
                 val callLimits = RecoveredCallSiteLimits()
                 val callCandidatePath = checkNotNull(callCandidate)
                 fun requireRemainingTime() {
@@ -274,15 +290,23 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
                     RecoveredCallSiteBindings(model.inputSha256, sha256(modelBytes), sha256(script), analysisToolSha256),
                     callLimits,
                 ) { requireRemainingTime() }.also { requireRemainingTime() }
-            }
+            } }
             deadline.checkpoint("before publishing validated export candidates")
             deadline.checkpoint("before publishing validated program model")
-            moveExportCandidate(modelCandidate, output)
-            if (callCandidate != null) {
-                deadline.checkpoint("before publishing validated call-site evidence")
-                moveExportCandidate(callCandidate, callOutput)
+            timing.measure("validated-candidate-publication") {
+                moveExportCandidate(modelCandidate, output)
+                if (callCandidate != null) {
+                    deadline.checkpoint("before publishing validated call-site evidence")
+                    moveExportCandidate(callCandidate, callOutput)
+                }
             }
             model to calls?.copy(path = callOutput.toAbsolutePath().normalize())
+            } }
+            timing.publish(true)
+            result
+        } catch (failure: Throwable) {
+            timing.publish(false)
+            throw failure
         }
     }
 
