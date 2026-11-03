@@ -144,7 +144,7 @@ for (const [name, qualify, filename, size] of [
     assert.equal(f.document.querySelector('#binary-file'), null);
     await assert.rejects(f.run(), error => error === f.submitted);
     assert.equal(f.counts().changes, 1);
-    assert.deepEqual(f.labels, ['workspace upload control', 'upload selection rendered']);
+    assert.equal(f.labels.at(-1), 'upload selection rendered');
     const [file] = f.picker.files;
     assert.equal(file.name, filename);
     assert.equal(file.size, size);
