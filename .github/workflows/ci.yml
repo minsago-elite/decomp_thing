@@ -171,6 +171,7 @@ jobs:
           sudo apt-get update
           mapfile -t web_browser_dependencies < "$RUNNER_TEMP/web-test-browser/deb.deps"
           sudo apt-get satisfy -y --no-install-recommends "${web_browser_dependencies[@]}"
+          sudo apt-get install -y --no-install-recommends xvfb
           python3 -m pip install --requirement requirements/oracle-generation.txt
       - name: Record browser pin and check driver lifecycle
         run: |
@@ -180,6 +181,10 @@ jobs:
           python3 scripts/test-packaged-browser-install.py
           node --check scripts/check-packaged-web-browser.mjs
           node --test scripts/packaged-browser-upload.test.mjs
+          node --check scripts/packaged-browser-restart.mjs
+          node --test scripts/packaged-browser-restart.test.mjs
+          node --check scripts/packaged-browser-cdp-diagnostics.mjs
+          node --test scripts/packaged-browser-cdp-diagnostics.test.mjs
       - name: Build archives and verify browser expiry and distribution contents
         env:
           DECOMP_BROWSER_CHROME: ${{ runner.temp }}/web-test-browser/chrome
@@ -244,6 +249,12 @@ jobs:
             --archive "$WEB_TEST_ARCHIVE" \
             --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
             --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode scale --no-sandbox
+      - name: Exercise same-origin JVM restart and two-tab stale progress pin
+        run: |
+          xvfb-run -a node scripts/check-packaged-web-browser.mjs \
+            --archive "$WEB_TEST_ARCHIVE" \
+            --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
+            --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode restart --no-sandbox
       - name: Audit packaged routes for reflow, contrast, focus, assets under CSP and timing
         run: |
           node scripts/check-packaged-web-browser.mjs \
