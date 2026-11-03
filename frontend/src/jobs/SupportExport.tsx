@@ -35,6 +35,23 @@ export function supportExportDownload(data: SupportExportData, requestId: string
   return { href: `data:application/json;charset=utf-8,${encodeURIComponent(text)}`, filename: `support-export-${scope}.json`, bytes };
 }
 
+// Matches the 3px outline plus 3px offset of :focus-visible, and the scroll-margin in app.css.
+const focusRingExtent = 6;
+
+/**
+ * Firefox can leave a keyboard-focused scope radio wholly below the viewport without scrolling it
+ * into view. Reveal only the focused control, only when its focus ring is not already inside the
+ * viewport, and with the nearest immediate scroll; focus, selection and group navigation stay native.
+ */
+function revealFocusedControl(event: FocusEvent) {
+  const control = event.currentTarget as HTMLElement;
+  const rect = control.getBoundingClientRect();
+  const { clientWidth, clientHeight } = document.documentElement;
+  if (rect.top - focusRingExtent >= 0 && rect.left - focusRingExtent >= 0
+    && rect.bottom + focusRingExtent <= clientHeight && rect.right + focusRingExtent <= clientWidth) return;
+  control.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+}
+
 /** Explicit, scoped and previewed: one bounded read per Preview activation, never on render. */
 export function SupportExport({ client }: { client: ExportClient }) {
   const [scope, setScope] = useState<'server' | 'job'>('server');
@@ -72,12 +89,12 @@ export function SupportExport({ client }: { client: ExportClient }) {
     <h2 id="support-export-title">{copy.supportExport}</h2>
     <p>{copy.intro}</p>
     <form onSubmit={event => { void preview(event); }} noValidate>
-      <fieldset>
+      <fieldset class="support-export-scope">
         <legend>{copy.scope}</legend>
         <label><input type="radio" name="support-export-scope" value="server" checked={scope === 'server'}
-          onChange={() => { setScope('server'); setInvalid(false); }} /> {copy.serverScope}</label>
+          onFocus={revealFocusedControl} onChange={() => { setScope('server'); setInvalid(false); }} /> {copy.serverScope}</label>
         <label><input type="radio" name="support-export-scope" value="job" checked={scope === 'job'}
-          onChange={() => { setScope('job'); }} /> {copy.jobScope}</label>
+          onFocus={revealFocusedControl} onChange={() => { setScope('job'); }} /> {copy.jobScope}</label>
       </fieldset>
       {scope === 'job' && <p>
         <label for="support-export-job">{copy.jobId}</label>
