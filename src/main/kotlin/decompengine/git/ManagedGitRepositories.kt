@@ -279,11 +279,12 @@ class ManagedGitRepositories(
                 val observation = GitRepositoryInspector.inspect(runner, directory.resolve(GIT_DIR), directory.resolve(WORK_TREE))
                 // A fresh initialization with no commit whose work tree still holds exactly the job's
                 // recorded candidate source contains no user work: deleting the job deletes only its own data.
-                // Git status can hide edits under source-provided ignore rules. Only the recorded
-                // manifest can prove an initialized unborn tree still contains no new user work.
+                // Git status can hide ignored edits; a restored work tree can also hide different
+                // staged bytes. Only an empty index plus the recorded work-tree manifest establishes
+                // that an initialized unborn repository contains no additional user work.
                 val initializedUnborn = record.origin == "initialized" && observation.head.state == GitHeadState.UNBORN
-                val uncommitted = if (initializedUnborn) !unchangedInitialization(record, directory.resolve(WORK_TREE))
-                    else observation.dirty
+                val uncommitted = if (initializedUnborn) hasIndexEntries(runner, directory.resolve(GIT_DIR), directory.resolve(WORK_TREE)) ||
+                    !unchangedInitialization(record, directory.resolve(WORK_TREE)) else observation.dirty
                 if (uncommitted) reasons += GitRetentionReason.UNCOMMITTED_CHANGES
                 if (unpushed(runner, directory.resolve(GIT_DIR), observation.head.objectId)) reasons += GitRetentionReason.UNPUSHED_COMMITS
             } catch (_: Exception) {
@@ -292,6 +293,12 @@ class ManagedGitRepositories(
         }
         return reasons.toList()
     }
+
+    /** Any index entry in an unborn repository is staged work; fresh initialization leaves it empty. */
+    private fun hasIndexEntries(runner: GitCommandRunner, gitDir: Path, workTree: Path): Boolean =
+        runner.run(GitInvocation("ls-files", listOf("--cached", "-z"), gitDir = gitDir, workTree = workTree,
+            limits = GitExecutionLimits(java.time.Duration.ofSeconds(20), 256 * 1024, 16 * 1024,
+                maxAddressSpaceBytes = 512L * 1024 * 1024))).stdout.isNotEmpty()
 
     /**
      * Whether an initialized work tree still holds exactly the files copied from its source snapshot:

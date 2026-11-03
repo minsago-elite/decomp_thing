@@ -236,6 +236,39 @@ class ManagedGitRepositoriesTest {
         }
     }
 
+    @Test fun `retention protects staged unborn work after the copied work tree is restored`() {
+        for (change in listOf("modified", "added", "baseline", "intent")) Fixture().use { f ->
+            f.write(".gitignore", "*\n")
+            val service = f.open()
+            val completed = service.settle(service.request(jobId,
+                GitRepositoryRequest.Init("run_1", "revision_1", null), "staged_retention_$change"))
+            assertEquals(GitOperationState.COMPLETED, completed.state, completed.message)
+            val directory = f.repositoryDirectory(completed.repositoryId)
+            val gitDir = directory.resolve("repository.git")
+            val workTree = directory.resolve("worktree")
+            assertTrue(service.retentionHolds(jobId).isEmpty(), "empty index and exact copied source are expendable")
+            val path = if (change == "added") "src/staged-only.c" else "src/main file.c"
+            val target = workTree.resolve(path)
+            val original = if (Files.exists(target)) Files.readAllBytes(target) else null
+            if (change != "baseline") Files.writeString(target, "int staged_user_work;\n")
+            val add = if (change == "intent") arrayOf("add", "-N", "-f", "--", path)
+                else arrayOf("add", "-f", "--", path)
+            f.repositories.git("--git-dir=$gitDir", "--work-tree=$workTree", *add)
+            if (original == null) Files.delete(target) else Files.write(target, original)
+            assertTrue(GitSourceCopy.matchesManifest(workTree, service.listing(jobId).repositories.single().sourceManifestSha256!!),
+                "the work tree alone no longer contains the staged change")
+            assertEquals(GitHeadState.UNBORN, GitRepositoryInspector.inspect(f.repositories.runner, gitDir, workTree).head.state)
+            assertTrue(f.repositories.git("--git-dir=$gitDir", "ls-files", "--cached", "-z").isNotEmpty())
+            if (change in setOf("modified", "added")) assertEquals("int staged_user_work;\n",
+                f.repositories.git("--git-dir=$gitDir", "show", ":$path"))
+            val before = f.storageTree()
+            assertEquals(listOf(GitRetentionReason.UNCOMMITTED_CHANGES), service.retentionHolds(jobId), change)
+            assertEquals(before, f.storageTree(), "index, object storage and copied source stay byte-identical")
+            f.repositories.git("--git-dir=$gitDir", "read-tree", "--empty")
+            assertTrue(service.retentionHolds(jobId).isEmpty(), "explicitly clearing the index removes the staged-work hold")
+        }
+    }
+
     private fun withManifestTree(body: (Path) -> Unit) {
         val root = Files.createTempDirectory(Files.createDirectories(Path.of("build/test-tmp/git-manifest")), "manifest-")
         try { body(root) } finally { root.toFile().deleteRecursively() }
