@@ -26,7 +26,6 @@ MAX_WORKER_MANIFEST_BYTES = 256 * 1024
 FIXTURE_SOURCE = '''#include <stdio.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <stdlib.h>
 int main(int argc, char **argv) {
     (void)argv;
     printf("args=%d\\n", argc - 1);
@@ -35,6 +34,7 @@ int main(int argc, char **argv) {
     return argc > 2 ? 3 : 0;
 }
 '''
+HEADER_CLOSURE_SOURCE = FIXTURE_SOURCE + '#include <stdlib.h>\n'
 
 
 def no_duplicate_keys(pairs):
@@ -356,9 +356,9 @@ def prepare(args):
         gcc_runtime = trusted(Path(command([str(gcc), '-print-libgcc-file-name'])).parent)
         copier.copy(gcc_runtime, RUNTIME / 'gcc')
         build = [{'source': str(RUNTIME / 'gcc'), 'destination': str(gcc_runtime)}] + subprogram_mounts
-        # The qualification image intentionally retains only the system headers needed by the
-        # fixed benign stdio/stddef/stdint fixture. A general deployment supplies its own reviewed closure.
-        dependency_text = command([str(gcc), '-M', '-x', 'c', '-'], input_text=FIXTURE_SOURCE)
+        # The qualification image retains the fixed fixture headers and the additional stdlib
+        # header used by module compilation controls. A deployment supplies its own reviewed closure.
+        dependency_text = command([str(gcc), '-M', '-x', 'c', '-'], input_text=HEADER_CLOSURE_SOURCE)
         headers = dependency_text.replace('\\\n', ' ').partition(':')[2].split()
         for header in headers:
             path = Path(header)
