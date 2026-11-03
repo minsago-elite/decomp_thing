@@ -37,6 +37,7 @@ function History({ jobId, basePath, session }: { jobId: string; basePath: string
   const data = observation?.value;
   const [refresh, setRefresh] = useState(0);
   const heading = useRef<HTMLHeadingElement>(null);
+  const retryButton = useRef<HTMLButtonElement>(null);
   const moveFocus = useRef(false);
   const path = `${jobPath(basePath, jobId)}/runs`;
   // A deletion in another tab must clear this history instead of leaving its attempts on screen.
@@ -85,7 +86,8 @@ function History({ jobId, basePath, session }: { jobId: string; basePath: string
     <button type="button" disabled={loading} onClick={() => first()}>{copy.refreshHistory}</button>
     {error && <p role="alert">{error}</p>}
     {error && data && <StaleMetadataNotice />}
-    {error && retryable && <button type="button" disabled={loading} onClick={() => {
+    {error && retryable && <button ref={retryButton} type="button" disabled={loading} onClick={() => {
+      if (document.activeElement === retryButton.current) heading.current?.focus();
       setRefresh(value => value + 1);
     }}>{copy.retryHistoryPage}</button>}
     <h2 ref={heading} tabIndex={-1}>{copy.recordedAttempts}</h2>

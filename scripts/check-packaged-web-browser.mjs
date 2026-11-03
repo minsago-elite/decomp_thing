@@ -1023,7 +1023,7 @@ try {
       report.jobDataCreated = true;
     }
     if (staleContextFixture) {
-      report.staleContext = await qualifyStaleContext({ fixture: staleContextFixture, tab: authenticated, cdp, evaluate, ready, browserOrigin, capture });
+      report.staleContext = await qualifyStaleContext({ fixture: staleContextFixture, tab: authenticated, cdp, evaluate, ready, waitFor, browserOrigin, capture });
       report.jobDataCreated = true;
     }
     if (values.mode === 'metadata') {

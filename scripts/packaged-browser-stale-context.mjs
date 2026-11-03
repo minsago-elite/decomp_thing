@@ -14,7 +14,21 @@ export function assertRetainedObservation(before, after, label, expectedStaleNot
   assert.ok(after.age.length > 0, `${label}: receipt age is missing`);
 }
 
-export async function qualifyStaleContext({ fixture, tab, cdp, evaluate, ready, browserOrigin, capture }) {
+export function countRequestsForPath(requests, method, path, origin) {
+  return requests.filter(request => {
+    if (request.method !== method) return false;
+    try { return new URL(request.url, origin).pathname === path; } catch { return false; }
+  }).length;
+}
+
+export function hasSuccessfulResponseAfter(responses, firstNewIndex, path, origin) {
+  return responses.slice(firstNewIndex).some(response => {
+    if (response.status !== 200) return false;
+    try { return new URL(response.url, origin).pathname === path; } catch { return false; }
+  });
+}
+
+export async function qualifyStaleContext({ fixture, tab, cdp, evaluate, ready, waitFor, browserOrigin, capture }) {
   let armedPath = null;
   let failedPath = null;
   let resolveFailure = null;
@@ -40,7 +54,7 @@ export async function qualifyStaleContext({ fixture, tab, cdp, evaluate, ready, 
     { name: 'run', route: `/nested/jobs/${fixture.jobId}/runs/run_fixture_3`, ready: `document.body.innerText.includes('run_fixture_3')`,
       apiPath: `/nested/api/v1/jobs/${fixture.jobId}/runs/run_fixture_3`, receipt: 'Attempt metadata', target: 'dl.job-facts dd', retry: 'Refresh attempt' },
     { name: 'runHistory', route: `/nested/jobs/${fixture.jobId}/runs`, ready: `document.querySelector('ul[aria-label="Recorded attempts"] a[href$="/run_fixture_54"]')`,
-      apiPath: `/nested/api/v1/jobs/${fixture.jobId}/runs`, receipt: 'Attempt history', target: 'ul[aria-label="Recorded attempts"] li a', retry: 'Retry this page' },
+      apiPath: `/nested/api/v1/jobs/${fixture.jobId}/runs`, receipt: 'Attempt history', target: 'ul[aria-label="Recorded attempts"] li a', retry: 'Refresh history' },
     { name: 'runtime', route: '/nested/runtime', ready: `document.querySelector('#server-runtime-title')`,
       apiPath: '/nested/api/v1/bootstrap', receipt: 'Runtime report', target: '#server-runtime-title', retry: 'Check session' },
   ];
@@ -73,7 +87,7 @@ export async function qualifyStaleContext({ fixture, tab, cdp, evaluate, ready, 
         scrollY, receiptAt: receipt?.dataset.receivedAt ?? null, age };
     })()`);
     assert.equal(before.focusedTarget, true, `${view.name}: target did not receive focus`);
-    const readCount = () => tab.requests.filter(request => request.method === 'GET' && request.url === view.apiPath).length;
+    const readCount = () => countRequestsForPath(tab.requests, 'GET', view.apiPath, browserOrigin);
     const initialReads = readCount();
     armedPath = view.apiPath;
     failedPath = null;
@@ -104,11 +118,14 @@ export async function qualifyStaleContext({ fixture, tab, cdp, evaluate, ready, 
     const aged = await evaluate(tab, `(() => document.querySelector(${JSON.stringify(`[aria-label="${view.receipt}"] [data-received-at]`)})?.parentElement?.textContent.match(/\\(([^()]+)\\)/)?.[1] ?? '')()`);
     assert.ok(aged && aged !== before.age, `${view.name}: receipt age did not advance from its local clock`);
     const readsBeforeRecovery = readCount();
+    const responsesBeforeRecovery = tab.responses.length;
     await evaluate(tab, `(() => [...document.querySelectorAll('button')].find(button => button.textContent.trim() === ${JSON.stringify(view.retry)})?.click())()`);
-    await ready(tab, `!document.body.innerText.includes(${JSON.stringify(STALE_COPY)}) && ${view.ready}`, `${view.name} recovered read`);
+    await waitFor(() => hasSuccessfulResponseAfter(tab.responses, responsesBeforeRecovery, view.apiPath, browserOrigin),
+      `${view.name}: new recovery request did not receive HTTP 200`);
+    await ready(tab, `!document.body.innerText.includes(${JSON.stringify(STALE_COPY)}) && ${view.ready} &&
+      document.querySelector(${JSON.stringify(`[aria-label="${view.receipt}"] [data-received-at]`)})?.dataset.receivedAt !== ${JSON.stringify(before.receiptAt)}`,
+      `${view.name} recovered receipt`);
     assert.equal(readCount(), readsBeforeRecovery + 1, `${view.name}: recovery did not make exactly one metadata read`);
-    assert.ok(tab.responses.some(response => response.url === browserOrigin + view.apiPath && response.status === 200),
-      `${view.name}: recovery did not receive HTTP 200`);
     const recovered = await evaluate(tab, `(() => {
       const node = document.querySelector(${JSON.stringify(view.target)});
       const receipt = document.querySelector(${JSON.stringify(`[aria-label="${view.receipt}"] [data-received-at]`)});

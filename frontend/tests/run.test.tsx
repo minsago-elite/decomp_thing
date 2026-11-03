@@ -417,6 +417,35 @@ it('retains only the verified history page through a transient refresh and expli
   } finally { auth.dispose(); }
 });
 
+it('moves focus from a disappearing history retry control to the stable heading', async () => {
+  const auth = await session();
+  let rejectRefresh: (failure: unknown) => void = () => undefined;
+  let finishRetry: (response: unknown) => void = () => undefined;
+  transport.get.mockResolvedValueOnce(historyPage('run_latest', null))
+    .mockImplementationOnce(() => new Promise((_, reject) => { rejectRefresh = reject; }))
+    .mockImplementationOnce(() => new Promise(resolve => { finishRetry = resolve; }));
+  history.replaceState(null, '', `/nested/jobs/${sample.jobId}/runs`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await screen.findByRole('link', { name: 'reconstruct: run_latest' });
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh history' }));
+    await waitFor(() => expect(transport.get).toHaveBeenCalledTimes(2));
+    await act(async () => {
+      rejectRefresh(new ApiClientError('network_error'));
+      await Promise.resolve();
+    });
+    const retry = await screen.findByRole('button', { name: 'Retry this page' });
+    retry.focus();
+    expect(document.activeElement).toBe(retry);
+    fireEvent.click(retry);
+    await waitFor(() => expect(transport.get).toHaveBeenCalledTimes(3));
+    expect(screen.queryByRole('button', { name: 'Retry this page' })).toBeNull();
+    expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Recorded attempts' }));
+    await act(async () => { finishRetry(historyPage('run_latest', null)); await Promise.resolve(); });
+    expect(await screen.findByRole('link', { name: 'reconstruct: run_latest' })).toBeTruthy();
+  } finally { auth.dispose(); }
+});
+
 it('retries a failed history continuation without resetting its cursor or showing another page', async () => {
   const auth = await session();
   transport.get.mockResolvedValueOnce(historyPage())
