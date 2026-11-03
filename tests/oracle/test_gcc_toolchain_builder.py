@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import gzip
 import hashlib
 import io
@@ -160,6 +161,40 @@ class GccToolchainBuilderTest(unittest.TestCase):
         for required in ("--network none", "--read-only", "--cap-drop ALL", "--security-opt no-new-privileges",
                          "--source-lock", "--build-record", "--container-digest", "--reproduction-lock"):
             self.assertIn(required, helper[invocation:publication])
+
+    def test_authentication_applies_the_locked_client_fingerprint_to_the_client(self):
+        # Execute the actual authentication prefix with every external effect stubbed. Stop at
+        # the daemon member fingerprint before any extracted executable can run.
+        helper = HELPER.read_text()
+        body = "authenticate() {\n" + helper.split("\nauthenticate() {\n", 1)[1].split("\nstart_rootless() {", 1)[0]
+        script = "set -euo pipefail\n" + body + """
+clean_environment() { :; }
+bounded_curl() { :; }
+safe_extract() { :; }
+check_archive() { :; }
+install() { :; }
+mv() { :; }
+sha256sum() { :; }
+check_executable() { printf '%s\n' "$1" "$2" "$3"; if [[ "$1" == "$daemon_bin" ]]; then exit 0; fi; }
+authenticate
+"""
+        client = self.root / "tools/docker/docker"
+        env = {"PATH": "/usr/bin:/bin", "tools": str(self.root / "tools"),
+               "docker_bin": str(client), "daemon_bin": str(self.root / "tools/docker/dockerd"),
+               "docker_hash": "authored-archive-stub", "rootless_hash": "authored-archive-stub",
+               "buildkit_hash": "authored-archive-stub"}
+        result = subprocess.run(["/usr/bin/bash", "--noprofile", "--norc", "-c", script],
+                                cwd=ROOT, env=env, capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # Independently recorded Docker client member fingerprint, not the daemon's.
+        daemon_sha = "c3ecdc8ac9e56b9a53ffd9fd4aece65432814597046f8d188a538be18c000df8"
+        self.assertEqual(result.stdout.splitlines(), [str(client), "42677472",
+                         "e45381109c685311cf84c5e33a1aca7da81d6b55c0f9aed74091fc08c3a94f13",
+                         str(self.root / "tools/docker/dockerd"), "99870816", daemon_sha])
+        owner = ast.parse((ROOT / "scripts/ci-gcc-toolchain-owner.py").read_text())
+        pins = next(ast.literal_eval(node.value) for node in owner.body if isinstance(node, ast.Assign)
+                    and any(isinstance(target, ast.Name) and target.id == "PINNED_TOOL_HASHES" for target in node.targets))
+        self.assertEqual(pins["dockerd"], daemon_sha)
 
     def test_actual_workflow_invokes_authenticate_and_reproduction_stages(self):
         workflow = WORKFLOW.read_text()

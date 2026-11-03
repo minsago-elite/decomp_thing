@@ -243,7 +243,8 @@ authenticate() {
   install -d -m 700 "$tools/buildkit"
   mv "$tools/buildkit-unpack/bin" "$tools/buildkit/bin"
   local rootless="$tools/docker-rootless-extras"
-  check_executable "$daemon_bin" 42677472 e45381109c685311cf84c5e33a1aca7da81d6b55c0f9aed74091fc08c3a94f13
+  check_executable "$docker_bin" 42677472 e45381109c685311cf84c5e33a1aca7da81d6b55c0f9aed74091fc08c3a94f13
+  check_executable "$daemon_bin" 99870816 c3ecdc8ac9e56b9a53ffd9fd4aece65432814597046f8d188a538be18c000df8
   test "$($docker_bin --version)" = 'Docker version 29.7.2, build a7dcaa6'
   test "$("$daemon_bin" --version)" = 'Docker version 29.7.2, build 6a43e3d'
   check_executable "$rootless/rootlesskit" 23922644 98f07e783dd6b3cd236c7865d1dce7937e645ec74a0fe2971725449af074f466
