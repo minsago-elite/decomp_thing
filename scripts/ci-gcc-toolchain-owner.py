@@ -761,7 +761,7 @@ def query_manager_unit(role: str, owner_uid: int, owner_gid: int, unit: str) -> 
 
 def require_manager_reservation_binding(receipt: dict, role: str, manifest: dict,
                                        slice_facts: dict[str, str],
-                                       service_facts: dict[str, str]) -> None:
+                                       service_facts: dict[str, str], *, teardown: bool = False) -> None:
     token = manifest.get("ownerToken")
     expected_slice, expected_service = unit_names(role, token)
     description = f"decomp-gcc-owner:{token}:{role}"
@@ -773,8 +773,10 @@ def require_manager_reservation_binding(receipt: dict, role: str, manifest: dict
             slice_facts.get("active") != "active" or not slice_facts.get("controlGroup") or \
             not slice_facts.get("invocation"):
         raise Refusal("current systemd slice identity does not bind the owner reservation")
+    # Teardown can follow supervisor failure; launch/readiness still requires an active service.
+    service_states = ("active", "failed") if teardown else ("active",)
     if service_facts.get("id") != expected_service or service_facts.get("description") != description or \
-            service_facts.get("slice") != expected_slice or service_facts.get("active") != "active" or \
+            service_facts.get("slice") != expected_slice or service_facts.get("active") not in service_states or \
             not service_facts.get("controlGroup") or not service_facts.get("invocation"):
         raise Refusal("current systemd service identity does not bind the owner reservation")
     if receipt.get("sliceControlGroup") != slice_facts["controlGroup"] or \
@@ -1418,7 +1420,7 @@ def _tree_empty(fd: int, *, deadline: float, budget: int = 10000) -> tuple[bool,
             os.close(fd_left)
 
 
-def inspect_domain_local(root: Path, role: str) -> dict:
+def inspect_domain_local(root: Path, role: str, *, teardown: bool = False) -> dict:
     manifest = Owner(root)._manifest()
     token = manifest.get("ownerToken")
     receipt = read_json_bounded(root / "control" / f"manager-receipt-{role}.json", 65536)
@@ -1434,7 +1436,7 @@ def inspect_domain_local(root: Path, role: str) -> dict:
         raise Refusal("owner identity is incomplete for privileged manager revalidation")
     slice_facts = query_manager_unit(role, owner_uid, owner_gid, expected_slice)
     service_facts = query_manager_unit(role, owner_uid, owner_gid, expected_service)
-    require_manager_reservation_binding(receipt, role, manifest, slice_facts, service_facts)
+    require_manager_reservation_binding(receipt, role, manifest, slice_facts, service_facts, teardown=teardown)
     slice_cg = receipt.get("sliceControlGroup")
     service_cg = receipt.get("controlGroup")
     if not isinstance(slice_cg, str) or not isinstance(service_cg, str) or not service_cg.startswith(slice_cg.rstrip("/") + "/"):
@@ -1468,7 +1470,7 @@ def inspect_domain_local(root: Path, role: str) -> dict:
 
 def kill_domain_local(root: Path, role: str) -> dict:
     receipt = read_json_bounded(root / "control" / f"manager-receipt-{role}.json", 65536)
-    inspected = inspect_domain_local(root, role)
+    inspected = inspect_domain_local(root, role, teardown=True)
     for key, receipt_key in (("sliceDevice", "device"), ("sliceInode", "inode"),
                              ("serviceDevice", "serviceDevice"), ("serviceInode", "serviceInode")):
         expected = receipt.get(receipt_key)
@@ -1482,7 +1484,7 @@ def kill_domain_local(root: Path, role: str) -> dict:
         raise Refusal("pidfd signalling support disappeared")
     killed = freeze_kill_prove(KernelCgroupIO(), receipt["sliceControlGroup"], receipt["device"],
                                receipt["inode"], timeout=5)
-    current = inspect_domain_local(root, role)
+    current = inspect_domain_local(root, role, teardown=True)
     if current.get("allDescendantsEmpty") is not True:
         raise Refusal("owned slice remained populated after cgroup.kill")
     return {"ownerToken": receipt["ownerToken"], "role": role,

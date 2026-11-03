@@ -1405,5 +1405,104 @@ class ThreadChildCensusTest(unittest.TestCase):
         self.assertTrue(all(x.closed for x in opened+dirs))
 
 
+class FailedServiceTeardownTest(unittest.TestCase):
+    def fixture(self, *, active="failed", changed=None, child=True, executed=True):
+        import contextlib
+        token="a"*32
+        root=ROOT / "build/test-tmp/gcc-failed-service"
+        role="buildkit"
+        slice_name,service_name=owner_module.unit_names(role,token)
+        desc=f"decomp-gcc-owner:{token}:{role}"
+        slice_group=f"/system.slice/{slice_name}"
+        service_group=f"{slice_group}/{service_name}"
+        receipt={"ownerToken":token,"role":role,"manager":"system","slice":slice_name,"unit":service_name,
+            "description":desc,"sliceControlGroup":slice_group,"controlGroup":service_group,
+            "sliceInvocationId":"slice-generation","invocationId":"service-generation","bootId":"boot",
+            "device":4,"inode":5,"serviceDevice":4,"serviceInode":6}
+        manifest={"ownerToken":token,"identity":{"ownerUid":os.getuid(),"ownerGid":os.getgid()},
+                  "roles":{role:{"status":"ready"}}}
+        slice_facts={"id":slice_name,"description":desc,"active":"active","controlGroup":slice_group,"invocation":"slice-generation"}
+        service_facts={"id":service_name,"description":desc,"slice":slice_name,"active":active,
+                       "controlGroup":service_group,"invocation":"service-generation"}
+        if changed:
+            target,key,value=changed
+            {"receipt":receipt,"slice":slice_facts,"service":service_facts}[target][key]=value
+        io=FakeCgroupIO();closed=[];written=[]
+        def read(path,limit):
+            if path.name.startswith('manager-receipt-'):return receipt
+            if path.name.startswith(('child-ready-','exec-observed-')):return {"ownerToken":token,"role":role,"pidfdHeld":True}
+            raise owner_module.Refusal("authored missing receipt")
+        def query(role,uid,gid,unit):
+            self.assertEqual((uid,gid),(os.getuid(),os.getgid()))
+            return slice_facts if unit==slice_name else service_facts
+        def census(fd,**kwargs):
+            return (any(c[:2]==('write','cgroup.kill') for c in io.calls),2)
+        stack=contextlib.ExitStack()
+        replacements={
+          'Owner':mock.Mock(return_value=SimpleNamespace(_manifest=lambda:manifest)),
+          'read_json_bounded':read,'query_manager_unit':query,
+          '_open_cgroup_path':lambda path:101 if path==slice_group else 102,
+          'require_cgroup_kill':lambda fd:None,
+          '_read_fd_text':lambda fd,key:{'memory.max':str(4*1024**3),'memory.swap.max':'0','pids.max':'1024'}[key],
+          '_tree_empty':census,'KernelCgroupIO':lambda:io,
+          'atomic_json':lambda path,value,**kwargs:written.append((path.name,value)),
+        }
+        for name,value in replacements.items():stack.enter_context(mock.patch.object(owner_module,name,value))
+        stack.enter_context(mock.patch.object(owner_module.os,'fstat',side_effect=lambda fd:SimpleNamespace(st_dev=4,st_ino=5 if fd==101 else 6)))
+        stack.enter_context(mock.patch.object(owner_module.os,'close',side_effect=closed.append))
+        stack.enter_context(mock.patch.object(owner_module.Path,'read_text',lambda *a,**k:'boot'))
+        stack.enter_context(mock.patch.object(owner_module.Path,'exists',lambda path:path.name.startswith('stop-request-')))
+        stack.enter_context(mock.patch.object(owner_module.Path,'is_file',lambda path:
+            child if path.name.startswith('child-ready-') else executed if path.name.startswith('exec-observed-') else False))
+        return SimpleNamespace(stack=stack,root=root,role=role,receipt=receipt,io=io,closed=closed,written=written)
+
+    def test_failed_service_can_reach_emergency_kernel_teardown(self):
+        f=self.fixture()
+        with f.stack:
+            result=owner_module.kill_domain_local(f.root,f.role)
+        self.assertTrue(result['empty'])
+        self.assertIn(('write','cgroup.kill',b'1'),f.io.calls)
+        self.assertEqual(f.closed,[102,101,102,101])
+
+    def test_failed_service_remains_ineligible_for_launch_inspection(self):
+        f=self.fixture()
+        with f.stack:
+            with self.assertRaisesRegex(owner_module.Refusal,'service identity'):
+                owner_module.inspect_domain_local(f.root,f.role)
+        self.assertEqual(f.io.calls,[])
+
+    def test_teardown_retains_state_generation_path_and_inode_refusals(self):
+        for change in [('service','active','inactive'),('service','active','deactivating'),
+            ('slice','active','failed'),('service','invocation','other-generation'),
+            ('service','controlGroup','/system.slice/unrelated'),('service','id','other.service'),
+            ('service','description','other-owner'),('receipt','manager','user'),
+            ('receipt','serviceInode',999),('receipt','inode',None)]:
+            f=self.fixture(changed=change)
+            with f.stack:
+                with self.assertRaises(owner_module.Refusal):owner_module.kill_domain_local(f.root,f.role)
+            self.assertFalse(any(c[:2]==('write','cgroup.kill') for c in f.io.calls),change)
+
+    def test_emergency_kill_without_stop_receipt_still_quarantines(self):
+        f=self.fixture();clock=FakeClock()
+        with f.stack, mock.patch.object(owner_module.time,'sleep',side_effect=clock.sleep):
+            authority=SimpleNamespace(kill=lambda root,role,timeout:owner_module.kill_domain_local(root,role))
+            backend=owner_module.ProductionBackend(f.root,runner=FakeCommandRunner('a'*32),authority=authority,
+                                                   clock=clock,test_repo_root=ROOT)
+            with self.assertRaisesRegex(owner_module.Refusal,'quarantine required'):
+                backend.manager_stop(f.role,f.receipt,10)
+        self.assertIn(('write','cgroup.kill',b'1'),f.io.calls)
+        self.assertEqual([n for n,_ in f.written],['stop-emergency-kill-buildkit.json'])
+
+    def test_missing_child_or_exec_receipt_still_refuses_before_kill(self):
+        for child,executed in [(False,True),(True,False)]:
+            f=self.fixture(child=child,executed=executed);clock=FakeClock()
+            with f.stack, mock.patch.object(owner_module.time,'sleep',side_effect=clock.sleep):
+                authority=SimpleNamespace(kill=lambda root,role,timeout:owner_module.kill_domain_local(root,role))
+                backend=owner_module.ProductionBackend(f.root,runner=FakeCommandRunner('a'*32),authority=authority,
+                                                       clock=clock,test_repo_root=ROOT)
+                with self.assertRaises(owner_module.Refusal):backend.manager_stop(f.role,f.receipt,10)
+            self.assertEqual(f.io.calls,[])
+
+
 if __name__ == "__main__":
     unittest.main()
