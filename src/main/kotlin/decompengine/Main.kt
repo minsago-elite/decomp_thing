@@ -942,6 +942,10 @@ private fun runWeb(args: List<String>) {
     } catch (_: java.net.BindException) {
         System.err.println("Cannot bind web server to $host:$port. Check --host or choose an unused --port.")
         kotlin.system.exitProcess(2)
+    } catch (failure: Exception) {
+        // A refused storage migration names its fixed code and whether bytes changed, not a stack trace.
+        System.err.println(decompengine.web.webStorageStartupGuidance(failure) ?: throw failure)
+        kotlin.system.exitProcess(2)
     }
     val urlHost = if (':' in host && !host.startsWith('[')) "[$host]" else host
     println("Serving decomp_engine ${uiMode.name.lowercase()} UI on http://$urlHost:${server.serverPort}$basePath")
