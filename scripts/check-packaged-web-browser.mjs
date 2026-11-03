@@ -264,7 +264,7 @@ async function makeTarget({ cspProbe = false, cacheEnabled = false, newWindow = 
     const type = event.type ?? (priorDocument ? 'Document' : undefined);
     const url = event.request.url.split('#')[0].split('?')[0];
     state.requestUrls.set(event.requestId, url);
-    state.requests.push({ method: event.request.method, url, type });
+    state.requests.push({ requestId: event.requestId, method: event.request.method, url, type });
     if (cacheEnabled) state.cacheRequests.push({ requestId: event.requestId, method: event.request.method, url, type });
     if (type === 'Document') {
       const request = { requestId: event.requestId, sequence: state.documentRequests.length,
@@ -278,7 +278,7 @@ async function makeTarget({ cspProbe = false, cacheEnabled = false, newWindow = 
     if (cacheEnabled) state.cacheRequestIds.add(event.requestId);
   }, sessionId);
   cdp.on('Network.responseReceived', (event) => {
-    const response = { url: event.response.url.split('#')[0].split('?')[0], status: event.response.status, type: event.type };
+    const response = { requestId: event.requestId, url: event.response.url.split('#')[0].split('?')[0], status: event.response.status, type: event.type };
     if (cacheEnabled) state.cacheResponses.push({ requestId: event.requestId, ...response,
       fromDiskCache: event.response.fromDiskCache ?? null, fromServiceWorker: event.response.fromServiceWorker ?? null });
     if (event.type === 'Document' || state.pendingDocumentRequests.has(event.requestId)) {

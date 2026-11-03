@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { assertGracefulShutdown, assertOnlyPinWrites, boundReport, findBootstrap, isProgressReadUrl, publishAtomically, scrubTokens, summarizeRequests } from './packaged-browser-restart.mjs';
+import { assertGracefulShutdown, assertOnlyPinWrites, boundReport, findBootstrap, hasOpenEventStream, isProgressReadUrl, matchingResponse, publishAtomically, scrubTokens, summarizeRequests } from './packaged-browser-restart.mjs';
 
 const origin = 'http://127.0.0.1:4000';
 
@@ -58,6 +58,19 @@ test('counts progress reads with cursor queries without matching unrelated route
   assert.equal(isProgressReadUrl(`${origin}/nested/api/v1/jobs/j/runs/r/snapshot?revision=1`), true);
   assert.equal(isProgressReadUrl(`${origin}/nested/api/v1/jobs?cursor=events`), false);
   assert.equal(isProgressReadUrl('/nested/api/v1/jobs/j/runs/r/events?after=204'), false);
+});
+
+test('correlates a mutation with its own response and tracks event stream closure', () => {
+  const request = { requestId: 'pin-put-1', method: 'PUT' };
+  assert.equal(matchingResponse(request, [
+    { requestId: 'earlier-pin-get', status: 200 },
+    { requestId: 'pin-put-1', status: 412 },
+  ])?.status, 412);
+  assert.equal(matchingResponse(request, [{ requestId: 'earlier-pin-get', status: 200 }]), null);
+  const streams = new Map([['events-1', { open: true }]]);
+  assert.equal(hasOpenEventStream(streams), true);
+  streams.get('events-1').open = false;
+  assert.equal(hasOpenEventStream(streams), false);
 });
 
 test('publishes by atomic rename and leaves no temporary file', async () => {

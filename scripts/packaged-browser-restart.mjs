@@ -66,6 +66,14 @@ export function isProgressReadUrl(value) {
   }
 }
 
+export function matchingResponse(request, responses) {
+  return responses.find(response => response.requestId === request.requestId) ?? null;
+}
+
+export function hasOpenEventStream(streams) {
+  return [...streams.values()].some(stream => stream.open);
+}
+
 /** Only the known session exchanges and progress-pin PUTs may mutate in this fixture. */
 export function assertOnlyPinWrites(requests, pinUrl, expectedPuts, sessionUrl = null, expectedSessionPosts = 0) {
   const mutations = requests.filter(r => !['GET', 'HEAD'].includes(r.method));
@@ -94,10 +102,20 @@ export async function qualifyRestart({ fixture, origin, makeTarget, cdp, evaluat
   const serverInstance = tab => evaluate(tab, `fetch('${basePath}/api/v1/bootstrap', { credentials: 'same-origin' }).then(r => r.json()).then(b => b.data.serverInstanceId ?? null)`);
   const track = tab => {
     tab.streams = 0;
+    tab.eventStreams = new Map();
     cdp.on('Network.requestWillBeSent', event => {
       if (event.type === 'Fetch' && new URL(event.request.url).pathname.endsWith('/events') &&
-        (event.request.headers.Accept ?? event.request.headers.accept) === 'text/event-stream') tab.streams++;
+        (event.request.headers.Accept ?? event.request.headers.accept) === 'text/event-stream') {
+        tab.streams++;
+        tab.eventStreams.set(event.requestId, { open: true, url: event.request.url });
+      }
     }, tab.sessionId);
+    for (const eventName of ['Network.loadingFinished', 'Network.loadingFailed']) {
+      cdp.on(eventName, event => {
+        const stream = tab.eventStreams.get(event.requestId);
+        if (stream) stream.open = false;
+      }, tab.sessionId);
+    }
     return tab;
   };
   const progressReads = tab => tab.requests.filter(r => isProgressReadUrl(r.url)).length;
@@ -129,27 +147,27 @@ export async function qualifyRestart({ fixture, origin, makeTarget, cdp, evaluat
   await openRun(old, 'attempt before restart');
   await readPin(old, 'pin policy before restart');
   await follow(old, 'activity before restart');
+  const automaticMutationsBaseline = old.requests.filter(r => !['GET', 'HEAD'].includes(r.method)).length;
+  assert.equal(old.requests.filter(r => r.method === 'PUT' && r.url === pinUrl).length, 0,
+    'The old tab must not write the pin before the deliberate pin action');
   const rowsBefore = await evaluate(old, rows);
   const snapshotBefore = await evaluate(old, `fetch('${basePath}/api/v1/jobs/${fixture.jobId}/runs/${RUN}/snapshot').then(r => r.json()).then(b => b.data.throughCursor)`);
   evidence.phases.push('first-process');
 
   // Graceful SIGTERM-only restart: same installation, data directory and port.
+  const mutationsBeforeRestart = old.requests.filter(r => !['GET', 'HEAD'].includes(r.method)).length;
+  assert.equal(mutationsBeforeRestart, automaticMutationsBaseline,
+    'Unexpected mutation occurred before the restart');
   const restarted = await restartApplication();
   assert.equal(restarted.origin, origin, 'Restart did not preserve the origin');
   evidence.shutdown = restarted.exit;
   evidence.sameOrigin = origin;
 
   // The old tab keeps its stale view until the server rejects it; it must clear, not replay.
-  const mutationsBeforeRejection = summarizeRequests(old.requests).mutations.length;
-  try {
-    await ready(old, `document.querySelector('section[aria-label="Progress retention"]') === null`, 'automatic private clearing');
-  } catch {
-    await evaluate(old, `${button('Read progress pin')}.click()`);
-    await ready(old, `document.body.innerText.includes('To access private work, open the sign-in link')`, 'server rejection clears old tab');
-  }
+  await ready(old, `document.querySelector('section[aria-label="Progress retention"]') === null`, 'automatic private clearing');
   assert.equal(await evaluate(old, `document.querySelector('ol[aria-label="Activity observations"]') === null && document.querySelector('section[aria-label="Progress retention"]') === null`), true,
     'Private attempt state survived restart rejection');
-  assert.equal(summarizeRequests(old.requests).mutations.length, mutationsBeforeRejection, 'A mutation was replayed after restart');
+  assert.equal(summarizeRequests(old.requests).mutations.length, mutationsBeforeRestart, 'A mutation was replayed during restart');
   assert.equal(await evaluate(old, 'localStorage.length + sessionStorage.length'), 0);
   evidence.privateStateCleared = true;
   evidence.automaticMutationReplays = 0;
@@ -190,8 +208,12 @@ export async function qualifyRestart({ fixture, origin, makeTarget, cdp, evaluat
     'hidden tab suspension (fail closed if the tab is not hidden)');
   const hiddenReads = progressReads(old);
   const peerReadsBefore = progressReads(peer);
+  await ready(old, `true`, 'hidden tab stream cancellation observation');
+  await delay(100);
+  assert.equal(hasOpenEventStream(old.eventStreams), false, 'A hidden tab left its activity event stream open');
   await delay(3000);
   assert.equal(progressReads(old), hiddenReads, 'A hidden tab made progress requests');
+  assert.equal(hasOpenEventStream(old.eventStreams), false, 'A hidden tab reopened its activity event stream');
   assert.equal(await evaluate(peer, 'document.visibilityState'), 'visible');
   evidence.backgroundTab = { hiddenRequests: 0, hiddenNoticeShown: true, foregroundReadsDuringObservation: progressReads(peer) - peerReadsBefore };
 
@@ -226,10 +248,13 @@ export async function qualifyRestart({ fixture, origin, makeTarget, cdp, evaluat
   for (const tab of [old, other]) assert.equal(await evaluate(tab, 'document.visibilityState'), 'visible',
     'Two visible windows are required for the stale-control scenario (fail closed)');
   const putsBefore = old.requests.filter(r => r.method === 'PUT').length;
+  const firstPinRequestIndex = old.requests.length;
   await evaluate(old, `${button('Pin progress history')}.click()`);
   await ready(old, `document.body.innerText.includes('Progress history is pinned.')`, 'first window pin');
-  const pinSucceeded = old.responses.filter(r => r.url === pinUrl && r.status === 200).length;
-  assert.ok(pinSucceeded >= 1);
+  const firstPinRequest = old.requests.slice(firstPinRequestIndex).find(r => r.method === 'PUT' && r.url === pinUrl);
+  assert.ok(firstPinRequest, 'First window did not issue the expected pin PUT');
+  assert.equal(matchingResponse(firstPinRequest, old.responses)?.status, 200,
+    'First window pin PUT did not receive an actual HTTP 200 response');
   const staleBefore = other.requests.length;
   await evaluate(other, `${button('Pin progress history')}.click()`);
   await ready(other, `document.body.innerText.includes('The attempt changed')`, 'stale second window rejection');
@@ -237,7 +262,8 @@ export async function qualifyRestart({ fixture, origin, makeTarget, cdp, evaluat
   const staleRequests = other.requests.slice(staleBefore);
   assertOnlyPinWrites(staleRequests, pinUrl, 1);
   assert.equal(staleRequests.length, 1, 'Stale rejection triggered an automatic retry or follow-up request');
-  assert.equal(other.responses.filter(r => r.url === pinUrl && r.status === 412).length, 1, 'Expected one actual 412 response');
+  const stalePut = staleRequests.find(r => r.method === 'PUT' && r.url === pinUrl);
+  assert.equal(matchingResponse(stalePut, other.responses)?.status, 412, 'Expected the stale PUT to receive an actual HTTP 412 response');
   assertOnlyPinWrites(old.requests, pinUrl, putsBefore + 1, `${origin}${basePath}/api/v1/session`, 3);
   assert.deepEqual([...old.exceptions, ...other.exceptions], []);
   await captureSafe(other, 'restart-stale-control.png');
