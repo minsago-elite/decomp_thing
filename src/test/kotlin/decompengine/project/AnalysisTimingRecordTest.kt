@@ -6,9 +6,11 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
+import java.nio.file.Path
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import kotlin.io.path.createDirectories
 import kotlin.io.path.readText
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -19,7 +21,10 @@ import kotlin.test.assertTrue
 class AnalysisTimingRecordTest {
     @Test
     fun `complete correlated worker phase stream is retained in a fresh sidecar`() {
-        val directory = Files.createTempDirectory(java.nio.file.Path.of("build"), "analysis-timing-record-").resolve("timings")
+        val directory =
+            Files.createTempDirectory(
+                Path.of("build", "analysis-timing-tests").createDirectories(), "analysis-timing-record-",
+            ).resolve("timings")
         val record = newRecord(directory)
         record.measure("worker-process-lifecycle") { Unit }
         val phases = listOf(
@@ -51,7 +56,10 @@ class AnalysisTimingRecordTest {
 
     @Test
     fun `truncated or mismatched worker telemetry remains incomplete without failing analysis`() {
-        val directory = Files.createTempDirectory(java.nio.file.Path.of("build"), "analysis-timing-incomplete-").resolve("timings")
+        val directory =
+            Files.createTempDirectory(
+                Path.of("build", "analysis-timing-tests").createDirectories(), "analysis-timing-incomplete-",
+            ).resolve("timings")
         val first = newRecord(directory)
         first.captureWorkerTelemetry(frame(first, 0, "begin", "application-initialization", 1L)
             .toByteArray(StandardCharsets.UTF_8), truncated = true)
