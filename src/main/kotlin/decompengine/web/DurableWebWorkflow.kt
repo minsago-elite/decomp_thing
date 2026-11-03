@@ -75,7 +75,7 @@ enum class DurableWebWorkflowInput {
 
 enum class WebWorkflowRequirement(val wireName: String) {
     SANDBOX("sandbox"), GHIDRA("ghidra"), AGENT_HARNESS("agent-harness"), REPAIR_VALIDATOR("repair-validator"),
-    EXPLORATION_HELPER_OWNERSHIP("exploration-helper-ownership"),
+    EXPLORATION_HELPER_OWNERSHIP("exploration-helper-ownership"), MODULE_COMPILATION_CONTAINMENT("module-compilation-containment"),
 }
 
 enum class DurableWebWorkflowMode(val wireName: String) { TOOLS("tools"), AGENT("agent"), EVIDENCE_ONLY("evidence-only") }
