@@ -2,6 +2,7 @@
 """Unprivileged provisioner controls; no compiler, mount or candidate executes."""
 import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -10,6 +11,7 @@ import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
+from contextlib import redirect_stdout
 from unittest.mock import patch
 import zipfile
 
@@ -193,6 +195,25 @@ class CompilerProvisioningControls(unittest.TestCase):
                 b'#include <...> search starts here:\nrelative/include\nEnd of search list.\n')
         with self.assertRaisesRegex(ValueError, 'byte bound'):
             PROVISIONER.parse_gcc_include_search_paths(b'x' * (1024 * 1024 + 1))
+
+    def test_failed_stddef_admission_retains_bounded_search_evidence_without_raw_diagnostics(self):
+        evidence = {'exitCode': 1, 'searchPaths': ['/usr/include'], 'stddefCandidates': [],
+                    'diagnosticsBytes': 42, 'diagnosticsSha256': 'a' * 64}
+        output = io.StringIO()
+        with redirect_stdout(output):
+            with self.assertRaisesRegex(ValueError, 'authenticated readable stddef'):
+                PROVISIONER.require_compiler_stddef_candidate(evidence)
+        retained = json.loads(output.getvalue())
+        self.assertEqual({'schemaVersion': 1, 'compilerIncludeSearch': evidence}, retained)
+        self.assertNotIn('fatal error', output.getvalue().lower())
+
+    def test_stddef_admission_emits_no_failure_record_when_candidate_is_authenticated(self):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            PROVISIONER.require_compiler_stddef_candidate(
+                {'exitCode': 0, 'searchPaths': ['/usr/include'], 'stddefCandidates': [{'sha256': 'b' * 64}],
+                 'diagnosticsBytes': 0, 'diagnosticsSha256': 'c' * 64})
+        self.assertEqual('', output.getvalue())
 
     def test_compiler_builtin_stddef_is_materialized_under_the_authenticated_include_alias(self):
         gcc_runtime = self.root / 'gcc'

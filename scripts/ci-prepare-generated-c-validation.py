@@ -258,6 +258,16 @@ def staged_compiler_include_search(staged_compiler, subprogram_prefix, mounted_r
             'diagnosticsBytes': len(stderr), 'diagnosticsSha256': hashlib.sha256(stderr).hexdigest()}
 
 
+def require_compiler_stddef_candidate(evidence):
+    if evidence['exitCode'] == 0 and evidence['stddefCandidates']:
+        return
+    # This stdout is retained as operator-provisioning.json by the hosted lane. Keep
+    # enough bounded, non-secret evidence to distinguish compiler failure from path
+    # projection failure without retaining arbitrary compiler diagnostics.
+    print(json.dumps({'schemaVersion': 1, 'compilerIncludeSearch': evidence}, sort_keys=True))
+    raise ValueError('registered compiler has no authenticated readable stddef include candidate')
+
+
 def preserve_compiler_builtin_headers(dependencies, gcc_runtime, headers_root, copier):
     """Expose GCC's required builtin stddef header through the declared /usr/include alias."""
     gcc_runtime = trusted(Path(gcc_runtime))
@@ -457,8 +467,7 @@ def prepare(args):
         compiler_include_search = staged_compiler_include_search(
             RUNTIME / 'tools' / 'cc', RUNTIME / 'tools',
             ((gcc_runtime, RUNTIME / 'gcc'), (Path('/usr/include'), RUNTIME / 'headers')))
-        if compiler_include_search['exitCode'] != 0 or not compiler_include_search['stddefCandidates']:
-            raise ValueError('registered compiler has no authenticated readable stddef include candidate')
+        require_compiler_stddef_candidate(compiler_include_search)
         link_parent = None
         for name in ('crt1.o', 'Scrt1.o', 'crti.o', 'crtn.o', 'libc.so', 'libc_nonshared.a'):
             path = Path(command([str(gcc), f'-print-file-name={name}'])).absolute().resolve()
