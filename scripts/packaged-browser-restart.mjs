@@ -128,6 +128,12 @@ export async function qualifyRestart({ fixture, origin, makeTarget, cdp, evaluat
     await evaluate(tab, `${button('Follow activity')}.click()`);
     await ready(tab, `(${rows}).length === 200`, label);
   };
+  const continueFollowing = async (tab, label) => {
+    await ready(tab, `[...document.querySelectorAll('button')].some(b => b.textContent === 'Continue activity on next page' && !b.disabled)`,
+      label + ' continuation control');
+    await evaluate(tab, `${button('Continue activity on next page')}.click()`);
+    await ready(tab, `(${rows}).length === 5 && document.body.innerText.includes('Following retained activity.')`, label);
+  };
   const readPin = async (tab, label, expected = 'Progress history is not pinned.') => {
     await ready(tab, `[...document.querySelectorAll('button')].some(b => b.textContent === 'Read progress pin' && !b.disabled)`, label + ' controls');
     await evaluate(tab, `${button('Read progress pin')}.click()`);
@@ -147,10 +153,11 @@ export async function qualifyRestart({ fixture, origin, makeTarget, cdp, evaluat
   await openRun(old, 'attempt before restart');
   await readPin(old, 'pin policy before restart');
   await follow(old, 'activity before restart');
+  const rowsBefore = await evaluate(old, rows);
+  await continueFollowing(old, 'activity following before restart');
   const automaticMutationsBaseline = old.requests.filter(r => !['GET', 'HEAD'].includes(r.method)).length;
   assert.equal(old.requests.filter(r => r.method === 'PUT' && r.url === pinUrl).length, 0,
     'The old tab must not write the pin before the deliberate pin action');
-  const rowsBefore = await evaluate(old, rows);
   // Cursor epochs are process-local; compare the durable sequence boundary instead.
   const snapshotBefore = await evaluate(old, `fetch('${basePath}/api/v1/jobs/${fixture.jobId}/runs/${RUN}/snapshot').then(r => r.json()).then(b => b.data.throughSequence)`);
   evidence.phases.push('first-process');
@@ -217,6 +224,7 @@ export async function qualifyRestart({ fixture, origin, makeTarget, cdp, evaluat
   await readPin(old, 'pin policy after restart');
   await follow(old, 'activity after restart');
   assert.deepEqual(await evaluate(old, rows), rowsBefore, 'Activity rows differ after restart');
+  await continueFollowing(old, 'activity following after restart');
   assert.equal(await evaluate(old, `fetch('${basePath}/api/v1/jobs/${fixture.jobId}/runs/${RUN}/snapshot').then(r => r.json()).then(b => b.data.throughSequence)`), snapshotBefore);
   assert.deepEqual(await fs.readFile(statePath), stateBefore, 'Reconciliation reads changed workflow-state bytes');
   await captureSafe(old, 'restart-reconciled.png');
@@ -227,6 +235,7 @@ export async function qualifyRestart({ fixture, origin, makeTarget, cdp, evaluat
   const peer = track(await makeTarget());
   await openRun(peer, 'second tab attempt');
   await follow(peer, 'second tab activity');
+  await continueFollowing(peer, 'second tab following activity');
   await cdp.call('Page.bringToFront', {}, peer.sessionId);
   await ready(old, `document.visibilityState === 'hidden' && document.body.innerText.includes('Background tab: activity reads are suspended.')`,
     'hidden tab suspension (fail closed if the tab is not hidden)');
