@@ -1,7 +1,7 @@
 import { activityCopy as copy, activityHistoryCopy } from '../copy/attempt';
 import { message as displayMessage } from '../shared/messages';
 import { PrivateSessionContext, usePrivateTransport } from '../session/PrivateTransport';
-import { useContext, useEffect, useRef, useState } from 'preact/hooks';
+import { useContext, useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import { ApiClientError, withApiFailureReference } from '../api/client';
 import type { Snapshot, WebEvent } from '../api/generated';
 import { ActivityReceiptAge } from './ActivityReceiptAge';
@@ -63,6 +63,10 @@ function LiveActivity({ jobId, runId, basePath, windowLinks }: { jobId: string; 
   const position = useRef<ActivityPosition>({ initialized: false, cursor: null, rows: [], last: null });
   const binding = useRef({ client, stream, jobId, runId });
   binding.current = { client, stream, jobId, runId };
+  const cancelReads = useRef<(() => void) | null>(null);
+  const readDeps = [client, stream, jobId, runId, following, reset, availability.online, availability.visible];
+  // Passive cleanup waits for a paint that a hidden tab may never deliver; cancel owned reads at commit (#526).
+  useLayoutEffect(() => () => cancelReads.current?.(), readDeps);
   useEffect(() => {
     if (!availability.online || !availability.visible) {
       reconcile.current = true;
@@ -183,9 +187,14 @@ function LiveActivity({ jobId, runId, basePath, windowLinks }: { jobId: string; 
         setFollowing(false);
       }
     };
+    const cancel = () => { controller.abort(); clearTimeout(timer); };
+    cancelReads.current = cancel;
     void poll();
-    return () => { controller.abort(); clearTimeout(timer); display.close(); };
-  }, [client, stream, jobId, runId, following, reset, availability.online, availability.visible]);
+    return () => {
+      if (cancelReads.current === cancel) cancelReads.current = null;
+      cancel(); display.close();
+    };
+  }, readDeps);
 
   const identities = useIdentityDigests(snapshot?.run ?? null);
   const visible = rows.filter(event => matchesActivity(event, group, taskDigest));
