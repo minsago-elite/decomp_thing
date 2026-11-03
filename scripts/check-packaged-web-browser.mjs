@@ -11,6 +11,7 @@ import { seedScale, qualifyScale, dashboardFiltersWithSnapshot } from './package
 import { seedLive, qualifyLive } from './packaged-browser-live.mjs';
 import { seedHistory, qualifyHistory } from './packaged-browser-history.mjs';
 import { seedLegacy, qualifyLegacy } from './packaged-browser-legacy.mjs';
+import { qualifyRestart, assertGracefulShutdown, scrubTokens, boundReport } from './packaged-browser-restart.mjs';
 import { qualifyUpgrade, qualifyUpgradeCache } from './packaged-browser-upgrade.mjs';
 import { qualifyAudit, assertAudit } from './packaged-browser-audit.mjs';
 
@@ -29,7 +30,8 @@ const { values } = parseArgs({ options: {
   help: { type: 'boolean', default: false },
 } });
 if (values.help) {
-  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|metadata|history|scale|live|proxy|upgrade|legacy|audit] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
+  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|metadata|history|restart|scale|live|proxy|upgrade|legacy|audit] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
+  console.log('restart: seeded history on one JVM, graceful SIGTERM-only restart on the same installation/data/port, fresh bootstrap and serverInstanceId, then two tabs with a progress-pin stale If-Match 412. No live worker, no restart-while-running, one Chromium only.');
   console.log('public: packaged home/Runtime/recovery; session: public plus local session journey; upload: session plus inert upload and lost-response retry; history: session plus preseeded inert multi-page attempts; scale: session plus 10,000 persisted jobs and keyboard pagination; proxy: real Vite HMR and session journey against packaged JVM; upgrade: previous JVM to current JVM on one origin with an old tab.');
   console.log('legacy: inert legacy HTML/polling with explicit test-owned state edits; no workflow execution.');
   console.log('audit: every route at 1440x900, 390x844, 320px and 200%/400% zoom in light/dark themes with contract-fixture API reads fulfilled in DevTools; measures reflow, text/focus contrast, target size, reduced motion, every packaged asset under CSP and navigation timing budgets.');
@@ -46,7 +48,7 @@ for (const option of ['archive', 'chrome', 'java-home', 'python']) {
   assert.ok(values[option] && isAbsolute(values[option]), `--${option} must name an absolute existing path; see --help`);
   await fs.access(values[option]);
 }
-assert.ok(['public', 'session', 'upload', 'metadata', 'history', 'scale', 'live', 'proxy', 'upgrade', 'legacy', 'audit'].includes(values.mode), '--mode must be public, session, upload, metadata, history, scale, live, proxy, upgrade, legacy or audit');
+assert.ok(['public', 'session', 'upload', 'metadata', 'history', 'restart', 'scale', 'live', 'proxy', 'upgrade', 'legacy', 'audit'].includes(values.mode), '--mode must be public, session, upload, metadata, history, restart, scale, live, proxy, upgrade, legacy or audit');
 if (values.mode === 'upgrade') {
   assert.ok(values['previous-archive'] && isAbsolute(values['previous-archive']), 'upgrade requires --previous-archive as an absolute existing ZIP path');
   await fs.access(values['previous-archive']);
@@ -178,6 +180,7 @@ async function snapshot(directory, relative = '') {
   return result;
 }
 
+const forcedKill = new WeakSet();
 async function stop(process) {
   if (!process || process.exitCode !== null || process.signalCode !== null) return;
   if (!process.pid && launchErrors.has(process)) return; // Spawn failed before any process existed.
@@ -185,6 +188,7 @@ async function stop(process) {
   const deadline = Date.now() + 5000;
   while (process.exitCode === null && process.signalCode === null && Date.now() < deadline) await delay(50);
   if (process.exitCode === null && process.signalCode === null) {
+    forcedKill.add(process);
     process.kill('SIGKILL');
     const killDeadline = Date.now() + 5000;
     while (process.exitCode === null && process.signalCode === null && Date.now() < killDeadline) await delay(50);
@@ -242,9 +246,9 @@ function correlateDocumentResponse(state, requestId, response, source) {
   state.pendingDocumentRequests.delete(requestId);
 }
 
-async function makeTarget({ cspProbe = false, cacheEnabled = false } = {}) {
+async function makeTarget({ cspProbe = false, cacheEnabled = false, newWindow = false } = {}) {
   assert.equal(typeof cacheEnabled, 'boolean', 'Browser cache policy must be explicit');
-  const { targetId } = await cdp.call('Target.createTarget', { url: 'about:blank' });
+  const { targetId } = await cdp.call('Target.createTarget', { url: 'about:blank', ...(newWindow ? { newWindow: true } : {}) });
   const { sessionId } = await cdp.call('Target.attachToTarget', { targetId, flatten: true });
   const state = { targetId, sessionId, cspProbe, cacheEnabled, requests: [], responses: [], exceptions: [], requestUrls: new Map(),
     cacheRequests: [], cacheResponses: [], cacheRequestIds: new Set(),
@@ -491,10 +495,11 @@ try {
   const { manifest, data } = installation;
   const legacyFixture = values.mode === 'legacy' ? await seedLegacy(data) : null;
   const historyFixture = values.mode === 'history' ? await seedHistory(data) : null;
+  const restartFixture = values.mode === 'restart' ? await seedHistory(data) : null;
   const scaleFixture = values.mode === 'scale' ? await seedScale(data) : null;
   const liveFixture = values.mode === 'live' ? await seedLive(data) : null;
-  const populated = !!(historyFixture || scaleFixture || liveFixture);
-  const libraryText = historyFixture ? 'synthetic-history.elf' : scaleFixture ? 'synthetic-project-09999.elf'
+  const populated = !!(historyFixture || restartFixture || scaleFixture || liveFixture);
+  const libraryText = historyFixture || restartFixture ? 'synthetic-history.elf' : scaleFixture ? 'synthetic-project-09999.elf'
     : liveFixture ? 'live-dashboard-2.elf' : 'No uploaded jobs yet.';
   let developmentPort;
   let browserOrigin;
@@ -653,6 +658,31 @@ try {
     report.requests.upgrade = tab.requests;
     report.requests.upgradeCacheWarm = cacheProbe.requests;
     report.jobDataCreated = false;
+  }
+  if (restartFixture) {
+    const restartApplication = async () => {
+      const previous = application;
+      const signalsSent = ['SIGTERM'];
+      previous.kill('SIGTERM');
+      await waitFor(() => previous.exitCode !== null || previous.signalCode !== null, 'graceful SIGTERM exit', 30000);
+      const exit = assertGracefulShutdown({ signalsSent, exitCode: previous.exitCode, signalCode: previous.signalCode });
+      const restartedOrigin = await launchApplication(installation, new URL(origin).port);
+      return { origin: restartedOrigin, exit };
+    };
+    const captureSafe = async (target, name) => {
+      const safe = await evaluate(target, `(() => {
+        if (location.hash !== '' || ${JSON.stringify(sensitiveValues)}.some(value => document.body.innerText.includes(value))) return false;
+        document.querySelectorAll('input, textarea, [contenteditable]').forEach(element => { element.style.visibility = 'hidden'; });
+        return true;
+      })()`);
+      assert.ok(safe, 'Refusing to capture a page with a bootstrap fragment or visible credential');
+      await capture(target, name);
+    };
+    const restarted = await qualifyRestart({ fixture: restartFixture, origin, makeTarget, cdp, evaluate, ready, waitFor, delay,
+      readOutput: () => applicationOutput, restartApplication, captureSafe, sensitiveValues });
+    report.restart = restarted.evidence;
+    report.requests.restart = restarted.requests;
+    report.jobDataCreated = true;
   }
   if (values.mode === 'audit') {
     report.audit = await qualifyAudit({ origin, repo, manifest, evidenceDirectory: root, cdp, makeTarget, evaluate, ready, capture, delay });
@@ -1103,6 +1133,9 @@ try {
 } finally {
   if (cdp) await cdp.call('Browser.close').catch(() => {});
   const cleanup = await Promise.allSettled([stop(browser), stop(application), stop(vite)]);
+  if (values.mode === 'restart' && application && forcedKill.has(application)) {
+    report.status = 'failed'; report.forcedShutdown = true; process.exitCode = 1;
+  }
   report.shutdownConfirmed = cleanup.every((result) => result.status === 'fulfilled');
   if (!report.shutdownConfirmed) {
     report.status = 'failed';
@@ -1124,7 +1157,8 @@ try {
       process.exitCode = 1;
     }
   }
-  await fs.writeFile(join(root, 'report.json'), JSON.stringify(report, null, 2) + '\n');
-  console.log(JSON.stringify(report, null, 2));
+  const retained = scrubTokens(boundReport(report), sensitiveValues);
+  await fs.writeFile(join(root, 'report.json'), JSON.stringify(retained, null, 2) + '\n');
+  console.log(JSON.stringify(retained, null, 2));
   console.log(`Shutdown ${report.shutdownConfirmed ? 'confirmed' : 'UNCONFIRMED'}. Report: ${join(root, 'report.json')}`);
 }

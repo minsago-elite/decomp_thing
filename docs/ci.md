@@ -228,6 +228,10 @@ regular XML input, including nested/case-variant XML. Gradle's regular binary
 result files remain allowed; symlink files/directories and nonregular entries
 refuse. Missing, linked, malformed, oversized, foreign, duplicate and empty reports refuse; the retained receipt binds the exact
 XML bytes/hash. Core runs the report gate's positive and negative controls.
+The `restart` packaged-browser mode (see `docs/web-browser-support.md`) restarts the packaged JVM
+with SIGTERM only and exercises two tabs and a stale progress-pin write; its sanitized report and
+screenshots are retained in `packaged-web-verification`.
+
 The focused `packaged-browser-expiry-test-reports` artifact retains the exact
 expiry XML and gate receipt for independent byte/hash checks without restoring
 browser journey payloads. The existing full packaged evidence upload is retained.
