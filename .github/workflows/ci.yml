@@ -62,7 +62,11 @@ jobs:
       - name: Verify packaged upgrade and cache evidence controls
         run: node scripts/test-packaged-browser-upgrade.mjs
       - name: Verify packaged accessibility and asset audit controls
-        run: node scripts/test-packaged-browser-audit.mjs
+        run: |
+          node scripts/test-packaged-browser-audit.mjs
+          node scripts/test-browser-engine-input.mjs
+          node scripts/test-packaged-browser-engine-adapter.mjs
+          node --check scripts/packaged-browser-engines.mjs
       - name: Verify packaged upload route readiness controls
         run: node scripts/test-packaged-browser-upload.mjs
       - name: Verify bounded archival cleanup controls
@@ -204,6 +208,12 @@ jobs:
           path: |
             build/test-results/test/TEST-decompengine.web.BrowserSessionExpiryTest.xml
             build/packaged-web-ci/browser-expiry-tests.json
+      - name: Verify legacy deep links remain inert in pinned Chrome
+        run: |
+          node scripts/check-packaged-web-browser.mjs \
+            --archive "$WEB_TEST_ARCHIVE" \
+            --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
+            --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode legacy --no-sandbox
       - name: Exercise packaged session and recovery in pinned Chrome
         run: |
           node scripts/check-packaged-web-browser.mjs \

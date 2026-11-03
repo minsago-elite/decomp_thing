@@ -282,7 +282,6 @@ class WebEventStreamTest {
             } finally { replacement.body().close() }
             println("Disconnect qualification: two dropped peers released in ${elapsedMs} ms of a 30000 ms lease; shutdown closed the replacement stream.")
         }
-
     companion object {
         private fun journal(sequences: List<Int>) = buildJsonObject {
             put("schemaVersion", 1); put("displayOnly", true); put("nextSequence", (sequences.lastOrNull() ?: -1) + 1)
