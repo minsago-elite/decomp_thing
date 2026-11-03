@@ -335,7 +335,11 @@ internal object GeneratedCSourceHeaderPolicy {
     private val directive = Regex("^\\s*(?:#|%:)\\s*([A-Za-z_][A-Za-z_0-9]*)(.*)$")
     private val guardName = Regex("^\\s*([A-Za-z_][A-Za-z_0-9]*)\\s*$")
     private val includeOperand = Regex("^\\s*(?:\"([^\"\\\\\\r\\n]+)\"|<([^<>\\r\\n]+)>)\\s*$")
-    private val assemblerFileRead = Regex("(?m)^\\s*\\.(?:include|incbin)\\b", RegexOption.IGNORE_CASE)
+    // The assembler accepts statements after target-specific separators and labels, so a
+    // line-start-only check misses inputs such as `nop; .incbin \"outside.bin\"`.
+    // Match the directive token anywhere in the decoded asm text; false positives merely
+    // refuse unsupported assembly and cannot grant file-read authority.
+    private val assemblerFileRead = Regex("\\.(?:include|incbin)\\b", RegexOption.IGNORE_CASE)
 
     fun requireAllowed(sourcePath: String, files: Map<String, ByteArray>) {
         require(sourcePath in files) { "generated-C policy source is absent from authenticated snapshot" }

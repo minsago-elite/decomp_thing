@@ -44,6 +44,8 @@ class GeneratedCSourceHeaderPolicyTest {
             "#pragma GCC dependency \"/tmp/transient.h\"\nint parser(void) { return 0; }",
             "#embed \"/tmp/transient.bin\"\nint parser(void) { return 0; }",
             "int parser(void) { __asm__(\".include \\\"/tmp/transient.s\\\"\"); return 0; }",
+            "int parser(void) { __asm__(\"nop; .include \\\"/tmp/transient.s\\\"\"); return 0; }",
+            "int parser(void) { __asm__(\"label: .incbin \\\"/tmp/transient.bin\\\"\"); return 0; }",
             """int parser(void) { __asm__("\056incbin \"/tmp/transient.bin\""); return 0; }""",
             "int parser(void) { __asm__(\".incbin \\\"/tmp/transient.bin\\\"\"); return 0; }",
         )
