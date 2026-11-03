@@ -1,4 +1,5 @@
 {
+  "schema": "contract.schema.json",
   "fixtures": [
     {
       "file": "fixtures/session.json",
@@ -814,44 +815,32 @@
       "valid": true
     },
     {
-      "file": "fixtures/queue-position-queued.json",
+      "file": "fixtures/bootstrap-workflow-launch.json",
       "valid": true
     },
     {
-      "file": "fixtures/queue-position-not-queued.json",
+      "file": "fixtures/invalid-launch-agent-contact.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-launch-multiple-workflows.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-launch-without-limits.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-launch-contract-version.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-launch-unknown-tool.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/bootstrap-without-launch.json",
       "valid": true
-    },
-    {
-      "file": "fixtures/queue-position-unavailable.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/invalid-queue-position-ahead.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-queue-position-exact.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-queue-position-identities.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/invalid-queue-position-queued-state.json",
-      "valid": false
-    },
-    {
-      "file": "fixtures/run-timed-out.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/run-infrastructure-failed.json",
-      "valid": true
-    },
-    {
-      "file": "fixtures/invalid-run-interrupted-timed-out.json",
-      "valid": false
     },
     {
       "file": "fixtures/job-organized.json",
@@ -986,6 +975,46 @@
       "reason": "An unborn branch has no commit, so no source provenance mapping."
     },
     {
+      "file": "fixtures/queue-position-queued.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/queue-position-not-queued.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/queue-position-unavailable.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-queue-position-ahead.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-queue-position-exact.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-queue-position-identities.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/invalid-queue-position-queued-state.json",
+      "valid": false
+    },
+    {
+      "file": "fixtures/run-timed-out.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/run-infrastructure-failed.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-run-interrupted-timed-out.json",
+      "valid": false
+    },
+    {
       "file": "fixtures/source-search-complete.json",
       "valid": true
     },
@@ -1057,6 +1086,5 @@
       "file": "fixtures/invalid-source-search-gaps-over-scope.json",
       "valid": false
     }
-  ],
-  "schema": "contract.schema.json"
+  ]
 }

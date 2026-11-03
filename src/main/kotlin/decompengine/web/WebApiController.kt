@@ -32,9 +32,13 @@ internal class WebApiController(
     private val sessions = WebSessionController(access)
     private val uploadProgress = WebUploadProgress()
     private val progressPins = WebProgressPinController(access, jobs, jobMutations)
-    private val workflowStarts = WebWorkflowStartController(jobs, jobMutations, assets.basePath)
+    private val workflowStarts = WebWorkflowStartController(jobs, jobMutations, assets.basePath) { request ->
+        webAdmissionPrerequisites(jobs.durableRegistrations(), request, readiness().prerequisites, harnessReadiness::inspectSandbox)
+    }
     private val cancellations = WebCancellationController(jobMutations, assets.basePath)
-    private val recoveries = WebRecoveryController(jobs, jobMutations, assets.basePath)
+    private val recoveries = WebRecoveryController(jobs, jobMutations, assets.basePath) { workflow, harness ->
+        webAdmissionPrerequisites(jobs.durableRegistrations(), workflow, harness, readiness().prerequisites, harnessReadiness::inspectSandbox)
+    }
     private val agentPreflights = WebAgentPreflightController(access, agentPreflight, assets.basePath)
     private val gitRoutes = WebGitController(access, jobs, jobMutations, git, assets.basePath)
     private val runPages = WebRunPages { jobId ->
@@ -56,11 +60,35 @@ internal class WebApiController(
     private val jobPages = WebJobPages(jobs::collectionRecords, checkpointedSource = jobs::collectionRecordsWithProgress)
     private val lifecycle = WebJobLifecycleController(access, jobs, jobMutations, assets.basePath, jobPages::invalidate)
 
+    // One private resource pattern per line, so independent route additions merge cleanly.
+    private val privateResources = listOf(
+        "(?:jobs|uploads)/[^/]+",
+        "jobs/[^/]+/runs",
+        "jobs/[^/]+/runs/[^/]+",
+        "jobs/[^/]+/runs/[^/]+/reports/(?:exploration|revision-validation)",
+        "jobs/[^/]+/runs/[^/]+/validation-history",
+        "jobs/[^/]+/runs/[^/]+/source-catalog",
+        "jobs/[^/]+/runs/[^/]+/revisions/[^/]+/sources",
+        "jobs/[^/]+/runs/[^/]+/revisions/[^/]+/source-search",
+        "jobs/[^/]+/runs/[^/]+/revisions/[^/]+/source-directories/[^/]+",
+        "jobs/[^/]+/runs/[^/]+/revisions/[^/]+/source-files/[^/]+(?:/(?:chunk|content))?",
+        "jobs/[^/]+/runs/[^/]+/snapshot",
+        "jobs/[^/]+/runs/[^/]+/events",
+        "jobs/[^/]+/runs/[^/]+/progress-pin",
+        "jobs/[^/]+/runs/[^/]+/cancel",
+        "jobs/[^/]+/runs/[^/]+/recover",
+        "jobs/[^/]+/runs/[^/]+/controls",
+        "jobs/[^/]+/artifacts/[^/]+/content",
+        "jobs/[^/]+/runs/[^/]+/queue-position",
+        "jobs/[^/]+/repositories(?:/[^/]+(?:/operations/[^/]+)?)?",
+        "jobs/[^/]+/(?:deletion-preview|operations/[^/]+)",
+    ).map(::Regex)
+
     fun route(exchange: HttpExchange): Boolean {
         val path = exchange.requestURI.rawPath
         if (!path.startsWith("${assets.basePath}api/")) return false
         val resource = path.removePrefix(prefix)
-        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs", "recovery", "agent/preflight", "storage", "storage/maintenance-preview") || resource.matches(Regex("(?:jobs|uploads)/[^/]+|jobs/[^/]+/(?:deletion-preview|operations/[^/]+|repositories(?:/[^/]+(?:/operations/[^/]+)?)?)|jobs/[^/]+/runs(?:/[^/]+(?:/reports/(?:exploration|revision-validation)|/validation-history|/source-catalog|/revisions/[^/]+/(?:sources|source-search|source-directories/[^/]+|source-files/[^/]+(?:/(?:chunk|content))?)|/snapshot|/events|/progress-pin|/cancel|/recover|/controls|/queue-position)?)?|jobs/[^/]+/artifacts/[^/]+/content")))) {
+        if (!path.startsWith(prefix) || !(resource in setOf("session", "bootstrap", "jobs", "recovery", "agent/preflight", "storage", "storage/maintenance-preview") || privateResources.any { resource.matches(it) })) {
             try {
                 val policy = if (exchange.requestMethod in setOf("POST", "PUT", "PATCH", "DELETE")) {
                     WebEndpointPolicy.jsonMutation(exchange.requestMethod)
@@ -142,13 +170,13 @@ internal class WebApiController(
                     }
                 }
                 resource == "agent/preflight" -> agentPreflights.handle(exchange)
+                resource.matches(Regex("jobs/[^/]+/repositories(?:/[^/]+(?:/operations/[^/]+)?)?")) -> gitRoutes.handle(exchange, resource.split('/'))
                 resource == "storage" || resource == "storage/maintenance-preview" -> lifecycle.storage(exchange, resource != "storage")
                 resource.matches(Regex("jobs/[^/]+/deletion-preview")) -> lifecycle.deletionPreview(exchange, resource.split('/')[1])
                 resource.matches(Regex("jobs/[^/]+/operations/[^/]+")) -> {
                     val parts = resource.split('/')
                     lifecycle.operation(exchange, parts[1], parts[3])
                 }
-                resource.matches(Regex("jobs/[^/]+/repositories(?:/[^/]+(?:/operations/[^/]+)?)?")) -> gitRoutes.handle(exchange, resource.split('/'))
                 resource.matches(Regex("jobs/[^/]+/runs/[^/]+/cancel")) -> {
                     val parts = resource.split('/')
                     cancellations.handle(exchange, parts[1], parts[3])
@@ -392,13 +420,15 @@ internal class WebApiController(
 
     /**
      * A handler authorizes only the method it serves, so its 405 names one method. Allow must list every
-     * method of the resource; a workflow start that is unavailable is not added.
+     * method of the resource. Workflow readiness may refuse a POST, but it does not make the documented
+     * start method disappear from the route contract.
      */
     private fun withResourceMethods(failure: WebAccessDenied, resource: String): WebAccessDenied {
         if (failure.status != 405) return failure
         val methods = when {
             resource == "jobs" || resource == "agent/preflight" -> setOf("GET", "POST")
             resource.matches(Regex("jobs/[^/]+/repositories")) -> setOf("GET", "POST")
+            resource.matches(Regex("jobs/[^/]+/runs")) -> setOf("GET", "POST")
             resource.matches(Regex("jobs/[^/]+/repositories/[^/]+(?:/operations/[^/]+)?")) -> setOf("GET")
             resource.matches(Regex("jobs/[^/]+/runs/[^/]+/progress-pin")) -> setOf("GET", "PUT")
             else -> return failure
@@ -416,15 +446,8 @@ internal class WebApiController(
         put("readiness", "degraded")
         put("sessionExpiresAt", credentials.session.expiresAt.toString())
         put("csrfToken", credentials.csrfToken)
-        put("capabilities", JsonArray(listOf(buildJsonObject {
-            put("id", "workflows")
-            put("state", "unavailable")
-            put("reasonCode", "PREVIEW_UNAVAILABLE")
-            put("message", "Workflow actions are unavailable in this preview.")
-            put("workflows", JsonArray(emptyList()))
-            put("agentContractVersion", JsonNull)
-            put("limits", JsonNull)
-        }, harnessCapability()) + git.capabilities()))
+        val readiness = readiness()
+        put("capabilities", JsonArray(webWorkflowCapabilities(jobs.durableRegistrations(), readiness) + harnessCapability(readiness) + git.capabilities()))
         // Configured ceilings for the API profile; unavailable resources remain
         // unavailable until their adapters enforce these limits and are enabled.
         put("limits", buildJsonObject {
@@ -461,8 +484,10 @@ internal class WebApiController(
     }
 
     // Configuration-only and cached: reports whether a harness is selectable, never that a workflow can run.
-    private fun harnessCapability(): JsonObject {
-        val readiness = harnessReadiness.current().withAgentInspection(agentPreflight.snapshot())
+    // Passive on page load: helper checks fold in only from a recent explicit operator inspection.
+    private fun readiness(): WebHarnessReadiness = harnessReadiness.current().withAgentInspection(agentPreflight.snapshot())
+
+    private fun harnessCapability(readiness: WebHarnessReadiness): JsonObject {
         return buildJsonObject {
             put("id", "harness")
             put("state", readiness.state)
@@ -471,6 +496,7 @@ internal class WebApiController(
             put("workflows", JsonArray(emptyList()))
             put("agentContractVersion", JsonNull)
             put("limits", JsonNull)
+            put("launch", JsonNull)
         }
     }
 

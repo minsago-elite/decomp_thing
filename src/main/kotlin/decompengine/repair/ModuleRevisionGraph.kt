@@ -5523,10 +5523,14 @@ private fun recordedHistoryCapture(
                     RepairRecordedValidationContext(state.profileId, state.budget))
             }, normalObservation(it.id, it.baselineId))
     }
+    // An assessed baseline accepts the root itself; expose it only with a proof bound to the root's source.
+    val acceptedBaseline = state.nodes.singleOrNull { it.id == state.fullyAcceptedHeadId && it.status == ModuleRevisionStatus.ROOT }
+        ?.let { root -> state.acceptedProof?.takeIf { it.sourceRevisionSha256 == root.sourceRevisionSha256 }
+            ?.let { proof -> RepairRecordedAcceptedBaseline(identities.revision(root.id), root.sourceRevisionSha256, proof.assurance) } }
     val snapshot = RepairHistorySnapshot(graphSha256, state.schemaVersion, RepairRecordedGraphWire.valueOf(wire.name),
         state.regressionCorpusSha256, identities.revision(state.headId), identity(state.provisionalHeadId),
         identity(state.fullyAcceptedHeadId), runs, attempts, pending,
-        state.retainedRegressionInputs.map { identities.case(it.id) })
+        state.retainedRegressionInputs.map { identities.case(it.id) }, acceptedBaseline)
     return RepairHistoryArtifactCapture(snapshot, artifactPaths)
 }
 
