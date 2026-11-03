@@ -837,12 +837,22 @@ def _fixed_child(manifest: dict, role: str) -> tuple[list[str], dict[str, str], 
     else:
         expected_exe = str(root / "v" / "tools" / "docker-rootless-extras" / "rootlesskit")
         expected_sha = PINNED_TOOL_HASHES["rootlesskit"]
-    safe_env = {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}
+    rootless_tools = root / "v" / "tools" / "docker-rootless-extras"
+    safe_env = {"PATH": (f"{rootless_tools}:{root}/v/tools/docker:/usr/bin:/bin"
+                         if role == "rootless" else "/usr/bin:/bin"),
+                "LANG": "C", "LC_ALL": "C"}
+    if role == "rootless":
+        safe_env["DOCKERD"] = str(root / "v" / "tools" / "docker" / "dockerd")
+        safe_env["DOCKERD_ROOTLESS_ROOTLESSKIT_STATE_DIR"] = str(root / "r")
     for key, value in env.items():
-        if key not in {"HOME", "XDG_RUNTIME_DIR", "DOCKER_CONFIG", "ROOTLESSKIT_STATE_DIR"} or "\0" in value:
+        if key not in {"HOME", "XDG_RUNTIME_DIR", "DOCKER_CONFIG", "DOCKERD",
+                       "DOCKERD_ROOTLESS_ROOTLESSKIT_STATE_DIR"} or "\0" in value:
             raise Refusal("supervisor environment contains an unapproved variable")
+        if key in {"DOCKERD", "DOCKERD_ROOTLESS_ROOTLESSKIT_STATE_DIR"} and \
+                value != safe_env.get(key):
+            raise Refusal("rootless wrapper path override differs from the authenticated bundle")
         safe_env[key] = value
-    if "DOCKERD" in env or any(key.startswith("DOCKER_") and key != "DOCKER_CONFIG" for key in env):
+    if any(key.startswith("DOCKER_") and key not in ("DOCKER_CONFIG", "DOCKERD") for key in env):
         raise Refusal("ambient Docker endpoint override is forbidden")
     return argv, safe_env, expected_exe, expected_sha
 
@@ -1396,7 +1406,8 @@ def fixed_launch_profile(root: Path, role: str, token: str, uid: int) -> tuple[l
         "--cgroup-parent", slice_name]
     return argv, {"HOME": str(root / "v/home"), "XDG_RUNTIME_DIR": f"/run/user/{uid}",
                   "DOCKER_CONFIG": str(root / "v/docker-config"),
-                  "ROOTLESSKIT_STATE_DIR": str(root / "r")}
+                  "DOCKERD": str(root / "v/tools/docker/dockerd"),
+                  "DOCKERD_ROOTLESS_ROOTLESSKIT_STATE_DIR": str(root / "r")}
 
 
 def repository_root() -> Path:

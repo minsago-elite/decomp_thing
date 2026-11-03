@@ -251,9 +251,10 @@ class OwnerTest(unittest.TestCase):
         self.assertEqual(argv[0], str(self.root / "v/tools/docker-rootless-extras/dockerd-rootless.sh"))
         self.assertEqual(argv[argv.index("--exec-root") + 1], str(self.root / "x"))
         self.assertEqual(argv[argv.index("--cgroup-parent") + 1], "dgr" + "a" * 32 + ".slice")
-        self.assertEqual(env["ROOTLESSKIT_STATE_DIR"], str(self.root / "r"))
+        self.assertEqual(env["DOCKERD"], str(self.root / "v/tools/docker/dockerd"))
+        self.assertEqual(env["DOCKERD_ROOTLESS_ROOTLESSKIT_STATE_DIR"], str(self.root / "r"))
         self.assertEqual(env["XDG_RUNTIME_DIR"], "/run/user/1000")
-        self.assertNotEqual(env["ROOTLESSKIT_STATE_DIR"], str(self.root / "control"))
+        self.assertNotEqual(env["DOCKERD_ROOTLESS_ROOTLESSKIT_STATE_DIR"], str(self.root / "control"))
         short_root = Path("/r/build/g/1234abcd")
         self.assertLessEqual(max(map(len, map(__import__("os").fsencode,
             owner_module.fixed_socket_inventory(short_root)))), 107)
@@ -272,6 +273,9 @@ class OwnerTest(unittest.TestCase):
         safe_argv, safe_env, expected_exe, _ = owner_module._fixed_child(manifest, "rootless")
         self.assertEqual(safe_argv, argv)
         self.assertEqual(expected_exe, str(self.root / "v/tools/docker-rootless-extras/rootlesskit"))
+        self.assertEqual(safe_env["DOCKERD"], str(self.root / "v/tools/docker/dockerd"))
+        self.assertEqual(safe_env["DOCKERD_ROOTLESS_ROOTLESSKIT_STATE_DIR"], str(self.root / "r"))
+        self.assertIn(str(self.root / "v/tools/docker-rootless-extras"), safe_env["PATH"].split(":"))
         self.assertNotIn("DOCKER_HOST", safe_env)
         for key, value in (("DOCKER_HOST", "tcp://ambient"), ("DOCKERD", "/tmp/dockerd"),
                            ("ROOTLESSKIT_FLAGS", "--detach-netns"), ("_DOCKERD_ROOTLESS_CHILD", "1")):
