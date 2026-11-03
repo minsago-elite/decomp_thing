@@ -12,6 +12,7 @@ import { seedStructure, qualifyStructure } from './packaged-browser-structure.mj
 import { seedLive, qualifyLive } from './packaged-browser-live.mjs';
 import { seedHistory, qualifyHistory } from './packaged-browser-history.mjs';
 import { seedSources, qualifySources } from './packaged-browser-sources.mjs';
+import { seedLogs, qualifyLogs } from './packaged-browser-logs.mjs';
 import { seedLegacy, qualifyLegacy } from './packaged-browser-legacy.mjs';
 import { qualifyUpgrade, qualifyUpgradeCache } from './packaged-browser-upgrade.mjs';
 import { qualifyAudit, assertAudit } from './packaged-browser-audit.mjs';
@@ -31,12 +32,13 @@ const { values } = parseArgs({ options: {
   help: { type: 'boolean', default: false },
 } });
 if (values.help) {
-  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|metadata|history|sources|scale|structure|live|proxy|upgrade|legacy|audit] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
+  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|metadata|history|logs|sources|scale|structure|live|proxy|upgrade|legacy|audit] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
   console.log('public: packaged home/Runtime/recovery; session: public plus local session journey; upload: session plus inert upload and lost-response retry; history: session plus preseeded inert multi-page attempts; sources: session plus two preseeded retained candidates browsed, previewed, highlighted and compared by keyboard; scale: session plus 10,000 persisted jobs and keyboard pagination; structure: session plus a 100,000-function recorded revision; proxy: real Vite HMR and session journey against packaged JVM; upgrade: previous JVM to current JVM on one origin with an old tab.');
   console.log('legacy: inert legacy HTML/polling with explicit test-owned state edits; no workflow execution.');
   console.log('audit: every route at 1440x900, 390x844, 320px and 200%/400% zoom in light/dark themes with contract-fixture API reads fulfilled in DevTools; measures reflow, text/focus contrast, target size, reduced motion, every packaged asset under CSP and navigation timing budgets.');
   console.log('metadata: session plus one inert header upload/retry, real packaged job metadata, maximum uint64 address, and simulated malformed-response recovery; no workflow execution or upload quota/scale measurement.');
   console.log('live: session plus authored inert job changes and real background listing reads; preserves focused row order and applies new jobs on explicit refresh.');
+  console.log('logs: session plus real bounded hostile recordings, deep-scroll filtering, whole-log search/download redaction, atomic replacement and SPA teardown heap/DOM budgets. Inert terminal attempts; does not claim live-worker follow qualification.');
   console.log('upgrade requires --previous-archive and distinct manifest builds with the old Runtime chunk absent from --archive. Its previous extraction is always removed before the current extraction, even with --keep-workdir.');
   console.log('Reports/screenshots stay in build/. Owned extraction/profile/socket directories are removed after confirmed shutdown unless --keep-workdir is set. Proxy requires npm ci --ignore-scripts under the pinned Node beforehand.');
   process.exit(0);
@@ -48,7 +50,7 @@ for (const option of ['archive', 'chrome', 'java-home', 'python']) {
   assert.ok(values[option] && isAbsolute(values[option]), `--${option} must name an absolute existing path; see --help`);
   await fs.access(values[option]);
 }
-assert.ok(['public', 'session', 'upload', 'metadata', 'history', 'sources', 'scale', 'structure', 'live', 'proxy', 'upgrade', 'legacy', 'audit'].includes(values.mode), '--mode must be public, session, upload, metadata, history, sources, scale, structure, live, proxy, upgrade, legacy or audit');
+assert.ok(['public', 'session', 'upload', 'metadata', 'history', 'logs', 'sources', 'scale', 'structure', 'live', 'proxy', 'upgrade', 'legacy', 'audit'].includes(values.mode), '--mode must be public, session, upload, metadata, history, logs, sources, scale, structure, live, proxy, upgrade, legacy or audit');
 if (values.mode === 'upgrade') {
   assert.ok(values['previous-archive'] && isAbsolute(values['previous-archive']), 'upgrade requires --previous-archive as an absolute existing ZIP path');
   await fs.access(values['previous-archive']);
@@ -492,13 +494,14 @@ try {
   recordInstallation(installation);
   const { manifest, data } = installation;
   const legacyFixture = values.mode === 'legacy' ? await seedLegacy(data) : null;
+  const logFixture = values.mode === 'logs' ? await seedLogs(data) : null;
   const historyFixture = values.mode === 'history' ? await seedHistory(data) : null;
   const sourcesFixture = values.mode === 'sources' ? await seedSources(data) : null;
   const scaleFixture = values.mode === 'scale' ? await seedScale(data) : null;
   const structureFixture = values.mode === 'structure' ? await seedStructure(data) : null;
   const liveFixture = values.mode === 'live' ? await seedLive(data) : null;
-  const populated = !!(historyFixture || sourcesFixture || scaleFixture || structureFixture || liveFixture);
-  const libraryText = historyFixture ? 'synthetic-history.elf' : sourcesFixture ? 'synthetic-sources.elf' : scaleFixture ? 'synthetic-project-09999.elf'
+  const populated = !!(logFixture || historyFixture || sourcesFixture || scaleFixture || structureFixture || liveFixture);
+  const libraryText = (logFixture || historyFixture) ? 'synthetic-history.elf' : sourcesFixture ? 'synthetic-sources.elf' : scaleFixture ? 'synthetic-project-09999.elf'
     : structureFixture ? 'synthetic-structure.elf'
     : liveFixture ? 'live-dashboard-2.elf' : 'No uploaded jobs yet.';
   let developmentPort;
@@ -668,7 +671,7 @@ try {
     assert.equal(await fs.stat(data).then(() => true, () => false), false, 'Fixture-backed audit created job data');
     report.jobDataCreated = false;
   }
-  if (values.mode === 'public' || values.mode === 'session' || values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'history' || values.mode === 'sources' || values.mode === 'scale' || values.mode === 'structure' || values.mode === 'live') {
+  if (values.mode === 'public' || values.mode === 'session' || values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'history' || values.mode === 'logs' || values.mode === 'sources' || values.mode === 'scale' || values.mode === 'structure' || values.mode === 'live') {
     const identityExpression = `(() => ({ buildId: document.querySelector('meta[name="decomp-ui-build"]')?.content, applicationVersion: document.querySelector('meta[name="decomp-application-version"]')?.content, page: location.pathname, text: document.body.innerText }))()`;
     const home = await makeTarget();
     await cdp.call('Page.navigate', { url: `${origin}/nested/` }, home.sessionId);
@@ -825,7 +828,7 @@ try {
     report.requests = {};
   }
 
-  if (values.mode === 'session' || values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'history' || values.mode === 'sources' || values.mode === 'scale' || values.mode === 'structure' || values.mode === 'live' || values.mode === 'proxy') {
+  if (values.mode === 'session' || values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'history' || values.mode === 'logs' || values.mode === 'sources' || values.mode === 'scale' || values.mode === 'structure' || values.mode === 'live' || values.mode === 'proxy') {
     const bootstrapUrl = await waitFor(() => applicationOutput.split(/\s+/).find((part) => part.startsWith(browserOrigin + '/nested/#bootstrap=')), 'local bootstrap handoff');
     const token = new URL(bootstrapUrl).hash.slice('#bootstrap='.length);
     sensitiveValues.push(token);
@@ -853,7 +856,18 @@ try {
       assert.equal(apiProof.buildId, manifest.buildId);
       report.backendBootstrap = apiProof;
     }
-    await ready(authenticated, `document.body.innerText.includes('${libraryText}')`, 'persistent job library');
+    try {
+      await ready(authenticated, `document.body.innerText.includes('${libraryText}')`, 'persistent job library');
+    } catch (failure) {
+      // Keep the bounded route/status evidence when a seeded library fails to load.
+      // Do not retain response bodies, request identifiers, or the bootstrap token.
+      const visible = await evaluate(authenticated, `({ pathname: location.pathname,
+        alerts: [...document.querySelectorAll('[role="alert"]')].map(node => node.innerText.slice(0, 240)),
+        libraryVisible: document.body.innerText.includes(${JSON.stringify(libraryText)}) })`).catch(() => null);
+      const requests = authenticated.requests.slice(-12).map(({ method, url }) => ({ method, route: urlPath(url) }));
+      const responses = authenticated.responses.slice(-12).map(({ url, status }) => ({ route: urlPath(url), status }));
+      throw new Error(`Persistent job library diagnostic: ${JSON.stringify({ visible, requests, responses })}`, { cause: failure });
+    }
     await evaluate(authenticated, `(() => {
       const field = [...document.querySelectorAll('label')].find(label => label.textContent.startsWith('Filename or label search')).querySelector('input');
       field.value = 'absent fixture'; field.dispatchEvent(new Event('input', { bubbles: true }));
@@ -954,6 +968,7 @@ try {
     assert.ok(runTab.requests.every(request => ['GET', 'HEAD'].includes(request.method)));
     report.attemptHistory = { navigation: true, directReload: true, missingExplained: true, mutationRequests: 0 };
 
+    if (logFixture) report.logs = await qualifyLogs({ fixture: logFixture, makeTarget, cdp, evaluate, ready, waitFor, browserOrigin });
     if (scaleFixture) report.scale = await qualifyScale({ fixture: scaleFixture, makeTarget, cdp, evaluate, ready, browserOrigin });
     if (structureFixture) report.structure = await qualifyStructure({ fixture: structureFixture, makeTarget, cdp, evaluate, ready, browserOrigin });
     if (liveFixture) {

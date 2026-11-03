@@ -43,6 +43,9 @@ internal class WebRedactionPolicy private constructor(
     /** Replace every redactable span; stable when applied twice. */
     fun text(value: String): String = text(value, paths = true)
 
+    /** Log adapters may label known roots after credential spans, before generic path masking. */
+    fun credentials(value: String): String = text(value, paths = false)
+
     private fun text(value: String, paths: Boolean): String {
         if (value.isEmpty()) return value
         if (value.length > MAXIMUM_TEXT_CHARACTERS) return OVERSIZED_MARK
@@ -156,9 +159,10 @@ internal class WebRedactionPolicy private constructor(
                 starts = IntArray(source.length + 1)
                 ends = IntArray(source.length + 1)
             }
-            val beginnings = requireNotNull(starts)
-            beginnings[start]++
-            ends!![end]++
+            val startCounts = requireNotNull(starts)
+            val endCounts = requireNotNull(ends)
+            startCounts[start]++
+            endCounts[end]++
         }
         for (literal in literals) {
             var start = source.indexOf(literal)
@@ -217,8 +221,11 @@ internal class WebRedactionPolicy private constructor(
         private const val CREDENTIAL_KEYS = "api[_-]?key|access[_-]?key|secret[_-]?key|access[_-]?token|refresh[_-]?token|" +
             "auth[_-]?token|client[_-]?secret|password|passwd|passphrase|secret|token|(?:proxy-)?authorization"
         private val DOCUMENT_CREDENTIAL_KEY = Regex("(?i)(?:$CREDENTIAL_KEYS|cookie|set-cookie)")
-        private val URL_USER_INFO =Regex("(?i)\\b([a-z][a-z0-9+.-]{1,31}://)[^/\\s:@\"'<>]{1,256}:[^/\\s@\"'<>]{1,512}@")
+        private val URL_USER_INFO = Regex("(?i)\\b([a-z][a-z0-9+.-]{1,31}://)[^/\\s:@\"'<>]{1,256}(?::[^/\\s@\"'<>]{0,512})?@")
         private val CREDENTIAL_PATTERNS = listOf(
+            // Recorded HTTP cookie headers may carry session secrets unknown to the listener's environment.
+            // Keep the header name but withhold the entire value (including cookie attributes).
+            Regex("(?i)(\\b(?:set-cookie|cookie)[\"']?[\\t ]*:[\\t ]*)[^\\r\\n]*") to true,
             // Authorization schemes are extensible. For quoted values, keep the opening quote and
             // redact through its matching boundary; for raw header text, redact the whole line value.
             Regex("""(?i)\b((?:proxy-)?authorization["']?\s*[:=]\s*")(?:(?:[^"\\\r\n]|\\[^\r\n]?))*+""") to true,
@@ -228,11 +235,17 @@ internal class WebRedactionPolicy private constructor(
             // redact to the line boundary rather than stopping at the first comma or quote.
             Regex("(?i)\\b((?:proxy-)?authorization[\"']?\\s*[:=]\\s*)digest\\s+[^\\r\\n<>]+") to true,
             Regex("(?i)\\b((?:proxy-)?authorization[\"']?\\s*[:=]\\s*)(?:basic|bearer|token|digest)\\s+[^\\s,;\"'<>]+") to true,
+            // Digest carries quoted comma-separated parameters, not one opaque token. Withhold
+            // the entire unquoted authorization value through the line boundary (also for JSON-like logs
+            // and underscore-prefixed names such as HTTP_AUTHORIZATION).
+            Regex("(?i)(?:\\b|(?<=_))((?:proxy-)?authorization[\"']?\\s*[:=][\\t ]*)(?![\"'])[^\\r\\n]+") to true,
             Regex("(?i)\\b(bearer\\s+)[A-Za-z0-9._~+/=-]{8,}") to true,
             // Consume escaped quotes and the full bounded input, including unterminated previews.
             // Possessive repetition avoids recursive backtracking on long/escape-heavy credentials.
-            Regex("""(?i)\b((?:$CREDENTIAL_KEYS)["']?\s*[:=]\s*)(?:"(?:[^"\\\r\n]|\\[^\r\n]?)*+(?:"|(?=[\r\n]|$))|'(?:[^'\\\r\n]|\\[^\r\n]?)*+(?:'|(?=[\r\n]|$)))""") to true,
-            Regex("(?i)\\b((?:$CREDENTIAL_KEYS)[\"']?\\s*[:=]\\s*)(?!\\[redacted])[^\\s,;\"'&<>]+") to true,
+            // An underscore is a word character: permit the credential suffix of DATABASE_PASSWORD
+            // or CUSTOM_API_KEY without an unbounded environment-name prefix/backtracking pattern.
+            Regex("""(?i)(?:\b|(?<=_))((?:$CREDENTIAL_KEYS)["']?\s*[:=]\s*)(?:"(?:[^"\\\r\n]|\\[^\r\n]?)*+(?:"|(?=[\r\n]|$))|'(?:[^'\\\r\n]|\\[^\r\n]?)*+(?:'|(?=[\r\n]|$)))""") to true,
+            Regex("(?i)(?:\\b|(?<=_))((?:$CREDENTIAL_KEYS)[\"']?\\s*[:=]\\s*)(?!\\[redacted])[^\\s,;\"'&<>]+") to true,
             Regex("(?<![A-Za-z0-9_-])(?:sk-[A-Za-z0-9_-]{16,}|sk-ant-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9]{20,}|" +
                 "github_pat_[A-Za-z0-9_]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35})") to false,
         )
@@ -260,15 +273,25 @@ internal class WebRedactionPolicy private constructor(
             require(named.all { it.length in 8..4096 }) {
                 "nonempty credential-named environment values must contain 8 to 4096 characters"
             }
+            // Logs and retained event prose are projected one line at a time. Register every
+            // nonempty line of multiline credentials too (PEM keys, CRLF or CR configuration),
+            // while keeping the full literal for other adapters. Refuse fragments too short to
+            // mask safely instead of serving a partially protected credential.
+            val fragments = named.flatMap { it.lineSequence().filter(String::isNotEmpty).toList() }
+            require(fragments.all { it.length in 8..4096 }) {
+                "nonempty credential lines must contain 8 to 4096 characters"
+            }
             // Long opaque configured values are secret-shaped regardless of their name. Path lists and
             // prose are left to the path rules; short generic values would corrupt public vocabulary.
             val opaque = sensitiveValues.filter { value ->
                 value.length in 20..4096 && value.none(Char::isWhitespace) && '/' !in value && '\\' !in value &&
                     value.any(Char::isLetter) && value.any(Char::isDigit)
             }
-            val literals = (named + opaque).filter { it.length in 8..4096 }.distinct()
-                .sortedByDescending(String::length).take(4096)
-            require(literals.sumOf { it.length.toLong() } <= 1024 * 1024) { "redaction literals exceed the configured limit" }
+            val literals = (named + fragments + opaque).filter { it.length in 8..4096 }.distinct()
+                .sortedByDescending(String::length)
+            require(literals.size <= 4096 && literals.sumOf { it.length.toLong() } <= 1024 * 1024) {
+                "redaction literals exceed the configured limit"
+            }
             val roots = privateRoots.flatMap { root ->
                 val absolute = root.toAbsolutePath().normalize()
                 listOfNotNull(absolute, try {

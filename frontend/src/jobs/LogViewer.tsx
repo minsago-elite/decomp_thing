@@ -131,9 +131,14 @@ export function LogViewer({ jobId, runId, basePath }: { jobId: string; runId: st
   }, [read]);
 
   const ended = attemptState !== null && terminal.has(attemptState);
+  // A terminal attempt can still have pages after the reader's current window. Keep
+  // following until the recorded tail has been fetched; terminal only means no more
+  // lines will be produced, not that this client already has them.
+  const caughtUp = !buffer || lastLine(buffer) >= buffer.totalLines;
+  const finished = ended && (status.state !== 'ready' || caughtUp);
   useEffect(() => {
     // A missing log is followed too: the build publishes it only when it finishes.
-    if (follow !== 'on' || !availability.visible || !availability.online || (status.state !== 'ready' && status.state !== 'missing') || ended) return;
+    if (follow !== 'on' || !availability.visible || !availability.online || (status.state !== 'ready' && status.state !== 'missing') || finished) return;
     let timer: ReturnType<typeof setTimeout> | undefined = setTimeout(() => {
       timer = undefined;
       // Background following must never supersede an in-flight deliberate navigation/search.
@@ -143,7 +148,7 @@ export function LogViewer({ jobId, runId, basePath }: { jobId: string; runId: st
         () => followRef.current === 'on' ? 'end' : null, { follow: true }).then(() => { if (mounted.current) setFollowTick(value => value + 1); });
     }, FOLLOW_INTERVAL_MS);
     return () => { if (timer !== undefined) clearTimeout(timer); };
-  }, [follow, availability.visible, availability.online, status.state, ended, followTick, read]);
+  }, [follow, availability.visible, availability.online, status.state, finished, followTick, read]);
 
   const lines = buffer?.lines ?? [];
   const displayed = find ? lines.filter(line => line.text.includes(find)) : lines;
@@ -180,15 +185,15 @@ export function LogViewer({ jobId, runId, basePath }: { jobId: string; runId: st
   const meta = buffer?.meta;
   return <section aria-labelledby="log-title" aria-busy={status.state === 'loading'}>
     <h2 id="log-title">{copy.title}</h2>
-    <p>{displayMessage(copy.boundary, { policy: <code>web-log-v1</code> })}</p>
+    <p>{displayMessage(copy.boundary, { policy: <code>{copy.redactionPolicy}</code> })}</p>
     {status.state === 'loading' && <p role="status">{copy.loading}</p>}
     {status.state === 'missing' && <>
       <p role="status">{copy.missing}</p>
       <div class="job-actions">
         <button type="button" onClick={() => { void read({ tail: 'true', limit: '200' }, 'end', () => 'end'); }}>{copy.checkAgain}</button>
-        {!ended && <button type="button" onClick={() => { pause(follow === 'on' ? 'off' : 'on'); }}>{follow === 'on' ? copy.pause : copy.follow}</button>}
+        {!finished && <button type="button" onClick={() => { pause(follow === 'on' ? 'off' : 'on'); }}>{follow === 'on' ? copy.pause : copy.follow}</button>}
       </div>
-      {follow === 'on' && !ended && <p>{copy.waitingForLog}</p>}
+      {follow === 'on' && !finished && <p>{copy.waitingForLog}</p>}
     </>}
     {status.state === 'oversized' && <p role="status">{displayMessage(copy.oversized, { limit: status.limit })}</p>}
     {error && <p role="alert">{error}</p>}
@@ -210,16 +215,21 @@ export function LogViewer({ jobId, runId, basePath }: { jobId: string; runId: st
           void read({ fromLine: String(lastLine(buffer) + 1n), limit: String(LOG_PAGE_LINES) }, 'end');
         }}>{copy.loadLater}</button>
         <button type="button" onClick={() => { void read({ tail: 'true', limit: '200' }, 'end', () => 'end'); }}>{copy.newest}</button>
-        {!ended && <button type="button" onClick={() => {
+        {!finished && <button type="button" onClick={() => {
           if (follow === 'on') { pause(); return; }
           pause('on'); pendingScroll.current = 'end'; setFind('');
         }}>{follow === 'on' ? copy.pause : follow === 'scrolled' ? copy.resume : copy.follow}</button>}
         <a class="button-link" href={apiPath(basePath, `/jobs/${jobId}/runs/${runId}/logs/build/content`)} download={`build-${runId}.log`}>{copy.download}</a>
       </div>
-      <p role="status">{ended ? copy.ended : follow === 'scrolled' ? copy.pausedScrolled : follow === 'off' ? copy.paused
+      <p role="status">{finished || (ended && follow !== 'on') ? copy.ended : follow === 'scrolled' ? copy.pausedScrolled : follow === 'off' ? copy.paused
         : !availability.visible || !availability.online ? copy.hidden : copy.following}</p>
       <div class="log-search">
-        <label>{copy.find}<input value={find} maxLength={128} onInput={event => { setFind(event.currentTarget.value); pause(follow === 'on' ? 'scrolled' : follow); }} /></label>
+        <label>{copy.find}<input value={find} maxLength={128} onInput={event => {
+          pause(follow === 'on' ? 'scrolled' : follow);
+          // Filtering changes row indices; the previous scroll position may be past every match.
+          pendingScroll.current = buffer.firstLine;
+          setFind(event.currentTarget.value);
+        }} /></label>
         <p>{find ? displayMessage(copy.findScope, { count: displayed.length, first: buffer.firstLine.toString(), last: lastLine(buffer).toString() }) : copy.findEmpty}</p>
         <form onSubmit={event => {
           event.preventDefault();

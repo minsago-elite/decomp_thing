@@ -86,7 +86,7 @@ class WebArchiveEvidenceTest {
             // Other namespaces have no archive: each is refused as a missing pinned read, never served from this attempt.
             // A missing final file is refused by the pinned read itself; a missing namespace directory by the store.
             val missingFile = assertFailsWith<decompengine.jobs.JobStoreException> { archives.read(job.id) }
-            assertEquals("artifact is unavailable", missingFile.message)
+            assertEquals("artifact is unavailable or its path changed", missingFile.message)
             val missingNamespace = assertFailsWith<decompengine.jobs.JobStoreException> {
                 archives.read(job.id, reportPrefix = "reports/runs/run_other")
             }

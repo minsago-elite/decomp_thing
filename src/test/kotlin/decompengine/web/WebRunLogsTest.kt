@@ -149,6 +149,132 @@ class WebRunLogsTest {
         assertEquals("0", search.getValue("matchCount").jsonPrimitive.content)
     }
 
+    @Test fun `shared configured credentials and private paths are masked before display cuts and search`() {
+        val canary = "ConfiguredLogCanary0123456789"
+        val policy = WebRedactionPolicy.create(mapOf("TEST_API_KEY" to canary), listOf(canary), emptyList())
+        val protected = WebRunLogs(WebLogRedaction(mapOf("job-store" to root), policy))
+        val (jobId, run) = attempt()
+        val inputs = listOf("raw $canary", "API_KEY=synthetic-key-123", "Authorization: Bearer synthetic-bearer-123",
+            "password=\"alpha\\\"bravo charlie\"", "token='unterminated credential", "/home/another-user/private-file",
+            "C:\\Users\\another-user\\private-file", "x".repeat(4096) + " secret=\"hidden suffix\"")
+        val capture = assertNotNull(protected.capture(inputs.joinToString("\n").toByteArray(), sha))
+        assertEquals(inputs.size, capture.redactedLines)
+        val forbidden = listOf(canary, "synthetic-key-123", "synthetic-bearer-123", "bravo", "unterminated credential",
+            "another-user", "hidden suffix")
+        val download = protected.download(jobId, run, capture, Instant.EPOCH).decodeToString()
+        for (secret in forbidden) {
+            assertFalse(download.contains(secret))
+            assertFalse(capture.allLines().any { it.text.contains(secret) || it.searchText.contains(secret) })
+            val result = protected.range(jobId, run, capture, false, WebRunLogs.Query(1, false, 1, secret), Instant.EPOCH)
+            assertEquals("0", result.getValue("search").jsonObject.getValue("matchCount").jsonPrimitive.content)
+        }
+    }
+
+    @Test fun `recorded session cookie headers and passwordless URL userinfo are redacted end to end`() {
+        val (jobId, run) = attempt()
+        val secrets = listOf(
+            "BuildCookieCanary0123456789",
+            "BuildSetCookieCanary0123456789",
+            "BuildJsonCookieCanary0123456789",
+            "BuildUrlCanary0123456789",
+        )
+        val input = listOf(
+            "Cookie: session=${secrets[0]}",
+            "Set-Cookie: session=${secrets[1]}; Path=/; HttpOnly; SameSite=Strict",
+            "{\"Cookie\": \"session=${secrets[2]}\"}",
+            "Fetching https://${secrets[3]}@example.com/repo.git",
+        ).joinToString("\n")
+        val capture = assertNotNull(logs.capture(input.toByteArray(), sha))
+        assertEquals(4, capture.redactedLines)
+        val download = logs.download(jobId, run, capture, Instant.EPOCH).decodeToString()
+        val range = logs.range(jobId, run, capture, false, WebRunLogs.Query(1, false, 10, null), Instant.EPOCH)
+        for (secret in secrets) {
+            assertFalse(download.contains(secret))
+            assertFalse(capture.allLines().any { it.text.contains(secret) || it.searchText.contains(secret) })
+            assertFalse(range.toString().contains(secret))
+            assertEquals("0", logs.range(jobId, run, capture, false,
+                WebRunLogs.Query(1, false, 1, secret), Instant.EPOCH)
+                .getValue("search").jsonObject.getValue("matchCount").jsonPrimitive.content)
+        }
+        assertTrue(download.contains("Cookie: [redacted]"))
+        assertTrue(download.contains("Set-Cookie: [redacted]"))
+        assertTrue(download.contains("{\"Cookie\": [redacted]"))
+    }
+
+    @Test fun `multiline configured credentials are redacted without losing source line numbering`() {
+        val parts = listOf("-----BEGIN PRIVATE KEY-----", "SyntheticPemBodyCanary0123456789abcdef", "-----END PRIVATE KEY-----")
+        val (jobId, run) = attempt()
+        for (separator in listOf("\n", "\r\n", "\r")) {
+            val secret = parts.joinToString(separator, postfix = separator)
+            val policy = WebRedactionPolicy.create(mapOf("TEST_PRIVATE_KEY" to secret), listOf(secret), emptyList())
+            val protected = WebRunLogs(WebLogRedaction(emptyMap(), policy))
+            // The log format itself is LF/CRLF, independent of the configured secret's newline style.
+            val bytes = ("before\n" + parts.joinToString("\r\n", postfix = "\r\n") + "after\n").toByteArray()
+            val capture = assertNotNull(protected.capture(bytes, sha))
+            assertEquals(5, capture.totalLines)
+            assertEquals(listOf(1L, 2L, 3L, 4L, 5L), capture.allLines().map { it.number })
+            assertEquals("before", capture.line(0).text); assertEquals("after", capture.line(4).text)
+            assertEquals(3, capture.redactedLines)
+            val range = protected.range(jobId, run, capture, false, WebRunLogs.Query(1, false, 500, null), Instant.EPOCH)
+            val download = protected.download(jobId, run, capture, Instant.EPOCH).decodeToString()
+            for (part in parts) {
+                assertFalse(range.toString().contains(part))
+                assertFalse(download.contains(part))
+                assertFalse(capture.allLines().any { it.searchText.contains(part) })
+                val search = protected.range(jobId, run, capture, false, WebRunLogs.Query(1, false, 1, part), Instant.EPOCH)
+                assertEquals("0", search.getValue("search").jsonObject.getValue("matchCount").jsonPrimitive.content)
+            }
+        }
+    }
+
+    @Test fun `unmaskable credential fragments and literal overflow are refused rather than dropped`() {
+        for (secret in listOf("long-credential-line\nshort", "long-credential-line\r\n  \r\nother-long-line")) {
+            assertFailsWith<IllegalArgumentException> {
+                WebRedactionPolicy.create(mapOf("TEST_PRIVATE_KEY" to secret), listOf(secret), emptyList())
+            }
+        }
+        val tooMany = (1..4097).associate { "TEST_TOKEN_$it" to "UniqueCredentialCanary$it" }
+        assertFailsWith<IllegalArgumentException> { WebRedactionPolicy.create(tooMany, emptyList(), emptyList()) }
+    }
+
+    @Test fun `credential suffix assignments are masked without configured literals`() {
+        val (jobId, run) = attempt()
+        val assignments = listOf(
+            "DATABASE_PASSWORD=unquoted-build-only-canary" to "unquoted-build-only-canary",
+            "CUSTOM_API_KEY=\"quoted build-only canary\"" to "quoted build-only canary",
+            "AWS_SECRET_ACCESS_KEY='single-quoted-build-only-canary'" to "single-quoted-build-only-canary",
+            "_DATABASE_PASSWORD=leading-underscore-build-canary" to "leading-underscore-build-canary",
+        )
+        val capture = assertNotNull(logs.capture(assignments.joinToString("\n") { it.first }.toByteArray(), sha))
+        assertEquals(assignments.size, capture.redactedLines)
+        val download = logs.download(jobId, run, capture, Instant.EPOCH).decodeToString()
+        for ((_, secret) in assignments) {
+            assertFalse(download.contains(secret))
+            assertFalse(capture.allLines().any { it.text.contains(secret) || it.searchText.contains(secret) })
+            assertEquals("0", logs.range(jobId, run, capture, false, WebRunLogs.Query(1, false, 1, secret), Instant.EPOCH)
+                .getValue("search").jsonObject.getValue("matchCount").jsonPrimitive.content)
+        }
+    }
+
+    @Test fun `complete Digest authorization values are withheld through the end of the line`() {
+        val (jobId, run) = attempt()
+        val value = "Digest username=\"alice-digest-canary\", realm=\"build-digest-canary\", nonce=\"nonce-digest-canary\", " +
+            "uri=\"/artifact\", response=\"response-digest-canary-0123456789\""
+        for (header in listOf("Authorization: $value", "Proxy-Authorization: $value", "HTTP_AUTHORIZATION=$value",
+            "{\"Authorization\": \"$value\"}")) {
+            val capture = assertNotNull(logs.capture((header + "\npublic\n").toByteArray(), sha))
+            assertEquals(2, capture.totalLines); assertEquals("public", capture.line(1).text)
+            assertTrue(capture.line(0).redacted)
+            val download = logs.download(jobId, run, capture, Instant.EPOCH).decodeToString()
+            for (secret in listOf("alice-digest-canary", "build-digest-canary", "nonce-digest-canary", "response-digest-canary-0123456789")) {
+                assertFalse(download.contains(secret))
+                assertFalse(capture.line(0).searchText.contains(secret))
+                assertEquals("0", logs.range(jobId, run, capture, false, WebRunLogs.Query(1, false, 1, secret), Instant.EPOCH)
+                    .getValue("search").jsonObject.getValue("matchCount").jsonPrimitive.content)
+            }
+        }
+    }
+
     @Test fun `downloads share the live redaction and carry provenance`() {
         val (jobId, run) = attempt()
         val capture = assertNotNull(logs.capture("first $root/a.c\n\u001b[1mbold\n".toByteArray(), sha))

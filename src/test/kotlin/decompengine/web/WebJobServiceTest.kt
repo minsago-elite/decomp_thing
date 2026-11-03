@@ -2,6 +2,7 @@ package decompengine.web
 
 import decompengine.testing.RecoveryMatrixEvidence
 import decompengine.testing.recoveryMatrixTempDirectory as createTempDirectory
+import kotlinx.serialization.json.*
 import org.junit.jupiter.api.extension.ExtendWith
 import decompengine.jobs.JobStore
 import decompengine.jobs.AtomicUploadPublisher
@@ -730,6 +731,55 @@ class WebJobServiceTest {
                     assertTrue(callers.awaitTermination(5, TimeUnit.SECONDS))
                 }
             }
+        }
+    }
+
+    @Test fun `large nested build recordings do not make the seeded job library unavailable`() = withStore { store, root ->
+        val job = store.createFromUpload("synthetic-history.elf", elfFixture())
+        val limits = decompengine.jobs.WorkflowExecutionLimits(60_000uL, 15_000uL, 1_048_576uL, 16uL)
+        val history = mutableListOf<decompengine.jobs.WorkflowAttempt>()
+        var previous: String? = null
+        decompengine.jobs.WorkflowAttemptStore.open(root).use { owner ->
+            var snapshot = assertIs<decompengine.jobs.WorkflowJobInspection.Available>(owner.inspect(job.id)).snapshot
+            repeat(55) { index ->
+                val queued = owner.create(job.id, snapshot.version,
+                    decompengine.jobs.NewWorkflowAttempt(decompengine.jobs.WorkflowKind.RECONSTRUCT, limits, previousRunId = previous))
+                val running = owner.transition(job.id, queued.attempt.runId, queued.attempt.version,
+                    decompengine.jobs.WorkflowTransition.Start)
+                val state = when (index % 3) {
+                    0 -> decompengine.jobs.WorkflowRunState.COMPLETED
+                    1 -> decompengine.jobs.WorkflowRunState.FAILED
+                    else -> decompengine.jobs.WorkflowRunState.INTERRUPTED
+                }
+                val reason = when (state) {
+                    decompengine.jobs.WorkflowRunState.COMPLETED -> decompengine.jobs.WorkflowTerminalReason.COMPLETED
+                    decompengine.jobs.WorkflowRunState.FAILED -> decompengine.jobs.WorkflowTerminalReason.FAILED
+                    else -> decompengine.jobs.WorkflowTerminalReason.PROCESS_INTERRUPTED
+                }
+                val candidate = if (state == decompengine.jobs.WorkflowRunState.COMPLETED)
+                    decompengine.jobs.WorkflowCandidate("revision_fixture_$index", "a".repeat(64)) else null
+                val finished = owner.transition(job.id, running.attempt.runId, running.attempt.version,
+                    decompengine.jobs.WorkflowTransition.Finish(state, reason, candidate,
+                        decompengine.jobs.WorkflowUsage(inputTokens = ULong.MAX_VALUE)))
+                snapshot = finished.snapshot
+                previous = finished.attempt.runId
+                history += finished.attempt
+            }
+        }
+        assertEquals(55, history.size)
+        val log = root.resolve(job.id).resolve("reports/runs/${history[3].runId}/source-tree/reports/build.log")
+        Files.createDirectories(log.parent)
+        Files.write(log, ByteArray(2_000_000) { 'x'.code.toByte() } + byteArrayOf(0xff.toByte(), 0x0a))
+
+        WebJobService(store, JobAnalyzer { _, _ -> error("Unexpected execution") }, inertReconstructor).use { service ->
+            service.initializeExistingStorage()
+            val rows = service.collectionRecords().toList()
+            assertEquals(1, rows.size)
+            assertEquals(job.id, rows.single().getValue("jobId").toString().trim('"'))
+            assertTrue(rows.single().toString().toByteArray(Charsets.UTF_8).size <= 4096)
+            val page = WebJobPages(service::collectionRecords).page("fixture-owner", WebJobQuery(), null)
+            assertEquals(job.id, page.getValue("items").jsonArray.single().jsonObject.getValue("jobId").jsonPrimitive.content)
+            assertEquals(listOf(job.id), service.dashboardRows().jobs.map { it.id })
         }
     }
 

@@ -262,6 +262,13 @@ jobs:
             --archive "$WEB_TEST_ARCHIVE" \
             --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
             --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode structure --no-sandbox
+      - name: Qualify large replaced log recordings and browser teardown budgets
+        run: |
+          node --test scripts/test-packaged-browser-logs.mjs
+          node scripts/check-packaged-web-browser.mjs \
+            --archive "$WEB_TEST_ARCHIVE" \
+            --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
+            --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode logs --no-sandbox
       - name: Audit packaged routes for reflow, contrast, focus, assets under CSP and timing
         run: |
           node scripts/check-packaged-web-browser.mjs \

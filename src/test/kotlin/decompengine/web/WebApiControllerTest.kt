@@ -416,10 +416,81 @@ class WebApiControllerTest {
             for (secret in listOf("hunter2", "LogCanary0123456789abcdef", "/home/redaction-canary/private.c")) {
                 assertFalse(safeDownload.body().contains(secret), secret)
             }
-            Files.write(log, ByteArray(1_000_001) { '\n'.code.toByte() })
-            assertEquals("oversized", assertEnvelopeRaw(request(server, "$path?tail=true&limit=1", headers = headers), "logRange")
+
+            // Credential syntax and private paths must be absent in all authenticated projections,
+            // including whole-log search beyond the display cut. Query echo is not match evidence.
+            val canaries = listOf("log-key-canary-012345", "log-bearer-canary-67890", "quoted canary value", "/home/other-user/private.txt")
+            Files.writeString(log, "api_key=${canaries[0]}\nAuthorization: Bearer ${canaries[1]}\n" +
+                "x".repeat(4096) + " password=\"${canaries[2]}\" ${canaries[3]}\n")
+            val safe = assertEnvelopeRaw(request(server, path, headers = headers), "logRange")
+            assertEquals("3", safe.getValue("redactedLines").jsonPrimitive.content)
+            val safeLines = safe.getValue("lines").jsonArray.map { it.jsonObject.getValue("text").jsonPrimitive.content }
+            val safeDownload = request(server, "$path/content", headers = headers + ("Accept" to "text/plain"))
+            assertEquals(200, safeDownload.statusCode())
+            for (canary in canaries) {
+                assertFalse(safe.toString().contains(canary))
+                assertFalse(safeDownload.body().contains(canary))
+                val query = java.net.URLEncoder.encode(canary, Charsets.UTF_8)
+                val searched = assertEnvelopeRaw(request(server, "$path?search=$query", headers = headers), "logRange")
+                assertEquals("0", searched.getValue("search").jsonObject.getValue("matchCount").jsonPrimitive.content)
+                assertTrue(searched.getValue("search").jsonObject.getValue("matches").jsonArray.isEmpty())
+            }
+            for (line in safeLines) assertTrue(safeDownload.body().contains(line))
+
+            // Unknown build-time environment assignments and complete Digest fields must not
+            // depend on the web listener having the same credential values in its environment.
+            val unknownCredentials = listOf(
+                "DATABASE_PASSWORD=build-only-password-canary" to listOf("build-only-password-canary"),
+                "CUSTOM_API_KEY=\"quoted build-only-key canary\"" to listOf("quoted build-only-key canary"),
+                "Authorization: Digest username=\"digest-user-canary\", nonce=\"digest-nonce-canary\", response=\"digest-response-canary\"" to
+                    listOf("digest-user-canary", "digest-nonce-canary", "digest-response-canary"),
+            )
+            for ((assignment, fragments) in unknownCredentials) {
+                Files.writeString(log, assignment + "\n")
+                val projected = assertEnvelopeRaw(request(server, path, headers = headers), "logRange")
+                assertEquals("1", projected.getValue("redactedLines").jsonPrimitive.content)
+                val exported = request(server, "$path/content", headers = headers + ("Accept" to "text/plain"))
+                assertEquals(200, exported.statusCode())
+                for (fragment in fragments) {
+                    assertFalse(projected.toString().contains(fragment))
+                    assertFalse(exported.body().contains(fragment))
+                    val query = java.net.URLEncoder.encode(fragment, Charsets.UTF_8)
+                    val searched = assertEnvelopeRaw(request(server, "$path?search=$query", headers = headers), "logRange")
+                    assertEquals("0", searched.getValue("search").jsonObject.getValue("matchCount").jsonPrimitive.content)
+                }
+            }
+
+            // Rejected directories, leaf links and parent links are unavailable, never proven absent.
+            Files.delete(log)
+            Files.createDirectory(log)
+            fun assertUnavailable() {
+                assertError(request(server, path, headers = headers), 503, "JOB_STORAGE_UNAVAILABLE")
+                assertError(request(server, "$path/content", headers = headers + ("Accept" to "text/plain")), 503, "JOB_STORAGE_UNAVAILABLE")
+            }
+            assertUnavailable()
+            Files.delete(log)
+            Files.createSymbolicLink(log, log.resolveSibling("absent-target"))
+            assertUnavailable()
+            Files.delete(log)
+            Files.delete(log.parent)
+            Files.createSymbolicLink(log.parent, root.resolve("absent-parent"))
+            assertUnavailable()
+            Files.delete(log.parent)
+            Files.createDirectory(log.parent)
+            // A genuinely absent leaf remains a missing result.
+            assertEquals("missing", assertEnvelopeRaw(request(server, path, headers = headers), "logRange")
                 .getValue("state").jsonPrimitive.content)
-            assertError(request(server, "$path/content", headers = headers + ("Accept" to "text/plain")), 413, "LOG_TOO_LARGE")
+
+            // Both independent capture budgets must report unavailable output, not a missing file.
+            for (oversized in listOf(
+                ByteArray(1_000_001) { '\n'.code.toByte() },
+                ByteArray(WebRunLogs.MAXIMUM_LOG_BYTES + 1) { 'x'.code.toByte() },
+            )) {
+                Files.write(log, oversized)
+                assertEquals("oversized", assertEnvelopeRaw(request(server, "$path?tail=true&limit=1", headers = headers), "logRange")
+                    .getValue("state").jsonPrimitive.content)
+                assertError(request(server, "$path/content", headers = headers + ("Accept" to "text/plain")), 413, "LOG_TOO_LARGE")
+            }
         } finally { server.stop(); root.toFile().deleteRecursively() }
     }
 
