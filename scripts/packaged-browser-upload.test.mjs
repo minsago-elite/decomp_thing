@@ -81,7 +81,7 @@ test('qualifyUpload waits for the recreated picker after restoring a retry ticke
       },
     }), error => error === reachedRetrySelection);
     assert.equal(selections, 2);
-    assert.deepEqual(readinessLabels, ['workspace upload control', 'workspace upload control',
+    assert.deepEqual(readinessLabels, ['workspace upload control',
       'upload selection rendered', 'lost upload response explanation', 'retry ticket restored after reload',
       'retry session and picker restored after reload', 'workspace upload control']);
   } finally {
