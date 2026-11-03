@@ -926,8 +926,13 @@ object SourceTreeGenerator {
             if (checkpoint.executionEvidencePath == null) configuredExecutionEvidenceFile?.deleteIfExists()
             attemptPath.deleteIfExists()
             projectDir.resolve("reports/modules/${module.id}.attempt.execution.json").deleteIfExists()
-            if (reusedAccepted == null) selectedReconstructor.reconcileSessionCheckpoint(
-                request, checkpoint.accepted, checkpoint.sourceSha256,
+            val reconciliationRequest = if (cached != null &&
+                request.sessionEvidenceFingerprint != checkpoint.fingerprint) {
+                request.copy(sessionEvidenceFingerprint = checkpoint.fingerprint)
+            } else request
+            selectedReconstructor.reconcileSessionCheckpoint(
+                reconciliationRequest,
+                checkpoint.accepted, checkpoint.sourceSha256,
                 checkpoint.executionRequestSha256, checkpoint.executionEvidenceSha256,
             )
             val normalizedSource = sourcePath.readText()

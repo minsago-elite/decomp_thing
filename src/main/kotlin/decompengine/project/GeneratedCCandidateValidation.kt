@@ -331,7 +331,7 @@ internal object GeneratedCCandidateValidation {
  * reviewed standard headers retained by the registered generated-C runtime.
  */
 internal object GeneratedCSourceHeaderPolicy {
-    private val systemHeaders = setOf("stddef.h", "stdint.h", "stdio.h", "stdlib.h")
+    private val systemHeaders = setOf("stddef.h", "stdint.h", "stdio.h", "stdlib.h", "string.h")
     private val directive = Regex("^\\s*(?:#|%:)\\s*([A-Za-z_][A-Za-z_0-9]*)(.*)$")
     private val guardName = Regex("^\\s*([A-Za-z_][A-Za-z_0-9]*)\\s*$")
     private val includeOperand = Regex("^\\s*(?:\"([^\"\\\\\\r\\n]+)\"|<([^<>\\r\\n]+)>)\\s*$")

@@ -160,6 +160,11 @@ class CompilerProvisioningControls(unittest.TestCase):
         path.chmod(0o555)
         return path
 
+    def test_contained_module_runtime_closure_includes_accepted_standard_headers(self):
+        for header in ('<stdlib.h>', '<string.h>'):
+            with self.subTest(header=header):
+                self.assertIn(header, PROVISIONER.HEADER_CLOSURE_SOURCE)
+
     def test_compiler_include_search_evidence_is_bounded_and_pins_stddef(self):
         include = self.root / 'gcc/include'
         include.mkdir(parents=True)
