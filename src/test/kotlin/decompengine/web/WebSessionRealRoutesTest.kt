@@ -49,7 +49,9 @@ class WebSessionRealRoutesTest {
     }
 
     private fun storageDigest(): Map<String, String> = Files.walk(root).use { paths ->
-        paths.filter { Files.isRegularFile(it) }.toList().associate { file ->
+        // The sensitive-action audit is append-only server evidence (session exchanges are recorded as their
+        // handler exits, possibly after the response); it is not job state a read could change.
+        paths.filter { Files.isRegularFile(it) && !root.relativize(it).startsWith(WebAuditLog.DIRECTORY) }.toList().associate { file ->
             root.relativize(file).toString() to MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(file)).joinToString("") { "%02x".format(it) }
         }
     }

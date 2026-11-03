@@ -32,6 +32,17 @@ export async function seedLive(root) {
   return { root, jobs, input };
 }
 
+const ownerLocks = ['.web-owner.lock', '.workflow-owner.lock'];
+
+// Session exchanges legitimately create the server-owned audit directory. Keep an
+// exact root inventory; do not ignore dotfiles or relax the owner/job checks.
+export async function assertLiveStorageInventory(root, jobs) {
+  assert.deepEqual((await fs.readdir(root)).sort(),
+    ['.web-audit', ...ownerLocks, ...jobs.map(job => job.id)].sort());
+  const audit = await fs.lstat(join(root, '.web-audit'));
+  assert.ok(audit.isDirectory() && !audit.isSymbolicLink(), 'Audit storage must be a real directory');
+}
+
 export async function qualifyLive({ fixture, makeTarget, cdp, evaluate, ready, waitFor, browserOrigin }) {
   const tab = await makeTarget();
   await cdp.call('Page.bringToFront', {}, tab.sessionId);
@@ -42,8 +53,7 @@ export async function qualifyLive({ fixture, makeTarget, cdp, evaluate, ready, w
   assert.deepEqual(await evaluate(tab, rows), initial);
   // The running JVM owns these cooperative locks. Inspect metadata only and keep
   // both original files in place throughout the authored fixture updates.
-  const ownerLocks = ['.web-owner.lock', '.workflow-owner.lock'];
-  assert.deepEqual((await fs.readdir(fixture.root)).sort(), [...ownerLocks, ...fixture.jobs.map(job => job.id)].sort());
+  await assertLiveStorageInventory(fixture.root, fixture.jobs);
   const initialOwners = await Promise.all(ownerLocks.map(name => fs.lstat(join(fixture.root, name))));
   for (const owner of initialOwners) assert.ok(owner.isFile() && !owner.isSymbolicLink());
   const heldPath = '/nested/jobs/' + fixture.jobs[0].id;
@@ -80,7 +90,7 @@ export async function qualifyLive({ fixture, makeTarget, cdp, evaluate, ready, w
   assert.equal(await evaluate(tab, `[...document.querySelectorAll('button')].some(button => button.textContent === 'Resume live updates' && button.getAttribute('aria-pressed') === 'true')`), true);
 
   const finalJobs = [changed, fixture.jobs[1], added];
-  assert.deepEqual((await fs.readdir(fixture.root)).sort(), [...ownerLocks, ...finalJobs.map(job => job.id)].sort());
+  await assertLiveStorageInventory(fixture.root, finalJobs);
   for (const [index, name] of ownerLocks.entries()) {
     const finalOwner = await fs.lstat(join(fixture.root, name));
     assert.ok(finalOwner.isFile() && !finalOwner.isSymbolicLink());
