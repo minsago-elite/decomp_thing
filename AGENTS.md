@@ -15,6 +15,16 @@
 - Create or update a GitHub issue when new roadmap work is discovered. Do not add planning checklists to `ROADMAP.md`; it is retained only as a deprecated migration pointer.
 - Files under `roadmap/` are historical design and benchmark context, not live project status, unless an active issue explicitly references them.
 
+## Agent Orchestration and Model Routing
+
+- Fetch and integrate the latest upstream state before implementation so branches do not drift unnecessarily. Keep pull requests ready for review when their implementation is ready.
+- Use the orchestration tools for provider- or model-specific work. Do not silently substitute a different provider or model when the requested one is unavailable; report the limitation and continue only with independent work.
+- For backend work, use Opus 5.5 for substantial planning, Luna for implementation, and Sol 6.1 as the technical middle layer for design decisions, integration, and review. Prefer Sol 6.1 through the orchestration tools rather than implementing backend changes directly with Codex.
+- Delegate hard backend tasks with detailed implementation decisions to Fable or Astra when those agents are available. Keep the work focused on a concrete acceptance boundary and retain exact-source test and review evidence.
+- For frontend work, use Opus 5.5 through Claude Code at low reasoning. Use Sonnet 5.5 only when a second frontend implementation or review pass is useful.
+- Fan out independent work when requested or when it shortens the critical path. Give every agent explicit file or module ownership, tell agents they share the repository, and require them to accommodate others' changes without reverting them.
+- Commit focused checkpoints frequently and push them to the intended pull request. Do not merge while required checks are failing or pending or while Codex review threads remain unresolved.
+
 ## CI and Pull Requests
 
 - Prefer GitHub Actions for primary verification and qualification. Use short local checks for fast feedback when practical.
