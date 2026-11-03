@@ -43,11 +43,11 @@ export function scrubTokens(value, tokens) {
 
 /** Keeps a retained report under a byte bound by replacing request lists with counts. */
 export function boundReport(report, maxBytes = MAX_REPORT_BYTES) {
-  if (JSON.stringify(report).length <= maxBytes) return report;
+  if (Buffer.byteLength(JSON.stringify(report), 'utf8') <= maxBytes) return report;
   const bounded = structuredClone(report);
   if (bounded.requests) bounded.requests = Object.fromEntries(Object.entries(bounded.requests)
     .map(([name, list]) => [name, Array.isArray(list) ? { count: list.length, truncated: true } : list]));
-  assert.ok(JSON.stringify(bounded).length <= maxBytes, 'Report exceeds its byte bound after truncation');
+  assert.ok(Buffer.byteLength(JSON.stringify(bounded), 'utf8') <= maxBytes, 'Report exceeds its byte bound after truncation');
   return bounded;
 }
 

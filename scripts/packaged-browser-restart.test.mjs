@@ -34,6 +34,8 @@ test('bounds reports by replacing request lists with counts', () => {
   const big = { status: 'passed', requests: { a: Array.from({ length: 1000 }, () => ({ method: 'GET', url: 'x'.repeat(50) })) } };
   assert.deepEqual(boundReport(big, 2000).requests, { a: { count: 1000, truncated: true } });
   assert.throws(() => boundReport({ blob: 'x'.repeat(5000), requests: {} }, 1000));
+  assert.throws(() => boundReport({ blob: 'é'.repeat(600), requests: {} }, 1000),
+    'UTF-8 encoded report bytes must be bounded, not JavaScript code units');
 });
 
 test('only pin PUTs to the selected attempt are accepted mutations', () => {
