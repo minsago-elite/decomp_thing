@@ -15,6 +15,8 @@ import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.Path
+import java.nio.file.NoSuchFileException
+import java.nio.file.attribute.BasicFileAttributes
 import java.nio.file.StandardCopyOption.ATOMIC_MOVE
 import java.security.SecureRandom
 import java.time.Clock
@@ -286,7 +288,12 @@ class ManagedGitRepositories(
                 val uncommitted = if (initializedUnborn) hasIndexEntries(runner, directory.resolve(GIT_DIR), directory.resolve(WORK_TREE)) ||
                     !unchangedInitialization(record, directory.resolve(WORK_TREE)) else observation.dirty
                 if (uncommitted) reasons += GitRetentionReason.UNCOMMITTED_CHANGES
-                if (unpushed(runner, directory.resolve(GIT_DIR), observation.head.objectId)) reasons += GitRetentionReason.UNPUSHED_COMMITS
+                val gitDir = directory.resolve(GIT_DIR)
+                // A stash reflog can retain older saved work even when the current stash tip is
+                // contained by a remote-tracking ref. Any stash ref or reflog therefore holds storage.
+                if (hasStashOrReflog(runner, gitDir) || unpushed(runner, gitDir, observation.head.objectId)) {
+                    reasons += GitRetentionReason.UNPUSHED_COMMITS
+                }
             } catch (_: Exception) {
                 reasons += GitRetentionReason.UNREADABLE
             }
@@ -307,6 +314,44 @@ class ManagedGitRepositories(
     private fun unchangedInitialization(record: GitRepositoryRecord, workTree: Path): Boolean {
         val expected = record.sourceManifestSha256?.takeIf { record.origin == "initialized" } ?: return false
         return GitSourceCopy.matchesManifest(workTree, expected)
+    }
+
+    /**
+     * Stash state is always retained. Git can keep older saved work in the stash reflog after
+     * `refs/stash` advances, so remote containment of the current tip says nothing about those
+     * entries. This also preserves a ref without a reflog and a reflog without its current ref.
+     * An empty existing reflog is conservatively retained; missing stash metadata is expendable.
+     * Both queries are fixed, bounded, read-only Git calls. Malformed output and every result other
+     * than the documented reflog exit codes fail closed through retentionHolds' unreadable hold.
+     */
+    private fun hasStashOrReflog(runner: GitCommandRunner, gitDir: Path): Boolean {
+        val limits = GitExecutionLimits(java.time.Duration.ofSeconds(20), 4096, 16 * 1024,
+            maxAddressSpaceBytes = 512L * 1024 * 1024)
+        val ref = runner.run(GitInvocation("for-each-ref", listOf("--count=1", "--format=%(refname)", "refs/stash"),
+            gitDir = gitDir, truncateStdout = false, limits = limits))
+        if (ref.stdoutTruncated) throw IOException("Stash ref query output was truncated.")
+        val refOutput = ref.text
+        if (refOutput.isNotEmpty() && refOutput != "refs/stash\n") throw IOException("Stash ref query returned malformed output.")
+        val reflog = runner.run(GitInvocation("reflog", listOf("exists", "refs/stash"), gitDir = gitDir,
+            allowedExitCodes = setOf(0, 1), truncateStdout = false, limits = limits))
+        if (reflog.stdoutTruncated || reflog.stdout.isNotEmpty()) throw IOException("Stash reflog query returned malformed output.")
+        // Git's existence command can map a failed lstat to exit 1. Check only fixed metadata
+        // paths as well, distinguishing a genuinely missing path from an unreadable/unsafe one.
+        return refOutput.isNotEmpty() || reflog.exitCode == 0 ||
+            stashMetadataExists(gitDir, "refs", "stash") || stashMetadataExists(gitDir, "logs", "refs", "stash")
+    }
+
+    private fun stashMetadataExists(gitDir: Path, vararg names: String): Boolean {
+        var path = gitDir
+        for ((index, name) in names.withIndex()) {
+            path = path.resolve(name)
+            val attributes = try {
+                Files.readAttributes(path, BasicFileAttributes::class.java, NOFOLLOW_LINKS)
+            } catch (_: NoSuchFileException) { return false }
+            val expectedKind = if (index == names.lastIndex) attributes.isRegularFile else attributes.isDirectory
+            if (!expectedKind) throw IOException("Stash metadata has an unexpected filesystem kind.")
+        }
+        return true
     }
 
     /**
