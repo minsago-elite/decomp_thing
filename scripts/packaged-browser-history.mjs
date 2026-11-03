@@ -327,6 +327,39 @@ export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready
   await evaluate(tab, `[...document.querySelectorAll('button')].find(b => b.textContent === 'Read exploration evidence').click()`);
   await ready(tab, `document.body.innerText.includes('Report state: available. Authority: observations.') && document.body.innerText.includes('Producer confidence score')`, 'bound exploration summary');
   assert.ok(await evaluate(tab, `document.body.innerText.includes('not proof of equivalence')`));
+  const chartEvidence = await evaluate(tab, `(() => {
+    const section = document.getElementById('output-signature-breadth-title')?.parentElement;
+    const chart = section?.querySelector('[role="img"][aria-labelledby="output-signature-chart-title"]');
+    const describedBy = (chart?.getAttribute('aria-describedby') ?? '').split(/\\s+/).filter(Boolean);
+    const table = section?.querySelector('#output-signature-counts-caption')?.closest('table');
+    const rows = table ? [...table.querySelectorAll('tbody tr')].map(row => [...row.cells].map(cell => cell.innerText.trim())) : [];
+    const binding = document.getElementById('exploration-report-binding');
+    const accessibleIds = ['exploration-report-binding', 'output-signature-chart-counts', 'output-signature-counts-caption', 'output-signature-chart-note'];
+    return {
+      chartName: document.getElementById(chart?.getAttribute('aria-labelledby') ?? '')?.textContent.trim() ?? null,
+      descriptionNames: describedBy,
+      descriptionsResolve: describedBy.length === accessibleIds.length && accessibleIds.every(id => describedBy.includes(id) && document.getElementById(id)?.textContent.trim()),
+      bindingText: binding?.innerText ?? '',
+      tableCaption: table?.querySelector('caption')?.innerText.trim() ?? null,
+      rows,
+      text: section?.innerText ?? '',
+    };
+  })()`);
+  assert.equal(chartEvidence.chartName, 'Observed output signature counts');
+  assert.equal(chartEvidence.descriptionsResolve, true);
+  assert.ok(chartEvidence.bindingText.includes(fixture.jobId) && chartEvidence.bindingText.includes('run_fixture_3')
+    && chartEvidence.bindingText.includes('revision_fixture_3'));
+  assert.equal(chartEvidence.tableCaption, 'Output signature counts reported by the producer');
+  assert.deepEqual(chartEvidence.rows, [
+    ['Expanded distinct exit/output signatures', '1', 'The producer’s expanded observation sample'],
+    ['New distinct exit/output signatures', '1', 'Expanded observed signatures: 1'],
+  ]);
+  assert.ok(chartEvidence.text.includes('A signature combines the observed exit code')
+    && chartEvidence.text.includes('No branch, statement, function or complete-behavior coverage denominator'));
+  assert.ok(!/%/.test(chartEvidence.text), 'Observed signature counts must not be presented as program-coverage percentages');
+  const chartAccessibility = await cdp.call('Accessibility.getFullAXTree', {}, tab.sessionId);
+  assert.ok(chartAccessibility.nodes.some(node => ['img', 'image'].includes(node.role?.value)
+    && node.name?.value === 'Observed output signature counts'), 'The chart must have its accessible image name in the browser accessibility tree');
   assert.equal(await fs.readFile(fixture.reportPath, 'utf8'), fixture.exploration);
   const downloads = join(fixture.directory, '..', '..', 'browser downloads');
   await fs.mkdir(downloads, { mode: 0o700 });
@@ -378,5 +411,9 @@ export async function qualifyHistory({ fixture, makeTarget, cdp, evaluate, ready
   assert.deepEqual(tab.exceptions, []);
   return { activityUi: { emptyCutoverSnapshotAndSseResume: true, emptyCutoverFixtureRestored: true, expiredCursorShowsGap: true, explicitGapRecovery: true, appendedObservationViaSseWithoutPolling: true, appendedFixtureRestored: true, pausedReceiptAgeAdvances: true, receiptAgeIsNotSourceAge: true, exactObservedUsage: true, explicitUsageUnitsAndProvenance: true, durationWithoutRounding: true, missingPricingBasis: true, backgroundSuspendsReads: true, offlineSuspendsReads: true, recoveryReconcilesSnapshot: true, recoveryPreservesRows: true, lastReceivedTime: true, categoryAndTaskFilters: true, filtersPreserveCursor: true, exactAttemptLinks: true, correlationReferences: true, narrowViewport: 320, firstPage: 200, continuationPage: 5, keyboardStart: true, focusPreserved: true, pauseStopsPolling: true, resumeWithoutDuplicates: true, navigationStopsPolling: true, privateTextWithheld: true, politeStatusOnly: true }, progressPolling: true, nativeEventSourceMatchesPolling: true, targetPollingQuery: true, cursorAliasPreservesPage: true, privateProseAbsentFromResponses: true, privatePathsAbsentFromResponses: true, presentationOmissionsCounted: true, progressBytesRestoredAfterControlledAppend: true, fixtureAttempts: 55, firstPage: 50, secondPage: 5, exactOrder: true, cursorReload: true,
     earlierAttemptReload: true, previousInterruptedAttempt: true, exactUnsignedUsage: true,
-    unacceptedCandidate: true, explorationSummary: true, nativeReportDownload: true, downloadedBytesMatch: true, reportBytesUnchanged: true, readPhaseRetainedBytesUnchanged: true, pinUi: { readBeforeChange: true, pinAndUnpinReconciled: true, auditedBrowserActor: true, otherAttemptDataPreserved: true }, mutationRequests: 2, executionStarted: false };
+    unacceptedCandidate: true, explorationSummary: true, explorationChart: { accessibleName: true, reportAndRunIdentityDescribed: true,
+      measurementAndDenominatorTable: true, noProgramCoverageClaim: true, accessibilityTreeRole: true },
+    nativeReportDownload: true, downloadedBytesMatch: true, reportBytesUnchanged: true, readPhaseRetainedBytesUnchanged: true,
+    pinUi: { readBeforeChange: true, pinAndUnpinReconciled: true, auditedBrowserActor: true, otherAttemptDataPreserved: true },
+    mutationRequests: 2, executionStarted: false };
 }
