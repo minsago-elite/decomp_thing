@@ -227,6 +227,7 @@ expected_fs = {
     "fs-cap-read-only": {"readTextFile": True, "writeTextFile": False},
     "fs-cap-write-only": {"readTextFile": False, "writeTextFile": True},
     "fs-cap-none": None,
+    "reconstruction-role-policy": {"readTextFile": False, "writeTextFile": True},
     "mvp-patch": {"readTextFile": True, "writeTextFile": True},
     "mvp-patch-bad-fix": {"readTextFile": True, "writeTextFile": True},
     "doctor-preflight": {"readTextFile": True, "writeTextFile": True},
@@ -1125,18 +1126,41 @@ update({
 
 if MODE in RECONSTRUCTION_MODES:
     module_id = SENTINEL.rsplit("/", 1)[-1].removesuffix(".c")
-    for ordinal, relative in enumerate((
-        "include/decomp_types.h",
-        f"include/modules/{module_id}.h",
-        f"src/modules/{module_id}_internal.h",
-    )):
-        response = read_workspace_file(join_path(cwd, relative), 810 + ordinal)
-        if "error" in response or not response.get("result", {}).get("content", "").strip():
+    interfaces = {
+        "include/decomp_types.h": (
+            "#ifndef DECOMP_TYPES_H", "#define DECOMP_TYPES_H",
+            "#include <stddef.h>", "#include <stdint.h>",
+        ),
+        f"include/modules/{module_id}.h": (
+            f"#ifndef DECOMP_MODULE_{module_id.upper()}_H",
+            f"#define DECOMP_MODULE_{module_id.upper()}_H",
+            '#include "decomp_types.h"',
+            "int decomp_engine_main(void); /* fn_0000000000001000 @ 0x1000 */",
+        ),
+        f"src/modules/{module_id}_internal.h": (
+            f"#ifndef DECOMP_MODULE_{module_id.upper()}_INTERNAL_H",
+            f"#define DECOMP_MODULE_{module_id.upper()}_INTERNAL_H",
+            f'#include "modules/{module_id}.h"',
+        ),
+    }
+    snapshot_paths = [
+        line[4:-4] for line in prompt_text.splitlines()
+        if line.startswith("--- ") and line.endswith(" ---")
+    ]
+    if sorted(snapshot_paths) != sorted(interfaces):
+        raise SystemExit(123)
+    for relative, declarations in interfaces.items():
+        marker = f"--- {relative} ---\n"
+        snapshot = prompt_text.split(marker, 1)[1].split("\n--- ", 1)[0].strip()
+        if not snapshot.endswith("#endif") or any(line not in snapshot.splitlines() for line in declarations):
             raise SystemExit(123)
 
-    denied_read = read_workspace_file(join_path(cwd, "reports/confidence.json"), 814)
-    if denied_read.get("error", {}).get("code") != -32602:
-        raise SystemExit(124)
+    # The measured snapshots are the complete context; even selected interfaces and the
+    # write-owned source must not become an additional filesystem read channel.
+    for ordinal, relative in enumerate((*interfaces, SENTINEL, "reports/confidence.json")):
+        denied_read = read_workspace_file(join_path(cwd, relative), 810 + ordinal)
+        if denied_read.get("error", {}).get("code") != -32602:
+            raise SystemExit(124)
     denied_write = try_write_workspace_file(join_path(cwd, "Makefile"), "unauthorized\n", 815)
     if denied_write.get("error", {}).get("code") != -32602:
         raise SystemExit(125)

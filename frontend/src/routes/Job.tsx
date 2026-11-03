@@ -1,9 +1,9 @@
-import { jobCopy as copy } from '../copy/job';
+import { jobCopy as copy, jobDeletionCopy } from '../copy/job';
 import { message as displayMessage } from '../shared/messages';
 import { usePrivateTransport } from '../session/PrivateTransport';
 import { useEffect, useMemo, useState } from 'preact/hooks';
 import { withApiFailureReference } from '../api/client';
-import type { Job as JobData } from '../api/generated';
+import type { Job as JobData, Operation } from '../api/generated';
 import { appPath, jobPath, runPath } from '../app/paths';
 import type { BrowserSession, RuntimeSnapshot } from '../session/session';
 import { useSession } from '../session/useSession';
@@ -11,15 +11,18 @@ import { JobSummary } from '../jobs/JobSummary';
 import { WorkflowAvailability } from '../jobs/WorkflowAvailability';
 import { WorkflowLaunch } from '../jobs/WorkflowLaunch';
 import { useLocation } from 'preact-iso/router';
+import { GitRepositoryPanel } from '../jobs/GitRepositoryPanel';
 import { receive } from '../shared/receiptTime';
 import type { ReceiptTime } from '../shared/receiptTime';
 import type { Received } from '../shared/receiptTime';
 import { MetadataReceipt } from '../shared/MetadataReceipt';
-import { canRetainMetadata, metadataFailureKind } from '../shared/retainMetadata';
+import { canRetainMetadata, isDeletedJob, metadataFailureKind } from '../shared/retainMetadata';
+import { JobDeletion, JobOrganization } from '../jobs/JobLifecycle';
+import { onLibraryChange } from '../jobs/libraryChannel';
+import { PanelBoundary } from '../shared/PanelBoundary';
+import { panelBoundaryCopy } from '../copy/shell';
 
-function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session }: {
-  jobId: string; basePath: string; runtime: RuntimeSnapshot; runtimeReceipt: ReceiptTime | undefined; session: BrowserSession;
-}) {
+function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session }: { jobId: string; basePath: string; runtime: RuntimeSnapshot; runtimeReceipt: ReceiptTime | undefined; session: BrowserSession }) {
   const { client } = usePrivateTransport(basePath);
   const location = useLocation();
   const binding = useMemo(() => ({ client, basePath, jobId }), [client, basePath, jobId]);
@@ -28,6 +31,10 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session }: {
   const { data: observation, error, loading } = stored.binding === binding ? stored : { data: null, error: '', loading: true };
   const job = observation?.value;
   const [refresh, setRefresh] = useState(0);
+  const [deleted, setDeleted] = useState(false);
+  const [operation, setOperation] = useState<Operation | null>(null);
+  // Another tab deleted or reorganized a job: read this one again so a deletion shows here too.
+  useEffect(() => onLibraryChange(basePath, () => setRefresh(value => value + 1)), [basePath]);
   useEffect(() => {
     const controller = new AbortController();
     setStored(previous => ({ binding, data: previous.binding === binding ? previous.data : null, error: '', loading: true }));
@@ -42,6 +49,7 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session }: {
         setStored({ binding, data: receive(response.data), error: '', loading: false });
       }
     }).catch((failure: unknown) => {
+      if (!controller.signal.aborted && isDeletedJob(failure)) { setDeleted(true); setStored({ binding, data: null, error: '', loading: false }); return; }
       if (!controller.signal.aborted) setStored(previous => ({ binding,
         data: previous.binding === binding && canRetainMetadata(failure) ? previous.data : null,
         error: withApiFailureReference({
@@ -53,6 +61,10 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session }: {
     });
     return () => { controller.abort(); };
   }, [binding, client, jobId, refresh]);
+  if (deleted) return <div class="notice" role="alert"><p>{copy.thisJobWasDeleted}</p>
+    {operation && <p>{operation.message}</p>}
+    {operation?.state === 'running' && <p>{jobDeletionCopy.stillRunning}</p>}
+    <a href={appPath(basePath, '/')}>{copy.returnToJobs}</a></div>;
   return <>
     {loading && <p role="status">{job ? copy.refreshingJob : copy.loadingJob}</p>}
     {error && <p role="alert">{error}</p>}
@@ -60,7 +72,9 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session }: {
     <button type="button" disabled={loading} onClick={() => setRefresh(value => value + 1)}>{copy.refreshJob}</button>
     {job && <>
       <MetadataReceipt kind="job" receipt={observation?.receipt} />
-      <h2>{job.displayFilename}</h2><p>{displayMessage(copy.identity, { identity: <code>{job.jobId}</code> })}</p>
+      <h2>{job.label ?? job.displayFilename}</h2>
+      {job.label && <p>{displayMessage(copy.fileName, { name: job.displayFilename })}</p>}
+      <p>{displayMessage(copy.identity, { identity: <code>{job.jobId}</code> })}</p>
       <JobSummary job={job} />
       <p><a href={`${jobPath(basePath, job.jobId)}/runs`}>{copy.browseAttemptHistory}</a></p>
       {job.latestRunId && <a href={runPath(basePath, job.jobId, job.latestRunId)}>{copy.openLatestRecordedAttempt}</a>}
@@ -73,11 +87,18 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session }: {
       </dl>
       <p>{copy.completionIsAnAttemptOutcomeOnlyTheRecordedAcceptedRevision}</p>
       <p>{copy.theAttemptPageRetainsItsExactIdentityAsNewerWork}</p>
-      <WorkflowAvailability runtime={runtime} {...(runtimeReceipt ? { receipt: runtimeReceipt } : {})} />
+      <PanelBoundary name={panelBoundaryCopy.names.workflowAvailability}>
+        <WorkflowAvailability runtime={runtime} {...(runtimeReceipt ? { receipt: runtimeReceipt } : {})} />
+      </PanelBoundary>
       <WorkflowLaunch key={`${job.jobId}/${job.version}`} job={job} runtime={runtime} basePath={basePath} session={session}
         onRefresh={() => { setRefresh(value => value + 1); }}
         onStarted={path => { if (location.url) location.route(path); else window.location.assign(path); }} />
+      <GitRepositoryPanel job={job} capabilities={runtime.capabilities} basePath={basePath} session={session} />
       <a href={appPath(basePath, '/runtime')}>{copy.viewReportedWorkflowAvailability}</a>
+      <JobOrganization job={job} client={client} basePath={basePath} session={session}
+        onChanged={next => setStored({ binding, data: receive(next), error: '', loading: false })} />
+      <JobDeletion job={job} client={client} basePath={basePath} session={session}
+        onDeleted={result => { setOperation(result); setDeleted(true); }} />
     </>}
   </>;
 }
@@ -87,8 +108,7 @@ export default function Job({ jobId, basePath, session }: { jobId: string; baseP
   return <section aria-labelledby="job-title">
     <h1 id="job-title">{copy.jobOverview}</h1>
     <a href={appPath(basePath, '/')}>{copy.returnToJobs}</a>
-    {session && state?.status === 'authenticated' ? <JobDetails key={`${state.generation}/${jobId}`} jobId={jobId} basePath={basePath}
-      runtime={state.runtime} runtimeReceipt={state.runtimeReceipt} session={session} />
+    {state?.status === 'authenticated' && session ? <JobDetails key={`${state.generation}/${jobId}`} jobId={jobId} basePath={basePath} runtime={state.runtime} runtimeReceipt={state.runtimeReceipt} session={session} />
       : <p>{copy.connectALocalSessionToViewThisJob}</p>}
   </section>;
 }

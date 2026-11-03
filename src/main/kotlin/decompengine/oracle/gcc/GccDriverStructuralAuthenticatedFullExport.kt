@@ -39,8 +39,20 @@ internal class GccDriverStructuralAuthenticatedFullExportV1 private constructor(
             profile: GccDriverStructuralInputsV1,
             operation: GccBundledFullExportOperation,
         ): GccDriverStructuralAuthenticatedFullExportV1 {
-            val binding = profile.bindFullExport(operation)
-            val snapshot = operation.snapshot
+            return captureBoundModel(profile, profile.bindFullExport(operation), operation.snapshot)
+        }
+
+        internal fun captureNative(
+            profile: GccDriverStructuralInputsV1,
+            operation: GccBundledNativeCallOperation,
+        ): GccDriverStructuralAuthenticatedFullExportV1 =
+            captureBoundModel(profile, profile.bindNativeModel(operation), operation.model)
+
+        private fun captureBoundModel(
+            profile: GccDriverStructuralInputsV1,
+            binding: GccDriverStructuralFullExportBindingV2,
+            snapshot: GccBundledFullExportSnapshot,
+        ): GccDriverStructuralAuthenticatedFullExportV1 {
             val modelBytes = snapshot.programModel
             if (modelBytes.size.toLong() != snapshot.programModelBytes ||
                 OracleArtifacts.sha256(modelBytes) != snapshot.programModelSha256

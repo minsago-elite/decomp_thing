@@ -52,7 +52,11 @@ it('returns to the filtered job list, with its form and request restored, after 
     expect(screen.getByLabelText('Workflow state')).toHaveProperty('value', 'failed');
     expect(transport.get.mock.calls.at(-1)?.[1]).toBe('/jobs?status=failed&limit=50');
     await act(() => { history.forward(); });
-    await screen.findByRole('heading', { name: 'filtered-match.elf' });
+    // The dashboard card has the same filename heading. Wait for the actual traversal,
+    // not that still-mounted card, or a pending forward event can escape into the next test.
+    await waitFor(() => expect(location.pathname).toBe(`/nested/jobs/${job.jobId}`));
+    await screen.findByRole('heading', { level: 1, name: 'Job overview' });
+    await screen.findByRole('heading', { level: 2, name: 'filtered-match.elf' });
   } finally { auth.dispose(); }
 });
 

@@ -1,0 +1,35 @@
+{
+  "canonicalOracle": {
+    "bytes": 12558460,
+    "path": "/home/june/decomp_thing/.claude/worktrees/a-series-20261025-pr1680/oracle/gcc/16.2.0/function-recovery-oracle.json",
+    "sha256": "b49b8a72a96580bd8727d9dc530753f40f78185a656f472ebe83a7a1f6fc9aae"
+  },
+  "kind": "independent-machine-call-request-v1",
+  "limits": {
+    "maximumCalls": 1000000,
+    "maximumInstructions": 10000000,
+    "maximumInstructionsPerRoot": 1000000,
+    "maximumOutputBytes": 67108864,
+    "maximumRoots": 131072,
+    "maximumWallMillis": 1800000,
+    "maximumWorkUnits": 100000000
+  },
+  "manifestSha256": "c9e21c5a6422c65572ee4c4de5578107b82ae92b6730536c4fc76490fe2ecad9",
+  "outputPath": "/home/june/decomp_thing/.claude/worktrees/a-series-20261025-machine-calls/.omo/machine-call-producer/gcc-driver-positive-machine-calls.json",
+  "richFile": {
+    "bytes": 20713760,
+    "path": "/home/june/decomp_thing/.claude/worktrees/a-series-20261025-pr1680/oracle/gcc/16.2.0/artifacts/gcc-driver.full",
+    "sha256": "8009c7cfc4f66017aa932d86a6d4ec7f374e6ab7a01b3ef5ab3d2fcc78c2378b"
+  },
+  "runtime": {
+    "archiveBytes": 569445154,
+    "archiveSha256": "93a5d11a9ad510622acaaf908c556a7b9b764d338e78a7567f3689bf5081fd54",
+    "bridgeSha256": "997ed3d92607ad2343a687b23d4fb54e83771736a9a819022b54100219316f7c",
+    "bundleManifestSha256": "6a5dd7e8d8d734336349bb0d4d96fb367bfad0c41cb051f27f87b2e02803906c",
+    "bundleRoot": "/home/june/decomp_thing/.claude/worktrees/a-series-20261025-machine-calls/ghidra-bridge/build/bundle",
+    "ghidraArchivePath": "/home/june/decomp_thing/.gradle/caches/decomp-ghidra/ghidra_12.1.3_PUBLIC_20260817.zip",
+    "languageId": "x86:LE:64:default",
+    "languageVersion": "4.8"
+  },
+  "schemaVersion": 1
+}

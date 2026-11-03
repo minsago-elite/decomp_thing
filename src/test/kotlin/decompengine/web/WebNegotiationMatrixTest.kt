@@ -41,7 +41,7 @@ class WebNegotiationMatrixTest {
             Case("unknown v1 capability", "GET", "$api/projects", "application/json", 404, "NOT_FOUND"),
             Case("unknown major", "GET", "/workbench/api/v2/jobs", "application/json", 404, "NOT_FOUND"),
             Case("read-only run collection", "POST", "$api/jobs/$id/runs", "application/json", 405, "METHOD_NOT_ALLOWED", "GET"),
-            Case("job HEAD is unavailable", "HEAD", "$api/jobs/$id", "application/json", 405, allow = "GET"),
+            Case("job HEAD is unavailable", "HEAD", "$api/jobs/$id", "application/json", 405, allow = "DELETE, GET, PATCH"),
             Case("binary download excludes HTML", "GET", "$api/jobs/$id/artifacts/missing/content", "text/html", 406, "NOT_ACCEPTABLE"),
             Case("binary download excludes JSON", "GET", "$api/jobs/$id/artifacts/missing/content", "application/json", 406, "NOT_ACCEPTABLE"),
             Case("binary download accepts its type", "GET", "$api/jobs/$id/artifacts/missing/content", "application/octet-stream", 404, "NOT_FOUND"),

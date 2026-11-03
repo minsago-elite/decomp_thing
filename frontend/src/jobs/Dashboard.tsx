@@ -1,4 +1,4 @@
-import { formatJobStatus } from './metadataFormat';
+import { formatJobStatus } from '../copy/format';
 import { dashboardCopy as copy } from '../copy/workspace';
 import { message as displayMessage } from '../shared/messages';
 import { usePrivateTransport } from '../session/PrivateTransport';
@@ -8,11 +8,14 @@ import type { Jobs } from '../api/generated';
 import { jobPath } from '../app/paths';
 import { DEFAULT_FILTERS, JOB_STATUSES, JobFilterError, filterSearch, jobFilters, jobLocation, jobPageSearch } from './query';
 import type { JobFilters } from './query';
+import { rememberFilterDraft, restoreFilterDraft } from './filterDraft';
+import type { DraftOwner } from './filterDraft';
 import { JobSummary } from './JobSummary';
 import { receive } from '../shared/receiptTime';
 import type { Received } from '../shared/receiptTime';
 import { MetadataReceipt } from '../shared/MetadataReceipt';
 import { RecoverySummary } from './RecoverySummary';
+import { onLibraryChange } from './libraryChannel';
 
 function currentFilters() {
   try { return { ...jobLocation(location.search), valid: true }; }
@@ -28,9 +31,10 @@ function snapshotPagination(page: Jobs['page'] | undefined): page is Jobs['page'
     typeof page.pageNumber === 'number' && Number.isSafeInteger(page.pageNumber) && page.pageNumber >= 1 && page.pageNumber <= 10000;
 }
 
-export function Dashboard({ basePath }: { basePath: string }) {
+export function Dashboard({ basePath, draftOwner = null }: { basePath: string; draftOwner?: DraftOwner | null }) {
   const [selection, setSelection] = useState(currentFilters);
-  const [draft, setDraft] = useState(selection.filters);
+  const [retainedDraft] = useState(() => restoreFilterDraft(draftOwner, basePath, filterSearch(selection.filters)));
+  const [draft, setDraft] = useState(retainedDraft?.draft ?? selection.filters);
   const [cursors, setCursors] = useState<(string | null)[]>([null]);
   const [pageIndex, setPageIndex] = useState(0);
   const [displayedPageIndex, setDisplayedPageIndex] = useState<number | null>(null);
@@ -39,7 +43,10 @@ export function Dashboard({ basePath }: { basePath: string }) {
   const data = observation?.value;
   const [phase, setPhase] = useState<'loading' | 'ready' | 'error'>('loading');
   const [error, setError] = useState('');
-  const [validationError, setValidationError] = useState<JobFilterError | null>(null);
+  const [validationError, setValidationError] = useState<JobFilterError | null>(retainedDraft?.validationError ?? null);
+  useEffect(() => {
+    rememberFilterDraft(draftOwner, basePath, filterSearch(selection.filters), draft, validationError);
+  }, [draftOwner, basePath, selection, draft, validationError]);
   const [pageNotice, setPageNotice] = useState('');
   const [livePaused, setLivePaused] = useState(false);
   const [liveDeferred, setLiveDeferred] = useState(false);
@@ -124,6 +131,10 @@ export function Dashboard({ basePath }: { basePath: string }) {
     } else setError(withApiFailureReference(copy.jobsCouldNotBeLoadedTheServerMayBeUnavailable, failure));
     pageTransition.current = null;
   }, []);
+  const reloadLatest = useRef(reload);
+  reloadLatest.current = reload;
+  // Another tab deleted or reorganized a job: read a fresh first page instead of trusting this snapshot.
+  useEffect(() => onLibraryChange(basePath, () => { if (location.pathname === dashboardPath.current) reloadLatest.current(); }), [basePath]);
   useEffect(() => {
     const restore = () => {
       activeBinding.current = null;
@@ -331,10 +342,13 @@ export function Dashboard({ basePath }: { basePath: string }) {
       <label>{copy.workflowState}<select {...fieldA11y('status')} value={draft.status} onChange={event => field('status', event.currentTarget.value)}>
         <option value="">{copy.allStates}</option>{JOB_STATUSES.map(status => <option key={status} value={status}>{formatJobStatus(status)}</option>)}
       </select></label>
-      <label>{copy.createdAtOrAfter}<input {...fieldA11y('createdAfter')} value={draft.createdAfter} placeholder="2026-09-05T00:00:00Z" onInput={event => field('createdAfter', event.currentTarget.value)} /></label>
-      <label>{copy.createdBefore}<input {...fieldA11y('createdBefore')} value={draft.createdBefore} placeholder="2026-09-06T00:00:00Z" onInput={event => field('createdBefore', event.currentTarget.value)} /></label>
+      <label>{copy.createdAtOrAfter}<input {...fieldA11y('createdAfter')} value={draft.createdAfter} placeholder={copy.createdAfterExample} onInput={event => field('createdAfter', event.currentTarget.value)} /></label>
+      <label>{copy.createdBefore}<input {...fieldA11y('createdBefore')} value={draft.createdBefore} placeholder={copy.createdBeforeExample} onInput={event => field('createdBefore', event.currentTarget.value)} /></label>
       <label>{copy.sortBy}<select {...fieldA11y('sort')} value={draft.sort} onChange={event => field('sort', event.currentTarget.value)}>
         <option value="newest">{copy.newestFirst}</option><option value="oldest">{copy.oldestFirst}</option>
+      </select></label>
+      <label>{copy.archivedJobs}<select {...fieldA11y('archived')} value={draft.archived} onChange={event => field('archived', event.currentTarget.value)}>
+        <option value="">{copy.hideArchived}</option><option value="all">{copy.includeArchived}</option><option value="only">{copy.onlyArchived}</option>
       </select></label>
       <label>{copy.jobsPerPage}<select {...fieldA11y('limit')} value={draft.limit} onChange={event => field('limit', event.currentTarget.value)}>
         {[50, 100, 200].map(limit => <option key={limit}>{limit}</option>)}
@@ -364,7 +378,8 @@ export function Dashboard({ basePath }: { basePath: string }) {
     {phase === 'ready' && retainedEmpty && <p>{filtered ? copy.noJobsMatchTheseFilters : copy.noUploadedJobsYet}</p>}
     {data && <ul ref={list} class="job-list" aria-label={copy.uploadedJobs}>
       {data.items.map(job => <li key={job.jobId}>
-        <h4><a href={jobPath(basePath, job.jobId)}>{job.displayFilename}</a></h4>
+        <h4><a href={jobPath(basePath, job.jobId)}>{job.label ?? job.displayFilename}</a></h4>
+        {job.archived && <p>{copy.archivedMark}</p>}
         <JobSummary job={job} />
       </li>)}
     </ul>}

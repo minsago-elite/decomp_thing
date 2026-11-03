@@ -1,0 +1,10 @@
+{
+  "apiVersion": 1,
+  "kind": "gitRepositoryInitRequest",
+  "data": {
+    "action": "git.init",
+    "runId": "run_example_1",
+    "revisionId": "revision_example_1",
+    "initialBranch": null
+  }
+}
