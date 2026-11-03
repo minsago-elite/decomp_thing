@@ -83,6 +83,7 @@ internal class VerifiedContainedModuleCompilation private constructor(private va
                 PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")))
             val requestPath = temporary.resolve("request.json")
             val executableSnapshotPath = temporary.resolve("compiler")
+            val trampolineSnapshotPath = temporary.resolve("trampoline")
             var launched = false
             var absenceProved = true
             var lease: FullTreeDiskScratchLease? = null
@@ -141,6 +142,14 @@ internal class VerifiedContainedModuleCompilation private constructor(private va
                     val executableSnapshot = materializeOwnedModuleCompilerSnapshot(compilerInput, executableSnapshotPath) {
                         checkCancellation(); deadline.requireCurrent()
                     }
+                    val trampolineInput = configuration.verifyCompilerExecHelper()
+                    require(configuration.compilerExecHelperSource == configuration.compilerExecHelperPath) {
+                        "contained module compiler trampoline must use one same-path authenticated runtime source"
+                    }
+                    val trampolineSnapshot = materializeOwnedModuleCompilerSnapshot(trampolineInput, trampolineSnapshotPath,
+                        label = "module compiler Landlock trampoline") {
+                        checkCancellation(); deadline.requireCurrent()
+                    }
                     snapshot.requireCurrent { deadline.requireCurrent() }
                     deadline.requireCurrent()
                     checkCancellation()
@@ -151,7 +160,8 @@ internal class VerifiedContainedModuleCompilation private constructor(private va
                             "${configuration.managerControlGroup.trimEnd('/')}/app.slice/$unit", nonce,
                             containedModuleCompilerCommand(configuration.isolation, requestPath, request),
                             mapOf("LANG" to "C.UTF-8", "LC_ALL" to "C.UTF-8", "TZ" to "UTC"),
-                            listOf(KotlinSystemdCgroupCommandInput(requestPath, request.canonicalBytes.size.toLong(), request.sha256), compilerInput, executableSnapshot),
+                            listOf(KotlinSystemdCgroupCommandInput(requestPath, request.canonicalBytes.size.toLong(), request.sha256),
+                                compilerInput, executableSnapshot, trampolineInput, trampolineSnapshot),
                             configuration.compilerRuntimeMounts,
                             KotlinSystemdCgroupCommandResources(deadline.remainingWholeSecondsMillis(60_000), 512L * 1024 * 1024,
                                 128, ContainedModuleCompilerRequest.MAXIMUM_OBJECT_BYTES), configuration.configurationSha256,
@@ -166,7 +176,10 @@ internal class VerifiedContainedModuleCompilation private constructor(private va
                             }, controlDirectoryName = moduleCompileControl(request.nonce),
                             readOnlyStateDirectory = checkNotNull(stateIdentity), operationDeadline = deadline,
                             requireTerminalResourceEventProof = true,
-                            executableSnapshots = listOf(ContainedCommandExecutableAlias(executableSnapshot.path, compilerInput.path)))
+                            executableSnapshots = listOf(
+                                ContainedCommandExecutableAlias(executableSnapshot.path, compilerInput.path),
+                                ContainedCommandExecutableAlias(trampolineSnapshot.path, trampolineInput.path),
+                            ))
                     } catch (failure: KotlinSystemdCgroupCommandExecutionException) {
                         // Polling sleeps clear interruption before the launcher wraps it. Keep that
                         // cancellation visible while allowing owned cleanup to run without a set flag.
@@ -285,6 +298,7 @@ internal class VerifiedContainedModuleCompilation private constructor(private va
                 if (!launched || absenceProved) {
                     cleanup { Files.deleteIfExists(requestPath) }
                     cleanup { Files.deleteIfExists(executableSnapshotPath) }
+                    cleanup { Files.deleteIfExists(trampolineSnapshotPath) }
                     cleanup { Files.deleteIfExists(temporary) }
                 }
                 if (!failedBeforeCleanup) primaryFailure?.let { throw it }

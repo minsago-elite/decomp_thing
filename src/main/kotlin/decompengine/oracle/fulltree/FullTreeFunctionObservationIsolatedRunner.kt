@@ -1264,8 +1264,7 @@ internal object KotlinSystemdCgroupCommandLauncher {
                 }
             }
             val runtimeClosureSha256 = OracleArtifacts.sha256(OracleJson.canonicalBytes(JsonObject(mapOf(
-                "provider" to JsonPrimitive(if (executableAliases.isEmpty()) baseRuntimeProvider else
-                    "kotlin-lease-contained-command-runtime-owned-executable-v1"),
+                "provider" to JsonPrimitive(containedCommandRuntimeProvider(baseRuntimeProvider, executableAliases)),
                 "configurationSha256" to JsonPrimitive(configuration.canonicalSha256),
                 "deploymentClosureSha256" to JsonPrimitive(deploymentClosureSha256),
                 "runtimeMounts" to JsonArray(additionalMounts.map { it.canonicalIdentity() }),

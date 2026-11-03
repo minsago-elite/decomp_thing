@@ -40,12 +40,14 @@ root. The controller keeps its original runtime/input authentication and streams
 most 64 MiB of pinned compiler bytes into its private host request directory, never
 into the **noexec** leased scratch. Both the original and its owner-read/execute-only,
 single-linked copy are authenticated and retained as stable inputs. An explicit
-read-only executable alias overlays the copy at the original runtime compiler path.
-It must join two identical pinned input records, target an existing host-root executable
-inside a same-path runtime tree, and retain authenticated terminal-resource enforcement.
-The alias mapping and both pins are bound into the distinct
-`kotlin-lease-contained-command-runtime-owned-executable-v1` preimage together with its
-base terminal-runtime provider. Calls without aliases keep their original runtime bytes.
+read-only executable alias overlays the copy at the original runtime compiler path. The
+Landlock trampoline uses the same handoff as a second alias. Each alias must join two
+identical pinned input records, target an existing host-root executable inside a same-path
+runtime tree, and retain authenticated terminal-resource enforcement. One-alias calls retain
+the `kotlin-lease-contained-command-runtime-owned-executable-v1` provider; module compiler
+calls bind both ordered aliases under the separate
+`kotlin-lease-contained-command-runtime-owned-executable-v2` provider. Calls without aliases
+keep their original runtime bytes.
 The worker acquires the ordinary `StableControlFile` kernel lease on the exact owned
 inode at the original compiler path through result capture. Scratch remains noexec,
 no writable executable mount is added, and no arbitrary foreign owner is trusted.
