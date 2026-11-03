@@ -2189,8 +2189,22 @@ class UploadServerTest {
             report.createDirectories()
             refuse()
             Files.delete(report)
+            // A contained path must still pass the strict JSON report projection.
             report.writeText("ordinary inside report")
-            assertContentEquals("ordinary inside report".toByteArray(), request(server, "GET", path).body)
+            for (method in listOf("GET", "HEAD")) {
+                val malformed = request(server, method, path)
+                assertEquals(409, malformed.status, method)
+                assertTrue(!malformed.body.decodeToString().contains("ordinary inside report"))
+            }
+            val payload = "{\"message\":\"ordinary inside report\"}".toByteArray()
+            report.writeBytes(payload)
+            val contained = request(server, "GET", path)
+            assertEquals(200, contained.status)
+            assertContentEquals(payload, contained.body)
+            val head = request(server, "HEAD", path)
+            assertEquals(200, head.status)
+            assertEquals(payload.size.toString(), head.contentLength)
+            assertTrue(head.body.isEmpty())
             assertEquals("outside-boundary-marker", outside.resolve("ordinary.json").readBytes().decodeToString())
         }
     }

@@ -152,7 +152,10 @@ class WebSensitiveBoundaryTest {
         assertFalse(combined.contains(canary), "a canary escaped into a served representation or log")
         assertFalse(combined.contains(root.toString()), "the private storage path escaped")
         assertFalse(combined.contains(parent.toString()), "a private host path escaped")
-        assertTrue(diagnostics.isNotEmpty() && diagnostics.all { it.startsWith("web-http-failure request_id=") || it.startsWith("web-capacity-summary ") })
+        val listingRefusals = WebListingRefusalBoundary.entries.map { "web-listing-refusal boundary=${it.label}" }.toSet()
+        assertTrue(diagnostics.isNotEmpty() && diagnostics.all {
+            it.startsWith("web-http-failure request_id=") || it.startsWith("web-capacity-summary ") || it in listingRefusals
+        })
     }
 
     @Test fun `near-limit filenames stay readable in upload read listing and scoped export responses`() {
