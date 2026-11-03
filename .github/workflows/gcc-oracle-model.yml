@@ -164,8 +164,36 @@ jobs:
             ${{ runner.temp }}/gcc-oracle-source/gcc-16.2.0.tar.xz
             ${{ runner.temp }}/gcc-oracle-source/gcc-16.2.0.tar.xz.sig
           key: ${{ steps.gcc-source-cache.outputs.cache-primary-key }}
+      - name: Capture GCC reproduction builder identity
+        run: |
+          mkdir -p build/gcc-toolchain-reproduction-diagnostics
+          diagnostics=build/gcc-toolchain-reproduction-diagnostics
+          {
+            printf 'runner.os=%s\nrunner.arch=%s\nrunner.name=%s\nImageOS=%s\nImageVersion=%s\n' \
+              '${{ runner.os }}' '${{ runner.arch }}' '${{ runner.name }}' \
+              "${ImageOS:-unknown}" "${ImageVersion:-unknown}"
+            printf 'sourceRevision=%s\n' "$(git rev-parse HEAD)"
+            sha256sum \
+              .github/workflows/gcc-oracle-model.yml \
+              oracle/gcc/16.2.0/build-toolchain.Dockerfile \
+              oracle/gcc/16.2.0/toolchain-reproduction.json \
+              oracle/gcc/16.2.0/build-record.json
+            uname -a
+            cat /etc/os-release
+            printf '\n--- docker version ---\n'
+            docker version --format '{{json .}}' || true
+            printf '\n--- docker info ---\n'
+            docker info --format 'server={{.ServerVersion}} driver={{.Driver}} os={{.OperatingSystem}} kernel={{.KernelVersion}} arch={{.Architecture}} name={{.Name}}' || true
+            printf '\n--- buildx version ---\n'
+            docker buildx version || true
+            printf '\n--- buildx builder ---\n'
+            docker buildx inspect --bootstrap || true
+          } >"$diagnostics/builder.txt" 2>&1
+          cat "$diagnostics/builder.txt"
       - name: Reproduce and verify the recorded toolchain image
         run: |
+          set -o pipefail
+          diagnostics=build/gcc-toolchain-reproduction-diagnostics
           echo '8b0af79ba3426f49ba599eb0c7eea433c62ac5bb6ab5e7797f7d09d978f43543  oracle/gcc/16.2.0/build-toolchain.Dockerfile' \
             | sha256sum --check --strict
           docker buildx build \
@@ -175,15 +203,19 @@ jobs:
             --load \
             --tag decomp-gcc-oracle-toolchain:16.2.0 \
             --file oracle/gcc/16.2.0/build-toolchain.Dockerfile \
-            oracle/gcc/16.2.0
+            --progress=plain \
+            oracle/gcc/16.2.0 2>&1 | tee "$diagnostics/build.log"
           observed="$(docker image inspect --format '{{.Id}}' decomp-gcc-oracle-toolchain:16.2.0)"
           echo "recorded origin image: sha256:510c510f300d811df22c7769633575a94939073b529a73125bf96cfb96dc7248"
           echo "reproduced image: $observed"
-          docker image inspect \
-            decomp-gcc-oracle-toolchain:16.2.0 \
-            | python3 scripts/verify-gcc-toolchain-reproduction.py \
-                --lock oracle/gcc/16.2.0/toolchain-reproduction.json \
-                --build-record oracle/gcc/16.2.0/build-record.json
+          docker image inspect decomp-gcc-oracle-toolchain:16.2.0 \
+            | tee "$diagnostics/image-inspect.json"
+          docker history --no-trunc --format '{{json .}}' \
+            decomp-gcc-oracle-toolchain:16.2.0 >"$diagnostics/image-history.jsonl" || true
+          python3 scripts/verify-gcc-toolchain-reproduction.py \
+            --lock oracle/gcc/16.2.0/toolchain-reproduction.json \
+            --build-record oracle/gcc/16.2.0/build-record.json \
+            <"$diagnostics/image-inspect.json"
           echo "GCC_TOOLCHAIN_IMAGE_ID=$observed" >> "$GITHUB_ENV"
           docker run --rm \
             --platform linux/amd64 \
@@ -201,6 +233,14 @@ jobs:
             --build-record oracle/gcc/16.2.0/build-record.json \
             --container-digest "$observed" \
             --reproduction-lock oracle/gcc/16.2.0/toolchain-reproduction.json
+      - name: Retain GCC toolchain reproduction diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: gcc-toolchain-reproduction-diagnostics
+          retention-days: 14
+          if-no-files-found: warn
+          path: build/gcc-toolchain-reproduction-diagnostics
       - name: Authenticate the behavior-corpus control client
         run: |
           install -d "$RUNNER_TEMP/docker-client"
