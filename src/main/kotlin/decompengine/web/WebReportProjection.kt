@@ -35,4 +35,4 @@ internal object WebReportProjection {
 
 internal fun webArtifactProjectionUnavailable(): Nothing = throw WebAccessDenied(409, "ARTIFACT_PROJECTION_UNAVAILABLE",
     "This report cannot be served through the redacted report projection, so its stored bytes are withheld. " +
-        "Use the report views in the workbench instead.")
+        "Use the numeric report summary when available; retained case details are withheld too.")

@@ -110,10 +110,19 @@ export function createApiClient(options: ClientOptions) {
         if (response.headers.get('Content-Type') !== 'application/octet-stream') throw new ApiClientError('invalid_headers');
         const text = await boundedBody(response, maxBytes, controller.signal);
         const bytes = new TextEncoder().encode(text);
-        if (BigInt(bytes.byteLength) !== BigInt(artifact.sizeBytes)) throw new ApiClientError('invalid_response');
+        const projected = artifact.content?.projection === 'redacted';
+        const expectedSize = projected ? response.headers.get('Content-Length') : artifact.sizeBytes;
+        const expectedDigest = projected ? response.headers.get('X-Decomp-Content-SHA256') : artifact.sha256;
+        if (projected && (response.headers.get('X-Decomp-Artifact-SHA256') !== artifact.sha256
+          || response.headers.get('X-Decomp-Content-Projection') !== 'redacted'
+          || response.headers.get('X-Decomp-Artifact-ID') !== artifact.artifactId
+          || !expectedSize || !/^(0|[1-9][0-9]*)$/.test(expectedSize)
+          || !expectedDigest || !/^[0-9a-f]{64}$/.test(expectedDigest)
+          || response.headers.get('ETag') !== `"${expectedDigest}"`)) throw new ApiClientError('invalid_headers');
+        if (expectedSize === null || BigInt(bytes.byteLength) !== BigInt(expectedSize)) throw new ApiClientError('invalid_response');
         const digest = new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', bytes));
         const actual = Array.from(digest, byte => byte.toString(16).padStart(2, '0')).join('');
-        if (actual !== artifact.sha256) throw new ApiClientError('invalid_response');
+        if (actual !== expectedDigest) throw new ApiClientError('invalid_response');
         return text;
       }
       if (!/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(response.headers.get('Content-Type') ?? '')) throw new ApiClientError('invalid_headers');
@@ -152,10 +161,12 @@ export function createApiClient(options: ClientOptions) {
     async readArtifactText(artifact: Artifact, expected: { jobId: string; runId: string }, settings: RequestOptions = {}): Promise<string> {
       const observed = { ...artifact };
       observed.binding = { ...observed.binding };
+      if (observed.content) observed.content = { ...observed.content };
       if (observed.binding.jobId !== expected.jobId || observed.binding.runId !== expected.runId
         || observed.binding.revisionId !== null || observed.role !== 'raw-evidence' || observed.derivedFromArtifactId !== null || observed.mediaType !== 'application/json'
         || observed.sha256.length !== 64 || !/^[0-9a-f]{64}$/.test(observed.sha256) || !/^(0|[1-9][0-9]{0,19})$/.test(observed.sizeBytes)
-        || BigInt(observed.sizeBytes).toString() !== observed.sizeBytes || BigInt(observed.sizeBytes) > BigInt(maxBytes)) throw new ApiClientError('invalid_request');
+        || BigInt(observed.sizeBytes).toString() !== observed.sizeBytes || BigInt(observed.sizeBytes) > BigInt(maxBytes)
+        || (observed.content !== undefined && !['verbatim', 'redacted'].includes(observed.content.projection))) throw new ApiClientError('invalid_request');
       try {
         validateResourceHref(basePath, observed.contentHref, { kind: 'artifact-content', jobId: expected.jobId, artifactId: observed.artifactId });
       } catch { throw new ApiClientError('invalid_request'); }

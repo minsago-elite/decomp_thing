@@ -990,16 +990,25 @@
         {
           "if": {
             "properties": {
-              "role": {
-                "const": "raw-evidence"
+              "family": {
+                "enum": [
+                  "exploration-report",
+                  "progress-journal"
+                ]
               }
             },
             "required": [
-              "content"
+              "family"
             ]
           },
           "then": {
+            "required": [
+              "content"
+            ],
             "properties": {
+              "role": {
+                "const": "raw-evidence"
+              },
               "content": {
                 "properties": {
                   "projection": {
@@ -1016,19 +1025,56 @@
         {
           "if": {
             "properties": {
-              "role": {
+              "family": {
                 "enum": [
-                  "source",
-                  "archive"
+                  "source-manifest",
+                  "build-contract"
                 ]
               }
             },
             "required": [
-              "content"
+              "family"
             ]
           },
           "then": {
+            "required": [
+              "content"
+            ],
             "properties": {
+              "role": {
+                "const": "source"
+              },
+              "content": {
+                "properties": {
+                  "projection": {
+                    "const": "verbatim"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "family": {
+                "enum": [
+                  "source-archive"
+                ]
+              }
+            },
+            "required": [
+              "family"
+            ]
+          },
+          "then": {
+            "required": [
+              "content"
+            ],
+            "properties": {
+              "role": {
+                "const": "archive"
+              },
               "content": {
                 "properties": {
                   "projection": {

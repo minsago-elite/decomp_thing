@@ -1509,6 +1509,18 @@
     {
       "file": "fixtures/invalid-run-interrupted-timed-out.json",
       "valid": false
+    },
+    {
+      "file": "fixtures/report-exploration-redacted.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/report-exploration-unavailable.json",
+      "valid": true
+    },
+    {
+      "file": "fixtures/invalid-artifact-family-role-projection.json",
+      "valid": false
     }
   ]
 }

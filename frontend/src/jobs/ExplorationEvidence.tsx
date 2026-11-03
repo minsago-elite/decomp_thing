@@ -68,7 +68,8 @@ export function ExplorationEvidence({ jobId, runId, basePath }: { jobId: string;
           ? <p><strong>{copy.explorationDownloadUnavailable}</strong></p>
           : <>{report.sourceArtifact.content?.projection === 'redacted' && <p>{copy.explorationDownloadRedacted}</p>}
             <a href={report.sourceArtifact.contentHref} download="exploration.json">{copy.downloadObservedExplorationJSON}</a></>}
-        {(report.state === 'available' || report.state === 'partial') && report.adapterVersion === 1 &&
+        {report.sourceArtifact.content?.projection !== 'unavailable' &&
+          (report.state === 'available' || report.state === 'partial') && report.adapterVersion === 1 &&
           (report.producerSchemaVersion === null || (report.producerSchemaVersion === 1 && report.state === 'partial')) &&
           <ExplorationCases key={`${jobId}/${runId}/${report.sourceArtifact.sha256}`} artifact={report.sourceArtifact} jobId={jobId} runId={runId}
             basePath={basePath} producerSchemaVersion={report.producerSchemaVersion} />}

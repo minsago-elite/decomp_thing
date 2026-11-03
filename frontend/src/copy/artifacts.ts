@@ -31,7 +31,7 @@ export const artifactCopy = {
   available: 'Available file, digest not validated: the server computed this SHA-256 from the current bytes. No producer or revision commitment has validated it.',
   downloadCheck: 'Downloads are checked against this SHA-256. If the file changes, the download stops before completion instead of saving different bytes.',
   projectionRedacted: 'This server-produced report downloads as a redacted copy: credentials, configured secrets and private host paths are replaced, so the file can differ from the SHA-256 and size above, which describe the stored report. The download is checked against the stored report first and stops if it changed.',
-  projectionUnavailable: 'Download withheld: this report is larger than the redacted-report limit (64 MiB for exploration reports, 2 MiB for progress journals), and the stored copy is never served unredacted. Use the report views in this workbench to inspect it.',
+  projectionUnavailable: 'Download withheld: this report is larger than the redacted-report limit (64 MiB for exploration reports, 2 MiB for progress journals), and the stored copy is never served unredacted. The numeric report summary remains available when recorded; retained case details are withheld too.',
   download: 'Download {name}',
   acceptance: 'A matching digest identifies bytes. It does not verify compilation, behavior, archive contents or accepted reconstruction.',
 } as const;
