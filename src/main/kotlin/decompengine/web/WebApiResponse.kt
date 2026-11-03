@@ -20,7 +20,7 @@ internal fun requireNoWebApiQuery(exchange: HttpExchange) {
  * redacting their text independently would invalidate those commitments and client validation.
  */
 private val committedContentKinds = setOf("sourceChunk", "revisionDirectory", "revisionSources", "revisionFile", "sourceCatalog",
-    "sourceSearch", "sourceFileDiff")
+    "sourceSearch", "sourceDiff", "sourceFileDiff")
 
 /** The public projection of one response payload under [policy]. */
 internal fun publicWebApiData(kind: String, data: JsonElement, policy: WebRedactionPolicy): JsonElement =

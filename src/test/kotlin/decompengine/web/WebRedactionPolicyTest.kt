@@ -257,6 +257,46 @@ class WebRedactionPolicyTest {
         assertFalse(publicWebApiData("error", committed, policy).toString().contains("/tmp/example"))
     }
 
+    @Test fun `source diff summaries preserve distinct committed filenames across redaction-like spellings`() {
+        for ((baseName, headName) in listOf(
+            "src/modules/sk-abcdefghijklmnopqrstuvwx.c" to "src/modules/sk-zyxwvutsrqponmlkjihgfedc.c",
+            "src/modules/$canary.c" to "src/modules/shortish9.c",
+        )) {
+            val summary = buildJsonObject {
+                put("renameDetection", "identical-digest")
+                put("totalChanged", 3)
+                put("items", buildJsonArray {
+                    fun reference(name: String) = buildJsonObject {
+                        put("fileId", if (name == baseName) "source_base" else "source_head")
+                        put("displayName", name)
+                    }
+                    add(buildJsonObject {
+                        put("status", "renamed")
+                        put("baseFile", reference(baseName)); put("headFile", reference(headName))
+                    })
+                    add(buildJsonObject {
+                        put("status", "added")
+                        put("baseFile", kotlinx.serialization.json.JsonNull); put("headFile", reference(headName))
+                    })
+                    add(buildJsonObject {
+                        put("status", "deleted")
+                        put("baseFile", reference(baseName)); put("headFile", kotlinx.serialization.json.JsonNull)
+                    })
+                })
+            }
+            val rewritten = policy.json(summary).jsonObject.getValue("items") as kotlinx.serialization.json.JsonArray
+            assertEquals(rewritten[0].jsonObject.getValue("baseFile").jsonObject.getValue("displayName"),
+                rewritten[0].jsonObject.getValue("headFile").jsonObject.getValue("displayName"),
+                "generic redaction would collapse the distinct committed names")
+            assertEquals(summary, publicWebApiData("sourceDiff", summary, policy))
+            for (kind in listOf("error", "report")) {
+                val safe = publicWebApiData(kind, summary, policy).toString()
+                assertFalse(safe.contains(baseName), kind)
+                assertFalse(safe.contains(headName), kind)
+            }
+        }
+    }
+
     @Test fun `committed source search snippets preserve text and code point positions`() {
         val snippet = buildJsonObject {
             put("before", "/tmp/x "); put("match", "needle"); put("after", " token=authored")
