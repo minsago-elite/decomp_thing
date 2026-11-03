@@ -411,8 +411,8 @@ async function ready(target, expression, label) {
   }, label);
 }
 
-async function capture(target, name) {
-  const { data } = await cdp.call('Page.captureScreenshot', { format: 'png' }, target.sessionId);
+async function capture(target, name, clip) {
+  const { data } = await cdp.call('Page.captureScreenshot', { format: 'png', ...(clip ? { clip, captureBeyondViewport: true } : {}) }, target.sessionId);
   await fs.writeFile(join(root, name), Buffer.from(data, 'base64'));
 }
 

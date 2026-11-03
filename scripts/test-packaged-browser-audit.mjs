@@ -4,7 +4,7 @@ import { dirname, resolve } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { runInNewContext } from 'node:vm';
-import { assertAudit, auditContentReady, auditFixtures, auditPageNames, auditPageReady, auditTokenKinds, auditViewports, measureContrast, measureFocus, measureOutputSignatureChart, measurePage, prepareAuditPage, qualifyAudit } from './packaged-browser-audit.mjs';
+import { assertAudit, auditContentReady, auditFixtures, auditPageNames, auditPageReady, auditTokenKinds, auditViewports, measureContrast, measureFocus, measureOutputSignatureChart, measurePage, prepareAuditPage, prepareOutputSignatureChartCapture, qualifyAudit } from './packaged-browser-audit.mjs';
 
 // Controls for the packaged audit's own verdict: each injected defect must be reported, so a
 // passing CI audit cannot be a vacuous one.
@@ -27,8 +27,8 @@ function clean() {
     page: 'attempt evidence', viewport: viewport.name, scheme, viewportWidth: viewport.width,
     chartPresent: true, chartRole: 'img', chartVisible: true, figurePresent: true, figureVisible: true, chartName: fixtures.chartExpected.chartName,
     chartBounds: { x: 0, y: 0, width: 300, height: 100, right: 300, bottom: 100 },
-    chartSeries: fixtures.chartExpected.labels.map(label => ({ label, bounds: { x: 0, y: 0, width: 300, height: 30, right: 300, bottom: 30 },
-      svgBounds: { x: 0, y: 0, width: 300, height: 14, right: 300, bottom: 14 }, barWidth: '50' })),
+    chartSeries: fixtures.chartExpected.labels.map((label, index) => ({ label, bounds: { x: 0, y: 0, width: 300, height: 30, right: 300, bottom: 30 },
+      svgBounds: { x: 0, y: 0, width: 300, height: 14, right: 300, bottom: 14 }, barWidth: index === 0 ? '100' : '50' })),
     binding: `${fixtures.chartExpected.reportId} ${fixtures.chartExpected.jobId} ${fixtures.chartExpected.runId} ${fixtures.chartExpected.revisionId}`,
     chartDescription: [`${fixtures.chartExpected.reportId} ${fixtures.chartExpected.jobId} ${fixtures.chartExpected.runId} ${fixtures.chartExpected.revisionId}`,
       `Expanded distinct exit/output signatures: ${fixtures.chartExpected.counts.expanded}. New distinct exit/output signatures: ${fixtures.chartExpected.counts.added}.`,
@@ -112,6 +112,24 @@ test('requires the rendered chart identity, exact table and geometry at every vi
   assert.match(verdict(missing).join('\n'), /chart: missing 1 coverage/);
   const screenshots = clean(); screenshots.chartScreenshots = [];
   assert.match(verdict(screenshots).join('\n'), /missing desktop or 400% packaged screenshot evidence/);
+  const emptyBars = clean();
+  for (const series of emptyBars.chart[0].chartSeries) series.barWidth = '0';
+  assert.match(verdict(emptyBars).join('\n'), /visual bar widths do not represent the reported counts/);
+  const misleadingBars = clean();
+  misleadingBars.chart[0].chartSeries[1].barWidth = '100';
+  assert.match(verdict(misleadingBars).join('\n'), /visual bar widths do not represent the reported counts/);
+});
+
+test('chart screenshot preparation scrolls the rendered figure into the measured viewport', () => {
+  let scrollOptions = null;
+  const expected = { x: 0, y: 20, width: 300, height: 110, right: 300, bottom: 130 };
+  const figure = { scrollIntoView: options => { scrollOptions = options; }, getBoundingClientRect: () => expected };
+  const measured = runInNewContext(prepareOutputSignatureChartCapture, {
+    document: { querySelector: selector => selector === '.output-signature-chart' ? figure : null },
+    innerWidth: 320, innerHeight: 200,
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(scrollOptions)), { block: 'center', inline: 'nearest' });
+  assert.deepEqual(JSON.parse(JSON.stringify(measured)), { ...expected, viewportWidth: 320, viewportHeight: 200 });
 });
 
 test('requires finite, complete timing samples and consistent summaries before budget checks', () => {
@@ -324,6 +342,8 @@ test('qualifyAudit prepares every fresh layout/contrast/focus navigation before 
       else if (expression === measureContrast) kind = 'contrast';
       else if (expression === measureFocus) kind = 'focus';
       else if (expression === measureOutputSignatureChart) kind = 'chart';
+      else if (expression === prepareOutputSignatureChartCapture) return { x: 0, y: 40, width: 300, height: 100,
+        right: 300, bottom: 140, viewportWidth: 320, viewportHeight: 200 };
       if (kind) {
         assert.equal(await current.evaluate(tab, auditPageReady(page, true)), true, `${kind} measured an empty ${page.name}`);
         assert.deepEqual(current.actions, (page.preparation ?? []).map(step => step.action));

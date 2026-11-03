@@ -207,6 +207,14 @@ export const measureOutputSignatureChart = `(() => {
   };
 })()`;
 
+export const prepareOutputSignatureChartCapture = `(() => {
+  const figure = document.querySelector('.output-signature-chart');
+  figure?.scrollIntoView({ block: 'center', inline: 'nearest' });
+  const box = figure?.getBoundingClientRect();
+  return box ? { x: box.x, y: box.y, width: box.width, height: box.height,
+    right: box.right, bottom: box.bottom, viewportWidth: innerWidth, viewportHeight: innerHeight } : null;
+})()`;
+
 // Runs in the page. Regions that require two-dimensional reading may scroll; nothing else may
 // push the page wider than its viewport or hide an action off-screen.
 export const measurePage = `(() => {
@@ -480,7 +488,12 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
         const name = viewport.name === 'desktop 1440x900'
           ? 'attempt-evidence-output-signature-chart-desktop.png'
           : 'attempt-evidence-output-signature-chart-zoom-400.png';
-        await capture(tab, name);
+        const chartBounds = await evaluate(tab, prepareOutputSignatureChartCapture);
+        assert.ok(chartBounds && chartBounds.width > 0 && chartBounds.height > 0
+          && chartBounds.x >= -1 && chartBounds.right <= chartBounds.viewportWidth + 1
+          && chartBounds.y >= -1 && chartBounds.y < chartBounds.viewportHeight,
+        `Chart must be brought into the rendered viewport before capture: ${JSON.stringify(chartBounds)}`);
+        await capture(tab, name, { x: chartBounds.x, y: chartBounds.y, width: chartBounds.width, height: chartBounds.height, scale: 1 });
         chartScreenshots.push(name);
       }
       // Visual evidence: every route at 400% zoom, and the #619 views at every supported size.
@@ -700,6 +713,14 @@ export function assertAudit(audit, manifest, responses, origin, budgets = { cold
     if (entry.chartSeries?.length !== 2 || entry.chartSeries.some(series => !series.label || !validRect(series.bounds)
       || !validRect(series.svgBounds) || series.barWidth === null))
       failures.push(`${where}: visual chart series are missing or not rendered`);
+    const expandedCount = Number(chartExpected?.counts.expanded);
+    const addedCount = Number(chartExpected?.counts.added);
+    const expectedBarWidths = [100, expandedCount > 0 ? addedCount / expandedCount * 100 : NaN];
+    const actualBarWidths = entry.chartSeries?.map(series => Number(series.barWidth)) ?? [];
+    if (!Number.isFinite(expandedCount) || !Number.isFinite(addedCount) || expandedCount <= 0
+      || actualBarWidths.length !== expectedBarWidths.length
+      || actualBarWidths.some((width, index) => !Number.isFinite(width) || Math.abs(width - expectedBarWidths[index]) > 0.1))
+      failures.push(`${where}: visual bar widths do not represent the reported counts`);
   }
   for (const entry of layout) {
     const where = `${entry.page} @ ${entry.viewport} (${entry.scheme})`;

@@ -590,7 +590,11 @@ async function auditWithFixtures(origin, fixtures, fulfilled, unmapped) {
         const name = viewport.name === 'desktop 1440x900'
           ? 'attempt-evidence-output-signature-chart-desktop.png'
           : 'attempt-evidence-output-signature-chart-zoom-400.png';
-        try { await target.screenshot({ path: join(root, name) }); }
+        try {
+          const figure = target.locator('.output-signature-chart');
+          await figure.scrollIntoViewIfNeeded();
+          await figure.screenshot({ path: join(root, name) });
+        }
         finally { await target.evaluate(() => { globalThis.__decompAuditPhase = null; }).catch(() => undefined); }
         chartScreenshots.push(name);
       }
