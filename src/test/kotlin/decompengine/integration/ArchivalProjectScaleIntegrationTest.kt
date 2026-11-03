@@ -3,6 +3,8 @@ package decompengine.integration
 import decompengine.project.ArchivalBundleVerifier
 import decompengine.project.ArchivalPackager
 import decompengine.project.ArchivalProjectAuditor
+import decompengine.project.ContainedModuleCompilationPolicy
+import decompengine.project.ContainedModuleQualificationFailureEvidence
 import decompengine.project.DeterministicModulePlanner
 import decompengine.project.MakeProjectBuilder
 import decompengine.project.RecoveredFunction
@@ -128,10 +130,16 @@ class ArchivalProjectScaleIntegrationTest {
         val original = compile(originalSource, temp.resolve("original"), listOf("-O2", "-fPIE", "-pie"))
         check(command(listOf("strip", "--strip-all", original.toString())).first == 0)
         val project = temp.resolve("project")
-        SourceTreeGenerator.generate(
-            model.copy(inputSha256 = sha256(original.readBytes())),
-            project,
-            reconstructor = RecoveredCModuleReconstructor(),
+        val compilerDiagnostics = mutableListOf<Pair<ByteArray, ByteArray>>()
+        ContainedModuleCompilationPolicy.withQualificationDiagnosticsObserver(
+            observer = { stdout, stderr -> compilerDiagnostics += stdout.copyOf() to stderr.copyOf() },
+            action = {
+                SourceTreeGenerator.generate(
+                    model.copy(inputSha256 = sha256(original.readBytes())),
+                    project,
+                    reconstructor = RecoveredCModuleReconstructor(),
+                )
+            },
         )
         val rebuilt = MakeProjectBuilder.build(project).projectDir.resolve("build/reconstructed")
         val fileInput = temp.resolve("sample.txt").also { it.writeText("from-file\n") }
@@ -221,6 +229,13 @@ class ArchivalProjectScaleIntegrationTest {
         assertTrue(project.resolve("reports/confidence.json").readText().contains("opaque_context"))
         assertTrue(sourceManifest.contains("opaque_context"))
         val audit = ArchivalProjectAuditor.audit(project, requiredCorpusSha256 = setOf(requiredCorpus))
+        if (audit.unresolvedEntityIds != listOf("opaque_context")) {
+            val retained = ContainedModuleQualificationFailureEvidence.retain(
+                "archival-project-scale", project, compilerDiagnostics,
+            )
+            assertEquals(listOf("opaque_context"), audit.unresolvedEntityIds,
+                "unexpected unresolved entities; moduleCompilationEvidenceProblems=${audit.moduleCompilationEvidenceProblems}; evidence=$retained")
+        }
         assertTrue(audit.provenanceComplete)
         assertEquals(true, audit.behaviorMatched)
         assertEquals(listOf(requiredCorpus), audit.requiredCorpusSha256)

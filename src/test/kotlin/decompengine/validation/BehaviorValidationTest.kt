@@ -2,6 +2,8 @@ package decompengine.validation
 
 import decompengine.oracle.core.OracleArtifacts
 import decompengine.project.ArchivalProjectAuditor
+import decompengine.project.ContainedModuleCompilationPolicy
+import decompengine.project.ContainedModuleQualificationFailureEvidence
 import decompengine.project.MakeProjectBuilder
 import decompengine.project.RecoveredCModuleReconstructor
 import decompengine.project.RecoveredFunction
@@ -189,12 +191,18 @@ class BehaviorValidationTest {
         """.trimIndent() + "\n"
         val original = compileC(tempDir, "file-original", source)
         val project = tempDir.resolve("project")
-        SourceTreeGenerator.generate(
-            RecoveredProgramModel(
-                inputSha256 = OracleArtifacts.sha256(java.nio.file.Files.readAllBytes(original)),
-                functions = listOf(RecoveredFunction("fn_1000", "main", 0x1000UL,
-                    "int main(int argc, char **argv)", decompiledC = source)),
-            ), project, reconstructor = RecoveredCModuleReconstructor(),
+        val compilerDiagnostics = mutableListOf<Pair<ByteArray, ByteArray>>()
+        ContainedModuleCompilationPolicy.withQualificationDiagnosticsObserver(
+            observer = { stdout, stderr -> compilerDiagnostics += stdout.copyOf() to stderr.copyOf() },
+            action = {
+                SourceTreeGenerator.generate(
+                    RecoveredProgramModel(
+                        inputSha256 = OracleArtifacts.sha256(java.nio.file.Files.readAllBytes(original)),
+                        functions = listOf(RecoveredFunction("fn_1000", "main", 0x1000UL,
+                            "int main(int argc, char **argv)", decompiledC = source)),
+                    ), project, reconstructor = RecoveredCModuleReconstructor(),
+                )
+            },
         )
         assertEquals(0, MakeProjectBuilder.build(project).returnCode)
         val rebuilt = project.resolve("build/reconstructed")
@@ -229,6 +237,13 @@ class BehaviorValidationTest {
         assertTrue(java.nio.file.Files.readAllBytes(data).contentEquals(payload))
         BehaviorEvidence.decode(java.nio.file.Files.readAllBytes(report.reportPath))
         val audit = ArchivalProjectAuditor.audit(project)
+        if (audit.unresolvedEntityIds.isNotEmpty()) {
+            val retained = ContainedModuleQualificationFailureEvidence.retain(
+                "behavior-file-mounts", project, compilerDiagnostics,
+            )
+            assertTrue(audit.unresolvedEntityIds.isEmpty(),
+                "unexpected unresolved entities ${audit.unresolvedEntityIds}; moduleCompilationEvidenceProblems=${audit.moduleCompilationEvidenceProblems}; evidence=$retained")
+        }
         assertEquals(true, audit.behaviorMatched)
         assertEquals(listOf("reports/file_mounts.behavior.json"), audit.projectBehaviorReportIds)
         assertTrue(audit.unresolvedEntityIds.isEmpty())
