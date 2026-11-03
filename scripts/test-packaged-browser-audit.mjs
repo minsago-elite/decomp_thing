@@ -122,14 +122,20 @@ test('requires the rendered chart identity, exact table and geometry at every vi
 
 test('chart screenshot preparation scrolls the rendered figure into the measured viewport', () => {
   let scrollOptions = null;
-  const expected = { x: 0, y: 20, width: 300, height: 110, right: 300, bottom: 130 };
+  const expected = { x: 0, y: 0, width: 300, height: 383, right: 300, bottom: 383 };
   const figure = { scrollIntoView: options => { scrollOptions = options; }, getBoundingClientRect: () => expected };
   const measured = runInNewContext(prepareOutputSignatureChartCapture, {
     document: { querySelector: selector => selector === '.output-signature-chart' ? figure : null },
-    innerWidth: 320, innerHeight: 200,
+    innerWidth: 320, innerHeight: 200, visualViewport: { pageLeft: 17, pageTop: 1400 }, scrollX: 17, scrollY: 1400,
   });
-  assert.deepEqual(JSON.parse(JSON.stringify(scrollOptions)), { block: 'center', inline: 'nearest' });
-  assert.deepEqual(JSON.parse(JSON.stringify(measured)), { ...expected, viewportWidth: 320, viewportHeight: 200 });
+  assert.deepEqual(JSON.parse(JSON.stringify(scrollOptions)), { block: 'start', inline: 'nearest' });
+  assert.deepEqual(JSON.parse(JSON.stringify(measured)), {
+    viewport: { ...expected, widthLimit: 320, heightLimit: 200 },
+    clip: { x: 17, y: 1400, width: 300, height: 383 },
+  });
+  assert.ok(measured.viewport.y < measured.viewport.heightLimit);
+  assert.ok(measured.viewport.height > measured.viewport.heightLimit,
+    'An oversized chart is valid when its top is visible and capture includes beyond-viewport content');
 });
 
 test('requires finite, complete timing samples and consistent summaries before budget checks', () => {
@@ -342,8 +348,10 @@ test('qualifyAudit prepares every fresh layout/contrast/focus navigation before 
       else if (expression === measureContrast) kind = 'contrast';
       else if (expression === measureFocus) kind = 'focus';
       else if (expression === measureOutputSignatureChart) kind = 'chart';
-      else if (expression === prepareOutputSignatureChartCapture) return { x: 0, y: 40, width: 300, height: 100,
-        right: 300, bottom: 140, viewportWidth: 320, viewportHeight: 200 };
+      else if (expression === prepareOutputSignatureChartCapture) return {
+        viewport: { x: 0, y: 0, width: 300, height: 383, right: 300, bottom: 383, widthLimit: 320, heightLimit: 200 },
+        clip: { x: 0, y: 1200, width: 300, height: 383 },
+      };
       if (kind) {
         assert.equal(await current.evaluate(tab, auditPageReady(page, true)), true, `${kind} measured an empty ${page.name}`);
         assert.deepEqual(current.actions, (page.preparation ?? []).map(step => step.action));

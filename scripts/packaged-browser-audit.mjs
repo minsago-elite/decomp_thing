@@ -209,10 +209,14 @@ export const measureOutputSignatureChart = `(() => {
 
 export const prepareOutputSignatureChartCapture = `(() => {
   const figure = document.querySelector('.output-signature-chart');
-  figure?.scrollIntoView({ block: 'center', inline: 'nearest' });
+  figure?.scrollIntoView({ block: 'start', inline: 'nearest' });
   const box = figure?.getBoundingClientRect();
-  return box ? { x: box.x, y: box.y, width: box.width, height: box.height,
-    right: box.right, bottom: box.bottom, viewportWidth: innerWidth, viewportHeight: innerHeight } : null;
+  if (!box) return null;
+  const pageLeft = visualViewport?.pageLeft ?? scrollX;
+  const pageTop = visualViewport?.pageTop ?? scrollY;
+  return { viewport: { x: box.x, y: box.y, width: box.width, height: box.height,
+    right: box.right, bottom: box.bottom, widthLimit: innerWidth, heightLimit: innerHeight },
+    clip: { x: box.x + pageLeft, y: box.y + pageTop, width: box.width, height: box.height } };
 })()`;
 
 // Runs in the page. Regions that require two-dimensional reading may scroll; nothing else may
@@ -489,11 +493,12 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
           ? 'attempt-evidence-output-signature-chart-desktop.png'
           : 'attempt-evidence-output-signature-chart-zoom-400.png';
         const chartBounds = await evaluate(tab, prepareOutputSignatureChartCapture);
-        assert.ok(chartBounds && chartBounds.width > 0 && chartBounds.height > 0
-          && chartBounds.x >= -1 && chartBounds.right <= chartBounds.viewportWidth + 1
-          && chartBounds.y >= -1 && chartBounds.y < chartBounds.viewportHeight,
+        const viewportBounds = chartBounds?.viewport;
+        assert.ok(viewportBounds && chartBounds.clip && viewportBounds.width > 0 && viewportBounds.height > 0
+          && viewportBounds.x >= -1 && viewportBounds.right <= viewportBounds.widthLimit + 1
+          && viewportBounds.y >= -1 && viewportBounds.y < viewportBounds.heightLimit,
         `Chart must be brought into the rendered viewport before capture: ${JSON.stringify(chartBounds)}`);
-        await capture(tab, name, { x: chartBounds.x, y: chartBounds.y, width: chartBounds.width, height: chartBounds.height, scale: 1 });
+        await capture(tab, name, { ...chartBounds.clip, scale: 1 });
         chartScreenshots.push(name);
       }
       // Visual evidence: every route at 400% zoom, and the #619 views at every supported size.
