@@ -9,6 +9,8 @@ import socket
 import tempfile
 import time
 import unittest
+from unittest import mock
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[2]
 OWNER_PATH = ROOT / "scripts/ci-gcc-toolchain-owner.py"
@@ -648,6 +650,106 @@ class OwnerTest(unittest.TestCase):
         self.assertTrue((self.root / "control/apparmor-absent.json").is_file())
         self.assertTrue(any("--user" in call[0] for call in manager_runner.calls))
         self.assertTrue(released["released"][-1]["inactive"])
+
+    def test_identity_hashing_accepts_pinned_daemon_size_and_refuses_oversized_metadata_before_open(self):
+        # Model proc metadata/stream in memory: no host process, proc read or executable runs.
+        size = 99_870_816
+        class Executable:
+            def __init__(self):
+                self.position = 0
+                self.closed = False
+            def read(self, count):
+                count = min(count, size - self.position)
+                self.position += count
+                return b"x" * count
+            def tell(self):
+                return self.position
+            def __enter__(self):
+                return self
+            def __exit__(self, *unused):
+                self.closed = True
+        fields = ["S", "1"] + ["0"] * 17 + ["777"]
+        texts = {"/proc/123/stat": "123 (authored process) " + " ".join(fields),
+                 "/proc/123/status": "Uid:\t1000\t1000\t1000\t1000\n",
+                 "/proc/123/cgroup": "0::/authored/daemon\n"}
+        def text(path, *args, **kwargs):
+            return texts[str(path)]
+        metadata = SimpleNamespace(st_dev=1, st_ino=2, st_size=size)
+        stream = Executable()
+        with mock.patch.object(Path, "read_text", text), \
+                mock.patch.object(owner_module.os, "stat", return_value=metadata), \
+                mock.patch.object(owner_module.os, "readlink", return_value="/authored/docker/dockerd"), \
+                mock.patch("builtins.open", return_value=stream):
+            try:
+                identity = owner_module._read_proc_identity(123)
+            except owner_module.Refusal as exc:
+                self.fail(f"the pinned daemon size must fit the finite identity budget: {exc}")
+        expected = hashlib.sha256()
+        remaining = size
+        while remaining:
+            count = min(1024 * 1024, remaining)
+            expected.update(b"x" * count)
+            remaining -= count
+        self.assertEqual(identity["exeSha256"], expected.hexdigest())
+        self.assertEqual(stream.position, size)
+        self.assertTrue(stream.closed)
+        metadata.st_size = 128 * 1024 * 1024 + 1
+        with mock.patch.object(Path, "read_text", text), \
+                mock.patch.object(owner_module.os, "stat", return_value=metadata), \
+                mock.patch.object(owner_module.os, "readlink", return_value="/authored/oversized"), \
+                mock.patch("builtins.open", side_effect=AssertionError("oversized metadata must refuse before opening")):
+            with self.assertRaisesRegex(owner_module.Refusal, "identity hash budget"):
+                owner_module._read_proc_identity(123)
+
+        metadata.st_size = 16
+        for size, message in ((17, "identity hash budget"), (15, "size changed")):
+            stream = Executable()
+            with mock.patch.object(Path, "read_text", text), \
+                    mock.patch.object(owner_module.os, "stat", return_value=metadata), \
+                    mock.patch.object(owner_module.os, "readlink", return_value="/authored/changing"), \
+                    mock.patch.object(owner_module, "MAX_EXECUTABLE_IDENTITY_BYTES", 16), \
+                    mock.patch("builtins.open", return_value=stream):
+                with self.assertRaisesRegex(owner_module.Refusal, message):
+                    owner_module._read_proc_identity(123)
+            self.assertLessEqual(stream.position, 17)
+            self.assertTrue(stream.closed)
+
+    def test_stop_coordinator_receives_remaining_outer_budget_without_five_second_truncation(self):
+        for limit in (30.0, 5.0):
+            clock = FakeClock()
+            class SlowStop(FakeBackend):
+                def manager_stop(self, role, receipt, timeout):
+                    self.stop_timeout = timeout
+                    if timeout < 8:
+                        raise owner_module.Refusal("authored stop requires eight seconds")
+                    clock.sleep(8)
+                    return super().manager_stop(role, receipt, timeout)
+            backend = SlowStop()
+            owner = owner_module.Owner(self.repo / "build/g" / f"budget-{int(limit)}", backend,
+                                       clock=clock, test_repo_root=self.repo)
+            self.reserve(owner)
+            owner.begin_role("buildkit", ["/pinned/buildkitd"], {"PATH": "/bin"}, {"seconds": 1})
+            owner.ready("buildkit", {"pidfd": "fixture", "identity": {"exe": "/pinned/buildkitd"}})
+            original_event = owner._event
+            def event(manifest, state, **facts):
+                result = original_event(manifest, state, **facts)
+                if state == "sealed" and limit == 30:
+                    clock.sleep(7)  # Authored preceding teardown work is charged to the same budget.
+                return result
+            owner._event = event
+            if limit == 30:
+                try:
+                    stopped = owner.seal_stop("buildkit", timeout=limit)
+                except owner_module.Refusal as exc:
+                    self.fail(f"remaining outer budget permits the authored eight-second stop: {exc}")
+                self.assertEqual(backend.stop_timeout, 23)
+                self.assertEqual(clock.now, 15)
+                self.assertEqual(stopped["roles"]["buildkit"]["status"], "absence-proved")
+            else:
+                with self.assertRaisesRegex(owner_module.Refusal, "requires eight seconds"):
+                    owner.seal_stop("buildkit", timeout=limit)
+                self.assertEqual(backend.stop_timeout, 5)
+                self.assertEqual(owner._manifest()["roles"]["buildkit"]["status"], "quarantined-unknown")
 
     def test_missing_stop_receipt_cannot_be_replaced_by_empty_inventory(self):
         owner = self.make_owner(FakeBackend(empty=True, missing_stop=True))

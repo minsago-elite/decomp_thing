@@ -30,6 +30,8 @@ from typing import Any, Protocol
 MAX_JOURNAL = 1024 * 1024
 MAX_CONTROL = 32 * 1024 * 1024
 MAX_FILES = 128
+# The authenticated dockerd member is 99,870,816 bytes; identity reads remain finite.
+MAX_EXECUTABLE_IDENTITY_BYTES = 128 * 1024 * 1024
 PINNED_TOOL_HASHES = {
     "rootlesskit": "98f07e783dd6b3cd236c7865d1dce7937e645ec74a0fe2971725449af074f466",
     "dockerd": "c3ecdc8ac9e56b9a53ffd9fd4aece65432814597046f8d188a538be18c000df8",
@@ -858,16 +860,22 @@ def _read_proc_identity(pid: int) -> dict:
                       for name in ("mnt", "pid", "user", "net", "ipc", "uts")}
     except (OSError, ValueError, StopIteration, IndexError) as exc:
         raise Refusal(f"process identity for pinned child {pid} is unknown") from exc
+    if exe.st_size > MAX_EXECUTABLE_IDENTITY_BYTES:
+        raise Refusal("admitted executable exceeds identity hash budget")
     digest = hashlib.sha256()
+    observed = 0
     try:
         with open(f"/proc/{pid}/exe", "rb", buffering=0) as executable:
             while True:
-                block = executable.read(1024 * 1024)
+                block = executable.read(min(1024 * 1024, MAX_EXECUTABLE_IDENTITY_BYTES - observed + 1))
                 if not block:
                     break
-                digest.update(block)
-                if executable.tell() > 64 * 1024 * 1024:
+                observed += len(block)
+                if observed > MAX_EXECUTABLE_IDENTITY_BYTES:
                     raise Refusal("admitted executable exceeds identity hash budget")
+                digest.update(block)
+            if observed != exe.st_size:
+                raise Refusal("admitted executable size changed during identity hashing")
     except OSError as exc:
         raise Refusal("cannot hash the admitted child executable") from exc
     return {"pid": pid, "parentPid": parent_pid, "startTicks": start_ticks, "uid": uid, "exe": exe_path,
@@ -2062,7 +2070,7 @@ class Owner:
             raise Refusal("launch intent lacks manager receipt; absence is unknown")
         remaining = max(0.001, deadline - self.clock())
         try:
-            result = self.backend.manager_stop(role, receipt, min(5.0, remaining))
+            result = self.backend.manager_stop(role, receipt, remaining)
         except Exception as exc:
             role_record["status"] = "quarantined-unknown"
             self._role_event(manifest, role, role_record, "bounded manager stop failed: " + type(exc).__name__)
