@@ -2,6 +2,7 @@ package decompengine
 
 import decompengine.agent.*
 import decompengine.jobs.AgentProgressJournal
+import decompengine.jobs.FullRunEventReader
 import java.io.ByteArrayOutputStream
 import java.io.OutputStream
 import java.io.PrintStream
@@ -15,6 +16,29 @@ import kotlin.test.*
 import kotlinx.serialization.json.*
 
 class RepairCliProgressTest {
+    @Test
+    fun `cli history is input-bound and records analysis context`() {
+        val root = createTempDirectory("reconstruction-history-context-")
+        val input = root.resolve("input.bin")
+        Files.writeString(input, "input")
+        val inputSha = decompengine.project.sha256(Files.readAllBytes(input))
+        val profileSha = "a".repeat(64)
+        ReconstructionCliProgress.open(root.resolve("output"), emptyList(), PrintStream(ByteArrayOutputStream()), inputPath = input).use { progress ->
+            progress.phase(AgentWorkflowPhase.ANALYZING)
+            progress.runContext(inputSha, profileSha)
+            progress.phase(AgentWorkflowPhase.UNRESOLVED)
+        }
+        val historyRoot = root.resolve("output/run-history")
+        val run = Files.list(historyRoot).use { stream -> stream.findFirst().orElseThrow() }
+        FullRunEventReader(run).use { reader ->
+            val events = generateSequence { reader.next() }.toList()
+            val context = events.single { it["kind"]?.jsonPrimitive?.content == "run_context" }
+            assertEquals(inputSha, context.getValue("inputSha256").jsonPrimitive.content)
+            assertEquals(profileSha, context.getValue("profileSha256").jsonPrimitive.content)
+            assertEquals(JsonPrimitive(true), reader.verifyEnd()["complete"])
+        }
+    }
+
     @Test
     fun `reconstruction terminal display drains owned callbacks without retained file reads`(): Unit {
         val parent = Files.createDirectories(Path.of("build/test-tmp/reconstruction-no-read"))

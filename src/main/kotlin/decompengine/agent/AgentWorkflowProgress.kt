@@ -9,6 +9,9 @@ interface AgentWorkflowProgress {
     fun runState(observation: AgentWorkflowRunObservation) =
         phase(observation.phase, observation.taskId, observation.acceptedRevisionSha256)
 
+    /** Bind observation history to the immutable analysis inputs; never grants acceptance authority. */
+    fun runContext(inputSha256: String, profileSha256: String) = Unit
+
     companion object {
         val NONE = object : AgentWorkflowProgress {
             override fun beginTask(taskId: String, request: AgentExecutionRequest) = AgentTaskProgress.NONE

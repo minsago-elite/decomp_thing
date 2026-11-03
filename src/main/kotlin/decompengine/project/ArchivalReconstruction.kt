@@ -924,6 +924,7 @@ class ArchivalReconstructionService(
         adapter.diagnostics.prepare(profile)
         progress.phase(AgentWorkflowPhase.ANALYZING)
         val model = selectedAnalyzer.analyze(binaryPath, outputDir.resolve("analysis"))
+        progress.runContext(model.inputSha256, profile.sha256)
         val project = outputDir.resolve("source-tree")
         val progressPath = outputDir.resolve("reconstruction_progress.json")
         progressPath.writeText("{\"phase\":\"planning\",\"completed\":0,\"total\":0}\n")

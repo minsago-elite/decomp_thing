@@ -45,6 +45,33 @@ class ReconstructionOutputWorkspaceTest {
     }
 
     @Test
+    fun `progress snapshot and full run history follow the selected input`() {
+        val base = createTempDirectory("input-history-")
+        val root = base.resolve("output")
+        val a = base.resolve("a").apply { writeText("input-a") }
+        val b = base.resolve("b").apply { writeText("input-b") }
+        val aHash = sha256(a.readBytes())
+        val bHash = sha256(b.readBytes())
+        ReconstructionOutputWorkspace.open(root, a).use {
+            root.resolve("agent-progress.json").writeText("progress-a")
+            root.resolve("run-history/a").createDirectories().resolve("events.jsonl").writeText("history-a")
+        }
+        ReconstructionOutputWorkspace.open(root, b).use {
+            assertFalse(root.resolve("agent-progress.json").exists())
+            assertFalse(root.resolve("run-history").exists())
+            root.resolve("agent-progress.json").writeText("progress-b")
+            root.resolve("run-history/b").createDirectories().resolve("events.jsonl").writeText("history-b")
+        }
+        ReconstructionOutputWorkspace.open(root, a).use {
+            assertEquals("progress-a", root.resolve("agent-progress.json").readText())
+            assertEquals("history-a", root.resolve("run-history/a/events.jsonl").readText())
+            assertEquals("progress-b", root.resolve("input-cache/$bHash/agent-progress.json").readText())
+            assertEquals("history-b", root.resolve("input-cache/$bHash/run-history/b/events.jsonl").readText())
+            assertEquals(aHash, it.inputSha256)
+        }
+    }
+
+    @Test
     fun `exclusive leases reject concurrent writers and can be reacquired after close`() {
         val base = createTempDirectory("input-lease-")
         val input = base.resolve("input").apply { writeText("a") }

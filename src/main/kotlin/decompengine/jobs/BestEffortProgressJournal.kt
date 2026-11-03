@@ -9,6 +9,8 @@ internal class BestEffortProgressJournal(
     workflow: String,
     sensitiveValues: Collection<String> = emptyList(),
     onPhase: (AgentWorkflowPhase) -> Unit = {},
+    recordFullRun: Boolean = false,
+    maximumFullRunBytes: Long = FullRunJournal.MAXIMUM_RUN_BYTES,
     private val onUnavailable: () -> Unit = {
         ProgressWarnings.journalUnavailable()
     },
@@ -18,7 +20,10 @@ internal class BestEffortProgressJournal(
     internal val journalRunId: String? get() = journal?.journalRunId
 
     init {
-        observe { journal = AgentProgressJournal(reportsDirectory, workflow, sensitiveValues, onPhase = onPhase) }
+        observe {
+            journal = AgentProgressJournal(reportsDirectory, workflow, sensitiveValues, onPhase = onPhase,
+                recordFullRun = recordFullRun, maximumFullRunBytes = maximumFullRunBytes)
+        }
     }
 
     private inline fun observe(evenIfFailed: Boolean = false, action: () -> Unit) {
@@ -58,6 +63,11 @@ internal class BestEffortProgressJournal(
         observe { journal?.phase(phase, taskId, acceptedRevisionSha256) }
 
     override fun runState(observation: AgentWorkflowRunObservation) = observe { journal?.runState(observation) }
+
+    override fun runContext(inputSha256: String, profileSha256: String) =
+        observe { journal?.runContext(inputSha256, profileSha256) }
+
+    fun diagnostic(message: String) = observe { journal?.diagnostic(message) }
 
     override fun close() {
         val interrupted = Thread.interrupted()

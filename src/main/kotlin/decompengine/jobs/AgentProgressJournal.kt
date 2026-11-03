@@ -283,6 +283,11 @@ class AgentProgressJournal private constructor(
         onPhase(observation.phase)
     }
 
+    override fun runContext(inputSha256: String, profileSha256: String) {
+        require(inputSha256.matches(Regex("[0-9a-f]{64}")) && profileSha256.matches(Regex("[0-9a-f]{64}")))
+        enqueue("run_context") { put("inputSha256", inputSha256); put("profileSha256", profileSha256) }
+    }
+
     /** Bounded, redacted diagnostic observation; it is never used as workflow authority. */
     internal fun diagnostic(message: String) = enqueue("diagnostic") { put("text", redactor.text(message, 2048)) }
 

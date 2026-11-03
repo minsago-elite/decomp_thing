@@ -19,12 +19,14 @@ internal fun <T> withReconstructionCliProgress(
     reportsDirectory: Path,
     sensitiveValues: Collection<String> = emptyList(),
     output: PrintStream = System.err,
+    inputPath: Path? = null,
     action: (ReconstructionCliProgress) -> T,
-): T = ReconstructionCliProgress.open(reportsDirectory, sensitiveValues, output).use(action)
+): T = ReconstructionCliProgress.open(reportsDirectory, sensitiveValues, output, inputPath = inputPath).use(action)
 
 internal class ReconstructionCliProgress private constructor(
     private val journal: BestEffortProgressJournal,
     private val observer: CliProgressObserver,
+    private val workspace: decompengine.project.ReconstructionOutputWorkspace?,
 ) : AgentWorkflowProgress by journal, AutoCloseable {
     private val closed = AtomicBoolean()
 
@@ -33,8 +35,13 @@ internal class ReconstructionCliProgress private constructor(
         try {
             journal.close()
         } finally {
-            observer.close()
+            try { observer.close() } finally { workspace?.close() }
         }
+    }
+
+    override fun runContext(inputSha256: String, profileSha256: String) {
+        workspace?.let { require(it.inputSha256 == inputSha256) { "reconstruction input changed after workspace activation" } }
+        journal.runContext(inputSha256, profileSha256)
     }
 
     companion object {
@@ -43,20 +50,26 @@ internal class ReconstructionCliProgress private constructor(
             sensitiveValues: Collection<String>,
             output: PrintStream,
             readSnapshot: (Path) -> JsonObject? = { directory -> AgentProgressJournal.read(directory) },
+            inputPath: Path? = null,
         ): ReconstructionCliProgress {
-            val observer = CliProgressObserver(reportsDirectory, output, CliProgressWorkflow.RECONSTRUCTION, readSnapshot)
+            val workspace = inputPath?.let { decompengine.project.ReconstructionOutputWorkspace.open(reportsDirectory, it) }
+            var observer: CliProgressObserver? = null
             var journal: BestEffortProgressJournal? = null
             try {
+                observer = CliProgressObserver(reportsDirectory, output, CliProgressWorkflow.RECONSTRUCTION, readSnapshot)
                 val owned = BestEffortProgressJournal(
                     reportsDirectory, "reconstruction", sensitiveValues,
                     onPhase = observer::reconstructionPhase,
+                    recordFullRun = true,
                     onUnavailable = observer::unavailable,
                 )
                 journal = owned
-                owned.journalRunId?.let(observer::bindReconstructionRun)
-                return ReconstructionCliProgress(owned, observer)
+                owned.journalRunId?.let(requireNotNull(observer)::bindReconstructionRun)
+                return ReconstructionCliProgress(owned, requireNotNull(observer), workspace)
             } catch (failure: Throwable) {
-                try { journal?.close() } finally { observer.close() }
+                try { journal?.close() } finally {
+                    try { observer?.close() } finally { workspace?.close() }
+                }
                 throw failure
             }
         }
