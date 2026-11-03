@@ -183,6 +183,8 @@ jobs:
           node --test scripts/packaged-browser-upload.test.mjs
           node --check scripts/packaged-browser-restart.mjs
           node --test scripts/packaged-browser-restart.test.mjs
+          node --check scripts/packaged-browser-cdp-diagnostics.mjs
+          node --test scripts/packaged-browser-cdp-diagnostics.test.mjs
       - name: Build archives and verify browser expiry and distribution contents
         env:
           DECOMP_BROWSER_CHROME: ${{ runner.temp }}/web-test-browser/chrome

@@ -14,6 +14,7 @@ import { seedLegacy, qualifyLegacy } from './packaged-browser-legacy.mjs';
 import { qualifyRestart, assertGracefulShutdown, scrubTokens, boundReport } from './packaged-browser-restart.mjs';
 import { qualifyUpgrade, qualifyUpgradeCache } from './packaged-browser-upgrade.mjs';
 import { qualifyAudit, assertAudit } from './packaged-browser-audit.mjs';
+import { PackagedBrowserCdpDiagnostics } from './packaged-browser-cdp-diagnostics.mjs';
 
 // Test driver only: the application is launched with a separate Node-free PATH.
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -85,6 +86,7 @@ let work;
 let browserTmp;
 let lastTarget;
 const targets = [];
+const cdpDiagnostics = new PackagedBrowserCdpDiagnostics();
 const profile = join(root, 'browser profile');
 const ownerToken = randomUUID();
 const installHelper = join(repo, 'scripts/packaged-browser-install.py');
@@ -94,6 +96,7 @@ let applicationOutput = '';
 let browserError = '';
 let viteError = '';
 const report = { status: 'running', mode: values.mode, testDirectory: root, driverNode: nodeVersion,
+  driverCommit: process.env.GITHUB_SHA ?? execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8', maxBuffer: 1024 }).trim(),
   tools: { node: process.execPath, chrome: chromeBinary, javaHome, python: values.python }, requests: {} };
 const launchErrors = new WeakMap();
 console.log(`Evidence directory: ${root}`);
@@ -248,9 +251,15 @@ function correlateDocumentResponse(state, requestId, response, source) {
 
 async function makeTarget({ cspProbe = false, cacheEnabled = false, newWindow = false } = {}) {
   assert.equal(typeof cacheEnabled, 'boolean', 'Browser cache policy must be explicit');
-  const { targetId } = await cdp.call('Target.createTarget', { url: 'about:blank', ...(newWindow ? { newWindow: true } : {}) });
-  const { sessionId } = await cdp.call('Target.attachToTarget', { targetId, flatten: true });
+  const initialization = cdpDiagnostics.beginTarget();
+  const { targetId } = await cdpDiagnostics.command(initialization, 'Target.createTarget', () =>
+    cdp.call('Target.createTarget', { url: 'about:blank', ...(newWindow ? { newWindow: true } : {}) }));
+  cdpDiagnostics.setTargetIds(initialization, targetId);
+  const { sessionId } = await cdpDiagnostics.command(initialization, 'Target.attachToTarget', () =>
+    cdp.call('Target.attachToTarget', { targetId, flatten: true }));
+  cdpDiagnostics.setTargetIds(initialization, targetId, sessionId);
   const state = { targetId, sessionId, cspProbe, cacheEnabled, requests: [], responses: [], exceptions: [], requestUrls: new Map(),
+    initializationComplete: false,
     cacheRequests: [], cacheResponses: [], cacheRequestIds: new Set(),
     documentRequests: [], pendingDocumentRequests: new Map(), orphanDocumentResponses: [],
     cspViolations: [], cspLogEntries: [], cspBlockedRequests: [], cspIssues: [] };
@@ -310,22 +319,25 @@ async function makeTarget({ cspProbe = false, cacheEnabled = false, newWindow = 
   cdp.on('Audits.issueAdded', ({ issue }) => {
     if (issue.code === 'ContentSecurityPolicyIssue') state.cspIssues.push(issue.details?.contentSecurityPolicyIssueDetails ?? issue);
   }, sessionId);
-  await cdp.call('Page.enable', {}, sessionId);
-  await cdp.call('Runtime.enable', {}, sessionId);
-  await cdp.call('Network.enable', {}, sessionId);
-  await cdp.call('Log.enable', {}, sessionId);
-  await cdp.call('Audits.enable', {}, sessionId);
-  await cdp.call('Runtime.addBinding', { name: '__decompRecordCspViolation' }, sessionId);
-  await cdp.call('Page.addScriptToEvaluateOnNewDocument', { source: `addEventListener('securitypolicyviolation', event => {
+  const initialize = (method, params = {}) => cdpDiagnostics.command(initialization, method,
+    () => cdp.call(method, params, sessionId));
+  await initialize('Page.enable');
+  await initialize('Runtime.enable');
+  await initialize('Network.enable');
+  await initialize('Log.enable');
+  await initialize('Audits.enable');
+  await initialize('Runtime.addBinding', { name: '__decompRecordCspViolation' });
+  await initialize('Page.addScriptToEvaluateOnNewDocument', { source: `addEventListener('securitypolicyviolation', event => {
     globalThis.__decompRecordCspViolation(JSON.stringify({
       blockedURI: event.blockedURI, columnNumber: event.columnNumber, disposition: event.disposition,
       documentURI: event.documentURI, effectiveDirective: event.effectiveDirective,
       lineNumber: event.lineNumber, originalPolicy: event.originalPolicy,
       sourceFile: event.sourceFile, statusCode: event.statusCode, violatedDirective: event.violatedDirective,
     }));
-  });` }, sessionId);
-  await cdp.call('Network.setCacheDisabled', { cacheDisabled: !cacheEnabled }, sessionId);
-  await cdp.call('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false }, sessionId);
+  });` });
+  await initialize('Network.setCacheDisabled', { cacheDisabled: !cacheEnabled });
+  await initialize('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+  state.initializationComplete = true;
   return state;
 }
 
@@ -538,6 +550,23 @@ try {
   const [port, socketPath] = portFile.trim().split('\n');
   const socket = await connectDevTools(`ws://127.0.0.1:${port}${socketPath}`);
   cdp = new Protocol(socket);
+  cdp.on('Target.targetCreated', ({ targetInfo }) => cdpDiagnostics.targetEvent('target-created', {
+    targetId: targetInfo?.targetId, targetType: targetInfo?.type, attached: targetInfo?.attached,
+  }));
+  cdp.on('Target.targetDestroyed', ({ targetId }) => cdpDiagnostics.targetEvent('target-destroyed', { targetId }));
+  cdp.on('Target.attachedToTarget', ({ sessionId, targetInfo }) => cdpDiagnostics.targetEvent('target-attached', {
+    targetId: targetInfo?.targetId, sessionId, targetType: targetInfo?.type, attached: targetInfo?.attached,
+  }));
+  cdp.on('Target.detachedFromTarget', ({ sessionId, targetId }) => cdpDiagnostics.targetEvent('target-detached', { targetId, sessionId }));
+  const discoveryStarted = performance.now();
+  try {
+    await cdp.call('Target.setDiscoverTargets', { discover: true });
+    report.targetDiscoveryMonitoring = { outcome: 'success', elapsedMs: Math.max(0, Math.round(performance.now() - discoveryStarted)) };
+  } catch (error) {
+    report.targetDiscoveryMonitoring = { outcome: error?.message === 'DevTools deadline: Target.setDiscoverTargets' ? 'deadline' : 'protocol-error',
+      elapsedMs: Math.max(0, Math.round(performance.now() - discoveryStarted)) };
+    throw error;
+  }
   report.browser = await cdp.call('Browser.getVersion');
   report.browserSandboxDisabled = values['no-sandbox'];
   report.cspDetectorProbe = await qualifyCspDetector();
@@ -1118,7 +1147,7 @@ try {
   report.viteError = safeDiagnostic(viteError);
   console.error(safeDiagnostic(error.stack));
   process.exitCode = 1;
-  if (lastTarget && cdp) {
+  if (lastTarget && cdp && lastTarget.initializationComplete) {
     try {
       // Fail closed if the handoff has not been scrubbed. Hide editable fields
       // before a diagnostic capture, and never capture visible credential text.
@@ -1134,7 +1163,7 @@ try {
     } catch {
       report.failureScreenshotSkipped = 'Attached page unavailable within the bounded DevTools request deadline';
     }
-  }
+  } else if (lastTarget && !lastTarget.initializationComplete) report.failureScreenshotSkipped = 'Target initialization failed before page commands completed';
 } finally {
   if (cdp) await cdp.call('Browser.close').catch(() => {});
   const cleanup = await Promise.allSettled([stop(browser), stop(application), stop(vite)]);
@@ -1147,6 +1176,7 @@ try {
     report.cleanupErrors = cleanup.filter((result) => result.status === 'rejected').map((result) => safeDiagnostic(result.reason));
     process.exitCode = 1;
   }
+  report.cdpTargetDiagnostics = cdpDiagnostics.snapshot();
   report.workRetained = true;
   if (report.shutdownConfirmed && !values['keep-workdir']) {
     try {

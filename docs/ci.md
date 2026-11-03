@@ -252,6 +252,10 @@ existing destination. Ubuntu CI installs the archive's `deb.deps`, following the
 The browser is separate from all application distributions. CI explicitly uses
 `--no-sandbox` on its disposable runner; each report records that setting and the
 actual executable digest/CDP version. It does not qualify browser sandbox behavior.
+Packaged-browser reports also retain a bounded target lifecycle trace and
+per-target initialization phase timings/outcomes. The trace hashes target/session
+identifiers and omits page URLs, titles and CDP payloads so an initialization
+timeout can be localized without retaining browser-private navigation data.
 
 The packaged lane retains JSON reports, screenshots, tool pins and JVM test
 reports as `packaged-web-verification` for 14 days even after failure. Session
