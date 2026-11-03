@@ -506,12 +506,12 @@ def prepare(args):
         build.append({'source': str(RUNTIME / 'headers'), 'destination': '/usr/include'})
         compiler_include_search = staged_compiler_include_search(
             RUNTIME / 'tools' / 'cc', RUNTIME / 'tools',
-            ((gcc_runtime, RUNTIME / 'gcc'), (RUNTIME / 'tools', Path('/decomp-generated-c-tools')),
+            ((gcc_runtime, RUNTIME / 'gcc'), (RUNTIME / 'tools', RUNTIME / 'tools'),
              (Path('/usr/include'), RUNTIME / 'headers')), RUNTIME / 'headers')
         require_compiler_stddef_candidate(compiler_include_search)
         require_compiler_builtin_header_candidate(
             compiler_include_search, RUNTIME / 'tools' / 'include', 'stdarg.h',
-            Path('/decomp-generated-c-tools') / 'include')
+            RUNTIME / 'tools' / 'include')
         link_parent = None
         for name in ('crt1.o', 'Scrt1.o', 'crti.o', 'crtn.o', 'libc.so', 'libc_nonshared.a'):
             path = Path(command([str(gcc), f'-print-file-name={name}'])).absolute().resolve()

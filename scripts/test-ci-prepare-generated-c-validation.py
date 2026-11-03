@@ -170,13 +170,16 @@ class CompilerProvisioningControls(unittest.TestCase):
         include.mkdir(parents=True)
         mounted_include = self.runtime / 'gcc/include'
         mounted_include.mkdir(parents=True)
+        staged_tools_include = self.runtime / 'tools/include'
+        staged_tools_include.mkdir(parents=True)
         (self.runtime / 'headers').mkdir(parents=True)
         header = mounted_include / 'stddef.h'
         header.write_bytes(b'authenticated standard header\n')
-        stdarg = mounted_include / 'stdarg.h'
+        stdarg = staged_tools_include / 'stdarg.h'
         stdarg.write_bytes(b'authenticated GCC builtin header\n')
         unapproved = self.root / 'unapproved/include'
-        stderr = (b'#include <...> search starts here:\n' + str(mounted_include).encode() + b'\n' +
+        stderr = (b'#include <...> search starts here:\n' + str(staged_tools_include).encode() + b'\n' +
+                  str(mounted_include).encode() + b'\n' +
                   str(include).encode() + b'\n' +
                   str(unapproved).encode() + b'\nEnd of search list.\n')
         result = SimpleNamespace(returncode=0, stdout='', stderr=stderr.decode())
@@ -184,30 +187,31 @@ class CompilerProvisioningControls(unittest.TestCase):
         prefix = staged.parent
         with patch.object(PROVISIONER.subprocess, 'run', return_value=result) as run:
             evidence = PROVISIONER.staged_compiler_include_search(staged, prefix,
-                ((self.root / 'gcc', self.runtime / 'gcc'), (Path('/usr/include'), self.runtime / 'headers')),
+                ((self.root / 'gcc', self.runtime / 'gcc'), (self.runtime / 'tools', self.runtime / 'tools'),
+                 (Path('/usr/include'), self.runtime / 'headers')),
                 mounted_include)
         self.assertEqual(0, evidence['exitCode'])
-        self.assertEqual([str(mounted_include), str(include), str(unapproved)], evidence['searchPaths'])
+        self.assertEqual([str(staged_tools_include), str(mounted_include), str(include), str(unapproved)], evidence['searchPaths'])
         self.assertEqual([{'searchPath': str(mounted_include), 'mountedPath': str(header), 'bytes': len(header.read_bytes()),
                            'sha256': hashlib.sha256(header.read_bytes()).hexdigest()},
                           {'searchPath': str(include), 'mountedPath': str(header), 'bytes': len(header.read_bytes()),
                            'sha256': hashlib.sha256(header.read_bytes()).hexdigest()}], evidence['stddefCandidates'])
-        self.assertEqual([{'searchPath': str(mounted_include), 'mountedPath': str(stdarg), 'bytes': len(stdarg.read_bytes()),
-                           'sha256': hashlib.sha256(stdarg.read_bytes()).hexdigest()},
-                          {'searchPath': str(include), 'mountedPath': str(stdarg), 'bytes': len(stdarg.read_bytes()),
-                           'sha256': hashlib.sha256(stdarg.read_bytes()).hexdigest()}], evidence['stdargCandidates'])
-        PROVISIONER.require_compiler_builtin_header_candidate(evidence, mounted_include, 'stdarg.h')
+        self.assertEqual([{'searchPath': str(staged_tools_include), 'mountedPath': str(stdarg),
+                           'bytes': len(stdarg.read_bytes()), 'sha256': hashlib.sha256(stdarg.read_bytes()).hexdigest()}],
+                         evidence['stdargCandidates'])
+        PROVISIONER.require_compiler_builtin_header_candidate(evidence, staged_tools_include, 'stdarg.h', staged_tools_include)
         self.assertIn('-B' + str(prefix) + '/', run.call_args.args[0])
         self.assertIn('-I' + str(mounted_include), run.call_args.args[0])
         no_candidate = SimpleNamespace(returncode=1, stdout='', stderr=(
             '#include <...> search starts here:\n' + str(unapproved) + '\nEnd of search list.\n'))
         with patch.object(PROVISIONER.subprocess, 'run', return_value=no_candidate):
             absent = PROVISIONER.staged_compiler_include_search(staged, prefix,
-                ((self.root / 'gcc', self.runtime / 'gcc'), (Path('/usr/include'), self.runtime / 'headers')),
+                ((self.root / 'gcc', self.runtime / 'gcc'), (self.runtime / 'tools', self.runtime / 'tools'),
+                 (Path('/usr/include'), self.runtime / 'headers')),
                 mounted_include)
         self.assertEqual([], absent['stddefCandidates'])
         with self.assertRaisesRegex(ValueError, 'authenticated readable GCC builtin stdarg.h'):
-            PROVISIONER.require_compiler_builtin_header_candidate(absent, mounted_include, 'stdarg.h')
+            PROVISIONER.require_compiler_builtin_header_candidate(absent, staged_tools_include, 'stdarg.h', staged_tools_include)
         with self.assertRaisesRegex(ValueError, 'complete include-search list'):
             PROVISIONER.parse_gcc_include_search_paths(b'no compiler diagnostics')
         with self.assertRaisesRegex(ValueError, 'canonical and absolute'):
