@@ -44,7 +44,10 @@ allprojects {
             }
         }
         tasks.register('moduleCompilerWriteConfig', JavaExec) {
-            dependsOn tasks.named('testClasses'), tasks.named('stageOracleNativeLibraries'), tasks.named('buildModuleCompilerExecHelper')
+            def prerequisites = [tasks.named('testClasses'), tasks.named('stageOracleNativeLibraries')]
+            def compilerExecHelper = tasks.findByName('buildModuleCompilerExecHelper')
+            if (compilerExecHelper != null) prerequisites << compilerExecHelper
+            dependsOn prerequisites
             classpath = sourceSets.test.runtimeClasspath
             mainClass = 'decompengine.project.ContainedModuleCompilationQualificationCli'
             systemProperty 'java.io.tmpdir', file('build/module-compilation-qualification/tmp').absolutePath
@@ -73,7 +76,12 @@ allprojects {
             }
         }
         tasks.register('moduleCompilationLiveQualification', Test) {
-            dependsOn tasks.named('testClasses'), tasks.named('generateAcpGateHelperChecksum'), tasks.named('stageOracleNativeLibraries'), tasks.named('buildModuleCompilerExecHelper'), tasks.named('moduleCompilerLiveInventory'), tasks.named('moduleCompilerLivePreflight')
+            def prerequisites = [tasks.named('testClasses'), tasks.named('generateAcpGateHelperChecksum'),
+                tasks.named('stageOracleNativeLibraries'), tasks.named('moduleCompilerLiveInventory'),
+                tasks.named('moduleCompilerLivePreflight')]
+            def compilerExecHelper = tasks.findByName('buildModuleCompilerExecHelper')
+            if (compilerExecHelper != null) prerequisites << compilerExecHelper
+            dependsOn prerequisites
             outputs.upToDateWhen { false }
             outputs.doNotCacheIf('hosted compiler authority must execute in this attempt') { true }
             testClassesDirs = sourceSets.test.output.classesDirs
