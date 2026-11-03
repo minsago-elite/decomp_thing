@@ -213,9 +213,12 @@ export async function qualifyRestart({ fixture, origin, makeTarget, cdp, evaluat
   evidence.consumedOldLinkDenied = true;
   await cdp.call('Page.navigate', { url: second.url }, old.sessionId);
   await ready(old, `document.body.innerText.includes('Local session connected.')`, 'fresh explicit session');
+  await ready(old, `document.body.innerText.includes('Application instance changed.')`,
+    'visible server-restart state after fresh authentication');
   const instanceAfter = await serverInstance(old);
   assert.ok(instanceAfter && instanceAfter !== instanceBefore, 'serverInstanceId did not change across the restart');
   evidence.serverInstanceChanged = true;
+  evidence.serverRestartNoticeShown = true;
 
   // Reconciliation: durable bytes, pin policy and activity match the pre-restart view.
   assert.deepEqual(await fs.readFile(statePath), stateBefore, 'Restart changed workflow-state bytes');
