@@ -288,6 +288,11 @@ regular XML input, including nested/case-variant XML. Gradle's regular binary
 result files remain allowed; symlink files/directories and nonregular entries
 refuse. Missing, linked, malformed, oversized, foreign, duplicate and empty reports refuse; the retained receipt binds the exact
 XML bytes/hash. Core runs the report gate's positive and negative controls.
+The `restart` packaged-browser mode (see `docs/web-browser-support.md`) runs pinned Chrome headfully
+under Xvfb, restarts the packaged JVM with SIGTERM only, and exercises background-tab suspension,
+two-tab observation and a stale progress-pin write; its sanitized report and screenshots are retained
+in `packaged-web-verification`.
+
 The focused `packaged-browser-expiry-test-reports` artifact retains the exact
 expiry XML and gate receipt for independent byte/hash checks without restoring
 browser journey payloads. The existing full packaged evidence upload is retained.
@@ -307,6 +312,10 @@ existing destination. Ubuntu CI installs the archive's `deb.deps`, following the
 The browser is separate from all application distributions. CI explicitly uses
 `--no-sandbox` on its disposable runner; each report records that setting and the
 actual executable digest/CDP version. It does not qualify browser sandbox behavior.
+Packaged-browser reports also retain a bounded target lifecycle trace and
+per-target initialization phase timings/outcomes. The trace hashes target/session
+identifiers and omits page URLs, titles and CDP payloads so an initialization
+timeout can be localized without retaining browser-private navigation data.
 
 The packaged lane retains JSON reports, screenshots, tool pins and JVM test
 reports as `packaged-web-verification` for 14 days even after failure. Session
