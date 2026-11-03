@@ -51,19 +51,23 @@ class WebGitControllerTest {
     private val schema = Json.parseToJsonElement(Files.readString(Path.of("contracts/web/v1/contract.schema.json")))
         .jsonObject.getValue("definitions").jsonObject
 
-    private class Fixture(availability: GitAvailability = GitRuntime.detect()) : AutoCloseable {
+    private class Fixture(
+        availability: GitAvailability = GitRuntime.detect(),
+        private var runnerFactory: (GitAvailability.Available, decompengine.git.GitEnvironment) -> decompengine.git.GitCommandRunner =
+            { available, environment -> available.runner(environment) },
+    ) : AutoCloseable {
         val root: Path = Files.createTempDirectory(Files.createDirectories(Path.of("build/test-tmp/git").toAbsolutePath()), "web git http ")
         val store = JobStore(root)
         val job = store.createFromUpload("inert.elf", elfFixture())
         lateinit var owner: WorkflowAttemptStore
         val service = WebJobService(store, JobAnalyzer { _, _ -> error("Unexpected analysis") }, JobReconstructor { _, _ -> error("Unexpected reconstruction") },
             attemptStoreFactory = { WorkflowAttemptStore.open(it).also { opened -> owner = opened } })
-        val repositories = ManagedGitRepositories(root, availability, service::gitSourceSnapshot)
-        val server: HttpServer = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        var repositories = ManagedGitRepositories(root, availability, service::gitSourceSnapshot, runnerFactory = runnerFactory)
+        var server: HttpServer = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
         val origin = "http://127.0.0.1:${server.address.port}"
         val access = LocalWebAccess(LocalWebAccessConfiguration(origin))
         val resources = WebStreamResources()
-        val workers = Executors.newFixedThreadPool(2)
+        var workers = Executors.newFixedThreadPool(2)
         val client: HttpClient = HttpClient.newHttpClient()
         val run: WorkflowAttempt
         val cookie: String
@@ -77,9 +81,7 @@ class WebGitControllerTest {
             run = owner.transition(job.id, running.runId, running.version, WorkflowTransition.Finish(WorkflowRunState.COMPLETED,
                 WorkflowTerminalReason.COMPLETED, WorkflowCandidate("revision_one", recordedSourceDigest(SOURCES)))).attempt
             sourceTree = recordSourceTree(root.resolve("${job.id}/reports/runs/${run.runId}/source-tree"), elfFixture(), SOURCES)
-            val api = WebApiController(access, EmbeddedWebAssets.load(basePath = "/workbench/"), service,
-                WebJobMutationBoundary(access, service), resources, git = WebGitCapability(availability, repositories))
-            server.executor = workers; server.createContext("/") { check(api.route(it)) }; server.start()
+            startServer(availability)
             val token = access.issueBootstrap().token
             val session = send("POST", "{\"token\":\"$token\"}", mapOf("Origin" to origin, "Content-Type" to "application/json"), "/workbench/api/v1/session")
             check(session.statusCode() == 200)
@@ -102,6 +104,25 @@ class WebGitControllerTest {
             put("action", "git.init"); put("runId", run.runId); put("revisionId", "revision_one")
             put("initialBranch", branch?.let(::JsonPrimitive) ?: JsonNull)
         }.toString()
+        private fun startServer(availability: GitAvailability) {
+            val api = WebApiController(access, EmbeddedWebAssets.load(basePath = "/workbench/"), service,
+                WebJobMutationBoundary(access, service), resources, git = WebGitCapability(availability, repositories))
+            server.executor = workers; server.createContext("/") { check(api.route(it)) }; server.start()
+        }
+        fun restartRepositories(
+            availability: GitAvailability = GitRuntime.detect(),
+            replacementRunnerFactory: ((GitAvailability.Available, decompengine.git.GitEnvironment) -> decompengine.git.GitCommandRunner)? = null,
+        ) {
+            repositories.close()
+            server.stop(0); workers.shutdownNow()
+            check(workers.awaitTermination(5, TimeUnit.SECONDS))
+            if (replacementRunnerFactory != null) runnerFactory = replacementRunnerFactory
+            repositories = ManagedGitRepositories(root, availability, service::gitSourceSnapshot, runnerFactory = runnerFactory)
+            repositories.recover(listOf(job.id))
+            server = HttpServer.create(InetSocketAddress("127.0.0.1", URI(origin).port), 0)
+            workers = Executors.newFixedThreadPool(2)
+            startServer(availability)
+        }
         override fun close() {
             repositories.close(); server.stop(0); resources.close(); workers.shutdownNow()
             check(workers.awaitTermination(5, TimeUnit.SECONDS)); client.close(); access.close(); service.close(); root.toFile().deleteRecursively()
@@ -266,6 +287,58 @@ class WebGitControllerTest {
             error(f.read("$base/status?path=/etc"), 400, "VALIDATION_FAILED")
             error(f.read("$base/status?limit=0"), 422, "VALIDATION_FAILED")
             error(f.read("$base/status?limit=1&limit=2"), 400, "VALIDATION_FAILED")
+        }
+    }
+
+    @Test fun `authenticated history and commit diff validation children carry the read memory limit`(): Unit = run {
+        val root = Files.createDirectories(Path.of("build/test-tmp/git").toAbsolutePath())
+        val log = Files.createTempFile(root, "web git read limits ", ".log")
+        Files.delete(log)
+        val executable = root.resolve("web-git-limit-wrapper-${System.nanoTime()}")
+        val detected = GitRuntime.detect() as GitAvailability.Available
+        Files.writeString(executable, "#!/bin/sh\nprintf '%s\\t%s\\t%s\\n' \"${'$'}*\" \"${'$'}(ulimit -Sv)\" \"${'$'}(ulimit -Hv)\" >> '$log'\nexec '${detected.executable}' \"${'$'}@\"\n")
+        Files.setPosixFilePermissions(executable, java.nio.file.attribute.PosixFilePermissions.fromString("rwx------"))
+        try {
+            Fixture(runnerFactory = { _, environment -> decompengine.git.GitCommandRunner(executable, environment) }).use { f ->
+                val (base, directory) = f.initialized()
+                decompengine.git.GitTestRepositories().use { g ->
+                    val gitDir = directory.resolve("repository.git"); val workTree = directory.resolve("worktree")
+                    fun raw(vararg args: String) = g.git("--git-dir=$gitDir", "--work-tree=$workTree", *args, cwd = workTree)
+                    raw("add", "-A"); raw("commit", "-q", "-m", "bounded validation")
+                    val commit = raw("rev-parse", "HEAD").trim()
+                    data(f.read("$base/history?start=$commit"), 200, "gitHistory")
+                    data(f.read("$base/diff?scope=commit&commit=$commit"), 200, "gitDiff")
+                    val validations = Files.readAllLines(log).filter { it.contains(" cat-file -e ") }
+                    assertEquals(2, validations.size, "Each endpoint must validate the exact supplied object ID")
+                    assertTrue(validations.all { it.contains(commit) })
+                    assertTrue(validations.all { it.endsWith("\t524288\t524288") }, validations.toString())
+                }
+            }
+        } finally {
+            Files.deleteIfExists(executable); Files.deleteIfExists(log)
+        }
+    }
+
+    @Test fun `HTTP reads stay unavailable and launch no Git child when memory limiting is unavailable`(): Unit = run {
+        val root = Files.createDirectories(Path.of("build/test-tmp/git").toAbsolutePath())
+        val log = root.resolve("no-limiter-${System.nanoTime()}.log")
+        val executable = root.resolve("no-limiter-git-${System.nanoTime()}")
+        val detected = GitRuntime.detect() as GitAvailability.Available
+        Files.writeString(executable, "#!/bin/sh\nprintf '%s\\n' \"${'$'}*\" >> '$log'\nexec '${detected.executable}' \"${'$'}@\"\n")
+        Files.setPosixFilePermissions(executable, java.nio.file.attribute.PosixFilePermissions.fromString("rwx------"))
+        try {
+            Fixture().use { f ->
+                val (base, _) = f.initialized()
+                f.restartRepositories(replacementRunnerFactory = { _, environment ->
+                    decompengine.git.GitCommandRunner(executable, environment, memoryLimiter = null)
+                })
+                for (target in listOf("$base", "$base/status", "$base/history", "$base/diff?scope=unstaged", "$base/refs")) {
+                    error(f.read(target), 503, "STORAGE_UNAVAILABLE")
+                }
+                assertFalse(Files.exists(log), "A required limited read must refuse before launching the Git wrapper")
+            }
+        } finally {
+            Files.deleteIfExists(executable); Files.deleteIfExists(log)
         }
     }
 
@@ -512,6 +585,27 @@ class WebGitControllerTest {
             }
         }
         assertEquals(published, storageTree(f.root))
+    }
+
+    @Test fun `legacy repository restart migrates before authenticated GETs and GETs preserve storage`(): Unit = Fixture().use { f ->
+        val (base, directory) = f.initialized()
+        val attributes = directory.resolve("repository.git/info/attributes")
+        Files.writeString(attributes, decompengine.git.GitManagedLayout.LEGACY_ATTRIBUTES)
+
+        f.restartRepositories()
+        assertEquals(decompengine.git.GitManagedLayout.ATTRIBUTES, Files.readString(attributes),
+            "Startup recovery must finish the exact compatibility migration before reads are ready")
+        val afterRecovery = storageTree(f.root)
+        repeat(2) {
+            data(f.read(), 200, "gitRepositories")
+            data(f.read(base), 200, "gitWorkspace")
+            data(f.read("$base/status"), 200, "gitStatus")
+            data(f.read("$base/history"), 200, "gitHistory")
+            data(f.read("$base/diff?scope=unstaged"), 200, "gitDiff")
+            data(f.read("$base/refs"), 200, "gitRefs")
+        }
+        assertEquals(afterRecovery, storageTree(f.root),
+            "Workspace, status, history, diff and refs GETs must preserve file bytes and directory entries")
     }
 
     @Test fun `Git GET routes refuse failed startup recovery without changing retained storage`(): Unit = Fixture().use { f ->

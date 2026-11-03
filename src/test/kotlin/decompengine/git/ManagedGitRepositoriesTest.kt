@@ -58,10 +58,13 @@ class ManagedGitRepositoriesTest {
         }
 
         fun open(policy: GitRepositoryPolicy = GitRepositoryPolicy(defaultBranch = "trunk"),
-            availability: GitAvailability = GitRuntime.detect(), limits: GitCheckoutLimits = GitCheckoutLimits()): ManagedGitRepositories =
+            availability: GitAvailability = GitRuntime.detect(), limits: GitCheckoutLimits = GitCheckoutLimits(),
+            runnerFactory: (GitAvailability.Available, GitEnvironment) -> GitCommandRunner = { available, environment ->
+                available.runner(environment)
+            }): ManagedGitRepositories =
             ManagedGitRepositories(store, availability, resolver, importRoot, policy, crash = { point ->
                 if (point in crashes) throw SimulatedGitCrash()
-            }, importLimits = limits).also(opened::add)
+            }, importLimits = limits, runnerFactory = runnerFactory).also(opened::add)
 
         fun tree(root: Path): Map<String, List<Byte>> = Files.walk(root).use { paths ->
             paths.filter { Files.isRegularFile(it, NOFOLLOW_LINKS) }.toList()
@@ -158,6 +161,53 @@ class ManagedGitRepositoriesTest {
             assertTrue(restarted.refs(jobId, completed.repositoryId, 0, 1).second.entries.isEmpty())
         }
         assertEquals(before, f.storageTree())
+    }
+
+    @Test fun `restart migrates only exact legacy attributes before publishing repository reads`(): Unit = Fixture().use { f ->
+        val first = f.open()
+        val completed = first.settle(first.request(jobId, GitRepositoryRequest.Init("run_1", "revision_1", null), "legacy_restart_01"))
+        val gitDir = f.repositoryDirectory(completed.repositoryId).resolve("repository.git")
+        first.close()
+        val attributes = gitDir.resolve("info/attributes")
+        Files.writeString(attributes, GitManagedLayout.LEGACY_ATTRIBUTES)
+
+        val restarted = f.open()
+        restarted.recover(listOf(jobId))
+        assertEquals(GitManagedLayout.ATTRIBUTES, Files.readString(attributes),
+            "Explicit startup recovery owns the one exact compatibility migration")
+        val ready = f.storageTree()
+        repeat(2) {
+            assertEquals(GitHeadState.UNBORN, restarted.workspace(jobId, completed.repositoryId).observation.head.state)
+            assertNull(restarted.history(jobId, completed.repositoryId, null, 0, 1).first)
+            assertTrue(restarted.diff(jobId, completed.repositoryId, GitDiffScope.UNSTAGED, null, null).listing.files.isEmpty())
+            assertTrue(restarted.refs(jobId, completed.repositoryId, 0, 1).second.entries.isEmpty())
+        }
+        assertEquals(ready, f.storageTree(), "Reads after recovery must preserve file bytes and directories")
+    }
+
+    @Test fun `service commit validation uses the observed managed read memory ceiling`(): Unit = Fixture().use { f ->
+        val log = f.repositories.root.resolve("service-read-limits")
+        val executable = f.repositories.root.resolve("observed-service-git")
+        val detected = GitRuntime.detect() as GitAvailability.Available
+        Files.writeString(executable, "#!/bin/sh\nprintf '%s\\t%s\\t%s\\n' \"${'$'}*\" \"${'$'}(ulimit -Sv)\" \"${'$'}(ulimit -Hv)\" >> '$log'\nexec '${detected.executable}' \"${'$'}@\"\n")
+        Files.setPosixFilePermissions(executable, PosixFilePermissions.fromString("rwx------"))
+        val service = f.open(runnerFactory = { _, environment -> GitCommandRunner(executable, environment) })
+        val completed = service.settle(service.request(jobId, GitRepositoryRequest.Init("run_1", "revision_1", null), "validation_limit_01"))
+        val directory = f.repositoryDirectory(completed.repositoryId)
+        val gitDir = directory.resolve("repository.git")
+        val workTree = directory.resolve("worktree")
+        Files.writeString(workTree.resolve("validated.c"), "int validated;\n")
+        val first = f.repositories.commitAll(gitDir, workTree, "first")
+        Files.writeString(workTree.resolve("validated.c"), "int validated_again;\n")
+        val second = f.repositories.commitAll(gitDir, workTree, "second")
+
+        assertEquals(second, service.history(jobId, completed.repositoryId, second, 0, 1).first)
+        assertEquals(second, service.diff(jobId, completed.repositoryId, GitDiffScope.COMMIT, second, null).commit)
+        val validations = Files.readAllLines(log).filter { it.contains(" cat-file -e ") }
+        assertEquals(2, validations.size, "History and commit diff each validate the supplied full object ID")
+        assertTrue(validations.all { it.contains(second) })
+        assertTrue(validations.all { it.endsWith("\t524288\t524288") }, validations.toString())
+        assertEquals(40, first.length)
     }
 
     @Test fun `initialization copies source bytes exactly, applies policy and creates no commit`(): Unit = Fixture().use { f ->

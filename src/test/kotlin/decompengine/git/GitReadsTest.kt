@@ -467,7 +467,12 @@ class GitReadsTest {
         // Independently reproduce the old forced-text classification, then audit/migrate it.
         assertFalse(GitReads.diff(f.runner, gitDir, workTree, GitObjectFormat.SHA1,
             GitDiffScope.STAGED, null, null).files.single { it.path.exact == "table.dat" }.binary)
-        GitConfigurationAudit.requireManaged(f.runner, gitDir)
+        assertEquals("REPOSITORY_CONFIG_UNTRUSTED", kotlin.test.assertFailsWith<GitRepositoryException> {
+            GitConfigurationAudit.requireManaged(f.runner, gitDir)
+        }.code)
+        assertEquals(GitManagedLayout.LEGACY_ATTRIBUTES, Files.readString(attributes),
+            "Read-side auditing must not rewrite retained metadata")
+        GitConfigurationAudit.migrateLegacyAttributes(f.runner, gitDir)
         assertEquals(GitManagedLayout.ATTRIBUTES, Files.readString(attributes))
         fun checkBinary(scope: GitDiffScope, commit: String? = null, parent: String? = null) {
             val files = GitReads.diff(f.runner, gitDir, workTree, GitObjectFormat.SHA1, scope, commit, parent).files

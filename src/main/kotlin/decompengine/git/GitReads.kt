@@ -155,7 +155,7 @@ object GitReads {
     // Output/time caps do not constrain allocations while inflating or comparing historical blobs.
     // Apply the same fail-closed child address-space ceiling as import verification to every read.
     private val LIMITS = GitExecutionLimits(Duration.ofSeconds(30), MAX_STATUS_BYTES, 16 * 1024,
-        maxAddressSpaceBytes = 512L * 1024 * 1024)
+        maxAddressSpaceBytes = GitExecutionLimits.MANAGED_READ_MEMORY_BYTES)
     private val DIFF_OPTIONS = listOf("--no-ext-diff", "--no-textconv", "--no-color", "--ignore-submodules=all", "-M")
 
     /** Split NUL-terminated records at the byte level so arbitrary path bytes survive. */

@@ -40,7 +40,8 @@ object GitConfigurationAudit {
         }
         val result = try {
             runner.run(GitInvocation("config", listOf("--file", file.toAbsolutePath().toString(), "--no-includes", "--null", "--list"),
-                allowedExitCodes = setOf(0, 1), limits = GitExecutionLimits(Duration.ofSeconds(10), 256 * 1024, 16 * 1024)))
+                allowedExitCodes = setOf(0, 1), limits = GitExecutionLimits(Duration.ofSeconds(10), 256 * 1024, 16 * 1024,
+                    maxAddressSpaceBytes = GitExecutionLimits.MANAGED_READ_MEMORY_BYTES)))
         } catch (_: GitCommandException) {
             throw GitRepositoryException("REPOSITORY_CORRUPT", "The repository configuration could not be parsed.")
         }
@@ -51,6 +52,26 @@ object GitConfigurationAudit {
     }
 
     fun requireManaged(runner: GitCommandRunner, gitDir: Path) {
+        requireManagedConfiguration(runner, gitDir)
+        requireSafeAttributes(gitDir)
+    }
+
+    /** Performs the sole compatibility rewrite under explicit recovery/mutation authority. */
+    internal fun migrateLegacyAttributes(runner: GitCommandRunner, gitDir: Path) {
+        requireManagedConfiguration(runner, gitDir)
+        val attributes = gitDir.resolve("info").resolve("attributes")
+        val content = if (Files.isDirectory(attributes.parent, NOFOLLOW_LINKS) &&
+            Files.isRegularFile(attributes, NOFOLLOW_LINKS) && Files.size(attributes) <= 4096) Files.readString(attributes) else null
+        when (content) {
+            GitManagedLayout.ATTRIBUTES -> Unit
+            GitManagedLayout.LEGACY_ATTRIBUTES -> GitManagedLayout.upgradeAttributes(gitDir)
+            else -> throw GitRepositoryException("REPOSITORY_CONFIG_UNTRUSTED",
+                "The managed repository does not contain an audited attributes layout.")
+        }
+        requireManaged(runner, gitDir)
+    }
+
+    private fun requireManagedConfiguration(runner: GitCommandRunner, gitDir: Path) {
         GitManagedLayout.requireUnlinkedRepository(gitDir)
         val entries = read(runner, gitDir.resolve("config"))
         val values = entries.groupBy({ it.first }, { it.second })
@@ -63,16 +84,14 @@ object GitConfigurationAudit {
                 throw GitRepositoryException("REPOSITORY_UNSUPPORTED", "The managed repository links outside its own storage.")
             }
         }
+    }
+
+    private fun requireSafeAttributes(gitDir: Path) {
         val attributes = gitDir.resolve("info").resolve("attributes")
         val content = if (Files.isDirectory(attributes.parent, NOFOLLOW_LINKS) &&
             Files.isRegularFile(attributes, NOFOLLOW_LINKS) && Files.size(attributes) <= 4096) Files.readString(attributes) else null
-        when (content) {
-            GitManagedLayout.ATTRIBUTES -> Unit
-            // Upgrade only the exact previously audited server layout, never arbitrary attributes.
-            GitManagedLayout.LEGACY_ATTRIBUTES -> GitManagedLayout.upgradeAttributes(gitDir)
-            else -> throw GitRepositoryException("REPOSITORY_CONFIG_UNTRUSTED",
-                "The managed repository does not neutralize content conversions and diff attributes.")
-        }
+        if (content != GitManagedLayout.ATTRIBUTES) throw GitRepositoryException("REPOSITORY_CONFIG_UNTRUSTED",
+            "The managed repository does not neutralize content conversions and diff attributes.")
     }
 }
 
@@ -186,7 +205,8 @@ data class GitWorkspaceObservation(
 
 object GitRepositoryInspector {
     const val MAX_REFS = 200
-    private val READ = GitExecutionLimits(Duration.ofSeconds(20), 256 * 1024, 16 * 1024)
+    private val READ = GitExecutionLimits(Duration.ofSeconds(20), 256 * 1024, 16 * 1024,
+        maxAddressSpaceBytes = GitExecutionLimits.MANAGED_READ_MEMORY_BYTES)
 
     fun objectFormat(runner: GitCommandRunner, gitDir: Path): GitObjectFormat = GitObjectFormat.fromGit(
         runner.run(GitInvocation("rev-parse", listOf("--show-object-format"), gitDir = gitDir, limits = READ)).text)

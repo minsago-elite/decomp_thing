@@ -177,11 +177,30 @@ class ManagedGitRepositories(
     private val random = SecureRandom()
     private var closed = false
     private var runner: GitCommandRunner? = null
+    private var runnerFactory: (GitAvailability.Available, GitEnvironment) -> GitCommandRunner = { available, environment ->
+        available.runner(environment)
+    }
     private val executor = ThreadPoolExecutor(1, 1, 0, TimeUnit.MILLISECONDS, ArrayBlockingQueue(MAX_QUEUED)) { task ->
         Thread(task, "decomp-git-operations").apply { isDaemon = true }
     }
 
     val importConfigured: Boolean get() = importRoot != null
+
+    /** Test-only constructor seam; the public constructor retains its original API. */
+    internal constructor(
+        storeRoot: Path,
+        availability: GitAvailability,
+        sources: GitSourceSnapshotResolver,
+        importRoot: Path? = null,
+        policy: GitRepositoryPolicy = GitRepositoryPolicy(),
+        clock: Clock = Clock.systemUTC(),
+        crash: (GitOperationCrashPoint) -> Unit = {},
+        importLimits: GitCheckoutLimits = GitCheckoutLimits(),
+        shutdownTimeout: java.time.Duration = java.time.Duration.ofSeconds(30),
+        runnerFactory: (GitAvailability.Available, GitEnvironment) -> GitCommandRunner,
+    ) : this(storeRoot, availability, sources, importRoot, policy, clock, crash, importLimits, shutdownTimeout) {
+        this.runnerFactory = runnerFactory
+    }
 
     // ---- Admission ------------------------------------------------------------------------
 
@@ -358,7 +377,9 @@ class ManagedGitRepositories(
     }
 
     private fun commitExists(runner: GitCommandRunner, gitDir: Path, objectId: String): Boolean =
-        runner.run(GitInvocation("cat-file", listOf("-e", "$objectId^{commit}"), gitDir = gitDir, allowedExitCodes = setOf(0, 1, 128))).exitCode == 0
+        runner.run(GitInvocation("cat-file", listOf("-e", "$objectId^{commit}"), gitDir = gitDir,
+            allowedExitCodes = setOf(0, 1, 128),
+            limits = GitExecutionLimits(maxAddressSpaceBytes = GitExecutionLimits.MANAGED_READ_MEMORY_BYTES))).exitCode == 0
 
     /** Startup authority prepares the runtime and recovers retained jobs before serving reads. */
     fun recover(jobIds: Collection<String>) = synchronized(lock) {
@@ -575,6 +596,13 @@ class ManagedGitRepositories(
                     }
                 }
             }
+            // A retained repository is not readable until exact legacy metadata is migrated and
+            // every published layout passes the same strict audit as ordinary reads.
+            val prepared = runner ?: requireRunner()
+            for (repository in published.values) {
+                GitConfigurationAudit.migrateLegacyAttributes(prepared,
+                    root.resolve(jobId).resolve("git/repositories").resolve(repository.repositoryId).resolve(GIT_DIR))
+            }
         }
         reconciled += jobId
     }
@@ -597,9 +625,9 @@ class ManagedGitRepositories(
     private fun requireRunner(): GitCommandRunner = when (val current = availability) {
         is GitAvailability.Unavailable -> throw ManagedGitException("CAPABILITY_UNAVAILABLE", current.message)
         is GitAvailability.Available -> synchronized(lock) {
-            runner ?: try { current.runner(GitEnvironment.prepare(root.resolve(".git-runtime"))) } catch (_: Exception) {
+            runner ?: try { runnerFactory(current, GitEnvironment.prepare(root.resolve(".git-runtime"))) } catch (_: Exception) {
                 throw ManagedGitException("CAPABILITY_UNAVAILABLE", "The server-owned Git runtime directory is unavailable.")
-            }.also { runner = it }
+        }.also { runner = it }
         }
     }
 

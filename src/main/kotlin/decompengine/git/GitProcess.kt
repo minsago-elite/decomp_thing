@@ -163,6 +163,11 @@ data class GitExecutionLimits(
         require(maxStdoutBytes in 1..64 * 1024 * 1024 && maxStderrBytes in 1..1024 * 1024)
         require(maxAddressSpaceBytes == null || maxAddressSpaceBytes in 16L * 1024 * 1024..4L * 1024 * 1024 * 1024)
     }
+
+    companion object {
+        /** Address-space bound for every child used to answer a managed repository read. */
+        internal const val MANAGED_READ_MEMORY_BYTES = 512L * 1024 * 1024
+    }
 }
 
 class GitCommandException(val kind: Kind, message: String, val exitCode: Int? = null) : IOException(message) {
