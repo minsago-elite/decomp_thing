@@ -15,5 +15,6 @@ internal object WebExplorationArtifact {
         put("sizeBytes", bytes.size.toString()); put("sha256", digest)
         put("contentHref", "${basePath}api/v1/jobs/$jobId/artifacts/$id/content")
         put("role", "raw-evidence"); put("derivedFromArtifactId", JsonNull)
+        put("content", webArtifactContentState(WebArtifactFamily.EXPLORATION, bytes.size.toLong()))
     }
 }

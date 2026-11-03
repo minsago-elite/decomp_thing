@@ -12,10 +12,12 @@ import kotlinx.serialization.json.*
 internal enum class WebArtifactFamily(
     val code: String, val wire: String, val path: String, val displayName: String,
     val mediaType: String, val role: String, val revisionBound: Boolean,
+    /** Server-produced reports are served only through [WebReportProjection]; other families are verbatim job content. */
+    val redactedContent: Boolean = false,
 ) {
-    EXPLORATION("exploration", "exploration-report", "exploration.json", "exploration.json", "application/json", "raw-evidence", false),
+    EXPLORATION("exploration", "exploration-report", "exploration.json", "exploration.json", "application/json", "raw-evidence", false, true),
     PROGRESS("progress", "progress-journal", decompengine.jobs.AgentProgressJournal.FILE_NAME,
-        decompengine.jobs.AgentProgressJournal.FILE_NAME, "application/json", "raw-evidence", false),
+        decompengine.jobs.AgentProgressJournal.FILE_NAME, "application/json", "raw-evidence", false, true),
     MANIFEST("manifest", "source-manifest", "source-tree/source_tree_manifest.json", "source_tree_manifest.json", "application/json", "source", true),
     CONTRACT("contract", "build-contract", "source-tree/reports/build_contract.json", "build_contract.json", "application/json", "source", true),
     ARCHIVE("archive", "source-archive", "source-tree.zip", "source-tree.zip", "application/zip", "archive", true);
@@ -246,4 +248,9 @@ internal fun webArtifactDescriptor(selection: WebArtifactSelection, size: Long, 
     // No independently persisted digest exists for these files: the digest is always observed. The inventory check only
     // says the recorded source inputs reproduce the candidate's source commitment; it never covers other bytes.
     put("verification", if (revisionVerified) "source-inventory-checked" else "not-verified")
+    // sha256/sizeBytes describe the stored artifact; this names the representation the content route serves.
+    put("content", webArtifactContentState(family, size))
 }
+
+internal fun webArtifactContentState(family: WebArtifactFamily, size: Long): JsonObject =
+    buildJsonObject { put("projection", WebReportProjection.state(family, size)) }

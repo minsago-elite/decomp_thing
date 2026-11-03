@@ -1258,12 +1258,12 @@ class UploadServer(
             exchange.sendUntrustedAttachment(200, verified.bytes, "application/zip", "source-tree.zip")
             return
         }
-        val limit = if (isProgressJournalArtifact(relativePath)) AgentProgressJournal.MAXIMUM_READ_BYTES.toLong() else MAX_ARTIFACT_BYTES
-        val artifact = jobs.readArtifact(jobId, relativePath, limit)
+        val progress = isProgressJournalArtifact(relativePath)
+        val artifact = jobs.readArtifact(jobId, relativePath, WebReportProjection.limit(progress))
         val name = Path.of(relativePath).fileName
-        val projected = progressArtifactProjection(relativePath, artifact.bytes)
-        // Server-produced reports pass through the shared policy; committed source-tree files are job content.
-        val public = if (relativePath.contains("/source-tree/")) projected else redaction.document(projected)
+        // Server-produced reports pass through the shared report projection; committed source-tree files are job content.
+        val public = if (relativePath.contains("/source-tree/")) progressArtifactProjection(relativePath, artifact.bytes)
+            else WebReportProjection.project(progress, artifact.bytes, redaction)
         exchange.sendUntrustedAttachment(200, public, contentType(name), name.toString())
     }
 
@@ -1290,7 +1290,6 @@ class UploadServer(
         const val HANDLER = 1
         const val TIMED_OUT = 2
         const val DONE = 3
-        const val MAX_ARTIFACT_BYTES = 64L * 1024 * 1024
         const val MAX_REPAIR_EVIDENCE_PRESENTATION_BYTES = 16L * 1024 * 1024
     }
 }

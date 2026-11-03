@@ -49,6 +49,8 @@ internal fun parseWebByteRange(header: String, size: Long): WebByteRange? {
 
 internal class WebRangeNotSatisfiable : RuntimeException("range is not satisfiable")
 
+internal class WebArtifactProjectionTooLarge : RuntimeException("report exceeds its projection limit")
+
 /** Shared admission for artifact hashing (catalog, detail, content and archive observations), released on success or failure. */
 internal class WebArtifactDownloads(private val maximum: Int = 4, private val perSession: Int = 2) {
     private val active = HashMap<String, Int>()
@@ -77,6 +79,8 @@ internal class WebArtifactDownloads(private val maximum: Int = 4, private val pe
  * Digest-bound artifact delivery. A first pinned pass confirms the listed digest before any header is sent;
  * the second pass streams with a held-back final chunk that is written only after that pass also reproduces the
  * digest and unchanged file identity. A changed or interrupted stream is closed short of its declared length.
+ * Report families are instead buffered within their projection limit by the first pass and served as the shared
+ * redacted report projection; their validators then describe the projection, never the stored bytes.
  */
 internal class WebArtifactContent(private val store: WebArtifactStore,
     private val maximumBytes: Long = WebArtifactCatalog.MAXIMUM_ARTIFACT_BYTES) {
@@ -94,19 +98,45 @@ internal class WebArtifactContent(private val store: WebArtifactStore,
         if (!store.present(jobId, selection.attempt.runId, selection.family.path)) webArtifactUnavailable()
         val cancellation = webExchangeCancellation(exchange)
         val deadline = WebRequestDeadline.of(exchange)
+        val family = selection.family
+        val progress = family == WebArtifactFamily.PROGRESS
         var size = -1L
+        // Report families are buffered within their projection limit, against this request's read budget, so the
+        // projection is computed from exactly the bytes whose digest pass 1 reproduces.
+        var stored: java.io.ByteArrayOutputStream? = null
         val observed = try {
-            store.stream(jobId, selection.attempt.runId, selection.family.path, {
+            store.stream(jobId, selection.attempt.runId, family.path, {
                 if (it > maximumBytes) throw WebArtifactTooLarge()
+                if (family.redactedContent) {
+                    if (it > WebReportProjection.limit(progress)) throw WebArtifactProjectionTooLarge()
+                    WebArtifactReadBudget(WebReportProjection.limit(progress), cancellation).reserve(it)
+                    stored = java.io.ByteArrayOutputStream(it.toInt())
+                }
                 size = it
-            }, { _, _ -> deadline?.renew() }, cancellation)
+            }, { bytes, count ->
+                deadline?.renew()
+                stored?.let { buffer -> check(buffer.size() + count <= size) { "artifact grew" }; buffer.write(bytes, 0, count) }
+            }, cancellation)
         } catch (failure: Exception) {
             if (failure is WebAccessDenied || failure is CancellationException || failure is InterruptedException) throw failure
             if (failure is WebArtifactTooLarge) throw WebAccessDenied(413, "ARTIFACT_TOO_LARGE", "The artifact exceeds the download byte ceiling.")
+            if (failure is WebArtifactProjectionTooLarge) webArtifactProjectionUnavailable()
             throw WebAccessDenied(503, "ARTIFACT_UNAVAILABLE", "The artifact could not be read consistently. Refresh the artifact catalog.")
         }
+        // The stored commitment is confirmed before any projection, header or body byte.
         if (observed.sha256 != selection.sha256 || observed.size != size) webArtifactChanged()
-        val etag = "\"${selection.sha256}\""
+        val projected = stored?.let { buffer ->
+            val bytes = buffer.toByteArray()
+            if (bytes.size.toLong() != size) webArtifactChanged()
+            try { WebReportProjection.project(progress, bytes, WebRedactionPolicy.of(exchange)) } catch (failure: Exception) {
+                if (failure is CancellationException || failure is InterruptedException) throw failure
+                webArtifactProjectionUnavailable() // Never a raw fallback.
+            }
+        }
+        // Validators, lengths and ranges describe the representation actually served.
+        val servedSha256 = projected?.let(WebExplorationArtifact::sha256) ?: selection.sha256
+        val servedSize = projected?.size?.toLong() ?: size
+        val etag = "\"$servedSha256\""
         // RFC 9110: If-Match uses strong comparison; If-None-Match uses weak comparison (a W/ prefix still matches).
         fun matches(value: String) = value.split(',').any { it.trim() == "*" || it.trim() == etag }
         fun weaklyMatches(value: String) = value.split(',').any { it.trim() == "*" || it.trim().removePrefix("W/") == etag }
@@ -114,30 +144,36 @@ internal class WebArtifactContent(private val store: WebArtifactStore,
         val notModified = headers.getFirst("If-None-Match")?.let(::weaklyMatches) == true
         val ifRange = headers.getFirst("If-Range")
         val range = if (notModified || exchange.requestMethod == "HEAD" || (ifRange != null && ifRange.trim() != etag)) null else try {
-            headers.getFirst("Range")?.let { parseWebByteRange(it, size) }
+            headers.getFirst("Range")?.let { parseWebByteRange(it, servedSize) }
         } catch (_: WebRangeNotSatisfiable) {
             webApiHeaders(exchange, UUID.randomUUID().toString())
-            exchange.responseHeaders.set("Content-Range", "bytes */$size")
+            exchange.responseHeaders.set("Content-Range", "bytes */$servedSize")
             throw WebAccessDenied(416, "RANGE_NOT_SATISFIABLE", "The requested byte range is outside this artifact.")
         }
-        val name = java.net.URLEncoder.encode(selection.family.displayName, Charsets.UTF_8).replace("+", "%20").replace("*", "%2A")
+        val name = java.net.URLEncoder.encode(family.displayName, Charsets.UTF_8).replace("+", "%20").replace("*", "%2A")
         webApiHeaders(exchange, UUID.randomUUID().toString())
         exchange.responseHeaders.set("ETag", etag)
         exchange.responseHeaders.set("Accept-Ranges", "bytes")
         exchange.responseHeaders.set("X-Decomp-Artifact-ID", selection.artifactId)
-        exchange.responseHeaders.set("X-Decomp-Content-SHA256", selection.sha256)
+        exchange.responseHeaders.set("X-Decomp-Content-SHA256", servedSha256)
+        exchange.responseHeaders.set("X-Decomp-Artifact-SHA256", selection.sha256)
+        exchange.responseHeaders.set("X-Decomp-Content-Projection", if (projected != null) WebReportProjection.REDACTED else WebReportProjection.VERBATIM)
         // The listed media type stays metadata; the transport is always an inert attachment.
         exchange.responseHeaders.set("Content-Type", "application/octet-stream")
-        exchange.responseHeaders.set("Content-Disposition", "attachment; filename=\"${selection.family.displayName}\"; filename*=UTF-8''$name")
+        exchange.responseHeaders.set("Content-Disposition", "attachment; filename=\"${family.displayName}\"; filename*=UTF-8''$name")
         try {
             if (notModified) { exchange.responseHeaders.remove("Content-Type"); exchange.sendResponseHeaders(304, -1); return }
-            val length = range?.length ?: size
+            val length = range?.length ?: servedSize
             exchange.responseHeaders.set("Content-Length", length.toString())
-            range?.let { exchange.responseHeaders.set("Content-Range", "bytes ${it.start}-${it.endInclusive}/$size") }
+            range?.let { exchange.responseHeaders.set("Content-Range", "bytes ${it.start}-${it.endInclusive}/$servedSize") }
             val status = if (range == null) 200 else 206
             if (exchange.requestMethod == "HEAD" || length == 0L) { exchange.sendResponseHeaders(status, -1); return }
             exchange.sendResponseHeaders(status, length)
-            stream(exchange, selection, size, range ?: WebByteRange(0, size - 1), cancellation)
+            val slice = range ?: WebByteRange(0, servedSize - 1)
+            if (projected != null) {
+                exchange.responseBody.write(projected, slice.start.toInt(), slice.length.toInt())
+                exchange.responseBody.flush()
+            } else stream(exchange, selection, size, slice, cancellation)
         } finally { exchange.close() }
     }
 
