@@ -13,7 +13,7 @@ import type { DraftOwner } from './filterDraft';
 import { JobSummary } from './JobSummary';
 import { receive } from '../shared/receiptTime';
 import type { Received } from '../shared/receiptTime';
-import { MetadataReceipt } from '../shared/MetadataReceipt';
+import { MetadataReceipt, StaleMetadataNotice } from '../shared/MetadataReceipt';
 import { RecoverySummary } from './RecoverySummary';
 import { onLibraryChange } from './libraryChannel';
 
@@ -67,7 +67,11 @@ export function Dashboard({ basePath, draftOwner = null }: { basePath: string; d
     if (validationError) form.current?.querySelector<HTMLElement>(`[name="${validationError.field}"]`)?.focus();
   }, [validationError]);
   useEffect(() => {
-    if (error && moveFocus.current) {
+    if (error && data && moveFocus.current) {
+      moveFocus.current = false;
+      return;
+    }
+    if (error && !data && moveFocus.current) {
       moveFocus.current = false;
       errorNotice.current?.focus();
     }
@@ -317,7 +321,8 @@ export function Dashboard({ basePath, draftOwner = null }: { basePath: string; d
       history.pushState(null, '', `${location.pathname}${search ? `?${search}` : ''}`);
       setSelection({ ...selection, cursor: null, invalidCursor: false });
     }
-    moveFocus.current = true; setPageNotice(''); setCursors([null]); setPageIndex(0); setRefresh(value => value + 1);
+    // Refreshing retained rows must not move focus to the results heading.
+    setPageNotice(''); setCursors([null]); setPageIndex(0); setRefresh(value => value + 1);
   }
   function field(key: keyof JobFilters, value: string) { setDraft(previous => ({ ...previous, [key]: value })); }
   function fieldA11y(key: keyof JobFilters) {
@@ -360,6 +365,7 @@ export function Dashboard({ basePath, draftOwner = null }: { basePath: string; d
     {pageNotice && <p role="status">{pageNotice}</p>}
     {phase === 'ready' && data && !snapshotPage && <p>{copy.snapshotHistoryUnavailable}</p>}
     {error && <p ref={errorNotice} role="alert" tabIndex={-1} class="notice notice-error">{error}{retainedNotice}</p>}
+    {error && data && <StaleMetadataNotice />}
     <div class="job-actions"><button type="button" disabled={phase === 'loading' || !selection.valid} onClick={reload}>{copy.refreshJobs}</button>
       <button type="button" aria-pressed={livePaused} disabled={phase !== 'ready' || pageIndex !== 0 || Boolean(cursor)}
         onClick={() => setLivePaused(value => !value)}>{livePaused ? copy.resumeLiveUpdates : copy.pauseLiveUpdates}</button>

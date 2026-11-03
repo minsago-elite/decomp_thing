@@ -292,6 +292,8 @@ it('retains attempt panels and filter focus through a transient metadata refresh
     fireEvent.click(screen.getByRole('button', { name: 'Refresh attempt' }));
     await waitFor(() => expect(transport.get).toHaveBeenCalledTimes(2));
     filter.focus();
+    filter.setSelectionRange(2, 5);
+    document.documentElement.scrollTop = 246;
     expect(screen.getByText('Refreshing attempt… Previously loaded metadata may be outdated.')).toBeTruthy();
     expect(screen.getByLabelText('Task digest contains')).toBe(filter);
     expect(filter.value).toBe('abc123');
@@ -299,10 +301,14 @@ it('retains attempt panels and filter focus through a transient metadata refresh
     await act(async () => { rejectRefresh(new ApiClientError('http_error', { status: 503, serverCode: 'PRIVATE_DIAGNOSTIC', requestId })); await Promise.resolve(); });
     expect((await screen.findByRole('alert')).textContent).toContain(`Reference ID: ${requestId}.`);
     expect(document.body.textContent).not.toContain('PRIVATE_DIAGNOSTIC');
-    expect(screen.getByText(/Previously loaded attempt metadata may be outdated/)).toBeTruthy();
+    expect(screen.getByText('Previously loaded metadata may be outdated. Refresh to read current details.')).toBeTruthy();
     expect(screen.getByText('9007199254740993')).toBeTruthy();
     expect(filter.value).toBe('abc123');
     expect(document.activeElement).toBe(filter);
+    expect(filter.selectionStart).toBe(2);
+    expect(filter.selectionEnd).toBe(5);
+    expect(document.documentElement.scrollTop).toBe(246);
+    expect(screen.getByRole('button', { name: 'Read exploration evidence' })).toBe(evidence);
     expect(transport.get).toHaveBeenCalledTimes(2);
     fireEvent.click(screen.getByRole('button', { name: 'Refresh attempt' }));
     await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
@@ -373,7 +379,7 @@ it('retains only the verified history page through a transient refresh and expli
   const requestId = '123e4567-e89b-42d3-a456-426614174000';
   transport.get.mockResolvedValueOnce(historyPage('run_latest', null))
     .mockImplementationOnce(() => new Promise((_, reject) => { rejectRefresh = reject; }))
-    .mockResolvedValueOnce(historyPage('run_recovered', null));
+    .mockResolvedValueOnce(historyPage('run_latest', null));
   history.replaceState(null, '', `/nested/jobs/${sample.jobId}/runs`);
   try {
     render(<App basePath="/nested" session={auth} />);
@@ -381,6 +387,9 @@ it('retains only the verified history page through a transient refresh and expli
     fireEvent.click(screen.getByRole('button', { name: 'Refresh history' }));
     await waitFor(() => expect(transport.get).toHaveBeenCalledTimes(2));
     link.focus();
+    const range = document.createRange(); range.selectNodeContents(link);
+    window.getSelection()?.removeAllRanges(); window.getSelection()?.addRange(range);
+    document.documentElement.scrollTop = 314;
     expect(screen.getByText('Refreshing attempt history… Previously loaded attempts may be outdated.')).toBeTruthy();
     expect(screen.getByRole('link', { name: 'reconstruct: run_latest' })).toBe(link);
     await act(async () => {
@@ -388,14 +397,21 @@ it('retains only the verified history page through a transient refresh and expli
       await Promise.resolve();
     });
     expect((await screen.findByRole('alert')).textContent).toContain(`Reference ID: ${requestId}.`);
-    expect(screen.getByText(/Previously loaded attempts may be outdated/)).toBeTruthy();
+    expect(screen.getByText('Previously loaded metadata may be outdated. Refresh to read current details.')).toBeTruthy();
     expect(document.activeElement).toBe(link);
+    expect(window.getSelection()?.toString()).toContain('run_latest');
+    expect(document.documentElement.scrollTop).toBe(314);
     expect(document.body.textContent).not.toContain('PRIVATE_HISTORY_FAILURE');
     expect(transport.get).toHaveBeenCalledTimes(2);
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)); });
+    expect(transport.get).toHaveBeenCalledTimes(2);
+    link.focus(); link.setAttribute('data-preserved-node', 'true'); document.documentElement.scrollTop = 314;
     fireEvent.click(screen.getByRole('button', { name: 'Retry this page' }));
-    expect(await screen.findByRole('link', { name: 'reconstruct: run_recovered' })).toBeTruthy();
+    expect(await screen.findByRole('link', { name: 'reconstruct: run_latest' })).toBe(link);
     expect(screen.queryByRole('alert')).toBeNull();
-    expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Recorded attempts' }));
+    expect(document.activeElement).toBe(link);
+    expect(screen.getByRole('link', { name: 'reconstruct: run_latest' })).toBe(link);
+    expect(document.documentElement.scrollTop).toBe(314);
     expect(transport.get.mock.calls.map(call => [call[0], call[1]])).toEqual(
       Array.from({ length: 3 }, () => ['runs', `/jobs/${sample.jobId}/runs?limit=50`]));
   } finally { auth.dispose(); }

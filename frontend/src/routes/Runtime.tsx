@@ -2,11 +2,12 @@ import { runtimeCopy as copy } from '../copy/runtime';
 import { message as displayMessage } from '../shared/messages';
 import { formatExactBytes } from '../copy/format';
 import { commonCopy } from '../copy/common';
+import { sessionStatusCopy } from '../copy/shell';
 import { useLayoutEffect, useState } from 'preact/hooks';
 import type { BrowserSession } from '../session/session';
 import { SchedulerSummary } from '../jobs/SchedulerSummary';
 import { ProgressRetentionSummary } from '../jobs/ProgressRetentionSummary';
-import { MetadataReceipt } from '../shared/MetadataReceipt';
+import { MetadataReceipt, StaleMetadataNotice } from '../shared/MetadataReceipt';
 import { StorageSummary } from '../jobs/StorageSummary';
 import type { BuildIdentity } from '../app/buildIdentity';
 
@@ -16,7 +17,8 @@ export default function Runtime({ identity, session = null, basePath = '' }: { i
     setState(session?.snapshot());
     return session?.subscribe(setState);
   }, [session]);
-  const snapshot = state?.status === 'authenticated' ? state.runtime : null;
+  const snapshot = state && 'runtime' in state ? state.runtime ?? null : null;
+  const runtimeReceipt = state && 'runtimeReceipt' in state ? state.runtimeReceipt : undefined;
   return (
     <section aria-labelledby="runtime-title">
       <p class="eyebrow">{copy.application}</p>
@@ -33,8 +35,13 @@ export default function Runtime({ identity, session = null, basePath = '' }: { i
       </section>
       {snapshot ? <section aria-labelledby="server-runtime-title">
         <h2 id="server-runtime-title">{copy.connectedServer}</h2>
-        <MetadataReceipt kind="runtime" receipt={state?.status === 'authenticated' ? state.runtimeReceipt : undefined} />
+        <MetadataReceipt kind="runtime" receipt={runtimeReceipt} />
         <p>{copy.reportedWhenTheLocalSessionWasCheckedOpeningThisView}</p>
+        {session && (state?.status === 'authenticated' || state?.status === 'checking') &&
+          <button type="button" disabled={state.status === 'checking'} onClick={() => { void session.refresh(); }}>
+            {state.status === 'checking' ? sessionStatusCopy.checkingLocalSession : sessionStatusCopy.checkSession}
+          </button>}
+        {state?.status === 'unavailable' && state.reason === 'connection' && <StaleMetadataNotice />}
         {snapshot.uiBuildId !== identity.uiBuildId && <p role="status" class="notice">{copy.theServerReportsADifferentUIBuildReloadTheApplication}</p>}
         <dl>
           <dt>{copy.readiness}</dt><dd>{snapshot.readiness}</dd>
