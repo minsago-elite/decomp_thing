@@ -44,7 +44,7 @@
       "translationUnitCount": 7,
       "linkOrder": ["main.c", "parse.c", "render.c", "state.c", "io.c", "measure.c", "report.c"],
       "compilerVariants": ["gcc -std=c11 -O2 -fPIE -pie -Wl,--build-id=none", "strip --strip-all"],
-      "compiler": "GCC 16.2.1_p20260926",
+      "compiler": "16.2.1_p20260926 (GCC)",
       "binaries": [
         {"path":"binaries/linux-x86_64/large_project_mtu-symbols","sha256":"a908caa6051f93dc88e579f5ca0f8d8b9d5654338257384a7be3d254eddd3e8e","symbols":"present","optimization":"O2","pie":true},
         {"path":"binaries/linux-x86_64/large_project_mtu-stripped","sha256":"75586772462bf24efa9fbe90140d1c4cf633f132ae5c8eda6456dc3eb430d5ab","symbols":"stripped","optimization":"O2","pie":true}
