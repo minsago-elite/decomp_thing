@@ -26,6 +26,23 @@ class WebAuditLogTest {
         WebAuditActor.browserSession(session), WebAuditAction.RUN_CANCEL,
         WebAuditTarget(job, runId, "version_1", "version_2"), outcome, status, reason, "0f3c2b1a-1111-4222-8333-944455556666")
 
+    @Test fun `post-response audit survives an existing interrupt and restores it`() {
+        val root = root("interrupted-record")
+        try {
+            val log = WebAuditLog(root, clock)
+            assertEquals(1L, log.cancel()?.sequence)
+            val recorded = try {
+                Thread.currentThread().interrupt()
+                log.cancel().also { assertTrue(Thread.currentThread().isInterrupted) }
+            } finally { Thread.interrupted() }
+            assertEquals(2L, recorded?.sequence)
+            assertEquals("0", Files.readString(root.resolve(".web-audit/incomplete")))
+            val reopened = WebAuditLog(root, clock).read()
+            assertEquals(2, reopened.entries.size)
+            assertTrue(reopened.complete)
+        } finally { Thread.interrupted(); root.toFile().deleteRecursively() }
+    }
+
     @Test fun `store accounting excludes audit appends until it finishes`() {
         val root = root("exclusion")
         try {

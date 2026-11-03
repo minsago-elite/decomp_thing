@@ -232,6 +232,9 @@ internal class WebAuditLog(
         reasonCode: String?,
         requestId: String?,
     ): WebAuditEntry? = synchronized(lock) {
+        // This bounded durability transaction runs after the response. Preserve cancellation for
+        // its caller, but do not let an already interrupted request tear its audit append.
+        val restoreInterrupt = Thread.interrupted()
         try {
             fun entry(sequence: Long) = WebAuditEntry(sequence, clock.instant(), requestId?.takeIf(REQUEST_ID::matches), actor, action,
                 target.sanitized(), outcome, status.takeIf { it in 100..599 } ?: 500, reasonCode?.takeIf(REASON_CODE::matches))
@@ -256,6 +259,8 @@ internal class WebAuditLog(
             // Reopen before the next write: open() discards any torn tail a failed truncation left behind.
             opened = false
             null
+        } finally {
+            if (restoreInterrupt) Thread.currentThread().interrupt()
         }
     }
 

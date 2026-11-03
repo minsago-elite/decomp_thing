@@ -568,7 +568,9 @@ class UploadServer(
         server.stop(delaySeconds)
         recordWebCapacityEvent(capacity.summaryLine(), requestDiagnosticOutput)
         if (!streamsClosed && !streamResources.shutdown()) System.err.println("Event stream shutdown did not complete cleanly.")
-        requestExecutor.shutdownNow()
+        // Close admission without interrupting an in-flight post-response audit append. The
+        // existing bounded request-drain below retains ownership if a handler cannot finish.
+        requestExecutor.shutdown()
         overloadResponders.shutdownNow()
         requestDeadlines.shutdownNow()
         harnessReadiness.close()
