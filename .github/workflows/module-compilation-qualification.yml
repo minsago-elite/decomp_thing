@@ -1,0 +1,101 @@
+name: Contained module compilation
+
+on:
+  workflow_dispatch:
+  workflow_call:
+    outputs:
+      inventory-sha256:
+        description: Exact compiled inventory of required tests executed in this workflow
+        value: ${{ jobs.exact-module-runtime.outputs.inventory-sha256 }}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: module-compilation-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  exact-module-runtime:
+    outputs:
+      inventory-sha256: ${{ steps.qualify.outputs.inventory-sha256 }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      GRADLE_USER_HOME: ${{ github.workspace }}/build/gradle-user-home
+      TMPDIR: ${{ github.workspace }}/build/module-compilation-qualification/tmp
+      XDG_CACHE_HOME: ${{ github.workspace }}/build/module-compilation-qualification/cache
+      JAVA_TOOL_OPTIONS: -XX:-UsePerfData -Djava.io.tmpdir=${{ github.workspace }}/build/module-compilation-qualification/tmp -Djna.tmpdir=${{ github.workspace }}/build/module-compilation-qualification/tmp
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          fetch-depth: 2
+      - name: Prepare repository-owned temporary and cache paths
+        run: mkdir -p "$TMPDIR" "$XDG_CACHE_HOME" "$GITHUB_WORKSPACE/build/module-compilation-qualification/runner-tmp"
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: ./.github/actions/setup-gradle-compiler-cache
+        with:
+          cache-read-only: true
+      - name: Verify ACP quota cleanup routing
+        run: python3 scripts/test-acp-quota-cleanup-routing.py
+      - name: Verify qualification freshness before Gradle prepares test outputs
+        run: bash scripts/test-module-compilation-qualification-preflight.sh
+      - name: Install pinned frontend build toolchain
+        run: |
+          bash scripts/install-frontend-node.sh "$GITHUB_WORKSPACE/build/module-compilation-qualification/node"
+          echo "$GITHUB_WORKSPACE/build/module-compilation-qualification/node/bin" >> "$GITHUB_PATH"
+      - name: Install existing sandbox host prerequisites
+        run: |
+          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 --error-on=any update
+          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y --no-install-recommends bubblewrap binutils build-essential dbus-user-session e2fsprogs ca-certificates curl python3 systemd util-linux
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Verify fixed module scratch profile
+        run: bash scripts/test-module-compile-ext4-scratch-profile.sh
+      - name: Prepare existing root-owned Java and ABI runtime
+        run: bash scripts/ci-prepare-oracle-runtime.sh
+      - name: Prepare existing user-session sandbox services
+        run: bash scripts/ci-prepare-acp-sandbox.sh
+      - name: Prepare finite compiler and terminal-proof scratch
+        env:
+          RUNNER_TEMP: ${{ github.workspace }}/build/module-compilation-qualification/runner-tmp
+        run: |
+          bash scripts/ci-prepare-oracle-ext4-scratch.sh --module-compile
+          bash scripts/ci-prepare-oracle-ext4-scratch.sh
+      - name: Qualify exact modules and failure rollback through actual containment
+        id: qualify
+        run: |
+          bash scripts/qualify-contained-module-compilation.sh
+          python3 - <<'PYTHON' >> "$GITHUB_OUTPUT"
+          import hashlib
+          from pathlib import Path
+          print('inventory-sha256=' + hashlib.sha256(Path('build/module-compilation-qualification/compiled-live-tests.json').read_bytes()).hexdigest())
+          PYTHON
+      - name: Release owned finite scratch mounts
+        if: always()
+        env:
+          RUNNER_TEMP: ${{ github.workspace }}/build/module-compilation-qualification/runner-tmp
+        run: |
+          first=0
+          bash scripts/ci-release-oracle-ext4-scratch.sh --module-compile || first=$?
+          bash scripts/ci-release-oracle-ext4-scratch.sh || first=$?
+          exit "$first"
+      - name: Retain exact compiler and lifecycle evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: contained-module-compilation
+          retention-days: 14
+          if-no-files-found: error
+          path: |
+            build/module-compilation-qualification/operator-provisioning.json
+            build/module-compilation-qualification/worker-classpath.json
+            build/module-compilation-qualification/config
+            build/module-compilation-qualification/test-summary.json
+            build/module-compilation-qualification/compiled-live-tests.json
+            build/reports/contained-module-compilation-live
+            build/test-results/moduleCompilationLiveQualification
+            build/reports/tests/moduleCompilationLiveQualification

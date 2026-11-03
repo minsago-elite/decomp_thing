@@ -11,9 +11,10 @@ import { seedScale, qualifyScale, dashboardFiltersWithSnapshot } from './package
 import { seedLive, qualifyLive } from './packaged-browser-live.mjs';
 import { seedHistory, qualifyHistory } from './packaged-browser-history.mjs';
 import { seedLegacy, qualifyLegacy } from './packaged-browser-legacy.mjs';
+import { qualifyRestart, assertGracefulShutdown, scrubTokens, boundReport } from './packaged-browser-restart.mjs';
 import { qualifyUpgrade, qualifyUpgradeCache } from './packaged-browser-upgrade.mjs';
 import { qualifyAudit, assertAudit } from './packaged-browser-audit.mjs';
-import { seedRestart, qualifyRestart, assertGracefulShutdown, scrubTokens, boundReport } from './packaged-browser-restart.mjs';
+import { PackagedBrowserCdpDiagnostics } from './packaged-browser-cdp-diagnostics.mjs';
 
 // Test driver only: the application is launched with a separate Node-free PATH.
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -31,8 +32,8 @@ const { values } = parseArgs({ options: {
 } });
 if (values.help) {
   console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|metadata|history|restart|scale|live|proxy|upgrade|legacy|audit] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
+  console.log('restart: seeded history on one JVM, graceful SIGTERM-only restart on the same installation/data/port, fresh bootstrap and serverInstanceId, then two tabs with a progress-pin stale If-Match 412. No live worker, no restart-while-running, one Chromium only.');
   console.log('public: packaged home/Runtime/recovery; session: public plus local session journey; upload: session plus inert upload and lost-response retry; history: session plus preseeded inert multi-page attempts; scale: session plus 10,000 persisted jobs and keyboard pagination; proxy: real Vite HMR and session journey against packaged JVM; upgrade: previous JVM to current JVM on one origin with an old tab.');
-  console.log('restart: seeded history, same-origin SIGTERM-only restart, new bootstrap and server identity, then background-tab and stale progress-pin controls; no live worker.');
   console.log('legacy: inert legacy HTML/polling with explicit test-owned state edits; no workflow execution.');
   console.log('audit: every route at 1440x900, 390x844, 320px and 200%/400% zoom in light/dark themes with contract-fixture API reads fulfilled in DevTools; measures reflow, text/focus contrast, target size, reduced motion, every packaged asset under CSP and navigation timing budgets.');
   console.log('metadata: session plus one inert header upload/retry, real packaged job metadata, maximum uint64 address, and simulated malformed-response recovery; no workflow execution or upload quota/scale measurement.');
@@ -85,6 +86,7 @@ let work;
 let browserTmp;
 let lastTarget;
 const targets = [];
+const cdpDiagnostics = new PackagedBrowserCdpDiagnostics();
 const profile = join(root, 'browser profile');
 const ownerToken = randomUUID();
 const installHelper = join(repo, 'scripts/packaged-browser-install.py');
@@ -94,6 +96,7 @@ let applicationOutput = '';
 let browserError = '';
 let viteError = '';
 const report = { status: 'running', mode: values.mode, testDirectory: root, driverNode: nodeVersion,
+  driverCommit: process.env.GITHUB_SHA ?? execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8', maxBuffer: 1024 }).trim(),
   tools: { node: process.execPath, chrome: chromeBinary, javaHome, python: values.python }, requests: {} };
 const launchErrors = new WeakMap();
 console.log(`Evidence directory: ${root}`);
@@ -248,9 +251,15 @@ function correlateDocumentResponse(state, requestId, response, source) {
 
 async function makeTarget({ cspProbe = false, cacheEnabled = false, newWindow = false } = {}) {
   assert.equal(typeof cacheEnabled, 'boolean', 'Browser cache policy must be explicit');
-  const { targetId } = await cdp.call('Target.createTarget', { url: 'about:blank', ...(newWindow ? { newWindow: true } : {}) });
-  const { sessionId } = await cdp.call('Target.attachToTarget', { targetId, flatten: true });
+  const initialization = cdpDiagnostics.beginTarget();
+  const { targetId } = await cdpDiagnostics.command(initialization, 'Target.createTarget', () =>
+    cdp.call('Target.createTarget', { url: 'about:blank', ...(newWindow ? { newWindow: true } : {}) }));
+  cdpDiagnostics.setTargetIds(initialization, targetId);
+  const { sessionId } = await cdpDiagnostics.command(initialization, 'Target.attachToTarget', () =>
+    cdp.call('Target.attachToTarget', { targetId, flatten: true }));
+  cdpDiagnostics.setTargetIds(initialization, targetId, sessionId);
   const state = { targetId, sessionId, cspProbe, cacheEnabled, requests: [], responses: [], exceptions: [], requestUrls: new Map(),
+    initializationComplete: false,
     cacheRequests: [], cacheResponses: [], cacheRequestIds: new Set(),
     documentRequests: [], pendingDocumentRequests: new Map(), orphanDocumentResponses: [],
     cspViolations: [], cspLogEntries: [], cspBlockedRequests: [], cspIssues: [] };
@@ -264,8 +273,7 @@ async function makeTarget({ cspProbe = false, cacheEnabled = false, newWindow = 
     const type = event.type ?? (priorDocument ? 'Document' : undefined);
     const url = event.request.url.split('#')[0].split('?')[0];
     state.requestUrls.set(event.requestId, url);
-    const ifMatch = Object.entries(event.request.headers ?? {}).find(([name]) => name.toLowerCase() === 'if-match')?.[1] ?? null;
-    state.requests.push({ method: event.request.method, url, type, ...(ifMatch === null ? {} : { ifMatch }) });
+    state.requests.push({ requestId: event.requestId, method: event.request.method, url, type });
     if (cacheEnabled) state.cacheRequests.push({ requestId: event.requestId, method: event.request.method, url, type });
     if (type === 'Document') {
       const request = { requestId: event.requestId, sequence: state.documentRequests.length,
@@ -279,7 +287,7 @@ async function makeTarget({ cspProbe = false, cacheEnabled = false, newWindow = 
     if (cacheEnabled) state.cacheRequestIds.add(event.requestId);
   }, sessionId);
   cdp.on('Network.responseReceived', (event) => {
-    const response = { url: event.response.url.split('#')[0].split('?')[0], status: event.response.status, type: event.type };
+    const response = { requestId: event.requestId, url: event.response.url.split('#')[0].split('?')[0], status: event.response.status, type: event.type };
     if (cacheEnabled) state.cacheResponses.push({ requestId: event.requestId, ...response,
       fromDiskCache: event.response.fromDiskCache ?? null, fromServiceWorker: event.response.fromServiceWorker ?? null });
     if (event.type === 'Document' || state.pendingDocumentRequests.has(event.requestId)) {
@@ -311,22 +319,25 @@ async function makeTarget({ cspProbe = false, cacheEnabled = false, newWindow = 
   cdp.on('Audits.issueAdded', ({ issue }) => {
     if (issue.code === 'ContentSecurityPolicyIssue') state.cspIssues.push(issue.details?.contentSecurityPolicyIssueDetails ?? issue);
   }, sessionId);
-  await cdp.call('Page.enable', {}, sessionId);
-  await cdp.call('Runtime.enable', {}, sessionId);
-  await cdp.call('Network.enable', {}, sessionId);
-  await cdp.call('Log.enable', {}, sessionId);
-  await cdp.call('Audits.enable', {}, sessionId);
-  await cdp.call('Runtime.addBinding', { name: '__decompRecordCspViolation' }, sessionId);
-  await cdp.call('Page.addScriptToEvaluateOnNewDocument', { source: `addEventListener('securitypolicyviolation', event => {
+  const initialize = (method, params = {}) => cdpDiagnostics.command(initialization, method,
+    () => cdp.call(method, params, sessionId));
+  await initialize('Page.enable');
+  await initialize('Runtime.enable');
+  await initialize('Network.enable');
+  await initialize('Log.enable');
+  await initialize('Audits.enable');
+  await initialize('Runtime.addBinding', { name: '__decompRecordCspViolation' });
+  await initialize('Page.addScriptToEvaluateOnNewDocument', { source: `addEventListener('securitypolicyviolation', event => {
     globalThis.__decompRecordCspViolation(JSON.stringify({
       blockedURI: event.blockedURI, columnNumber: event.columnNumber, disposition: event.disposition,
       documentURI: event.documentURI, effectiveDirective: event.effectiveDirective,
       lineNumber: event.lineNumber, originalPolicy: event.originalPolicy,
       sourceFile: event.sourceFile, statusCode: event.statusCode, violatedDirective: event.violatedDirective,
     }));
-  });` }, sessionId);
-  await cdp.call('Network.setCacheDisabled', { cacheDisabled: !cacheEnabled }, sessionId);
-  await cdp.call('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false }, sessionId);
+  });` });
+  await initialize('Network.setCacheDisabled', { cacheDisabled: !cacheEnabled });
+  await initialize('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+  state.initializationComplete = true;
   return state;
 }
 
@@ -496,7 +507,7 @@ try {
   const { manifest, data } = installation;
   const legacyFixture = values.mode === 'legacy' ? await seedLegacy(data) : null;
   const historyFixture = values.mode === 'history' ? await seedHistory(data) : null;
-  const restartFixture = values.mode === 'restart' ? await seedRestart(data) : null;
+  const restartFixture = values.mode === 'restart' ? await seedHistory(data) : null;
   const scaleFixture = values.mode === 'scale' ? await seedScale(data) : null;
   const liveFixture = values.mode === 'live' ? await seedLive(data) : null;
   const populated = !!(historyFixture || restartFixture || scaleFixture || liveFixture);
@@ -517,13 +528,18 @@ try {
   const origin = await launchApplication(installation, '0', values.mode === 'proxy' ? browserOrigin : undefined);
   report.origin = origin;
   browserOrigin ??= origin;
+  const observeNativeVisibility = values.mode === 'restart';
+  if (observeNativeVisibility && !process.env.DISPLAY) {
+    throw new Error('restart mode requires a real X display; run it under xvfb-run rather than emulating visibility');
+  }
+  report.browserDisplayMode = observeNativeVisibility ? 'headful-x11' : 'headless';
 
   // Chrome places SingletonSocket under TMPDIR. Keep it short enough even on hosted
   // runners whose checkout path is /home/runner/work/<repo>/<repo>.
-  browserTmp = await fs.mkdtemp(join(values['work-parent'], '.ct-'));
+  browserTmp = await fs.mkdtemp(join(repo, '.ct-'));
   report.browserTempDirectory = browserTmp;
   await fs.mkdir(profile);
-  browser = startOwned(chromeBinary, ['--headless=new', '--disable-gpu', ...(values['no-sandbox'] ? ['--no-sandbox'] : []), '--no-first-run', '--no-default-browser-check', '--disable-background-networking', '--disable-extensions', '--disable-default-apps', '--disable-sync', '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1', `--user-data-dir=${profile}`, 'about:blank'], {
+  browser = startOwned(chromeBinary, [...(observeNativeVisibility ? [] : ['--headless=new']), '--disable-gpu', ...(values['no-sandbox'] ? ['--no-sandbox'] : []), '--no-first-run', '--no-default-browser-check', '--disable-background-networking', '--disable-extensions', '--disable-default-apps', '--disable-sync', '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1', `--user-data-dir=${profile}`, 'about:blank'], {
     env: { ...process.env, TMPDIR: browserTmp }, stdio: ['ignore', 'ignore', 'pipe'],
   });
   browser.stderr.on('data', (chunk) => { browserError = (browserError + chunk).slice(-1048576); });
@@ -534,6 +550,23 @@ try {
   const [port, socketPath] = portFile.trim().split('\n');
   const socket = await connectDevTools(`ws://127.0.0.1:${port}${socketPath}`);
   cdp = new Protocol(socket);
+  cdp.on('Target.targetCreated', ({ targetInfo }) => cdpDiagnostics.targetEvent('target-created', {
+    targetId: targetInfo?.targetId, targetType: targetInfo?.type, attached: targetInfo?.attached,
+  }));
+  cdp.on('Target.targetDestroyed', ({ targetId }) => cdpDiagnostics.targetEvent('target-destroyed', { targetId }));
+  cdp.on('Target.attachedToTarget', ({ sessionId, targetInfo }) => cdpDiagnostics.targetEvent('target-attached', {
+    targetId: targetInfo?.targetId, sessionId, targetType: targetInfo?.type, attached: targetInfo?.attached,
+  }));
+  cdp.on('Target.detachedFromTarget', ({ sessionId, targetId }) => cdpDiagnostics.targetEvent('target-detached', { targetId, sessionId }));
+  const discoveryStarted = performance.now();
+  try {
+    await cdp.call('Target.setDiscoverTargets', { discover: true });
+    report.targetDiscoveryMonitoring = { outcome: 'success', elapsedMs: Math.max(0, Math.round(performance.now() - discoveryStarted)) };
+  } catch (error) {
+    report.targetDiscoveryMonitoring = { outcome: error?.message === 'DevTools deadline: Target.setDiscoverTargets' ? 'deadline' : 'protocol-error',
+      elapsedMs: Math.max(0, Math.round(performance.now() - discoveryStarted)) };
+    throw error;
+  }
   report.browser = await cdp.call('Browser.getVersion');
   report.browserSandboxDisabled = values['no-sandbox'];
   report.cspDetectorProbe = await qualifyCspDetector();
@@ -659,6 +692,31 @@ try {
     report.requests.upgrade = tab.requests;
     report.requests.upgradeCacheWarm = cacheProbe.requests;
     report.jobDataCreated = false;
+  }
+  if (restartFixture) {
+    const restartApplication = async () => {
+      const previous = application;
+      const signalsSent = ['SIGTERM'];
+      previous.kill('SIGTERM');
+      await waitFor(() => previous.exitCode !== null || previous.signalCode !== null, 'graceful SIGTERM exit', 30000);
+      const exit = assertGracefulShutdown({ signalsSent, exitCode: previous.exitCode, signalCode: previous.signalCode });
+      const restartedOrigin = await launchApplication(installation, new URL(origin).port);
+      return { origin: restartedOrigin, exit };
+    };
+    const captureSafe = async (target, name) => {
+      const safe = await evaluate(target, `(() => {
+        if (location.hash !== '' || ${JSON.stringify(sensitiveValues)}.some(value => document.body.innerText.includes(value))) return false;
+        document.querySelectorAll('input, textarea, [contenteditable]').forEach(element => { element.style.visibility = 'hidden'; });
+        return true;
+      })()`);
+      assert.ok(safe, 'Refusing to capture a page with a bootstrap fragment or visible credential');
+      await capture(target, name);
+    };
+    const restarted = await qualifyRestart({ fixture: restartFixture, origin, makeTarget, cdp, evaluate, ready, waitFor, delay,
+      readOutput: () => applicationOutput, restartApplication, captureSafe, sensitiveValues });
+    report.restart = restarted.evidence;
+    report.requests.restart = restarted.requests;
+    report.jobDataCreated = true;
   }
   if (values.mode === 'audit') {
     report.audit = await qualifyAudit({ origin, repo, manifest, evidenceDirectory: root, cdp, makeTarget, evaluate, ready, capture, delay });
@@ -860,14 +918,7 @@ try {
       field.value = 'absent fixture'; field.dispatchEvent(new Event('input', { bubbles: true }));
     })()`);
     await evaluate(authenticated, `[...document.querySelectorAll('button')].find(button => button.textContent === 'Apply filters').click()`);
-    try {
-      await ready(authenticated, `document.body.innerText.includes('No jobs match these filters.')`, 'filtered empty job library');
-    } catch (failure) {
-      const page = await evaluate(authenticated, `({ pathname: location.pathname, search: location.search,
-        alerts: [...document.querySelectorAll('[role="alert"]')].map(node => node.innerText.slice(0, 800)),
-        results: document.querySelector('ul[aria-label="Uploaded jobs"]')?.innerText.slice(0, 1200) ?? null })`).catch(() => null);
-      throw new Error(`Filtered empty job library diagnostic: ${JSON.stringify({ page, requests: authenticated.requests.slice(-12), responses: authenticated.responses.slice(-12) })}`, { cause: failure });
-    }
+    await ready(authenticated, `document.body.innerText.includes('No jobs match these filters.')`, 'filtered empty job library');
     assert.equal(dashboardFiltersWithSnapshot(await evaluate(authenticated, 'location.search')), '?search=absent+fixture');
     await cdp.call('Page.reload', {}, authenticated.sessionId);
     await ready(authenticated, `document.body.innerText.includes('Local session connected.') && document.body.innerText.includes('No jobs match these filters.')`, 'saved job filters after reload');
@@ -1064,32 +1115,6 @@ try {
     report.requests.authenticated = authenticated.requests;
   }
 
-  if (restartFixture) {
-    const restartApplication = async () => {
-      const previous = application;
-      const signalSent = previous.kill('SIGTERM');
-      assert.equal(signalSent, true, 'The first JVM was not alive when SIGTERM was sent');
-      await waitFor(() => previous.exitCode !== null || previous.signalCode !== null, 'graceful SIGTERM exit', 30000);
-      const exit = assertGracefulShutdown({ signalsSent: signalSent ? ['SIGTERM'] : [], exitCode: previous.exitCode, signalCode: previous.signalCode });
-      const restartedOrigin = await launchApplication(installation, new URL(origin).port);
-      return { origin: restartedOrigin, exit };
-    };
-    const captureSafe = async (target, name) => {
-      const safe = await evaluate(target, `(() => {
-        if (location.hash !== '' || ${JSON.stringify(sensitiveValues)}.some(value => document.body.innerText.includes(value))) return false;
-        document.querySelectorAll('input, textarea, [contenteditable]').forEach(element => { element.style.visibility = 'hidden'; });
-        return true;
-      })()`);
-      assert.ok(safe, 'Refusing to capture a page with a bootstrap fragment or visible credential');
-      await capture(target, name);
-    };
-    const restarted = await qualifyRestart({ fixture: restartFixture, origin, makeTarget, cdp, evaluate, ready, waitFor, delay,
-      readOutput: () => applicationOutput, restartApplication, captureSafe, sensitiveValues });
-    report.restart = restarted.evidence;
-    report.requests.restart = restarted.requests;
-    report.jobDataCreated = true;
-  }
-
   // Let the final DevTools events drain before taking the evidence snapshot.
   await delay(100);
   report.contentSecurityPolicy = cspEvidence();
@@ -1122,7 +1147,7 @@ try {
   report.viteError = safeDiagnostic(viteError);
   console.error(safeDiagnostic(error.stack));
   process.exitCode = 1;
-  if (lastTarget && cdp) {
+  if (lastTarget && cdp && lastTarget.initializationComplete) {
     try {
       // Fail closed if the handoff has not been scrubbed. Hide editable fields
       // before a diagnostic capture, and never capture visible credential text.
@@ -1138,7 +1163,7 @@ try {
     } catch {
       report.failureScreenshotSkipped = 'Attached page unavailable within the bounded DevTools request deadline';
     }
-  }
+  } else if (lastTarget && !lastTarget.initializationComplete) report.failureScreenshotSkipped = 'Target initialization failed before page commands completed';
 } finally {
   if (cdp) await cdp.call('Browser.close').catch(() => {});
   const cleanup = await Promise.allSettled([stop(browser), stop(application), stop(vite)]);
@@ -1151,6 +1176,7 @@ try {
     report.cleanupErrors = cleanup.filter((result) => result.status === 'rejected').map((result) => safeDiagnostic(result.reason));
     process.exitCode = 1;
   }
+  report.cdpTargetDiagnostics = cdpDiagnostics.snapshot();
   report.workRetained = true;
   if (report.shutdownConfirmed && !values['keep-workdir']) {
     try {

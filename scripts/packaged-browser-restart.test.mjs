@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { assertGracefulShutdown, assertOnlyPinWrites, boundReport, findBootstrap, publishAtomically, scrubTokens, summarizeRequests } from './packaged-browser-restart.mjs';
+import { assertGracefulShutdown, bootstrapHashExpression, assertOnlyPinWrites, boundReport, findBootstrap, hasOpenEventStream, isProgressReadUrl, matchingResponse, publishAtomically, scrubTokens, summarizeRequests } from './packaged-browser-restart.mjs';
 
 const origin = 'http://127.0.0.1:4000';
 
@@ -34,7 +34,8 @@ test('bounds reports by replacing request lists with counts', () => {
   const big = { status: 'passed', requests: { a: Array.from({ length: 1000 }, () => ({ method: 'GET', url: 'x'.repeat(50) })) } };
   assert.deepEqual(boundReport(big, 2000).requests, { a: { count: 1000, truncated: true } });
   assert.throws(() => boundReport({ blob: 'x'.repeat(5000), requests: {} }, 1000));
-  assert.throws(() => boundReport({ blob: '界'.repeat(1000), requests: {} }, 1500));
+  assert.throws(() => boundReport({ blob: 'é'.repeat(600), requests: {} }, 1000),
+    'UTF-8 encoded report bytes must be bounded, not JavaScript code units');
 });
 
 test('only pin PUTs to the selected attempt are accepted mutations', () => {
@@ -52,6 +53,26 @@ test('only pin PUTs to the selected attempt are accepted mutations', () => {
   assert.deepEqual(summarizeRequests([get, { method: 'PUT', url: pin }]), { total: 2, methods: { GET: 1, PUT: 1 }, mutations: [{ method: 'PUT', url: pin }] });
 });
 
+test('counts progress reads with cursor queries without matching unrelated routes', () => {
+  assert.equal(isProgressReadUrl(`${origin}/nested/api/v1/jobs/j/runs/r/events?after=204&limit=200`), true);
+  assert.equal(isProgressReadUrl(`${origin}/nested/api/v1/jobs/j/runs/r/snapshot?revision=1`), true);
+  assert.equal(isProgressReadUrl(`${origin}/nested/api/v1/jobs?cursor=events`), false);
+  assert.equal(isProgressReadUrl('/nested/api/v1/jobs/j/runs/r/events?after=204'), false);
+});
+
+test('correlates a mutation with its own response and tracks event stream closure', () => {
+  const request = { requestId: 'pin-put-1', method: 'PUT' };
+  assert.equal(matchingResponse(request, [
+    { requestId: 'earlier-pin-get', status: 200 },
+    { requestId: 'pin-put-1', status: 412 },
+  ])?.status, 412);
+  assert.equal(matchingResponse(request, [{ requestId: 'earlier-pin-get', status: 200 }]), null);
+  const streams = new Map([['events-1', { open: true }]]);
+  assert.equal(hasOpenEventStream(streams), true);
+  streams.get('events-1').open = false;
+  assert.equal(hasOpenEventStream(streams), false);
+});
+
 test('publishes by atomic rename and leaves no temporary file', async () => {
   const build = join(process.cwd(), 'build');
   await mkdir(build, { recursive: true });
@@ -63,4 +84,9 @@ test('publishes by atomic rename and leaves no temporary file', async () => {
     assert.equal(await readFile(path, 'utf8'), 'new');
     assert.deepEqual(await readdir(directory), ['agent-progress.json']);
   } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('applies a bootstrap token only as an in-page hash assignment', () => {
+  assert.equal(bootstrapHashExpression('abc_-9'), 'location.hash = "#bootstrap=abc_-9"');
+  assert.throws(() => bootstrapHashExpression('a"; alert(1)'));
 });

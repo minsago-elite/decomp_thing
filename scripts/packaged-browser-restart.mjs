@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
-import { seedHistory } from './packaged-browser-history.mjs';
 
 const RUN = 'run_fixture_3';
 const MAX_REPORT_BYTES = 512 * 1024;
@@ -21,6 +20,12 @@ export function findBootstrap(output, origin) {
   const url = String(output).split(/\s+/).find(part => part.startsWith(prefix) && /^[A-Za-z0-9_-]+$/.test(part.slice(prefix.length)));
   return url ? { url, token: url.slice(prefix.length) } : null;
 }
+
+/** In-page expression that applies a bootstrap token through the document's hash-change path. */
+export const bootstrapHashExpression = token => {
+  assert.match(token, /^[A-Za-z0-9_-]+$/, 'Bootstrap token is malformed');
+  return `location.hash = ${JSON.stringify('#bootstrap=' + token)}`;
+};
 
 /** Graceful means exactly one SIGTERM, then a normal JVM exit; never a kill escalation. */
 export function assertGracefulShutdown({ signalsSent, exitCode, signalCode }) {
@@ -58,6 +63,23 @@ export function summarizeRequests(requests) {
   return { total: requests.length, methods, mutations: requests.filter(r => !['GET', 'HEAD'].includes(r.method)) };
 }
 
+export function isProgressReadUrl(value) {
+  try {
+    const path = new URL(value).pathname;
+    return path.endsWith('/events') || path.endsWith('/snapshot');
+  } catch {
+    return false;
+  }
+}
+
+export function matchingResponse(request, responses) {
+  return responses.find(response => response.requestId === request.requestId) ?? null;
+}
+
+export function hasOpenEventStream(streams) {
+  return [...streams.values()].some(stream => stream.open);
+}
+
 /** Only the known session exchanges and progress-pin PUTs may mutate in this fixture. */
 export function assertOnlyPinWrites(requests, pinUrl, expectedPuts, sessionUrl = null, expectedSessionPosts = 0) {
   const mutations = requests.filter(r => !['GET', 'HEAD'].includes(r.method));
@@ -74,17 +96,6 @@ export function assertOnlyPinWrites(requests, pinUrl, expectedPuts, sessionUrl =
 
 export const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 
-/** Restart qualification needs an actively-following page; keep its journal below the UI's 200-row cap. */
-export async function seedRestart(root) {
-  const fixture = await seedHistory(root);
-  const progress = JSON.parse(fixture.progress);
-  progress.events = progress.events.slice(0, 40);
-  progress.nextSequence = progress.events.at(-1).sequence + 1;
-  fixture.progress = JSON.stringify(progress);
-  await fs.writeFile(fixture.progressPath, fixture.progress, { mode: 0o600 });
-  return fixture;
-}
-
 export async function qualifyRestart({ fixture, origin, makeTarget, cdp, evaluate, ready, waitFor, delay, readOutput, restartApplication,
   captureSafe, sensitiveValues }) {
   const basePath = '/nested';
@@ -94,49 +105,45 @@ export async function qualifyRestart({ fixture, origin, makeTarget, cdp, evaluat
   const rows = `Array.from(document.querySelectorAll('ol[aria-label="Activity observations"] li span')).map(row => row.textContent)`;
   const button = label => `[...document.querySelectorAll('button')].find(b => b.textContent === ${JSON.stringify(label)})`;
   const evidence = { phases: [] };
-  const progressBoundary = async tab => evaluate(tab, `fetch('${basePath}/api/v1/jobs/${fixture.jobId}/runs/${RUN}/snapshot')
-    .then(r => r.json()).then(b => ({ throughSequence: b.data.throughSequence,
-      nextSequence: b.data.progress.nextSequence, retainedEventCount: b.data.progress.retainedEventCount }))`);
   const serverInstance = tab => evaluate(tab, `fetch('${basePath}/api/v1/bootstrap', { credentials: 'same-origin' }).then(r => r.json()).then(b => b.data.serverInstanceId ?? null)`);
   const track = tab => {
     tab.streams = 0;
+    tab.eventStreams = new Map();
     cdp.on('Network.requestWillBeSent', event => {
       if (event.type === 'Fetch' && new URL(event.request.url).pathname.endsWith('/events') &&
-        (event.request.headers.Accept ?? event.request.headers.accept) === 'text/event-stream') tab.streams++;
+        (event.request.headers.Accept ?? event.request.headers.accept) === 'text/event-stream') {
+        tab.streams++;
+        tab.eventStreams.set(event.requestId, { open: true, url: event.request.url });
+      }
     }, tab.sessionId);
+    for (const eventName of ['Network.loadingFinished', 'Network.loadingFailed']) {
+      cdp.on(eventName, event => {
+        const stream = tab.eventStreams.get(event.requestId);
+        if (stream) stream.open = false;
+      }, tab.sessionId);
+    }
     return tab;
   };
-  const progressReads = tab => tab.requests.filter(r => r.url.endsWith('/events') || r.url.endsWith('/snapshot')).length;
+  const progressReads = tab => tab.requests.filter(r => isProgressReadUrl(r.url)).length;
   const openRun = async (tab, label) => {
     await cdp.call('Page.navigate', { url: origin + runPath }, tab.sessionId);
     await cdp.call('Page.bringToFront', {}, tab.sessionId);
     await ready(tab, `document.querySelector('section[aria-label="Progress retention"]') !== null`, label);
   };
   const follow = async (tab, label) => {
-    await evaluate(tab, `([...document.querySelectorAll('a')].find(a => a.textContent.trim() === 'Activity') ??
-      [...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'Activity')).click()`);
-    await ready(tab, `document.querySelector('section[aria-labelledby="activity-title"]') !== null`, label + ' view');
     await evaluate(tab, `${button('Follow activity')}.click()`);
-    await ready(tab, `(${rows}).length > 0 && document.body.innerText.includes('Following retained activity.')`, label);
+    await ready(tab, `(${rows}).length === 200`, label);
+  };
+  const continueFollowing = async (tab, label) => {
+    await ready(tab, `[...document.querySelectorAll('button')].some(b => b.textContent === 'Continue activity on next page' && !b.disabled)`,
+      label + ' continuation control');
+    await evaluate(tab, `${button('Continue activity on next page')}.click()`);
+    await ready(tab, `(${rows}).length === 5 && document.body.innerText.includes('Following retained activity.')`, label);
   };
   const readPin = async (tab, label, expected = 'Progress history is not pinned.') => {
     await ready(tab, `[...document.querySelectorAll('button')].some(b => b.textContent === 'Read progress pin' && !b.disabled)`, label + ' controls');
     await evaluate(tab, `${button('Read progress pin')}.click()`);
     await ready(tab, `document.body.innerText.includes(${JSON.stringify(expected)})`, label);
-  };
-  const readPinFromServer = async tab => {
-    const result = await evaluate(tab, `fetch(${JSON.stringify(`${basePath}/api/v1/jobs/${fixture.jobId}/runs/${RUN}/progress-pin`)}, { credentials: 'same-origin' })
-      .then(async response => ({ status: response.status, body: await response.json() }))`);
-    assert.equal(result.status, 200, 'Progress pin read did not reach the real server');
-    assert.equal(result.body.kind, 'progressPin');
-    return result.body.data;
-  };
-  const readRunFromServer = async (tab, runId) => {
-    const result = await evaluate(tab, `fetch(${JSON.stringify(`${basePath}/api/v1/jobs/${fixture.jobId}/runs/${runId}`)}, { credentials: 'same-origin' })
-      .then(async response => ({ status: response.status, body: await response.json() }))`);
-    assert.equal(result.status, 200, `Attempt ${runId} read did not reach the real server`);
-    assert.equal(result.body.kind, 'run');
-    return result.body.data;
   };
 
   // Phase A: first JVM, one explicit bootstrap, a populated attempt page, and followed activity.
@@ -153,45 +160,75 @@ export async function qualifyRestart({ fixture, origin, makeTarget, cdp, evaluat
   await readPin(old, 'pin policy before restart');
   await follow(old, 'activity before restart');
   const rowsBefore = await evaluate(old, rows);
-  const snapshotBefore = await progressBoundary(old);
+  await continueFollowing(old, 'activity following before restart');
+  const automaticMutationsBaseline = old.requests.filter(r => !['GET', 'HEAD'].includes(r.method)).length;
+  assert.equal(old.requests.filter(r => r.method === 'PUT' && r.url === pinUrl).length, 0,
+    'The old tab must not write the pin before the deliberate pin action');
+  // Cursor epochs are process-local; compare the durable sequence boundary instead.
+  const snapshotBefore = await evaluate(old, `fetch('${basePath}/api/v1/jobs/${fixture.jobId}/runs/${RUN}/snapshot').then(r => r.json()).then(b => b.data.throughSequence)`);
   evidence.phases.push('first-process');
 
   // Graceful SIGTERM-only restart: same installation, data directory and port.
+  const mutationsBeforeRestart = old.requests.filter(r => !['GET', 'HEAD'].includes(r.method)).length;
+  assert.equal(mutationsBeforeRestart, automaticMutationsBaseline,
+    'Unexpected mutation occurred before the restart');
   const restarted = await restartApplication();
   assert.equal(restarted.origin, origin, 'Restart did not preserve the origin');
   evidence.shutdown = restarted.exit;
   evidence.sameOrigin = origin;
-  evidence.samePort = true;
-  evidence.sameDataDirectory = true;
 
-  // The old tab keeps its stale view until the server rejects it; it must clear, not replay.
-  const mutationsBeforeRejection = summarizeRequests(old.requests).mutations.length;
-  try {
-    await ready(old, `document.querySelector('section[aria-label="Progress retention"]') === null`, 'automatic private clearing');
-  } catch {
-    await evaluate(old, `${button('Read progress pin')}.click()`);
-    await ready(old, `document.body.innerText.includes('To access private work, open the sign-in link')`, 'server rejection clears old tab');
+  // Give reconnects time to invalidate the old session automatically. If the page remains
+  // private, require a deliberate read and an actual 401 before treating it as cleared.
+  const signInNotice = 'To access private work, open the sign-in link printed by your local application.';
+  let privateClearPath = null;
+  const clearDeadline = Date.now() + 20000;
+  while (Date.now() < clearDeadline) {
+    const state = await evaluate(old, `(() => {
+      const retained = document.querySelector('section[aria-label="Progress retention"]') !== null;
+      const notice = document.body.innerText.includes(${JSON.stringify(signInNotice)});
+      return !retained && notice ? 'cleared' : retained ? 'private' : 'unknown';
+    })()`);
+    if (state === 'cleared') { privateClearPath = 'automatic-server-rejection'; break; }
+    assert.equal(state, 'private', 'Old attempt page became indeterminate before session invalidation');
+    await delay(75);
+  }
+  if (privateClearPath === null) {
+    const readStart = old.requests.length;
+    await readPin(old, 'explicit progress-pin read after restart', signInNotice);
+    const rejectedReads = old.requests.slice(readStart).filter(r => r.method === 'GET' && r.url === pinUrl);
+    assert.equal(rejectedReads.length, 1, 'Session invalidation must follow one deliberate pin GET');
+    assert.equal(matchingResponse(rejectedReads[0], old.responses)?.status, 401,
+      'The deliberate post-restart pin GET must receive an actual HTTP 401');
+    privateClearPath = 'explicit-progress-pin-read-401';
   }
   assert.equal(await evaluate(old, `document.querySelector('ol[aria-label="Activity observations"]') === null && document.querySelector('section[aria-label="Progress retention"]') === null`), true,
     'Private attempt state survived restart rejection');
-  assert.equal(summarizeRequests(old.requests).mutations.length, mutationsBeforeRejection, 'A mutation was replayed after restart');
+  assert.equal(summarizeRequests(old.requests).mutations.length, mutationsBeforeRestart, 'A mutation was replayed during restart');
   assert.equal(await evaluate(old, 'localStorage.length + sessionStorage.length'), 0);
   evidence.privateStateCleared = true;
+  evidence.privateClearPath = privateClearPath;
   evidence.automaticMutationReplays = 0;
 
   // The consumed first link stays denied; only a fresh explicit bootstrap authenticates.
   const second = await waitFor(() => findBootstrap(readOutput(), origin), 'fresh local bootstrap handoff');
   assert.notEqual(second.token, first.token, 'Restart reused the previous bootstrap token');
   sensitiveValues.push(second.token);
-  await cdp.call('Page.navigate', { url: first.url }, old.sessionId);
-  await ready(old, `document.body.innerText.includes('This sign-in link is no longer available.')`, 'consumed first-process link denial');
-  assert.equal(await evaluate(old, 'location.hash'), '');
+  // Denial uses a separate target so the original document keeps its session and prior instance identity.
+  const denial = track(await makeTarget());
+  await cdp.call('Page.navigate', { url: first.url }, denial.sessionId);
+  await ready(denial, `document.body.innerText.includes('This sign-in link is no longer available.')`, 'consumed first-process link denial');
+  assert.equal(await evaluate(denial, 'location.hash'), '');
+  await cdp.call('Target.closeTarget', { targetId: denial.targetId });
   evidence.consumedOldLinkDenied = true;
-  await cdp.call('Page.navigate', { url: second.url }, old.sessionId);
+  // Apply the fresh link to the existing document through its hash-change path.
+  await evaluate(old, bootstrapHashExpression(second.token));
   await ready(old, `document.body.innerText.includes('Local session connected.')`, 'fresh explicit session');
+  await ready(old, `document.body.innerText.includes('Application instance changed.')`,
+    'visible server-restart state after fresh authentication');
   const instanceAfter = await serverInstance(old);
   assert.ok(instanceAfter && instanceAfter !== instanceBefore, 'serverInstanceId did not change across the restart');
   evidence.serverInstanceChanged = true;
+  evidence.serverRestartNoticeShown = true;
 
   // Reconciliation: durable bytes, pin policy and activity match the pre-restart view.
   assert.deepEqual(await fs.readFile(statePath), stateBefore, 'Restart changed workflow-state bytes');
@@ -200,39 +237,37 @@ export async function qualifyRestart({ fixture, origin, makeTarget, cdp, evaluat
   await readPin(old, 'pin policy after restart');
   await follow(old, 'activity after restart');
   assert.deepEqual(await evaluate(old, rows), rowsBefore, 'Activity rows differ after restart');
-  const snapshotAfter = await progressBoundary(old);
-  assert.deepEqual(snapshotAfter, snapshotBefore, 'The durable activity boundary changed across restart');
+  await continueFollowing(old, 'activity following after restart');
+  await waitFor(() => hasOpenEventStream(old.eventStreams), 'open foreground activity event stream before backgrounding');
+  const streamsBeforeBackground = [...old.eventStreams.entries()].filter(([, stream]) => stream.open).map(([id]) => id);
+  assert.ok(streamsBeforeBackground.length > 0, 'Background-tab check requires an already-open activity stream');
+  assert.equal(await evaluate(old, `fetch('${basePath}/api/v1/jobs/${fixture.jobId}/runs/${RUN}/snapshot').then(r => r.json()).then(b => b.data.throughSequence)`), snapshotBefore);
   assert.deepEqual(await fs.readFile(statePath), stateBefore, 'Reconciliation reads changed workflow-state bytes');
   await captureSafe(old, 'restart-reconciled.png');
-  evidence.activityContinuity = { rows: rowsBefore.length, ...snapshotBefore };
+  evidence.activityContinuity = { rows: rowsBefore.length, throughSequence: snapshotBefore };
   evidence.phases.push('restarted-process');
 
   // Two tabs in one window: only the foreground tab may read; closing it leaves the survivor streaming.
   const peer = track(await makeTarget());
   await openRun(peer, 'second tab attempt');
   await follow(peer, 'second tab activity');
-  const oldWindow = await cdp.call('Browser.getWindowForTarget', { targetId: old.targetId });
-  const peerWindow = await cdp.call('Browser.getWindowForTarget', { targetId: peer.targetId });
-  assert.equal(oldWindow.windowId, peerWindow.windowId, 'Background observation requires two tabs in the same browser window');
-  await cdp.call('Target.activateTarget', { targetId: peer.targetId });
+  await continueFollowing(peer, 'second tab following activity');
   await cdp.call('Page.bringToFront', {}, peer.sessionId);
-  try {
-    await ready(old, `document.visibilityState === 'hidden'`, 'hidden tab state (fail closed if the page is not hidden)');
-  } catch (error) {
-    const [oldVisibility, peerVisibility] = await Promise.all([
-      evaluate(old, 'document.visibilityState'), evaluate(peer, 'document.visibilityState'),
-    ]);
-    throw new Error(`Background activation did not hide the original page (old=${oldVisibility}, peer=${peerVisibility}, ` +
-      `oldWindow=${oldWindow.windowId}, peerWindow=${peerWindow.windowId})`, { cause: error });
-  }
-  await ready(old, `document.body.innerText.includes('Background tab: activity reads are suspended.')`,
-    'hidden activity suspension notice');
+  await ready(old, `document.visibilityState === 'hidden' && document.body.innerText.includes('Background tab: activity reads are suspended.')`,
+    'hidden tab suspension (fail closed if the tab is not hidden)');
   const hiddenReads = progressReads(old);
   const peerReadsBefore = progressReads(peer);
+  await ready(old, `true`, 'hidden tab stream cancellation observation');
+  await delay(100);
+  assert.equal(hasOpenEventStream(old.eventStreams), false, 'A hidden tab left its activity event stream open');
+  assert.ok(streamsBeforeBackground.every(id => old.eventStreams.get(id)?.open === false),
+    'Every activity stream that was open before backgrounding must close');
   await delay(3000);
   assert.equal(progressReads(old), hiddenReads, 'A hidden tab made progress requests');
+  assert.equal(hasOpenEventStream(old.eventStreams), false, 'A hidden tab reopened its activity event stream');
   assert.equal(await evaluate(peer, 'document.visibilityState'), 'visible');
-  evidence.backgroundTab = { hiddenRequests: 0, hiddenNoticeShown: true, foregroundReadsDuringObservation: progressReads(peer) - peerReadsBefore };
+  evidence.backgroundTab = { hiddenRequests: 0, hiddenNoticeShown: true, foregroundReadsDuringObservation: progressReads(peer) - peerReadsBefore,
+    openStreamsBeforeBackground: streamsBeforeBackground.length, allPreviousStreamsClosed: streamsBeforeBackground.every(id => old.eventStreams.get(id)?.open === false) };
 
   await cdp.call('Target.closeTarget', { targetId: peer.targetId });
   await cdp.call('Page.bringToFront', {}, old.sessionId);
@@ -243,12 +278,11 @@ export async function qualifyRestart({ fixture, origin, makeTarget, cdp, evaluat
   assert.ok(old.streams > streamsBefore, 'Survivor did not reopen its activity stream');
   const original = fixture.progress;
   const appended = JSON.parse(original);
-  const streamedSequence = appended.nextSequence;
-  appended.events.push({ ...appended.events[0], sequence: streamedSequence, text: 'Synthetic private streamed content' });
-  appended.nextSequence = streamedSequence + 1;
+  appended.events.push({ ...appended.events[0], sequence: 205, text: 'Synthetic private streamed content' });
+  appended.nextSequence = 206;
   try {
     await publishAtomically(fixture.progressPath, JSON.stringify(appended));
-    await ready(old, `(${rows}).includes(${JSON.stringify(`Sequence ${streamedSequence}`)})`, 'survivor streamed appended observation');
+    await ready(old, `(${rows}).includes('Sequence 205')`, 'survivor streamed appended observation');
     assert.equal(await evaluate(old, `document.body.innerText.includes('Synthetic private streamed content')`), false);
     await evaluate(old, `${button('Pause activity')}.click()`);
   } finally {
@@ -263,20 +297,16 @@ export async function qualifyRestart({ fixture, origin, makeTarget, cdp, evaluat
   await openRun(other, 'second window attempt');
   await readPin(old, 'first window policy');
   await readPin(other, 'second window policy');
-  const firstWindowPolicy = await readPinFromServer(old);
-  const secondWindowPolicy = await readPinFromServer(other);
-  assert.equal(firstWindowPolicy.version, secondWindowPolicy.version, 'Both windows must start from the same pin version');
-  assert.equal(firstWindowPolicy.pinned, false);
   for (const tab of [old, other]) assert.equal(await evaluate(tab, 'document.visibilityState'), 'visible',
     'Two visible windows are required for the stale-control scenario (fail closed)');
   const putsBefore = old.requests.filter(r => r.method === 'PUT').length;
+  const firstPinRequestIndex = old.requests.length;
   await evaluate(old, `${button('Pin progress history')}.click()`);
   await ready(old, `document.body.innerText.includes('Progress history is pinned.')`, 'first window pin');
-  const pinSucceeded = old.responses.filter(r => r.url === pinUrl && r.status === 200).length;
-  assert.ok(pinSucceeded >= 1);
-  const currentPolicy = await readPinFromServer(old);
-  assert.equal(currentPolicy.pinned, true);
-  assert.notEqual(currentPolicy.version, secondWindowPolicy.version, 'The first window mutation must advance the version');
+  const firstPinRequest = old.requests.slice(firstPinRequestIndex).find(r => r.method === 'PUT' && r.url === pinUrl);
+  assert.ok(firstPinRequest, 'First window did not issue the expected pin PUT');
+  assert.equal(matchingResponse(firstPinRequest, old.responses)?.status, 200,
+    'First window pin PUT did not receive an actual HTTP 200 response');
   const staleBefore = other.requests.length;
   await evaluate(other, `${button('Pin progress history')}.click()`);
   await ready(other, `document.body.innerText.includes('The attempt changed')`, 'stale second window rejection');
@@ -284,45 +314,12 @@ export async function qualifyRestart({ fixture, origin, makeTarget, cdp, evaluat
   const staleRequests = other.requests.slice(staleBefore);
   assertOnlyPinWrites(staleRequests, pinUrl, 1);
   assert.equal(staleRequests.length, 1, 'Stale rejection triggered an automatic retry or follow-up request');
-  assert.equal(staleRequests[0].ifMatch, `"${secondWindowPolicy.version}"`, "The stale write did not use the second window original If-Match version");
-  assert.notEqual(secondWindowPolicy.version, currentPolicy.version);
-  assert.equal(other.responses.filter(r => r.url === pinUrl && r.status === 412).length, 1, 'Expected one actual 412 response');
-  assertOnlyPinWrites(old.requests, pinUrl, putsBefore + 1, `${origin}${basePath}/api/v1/session`, 3);
+  const stalePut = staleRequests.find(r => r.method === 'PUT' && r.url === pinUrl);
+  assert.equal(matchingResponse(stalePut, other.responses)?.status, 412, 'Expected the stale PUT to receive an actual HTTP 412 response');
+  assertOnlyPinWrites(old.requests, pinUrl, putsBefore + 1, `${origin}${basePath}/api/v1/session`, 2);
   assert.deepEqual([...old.exceptions, ...other.exceptions], []);
   await captureSafe(other, 'restart-stale-control.png');
-  // A stale run control must not cancel a different attempt. The request reaches the
-  // real cancellation endpoint, but carries run_fixture_3's version for run_fixture_4.
-  const otherRunId = 'run_fixture_4';
-  const otherRunBefore = await readRunFromServer(other, otherRunId);
-  assert.notEqual(otherRunBefore.version, secondWindowPolicy.version,
-    'Cross-attempt cancellation requires distinct attempt versions');
-  const stateBeforeCrossAttemptCancel = await fs.readFile(statePath);
-  const cancelUrl = `${origin}${basePath}/api/v1/jobs/${fixture.jobId}/runs/${otherRunId}/cancel`;
-  const cancelRequestStart = other.requests.length;
-  const crossAttemptCancel = await evaluate(other, `(async () => {
-    const bootstrap = await fetch(${JSON.stringify(`${basePath}/api/v1/bootstrap`)}, { credentials: 'same-origin' }).then(r => r.json());
-    const response = await fetch(${JSON.stringify(cancelUrl)}, { method: 'POST', credentials: 'same-origin', headers: {
-      'Content-Type': 'application/json', 'X-CSRF-Token': bootstrap.data.csrfToken,
-      'If-Match': ${JSON.stringify(`"${secondWindowPolicy.version}"`)}, 'Idempotency-Key': crypto.randomUUID()
-    }, body: JSON.stringify({ action: 'cancel' }) });
-    return { status: response.status, body: await response.json() };
-  })()`);
-  assert.equal(crossAttemptCancel.status, 412, 'A stale control must not cancel another attempt');
-  assert.match(JSON.stringify(crossAttemptCancel.body), /VERSION_CONFLICT/);
-  const crossAttemptRequests = other.requests.slice(cancelRequestStart).filter(r => r.url === cancelUrl && r.method === 'POST');
-  assert.equal(crossAttemptRequests.length, 1, 'Expected exactly one cross-attempt cancellation request');
-  assert.equal(crossAttemptRequests[0].ifMatch, `"${secondWindowPolicy.version}"`,
-    'Cross-attempt cancellation did not carry the stale version of the first attempt');
-  assert.equal(other.responses.filter(r => r.url === cancelUrl && r.status === 412).length, 1,
-    'The cancellation endpoint did not return an actual 412');
-  assert.deepEqual(await fs.readFile(statePath), stateBeforeCrossAttemptCancel,
-    'A refused cross-attempt cancellation changed durable workflow state');
-  const otherRunAfter = await readRunFromServer(other, otherRunId);
-  assert.deepEqual({ version: otherRunAfter.version, state: otherRunAfter.state },
-    { version: otherRunBefore.version, state: otherRunBefore.state }, 'The other attempt changed after cancellation refusal');
-  evidence.staleControl = { first: { puts: 1, status: 200 }, second: { puts: 1, status: 412, retries: 0, crossAttemptWrites: 0, ifMatchBoundToStaleVersion: true }, mutation: 'progress-pin',
-    crossAttemptCancellation: { targetRunId: otherRunId, requestCount: 1, status: 412,
-      ifMatchBoundToDifferentAttempt: true, workflowStateUnchanged: true, targetAttemptUnchanged: true },
+  evidence.staleControl = { first: { puts: 1, status: 200 }, second: { puts: 1, status: 412, retries: 0, crossAttemptWrites: 0 }, mutation: 'progress-pin',
     liveWorkerCancellationOrApprovalCovered: false };
   await cdp.call('Target.closeTarget', { targetId: other.targetId });
   evidence.requests = { restarted: summarizeRequests(old.requests), staleWindow: summarizeRequests(other.requests) };

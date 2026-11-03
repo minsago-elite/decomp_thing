@@ -146,9 +146,21 @@ The cache-observation helper and its controls exist, but no CI job builds a seco
 missing implementation and the unexecuted two-package qualification are separate gaps; existing
 asset/API recovery checks do not close either one.
 
+## Restart and two-tab mode (`--mode restart`)
 
-## Restart and two-tab qualification (`--mode restart`)
+Covers issues #525 (same-origin JVM restart and reconciliation) and #526 (two tabs observing one
+attempt, stale controls). It seeds the history fixture before server ownership, then checks a
+SIGTERM-only restart on the same installation, data directory and port. The old tab must clear
+private attempt state without replaying mutations; a fresh one-time bootstrap must observe the new
+`serverInstanceId` while retaining the same workflow state, pin policy and activity cursor.
 
-The packaged Chromium mode covers the remaining browser journeys for [#525](https://github.com/minsago-elite/decomp_thing/issues/525) and [#526](https://github.com/minsago-elite/decomp_thing/issues/526). It seeds an inert retained run, restarts the packaged JVM with SIGTERM on the same port and data directory, then checks explicit session re-entry, durable state reconciliation, background-tab request suspension, survivor streaming and stale progress-pin rejection with an actual 412 response. The run records a sanitized report and screenshots in `packaged-web-verification`.
+Restart mode runs pinned Chrome headfully on an Xvfb display so foregrounding the peer can create a
+real page visibility transition. The mode refuses to start without `DISPLAY`; it does not override
+the page's visibility state. Other packaged-browser modes remain headless.
 
-This mode does not start a workflow worker, test cancel/approve against live work, or restart while an attempt is running. It qualifies the pinned Chromium build only. A passing run is packaged-browser evidence and still needs exact-head review and issue-criteria reconciliation before #525 or #526 can close.
+The two-tab journey checks that a hidden tab stops progress requests, the surviving tab continues
+streaming after its peer closes, and a stale progress-pin control receives one real `If-Match` 412
+without retry or writes to another attempt. Reports and screenshots stay in `build/packaged-browser-*`,
+are bounded and scrub bootstrap tokens. The CI evidence is one pinned Chromium run; it does not cover
+live-worker cancellation or approval, restart during a running workflow, or other browsers. The mode
+fails if Chromium on the virtual display cannot provide the visibility conditions required by the scenario.
