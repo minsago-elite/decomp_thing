@@ -316,7 +316,7 @@ build_solve_argv() {
     --opt build-arg:SOURCE_DATE_EPOCH=1786060800 --no-cache
     --opt attest:provenance=mode=min,inline-only=true
     --output "type=docker,name=$tag,dest=$1"
-    --output "type=oci,dest=$2,attestation-inline=true"
+    --output "type=oci,name=$tag,dest=$2,attestation-inline=true"
     --metadata-file "$evidence/solve-metadata.json" --progress=plain)
 }
 run_solve() {
@@ -335,7 +335,7 @@ admit_solve_argv() {
      "$joined" == *" build-arg:SOURCE_DATE_EPOCH=1786060800 "* &&
      "$joined" == *" --no-cache "* && "$joined" == *" --opt attest:provenance=mode=min,inline-only=true "* &&
      "$joined" == *" --output type=docker,name=$tag,dest=$1 "* &&
-     "$joined" == *" --output type=oci,dest=$2,attestation-inline=true "* &&
+     "$joined" == *" --output type=oci,name=$tag,dest=$2,attestation-inline=true "* &&
      "$joined" != *" --load "* && "$joined" != *" BUILDKIT_DEBUG_FORCE_OVERLAY_DIFF "* ]]
 }
 verify_archive() { check_archive "$1" "$2" "$3"; }

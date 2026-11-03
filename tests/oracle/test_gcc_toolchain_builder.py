@@ -58,7 +58,7 @@ class GccToolchainBuilderTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp.cleanup()
 
-    def write_pair(self, *, nested=True, subject=False, join=True) -> None:
+    def write_pair(self, *, nested=True, subject=False, join=True, statement_subject="matching") -> None:
         stored = [gzip.compress(item, mtime=0) for item in self.layers]
         names = [f"blobs/sha256/{hashlib.sha256(item).hexdigest()}" for item in stored]
         manifest = [{"Config": "config.json", "RepoTags": ["fixture:1"],
@@ -77,8 +77,11 @@ class GccToolchainBuilderTest(unittest.TestCase):
             "digest": c_digest, "size": len(self.config_raw)}, "layers": layers}
         runtime_raw = json.dumps(runtime, sort_keys=True).encode()
         runtime_digest = "sha256:" + hashlib.sha256(runtime_raw).hexdigest()
-        statement = {"_type": "https://in-toto.io/Statement/v0.1", "subject": [{"name": "fixture:1",
-            "digest": {"sha256": runtime_digest[7:]}}], "predicateType": "https://slsa.dev/provenance/v0.2",
+        subject_digest = runtime_digest[7:] if statement_subject == "matching" else "f" * 64
+        statement_subjects = [] if statement_subject == "empty" else [{"name": "fixture:1",
+            "digest": {"sha256": subject_digest}}]
+        statement = {"_type": "https://in-toto.io/Statement/v0.1", "subject": statement_subjects,
+            "predicateType": "https://slsa.dev/provenance/v0.2",
             "predicate": {}}
         statement_raw = json.dumps(statement, sort_keys=True).encode()
         statement_digest = "sha256:" + hashlib.sha256(statement_raw).hexdigest()
@@ -133,6 +136,18 @@ class GccToolchainBuilderTest(unittest.TestCase):
         self.write_pair(subject=True, join=False)
         result = self.run_parser()
         self.assertNotEqual(result.returncode, 0)
+
+    def test_empty_provenance_subject_refuses(self):
+        self.write_pair(statement_subject="empty")
+        result = self.run_parser()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("statement subject", result.stderr)
+
+    def test_wrong_provenance_subject_refuses(self):
+        self.write_pair(statement_subject="wrong")
+        result = self.run_parser()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("statement subject", result.stderr)
 
     def test_actual_worker_mode_requires_explicit_oci_native_sandbox(self):
         fixture = self.root / "workers.json"
@@ -238,5 +253,80 @@ authenticate
                 cwd=ROOT, capture_output=True, text=True, timeout=5)
             self.assertEqual(result.returncode, expected, result.stderr)
 
+class GccNamedOciSolveAdmissionTest(unittest.TestCase):
+    """Exercise only extracted production solve functions with inert boundaries."""
+
+    def _function(self, source: str, name: str, next_name: str) -> str:
+        start = source.index(f"{name}() {{")
+        end = source.index(f"\n{next_name}() {{", start)
+        return source[start:end]
+
+    def _invoke(self, source: str, *, argv_edit: str = "") -> subprocess.CompletedProcess:
+        solve = self._function(source, "build_solve_argv", "run_solve")
+        run = self._function(source, "run_solve", "admit_solve_argv")
+        admit = self._function(source, "admit_solve_argv", "verify_archive")
+        script = ("set -euo pipefail\nbuildctl=/fake/buildctl\nbk_socket=/fake/buildkit.sock\nrepo=/repo\n"
+                  "evidence=/evidence\ntag=ghcr.io/example/gcc:locked\n"
+                  "die() { printf 'REFUSED'; exit 1; }\n"
+                  "timeout() { printf 'FAKE_LAUNCH'; printf ' <%s>' \"$@\"; printf '\\n'; return 0; }\n"
+                  "bounded_stream() { while IFS= read -r line; do printf '%s\\n' \"$line\"; done; }\n")
+        if argv_edit:
+            # Interpose only the argv producer; still exercise the real run_solve admission call.
+            solve = solve.replace("build_solve_argv() {", "original_build_solve_argv() {", 1)
+        script += solve + "\n" + run + "\n" + admit + "\n"
+        if argv_edit:
+            script += 'build_solve_argv() { original_build_solve_argv "$@";\n' + argv_edit + "\n}\n"
+        script += "run_solve /tmp/docker.tar /tmp/oci.tar\n"
+        return subprocess.run(["/usr/bin/bash", "-c", script], cwd=ROOT, text=True,
+                              env={"PATH": "/nonexistent", "LANG": "C.UTF-8", "TMPDIR": str(ARTIFACTS)},
+                              capture_output=True, timeout=5)
+
+    def test_normal_argv_keeps_one_solve_and_same_tag_for_both_exports(self):
+        source = HELPER.read_text()
+        result = self._invoke(source)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.count("FAKE_LAUNCH"), 1)
+        actual = [item[1:-1] for item in result.stdout.split()[1:]]
+        previous = ["--signal=TERM", "--kill-after=30s", "20m", "/fake/buildctl", "--addr",
+                    "unix:///fake/buildkit.sock", "build", "--frontend", "dockerfile.v0", "--local",
+                    "context=/repo/oracle/gcc/16.2.0", "--local", "dockerfile=/repo/oracle/gcc/16.2.0",
+                    "--opt", "filename=build-toolchain.Dockerfile", "--opt", "platform=linux/amd64",
+                    "--opt", "build-arg:SOURCE_DATE_EPOCH=1786060800", "--no-cache", "--opt",
+                    "attest:provenance=mode=min,inline-only=true", "--output",
+                    "type=docker,name=ghcr.io/example/gcc:locked,dest=/tmp/docker.tar", "--output",
+                    "type=oci,dest=/tmp/oci.tar,attestation-inline=true", "--metadata-file",
+                    "/evidence/solve-metadata.json", "--progress=plain"]
+        current = list(actual)
+        named_oci = "type=oci,name=ghcr.io/example/gcc:locked,dest=/tmp/oci.tar,attestation-inline=true"
+        self.assertIn(named_oci, current)
+        oci = current.index(named_oci)
+        current[oci] = current[oci].replace("name=ghcr.io/example/gcc:locked,", "")
+        self.assertEqual(current, previous)
+        expected = ('--output "type=docker,name=$tag,dest=$1"\n'
+                    '    --output "type=oci,name=$tag,dest=$2,attestation-inline=true"')
+        self.assertIn(expected, source)
+        self.assertEqual(source.count("run_solve() {"), 1)
+        self.assertEqual(source.count('build_solve_argv "$1" "$2"'), 1)
+
+    def test_missing_or_wrong_oci_name_refuses_before_solve_launch(self):
+        source = HELPER.read_text()
+        for mutate in (
+            'for i in "${!SOLVE_ARGV[@]}"; do [[ ${SOLVE_ARGV[$i]} != type=oci,* ]] || SOLVE_ARGV[$i]=type=oci,dest=/tmp/oci.tar,attestation-inline=true; done',
+            'for i in "${!SOLVE_ARGV[@]}"; do [[ ${SOLVE_ARGV[$i]} != type=oci,* ]] || SOLVE_ARGV[$i]=type=oci,name=wrong,dest=/tmp/oci.tar,attestation-inline=true; done',
+        ):
+            result = self._invoke(source, argv_edit=mutate)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertNotIn("FAKE_LAUNCH", result.stdout)
+
+    def test_mutant_deleting_production_oci_name_is_detected(self):
+        source = HELPER.read_text()
+        mutant = source.replace('type=oci,name=$tag,dest=$2,attestation-inline=true',
+                                'type=oci,dest=$2,attestation-inline=true', 1)
+        result = self._invoke(mutant)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("FAKE_LAUNCH", result.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
+
