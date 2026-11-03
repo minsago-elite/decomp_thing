@@ -79,11 +79,13 @@ it('starts from server defaults with one guarded keyed request and opens the rec
   const [kind, path, requestKind, body, settings] = transport.post.mock.calls[0]!;
   expect([kind, path, requestKind]).toEqual(['run', '/jobs/' + job.jobId + '/runs', 'workflowStartRequest']);
   expect(body).toEqual({ workflow: 'reconstruct', inputRevisionId: null, harnessCapabilityId: 'evidence-only',
+    launchSelection: { capabilityId: 'workflow-reconstruct-evidence-only', mode: 'evidence-only' },
     limits: { wallClockMs: '7200000', idleMs: '1200000', maxOutputBytes: '4294967296', maxToolCalls: '0' } });
   expect(settings).toMatchObject({ csrfToken: session.csrf(), ifMatch: '"job_version_1"' });
   expect(settings.idempotencyKey).toMatch(/^[A-Za-z0-9_-]{16,128}$/);
   expect(start(/Start Reconstruction/)).toHaveProperty('disabled', true);
-  answer(run({ runId: 'run_started', harnessCapabilityId: 'evidence-only' }));
+  answer(run({ runId: 'run_started', harnessCapabilityId: 'evidence-only',
+    launchSelection: { capabilityId: 'workflow-reconstruct-evidence-only', mode: 'evidence-only' } }));
   await waitFor(() => expect(onStarted).toHaveBeenCalledWith('/nested/jobs/' + job.jobId + '/runs/run_started'));
   expect(screen.getByRole('link', { name: 'Open the started attempt' }).getAttribute('href')).toBe('/nested/jobs/' + job.jobId + '/runs/run_started');
 });
@@ -105,6 +107,7 @@ it('validates lowered bounds locally and never submits a raised or inconsistent 
   expect(start()).toHaveProperty('disabled', false);
   fireEvent.click(start());
   expect(transport.post.mock.calls[0]?.[3]).toEqual({ workflow: 'explore', inputRevisionId: null, harnessCapabilityId: null,
+    launchSelection: { capabilityId: 'workflow-explore-tools', mode: 'tools' },
     limits: { wallClockMs: '1000', idleMs: '1000', maxOutputBytes: '1024', maxToolCalls: '0' } });
 });
 
@@ -113,7 +116,8 @@ it('requires a revision recorded by this job for repair and keeps its fixed limi
     { ...run().data, runId: 'run_new', state: 'completed', resultRevisionId: 'source_candidate' },
     { ...run().data, runId: 'run_failed', state: 'failed', resultRevisionId: 'source_failed' },
   ], page: { nextCursor: null, limit: 50, snapshotVersion: 'snapshot_1' } } });
-  transport.post.mockResolvedValue(run({ runId: 'run_repair', workflow: 'repair' }));
+  transport.post.mockResolvedValue(run({ runId: 'run_repair', workflow: 'repair',
+    launchSelection: { capabilityId: 'workflow-repair-agent', mode: 'agent' } }));
   mount({ capabilities: supported('workflow-repair-agent'), selected: { ...job, acceptedRevisionId: 'source_accepted' } });
   fireEvent.click(screen.getByLabelText('Repair: configured agent'));
   expect(screen.queryByLabelText('Wall-clock limit (ms)')).toBeNull();
@@ -126,6 +130,7 @@ it('requires a revision recorded by this job for repair and keeps its fixed limi
   fireEvent.click(start(/Start Repair/));
   await waitFor(() => expect(transport.post).toHaveBeenCalledOnce());
   expect(transport.post.mock.calls[0]?.[3]).toMatchObject({ workflow: 'repair', inputRevisionId: 'source_candidate', harnessCapabilityId: 'agent-acp',
+    launchSelection: { capabilityId: 'workflow-repair-agent', mode: 'agent' },
     limits: { wallClockMs: '21600000', idleMs: '1200000', maxOutputBytes: '4294967296', maxToolCalls: '1280' } });
 });
 
@@ -232,7 +237,8 @@ it.each([
 ] as const)('reports HTTP %s %s once and decides whether a resend reuses its key', async (status, serverCode, text, refresh, renewed) => {
   transport.post.mockRejectedValueOnce(status === undefined ? new ApiClientError('network_error')
     : new ApiClientError('http_error', { status, ...(serverCode ? { serverCode } : {}) }));
-  transport.post.mockResolvedValueOnce(run({ runId: 'run_retry', workflow: 'explore' }));
+  transport.post.mockResolvedValueOnce(run({ runId: 'run_retry', workflow: 'explore',
+    launchSelection: { capabilityId: 'workflow-explore-tools', mode: 'tools' } }));
   const { onRefresh, onStarted } = mount();
   fireEvent.click(screen.getByLabelText('Exploration: local tools'));
   fireEvent.click(start());
@@ -298,4 +304,35 @@ it('treats an older producer that omits launch facts like one that reports none'
   mount({ capabilities: launchBootstrap.capabilities.map(capability => { const legacy: Capability = { ...capability }; delete legacy.launch; return legacy; }) });
   expect(screen.queryByRole('radio')).toBeNull();
   expect(screen.queryByRole('button')).toBeNull();
+});
+
+it.each([
+  ['absent', undefined],
+  ['legacy null', null],
+  ['another option', { capabilityId: 'workflow-reconstruct-agent', mode: 'evidence-only' as const }],
+  ['another mode', { capabilityId: 'workflow-reconstruct-evidence-only', mode: 'agent' as const }],
+] as const)('refuses a started attempt whose recorded selection is %s instead of opening it', async (_label, recorded) => {
+  const response = run({ runId: 'run_mismatch', harnessCapabilityId: 'evidence-only' });
+  if (recorded === undefined) delete response.data.launchSelection; else response.data.launchSelection = recorded;
+  transport.post.mockResolvedValue(response);
+  const { onStarted } = mount();
+  fireEvent.click(screen.getByLabelText('Reconstruction: evidence only'));
+  fireEvent.click(start(/Start Reconstruction/));
+  expect(await screen.findByText(/did not confirm/)).toBeTruthy();
+  expect(onStarted).not.toHaveBeenCalled();
+  expect(screen.queryByRole('link', { name: 'Open the started attempt' })).toBeNull();
+  // The unconfirmed intent keeps its key, so a resend replays instead of starting a second attempt.
+  fireEvent.click(start(/Start Reconstruction/));
+  await waitFor(() => expect(transport.post).toHaveBeenCalledTimes(2));
+  const [first, second] = transport.post.mock.calls.map(call => call[4]);
+  expect(second!.idempotencyKey).toBe(first!.idempotencyKey);
+  expect(transport.post.mock.calls[1]![3].launchSelection).toEqual({ capabilityId: 'workflow-reconstruct-evidence-only', mode: 'evidence-only' });
+});
+
+it('never selects an option or submits a selection on its own', () => {
+  mount({ capabilities: supported('workflow-reconstruct-agent') });
+  expect(screen.getAllByRole<HTMLInputElement>('radio').every(option => !option.checked)).toBe(true);
+  expect(start()).toHaveProperty('disabled', true);
+  fireEvent.submit(start().closest('form')!);
+  expect(transport.post).not.toHaveBeenCalled();
 });

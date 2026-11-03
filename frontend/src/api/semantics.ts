@@ -409,10 +409,12 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
       const { limits, capabilities, apiVersions } = document.data;
       requireValue(limits.defaultPageLimit <= limits.maxPageLimit);
       requireValue(new Set(capabilities.map((item) => item.id)).size === capabilities.length);
-      // An agent contract version is reported exactly for launch options that contact an agent;
+      // An agent contract version is reported exactly for launch options that contact an agent, and
+      // only agent-mode options contact one, matching the server's launch invariant;
       // older v1 producers omit launch, which means no launch facts were reported.
       requireValue(capabilities.every((item) => item.launch == null
-        || item.launch.contactsAgent === (item.agentContractVersion !== null)));
+        || (item.launch.contactsAgent === (item.agentContractVersion !== null)
+          && item.launch.contactsAgent === (item.launch.mode === 'agent'))));
       if (!apiVersions.includes(1)) throw new ApiClientError('unsupported_contract');
       try {
         requireValue(document.data.basePath === `${normalizeBasePath(basePath)}/`);

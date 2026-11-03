@@ -62,6 +62,12 @@ function failureMessage(failure: unknown): { text: string; refresh: boolean; ren
   return result(copy.uncertain);
 }
 
+/** A started attempt must record exactly the submitted option; absent or null would mean it was not bound. */
+function sameSelection(recorded: Run['launchSelection'], submitted: WorkflowStart['launchSelection']): boolean {
+  return recorded != null && submitted !== undefined
+    && recorded.capabilityId === submitted.capabilityId && recorded.mode === submitted.mode;
+}
+
 interface Revision { id: string; label: string }
 
 /** The store retains at most 1024 attempts, so six 200-row pages always reach the oldest one. */
@@ -154,6 +160,8 @@ export function WorkflowLaunch({ job, runtime, basePath, session, onRefresh, onS
   const body: WorkflowStart | null = selected && values && problems && limitKeys.every(key => problems[key] === null) && !inputMissing ? {
     workflow: selected.workflows[0]!, inputRevisionId: inputRevisionId === '' ? null : inputRevisionId,
     harnessCapabilityId: selected.launch.harnessCapabilityId,
+    // The exact option the user chose; the server refuses rather than substitute another one.
+    launchSelection: { capabilityId: selected.id, mode: selected.launch.mode },
     limits: selected.launch.limitsAdjustable ? { ...values } : { ...selected.limits },
   } : null;
   const signature = body ? JSON.stringify([job.jobId, job.version, body]) : null;
@@ -173,7 +181,9 @@ export function WorkflowLaunch({ job, runtime, basePath, session, onRefresh, onS
       });
       if (controller.signal.aborted) return;
       const run: Run = response.data;
-      if (run.jobId !== job.jobId || run.workflow !== body.workflow) throw new ApiClientError('invalid_response');
+      if (run.jobId !== job.jobId || run.workflow !== body.workflow || !sameSelection(run.launchSelection, body.launchSelection)) {
+        throw new ApiClientError('invalid_response');
+      }
       const path = runPath(basePath, job.jobId, run.runId);
       setNotice({ text: textMessage(copy.startedOpening, { run: run.runId }), refresh: false, alert: false });
       setStartedPath(path);

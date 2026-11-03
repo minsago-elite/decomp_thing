@@ -28,6 +28,43 @@ function mismatchContract(page = 1) {
 }
 
 describe('generated v1 contract pipeline', () => {
+  it('decodes absent null and populated run launch selections and rejects malformed ones', () => {
+    const queued = JSON.parse(fixture('run-queued')) as ResponseOf<'run'>;
+    const decode = (selection: unknown, omit = false) => {
+      const data: Record<string, unknown> = { ...queued.data, launchSelection: selection };
+      if (omit) delete data.launchSelection;
+      return () => decodeResponse(JSON.stringify({ ...queued, data }), 'run');
+    };
+    expect(decode(undefined, true)().data.launchSelection).toBeUndefined();
+    expect(decode(null)().data.launchSelection).toBeNull();
+    expect(decode({ capabilityId: 'workflow-reconstruct-agent', mode: 'agent' })().data.launchSelection)
+      .toEqual({ capabilityId: 'workflow-reconstruct-agent', mode: 'agent' });
+    // Responses project additive fields away; requests and producer fixtures stay closed.
+    expect(decode({ capabilityId: 'workflow-reconstruct-agent', mode: 'agent', fallback: true })().data.launchSelection)
+      .toEqual({ capabilityId: 'workflow-reconstruct-agent', mode: 'agent' });
+    expect(() => decodeContract(fixture('invalid-workflow-launch-selection'), { mode: 'producer' })).toThrow(ApiClientError);
+    for (const malformed of [{ capabilityId: 'workflow-reconstruct-agent', mode: 'fallback' }, { mode: 'agent' }, { capabilityId: '', mode: 'tools' },
+      'workflow-reconstruct-agent', []]) {
+      expect(decode(malformed), JSON.stringify(malformed)).toThrow(ApiClientError);
+    }
+    const start = JSON.parse(fixture('request-workflow-start')) as { data: Record<string, unknown> };
+    expect(JSON.parse(encodeRequest('workflowStartRequest', start.data as never)) as unknown).toMatchObject({
+      launchSelection: { capabilityId: 'workflow-reconstruct-agent', mode: 'agent' } });
+    expect(() => encodeRequest('workflowStartRequest', { ...start.data, launchSelection: null } as never)).toThrow();
+  });
+
+  it('rejects a launch option whose mode contradicts its reported agent contact', () => {
+    const document = JSON.parse(fixture('bootstrap-workflow-launch')) as ResponseOf<'bootstrap'>;
+    expect(() => decodeResponse(JSON.stringify(document), 'bootstrap', undefined, document.data.basePath)).not.toThrow();
+    for (const [mode, contactsAgent] of [['tools', true], ['evidence-only', true], ['agent', false]] as const) {
+      const changed = structuredClone(document);
+      const option = changed.data.capabilities.find(item => item.launch?.mode === (contactsAgent ? 'agent' : 'tools'))!;
+      option.launch = { ...option.launch!, mode, contactsAgent };
+      if (!contactsAgent) option.agentContractVersion = null;
+      expect(() => decodeResponse(JSON.stringify(changed), 'bootstrap', undefined, changed.data.basePath)).toThrow(ApiClientError);
+    }
+  });
+
   it('accepts only coherent preflight status identity and fixed reason combinations', () => {
     const allowed = new Set(['idle:null:null', 'inspecting:inspection_fixture:null', 'ready:inspection_fixture:null',
       'cancelled:inspection_fixture:null', 'failed:inspection_fixture:AGENT_PREFLIGHT_FAILED']);
