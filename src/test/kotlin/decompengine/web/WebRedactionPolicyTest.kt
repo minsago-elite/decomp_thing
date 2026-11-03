@@ -181,6 +181,17 @@ class WebRedactionPolicyTest {
             .let { (it as kotlinx.serialization.json.JsonArray)[0].jsonObject.getValue("displayName").jsonPrimitive.content })
     }
 
+    @Test fun `committed source search snippets preserve text and code point positions`() {
+        val snippet = buildJsonObject {
+            put("before", "/tmp/x "); put("match", "needle"); put("after", " token=authored")
+            put("column", 8); put("beforeTruncated", false)
+        }
+        val result = buildJsonObject { put("matches", buildJsonArray { add(snippet) }) }
+        assertEquals(result, publicWebApiData("sourceSearch", result, policy))
+        // The regression must include content that generic structural redaction would change.
+        assertFalse(result == policy.json(result))
+    }
+
     @Test fun `redacted near-limit names remain bounded without truncating secret replacements`() {
         val filename = "shortish9".repeat(28) + ".c"
         assertEquals(254, filename.length)
