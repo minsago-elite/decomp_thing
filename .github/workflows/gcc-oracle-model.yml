@@ -178,6 +178,17 @@ jobs:
         run: bash scripts/ci-gcc-toolchain-builder.sh start-rootless
       - name: Reproduce and verify the recorded toolchain image
         run: bash scripts/ci-gcc-toolchain-builder.sh reproduce
+      - name: Fetch recorded component source objects for offline regression controls
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          import subprocess
+          manifests = [Path("oracle/gcc/16.2.0") / kind / "evidence.json"
+                       for kind in ("machine-call-component-v1", "external-call-component-v1")]
+          commits = sorted({json.loads(path.read_bytes())["source"]["commit"] for path in manifests})
+          subprocess.run(["git", "fetch", "--no-tags", "--depth=1", "origin", *commits], check=True)
+          PY
       - name: Test oracle schemas and ELF twin verifier
         env:
           TMPDIR: ${{ github.workspace }}/build/gcc-toolchain-reproduction/${{ github.run_id }}-${{ github.run_attempt }}/tmp
