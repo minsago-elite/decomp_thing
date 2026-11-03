@@ -28,6 +28,8 @@ internal class FullRunJournal private constructor(
     private val firstSequence: Long,
     private val maximumBytes: Long,
     private val beforeMetadataDirectoryFsync: () -> Unit,
+    private val beforeParentDirectoryFsync: (Path) -> Unit,
+    private val beforeMetadataWrite: () -> Unit,
 ) : AutoCloseable {
     private val startedAt = Instant.now().toString()
     private val events = FileChannel.open(directory.resolve("events.jsonl"), CREATE_NEW, WRITE, NOFOLLOW_LINKS)
@@ -92,6 +94,7 @@ internal class FullRunJournal private constructor(
         }.toString()
         val temporary = Files.createTempFile(directory, ".run-", ".tmp")
         try {
+            beforeMetadataWrite()
             FileChannel.open(temporary, WRITE, NOFOLLOW_LINKS).use { channel ->
                 val buffer = ByteBuffer.wrap(metadata.toByteArray(Charsets.UTF_8))
                 while (buffer.hasRemaining()) channel.write(buffer)
@@ -103,30 +106,73 @@ internal class FullRunJournal private constructor(
         } finally { Files.deleteIfExists(temporary) }
     }
 
+    private fun syncDirectory(path: Path) {
+        require(Files.isDirectory(path, NOFOLLOW_LINKS)) { "journal parent must be a real directory" }
+        beforeParentDirectoryFsync(path)
+        FileChannel.open(path, READ, NOFOLLOW_LINKS).use { it.force(true) }
+    }
+
     @Synchronized
     override fun close() {
         if (closed) return
-        closed = true
-        var failure: Throwable? = null
-        try { events.force(true) } catch (problem: Throwable) { failure = problem }
-        try { events.close() } catch (problem: Throwable) {
-            if (failure == null) failure = problem else failure!!.addSuppressed(problem)
-        }
-        if (failure != null) complete = false
+        val interrupted = Thread.interrupted()
         try {
-            publishMetadata(if (complete) "closed" else "logging-failed")
-        } catch (problem: Throwable) {
-            complete = false
-            try {
-                // A post-replacement directory fsync failure leaves the replaced metadata visible.
-                // Publish an explicit failure state while preserving the original failure.
-                publishMetadata("logging-failed")
-            } catch (fallback: Throwable) {
-                problem.addSuppressed(fallback)
+            // Keep finalization retryable until the disk has an unambiguous terminal state.
+            var failure: Throwable? = null
+            try { events.force(true) } catch (problem: Throwable) { failure = problem }
+            try { events.close() } catch (problem: Throwable) {
+                if (failure == null) failure = problem else failure!!.addSuppressed(problem)
             }
-            if (failure == null) failure = problem else failure!!.addSuppressed(problem)
+            if (failure != null) complete = false
+            val marker = directory.resolve(".finalization-in-progress")
+            var markerCreated = false
+            try {
+                if (Files.exists(marker, NOFOLLOW_LINKS)) {
+                    require(Files.isRegularFile(marker, NOFOLLOW_LINKS) &&
+                        Files.newInputStream(marker, READ, NOFOLLOW_LINKS).use { it.readNBytes(2) }
+                            .contentEquals(byteArrayOf(1))) { "invalid journal finalization marker" }
+                } else {
+                    Files.write(marker, byteArrayOf(1), CREATE_NEW, WRITE, NOFOLLOW_LINKS)
+                }
+                FileChannel.open(marker, WRITE, NOFOLLOW_LINKS).use { it.force(true) }
+                syncDirectory(directory)
+                markerCreated = true
+            } catch (problem: Throwable) {
+                complete = false
+                if (failure == null) failure = problem else failure!!.addSuppressed(problem)
+            }
+            var failureStateDurable = false
+            var terminalStateDurable = false
+            if (markerCreated) {
+                try {
+                    publishMetadata(if (complete) "closed" else "logging-failed")
+                    failureStateDurable = true
+                } catch (problem: Throwable) {
+                    complete = false
+                    if (failure == null) failure = problem else failure!!.addSuppressed(problem)
+                    try {
+                        publishMetadata("logging-failed")
+                        failureStateDurable = true
+                    } catch (fallback: Throwable) { problem.addSuppressed(fallback) }
+                }
+                // The marker is a durable veto. Metadata publication has already fsynced this
+                // directory. Unlinking the marker is the final filesystem operation: if that unlink
+                // is lost on a crash, readers reject the history (a safe false negative).
+                if (failureStateDurable) {
+                    try {
+                        Files.delete(marker)
+                        terminalStateDurable = true
+                    } catch (problem: Throwable) {
+                        complete = false
+                        if (failure == null) failure = problem else failure!!.addSuppressed(problem)
+                    }
+                }
+            }
+            closed = markerCreated && failureStateDurable && terminalStateDurable
+            failure?.let { throw it }
+        } finally {
+            if (interrupted) Thread.currentThread().interrupt()
         }
-        failure?.let { throw it }
     }
 
     companion object {
@@ -138,18 +184,28 @@ internal class FullRunJournal private constructor(
 
         fun create(root: Path, runId: String, workflow: String, firstSequence: Long,
                    maximumBytes: Long = MAXIMUM_RUN_BYTES,
-                   beforeMetadataDirectoryFsync: () -> Unit = {}): FullRunJournal {
+                   beforeMetadataDirectoryFsync: () -> Unit = {},
+                   beforeParentDirectoryFsync: (Path) -> Unit = {},
+                   beforeMetadataWrite: () -> Unit = {}) : FullRunJournal {
             require(RUN_ID.matches(runId))
             require(maximumBytes in 4096..MAXIMUM_RUN_BYTES)
+            require(Files.isDirectory(root, NOFOLLOW_LINKS)) { "output root must be a real directory" }
             val runs = root.resolve(DIRECTORY)
             if (!Files.exists(runs, NOFOLLOW_LINKS)) {
                 Files.createDirectory(runs, PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")))
+                require(Files.isDirectory(runs, NOFOLLOW_LINKS)) { "run history directory must not be a link" }
             }
             require(Files.isDirectory(runs, NOFOLLOW_LINKS)) { "run history directory must not be a link" }
+            // Sync even when it already existed: a prior creation may have failed before its
+            // parent sync completed, and this sync makes that entry durable before reuse.
+            beforeParentDirectoryFsync(root)
+            FileChannel.open(root, READ, NOFOLLOW_LINKS).use { it.force(true) }
             val directory = Files.createDirectory(runs.resolve(runId),
                 PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")))
+            beforeParentDirectoryFsync(runs)
+            FileChannel.open(runs, READ, NOFOLLOW_LINKS).use { it.force(true) }
             return FullRunJournal(directory, runId, workflow, firstSequence, maximumBytes,
-                beforeMetadataDirectoryFsync)
+                beforeMetadataDirectoryFsync, beforeParentDirectoryFsync, beforeMetadataWrite)
         }
 
         fun directory(root: Path, runId: String): Path {
@@ -161,6 +217,9 @@ internal class FullRunJournal private constructor(
         }
 
         fun metadata(directory: Path): JsonObject {
+            require(!Files.exists(directory.resolve(".finalization-in-progress"), NOFOLLOW_LINKS)) {
+                "run history finalization is indeterminate"
+            }
             val path = directory.resolve("run.json")
             require(Files.isRegularFile(path, NOFOLLOW_LINKS) && Files.size(path) <= 16 * 1024)
             val bytes = Files.newInputStream(path, READ, NOFOLLOW_LINKS).use { it.readNBytes(16 * 1024 + 1) }

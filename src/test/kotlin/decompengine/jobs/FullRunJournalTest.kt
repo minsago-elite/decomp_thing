@@ -119,6 +119,81 @@ class FullRunJournalTest {
     }
 
     @Test
+    fun `failed fallback leaves a durable veto that readers reject`() {
+        val parent = Files.createDirectories(java.nio.file.Path.of("build/test-tmp/run-writer-fallback-failure")
+            .toAbsolutePath())
+        val root = createTempDirectory(parent, "run-writer-")
+        val directoryFsyncs = java.util.concurrent.atomic.AtomicInteger()
+        val metadataWrites = java.util.concurrent.atomic.AtomicInteger()
+        val id = UUID.randomUUID().toString()
+        val journal = FullRunJournal.create(root, id, "reconstruction", 0,
+            beforeMetadataDirectoryFsync = {
+                if (directoryFsyncs.incrementAndGet() == 2) error("injected close directory fsync failure")
+            },
+            beforeMetadataWrite = {
+                if (metadataWrites.incrementAndGet() == 3) error("injected fallback pre-write failure")
+            })
+        journal.append(event(id, 0))
+
+        assertFailsWith<IllegalStateException> { journal.close() }
+        assertTrue(Files.exists(journal.directory.resolve(".finalization-in-progress")))
+        // The first close publication is visible but indeterminate; the veto prevents replay or
+        // metadata consumers from interpreting it as a successful complete history.
+        assertTrue(journal.directory.resolve("run.json").readText().contains("\"complete\":true"))
+        assertFailsWith<IllegalArgumentException> { FullRunJournal.metadata(journal.directory) }
+        assertFailsWith<IllegalArgumentException> { FullRunEventReader(journal.directory) }
+    }
+
+    @Test
+    fun `interrupt during writer finalization is cleared for fallback then restored`() {
+        val parent = Files.createDirectories(java.nio.file.Path.of("build/test-tmp/run-writer-interrupt")
+            .toAbsolutePath())
+        val root = createTempDirectory(parent, "run-writer-")
+        val directoryFsyncs = java.util.concurrent.atomic.AtomicInteger()
+        val id = UUID.randomUUID().toString()
+        val journal = FullRunJournal.create(root, id, "reconstruction", 0,
+            beforeMetadataDirectoryFsync = {
+                if (directoryFsyncs.incrementAndGet() == 2) error("injected close directory fsync failure")
+            })
+        journal.append(event(id, 0))
+        try {
+            Thread.currentThread().interrupt()
+            assertFailsWith<IllegalStateException> { journal.close() }
+            assertTrue(Thread.currentThread().isInterrupted, "journal close must restore interruption")
+            val metadata = FullRunJournal.metadata(journal.directory)
+            assertEquals("logging-failed", metadata.getValue("state").jsonPrimitive.content)
+            assertFalse(metadata.getValue("complete").jsonPrimitive.boolean)
+        } finally {
+            Thread.interrupted()
+        }
+    }
+
+    @Test
+    fun `parent directory fsync failures cannot create a successful complete history`() {
+        val parent = Files.createDirectories(java.nio.file.Path.of("build/test-tmp/run-writer-parent-fsync")
+            .toAbsolutePath())
+        val root = createTempDirectory(parent, "run-writer-")
+        val id = UUID.randomUUID().toString()
+        assertFailsWith<IllegalStateException> {
+            FullRunJournal.create(root, id, "reconstruction", 0,
+                beforeParentDirectoryFsync = { error("injected parent directory fsync failure") })
+        }
+
+        val runs = root.resolve(FullRunJournal.DIRECTORY)
+        assertTrue(Files.isDirectory(runs))
+        assertFalse(Files.exists(runs.resolve(id)))
+        val succeedingId = UUID.randomUUID().toString()
+        assertFailsWith<IllegalStateException> {
+            FullRunJournal.create(root, succeedingId, "reconstruction", 0,
+                beforeParentDirectoryFsync = { path ->
+                    if (path == runs) error("injected run-history entry fsync failure")
+                })
+        }
+        assertTrue(Files.isDirectory(runs.resolve(succeedingId)))
+        assertFalse(Files.exists(runs.resolve(succeedingId).resolve("run.json")))
+    }
+
+    @Test
     fun `full run history survives display eviction and redacts diagnostics`() {
         val root = createTempDirectory("full-run-")
         lateinit var directory: java.nio.file.Path
