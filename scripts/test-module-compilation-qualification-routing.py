@@ -82,6 +82,9 @@ class ModuleCompilationQualificationRoutingTest(unittest.TestCase):
                     helper = root / 'build/native/acp/decomp-acp-gate-helper'
                     helper.parent.mkdir(parents=True, exist_ok=True)
                     helper.write_text('authored inert helper bytes\\n', encoding='utf-8')
+                    module_exec_helper = root / 'build/native/module-compiler/decomp-module-compiler-exec'
+                    module_exec_helper.parent.mkdir(parents=True, exist_ok=True)
+                    module_exec_helper.write_text('authored inert module compiler helper bytes\\n', encoding='utf-8')
                     (qualification / 'worker-classpath.json').write_text('{}\\n', encoding='utf-8')
             elif 'moduleCompilerWriteConfig' in args:
                 log('gradle-configuration')
