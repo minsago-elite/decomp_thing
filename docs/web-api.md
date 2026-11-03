@@ -2538,3 +2538,7 @@ must fit the family byte ceiling. Empty reports stay empty. Malformed, over-budg
 reports are refused as `ARTIFACT_PROJECTION_UNAVAILABLE` before artifact validators or content bytes
 are sent, on legacy and v1 routes. The stored artifact identity stays unchanged. These limits do not
 apply to authorized committed source/manifests/contracts/archive content served verbatim.
+
+Legacy generated build-log attachments under `source-tree/reports/build.log` use the same bounded, redacted visible lines as the v1 build-log range/content API. They replace malformed text and escape terminal controls, cap input at 8 MiB and one million lines, and refuse oversized logs with 413 `LOG_TOO_LARGE`. Their attachment body carries those lines without inventing v1 attempt/export provenance. Other generated diagnostics under `source-tree/reports/` use the report projection; the committed build contract and source files remain verbatim job content.
+
+Legacy non-JSON report attachments (including HTML, SVG and Markdown) remain sandboxed attachments. They are strictly decoded as UTF-8 and redacted as text, without parsing them as JSON or passing malformed/binary bytes through. JSON-named reports and progress journals retain the bounded strict JSON projection.

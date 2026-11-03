@@ -103,6 +103,47 @@ class WebArtifactReportProjectionTest {
         put("cases", buildJsonArray { repeat(8) { add("case $it") } })
     }.toString().toByteArray()
 
+    @Test fun `legacy generated build logs share redacted lines while committed source stays verbatim`() = withFixture { fixture ->
+        val log = fixture.reports.resolve("source-tree/reports/build.log")
+        Files.createDirectories(log.parent)
+        val raw = "$canary /home/log-canary/private \u001b[31m <script>literal</script>\n".toByteArray() +
+            byteArrayOf(0xff.toByte(), '\n'.code.toByte()) + ("z".repeat(5000) + "\n").toByteArray()
+        Files.write(log, raw)
+        val range = get(fixture, "${fixture.api}/runs/${fixture.runId}/logs/build?fromLine=1&limit=3")
+        assertEquals(200, range.statusCode(), String(range.body()))
+        val lines = json(range).getValue("data").jsonObject.getValue("lines").jsonArray
+        assertEquals(3, lines.size)
+        val legacy = legacyDownload(fixture, "source-tree/reports/build.log")
+        assertEquals(200, legacy.statusCode())
+        val text = String(legacy.body())
+        assertFalse(text.contains(canary)); assertFalse(text.contains("/home/log-canary")); assertFalse(text.contains('\u001b'))
+        for (line in lines) assertTrue(text.contains(line.jsonObject.text("text")), text)
+        assertTrue(text.contains("\\e[31m")); assertTrue(text.contains("[line truncated]"))
+        assertTrue(text.contains("<script>literal</script>"), "log text is inert attachment content")
+        assertTrue(header(legacy, "Content-Type").orEmpty().startsWith("text/plain"))
+        assertTrue(header(legacy, "Content-Security-Policy").orEmpty().contains("sandbox"))
+
+        val source = fixture.reports.resolve("source-tree/src/main.c")
+        Files.createDirectories(source.parent)
+        val sourceBytes = "const char *fixture = \"$canary\";\n".toByteArray()
+        Files.write(source, sourceBytes)
+        assertContentEquals(sourceBytes, legacyDownload(fixture, "source-tree/src/main.c").body())
+        Files.write(fixture.reports.resolve("source-tree/reports/diagnostic.json"), "{\"apiKey\":\"$canary\"}".toByteArray())
+        val diagnostic = legacyDownload(fixture, "source-tree/reports/diagnostic.json")
+        assertEquals(200, diagnostic.statusCode()); assertFalse(String(diagnostic.body()).contains(canary))
+        Files.write(fixture.reports.resolve("legacy.md"), "$canary /home/log-canary/private".toByteArray())
+        val prose = legacyDownload(fixture, "legacy.md")
+        assertEquals(200, prose.statusCode()); assertFalse(String(prose.body()).contains(canary))
+        assertFalse(String(prose.body()).contains("/home/log-canary"))
+        Files.write(fixture.reports.resolve("legacy.md"), canary.toByteArray() + byteArrayOf(0xff.toByte()))
+        assertEquals(409, legacyDownload(fixture, "legacy.md").statusCode())
+
+        Files.write(log, ByteArray(WebRunLogs.MAXIMUM_LOG_BYTES + 1) { 'x'.code.toByte() })
+        assertEquals(413, legacyDownload(fixture, "source-tree/reports/build.log").statusCode())
+        Files.write(log, ByteArray(WebRunLogs.MAXIMUM_LOG_LINES + 1) { '\n'.code.toByte() })
+        assertEquals(413, legacyDownload(fixture, "source-tree/reports/build.log").statusCode())
+    }
+
     @Test fun `malformed UTF-8 reports refuse before validators or bytes on both routes`() {
         val unicode = "테스트비밀토큰-12345678"
         val policy = WebRedactionPolicy.create(mapOf("API_TOKEN" to unicode), emptyList(), emptyList())

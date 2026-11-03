@@ -39,6 +39,24 @@ internal object WebReportProjection {
         }
     }
 
+    /** Legacy non-JSON report attachments are text, never a binary pass-through or a JSON interpretation. */
+    fun legacyText(bytes: ByteArray, policy: WebRedactionPolicy): ByteArray {
+        return try {
+            require(bytes.size <= MAXIMUM_REPORT_BYTES)
+            val text = Charsets.UTF_8.newDecoder()
+                .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+                .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
+                .decode(java.nio.ByteBuffer.wrap(bytes)).toString()
+            val safe = policy.text(text)
+            if (safe == text) bytes else safe.toByteArray(Charsets.UTF_8).also {
+                require(it.size <= MAXIMUM_REPORT_BYTES)
+            }
+        } catch (failure: Exception) {
+            if (failure is java.util.concurrent.CancellationException || failure is InterruptedException) throw failure
+            webArtifactProjectionUnavailable()
+        }
+    }
+
     /** Descriptor state for a stored file of [size] bytes in [family]. */
     fun state(family: WebArtifactFamily, size: Long): String = when {
         !family.redactedContent -> VERBATIM

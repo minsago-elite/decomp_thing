@@ -162,12 +162,19 @@ internal class WebRunLogs(private val redaction: WebLogRedaction) {
         append("# redaction ").append(REDACTION_POLICY).append(" redacted lines ").append(capture.redactedLines)
             .append("; long lines are cut at ").append(MAXIMUM_LINE_CHARACTERS).append(" characters and marked\n")
         append("# exported ").append(exportedAt).append('\n')
+        appendLines(capture)
+    }.toByteArray(Charsets.UTF_8)
+
+    /** Legacy attachments share the exact visible lines, without inventing attempt/export provenance. */
+    fun legacyDownload(capture: Capture): ByteArray = buildString { appendLines(capture) }.toByteArray(Charsets.UTF_8)
+
+    private fun StringBuilder.appendLines(capture: Capture) {
         for (line in capture.allLines()) {
             append(line.text)
             if (line.truncated) append(" [line truncated]")
             append('\n')
         }
-    }.toByteArray(Charsets.UTF_8)
+    }
 
     private fun search(capture: Capture, query: String): JsonObject {
         val matches = mutableListOf<Long>()

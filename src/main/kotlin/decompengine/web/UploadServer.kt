@@ -1258,12 +1258,32 @@ class UploadServer(
             exchange.sendUntrustedAttachment(200, verified.bytes, "application/zip", "source-tree.zip")
             return
         }
+        val sourcePath = relativePath.substringAfter("/source-tree/", "")
+        if (sourcePath == "reports/build.log") {
+            // The generated build log is not committed source. Reuse the v1 line projection,
+            // including malformed-text replacement, credential/path masking and visible controls.
+            val artifact = try { jobs.readArtifact(jobId, relativePath, WebRunLogs.MAXIMUM_LOG_BYTES.toLong()) }
+            catch (_: decompengine.repair.RepairBudgetExceededException) {
+                throw WebAccessDenied(413, "LOG_TOO_LARGE", "The build log exceeds its byte budget and cannot be downloaded here.")
+            }
+            val logs = WebRunLogs(WebLogRedaction.forHost(jobs.redactionStorageRoot))
+            val capture = logs.capture(artifact.bytes, artifact.sha256, redaction)
+                ?: throw WebAccessDenied(413, "LOG_TOO_LARGE", "The build log exceeds its line budget and cannot be downloaded here.")
+            exchange.sendUntrustedAttachment(200, logs.legacyDownload(capture), "text/plain; charset=utf-8", "build.log")
+            return
+        }
         val progress = isProgressJournalArtifact(relativePath)
         val artifact = jobs.readArtifact(jobId, relativePath, WebReportProjection.limit(progress))
         val name = Path.of(relativePath).fileName
         // Server-produced reports pass through the shared report projection; committed source-tree files are job content.
-        val public = if (relativePath.contains("/source-tree/")) progressArtifactProjection(relativePath, artifact.bytes)
-            else WebReportProjection.project(progress, artifact.bytes, redaction)
+        // The build contract is a committed artifact identity; other generated diagnostics
+        // under reports must pass the report projection rather than the source exemption.
+        val committedSource = sourcePath.isNotEmpty() && (!sourcePath.startsWith("reports/") || sourcePath == "reports/build_contract.json")
+        val public = when {
+            committedSource -> progressArtifactProjection(relativePath, artifact.bytes)
+            progress || name.toString().endsWith(".json", ignoreCase = true) -> WebReportProjection.project(progress, artifact.bytes, redaction)
+            else -> WebReportProjection.legacyText(artifact.bytes, redaction)
+        }
         exchange.sendUntrustedAttachment(200, public, contentType(name), name.toString())
     }
 
