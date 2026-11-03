@@ -32,7 +32,7 @@ MAX_CONTROL = 32 * 1024 * 1024
 MAX_FILES = 128
 PINNED_TOOL_HASHES = {
     "rootlesskit": "98f07e783dd6b3cd236c7865d1dce7937e645ec74a0fe2971725449af074f466",
-    "dockerd": "e45381109c685311cf84c5e33a1aca7da81d6b55c0f9aed74091fc08c3a94f13",
+    "dockerd": "c3ecdc8ac9e56b9a53ffd9fd4aece65432814597046f8d188a538be18c000df8",
 }
 TRANSITIONS = {
     "reserved": {"launch-intent", "sealed", "released"},
