@@ -53,10 +53,16 @@ class WebApiControllerTest {
             assertTrue(first.getValue("uiBuildId").jsonPrimitive.content.matches(Regex("[0-9a-f]{64}")))
             assertEquals("/workbench/", first.getValue("basePath").jsonPrimitive.content)
             assertEquals("degraded", first.getValue("readiness").jsonPrimitive.content)
-            val capability = first.getValue("capabilities").jsonArray.map { it.jsonObject }
-                .single { it.getValue("id").jsonPrimitive.content == "workflows" }
-            assertEquals("unavailable", capability.getValue("state").jsonPrimitive.content)
-            assertTrue(capability.getValue("workflows").jsonArray.isEmpty())
+            // Production registrations report one capability per launch option, never the preview refusal.
+            val capabilities = first.getValue("capabilities").jsonArray.map { it.jsonObject }.associateBy { it.getValue("id").jsonPrimitive.content }
+            assertTrue(capabilities.keys.containsAll(setOf("workflow-explore-tools", "workflow-reconstruct-agent",
+                "workflow-reconstruct-evidence-only", "workflow-repair-agent", "workflow-build", "workflow-validate", "harness")))
+            assertFalse("workflows" in capabilities)
+            val agent = capabilities.getValue("workflow-reconstruct-agent")
+            assertEquals(listOf("reconstruct"), agent.getValue("workflows").jsonArray.map { it.jsonPrimitive.content })
+            assertEquals("true", agent.getValue("launch").jsonObject.getValue("contactsAgent").jsonPrimitive.content)
+            assertTrue(agent.getValue("state").jsonPrimitive.content in setOf("supported", "unavailable", "unknown"))
+            assertEquals("WORKFLOW_NOT_IMPLEMENTED", capabilities.getValue("workflow-build").getValue("reasonCode").jsonPrimitive.content)
             val limits = first.getValue("limits").jsonObject
             assertEquals(StreamingMultipartUpload.MAX_REQUEST_BYTES.toString(), limits.getValue("maxUploadBytes").jsonPrimitive.content)
             assertEquals("30000", limits.getValue("requestDeadlineMs").jsonPrimitive.content)
@@ -364,9 +370,10 @@ class WebApiControllerTest {
             )).attempt
         }
         var executed = false
+        // No registrations: this control covers the unregistered start route and preview refusal.
         val server = UploadServer("127.0.0.1", 0, root,
             JobAnalyzer { _, _ -> executed = true }, JobReconstructor { _, _ -> executed = true },
-            uiMode = WebUiMode.SPA, basePath = "/workbench/")
+            uiMode = WebUiMode.SPA, basePath = "/workbench/", durableAdapters = emptyList())
         server.start()
         try {
             val cookie = establish(server)

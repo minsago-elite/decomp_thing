@@ -78,19 +78,18 @@ class WebRouteMatrixTest {
         "$J/deletion-preview" to Live(setOf("GET"), Outcome(200, "jobDeletionPreview")),
         "/api/v1/storage" to Live(setOf("GET"), Outcome(200, "storageSummary")),
         "/api/v1/storage/maintenance-preview" to Live(setOf("GET"), Outcome(200, "maintenancePreview")),
-        "$J/runs" to Live(setOf("GET"), Outcome(200, "runs"), Query.PAGED),
+        "$J/runs" to Live(setOf("GET", "POST"), Outcome(200, "runs"), Query.PAGED,
+            mutationRefusal = Outcome(428, "PRECONDITION_REQUIRED")),
+        "$G/status" to Live(setOf("GET"), Outcome(404, "NOT_FOUND")),
+        "$G/history" to Live(setOf("GET"), Outcome(404, "NOT_FOUND")),
+        "$G/diff" to Live(setOf("GET"), Outcome(422, "VALIDATION_FAILED")),
+        "$G/refs" to Live(setOf("GET"), Outcome(404, "NOT_FOUND")),
         "$J/repositories" to Live(setOf("GET", "POST"), Outcome(200, "gitRepositories"),
             mutationRefusal = Outcome(428, "PRECONDITION_REQUIRED")),
-        "$J/repositories/{repositoryId}" to Live(setOf("GET"), Outcome(404, "NOT_FOUND")),
-        "$J/repositories/{repositoryId}/operations/{operationId}" to Live(setOf("GET"), Outcome(404, "NOT_FOUND")),
-        "$J/repositories/{repositoryId}/status" to Live(setOf("GET"), Outcome(404, "NOT_FOUND"), Query.PAGED),
-        "$J/repositories/{repositoryId}/history" to Live(setOf("GET"), Outcome(404, "NOT_FOUND"), Query.PAGED),
-        "$J/repositories/{repositoryId}/diff" to Live(setOf("GET"), Outcome(422, "VALIDATION_FAILED"), Query.PAGED),
-        "$J/repositories/{repositoryId}/refs" to Live(setOf("GET"), Outcome(404, "NOT_FOUND"), Query.PAGED),
         "$R" to Live(setOf("GET"), Outcome(200, "run")),
         "$R/progress-pin" to Live(setOf("GET", "PUT"), Outcome(200, "progressPin")),
         "$R/cancel" to Live(setOf("POST")),
-        "$R/recover" to Live(setOf("POST"), mutationRefusal = Outcome(503, "CAPABILITY_UNAVAILABLE")),
+        "$R/recover" to Live(setOf("POST"), mutationRefusal = Outcome(428, "PRECONDITION_REQUIRED")),
         "$R/controls" to Live(setOf("GET"), Outcome(200, "attemptControls")),
         "$R/queue-position" to Live(setOf("GET"), Outcome(200, "queuePosition")),
         "$R/snapshot" to Live(setOf("GET"), Outcome(200, "snapshot")),
@@ -482,6 +481,7 @@ class WebRouteMatrixTest {
         private val MUTATIONS = setOf("POST", "PUT", "PATCH", "DELETE")
         private const val J = "/api/v1/jobs/{jobId}"
         private const val R = "$J/runs/{runId}"
+        private const val G = "$J/repositories/{repositoryId}"
         private val docs: List<String> by lazy { Files.readAllLines(Path.of("docs/web-api.md")) }
 
         private fun table(heading: String, firstColumn: String): List<List<String>> {

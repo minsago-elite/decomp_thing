@@ -15,6 +15,8 @@ import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.Path
+import java.nio.file.NoSuchFileException
+import java.nio.file.attribute.BasicFileAttributes
 import java.nio.file.StandardCopyOption.ATOMIC_MOVE
 import java.security.SecureRandom
 import java.time.Clock
@@ -89,16 +91,6 @@ data class GitRepositoryRecord(
 /** Read view of one registered repository plus its current bounded observation. */
 data class GitWorkspaceView(val record: GitRepositoryRecord, val observation: GitWorkspaceObservation)
 
-/** One diff read: the comparison, its changed files and an optional selected patch. */
-data class GitDiffView(
-    val record: GitRepositoryRecord,
-    val scope: GitDiffScope,
-    val commit: String?,
-    val parent: String?,
-    val listing: GitDiffListing,
-    val patch: Pair<GitDiffFile, GitPatch>?,
-)
-
 data class GitRepositoryListing(val repositories: List<GitRepositoryRecord>, val operations: List<GitOperationRecord>)
 
 data class GitOperationAdmission(val operation: GitOperationRecord, val replayed: Boolean)
@@ -143,6 +135,30 @@ data class GitRepositoryPolicy(
 }
 
 class ManagedGitException(val code: String, message: String) : RuntimeException(message)
+
+/** One diff read: the comparison, its changed files and an optional selected patch. */
+data class GitDiffView(
+    val record: GitRepositoryRecord,
+    val scope: GitDiffScope,
+    val commit: String?,
+    val parent: String?,
+    val listing: GitDiffListing,
+    val patch: Pair<GitDiffFile, GitPatch>?,
+)
+
+/** One reason a job's Git storage must be retained (#509); codes and messages are fixed public text. */
+data class GitRetentionReason(val code: String, val message: String) {
+    companion object {
+        val OPERATION_ACTIVE = GitRetentionReason("GIT_OPERATION_ACTIVE",
+            "A Git repository operation for this job is queued or running. Wait until it finishes, then review the job again.")
+        val UNCOMMITTED_CHANGES = GitRetentionReason("GIT_UNCOMMITTED_CHANGES",
+            "A managed Git work tree has uncommitted changes. Commit or remove them before deleting the job.")
+        val UNPUSHED_COMMITS = GitRetentionReason("GIT_UNPUSHED_COMMITS",
+            "Managed Git history has commits that no remote-tracking branch contains. Preserve them before deleting the job.")
+        val UNREADABLE = GitRetentionReason("GIT_STATE_UNAVAILABLE",
+            "A managed Git repository could not be inspected, so its work is retained. Check Git on the server.")
+    }
+}
 
 /** Crash points for recovery tests; a crash leaves records and staging exactly as a process death would. */
 enum class GitOperationCrashPoint { AFTER_RUNNING, AFTER_STAGING, BEFORE_PUBLISH, AFTER_PUBLISH }
@@ -265,6 +281,120 @@ class ManagedGitRepositories(
                     "Repository operation capacity was exhausted before this operation started."))
             }
             return GitOperationAdmission(operations(jobId).single { it.operationId == operation.operationId }, replayed = false)
+        }
+    }
+
+    // ---- Retention --------------------------------------------------------------------------
+
+    /**
+     * Why the job's Git storage must be retained (#509): a queued or running operation owns its
+     * staging and records, and a work tree with uncommitted changes or a branch with commits no
+     * remote-tracking ref contains would be lost by deletion. Read-only; an uninspectable repository
+     * is retained. The caller (job deletion) serializes this check with Git admission.
+     */
+    fun retentionHolds(jobId: String): List<GitRetentionReason> {
+        if (!jobId.matches(JOB_ID) || !Files.isDirectory(root.resolve(jobId).resolve("git"), NOFOLLOW_LINKS)) return emptyList()
+        val reasons = LinkedHashSet<GitRetentionReason>()
+        val records = try {
+            synchronized(lock) {
+                if (availability is GitAvailability.Available) reconcile(jobId)
+                if (operations(jobId).any { !it.state.terminal }) reasons += GitRetentionReason.OPERATION_ACTIVE
+                repositories(jobId)
+            }
+        } catch (_: Exception) { return listOf(GitRetentionReason.UNREADABLE) }
+        if (records.isEmpty()) return reasons.toList()
+        val runner = try { requireRunner() } catch (_: ManagedGitException) { return (reasons + GitRetentionReason.UNREADABLE).toList() }
+        for (record in records) {
+            val directory = root.resolve(jobId).resolve("git").resolve("repositories").resolve(record.repositoryId)
+            try {
+                val observation = GitRepositoryInspector.inspect(runner, directory.resolve(GIT_DIR), directory.resolve(WORK_TREE))
+                // A fresh initialization with no commit whose work tree still holds exactly the job's
+                // recorded candidate source contains no user work: deleting the job deletes only its own data.
+                // Git status can hide ignored edits; a restored work tree can also hide different
+                // staged bytes. Only an empty index plus the recorded work-tree manifest establishes
+                // that an initialized unborn repository contains no additional user work.
+                val initializedUnborn = record.origin == "initialized" && observation.head.state == GitHeadState.UNBORN
+                val uncommitted = if (initializedUnborn) hasIndexEntries(runner, directory.resolve(GIT_DIR), directory.resolve(WORK_TREE)) ||
+                    !unchangedInitialization(record, directory.resolve(WORK_TREE)) else observation.dirty
+                if (uncommitted) reasons += GitRetentionReason.UNCOMMITTED_CHANGES
+                val gitDir = directory.resolve(GIT_DIR)
+                // A stash reflog can retain older saved work even when the current stash tip is
+                // contained by a remote-tracking ref. Any stash ref or reflog therefore holds storage.
+                if (hasStashOrReflog(runner, gitDir) || unpushed(runner, gitDir, observation.head.objectId)) {
+                    reasons += GitRetentionReason.UNPUSHED_COMMITS
+                }
+            } catch (_: Exception) {
+                reasons += GitRetentionReason.UNREADABLE
+            }
+        }
+        return reasons.toList()
+    }
+
+    /** Any index entry in an unborn repository is staged work; fresh initialization leaves it empty. */
+    private fun hasIndexEntries(runner: GitCommandRunner, gitDir: Path, workTree: Path): Boolean =
+        runner.run(GitInvocation("ls-files", listOf("--cached", "-z"), gitDir = gitDir, workTree = workTree,
+            limits = GitExecutionLimits(java.time.Duration.ofSeconds(20), 256 * 1024, 16 * 1024,
+                maxAddressSpaceBytes = 512L * 1024 * 1024))).stdout.isNotEmpty()
+
+    /**
+     * Whether an initialized work tree still holds exactly the files copied from its source snapshot:
+     * no file added, modified or deleted. Anything unreadable or beyond the copy bound counts as changed.
+     */
+    private fun unchangedInitialization(record: GitRepositoryRecord, workTree: Path): Boolean {
+        val expected = record.sourceManifestSha256?.takeIf { record.origin == "initialized" } ?: return false
+        return GitSourceCopy.matchesManifest(workTree, expected)
+    }
+
+    /**
+     * Stash state is always retained. Git can keep older saved work in the stash reflog after
+     * `refs/stash` advances, so remote containment of the current tip says nothing about those
+     * entries. This also preserves a ref without a reflog and a reflog without its current ref.
+     * An empty existing reflog is conservatively retained; missing stash metadata is expendable.
+     * Both queries are fixed, bounded, read-only Git calls. Malformed output and every result other
+     * than the documented reflog exit codes fail closed through retentionHolds' unreadable hold.
+     */
+    private fun hasStashOrReflog(runner: GitCommandRunner, gitDir: Path): Boolean {
+        val limits = GitExecutionLimits(java.time.Duration.ofSeconds(20), 4096, 16 * 1024,
+            maxAddressSpaceBytes = 512L * 1024 * 1024)
+        val ref = runner.run(GitInvocation("for-each-ref", listOf("--count=1", "--format=%(refname)", "refs/stash"),
+            gitDir = gitDir, truncateStdout = false, limits = limits))
+        if (ref.stdoutTruncated) throw IOException("Stash ref query output was truncated.")
+        val refOutput = ref.text
+        if (refOutput.isNotEmpty() && refOutput != "refs/stash\n") throw IOException("Stash ref query returned malformed output.")
+        val reflog = runner.run(GitInvocation("reflog", listOf("exists", "refs/stash"), gitDir = gitDir,
+            allowedExitCodes = setOf(0, 1), truncateStdout = false, limits = limits))
+        if (reflog.stdoutTruncated || reflog.stdout.isNotEmpty()) throw IOException("Stash reflog query returned malformed output.")
+        // Git's existence command can map a failed lstat to exit 1. Check only fixed metadata
+        // paths as well, distinguishing a genuinely missing path from an unreadable/unsafe one.
+        return refOutput.isNotEmpty() || reflog.exitCode == 0 ||
+            stashMetadataExists(gitDir, "refs", "stash") || stashMetadataExists(gitDir, "logs", "refs", "stash")
+    }
+
+    private fun stashMetadataExists(gitDir: Path, vararg names: String): Boolean {
+        var path = gitDir
+        for ((index, name) in names.withIndex()) {
+            path = path.resolve(name)
+            val attributes = try {
+                Files.readAttributes(path, BasicFileAttributes::class.java, NOFOLLOW_LINKS)
+            } catch (_: NoSuchFileException) { return false }
+            val expectedKind = if (index == names.lastIndex) attributes.isRegularFile else attributes.isDirectory
+            if (!expectedKind) throw IOException("Stash metadata has an unexpected filesystem kind.")
+        }
+        return true
+    }
+
+    /**
+     * Local history is expendable only when a remote-tracking ref contains every tip, including
+     * detached HEAD and tag-only history. No configured remote is not evidence of a push. Git's
+     * contains check peels annotated tags; non-commit tags fail closed through the unreadable hold.
+     */
+    private fun unpushed(runner: GitCommandRunner, gitDir: Path, headObjectId: String?): Boolean {
+        fun refs(vararg arguments: String) = runner.run(GitInvocation("for-each-ref", listOf(*arguments), gitDir = gitDir))
+            .text.lines().filter { it.isNotBlank() }
+        val tips = refs("--count=${MAX_RETENTION_BRANCHES + 1}", "--format=%(objectname)", "refs/heads/", "refs/tags/")
+        if (tips.size > MAX_RETENTION_BRANCHES) return true
+        return (tips + listOfNotNull(headObjectId)).distinct().any { tip ->
+            refs("--count=1", "--format=%(refname)", "--contains", tip, "refs/remotes/").isEmpty()
         }
     }
 
@@ -596,12 +726,13 @@ class ManagedGitRepositories(
                     }
                 }
             }
-            // A retained repository is not readable until exact legacy metadata is migrated and
-            // every published layout passes the same strict audit as ordinary reads.
+        }
+        // Recovery is the sole authority for the explicit legacy-attributes upgrade.
+        if (Files.isDirectory(directory, NOFOLLOW_LINKS)) {
             val prepared = runner ?: requireRunner()
-            for (repository in published.values) {
+            for (repository in repositories(jobId)) {
                 GitConfigurationAudit.migrateLegacyAttributes(prepared,
-                    root.resolve(jobId).resolve("git/repositories").resolve(repository.repositoryId).resolve(GIT_DIR))
+                    directory.resolve("repositories").resolve(repository.repositoryId).resolve(GIT_DIR))
             }
         }
         reconciled += jobId
@@ -627,7 +758,7 @@ class ManagedGitRepositories(
         is GitAvailability.Available -> synchronized(lock) {
             runner ?: try { runnerFactory(current, GitEnvironment.prepare(root.resolve(".git-runtime"))) } catch (_: Exception) {
                 throw ManagedGitException("CAPABILITY_UNAVAILABLE", "The server-owned Git runtime directory is unavailable.")
-        }.also { runner = it }
+            }.also { runner = it }
         }
     }
 
@@ -760,6 +891,8 @@ class ManagedGitRepositories(
         const val MAX_LISTED_OPERATIONS = 20
         const val MAX_QUEUED = 8
         const val MAX_RECORD_BYTES = 16 * 1024
+        /** Local branch/tag tips inspected for unpushed work; excess tips retain conservatively. */
+        const val MAX_RETENTION_BRANCHES = 256
         val JOB_ID = Regex("[a-f0-9]{32}")
         val ID = Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
         const val QUEUED_MESSAGE = "Queued. The repository becomes visible only after it is completely prepared."

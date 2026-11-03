@@ -165,7 +165,7 @@ data class GitExecutionLimits(
     }
 
     companion object {
-        /** Address-space bound for every child used to answer a managed repository read. */
+        /** Hard and soft address-space limit for every managed read child. */
         internal const val MANAGED_READ_MEMORY_BYTES = 512L * 1024 * 1024
     }
 }
@@ -209,20 +209,20 @@ data class GitInvocation(
         require(workTree == null || (workTree.isAbsolute && gitDir != null)) { "Git work tree requires an absolute path and Git directory" }
         require(allowedExitCodes.isNotEmpty() && allowedExitCodes.all { it in 0..255 })
         require(input == null || input.size <= 4 * 1024 * 1024) { "Git input is unbounded" }
-        require(variables.keys.all { it in VARIABLES } && variables.values.all { it.length <= 512 && it.none(Char::isISOControl) }) {
-            "Git variables are not allowlisted"
+        require(variables.keys.all { it in VARIABLES } && variables.values.all { it.length <= 512 && it.none(Char::isISOControl) }) { "Git variables are not allowlisted" }
+        if (subcommand == "reflog") {
+            require(arguments == listOf("exists", "refs/stash")) { "Only stash reflog existence checks are allowlisted" }
+            require(allowedExitCodes == setOf(0, 1) && !truncateStdout) { "Stash reflog checks must use closed exits and complete output" }
         }
     }
 
     companion object {
         const val MAX_ARGUMENT_LENGTH = 4096
+        val VARIABLES = setOf("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_AUTHOR_DATE", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_COMMITTER_DATE")
         val SUBCOMMANDS = setOf(
             "version", "init", "config", "check-ref-format", "rev-parse", "symbolic-ref", "for-each-ref",
-            "status", "read-tree", "fsck", "cat-file", "ls-files", "ls-tree", "check-ignore", "update-ref",
-            "log", "diff", "diff-tree",
+            "status", "read-tree", "fsck", "cat-file", "ls-files", "ls-tree", "check-ignore", "update-ref", "reflog", "log", "diff", "diff-tree",
         )
-        val VARIABLES = setOf("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_AUTHOR_DATE",
-            "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_COMMITTER_DATE")
     }
 }
 

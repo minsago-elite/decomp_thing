@@ -506,6 +506,11 @@ def check_semantics(document: dict) -> None:
         capabilities = [item["id"] for item in data["capabilities"]]
         if len(capabilities) != len(set(capabilities)):
             raise ValueError("duplicate capability identity")
+        for item in data["capabilities"]:
+            launch = item.get("launch")  # Optional: older v1 producers omit it.
+            # An agent contract version is reported exactly for launch options that contact an agent.
+            if launch is not None and launch["contactsAgent"] != (item["agentContractVersion"] is not None):
+                raise ValueError("launch agent contact and agent contract version disagree")
     elif kind == "report":
         artifact = data["sourceArtifact"]
         if artifact is not None and artifact["binding"] != data["binding"]:
@@ -568,6 +573,18 @@ def check_semantics(document: dict) -> None:
             previous = sequence
         if data["items"] and data["nextCursor"] != data["items"][-1]["cursor"]:
             raise ValueError("poll continuation must follow the last returned event")
+    elif kind == "gitStatus":
+        expected_head = {"attached": (True, True), "unborn": (True, False), "detached": (False, True)}[data["headState"]]
+        if (data["headRefName"] is not None, data["headObjectId"] is not None) != expected_head:
+            raise ValueError("Git status HEAD state disagrees with its branch and object")
+        if len({entry["fileId"] for entry in data["entries"]}) != len(data["entries"]):
+            raise ValueError("Git status file identities must be unique")
+    elif kind == "gitDiff":
+        if (data["scope"] == "commit") != (data["commitObjectId"] is not None):
+            raise ValueError("only a commit diff names a commit")
+        patch = data["patch"]
+        if patch is not None and patch["fileId"] not in {item["fileId"] for item in data["files"]}:
+            raise ValueError("a diff patch must belong to a listed file")
     elif kind == "gitWorkspace":
         length = {"sha1": 40, "sha256": 64}.get(data["objectFormat"])
         object_ids = [data["headObjectId"]]
@@ -599,18 +616,6 @@ def check_semantics(document: dict) -> None:
             raise ValueError("an attached HEAD must name a listed ref at the observed object")
         if len({ref["refId"] for ref in data["refs"]}) != len(data["refs"]):
             raise ValueError("Git refs must be unique")
-    elif kind == "gitStatus":
-        expected_head = {"attached": (True, True), "unborn": (True, False), "detached": (False, True)}[data["headState"]]
-        if (data["headRefName"] is not None, data["headObjectId"] is not None) != expected_head:
-            raise ValueError("Git status HEAD state disagrees with its branch and object")
-        if len({entry["fileId"] for entry in data["entries"]}) != len(data["entries"]):
-            raise ValueError("Git status file identities must be unique")
-    elif kind == "gitDiff":
-        if (data["scope"] == "commit") != (data["commitObjectId"] is not None):
-            raise ValueError("only a commit diff names a commit")
-        patch = data["patch"]
-        if patch is not None and patch["fileId"] not in {item["fileId"] for item in data["files"]}:
-            raise ValueError("a diff patch must belong to a listed file")
 
 
 def check_run_lifecycle_controls(validate) -> int:
