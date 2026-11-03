@@ -55,7 +55,13 @@ internal class VerifiedContainedModuleCompilation private constructor(private va
     }
 
     companion object {
-        fun compile(projectDir: Path, sourcePath: String, profile: ReconstructionProfile): ModuleCompilationEvidence {
+        /**
+         * Optional caller-owned capture for qualification diagnostics. It receives only the
+         * already bounded bytes whose lengths and digests were authenticated against the worker
+         * result. A sink failure aborts before live acceptance authority is issued.
+         */
+        fun compile(projectDir: Path, sourcePath: String, profile: ReconstructionProfile,
+            diagnosticsObserver: ((stdout: ByteArray, stderr: ByteArray) -> Unit)? = null): ModuleCompilationEvidence {
             checkCancellation()
             val deadline = ContainedCommandOperationDeadline(moduleCompilerOperationWallMillis(profile))
             requireContainedModuleCompilerProfile(profile)
@@ -85,6 +91,7 @@ internal class VerifiedContainedModuleCompilation private constructor(private va
             var rootRemoved = false
             var releaseAttempted = false
             var primaryFailure: Throwable? = null
+            var capturedDiagnostics: Pair<ByteArray, ByteArray>? = null
             try {
                 val acquired = FullTreeDiskScratchAuthority.acquireDedicatedFilesystem(configuration.scratchMount,
                     FullTreeDiskScratchOperation(nonce, intentSha, "module-compile", configuration.configurationSha256), configuration.scratchPolicy)
@@ -190,6 +197,7 @@ internal class VerifiedContainedModuleCompilation private constructor(private va
                             stderr.size.toLong() == worker.stderrBytes && sha256(stderr) == worker.stderrSha256) {
                             "module compiler diagnostic capture differs from its result"
                         }
+                        capturedDiagnostics = stdout to stderr
                         worker.objectSha256?.let { expected ->
                             val objectBytes = readOwnedFile(directory, "reports/${ContainedModuleCompilerRequest.OBJECT_FILE}",
                                 ContainedModuleCompilerRequest.MAXIMUM_OBJECT_BYTES.toInt())
@@ -227,6 +235,13 @@ internal class VerifiedContainedModuleCompilation private constructor(private va
                     if (worker.outcome == "compiled-object") VerifiedContainedModuleCompilation(sha256(OracleJson.canonicalBytes(proof)), snapshot) else null)
                 ContainedModuleCompilationProof.verify(evidence)
                 snapshot.requireCurrent { deadline.requireCurrent() }
+                deadline.requireCurrent()
+                checkCancellation()
+                capturedDiagnostics?.let { (stdout, stderr) ->
+                    diagnosticsObserver?.invoke(stdout.copyOf(), stderr.copyOf())
+                }
+                // Diagnostic collection is not part of acceptance authority. A slow or failing
+                // sink must not mint a permit after the operation's deadline or cancellation.
                 deadline.requireCurrent()
                 checkCancellation()
                 evidence.liveAuthority?.let { token ->

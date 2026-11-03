@@ -6,6 +6,7 @@ import decompengine.oracle.core.OracleJson
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
+import java.util.Base64
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
@@ -251,11 +252,48 @@ class ContainedModuleCompilationLiveTest {
             Files.writeString(target, content)
         }
         fun report(name: String, value: JsonObject) { Files.write(root.resolve(name), OracleJson.canonicalBytes(value)) }
-        fun compile(source: String, label: String): ModuleCompilationEvidence =
-            ContainedModuleCompilationPolicy.validate(project, source, profile).also {
-                Files.writeString(root.resolve("$label-evidence.json"), it.toJson())
-                requireClean(it)
+        fun compile(source: String, label: String): ModuleCompilationEvidence {
+            var captured: Pair<ByteArray, ByteArray>? = null
+            val evidence = VerifiedContainedModuleCompilation.compile(project, source, profile) { stdout, stderr ->
+                captured = stdout to stderr
             }
+            Files.writeString(root.resolve("$label-evidence.json"), evidence.toJson())
+            if (!evidence.passed) {
+                val (stdout, stderr) = requireNotNull(captured) { "compiler failure did not expose its authenticated bounded diagnostics" }
+                val verified = ContainedModuleCompilationProof.verify(evidence)
+                val result = verified.result
+                assertEquals(result.stdoutBytes, stdout.size.toLong())
+                assertEquals(result.stderrBytes, stderr.size.toLong())
+                assertEquals(result.stdoutSha256, sha256(stdout))
+                assertEquals(result.stderrSha256, sha256(stderr))
+                assertTrue(stdout.size.toLong() + stderr.size <= verified.request.maximumOutputBytes)
+                val proof = requireNotNull(evidence.containedProof)
+                val diagnosticSidecar = JsonObject(mapOf(
+                    "schemaVersion" to JsonPrimitive(1),
+                    "requestSha256" to JsonPrimitive(verified.request.sha256),
+                    "proofSha256" to JsonPrimitive(sha256(OracleJson.canonicalBytes(proof))),
+                    "profileId" to JsonPrimitive(verified.request.profileId),
+                    "profileSha256" to JsonPrimitive(verified.request.profileSha256),
+                    "sourceSha256" to JsonPrimitive(verified.request.sourceSha256),
+                    "snapshotSha256" to JsonPrimitive(verified.request.snapshotSha256),
+                    "compilerSha256" to JsonPrimitive(verified.request.compilerSha256),
+                    "runtimeConfigurationSha256" to proof.getValue("runtimeConfigurationSha256"),
+                    "outcome" to JsonPrimitive(result.outcome),
+                    "exitCode" to (result.exitCode?.let(::JsonPrimitive) ?: kotlinx.serialization.json.JsonNull),
+                    "stdoutBytes" to JsonPrimitive(stdout.size),
+                    "stdoutSha256" to JsonPrimitive(result.stdoutSha256),
+                    "stdoutBase64" to JsonPrimitive(Base64.getEncoder().encodeToString(stdout)),
+                    "stderrBytes" to JsonPrimitive(stderr.size),
+                    "stderrSha256" to JsonPrimitive(result.stderrSha256),
+                    "stderrBase64" to JsonPrimitive(Base64.getEncoder().encodeToString(stderr)),
+                ))
+                val destination = Path.of("build/module-compilation-qualification", root.fileName.toString())
+                Files.createDirectories(destination)
+                Files.write(destination.resolve("$label.diagnostics.json"), OracleJson.canonicalBytes(diagnosticSidecar))
+            }
+            requireClean(evidence)
+            return evidence
+        }
         fun acceptedRevision(manifest: SourceTreeManifest): Map<String, ByteArray> {
             val source = manifest.files.single { it.path == path("module-implementation") }
             assertEquals(true, source.acceptedImplementation)
