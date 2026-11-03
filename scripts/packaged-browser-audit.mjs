@@ -303,6 +303,9 @@ export const measureContrast = `(() => {
   return { measured: results.length, minimum: results.length ? Number(Math.min(...results).toFixed(3)) : null, failures: failures.slice(0, 12), failureCount: failures.length, unsupported: unsupported.slice(0, 12), tokens };
 })()`;
 
+/** Failure-only focus trajectory bounds, independent of every assertion deadline. */
+export const focusTrajectoryFrames = 30;
+export const focusTrajectoryMs = 1000;
 export const measureFocus = `(async () => {
   await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
   const element = document.activeElement;
@@ -320,7 +323,7 @@ export const measureFocus = `(async () => {
   const box = element.getBoundingClientRect();
   const hit = document.elementFromPoint(Math.min(Math.max(box.left + box.width / 2, 0), innerWidth - 1), Math.min(Math.max(box.top + box.height / 2, 0), innerHeight - 1));
   const [low, high] = outline && adjacent ? [luminance(outline), luminance(adjacent)].sort((a, b) => a - b) : [0, 0];
-  return {
+  const result = {
     key: ids.get(element), heading: element.matches('main h1'),
     // Numeric layout facts only; keep the original sample and verdict, without scrolling or extra waits.
     geometry: { left: box.left, top: box.top, right: box.right, bottom: box.bottom,
@@ -333,6 +336,25 @@ export const measureFocus = `(async () => {
     inViewport: box.bottom > 0 && box.top < innerHeight && box.right > 0 && box.left < innerWidth,
     unobscured: hit !== null && (element.contains(hit) || hit.contains(element)),
   };
+  // Failure-only diagnostic: after an off-screen sample, record later frames without scrolling or
+  // refocusing, so a delayed engine focus scroll is distinguishable from a persistent one. Numbers
+  // and a fixed same-target flag only. Bounded by ${focusTrajectoryFrames} frames and ${focusTrajectoryMs} ms.
+  if (!result.inViewport) {
+    const started = performance.now(); const trajectory = [];
+    for (let frame = 1; frame <= ${focusTrajectoryFrames}; frame += 1) {
+      const elapsed = performance.now() - started;
+      if (elapsed >= ${focusTrajectoryMs}) break;
+      const ticked = await new Promise(resolve => { const timer = setTimeout(() => resolve(false), ${focusTrajectoryMs} - elapsed);
+        requestAnimationFrame(() => { clearTimeout(timer); resolve(true); }); });
+      if (!ticked) break;
+      const later = element.getBoundingClientRect();
+      trajectory.push({ frame, ms: Number((performance.now() - started).toFixed(1)), top: later.top, bottom: later.bottom,
+        left: later.left, right: later.right, viewportWidth: innerWidth, viewportHeight: innerHeight, scrollX, scrollY,
+        sameTarget: document.activeElement === element });
+    }
+    result.trajectory = trajectory;
+  }
+  return result;
 })()`;
 
 function percentile(values, fraction) {

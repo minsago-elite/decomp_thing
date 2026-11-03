@@ -4,7 +4,7 @@ import { dirname, resolve } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { runInNewContext } from 'node:vm';
-import { assertAudit, auditContentReady, auditFixtures, auditPageNames, auditPageReady, auditTokenKinds, auditViewports, measureContrast, measureFocus, measurePage, prepareAuditPage, qualifyAudit } from './packaged-browser-audit.mjs';
+import { assertAudit, auditContentReady, auditFixtures, auditPageNames, auditPageReady, auditTokenKinds, auditViewports, focusTrajectoryFrames, focusTrajectoryMs, measureContrast, measureFocus, measurePage, prepareAuditPage, qualifyAudit } from './packaged-browser-audit.mjs';
 
 // Controls for the packaged audit's own verdict: each injected defect must be reported, so a
 // passing CI audit cannot be a vacuous one.
@@ -480,4 +480,62 @@ test('measures visible input values and placeholders and rejects low contrast fo
 test('covers the documented desktop, narrow, 320px and 200%/400% zoom profiles', () => {
   assert.deepEqual(auditViewports.map(({ width, height, deviceScaleFactor }) => [width, height, deviceScaleFactor]),
     [[1440, 900, 1], [390, 844, 1], [320, 640, 1], [640, 400, 2], [320, 200, 4]]);
+});
+
+// Runs the real focus probe against a scripted page. `tops` gives the box top per frame; frames
+// past the end keep the last value. `ticks` caps how many frames the page renders.
+async function runFocusProbe({ tops, ticks = Infinity, blur = null, text = 'secret-token https://example.invalid/x' }) {
+  let frame = 0; let now = 0; let rendered = 0;
+  const element = { tagName: 'INPUT', id: '', textContent: text, getAttribute: () => null, parentElement: null,
+    matches: selector => selector === ':focus-visible', contains: other => other === element,
+    getBoundingClientRect: () => { const top = tops[Math.min(frame, tops.length - 1)]; return { left: 311, right: 328.6, top, bottom: top + 17.6, width: 17.6, height: 17.6 }; } };
+  const document = { activeElement: element, body: {}, elementFromPoint: () => element };
+  const context = { document, innerWidth: 1440, innerHeight: 900, scrollX: 0, get scrollY() { return 794 - (tops[Math.min(frame, tops.length - 1)] - tops[0]); },
+    performance: { now: () => now },
+    // A timer fires only after a frame would have rendered, and jumps the clock to the bound.
+    setTimeout: (fn) => { const t = { cleared: false }; setImmediate(() => { if (!t.cleared) { now += 1000; fn(); } }); return t; },
+    clearTimeout: t => { t.cleared = true; },
+    requestAnimationFrame: fn => { if (rendered >= ticks) return; rendered += 1; queueMicrotask(() => { frame += 1; now += 16; if (frame === blur) document.activeElement = {}; fn(); }); },
+    getComputedStyle: () => ({ backgroundColor: 'rgb(255, 255, 255)', outlineColor: 'rgb(163, 92, 0)', outlineStyle: 'solid', outlineWidth: '3px' }),
+    WeakMap, Number, Math, JSON, Promise };
+  context.window = context;
+  return runInNewContext(measureFocus, context);
+}
+
+test('focus trajectory is failure-only, bounded, numeric and does not change the verdict', async () => {
+  // Visible stop: original sample only, no trajectory or extra frames.
+  const visible = await runFocusProbe({ tops: [400, 400, 400] });
+  assert.equal(visible.inViewport, true); assert.equal('trajectory' in visible, false);
+  // Persistent: off-screen in every later frame; bounded by the frame cap.
+  const persistent = await runFocusProbe({ tops: [900, 900, 900] });
+  assert.equal(persistent.inViewport, false);
+  assert.equal(persistent.geometry.top, 900, 'original sample is preserved');
+  assert.ok(persistent.trajectory.length > 0 && persistent.trajectory.length <= focusTrajectoryFrames);
+  assert.ok(persistent.trajectory.every(entry => entry.top >= entry.viewportHeight && entry.sameTarget === true));
+  assert.ok(persistent.trajectory.at(-1).ms <= focusTrajectoryMs + 16);
+  // Delayed: comes into view later; the original verdict field still reports the failure.
+  const delayed = await runFocusProbe({ tops: [900, 900, 900, 900, 500] });
+  assert.equal(delayed.inViewport, false);
+  assert.ok(delayed.trajectory.some(entry => entry.top < entry.viewportHeight));
+  assert.ok(delayed.trajectory.some(entry => entry.top >= entry.viewportHeight));
+  // Focus moving away is recorded only as the fixed flag.
+  const moved = await runFocusProbe({ tops: [900], blur: 4 });
+  assert.equal(moved.trajectory.find(entry => entry.frame === 2).sameTarget, false);
+  // A page that stops rendering frames ends the trajectory through the time bound, not a hang.
+  const stalled = await runFocusProbe({ tops: [900], ticks: 4 });
+  assert.equal(stalled.trajectory.length, 2);
+  // Privacy: trajectory entries carry only fixed numeric/boolean keys, never text, URLs or tokens.
+  const keys = ['frame', 'ms', 'top', 'bottom', 'left', 'right', 'viewportWidth', 'viewportHeight', 'scrollX', 'scrollY', 'sameTarget'];
+  for (const entry of [...persistent.trajectory, ...delayed.trajectory]) {
+    assert.deepEqual(Object.keys(entry), keys);
+    assert.ok(Object.values(entry).every(value => typeof value === 'number' || typeof value === 'boolean'));
+  }
+  assert.doesNotMatch(JSON.stringify(persistent.trajectory), /secret|https?:|example/);
+  // Negative control: the verdict still fails a delayed stop and passes a visible one.
+  const audit = clean();
+  audit.focus[0].stops[0] = { ...audit.focus[0].stops[0], ...delayed };
+  assert.match(verdict(audit).join('\n'), /focus/);
+  const passing = clean();
+  passing.focus[0].stops[0] = { ...passing.focus[0].stops[0], ...visible };
+  assert.deepEqual(verdict(passing).filter(line => /focus \{/.test(line)), []);
 });
