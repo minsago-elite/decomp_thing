@@ -156,6 +156,151 @@ class WebSourceArchiveRoutesTest {
             sha256(Files.readAllBytes(extracted.resolve(artifact.getValue("path").jsonPrimitive.content))))
     }
 
+    @Test fun `archive observations share session and global artifact capacity without blocking operation reads or replay`() = withFixture { fixture ->
+        val original = Files.readAllBytes(fixture.archive)
+        val key = "archive-capacity-replay-01"
+        val operation = data(verify(fixture, sha256(original), key), "operation", 202)
+        finish(fixture, operation)
+        // Hold real pinned download descriptors open by not consuming a body larger than socket buffers.
+        Files.write(fixture.archive, ByteArray(48 * 1024 * 1024) { (it % 251).toByte() })
+        val href = status(fixture).getValue("archive").jsonObject.getValue("contentHref").jsonPrimitive.content
+        val held = mutableListOf<HttpResponse<java.io.InputStream>>()
+        fun hold(owner: Fixture) {
+            val response = client.send(HttpRequest.newBuilder(URI(owner.origin + href)).timeout(Duration.ofSeconds(30))
+                .header("Cookie", owner.cookie).header("Accept", "application/octet-stream").GET().build(), HttpResponse.BodyHandlers.ofInputStream())
+            held += response
+            assertEquals(200, response.statusCode())
+            response.body().readNBytes(1024)
+        }
+        fun anotherSession(): Fixture {
+            val response = client.send(HttpRequest.newBuilder(URI("${fixture.origin}/w/api/v1/session"))
+                .header("Origin", fixture.origin).header("Content-Type", "application/json").header("Accept", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString("{\"token\":\"${fixture.server.issueBrowserBootstrap().token}\"}")).build(), HttpResponse.BodyHandlers.ofString())
+            assertEquals(200, response.statusCode())
+            val csrf = Json.parseToJsonElement(response.body()).jsonObject.getValue("data").jsonObject.getValue("csrfToken").jsonPrimitive.content
+            return Fixture(fixture.server, fixture.root, fixture.jobId, fixture.runId, fixture.tree,
+                response.headers().firstValue("Set-Cookie").orElseThrow().substringBefore(';'), csrf, fixture.origin)
+        }
+        fun refused(owner: Fixture) {
+            val get = get(owner, "${owner.revision}/source-archive")
+            assertEquals(429, get.statusCode())
+            assertEquals("DOWNLOAD_LIMIT", Json.parseToJsonElement(String(get.body())).jsonObject.getValue("error").jsonObject.getValue("code").jsonPrimitive.content)
+            val head = client.send(HttpRequest.newBuilder(URI("${owner.origin}${owner.revision}/source-archive"))
+                .header("Cookie", owner.cookie).header("Accept", "application/json").method("HEAD", HttpRequest.BodyPublishers.noBody()).build(), HttpResponse.BodyHandlers.ofByteArray())
+            assertEquals(429, head.statusCode())
+            val post = verify(owner, "0".repeat(64), "archive-capacity-new-0001")
+            assertEquals(429, post.statusCode())
+            assertEquals("DOWNLOAD_LIMIT", Json.parseToJsonElement(String(post.body())).jsonObject.getValue("error").jsonObject.getValue("code").jsonPrimitive.content)
+        }
+        try {
+            hold(fixture); hold(fixture)
+            refused(fixture) // Two reads in this session, but spare global capacity remains.
+            val second = anotherSession()
+            assertEquals(200, get(second, "${second.revision}/source-archive").statusCode())
+            hold(second); hold(second)
+            assertEquals(4, fixture.server.activeArtifactDownloads())
+            refused(anotherSession()) // A fresh session cannot bypass the four-global ceiling.
+            assertEquals(200, get(fixture, "/w/api/v1/jobs/${fixture.jobId}/runs").statusCode())
+            val id = operation.getValue("operationId").jsonPrimitive.content
+            assertEquals(200, get(fixture, "${fixture.revision}/archive-verifications/$id").statusCode())
+            val replay = verify(fixture, sha256(original), key)
+            assertEquals("true", replay.headers().firstValue("Idempotency-Replayed").orElseThrow())
+            assertEquals(operation.getValue("operationId"), data(replay, "operation", 202).getValue("operationId"))
+        } finally { held.forEach { it.body().close() } }
+        val deadline = System.nanoTime() + 10_000_000_000
+        while (fixture.server.activeArtifactDownloads() != 0 && System.nanoTime() < deadline) Thread.sleep(10)
+        assertEquals(0, fixture.server.activeArtifactDownloads())
+        assertEquals(200, get(fixture, "${fixture.revision}/source-archive").statusCode())
+        Files.write(fixture.archive, original)
+        // The capacity-refused key was not admitted or bound to the refused digest.
+        assertEquals(202, verify(fixture, sha256(original), "archive-capacity-new-0001").statusCode())
+    }
+
+    @Test fun `archive routes propagate their own expired exchange deadline before observation admission`() = withFixture { fixture ->
+        fixture.server.stop() // Reopen the same persisted fixture under a directly controlled request boundary.
+        val store = JobStore(fixture.root)
+        WebJobService(store, JobAnalyzer { _, _ -> error("unexpected analysis") },
+            JobReconstructor { _, _ -> error("unexpected reconstruction") }).use { service ->
+            service.initializeExistingStorage()
+            LocalWebAccess(LocalWebAccessConfiguration("http://127.0.0.1:12345")).use { access ->
+                WebStreamResources().use { resources ->
+                    val evidence = WebArchiveEvidence(store, WebSourceEvidence(store, defaultWebSourceProfiles(), service::readArtifact), service::readArtifact)
+                    WebApiController(access, EmbeddedWebAssets.load(basePath = "/w/"), service,
+                        WebJobMutationBoundary(access, service), resources, archiveEvidence = evidence).use { api ->
+                        val session = MemoryExchange("POST", "/w/api/v1/session", "{\"token\":\"${access.issueBootstrap().token}\"}")
+                        session.requestHeaders.set("Origin", "http://127.0.0.1:12345")
+                        session.requestHeaders.set("Content-Type", "application/json")
+                        assertTrue(api.route(session)); assertEquals(200, session.responseCode)
+                        val cookie = session.responseHeaders.getFirst("Set-Cookie").substringBefore(';')
+                        val csrf = Json.parseToJsonElement(session.output.toString()).jsonObject.getValue("data").jsonObject.getValue("csrfToken").jsonPrimitive.content
+                        val digest = sha256(Files.readAllBytes(fixture.archive))
+                        fun request(method: String) = MemoryExchange(method, fixture.revision +
+                            if (method == "POST") "/archive-verifications" else "/source-archive", "{\"archiveSha256\":\"$digest\"}").apply {
+                            requestHeaders.set("Cookie", cookie)
+                            if (method == "POST") {
+                                requestHeaders.set("Origin", "http://127.0.0.1:12345"); requestHeaders.set("Content-Type", "application/json")
+                                requestHeaders.set("X-CSRF-Token", csrf); requestHeaders.set("Idempotency-Key", "archive-expired-route-0001")
+                            }
+                        }
+                        val scheduler = object : java.util.concurrent.ScheduledThreadPoolExecutor(1) {
+                            lateinit var expire: Runnable
+                            override fun schedule(command: Runnable, delay: Long, unit: java.util.concurrent.TimeUnit): java.util.concurrent.ScheduledFuture<*> {
+                                expire = command
+                                return super.schedule(command, 1, java.util.concurrent.TimeUnit.DAYS)
+                            }
+                        }
+                        try {
+                            for (method in listOf("GET", "HEAD", "POST")) {
+                                val exchange = request(method)
+                                val deadline = WebRequestDeadline(scheduler, AutoCloseable { exchange.close() }, 30_000)
+                                WebRequestDeadline.register(exchange, deadline)
+                                try {
+                                    scheduler.expire.run()
+                                    assertTrue(api.route(exchange))
+                                    // The memory transport records the generic error a real closed exchange cannot send.
+                                    assertEquals(500, exchange.responseCode, "$method must not succeed after its deadline expired")
+                                    assertEquals(0, api.artifactDownloads.activeCount())
+                                } finally { WebRequestDeadline.release(exchange); deadline.cancel() }
+                            }
+                            for (method in listOf("GET", "HEAD", "POST")) {
+                                val fresh = request(method)
+                                assertTrue(api.route(fresh)); assertEquals(if (method == "POST") 202 else 200, fresh.responseCode)
+                                assertNull(fresh.responseHeaders.getFirst("Idempotency-Replayed"), "expired POST must not bind the key")
+                                assertEquals(0, api.artifactDownloads.activeCount())
+                            }
+                        } finally { scheduler.shutdownNow() }
+                    }
+                }
+            }
+        }
+    }
+
+    private class MemoryExchange(private val method: String, path: String, body: String) : com.sun.net.httpserver.HttpExchange() {
+        private val incoming = com.sun.net.httpserver.Headers().apply { set("Host", "127.0.0.1:12345"); set("Accept", "application/json") }
+        private val outgoing = com.sun.net.httpserver.Headers()
+        private val input = body.byteInputStream()
+        val output = java.io.ByteArrayOutputStream()
+        private var status = -1
+        private val uri = URI.create(path)
+        override fun getRequestHeaders() = incoming
+        override fun getResponseHeaders() = outgoing
+        override fun getRequestURI() = uri
+        override fun getRequestMethod() = method
+        override fun getHttpContext(): com.sun.net.httpserver.HttpContext = throw UnsupportedOperationException()
+        override fun close() = Unit
+        override fun getRequestBody() = input
+        override fun getResponseBody() = output
+        override fun sendResponseHeaders(code: Int, length: Long) { status = code }
+        override fun getRemoteAddress() = java.net.InetSocketAddress("127.0.0.1", 1)
+        override fun getResponseCode() = status
+        override fun getLocalAddress() = java.net.InetSocketAddress("127.0.0.1", 12345)
+        override fun getProtocol() = "HTTP/1.1"
+        override fun getAttribute(name: String): Any? = null
+        override fun setAttribute(name: String, value: Any?) = Unit
+        override fun setStreams(input: java.io.InputStream?, output: java.io.OutputStream?) = Unit
+        override fun getPrincipal(): com.sun.net.httpserver.HttpPrincipal? = null
+    }
+
     @Test fun `operation location and key replay survive missing source metadata`() = withFixture { fixture ->
         val digest = sha256(Files.readAllBytes(fixture.archive))
         val key = "archive-metadata-loss-0001"

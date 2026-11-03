@@ -49,7 +49,7 @@ internal fun parseWebByteRange(header: String, size: Long): WebByteRange? {
 
 internal class WebRangeNotSatisfiable : RuntimeException("range is not satisfiable")
 
-/** Shared admission for all artifact hashing (catalog, detail and content), released on success or failure. */
+/** Shared admission for artifact hashing (catalog, detail, content and archive observations), released on success or failure. */
 internal class WebArtifactDownloads(private val maximum: Int = 4, private val perSession: Int = 2) {
     private val active = HashMap<String, Int>()
     private var total = 0

@@ -47,23 +47,29 @@ internal class WebSourceArchives(
     private val reference: (String, String, String) -> WebRevisionSourceReference,
     private val clock: Clock = Clock.systemUTC(),
     private val shutdownTimeoutMs: Long = 60_000,
+    private val artifactReads: WebArtifactDownloads = WebArtifactDownloads(),
 ) : AutoCloseable {
     private val records = LinkedHashMap<String, WebArchiveVerification>()
     private val keys = HashMap<String, String>()
 
     /** Observed digest of the retained archive, or null when no archive file is retained for the attempt. */
-    private fun observe(jobId: String, runId: String): Pair<String, Long>? {
-        if (!store.present(jobId, runId, ARCHIVE)) return null
-        val digest = store.stream(jobId, runId, ARCHIVE, { if (it > MAXIMUM_ARCHIVE_BYTES) throw WebArtifactTooLarge() }, { _, _ -> }, {})
-        return digest.sha256 to digest.size
-    }
+    private fun observe(jobId: String, runId: String, sessionId: String, cancellationCheck: () -> Unit): Pair<String, Long>? =
+        artifactReads.admit(sessionId) {
+            cancellationCheck()
+            if (!store.present(jobId, runId, ARCHIVE)) return@admit null
+            val digest = store.stream(jobId, runId, ARCHIVE,
+                { if (it > MAXIMUM_ARCHIVE_BYTES) throw WebArtifactTooLarge() }, { _, _ -> }, cancellationCheck)
+            cancellationCheck()
+            digest.sha256 to digest.size
+        }
 
-    fun status(basePath: String, jobId: String, runId: String, revisionId: String): JsonObject {
+    fun status(basePath: String, jobId: String, runId: String, revisionId: String,
+        sessionId: String = "internal", cancellationCheck: () -> Unit = {}): JsonObject {
         val snapshot = revision(jobId, runId, revisionId)
         val run = attempt(jobId, runId)
         check(snapshot.reference.jobId == jobId && snapshot.reference.runId == runId && snapshot.reference.revisionId == revisionId)
         var tooLarge = false
-        val current = try { observe(jobId, runId) } catch (_: WebArtifactTooLarge) { tooLarge = true; null }
+        val current = try { observe(jobId, runId, sessionId, cancellationCheck) } catch (_: WebArtifactTooLarge) { tooLarge = true; null }
         // One consistent copy of every record's progress; the projection below never rereads mutable state.
         val history = synchronized(this) {
             records.values.filter { it.jobId == jobId && it.runId == runId && it.revisionId == revisionId }.map { it to it.progress }
@@ -132,14 +138,15 @@ internal class WebSourceArchives(
      * operation; the same key with another intent conflicts. A verification already queued or running for the same
      * archive and revision metadata is returned instead of starting a second one.
      */
-    fun start(jobId: String, runId: String, revisionId: String, archiveSha256: String, key: String): Started {
+    fun start(jobId: String, runId: String, revisionId: String, archiveSha256: String, key: String,
+        sessionId: String = "internal", cancellationCheck: () -> Unit = {}): Started {
         // Existing operations require durable candidate authorization, not another read of their verification inputs.
         val selected = reference(jobId, runId, revisionId)
         val intent = listOf(jobId, runId, revisionId, archiveSha256).joinToString("\u0000")
         synchronized(this) { replay(key, intent, selected)?.let { return it } }
         val snapshot = revision(jobId, runId, revisionId)
         if (snapshot.reference != selected) revisionSourceChanged()
-        val current = try { observe(jobId, runId) } catch (_: WebArtifactTooLarge) {
+        val current = try { observe(jobId, runId, sessionId, cancellationCheck) } catch (_: WebArtifactTooLarge) {
             throw WebAccessDenied(413, "ARCHIVE_TOO_LARGE", "The retained source archive exceeds the verifier's 64 MiB limit.")
         } ?: throw WebAccessDenied(404, "ARCHIVE_NOT_FOUND", "No source archive is retained for this attempt.")
         if (current.first != archiveSha256) throw WebAccessDenied(409, "ARCHIVE_CHANGED",
@@ -147,6 +154,13 @@ internal class WebSourceArchives(
         synchronized(this) {
             // Recheck under the admission lock: a concurrent request with this key may have been admitted meanwhile.
             replay(key, intent, selected)?.let { return it }
+            // Aliases are retained state too: deduplicating onto one slow verifier must not admit unlimited keys.
+            while (keys.size >= MAXIMUM_KEYS) {
+                val oldest = records.values.firstOrNull { it.terminal }
+                    ?: throw WebAccessDenied(429, "ARCHIVE_VERIFICATION_BUSY",
+                        "Archive verification request-key capacity is full. Try again after verification finishes.")
+                forget(oldest)
+            }
             records.values.lastOrNull { !it.terminal && it.jobId == jobId && it.runId == runId && it.revisionId == revisionId &&
                 it.archiveSha256 == archiveSha256 && it.metadataVersion == snapshot.metadataVersion }?.let { running ->
                 keys[key] = running.operationId // A deduplicated request still binds its key to the returned operation.
@@ -160,7 +174,7 @@ internal class WebSourceArchives(
             records[record.operationId] = record; keys[key] = record.operationId
             while (records.size > MAXIMUM_RECORDS) {
                 val oldest = records.values.firstOrNull { it.terminal } ?: break
-                records.remove(oldest.operationId); keys.values.removeAll { it == oldest.operationId }
+                forget(oldest)
             }
             try { executor.execute { run(record) } }
             catch (_: RejectedExecutionException) {
@@ -169,6 +183,12 @@ internal class WebSourceArchives(
             }
             return Started(record, false)
         }
+    }
+
+    /** Caller holds the monitor. Evict the operation and all admitted aliases together. */
+    private fun forget(record: WebArchiveVerification) {
+        records.remove(record.operationId)
+        keys.values.removeAll { it == record.operationId }
     }
 
     /** Caller holds the monitor. A bound key replays its operation; another intent under that key conflicts. */
@@ -251,6 +271,7 @@ internal class WebSourceArchives(
         const val ARCHIVE = "source-tree.zip"
         const val MAXIMUM_ARCHIVE_BYTES = 64L * 1024 * 1024
         const val MAXIMUM_RECORDS = 256
+        const val MAXIMUM_KEYS = 256
         const val MAXIMUM_ACTIVE = 2
         private const val RECAPTURE_ATTEMPTS = 50
         private const val RECAPTURE_DELAY_MS = 20L

@@ -1627,8 +1627,19 @@ worker. The `202 operation` has `action: "archive.verify"` and null repository, 
 object. Its `Location` names `archive-verifications/{operationId}`, which reports `queued`,
 `running`, `completed` (verified), `failed` (with a fixed message) or `interrupted`.
 
+Archive observation for status (including HEAD) and new verification keys shares artifact-read
+admission with catalog, detail and download hashing: four global reads and two per session,
+otherwise `429 DOWNLOAD_LIMIT`. The exchange's request deadline and thread interruption cancel
+hashing between chunks; cancellation releases the pinned descriptor and read admission without
+admitting a verification or binding its key. Operation reads and existing-key replay do not hash
+the archive or consume this read capacity, so they remain available during saturation.
+
 Operation records and verified labels live in memory for the listener lifetime, at most 256
-records. After a restart every archive reads as not verified until it is verified again.
+records and 256 admitted request keys (including deduplicated aliases). When key capacity is full,
+the oldest terminal operation and all its aliases are evicted together; if every retained operation
+is still active, a new key receives `429 ARCHIVE_VERIFICATION_BUSY` until one finishes. Existing
+keys still replay or conflict at capacity. After eviction, a key is no longer bound to the removed
+operation. After a restart every archive reads as not verified until it is verified again.
 
 The SPA shows this panel on the root directory of each revision. Status is read only after an
 explicit action. The panel lists revision, recorded build, acceptance, digest, size and Git mapping
