@@ -157,3 +157,49 @@ it('allows a new revalidation immediately after the previous connectivity check 
   expect(gateway.bootstrap).toHaveBeenCalledTimes(3);
   noMutations(gateway);
 });
+
+it('preserves the private view generation when background revalidation confirms the same server', async () => {
+  const { session, gateway, data } = setup();
+  const run = fixture<{ data: Run }>('run-completed-unaccepted').data;
+  const path = `/nested/jobs/${run.jobId}/runs/${run.runId}`;
+  transport.get.mockImplementation((_kind, requestPath) => {
+    if (requestPath === `/jobs/${run.jobId}/runs/${run.runId}`) return Promise.resolve({ data: run });
+    return Promise.reject(new ApiClientError('http_error', { status: 404 }));
+  });
+  await session.initialize({ kind: 'absent' });
+  history.replaceState(null, '', path);
+  render(<App basePath="/nested" session={session} />); await settle();
+  const initialState = session.snapshot();
+  expect(initialState.status).toBe('authenticated');
+  const generation = initialState.status === 'authenticated' ? initialState.generation : -1;
+  const receipt = screen.getByLabelText('Attempt metadata');
+  gateway.bootstrap.mockResolvedValueOnce(data);
+
+  await act(async () => { await session.revalidate(); }); await settle();
+
+  expect(session.snapshot()).toMatchObject({ status: 'authenticated', generation });
+  expect(screen.getByLabelText('Attempt metadata')).toBe(receipt);
+  expect(screen.getByText(run.runId)).toBeTruthy();
+  noMutations(gateway);
+});
+
+it('lets explicit sign-out cancel a pending background revalidation', async () => {
+  const { session, gateway, data } = setup();
+  await session.initialize({ kind: 'absent' });
+  let finishBootstrap!: (value: Bootstrap) => void;
+  gateway.bootstrap.mockReturnValueOnce(new Promise(resolve => { finishBootstrap = resolve; }));
+
+  const revalidation = session.revalidate();
+  const pendingSignal = gateway.bootstrap.mock.calls[1]![0];
+  expect(session.snapshot().status).toBe('authenticated');
+  const logout = session.logout();
+
+  expect(pendingSignal.aborted).toBe(true);
+  expect(gateway.logout).toHaveBeenCalledOnce();
+  await logout;
+  finishBootstrap(data);
+  await revalidation;
+
+  expect(session.snapshot()).toMatchObject({ status: 'required', reason: 'signed-out' });
+  expect(gateway.logout).toHaveBeenCalledOnce();
+});
