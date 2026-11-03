@@ -82,6 +82,9 @@ export async function qualifyRestart({ fixture, origin, makeTarget, cdp, evaluat
   const rows = `Array.from(document.querySelectorAll('ol[aria-label="Activity observations"] li span')).map(row => row.textContent)`;
   const button = label => `[...document.querySelectorAll('button')].find(b => b.textContent === ${JSON.stringify(label)})`;
   const evidence = { phases: [] };
+  const progressBoundary = async tab => evaluate(tab, `fetch('${basePath}/api/v1/jobs/${fixture.jobId}/runs/${RUN}/snapshot')
+    .then(r => r.json()).then(b => ({ throughSequence: b.data.throughSequence,
+      nextSequence: b.data.progress.nextSequence, retainedEventCount: b.data.progress.retainedEventCount }))`);
   const serverInstance = tab => evaluate(tab, `fetch('${basePath}/api/v1/bootstrap', { credentials: 'same-origin' }).then(r => r.json()).then(b => b.data.serverInstanceId ?? null)`);
   const track = tab => {
     tab.streams = 0;
@@ -128,7 +131,7 @@ export async function qualifyRestart({ fixture, origin, makeTarget, cdp, evaluat
   await readPin(old, 'pin policy before restart');
   await follow(old, 'activity before restart');
   const rowsBefore = await evaluate(old, rows);
-  const snapshotBefore = await evaluate(old, `fetch('${basePath}/api/v1/jobs/${fixture.jobId}/runs/${RUN}/snapshot').then(r => r.json()).then(b => b.data.throughCursor)`);
+  const snapshotBefore = await progressBoundary(old);
   evidence.phases.push('first-process');
 
   // Graceful SIGTERM-only restart: same installation, data directory and port.
@@ -175,10 +178,11 @@ export async function qualifyRestart({ fixture, origin, makeTarget, cdp, evaluat
   await readPin(old, 'pin policy after restart');
   await follow(old, 'activity after restart');
   assert.deepEqual(await evaluate(old, rows), rowsBefore, 'Activity rows differ after restart');
-  assert.equal(await evaluate(old, `fetch('${basePath}/api/v1/jobs/${fixture.jobId}/runs/${RUN}/snapshot').then(r => r.json()).then(b => b.data.throughCursor)`), snapshotBefore);
+  const snapshotAfter = await progressBoundary(old);
+  assert.deepEqual(snapshotAfter, snapshotBefore, 'The durable activity boundary changed across restart');
   assert.deepEqual(await fs.readFile(statePath), stateBefore, 'Reconciliation reads changed workflow-state bytes');
   await captureSafe(old, 'restart-reconciled.png');
-  evidence.activityContinuity = { rows: rowsBefore.length, throughCursor: snapshotBefore };
+  evidence.activityContinuity = { rows: rowsBefore.length, ...snapshotBefore };
   evidence.phases.push('restarted-process');
 
   // Two tabs in one window: only the foreground tab may read; closing it leaves the survivor streaming.
