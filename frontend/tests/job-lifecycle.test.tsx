@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/preact';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/preact';
 import { beforeEach, expect, it, vi } from 'vitest';
 import { ApiClientError } from '../src/api/client';
 import type { createApiClient } from '../src/api/client';
@@ -166,6 +166,41 @@ it('delivers bounded library-change hints without job or session material', asyn
   raw.close(); stop(); stopOther();
 });
 
+it.each(['hidden', 'offline', 'new-version'] as const)('discards a late deletion preview after %s invalidates the read', async reason => {
+  let finish!: (result: { data: unknown }) => void;
+  client.get.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }))
+    .mockResolvedValueOnce({ data: preview({ version: 'version_2' }) });
+  const deleted = vi.fn();
+  const view = render(<JobDeletion job={job()} client={typed} basePath="/" session={session} onDeleted={deleted} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Review what would be deleted' }));
+  await waitFor(() => expect(client.get).toHaveBeenCalledOnce());
+  const signal = client.get.mock.calls[0]![2].signal;
+  if (reason === 'new-version') {
+    view.rerender(<JobDeletion job={job({ version: 'version_2' })} client={typed} basePath="/" session={session} onDeleted={deleted} />);
+  } else if (reason === 'hidden') {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+    fireEvent(document, new Event('visibilitychange'));
+    await screen.findByText(/paused while this tab is hidden/);
+  } else {
+    Object.defineProperty(navigator, 'onLine', { configurable: true, value: false });
+    fireEvent(window, new Event('offline'));
+    await screen.findByText(/paused while this tab is hidden/);
+  }
+  await waitFor(() => expect(signal.aborted).toBe(true));
+  // Model a read whose transport has already completed before cancellation is observed.
+  await act(async () => { finish({ data: preview() }); await Promise.resolve(); });
+  expect(screen.queryByLabelText(/Type the file name/)).toBeNull();
+  expect(signal.aborted).toBe(true);
+  expect(deleted).not.toHaveBeenCalled();
+  Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
+  Object.defineProperty(navigator, 'onLine', { configurable: true, value: true });
+  fireEvent(document, new Event('visibilitychange'));
+  fireEvent(window, new Event('online'));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Review what would be deleted' })).toHaveProperty('disabled', false));
+  fireEvent.click(screen.getByRole('button', { name: 'Review what would be deleted' }));
+  expect(await screen.findByLabelText(/Type the file name/)).toBeTruthy();
+});
+
 it('re-enables deletion controls after a hidden tab abandons a pending preview', async () => {
   client.get.mockImplementationOnce(() => new Promise(() => undefined)).mockResolvedValueOnce({ data: preview() });
   render(<JobDeletion job={job()} client={typed} basePath="/" session={session} onDeleted={vi.fn()} />);
@@ -173,7 +208,7 @@ it('re-enables deletion controls after a hidden tab abandons a pending preview',
   await waitFor(() => expect(screen.getByRole('button', { name: 'Review what would be deleted' })).toHaveProperty('disabled', true));
   const visibility = (value: string) => {
     Object.defineProperty(document, 'visibilityState', { configurable: true, value });
-    document.dispatchEvent(new Event('visibilitychange'));
+    fireEvent(document, new Event('visibilitychange'));
   };
   visibility('hidden');
   expect(await screen.findByText(/paused while this tab is hidden/)).toBeTruthy();

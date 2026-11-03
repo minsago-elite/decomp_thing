@@ -261,7 +261,7 @@ internal val productionAcpExecutionScheduler = AcpExecutionScheduler()
 private fun schedulingFailure(
     reason: String,
     kind: AgentFailureKind,
-    retryable: Boolean = true,
+    retryable: Boolean = reason == "queueDeadline" || reason == "queueCapacity",
 ): AgentExecutionException = AgentExecutionException(
     AgentFailure(
         kind,

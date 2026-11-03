@@ -35,6 +35,7 @@ internal interface ReconstructionAdapter {
         payloadPaths: Set<String>) = Unit
     fun validateArchivedCheckpoint(profile: ReconstructionProfile, source: GeneratedFileEvidence,
         checkpoint: ArchivedModuleCheckpointProvenance) = Unit
+    fun moduleContext(request: ModuleReconstructionRequest): ModulePromptContext
     fun modulePrompt(request: ModuleReconstructionRequest): ModulePromptContent
     fun defaultReconstructor(): ModuleReconstructor
     fun assess(module: PlannedModule, model: RecoveredProgramModel, generator: String, source: String): List<ModuleReconstructionIssue>
@@ -52,6 +53,8 @@ internal data class ArchivedModuleCheckpointProvenance(
     val executionEvidencePresent: Boolean,
     val repairLineagePresent: Boolean,
 )
+
+internal data class ModulePromptContext(val prompt: ModulePromptContent, val interfaces: Map<String, String>)
 
 internal data class ModulePromptContent(val objective: String, val evidence: String)
 

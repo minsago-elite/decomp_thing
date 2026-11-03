@@ -83,7 +83,7 @@ export function JobOrganization({ job, client, basePath, session, onChanged }: {
           onInput={event => setLabel(event.currentTarget.value)} disabled={busy} />
       </label>
       <p id="job-label-help">{copy.labelHelp}</p>
-      <label><input type="checkbox" name="archived" checked={archived} disabled={busy}
+      <label class="job-archive-toggle"><input type="checkbox" name="archived" checked={archived} disabled={busy}
         onChange={event => setArchived(event.currentTarget.checked)} /> {copy.archived}</label>
       <div class="job-actions"><button type="submit" disabled={busy || !available}>{copy.save}</button></div>
     </form>
@@ -109,15 +109,17 @@ export function JobDeletion({ job, client, basePath, session, onDeleted }: {
   const heading = useRef<HTMLHeadingElement>(null);
   // Any newer job version invalidates a reviewed preview and its typed confirmation.
   useEffect(() => { setPreview(null); setConfirm(''); }, [job.jobId, job.version]);
-  // Hiding the tab or going offline abandons the pending read or request; its handler then skips cleanup.
+  // Availability or a newer job version abandons pending observation, including late read responses.
+  // A durable DELETE acceptance is still handed to the page even after its observation is cancelled.
   useEffect(() => () => {
     if (active.current) { active.current.abort(); active.current = null; setBusy(false); }
-  }, [job.jobId, available]);
+  }, [job.jobId, job.version, available]);
   async function review(signal?: AbortSignal) {
     const controller = signal ? null : new AbortController();
     if (controller) { if (active.current) return; active.current = controller; setBusy(true); setNotice(copy.reading); }
     try {
       const result = await client.get('jobDeletionPreview', `/jobs/${job.jobId}/deletion-preview`, { signal: signal ?? controller!.signal });
+      if ((signal ?? controller!.signal).aborted) return;
       if (result.data.jobId !== job.jobId) throw new ApiClientError('invalid_response');
       setPreview(result.data);
       if (controller) setNotice('');

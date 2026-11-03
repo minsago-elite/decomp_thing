@@ -17,6 +17,8 @@ import { MetadataReceipt } from '../shared/MetadataReceipt';
 import { canRetainMetadata, isDeletedJob, metadataFailureKind } from '../shared/retainMetadata';
 import { JobDeletion, JobOrganization } from '../jobs/JobLifecycle';
 import { onLibraryChange } from '../jobs/libraryChannel';
+import { PanelBoundary } from '../shared/PanelBoundary';
+import { panelBoundaryCopy } from '../copy/shell';
 
 function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session }: { jobId: string; basePath: string; runtime: RuntimeSnapshot; runtimeReceipt: ReceiptTime | undefined; session: BrowserSession }) {
   const { client } = usePrivateTransport(basePath);
@@ -83,7 +85,9 @@ function JobDetails({ jobId, basePath, runtime, runtimeReceipt, session }: { job
       <p>{copy.completionIsAnAttemptOutcomeOnlyTheRecordedAcceptedRevision}</p>
       <p>{copy.theAttemptPageRetainsItsExactIdentityAsNewerWork}</p>
       <p>{copy.startingExplorationReconstructionBuildsValidationOrRepairIsUnavailableIn}</p>
-      <WorkflowAvailability runtime={runtime} {...(runtimeReceipt ? { receipt: runtimeReceipt } : {})} />
+      <PanelBoundary name={panelBoundaryCopy.names.workflowAvailability}>
+        <WorkflowAvailability runtime={runtime} {...(runtimeReceipt ? { receipt: runtimeReceipt } : {})} />
+      </PanelBoundary>
       <GitRepositoryPanel job={job} capabilities={runtime.capabilities} basePath={basePath} session={session} />
       <a href={appPath(basePath, '/runtime')}>{copy.viewReportedWorkflowAvailability}</a>
       <JobOrganization job={job} client={client} basePath={basePath} session={session}

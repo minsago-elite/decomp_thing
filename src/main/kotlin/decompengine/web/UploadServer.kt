@@ -290,7 +290,16 @@ class UploadServer(
     internal val audit = WebAuditLog(dataDir, prepareStorage = ownership::ensureLockFile)
     private val auditRecorder = WebAuditRecorder(access, audit)
     private val legacySessions = WebSessionController(access)
-    internal val streamResources = WebStreamResources()
+    // A stream that outlives stop's bounded wait releases store ownership when it finally ends.
+    // Before stop has finished its own shutdown sequence, stop alone decides when ownership is released.
+    private val stopSequenceFinished = java.util.concurrent.atomic.AtomicBoolean(false)
+    internal val streamResources = WebStreamResources(onDrained = {
+        try {
+            if (stopSequenceFinished.get()) releaseOwnershipIfIdle()
+        } catch (_: Exception) {
+            System.err.println("Event stream cleanup did not release store ownership; recovery is required")
+        }
+    })
     private val harnessReadiness = WebHarnessReadinessProjector()
     private val agentPreflight = WebAgentPreflight(configurationIdentity = {
         (authenticationInspector as? WebObservedAuthenticationInspector)?.configurationIdentity()
@@ -345,6 +354,10 @@ class UploadServer(
     private val requestsDrained = java.util.concurrent.CountDownLatch(1)
     private val stopRequested = java.util.concurrent.atomic.AtomicBoolean(false)
     val serverPort: Int get() = server.address.port
+
+    /** Approximate admission occupancy; test evidence helper for overload and release qualification. */
+    internal data class AdmissionSnapshot(val workers: Int, val queued: Int, val responders: Int)
+    internal fun admissionSnapshot() = AdmissionSnapshot(requestExecutor.activeCount, requestExecutor.queue.size, overloadResponders.activeCount)
     val browserOrigin: String = devFrontendOrigin ?: webOrigin(host, serverPort)
 
     /** The CLI calls this explicitly; no HTTP route can issue a local link. */
@@ -581,6 +594,7 @@ class UploadServer(
                 try { requestsDrained.await(remaining, TimeUnit.NANOSECONDS) }
                 catch (_: InterruptedException) { restoreInterrupt = true }
             }
+            stopSequenceFinished.set(true)
             if (!releaseOwnershipIfIdle()) throw IllegalStateException("HTTP requests remain active after server stop")
         } finally {
             if (restoreInterrupt) Thread.currentThread().interrupt()

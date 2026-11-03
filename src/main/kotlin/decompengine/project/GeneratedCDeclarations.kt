@@ -286,10 +286,287 @@ internal class GeneratedCDeclarationContextCache {
     }
 }
 
-private fun splitCTypeSource(source: String, separator: String): List<String> {
+/**
+ * Select whole recovered declarations by their named dependencies. Names inside comments and
+ * literals are not evidence. Tag names use C's separate namespace; ordinary names are a
+ * conservative lexical dependency because recovered bodies need not be parseable C yet.
+ * A recovered record can contain several declarations and remains an indivisible evidence unit.
+ */
+internal fun selectRequiredGeneratedCTypes(types: List<RecoveredType>, evidence: List<String>): List<RecoveredType> {
+    data class Export(val type: RecoveredType, val signature: List<String>, val definition: Boolean)
+    val identifier = Regex("[A-Za-z_][A-Za-z0-9_]*")
+    val aggregateKeywords = setOf("struct", "union", "enum")
+    val exports = linkedMapOf<String, MutableList<Export>>()
+    val references = linkedMapOf<String, Set<String>>()
+    var characters = 0L
+    var exportCount = 0
+
+    fun names(tokens: List<CToken>): Set<String> = buildSet {
+        tokens.forEachIndexed { index, token ->
+            if (token.text.matches(identifier) && token.text !in aggregateKeywords) {
+                add(if (tokens.getOrNull(index - 1)?.text in aggregateKeywords) "tag:${token.text}" else "name:${token.text}")
+            }
+        }
+    }
+
+    fun export(key: String, type: RecoveredType, signature: List<String>, definition: Boolean = true) {
+        require(++exportCount <= 131_072) { "recovered type dependency inventory exceeds its bound" }
+        exports.getOrPut(key) { mutableListOf() } += Export(type, signature, definition)
+    }
+
+    for (type in types.sortedBy { it.id }) declarationFor(type.id) {
+        characters += type.declaration.length.toLong()
+        require(type.declaration.length <= 1024 * 1024 && characters <= 64L * 1024 * 1024) {
+            "recovered type dependency context exceeds its source bounds"
+        }
+        require(generatedCAttributionPreprocessorIssue(type.declaration, allowIncludes = false) == null) {
+            "preprocessor-dependent type declarations cannot establish dependencies"
+        }
+        val tokens = cDeclarationTokens(type.declaration)
+        require(tokens.none { it.text == "#" }) { "preprocessor-dependent type declarations cannot establish dependencies" }
+        references[type.id] = names(tokens)
+        for (statement in splitCTypeSource(type.declaration, ";")) {
+            val statementTokens = cDeclarationTokens(statement)
+            val scope = cTypeDeclarationScope(statement)
+            scope.introductions.forEach { (kind, tag) ->
+                export("tag:$tag", type, listOf(kind, tag), definition = false)
+            }
+            if (statementTokens.any { it.text == "typedef" }) {
+                val parsingView = aliasParsingSourceView(statement)
+                val parts = splitCTypeSourceParts(parsingView.source, ",")
+                val first = CDeclarationParser(parts.first().source).parse()
+                // Preserve previously admitted bodyless enum typedef introductions. The
+                // strict compiler, not this additional scope inventory, owns their validity.
+                if (parsingView.source == statement) first.specifiers.zipWithNext().firstOrNull { (kind, tag) ->
+                    kind == "enum" && tag.matches(identifier)
+                }?.let { (kind, tag) -> export("tag:$tag", type, listOf(kind, tag), definition = false) }
+                val prefix = first.source.substring(0, first.declaratorOffset)
+                val originalPrefix = statement.substring(0, parsingView.originalOffset(first.declaratorOffset))
+                for ((index, part) in parts.withIndex()) {
+                    val declaration = if (index == 0) first else CDeclarationParser(prefix + part.source).parse()
+                    val name = requireNotNull(declaration.name) { "typedef has no alias name" }.text
+                    // Identity belongs to this alias, not its sibling declarators. Restore
+                    // original aggregate bodies rather than comparing synthetic parsing tags.
+                    // Selection still retains the entire recovered record as evidence.
+                    val originalPart = statement.substring(parsingView.originalOffset(part.start),
+                        parsingView.originalOffset(part.start + part.source.length))
+                    val aliasSource = if (index == 0) originalPart else originalPrefix + originalPart
+                    export("name:$name", type, cDeclarationTokens(aliasSource).map { it.text })
+                }
+            }
+            statementTokens.forEachIndexed { index, token ->
+                if (token.text !in aggregateKeywords) return@forEachIndexed
+                if (scope.isPrototypeOffset(token.start)) return@forEachIndexed
+                val tag = statementTokens.getOrNull(index + 1)?.takeIf { it.text.matches(identifier) }
+                val body = index + if (tag == null) 1 else 2
+                if (statementTokens.getOrNull(body)?.text == "{") {
+                    val end = matchingCTypeBody(statementTokens, body)
+                    val signature = statementTokens.subList(index, end + 1).map { it.text }
+                    if (tag != null) export("tag:${tag.text}", type, signature)
+                    if (token.text == "enum") {
+                        val bodyText = statement.substring(statementTokens[body].end, statementTokens[end].start)
+                        for (entry in splitCTypeSource(bodyText, ",")) {
+                            val enumerator = cDeclarationTokens(entry).firstOrNull()
+                            require(enumerator?.text?.matches(identifier) == true) { "enum member lacks an identifier" }
+                            export("name:${enumerator!!.text}", type, signature)
+                        }
+                    }
+                } else if (tag != null && index == 0 && body == statementTokens.size && token.text == "enum") {
+                    export("tag:${tag.text}", type, statementTokens.map { it.text }, definition = false)
+                }
+            }
+        }
+    }
+
+    val pending = ArrayDeque<String>()
+    var evidenceCharacters = 0L
+    evidence.forEach { source ->
+        evidenceCharacters += source.length.toLong()
+        require(evidenceCharacters <= 64L * 1024 * 1024) { "recovered type dependency evidence exceeds its source bound" }
+        names(cDeclarationTokens(source)).sorted().forEach(pending::addLast)
+    }
+    val visited = hashSetOf<String>()
+    val selected = linkedMapOf<String, RecoveredType>()
+    while (pending.isNotEmpty()) {
+        val name = pending.removeFirst()
+        if (!visited.add(name)) continue
+        val candidates = exports[name].orEmpty()
+        if (candidates.isEmpty()) continue // Built-in, standard-header, or unrecovered names remain explicit source evidence.
+        val definitions = candidates.filter { it.definition }.ifEmpty { candidates }
+        require(definitions.map { it.signature }.distinct().size == 1) {
+            "ambiguous recovered type dependency $name in ${definitions.map { it.type.id }.distinct().sorted()}"
+        }
+        val chosen = definitions.minBy { it.type.id }
+        val preceding = candidates.asSequence()
+            .filter { !it.definition && it.type.id < chosen.type.id &&
+                it.signature == chosen.signature.take(2) }
+            .minByOrNull { it.type.id }
+        for (required in listOfNotNull(preceding, chosen)) {
+            val type = required.type
+            if (selected.putIfAbsent(type.id, type) == null) references.getValue(type.id).sorted().forEach(pending::addLast)
+        }
+    }
+    return selected.values.sortedBy { it.id }
+}
+
+/** Aggregate members inherit file scope; function parameter lists do not. */
+private data class CTypeDeclarationScope(
+    val introductions: List<Pair<String, String>>,
+    val prototypeRanges: List<IntRange>,
+) {
+    fun isPrototypeOffset(offset: Int): Boolean {
+        var low = 0
+        var high = prototypeRanges.size
+        while (low < high) {
+            val middle = (low + high) ushr 1
+            if (prototypeRanges[middle].first <= offset) low = middle + 1 else high = middle
+        }
+        return low > 0 && offset <= prototypeRanges[low - 1].last
+    }
+}
+
+private fun cTypeDeclarationScope(source: String): CTypeDeclarationScope {
+    val introductions = linkedSetOf<Pair<String, String>>()
+    val prototypes = java.util.TreeMap<Int, Int>()
+    val identifier = Regex("[A-Za-z_][A-Za-z0-9_]*")
+
+    fun inPrototype(offset: Int): Boolean = prototypes.floorEntry(offset)?.value?.let { offset < it } == true
+    fun addPrototype(start: Int, end: Int) {
+        if (prototypes.floorEntry(start)?.value?.let { it >= end } == true) return
+        require(prototypes.floorEntry(start)?.value?.let { it > start } != true) { "overlapping type prototype scopes" }
+        while (prototypes.ceilingEntry(start)?.key?.let { it < end } == true) {
+            val nested = prototypes.ceilingEntry(start)
+            require(nested.value <= end) { "overlapping type prototype scopes" }
+            prototypes.remove(nested.key)
+        }
+        prototypes[start] = end
+    }
+
+    fun functionRanges(declaration: CDeclaration, offset: Int = 0): List<IntRange> = buildList {
+        declaration.derived.filterIsInstance<CDerived.Function>().forEach {
+            add(offset + it.start until offset + it.end)
+        }
+        declaration.atomicType?.let { atomic ->
+            val tokens = cDeclarationTokens(declaration.source)
+            val start = tokens.indices.first { index ->
+                tokens[index].start < declaration.declaratorOffset && tokens[index].text == "_Atomic" &&
+                    tokens.getOrNull(index + 1)?.text == "("
+            }
+            addAll(functionRanges(atomic, offset + tokens[start + 1].end))
+        }
+    }
+
+    fun visit(declaration: String, originalStart: Int, depth: Int) {
+        require(depth <= 64) { "recovered type aggregate nesting exceeds 64" }
+        val tokens = cDeclarationTokens(declaration)
+        if (tokens.none { it.text in setOf("struct", "union", "enum") }) return
+        val view = aliasParsingSourceView(declaration, omitAlignmentSpecifiers = true)
+        val parts = splitCTypeSourceParts(view.source, ",")
+        // Non-typedef recovered records were never required to fit the declarator parser.
+        // Keep their existing export handling when this additional analysis is unavailable.
+        val parsed = if (parts.isEmpty()) null else try {
+            val first = CDeclarationParser(cTypeBeforeInitializer(parts.first().source)).parse(allowAbstract = true)
+            val prefix = first.source.substring(0, first.declaratorOffset)
+            val declarations = listOf(first to { offset: Int -> offset }) + parts.drop(1).map { part ->
+                CDeclarationParser(prefix + cTypeBeforeInitializer(part.source)).parse(allowAbstract = true) to
+                    { offset: Int -> if (offset < prefix.length) offset else part.start + offset - prefix.length }
+            }
+            first to declarations
+        } catch (_: IllegalArgumentException) {
+            null
+        } catch (_: IllegalStateException) {
+            null
+        }
+        parsed?.second?.forEach { (item, offset) ->
+            functionRanges(item).forEach { range ->
+                addPrototype(originalStart + view.originalOffset(offset(range.first)),
+                    originalStart + view.originalOffset(offset(range.last + 1)))
+            }
+        }
+        // A member's leading type specifiers have the surrounding scope even when its
+        // declarator uses an extension that the optional parser above does not support.
+        // Do not walk arbitrary parentheses or bodies after the declarator has started.
+        var index = 0
+        var hasType = false
+        while (index < tokens.size) {
+            val token = tokens[index]
+            when {
+                token.text in setOf("_Alignas", "_Atomic") && tokens.getOrNull(index + 1)?.text == "(" -> {
+                    val end = matchingCToken(tokens, index + 1)
+                    val innerStart = tokens[index + 1].end
+                    val inner = declaration.substring(innerStart, tokens[end].start)
+                    val first = cDeclarationTokens(inner).firstOrNull()?.text
+                    if (token.text == "_Atomic" || first in setOf("struct", "union", "enum", "_Atomic", "const", "volatile",
+                            "restrict", "void", "char", "short", "int", "long", "float", "double", "signed", "unsigned", "_Bool", "_Complex")) {
+                        visit(inner, originalStart + innerStart, depth + 1)
+                    }
+                    if (token.text == "_Atomic") hasType = true
+                    index = end + 1
+                }
+                token.text in setOf("struct", "union", "enum") -> {
+                    val tag = tokens.getOrNull(index + 1)?.takeIf { it.text.matches(identifier) }
+                    val body = index + if (tag == null) 1 else 2
+                    if (tokens.getOrNull(body)?.text == "{") {
+                        val end = matchingCTypeBody(tokens, body)
+                        if (token.text != "enum" && !inPrototype(originalStart + token.start)) {
+                            val memberStart = tokens[body].end
+                            val members = declaration.substring(memberStart, tokens[end].start)
+                            splitCTypeSourceParts(members, ";").forEach { member ->
+                                visit(member.source, originalStart + memberStart + member.start, depth + 1)
+                            }
+                        }
+                        index = end + 1
+                    } else {
+                        if (tag == null) return
+                        if (token.text != "enum" && !inPrototype(originalStart + token.start)) {
+                            introductions += token.text to tag.text
+                        }
+                        index = body
+                    }
+                    hasType = true
+                }
+                token.text in cStorageSpecifiers || token.text in setOf("const", "volatile", "restrict", "_Atomic") -> index++
+                token.text in setOf("void", "char", "short", "int", "long", "float", "double", "signed", "unsigned", "_Bool", "_Complex") -> {
+                    hasType = true
+                    index++
+                }
+                !hasType && token.text.matches(identifier) -> { hasType = true; index++ }
+                else -> break
+            }
+        }
+    }
+    visit(source, 0, 0)
+    return CTypeDeclarationScope(introductions.toList(), prototypes.map { (start, end) -> start until end })
+}
+
+private fun cTypeBeforeInitializer(source: String): String {
+    var depth = 0
+    for (token in cDeclarationTokens(source)) when (token.text) {
+        "(", "[", "{" -> depth++
+        ")", "]", "}" -> depth--
+        "=" -> if (depth == 0) return source.substring(0, token.start)
+    }
+    return source
+}
+
+private fun matchingCTypeBody(tokens: List<CToken>, start: Int): Int {
+    var depth = 0
+    for (index in start until tokens.size) when (tokens[index].text) {
+        "{" -> { require(++depth <= 64) { "recovered type aggregate nesting exceeds 64" } }
+        "}" -> if (--depth == 0) return index
+    }
+    error("unclosed recovered type aggregate")
+}
+
+private data class CTypeSourcePart(val source: String, val start: Int)
+
+private fun splitCTypeSource(source: String, separator: String): List<String> =
+    splitCTypeSourceParts(source, separator).map { it.source }
+
+private fun splitCTypeSourceParts(source: String, separator: String): List<CTypeSourcePart> {
     val tokens = cDeclarationTokens(source)
     val stack = mutableListOf<String>()
-    val parts = mutableListOf<String>()
+    val parts = mutableListOf<CTypeSourcePart>()
     var start = 0
     for (token in tokens) {
         when (token.text) {
@@ -302,22 +579,47 @@ private fun splitCTypeSource(source: String, separator: String): List<String> {
                 require(stack.isNotEmpty() && stack.removeAt(stack.lastIndex) == expected) { "unbalanced type declaration" }
             }
             separator -> if (stack.isEmpty()) {
-                parts += source.substring(start, token.start)
+                parts += CTypeSourcePart(source.substring(start, token.start), start)
                 start = token.end
             }
         }
     }
     require(stack.isEmpty()) { "unclosed type declaration" }
     val tail = source.substring(start)
-    if (cDeclarationTokens(tail).isNotEmpty()) parts += tail
-    return parts.filter { cDeclarationTokens(it).isNotEmpty() }
+    if (cDeclarationTokens(tail).isNotEmpty()) parts += CTypeSourcePart(tail, start)
+    return parts.filter { cDeclarationTokens(it.source).isNotEmpty() }
 }
 
-private fun aliasParsingView(source: String): String {
+private data class CTypeSourceReplacement(val originalEnd: Int, val viewStart: Int, val viewEnd: Int)
+
+private data class CTypeAliasSourceView(val source: String, val replacements: List<CTypeSourceReplacement>) {
+    fun originalOffset(offset: Int): Int {
+        var low = 0
+        var high = replacements.size
+        while (low < high) {
+            val middle = (low + high) ushr 1
+            if (replacements[middle].viewEnd <= offset) low = middle + 1 else high = middle
+        }
+        require(low == replacements.size || offset <= replacements[low].viewStart) {
+            "type scope offset lies inside a replaced aggregate body"
+        }
+        return if (low == 0) offset else offset + replacements[low - 1].originalEnd - replacements[low - 1].viewEnd
+    }
+}
+
+private fun aliasParsingView(source: String): String = aliasParsingSourceView(source).source
+
+private fun aliasParsingSourceView(source: String, omitAlignmentSpecifiers: Boolean = false): CTypeAliasSourceView {
     val tokens = cDeclarationTokens(source)
     val edits = mutableListOf<Triple<Int, Int, String>>()
     var index = 0
     while (index < tokens.size) {
+        if (omitAlignmentSpecifiers && tokens[index].text == "_Alignas" && tokens.getOrNull(index + 1)?.text == "(") {
+            val end = matchingCToken(tokens, index + 1)
+            edits += Triple(tokens[index].start, tokens[end].end, "")
+            index = end + 1
+            continue
+        }
         if (tokens[index].text in setOf("struct", "union", "enum")) {
             val aggregateStart = index
             var body = index + 1
@@ -338,7 +640,19 @@ private fun aliasParsingView(source: String): String {
         }
         index++
     }
-    return edits.asReversed().fold(source) { text, (start, end, replacement) -> text.replaceRange(start, end, replacement) }
+    val replacements = mutableListOf<CTypeSourceReplacement>()
+    val view = buildString {
+        var previous = 0
+        edits.forEach { (start, end, replacement) ->
+            append(source, previous, start)
+            val viewStart = length
+            append(replacement)
+            replacements += CTypeSourceReplacement(end, viewStart, length)
+            previous = end
+        }
+        append(source, previous, source.length)
+    }
+    return CTypeAliasSourceView(view, replacements)
 }
 
 private fun retainedInitializer(raw: String): String {

@@ -54,7 +54,7 @@ class ArchivalReconstructionTest {
                     target.relativePath,
                 )
                 assertEquals(
-                    setOf(AgentOperation.READ_FILE, AgentOperation.WRITE_FILE, AgentOperation.CREATE_FILE),
+                    setOf(AgentOperation.WRITE_FILE, AgentOperation.CREATE_FILE),
                     targetRule.operations,
                 )
                 val expectedReadRoles = mapOf(
@@ -65,9 +65,8 @@ class ArchivalReconstructionTest {
                         ProjectFileRole.PRIVATE_INTERFACE,
                 )
                 val readRules = request.accessPolicy.pathRules.filter { it.path != target }
-                assertEquals(expectedReadRoles.keys, readRules.map { it.path.relativePath }.toSet())
-                assertTrue(readRules.all { it.operations == setOf(AgentOperation.READ_FILE) })
-                assertEquals(setOf(AgentOperation.READ_FILE, AgentOperation.WRITE_FILE, AgentOperation.CREATE_FILE),
+                assertTrue(readRules.isEmpty())
+                assertEquals(setOf(AgentOperation.WRITE_FILE, AgentOperation.CREATE_FILE),
                     request.accessPolicy.allowedOperations)
                 for ((path, role) in expectedReadRoles) {
                     val declaration = profile.layout.declarationForPath(path)
@@ -75,7 +74,7 @@ class ArchivalReconstructionTest {
                     assertTrue(role in declaration.roles, path)
                     assertEquals(ProjectContentKind.UTF8_TEXT, declaration.contentKind, path)
                     assertTrue(
-                        AgentWorkspacePath("project", path).resolve(request.workspaceRoots).readText().isNotBlank(),
+                        request.contextInputs.single { it.id == "recovered-module-evidence" }.content.contains("--- $path ---"),
                         path,
                     )
                 }
@@ -145,18 +144,11 @@ class ArchivalReconstructionTest {
                         analyzer, BoundedLlmModuleReconstructor(alternateHarness), profile = alternate,
                     ).reconstruct(binary, alternateOutput)
                 }
-                assertTrue(alternateFailure.message.orEmpty().contains("agent-generated module is not accepted"))
+                assertTrue(alternateFailure.message.orEmpty().contains("not declared viewable"))
                 assertEquals(0, alternateCalls)
                 val alternateProject = alternateOutput.resolve("source-tree")
-                assertTrue(alternateProject.resolve("build/reconstructed").exists())
-                assertEquals("0", Json.parseToJsonElement(alternateProject.resolve("reports/build_contract.json").readText())
-                    .jsonObject.getValue("returnCode").jsonPrimitive.content)
-                assertEquals(listOf("fn_1000"),
-                    SourceTreeManifestReader.read(alternateProject, alternate).unresolvedImplementationIds)
-                val alternateAuditFailure = assertFailsWith<IllegalArgumentException> {
-                    ArchivalProjectAuditor.audit(alternateProject, alternate)
-                }
-                assertTrue(alternateAuditFailure.message.orEmpty().contains("agent-generated module is not accepted"))
+                assertFalse(alternateProject.resolve("build/reconstructed").exists())
+                assertFalse(alternateProject.resolve("source_tree_manifest.json").exists())
                 assertFalse(alternateProject.resolve("reports/archival_audit.json").exists())
                 assertFalse(alternateOutput.resolve("source-tree.zip").exists())
             }

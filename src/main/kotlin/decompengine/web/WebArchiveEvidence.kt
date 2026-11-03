@@ -4,7 +4,9 @@ import decompengine.acp.AcpRuntimeClosureLimits
 import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.acp.LinuxFileIdentity
 import decompengine.acp.deletePrivateTreeContents
+import decompengine.jobs.ArtifactChangedException
 import decompengine.jobs.JobStore
+import decompengine.jobs.JobStoreException
 import decompengine.oracle.core.OracleJson
 import decompengine.project.ArchivalBundleLimits
 import decompengine.project.ArchivalBundleVerifier
@@ -86,7 +88,7 @@ internal class WebArchiveEvidence(private val store: JobStore, private val sourc
             require(current.getValue("source_tree_manifest.json").sha256 == sourceSnapshot.manifestSha256) {
                 "archive manifest differs from the checked source manifest"
             }
-            val contractSnapshot = readArtifact(jobId, "$reportPrefix/source-tree/${layout.contractPath}", MAXIMUM_FILE_BYTES)
+            val contractSnapshot = revalidate { readArtifact(jobId, "$reportPrefix/source-tree/${layout.contractPath}", MAXIMUM_FILE_BYTES) }
             requireSame(current.getValue(layout.contractPath), contractSnapshot)
             val parsedContract = OracleJson.parse(contractSnapshot.bytes).jsonObject
             val contract = buildPolicy.parseContract(parsedContract, source.profile)
@@ -98,15 +100,21 @@ internal class WebArchiveEvidence(private val store: JobStore, private val sourc
                 ) { "archive build contract differs from the current rebuilt executable" }
                 identity(snapshot)
             }
-            // A second complete receipt pass must observe the identical snapshot; otherwise this is a conflict.
-            if (store.sourceArchiveReceipts(jobId, transport, reportPrefix, MAXIMUM_FILE_BYTES, MAXIMUM_BYTES) != receipts) {
-                throw decompengine.jobs.ArtifactChangedException("archive source tree changed during verification")
+            // The first pass already admitted this tree. Unavailability or an inventory/budget
+            // refusal on revalidation is a concurrent change, not an initially missing artifact.
+            val revalidated = revalidate {
+                store.sourceArchiveReceipts(jobId, transport, reportPrefix, MAXIMUM_FILE_BYTES, MAXIMUM_BYTES)
             }
-            require(inventory == store.sourceArchiveInventory(jobId, transport, reportPrefix)) { "archive source inventory changed during verification" }
-            require(sourceSnapshot.manifestSha256 == sources.read(jobId, reportPrefix).manifestSha256) { "archive source revision changed during verification" }
-            requireSame(executable, readArtifact(jobId, "$reportPrefix/source-tree/${layout.artifactPath}", MAXIMUM_BYTES))
-            requireSame(input, store.readInput(jobId))
-            requireSame(identity(archive), readArtifact(jobId, "$reportPrefix/source-tree.zip", MAXIMUM_BYTES))
+            if (revalidated != receipts) {
+                throw ArtifactChangedException("archive source tree changed during verification")
+            }
+            val manifest = revalidate { sources.read(jobId, reportPrefix) }
+            if (sourceSnapshot.manifestSha256 != manifest.manifestSha256 || source.manifestDocument != manifest.manifestDocument) {
+                throw ArtifactChangedException("archive source revision changed during verification")
+            }
+            requireSame(executable, revalidate { readArtifact(jobId, "$reportPrefix/source-tree/${layout.artifactPath}", MAXIMUM_BYTES) })
+            requireSame(input, revalidate { store.readInput(jobId) })
+            requireSame(identity(archive), revalidate { readArtifact(jobId, "$reportPrefix/source-tree.zip", MAXIMUM_BYTES) })
             return WebArchiveSnapshot(archive.bytes, archive.sha256, source.view.copy(archiveSha256 = archive.sha256), source.manifestDocument,
                 contractSnapshot.sha256, sourceSnapshot.manifestSha256)
         } finally {
@@ -119,8 +127,22 @@ internal class WebArchiveEvidence(private val store: JobStore, private val sourc
 
     private fun identity(snapshot: StableRegularFile): ReadIdentity = ReadIdentity(snapshot.sha256, snapshot.identity)
 
+    /** Only for objects already admitted above; initial missing/invalid input retains its refusal. */
+    private inline fun <T> revalidate(read: () -> T): T = try {
+        read()
+    } catch (failure: ArtifactChangedException) {
+        throw failure
+    } catch (_: JobStoreException) {
+        throw ArtifactChangedException("archive input changed during verification")
+    } catch (_: IllegalArgumentException) {
+        // Includes budget growth and a manifest/source validation that no longer matches admission.
+        throw ArtifactChangedException("archive input changed during verification")
+    }
+
     private fun requireSame(expected: ReadIdentity, current: StableRegularFile) {
-        require(expected.sha256 == current.sha256 && expected.identity == current.identity) { "archive input changed during verification" }
+        if (expected.sha256 != current.sha256 || expected.identity != current.identity) {
+            throw ArtifactChangedException("archive input changed during verification")
+        }
     }
 
     companion object {

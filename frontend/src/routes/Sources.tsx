@@ -9,8 +9,8 @@ import type { SourceSelection, SourceSnapshotPin } from '../app/paths';
 import { usePrivateTransport } from '../session/PrivateTransport';
 import { useSession } from '../session/useSession';
 import type { BrowserSession, RuntimeSnapshot } from '../session/session';
-import { formatExactBytes } from '../jobs/metadataFormat';
-import { beginSourceRead, bindDirectory, bindFile, currentSourceRead, directoryReadRoute, pinSourceEntry, sourceCursor, sourceEntryCurrent, sourceFilePolicy, sourceReadMessage, sourceSnapshotSelection } from '../sources/navigation';
+import { formatExactBytes } from '../copy/format';
+import { beginSourceRead, bindDirectory, bindFile, currentSourceRead, directoryReadRoute, pinSourceEntry, sourceCursor, sourceDownloadName, sourceEntryCurrent, sourceFilePolicy, sourceReadMessage, sourceSnapshotSelection } from '../sources/navigation';
 import type { DirectorySelection, FileSelection, SourceHistoryEntry, SourceReadState, SourceSnapshot } from '../sources/navigation';
 import { SourcePreview } from '../sources/SourcePreview';
 import { SourceDigestCheck } from '../sources/SourceDigestCheck';
@@ -30,6 +30,8 @@ import { acceptReceipt, receiptOf } from '../shared/receiptTime';
 import { MetadataReceipt } from '../shared/MetadataReceipt';
 import { isDeletedJob } from '../shared/retainMetadata';
 import { onLibraryChange } from '../jobs/libraryChannel';
+import { PanelBoundary } from '../shared/PanelBoundary';
+import { panelBoundaryCopy } from '../copy/shell';
 
 function DeletedSource({ failure, basePath }: { failure: unknown; basePath: string }) {
   return <div class="notice" role="alert"><p>{sourceReadMessage(failure)}</p>
@@ -223,12 +225,12 @@ function File({ selected, basePath, runtime, search, pin, historyEntry }: { sele
       <p>{data.item.declaredUtf8Text ? copy.declaredText : copy.declaredBinary}</p>
       <p>{previewNotice[policy.preview]}</p>
       {policy.preview === 'available' && ((previewOpened !== null && previewOpened.sourceSha256 === data.sourceSha256 && previewOpened.metadataVersion === data.metadataVersion) || search !== ''
-        ? <SourcePreview key={data.metadataVersion} selected={selected} metadata={data} basePath={basePath}
-            maximumChunkBytes={runtime.limits.maxSourceChunkBytes} search={search} {...(effectivePin ? { snapshotPin: effectivePin } : {})} />
+        ? <PanelBoundary name={panelBoundaryCopy.names.sourcePreview}><SourcePreview key={data.metadataVersion} selected={selected} metadata={data} basePath={basePath}
+            maximumChunkBytes={runtime.limits.maxSourceChunkBytes} search={search} {...(effectivePin ? { snapshotPin: effectivePin } : {})} /></PanelBoundary>
         : <button type="button" onClick={() => setPreviewOpened({ sourceSha256: data.sourceSha256, metadataVersion: data.metadataVersion })}>{copy.openPreview}</button>)}
-      {policy.download && <SourceDigestCheck key={`${key}/${data.metadataVersion}/${data.sourceSha256}/${data.item.sha256}/${data.item.sizeBytes}`} metadata={data} basePath={basePath} />}
+      {policy.download && <PanelBoundary name={panelBoundaryCopy.names.digestCheck}><SourceDigestCheck key={`${key}/${data.metadataVersion}/${data.sourceSha256}/${data.item.sha256}/${data.item.sizeBytes}`} metadata={data} basePath={basePath} /></PanelBoundary>}
       {policy.download
-        ? <a href={apiPath(basePath, sourceDownloadRoute(selected, selected.fileId, data.metadataVersion))} download="">{copy.download}</a>
+        ? <a href={apiPath(basePath, sourceDownloadRoute(selected, selected.fileId, data.metadataVersion))} download={sourceDownloadName(data.item.displayName)}>{copy.download}</a>
         : <p>{policy.downloadNotice === 'too-large' ? copy.tooLarge : copy.notArchivable}</p>}
     </>}
   </>;

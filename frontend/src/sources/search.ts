@@ -116,7 +116,7 @@ export function sourceSearchResultPath(basePath: string, selected: SourceSelecti
     { sourceSha256: data.sourceSha256, metadataVersion: data.metadataVersion });
 }
 
-/** Files in scope that this page did not search, by explicit reason; zero means no known coverage gap. */
+/** Files in scope not searched across all pages so far, by reason; zero means no known coverage gap. */
 export function sourceSearchSkipped(data: SourceSearch): { reason: 'notViewable' | 'declaredBinary' | 'tooLarge' | 'unsearchableText' | 'unavailableFiles'; count: number }[] {
   const counts = { notViewable: data.scope.notViewable, declaredBinary: data.scope.declaredBinary, tooLarge: data.scope.tooLarge,
     // Read gaps are cumulative across continued pages, so a final page cannot hide an earlier gap.

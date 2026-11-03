@@ -229,6 +229,12 @@ internal class WebRevisionSourceSearch(
                         stop = Stop("result-limit", fileIndex, bytePosition); position--; break@files
                     }
                     items += item; itemBytes += size
+                    // find's candidate counter restarts after a match. Check between calls too,
+                    // continuing after this emitted match so even dense results make progress.
+                    if (expired()) {
+                        val offset = bytePosition + utf8Length(content, charPosition, end)
+                        stop = Stop("deadline", fileIndex, offset); position--; break@files
+                    }
                 }
                 bytesSinceCheck += lineEnd + 1 - lineStart
                 lineStart = lineEnd + 1; line++

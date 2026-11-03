@@ -250,10 +250,12 @@ class WebRevisionSourceSearchTest {
         assertEquals(truth(body.toByteArray(), "Needle").map { it.toString() }, found.map { string(it, "offsetBytes") })
     }
 
-    @Test fun `repetitive maximum width queries stop inside the matcher and continuations make progress`() {
+    @Test fun `repetitive maximum width queries stop inside the matcher and UTF-8 continuations advance`() {
         for (sensitive in listOf(true, false)) {
             val needle = "a".repeat(127) + "b"
-            val body = "😀" + "a".repeat(4096) + needle + "😀" + "a".repeat(4096) + needle
+            val body = "😀" + "a".repeat(128 * 1024) + needle + "😀" + "a".repeat(128 * 1024 - 264) + needle
+            val bytes = body.toByteArray()
+            assertEquals(256 * 1024, bytes.size)
             val entries = listOf(entry("repetitive.c", body))
             var now = 0L
             val engine = WebRevisionSourceSearch(harness(entries)::source,
@@ -267,11 +269,11 @@ class WebRevisionSourceSearchTest {
                 cursor(page)?.let {
                     val offset = it.split('_')[2].toInt()
                     assertTrue(offset > previous, "a continuation must advance within the same long line")
-                    assertTrue((body.toByteArray()[offset].toInt() and 0xc0) != 0x80, "UTF-8 boundary")
+                    assertTrue((bytes[offset].toInt() and 0xc0) != 0x80, "UTF-8 boundary")
                     previous = offset
                 }
             }
-            assertEquals(truth(body.toByteArray(), needle).map(Int::toString), found.map { string(it, "offsetBytes") })
+            assertEquals(truth(bytes, needle).map(Int::toString), found.map { string(it, "offsetBytes") })
         }
     }
 
@@ -341,16 +343,61 @@ class WebRevisionSourceSearchTest {
         }
     }
 
+    @Test fun `rejected symbol candidates observe the deadline and resume to the whole identifier`() {
+        for (sensitive in listOf(true, false)) {
+            val body = "😀" + "count_".repeat(2048) + " count 😀 count"
+            val bytes = body.toByteArray()
+            var now = 0L
+            val engine = WebRevisionSourceSearch(harness(listOf(entry("symbols.c", body)))::source,
+                nanoTime = { now.also { now += 1_000_000 } }, deadlineNanos = 3_000_000)
+            val query = "q=count&match=symbol&case=${if (sensitive) "sensitive" else "insensitive"}"
+            val first = search(engine, query)
+            assertEquals("deadline", first.getValue("stopReason").jsonPrimitive.content)
+            assertTrue(items(first).isEmpty())
+            var previous = 0
+            val found = all(engine, query) { page ->
+                cursor(page)?.let {
+                    val offset = it.split('_')[2].toInt()
+                    assertTrue(offset > previous)
+                    assertTrue((bytes[offset].toInt() and 0xc0) != 0x80)
+                    previous = offset
+                }
+            }
+            val expected = truth(bytes, " count").map { (it + 1).toString() }
+            assertEquals(expected, found.map { string(it, "offsetBytes") })
+        }
+    }
+
+    @Test fun `deadline checks between short successful matcher calls preserve nonoverlapping results`() {
+        val body = "😀" + "aa ".repeat(80)
+        var now = 0L
+        val engine = WebRevisionSourceSearch(harness(listOf(entry("dense.c", body)))::source,
+            nanoTime = { now.also { now += 1_000_000 } }, deadlineNanos = 3_000_000)
+        val first = search(engine, "q=aa&limit=100")
+        assertEquals("deadline", first.getValue("stopReason").jsonPrimitive.content)
+        assertTrue(items(first).size in 1 until 80)
+        val found = all(engine, "q=aa&limit=100")
+        assertEquals(truth(body.toByteArray(), "aa").map(Int::toString), found.map { string(it, "offsetBytes") })
+    }
+
     @Test fun `interruption is observed inside matching without clearing the thread flag`() {
-        val state = harness(listOf(entry("long.c", "a".repeat(4096))))
+        val body = "😀" + "a".repeat(4096) + "b"
+        val state = harness(listOf(entry("long.c", body)))
         val engine = WebRevisionSourceSearch(state::source)
-        try {
+        val query = "q=${"a".repeat(127)}b&case=insensitive"
+        val page = try {
             Thread.currentThread().interrupt()
-            val page = search(engine, "q=${"a".repeat(127)}b&case=insensitive")
-            assertEquals("deadline", page.getValue("stopReason").jsonPrimitive.content)
-            assertNotNull(cursor(page))
-            assertTrue(Thread.currentThread().isInterrupted)
+            search(engine, query).also {
+                assertEquals("deadline", it.getValue("stopReason").jsonPrimitive.content)
+                assertNotNull(cursor(it))
+                assertTrue(cursor(it)!!.split('_')[2].toInt() > 0)
+                assertTrue(Thread.currentThread().isInterrupted)
+            }
         } finally { Thread.interrupted() }
+        val continued = search(engine, "$query&cursor=${cursor(page)}")
+        assertEquals("complete", continued.getValue("status").jsonPrimitive.content)
+        assertEquals(truth(body.toByteArray(), "a".repeat(127) + "b").map(Int::toString),
+            items(continued).map { string(it, "offsetBytes") })
     }
 
     @Test fun `coverage gaps from earlier pages are carried by signed continuations`() {

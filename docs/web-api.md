@@ -155,8 +155,8 @@ internal storage optimization and must not merge identity, permissions or histor
 | `GET J/runs`, `GET R` | `200 runs`, `200 run` | Bounded attempts or durable attempt snapshot; #160 |
 | `GET R/progress-pin` | `200 progressPin`, strong run ETag | Current per-attempt journal pin; #172 |
 | `PUT R/progress-pin` | `200 progressPin`, original result on keyed replay | Strict `progressPinRequest`, session/Origin/CSRF, run If-Match and idempotency; #172/#177 |
-| `GET /agent/preflight` | `200 agentPreflight` | Last explicit agent inspection result; never starts the agent; #493 |
-| `POST /agent/preflight` | `202 agentPreflight`, `409` while one runs | Strict `agentPreflightRequest` (`{"action":"inspect"}`), session/Origin/CSRF; starts one single-flight `preflight(WEB)`; #493 |
+| `GET /api/v1/agent/preflight` | `200 agentPreflight` | Last explicit agent inspection result; never starts the agent; #493 |
+| `POST /api/v1/agent/preflight` | `202 agentPreflight`, `409` while one runs | Strict `agentPreflightRequest` (`{"action":"inspect"}`), session/Origin/CSRF; starts one single-flight `preflight(WEB)`; #493 |
 | `POST J/runs` | `202 run`, `Location: R` | `workflowStart` request, explicit option, server-approved limits, input policy and fresh readiness checks, job If-Match; #163/#478 |
 | `POST R/cancel` | `202 run` or `200 run` if already terminal | Closed `workflowCancel` request, idempotent recorded intent, run If-Match; #163 |
 | `POST R/recover` | `202 run`, `Location` of a new attempt | Closed `recover` request; explicit `retry` or capability-gated `resume`; run If-Match and idempotency; #486 |
@@ -170,6 +170,7 @@ internal storage optimization and must not merge identity, permissions or histor
 | `GET R/reports/{reportId}` | `200 report` | State may be missing/partial/unsupported/unknown; #165 |
 | `GET R/source-catalog` | `200 sourceCatalog` | Bounded flat manifest metadata; selected durable job/run; #490 |
 | `GET`, `HEAD R/reports/revision-validation` | `200 report` | Explicit graph and evidence-owner selection; checked normal summary and bounded case pages; #489, #543 |
+| `GET`, `HEAD R/validation-history` | `200 validationHistory` | Bounded finalized-attempt, baseline and failed-operation history windows; see validation history discovery |
 | `GET`, `HEAD R/revisions/{revisionId}/sources` | `200 revisionSources` | Bounded canonical input commitments for the selected persisted candidate; #490 |
 | `GET`, `HEAD R/revisions/{revisionId}/source-directories/{directoryId}` | `200 revisionDirectory` | Lazy immediate children of canonical input prefixes; use `root` for the first directory; #188 |
 | `GET`, `HEAD R/revisions/{revisionId}/source-files/{fileId}` | `200 revisionFile` | Recorded file metadata and opaque parent directory, without requesting its body; #188 |
@@ -215,6 +216,26 @@ job filters are bounded display-name search (256 characters), exact known status
 `all` or `only`. The search also matches a job's display label. Cursors cannot be reused across
 resources, revisions or filters. Counts are optional and explicitly exact/estimated/unknown;
 absence of a total never prevents page navigation.
+
+### Route matrix qualification
+
+`WebRouteMatrixTest` parses the table above and probes every documented method and route through
+the real SPA listener. Foreign `Origin`, cross-site `Sec-Fetch-Site` and forwarding headers are
+refused before route selection; private routes require a session and mutations the exact Origin,
+JSON or multipart media type and CSRF token. A `405` lists every live method of the resource in
+`Allow`, HEAD matches its GET status without a body, and wrong `Accept`, unknown queries and
+out-of-range page limits are typed refusals. Every JSON body, including each error, validates
+against `contract.schema.json`, and the route's success kind must be one the row names. Contract
+request fixtures and malformed bodies are refused without changing stored bytes. A documented row
+without a live matrix entry is reserved and must stay an authenticated `404 NOT_FOUND`; enabling it
+requires adding its live methods and fixture outcome to the matrix. `verify.py` checks that every
+success document named here is a schema kind or one of the reserved collection documents. Each
+documented error status is produced by the matrix or owned by a named suite; `501` and `504` are
+reserved and not emitted by the current producer, whose request deadline closes the exchange.
+
+An exploration report whose file is missing, linked, nonregular, multiply named or over its byte
+bound is an `unknown` report without an artifact descriptor, and its download is `404`. Browser
+readable job artifacts and selected source inputs must have exactly one filesystem name.
 
 ## Errors, deadlines and concurrent mutations
 
@@ -657,6 +678,34 @@ binding, `state`, completeness, provenance limitations and explicit acceptance s
 Missing is a known absent report; unknown means the association/meaning cannot be established.
 Partial means available observations cover less than the declared scope. None implies pass.
 
+Both implemented report adapters (`reports/exploration` and `reports/revision-validation`)
+map the evidence conditions onto these states the same way, and withhold `summary` in every
+state except `available`:
+
+| Evidence condition | `state` | Exploration adapter | Revision-validation adapter |
+| --- | --- | --- | --- |
+| Unavailable: bytes missing, unreadable or changed during the bounded read | `unknown` | no captured report bytes | no normal receipt, or receipt bytes not captured |
+| Incomplete: fewer observations than the declared scope | `partial` | absent producer fields, versioned failure records | missing required scope, diff or identity evidence |
+| Unsupported producer version | `unsupported` | declared `schema`/`schemaVersion` it does not support | unsupported producer schema |
+| Corrupt or inconsistent bytes | `invalid` | malformed JSON, count/array mismatch, non-decimal counts | malformed or inconsistent receipt evidence |
+| Structurally checked observations | `available` | exact counts with `authority: observations` | checked normal receipt and result |
+
+`WebExplorationReportTest`, `WebExplorationPreparationReportTest`,
+`RecordedRepairValidationDiagnosticTest` and `RecordedRepairValidationCasesTest` cover each row.
+
+`available` means the adapter verified the report's structure and bindings, not that the
+reconstruction was accepted: `acceptance` stays `not-evaluated` unless an acceptance artifact
+supplies it.
+
+Sizes, counts and addresses keep their exact values on the wire and in the SPA. Unsigned
+counts and byte sizes are canonical decimal strings, and the SPA prints them unchanged
+(`formatExactBytes` adds only a unit label, never `Number` rounding). ELF entry addresses are
+hexadecimal strings shown as sent. Timestamps keep their original fractional digits and
+offset; the SPA only replaces `T` with a space and a trailing `Z` with ` UTC`. The exploration
+confidence `score` is the one JSON number, a producer ratio in `[0, 1]`, shown as received.
+Each report carries its provenance: the `binding` (job, run, revision), `sourceArtifact`
+digest descriptor, `producerSchemaVersion`, `adapterVersion` and `limitations`.
+
 An exploration confidence score reports observed input/output breadth and active isolation,
 never universal equivalence. A graph root is an initial snapshot, not an accepted repair.
 For graph-backed revision acceptance, canonical accepted nodes, validation evidence, agent receipt binding and source
@@ -774,7 +823,7 @@ of a snapshot is not copied into the work tree, which matches the archive transp
 | --- | --- |
 | Original binaries | `/input.elf`, `*.elf`, `*.bin`, `*.exe`, `*.dll`, `*.so`, `*.so.*`, `*.dylib`, `*.a`, `*.lib`, `*.o`, `*.obj`, `*.out` |
 | Credentials | `.env`, `.env.*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `id_rsa*`, `id_ecdsa*`, `id_ed25519*`, `.netrc`, `.git-credentials`, `.npmrc`, `.pypirc`, `*.token`, `credentials.json` |
-| Job databases and runtime state | `job.json`, `workflow-state.json`, `*.sqlite`, `*.sqlite3`, `*.db`, `*.db-journal`, `*.db-wal`, `.upload-*/`, `.job-metadata-*`, `.git-runtime/` |
+| Job databases and runtime state | `job.json`, `workflow-state.json`, `workflow-state.pending.json`, `*.sqlite`, `*.sqlite-journal`, `*.sqlite-wal`, `*.sqlite-shm`, `*.sqlite3`, `*.sqlite3-journal`, `*.sqlite3-wal`, `*.sqlite3-shm`, `*.db`, `*.db-journal`, `*.db-wal`, `*.db-shm`, `.upload-*/`, `.job-metadata-*`, `.git-runtime/` |
 | Private transcripts | `/transcripts/`, `/sessions/`, `*.transcript`, `*.jsonl`, `*.ndjson` |
 | Native build output | `/build/`, `/out/`, `cmake-build-*/`, `CMakeFiles/`, `CMakeCache.txt`, `cmake_install.cmake`, `build.ninja`, `.ninja_deps`, `.ninja_log`, `compile_commands.json`, `*.d`, `*.gcda`, `*.gcno` |
 | Transient evidence | `/reports/`, `/evidence/`, `*.log`, `*.tmp`, `*.swp`, `/tmp/`, `/.tmp/` |
@@ -798,17 +847,27 @@ is resolved to its real path and probed with `git version`. Versions older than 
 Bootstrap reports `runtime.gitVersion` as the bare numeric version, or `null` when none is
 detected, plus `git` and `git-import` capabilities. `git` is `unavailable` with `GIT_NOT_FOUND`,
 `GIT_VERSION_UNSUPPORTED` or `GIT_PROBE_FAILED`, and `supported` when the managed repository
-routes below are served. Every Git endpoint answers `503 CAPABILITY_UNAVAILABLE` with that reason's message when
-Git is unusable. The executable path never leaves the server.
+routes below are served. The `git-import` capability is unavailable when no operator-configured
+import root is present. Every Git endpoint answers `503 CAPABILITY_UNAVAILABLE` with that reason's message when
+Git is unusable. The executable path never leaves the server. Process containment requires the
+Linux x86-64/aarch64 LP64 runtime and glibc spawn extensions already used by the application;
+if native containment is unavailable, the startup probe fails closed (`GIT_PROBE_FAILED`).
 
-- **Argument safety.** `ProcessBuilder` receives a separate argv; no shell is involved. Callers
+- **Argument safety.** Native `posix_spawn` receives a separate argv; no shell is involved. Callers
   name one allowlisted subcommand and its arguments. Only the runner adds global options
   (`--no-pager`, `--no-replace-objects`, `--literal-pathspecs` except for `check-ignore`, which
   takes plain names, `-c` overrides, `--git-dir`, `--work-tree`). Arguments are bounded and contain no NUL. Branch names pass a local syntax check
   and then `git check-ref-format refs/heads/<name>`, so a value can never be parsed as an option.
 - **Bounds.** Each call has its own wall-clock limit (30 s by default) and stdout/stderr byte
-  limits (1 MiB and 64 KiB). Exceeding either kills the process and its descendants. Stdin is
-  closed. Captured stderr stays server-side; public errors use fixed messages.
+  limits (1 MiB and 64 KiB). A fresh session/process group is established atomically at spawn.
+  The adapter owns reaping and retains the unreaped leader until group cleanup, so descendants
+  cannot become unowned merely by outliving their direct parent. Normal exit, timeout, overflow,
+  truncation and interruption all kill the owned group **before** reaping; even children with
+  closed output pipes are covered. Nonblocking capture uses no reader threads and shares the
+  command deadline; failures get one additional five-second emergency cleanup budget. Stdin is
+  `/dev/null`. Captured stderr stays server-side; public errors use fixed messages. This is
+  control-plane cleanup for a trusted executable, not a hostile-code sandbox: a process deliberately
+  escaping with `setsid`/`setpgid` needs separate cgroup containment. Imported helpers remain refused.
 - **Environment.** The child receives a fresh environment: `PATH` (the executable's directory,
   `/usr/bin`, `/bin`), a server-owned `HOME` and `XDG_CONFIG_HOME`, `GIT_CONFIG_NOSYSTEM=1`,
   `GIT_CONFIG_GLOBAL` pointing to an empty server-owned file, `GIT_ATTR_NOSYSTEM=1`,
@@ -940,8 +999,12 @@ Each operation works in a private staging tree under the job's `git/staging/<ope
 registration record is written inside that tree before one atomic rename publishes it as
 `git/repositories/<repositoryId>`, and an existing name is never replaced. Readers therefore see
 either no repository or a complete one. Nothing is written under `reports/`, so a recorded or
-accepted source snapshot cannot be overwritten. On restart, and before an instance first uses a
-job, non-terminal records are reconciled. A published repository makes its operation
+accepted source snapshot cannot be overwritten. Startup prepares the private Git runtime and
+reconciles retained jobs; explicit mutation admission can also reconcile a job before use.
+GET routes never prepare runtime/storage or retry reconciliation. If startup recovery failed for
+a retained job, reads return `503 STORAGE_UNAVAILABLE` without changing its records or staging;
+only an explicit lifecycle recovery sweep or mutation admission may retry. Non-terminal records
+are reconciled under those authorities. A published repository makes its operation
 `completed`. Otherwise the staging tree is removed and the operation becomes `interrupted` with
 `recoveryRequired: false`. If removal fails, it becomes `recovery-required` and the tree is kept
 for inspection. Reconciliation never repeats work. Replaying the original key reports the
@@ -1064,7 +1127,8 @@ currently expose v1 job routes, so no successor link or sunset date is advertise
 Existing persisted `job.json`
 files stay readable through a versioned, recoverable migration; public response changes do not
 rewrite raw report bytes. Legacy URLs redirect/map per the navigation/parity contract and never
-auto-start a workflow. Unsupported legacy automation dependencies receive a documented migration
+auto-start a workflow; the per-route outcomes, upgrade writes and rollback rules are in
+[legacy migration](web-legacy-migration.md). Unsupported legacy automation dependencies receive a documented migration
 error, not an empty success response.
 
 The optional upload progress transport, state semantics and bounded retention are defined
@@ -1410,9 +1474,12 @@ signed continuations, so a final continued page cannot report complete coverage 
 earlier page skipped a file.
 
 Each page reads at most 32 MiB of bodies (failed reads are charged their committed size; at least one file is always read), stops after
-2,000 ms of elapsed work (checked between files and before every 256 lines or 64 KiB of
-lines, so one line of at most 256 KiB is the largest unit between checks) and returns at most `limit` matches below a 900,000-byte item
-ceiling. `status: "partial"` with `stopReason` `result-limit`, `byte-limit` or
+2,000 ms of elapsed work (checked between files, before every 256 lines or 64 KiB of
+lines, and within matching after at most 256 candidate starts, each comparing at most
+128 code points) and returns at most `limit` matches below a 900,000-byte item ceiling.
+Matcher checks also observe thread interruption without clearing the interrupt flag.
+A deadline continuation resumes at the first untested UTF-8 candidate boundary within
+the line, rather than replaying its already searched prefix. `status: "partial"` with `stopReason` `result-limit`, `byte-limit` or
 `deadline` always has a signed `nextCursor`; `status: "complete"` has neither and
 `remainingFiles` is zero. `remainingFiles` counts searchable files not completely
 checked, including a file the page stopped inside. No total match count is computed.
@@ -1431,8 +1498,10 @@ points of context on each side with explicit truncation flags. There is no persi
 or cached index (`index: "none"`): offsets always come from bytes verified against the
 selected revision's commitments, so a replaced file cannot yield stale offsets. One
 search is admitted at a time (`429 SOURCE_SEARCH_BUSY`), separately from metadata
-capture admission. Client cancellation abandons the response; the server's elapsed
-deadline and byte budget bound the work it can continue after a disconnect.
+capture admission. Client cancellation abandons the response; it does not guarantee
+interruption of the server thread. The server's elapsed deadline and byte budget bound
+the work it can continue after a disconnect; these are cooperative checkpoints, not a
+hard wall-clock timeout on capture or I/O.
 
 The SPA route `jobs/J/runs/R/revisions/V/source-search` keeps the query in its closed
 document URL. Directory pages link to a search scoped to that directory. A search runs
@@ -1926,9 +1995,13 @@ refusal is returned. `JobStore.artifactReceipt` streams one file to a size/diges
 (the digest of the bytes observed now, not a committed digest); `sourceArchiveReceipts` requires two complete bounded
 receipt passes with identical sizes, digests and identities, then revalidates the whole source-tree inventory. This
 also detects persistent in-place writes to files whose first receipt has already completed, not just inode replacement.
-Detected content, publication or deletion changes are conflicts. These are observed receipts, not an atomic filesystem
-snapshot or committed-revision proof. Archive verification consumes these streamed receipts, so the source tree is no
-longer read into memory twice. The v1 exploration report route preserves change conflicts as `409 ARTIFACT_CHANGED`;
+Detected content, publication or deletion changes are conflicts, including growth beyond the per-file or aggregate
+allowance during the second receipt pass; initially oversized input retains its budget refusal. These are observed
+receipts, not an atomic filesystem snapshot or committed-revision proof. Archive verification consumes these streamed
+receipts, so the source tree is no longer read into memory twice. Later rereads of admitted archive inputs (manifest,
+build contract, executable, uploaded input and ZIP) also return `409 ARTIFACT_CHANGED` for unavailability, over-budget
+growth or identity/digest mismatch, rather than treating a detected change as an initial missing/invalid request.
+The v1 exploration report route preserves change conflicts as `409 ARTIFACT_CHANGED`;
 an ordinary missing report still returns the unavailable-report projection.
 The lexical path-returning `WebJobService.resolveArtifact` was removed.
 
@@ -2012,6 +2085,12 @@ and an admitted Git operation is always visible to the next deletion check. A ho
 (`RETENTION_HOLD_UNAVAILABLE`). A refused `DELETE` is `409 RETENTION_PROTECTED` with one error
 `details` entry (pointer `/protections/N`, protection code, recovery message) per reason.
 
+These holds and admission locks cover retention and active-operation coordination only. They
+are not a backup/restore protocol or qualification of managed Git history/worktree recovery.
+The backup participation acceptance criterion in #509 and its parent #172 remains open until
+implementation and backup/restore evidence are supplied; deletion protection alone does not
+complete either issue.
+
 **Deletion (`DELETE J`).** The body repeats the reviewed job identity
 (`{"confirmJobId": "<jobId>"}`; a mismatch is `422`). The key lookup precedes all other checks,
 so an exact replay returns the original operation (`Idempotency-Replayed: true`) even after the
@@ -2037,7 +2116,15 @@ journal read and holds the service monitor only for that read.
 
 The operation record keeps the job identity, a domain-separated session digest, request
 digests, times, outcome and the removed byte/entry counts; it never keeps the filename, label,
-binary facts or contents. Up to 1024 records are retained and a record is evicted only once
+binary facts or contents. Journal schema v2 also persists `removedCountsExact`. Reloaded
+unfinished operations conservatively treat their saved counts as lower bounds: a purge may
+have removed entries before its count update reached disk. Legacy v1 records are also treated
+as lower bounds, including terminal records whose earlier recovery may have lost counts.
+The completed public operation message explicitly says "at least" and "exact totals are
+unknown after interrupted cleanup" in these cases; it never presents recovered zero counters
+as exact totals. Completion and the deletion tombstone remain authoritative even when totals
+are unknown. Uninterrupted v2 completion retains exact accounting across restart.
+Up to 1024 records are retained and a record is evicted only once
 it is older than 24 hours (`tombstoneRetentionMs`). While a record exists, reads of the job and
 its children (`GET J`, runs, reports, progress, the event stream before headers) return
 `410 RESOURCE_GONE`; afterwards they return `404`. There is no undo: `undoAvailable` is always
@@ -2071,7 +2158,9 @@ Verification: `WebJobLifecycleTest` (real HTTP): organization bytes/hashes uncha
 conflict, stale guard, archive filtering; strict body and authorization; read-only job
 directory; active/pinned/download/hold protections and fail-closed holds; deletion with
 escaping symbolic and hard links, tombstone `410`s, replay and audit record contents;
-interrupted purge resumed after restart and a crash between intent and rename; disk-full and
+interrupted purge resumed after restart and a crash between intent and rename; complete and
+partial unrecorded purges with accepted/running records and truthful operation messages;
+disk-full and
 read-only journals; storage categories and a dry run that leaves journal bytes unchanged.
 Frontend: `job-lifecycle.test.tsx` and `job-deletion-reconciliation.test.tsx`. Repository
 workspace holds and packaged-browser deletion journeys remain outstanding.

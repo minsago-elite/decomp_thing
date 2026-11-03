@@ -91,7 +91,8 @@ class WebArtifactContainmentTest {
                     Files.writeString(reports.resolve("a${String(Character.toChars(codePoint))}.txt"), "INVISIBLE_NAME_MARKER")
                     val response = get("reports/a$encoded.txt")
                     assertEquals(400, response.statusCode(), encoded)
-                    assertTrue(response.body().contains("INVALID_REQUEST"))
+                    // Legacy artifact routes answer with an HTML error page carrying the fixed refusal text.
+                    assertTrue(response.body().contains("not a canonical contained name"), response.body())
                     assertFalse(response.body().contains("INVISIBLE_NAME_MARKER"))
                 }
                 val attempts = listOf("reports/link.txt", "reports/linked-dir/secret.txt", "reports/fifo",
@@ -232,6 +233,57 @@ class WebArtifactContainmentTest {
             assertEquals(sha256("B1".toByteArray()), current.files.getValue("b.txt").sha256)
             assertEquals(4, current.totalBytes)
             assertEquals(0, openDescriptorsUnder(root), "conflicted receipts release every descriptor")
+        } finally { root.toFile().deleteRecursively() }
+    }
+
+    @Test fun `growth past file or aggregate budgets during receipt revalidation is a conflict`() {
+        val root = directory("receipt-budget-race")
+        try {
+            val store = JobStore(root)
+            val job = store.createFromUpload("fixture.elf", elfFixture())
+            val tree = Files.createDirectories(root.resolve(job.id).resolve("reports/source-tree"))
+            val first = tree.resolve("a.txt")
+            val second = tree.resolve("b.txt")
+            val layout = ArchiveTransportLayout(emptySet(), emptySet())
+            // Per-file overflow, remaining aggregate allowance, and the exhausted-allowance
+            // accounting check (an initially empty final file grows to one byte).
+            for ((fileLimit, totalLimit, initialSecond, grownFirst, grownSecond) in listOf(
+                listOf(8, 16, 4, 9, 4), listOf(8, 8, 4, 4, 5), listOf(4, 4, 0, 4, 1),
+            )) {
+                fun initial() {
+                    Files.write(first, ByteArray(4))
+                    Files.write(second, ByteArray(initialSecond))
+                }
+                fun grown() {
+                    Files.write(first, ByteArray(grownFirst))
+                    Files.write(second, ByteArray(grownSecond))
+                }
+                grown()
+                assertFailsWith<RepairBudgetExceededException>("initial oversize remains a budget refusal") {
+                    store.sourceArchiveReceipts(job.id, layout,
+                        maximumFileBytes = fileLimit.toLong(), maximumTotalBytes = totalLimit.toLong())
+                }
+                initial()
+                var callbacks = 0
+                store.sourceArchiveReceipts(job.id, layout,
+                    maximumFileBytes = fileLimit.toLong(), maximumTotalBytes = totalLimit.toLong()) { callbacks++ }
+                assertEquals(0, callbacks % 2, "the unchanged passes have matching callback schedules")
+                var calls = 0
+                var changed = false
+                assertFailsWith<ArtifactChangedException> {
+                    store.sourceArchiveReceipts(job.id, layout,
+                        maximumFileBytes = fileLimit.toLong(), maximumTotalBytes = totalLimit.toLong()) {
+                        // Mutate at the second pass's first outer callback, after all first-pass
+                        // descriptors closed. No timing assumptions or callback counts are hardcoded.
+                        if (++calls == callbacks / 2 + 1) {
+                            grown()
+                            changed = true
+                        }
+                    }
+                }
+                assertTrue(changed)
+                assertEquals(0, openDescriptorsUnder(root), "over-budget revalidation closes descriptors")
+            }
         } finally { root.toFile().deleteRecursively() }
     }
 

@@ -128,6 +128,25 @@ class WebAdmissionBoundsTest {
         }
     }
 
+    /** Waits on observed occupancy instead of a fixed delay, so a slow host cannot probe before saturation. */
+    private fun awaitOccupied(server: UploadServer, responders: Int = 0) {
+        val deadline = System.nanoTime() + 20_000_000_000L
+        while (server.admissionSnapshot().let { it.workers < 16 || it.queued < 64 || it.responders < responders } &&
+            System.nanoTime() < deadline) Thread.sleep(10)
+        val observed = server.admissionSnapshot()
+        assertTrue(observed.workers == 16 && observed.queued == 64 && observed.responders >= responders,
+            "pinned requests did not occupy every admission slot: $observed")
+    }
+
+    /** Overload must not strand an admission slot: stop drains, releases ownership and a replacement starts. */
+    private fun assertReleased(server: UploadServer) {
+        val deadline = System.nanoTime() + 20_000_000_000L
+        while (server.admissionSnapshot().let { it.workers + it.queued + it.responders } != 0 && System.nanoTime() < deadline) Thread.sleep(10)
+        assertEquals(UploadServer.AdmissionSnapshot(0, 0, 0), server.admissionSnapshot())
+        server.stop()
+        UploadServer("127.0.0.1", 0, directory.resolve("jobs"), uiMode = WebUiMode.SPA, basePath = "/w/").also { it.start() }.stop()
+    }
+
     @Test
     fun `a saturated server answers with a stable 429 and retry guidance, then recovers when load is released`() {
         val server = server()
@@ -135,6 +154,7 @@ class WebAdmissionBoundsTest {
             val port = server.serverPort
             assertEquals(401, get(port).status, "an idle server answers normally")
             saturate(server)
+            awaitOccupied(server)
             for (attempt in 1..3) {
                 val response = get(port)
                 assertEquals(429, response.status, "attempt $attempt under overload: ${response.failure}")
@@ -151,7 +171,8 @@ class WebAdmissionBoundsTest {
             assertEquals(3L, server.capacity.overloadResponses.get())
             closePinned()
             awaitServing(port)
-        } finally { closePinned(); server.stop() }
+            assertReleased(server)
+        } finally { closePinned(); runCatching { server.stop() } }
     }
 
     @Test
@@ -160,9 +181,11 @@ class WebAdmissionBoundsTest {
         try {
             val port = server.serverPort
             saturate(server)
+            awaitOccupied(server)
             // Two unfinished header blocks overflow to, and occupy, both responder threads.
             repeat(2) { slowHeaders(port) }
             await("both responders occupied") { server.admissionSample().activeResponders == 2 }
+            awaitOccupied(server, responders = 2)
             val results = (1..3).map { get(port, 3_000) }
             for (result in results) {
                 assertTrue(result.status == null && result.failure != null && result.failure != "timeout",
@@ -171,7 +194,8 @@ class WebAdmissionBoundsTest {
             assertTrue(server.capacity.overloadConnectionsClosed.get() >= 3)
             closePinned()
             awaitServing(port)
-        } finally { closePinned(); server.stop() }
+            assertReleased(server)
+        } finally { closePinned(); runCatching { server.stop() } }
     }
 
     @Test

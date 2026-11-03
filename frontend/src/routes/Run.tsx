@@ -1,7 +1,7 @@
 import { runCopy as copy } from '../copy/attempt';
 import { sourceCopy } from '../copy/sources';
 import { message as displayMessage } from '../shared/messages';
-import { formatExactTimestamp } from '../jobs/metadataFormat';
+import { formatExactTimestamp } from '../copy/format';
 import { usePrivateTransport } from '../session/PrivateTransport';
 import { useEffect, useMemo, useState } from 'preact/hooks';
 import { useLocation } from 'preact-iso/router';
@@ -23,10 +23,12 @@ import { useSession } from '../session/useSession';
 import { receive } from '../shared/receiptTime';
 import type { Received } from '../shared/receiptTime';
 import { MetadataReceipt } from '../shared/MetadataReceipt';
+import { PanelBoundary } from '../shared/PanelBoundary';
+import { panelBoundaryCopy } from '../copy/shell';
 import { canRetainMetadata, isDeletedJob, metadataFailureKind } from '../shared/retainMetadata';
+import { onLibraryChange } from '../jobs/libraryChannel';
 import { attemptOutcomeCopy as outcomeCopy, stopOutcomeCopy } from '../copy/attemptOutcome';
 import { QueuePosition } from '../jobs/QueuePosition';
-import { onLibraryChange } from '../jobs/libraryChannel';
 import { registerContractExtension } from '../api/decode';
 import { lazyContractSchema } from '../api/generated-schema-lazy';
 
@@ -87,10 +89,11 @@ function Details({ jobId, runId, basePath, session, view, navigation }: {
         <dt>{copy.created}</dt><dd><time dateTime={run.createdAt} title={run.createdAt}>{formatExactTimestamp(run.createdAt)}</time></dd>
         <dt>{copy.started}</dt><dd>{run.startedAt ? <time dateTime={run.startedAt} title={run.startedAt}>{formatExactTimestamp(run.startedAt)}</time> : copy.notRecorded}</dd>
         <dt>{copy.ended}</dt><dd>{run.endedAt ? <time dateTime={run.endedAt} title={run.endedAt}>{formatExactTimestamp(run.endedAt)}</time> : copy.notRecorded}</dd>
-        <dt>{outcomeCopy.stopReason}</dt><dd>{run.terminalReason ? <>
-          <strong>{stopOutcomeCopy[run.terminalReason].label}</strong>. {stopOutcomeCopy[run.terminalReason].detail}{' '}
-          {displayMessage(outcomeCopy.recordedCode, { code: <code>{run.terminalReason}</code> })}
-        </> : copy.noTerminalReasonRecorded}</dd>
+        <dt>{outcomeCopy.stopReason}</dt><dd>{run.terminalReason ? displayMessage(outcomeCopy.stopDescription, {
+          label: <strong>{stopOutcomeCopy[run.terminalReason].label}</strong>,
+          detail: stopOutcomeCopy[run.terminalReason].detail,
+          recordedCode: displayMessage(outcomeCopy.recordedCode, { code: <code>{run.terminalReason}</code> }),
+        }) : copy.noTerminalReasonRecorded}</dd>
         <dt>{copy.inputRevision}</dt><dd>{run.inputRevisionId ?? copy.originalUploadedInput}</dd>
         <dt>{copy.resultRevision}</dt><dd>{run.resultRevisionId ?? copy.noResultRevisionRecorded}</dd>
       </dl>
@@ -117,17 +120,31 @@ function Details({ jobId, runId, basePath, session, view, navigation }: {
         <dt>{copy.wallClockUsage2}</dt><dd>{run.usage.wallClockMs === null ? copy.notReported : displayMessage(copy.wallClockUsage, { value: run.usage.wallClockMs })}</dd>
       </dl> : <p>{copy.usageWasNotReportedForThisAttempt}</p>}
       </>}
-      {view === 'logs' && <LogViewer key={`logs/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} />}
+      {view === 'logs' && <PanelBoundary name={panelBoundaryCopy.names.logs}>
+        <LogViewer key={`logs/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} />
+      </PanelBoundary>}
       {view !== 'evidence' && view !== 'logs' && <>
-        <AttemptControls key={`controls/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} session={session}
-          run={run} onChanged={() => { setRefresh(value => value + 1); }} />
-        <ProgressPin key={`pin/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} session={session} />
-        <Activity key={`activity/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} {...(view === 'activity' && navigation !== undefined ? { navigation } : {})} />
+        <PanelBoundary name={panelBoundaryCopy.names.attemptControls}>
+          <AttemptControls key={`controls/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} session={session}
+            run={run} onChanged={() => { setRefresh(value => value + 1); }} />
+        </PanelBoundary>
+        <PanelBoundary name={panelBoundaryCopy.names.progressPin}>
+          <ProgressPin key={`pin/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} session={session} />
+        </PanelBoundary>
+        <PanelBoundary name={panelBoundaryCopy.names.activity}>
+          <Activity key={`activity/${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} {...(view === 'activity' && navigation !== undefined ? { navigation } : {})} />
+        </PanelBoundary>
       </>}
       {view !== 'activity' && view !== 'logs' && <>
-        <ExplorationEvidence key={`${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} />
-        <RecordedValidationEvidence key={`${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} {...(navigation === undefined ? {} : { navigation })} />
-        <ArtifactCatalog key={`artifacts/${jobId}/${runId}`} jobId={jobId} runId={runId} revisionId={run.resultRevisionId} basePath={basePath} />
+        <PanelBoundary name={panelBoundaryCopy.names.exploration}>
+          <ExplorationEvidence key={`${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} />
+        </PanelBoundary>
+        <PanelBoundary name={panelBoundaryCopy.names.validation}>
+          <RecordedValidationEvidence key={`${jobId}/${runId}`} jobId={jobId} runId={runId} basePath={basePath} {...(navigation === undefined ? {} : { navigation })} />
+        </PanelBoundary>
+        <PanelBoundary name={panelBoundaryCopy.names.artifacts}>
+          <ArtifactCatalog key={`artifacts/${jobId}/${runId}`} jobId={jobId} runId={runId} revisionId={run.resultRevisionId} basePath={basePath} />
+        </PanelBoundary>
       </>}
       {run.resultRevisionId ? <ul class="job-actions" aria-label={structureCopy.revisionViews}>
         <li><a href={sourceDirectoryPath(basePath, { jobId, runId, revisionId: run.resultRevisionId })}>{sourceCopy.browse}</a></li>
