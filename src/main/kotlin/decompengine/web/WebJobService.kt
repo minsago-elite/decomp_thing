@@ -1051,7 +1051,11 @@ class WebJobService(
     internal fun runArtifactPresent(jobId: String, runId: String, artifactPath: String): Boolean {
         requireInitializedRead()
         getAttempt(jobId, runId)
-        return try { store.resolveRunArtifact(jobId, runId, artifactPath); true } catch (_: decompengine.jobs.JobStoreException) { false }
+        return try {
+            val path = store.resolveRunArtifact(jobId, runId, artifactPath)
+            // A second name (hard link to bytes owned elsewhere) is never a cataloged artifact; streaming refuses it too.
+            (java.nio.file.Files.getAttribute(path, "unix:nlink", java.nio.file.LinkOption.NOFOLLOW_LINKS) as Int) == 1
+        } catch (_: decompengine.jobs.JobStoreException) { false } catch (_: java.io.IOException) { false }
     }
 
     /** Host root used only to redact display text; it never enters a DTO. */
