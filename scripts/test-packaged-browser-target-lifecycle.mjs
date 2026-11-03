@@ -66,6 +66,21 @@ test('a silent Page.enable ends only at the unchanged 15 second deadline, classi
   assert.deepEqual(h.lifecycle.toJSON().failedTarget, { ordinal: 1, stage: 'authenticated', phase: 'page-enable', category: 'deadline' });
 });
 
+for (const [method, category] of [['Target.targetCrashed', 'crashed'], ['Target.detachedFromTarget', 'detached']]) {
+  test(`an observed ${category} during attach is retained when the original attach deadline expires`, async () => {
+    const h = harness({ silent: new Set(['Target.attachToTarget']) });
+    const opened = open(h);
+    await settle();
+    h.deliver({ method, params: { targetId: `${SECRET_TARGET}-1`, status: 'crashed' } });
+    h.fire();
+    await assert.rejects(opened, { message: 'DevTools deadline: Target.attachToTarget' });
+    assert.deepEqual(h.lifecycle.toJSON().failedTarget, { ordinal: 1, stage: 'authenticated', phase: 'attach', category });
+    assert.equal(h.sent.filter(message => message.method === 'Target.createTarget').length, 1);
+    assert.equal(h.sent.filter(message => message.method === 'Target.attachToTarget').length, 1);
+    assert.equal(JSON.stringify(h.lifecycle).includes(SECRET_TARGET), false);
+  });
+}
+
 for (const [label, emit, category] of [
   ['browser detach', (h, message) => h.deliver({ method: 'Target.detachedFromTarget', params: { sessionId: message.sessionId, targetId: 'x' } }), 'detached'],
   ['browser crash', (h) => h.deliver({ method: 'Target.targetCrashed', params: { targetId: `${SECRET_TARGET}-1`, status: 'crashed', errorCode: 139 } }), 'crashed'],

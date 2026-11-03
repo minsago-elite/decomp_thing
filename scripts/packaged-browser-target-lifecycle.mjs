@@ -60,8 +60,9 @@ export class TargetLifecycle {
   /** The first target whose setup failed, classified without its error text. */
   fail(record, error) {
     if (this.#failed) return;
+    const observedLoss = record.events.find(event => event.category === 'crashed') ?? record.events.at(-1);
     const category = TARGET_EVENTS.includes(error?.targetCategory) ? error.targetCategory
-      : /^DevTools deadline: /.test(error?.message ?? '') ? 'deadline' : 'other';
+      : /^DevTools deadline: /.test(error?.message ?? '') ? observedLoss?.category ?? 'deadline' : 'other';
     this.#failed = { ordinal: record.ordinal, stage: record.stage, phase: record.phase, category };
   }
 
