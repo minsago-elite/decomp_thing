@@ -926,11 +926,12 @@ class ArchivalReconstructionService(
         val model = selectedAnalyzer.analyze(binaryPath, outputDir.resolve("analysis"))
         progress.runContext(model.inputSha256, profile.sha256)
         val project = outputDir.resolve("source-tree")
+        val compilerFeedback = ModuleCompilerFeedbackStore(outputDir, model.inputSha256, profile.sha256)
         val progressPath = outputDir.resolve("reconstruction_progress.json")
         progressPath.writeText("{\"phase\":\"planning\",\"completed\":0,\"total\":0}\n")
         progress.phase(AgentWorkflowPhase.PLANNING)
         var moduleTotal = 0
-        SourceTreeGenerator.generate(
+        SourceTreeGenerator.generateWithCompilerFeedback(
             model,
             project,
             hostSafetyLimits = hostSafetyLimits,
@@ -938,6 +939,8 @@ class ArchivalReconstructionService(
             observedBehavior = observedBehavior,
             profile = profile,
             progress = progress,
+            compilerFeedback = { moduleId -> runCatching { compilerFeedback.read(moduleId) }.getOrNull() },
+            onCompilerFeedback = { feedback -> runCatching { compilerFeedback.write(feedback) } },
         ) { completed, total, module ->
             moduleTotal = total
             progressPath.writeText("{\"phase\":\"modules\",\"completed\":$completed,\"total\":$total,\"module\":\"$module\"}\n")

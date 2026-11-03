@@ -63,6 +63,8 @@ data class ModuleReconstructionRequest(
     val profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
     val sessionEvidenceFingerprint: String? = null,
     val acceptedSourceSha256: String? = null,
+    /** Bounded compiler feedback is prompt context only; acceptance uses fresh compilation below. */
+    val compilerDiagnostics: String? = null,
     /** Recovered ownership used to select only required cross-module interfaces. */
     val modulePlan: ModulePlan? = null,
 )
@@ -534,17 +536,9 @@ object SourceTreeGenerator {
         profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
         progress: AgentWorkflowProgress = AgentWorkflowProgress.NONE,
         onModuleProgress: (completed: Int, total: Int, moduleId: String) -> Unit = { _, _, _ -> },
-    ): SourceTreeManifest = generate(
-        model = model,
-        projectDir = projectDir,
-        hostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
-        planner = planner,
-        reconstructor = reconstructor,
-        overrides = overrides,
-        observedBehavior = observedBehavior,
-        profile = profile,
-        progress = progress,
-        onModuleProgress = onModuleProgress,
+    ): SourceTreeManifest = generateWithCompilerFeedback(
+        model, projectDir, ReconstructionHostSafetyLimits.DEFAULT, planner, reconstructor, overrides,
+        observedBehavior, profile, progress, { null }, {}, onModuleProgress,
     )
 
     /** Explicit host policy can authorize a profile without changing its recorded budgets or identity. */
@@ -558,6 +552,24 @@ object SourceTreeGenerator {
         observedBehavior: String? = null,
         profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
         progress: AgentWorkflowProgress = AgentWorkflowProgress.NONE,
+        onModuleProgress: (completed: Int, total: Int, moduleId: String) -> Unit = { _, _, _ -> },
+    ): SourceTreeManifest = generateWithCompilerFeedback(
+        model, projectDir, hostSafetyLimits, planner, reconstructor, overrides,
+        observedBehavior, profile, progress, { null }, {}, onModuleProgress,
+    )
+
+    internal fun generateWithCompilerFeedback(
+        model: RecoveredProgramModel,
+        projectDir: Path,
+        hostSafetyLimits: ReconstructionHostSafetyLimits,
+        planner: DeterministicModulePlanner? = null,
+        reconstructor: ModuleReconstructor? = null,
+        overrides: Map<String, String> = emptyMap(),
+        observedBehavior: String? = null,
+        profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
+        progress: AgentWorkflowProgress = AgentWorkflowProgress.NONE,
+        compilerFeedback: (moduleId: String) -> ModuleCompilerFeedback? = { null },
+        onCompilerFeedback: (ModuleCompilerFeedback) -> Unit = {},
         onModuleProgress: (completed: Int, total: Int, moduleId: String) -> Unit = { _, _, _ -> },
     ): SourceTreeManifest {
         hostSafetyLimits.requireAllows(profile.budgets)
@@ -638,10 +650,22 @@ object SourceTreeGenerator {
         moduleDependencyOrder(dependenciesByModule).map(moduleById::getValue).forEachIndexed { index, module ->
             val dependencies = dependenciesByModule.getValue(module.id)
             val dependencyHeaders = dependencies.associate { dependency -> moduleById.getValue(dependency).headerPath to headers.getValue(dependency) }
-            val promptRequest = ModuleReconstructionRequest(
+            val basePromptRequest = ModuleReconstructionRequest(
                 module, model, typesHeader, headers.getValue(module.id), privateHeaders.getValue(module.id),
                 dependencyHeaders, projectDir, observedBehavior, profile = profile, modulePlan = plan,
             )
+            val contextFingerprint = if (selectedReconstructor is BoundedLlmModuleReconstructor &&
+                compilationPolicy.id == GeneratedCModuleValidation.POLICY_ID) {
+                selectedModuleInputFingerprint(basePromptRequest)
+            } else null
+            val feedbackSource = projectDir.resolve(module.sourcePath)
+            val priorCompilerDiagnostics = contextFingerprint?.let { expectedContext ->
+                runCatching { compilerFeedback(module.id) }.getOrNull()?.takeIf {
+                    it.contextSha256 == expectedContext && feedbackSource.exists() &&
+                        it.sourceSha256 == sha256(feedbackSource.readBytes())
+                }?.diagnostics
+            }
+            val promptRequest = basePromptRequest.copy(compilerDiagnostics = priorCompilerDiagnostics)
             val localFingerprint = moduleFingerprint(
                 module,
                 model,
@@ -721,6 +745,7 @@ object SourceTreeGenerator {
                 profile = profile,
                 sessionEvidenceFingerprint = fingerprint,
                 acceptedSourceSha256 = verifiedPreviousAcceptance?.sourceSha256,
+                compilerDiagnostics = priorCompilerDiagnostics,
                 modulePlan = plan,
             )
             val cacheIdentity = selectedReconstructor.cacheIdentity(profile)
@@ -818,6 +843,17 @@ object SourceTreeGenerator {
                         throw interrupted
                     }
                     validation.also { validation ->
+                        if (!validation.passed && contextFingerprint != null) {
+                            runCatching {
+                                onCompilerFeedback(ModuleCompilerFeedback(
+                                    moduleId = module.id,
+                                    sourceSha256 = validation.sourceSha256,
+                                    contextSha256 = requireNotNull(contextFingerprint),
+                                    diagnosticsSha256 = validation.diagnosticsSha256,
+                                    diagnostics = validation.diagnosticsPrefix,
+                                ))
+                            }
+                        }
                         if (!validation.passed) issues += ModuleReconstructionIssue(
                             "module-compilation-${validation.outcome}",
                             "module compiler gate ${validation.outcome}; diagnostics SHA-256=${validation.diagnosticsSha256}",

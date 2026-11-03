@@ -79,6 +79,21 @@ internal object GeneratedCModuleValidation : ModuleCompilationPolicy {
         val diagnostics = output.toByteArray()
         return ModuleCompilationEvidence(
             before, command, outcome, returnCode, sha256(diagnostics), diagnostics.size.toLong(),
+            diagnosticFeedback(diagnostics, projectDir),
         )
+    }
+
+    private fun diagnosticFeedback(bytes: ByteArray, projectDir: Path): String {
+        val raw = bytes.copyOfRange(0, minOf(bytes.size, 32_768)).toString(Charsets.UTF_8)
+            .replace(projectDir.toAbsolutePath().normalize().toString(), "<workspace>")
+            .replace(Regex("\\u001B\\[[0-?]*[ -/]*[@-~]"), "")
+        val selected = raw.lineSequence().filter { line ->
+            listOf("error:", "fatal error:", "warning:", "undefined reference", "note:").any(line::contains)
+        }.map { line ->
+            line.replace(Regex("(?:[A-Za-z]:)?/[^\\s:]+(?=:[0-9]+(?::[0-9]+)?:)"), "<path>")
+                .filter { it == '\t' || it >= ' ' && it != '\u007f' }
+        }.take(32).joinToString("\n")
+        val bounded = selected.toByteArray(Charsets.UTF_8)
+        return bounded.copyOfRange(0, minOf(bounded.size, 16_384)).toString(Charsets.UTF_8)
     }
 }
