@@ -279,10 +279,12 @@ class ManagedGitRepositories(
                 val observation = GitRepositoryInspector.inspect(runner, directory.resolve(GIT_DIR), directory.resolve(WORK_TREE))
                 // A fresh initialization with no commit whose work tree still holds exactly the job's
                 // recorded candidate source contains no user work: deleting the job deletes only its own data.
-                if (observation.dirty && !(observation.head.state == GitHeadState.UNBORN &&
-                        unchangedInitialization(record, directory.resolve(WORK_TREE)))) {
-                    reasons += GitRetentionReason.UNCOMMITTED_CHANGES
-                }
+                // Git status can hide edits under source-provided ignore rules. Only the recorded
+                // manifest can prove an initialized unborn tree still contains no new user work.
+                val initializedUnborn = record.origin == "initialized" && observation.head.state == GitHeadState.UNBORN
+                val uncommitted = if (initializedUnborn) !unchangedInitialization(record, directory.resolve(WORK_TREE))
+                    else observation.dirty
+                if (uncommitted) reasons += GitRetentionReason.UNCOMMITTED_CHANGES
                 if (unpushed(runner, directory.resolve(GIT_DIR), observation.head.objectId)) reasons += GitRetentionReason.UNPUSHED_COMMITS
             } catch (_: Exception) {
                 reasons += GitRetentionReason.UNREADABLE

@@ -206,6 +206,36 @@ class ManagedGitRepositoriesTest {
         assertTrue(codes().isEmpty())
     }
 
+    @Test fun `retention checks ignored unborn source changes against the initialization manifest`() {
+        for (change in listOf("modify", "add", "delete")) Fixture().use { f ->
+            f.write(".gitignore", "*\n")
+            val service = f.open()
+            val completed = service.settle(service.request(jobId,
+                GitRepositoryRequest.Init("run_1", "revision_1", null), "ignored_retention_$change"))
+            assertEquals(GitOperationState.COMPLETED, completed.state, completed.message)
+            val directory = f.repositoryDirectory(completed.repositoryId)
+            val gitDir = directory.resolve("repository.git")
+            val workTree = directory.resolve("worktree")
+            fun cleanUnborn() {
+                val observation = GitRepositoryInspector.inspect(f.repositories.runner, gitDir, workTree)
+                assertEquals(GitHeadState.UNBORN, observation.head.state)
+                assertFalse(observation.dirty, "source ignore rules hide $change from the exact inspector status")
+            }
+            cleanUnborn()
+            assertTrue(service.retentionHolds(jobId).isEmpty(), "unchanged copied bytes remain expendable")
+            val target = workTree.resolve(if (change == "add") "src/ignored-extra.c" else "src/main file.c")
+            val original = if (Files.exists(target)) Files.readAllBytes(target) else null
+            if (change == "delete") Files.delete(target) else Files.writeString(target, "int ignored_user_work;\n")
+            cleanUnborn()
+            val before = f.storageTree()
+            assertEquals(listOf(GitRetentionReason.UNCOMMITTED_CHANGES), service.retentionHolds(jobId), change)
+            assertEquals(before, f.storageTree(), "retention must not alter source, metadata or repository bytes")
+            if (original == null) Files.delete(target) else Files.write(target, original)
+            cleanUnborn()
+            assertTrue(service.retentionHolds(jobId).isEmpty(), "restoring the exact initialization removes the hold")
+        }
+    }
+
     @Test fun `a retained snapshot that no longer matches its commitments is never published`(): Unit {
         for (change in listOf("modify", "delete")) Fixture().use { f ->
             if (change == "modify") f.write("src/main file.c", "int main(void) { return 1; }\r\n")
