@@ -130,7 +130,7 @@ class WebProductionWorkflowsTest {
             }
             writeSourceTree(reports.resolve("source-tree"), "base")
         }
-        val agent = ReconstructWorkflowAdapter(engines, FAST, WebReconstructionMode.AGENT, "agent-acp", emptyList())
+        val agent = ReconstructWorkflowAdapter(engines, FAST, WebReconstructionMode.AGENT, "agent-acp", emptyList(), allowTestOnlyExecution = true)
         val completed = assertIs<DurableWebWorkflowOutcome.Completed>(agent.execute(context(root, root.resolve("counted"), WebWorkflowDefaults.RECONSTRUCT_AGENT)))
         assertEquals(5uL, completed.usage?.toolCalls); assertEquals(7uL, completed.usage?.inputTokens)
         assertLimitExhausted(agent.execute(context(root, root.resolve("bounded"), WebWorkflowDefaults.RECONSTRUCT_AGENT.copy(maxToolCalls = 4uL))))
@@ -321,7 +321,7 @@ class WebProductionWorkflowsTest {
             }
             writeSourceTree(reports.resolve("source-tree"), "base")
         }
-        val agent = ReconstructWorkflowAdapter(engines, FAST, WebReconstructionMode.AGENT, "agent-acp", emptyList())
+        val agent = ReconstructWorkflowAdapter(engines, FAST, WebReconstructionMode.AGENT, "agent-acp", emptyList(), allowTestOnlyExecution = true)
         val exhausted = agent.execute(context(root, root.resolve("tools"), WebWorkflowDefaults.RECONSTRUCT_AGENT.copy(maxToolCalls = 2uL)))
         assertLimitExhausted(exhausted)
         assertEquals(baseCandidate(), (exhausted as DurableWebWorkflowOutcome.Failed).candidate, "candidate output is retained, not accepted")
@@ -333,6 +333,25 @@ class WebProductionWorkflowsTest {
         val missing = assertIs<DurableWebWorkflowOutcome.Completed>(evidence.execute(context(root, root.resolve("evidence"), WebWorkflowDefaults.RECONSTRUCT_EVIDENCE)))
         assertNull(missing.candidate, "no build contract, no candidate identity")
         assertEquals(listOf(WebReconstructionMode.AGENT, WebReconstructionMode.AGENT, WebReconstructionMode.EVIDENCE_ONLY), modes)
+    }
+
+    @Test
+    fun `production agent reconstruction is unavailable until module compiler containment is qualified`() = withRoot { root ->
+        val engines = FakeEngines()
+        val adapter = ReconstructWorkflowAdapter(engines, FAST, WebReconstructionMode.AGENT, "agent-acp", emptyList())
+        val readiness = WebHarnessReadiness("supported", null, "ready", prerequisites = WebWorkflowPrerequisites.UNCHECKED)
+
+        assertTrue(WebWorkflowRequirement.MODULE_COMPILATION_CONTAINMENT in adapter.requirements)
+        val capability = webWorkflowCapabilities(listOf(adapter), readiness).single {
+            it.getValue("id").jsonPrimitive.content == "workflow-reconstruct-agent"
+        }
+        assertEquals("unavailable", capability.getValue("state").jsonPrimitive.content)
+        assertEquals("MODULE_COMPILATION_UNQUALIFIED", capability.getValue("reasonCode").jsonPrimitive.content)
+        val outcome = assertIs<DurableWebWorkflowOutcome.Failed>(
+            adapter.execute(context(root, root.resolve("direct"), adapter.limits)),
+        )
+        assertEquals(WorkflowTerminalReason.REFUSED, outcome.reason)
+        assertEquals(0, engines.calls.get(), "the uncontained compiler route must not execute")
     }
 
     @Test
@@ -799,7 +818,7 @@ class WebProductionWorkflowsTest {
 
     private fun adapters(engines: WebWorkflowEngines, acceptTestOnly: Boolean = false): List<DurableWebWorkflowAdapter> = listOf(
         ExploreWorkflowAdapter(engines, FAST, allowTestOnlyExecution = true),
-        ReconstructWorkflowAdapter(engines, FAST, WebReconstructionMode.AGENT, "agent-acp", emptyList()),
+        ReconstructWorkflowAdapter(engines, FAST, WebReconstructionMode.AGENT, "agent-acp", emptyList(), allowTestOnlyExecution = true),
         ReconstructWorkflowAdapter(engines, FAST, WebReconstructionMode.EVIDENCE_ONLY, EVIDENCE_ONLY_CAPABILITY, emptyList()),
         RepairWorkflowAdapter(engines, FAST, "agent-acp", acceptTestOnly),
     )

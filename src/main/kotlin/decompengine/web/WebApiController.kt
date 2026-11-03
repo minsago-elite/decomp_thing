@@ -420,17 +420,17 @@ internal class WebApiController(
 
     /**
      * A handler authorizes only the method it serves, so its 405 names one method. Allow must list every
-     * method of the resource; a workflow start that is unavailable is not added.
+     * method of the resource. Workflow readiness may refuse a POST, but it does not make the documented
+     * start method disappear from the route contract.
      */
     private fun withResourceMethods(failure: WebAccessDenied, resource: String): WebAccessDenied {
         if (failure.status != 405) return failure
         val methods = when {
             resource == "jobs" || resource == "agent/preflight" -> setOf("GET", "POST")
             resource.matches(Regex("jobs/[^/]+/repositories")) -> setOf("GET", "POST")
+            resource.matches(Regex("jobs/[^/]+/runs")) -> setOf("GET", "POST")
             resource.matches(Regex("jobs/[^/]+/repositories/[^/]+(?:/operations/[^/]+)?")) -> setOf("GET")
             resource.matches(Regex("jobs/[^/]+/runs/[^/]+/progress-pin")) -> setOf("GET", "PUT")
-            resource.matches(Regex("jobs/[^/]+/runs")) ->
-                if (runCatching { jobs.durableStartRouteAvailable(resource.split('/')[1]) }.getOrDefault(false)) setOf("GET", "POST") else setOf("GET")
             else -> return failure
         }
         return WebAccessDenied(405, failure.code, failure.message ?: "The endpoint does not support this method.",

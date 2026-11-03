@@ -43,6 +43,7 @@ internal data class WebWorkflowPrerequisites(
         WebWorkflowRequirement.EXPLORATION_HELPER_OWNERSHIP to EXPLORATION_HELPERS_UNQUALIFIED,
         WebWorkflowRequirement.AGENT_HARNESS to agent, WebWorkflowRequirement.SANDBOX to sandbox,
         WebWorkflowRequirement.GHIDRA to ghidra, WebWorkflowRequirement.REPAIR_VALIDATOR to repairValidator,
+        WebWorkflowRequirement.MODULE_COMPILATION_CONTAINMENT to MODULE_COMPILATION_UNQUALIFIED,
     ).firstOrNull { (requirement, fact) -> requirement in requirements && !fact.available }?.second
 
     companion object {
@@ -50,6 +51,8 @@ internal data class WebWorkflowPrerequisites(
         // readiness result or environment flag can qualify this production execution option.
         private val EXPLORATION_HELPERS_UNQUALIFIED = WebPrerequisite(false, "EXPLORATION_HELPERS_UNQUALIFIED",
             "Exploration helper ownership and cancellation are not yet qualified for production use, so exploration cannot run on this server.")
+        private val MODULE_COMPILATION_UNQUALIFIED = WebPrerequisite(false, "MODULE_COMPILATION_UNQUALIFIED",
+            "Generated-C compilation is not yet contained and qualified for production agent reconstruction.")
         /** In-process callers without a runtime probe (inert fixtures). The HTTP path always supplies a snapshot. */
         val UNCHECKED = WebWorkflowPrerequisites(WebPrerequisite.AVAILABLE, WebPrerequisite.AVAILABLE, WebPrerequisite.AVAILABLE)
     }
