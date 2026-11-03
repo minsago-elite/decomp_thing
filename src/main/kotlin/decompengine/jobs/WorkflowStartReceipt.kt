@@ -63,7 +63,7 @@ internal fun workflowStartIntentSha256(expectedRequestVersion: String, request: 
     // A recovery command has its own closed intent; a plain start's existing digest is unchanged.
     request.recovery?.let { recovery ->
         return workflowRecoveryIntentSha256(expectedRequestVersion, checkNotNull(request.previousRunId), recovery.mode,
-            request.inputRevisionId, request.launchSelection)
+            request.inputRevisionId)
     }
     val intent = buildJsonObject {
         put("expectedRequestVersion", expectedRequestVersion)

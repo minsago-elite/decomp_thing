@@ -35,6 +35,12 @@ import kotlin.test.assertTrue
 @ExtendWith(RecoveryMatrixEvidence::class)
 class WorkflowStartReceiptTest {
     @Test
+    fun `legacy start intent retains its fixed pre-selection digest`() {
+        assertEquals("841d046279a020d42fc074918a2fa7c1e91f4c2d1eeadd6a0c230414b5eb229d",
+            workflowStartIntentSha256("version_legacy_1", REQUEST))
+    }
+
+    @Test
     fun `one atomic admission retains a hashed job key and replay precedes stale CAS`() = withRoot { root ->
         val job = upload(root)
         WorkflowAttemptStore.open(root, CLOCK).use { store ->

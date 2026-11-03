@@ -125,7 +125,9 @@ class WebRecoveryControllerTest {
     }
 
     @Test
-    fun `retry publishes one new linked attempt and keyed replay returns it without rescheduling`() = Fixture().use { f ->
+    fun `retry publishes one new linked selected attempt and keyed replay returns it without rescheduling`() = Fixture(
+        launch = DurableWebWorkflowLaunch(DurableWebWorkflowMode.AGENT, true, true, listOf("agent-harness")),
+    ).use { f ->
         val failed = f.start()
         assertEquals(WorkflowRunState.FAILED, f.attempt(failed).state)
         val (read, before) = f.controls(failed)
@@ -142,6 +144,7 @@ class WebRecoveryControllerTest {
         assertEquals(failed, retried.getValue("previousRunId").jsonPrimitive.content)
         assertEquals(buildJsonObject { put("mode", "retry"); put("restores", JsonNull); put("checkpointSha256", JsonNull) }, retried["recovery"])
         assertEquals("completed", retried.getValue("state").jsonPrimitive.content)
+        assertEquals(WorkflowLaunchSelection("workflow-reconstruct-agent", "agent"), f.attempt(id).launchSelection)
         assertEquals("${f.runs}/$id", response.headers().firstValue("Location").orElseThrow())
         assertEquals(2, f.contexts.size); assertNull(f.contexts.last().predecessorReportsDirectory)
         // The predecessor is unchanged; retry restores nothing from it.
@@ -168,7 +171,8 @@ class WebRecoveryControllerTest {
             DurableWebWorkflowCheckpoint.Refused(DurableWebWorkflowCheckpointRefusal.WORKSPACE_UNVERIFIED)
         }
         val inspected = CopyOnWriteArrayList<DurableWebWorkflowCheckpointRequest>()
-        Fixture(checkpoints = { request -> inspected += request; decision() }).use { f ->
+        Fixture(checkpoints = { request -> inspected += request; decision() },
+            launch = DurableWebWorkflowLaunch(DurableWebWorkflowMode.AGENT, true, true, listOf("agent-harness"))).use { f ->
             val failed = f.start()
             assertEquals(control(false, "WORKSPACE_UNVERIFIED"), f.controls(failed).second.getValue("resume"))
             assertEquals(control(true, null), f.controls(failed).second.getValue("retry"))
@@ -188,6 +192,8 @@ class WebRecoveryControllerTest {
             assertEquals(f.store.runReportsDirectory(f.job.id, failed), context.predecessorReportsDirectory)
             assertTrue(inspected.all { it.predecessor.runId == failed && it.job.id == f.job.id })
             assertEquals(CAPABILITY, resumed.getValue("harnessCapabilityId").jsonPrimitive.content)
+            assertEquals(WorkflowLaunchSelection("workflow-reconstruct-agent", "agent"),
+                f.attempt(resumed.getValue("runId").jsonPrimitive.content).launchSelection)
         }
     }
 
@@ -216,6 +222,37 @@ class WebRecoveryControllerTest {
     }
 
     @Test
+    fun `retained selected recovery key replays after its launch registration is replaced`() {
+        val root = createTempDirectory("web-recovery-selected-replay-")
+        var jobId = ""
+        var failedRunId = ""
+        var failedVersion = ""
+        var retryRunId = ""
+        try {
+            Fixture(root = root, deleteRoot = false, deferred = false,
+                launch = DurableWebWorkflowLaunch(DurableWebWorkflowMode.AGENT, true, true, listOf("agent-harness"))).use { f ->
+                jobId = f.job.id
+                failedRunId = f.start()
+                failedVersion = f.attempt(failedRunId).version
+                f.deferred = true
+                retryRunId = run(f.recover(failedRunId)).getValue("runId").jsonPrimitive.content
+                assertEquals(WorkflowLaunchSelection("workflow-reconstruct-agent", "agent"), f.attempt(retryRunId).launchSelection)
+            }
+            Fixture(root = root, reuseJob = jobId, deleteRoot = false,
+                launch = DurableWebWorkflowLaunch(DurableWebWorkflowMode.EVIDENCE_ONLY, true, false, emptyList())).use { f ->
+                val before = f.state().readBytes()
+                val replay = f.recover(failedRunId, version = failedVersion)
+                val body = run(replay)
+                assertEquals(retryRunId, body.getValue("runId").jsonPrimitive.content)
+                assertEquals(WorkflowLaunchSelection("workflow-reconstruct-agent", "agent"), f.attempt(retryRunId).launchSelection)
+                assertEquals("true", replay.headers().firstValue("Idempotency-Replayed").orElseThrow())
+                assertContentEquals(before, f.state().readBytes())
+                assertTrue(f.contexts.isEmpty())
+            }
+        } finally { root.toFile().deleteRecursively() }
+    }
+
+    @Test
     fun `resume refuses a predecessor recorded under a different harness`() {
         Fixture(checkpoints = { DurableWebWorkflowCheckpoint.Verified(SHA, WorkflowResumeRestoration.AGENT_SESSION) }, seed = { store, job ->
             val version = (store.inspect(job) as WorkflowJobInspection.Available).snapshot.version
@@ -229,6 +266,44 @@ class WebRecoveryControllerTest {
             // An explicit retry is a fresh attempt under the current registration, not a continuation.
             val retried = run(f.recover(predecessor, key = "http_recovery_retry_after_harness"))
             assertEquals(CAPABILITY, retried.getValue("harnessCapabilityId").jsonPrimitive.content)
+        }
+    }
+
+    @Test
+    fun `recovery isolates recorded launch capability mode workflow and harness mismatches`() {
+        val cases = listOf(
+            WorkflowKind.RECONSTRUCT to WorkflowLaunchSelection("workflow-reconstruct-other", "agent"),
+            WorkflowKind.RECONSTRUCT to WorkflowLaunchSelection("workflow-reconstruct-agent", "tools"),
+            WorkflowKind.REPAIR to WorkflowLaunchSelection("workflow-repair-agent", "agent"),
+        )
+        for ((workflow, selection) in cases) Fixture(
+            launch = DurableWebWorkflowLaunch(DurableWebWorkflowMode.AGENT, true, true, listOf("agent-harness")),
+            seed = { store, job ->
+                val version = (store.inspect(job) as WorkflowJobInspection.Available).snapshot.version
+                val created = store.create(job, version,
+                    NewWorkflowAttempt(workflow, LIMITS, harnessCapabilityId = CAPABILITY, launchSelection = selection)).attempt
+                val started = store.transition(job, created.runId, created.version, WorkflowTransition.Start).attempt
+                store.transition(job, started.runId, started.version,
+                    WorkflowTransition.Finish(WorkflowRunState.FAILED, WorkflowTerminalReason.FAILED))
+            },
+        ).use { f ->
+            val predecessor = f.snapshot().attempts.single().runId
+            error(f.recover(predecessor), 409, "HARNESS_CHANGED")
+            assertEquals(1, f.snapshot().attempts.size)
+            assertTrue(f.contexts.isEmpty())
+        }
+
+        Fixture(launch = DurableWebWorkflowLaunch(DurableWebWorkflowMode.AGENT, true, true, listOf("agent-harness")), seed = { store, job ->
+            val version = (store.inspect(job) as WorkflowJobInspection.Available).snapshot.version
+            val created = store.create(job, version, NewWorkflowAttempt(WorkflowKind.RECONSTRUCT, LIMITS,
+                harnessCapabilityId = "older_harness", launchSelection = WorkflowLaunchSelection("workflow-reconstruct-agent", "agent"))).attempt
+            val started = store.transition(job, created.runId, created.version, WorkflowTransition.Start).attempt
+            store.transition(job, started.runId, started.version,
+                WorkflowTransition.Finish(WorkflowRunState.FAILED, WorkflowTerminalReason.FAILED))
+        }).use { f ->
+            error(f.recover(f.snapshot().attempts.single().runId), 409, "HARNESS_CHANGED")
+            assertEquals(1, f.snapshot().attempts.size)
+            assertTrue(f.contexts.isEmpty())
         }
     }
 

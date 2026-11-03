@@ -329,11 +329,9 @@ class WorkflowAttemptStore private constructor(
         inputRevisionId: String?, requestKey: String): WorkflowStartResult? = withJob(jobId, readOnly = true) { directory ->
         val key = workflowStartKeyDigest(jobId, requestKey)
         val current = available(jobId, directory).snapshot
-        val predecessor = current.attempts.singleOrNull { it.runId == previousRunId }
-            ?: fail("RUN_NOT_FOUND", "The requested attempt does not belong to this job.")
-        val intent = workflowRecoveryIntentSha256(expectedRunVersion, previousRunId, mode, inputRevisionId,
-            predecessor.launchSelection)
         requireRecovered(current, directory)
+        // A retained key owns replay precedence, even if its predecessor or registration has since changed.
+        val intent = workflowRecoveryIntentSha256(expectedRunVersion, previousRunId, mode, inputRevisionId)
         replayStartLocked(current, key, intent)
     }
 
