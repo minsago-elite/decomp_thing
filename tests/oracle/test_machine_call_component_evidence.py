@@ -2,25 +2,31 @@
 
 from __future__ import annotations
 
-from contextlib import redirect_stdout
-from hashlib import sha256
 import gzip
 import importlib.util
 import io
-import json
 import os
-from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from hashlib import sha256
+from importlib.machinery import ModuleSpec
+from pathlib import Path
+from typing import cast
 from unittest import mock
 
-
 ROOT = Path(__file__).resolve().parents[2]
-SPEC = importlib.util.spec_from_file_location("machine_call_evidence", ROOT / "scripts/verify-machine-call-component-evidence.py")
-VERIFY = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(VERIFY)
+spec = importlib.util.spec_from_file_location("machine_call_evidence", ROOT / "scripts/verify-machine-call-component-evidence.py")
+if spec is None:
+    raise ImportError("cannot load offline machine-call evidence verifier")
+spec = cast(ModuleSpec, spec)
+loader = spec.loader
+if loader is None:
+    raise ImportError("offline machine-call evidence verifier has no loader")
+VERIFY = importlib.util.module_from_spec(spec)
+loader.exec_module(VERIFY)
 
 
 def reference(path: str, data: bytes) -> dict:
@@ -41,7 +47,7 @@ class MachineCallComponentEvidenceTest(unittest.TestCase):
 
         def git(*arguments: str) -> str:
             return subprocess.run(["git", "-C", str(self.root), *arguments], env=environment,
-                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, timeout=10).stdout.decode().strip()
+                                  capture_output=True, check=True, timeout=10).stdout.decode().strip()
 
         git("init", "--quiet")
         sources = []
@@ -199,9 +205,8 @@ class MachineCallComponentEvidenceTest(unittest.TestCase):
     def test_json_is_bounded_duplicate_free_closed_and_canonical(self) -> None:
         for data in (b'{"a":1,"a":2}', b'{"a":NaN}', b'{"a":1.0}', b'{"a":"\\ud800"}',
                      b'{"a":' + b'[' * 65 + b'0' + b']' * 65 + b'}', b'{}', b'{}\n\n'):
-            with self.subTest(data=data[:40]):
-                with self.assertRaises(VERIFY.VerificationError):
-                    VERIFY.parse_canonical(data)
+            with self.subTest(data=data[:40]), self.assertRaises(VERIFY.VerificationError):
+                VERIFY.parse_canonical(data)
         self.evidence["unexpected"] = False
         self.write_manifest()
         with self.assertRaises(VERIFY.VerificationError):
@@ -239,10 +244,99 @@ else:
 """
         result = subprocess.run([sys.executable, "-c", child,
             str(ROOT / "scripts/verify-machine-call-component-evidence.py"), str(self.root)],
-            env=os.environ | {"PYTHONDONTWRITEBYTECODE": "1"}, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, timeout=5, check=True)
+            env=os.environ | {"PYTHONDONTWRITEBYTECODE": "1"}, capture_output=True, timeout=5, check=True)
         self.assertIn(b"real FIFO substitution refused", result.stdout)
 
+    def parent_substitution_control(self, operation: str, stage: str) -> None:
+        fixture = self.root / f"{operation}-{stage}"
+        repository = fixture / "repository"
+        parent = repository / "selected"
+        moved = repository / "original"
+        outside = fixture / "outside-repository"
+        for directory in (parent / "nested", outside / "nested"):
+            directory.mkdir(parents=True)
+        victim = parent / "nested/report.json"
+        outside_victim = outside / "nested/report.json"
+        if operation == "read":
+            victim.write_bytes(b"original repository bytes")
+            outside_victim.write_bytes(b"outside repository bytes")
+        original_path = VERIFY.repository_path
+        original_open = os.open
+        replaced = False
+
+        def substitute() -> None:
+            nonlocal replaced
+            self.assertFalse(replaced)
+            parent.rename(moved)
+            parent.symlink_to(outside, target_is_directory=True)
+            replaced = True
+
+        def after_validation(path, *, existing):
+            selected = original_path(path, existing=existing)
+            if stage == "after-validation":
+                substitute()
+            return selected
+
+        def before_leaf(path, flags, *args, **kwargs):
+            if stage == "before-leaf" and path == "report.json":
+                self.assertIn("dir_fd", kwargs)
+                substitute()
+            return original_open(path, flags, *args, **kwargs)
+
+        with mock.patch.object(VERIFY, "REPOSITORY_ROOT", repository), \
+                mock.patch.object(VERIFY, "repository_path", side_effect=after_validation), \
+                mock.patch.object(VERIFY.os, "open", side_effect=before_leaf):
+            def perform():
+                if operation == "read":
+                    return VERIFY.read_file(victim, 1024)
+                VERIFY.extract_report(victim, b"verified report")
+
+            if stage == "after-validation":
+                # A substituted parent cannot be opened as a nonsymlink directory.
+                with self.assertRaises((VERIFY.VerificationError, OSError)):
+                    perform()
+            elif operation == "read":
+                self.assertEqual(b"original repository bytes", perform())
+            else:
+                perform()
+                self.assertEqual(b"verified report", (moved / "nested/report.json").read_bytes())
+        self.assertTrue(replaced)
+        if operation == "read":
+            self.assertEqual(b"outside repository bytes", outside_victim.read_bytes())
+        else:
+            self.assertFalse(outside_victim.exists())
+
+    def test_parent_substitution_cannot_redirect_reads(self) -> None:
+        for stage in ("after-validation", "before-leaf"):
+            with self.subTest(stage=stage):
+                self.parent_substitution_control("read", stage)
+
+    def test_parent_substitution_cannot_redirect_extraction(self) -> None:
+        for stage in ("after-validation", "before-leaf"):
+            with self.subTest(stage=stage):
+                self.parent_substitution_control("extract", stage)
+
+    def test_failed_extraction_cleans_up_using_retained_parent_not_substituted_path(self) -> None:
+        repository = self.root / "cleanup-repository"
+        parent = repository / "selected"
+        moved = repository / "original"
+        outside = self.root / "cleanup-outside"
+        parent.mkdir(parents=True)
+        outside.mkdir()
+        outside_victim = outside / "report.json"
+        outside_victim.write_bytes(b"outside file must survive")
+
+        def fail_sync(descriptor):
+            parent.rename(moved)
+            parent.symlink_to(outside, target_is_directory=True)
+            raise OSError("authored sync failure after parent substitution")
+
+        with (mock.patch.object(VERIFY, "REPOSITORY_ROOT", repository),
+              mock.patch.object(VERIFY.os, "fsync", side_effect=fail_sync),
+              self.assertRaisesRegex(OSError, "authored sync failure")):
+            VERIFY.extract_report(parent / "report.json", b"verified report")
+        self.assertFalse((moved / "report.json").exists())
+        self.assertEqual(b"outside file must survive", outside_victim.read_bytes())
     def test_parent_substitution_cannot_redirect_read_create_or_failure_cleanup(self) -> None:
         # Deterministic syscall-boundary substitutions, not timing-dependent race loops.
         for operation in ("read", "create", "cleanup"):
@@ -262,7 +356,8 @@ else:
                 original_open = os.open
                 substituted = False
 
-                def substitute(path, flags, *args, **kwargs):
+                def substitute(path, flags, *args, destination=destination, parent=parent, held=held,
+                               outside=outside, original_open=original_open, **kwargs):
                     nonlocal substituted
                     if path == destination.name:
                         self.assertIsNotNone(kwargs.get("dir_fd"))
@@ -279,9 +374,9 @@ else:
                         VERIFY.extract_report(destination, b"inside output")
                         self.assertEqual(b"inside output", (held / destination.name).read_bytes())
                     else:
-                        with mock.patch.object(VERIFY.os, "fsync", side_effect=OSError("authored write failure")):
-                            with self.assertRaisesRegex(OSError, "authored write failure"):
-                                VERIFY.extract_report(destination, b"partial output")
+                        with (mock.patch.object(VERIFY.os, "fsync", side_effect=OSError("authored write failure")),
+                              self.assertRaisesRegex(OSError, "authored write failure")):
+                            VERIFY.extract_report(destination, b"partial output")
                         self.assertFalse((held / destination.name).exists())
                 self.assertTrue(substituted)
                 self.assertEqual(b"outside sentinel", sentinel.read_bytes())
@@ -299,9 +394,8 @@ else:
                 parent.symlink_to(outside, target_is_directory=True)
             return original_open(path, flags, *args, **kwargs)
 
-        with mock.patch.object(VERIFY.os, "open", substitute):
-            with self.assertRaises(OSError):
-                VERIFY.extract_report(parent / "report.json", b"must not escape")
+        with (mock.patch.object(VERIFY.os, "open", substitute), self.assertRaises(OSError)):
+            VERIFY.extract_report(parent / "report.json", b"must not escape")
         self.assertEqual([], list(outside.iterdir()))
 
     def test_read_refuses_symlink_parent_final_symlink_and_oversized_input(self) -> None:
@@ -312,12 +406,10 @@ else:
         parent_link = self.root / "input-parent-link"
         parent_link.symlink_to(self.directory, target_is_directory=True)
         for candidate in (link, parent_link / "request.json", self.directory):
-            with self.subTest(path=candidate):
-                with self.assertRaises((VERIFY.VerificationError, OSError)):
-                    VERIFY.read_file(candidate, 64)
+            with self.subTest(path=candidate), self.assertRaises((VERIFY.VerificationError, OSError)):
+                VERIFY.read_file(candidate, 64)
         with self.assertRaises(VERIFY.VerificationError):
             VERIFY.read_file(victim, 1)
-
     def test_extraction_refuses_overwrite_symlinks_missing_parent_and_repository_escape(self) -> None:
         recovered, _ = self.verify()
         output = self.root / "output.json"
@@ -329,9 +421,8 @@ else:
         parent_link = self.root / "parent-link"
         parent_link.symlink_to(self.directory, target_is_directory=True)
         for destination in (link, parent_link / "output.json", self.root / "absent/output.json", self.root.parent / "escape.json"):
-            with self.subTest(path=destination):
-                with self.assertRaises((VERIFY.VerificationError, OSError)):
-                    VERIFY.extract_report(destination, recovered)
+            with self.subTest(path=destination), self.assertRaises((VERIFY.VerificationError, OSError)):
+                VERIFY.extract_report(destination, recovered)
         self.assertEqual(recovered, output.read_bytes())
         self.assertFalse((self.directory / "output.json").exists())
 
