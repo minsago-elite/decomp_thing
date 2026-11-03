@@ -63,6 +63,10 @@ class ContainedModuleCompilerWorkerTest {
     fun `direct worker refuses transient source or transitive header includes before compiler launch`() = withRoot { root ->
         val cases = listOf(
             "#include \"/tmp/transient-reports.h\"\nint alpha(void) { return 1; }" to "int alpha(void);\n",
+            // This is the concrete writable-tree escape spelling from the compiler-read
+            // finding. Keep the path literal here so a future policy change cannot silently
+            // admit it before the native boundary is exercised.
+            "#include \"../../../../reports/tmp/input.h\"\nint alpha(void) { return 1; }" to "int alpha(void);\n",
             "#include \"modules/alpha.h\"\nint alpha(void) { return 1; }" to
                 "#ifndef ALPHA_H\n#define ALPHA_H\n#include \"/tmp/transient-tmp.h\"\n#endif\n",
         )
