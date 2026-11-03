@@ -113,7 +113,8 @@ internal class WebSourceCatalogEvidence(
             val result = scan(before) { file ->
                 check(file in members)
                 val captured = try {
-                    readSource(reference.jobId, reference.runId, file.evidence.path, WebRevisionSourceContent.MAXIMUM_FILE_BYTES)
+                    // The scan reserves this limit plus the pinned reader's one-byte overflow probe, even on failure.
+                    readSource(reference.jobId, reference.runId, file.evidence.path, sourceSearchReadReservation(file) - 1)
                 } catch (failure: Exception) {
                     if (failure is WebAccessDenied || failure is java.util.concurrent.CancellationException || failure is InterruptedException) throw failure
                     null

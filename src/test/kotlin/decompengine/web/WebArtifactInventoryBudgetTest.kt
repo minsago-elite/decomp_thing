@@ -11,6 +11,30 @@ import kotlinx.serialization.json.*
 
 /** Actual production adapter and pinned store reads over tiny synthetic inputs; no workflow executes. */
 class WebArtifactInventoryBudgetTest {
+    @Test fun `inventory input reader preserves the store ceiling before reserving oversized bytes`() {
+        val parent = Files.createDirectories(Path.of("build/test-tmp/web-artifact-inventory").toAbsolutePath())
+        val root = createTempDirectory(parent, "input-ceiling-")
+        try {
+            val store = JobStore(root)
+            val input = elfFixture()
+            val job = store.createFromUpload("inert.elf", input)
+            var reserved = 0L
+            val captured = store.readArtifactInventoryInput(job.id, { reserved += it }, {})
+            assertContentEquals(input, captured.bytes)
+            assertEquals(input.size.toLong(), reserved)
+
+            // Sparse growth crosses the unchanged 32 MiB store limit without allocating a large test body.
+            java.io.RandomAccessFile(root.resolve(job.id).resolve("input.elf").toFile(), "rw").use {
+                it.setLength(32L * 1024 * 1024 + 1)
+            }
+            reserved = 0L
+            assertFailsWith<decompengine.repair.RepairBudgetExceededException> {
+                store.readArtifactInventoryInput(job.id, { reserved += it }, {})
+            }
+            assertEquals(0L, reserved, "oversized input must be refused before page-budget admission")
+        } finally { root.toFile().deleteRecursively() }
+    }
+
     @Test fun `production inventory accounts for input and repeated metadata reads including failure and cancellation`() {
         val parent = Files.createDirectories(Path.of("build/test-tmp/web-artifact-inventory").toAbsolutePath())
         val root = createTempDirectory(parent, "budget-")

@@ -1483,7 +1483,9 @@ count as `progress.unsearchableText`; unreadable bodies count as
 signed continuations, so a final continued page cannot report complete coverage after an
 earlier page skipped a file.
 
-Each page reads at most 32 MiB of bodies (failed reads are charged their committed size; at least one file is always read), stops after
+Each page reserves at most 32 MiB for body reads, including failures. Each read is bounded to its committed size
+(with a one-byte minimum for empty files), plus one reserved overflow-detection byte. `progress.scannedBytes`
+reports these reservations, not just successfully returned bytes. At least one eligible file fits each page. A page stops after
 2,000 ms of elapsed work (checked between files, before every 256 lines or 64 KiB of
 lines, and within matching after at most 256 candidate starts, each comparing at most
 128 code points) and returns at most `limit` matches below a 900,000-byte item ceiling.
