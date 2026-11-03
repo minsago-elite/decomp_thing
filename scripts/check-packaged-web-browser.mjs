@@ -16,6 +16,7 @@ import { seedLogs, qualifyLogs } from './packaged-browser-logs.mjs';
 import { seedLegacy, qualifyLegacy } from './packaged-browser-legacy.mjs';
 import { qualifyUpgrade, qualifyUpgradeCache } from './packaged-browser-upgrade.mjs';
 import { qualifyAudit, assertAudit } from './packaged-browser-audit.mjs';
+import { TargetLifecycle, TargetProtocol, openLifecycleTarget } from './packaged-browser-target-lifecycle.mjs';
 
 // Test driver only: the application is launched with a separate Node-free PATH.
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -86,6 +87,8 @@ let vite;
 let work;
 let browserTmp;
 let lastTarget;
+// Closed-vocabulary setup/loss record of every opened target (#1856); no identifiers, URLs or payloads.
+const targetLifecycle = new TargetLifecycle();
 const targets = [];
 const profile = join(root, 'browser profile');
 const ownerToken = randomUUID();
@@ -119,55 +122,7 @@ async function waitFor(check, label, timeout = 20000) {
   throw new Error(`Timed out waiting for ${label}`);
 }
 
-class Protocol {
-  constructor(socket) {
-    this.socket = socket;
-    this.sequence = 0;
-    this.pending = new Map();
-    this.listeners = new Map();
-    socket.addEventListener('message', ({ data }) => {
-      let message;
-      try { message = JSON.parse(data); }
-      catch (error) {
-        const failure = new Error('Chrome DevTools returned invalid JSON', { cause: error });
-        for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(failure); }
-        this.pending.clear();
-        socket.close();
-        return;
-      }
-      if (message.id) {
-        const pending = this.pending.get(message.id);
-        if (!pending) return;
-        clearTimeout(pending.timer);
-        this.pending.delete(message.id);
-        if (message.error) pending.reject(new Error(message.error.message));
-        else pending.resolve(message.result);
-      } else {
-        for (const listener of this.listeners.get(`${message.sessionId ?? ''}:${message.method}`) ?? []) listener(message.params);
-      }
-    });
-    socket.addEventListener('close', () => {
-      for (const pending of this.pending.values()) {
-        clearTimeout(pending.timer);
-        pending.reject(new Error('DevTools connection closed'));
-      }
-      this.pending.clear();
-    });
-  }
-  call(method, params = {}, sessionId) {
-    const id = ++this.sequence;
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { this.pending.delete(id); reject(new Error(`DevTools deadline: ${method}`)); }, 15000);
-      this.pending.set(id, { resolve, reject, timer });
-      this.socket.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
-    });
-  }
-  on(method, listener, sessionId) {
-    const key = `${sessionId ?? ''}:${method}`;
-    if (!this.listeners.has(key)) this.listeners.set(key, []);
-    this.listeners.get(key).push(listener);
-  }
-}
+class Protocol extends TargetProtocol {}
 
 async function snapshot(directory, relative = '') {
   const result = {};
@@ -246,10 +201,13 @@ function correlateDocumentResponse(state, requestId, response, source) {
   state.pendingDocumentRequests.delete(requestId);
 }
 
-async function makeTarget({ cspProbe = false, cacheEnabled = false } = {}) {
+async function makeTarget({ cspProbe = false, cacheEnabled = false, stage = cspProbe ? 'csp-probe' : 'mode' } = {}) {
   assert.equal(typeof cacheEnabled, 'boolean', 'Browser cache policy must be explicit');
-  const { targetId } = await cdp.call('Target.createTarget', { url: 'about:blank' });
-  const { sessionId } = await cdp.call('Target.attachToTarget', { targetId, flatten: true });
+  return openLifecycleTarget({ cdp, lifecycle: targetLifecycle, stage, setup: ({ targetId, sessionId, step }) =>
+    setupTarget({ targetId, sessionId, step, cspProbe, cacheEnabled }) });
+}
+
+async function setupTarget({ targetId, sessionId, step, cspProbe, cacheEnabled }) {
   const state = { targetId, sessionId, cspProbe, cacheEnabled, requests: [], responses: [], exceptions: [], requestUrls: new Map(),
     cacheRequests: [], cacheResponses: [], cacheRequestIds: new Set(),
     documentRequests: [], pendingDocumentRequests: new Map(), orphanDocumentResponses: [],
@@ -310,22 +268,22 @@ async function makeTarget({ cspProbe = false, cacheEnabled = false } = {}) {
   cdp.on('Audits.issueAdded', ({ issue }) => {
     if (issue.code === 'ContentSecurityPolicyIssue') state.cspIssues.push(issue.details?.contentSecurityPolicyIssueDetails ?? issue);
   }, sessionId);
-  await cdp.call('Page.enable', {}, sessionId);
-  await cdp.call('Runtime.enable', {}, sessionId);
-  await cdp.call('Network.enable', {}, sessionId);
-  await cdp.call('Log.enable', {}, sessionId);
-  await cdp.call('Audits.enable', {}, sessionId);
-  await cdp.call('Runtime.addBinding', { name: '__decompRecordCspViolation' }, sessionId);
-  await cdp.call('Page.addScriptToEvaluateOnNewDocument', { source: `addEventListener('securitypolicyviolation', event => {
+  await step('page-enable', () => cdp.call('Page.enable', {}, sessionId));
+  await step('runtime-enable', () => cdp.call('Runtime.enable', {}, sessionId));
+  await step('network-enable', () => cdp.call('Network.enable', {}, sessionId));
+  await step('log-enable', () => cdp.call('Log.enable', {}, sessionId));
+  await step('audits-enable', () => cdp.call('Audits.enable', {}, sessionId));
+  await step('binding', () => cdp.call('Runtime.addBinding', { name: '__decompRecordCspViolation' }, sessionId));
+  await step('init-script', () => cdp.call('Page.addScriptToEvaluateOnNewDocument', { source: `addEventListener('securitypolicyviolation', event => {
     globalThis.__decompRecordCspViolation(JSON.stringify({
       blockedURI: event.blockedURI, columnNumber: event.columnNumber, disposition: event.disposition,
       documentURI: event.documentURI, effectiveDirective: event.effectiveDirective,
       lineNumber: event.lineNumber, originalPolicy: event.originalPolicy,
       sourceFile: event.sourceFile, statusCode: event.statusCode, violatedDirective: event.violatedDirective,
     }));
-  });` }, sessionId);
-  await cdp.call('Network.setCacheDisabled', { cacheDisabled: !cacheEnabled }, sessionId);
-  await cdp.call('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false }, sessionId);
+  });` }, sessionId));
+  await step('cache-policy', () => cdp.call('Network.setCacheDisabled', { cacheDisabled: !cacheEnabled }, sessionId));
+  await step('metrics', () => cdp.call('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false }, sessionId));
   return state;
 }
 
@@ -535,12 +493,14 @@ try {
   }, 'Chrome DevTools listener');
   const [port, socketPath] = portFile.trim().split('\n');
   const socket = await connectDevTools(`ws://127.0.0.1:${port}${socketPath}`);
-  cdp = new Protocol(socket);
+  cdp = new Protocol(socket, { lifecycle: targetLifecycle });
+  // Target.targetCrashed is only delivered with discovery on; it records loss events, it opens nothing.
+  await cdp.call('Target.setDiscoverTargets', { discover: true });
   report.browser = await cdp.call('Browser.getVersion');
   report.browserSandboxDisabled = values['no-sandbox'];
   report.cspDetectorProbe = await qualifyCspDetector();
   if (legacyFixture) {
-    const tab = await makeTarget();
+    const tab = await makeTarget({ stage: 'legacy' });
     const bootstrapUrl = await waitFor(() => applicationOutput.split(/\s+/).find(part => part.startsWith(origin + '/login#bootstrap=')), 'legacy local bootstrap handoff');
     sensitiveValues.push(new URL(bootstrapUrl).hash.slice('#bootstrap='.length));
     report.legacy = await qualifyLegacy({ fixture: legacyFixture, origin, bootstrapUrl, tab, cdp, evaluate, ready, makeTarget });
@@ -673,7 +633,7 @@ try {
   }
   if (values.mode === 'public' || values.mode === 'session' || values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'history' || values.mode === 'logs' || values.mode === 'sources' || values.mode === 'scale' || values.mode === 'structure' || values.mode === 'live') {
     const identityExpression = `(() => ({ buildId: document.querySelector('meta[name="decomp-ui-build"]')?.content, applicationVersion: document.querySelector('meta[name="decomp-application-version"]')?.content, page: location.pathname, text: document.body.innerText }))()`;
-    const home = await makeTarget();
+    const home = await makeTarget({ stage: 'home' });
     await cdp.call('Page.navigate', { url: `${origin}/nested/` }, home.sessionId);
     await ready(home, `document.querySelector('h1')?.textContent === 'Your work, with its evidence'`, 'rendered packaged home');
     await ready(home, `document.activeElement === document.querySelector('main h1')`, 'home heading focus');
@@ -742,7 +702,7 @@ try {
     report.runtime = { identity: runtimeIdentity, lazyChunk: runtimeAsset.path, responseStatus: 200 };
     console.log('Packaged home, CSS/icon, lazy Runtime and exact manifest identities verified.');
 
-    const boundary = await makeTarget();
+    const boundary = await makeTarget({ stage: 'boundary' });
     const missingRoute = '/nested/not-a-packaged-route';
     await cdp.call('Page.navigate', { url: origin + '/nested/' }, boundary.sessionId);
     await ready(boundary, `document.querySelector('h1')?.textContent === 'Your work, with its evidence'`, 'not-found fixture home');
@@ -756,7 +716,7 @@ try {
     await ready(boundary, `document.contentType === 'application/json' && document.body.innerText.length > 0`, 'inert API navigation');
     assert.ok(boundary.responses.some((response) => response.url === origin + inertRoute && response.status === 401));
     assert.deepEqual(boundary.exceptions, []);
-    const redirect = await makeTarget();
+    const redirect = await makeTarget({ stage: 'redirect' });
     await cdp.call('Page.navigate', { url: origin + '/nested/runtime/' }, redirect.sessionId);
     await ready(redirect, `location.pathname === '/nested/runtime' && document.querySelector('h1')?.textContent === 'Runtime status'`, 'packaged canonical route redirect');
     const redirectHops = redirect.documentRequests;
@@ -769,7 +729,7 @@ try {
     report.routeBoundaries = { notFoundClientNavigation: true, missingRouteReloadInert: true,
       inertJsonNavigation: true, canonicalRedirectDocumentHops: 2 };
 
-    const recovery = await makeTarget();
+    const recovery = await makeTarget({ stage: 'recovery' });
     const interceptionErrors = [];
     let intercepted = 0;
     cdp.on('Fetch.requestPaused', (event) => {
@@ -832,7 +792,7 @@ try {
     const bootstrapUrl = await waitFor(() => applicationOutput.split(/\s+/).find((part) => part.startsWith(browserOrigin + '/nested/#bootstrap=')), 'local bootstrap handoff');
     const token = new URL(bootstrapUrl).hash.slice('#bootstrap='.length);
     sensitiveValues.push(token);
-    const authenticated = await makeTarget();
+    const authenticated = await makeTarget({ stage: 'authenticated' });
     let hmrConnected = false;
     cdp.on('Network.webSocketFrameReceived', (event) => {
       if (event.response.payloadData.includes('"type":"connected"')) hmrConnected = true;
@@ -940,7 +900,7 @@ try {
     const postReload = await evaluate(authenticated, 'window.__sessionTestRequests');
     assert.ok(postReload.every((request) => request.method === 'GET' && request.fragmentEmpty));
     await capture(authenticated, 'authenticated-runtime.png');
-    const jobTab = await makeTarget();
+    const jobTab = await makeTarget({ stage: 'job' });
     const absentJobPath = '/nested/jobs/' + 'a'.repeat(32);
     await cdp.call('Page.navigate', { url: browserOrigin + absentJobPath }, jobTab.sessionId);
     await ready(jobTab, `document.querySelector('h1')?.textContent === 'Job overview' && document.body.innerText.includes('This job is unavailable. It may have been removed.')`, 'durable job deep link');
@@ -951,7 +911,7 @@ try {
     report.dashboard.jobDeepLinkAndRefresh = true;
     report.dashboard.missingJobExplained = true;
     report.requests.job = jobTab.requests;
-    const runTab = await makeTarget();
+    const runTab = await makeTarget({ stage: 'run' });
     await cdp.call('Page.navigate', { url: browserOrigin + absentJobPath + '/runs/run_missing' }, runTab.sessionId);
     await ready(runTab, `document.querySelector('h1')?.textContent === 'Workflow attempt' && document.body.innerText.includes('This attempt is unavailable for this job.')`, 'pinned attempt deep link');
     await cdp.call('Page.reload', {}, runTab.sessionId);
@@ -998,7 +958,7 @@ try {
     let unnotified;
     let unnotifiedState;
     if (historyFixture) {
-      unnotified = await makeTarget();
+      unnotified = await makeTarget({ stage: 'unnotified' });
       await cdp.call('Page.addScriptToEvaluateOnNewDocument', {
         source: "Object.defineProperty(globalThis, 'BroadcastChannel', { value: undefined, configurable: true });",
       }, unnotified.sessionId);
@@ -1011,7 +971,7 @@ try {
       unnotifiedState = await fs.readFile(join(historyFixture.directory, 'workflow-state.json'));
     }
 
-    const peer = await makeTarget();
+    const peer = await makeTarget({ stage: 'peer' });
     await cdp.call('Page.navigate', { url: browserOrigin + '/nested/runtime' }, peer.sessionId);
     await ready(peer, `document.querySelector('#server-runtime-title') !== null`, 'peer private Runtime');
     await evaluate(peer, `(() => {
@@ -1104,6 +1064,8 @@ try {
 
 } catch (error) {
   report.status = 'failed';
+  // Which target setup step ended how (reply, deadline, detach, crash); a classification, not a cause.
+  report.targetLifecycle = targetLifecycle.toJSON();
   report.contentSecurityPolicy = cspEvidence();
   report.error = safeDiagnostic(error.stack);
   report.applicationError = safeDiagnostic(applicationError);
