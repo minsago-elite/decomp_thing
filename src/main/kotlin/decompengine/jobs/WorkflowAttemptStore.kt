@@ -220,23 +220,28 @@ class WorkflowAttemptStore private constructor(
     internal fun expireProgressJournal(jobId: String, runId: String, protectedFromRetention: Boolean,
         retention: java.time.Duration = AgentProgressJournalRetention.DEFAULT_TERMINAL_RETENTION,
         fault: (ProgressRetentionFaultPoint) -> Unit = {}): ProgressRetentionResult = withJob(jobId, readOnly = true) { directory ->
-        val attempt = available(jobId, directory).snapshot.attempts.singleOrNull { it.runId == runId }
-            ?: fail("RUN_NOT_FOUND", "The requested attempt does not belong to this job.")
-        if (protectedFromRetention || attempt.progressRetentionPinned) ProgressRetentionResult.RETAINED else {
-            val now = clock.instant()
-            if (AgentProgressJournalMaintenance.retainWithoutFilesystem(attempt, now, retention)) {
+        var provenNoOp = false
+        try {
+            val attempt = available(jobId, directory).snapshot.attempts.singleOrNull { it.runId == runId }
+                ?: fail("RUN_NOT_FOUND", "The requested attempt does not belong to this job.")
+            if (protectedFromRetention || attempt.progressRetentionPinned) {
+                provenNoOp = true
                 ProgressRetentionResult.RETAINED
             } else try {
-                AgentProgressJournalMaintenance.expire(root, attempt, now, retention, fault)
+                val now = clock.instant()
+                if (AgentProgressJournalMaintenance.retainWithoutFilesystem(attempt, now, retention)) {
+                    provenNoOp = true
+                    ProgressRetentionResult.RETAINED
+                } else AgentProgressJournalMaintenance.expire(root, attempt, now, retention, fault)
             } catch (failure: Exception) {
                 throw WorkflowStoreException("PROGRESS_RETENTION_FAILED",
                     "Progress retention did not finish. Preserve the journal and pending retention file, then retry maintenance with storage ownership.",
                     outcomeUnknown = true, cause = failure)
-            } finally {
-                // Once eligibility permits filesystem maintenance, its outcome may be mutating or
-                // uncertain. Preserve the ordinary command epoch even on failure/partial publish.
-                invalidateListingEpoch(jobId)
             }
+        } finally {
+            // Only a positively established no-op may preserve the token. Guard/lookup failures,
+            // actual maintenance and uncertain outcomes retain the original conservative invalidation.
+            if (!provenNoOp) invalidateListingEpoch(jobId)
         }
     }
 
