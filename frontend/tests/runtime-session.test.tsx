@@ -142,14 +142,15 @@ it('discards instance-bound storage and maintenance results when the Runtime ser
   const responses = new Map([
     ['/api/v1/storage', storage], ['/api/v1/storage/maintenance-preview', maintenance],
   ]);
-  const fetcher = vi.fn<typeof fetch>(async input => {
-    const path = new URL(String(input), window.location.origin).pathname;
+  const fetcher = vi.fn<typeof fetch>(input => {
+    const requestUrl = input instanceof Request ? input.url : input instanceof URL ? input.href : input;
+    const path = new URL(requestUrl, window.location.origin).pathname;
     const suffix = path.endsWith('/storage/maintenance-preview') ? '/api/v1/storage/maintenance-preview' : '/api/v1/storage';
     const document = responses.get(suffix);
     expect(document).toBeTruthy();
-    return new Response(JSON.stringify(document), { status: 200, headers: {
+    return Promise.resolve(new Response(JSON.stringify(document), { status: 200, headers: {
       'Content-Type': 'application/json; charset=utf-8', 'X-Request-ID': document!.requestId,
-    } });
+    } }));
   });
   vi.stubGlobal('fetch', fetcher);
   const gateway = { bootstrap: vi.fn().mockResolvedValueOnce(data).mockResolvedValueOnce({ ...data, serverInstanceId: 'server_fixture_2' }),
