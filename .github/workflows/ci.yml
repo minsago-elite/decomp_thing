@@ -699,3 +699,7 @@ jobs:
             build/test-results/test
             build/reports/junit-signatures
             build/source-identity-fixture-evidence
+
+  module-compilation-qualification:
+    if: github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'module-compilation-qualification')
+    uses: ./.github/workflows/module-compilation-qualification.yml
