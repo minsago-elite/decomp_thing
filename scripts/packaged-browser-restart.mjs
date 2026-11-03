@@ -163,13 +163,36 @@ export async function qualifyRestart({ fixture, origin, makeTarget, cdp, evaluat
   evidence.shutdown = restarted.exit;
   evidence.sameOrigin = origin;
 
-  // The old tab keeps its stale view until the server rejects it; it must clear, not replay.
-  await ready(old, `document.querySelector('section[aria-label="Progress retention"]') === null`, 'automatic private clearing');
+  // Give reconnects time to invalidate the old session automatically. If the page remains
+  // private, require a deliberate read and an actual 401 before treating it as cleared.
+  const signInNotice = 'To access private work, open the sign-in link printed by your local application.';
+  let privateClearPath = null;
+  const clearDeadline = Date.now() + 20000;
+  while (Date.now() < clearDeadline) {
+    const state = await evaluate(old, `(() => {
+      const retained = document.querySelector('section[aria-label="Progress retention"]') !== null;
+      const notice = document.body.innerText.includes(${JSON.stringify(signInNotice)});
+      return !retained && notice ? 'cleared' : retained ? 'private' : 'unknown';
+    })()`);
+    if (state === 'cleared') { privateClearPath = 'automatic-server-rejection'; break; }
+    assert.equal(state, 'private', 'Old attempt page became indeterminate before session invalidation');
+    await delay(75);
+  }
+  if (privateClearPath === null) {
+    const readStart = old.requests.length;
+    await readPin(old, 'explicit progress-pin read after restart', signInNotice);
+    const rejectedReads = old.requests.slice(readStart).filter(r => r.method === 'GET' && r.url === pinUrl);
+    assert.equal(rejectedReads.length, 1, 'Session invalidation must follow one deliberate pin GET');
+    assert.equal(matchingResponse(rejectedReads[0], old.responses)?.status, 401,
+      'The deliberate post-restart pin GET must receive an actual HTTP 401');
+    privateClearPath = 'explicit-progress-pin-read-401';
+  }
   assert.equal(await evaluate(old, `document.querySelector('ol[aria-label="Activity observations"]') === null && document.querySelector('section[aria-label="Progress retention"]') === null`), true,
     'Private attempt state survived restart rejection');
   assert.equal(summarizeRequests(old.requests).mutations.length, mutationsBeforeRestart, 'A mutation was replayed during restart');
   assert.equal(await evaluate(old, 'localStorage.length + sessionStorage.length'), 0);
   evidence.privateStateCleared = true;
+  evidence.privateClearPath = privateClearPath;
   evidence.automaticMutationReplays = 0;
 
   // The consumed first link stays denied; only a fresh explicit bootstrap authenticates.
