@@ -58,6 +58,7 @@ export const structureCopy = {
     available: 'available', 'not-recorded': 'not recorded by the current producer', unsupported: 'unsupported schema',
     invalid: 'malformed record', 'limit-exceeded': 'exceeds reader limits',
   },
+  labelSeparator: ': ',
   evidenceTitle: 'Evidence classes',
   evidence: {
     recovered: 'Recovered label', inferred: 'Inferred', unresolved: 'Unresolved', excluded: 'Excluded',

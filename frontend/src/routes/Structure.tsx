@@ -60,7 +60,7 @@ function States({ data }: { data: Header }) {
     <p>{copy.assessment[data.recoveryAssessment]}</p>
     <details>
       <summary>{copy.capabilitiesTitle}</summary>
-      <ul>{data.capabilities.map(item => <li key={item.id}>{copy.capabilityNames[item.id]}: {copy.capabilityStates[item.state]}
+      <ul>{data.capabilities.map(item => <li key={item.id}>{copy.capabilityNames[item.id]}{copy.labelSeparator}{copy.capabilityStates[item.state]}
         {item.reason && <> ({message(copy.reason, { code: <code>{item.reason}</code> })})</>}</li>)}</ul>
     </details>
   </>;
@@ -418,7 +418,7 @@ function Entity({ selected, basePath, kind, selector, search }: {
         <h3>{copy.collisionsTitle}</h3>
         {entity.collisions.total === 0 ? <p>{copy.noCollisions}</p> : <>
           <ul>{entity.collisions.items.map(item => <li key={`${item.kind}/${item.entityId}`}>
-            {item.kind}: <EntityName basePath={basePath} selected={selected} entity={item} version={data.structureVersion} /> (<code>{item.entityId}</code>)</li>)}</ul>
+            {item.kind}{copy.labelSeparator}<EntityName basePath={basePath} selected={selected} entity={item} version={data.structureVersion} /> (<code>{item.entityId}</code>)</li>)}</ul>
           {entity.collisions.total > entity.collisions.items.length && <p>{message(copy.boundedList, { shown: entity.collisions.items.length, total: entity.collisions.total })}</p>}
         </>}
       </section>
