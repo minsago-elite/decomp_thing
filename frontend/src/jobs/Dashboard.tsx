@@ -41,6 +41,8 @@ export function Dashboard({ basePath, draftOwner = null }: { basePath: string; d
   const [refresh, setRefresh] = useState(0);
   const [observation, setData] = useState<Received<Jobs> | null>(null);
   const data = observation?.value;
+  const currentData = useRef(data);
+  currentData.current = data;
   const [phase, setPhase] = useState<'loading' | 'ready' | 'error'>('loading');
   const [error, setError] = useState('');
   const [validationError, setValidationError] = useState<JobFilterError | null>(retainedDraft?.validationError ?? null);
@@ -55,6 +57,7 @@ export function Dashboard({ basePath, draftOwner = null }: { basePath: string; d
   const results = useRef<HTMLHeadingElement>(null);
   const moveFocus = useRef(false);
   const errorNotice = useRef<HTMLParagraphElement>(null);
+  const retainedFocusPosition = useRef<{ target: HTMLElement; top: number } | null>(null);
   // Transfer focus after the accepted page has committed, including cached pages
   // whose rows are replaced synchronously without a loading render.
   useLayoutEffect(() => {
@@ -120,6 +123,10 @@ export function Dashboard({ basePath, draftOwner = null }: { basePath: string; d
     return true;
   }, [binding, client, selection]);
   const failRead = useCallback((failure: unknown) => {
+    const active = document.activeElement;
+    retainedFocusPosition.current = currentData.current && active instanceof HTMLElement && list.current?.contains(active)
+      ? { target: active, top: active.getBoundingClientRect().top }
+      : null;
     setPhase('error');
     if (failure instanceof ApiClientError && (failure.status === 401 || failure.status === 403)) {
       firstPage.current = null;
@@ -135,6 +142,16 @@ export function Dashboard({ basePath, draftOwner = null }: { basePath: string; d
     } else setError(withApiFailureReference(copy.jobsCouldNotBeLoadedTheServerMayBeUnavailable, failure));
     pageTransition.current = null;
   }, []);
+  useLayoutEffect(() => {
+    const retained = retainedFocusPosition.current;
+    if (!error || phase !== 'error' || !data || !retained) return;
+    retainedFocusPosition.current = null;
+    if (!retained.target.isConnected || document.activeElement !== retained.target) return;
+    const delta = retained.target.getBoundingClientRect().top - retained.top;
+    if (!Number.isFinite(delta) || Math.abs(delta) <= 1) return;
+    const scroller = document.scrollingElement ?? document.documentElement;
+    scroller.scrollTop += delta;
+  }, [error, phase, data]);
   const reloadLatest = useRef(reload);
   reloadLatest.current = reload;
   // Another tab deleted or reorganized a job: read a fresh first page instead of trusting this snapshot.
