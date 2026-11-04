@@ -15,6 +15,7 @@ import { qualifyRestart, assertGracefulShutdown } from './packaged-browser-resta
 import { finalizePublication } from './packaged-browser-report.mjs';
 import { qualifyUpgrade, qualifyUpgradeCache } from './packaged-browser-upgrade.mjs';
 import { qualifyAudit, assertAudit } from './packaged-browser-audit.mjs';
+import { createResponsiveSection, responsiveFixtures, qualifyResponsive, assessResponsiveReport } from './packaged-browser-responsive.mjs';
 import { PackagedBrowserCdpDiagnostics } from './packaged-browser-cdp-diagnostics.mjs';
 import { AXE_VERSION, createNoticeSection, qualifyAvailabilityNotices, assessNoticeReport } from './packaged-browser-a11y-notices.mjs';
 
@@ -725,6 +726,13 @@ try {
     await delay(100); // Drain resource events from the last measured target.
     report.auditVerdict = assertAudit(report.audit, manifest, targets.filter((target) => !target.cspProbe).flatMap((target) => target.responses), origin);
     assert.deepEqual(report.auditVerdict.failures, [], `Packaged audit failures:\n${report.auditVerdict.failures.join('\n')}`);
+    // #619: rich long-content fixtures and trusted keyboard/emulated-touch operability on a separate target.
+    // The section is attached before driving so partial evidence is published if the driver throws.
+    const responsive = report.auditResponsive = createResponsiveSection();
+    await qualifyResponsive({ cdp, makeTarget, evaluate, ready, delay, root, origin, section: responsive,
+      fixtures: () => responsiveFixtures({ repo, python: values.python, buildId: manifest.buildId }) });
+    const responsiveFailures = assessResponsiveReport(responsive);
+    assert.deepEqual(responsiveFailures, [], `Packaged #619 responsive failures:\n${responsiveFailures.join('\n')}`);
     assert.ok(targets.filter((target) => !target.cspProbe).every((target) => target.requests.every((entry) => entry.url.startsWith(origin + '/') || entry.url.startsWith('data:'))), 'Audit fetched an external dependency');
     assert.equal(await fs.stat(data).then(() => true, () => false), false, 'Fixture-backed audit created job data');
     report.jobDataCreated = false;
