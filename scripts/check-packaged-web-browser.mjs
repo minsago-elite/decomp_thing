@@ -932,7 +932,18 @@ try {
       field.value = 'absent fixture'; field.dispatchEvent(new Event('input', { bubbles: true }));
     })()`);
     await evaluate(authenticated, `[...document.querySelectorAll('button')].find(button => button.textContent === 'Apply filters').click()`);
-    await ready(authenticated, `document.body.innerText.includes('No jobs match these filters.')`, 'filtered empty job library');
+    try {
+      await ready(authenticated, `document.body.innerText.includes('No jobs match these filters.')`, 'filtered empty job library');
+    } catch (failure) {
+      // A failed filter precondition prevents later route qualification. Preserve only a bounded
+      // visible-state summary and the last twelve same-origin route/status observations.
+      const visible = await evaluate(authenticated, `({ pathname: location.pathname,
+        alerts: [...document.querySelectorAll('[role="alert"]')].slice(0, 3).map(node => node.innerText.slice(0, 240)),
+        noMatches: document.body.innerText.includes('No jobs match these filters.') })`).catch(() => null);
+      const requests = authenticated.requests.slice(-12).map(({ method, url, type }) => ({ method, route: urlPath(url), type }));
+      const responses = authenticated.responses.slice(-12).map(({ url, status, type }) => ({ route: urlPath(url), status, type }));
+      throw new Error(`Filtered empty job library diagnostic: ${JSON.stringify({ visible, requests, responses })}`, { cause: failure });
+    }
     assert.equal(dashboardFiltersWithSnapshot(await evaluate(authenticated, 'location.search')), '?search=absent+fixture');
     await cdp.call('Page.reload', {}, authenticated.sessionId);
     await ready(authenticated, `document.body.innerText.includes('Local session connected.') && document.body.innerText.includes('No jobs match these filters.')`, 'saved job filters after reload');
