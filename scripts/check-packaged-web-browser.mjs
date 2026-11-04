@@ -14,7 +14,7 @@ import { seedHistory, qualifyHistory } from './packaged-browser-history.mjs';
 import { seedSources, qualifySources } from './packaged-browser-sources.mjs';
 import { seedLogs, qualifyLogs, logsFailureEvidence } from './packaged-browser-logs.mjs';
 import { seedLegacy, qualifyLegacy } from './packaged-browser-legacy.mjs';
-import { qualifyRestart, assertGracefulShutdown, scrubTokens, boundReport } from './packaged-browser-restart.mjs';
+import { qualifyRestart, assertGracefulShutdown, publishReport } from './packaged-browser-restart.mjs';
 import { qualifyUpgrade, qualifyUpgradeCache } from './packaged-browser-upgrade.mjs';
 import { qualifyAudit, assertAudit } from './packaged-browser-audit.mjs';
 import { TargetLifecycle, TargetProtocol } from './packaged-browser-target-lifecycle.mjs';
@@ -1202,8 +1202,9 @@ try {
       process.exitCode = 1;
     }
   }
-  const retained = scrubTokens(boundReport(report), sensitiveValues);
-  await fs.writeFile(join(root, 'report.json'), JSON.stringify(retained, null, 2) + '\n');
-  console.log(JSON.stringify(retained, null, 2));
+  // Scrubbed, bounded and lossless (#1882): report.json stays within 512 KiB, with any larger
+  // evidence in digest-referenced parts; a failed publication leaves a failure record and throws.
+  const { primaryText } = await publishReport(root, report, sensitiveValues);
+  console.log(primaryText.trimEnd());
   console.log(`Shutdown ${report.shutdownConfirmed ? 'confirmed' : 'UNCONFIRMED'}. Report: ${join(root, 'report.json')}`);
 }
