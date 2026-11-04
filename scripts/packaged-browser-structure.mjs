@@ -285,12 +285,14 @@ export function createStructureResponseRecorder(readBody) {
   const byPath = new Map();
   const byRequest = new Map();
   return {
-    responseReceived(path, requestId) {
+    responseReceived(path, requestId, response = {}) {
       let resolve;
       let reject;
       const promise = new Promise((accept, refuse) => { resolve = accept; reject = refuse; });
       promise.catch(() => undefined);
-      const capture = { promise, resolve, reject, requestId };
+      const capture = { promise, resolve, reject, requestId, status: Number.isInteger(response.status) ? response.status : null,
+        fromDiskCache: response.fromDiskCache === true, fromServiceWorker: response.fromServiceWorker === true,
+        terminal: 'pending', failure: null };
       const captures = byPath.get(path) ?? [];
       if (captures.length >= 8) throw new Error('Too many module response candidates for one path');
       captures.push(capture);
@@ -301,14 +303,25 @@ export function createStructureResponseRecorder(readBody) {
       const capture = byRequest.get(requestId);
       if (!capture) return;
       byRequest.delete(requestId);
+      capture.terminal = 'loading-finished';
       try { capture.resolve(await readBody(requestId)); }
-      catch (error) { capture.reject(error); }
+      catch {
+        capture.terminal = 'body-unavailable';
+        capture.failure = 'body-unavailable';
+        capture.reject(new Error('Structure response body unavailable after loadingFinished'));
+      }
     },
-    loadingFailed(requestId, reason) {
+    loadingFailed(requestId, { errorText, canceled, blockedReason } = {}) {
       const capture = byRequest.get(requestId);
       if (!capture) return;
       byRequest.delete(requestId);
-      capture.reject(new Error(`Structure response ${capture.requestId} failed: ${reason}`));
+      capture.terminal = 'loading-failed';
+      capture.failure = {
+        error: typeof errorText === 'string' && /^net::ERR_[A-Z0-9_]{1,64}$/.test(errorText) ? errorText : 'other',
+        canceled: canceled === true,
+        blocked: typeof blockedReason === 'string' && /^[A-Z_]{1,32}$/.test(blockedReason) ? blockedReason : null,
+      };
+      capture.reject(new Error('Structure response failed'));
     },
     async bodyForPath(path) {
       const captures = byPath.get(path);
@@ -316,7 +329,12 @@ export function createStructureResponseRecorder(readBody) {
       const outcomes = await Promise.allSettled(captures.map((capture) => capture.promise));
       const completed = outcomes.find((outcome) => outcome.status === 'fulfilled');
       if (completed) return completed.value;
-      const failures = outcomes.map((outcome) => outcome.reason instanceof Error ? outcome.reason.message : 'unknown failure');
+      const failures = captures.map((capture) => {
+        const id = typeof capture.requestId === 'string' && /^[A-Za-z0-9_.:-]{1,64}$/.test(capture.requestId) ? capture.requestId : 'unknown';
+        const error = capture.failure?.error ?? 'none';
+        const blocked = capture.failure?.blocked ?? 'none';
+        return `id=${id},status=${capture.status ?? 'unknown'},diskCache=${capture.fromDiskCache},serviceWorker=${capture.fromServiceWorker},terminal=${capture.terminal},error=${error},canceled=${capture.failure?.canceled ?? false},blocked=${blocked}`;
+      });
       throw new Error(`No module response completed for ${path}: ${failures.join('; ')}`);
     },
   };
@@ -397,7 +415,7 @@ async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evalua
     if (url.origin === new URL(browserOrigin).origin && event.response.status === 200
       && /\/api\/v1\/jobs\/[^/]+\/runs\/[^/]+\/revisions\/[^/]+\/modules\/[^/]+$/.test(url.pathname)) {
       moduleResponsePaths.set(event.requestId, url.pathname);
-      moduleResponseBodies.responseReceived(url.pathname, event.requestId);
+      moduleResponseBodies.responseReceived(url.pathname, event.requestId, event.response);
     }
   }, tab.sessionId);
   cdp.on('Network.loadingFinished', (event) => {
@@ -407,7 +425,7 @@ async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evalua
     const path = moduleResponsePaths.get(event.requestId);
     if (path) {
       moduleResponsePaths.delete(event.requestId);
-      moduleResponseBodies.loadingFailed(event.requestId, event.errorText);
+      moduleResponseBodies.loadingFailed(event.requestId, event);
     }
   }, tab.sessionId);
   cdp.on('Network.requestWillBeSent', (event) => {

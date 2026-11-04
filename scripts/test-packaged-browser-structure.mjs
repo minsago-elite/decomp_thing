@@ -67,7 +67,7 @@ test('module response bodies are captured at loadingFinished, before later navig
     reads.push(requestId);
     return expected;
   });
-  recorder.responseReceived('/modules/module_0041', 'request-41');
+  recorder.responseReceived('/modules/module_0041', 'request-41', { status: 200 });
   assert.deepEqual(reads, [], 'Response arrival alone must not attempt body retrieval');
   const body = recorder.bodyForPath('/modules/module_0041');
   await recorder.loadingFinished('request-41');
@@ -82,10 +82,10 @@ test('module response body capture ignores an aborted duplicate when a same-path
     reads.push(requestId);
     return expected;
   });
-  recorder.responseReceived('/modules/module_0002', 'request-aborted');
-  recorder.responseReceived('/modules/module_0002', 'request-complete');
+  recorder.responseReceived('/modules/module_0002', 'request-aborted', { status: 200, fromDiskCache: true });
+  recorder.responseReceived('/modules/module_0002', 'request-complete', { status: 200 });
   const body = recorder.bodyForPath('/modules/module_0002');
-  recorder.loadingFailed('request-aborted', 'net::ERR_ABORTED');
+  recorder.loadingFailed('request-aborted', { errorText: 'net::ERR_ABORTED', canceled: true });
   await recorder.loadingFinished('request-complete');
   assert.equal(await body, expected);
   assert.deepEqual(reads, ['request-complete']);
@@ -94,12 +94,12 @@ test('module response body capture ignores an aborted duplicate when a same-path
 test('module response body capture refuses when every same-path response fails', async () => {
   const reads = [];
   const recorder = createStructureResponseRecorder(async (requestId) => { reads.push(requestId); return {}; });
-  recorder.responseReceived('/modules/module_0002', 'request-2');
-  recorder.responseReceived('/modules/module_0002', 'request-3');
+  recorder.responseReceived('/modules/module_0002', 'request-2', { status: 200 });
+  recorder.responseReceived('/modules/module_0002', 'request-3', { status: 200, fromServiceWorker: true });
   const body = recorder.bodyForPath('/modules/module_0002');
-  recorder.loadingFailed('request-2', 'net::ERR_ABORTED');
-  recorder.loadingFailed('request-3', 'net::ERR_ABORTED');
-  await assert.rejects(body, /No module response completed for \/modules\/module_0002: .*net::ERR_ABORTED.*net::ERR_ABORTED/);
+  recorder.loadingFailed('request-2', { errorText: 'net::ERR_ABORTED', canceled: true });
+  recorder.loadingFailed('request-3', { errorText: 'private text with possible URL', blockedReason: 'private reason' });
+  await assert.rejects(body, /No module response completed for \/modules\/module_0002: .*status=200.*diskCache=false.*error=net::ERR_ABORTED,canceled=true.*serviceWorker=true.*error=other/);
   assert.deepEqual(reads, []);
 });
 
