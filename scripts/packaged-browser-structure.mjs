@@ -236,7 +236,10 @@ export function createStructureResponseRecorder(readBody) {
       const promise = new Promise((accept, refuse) => { resolve = accept; reject = refuse; });
       promise.catch(() => undefined);
       const capture = { promise, resolve, reject, requestId };
-      byPath.set(path, capture);
+      const captures = byPath.get(path) ?? [];
+      if (captures.length >= 8) throw new Error('Too many module response candidates for one path');
+      captures.push(capture);
+      byPath.set(path, captures);
       byRequest.set(requestId, capture);
     },
     async loadingFinished(requestId) {
@@ -253,9 +256,13 @@ export function createStructureResponseRecorder(readBody) {
       capture.reject(new Error(`Structure response ${capture.requestId} failed: ${reason}`));
     },
     async bodyForPath(path) {
-      const capture = byPath.get(path);
-      if (!capture) throw new Error('Missing completed module response');
-      return capture.promise;
+      const captures = byPath.get(path);
+      if (!captures?.length) throw new Error('Missing completed module response');
+      const outcomes = await Promise.allSettled(captures.map((capture) => capture.promise));
+      const completed = outcomes.find((outcome) => outcome.status === 'fulfilled');
+      if (completed) return completed.value;
+      const failures = outcomes.map((outcome) => outcome.reason instanceof Error ? outcome.reason.message : 'unknown failure');
+      throw new Error(`No module response completed for ${path}: ${failures.join('; ')}`);
     },
   };
 }

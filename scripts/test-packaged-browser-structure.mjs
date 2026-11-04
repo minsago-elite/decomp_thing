@@ -51,13 +51,31 @@ test('module response bodies are captured at loadingFinished, before later navig
   assert.equal(await body, expected);
 });
 
-test('module response body capture preserves request failure instead of reading an incomplete body', async () => {
+test('module response body capture ignores an aborted duplicate when a same-path response completes', async () => {
+  const expected = { body: '{"data":{"module":"recorded"}}', base64Encoded: false };
+  const reads = [];
+  const recorder = createStructureResponseRecorder(async (requestId) => {
+    reads.push(requestId);
+    return expected;
+  });
+  recorder.responseReceived('/modules/module_0002', 'request-aborted');
+  recorder.responseReceived('/modules/module_0002', 'request-complete');
+  const body = recorder.bodyForPath('/modules/module_0002');
+  recorder.loadingFailed('request-aborted', 'net::ERR_ABORTED');
+  await recorder.loadingFinished('request-complete');
+  assert.equal(await body, expected);
+  assert.deepEqual(reads, ['request-complete']);
+});
+
+test('module response body capture refuses when every same-path response fails', async () => {
   const reads = [];
   const recorder = createStructureResponseRecorder(async (requestId) => { reads.push(requestId); return {}; });
   recorder.responseReceived('/modules/module_0002', 'request-2');
+  recorder.responseReceived('/modules/module_0002', 'request-3');
   const body = recorder.bodyForPath('/modules/module_0002');
   recorder.loadingFailed('request-2', 'net::ERR_ABORTED');
-  await assert.rejects(body, /Structure response request-2 failed: net::ERR_ABORTED/);
+  recorder.loadingFailed('request-3', 'net::ERR_ABORTED');
+  await assert.rejects(body, /No module response completed for \/modules\/module_0002: .*net::ERR_ABORTED.*net::ERR_ABORTED/);
   assert.deepEqual(reads, []);
 });
 
