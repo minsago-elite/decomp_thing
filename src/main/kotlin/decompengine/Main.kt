@@ -18,6 +18,7 @@ import decompengine.mvp.BinaryRunnerService
 import decompengine.acp.AcpHarnessFactory
 import decompengine.project.GeneratedCMakeReconstructionProfile
 import decompengine.project.ReconstructionProfiles
+import decompengine.project.ReconstructionOutputWorkspace
 import decompengine.project.ArchivalReconstructionService
 import decompengine.project.BoundedLlmModuleReconstructor
 import decompengine.project.ReconstructionAdapters
@@ -51,6 +52,7 @@ fun main(args: Array<String>) {
         "runner" -> runRunner(args.drop(1))
         "repair" -> runRepair(args.drop(1))
         "repair-history" -> runRecordedRepairHistory(args.drop(1))
+        "runs" -> runRunHistory(args.drop(1))
         "explore" -> runExplore(args.drop(1))
         "reconstruct" -> runReconstruct(args.drop(1))
         "gcc-engine-plan" -> runGccEnginePlan(args.drop(1))
@@ -208,7 +210,7 @@ private fun runReconstruct(args: List<String>) {
     if (binary == null || output == null) reconstructUsageError("reconstruct requires an input binary and output directory")
     val environment = System.getenv()
     val exitCode = runReconstructionCliAction(environment.values) { redactor ->
-        withReconstructionCliProgress(output, environment.values) { progress ->
+        withReconstructionCliProgress(output, environment.values, inputPath = checkNotNull(binary)) { progress ->
             val strategy = try {
                 selectReconstructionStrategy(evidenceOnly, maximumContext, harnessOverride, environment, progress, profile)
             } catch (e: IllegalArgumentException) {
@@ -354,13 +356,21 @@ private fun runExplore(args: List<String>) {
             add(CandidateInput("seed_stdin_$seedIndex", CandidateSource.SEED, stdin = value.toByteArray()))
         }
     }
-    val report = AutomaticExplorer().explore(binary, seeds, reports)
+    val binaryPath = checkNotNull(binary)
+    val reportsPath = checkNotNull(reports)
+    val report = withExplorationOutputWorkspace(binaryPath, reportsPath) {
+        AutomaticExplorer().explore(binaryPath, seeds, reportsPath)
+    }
     println(
         "exploration generated ${report.candidates.size} input(s), discovered " +
             "${report.coverage.newSignatures.size} new output signature(s), uncalibrated exploration heuristic=${"%.4f".format(Locale.ROOT, report.confidence.score)}",
     )
     println("report: ${report.reportPath}")
 }
+
+/** Activate the selected input before exploration writes its input-bound report. */
+internal fun <T> withExplorationOutputWorkspace(binaryPath: Path, reportsPath: Path, action: () -> T): T =
+    ReconstructionOutputWorkspace.open(reportsPath, binaryPath).use { action() }
 
 private fun exploreUsageError(message: String): Nothing {
     System.err.println(message)
@@ -973,6 +983,7 @@ private fun printHelp() {
           llm_bin_patch runner [--control-dir <directory>] [--root <directory>]...
           llm_bin_patch repair <original-binary> <project-dir> [--reports <directory>] [--max-iterations <count>] [--explore] [--harness acp|legacy-openai]
           llm_bin_patch repair-history <project-dir> [--page N] [--case-page N] [--graph SHA256]
+          llm_bin_patch runs list|replay|follow <output-directory> [run-id]
           llm_bin_patch explore <binary> --reports <directory> [--arg <value>] [--stdin <value>]
           llm_bin_patch reconstruct <binary> --output <directory> [--profile generated-c-make-v1|generated-c-ninja-v1] [--evidence-only] [--max-context-chars <count>] [--harness acp|legacy-openai]
           llm_bin_patch gcc-engine-plan <cc1|lto1> <stripped-binary> --profile <file> --ghidra-archive <file> --output <empty-private-directory> --scratch <provisioned-mount>
