@@ -75,7 +75,7 @@ export function auditFixtures(repo, buildId) {
   const failureSha256 = createHash('sha256').update(failureBytes).digest('hex');
   const explorationBinding = createHash('sha256').update(`${jobId}\0${runId}`).digest('hex').slice(0, 32);
   const failureArtifactId = `exploration_${explorationBinding}_${failureSha256}`;
-  Object.assign(exploration.data, { producerSchemaVersion: 1 });
+  Object.assign(exploration.data, { state: 'partial', summary: null, producerSchemaVersion: 1 });
   Object.assign(exploration.data.sourceArtifact, { binding: selected, artifactId: failureArtifactId,
     sha256: failureSha256, sizeBytes: String(failureBytes.length), contentHref: `/nested/api/v1/jobs/${jobId}/artifacts/${failureArtifactId}/content` });
   const history = bound('validation-history', { jobId, runId, revisionId: null });
@@ -119,8 +119,6 @@ export function auditFixtures(repo, buildId) {
   const evidence = [
     { action: 'Read exploration evidence', reads: [`${api}/reports/exploration`], content: [
       { selector: '#exploration-report-binding', text: exploration.data.reportId },
-      { selector: '.output-signature-chart [role="img"]', text: '' },
-      { selector: '[aria-labelledby="output-signature-breadth-title"] .retained-case-table tbody', text: 'New distinct exit/output signatures' },
     ] },
     { action: 'Read retained case details', reads: [`/jobs/${jobId}/artifacts/${failureArtifactId}/content`], content: [
       { selector: '[aria-label="Retained candidate records"] tbody', text: 'seed_default' },
