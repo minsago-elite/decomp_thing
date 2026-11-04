@@ -219,6 +219,34 @@ def history_ids(output: Path) -> set[str]:
     return found
 
 
+def history_ids_started_during(output: Path, started_at: datetime, completed_at: datetime) -> list[str]:
+    """Identify this CLI invocation even when input switching restores old run-history directories."""
+    root = output / "run-history"
+    if not root.exists():
+        return []
+    if root.is_symlink() or not root.is_dir():
+        raise MatrixError("run-history is not a real directory")
+    matches = []
+    for run_id in sorted(history_ids(output)):
+        directory = root / run_id
+        metadata_path = directory / "run.json"
+        if metadata_path.is_symlink() or not metadata_path.is_file() or metadata_path.stat().st_size > 16 * 1024:
+            raise MatrixError("run history metadata is absent, linked, or oversized")
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            started_value = metadata.get("startedAt")
+            if not isinstance(started_value, str):
+                raise MatrixError("run history metadata has no valid invocation timestamp")
+            run_started = datetime.fromisoformat(started_value.replace("Z", "+00:00"))
+        except (OSError, UnicodeError, json.JSONDecodeError, KeyError, TypeError, ValueError) as problem:
+            raise MatrixError("run history metadata has no valid invocation timestamp") from problem
+        if metadata.get("runId") != run_id or run_started.tzinfo is None:
+            raise MatrixError("run history identity or timestamp is invalid")
+        if started_at <= run_started <= completed_at:
+            matches.append(run_id)
+    return matches
+
+
 def copy_bounded(source: Path, destination: Path, budget: list[int]) -> None:
     if source.is_symlink():
         raise MatrixError(f"refusing to retain linked evidence entry: {source}")
@@ -350,7 +378,6 @@ def read_exporter_progress(output: Path) -> tuple[dict[str, Any], Path]:
 
 def capture_run(cli: Path, output: Path, fixture: dict[str, Any], profile: str,
                 label: str, evidence: Path, budget: list[int]) -> dict[str, Any]:
-    before = history_ids(output)
     attempt_dir = evidence / "observations" / label
     home = attempt_dir / "home"
     temporary = attempt_dir / "tmp"
@@ -359,10 +386,11 @@ def capture_run(cli: Path, output: Path, fixture: dict[str, Any], profile: str,
     command = [str(cli), "reconstruct", str(fixture["path"]), "--output", str(output),
         "--profile", profile, "--evidence-only"]
     host_before = host_sample()
+    invocation_started = datetime.now(timezone.utc)
     result = run_logged(command, ROOT, safe_environment(home, temporary), attempt_dir / "cli")
+    invocation_completed = datetime.now(timezone.utc)
     host_after = host_sample()
-    after = history_ids(output)
-    new_ids = sorted(after - before)
+    new_ids = history_ids_started_during(output, invocation_started, invocation_completed)
     input_binding: dict[str, Any] = {
         "path": str(fixture["path"].relative_to(ROOT)),
         "sha256": fixture["sha256"],
@@ -377,6 +405,8 @@ def capture_run(cli: Path, output: Path, fixture: dict[str, Any], profile: str,
         "cli": result,
         "hostBefore": host_before,
         "hostAfter": host_after,
+        "invocationStartedAt": invocation_started.isoformat(),
+        "invocationCompletedAt": invocation_completed.isoformat(),
         "newRunIds": new_ids,
         "replayReturnCodes": {},
         "status": "failed",

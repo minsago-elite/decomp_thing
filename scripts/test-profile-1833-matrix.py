@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -142,6 +143,26 @@ class Profile1833MatrixTests(unittest.TestCase):
             (history / "not-a-run").mkdir()
             self.assertEqual(MATRIX.history_ids(output), {run_id})
 
+    def test_invocation_timestamp_ignores_restored_history_when_input_switches_back(self) -> None:
+        prior_input_run = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        new_input_run = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+        started = datetime(2026, 11, 4, 12, 0, 1, tzinfo=timezone.utc)
+        completed = datetime(2026, 11, 4, 12, 0, 3, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory(dir=MATRIX.ROOT) as scratch:
+            output = Path(scratch)
+            history = output / "run-history"
+            history.mkdir()
+            for run_id, timestamp in ((prior_input_run, "2026-11-04T12:00:00Z"),
+                (new_input_run, "2026-11-04T12:00:02Z")):
+                directory = history / run_id
+                directory.mkdir()
+                (directory / "run.json").write_text(json.dumps({
+                    "schemaVersion": 1, "displayOnly": True, "runId": run_id,
+                    "workflow": "reconstruction", "startedAt": timestamp,
+                    "state": "closed", "complete": True,
+                }), encoding="utf-8")
+            self.assertEqual(MATRIX.history_ids_started_during(output, started, completed), [new_input_run])
+
     def test_run_context_binds_input_profile_and_observation_counts(self) -> None:
         run_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
         with tempfile.TemporaryDirectory(dir=MATRIX.ROOT) as scratch:
@@ -200,6 +221,7 @@ class Profile1833MatrixTests(unittest.TestCase):
         run_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
         fake_cli_source = r'''#!/usr/bin/env python3
 import hashlib, json, pathlib, sys
+from datetime import datetime, timezone
 run_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 if sys.argv[1] == "reconstruct":
     binary = pathlib.Path(sys.argv[2])
@@ -207,7 +229,8 @@ if sys.argv[1] == "reconstruct":
     input_sha = hashlib.sha256(binary.read_bytes()).hexdigest()
     history = output / "run-history" / run_id
     history.mkdir(parents=True)
-    (history / "run.json").write_text(json.dumps({"state":"closed","complete":True,"runId":run_id}), encoding="utf-8")
+    (history / "run.json").write_text(json.dumps({"state":"closed","complete":True,"runId":run_id,
+      "startedAt":datetime.now(timezone.utc).isoformat()}), encoding="utf-8")
     event = {"event":{"kind":"run_context","inputSha256":input_sha,"profileSha256":"b"*64}}
     (history / "events.jsonl").write_text(json.dumps(event)+"\n", encoding="utf-8")
     reports = output / "analysis/reports"
