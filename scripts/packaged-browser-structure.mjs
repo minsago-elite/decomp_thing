@@ -13,6 +13,8 @@ const LOCAL_FEEDBACK_BUDGET_MS = 100;
 const LOCAL_FEEDBACK_SAMPLE_LIMIT = 51;
 const LOCAL_FEEDBACK_SAMPLE_MAX_MS = 60_000;
 const LOCAL_FEEDBACK_BINDING = '__decompRecordStructureFeedback';
+const JVM_RSS_BUDGET_BYTES = 256 * 1024 * 1024;
+const JVM_RSS_SAMPLE_INTERVAL_MS = 25;
 const sha = (bytes) => createHash('sha256').update(bytes).digest('hex');
 const hex = (value) => value.toString(16);
 const functionAddress = (index) => 0x400000 + index * 16;
@@ -152,6 +154,76 @@ export function nearestRankP95(values) {
   return sorted[Math.ceil(sorted.length * 0.95) - 1];
 }
 
+export function createJvmRssSummary(baselineBytes) {
+  if (!Number.isSafeInteger(baselineBytes) || baselineBytes <= 0) throw new TypeError('JVM RSS baseline is invalid');
+  return { baselineBytes, peakBytes: baselineBytes, baselineSampleCount: 1, baselineSpreadBytes: 0,
+    sampleCount: 0, failedSamples: 0 };
+}
+
+export function recordJvmRssSample(summary, valueBytes) {
+  if (!Number.isSafeInteger(valueBytes) || valueBytes <= 0) {
+    summary.failedSamples++;
+    return false;
+  }
+  summary.sampleCount++;
+  summary.peakBytes = Math.max(summary.peakBytes, valueBytes);
+  return true;
+}
+
+export function summarizeJvmRss(summary) {
+  return { measurement: 'linux-proc-vm-rss', baselineBytes: summary.baselineBytes,
+    baselineSamples: summary.baselineSampleCount, baselineSpreadBytes: summary.baselineSpreadBytes,
+    sampledPeakBytes: summary.peakBytes, incrementalPeakBytes: Math.max(0, summary.peakBytes - summary.baselineBytes),
+    budgetBytes: JVM_RSS_BUDGET_BYTES, sampleIntervalMs: JVM_RSS_SAMPLE_INTERVAL_MS,
+    sampleCount: summary.sampleCount, failedSamples: summary.failedSamples,
+    coverageComplete: summary.sampleCount > 0 && summary.failedSamples === 0 };
+}
+
+async function readJvmRssBytes(pid) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error('Packaged JVM process identity is unavailable');
+  const [commandLine, status] = await Promise.all([
+    fs.readFile(`/proc/${pid}/cmdline`), fs.readFile(`/proc/${pid}/status`, 'utf8'),
+  ]);
+  if (!commandLine.toString('utf8').split('\0').includes('decompengine.MainKt')) {
+    throw new Error('Packaged application process does not identify the expected JVM entry point');
+  }
+  const match = status.match(/^VmRSS:\s+(\d+)\s+kB$/m);
+  if (!match) throw new Error('Packaged JVM RSS sample is unavailable');
+  return Number(match[1]) * 1024;
+}
+
+async function startJvmRssSampler(pid) {
+  const baselineSamples = [await readJvmRssBytes(pid)];
+  for (let index = 1; index < 5; index++) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    baselineSamples.push(await readJvmRssBytes(pid));
+  }
+  const sortedBaseline = [...baselineSamples].sort((left, right) => left - right);
+  const summary = createJvmRssSummary(sortedBaseline[Math.floor(sortedBaseline.length / 2)]);
+  summary.baselineSampleCount = baselineSamples.length;
+  summary.baselineSpreadBytes = sortedBaseline.at(-1) - sortedBaseline[0];
+  let inFlight = null;
+  const sample = async () => {
+    if (inFlight) return inFlight;
+    inFlight = readJvmRssBytes(pid).then((bytes) => { recordJvmRssSample(summary, bytes); }, () => {
+      summary.failedSamples++;
+    }).finally(() => { inFlight = null; });
+    return inFlight;
+  };
+  const timer = setInterval(() => { void sample(); }, JVM_RSS_SAMPLE_INTERVAL_MS);
+  await sample();
+  let stoppedSummary = null;
+  return {
+    async stop() {
+      if (stoppedSummary) return stoppedSummary;
+      clearInterval(timer);
+      await sample();
+      stoppedSummary = summarizeJvmRss(summary);
+      return stoppedSummary;
+    },
+  };
+}
+
 /** Retain a selected response body as soon as Chrome reports the request complete. */
 export function createStructureResponseRecorder(readBody) {
   if (typeof readBody !== 'function') throw new TypeError('Structure response reader is required');
@@ -230,7 +302,13 @@ export function structureFeedbackInstrumentation() {
   })();`;
 }
 
-export async function qualifyStructure({ fixture, makeTarget, cdp, evaluate, ready, browserOrigin }) {
+export async function qualifyStructure(options) {
+  const jvmRssSampler = await startJvmRssSampler(options.applicationPid);
+  try { return await qualifyStructureWithRssSampler(options, jvmRssSampler); }
+  finally { await jvmRssSampler.stop(); }
+}
+
+async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evaluate, ready, browserOrigin }, jvmRssSampler) {
   const tab = await makeTarget();
   const localFeedbackMs = [];
   let invalidFeedbackSamples = 0;
@@ -353,6 +431,7 @@ export async function qualifyStructure({ fixture, makeTarget, cdp, evaluate, rea
   const pageDataP95Ms = nearestRankP95(pageMs);
   const requestP95Ms = nearestRankP95(inventoryRequestDurationsMs);
   const localFeedbackP95Ms = nearestRankP95(localFeedbackMs);
+  const jvmMemory = await jvmRssSampler.stop();
   assert.ok(firstPageMs <= FIRST_DATA_BUDGET_MS, `First function data page ${firstPageMs}ms exceeds the D0 ${FIRST_DATA_BUDGET_MS}ms budget`);
   assert.ok(pageDataP95Ms <= FIRST_DATA_BUDGET_MS, `Paged function data p95 ${pageDataP95Ms}ms exceeds the D0 ${FIRST_DATA_BUDGET_MS}ms budget`);
   assert.ok(searchMs <= FIRST_DATA_BUDGET_MS, `Function search first data ${searchMs}ms exceeds the D0 ${FIRST_DATA_BUDGET_MS}ms budget`);
@@ -366,12 +445,15 @@ export async function qualifyStructure({ fixture, makeTarget, cdp, evaluate, rea
   assert.deepEqual(tab.exceptions, []);
   assert.ok(tab.requests.every((request) => ['GET', 'HEAD'].includes(request.method)));
   assert.ok(peakBrowserHeapBytes <= 128 * 1024 * 1024, `Browser heap ${peakBrowserHeapBytes} exceeds the D0 budget`);
+  assert.ok(jvmMemory.coverageComplete, `JVM RSS sampling was incomplete: ${JSON.stringify(jvmMemory)}`);
+  assert.ok(jvmMemory.incrementalPeakBytes <= JVM_RSS_BUDGET_BYTES,
+    `JVM incremental RSS ${jvmMemory.incrementalPeakBytes} exceeds the D0 ${JVM_RSS_BUDGET_BYTES}-byte budget`);
   pageMs.sort((a, b) => a - b);
   return { recordedFunctions: fixture.functions, modules: fixture.modules, modelBytes: fixture.modelBytes, rowsPerPage: 100,
     pagesVisited: 51, measuredInteractions: localFeedbackMs.length, maximumMountedRows: 100,
     firstPageMs: Math.round(firstPageMs), pageMsP50: Math.round(pageMs[Math.ceil(pageMs.length * 0.5) - 1]), pageMsP95: Math.round(pageDataP95Ms),
     functionRequestP95Ms: Math.round(requestP95Ms), localFeedbackP95Ms: Math.round(localFeedbackP95Ms),
-    firstPageBudgetMs: FIRST_DATA_BUDGET_MS, localFeedbackBudgetMs: LOCAL_FEEDBACK_BUDGET_MS,
+    firstPageBudgetMs: FIRST_DATA_BUDGET_MS, localFeedbackBudgetMs: LOCAL_FEEDBACK_BUDGET_MS, jvmMemory,
     searchMs: Math.round(searchMs), peakBrowserHeapBytes, cursorReload: true,
     pinnedCrossLinks: true, moduleSourceLink: true, narrowReflow: true, boundedInventoryReads: inventoryReads.length, mutationRequests: 0 };
 }

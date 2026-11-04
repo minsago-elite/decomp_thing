@@ -1017,7 +1017,8 @@ try {
     report.attemptHistory = { navigation: true, directReload: true, missingExplained: true, mutationRequests: 0 };
 
     if (scaleFixture) report.scale = await qualifyScale({ fixture: scaleFixture, makeTarget, cdp, evaluate, ready, browserOrigin });
-    if (structureFixture) report.structure = await qualifyStructure({ fixture: structureFixture, makeTarget, cdp, evaluate, ready, browserOrigin });
+    if (structureFixture) report.structure = await qualifyStructure({ fixture: structureFixture, makeTarget, cdp, evaluate, ready, browserOrigin,
+      applicationPid: application.pid });
     if (liveFixture) {
       report.liveDashboard = await qualifyLive({ fixture: liveFixture, makeTarget, cdp, evaluate, ready, waitFor, browserOrigin });
       report.jobDataCreated = true;

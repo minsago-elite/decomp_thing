@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { runInNewContext } from 'node:vm';
-import { appendStructureFeedbackSample, assertStructureSourceLink, createStructureResponseRecorder, nearestRankP95, structureFeedbackInstrumentation } from './packaged-browser-structure.mjs';
+import { appendStructureFeedbackSample, assertStructureSourceLink, createJvmRssSummary, createStructureResponseRecorder,
+  nearestRankP95, recordJvmRssSample, structureFeedbackInstrumentation, summarizeJvmRss } from './packaged-browser-structure.mjs';
 
 const revision = `/nested/jobs/${'f'.repeat(32)}/runs/run_structure_scale/revisions/revision_structure_scale`;
 const browserOrigin = 'http://127.0.0.1:12345';
@@ -17,6 +18,22 @@ test('structure scale p95 uses nearest rank and refuses missing or invalid timin
   for (const values of [[], [Number.NaN], [Number.POSITIVE_INFINITY], [-1], null]) {
     assert.throws(() => nearestRankP95(values), TypeError);
   }
+});
+
+test('JVM RSS budget is measured above warmed baseline and incomplete sampling stays explicit', () => {
+  const summary = createJvmRssSummary(100 * 1024 * 1024);
+  assert.equal(recordJvmRssSample(summary, 90 * 1024 * 1024), true);
+  assert.equal(recordJvmRssSample(summary, 300 * 1024 * 1024), true);
+  const complete = summarizeJvmRss(summary);
+  assert.equal(complete.baselineBytes, 100 * 1024 * 1024);
+  assert.equal(complete.sampledPeakBytes, 300 * 1024 * 1024);
+  assert.equal(complete.incrementalPeakBytes, 200 * 1024 * 1024);
+  assert.equal(complete.coverageComplete, true);
+  assert.equal(recordJvmRssSample(summary, 0), false);
+  const incomplete = summarizeJvmRss(summary);
+  assert.equal(incomplete.failedSamples, 1);
+  assert.equal(incomplete.coverageComplete, false);
+  assert.throws(() => createJvmRssSummary(Number.NaN), TypeError);
 });
 
 test('module response bodies are captured at loadingFinished, before later navigation can evict them', async () => {

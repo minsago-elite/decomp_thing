@@ -145,8 +145,8 @@ Two checks qualify the 100,000-function budget (#536):
 - `WebProgramStructureTest` builds a 100,000-function synthetic revision (4,167
   modules) through the real capture path and requires pages of at most 200 rows and
   under 1 MiB, a p95 across 20 fresh-cache first-page reads below 500 ms, a median
-  warm page read below 500 ms and a retained projection inside the 256 MiB
-  incremental JVM budget. It prints each cold sample plus the median, p95 and max.
+  warm page read below 500 ms and a retained projection below its 256 MiB test
+  bound. It prints each cold sample plus the median, p95 and max.
 - `node scripts/check-packaged-web-browser.mjs --mode structure` seeds a persisted
   100,000-function revision (`scripts/packaged-browser-structure.mjs`) into the
   packaged application and drives pinned Chrome: it opens the inventory from the
@@ -157,6 +157,11 @@ Two checks qualify the 100,000-function budget (#536):
   128 MiB and at most 500 mounted table rows. CI runs it in the `web-packaged` job.
   Its seed writes manifests directly, so `WebProgramStructureTest` keeps
   `scripts/packaged-browser-structure-profile.json` equal to the current profile.
+  During that journey the driver samples the packaged JVM's Linux `VmRSS` every
+  25 ms, using the median of five idle samples before structure navigation as its
+  warm baseline. It fails on missing samples or incremental RSS above 256 MiB.
+  This is sampled process RSS for this synthetic journey; it does not establish a
+  maximum over every request pattern or long-running session.
 
 Five local 20-sample runs measured cold projection p50/p95/max of 323/438/569 ms,
 392/487/595 ms, 398/588/751 ms, 270/362/521 ms, and 333/493/502 ms; retained
