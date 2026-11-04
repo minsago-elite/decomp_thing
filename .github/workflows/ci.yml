@@ -82,6 +82,9 @@ jobs:
         run: python3 -B scripts/test-clang-sanitizer.py --verbose
       - name: Validate versioned web contract fixtures
         run: python3 contracts/web/v1/verify.py | tee "$RUNNER_TEMP/frontend-ci/contracts.txt"
+      - name: Verify pure ACP mount fixture protocol controls
+        timeout-minutes: 1
+        run: python3 -B src/test/python/acp_mount_isolation_protocol_test.py
       - name: Validate ACP required-case metadata controls
         timeout-minutes: 1
         run: |

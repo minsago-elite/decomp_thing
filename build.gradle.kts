@@ -2551,3 +2551,41 @@ tasks.named("check") {
     dependsOn(verifyLlvmBehaviorHelperDistribution)
     dependsOn(verifyKotlinBootClasspathDistribution)
 }
+
+// Opt-in test-only wiring for #1799/#1530/#1551. No default lifecycle edge.
+val acpMountIsolationNative = layout.buildDirectory.file("acp-mount-isolation-native/acp-mount-isolation-fixture")
+val buildAcpMountIsolationFixtureNative = tasks.register<Exec>("buildAcpMountIsolationFixtureNative") {
+    group = "verification"
+    val source = layout.projectDirectory.file("src/test/c/acp_mount_isolation_fixture.c")
+    inputs.file(source)
+    outputs.file(acpMountIsolationNative)
+    doFirst {
+        acpMountIsolationNative.get().asFile.parentFile.mkdirs()
+        environment("TMPDIR", acpMountIsolationNative.get().asFile.parentFile.absolutePath)
+        commandLine("cc", "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
+            source.asFile.absolutePath, "-o", acpMountIsolationNative.get().asFile.absolutePath)
+    }
+}
+val acpMountIsolationClasspath = layout.buildDirectory.file("acp-mount-isolation-native/test-runtime-classpath.txt")
+val exportAcpMountIsolationFixtureClasspath = tasks.register("exportAcpMountIsolationFixtureClasspath") {
+    dependsOn(tasks.named("testClasses"))
+    inputs.files(sourceSets["test"].runtimeClasspath)
+    outputs.file(acpMountIsolationClasspath)
+    doLast {
+        val output = acpMountIsolationClasspath.get().asFile
+        output.parentFile.mkdirs()
+        output.writeText(sourceSets["test"].runtimeClasspath.files.joinToString(File.pathSeparator) { it.absolutePath })
+    }
+}
+tasks.register<Exec>("acpMountIsolationFixture") {
+    group = "verification"
+    description = "Explicit controlled-host-only synthetic mount isolation experiment"
+    dependsOn(buildAcpMountIsolationFixtureNative, exportAcpMountIsolationFixtureClasspath)
+    doFirst {
+        commandLine("bash", "scripts/test-acp-mount-isolation.sh", "--run",
+            "--native", acpMountIsolationNative.get().asFile.absolutePath,
+            "--classpath-file", acpMountIsolationClasspath.get().asFile.absolutePath,
+            "--java", javaToolchains.launcherFor { languageVersion.set(JavaLanguageVersion.of(21)) }
+                .get().executablePath.asFile.absolutePath)
+    }
+}
