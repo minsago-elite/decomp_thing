@@ -5,7 +5,12 @@ Run only after all source owners have stopped editing. Publisher/driver controls
 separate gates; this driver never describes a mixed installation as a snapshot.
 """
 from __future__ import annotations
+import importlib.util
 import hashlib, json, os, pathlib, re, shlex, shutil, signal, subprocess, sys, tempfile, threading, time, zipfile
+
+_SPEC = importlib.util.spec_from_file_location("atomic_install_prepared", pathlib.Path(__file__).with_name("atomic_install_prepared.py"))
+prepared = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(prepared)
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 EVIDENCE = ROOT / "build/orchestration/atomic-install-remediation"
@@ -41,10 +46,15 @@ def qualified_java_home():
     return home
 
 
-def digest(path):
+def digest(path, limit=8 * 1024**3):
     h = hashlib.sha256()
-    with pathlib.Path(path).open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""): h.update(chunk)
+    with prepared.regular(pathlib.Path(path), limit) as (stream, info):
+        total = 0
+        while chunk := stream.read(min(1024 * 1024, limit - total + 1)):
+            total += len(chunk)
+            prepared.require(total <= limit, "digest input grew beyond byte bound")
+            h.update(chunk)
+        prepared.require(total == info.st_size, "digest input size changed")
     return h.hexdigest()
 
 
@@ -52,8 +62,9 @@ def source_hashes():
     # Include dirty product/test/build sources, not just the committed HEAD.
     names = set(subprocess.check_output(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"], cwd=ROOT).decode().split("\0"))
     names.update(OWNED_SOURCES)
-    return {name: digest(ROOT / name) for name in sorted(names) if name and
-            (name.startswith(("src/", "scripts/", "frontend/", "ghidra-bridge/")) or name.endswith((".gradle.kts", ".properties")))
+    names.update(prepared.BUILD_CONTROLS)
+    return {name: digest(ROOT / name, 128 * 1024**2) for name in sorted(names) if name and
+            (name in prepared.BUILD_CONTROLS or name.startswith(("src/", "scripts/", "frontend/", "ghidra-bridge/", "contracts/", "oracle/")) or name.endswith((".gradle.kts", ".properties")))
             and (ROOT / name).is_file() and not (ROOT / name).is_symlink()}
 
 
@@ -63,6 +74,26 @@ def save_record():
     temporary = target.with_suffix(".tmp")
     temporary.write_text(json.dumps(RECORD, indent=2) + "\n")
     temporary.replace(target)
+
+
+def close_preserving_failure(child, record=None):
+    """Keep the active error primary; cleanup is separately retained and fatal."""
+    primary = sys.exception()
+    try:
+        child.close()
+    except BaseException as cleanup:
+        detail = repr(cleanup)
+        RECORD.setdefault("cleanupFailures", []).append(detail)
+        RECORD["status"] = "failed"
+        if record is not None:
+            record.setdefault("cleanupFailures", []).append(detail)
+            record["status"] = "failed"
+            if primary is None:
+                record.setdefault("failure", detail)
+        if primary is not None:
+            primary.add_note("Secondary child cleanup failure: " + detail)
+        else:
+            raise
 
 
 class Child:
@@ -83,7 +114,7 @@ class Child:
             self.reader = threading.Thread(target=self._drain, daemon=True)
             self.reader.start()
         except BaseException:
-            self.close()
+            close_preserving_failure(self)
             raise
 
     def _drain(self):
@@ -132,13 +163,18 @@ class Child:
             if self.error: raise self.error
             return code
         finally:
-            self.close()
+            close_preserving_failure(self)
 
     def text(self): return self.tail.decode("utf-8", errors="replace")
 
 
 def run(args, *, env=None, timeout=900, log=None, allow_failure=False):
-    command = {"args": list(map(str, args)), "phase": RECORD["phase"], "status": "running"}
+    command = {"args": list(map(str, args)), "phase": RECORD["phase"], "status": "running",
+               "commandId": len(RECORD["commands"]), "startedAtUnixNs": time.time_ns()}
+    if "-I" in command["args"]:
+        init = pathlib.Path(command["args"][command["args"].index("-I") + 1])
+        command.update(init=str(init), initSha256=digest(init),
+                       initConfig=prepared.read_json(init.with_suffix(".json")))
     RECORD["commands"].append(command)
     save_record()
     child = None
@@ -153,8 +189,14 @@ def run(args, *, env=None, timeout=900, log=None, allow_failure=False):
         command.update(status="failed", failure=repr(failure))
         raise
     finally:
-        if child is not None: child.close()
-        save_record()
+        try:
+            if child is not None: close_preserving_failure(child, command)
+        finally:
+            command["finishedAtUnixNs"] = time.time_ns()
+            receipt = WORK / f"command-{command['commandId']:02d}-events.json"
+            if receipt.exists():
+                command.update(taskReceipt=str(receipt), taskReceiptSha256=digest(receipt))
+            save_record()
 
 
 def safe_env():
@@ -192,44 +234,169 @@ def install_root():
     return WORK / "root-build/install" / APP
 
 
-def write_init(generation, fail_before_rename=False):
-    gen = WORK / "markers" / generation
-    gen.mkdir(parents=True, exist_ok=True)
-    (gen / "atomic-install-generation.txt").write_text(generation)
-    text = f'''allprojects {{ p -> if (p == p.rootProject) {{
+def write_init(generation, fail_before_rename=False, *, replay=False, command_id=None):
+    global INIT
+    command_id = len(RECORD["commands"]) if command_id is None else command_id
+    INIT = WORK / f"command-{command_id:02d}.init.gradle"
+    config = {"commandId": command_id, "runRoot": str(WORK), "generation": generation,
+              "failBeforeRename": fail_before_rename, "replay": replay,
+              "exclusions": prepared.EXCLUSIONS if replay else []}
+    if generation is not None:
+        gen = WORK / "markers" / generation
+        gen.mkdir(parents=True, exist_ok=True)
+        marker = gen / "atomic-install-generation.txt"
+        if not marker.exists(): marker.write_text(generation)
+        if marker.read_text() != generation: raise RuntimeError("generation marker changed")
+    text = init_text(config)
+    with INIT.open("x") as target:
+        target.write(text)
+    prepared.write_json(INIT.with_suffix(".json"), config, immutable=True)
+    return INIT
+
+
+def init_text(config, *, root=None, work=None):
+    ROOT = root or globals()["ROOT"]
+    WORK = work or globals()["WORK"]
+    generation, replay = config["generation"], config["replay"]
+    command_id = config["commandId"]
+    gen = WORK / "markers" / str(generation)
+    event_file = WORK / f"command-{command_id:02d}-events.json"
+    plan_file = WORK / f"command-{command_id:02d}-plan.json"
+    helper = ROOT / "scripts/atomic_install_prepared.py"
+    text = f'''import groovy.json.JsonOutput
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
+// Immutable command configuration: {json.dumps(config, sort_keys=True)}
+def nowNs = {{ -> def instant = java.time.Instant.now(); instant.epochSecond * 1000000000L + instant.nano }}
+def receipt = [commandId: {command_id}, runRoot: {groovy_path(WORK)}, tasks: [], events: [], actionsStarted: false, publisherCompleted: false]
+def saveReceipt = {{ ->
+    def data = JsonOutput.toJson(receipt)
+    if (data.getBytes('UTF-8').length > 16777216) throw new GradleException('atomic receipt exceeds bound')
+    def target = new File({groovy_path(event_file)})
+    def stage = new File(target.path + '.partial')
+    stage.setText(data, 'UTF-8')
+    Files.move(stage.toPath(), target.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+}}
+gradle.taskGraph.afterTask {{ task, state ->
+    if (receipt.tasks.size() >= 8192) throw new GradleException('atomic task receipt exceeds bound')
+    receipt.tasks.add([path: task.path, enabled: task.enabled, skipped: state.skipped, upToDate: state.upToDate,
+        noSource: state.noSource, executed: state.executed, failure: state.failure != null,
+        atUnixNs: nowNs()])
+    saveReceipt()
+}}
+'''
+    if generation is None:
+        return text
+    text += f'''allprojects {{ p -> if (p == p.rootProject) {{
 p.buildDir = new File({groovy_path(WORK / "root-build")})
 p.afterEvaluate {{
+def declaredProperties = [:]
+gradle.taskGraph.whenReady {{ graph ->
+    if (!graph.hasTask(":installDist")) return
+    ['buildAnalysisIoHelper', 'buildLlvmBehaviorHelper'].each {{ name ->
+        declaredProperties[name] = p.tasks.getByName(name).inputs.properties.collectEntries {{ key, value -> [(key): value.toString()] }}
+    }}
+}}
 p.tasks.matching {{ it.name == "frontendBuild" }}.configureEach {{
-    // Vite writes to the repository's normal build/frontend path. Only copy
-    // after a successful fresh build; never seed from a historical bundle.
     outputs.upToDateWhen {{ false }}
     doLast {{
         def produced = new File({groovy_path(ROOT / "build/frontend")})
         def consumed = new File({groovy_path(WORK / "root-build/frontend")})
-        ["dist", "bundle-report.json", "bundle-composition.json"].each {{ name ->
+'''
+    if replay:
+        text += f'''        p.providers.exec {{ commandLine({groovy_path(pathlib.Path(sys.executable).resolve())}, '-B', {groovy_path(helper)},
+            'frontend', produced.absolutePath, consumed.absolutePath) }}.result.get().assertNormalExitValue()
+'''
+    else:
+        text += '''        ["dist", "bundle-report.json", "bundle-composition.json"].each { name ->
             def source = new File(produced, name)
             if (!source.exists()) throw new GradleException("Missing fresh frontend output: " + name)
             p.delete(new File(consumed, name))
-            p.copy {{ from(source); into(name == "dist" ? new File(consumed, name) : consumed) }}
-        }}
-    }}
+            p.copy { from(source); into(name == "dist" ? new File(consumed, name) : consumed) }
+        }
+'''
+    text += f'''    }}
 }}
 p.tasks.matching {{ it.name == "jar" }}.configureEach {{ from(new File({groovy_path(gen)})) }}
-p.tasks.matching {{ it.name == "installDist" }}.configureEach {{
-    destinationDir = new File({groovy_path(install_root())})
+p.tasks.matching {{ it.name == "installDist" }}.configureEach {{ install ->
+    destinationDir = new File({groovy_path(WORK / "root-build/install" / APP)})
+    ext.atomicInstallTestEvent = {{ phase, path ->
+        if (receipt.events.size() >= 24576) throw new GradleException('atomic event receipt exceeds bound')
+        receipt.events.add([phase: phase, path: path.toString(), atUnixNs: nowNs()])
+        saveReceipt()
 '''
-    if fail_before_rename:
-        text += '''    ext.atomicInstallTestEvent = { phase, path ->
-        if (phase == "before-rename") throw new IllegalStateException("atomic-probe injected before first rename")
-    } as java.util.function.BiConsumer
+    if config["failBeforeRename"]:
+        text += '''        if (phase == "before-rename") throw new IllegalStateException("atomic-probe injected before first rename")
 '''
-    INIT.write_text(text + "}\n} } }\n")
+    text += '''    } as java.util.function.BiConsumer
+'''
+    if replay:
+        text += '    outputs.upToDateWhen { false }\n'
+    text += f'''    doFirst {{
+        receipt.actionsStarted = true
+        receipt.actionsStartedAtUnixNs = nowNs()
+        saveReceipt()
+        def files = {{ collection -> collection.files.collect {{ it.absolutePath }}.sort() }}
+        def producers = [:]
+        ['buildAnalysisIoHelper', 'buildLlvmBehaviorHelper'].each {{ name ->
+            def producer = p.tasks.getByName(name)
+            producers[name] = [inputs: files(producer.inputs.files), outputs: files(producer.outputs.files),
+                classpath: files(producer.classpath), mainClass: producer.mainClass.get(),
+                properties: declaredProperties[name]]
+        }}
+        def roots = [:]
+        ['stageKotlinBootRuntime', 'generateKotlinBootClasspathReference', 'generateGccBundledGhidraReference',
+         'generateLlvmHostedWorkerClasspathReference', 'startScripts'].each {{ name ->
+            def task = p.tasks.getByName(name)
+            def outputs = files(task.outputs.files)
+            if (outputs.size() != 1) throw new GradleException('unexpected mapping output roots: ' + name)
+            roots[name] = outputs[0]
+        }}
+        def plan = [runRoot: {groovy_path(WORK)}, repoRoot: {groovy_path(ROOT)}, installInputs: files(install.inputs.files), producers: producers,
+            frontendNodeHome: p.tasks.getByName('frontendBuild').inputs.properties.frontendNodeHome.toString(),
+            mappingRoots: roots, originalJar: p.tasks.getByName('jar').archiveFile.get().asFile.absolutePath]
+        def planText = JsonOutput.toJson(plan)
+        if (planText.getBytes('UTF-8').length > 33554432) throw new GradleException('atomic plan exceeds bound')
+        Files.writeString(new File({groovy_path(plan_file)}).toPath(), planText, java.nio.file.StandardOpenOption.CREATE_NEW)
+'''
+    if replay:
+        text += f'''        p.providers.exec {{ commandLine({groovy_path(pathlib.Path(sys.executable).resolve())}, '-B', {groovy_path(helper)},
+            'guard', {groovy_path(WORK)}) }}.result.get().assertNormalExitValue()
+        def boundedNames = {{ directory ->
+            def names = []
+            def entries = Files.newDirectoryStream(directory.toPath())
+            try {{
+                entries.each {{ entry ->
+                    if (names.size() >= 4096) throw new GradleException('protected directory exceeds bound')
+                    names.add(entry.fileName.toString())
+                }}
+            }} finally {{ entries.close() }}
+            names
+        }}
+        def expectedNames = boundedNames(new File(roots.stageKotlinBootRuntime)).toSet()
+        def existing = boundedNames(new File(destinationDir, 'lib'))
+        receipt.stalePruneCandidates = existing.findAll {{ it.endsWith('.jar') && !expectedNames.contains(it) }}.sort()
+        if (!receipt.stalePruneCandidates.isEmpty()) throw new GradleException('unexpected stale prune candidates')
+        receipt.guardPassedAtUnixNs = nowNs()
+        saveReceipt()
+'''
+    text += '''    }
+    // Registered after production configuration; this follows the real publisher.
+    doLast {
+        receipt.publisherCompleted = true
+        receipt.publisherCompletedAtUnixNs = nowNs()
+        saveReceipt()
+    }
+}
+} } }
+'''
+    return text
 
 
-def install(generation, *, fail=False):
-    write_init(generation, fail)
+def install(generation, *, fail=False, replay=False):
+    write_init(generation, fail, replay=replay)
     log = WORK / f"install-{generation}-{time.monotonic_ns()}.log"
-    code, output = gradle("-I", INIT, "installDist", log=log, allow_failure=fail)
+    code, output = gradle("-I", INIT, "installDist", *(prepared.EXCLUSIONS if replay else []), log=log, allow_failure=fail)
     if fail and (code == 0 or "atomic-probe injected before first rename" not in output or "completed renames=0" not in output):
         raise RuntimeError("failed-update control did not reach the intended production pre-rename seam")
     return code, output
@@ -249,10 +416,9 @@ def statkey(path):
 
 
 def protected_snapshot():
-    paths = list((install_root() / "lib").glob("*.jar")) + list((install_root() / "lib").glob("*reference-v1.json"))
-    paths += [install_root() / "bin" / APP, install_root() / "bin" / (APP + ".bat")]
-    return {str(p.relative_to(WORK)): {"sha256": digest(p), "key": statkey(p), "mode": p.stat().st_mode & 0o777}
-            for p in paths}
+    snapshot = prepared.protected(install_root(), WORK)
+    prepared.require(snapshot["status"] == "passed", "protected snapshot failed: " + snapshot.get("error", ""))
+    return snapshot["entries"]
 
 
 def read_evidence(path):
@@ -292,17 +458,18 @@ def launch_blocked(generation, authority="none"):
         if len(actual) != len(expected) or set(actual) != expected:
             raise RuntimeError("installed launcher classpath is not the exact installed JAR closure")
         if data["descriptorDigest"] != digest(jar): raise RuntimeError("READY descriptor not installed generation")
-        probe.update(status="ready", ready=data)
+        probe.update(status="ready", ready=data, readyAtUnixNs=time.time_ns())
         return child, release, data, jar  # Ownership transfers only here.
     except BaseException as failure:
         probe.update(status="failed", failure=repr(failure))
-        if child is not None: child.close()
+        if child is not None: close_preserving_failure(child, probe)
         raise
     finally: save_record()
 
 
 def release_and_reap(child, release, generation, expected="changed"):
     try:
+        child.probe["releasedAtUnixNs"] = time.time_ns()
         release.write_text(expected + "\n")
         code = child.wait(PROBE_FINISH_TIMEOUT)
         loaded = release.with_name("READY.loaded")
@@ -318,23 +485,96 @@ def release_and_reap(child, release, generation, expected="changed"):
         child.probe.update(status="failed", failure=repr(failure))
         raise
     finally:
-        child.close()
-        save_record()
+        try:
+            close_preserving_failure(child, child.probe)
+        finally:
+            save_record()
 
 
 def set_phase(phase):
     RECORD["phase"] = phase; save_record()
 
 
+def seal_preparation():
+    command = RECORD["commands"][1]
+    tasks = prepared.read_json(WORK / "command-01-events.json")["tasks"]
+    for name in prepared.PRODUCERS:
+        events = [t for t in tasks if t["path"] == ":" + name]
+        prepared.require(len(events) == 1 and events[0]["executed"] and events[0]["enabled"] and
+                         not any(events[0][key] for key in ("skipped", "upToDate", "noSource", "failure")),
+                         "fresh preparation did not execute helper producer: " + name)
+    plan = prepared.read_json(WORK / "command-01-plan.json")
+    java = qualified_java_home()
+    node = pathlib.Path(shutil.which("node")).resolve()
+    tools = {"java": {"path": str((java / "bin/java").resolve()), "home": str(java)},
+             "javaRelease": {"path": str(java / "release")}, "node": {"path": str(node), "home": str(node.parent.parent)}}
+    # Original JDK release and pinned Node version; no compiler re-execution on replay.
+    node_version = subprocess.check_output([node, "--version"], env=safe_env(), timeout=10).decode().strip()
+    prepared.require(node_version.lstrip("v") == (ROOT / ".node-version").read_text().strip().lstrip("v"), "Node version differs")
+    manifest = {"schemaVersion": 1, "runRoot": str(WORK), "preparationCommandId": 1,
+                "preparationCommand": dict(command), "plan": plan, "sourceHashes": source_hashes(),
+                "buildControls": prepared.build_controls(ROOT), "tools": tools, "nodeVersion": node_version,
+                "sealedAtUnixNs": time.time_ns()}
+    prepared.require(manifest["sourceHashes"] == RECORD["sourceHashes"], "source changed during preparation")
+    manifest.update(prepared.capture(plan, ROOT, manifest["sourceHashes"], tools))
+    prepared.write_json(WORK / "prepared-A.json", manifest, immutable=True)
+    return manifest
+
+
 def live_no_update():
+    prepared.require(not (WORK / "root-build").exists(), "initial A build directory is not fresh")
     install("A")
-    initial = protected_snapshot()
-    child, release, ready, jar = launch_blocked("A")
-    install("A")
-    if protected_snapshot() != initial:
-        raise RuntimeError("no-update install changed protected bytes/inodes/modes")
+    manifest = seal_preparation()
+    child = None
+    primary = None
+    before = prepared.protected(install_root(), WORK)
+    prepared.write_json(WORK / "protected-before.json", before, immutable=True)
+    prepared.write_json(WORK / "prepared-input-before.json", manifest["inventory"], immutable=True)
+    try:
+        prepared.require(before["status"] == "passed", "protected before snapshot failed")
+        prepared.check_prepared(manifest, manifest["plan"])
+        child, release, ready, jar = launch_blocked("A")
+        RECORD["probes"][0].update(role="prepared-no-update", preparationCommandId=1, replayCommandId=2,
+                                    preparedManifestSha256=digest(WORK / "prepared-A.json"))
+        prepared.require(child.process.poll() is None, "installed probe died before replay")
+        install("A", replay=True)
+        prepared.require(child.process.poll() is None, "installed probe died during replay")
+    except BaseException as failure:
+        primary = failure
+        raise
+    finally:
+        # Always retain diagnostics before releasing/reaping, including guard/command failures.
+        diagnostic_errors = []
+        for prefix, capture, old in (("protected", lambda: prepared.protected(install_root(), WORK), before),
+                ("prepared-input", lambda: prepared.inventory(manifest["roots"]), manifest["inventory"])):
+            try:
+                after = capture()
+                prepared.write_json(WORK / (prefix + "-after.json"), after, immutable=True)
+                prepared.write_json(WORK / (prefix + "-diff.json"), prepared.difference(old, after), immutable=True)
+            except BaseException as failure:
+                diagnostic_errors.append(repr(failure))
+        if diagnostic_errors:
+            RECORD["diagnosticFailures"] = diagnostic_errors
+            if primary is None: raise RuntimeError("no-update diagnostic capture failed: " + repr(diagnostic_errors))
+    for prefix in ("protected", "prepared-input"):
+        prepared.require(prepared.read_json(WORK / (prefix + "-diff.json")) == prepared.EMPTY_DIFF,
+                         "no-update changed " + prefix)
+    validate_replay_receipt(manifest)
     result = release_and_reap(child, release, "A", "unchanged")
-    return {"status": "passed", "probe": result, "protectedUnchanged": True}
+    prepared.require(result["descriptorDigest"] == result["installedPathDigestAfterRelease"] == ready["descriptorDigest"],
+                     "no-update retained descriptor/path differs")
+    retained = prepared.retain_inputs(manifest, WORK)
+    prepared.write_json(WORK / "prepared-retained.json", retained, immutable=True)
+    evidence = ["prepared-A.json", "prepared-retained.json", "prepared-closure.json", "prepared-guard.json",
+                *[prefix + suffix + ".json" for prefix in ("protected", "prepared-input") for suffix in ("-before", "-after", "-diff")]]
+    return {"status": "passed", "probe": result, "protectedUnchanged": True,
+            "preparationCommandId": 1, "replayCommandId": 2, "probeIndex": 0,
+            "evidenceHashes": {name: digest(WORK / name) for name in evidence}}
+
+
+def validate_replay_receipt(manifest):
+    receipt = prepared.read_json(WORK / "command-02-events.json")
+    prepared.validate_publisher(receipt, manifest)
 
 
 def main():
@@ -351,7 +591,8 @@ def main():
         set_phase("source capture")
         RECORD.update(sourceHead=subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(), sourceHashes=source_hashes())
         set_phase("agent build")
-        gradle("atomicInstallProbeAgentJar", log=WORK / "agent-build.log")
+        write_init(None)
+        gradle("-I", INIT, "atomicInstallProbeAgentJar", log=WORK / "agent-build.log")
         RECORD["agentSha256"] = digest(AGENT)
         set_phase("initial A and no-update")
         RECORD["noUpdate"] = live_no_update()
@@ -398,6 +639,7 @@ def main():
             RECORD["authorities"].append({"authority": authority, "installExit": code, "protectedUnchanged": unchanged, "probe": result})
             save_record()
         set_phase("archive/classpath/helper contracts")
+        write_init("B")
         gradle("-I", INIT, "installDist", "distZip", "distTar", "verifyGhidraDistributionArchives",
                "verifyAnalysisIoHelperInstalled", "verifyAcpGateHelperDistribution", "verifyLlvmBehaviorHelperDistribution",
                "verifyKotlinBootClasspathDistribution", log=WORK / "distribution-contracts.log")
@@ -412,7 +654,7 @@ def main():
         RECORD.update(status="failed", failure=repr(failure))
         raise
     finally:
-        cleanup = []
+        cleanup = RECORD.setdefault("cleanupFailures", [])
         for child in list(ACTIVE):
             try: child.close()
             except BaseException as failure: cleanup.append(repr(failure))
@@ -420,7 +662,7 @@ def main():
         RECORD["finalOwnedSourceHashes"] = {p: digest(ROOT / p) for p in OWNED_SOURCES if (ROOT / p).exists()}
         save_record()
         print(json.dumps({"status": RECORD["status"], "phase": RECORD["phase"], "record": str(WORK / "qualification.json")}))
-        if cleanup: raise RuntimeError("process cleanup failed: " + repr(cleanup))
+        if cleanup and "failure" not in RECORD: raise RuntimeError("process cleanup failed: " + repr(cleanup))
 
 
 if __name__ == "__main__":

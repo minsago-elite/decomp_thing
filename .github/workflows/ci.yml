@@ -190,6 +190,8 @@ jobs:
         run: |
           mkdir -p build/orchestration/atomic-install-ci
           python3 -B scripts/test-atomic-install-qualification.py 2>&1 | tee build/orchestration/atomic-install-ci/verifier-controls.log
+          python3 -B scripts/test-atomic-install-prepared.py 2>&1 | tee build/orchestration/atomic-install-ci/prepared-controls.log
+          python3 -B scripts/atomic_install_artifacts.py check
       - name: Check the configured native helper compiler
         run: |
           test -x /usr/bin/cc
@@ -216,6 +218,9 @@ jobs:
         run: python3 -B scripts/test-atomic-install.py
       - name: Verify the retained installed qualification record
         run: python3 -B scripts/verify-atomic-install-qualification.py --expected-head "$GITHUB_SHA"
+      - name: Seal atomic-install upload membership
+        if: always()
+        run: python3 -B scripts/atomic_install_artifacts.py seal
       - name: Retain atomic-install qualification evidence
         if: always()
         uses: actions/upload-artifact@v7
@@ -226,6 +231,7 @@ jobs:
           path: |
             build/orchestration/atomic-install-remediation/**
             !build/orchestration/atomic-install-remediation/installed-*/root-build/**
+            !build/orchestration/atomic-install-remediation/installed-*/prepared-products/**
             !build/orchestration/atomic-install-remediation/installed-*/home/**
             !build/orchestration/atomic-install-remediation/installed-*/tmp/**
             !build/orchestration/atomic-install-remediation/driver-controls-*/root-build/**

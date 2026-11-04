@@ -2,6 +2,7 @@
 """Select and validate the latest producer-shaped atomic-install qualification."""
 from __future__ import annotations
 
+import importlib.util
 import argparse
 import hashlib
 import json
@@ -13,6 +14,13 @@ import subprocess
 import sys
 from collections import Counter
 from contextlib import contextmanager
+
+_SPEC = importlib.util.spec_from_file_location("atomic_prepared_consumer", pathlib.Path(__file__).with_name("atomic_install_prepared.py"))
+prepared = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(prepared)
+_DRIVER_SPEC = importlib.util.spec_from_file_location("atomic_init_consumer", pathlib.Path(__file__).with_name("test-atomic-install.py"))
+producer = importlib.util.module_from_spec(_DRIVER_SPEC)
+_DRIVER_SPEC.loader.exec_module(producer)
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 EVIDENCE = ROOT / "build/orchestration/atomic-install-remediation"
@@ -153,9 +161,9 @@ def git_source_names(repo: pathlib.Path):
 def current_source_paths(repo: pathlib.Path):
     # Exact source_hashes() inclusion policy, including deleted tracked files and
     # symlink exclusion. Safe opening additionally rejects symlinked ancestors.
-    names = set(git_source_names(repo)) | set(OWNED)
+    names = set(git_source_names(repo)) | set(OWNED) | set(prepared.BUILD_CONTROLS)
     return {name for name in names if name and
-            (name.startswith(("src/", "scripts/", "frontend/", "ghidra-bridge/")) or
+            (name in prepared.BUILD_CONTROLS or name.startswith(("src/", "scripts/", "frontend/", "ghidra-bridge/", "contracts/", "oracle/")) or
              name.endswith((".gradle.kts", ".properties"))) and
             (repo / name).is_file() and not (repo / name).is_symlink()}
 
@@ -210,12 +218,13 @@ def task_arguments(command: dict) -> set[str]:
     return set(command_args(command))
 
 
-def validate_commands(record: dict, run_dir: pathlib.Path):
+def validate_commands(record: dict, run_dir: pathlib.Path, repo=None):
+    repo = ROOT if repo is None else repo
     commands = record.get("commands")
     require(isinstance(commands, list) and len(commands) == 13, "expected all 13 external Gradle invocations")
     logs, log_keys = set(), set()
-    init_path = child_path(run_dir, "atomic-install.init.gradle", "init script")
-    init_digest = file_receipt(init_path, MAX_JSON)["sha256"]
+    init_receipts = []
+    generations = [None, "A", "A", "B", "A", "B", "B", "A", "A", "B", "A", "B", "B"]
     for index, command in enumerate(commands):
         require(isinstance(command, dict), "malformed command entry")
         require(command.get("status") in {"passed", "failed"}, "incomplete/running Gradle command record")
@@ -224,9 +233,30 @@ def validate_commands(record: dict, run_dir: pathlib.Path):
                 "Gradle command status and exit code disagree")
         args = command_args(command)
         require(command.get("phase") == COMMAND_PHASES[index], "command phase differs from producer plan")
-        # The producer appends exactly this task tail to its common Gradle prefix.
-        tail = ["atomicInstallProbeAgentJar"] if index == 0 else ["-I", str(init_path), *(
-            FINAL_TASKS if index == 12 else ["installDist"])]
+        require(command.get("commandId") == index, "command identity differs")
+        init_path = child_path(run_dir, f"command-{index:02d}.init.gradle", "init script")
+        init_digest = file_receipt(init_path, MAX_JSON)["sha256"]
+        require(command.get("init") == str(init_path) and command.get("initSha256") == init_digest,
+                "immutable command init path/hash differs")
+        expected_config = {"commandId": index, "runRoot": str(run_dir), "generation": generations[index],
+                           "failBeforeRename": index == 3, "replay": index == 2,
+                           "exclusions": prepared.EXCLUSIONS if index == 2 else []}
+        config = read_json(init_path.with_suffix(".json"))
+        require(config == expected_config == command.get("initConfig"), "init role/configuration differs")
+        expected_text = producer.init_text(config, root=repo, work=run_dir)
+        require(read_bytes(init_path, MAX_JSON).decode() == expected_text, "immutable init bytes differ from exact producer")
+        receipt_path = child_path(run_dir, f"command-{index:02d}-events.json", "task receipt")
+        require(command.get("taskReceipt") == str(receipt_path) and
+                command.get("taskReceiptSha256") == digest(receipt_path), "task receipt path/hash differs")
+        receipt = read_json(receipt_path, MAX_LOG)
+        require(receipt.get("commandId") == index and receipt.get("runRoot") == str(run_dir), "task receipt role differs")
+        require(type(command.get("startedAtUnixNs")) is int and type(command.get("finishedAtUnixNs")) is int and
+                command["startedAtUnixNs"] <= command["finishedAtUnixNs"], "command timestamps missing/reversed")
+        require(all(command["startedAtUnixNs"] <= t["atUnixNs"] <= command["finishedAtUnixNs"] for t in receipt["tasks"]),
+                "task timestamps outside command")
+        init_receipts.append({"commandId": index, "initSha256": init_digest, "taskReceiptSha256": command["taskReceiptSha256"]})
+        tail = ["-I", str(init_path), *(["atomicInstallProbeAgentJar"] if index == 0 else (
+            FINAL_TASKS if index == 12 else ["installDist"])), *(prepared.EXCLUSIONS if index == 2 else [])]
         require(args[-len(tail):] == tail, "command task/init plan differs from producer")
         prefix = args[:-len(tail)]
         require(len(prefix) >= 2 and pathlib.Path(prefix[0]).name == "gradlew" and prefix[1] == "--no-daemon",
@@ -288,8 +318,8 @@ def validate_commands(record: dict, run_dir: pathlib.Path):
                       "verifyLlvmBehaviorHelperDistribution", "verifyKotlinBootClasspathDistribution"}
     require(final.get("status") == "passed" and required_tasks <= task_arguments(final),
             "final distribution/archive/helper closure command incomplete")
-    return {"finalInitSha256": init_digest,
-            "limitation": "Final init is overwritten; no historical per-command generation/init identity is inferred."}
+    return {"finalInitSha256": init_digest, "immutableInits": init_receipts,
+            "limitation": "Retained per-command consistency; no historical execution authentication is inferred."}
 
 
 def directory_entries(base: pathlib.Path, relative: str):
@@ -429,10 +459,11 @@ def validate_record(record: dict, run_dir: pathlib.Path, repo: pathlib.Path, exp
     require(record.get("status") == "passed" and record.get("phase") == "complete",
             "latest installed qualification did not finish passed/complete")
     require(not record.get("cleanupFailures"), "driver reported child cleanup failures")
+    require(not record.get("diagnosticFailures"), "driver reported diagnostic capture failures")
     source_digests = validate_sources(record, repo, expected_head)
     agent = child_path(repo, "build/atomic-install/atomic-install-probe-agent.jar", "probe agent")
     require(record.get("agentSha256") == digest(agent), "retained probe-agent digest differs")
-    command_receipt = validate_commands(record, run_dir)
+    command_receipt = validate_commands(record, run_dir, repo)
     product_receipt = validate_products(record, run_dir)
     probes = validate_probe_files(record, run_dir)
 
@@ -441,6 +472,7 @@ def validate_record(record: dict, run_dir: pathlib.Path, repo: pathlib.Path, exp
             no_update.get("protectedUnchanged") is True and
             no_update.get("probe") == probes[0].get("loaded"),
             "live no-update control missing or failed")
+    command_receipt["preparedReplay"] = validate_prepared(record, run_dir, repo)
     failed = record.get("failedBeforeRename")
     require(isinstance(failed, dict) and failed.get("lateResourceMarker") == "A" and
             failed.get("schemaVersion") == "4" and
@@ -475,6 +507,149 @@ def validate_record(record: dict, run_dir: pathlib.Path, repo: pathlib.Path, exp
                     probe.get("authority") == authority.get("authority") for probe in probes),
                 "authority result is not backed by its retained installed probe")
     return source_digests, command_receipt, product_receipt
+
+
+def validate_prepared(record, run, repo):
+    try:
+        return _validate_prepared(record, run, repo)
+    except (RuntimeError, KeyError, TypeError, ValueError) as failure:
+        raise QualificationError("prepared replay evidence rejected: " + str(failure)) from failure
+
+
+def _validate_prepared(record, run, repo):
+    no_update = record["noUpdate"]
+    require([no_update.get(k) for k in ("preparationCommandId", "replayCommandId", "probeIndex")] == [1, 2, 0],
+            "prepared replay command/probe linkage differs")
+    names = {"prepared-A.json", "prepared-retained.json", "prepared-closure.json", "prepared-guard.json",
+             *[p + s + ".json" for p in ("protected", "prepared-input") for s in ("-before", "-after", "-diff")]}
+    require(set(no_update.get("evidenceHashes", {})) == names, "prepared evidence set differs")
+    values = {}
+    for name in names:
+        path = child_path(run, name, "prepared evidence")
+        require(file_receipt(path, prepared.MAX_JSON)["sha256"] == no_update["evidenceHashes"][name], "prepared evidence hash differs")
+        values[name] = read_json(path, prepared.MAX_JSON)
+    manifest = values["prepared-A.json"]
+    require(manifest.get("schemaVersion") == 1 and manifest.get("runRoot") == str(run) and
+            manifest.get("preparationCommandId") == 1 and manifest.get("preparationCommand") == record["commands"][1],
+            "previous-run/wrong-command preparation")
+    require(manifest["sourceHashes"] == record["sourceHashes"] and manifest["buildControls"] == prepared.build_controls(repo),
+            "prepared source/build-control pins differ")
+    require(record["commands"][1]["finishedAtUnixNs"] <= manifest["sealedAtUnixNs"] <= record["commands"][2]["startedAtUnixNs"],
+            "stale preparation time")
+    plan = manifest["plan"]
+    require(plan["runRoot"] == str(run) and plan["repoRoot"] == str(repo), "plan root differs")
+    for index in (1, 2):
+        require(read_json(child_path(run, f"command-{index:02d}-plan.json", "prepared plan"), prepared.MAX_JSON) == plan,
+                "preparation/replay input/task configuration differs")
+    initial_tasks = read_json(run / "command-01-events.json", MAX_LOG)["tasks"]
+    for name in prepared.PRODUCERS:
+        matches = [t for t in initial_tasks if t["path"] == ":" + name]
+        require(len(matches) == 1 and matches[0]["enabled"] is True and matches[0]["executed"] is True and
+                all(matches[0][k] is False for k in ("skipped", "upToDate", "noSource", "failure")),
+                "fresh preparation omitted producer execution")
+    inputs = manifest["inventory"]
+    require(inputs.get("status") == "passed" and inputs == values["prepared-input-before.json"] == values["prepared-input-after.json"],
+            "prepared before/after inputs changed or partial")
+    entries = inputs["entries"]
+    require(0 < len(entries) <= prepared.MAX_INPUT_ENTRIES, "prepared entries exceed bound")
+    prepared.validate_output_sets(plan, entries)
+    tools = manifest["tools"]
+    require(set(tools) == {"java", "javaRelease", "node"} and manifest["nodeVersion"].lstrip("v") ==
+            read_bytes(repo / ".node-version", MAX_POINTER).decode().strip().lstrip("v"), "qualified build tools differ")
+    roots = sorted(set(prepared.plan_roots(plan) + [str(repo / p) for p in record["sourceHashes"]] +
+                       [t["path"] for t in tools.values()] +
+                       [p["record"]["compiler"]["path"] for p in manifest["provenance"]["producers"].values()]))
+    require(manifest["roots"] == roots, "prepared root set differs")
+    for root in prepared.plan_roots(plan):
+        child_path(repo, root, "declared prepared input")
+    require(all(any(pathlib.Path(name) == pathlib.Path(root) or pathlib.Path(name).is_relative_to(root) for root in roots)
+                for name in entries) and all(root in entries for root in roots), "prepared input missing/escaped root")
+    for prefix in ("protected", "prepared-input"):
+        before, after = values[prefix + "-before.json"], values[prefix + "-after.json"]
+        require(prepared.difference(before, after) == values[prefix + "-diff.json"] == prepared.EMPTY_DIFF,
+                "nonempty/altered no-update snapshot diff")
+    require(manifest["mapping"] == prepared.mapping(plan, entries, run), "protected source mapping differs")
+    protected = values["protected-before.json"]["entries"]
+    require(set(protected) == {"root-build/install/llm_bin_patch/" + n for n in manifest["mapping"]}, "protected snapshot membership differs")
+    for logical, item in manifest["mapping"].items():
+        target = protected["root-build/install/llm_bin_patch/" + logical]
+        require(target["mode"] == item["requiredMode"] and target["type"] == "file" and
+                all(target[k] == item[k] for k in ("sha256", "bytes")), "protected bytes/mode not prepared mapping")
+    retained = values["prepared-retained.json"]
+    closure = values["prepared-closure.json"]
+    require(closure == {"schemaVersion": 1, "roots": roots, "inventory": inputs, "copies": retained},
+            "independent original recursive closure/copy receipt differs")
+    require(set(retained) == {p for p, r in entries.items() if r["type"] == "file"}, "retained prepared file set differs")
+    paths = directory_entries(run, "prepared-products") if len(retained) <= MAX_ENTRIES else None
+    # The prepared closure has its separate 131072-entry bound (products use 4096).
+    if paths is None:
+        paths = []
+        with os.scandir(child_path(run, "prepared-products", "prepared products")) as children:
+            for child in children:
+                require(len(paths) < prepared.MAX_INPUT_ENTRIES, "retained prepared entry bound")
+                paths.append(pathlib.Path(child.path))
+    require({str(p.relative_to(run)) for p in paths} == {r["path"] for r in retained.values()}, "extra/missing retained prepared input")
+    budget = [prepared.MAX_INPUT_BYTES]
+    verified = {}
+    for name, claim in retained.items():
+        path = child_path(run, claim["path"], "retained prepared input")
+        require(path.parent == run / "prepared-products", "retained input escaped product directory")
+        actual = prepared.file_receipt(path, budget)
+        require(actual == {k: v for k, v in claim.items() if k != "path"} and
+                all(actual[k] == entries[name][k] for k in ("sha256", "bytes", "mode", "type")), "retained prepared bytes/mode/key differ")
+        verified[name] = claim
+    for name, value in record["sourceHashes"].items():
+        require(entries[str(repo / name)]["sha256"] == value, "prepared source inventory digest differs")
+    prepared.validate_tools(tools, entries, lambda name: read_bytes(run / retained[name]["path"], 65536))
+    require(plan["frontendNodeHome"] in ("PATH", tools["node"]["home"]), "frontend Node home differs")
+    java_option = "-Dorg.gradle.java.installations.paths=" + tools["java"]["home"]
+    require(all([arg for arg in command["args"] if arg.startswith("-Dorg.gradle.java.installations.paths=")] == [java_option]
+                for command in record["commands"]), "command Java home differs from retained tool")
+    prov = manifest["provenance"]
+    prepared.validate_provenance(plan, entries, prov, lambda name: read_bytes(run / retained[name]["path"], 65536))
+    require(set(prov["producers"]) == set(prepared.PRODUCERS), "provenance producer set differs")
+    for item in prov["producers"].values():
+        original = read_json(run / retained[item["path"]]["path"])
+        require(item["record"] == original, "original compiler provenance bytes differ")
+        compiler = original["compiler"]
+        require(item["compilerFile"] == entries[compiler["path"]] and item["compilerFile"]["mode"] & 0o111 and
+                all(item["compilerFile"][k] == compiler[k] for k in ("sha256", "bytes")) and
+                compiler["versionCommand"] == [compiler["path"], "--version"] and compiler["version"] and
+                compiler["result"]["exitCode"] == 0 and original["compilation"]["result"]["exitCode"] == 0,
+                "compiler original receipt differs")
+    # Re-read embedded resources from the retained original app; no product execution.
+    import zipfile
+    with regular_stream(run / retained[plan["originalJar"]]["path"], MAX_PROTECTED) as (stream, _):
+        with zipfile.ZipFile(stream) as archive:
+            require(len(archive.infolist()) <= prepared.MAX_INPUT_ENTRIES and set(prov["embeddedResources"]) == prepared.EMBEDDED_RESOURCES,
+                    "embedded resource inventory incomplete/bounded")
+            for resource, name in prov["embeddedResources"].items():
+                matches = [i for i in archive.infolist() if i.filename == resource]
+                require(len(matches) == 1 and matches[0].file_size <= 65536, "embedded helper missing/duplicate/oversize")
+                with archive.open(matches[0]) as member:
+                    data = member.read(65537)
+                require(len(data) <= 65536 and hashlib.sha256(data).hexdigest() == entries[name]["sha256"], "embedded helper bytes differ")
+    guard = values["prepared-guard.json"]
+    require(guard["commandId"] == 2 and guard["runRoot"] == str(run) and guard["planEqual"] is True and
+            guard.get("sourceError") is None and
+            guard["manifestSha256"] == no_update["evidenceHashes"]["prepared-A.json"] and
+            guard["inventory"] == inputs and guard["diff"] == prepared.EMPTY_DIFF,
+            "pre-Sync guard receipt differs")
+    replay = read_json(run / "command-02-events.json", MAX_LOG)
+    require(replay["actionsStartedAtUnixNs"] <= guard["atUnixNs"] <= replay["guardPassedAtUnixNs"], "guard ordering differs")
+    prepared.validate_publisher(replay, manifest)
+    probe = record["probes"][0]
+    require(probe.get("role") == "prepared-no-update" and probe.get("preparationCommandId") == 1 and
+            probe.get("replayCommandId") == 2 and probe.get("preparedManifestSha256") == no_update["evidenceHashes"]["prepared-A.json"],
+            "prepared probe role differs")
+    app_digest = entries[plan["originalJar"]]["sha256"]
+    require(manifest["sealedAtUnixNs"] <= probe["readyAtUnixNs"] <= record["commands"][2]["startedAtUnixNs"] and
+            record["commands"][2]["finishedAtUnixNs"] <= probe["releasedAtUnixNs"], "live replay/probe ordering differs")
+    require(probe["ready"]["descriptorDigest"] == probe["loaded"]["descriptorDigest"] ==
+            probe["loaded"]["installedPathDigestAfterRelease"] == app_digest, "prepared live descriptor/path differs")
+    return {"manifestSha256": no_update["evidenceHashes"]["prepared-A.json"], "verifiedRetainedInputs": verified,
+            "bytesVerified": prepared.MAX_INPUT_BYTES - budget[0], "publisherRenames": 0, "stalePruneCandidates": [],
+            "limitation": "copies checked before upload; original preparation keys checked before/after replay, not after later normal rebuilds"}
 
 
 def validate_controls(repo: pathlib.Path):

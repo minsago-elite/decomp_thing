@@ -71,23 +71,10 @@ try:
     assert 120 < driver.BUILD_TIMEOUT < driver.RELEASE_TIMEOUT <= 3600
     assert driver.RELEASE_TIMEOUT >= driver.BUILD_TIMEOUT + driver.READY_TIMEOUT + driver.PROBE_FINISH_TIMEOUT + 60
     passed.append("original-home-and-whole-overlap-budget")
-    events = []; held = [False]
-    def no_update_install(generation):
-        events.append("install-" + generation)
-        if events.count("install-A") == 2: assert held[0], "no live JVM during reinstall"
-    def no_update_launch(generation):
-        events.append("launch-" + generation); held[0] = True
-        return object(), WORK / "RELEASE", {}, WORK / "app.jar"
-    def no_update_release(child, release, generation, expected):
-        assert held[0] and expected == "unchanged"
-        events.append("release-" + generation); held[0] = False
-        return {"schemaVersion": "4", "lateResourceMarker": "A"}
-    with unittest.mock.patch.object(driver, "install", side_effect=no_update_install), \
-         unittest.mock.patch.object(driver, "launch_blocked", side_effect=no_update_launch), \
-         unittest.mock.patch.object(driver, "protected_snapshot", return_value={"inode": 1}), \
-         unittest.mock.patch.object(driver, "release_and_reap", side_effect=no_update_release):
-        assert driver.live_no_update()["probe"]["schemaVersion"] == "4"
-    assert events == ["install-A", "launch-A", "install-A", "release-A"]
+    prepared_spec = importlib.util.spec_from_file_location("prepared_ordering_controls", ROOT / "scripts/test-atomic-install-prepared.py")
+    prepared_controls = importlib.util.module_from_spec(prepared_spec)
+    prepared_spec.loader.exec_module(prepared_controls)
+    prepared_controls.PreparedControls().exercise()
     passed.append("live-no-update-orchestration-before-reinstall-and-late-load-after")
 
     child = driver.Child([PYTHON, "-c", "print('complete')"], log=WORK / "success.log")
@@ -177,7 +164,7 @@ tasks.register('verifyDriverInit') {
  }
 }
 ''')
-        with unittest.mock.patch.object(driver, "ROOT", project): driver.write_init("A")
+        with unittest.mock.patch.object(driver, "ROOT", project): driver.write_init("A", command_id=100)
         env = driver.safe_env(); env["JAVA_OPTS"] = shlex.join(driver.jvm_options())
         for iteration in (1, 2):
             consumed_dist = WORK / "root-build/frontend/dist"
