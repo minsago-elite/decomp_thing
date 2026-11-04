@@ -165,6 +165,32 @@ class BuiltinAgentHarnessTest {
         assertEquals("old", tools.text)
     }
 
+    @Test fun `cancellation during streamed model output stops later events and closes the session`() {
+        val source = AgentCancellationSource()
+        val tools = Session()
+        var providerContinuedAfterFirstDelta = false
+        val provider = ModelProvider { _, emit ->
+            emit(ModelEvent.TextDelta("partial response"))
+            providerContinuedAfterFirstDelta = true
+            emit(ModelEvent.TextDelta("must not reach the harness"))
+            error("Cancelled stream should have stopped before producing a response")
+        }
+        val seen = mutableListOf<AgentExecutionEvent>()
+        val receipt = harness(provider, tools).executeReceipt(request(cancellation = source.cancellation)) { event ->
+            seen += event
+            if (event is AgentMessageEvent) source.cancel()
+        }
+
+        assertTrue(providerContinuedAfterFirstDelta, "The cancellation is issued from the first streamed event")
+        assertEquals(listOf("partial response"), seen.filterIsInstance<AgentMessageEvent>().map { it.textDelta })
+        assertEquals(BuiltinStop.CANCELLED, evidence(receipt).stop)
+        assertEquals(1, evidence(receipt).modelCalls)
+        assertEquals(0, tools.executions)
+        assertEquals("old", tools.text)
+        assertTrue(tools.closed)
+        assertEquals(AgentStopReason.CANCELLED, receipt.requireResult().stopReason)
+    }
+
     @Test fun `elapsed deadline survives tool and validation boundaries`() {
         val tools = Session(beforeExecute = { Thread.sleep(40) })
         val receipt = harness(script(response(calls = listOf(call()))), tools)
