@@ -275,7 +275,9 @@ jobs:
           git diff --exit-code -- frontend/ contracts/web/v1/
       - name: Verify retained bounded packaged reports read back
         if: always()
-        run: node scripts/verify-packaged-browser-reports.mjs "$GITHUB_WORKSPACE/build"
+        run: >-
+          node scripts/verify-packaged-browser-reports.mjs "$GITHUB_WORKSPACE/build"
+          --require-modes legacy,session,upload,metadata,live,scale,restart,audit,proxy
       - name: Retain sanitized packaged web evidence
         uses: actions/upload-artifact@v7
         if: always()

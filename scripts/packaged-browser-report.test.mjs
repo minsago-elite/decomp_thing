@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { boundReport } from './packaged-browser-restart.mjs';
 import { REPORT_LIMITS, PRIMARY_NAME, finalizePublication, loadReport, planReport, publishReport, scrubReport, verifyRetainedReports } from './packaged-browser-report.mjs';
 import { symlink, unlink } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
 
 const repo = fileURLToPath(new URL('..', import.meta.url));
 const scratch = join(repo, 'build/test-packaged-browser-report');
@@ -287,6 +288,47 @@ test('F2: verifier over retained directories flags a missing part and accepts va
   assert.deepEqual((await verifyRetainedReports(parent)).map(r => r.ok), [true, true]);
   await unlink(join(parent, 'packaged-browser-b', await firstPart(join(parent, 'packaged-browser-b'))));
   assert.deepEqual((await verifyRetainedReports(parent)).map(r => r.ok), [true, false]);
+});
+
+for (const [label, reports, passes] of [
+  ['complete passing set', [['audit', 'passed'], ['proxy', 'passed']], true],
+  ['empty set', [], false],
+  ['missing mode', [['audit', 'passed']], false],
+  ['failed mode', [['audit', 'failed'], ['proxy', 'passed']], false],
+  ['unfinished mode', [['audit', 'running'], ['proxy', 'passed']], false],
+  ['duplicate mode', [['audit', 'passed'], ['audit', 'passed'], ['proxy', 'passed']], false],
+  ['unidentified mode', [[null, 'passed'], ['proxy', 'passed']], false],
+  ['unexpected mode', [['audit', 'passed'], ['proxy', 'passed'], ['session', 'passed']], false],
+]) test(`R1: required mode verification rejects incomplete evidence: ${label}`, async () => {
+  const parent = await fresh('r1-modes');
+  for (const [i, [mode, status]] of reports.entries()) {
+    const directory = join(parent, `packaged-browser-${i}`);
+    await mkdir(directory);
+    assert.equal((await publishReport(directory, { mode, status })).ok, true);
+  }
+  const results = await verifyRetainedReports(parent, { requiredModes: ['audit', 'proxy'] });
+  assert.equal(results.length > 0 && results.every(r => r.ok), passes);
+  const cli = spawnSync(process.execPath, [join(repo, 'scripts/verify-packaged-browser-reports.mjs'), parent,
+    '--require-modes', 'audit,proxy'], { encoding: 'utf8', timeout: 5000 });
+  assert.equal(cli.status, passes ? 0 : 1, cli.stdout + cli.stderr);
+});
+
+test('R1: required-mode CLI refuses an empty or duplicate requirement', async () => {
+  const parent = await fresh('r1-invalid');
+  for (const value of ['', 'audit,audit', 'audit,,proxy']) {
+    const cli = spawnSync(process.execPath, [join(repo, 'scripts/verify-packaged-browser-reports.mjs'), parent,
+      '--require-modes', value], { encoding: 'utf8', timeout: 5000 });
+    assert.equal(cli.status, 2, cli.stdout + cli.stderr);
+  }
+});
+
+test('R1: CI requires exactly the packaged modes it executes', async () => {
+  const workflow = await readFile(join(repo, '.github/workflows/ci.yml'), 'utf8');
+  const executed = [...workflow.matchAll(/--mode ([a-z][a-z0-9-]*)\b/g)].map(match => match[1]);
+  const requirements = [...workflow.matchAll(/--require-modes ([a-z0-9,-]+)/g)];
+  assert.equal(requirements.length, 1);
+  assert.ok(executed.length > 0);
+  assert.deepEqual(requirements[0][1].split(',').sort(), executed.sort());
 });
 
 test('F3: loader rejects unresolved, unlisted and inline-shaped references', async () => {

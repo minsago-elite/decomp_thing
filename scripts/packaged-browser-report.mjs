@@ -382,13 +382,28 @@ export async function finalizePublication(root, report, sensitiveValues = [], {
 }
 
 /** Verifies every retained `packaged-browser-*` report directory under `parent`. */
-export async function verifyRetainedReports(parent, { limits = REPORT_LIMITS } = {}) {
+export async function verifyRetainedReports(parent, { limits = REPORT_LIMITS, requiredModes = [] } = {}) {
+  if (!Array.isArray(requiredModes) || requiredModes.some(mode => typeof mode !== 'string' || !/^[a-z][a-z0-9-]*$/.test(mode)) || new Set(requiredModes).size !== requiredModes.length)
+    throw new Error('Required modes must be unique nonempty mode names');
   const results = [];
   for (const entry of (await fs.readdir(parent, { withFileTypes: true })).filter(e => /^packaged-browser-(?!work-)/.test(e.name)).sort((a, b) => (a.name < b.name ? -1 : 1))) {
     const directory = join(parent, entry.name);
     if (!entry.isDirectory()) { results.push({ directory, ok: false, error: 'not a directory' }); continue; }
-    try { const loaded = await loadReport(directory, { limits }); results.push({ directory, ok: true, status: loaded.status ?? null }); }
+    try { const loaded = await loadReport(directory, { limits }); results.push({ directory, ok: true, status: loaded.status ?? null, mode: loaded.mode ?? null }); }
     catch (error) { results.push({ directory, ok: false, error: String(error?.message ?? error) }); }
+  }
+  if (requiredModes.length) {
+    for (const mode of requiredModes) {
+      const matches = results.filter(r => r.ok && r.mode === mode);
+      if (matches.length !== 1)
+        results.push({ directory: parent, ok: false, error: `Required mode ${mode} needs exactly one verified report; found ${matches.length}` });
+    }
+    for (const result of results.filter(r => r.ok)) {
+      if (!requiredModes.includes(result.mode) || result.status !== 'passed') {
+        result.ok = false;
+        result.error = 'Report must identify an expected mode and have status=passed';
+      }
+    }
   }
   return results;
 }
