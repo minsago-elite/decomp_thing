@@ -194,6 +194,7 @@ test('fixtures bind one job, attempt and revision with long names and a self-con
   const artifactPath = new URL(report.sourceArtifact.contentHref, 'https://audit.invalid').pathname.replace('/nested/api/v1', '');
   const artifact = fixtures.respond('GET', artifactPath, 'application/json');
   assert.equal(artifact.status, 200);
+  assert.equal(artifact.contentType, 'application/octet-stream');
   assert.equal(createHash('sha256').update(artifact.bytes).digest('hex'), report.sourceArtifact.sha256);
   assert.equal(artifact.bytes.length, Number(report.sourceArtifact.sizeBytes));
   const retained = JSON.parse(artifact.bytes.toString('utf8'));

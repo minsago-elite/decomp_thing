@@ -101,7 +101,7 @@ export function auditFixtures(repo, buildId) {
       ? error(406, 'STREAM_UNSUPPORTED') : ok(load('events-poll'))],
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/progress-pin$`), () => ok(load('progress-pin'))],
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/reports/exploration$`), () => ok(exploration)],
-    [new RegExp(`^/jobs/${jobId}/artifacts/${retainedArtifactId}/content$`), () => ({ status: 200, bytes: retainedBytes, contentType: 'application/json' })],
+    [new RegExp(`^/jobs/${jobId}/artifacts/${retainedArtifactId}/content$`), () => ({ status: 200, bytes: retainedBytes, contentType: 'application/octet-stream' })],
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/validation-history$`), () => ok(history)],
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/reports/revision-validation$`), () => ok(validation)],
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-search$`), () => ok(sourceSearch)],
