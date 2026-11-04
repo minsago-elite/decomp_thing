@@ -9,8 +9,8 @@ import { fileURLToPath } from 'node:url';
 import {
   MAX_PHASE_READS, MAX_RESPONSIVE_PNG_BYTES, MAX_SAME_PATH_READS, NAVIGATION_PAGE, PRODUCT_COPY, hexDisplayRows, RESPONSIVE_EXPLORATION, RESPONSIVE_HEX_FILE, RESPONSIVE_JOB, RESPONSIVE_PROFILES, RESPONSIVE_REGIONS,
   RESPONSIVE_REVISION, RESPONSIVE_RUN, RESPONSIVE_SCHEMA, RESPONSIVE_SIZING, RESPONSIVE_TOUCH, applyAuditResponsiveGate, assessResponsiveObservation, assessResponsiveReport,
-  bindResponsiveFixtures, createResponsiveSection, expectedObservations, pngDimensions, qualifyResponsive, responsiveFixtures, screenshotName,
-  verifyResponsiveScreenshots,
+  bindResponsiveFixtures, createResponsiveSection, expectedObservations, MAX_RUN_REQUESTS, pngDimensions, qualifyResponsive, responsiveFixtures, screenshotName,
+  snapClip, verifyResponsiveScreenshots,
 } from './packaged-browser-responsive.mjs';
 import { auditViewports } from './packaged-browser-audit.mjs';
 
@@ -80,6 +80,12 @@ function cleanSection(identity = fixtures().identity) {
         artifacts: bound ? [{ kind: bound.kind, path: 'p', servedSha256: bound.sha256, servedBytes: bound.sizeBytes }] : [] });
     }
   }
+  // Whole-run ledger: the union of every phase ledger, nothing outside a phase, nothing dropped.
+  const all = [...section.observations.map((o) => o.requests), section.digestControl.positive.requests, section.digestControl.tampered.requests];
+  const rows = new Map();
+  for (const l of all) for (const p of l.paths) { const key = `${p.method} ${p.path} ${p.status}`; const row = rows.get(key) ?? { ...p, count: 0 }; row.count += p.count; rows.set(key, row); }
+  section.requests = { reads: all.reduce((n, l) => n + l.reads, 0), mutations: 0, failed: 0, truncated: false, paths: [...rows.values()], dropped: 0,
+    unledgered: { reads: 0, mutations: 0, failed: 0, truncated: false, paths: [], phases: [] } };
   return { section, pngs };
 }
 const find = (section, profile, kind, subject) => section.observations.find((o) => o.profile === profile && o.kind === kind && o.subject === subject);
@@ -415,4 +421,149 @@ test('product copy, hex rows and selectors are pinned to the real frontend sourc
   assert.match(preview, /<details><summary>\{title\}<\/summary>/, 'byte previews are inside closed details');
   const prefs = readFileSync(join(repo, 'frontend/src/app/DisplayPreferences.tsx'), 'utf8').replace(/\s+/g, ' ');
   assert.ok(!/role="dialog"|aria-modal/.test(prefs), 'preferences is a disclosure, not a dialog');
+});
+
+// Hosted #619 correction (run 41912389635, audit lEC5AV): integral clips, exact PNG geometry, settled fulfilments, run ledger.
+const HOSTED_VIEWPORT = { scrollX: 0, scrollY: 77, innerWidth: 320, innerHeight: 200 };
+test('snapClip: enclosing whole-CSS-pixel page clip intersected with the viewport', () => {
+  // Hosted scale400 preferences panel: 273x143.625 at viewport top 56.375, scrollY 77 -> 273x144 (PNG 1092x576 at 4x).
+  const hosted = snapClip({ left: 16, top: 56.375, width: 273, height: 143.625 }, HOSTED_VIEWPORT);
+  assert.deepEqual(hosted, { x: 16, y: 133, width: 273, height: 144, scale: 1 });
+  assert.deepEqual([hosted.width * 4, hosted.height * 4], [1092, 576]);
+  // Fractional origin snaps outward on both edges.
+  assert.deepEqual(snapClip({ left: 16.5, top: 10.25, width: 100, height: 50 }, { scrollX: 0, scrollY: 0, innerWidth: 390, innerHeight: 844 }), { x: 16, y: 10, width: 101, height: 51, scale: 1 });
+  // Viewport edges: overhang right/bottom and above-top is intersected away; below-fold scroll is kept in page coordinates.
+  assert.deepEqual(snapClip({ left: 300.2, top: 150.5, width: 80, height: 90 }, HOSTED_VIEWPORT), { x: 300, y: 227, width: 20, height: 50, scale: 1 });
+  assert.deepEqual(snapClip({ left: 16, top: -40.5, width: 273, height: 100 }, HOSTED_VIEWPORT), { x: 16, y: 77, width: 273, height: 60, scale: 1 });
+  assert.deepEqual(snapClip({ left: 16, top: 0, width: 273, height: 200 }, { scrollX: 0, scrollY: 3362, innerWidth: 320, innerHeight: 200 }), { x: 16, y: 3362, width: 273, height: 200, scale: 1 });
+  // Not visible -> null (the driver then refuses the screenshot); invalid geometry -> thrown, never guessed.
+  assert.equal(snapClip({ left: 16, top: 200, width: 10, height: 10 }, HOSTED_VIEWPORT), null);
+  assert.equal(snapClip({ left: 16, top: -30, width: 10, height: 10 }, HOSTED_VIEWPORT), null);
+  assert.equal(snapClip({ left: 320, top: 0, width: 10, height: 10 }, HOSTED_VIEWPORT), null);
+  assert.equal(snapClip({ left: 10, top: 10, width: 0, height: 10 }, HOSTED_VIEWPORT), null);
+  for (const bad of [null, { left: NaN, top: 0, width: 1, height: 1 }, { left: 0, top: 0, width: -1, height: 1 }, { left: 0, top: 0, width: 1, height: Infinity }])
+    assert.throws(() => snapClip(bad, HOSTED_VIEWPORT), /invalid element rect/);
+  for (const v of [{ ...HOSTED_VIEWPORT, scrollY: 77.25 }, { ...HOSTED_VIEWPORT, scrollX: 0.5 }, { ...HOSTED_VIEWPORT, innerWidth: 320.5 }, { ...HOSTED_VIEWPORT, innerHeight: 0 }])
+    assert.throws(() => snapClip({ left: 0, top: 0, width: 10, height: 10 }, v), /not integral/);
+});
+
+test('screenshot gate: integral clip required and PNG = clip x DPR exactly (no +-1)', () => {
+  const at = (section, profile, kind = 'preferences', subject = 'disclosure') => find(section, profile, kind, subject).screenshot;
+  // Hosted failing cell as recorded: fractional clip, PNG 1092x572.
+  const hosted = cleanSection().section; Object.assign(at(hosted, 'scale400'), { width: 1092, height: 572,
+    clip: { x: 16, y: 133.375, width: 273, height: 143.625, scale: 1 }, viewport: { ...HOSTED_VIEWPORT, devicePixelRatio: 4 } });
+  fails(hosted, /scale400\/preferences\/disclosure: screenshot clip is not integral CSS pixels/);
+  // Previously passing hosted desktop cell (223.797 -> PNG 223 within the old +-1) is now rejected.
+  const desktop = cleanSection().section; Object.assign(at(desktop, 'desktop'), { width: 576, height: 223, clip: { x: 432, y: 64, width: 576, height: 223.797, scale: 1 } });
+  fails(desktop, /desktop\/preferences\/disclosure: screenshot clip is not integral CSS pixels/);
+  // Corrected integral clip: exact PNG passes; one pixel either way fails.
+  for (const [height, ok] of [[576, true], [575, false], [577, false]]) {
+    const s = cleanSection().section; Object.assign(at(s, 'scale400'), { width: 1092, height, clip: { x: 16, y: 133, width: 273, height: 144, scale: 1 }, viewport: { ...HOSTED_VIEWPORT, devicePixelRatio: 4 } });
+    if (ok) assert.deepEqual(assessResponsiveReport(s), []); else fails(s, new RegExp(`screenshot 1092x${height} is not its clip 273x144 at 4x`));
+  }
+  const wide = cleanSection().section; at(wide, 'narrow', 'region', 'source-hex').width += 1; fails(wide, /is not its clip/);
+  // Fractional origin, fractional scroll, and a clip one pixel past the viewport edge (old +1 slack) all fail.
+  const origin = cleanSection().section; at(origin, 'narrow').clip.x = 0.5; fails(origin, /not integral CSS pixels/);
+  const scroll = cleanSection().section; at(scroll, 'narrow').viewport.scrollY = 10.5; fails(scroll, /not integral CSS pixels/);
+  const edge = cleanSection().section; const e = at(edge, 'reflow320'); e.clip.y = 641 - e.clip.height; fails(edge, /bounded element clip within the viewport/);
+  const left = cleanSection().section; const l = at(left, 'narrow'); l.viewport.scrollX = 1; fails(left, /bounded element clip within the viewport/);
+});
+
+function fakeCdp({ onEnable = () => {}, onDisable = () => {}, rejectFulfil = null, failOn = 'Emulation.setDeviceMetricsOverride', failRestore = false } = {}) {
+  const timeline = []; let handler = null;
+  const event = (id, method, path) => ({ requestId: `r${id}`, request: { url: `http://127.0.0.1:1${path}`, method, headers: { Accept: 'application/json' } } });
+  const emit = (...args) => handler?.(event(...args));
+  const cdp = {
+    on(name, fn) { if (name === 'Fetch.requestPaused') handler = fn; },
+    off(name, fn) { if (handler === fn) handler = null; },
+    async call(method) {
+      timeline.push(method);
+      if (method === 'Fetch.fulfillRequest' && rejectFulfil) {
+        await new Promise((resolve) => setTimeout(resolve, rejectFulfil));
+        timeline.push('fulfil-rejected'); throw new Error('stand-in late fulfil failure');
+      }
+      if (method === 'Fetch.enable') onEnable(emit);
+      if (method === 'Fetch.disable') onDisable(emit);
+      if (method === failOn) throw new Error(`stand-in ${method} failure`);
+      if (failRestore && method === 'Emulation.clearDeviceMetricsOverride') throw new Error('restore failure');
+      return {};
+    },
+  };
+  const fixtures = { identity: { jobId: RESPONSIVE_JOB }, artifacts: new Map(), tamper: {},
+    respond: (method, path) => method !== 'GET' ? { status: 405, document: { kind: 'error' } } : path.endsWith('/missing') ? { status: 404, document: { kind: 'error' } } : { status: 200, document: { kind: 'x' } } };
+  return { timeline, args: { cdp, fixtures, root: repo, origin: 'http://127.0.0.1:1', makeTarget: async () => ({ sessionId: 's', targetId: 't' }),
+    evaluate: async () => true, ready: async () => true, delay: async () => undefined } };
+}
+
+test('driver: a late Fetch.fulfillRequest rejection is settled and retained before return, original error first', async () => {
+  for (const failRestore of [false, true]) {
+    const f = fakeCdp({ rejectFulfil: 20, failRestore, onEnable: (emit) => emit(1, 'GET', '/nested/api/v1/bootstrap') });
+    const section = createResponsiveSection();
+    await assert.rejects(qualifyResponsive({ ...f.args, section }), /stand-in Emulation.setDeviceMetricsOverride failure/);
+    assert.equal(section.fulfillFailures.length, 1, 'late rejection recorded when qualifyResponsive settles');
+    assert.match(section.fulfillFailures[0], /^setup \/nested\/api\/v1\/bootstrap: stand-in late fulfil failure/);
+    assert.ok(f.timeline.indexOf('fulfil-rejected') < f.timeline.indexOf('Fetch.disable'), 'settled before Fetch.disable');
+    assert.equal(section.failure, 'stand-in Emulation.setDeviceMetricsOverride failure');
+    if (failRestore) assert.equal(section.restoreFailure, 'restore failure');
+    fails(section, /Fetch.fulfillRequest failed: setup/); fails(section, /responsive driver failed/);
+  }
+  // A request paused during teardown (at Fetch.disable) is still settled and retained before return.
+  const late = fakeCdp({ rejectFulfil: 20, onDisable: (emit) => emit(9, 'GET', '/nested/api/v1/bootstrap') });
+  const section = createResponsiveSection();
+  await assert.rejects(qualifyResponsive({ ...late.args, section }), /stand-in Emulation.setDeviceMetricsOverride failure/);
+  assert.deepEqual(section.fulfillFailures.map((f) => f.split(' ')[0]), ['teardown']);
+});
+
+test('driver: detaching the handler cannot mask the original failure or discard the ledger', async () => {
+  const f = fakeCdp({ onEnable: (emit) => emit(1, 'GET', '/nested/api/v1/bootstrap') });
+  f.args.cdp.off = () => { throw new Error('detach failure'); };
+  const section = createResponsiveSection();
+  await assert.rejects(qualifyResponsive({ ...f.args, section }), /stand-in Emulation.setDeviceMetricsOverride failure/);
+  assert.equal(section.failure, 'stand-in Emulation.setDeviceMetricsOverride failure');
+  assert.equal(section.restoreFailure, 'detach failure');
+  assert.equal(section.restored, null);
+  assert.equal(section.requests.reads, 1);
+});
+
+test('driver: distinct ledger keys have a diagnostic separate from dropped requests', async () => {
+  const f = fakeCdp({ onEnable: (emit) => { for (let i = 0; i < 65; i++) emit(i, 'GET', `/nested/api/v1/r${i}`); } });
+  const section = createResponsiveSection();
+  await assert.rejects(qualifyResponsive({ ...f.args, section }));
+  assert.equal(section.requests.dropped, 0);
+  const failures = assessResponsiveReport(section);
+  assert.ok(failures.some((failure) => failure.includes('run request ledger exceeds 64 distinct request keys')));
+  assert.ok(failures.every((failure) => !failure.includes('0 dropped beyond')));
+});
+
+test('driver: setup 404, teardown POST and the 4096 cap land in the failing run ledger', async () => {
+  const setup = fakeCdp({ onEnable: (emit) => emit(1, 'GET', '/nested/api/v1/missing') });
+  const s1 = createResponsiveSection();
+  await assert.rejects(qualifyResponsive({ ...setup.args, section: s1 }));
+  assert.deepEqual([s1.requests.failed, s1.requests.unledgered.failed, s1.requests.unledgered.phases], [1, 1, ['setup']]);
+  fails(s1, /outside observation phases \["setup"\]: 1 failed or unmapped API reads/); fails(s1, /run: 1 failed/);
+
+  const teardown = fakeCdp({ onDisable: (emit) => emit(2, 'POST', '/nested/api/v1/jobs') });
+  const s2 = createResponsiveSection();
+  await assert.rejects(qualifyResponsive({ ...teardown.args, section: s2 }));
+  assert.ok(teardown.timeline.lastIndexOf('Fetch.fulfillRequest') > teardown.timeline.indexOf('Fetch.disable'), 'teardown request fulfilled, not swallowed');
+  assert.deepEqual([s2.requests.mutations, s2.requests.unledgered.phases], [1, ['teardown']]);
+  fails(s2, /outside observation phases \["teardown"\]: 1 API mutations/);
+
+  const flood = fakeCdp({ onEnable: (emit) => { for (let i = 0; i <= MAX_RUN_REQUESTS; i++) emit(i, 'GET', `/nested/api/v1/r${i}`); } });
+  const s3 = createResponsiveSection();
+  await assert.rejects(qualifyResponsive({ ...flood.args, section: s3 }));
+  assert.equal(MAX_RUN_REQUESTS, 4096);
+  assert.deepEqual([s3.requests.reads, s3.requests.dropped, s3.requests.truncated], [4096, 1, true]);
+  fails(s3, /run request ledger truncated \(1 dropped beyond 4096\)/);
+});
+
+test('run ledger gate: missing, dropped, between-phase failures, mutations and storms fail', () => {
+  const missing = cleanSection().section; delete missing.requests; fails(missing, /run request ledger missing/);
+  const dropped = cleanSection().section; dropped.requests.dropped = 1; dropped.requests.truncated = true; fails(dropped, /run request ledger truncated/);
+  const between = cleanSection().section; const u = between.requests.unledgered;
+  Object.assign(u, { reads: 1, failed: 1, phases: ['digest/positive'], paths: [{ method: 'GET', path: '/nested/api/v1/x', status: 406, count: 1 }] });
+  between.requests.failed = 1; fails(between, /outside observation phases \["digest\/positive"\]: 1 failed/);
+  const storm = cleanSection().section; Object.assign(storm.requests.unledgered, { reads: MAX_SAME_PATH_READS + 1, phases: ['narrow/region/source-hex'],
+    paths: [{ method: 'GET', path: BOOT, status: 200, count: MAX_SAME_PATH_READS + 1 }] }); fails(storm, /retry storm outside observation phases/);
+  const over = cleanSection().section; over.requests.reads = MAX_RUN_REQUESTS + 1; fails(over, /totals are out of bounds/);
 });

@@ -40,6 +40,8 @@ export const PRODUCT_COPY = Object.freeze({
 export const MAX_SAME_PATH_READS = 2;
 export const MAX_PHASE_READS = 24;
 const LEDGER_CAP = 64;
+/** Whole-run request record cap: entries beyond it are counted as dropped and fail the gate (never silently lost). */
+export const MAX_RUN_REQUESTS = 4096;
 
 /** Narrow profiles reuse the ordinary audit's sizes; desktop is only for the preferences disclosure. */
 export const RESPONSIVE_PROFILES = Object.freeze([
@@ -213,6 +215,22 @@ export function createResponsiveSection() {
     observations: [], unmapped: [], fulfillFailures: [], restored: null, limits: [...LIMITS] };
 }
 
+/**
+ * Pure: element rect (viewport CSS px, possibly fractional) -> the enclosing whole-CSS-pixel page clip intersected
+ * with the viewport, or null when nothing of the element is visible. The scroll offset and viewport must be integral
+ * so the snapped clip stays inside the viewport; non-finite or negative geometry is rejected rather than guessed.
+ */
+export function snapClip(r, v) {
+  const num = (...values) => values.every((value) => typeof value === 'number' && Number.isFinite(value));
+  if (!r || !v || !num(r.left, r.top, r.width, r.height) || r.width < 0 || r.height < 0) throw new Error('invalid element rect');
+  if (![v.scrollX, v.scrollY, v.innerWidth, v.innerHeight].every(Number.isInteger) || v.innerWidth < 1 || v.innerHeight < 1)
+    throw new Error('viewport scroll offset or size is not integral CSS pixels');
+  const x0 = Math.max(Math.floor(r.left + v.scrollX), v.scrollX); const y0 = Math.max(Math.floor(r.top + v.scrollY), v.scrollY);
+  const x1 = Math.min(Math.ceil(r.left + r.width + v.scrollX), v.scrollX + v.innerWidth);
+  const y1 = Math.min(Math.ceil(r.top + r.height + v.scrollY), v.scrollY + v.innerHeight);
+  return x1 - x0 >= 1 && y1 - y0 >= 1 ? { x: x0, y: y0, width: x1 - x0, height: y1 - y0, scale: 1 } : null;
+}
+
 /** Bounded per-phase request ledger: [{ method, path, status, count }] with totals. */
 function ledgerSummary(entries) {
   const byKey = new Map();
@@ -232,6 +250,10 @@ export async function qualifyResponsive({ cdp, makeTarget, evaluate, ready, dela
   const call = (method, params = {}) => cdp.call(method, params, target.sessionId);
   const served = [];
   const requests = [];
+  let dropped = 0;
+  // Every in-flight Fetch.fulfillRequest; each is bounded by the DevTools per-call deadline, so a snapshot settles.
+  const pending = new Set();
+  const settleFulfilments = async () => { if (pending.size) await Promise.allSettled([...pending]); };
   const press = async (name, modifiers = 0) => {
     const [key, code, vk, text] = KEYS[name];
     await call('Input.dispatchKeyEvent', { type: text ? 'keyDown' : 'rawKeyDown', key, code, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk, modifiers, ...(text ? { text } : {}) });
@@ -278,14 +300,12 @@ export async function qualifyResponsive({ cdp, makeTarget, evaluate, ready, dela
     return previous;
   };
   const shot = async (o, clipExpr, viewport) => {
-    let clip = null;
+    const round = (v) => Math.round(v * 1000) / 1000;
+    let clip = null; let elementRect = null;
     if (clipExpr) {
       const r = await rect(clipExpr);
-      if (r) {
-        const left = Math.max(r.left, 0); const top = Math.max(r.top, 0);
-        const width = Math.min(r.left + r.width, viewport.innerWidth) - left; const height = Math.min(r.top + r.height, viewport.innerHeight) - top;
-        if (width >= 1 && height >= 1) clip = { x: left + viewport.scrollX, y: top + viewport.scrollY, width, height, scale: 1 };
-      }
+      // The exact integral clip is both sent and recorded; the raw rect is reference data only, never a pixel prediction.
+      if (r) { elementRect = { left: round(r.left), top: round(r.top), width: round(r.width), height: round(r.height) }; clip = snapClip(r, viewport); }
       if (!clip) throw new Error(`${screenshotName(o)}: element is not in the viewport`);
     }
     const { data } = await call('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false, ...(clip ? { clip } : {}) });
@@ -293,14 +313,12 @@ export async function qualifyResponsive({ cdp, makeTarget, evaluate, ready, dela
     if (png.length > MAX_RESPONSIVE_PNG_BYTES) throw new Error(`${screenshotName(o)} exceeds ${MAX_RESPONSIVE_PNG_BYTES} bytes`);
     const dims = pngDimensions(png);
     await fs.writeFile(join(root, screenshotName(o)), png);
-    const round = (v) => Math.round(v * 1000) / 1000;
-    return { name: screenshotName(o), bytes: png.length, sha256: sha256(png), ...dims,
-      clip: clip ? Object.fromEntries(Object.entries(clip).map(([k, v]) => [k, round(v)])) : null,
-      viewport: { scrollX: round(viewport.scrollX), scrollY: round(viewport.scrollY), innerWidth: viewport.innerWidth, innerHeight: viewport.innerHeight, devicePixelRatio: viewport.devicePixelRatio } };
+    return { name: screenshotName(o), bytes: png.length, sha256: sha256(png), ...dims, clip: clip ? { ...clip } : null, elementRect,
+      viewport: { scrollX: viewport.scrollX, scrollY: viewport.scrollY, innerWidth: viewport.innerWidth, innerHeight: viewport.innerHeight, devicePixelRatio: viewport.devicePixelRatio } };
   };
   let phase = 'setup';
   const phaseStart = () => requests.length;
-  const phaseLedger = (start) => ledgerSummary(requests.slice(start));
+  const phaseLedger = (start) => { const slice = requests.slice(start); for (const entry of slice) entry.ledgered = true; return ledgerSummary(slice); };
   try {
     // A thunk keeps generator failures inside the recorded, partial-evidence path.
     if (typeof fixtures === 'function') fixtures = fixtures();
@@ -315,15 +333,19 @@ export async function qualifyResponsive({ cdp, makeTarget, evaluate, ready, dela
       const response = url ? fixtures.respond(event.request.method, path, accept) : { status: 404, document: { kind: 'error' } };
       const unmapped = response.status === 404 || response.status === 400;
       if (unmapped && section.unmapped.length < 32) section.unmapped.push(cap(`${phase} ${event.request.method} ${path}`));
-      if (requests.length < 4096) requests.push({ phase, method: String(event.request.method), path, status: response.status, unmapped });
+      if (requests.length < MAX_RUN_REQUESTS) requests.push({ phase, method: String(event.request.method), path, status: response.status, unmapped });
+      else dropped++;
       if (response.artifact) served.push({ path: url.pathname, ...response.artifact });
       const body = response.bytes ?? Buffer.from(JSON.stringify(response.document));
       const headers = [{ name: 'Content-Type', value: response.contentType ?? 'application/json; charset=utf-8' },
         { name: 'X-Request-ID', value: response.document?.requestId ?? 'request_responsive_artifact' }, { name: 'Cache-Control', value: 'no-store' },
         ...Object.entries(response.headers ?? {}).map(([name, value]) => ({ name, value }))];
       // A failed fulfilment is recorded evidence, never swallowed into an unrelated later timeout.
-      void Promise.resolve().then(() => cdp.call('Fetch.fulfillRequest', { requestId: event.requestId, responseCode: response.status, body: body.toString('base64'), responseHeaders: headers }, target.sessionId))
-        .catch((error) => { if (section.fulfillFailures.length < 32) section.fulfillFailures.push(cap(`${phase} ${path}: ${String(error?.message ?? error)}`)); });
+      const recordPhase = phase;
+      const fulfilment = Promise.resolve().then(() => cdp.call('Fetch.fulfillRequest', { requestId: event.requestId, responseCode: response.status, body: body.toString('base64'), responseHeaders: headers }, target.sessionId))
+        .catch((error) => { if (section.fulfillFailures.length < 32) section.fulfillFailures.push(cap(`${recordPhase} ${path}: ${String(error?.message ?? error)}`)); });
+      pending.add(fulfilment);
+      void fulfilment.finally(() => pending.delete(fulfilment));
     };
     cdp.on('Fetch.requestPaused', fetchHandler, target.sessionId);
     await call('Fetch.enable', { patterns: [{ urlPattern: `${origin}/nested/api/v1/*`, requestStage: 'Request' }] });
@@ -470,10 +492,14 @@ export async function qualifyResponsive({ cdp, makeTarget, evaluate, ready, dela
     section.failure = cap(String(error?.message ?? error));
     throw error;
   } finally {
+    phase = 'teardown';
     if (target) {
       try {
-        if (fetchHandler) cdp.off?.('Fetch.requestPaused', fetchHandler, target.sessionId);
+        // Settle in-flight fulfilments while interception is still recorded, then disable; the handler stays
+        // attached until Fetch.disable so no paused teardown request goes unrecorded.
+        await settleFulfilments();
         await call('Fetch.disable');
+        if (fetchHandler) cdp.off?.('Fetch.requestPaused', fetchHandler, target.sessionId);
         await call('Emulation.setTouchEmulationEnabled', { enabled: false });
         await call('Emulation.clearDeviceMetricsOverride');
         await evaluate(target, `(document.activeElement?.blur?.(), true)`);
@@ -483,6 +509,18 @@ export async function qualifyResponsive({ cdp, makeTarget, evaluate, ready, dela
         section.restored = null;
         section.restoreFailure = cap(String(restoreError?.message ?? restoreError));
         if (!failed) throw restoreError;
+      } finally {
+        // Gates run on the returned section: late fulfilment failures and every request are recorded first.
+        try {
+          if (fetchHandler) cdp.off?.('Fetch.requestPaused', fetchHandler, target.sessionId);
+        } catch (detachError) {
+          section.restored = null;
+          section.restoreFailure ??= cap(String(detachError?.message ?? detachError));
+        }
+        await settleFulfilments();
+        const all = ledgerSummary(requests); const outside = requests.filter((entry) => !entry.ledgered);
+        section.requests = { ...all, dropped, truncated: all.truncated || dropped > 0,
+          unledgered: { ...ledgerSummary(outside), phases: [...new Set(outside.map((entry) => entry.phase))].slice(0, 32) } };
       }
     }
   }
@@ -504,15 +542,16 @@ const untrusted = (events) => !Array.isArray(events) || events.some((e) => e?.tr
 const fixed = (a, b) => !!a && !!b && a.scrollX === 0 && b.scrollX === 0 && Math.abs((a.scrollY ?? NaN) - (b.scrollY ?? NaN)) <= 1 && b.overflow <= 1;
 const finite = (...values) => values.every((v) => typeof v === 'number' && Number.isFinite(v));
 
-/** PNG bound to its actual clip and the device profile: pixels = clip CSS size x DPR (+-1), clip inside the viewport. */
+/** PNG bound to its actual integral clip and the device profile: pixels = clip CSS size x DPR exactly, clip inside the viewport. */
 function screenshotFailure(s, profile) {
   const c = s.clip; const v = s.viewport;
   if (!c || !v || !finite(c.x, c.y, c.width, c.height, v.scrollX, v.scrollY) || c.scale !== 1) return 'screenshot is not a bounded element clip within the viewport';
   if (v.innerWidth !== profile.width || v.innerHeight !== profile.height || v.devicePixelRatio !== profile.deviceScaleFactor) return 'screenshot viewport differs from the device profile';
-  if (c.width < 1 || c.height < 1 || c.x < v.scrollX - 1 || c.y < v.scrollY - 1 || c.x + c.width > v.scrollX + v.innerWidth + 1 || c.y + c.height > v.scrollY + v.innerHeight + 1)
+  if (![c.x, c.y, c.width, c.height, v.scrollX, v.scrollY, profile.deviceScaleFactor].every(Number.isInteger)) return 'screenshot clip is not integral CSS pixels';
+  if (c.width < 1 || c.height < 1 || c.x < v.scrollX || c.y < v.scrollY || c.x + c.width > v.scrollX + v.innerWidth || c.y + c.height > v.scrollY + v.innerHeight)
     return 'screenshot is not a bounded element clip within the viewport';
   const dpr = profile.deviceScaleFactor;
-  if (Math.abs(s.width - Math.round(c.width * dpr)) > 1 || Math.abs(s.height - Math.round(c.height * dpr)) > 1)
+  if (s.width !== c.width * dpr || s.height !== c.height * dpr)
     return `screenshot ${s.width}x${s.height} is not its clip ${c.width}x${c.height} at ${dpr}x`;
   return null;
 }
@@ -530,6 +569,25 @@ function ledgerFailures(ledger, exact = []) {
   for (const p of ledger.paths) counts.set(p.path, (counts.get(p.path) ?? 0) + p.count);
   for (const [path, count] of counts) if (count > MAX_SAME_PATH_READS) out.push(`retry storm: ${cap(path)} read ${count} times`);
   for (const { path, count } of exact) if ((counts.get(path) ?? 0) !== count) out.push(`expected exactly ${count} read(s) of ${cap(path)}, found ${counts.get(path) ?? 0}`);
+  return out;
+}
+
+/** Whole-run ledger: setup, teardown and between-phase requests included; nothing dropped, failed, mutating or storming. */
+function runLedgerFailures(l) {
+  if (!l || typeof l !== 'object' || !Array.isArray(l.paths) || !l.unledgered || !Array.isArray(l.unledgered.paths)) return ['run request ledger missing'];
+  const out = [];
+  if (!(Number.isInteger(l.dropped) && l.dropped === 0)) out.push(`run request ledger truncated (${cap(String(l.dropped))} dropped beyond ${MAX_RUN_REQUESTS})`);
+  else if (l.truncated !== false) out.push(`run request ledger exceeds ${LEDGER_CAP} distinct request keys`);
+  if (l.failed !== 0) out.push(`run: ${l.failed} failed or unmapped API reads`);
+  if (l.mutations !== 0) out.push(`run: ${l.mutations} API mutations during a read-only audit`);
+  if (!(Number.isInteger(l.reads) && Number.isInteger(l.mutations) && l.reads + l.mutations <= MAX_RUN_REQUESTS)) out.push('run request ledger totals are out of bounds');
+  const u = l.unledgered; const where = cap(JSON.stringify(u.phases ?? null));
+  if (u.failed !== 0) out.push(`outside observation phases ${where}: ${u.failed} failed or unmapped API reads`);
+  if (u.mutations !== 0) out.push(`outside observation phases ${where}: ${u.mutations} API mutations`);
+  if (u.truncated !== false) out.push('outside-phase request ledger truncated');
+  const counts = new Map();
+  for (const p of u.paths) counts.set(p.path, (counts.get(p.path) ?? 0) + p.count);
+  for (const [path, count] of counts) if (count > MAX_SAME_PATH_READS) out.push(`retry storm outside observation phases: ${cap(path)} read ${count} times`);
   return out;
 }
 
@@ -660,6 +718,7 @@ export function assessResponsiveReport(section) {
   else if (section.unmapped.length) failures.push(`unmapped API reads: ${cap(section.unmapped.slice(0, 4).join(', '))}`);
   if (!Array.isArray(section.fulfillFailures)) failures.push('fulfilment failure record missing');
   else if (section.fulfillFailures.length) failures.push(`Fetch.fulfillRequest failed: ${cap(section.fulfillFailures.slice(0, 2).join(', '))}`);
+  failures.push(...runLedgerFailures(section.requests));
   if (section.failure !== undefined) failures.push(`responsive driver failed: ${cap(String(section.failure))}`);
   if (section.restoreFailure !== undefined) failures.push(`state restoration failed: ${cap(String(section.restoreFailure))}`);
   if (section.restored?.touch !== false || section.restored?.metricsCleared !== true || section.restored?.focus !== true) failures.push('viewport/touch/focus state was not restored');
