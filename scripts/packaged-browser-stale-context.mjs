@@ -6,7 +6,10 @@ export function assertRetainedObservation(before, after, label, expectedStaleNot
   assert.equal(after.identityMarker, before.identityMarker, `${label}: the retained DOM node was replaced`);
   assert.equal(after.focusedTarget, true, `${label}: focus left the selected metadata row`);
   assert.equal(after.selectionLength, before.selectionLength, `${label}: selected text changed`);
-  assert.equal(after.scrollY, before.scrollY, `${label}: viewport scroll changed`);
+  assert.ok(before.scrollY > 0 && after.scrollY > 0, `${label}: the viewport returned to the top`);
+  assert.ok(Number.isFinite(before.targetTop) && Number.isFinite(after.targetTop), `${label}: selected target position is missing`);
+  assert.ok(Math.abs(after.targetTop - before.targetTop) <= 1,
+    `${label}: selected target moved in the viewport (${before.targetTop} -> ${after.targetTop})`);
   assert.equal(after.visibilityState, 'visible', `${label}: page was hidden during visible receipt-age qualification`);
   assert.ok(after.receiptAt, `${label}: receipt is missing`);
   if (sameReceipt) assert.equal(after.receiptAt, before.receiptAt, `${label}: retained receipt was replaced`);
@@ -81,8 +84,9 @@ export async function qualifyStaleContext({ fixture, tab, cdp, evaluate, ready, 
       const maxScroll = Math.max(0, document.documentElement.scrollHeight - innerHeight);
       if (maxScroll < 80) return false;
       scrollTo(0, Math.min(160, maxScroll));
+      const targetTop = node.getBoundingClientRect().top;
       return { receiptAt: receipt.dataset.receivedAt, visibilityState: document.visibilityState,
-        scrollY, selectionLength: getSelection()?.toString().length ?? 0 };
+        scrollY, targetTop, selectionLength: getSelection()?.toString().length ?? 0 };
     })()`);
     assert.ok(setup && setup.receiptAt && setup.visibilityState === 'visible' && setup.scrollY > 0 && setup.selectionLength > 0,
       `${view.name}: fixture must support a visible retained receipt, selection and scroll`);
@@ -90,9 +94,10 @@ export async function qualifyStaleContext({ fixture, tab, cdp, evaluate, ready, 
       const node = document.querySelector(${JSON.stringify(view.target)});
       const receipt = document.querySelector(${JSON.stringify(`[aria-label="${view.receipt}"] [data-received-at]`)});
       const age = receipt?.parentElement?.textContent.match(/\\(([^()]+)\\)/)?.[1] ?? '';
+      const targetTop = node?.getBoundingClientRect().top ?? null;
       return { identityMarker: node?.dataset.staleContextIdentity ?? null,
         focusedTarget: document.activeElement === node, selectionLength: getSelection()?.toString().length ?? 0,
-        scrollY, visibilityState: document.visibilityState, receiptAt: receipt?.dataset.receivedAt ?? null, age };
+        scrollY, targetTop, visibilityState: document.visibilityState, receiptAt: receipt?.dataset.receivedAt ?? null, age };
     })()`);
     assert.equal(before.focusedTarget, true, `${view.name}: target did not receive focus`);
     const readCount = () => countRequestsForPath(tab.requests, 'GET', view.apiPath, browserOrigin);
@@ -111,9 +116,10 @@ export async function qualifyStaleContext({ fixture, tab, cdp, evaluate, ready, 
       const node = document.querySelector(${JSON.stringify(view.target)});
       const receipt = document.querySelector(${JSON.stringify(`[aria-label="${view.receipt}"] [data-received-at]`)});
       const age = receipt?.parentElement?.textContent.match(/\\(([^()]+)\\)/)?.[1] ?? '';
+      const targetTop = node?.getBoundingClientRect().top ?? null;
       return { identityMarker: node?.dataset.staleContextIdentity ?? null,
         focusedTarget: document.activeElement === node, selectionLength: getSelection()?.toString().length ?? 0,
-        scrollY, visibilityState: document.visibilityState, receiptAt: receipt?.dataset.receivedAt ?? null, age,
+        scrollY, targetTop, visibilityState: document.visibilityState, receiptAt: receipt?.dataset.receivedAt ?? null, age,
         staleNotice: document.body.innerText.includes(${JSON.stringify(STALE_COPY)}) };
     })()`);
     assertRetainedObservation(before, failed, view.name + ' failed read');
@@ -138,9 +144,10 @@ export async function qualifyStaleContext({ fixture, tab, cdp, evaluate, ready, 
       const node = document.querySelector(${JSON.stringify(view.target)});
       const receipt = document.querySelector(${JSON.stringify(`[aria-label="${view.receipt}"] [data-received-at]`)});
       const age = receipt?.parentElement?.textContent.match(/\\(([^()]+)\\)/)?.[1] ?? '';
+      const targetTop = node?.getBoundingClientRect().top ?? null;
       return { identityMarker: node?.dataset.staleContextIdentity ?? null,
         focusedTarget: document.activeElement === node, selectionLength: getSelection()?.toString().length ?? 0,
-        scrollY, visibilityState: document.visibilityState, receiptAt: receipt?.dataset.receivedAt ?? null, age,
+        scrollY, targetTop, visibilityState: document.visibilityState, receiptAt: receipt?.dataset.receivedAt ?? null, age,
         staleNotice: document.body.innerText.includes(${JSON.stringify(STALE_COPY)}) };
     })()`);
     assertRetainedObservation(before, recovered, view.name + ' recovered read', false, false);
