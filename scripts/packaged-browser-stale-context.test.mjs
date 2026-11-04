@@ -3,11 +3,11 @@ import { test } from 'node:test';
 import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { assertRetainedObservation, countRequestsForPath, hasSuccessfulResponseAfter } from './packaged-browser-stale-context.mjs';
+import { assertRetainedObservation, countRequestsForPath, hasSuccessfulResponseAfter, requireVisibleTarget } from './packaged-browser-stale-context.mjs';
 import { seedHistory } from './packaged-browser-history.mjs';
 
 const retained = { identityMarker: 'fixture', focusedTarget: true, selectionLength: 12, scrollY: 160,
-  receiptAt: '2026-11-04T00:00:00.000Z', age: 'less than 10 seconds ago', staleNotice: true };
+  visibilityState: 'visible', receiptAt: '2026-11-04T00:00:00.000Z', age: 'less than 10 seconds ago', staleNotice: true };
 
 test('seeds a workflow version admitted by the packaged job reader', async t => {
   const root = fileURLToPath(new URL('../build/', import.meta.url));
@@ -26,13 +26,25 @@ test('accepts a bounded retained-view observation', () => {
 
 test('rejects changed focus, selection, scroll, node identity, receipt or stale status', () => {
   for (const changed of [
-    { focusedTarget: false }, { selectionLength: 0 }, { scrollY: 0 }, { identityMarker: null },
+    { focusedTarget: false }, { selectionLength: 0 }, { scrollY: 0 }, { identityMarker: null }, { visibilityState: 'hidden' },
     { receiptAt: null }, { staleNotice: false },
   ]) assert.throws(() => assertRetainedObservation(retained, { ...retained, ...changed }, 'view'));
 });
 
 test('accepts the same retained context after recovery once the stale notice clears', () => {
   assertRetainedObservation(retained, { ...retained, staleNotice: false, age: 'about 10 seconds ago' }, 'Runtime', false);
+});
+
+test('foregrounds the browser target and waits for visible state before receipt-age checks', async () => {
+  const calls = [];
+  const tab = { sessionId: 'session-1' };
+  const cdp = { call: async (...args) => calls.push(['cdp', ...args]) };
+  const ready = async (...args) => calls.push(['ready', ...args]);
+  await requireVisibleTarget(tab, cdp, ready, 'visible age fixture');
+  assert.deepEqual(calls, [
+    ['cdp', 'Page.bringToFront', {}, 'session-1'],
+    ['ready', tab, `document.visibilityState === 'visible'`, 'visible age fixture'],
+  ]);
 });
 
 test('matches absolute and relative API requests by method and pathname', () => {
