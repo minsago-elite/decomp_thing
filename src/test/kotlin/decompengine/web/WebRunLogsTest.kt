@@ -287,4 +287,28 @@ class WebRunLogsTest {
             assertTrue(download.contains(expected), expected)
         }
     }
+
+    @Test fun `distinct host and listener literals and invalid byte decoding survive guarded dispatch`() {
+        val (jobId, run) = attempt()
+        val hostSecret = "HostOnlySecret123"
+        val listenerSecret = "ListenerOnlySecret123"
+        val hostPolicy = WebRedactionPolicy.create(mapOf("HOST_API_TOKEN" to hostSecret), emptyList(), emptyList())
+        val listenerPolicy = WebRedactionPolicy.create(mapOf("LISTENER_API_TOKEN" to listenerSecret), emptyList(), emptyList())
+        val adapter = WebRunLogs(WebLogRedaction(mapOf("job-store" to root), hostPolicy))
+        val bytes = ("host $hostSecret\nlistener $listenerSecret\n" + "invalid ").toByteArray() +
+            byteArrayOf(0xff.toByte()) + " Authorization: Basic synthetic-token-123\n".toByteArray()
+        val capture = assertNotNull(adapter.capture(bytes, sha, listenerPolicy))
+        assertEquals(3, capture.totalLines)
+        assertEquals("invalid � Authorization: [redacted]", capture.line(2).text)
+        assertTrue(capture.allLines().all { it.redacted })
+        val download = adapter.download(jobId, run, capture, Instant.EPOCH).decodeToString()
+        val range = adapter.range(jobId, run, capture, false, WebRunLogs.Query(1, false, 10, null), Instant.EPOCH)
+        for (secret in listOf(hostSecret, listenerSecret, "synthetic-token-123")) {
+            assertFalse(download.contains(secret), secret)
+            assertFalse(range.toString().contains(secret), secret)
+            assertFalse(capture.allLines().any { it.searchText.contains(secret) }, secret)
+        }
+        assertTrue(download.contains("host [redacted]"))
+        assertTrue(download.contains("listener [redacted]"))
+    }
 }

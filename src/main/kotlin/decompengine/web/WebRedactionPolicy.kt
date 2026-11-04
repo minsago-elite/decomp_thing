@@ -200,7 +200,74 @@ internal class WebRedactionPolicy private constructor(
         }
     }
 
+    private enum class RequiredToken { ALWAYS, COOKIE, AUTHORIZATION, BEARER }
+
+    private data class CredentialRule(
+        val pattern: Regex,
+        val keepPrefix: Boolean,
+        val required: RequiredToken = RequiredToken.ALWAYS,
+    )
+
+    private class SyntaxPresence(source: String) {
+        private val ascii: Boolean
+        private val cookie: Boolean
+        private val authorization: Boolean
+        private val bearer: Boolean
+        private val atSign: Boolean
+
+        init {
+            var isAscii = true
+            for (character in source) {
+                if (character.code > 127) {
+                    isAscii = false
+                    break
+                }
+            }
+            ascii = isAscii
+            if (!ascii) {
+                cookie = false
+                authorization = false
+                bearer = false
+                atSign = false
+            } else {
+                cookie = containsAsciiWord(source, "cookie")
+                authorization = containsAsciiWord(source, "authorization")
+                bearer = containsAsciiWord(source, "bearer")
+                atSign = source.indexOf('@') >= 0
+            }
+        }
+
+        fun permits(required: RequiredToken): Boolean = when {
+            !ascii -> true
+            required == RequiredToken.ALWAYS -> true
+            required == RequiredToken.COOKIE -> cookie
+            required == RequiredToken.AUTHORIZATION -> authorization
+            required == RequiredToken.BEARER -> bearer
+            else -> true
+        }
+
+        fun permitsUrl(): Boolean = !ascii || atSign
+
+        private fun containsAsciiWord(source: String, word: String): Boolean {
+            if (source.length < word.length) return false
+            var start = 0
+            while (start <= source.length - word.length) {
+                var offset = 0
+                while (offset < word.length) {
+                    val character = source[start + offset]
+                    val folded = if (character in 'A'..'Z') character + ('a' - 'A') else character
+                    if (folded != word[offset]) break
+                    offset++
+                }
+                if (offset == word.length) return true
+                start++
+            }
+            return false
+        }
+    }
+
     private fun redactOnce(source: String, paths: Boolean = true): String {
+        val syntaxPresence = SyntaxPresence(source)
         // Collect complete spans against the same original text. Sequential substitutions can erase
         // the assignment prefix/quote before syntax masking, or split an overlapping configured literal.
         var starts: IntArray? = null
@@ -222,10 +289,14 @@ internal class WebRedactionPolicy private constructor(
                 start = source.indexOf(literal, start + 1)
             }
         }
-        for (match in URL_USER_INFO.findAll(source)) mark(match.groups[1]!!.range.last + 1, match.range.last)
-        for ((pattern, keepPrefix) in CREDENTIAL_PATTERNS) {
-            for (match in pattern.findAll(source)) {
-                mark(if (keepPrefix) match.groups[1]!!.range.last + 1 else match.range.first, match.range.last + 1)
+        if (syntaxPresence.permitsUrl()) {
+            for (match in URL_USER_INFO.findAll(source)) mark(match.groups[1]!!.range.last + 1, match.range.last)
+        }
+        for (rule in CREDENTIAL_PATTERNS) {
+            if (syntaxPresence.permits(rule.required)) {
+                for (match in rule.pattern.findAll(source)) {
+                    mark(if (rule.keepPrefix) match.groups[1]!!.range.last + 1 else match.range.first, match.range.last + 1)
+                }
             }
         }
         var result = if (starts == null) source else buildString {
@@ -276,29 +347,29 @@ internal class WebRedactionPolicy private constructor(
         private val CREDENTIAL_PATTERNS = listOf(
             // Recorded HTTP cookie headers may carry session secrets unknown to the listener's environment.
             // Keep the header name but withhold the entire value (including cookie attributes).
-            Regex("(?i)(\\b(?:set-cookie|cookie)[\"']?[\\t ]*:[\\t ]*)[^\\r\\n]*") to true,
+            CredentialRule(Regex("(?i)(\\b(?:set-cookie|cookie)[\"']?[\\t ]*:[\\t ]*)[^\\r\\n]*"), true, RequiredToken.COOKIE),
             // Authorization schemes are extensible. For quoted values, keep the opening quote and
             // redact through its matching boundary; for raw header text, redact the whole line value.
-            Regex("""(?i)\b((?:proxy-)?authorization["']?\s*[:=]\s*")(?:(?:[^"\\\r\n]|\\[^\r\n]?))*+""") to true,
-            Regex("""(?i)\b((?:proxy-)?authorization["']?\s*[:=]\s*')(?:(?:[^'\\\r\n]|\\[^\r\n]?))*+""") to true,
-            Regex("(?i)\\b((?:proxy-)?authorization[\"']?\\s*[:=]\\s*+)(?![\"'])[^\\r\\n<>]+") to true,
+            CredentialRule(Regex("""(?i)\b((?:proxy-)?authorization["']?\s*[:=]\s*")(?:(?:[^"\\\r\n]|\\[^\r\n]?))*+"""), true, RequiredToken.AUTHORIZATION),
+            CredentialRule(Regex("""(?i)\b((?:proxy-)?authorization["']?\s*[:=]\s*')(?:(?:[^'\\\r\n]|\\[^\r\n]?))*+"""), true, RequiredToken.AUTHORIZATION),
+            CredentialRule(Regex("(?i)\\b((?:proxy-)?authorization[\"']?\\s*[:=]\\s*+)(?![\"'])[^\\r\\n<>]+"), true, RequiredToken.AUTHORIZATION),
             // Digest is a comma-separated parameter list and quoted values may contain spaces;
             // redact to the line boundary rather than stopping at the first comma or quote.
-            Regex("(?i)\\b((?:proxy-)?authorization[\"']?\\s*[:=]\\s*)digest\\s+[^\\r\\n<>]+") to true,
-            Regex("(?i)\\b((?:proxy-)?authorization[\"']?\\s*[:=]\\s*)(?:basic|bearer|token|digest)\\s+[^\\s,;\"'<>]+") to true,
+            CredentialRule(Regex("(?i)\\b((?:proxy-)?authorization[\"']?\\s*[:=]\\s*)digest\\s+[^\\r\\n<>]+"), true, RequiredToken.AUTHORIZATION),
+            CredentialRule(Regex("(?i)\\b((?:proxy-)?authorization[\"']?\\s*[:=]\\s*)(?:basic|bearer|token|digest)\\s+[^\\s,;\"'<>]+"), true, RequiredToken.AUTHORIZATION),
             // Digest carries quoted comma-separated parameters, not one opaque token. Withhold
             // the entire unquoted authorization value through the line boundary (also for JSON-like logs
             // and underscore-prefixed names such as HTTP_AUTHORIZATION).
-            Regex("(?i)(?:\\b|(?<=_))((?:proxy-)?authorization[\"']?\\s*[:=][\\t ]*)(?![\"'])[^\\r\\n]+") to true,
-            Regex("(?i)\\b(bearer\\s+)[A-Za-z0-9._~+/=-]{8,}") to true,
+            CredentialRule(Regex("(?i)(?:\\b|(?<=_))((?:proxy-)?authorization[\"']?\\s*[:=][\\t ]*)(?![\"'])[^\\r\\n]+"), true, RequiredToken.AUTHORIZATION),
+            CredentialRule(Regex("(?i)\\b(bearer\\s+)[A-Za-z0-9._~+/=-]{8,}"), true, RequiredToken.BEARER),
             // Consume escaped quotes and the full bounded input, including unterminated previews.
             // Possessive repetition avoids recursive backtracking on long/escape-heavy credentials.
             // An underscore is a word character: permit the credential suffix of DATABASE_PASSWORD
             // or CUSTOM_API_KEY without an unbounded environment-name prefix/backtracking pattern.
-            Regex("""(?i)(?:\b|(?<=_))((?:$CREDENTIAL_KEYS)["']?\s*[:=]\s*)(?:"(?:[^"\\\r\n]|\\[^\r\n]?)*+(?:"|(?=[\r\n]|$))|'(?:[^'\\\r\n]|\\[^\r\n]?)*+(?:'|(?=[\r\n]|$)))""") to true,
-            Regex("(?i)(?:\\b|(?<=_))((?:$CREDENTIAL_KEYS)[\"']?\\s*[:=]\\s*)(?!\\[redacted])[^\\s,;\"'&<>]+") to true,
-            Regex("(?<![A-Za-z0-9_-])(?:sk-[A-Za-z0-9_-]{16,}|sk-ant-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9]{20,}|" +
-                "github_pat_[A-Za-z0-9_]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35})") to false,
+            CredentialRule(Regex("""(?i)(?:\b|(?<=_))((?:$CREDENTIAL_KEYS)["']?\s*[:=]\s*)(?:"(?:[^"\\\r\n]|\\[^\r\n]?)*+(?:"|(?=[\r\n]|$))|'(?:[^'\\\r\n]|\\[^\r\n]?)*+(?:'|(?=[\r\n]|$)))"""), true),
+            CredentialRule(Regex("(?i)(?:\\b|(?<=_))((?:$CREDENTIAL_KEYS)[\"']?\\s*[:=]\\s*)(?!\\[redacted])[^\\s,;\"'&<>]+"), true),
+            CredentialRule(Regex("(?<![A-Za-z0-9_-])(?:sk-[A-Za-z0-9_-]{16,}|sk-ant-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9]{20,}|" +
+                "github_pat_[A-Za-z0-9_]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35})"), false),
         )
         // A path starts the value, follows a separator or follows a URL scheme ("file:///home/...");
         // a relative path such as "pkg/home/notes.txt" is public. Path text ends at whitespace or punctuation.

@@ -441,4 +441,214 @@ class WebRedactionPolicyTest {
         assertEquals("value [redacted] at [private-path]", diagnostic.diagnostic("value s3cr at /home/x/y"))
         assertTrue(diagnostic.diagnostic("x".repeat(1000)).length < 600)
     }
+
+    @Test fun `necessary token metadata and actual production gates preserve rule spans`() {
+        val policyClass = WebRedactionPolicy::class.java
+        val rulesField = policyClass.getDeclaredField("CREDENTIAL_PATTERNS").apply { isAccessible = true }
+        @Suppress("UNCHECKED_CAST")
+        val rules = rulesField.get(null) as List<Any>
+        assertEquals(11, rules.size)
+        val required = listOf("COOKIE") + List(6) { "AUTHORIZATION" } + listOf("BEARER", "ALWAYS", "ALWAYS", "ALWAYS")
+        val prefix = List(10) { true } + false
+        val ruleClass = rules.first().javaClass
+        val patternField = ruleClass.getDeclaredField("pattern").apply { isAccessible = true }
+        val prefixField = ruleClass.getDeclaredField("keepPrefix").apply { isAccessible = true }
+        val requiredField = ruleClass.getDeclaredField("required").apply { isAccessible = true }
+        val nested = policyClass.declaredClasses.associateBy { it.simpleName }
+        val tokenClass = nested.getValue("RequiredToken")
+        val presenceClass = nested.getValue("SyntaxPresence")
+        val constructor = presenceClass.getDeclaredConstructor(String::class.java).apply { isAccessible = true }
+        val permits = presenceClass.getDeclaredMethod("permits", tokenClass).apply { isAccessible = true }
+        val permitsUrl = presenceClass.getDeclaredMethod("permitsUrl").apply { isAccessible = true }
+        val defaultMarker = Class.forName("kotlin.jvm.internal.DefaultConstructorMarker")
+        val defaultConstructor = ruleClass.getDeclaredConstructor(
+            Regex::class.java, java.lang.Boolean.TYPE, tokenClass, Integer.TYPE, defaultMarker,
+        ).apply { isAccessible = true }
+        val urlField = policyClass.getDeclaredField("URL_USER_INFO").apply { isAccessible = true }
+        val urlPattern = urlField.get(null) as Regex
+        assertEquals("""(?i)\b([a-z][a-z0-9+.-]{1,31}://)[^/\s:@"'<>]{1,256}(?::[^/\s@"'<>]{0,512})?@""", urlPattern.pattern)
+        assertEquals(setOf(RegexOption.IGNORE_CASE), urlPattern.options)
+
+        fun signature(match: MatchResult, keepPrefix: Boolean, endOffset: Int = 1): String {
+            val groups = match.groups.map { group -> group?.let { "${it.value}@${it.range.first}:${it.range.last + 1}" } ?: "null" }
+            val start = if (keepPrefix) match.groups[1]!!.range.last + 1 else match.range.first
+            val end = match.range.last + endOffset
+            return "${match.value}@${match.range.first}:${match.range.last + 1}|$groups|mark=$start:$end"
+        }
+
+        val defaultedRule = defaultConstructor.newInstance(patternField.get(rules[0]), true, null, 4, null)
+        assertEquals("ALWAYS", requiredField.get(defaultedRule).toString(), "new-rule default remains unconditional")
+
+        val witnesses = listOf(
+            "Cookie: sid=alpha", "Authorization: \"alpha\"", "Authorization: 'alpha'",
+            "Authorization: Custom alpha", "Authorization: Digest username=\"alpha\", nonce=\"bravo\"",
+            "Authorization: Basic YWxwaGE=", "HTTP_AUTHORIZATION=Digest username=\"alpha\", nonce=\"bravo\"",
+            "bearer abcdefgh", "PASSWORD=\"alpha bravo\"", "api_key=alpha", "sk-abcdefghijklmnop",
+        )
+        val expectedMatch = listOf(
+            "Cookie: sid=alpha", "Authorization: \"alpha", "Authorization: 'alpha", "Authorization: Custom alpha",
+            "Authorization: Digest username=\"alpha\", nonce=\"bravo\"", "Authorization: Basic YWxwaGE=",
+            "AUTHORIZATION=Digest username=\"alpha\", nonce=\"bravo\"", "bearer abcdefgh",
+            "PASSWORD=\"alpha bravo\"", "api_key=alpha", "sk-abcdefghijklmnop",
+        )
+        val expectedMatchStart = listOf(0, 0, 0, 0, 0, 0, 5, 0, 0, 0, 0)
+        val expectedMatchEndExclusive = listOf(17, 21, 21, 27, 53, 29, 57, 15, 22, 13, 19)
+        val expectedGroup1 = listOf("Cookie: ", "Authorization: \"", "Authorization: '", "Authorization: ",
+            "Authorization: ", "Authorization: ", "AUTHORIZATION=", "bearer ", "PASSWORD=", "api_key=", null)
+        val expectedGroupStart = listOf(0, 0, 0, 0, 0, 0, 5, 0, 0, 0, null)
+        val expectedGroupEndExclusive = listOf(8, 16, 16, 15, 15, 15, 19, 7, 9, 8, null)
+        val expectedMark = listOf(8 to 17, 16 to 21, 16 to 21, 15 to 27, 15 to 53, 15 to 29,
+            19 to 57, 7 to 15, 9 to 22, 8 to 13, 0 to 19)
+        val credentialKeys = "api[_-]?key|access[_-]?key|secret[_-]?key|access[_-]?token|refresh[_-]?token|" +
+            "auth[_-]?token|client[_-]?secret|password|passwd|passphrase|secret|token|(?:proxy-)?authorization"
+        val expectedPatterns = listOf(
+            """(?i)(\b(?:set-cookie|cookie)["']?[\t ]*:[\t ]*)[^\r\n]*""",
+            """(?i)\b((?:proxy-)?authorization["']?\s*[:=]\s*")(?:(?:[^"\\\r\n]|\\[^\r\n]?))*+""",
+            """(?i)\b((?:proxy-)?authorization["']?\s*[:=]\s*')(?:(?:[^'\\\r\n]|\\[^\r\n]?))*+""",
+            """(?i)\b((?:proxy-)?authorization["']?\s*[:=]\s*+)(?!["'])[^\r\n<>]+""",
+            """(?i)\b((?:proxy-)?authorization["']?\s*[:=]\s*)digest\s+[^\r\n<>]+""",
+            """(?i)\b((?:proxy-)?authorization["']?\s*[:=]\s*)(?:basic|bearer|token|digest)\s+[^\s,;"'<>]+""",
+            """(?i)(?:\b|(?<=_))((?:proxy-)?authorization["']?\s*[:=][\t ]*)(?!["'])[^\r\n]+""",
+            """(?i)\b(bearer\s+)[A-Za-z0-9._~+/=-]{8,}""",
+            """(?i)(?:\b|(?<=_))((?:$credentialKeys)["']?\s*[:=]\s*)(?:"(?:[^"\\\r\n]|\\[^\r\n]?)*+(?:"|(?=[\r\n]|$))|'(?:[^'\\\r\n]|\\[^\r\n]?)*+(?:'|(?=[\r\n]|$)))""",
+            """(?i)(?:\b|(?<=_))((?:$credentialKeys)["']?\s*[:=]\s*)(?!\[redacted])[^\s,;"'&<>]+""",
+            """(?<![A-Za-z0-9_-])(?:sk-[A-Za-z0-9_-]{16,}|sk-ant-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35})""",
+        )
+        val corpus = buildList {
+            add("plain opaque input")
+            addAll(witnesses)
+            for (witness in witnesses) for (code in 0..127) {
+                val context = code.toChar()
+                add("$context$witness$context")
+            }
+            addAll(listOf("no syntax words", "token=ordinary", "private path /home/person/file", "https://alpha@example.test/x"))
+            for (left in witnesses) for (right in witnesses) add("$left\n$right")
+            for (key in listOf("api_key", "apikey", "api-key", "access_key", "secret_key", "access_token",
+                "refresh_token", "auth_token", "client_secret", "password", "passwd", "passphrase", "secret", "token",
+                "authorization", "proxy-authorization", "DATABASE_PASSWORD", "CUSTOM_API_KEY", "HTTP_AUTHORIZATION", "_password")) {
+                add("$key=alpha")
+                add("$key=\"alpha bravo\"")
+                add("$key='alpha bravo'")
+                add("$key=\"alpha\\\" bravo")
+            }
+            addAll(listOf("sk-ant-abcdefgh", "github_pat_" + "a".repeat(20), "AKIA" + "A".repeat(16), "AIza" + "a".repeat(35)))
+            for (kind in "pousr") add("gh${kind}_" + "a".repeat(20))
+            for (kind in "abprs") add("xox$kind-" + "a".repeat(10))
+        }
+        for (index in rules.indices) {
+            val rule = rules[index]
+            val regex = patternField.get(rule) as Regex
+            assertEquals(expectedPatterns[index], regex.pattern, "rule $index exact regex")
+            assertEquals(if (index < 10) setOf(RegexOption.IGNORE_CASE) else emptySet(), regex.options, "rule $index effective options")
+            val token = requiredField.get(rule)
+            assertEquals(required[index], token.toString(), "rule $index required token")
+            assertEquals(prefix[index], prefixField.getBoolean(rule), "rule $index prefix behavior")
+            val positive = witnesses[index]
+            val positivePresence = constructor.newInstance(positive)
+            assertEquals(true, permits.invoke(positivePresence, token), "rule $index positive gate")
+            val raw = regex.findAll(positive).map { signature(it, prefix[index]) }.toList()
+            assertTrue(raw.isNotEmpty(), "rule $index positive production Regex witness")
+            val first = regex.findAll(positive).first()
+            assertEquals(expectedMatch[index], first.value, "rule $index hand-derived witness")
+            assertEquals(expectedMatchStart[index], first.range.first, "rule $index witness start")
+            assertEquals(expectedMatchEndExclusive[index], first.range.last + 1, "rule $index witness end")
+            if (expectedGroup1[index] != null) {
+                assertEquals(expectedGroup1[index], first.groups[1]!!.value, "rule $index group 1")
+                assertEquals(expectedGroupStart[index], first.groups[1]!!.range.first, "rule $index group 1 start")
+                assertEquals(expectedGroupEndExclusive[index], first.groups[1]!!.range.last + 1, "rule $index group 1 end")
+            } else assertEquals(1, first.groups.size, "opaque rule has only the whole-match group")
+            val actualMarkStart = if (prefix[index]) first.groups[1]!!.range.last + 1 else first.range.first
+            assertEquals(expectedMark[index].first to expectedMark[index].second,
+                actualMarkStart to (first.range.last + 1), "rule $index derived mark interval")
+            assertEquals(raw, regex.findAll(positive).map { signature(it, prefix[index]) }.toList())
+            for (source in corpus) {
+                val sourcePresence = constructor.newInstance(source)
+                val sourceAllowed = permits.invoke(sourcePresence, token) as Boolean
+                val sourceRaw = regex.findAll(source).map { signature(it, prefix[index]) }.toList()
+                val sourceSelected = if (sourceAllowed) regex.findAll(source).map { signature(it, prefix[index]) }.toList() else emptyList()
+                assertEquals(sourceRaw, sourceSelected, "rule $index source-derived engine spans")
+                if (!sourceAllowed) assertTrue(sourceRaw.isEmpty(), "disabled rule $index has no raw match")
+            }
+
+            val negative = "plain opaque input"
+            val negativePresence = constructor.newInstance(negative)
+            val allowed = permits.invoke(negativePresence, token) as Boolean
+            assertEquals(index >= 8, allowed, "rule $index negative gate")
+            val rawNegative = regex.findAll(negative).map { signature(it, prefix[index]) }.toList()
+            val selected = if (allowed) rawNegative else emptyList()
+            assertEquals(rawNegative, selected, "rule $index actual-engine selected spans")
+            if (!allowed) assertTrue(rawNegative.isEmpty(), "skipped rule $index must have no raw matches")
+        }
+        assertEquals(true, permitsUrl.invoke(constructor.newInstance("https://alpha@example.test/x")))
+        assertEquals(false, permitsUrl.invoke(constructor.newInstance("plain opaque input")))
+        val urlMatch = urlPattern.find("https://alpha@example.test/x")!!
+        assertEquals("https://alpha@", urlMatch.value)
+        assertEquals(0..13, urlMatch.range)
+        assertEquals("https://", urlMatch.groups[1]!!.value)
+        assertEquals(0..7, urlMatch.groups[1]!!.range)
+        assertEquals(8, urlMatch.groups[1]!!.range.last + 1)
+        assertEquals(13, urlMatch.range.last)
+        for (source in corpus) {
+            val sourcePresence = constructor.newInstance(source)
+            val sourceAllowed = permitsUrl.invoke(sourcePresence) as Boolean
+            val sourceRaw = urlPattern.findAll(source).map { signature(it, true, 0) }.toList()
+            val sourceSelected = if (sourceAllowed) urlPattern.findAll(source).map { signature(it, true, 0) }.toList() else emptyList()
+            assertEquals(sourceRaw, sourceSelected, "URL source-derived engine spans")
+            if (!sourceAllowed) assertTrue(sourceRaw.isEmpty(), "disabled URL search has no raw match")
+        }
+
+        val words = listOf("cookie", "authorization", "bearer")
+        val tokens = listOf("COOKIE", "AUTHORIZATION", "BEARER")
+        for (wordIndex in words.indices) {
+            val word = words[wordIndex]
+            val enumValue = tokenClass.enumConstants.first { it.toString() == tokens[wordIndex] }
+            val masks = 1 shl word.length
+            for (mask in 0 until masks) {
+                val spelling = word.mapIndexed { position, char -> if (mask and (1 shl position) != 0) char.uppercaseChar() else char }.joinToString("")
+                assertEquals(true, permits.invoke(constructor.newInstance("x$spelling-y"), enumValue), "$word case mask $mask")
+            }
+        }
+        val nonAscii = listOf("é", "xİy", "xıy", "ſ", "K", "\uFFFD", "\uD83D\uDE00", "\uD800", "\uDC00")
+        for (injection in nonAscii) {
+            val samples = listOf("$injection plain", "plain $injection", "pl${injection}ain") +
+                (witnesses + "https://alpha@example.test/x").flatMap { witness ->
+                    listOf(injection + witness, witness + injection, witness.take(3) + injection + witness.drop(3))
+                }
+            for (sample in samples) {
+                val presence = constructor.newInstance(sample)
+                for (rule in rules) {
+                    assertEquals(true, permits.invoke(presence, requiredField.get(rule)))
+                    val regex = patternField.get(rule) as Regex
+                    val raw = regex.findAll(sample).map { signature(it, prefix[rules.indexOf(rule)]) }.toList()
+                    val selected = if (permits.invoke(presence, requiredField.get(rule)) as Boolean)
+                        regex.findAll(sample).map { signature(it, prefix[rules.indexOf(rule)]) }.toList() else emptyList()
+                    assertEquals(raw, selected)
+                }
+                assertEquals(true, permitsUrl.invoke(presence))
+                val urlRaw = urlPattern.findAll(sample).map { signature(it, true, 0) }.toList()
+                val urlSelected = if (permitsUrl.invoke(presence) as Boolean)
+                    urlPattern.findAll(sample).map { signature(it, true, 0) }.toList() else emptyList()
+                assertEquals(urlRaw, urlSelected)
+            }
+        }
+        assertEquals("CoOkIe: [redacted]", WebRedactionPolicy.BASELINE.text("CoOkIe: sid=alpha"))
+        assertEquals("AUTHORIZATION: [redacted]", WebRedactionPolicy.BASELINE.text("AUTHORIZATION: Custom alpha"))
+        assertEquals("bEaReR [redacted]", WebRedactionPolicy.BASELINE.text("bEaReR abcdefgh"))
+        assertEquals("password=[redacted]", WebRedactionPolicy.BASELINE.text("password=alpha"))
+        assertEquals("[redacted]", WebRedactionPolicy.BASELINE.text("sk-abcdefghijklmnop"))
+    }
+
+    @Test fun `configured literals remain unconditional through replacement synthesis and final withholding`() {
+        val literals = listOf("abcdefgh", "[redacted]X", "[redacted]Y", "[redacted]Z", "[redacted]W")
+        val configured = WebRedactionPolicy.create(
+            environment = literals.mapIndexed { index, literal -> "TEST_API_TOKEN_$index" to literal }.toMap(),
+            sensitiveValues = emptyList(),
+            privateRoots = emptyList(),
+        )
+        val once = configured.text("abcdefghXYZW")
+        assertEquals("[redacted]", once)
+        assertFalse(configured.leaks(once))
+        assertEquals(once, configured.text(once))
+        assertEquals("[redacted]", configured.text("abcdefghX"))
+    }
 }
