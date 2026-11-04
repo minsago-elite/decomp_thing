@@ -3,6 +3,9 @@ package decompengine.project
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption.ATOMIC_MOVE
+import java.io.IOException
+import java.nio.channels.FileChannel
+import java.nio.file.StandardOpenOption.READ
 import decompengine.testing.recoveryMatrixTempDirectory as createTempDirectory
 import decompengine.testing.RecoveryMatrixEvidence
 import org.junit.jupiter.api.extension.ExtendWith
@@ -38,6 +41,43 @@ class ReconstructionOutputWorkspaceTest {
             assertEquals("observations-a", root.resolve(ModuleObservedBehavior.FILE_NAME).readText())
             assertEquals("archive-b", root.resolve("input-cache/${sha256(b.readBytes())}/source-tree.zip").readText())
             assertEquals("observations-b", root.resolve("input-cache/${sha256(b.readBytes())}/${ModuleObservedBehavior.FILE_NAME}").readText())
+        }
+    }
+
+    @Test
+    fun `cache and per-input parent entries are synced before moving active results`() {
+        for (failedSync in 0..3) {
+            val base = createTempDirectory("input-cache-parent-sync-")
+            val root = base.resolve("output")
+            val a = base.resolve("a").apply { writeText("input-a") }
+            val b = base.resolve("b").apply { writeText("input-b") }
+            ReconstructionOutputWorkspace.open(root, a).use {
+                root.resolve("source-tree.zip").writeText("accepted-a")
+            }
+
+            val synced = mutableListOf<Path>()
+            assertFailsWith<IOException> {
+                ReconstructionOutputWorkspace.openWithParentSyncForTest(root, b) { parent ->
+                    synced.add(parent)
+                    if (synced.lastIndex == failedSync) throw IOException("injected parent sync failure")
+                    FileChannel.open(parent, READ).use { it.force(true) }
+                }
+            }
+
+            val cache = root.resolve(ReconstructionOutputWorkspace.CACHE)
+            assertEquals(listOf(root, cache, root, cache).take(failedSync + 1), synced)
+            assertEquals("accepted-a", root.resolve("source-tree.zip").readText())
+            assertFalse(root.resolve(ReconstructionOutputWorkspace.SWITCH).exists())
+            assertEquals(sha256(a.readBytes()),
+                Json.parseToJsonElement(root.resolve(ReconstructionOutputWorkspace.ACTIVE).readText())
+                    .jsonObject.getValue("inputSha256").jsonPrimitive.content)
+
+            // The failed sync may have left created directories in place. A retry must sync
+            // their parents again before archiving the accepted active result.
+            ReconstructionOutputWorkspace.open(root, b).use {
+                assertFalse(root.resolve("source-tree.zip").exists())
+                assertEquals("accepted-a", root.resolve("input-cache/${sha256(a.readBytes())}/source-tree.zip").readText())
+            }
         }
     }
 

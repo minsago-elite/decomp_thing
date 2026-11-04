@@ -25,6 +25,7 @@ internal class ReconstructionOutputWorkspace private constructor(
     private val ownerKey: Any,
     private val channel: FileChannel,
     private val lock: FileLock,
+    private val syncParentDirectory: (Path) -> Unit,
     val inputSha256: String,
 ) : AutoCloseable {
     private var closed = false
@@ -142,9 +143,15 @@ internal class ReconstructionOutputWorkspace private constructor(
         val cache = cacheRoot()
         if (!Files.exists(cache, NOFOLLOW_LINKS)) Files.createDirectory(cache)
         require(Files.isDirectory(cache, NOFOLLOW_LINKS)) { "input cache must be an ordinary directory" }
+        // Repeat the parent sync even when the directory already exists: an earlier sync may
+        // have failed after creation, and a retry must not treat that entry as durable.
+        syncParentDirectory(root)
         val directory = cache.resolve(key)
         if (!Files.exists(directory, NOFOLLOW_LINKS)) Files.createDirectory(directory)
         require(Files.isDirectory(directory, NOFOLLOW_LINKS)) { "input cache entry must be an ordinary directory" }
+        // Persist each per-input entry before publishing the switch transaction or moving any
+        // preserved output into it, including entries left by a failed earlier sync.
+        syncParentDirectory(cache)
         return directory
     }
 
@@ -179,7 +186,20 @@ internal class ReconstructionOutputWorkspace private constructor(
         private val KEY = Regex("[0-9a-f]{64}|unidentified-[0-9a-f-]{36}")
         private val OWNERS = mutableSetOf<Any>()
 
-        fun open(root: Path, input: Path): ReconstructionOutputWorkspace {
+        fun open(root: Path, input: Path): ReconstructionOutputWorkspace =
+            openInternal(root, input, ::sync)
+
+        internal fun openWithParentSyncForTest(
+            root: Path,
+            input: Path,
+            syncParentDirectory: (Path) -> Unit,
+        ): ReconstructionOutputWorkspace = openInternal(root, input, syncParentDirectory)
+
+        private fun openInternal(
+            root: Path,
+            input: Path,
+            syncParentDirectory: (Path) -> Unit,
+        ): ReconstructionOutputWorkspace {
             require(Files.isRegularFile(input)) { "reconstruction input must be a regular file" }
             Files.createDirectories(root)
             require(Files.isDirectory(root, NOFOLLOW_LINKS)) { "reconstruction output must be an ordinary directory" }
@@ -197,7 +217,7 @@ internal class ReconstructionOutputWorkspace private constructor(
                     while (true) { val count = stream.read(bytes); if (count < 0) break; digest.update(bytes, 0, count) }
                 }
                 val inputSha = digest.digest().joinToString("") { "%02x".format(it) }
-                lease = ReconstructionOutputWorkspace(root, key, channel, lock, inputSha)
+                lease = ReconstructionOutputWorkspace(root, key, channel, lock, syncParentDirectory, inputSha)
                 lease.activate()
                 return lease
             } catch (failure: Throwable) {
