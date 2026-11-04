@@ -22,13 +22,13 @@ import sys
 import time
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
 RUN_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
-GCC_DRIVER_SHA256 = "3c0cfef73a02b06b40456e89d9d9e33727144c2f473b8b7256b361a7699d48a4"
+DRIVER_PROFILE = "oracle/gcc/analysis-timing-profile-v1.json"
 MAX_TOTAL_BYTES = 4 * 1024 * 1024 * 1024
 MAX_RUN_DIRECTORY_BYTES = 256 * 1024 * 1024
 MAX_INDIVIDUAL_FILE_BYTES = MAX_TOTAL_BYTES
@@ -87,22 +87,91 @@ def load_archival_fixture(fixture_id: str, binary_kind: str) -> dict[str, Any]:
     actual = sha256_file(path)
     if actual != binary["sha256"]:
         raise MatrixError(f"fixture digest mismatch for {binary['path']}")
-    return {"id": fixture_id, "path": path, "sha256": actual, "manifest": str(manifest_path.relative_to(ROOT))}
+    return {"id": fixture_id, "path": path, "sha256": actual,
+        "manifest": str(manifest_path.relative_to(ROOT)), "manifestSha256": sha256_file(manifest_path)}
+
+
+def load_driver_fixture(root: Path = ROOT) -> dict[str, Any]:
+    profile_relative = PurePosixPath(DRIVER_PROFILE)
+    if profile_relative.is_absolute() or profile_relative.as_posix() != DRIVER_PROFILE or \
+            any(part in {"", ".", ".."} for part in profile_relative.parts):
+        raise MatrixError("pinned driver profile path is unsafe")
+    profile_path = root.joinpath(*profile_relative.parts)
+    current = root
+    for index, part in enumerate(profile_relative.parts):
+        current = current / part
+        if current.is_symlink():
+            raise MatrixError("pinned driver profile traverses a link")
+        if index < len(profile_relative.parts) - 1 and not current.is_dir():
+            raise MatrixError("pinned driver profile parent is not a directory")
+    profile_root = profile_path.parent
+    if not profile_path.is_file() or profile_path.stat().st_size > 16 * 1024:
+        raise MatrixError("pinned driver profile is absent, linked, or oversized")
+    profile = json.loads(profile_path.read_text(encoding="utf-8"))
+    if not isinstance(profile, dict) or set(profile) != {"schemaVersion", "driver"} or \
+            type(profile.get("schemaVersion")) is not int or profile["schemaVersion"] != 1:
+        raise MatrixError("unsupported pinned driver profile")
+    driver = profile.get("driver")
+    fields = {"id", "path", "sha256", "identityName", "identityManifest"}
+    if not isinstance(driver, dict) or set(driver) != fields:
+        raise MatrixError("pinned driver profile has unsupported fields")
+    if not isinstance(driver["id"], str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", driver["id"]):
+        raise MatrixError("pinned driver profile has invalid id")
+    if not isinstance(driver["sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", driver["sha256"]):
+        raise MatrixError("pinned driver profile has invalid digest")
+    if not isinstance(driver["identityName"], str) or not driver["identityName"]:
+        raise MatrixError("pinned driver profile has invalid identity name")
+
+    def relative_path(value: object, label: str) -> Path:
+        if not isinstance(value, str) or not value or "\\" in value or any(ord(char) < 32 for char in value):
+            raise MatrixError(f"pinned driver profile has invalid {label}")
+        relative = PurePosixPath(value)
+        if relative.is_absolute() or relative.as_posix() != value or any(part in {"", ".", ".."} for part in relative.parts):
+            raise MatrixError(f"pinned driver profile has unsafe {label}")
+        path = profile_root.joinpath(*relative.parts)
+        current = profile_root
+        for index, part in enumerate(relative.parts):
+            current = current / part
+            if current.is_symlink():
+                raise MatrixError(f"pinned driver profile {label} traverses a link")
+            if index < len(relative.parts) - 1 and not current.is_dir():
+                raise MatrixError(f"pinned driver profile {label} has a non-directory parent")
+        return path
+
+    binary_path = relative_path(driver["path"], "binary path")
+    catalog_path = relative_path(driver["identityManifest"], "identity manifest")
+    if not binary_path.is_file() or binary_path.stat().st_size > MAX_INDIVIDUAL_FILE_BYTES:
+        raise MatrixError("pinned driver binary is absent or not a regular file")
+    if not catalog_path.is_file() or catalog_path.stat().st_size > 1024 * 1024:
+        raise MatrixError("pinned driver identity manifest is absent, linked, or oversized")
+    catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+    if not isinstance(catalog, dict) or type(catalog.get("schemaVersion")) is not int or \
+            catalog.get("schemaVersion") != 1 or not isinstance(catalog.get("identities"), list):
+        raise MatrixError("unsupported pinned driver identity manifest")
+    identities = [item for item in catalog["identities"]
+        if isinstance(item, dict) and item.get("name") == driver["identityName"]]
+    if len(identities) != 1 or identities[0].get("sha256") != driver["sha256"]:
+        raise MatrixError("pinned driver identity does not match its identity manifest")
+    actual = sha256_file(binary_path)
+    if actual != driver["sha256"]:
+        raise MatrixError("pinned driver binary digest differs from its identity manifest")
+    return {
+        "id": driver["id"],
+        "path": binary_path,
+        "sha256": actual,
+        "manifest": str(profile_path.relative_to(root)),
+        "manifestSha256": sha256_file(profile_path),
+        "identityManifest": str(catalog_path.relative_to(root)),
+        "identityManifestSha256": sha256_file(catalog_path),
+        "identityName": driver["identityName"],
+    }
 
 
 def fixtures() -> dict[str, dict[str, Any]]:
-    gcc_path = ROOT / "oracle/gcc/16.2.0/artifacts/gcc-driver.stripped"
-    if gcc_path.is_symlink() or not gcc_path.is_file() or sha256_file(gcc_path) != GCC_DRIVER_SHA256:
-        raise MatrixError("pinned GCC driver input is absent or does not match the retained SHA-256")
     return {
         "large_project_mtu": load_archival_fixture("large_project_mtu", "stripped"),
         "large_project": load_archival_fixture("large_project", "stripped"),
-        "gcc_driver": {
-            "id": "gcc_driver",
-            "path": gcc_path,
-            "sha256": GCC_DRIVER_SHA256,
-            "manifest": "oracle/gcc/16.2.0/reconstruction-neutrality-identities.json",
-        },
+        "gcc_driver": load_driver_fixture(),
     }
 
 
@@ -275,9 +344,16 @@ def capture_run(cli: Path, output: Path, fixture: dict[str, Any], profile: str,
     host_after = host_sample()
     after = history_ids(output)
     new_ids = sorted(after - before)
+    input_binding: dict[str, Any] = {
+        "path": str(fixture["path"].relative_to(ROOT)),
+        "sha256": fixture["sha256"],
+    }
+    for key in ("manifest", "manifestSha256", "identityManifest", "identityManifestSha256", "identityName"):
+        if key in fixture:
+            input_binding[key] = fixture[key]
     observation: dict[str, Any] = {
         "label": label,
-        "input": {"path": str(fixture["path"].relative_to(ROOT)), "sha256": fixture["sha256"]},
+        "input": input_binding,
         "profile": profile,
         "cli": result,
         "hostBefore": host_before,
@@ -516,7 +592,10 @@ def run_matrix(cli_arg: Path, evidence_arg: Path, repetitions: int) -> dict[str,
             fixture_dir.mkdir()
             fixture_record = report["fixtures"].setdefault(fixture_id, {
                 "input": {"path": str(fixture["path"].relative_to(ROOT)), "sha256": fixture["sha256"],
-                    "manifest": fixture["manifest"]},
+                    "manifest": fixture["manifest"], "manifestSha256": fixture["manifestSha256"],
+                    **({"identityManifest": fixture["identityManifest"],
+                        "identityManifestSha256": fixture["identityManifestSha256"],
+                        "identityName": fixture["identityName"]} if "identityManifest" in fixture else {})},
                 "observations": [],
             })
             for repetition in range(1, repetitions + 1):

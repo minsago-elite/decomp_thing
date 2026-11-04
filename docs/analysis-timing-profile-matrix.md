@@ -16,8 +16,12 @@ three independent fresh outputs per pinned fixture, followed by three complete
 resume invocations on each output. It also runs a shared-output input switch
 (`large_project_mtu` → `large_project` → `large_project_mtu`) and a profile
 switch (Make → Ninja → Make). Use `--repetitions 2` through `5` to adjust the
-sample count. Inputs are checked against `benchmarks/archival/manifest.json` or
-the retained GCC driver SHA-256 before any analysis starts.
+sample count. Archival inputs are checked against
+`benchmarks/archival/manifest.json`. The driver input is declared in
+`oracle/gcc/analysis-timing-profile-v1.json`, checked against the repository's
+neutrality identity catalogue, and hashed before analysis starts. Each run
+records the profile and identity-manifest paths and digests alongside the
+binary pin.
 
 Each successful invocation must produce one complete closed run history, a
 successful `runs list` and `runs replay`, a correlated timing sidecar with

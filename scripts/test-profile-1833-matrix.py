@@ -26,7 +26,64 @@ class Profile1833MatrixTests(unittest.TestCase):
             "940ea9fd464d194b3e3ea9e8cfaac9ae084afb5fe12fc4b14ca933a0d9819ea7")
         self.assertEqual(inputs["large_project"]["sha256"],
             "0c6da08bcb7ca936d20e76e816bf5bab2e94393cf5f2c7bf0a40d752c8b82bd1")
-        self.assertEqual(inputs["gcc_driver"]["sha256"], MATRIX.GCC_DRIVER_SHA256)
+        driver = inputs["gcc_driver"]
+        self.assertEqual(driver["manifest"], MATRIX.DRIVER_PROFILE)
+        self.assertEqual(driver["identityManifest"], "oracle/gcc/reconstruction-neutrality-identities.json")
+        self.assertEqual(MATRIX.sha256_file(driver["path"]), driver["sha256"])
+        self.assertTrue(driver["manifestSha256"])
+        self.assertTrue(driver["identityManifestSha256"])
+
+    def test_driver_profile_cross_checks_binary_and_identity_manifest(self) -> None:
+        with tempfile.TemporaryDirectory(dir=MATRIX.ROOT) as scratch:
+            root = Path(scratch)
+            profile_root = root / "oracle/gcc"
+            binary = profile_root / "fixture.bin"
+            binary.parent.mkdir(parents=True)
+            binary.write_bytes(b"pinned profile fixture")
+            digest = hashlib.sha256(binary.read_bytes()).hexdigest()
+            catalog = profile_root / "identities.json"
+            catalog.write_text(json.dumps({"schemaVersion": 1, "identities": [
+                {"name": "fixture-driver", "sha256": digest}]}), encoding="utf-8")
+            profile = profile_root / "analysis-timing-profile-v1.json"
+            value = {"schemaVersion": 1, "driver": {"id": "fixture_driver", "path": "fixture.bin",
+                "sha256": digest, "identityName": "fixture-driver", "identityManifest": "identities.json"}}
+            profile.write_text(json.dumps(value), encoding="utf-8")
+
+            loaded = MATRIX.load_driver_fixture(root)
+            self.assertEqual(loaded["path"], binary)
+            self.assertEqual(loaded["sha256"], digest)
+            self.assertEqual(loaded["identityName"], "fixture-driver")
+
+            value["driver"]["path"] = "../outside.bin"
+            profile.write_text(json.dumps(value), encoding="utf-8")
+            with self.assertRaisesRegex(MATRIX.MatrixError, "unsafe binary path"):
+                MATRIX.load_driver_fixture(root)
+
+    def test_driver_profile_rejects_digest_and_catalog_substitution(self) -> None:
+        with tempfile.TemporaryDirectory(dir=MATRIX.ROOT) as scratch:
+            root = Path(scratch)
+            profile_root = root / "oracle/gcc"
+            profile_root.mkdir(parents=True)
+            binary = profile_root / "fixture.bin"
+            binary.write_bytes(b"pinned profile fixture")
+            digest = hashlib.sha256(binary.read_bytes()).hexdigest()
+            catalog = profile_root / "identities.json"
+            catalog.write_text(json.dumps({"schemaVersion": 1, "identities": [
+                {"name": "fixture-driver", "sha256": digest}]}), encoding="utf-8")
+            profile = profile_root / "analysis-timing-profile-v1.json"
+            value = {"schemaVersion": 1, "driver": {"id": "fixture_driver", "path": "fixture.bin",
+                "sha256": digest, "identityName": "fixture-driver", "identityManifest": "identities.json"}}
+            profile.write_text(json.dumps(value), encoding="utf-8")
+
+            binary.write_bytes(b"substituted driver bytes")
+            with self.assertRaisesRegex(MATRIX.MatrixError, "binary digest differs"):
+                MATRIX.load_driver_fixture(root)
+
+            binary.write_bytes(b"pinned profile fixture")
+            catalog.write_text(json.dumps({"schemaVersion": 1, "identities": [
+                {"name": "fixture-driver", "sha256": "0" * 64}]}), encoding="utf-8")
+            with self.assertRaisesRegex(MATRIX.MatrixError, "identity does not match"):
+                MATRIX.load_driver_fixture(root)
 
     def test_child_environment_excludes_provider_and_external_ghidra_settings(self) -> None:
         old = os.environ.copy()
