@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Require the two installed GCC/Ghidra deployment probes to pass in JUnit XML."""
+"""Require installed bundled-Ghidra probes to pass in JUnit XML."""
 import argparse
 from collections import Counter
 from itertools import islice
@@ -8,10 +8,21 @@ import sys
 import xml.etree.ElementTree as ET
 
 
-CLASS = "decompengine.oracle.gcc.GccBundledGhidraDeploymentReferenceTest"
+# Exact Gradle/JUnit identities are the hosted gate. Keep the existing GCC
+# deployment probes mandatory alongside the #1893 default-dot qualifier.
 REQUIRED = {
-    "installed opener selects its own application exporter despite an earlier shadow resource()",
-    "installed opener rejects reference root and paired overrides before source selection()",
+    (
+        "decompengine.oracle.gcc.GccBundledGhidraDeploymentReferenceTest",
+        "installed opener selects its own application exporter despite an earlier shadow resource()",
+    ),
+    (
+        "decompengine.oracle.gcc.GccBundledGhidraDeploymentReferenceTest",
+        "installed opener rejects reference root and paired overrides before source selection()",
+    ),
+    (
+        "decompengine.project.GhidraDotDirectoryInvocationQualificationTest",
+        "installed bundled worker records default dot directory invocation()",
+    ),
 }
 # The dedicated job emits Gradle testsuite documents, not arbitrary XML wrappers.
 MAX_REPORT_FILES = 1024
@@ -47,23 +58,23 @@ def verify(report_root: Path) -> list[str]:
             errors.append(f"unsupported Gradle JUnit report structure: {report}")
             continue
         for case in cases:
-            classname, name = case.get("classname", ""), case.get("name", "")
-            if classname != CLASS or name not in REQUIRED:
+            identity = (case.get("classname", ""), case.get("name", ""))
+            if identity not in REQUIRED:
                 continue
-            if root.get("name") != CLASS:
+            if root.get("name") != identity[0]:
                 errors.append(f"required testcase has the wrong suite identity: {report}")
                 continue
-            identity = (classname, name)
             found[identity] += 1
             outcomes = [child.tag for child in case if child.tag in {"skipped", "failure", "error"}]
             if outcomes:
-                errors.append(f"{name}: report contains {', '.join(outcomes)} in {report}")
-    for name in sorted(REQUIRED):
-        count = found[(CLASS, name)]
+                errors.append(f"{identity[1]}: report contains {', '.join(outcomes)} in {report}")
+    for identity in sorted(REQUIRED):
+        classname, name = identity
+        count = found[identity]
         if count == 0:
-            errors.append(f"missing required passing testcase: {name}")
+            errors.append(f"missing required passing testcase: {classname}#{name}")
         elif count > 1:
-            errors.append(f"duplicate testcase identity ({count} reports): {name}")
+            errors.append(f"duplicate testcase identity ({count} reports): {classname}#{name}")
     return errors
 
 
@@ -77,7 +88,7 @@ def main() -> int:
         for error in errors:
             print(f"- {error}", file=sys.stderr)
         return 1
-    print("Bundled Ghidra installed-probe qualification PASSED (both required methods, once each).")
+    print("Bundled Ghidra installed-probe qualification PASSED (all three required identities, once each).")
     return 0
 
 

@@ -1727,6 +1727,34 @@ tasks.withType<Test>().configureEach {
     dependsOn(verifyCompiledJunitSignatures)
 }
 
+// A single build invocation must finish installation and test compilation before sealing.
+// Starting another build after sealing regenerates native-helper provenance and changes the JAR.
+// CI cleans and records the source pin before invoking this opt-in route; the seal rejects stale output.
+if (providers.gradleProperty("qualifyGhidraInvocation").orNull == "true") {
+    require(providers.environmentVariable("RUN_REAL_GHIDRA").orNull == "true") {
+        "Ghidra invocation qualification requires the real bundled worker lane"
+    }
+    require(!gradle.startParameter.isBuildCacheEnabled &&
+        providers.gradleProperty("kotlin.incremental").orNull == "false") {
+        "Ghidra invocation qualification requires cache-disabled, nonincremental compilation"
+    }
+    val sealInvocationBuild = tasks.register<Exec>("sealGhidraInvocationBuild") {
+        group = "verification"
+        description = "Seals fresh compiled and installed bytes before the hosted invocation probe"
+        dependsOn("installDist", "testClasses")
+        inputs.file("src/test/python/ghidra_invocation_provenance.py")
+        inputs.file(layout.buildDirectory.file("orchestration/ghidra-invocation-source-pin.json"))
+        outputs.file(layout.buildDirectory.file("orchestration/ghidra-invocation-build-provenance.json"))
+        outputs.upToDateWhen { false }
+        timeout.set(Duration.ofMinutes(1))
+        commandLine("python3", "-B", "src/test/python/ghidra_invocation_provenance.py", "seal")
+    }
+    tasks.named<Test>("test") {
+        dependsOn(sealInvocationBuild)
+        outputs.upToDateWhen { false }
+    }
+}
+
 tasks.test {
     // The authenticated model boundary returns a real 512 MiB array in the largest ordinary test.
     maxHeapSize = "2g"

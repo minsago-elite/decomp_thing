@@ -94,11 +94,19 @@ class BundledGhidra private constructor(val root: Path) {
     }
 
     /** Only the generic exporter uses this opt-in gate; existing probe/oracle commands stay unchanged. */
-    internal fun analysisCommandForOwnedLaunch(invocation: GhidraInvocation, checkpoint: (String) -> Unit): List<String> {
+    internal fun analysisCommandForOwnedLaunch(invocation: GhidraInvocation, checkpoint: (String) -> Unit): PreparedGhidraCommand {
         val libraries = BundledGhidraVerificationProcess().verifyAndGetLibraries(root, checkpoint)
-        val command = workerCommand(checkpoint, libraries) + "await-parent-launch" + invocation.arguments()
+        val prefix = workerCommand(checkpoint, libraries)
+        val analysisArguments = invocation.arguments()
+        val command = prefix + "await-parent-launch" + analysisArguments
+        val classIndex = prefix.size - 2
+        require(command[classIndex] == WORKER_CLASS && command[prefix.size + 1] == "analyze") {
+            "Bundled Ghidra command layout is invalid"
+        }
         checkpoint("before returning owned bundled Ghidra analysis command")
-        return command
+        return PreparedGhidraCommand.bundled(command, classIndex, prefix.size + 1) {
+            checkpoint("while snapshotting bundled Ghidra command")
+        }
     }
 
     private fun workerCommand(checkpoint: (String) -> Unit, libraries: List<Path>): List<String> {

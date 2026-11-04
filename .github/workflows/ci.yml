@@ -730,9 +730,12 @@ jobs:
           RUN_REAL_GHIDRA_PURE_RENDERING: "true"
         run: |
           unset GHIDRA_HOME
+          ./gradlew --no-daemon clean :ghidra-bridge:clean
           python3 -B scripts/test-verify-bundled-ghidra-probes.py
+          python3 -B src/test/python/test_ghidra_invocation_provenance.py
+          python3 -B src/test/python/ghidra_invocation_provenance.py pin
           mkdir -p build/exporter-rendering-v16
-          ./gradlew --no-daemon test \
+          ./gradlew --no-daemon --no-build-cache -Pkotlin.incremental=false -PqualifyGhidraInvocation=true test \
             --tests decompengine.analysis.BundledGhidraTest \
             --tests decompengine.project.GhidraProgramModelExporterTest \
             --tests decompengine.project.ReferencedDataBytesRealGhidraTest \
@@ -742,20 +745,38 @@ jobs:
             --tests decompengine.project.NativeCallObservationsV1Test \
             --tests decompengine.oracle.gcc.GccBundledNativeCallCaptureTest \
             --tests decompengine.oracle.gcc.GccBundledGhidraDeploymentReferenceTest \
+            --tests decompengine.project.GhidraDotDirectoryInvocationQualificationTest \
             --tests decompengine.mvp.GhidraDecompilerTest \
             --tests decompengine.project.ReconstructionPipelineTest \
             --tests decompengine.web.SourceTreeJobReconstructorTest
+          python3 -B src/test/python/ghidra_invocation_provenance.py verify
           python3 scripts/verify-bundled-ghidra-probes.py build/test-results/test
       - name: Verify ZIP and TAR bundle contents and native executable modes
         run: ./gradlew --no-daemon --offline verifyGhidraDistributionArchives
       - uses: actions/upload-artifact@v7
         if: always()
+        id: bundled-ghidra-reports
         with:
           name: bundled-ghidra-test-reports
           path: |
             build/reports/tests/test
             build/test-results/test
             build/reports/junit-signatures
+            build/orchestration/ghidra-invocation-qualification
+      - name: Download completed bundled invocation evidence
+        if: success()
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ steps.bundled-ghidra-reports.outputs.artifact-id }}
+          path: build/ghidra-invocation-upload-check
+          merge-multiple: true
+      - name: Verify uploaded invocation evidence bytes
+        if: success()
+        timeout-minutes: 1
+        run: |
+          python3 -B src/test/python/ghidra_invocation_provenance.py verify-uploaded \
+            build/orchestration/ghidra-invocation-qualification \
+            build/ghidra-invocation-upload-check/orchestration/ghidra-invocation-qualification
       - uses: actions/upload-artifact@v7
         if: always()
         with:

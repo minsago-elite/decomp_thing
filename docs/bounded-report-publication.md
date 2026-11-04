@@ -184,3 +184,63 @@ This work does not qualify production-scale memory use, the whole parent JVM,
 other report renderers, the complete archive budget or production execution.
 Those remaining phase and consumer bounds stay open in
 [#84](https://github.com/minsago-elite/decomp_thing/issues/84).
+
+# Ghidra invocation report schema v2
+
+`ghidra_analysis.json` now writes `schemaVersion: 2`. The `analysisOutcome` field reports that
+model validation, metadata identity checking, and report publication succeeded. The `invocation`
+object records the per-call command supplied to the process-starter boundary and the returned
+process exit value. This is diagnostic boundary evidence; it is not kernel argv attestation,
+proof of a particular runtime class, analysis correctness, or authenticated path identity.
+
+Bundled and controlled test Java commands disclose only the executable, main class, and exact
+worker argument slice. Custom commands withhold executable and arguments. Adapters that provide
+no invocation receipt report `status: unavailable`. Consumers should read `invocation.exitCode`
+only when `invocation.status` is `captured`.
+
+The in-memory `GhidraAnalysis.mainClass` and `args` getters remain compatibility projections of
+qualified evidence and are empty when it is unavailable or custom. `returnCode` remains the
+deprecated logical successful-wrapper code and is not a process exit receipt. Schema v2 removes
+the former top-level `mainClass`, `args`, and `returnCode` fields; absence of `schemaVersion`
+denotes a legacy v1 report.
+
+The snapshot limits are 256 command elements, 65,536 UTF-16 units per element or
+working directory, and 131,072 units in aggregate including the directory. Validation
+checks cancellation at gaps of at most 1,024 UTF-16 units, including supplementary
+characters that straddle a chunk boundary. Admission errors use fixed diagnostic
+labels. Qualified payloads still pass through the private atomic 1-MiB publisher.
+
+The opt-in `GhidraDotDirectoryInvocationQualificationTest` launches a separate probe
+with installed application JARs before test helpers on its classpath. The probe
+requires a build witness from `src/test/python/ghidra_invocation_provenance.py`:
+`pin` follows cleanup and precedes cache-disabled compilation and installation.
+With `-PqualifyGhidraInvocation=true`, one Gradle task graph builds the installation
+and test classes, then seals them before running the tests. `seal` checks compiled
+class bytes against the installed application, bridge JAR, and separately staged
+bridge scripts; `verify`
+checks HEAD, dirty/source inventory and installed hashes before and after analysis.
+A missing witness, old compiler output, changed source, exporter mismatch, or stale
+installation refuses qualification. Keeping preparation and sealing in the same
+task graph prevents a second helper build from changing the sealed generation.
+The opt-in requires real-Ghidra mode, disabled build caching and disabled incremental
+Kotlin compilation. A normal test-JVM run or bundle property is insufficient proof.
+
+Each hosted run uses a new directory with the `.decomp_engine/jobs/.../reports/analysis`
+suffix. It observes the complete bounded direct-child inventory throughout analysis,
+rejects a second matching process identity even in a later poll, and resolves the
+project argument from the observed worker vector while that child lives. Acceptance
+requires schema 2, the expected offset/classifications/outcome, authored `main`, a
+new project database, and no dot-name rejection. Compiler/probe sessions and observer
+threads must acknowledge bounded cleanup on every exit.
+
+`build/orchestration/ghidra-invocation-qualification/` retains private bounded
+`retained-invocation.json`, `observed-worker.json`, `compiler.json`, and `provenance.json`.
+The provenance document binds report/observation/compiler digests and the source/build
+manifest to one fresh run. The observation contains the approved receipt projection
+and project identity, never the full JVM vector, options, classpath, or raw compiler
+output. These artifacts are diagnostic evidence, not oracle authorization. Synthetic
+controls and isolated compilation do not qualify installed Ghidra, default web
+reconstruction/exploration, or actual hosted artifact upload membership.
+The bundled CI job downloads its own uploaded artifact by ID and checks these four
+files against the retained bytes and provenance digests. That check establishes
+artifact consistency for the run, not authentication of the artifact.

@@ -65,12 +65,18 @@ class GhidraJvmMetadataInspectionTest {
         val analysis = analyzer.analyze(input, root.resolve("analysis"))
 
         val report = Json.parseToJsonElement(analysis.reportPath.readText()).jsonObject
-        assertEquals(listOf("tool", "mainClass", "returnCode", "binary", "metadataInputSha256", "metadataInputBytes",
-            "metadataInspection", "args", "metadata", "stdoutLog", "stderrLog", "programModel", "reportPublication"),
+        assertEquals(listOf("schemaVersion", "analysisOutcome", "invocation", "tool", "binary", "metadataInputSha256", "metadataInputBytes",
+            "metadataInspection", "metadata", "stdoutLog", "stderrLog", "programModel", "reportPublication"),
             report.keys.toList())
-        assertEquals(analysis.args, report.getValue("args").jsonArray.map { it.jsonPrimitive.content })
+        assertEquals(2L, report.getValue("schemaVersion").jsonPrimitive.long)
+        assertEquals("succeeded", report.getValue("analysisOutcome").jsonPrimitive.content)
+        assertEquals("unavailable", report.getValue("invocation").jsonObject.getValue("status").jsonPrimitive.content)
+        assertEquals("adapter-did-not-supply-invocation-evidence", report.getValue("invocation").jsonObject
+            .getValue("reason").jsonPrimitive.content)
+        assertEquals("", analysis.mainClass)
+        assertTrue(analysis.args.isEmpty())
+        assertEquals(0, analysis.returnCode)
         assertEquals(analysis.binaryPath.toString(), report.getValue("binary").jsonPrimitive.content)
-        assertEquals(0L, report.getValue("returnCode").jsonPrimitive.long)
         val metadata = report.getValue("metadata").jsonObject
         assertEquals(listOf("format", "endianness", "elfVersion", "osAbi", "objectType", "machine", "entryPoint",
             "elfHeaderSize", "programHeaderCount", "sectionHeaderCount", "sectionNameTableIndex"), metadata.keys.toList())
@@ -230,6 +236,54 @@ class GhidraJvmMetadataInspectionTest {
             ))
         }
         assertFalse(bound)
+    }
+
+    @Test
+    fun `lambda and budget bound lambda never invent invocation at invalid Ghidra output names`() = inControlTemporaryDirectory { root ->
+        val bytes = elfFixture()
+        val input = writeElf(root.resolve("authored.elf"), bytes)
+        for (budgeted in listOf(false, true)) for (name in listOf(".decomp_engine/jobs/job/reports/analysis", "invalid#output")) {
+            val output = root.resolve("case-$budgeted").resolve(name)
+            var calls = 0
+            val operation: (Path, Path) -> RecoveredProgramModel = { actual, directory ->
+                calls++; assertEquals(input, actual); assertEquals(output, directory); model(sha256(bytes))
+            }
+            val analyzer = if (budgeted) GhidraJvmAnalyzer(budgetCapable(operation))
+                .withExportBudgets(GeneratedCMakeReconstructionProfile.descriptor.budgets)
+                else GhidraJvmAnalyzer(ProgramModelAnalyzer(operation))
+            val analysis = analyzer.analyze(input, output)
+            val invocation = Json.parseToJsonElement(analysis.reportPath.readText()).jsonObject.getValue("invocation").jsonObject
+            assertEquals(1, calls)
+            assertEquals(setOf("status", "reason"), invocation.keys)
+            assertEquals("unavailable", invocation.getValue("status").jsonPrimitive.content)
+            assertFalse(output.resolve("scripts").exists())
+            assertFalse(output.resolve("ghidra_project").exists())
+            assertEquals("", analysis.mainClass); assertTrue(analysis.args.isEmpty())
+            val authored = GhidraAnalysis(analysis.binaryPath, analysis.reportsDir, analysis.metadata,
+                analysis.symbolInventory, analysis.programModel, "authored.Worker", listOf("authored"), 0)
+            val copied = authored.copy(args = listOf("replacement"))
+            assertEquals(listOf("authored"), authored.args)
+            assertEquals(listOf("replacement"), copied.args)
+            assertEquals(0, copied.component8())
+            assertTrue(GhidraAnalysis::class.java.declaredFields.none { it.name.contains("receipt", ignoreCase = true) })
+        }
+    }
+
+    @Test
+    fun `analysis primary constructor copy getters and components keep their JVM descriptors`() {
+        val type = GhidraAnalysis::class.java
+        val parameters = arrayOf(Path::class.java, Path::class.java, decompengine.binary.ElfMetadata::class.java,
+            decompengine.binary.SymbolInventory::class.java, RecoveredProgramModel::class.java,
+            String::class.java, List::class.java, Int::class.javaPrimitiveType!!)
+        assertNotNull(type.getConstructor(*parameters))
+        assertEquals(type, type.getMethod("copy", *parameters).returnType)
+        listOf("getBinaryPath", "getReportsDir", "getMetadata", "getSymbolInventory", "getProgramModel", "getMainClass", "getArgs", "getReturnCode")
+            .forEachIndexed { i, getter ->
+                assertEquals(parameters[i], type.getMethod(getter).returnType)
+                assertEquals(parameters[i], type.getMethod("component${i + 1}").returnType)
+            }
+        val copyDefault = arrayOf(type, *parameters, Int::class.javaPrimitiveType!!, Any::class.java)
+        assertEquals(type, type.getDeclaredMethod("copy\$default", *copyDefault).returnType)
     }
 
     private fun budgetCapable(operation: (Path, Path) -> RecoveredProgramModel) = object : ExportBudgetedProgramModelAnalyzer {
