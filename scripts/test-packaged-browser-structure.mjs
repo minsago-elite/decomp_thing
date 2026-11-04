@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { assertStructureSourceLink } from './packaged-browser-structure.mjs';
+import { assertStructureSourceLink, nearestRankP95 } from './packaged-browser-structure.mjs';
 
 const revision = `/nested/jobs/${'f'.repeat(32)}/runs/run_structure_scale/revisions/revision_structure_scale`;
 const browserOrigin = 'http://127.0.0.1:12345';
@@ -9,6 +9,14 @@ const snapshot = { sourceSha256: 'a'.repeat(64), metadataVersion: 'b'.repeat(64)
 const path = `${revision}/source-files/${snapshot.module.implementationFileId}`;
 const pins = `sourceSha256=${snapshot.sourceSha256}&metadataVersion=${snapshot.metadataVersion}`;
 const check = href => assertStructureSourceLink(href, { revision, browserOrigin, snapshot });
+
+test('structure scale p95 uses nearest rank and refuses missing or invalid timings', () => {
+  assert.equal(nearestRankP95(Array.from({ length: 50 }, (_, index) => index + 1)), 48);
+  assert.equal(nearestRankP95([3, 1, 2]), 3);
+  for (const values of [[], [Number.NaN], [Number.POSITIVE_INFINITY], [-1], null]) {
+    assert.throws(() => nearestRankP95(values), TypeError);
+  }
+});
 
 test('packaged structure accepts only source links pinned to the originating module snapshot', () => {
   check(`${path}?${pins}`);

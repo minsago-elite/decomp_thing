@@ -8,6 +8,8 @@ const pins = JSON.parse(readFileSync(new URL('./packaged-browser-structure-profi
 const FUNCTIONS = 100000;
 const PER_MODULE = 24;
 const OWNED = FUNCTIONS - 1; // The last function is deliberately owned by no module.
+const FIRST_DATA_BUDGET_MS = 500;
+const LOCAL_FEEDBACK_BUDGET_MS = 100;
 const sha = (bytes) => createHash('sha256').update(bytes).digest('hex');
 const hex = (value) => value.toString(16);
 const functionAddress = (index) => 0x400000 + index * 16;
@@ -139,10 +141,21 @@ export function assertStructureSourceLink(href, { revision, browserOrigin, snaps
   ], 'Source link must carry exactly the originating source and metadata pins');
 }
 
+export function nearestRankP95(values) {
+  if (!Array.isArray(values) || values.length === 0 || values.some(value => !Number.isFinite(value) || value < 0)) {
+    throw new TypeError('p95 requires non-empty finite nonnegative samples');
+  }
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.ceil(sorted.length * 0.95) - 1];
+}
+
 export async function qualifyStructure({ fixture, makeTarget, cdp, evaluate, ready, browserOrigin }) {
   const tab = await makeTarget();
   await cdp.call('Performance.enable', {}, tab.sessionId);
   const inventoryReads = [];
+  const inventoryRequests = new Map();
+  const inventoryRequestDurationsMs = [];
+  const localFeedbackMs = [];
   const moduleResponses = new Map();
   cdp.on('Network.responseReceived', (event) => {
     const url = new URL(event.response.url);
@@ -153,7 +166,16 @@ export async function qualifyStructure({ fixture, makeTarget, cdp, evaluate, rea
   }, tab.sessionId);
   cdp.on('Network.requestWillBeSent', (event) => {
     const url = new URL(event.request.url);
-    if (/\/api\/v1\/jobs\/[^/]+\/runs\/[^/]+\/revisions\/[^/]+\/functions$/.test(url.pathname)) inventoryReads.push(url.searchParams.get('limit'));
+    if (/\/api\/v1\/jobs\/[^/]+\/runs\/[^/]+\/revisions\/[^/]+\/functions$/.test(url.pathname)) {
+      inventoryReads.push(url.searchParams.get('limit'));
+      inventoryRequests.set(event.requestId, event.timestamp);
+    }
+  }, tab.sessionId);
+  cdp.on('Network.loadingFinished', (event) => {
+    const started = inventoryRequests.get(event.requestId);
+    if (started === undefined) return;
+    inventoryRequests.delete(event.requestId);
+    inventoryRequestDurationsMs.push((event.timestamp - started) * 1000);
   }, tab.sessionId);
   let peakBrowserHeapBytes = 0;
   const heap = async () => {
@@ -169,6 +191,22 @@ export async function qualifyStructure({ fixture, makeTarget, cdp, evaluate, rea
   const address = (index) => `0x${fixture.functionAddress(index).toString(16)}`;
   await cdp.call('Page.navigate', { url: browserOrigin + run }, tab.sessionId);
   await ready(tab, `[...document.querySelectorAll('a')].some(a => a.textContent === 'Browse recovered functions')`, 'structure links on the result revision');
+  await evaluate(tab, `(() => {
+    window.__structureLocalFeedbackMs = [];
+    let started = null;
+    new MutationObserver(() => {
+      if (started === null) return;
+      const loading = [...document.querySelectorAll('[role="status"]')].some(node => node.textContent.includes('Loading recorded structure'));
+      if (loading) {
+        window.__structureLocalFeedbackMs.push(performance.now() - started);
+        started = null;
+      }
+    }).observe(document.body, { childList: true, subtree: true, characterData: true });
+    document.addEventListener('click', event => {
+      const button = event.target.closest('button');
+      if (button && ['Next page', 'Apply filters'].includes(button.textContent.trim())) started = performance.now();
+    }, true);
+  })()`);
   let started = performance.now();
   await evaluate(tab, `[...document.querySelectorAll('a')].find(a => a.textContent === 'Browse recovered functions').click()`);
   await ready(tab, `(${ROWS}).length === 100 && document.body.innerText.includes('of 100000 matching functions (100000 recorded)')`, 'first page of 100000 recorded functions');
@@ -177,7 +215,7 @@ export async function qualifyStructure({ fixture, makeTarget, cdp, evaluate, rea
   assert.deepEqual(await evaluate(tab, ROWS), Array.from({ length: 100 }, (_, index) => address(index)));
   await heap();
   const pageMs = [];
-  for (let page = 1; page <= 20; page++) {
+  for (let page = 1; page <= 50; page++) {
     await evaluate(tab, `[...document.querySelectorAll('button')].find(b => b.textContent === 'Next page').focus()`);
     started = performance.now();
     await enter();
@@ -189,7 +227,7 @@ export async function qualifyStructure({ fixture, makeTarget, cdp, evaluate, rea
   }
   assert.ok(await evaluate(tab, `document.body.innerText.includes('Showing 2001–2100 of 100000 matching functions')`));
   await cdp.call('Page.reload', {}, tab.sessionId);
-  await ready(tab, `(${ROWS})[0] === ${JSON.stringify(address(2000))}`, 'function cursor restored after reload');
+  await ready(tab, `(${ROWS})[0] === ${JSON.stringify(address(5000))}`, 'function cursor restored after reload');
 
   started = performance.now();
   await evaluate(tab, `(() => {
@@ -229,13 +267,28 @@ export async function qualifyStructure({ fixture, makeTarget, cdp, evaluate, rea
     const dimensions = await evaluate(tab, `({ available: document.documentElement.clientWidth, document: document.documentElement.scrollWidth })`);
     assert.ok(dimensions.document <= dimensions.available, `Structure view overflows at ${width}px: ${JSON.stringify(dimensions)}`);
   }
-  assert.ok(inventoryReads.length >= 22 && inventoryReads.every((limit) => limit === '100'), 'Every inventory read must request one bounded page');
+  localFeedbackMs.push(...await evaluate(tab, 'window.__structureLocalFeedbackMs'));
+  const pageDataP95Ms = nearestRankP95(pageMs);
+  const requestP95Ms = nearestRankP95(inventoryRequestDurationsMs);
+  const localFeedbackP95Ms = nearestRankP95(localFeedbackMs);
+  assert.ok(firstPageMs <= FIRST_DATA_BUDGET_MS, `First function data page ${firstPageMs}ms exceeds the D0 ${FIRST_DATA_BUDGET_MS}ms budget`);
+  assert.ok(pageDataP95Ms <= FIRST_DATA_BUDGET_MS, `Paged function data p95 ${pageDataP95Ms}ms exceeds the D0 ${FIRST_DATA_BUDGET_MS}ms budget`);
+  assert.ok(searchMs <= FIRST_DATA_BUDGET_MS, `Function search first data ${searchMs}ms exceeds the D0 ${FIRST_DATA_BUDGET_MS}ms budget`);
+  assert.ok(requestP95Ms <= FIRST_DATA_BUDGET_MS, `Function inventory request p95 ${requestP95Ms}ms exceeds the D0 ${FIRST_DATA_BUDGET_MS}ms budget`);
+  assert.equal(localFeedbackMs.length, 51, 'Every page/filter interaction must expose immediate loading feedback');
+  assert.ok(localFeedbackP95Ms <= LOCAL_FEEDBACK_BUDGET_MS,
+    `Local function-inventory feedback p95 ${localFeedbackP95Ms}ms exceeds the D0 ${LOCAL_FEEDBACK_BUDGET_MS}ms budget`);
+  assert.equal(inventoryRequests.size, 0, 'Every function inventory request must finish before evidence is retained');
+  assert.ok(inventoryReads.length >= 52 && inventoryReads.every((limit) => limit === '100'), 'Every inventory read must request one bounded page');
   assert.deepEqual(tab.exceptions, []);
   assert.ok(tab.requests.every((request) => ['GET', 'HEAD'].includes(request.method)));
   assert.ok(peakBrowserHeapBytes <= 128 * 1024 * 1024, `Browser heap ${peakBrowserHeapBytes} exceeds the D0 budget`);
   pageMs.sort((a, b) => a - b);
   return { recordedFunctions: fixture.functions, modules: fixture.modules, modelBytes: fixture.modelBytes, rowsPerPage: 100,
-    pagesVisited: 21, maximumMountedRows: 100, firstPageMs: Math.round(firstPageMs), pageMsP50: Math.round(pageMs[10]),
-    pageMsP95: Math.round(pageMs[18]), searchMs: Math.round(searchMs), peakBrowserHeapBytes, cursorReload: true,
+    pagesVisited: 51, measuredInteractions: localFeedbackMs.length, maximumMountedRows: 100,
+    firstPageMs: Math.round(firstPageMs), pageMsP50: Math.round(pageMs[Math.ceil(pageMs.length * 0.5) - 1]), pageMsP95: Math.round(pageDataP95Ms),
+    functionRequestP95Ms: Math.round(requestP95Ms), localFeedbackP95Ms: Math.round(localFeedbackP95Ms),
+    firstPageBudgetMs: FIRST_DATA_BUDGET_MS, localFeedbackBudgetMs: LOCAL_FEEDBACK_BUDGET_MS,
+    searchMs: Math.round(searchMs), peakBrowserHeapBytes, cursorReload: true,
     pinnedCrossLinks: true, moduleSourceLink: true, narrowReflow: true, boundedInventoryReads: inventoryReads.length, mutationRequests: 0 };
 }
