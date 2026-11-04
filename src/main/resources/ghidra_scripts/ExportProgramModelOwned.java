@@ -64,9 +64,7 @@ import ghidra.program.model.data.VoidDataType;
 import ghidra.program.model.data.AbstractIntegerDataType;
 import ghidra.program.model.data.AbstractFloatDataType;
 import ghidra.program.model.data.DataTypeComponent;
-import ghidra.program.model.data.FunctionDefinitionDataType;
-import ghidra.program.model.data.ParameterDefinition;
-import ghidra.program.model.data.ParameterDefinitionImpl;
+import ghidra.program.model.data.*;
 import ghidra.program.model.pcode.FunctionPrototype;
 import ghidra.program.model.pcode.HighSymbol;
 import ghidra.program.model.pcode.HighFunction;
@@ -733,7 +731,7 @@ public class ExportProgramModelOwned extends GhidraScript {
         catch (Throwable diagnosticFailure) { /* Never replace the primary outcome. */ }
     }
 
-    private static final int EXPORTER_VERSION = 19;
+    private static final int EXPORTER_VERSION = 20;
     private static final int DECOMPILE_TIMEOUT_SECONDS = 60;
     private static final int DECOMPILE_RETRY_TIMEOUT_SECONDS = 180;
     private static final int MAXIMUM_DECOMPILE_INSTRUCTIONS = 500_000;
@@ -1173,37 +1171,14 @@ public class ExportProgramModelOwned extends GhidraScript {
         ) throw failure;
     }
 
-    private void retainType(
-        Path typesDirectory,
-        PlanningBatchEvidence planningEvidence,
-        DataType type,
-        Address sourceAddress,
-        boolean catalogOnly
-    ) throws Exception {
-        if (!(type instanceof Composite) && !(type instanceof Enum) && !(type instanceof TypeDef)) return;
-        String key = type.getPathName();
-        String id = typeId(key);
-        int length = Math.max(type.getLength(), 1);
-        String cName = ExporterPureRenderingOwnedV1.typeName(type.getName());
-        if (cName.isEmpty() || Character.isDigit(cName.charAt(0))) cName = "recovered_" + id;
-        // Retain the exact path used for the identity without allowing a comment terminator.
-        String prefix = "/* Ghidra type " + json(key).replace("/", "\\/") + " */ ";
-        String declaration;
-        if (type instanceof Composite) {
-            declaration = prefix + "typedef struct " + cName + " { unsigned char _data[" + length + "]; } " + cName + ";";
-        } else if (type instanceof Enum) {
-            declaration = prefix + "typedef int " + cName + ";";
-        } else {
-            declaration = prefix + "typedef unsigned char " + cName + "[" + length + "];";
-        }
-        TypeEvidence evidence = new TypeEvidence(id, declaration, sourceAddress);
+    private void retainType(Path typesDirectory, PlanningBatchEvidence planningEvidence,
+                            TypeRequirement type, Address sourceAddress, boolean catalogOnly) throws Exception {
+        prototypeCancellation(monitor);
+        TypeEvidence evidence = new TypeEvidence(type.id, type.declaration, sourceAddress);
         String record = renderType(evidence);
-        if (catalogOnly) return; // Preserve metadata/render refusals during replay without filesystem effects.
-        if (planningEvidence == null) {
-            writeIfAbsentAtomic(typesDirectory.resolve(id + ".json"), record, phaseObservation, true);
-        } else {
-            planningEvidence.retainType(id, record);
-        }
+        if (catalogOnly) return;
+        if (planningEvidence == null) writeIfAbsentAtomic(typesDirectory.resolve(type.id + ".json"), record, phaseObservation, true);
+        else planningEvidence.retainType(type.id, record);
     }
 
     private static final int MAXIMUM_REFERENCE_CANDIDATES = 65536;
@@ -1634,16 +1609,26 @@ public class ExportProgramModelOwned extends GhidraScript {
         }
     }
     static final class TypeRequirement {
-        final String path, id, cSpelling, definitionDigest;
-        TypeRequirement(String path, String id, String cSpelling, String definitionDigest) {
-            this.path = java.util.Objects.requireNonNull(path);
-            this.id = java.util.Objects.requireNonNull(id);
+        final String path, id, cSpelling, semanticDigest, declaration, definitionDigest, descriptor;
+        final List<String> dependencyIds, namespaceKeys;
+        TypeRequirement(String path, String id, String cSpelling, String digest) {
+            this(path, id, cSpelling, digest, "", digest, java.util.List.of(), java.util.List.of("name:" + cSpelling), "");
+        }
+        TypeRequirement(String path, String id, String cSpelling, String semanticDigest, String declaration,
+                        String definitionDigest, List<String> dependencyIds, List<String> namespaceKeys, String descriptor) {
+            this.path = java.util.Objects.requireNonNull(path); this.id = java.util.Objects.requireNonNull(id);
             this.cSpelling = java.util.Objects.requireNonNull(cSpelling);
+            this.semanticDigest = java.util.Objects.requireNonNull(semanticDigest);
+            this.declaration = java.util.Objects.requireNonNull(declaration);
             this.definitionDigest = java.util.Objects.requireNonNull(definitionDigest);
+            this.dependencyIds = java.util.List.copyOf(dependencyIds);
+            this.namespaceKeys = java.util.List.copyOf(namespaceKeys);
+            this.descriptor = java.util.Objects.requireNonNull(descriptor);
         }
         boolean same(TypeRequirement other) {
             return id.equals(other.id) && path.equals(other.path) && cSpelling.equals(other.cSpelling) &&
-                definitionDigest.equals(other.definitionDigest);
+                semanticDigest.equals(other.semanticDigest) && definitionDigest.equals(other.definitionDigest) &&
+                declaration.equals(other.declaration) && dependencyIds.equals(other.dependencyIds) && namespaceKeys.equals(other.namespaceKeys);
         }
     }
     static final class PlannedTypeCoverage {
@@ -1693,18 +1678,44 @@ public class ExportProgramModelOwned extends GhidraScript {
     static final class PlannedTypeCatalog {
         final Map<String, TypeRequirement> definitions = new TreeMap<>();
         final Map<String, String> spellings = new TreeMap<>();
-        void clear() { definitions.clear(); spellings.clear(); }
+        final Set<String> ordinaryNames = new TreeSet<>();
+        int ordinaryNameBytes;
+        void clear() { definitions.clear(); spellings.clear(); ordinaryNames.clear(); ordinaryNameBytes = 0; }
+        void reserveOrdinary(String name, PrototypeCancellation cancellation) throws Exception {
+            cancellation.check();
+            if (name == null || name.length() > 4096)
+                throw new PrototypeRejected(PrototypeRefusalCode.LIMIT, "ORDINARY_NAME_BYTES");
+            if (spellings.containsKey("name:" + name))
+                throw new PrototypeRejected(PrototypeRefusalCode.TYPE_MISMATCH, "ORDINARY_NAMESPACE_COLLISION");
+            if (ordinaryNames.contains(name)) return;
+            int bytes = name.getBytes(StandardCharsets.UTF_8).length;
+            if (bytes > 4096 || ordinaryNames.size() >= 131072 || bytes > 4 * 1024 * 1024 - ordinaryNameBytes)
+                throw new PrototypeRejected(PrototypeRefusalCode.LIMIT, "ORDINARY_NAMESPACE");
+            ordinaryNames.add(name); ordinaryNameBytes += bytes;
+        }
         void admit(Map<String, TypeRequirement> requirements, PrototypeCancellation cancellation) throws Exception {
+            if (requirements.size() > 4096) throw new PrototypeRejected(PrototypeRefusalCode.LIMIT, "PLANNED_NAMED_TYPES");
             Map<String, String> incomingSpellings = new TreeMap<>();
+            Set<String> ids = new TreeSet<>();
+            for (TypeRequirement requirement : requirements.values()) ids.add(requirement.id);
             int additions = 0;
             for (TypeRequirement requirement : requirements.values()) {
                 cancellation.check();
-                String previous = incomingSpellings.putIfAbsent(requirement.cSpelling, requirement.path);
-                String published = spellings.get(requirement.cSpelling);
+                for (String key : requirement.namespaceKeys) {
+                    cancellation.check();
+                    if (key.startsWith("name:") && ordinaryNames.contains(key.substring(5)))
+                        throw new PrototypeRejected(PrototypeRefusalCode.TYPE_MISMATCH, "ORDINARY_NAMESPACE_COLLISION");
+                    String previous = incomingSpellings.putIfAbsent(key, requirement.path);
+                    String published = spellings.get(key);
+                    if ((previous != null && !previous.equals(requirement.path)) ||
+                        (published != null && !published.equals(requirement.path)))
+                        throw new PrototypeRejected(PrototypeRefusalCode.TYPE_MISMATCH, "C_SPELLING_COLLISION");
+                }
+                for (String dependency : requirement.dependencyIds) {
+                    cancellation.check();
+                    if (!ids.contains(dependency)) throw new PrototypeRejected(PrototypeRefusalCode.UNPLANNED_TYPE, "INCOMPLETE_DEFINITION_CLOSURE");
+                }
                 TypeRequirement known = definitions.get(requirement.path);
-                if ((previous != null && !previous.equals(requirement.path)) ||
-                    (published != null && !published.equals(requirement.path)))
-                    throw new PrototypeRejected(PrototypeRefusalCode.TYPE_MISMATCH, "C_SPELLING_COLLISION");
                 if (known != null && !known.same(requirement))
                     throw new PrototypeRejected(PrototypeRefusalCode.TYPE_MISMATCH, "NAMED_TYPE_CHANGED");
                 if (known == null) additions++;
@@ -1715,18 +1726,9 @@ public class ExportProgramModelOwned extends GhidraScript {
             // No partial admission on rejection. Existing paths are not charged twice on replay/retry.
             for (TypeRequirement requirement : requirements.values()) {
                 definitions.putIfAbsent(requirement.path, requirement);
-                spellings.putIfAbsent(requirement.cSpelling, requirement.path);
+                for (String key : requirement.namespaceKeys) spellings.putIfAbsent(key, requirement.path);
             }
         }
-    }
-    static boolean supportedBuiltinSpelling(String spelling) {
-        // These are C language spellings, not Ghidra identifiers requiring an invented typedef.
-        return java.util.Set.of("void", "char", "signed char", "unsigned char", "short", "short int",
-            "signed short", "signed short int", "unsigned short", "unsigned short int", "int", "signed",
-            "signed int", "unsigned", "unsigned int", "long", "long int", "signed long", "signed long int",
-            "unsigned long", "unsigned long int", "long long", "long long int", "signed long long",
-            "signed long long int", "unsigned long long", "unsigned long long int", "float", "double",
-            "long double", "_Bool").contains(spelling);
     }
     static final class ParameterText {
         final String name, typeText;
@@ -1736,18 +1738,27 @@ public class ExportProgramModelOwned extends GhidraScript {
         }
     }
     static final class TypedPrototype {
-        final String declaration, returnText;
+        final String declaration, returnText, observations;
         final List<ParameterText> parameters;
         final boolean variadic;
         final List<TypeRequirement> requirements;
         TypedPrototype(String declaration, List<ParameterText> parameters, String returnText,
                        boolean variadic, List<TypeRequirement> requirements) {
+            this(declaration, parameters, returnText, variadic, requirements, "");
+        }
+        TypedPrototype(String declaration, List<ParameterText> parameters, String returnText,
+                       boolean variadic, List<TypeRequirement> requirements, String observations) {
+            this.observations = java.util.Objects.requireNonNull(observations);
             this.declaration = java.util.Objects.requireNonNull(declaration);
             this.parameters = java.util.Collections.unmodifiableList(new ArrayList<>(parameters));
             this.returnText = java.util.Objects.requireNonNull(returnText);
             this.variadic = variadic;
+            if (requirements.size() > 4096) throw new IllegalArgumentException("typed requirement bound");
             List<TypeRequirement> sorted = new ArrayList<>(requirements);
-            sorted.sort(Comparator.comparing(requirement -> requirement.path));
+            sorted.sort((left, right) -> {
+                if (Thread.currentThread().isInterrupted()) throw new java.util.concurrent.CancellationException("typed requirement ordering cancelled");
+                return left.path.compareTo(right.path);
+            });
             this.requirements = java.util.Collections.unmodifiableList(sorted);
         }
     }
@@ -1755,7 +1766,12 @@ public class ExportProgramModelOwned extends GhidraScript {
         final TypedPrototype typed;
         final Refusal refusal;
         final PrototypeOrigin origin;
+        final String observations;
         PrototypeResult(TypedPrototype typed, Refusal refusal) {
+            this(typed, refusal, typed == null ? "unknown" : typed.observations);
+        }
+        PrototypeResult(TypedPrototype typed, Refusal refusal, String observations) {
+            this.observations = java.util.Objects.requireNonNull(observations);
             if ((typed == null) == (refusal == null)) throw new IllegalArgumentException("exclusive prototype result required");
             this.typed = typed;
             this.refusal = refusal;
@@ -1804,8 +1820,9 @@ public class ExportProgramModelOwned extends GhidraScript {
         final String identity, name, listingPrototype, evidence, failure;
         final boolean evidenceComplete;
         final PlannedTypeCoverage coverage;
+        final TargetContext target;
         FunctionMetadata(Function function, String identity, String name, String listingPrototype, String evidence,
-                         String failure, boolean evidenceComplete, PlannedTypeCoverage coverage) {
+                         String failure, boolean evidenceComplete, PlannedTypeCoverage coverage, TargetContext target) {
             this.function = function;
             this.identity = identity;
             this.name = name;
@@ -1814,6 +1831,7 @@ public class ExportProgramModelOwned extends GhidraScript {
             this.failure = failure;
             this.evidenceComplete = evidenceComplete;
             this.coverage = coverage;
+            this.target = target;
         }
     }
 
@@ -1822,143 +1840,396 @@ public class ExportProgramModelOwned extends GhidraScript {
             throw new InterruptedException("typed prototype extraction was cancelled");
     }
 
+    /** Copied target facts. No manager, language, compiler spec or renderer escapes preparation. */
+    static final class TargetContext {
+        final String language, compiler, convention, identity;
+        final int pointerSize, longSize, longLongAlignment;
+        final boolean signedChar;
+        final Refusal refusal;
+        TargetContext(String language, String compiler, String convention, DataOrganization organization) throws Exception {
+            PrototypeBudget b = new PrototypeBudget();
+            this.language = b.text(language == null ? "unknown" : language);
+            this.compiler = b.text(compiler == null ? "unknown" : compiler);
+            this.convention = b.text(convention == null ? "unknown" : convention);
+            boolean amd64 = this.language.equals("x86:LE:64:default");
+            boolean i386 = this.language.equals("x86:LE:32:default");
+            pointerSize = organization == null ? 0 : organization.getPointerSize();
+            longSize = organization == null ? 0 : organization.getLongSize();
+            signedChar = organization != null && organization.isSignedChar();
+            longLongAlignment = amd64 ? 8 : 4;
+            boolean supported = (amd64 || i386) && this.compiler.equals("gcc") && this.convention.equals(amd64 ? "__stdcall" : "__cdecl") &&
+                organization != null && !organization.isBigEndian() && organization.isSignedChar() && organization.getPointerShift() == 0 &&
+                organization.getCharSize() == 1 && organization.getShortSize() == 2 && organization.getIntegerSize() == 4 &&
+                organization.getLongLongSize() == 8 && pointerSize == (amd64 ? 8 : 4) && longSize == pointerSize;
+            String alignmentFacts = "unknown";
+            if (organization != null) {
+                int[] sizes = {1, 2, 4, 8};
+                int[] aligns = {1, 2, 4, longLongAlignment};
+                StringBuilder facts = new StringBuilder();
+                for (int i = 0; i < sizes.length; i++) {
+                    int alignment = organization.getSizeAlignment(sizes[i]);
+                    facts.append(sizes[i]).append(':').append(alignment).append(',');
+                    supported &= alignment == aligns[i];
+                }
+                alignmentFacts = facts.toString();
+                supported &= organization.getDefaultPointerAlignment() == pointerSize;
+            }
+            refusal = supported ? null : new Refusal(PrototypeRefusalCode.UNSUPPORTED_SHAPE, "TARGET_C_POLICY_UNKNOWN");
+            identity = b.text("owned-c-layout-v1;" + this.language + ";" + this.compiler + ";" + this.convention +
+                ";signed-char=" + signedChar + ";long=" + longSize + ";pointer=" + pointerSize +
+                ";size-alignments=" + alignmentFacts + ";organization=" + (organization == null ? "unknown" :
+                    organization.getCharSize() + "," + organization.getShortSize() + "," + organization.getIntegerSize() + "," +
+                    organization.getLongLongSize() + "," + organization.getDefaultAlignment() + "," +
+                    organization.getMachineAlignment() + "," + organization.getAbsoluteMaxAlignment() + "," +
+                    organization.getDefaultPointerAlignment() + "," + organization.getPointerShift() + "," + organization.isBigEndian()) +
+                ";policy=" + (supported ? "gcc-default-int-enums-natural-layout" : "unknown"));
+        }
+        void requireSupported() throws PrototypeRejected {
+            if (refusal != null) throw new PrototypeRejected(refusal.code, refusal.detail);
+        }
+        static TargetContext capture(ghidra.program.model.listing.Program program) throws Exception {
+            if (program == null) return new TargetContext(null, null, null, null);
+            var compiler = program.getCompilerSpec();
+            if (compiler == null || program.getLanguageID() == null || program.getDataTypeManager() == null)
+                return new TargetContext(null, null, null, null);
+            if (compiler.getDefaultCallingConvention() == null || compiler.getDefaultCallingConvention().getExtrapop() !=
+                program.getDataTypeManager().getDataOrganization().getPointerSize())
+                return new TargetContext(program.getLanguageID().toString(), compiler.getCompilerSpecID().toString(), null,
+                    program.getDataTypeManager().getDataOrganization());
+            return new TargetContext(program.getLanguageID().toString(), compiler.getCompilerSpecID().toString(),
+                compiler.getDefaultCallingConvention() == null ? null : compiler.getDefaultCallingConvention().getName(),
+                program.getDataTypeManager().getDataOrganization());
+        }
+    }
+
     /** Lives only during coordinator preparation or a single native call, never in a worker result. */
-    private static final class TypedGraph {
+    static final class TypedGraph {
         final PrototypeBudget budget = new PrototypeBudget();
         final TaskMonitor taskMonitor;
+        final TargetContext target;
         final Map<String, DataType> named = new TreeMap<>();
         final java.util.IdentityHashMap<DataType, Boolean> namedInstances = new java.util.IdentityHashMap<>();
         final List<DataType> definitions = new ArrayList<>();
-        boolean recording = true;
         final Map<String, TypeRequirement> requirements = new TreeMap<>();
-        TypedGraph(TaskMonitor taskMonitor) { this.taskMonitor = taskMonitor; }
+        final List<String> rootObservations = new ArrayList<>();
+        String lastObservation = "not observed";
+        boolean recording = true;
+        TypedGraph(TaskMonitor taskMonitor, TargetContext target) throws Exception {
+            this.taskMonitor = taskMonitor; this.target = target;
+            target.requireSupported(); budget.text(target.identity);
+        }
         String field(String value) throws PrototypeRejected { return budget.text(value).length() + ":" + value; }
         void append(StringBuilder output, String value) throws PrototypeRejected {
             if (value.length() > 65536 - output.length()) throw new PrototypeRejected(PrototypeRefusalCode.LIMIT, "DESCRIPTOR_BYTES");
             output.append(value);
         }
-        String describe(DataType type, int depth, java.util.IdentityHashMap<DataType, Boolean> active,
-                        Map<String, DataType> activeNames) throws Exception {
+        PrototypeRejected unsupported(String reason) { return new PrototypeRejected(PrototypeRefusalCode.UNSUPPORTED_SHAPE, reason); }
+        String name(DataType type) throws Exception {
             prototypeCancellation(taskMonitor);
-            budget.node(depth);
-            if (type == null) throw new PrototypeRejected(PrototypeRefusalCode.NULL_TYPE, "MISSING_DATA_TYPE");
-            boolean isNamed = type instanceof Composite || type instanceof Enum || type instanceof TypeDef;
-            String path = type instanceof Pointer ? "<pointer>" : type instanceof Array ? "<array>" : budget.text(type.getPathName());
-            if (isNamed && activeNames.containsKey(path)) {
-                if (activeNames.get(path) != type) throw new PrototypeRejected(PrototypeRefusalCode.TYPE_MISMATCH, "RECURSIVE_PATH_CONFLICT");
-                return "ref:" + field(path);
+            String name = budget.text(type.getName());
+            if (!validCName(name)) throw new PrototypeRejected(PrototypeRefusalCode.INVALID_NAME, "TYPE_NAME");
+            return name;
+        }
+        String scalar(DataType type) throws Exception {
+            prototypeCancellation(taskMonitor);
+            if (type.getClass() == VoidDataType.class) return "void";
+            if (!(type instanceof AbstractIntegerDataType)) throw unsupported("SCALAR_FORMAT_UNPROVEN");
+            AbstractIntegerDataType integer = (AbstractIntegerDataType)type;
+            lastObservation = type.getClass().getSimpleName();
+            Class<?> kind = type.getClass();
+            String expected; int size; int alignment; boolean signed;
+            if (kind == CharDataType.class) { expected = "char"; size = 1; alignment = 1; signed = target.signedChar; }
+            else if (kind == SignedCharDataType.class || kind == UnsignedCharDataType.class) {
+                signed = kind == SignedCharDataType.class; expected = signed ? "signed char" : "unsigned char"; size = 1; alignment = 1;
+            } else if (kind == ShortDataType.class || kind == UnsignedShortDataType.class) {
+                signed = kind == ShortDataType.class; expected = signed ? "short" : "unsigned short"; size = 2; alignment = 2;
+            } else if (kind == IntegerDataType.class || kind == UnsignedIntegerDataType.class) {
+                signed = kind == IntegerDataType.class; expected = signed ? "int" : "unsigned int"; size = 4; alignment = 4;
+            } else if (kind == LongDataType.class || kind == UnsignedLongDataType.class) {
+                signed = kind == LongDataType.class; expected = signed ? "long" : "unsigned long"; size = target.longSize; alignment = size;
+            } else if (kind == LongLongDataType.class || kind == UnsignedLongLongDataType.class) {
+                signed = kind == LongLongDataType.class; expected = signed ? "long long" : "unsigned long long"; size = 8; alignment = target.longLongAlignment;
+            } else throw unsupported("INTEGER_RANK_UNPROVEN");
+            String actual = budget.text(integer.getCDeclaration());
+            lastObservation = type.getClass().getSimpleName() + ";C=" + actual + ";size=" + type.getLength() +
+                ";alignment=" + type.getAlignment() + ";signed=" + integer.isSigned();
+            if (!expected.equals(actual) || type.getLength() != size || type.getAlignment() != alignment || integer.isSigned() != signed)
+                throw unsupported("SCALAR_TARGET_MISMATCH");
+            return actual;
+        }
+        boolean isNamed(DataType type) throws Exception {
+            if (type instanceof Composite || type instanceof Enum || type instanceof TypeDef) return true;
+            if (type instanceof AbstractIntegerDataType) return !scalar(type).equals(type.getName());
+            return false;
+        }
+        void settings(DataType type) throws Exception {
+            // Only explicitly changed semantic settings matter. Display format/charset defaults do
+            // not introduce qualifiers. Offset/address-space/shifted typedefs are not ordinary C.
+            var settings = type.getDefaultSettings();
+            if (settings != null && !settings.isEmpty()) throw unsupported("TYPE_SETTINGS_UNSUPPORTED");
+        }
+        DataTypeComponent[] components(Composite type) throws Exception {
+            prototypeCancellation(taskMonitor);
+            int count = type.getNumDefinedComponents();
+            if (count < 0 || count > 4096) throw new PrototypeRejected(PrototypeRefusalCode.LIMIT, "AGGREGATE_FIELDS");
+            DataTypeComponent[] result = type.getDefinedComponents();
+            if (result == null || result.length != count) throw unsupported("AGGREGATE_COMPONENT_COUNT");
+            return result;
+        }
+        String[] enumNames(Enum type, int depth) throws Exception {
+            prototypeCancellation(taskMonitor);
+            int count = type.getCount();
+            if (count < 0 || count > 4096) throw new PrototypeRejected(PrototypeRefusalCode.LIMIT, "ENUM_VALUES");
+            // getNames() sorts unvalidated strings inside Ghidra. Numeric values and the unsorted
+            // names-per-value API let us bound/charge every name before our cancellable sort.
+            long[] values = type.getValues();
+            if (values == null || values.length > count) throw unsupported("ENUM_VALUES");
+            String[] names = new String[count]; int index = 0;
+            Set<Long> uniqueValues = new TreeSet<>();
+            for (long value : values) {
+                prototypeCancellation(taskMonitor); budget.node(depth + 1);
+                if (!uniqueValues.add(value)) throw unsupported("ENUM_VALUES");
+                String[] group = type.getNames(value);
+                if (group == null || group.length == 0 || group.length > count - index) throw unsupported("ENUM_VALUES");
+                for (String entry : group) { prototypeCancellation(taskMonitor); names[index++] = entry; }
             }
-            if (active.put(type, Boolean.TRUE) != null)
-                throw new PrototypeRejected(PrototypeRefusalCode.UNSUPPORTED_SHAPE, "WRAPPER_CYCLE");
-            if (isNamed) activeNames.put(path, type);
+            if (index != count) throw unsupported("ENUM_VALUES");
+            return boundedEnumNames(names, count, depth, budget, () -> prototypeCancellation(taskMonitor));
+        }
+        String describe(DataType type, int depth, java.util.IdentityHashMap<DataType, Boolean> active,
+                        Map<String, DataType> activeNames, boolean pointerTarget) throws Exception {
+            prototypeCancellation(taskMonitor); budget.node(depth);
+            if (type == null) throw new PrototypeRejected(PrototypeRefusalCode.NULL_TYPE, "MISSING_DATA_TYPE");
+            boolean namedType = isNamed(type);
+            String path = type instanceof Pointer ? "<pointer>" : type instanceof Array ? "<array>" : budget.text(type.getPathName());
+            if (namedType && activeNames.containsKey(path)) {
+                if (activeNames.get(path) != type) throw new PrototypeRejected(PrototypeRefusalCode.TYPE_MISMATCH, "RECURSIVE_PATH_CONFLICT");
+                if (!(type instanceof Composite) || !pointerTarget) throw unsupported("BY_VALUE_TYPE_CYCLE");
+                return "tag-ref:" + field(path);
+            }
+            if (active.put(type, Boolean.TRUE) != null) throw unsupported("WRAPPER_CYCLE");
+            if (namedType) activeNames.put(path, type);
+            settings(type);
             String kind = type instanceof TypeDef ? "typedef" : type instanceof Pointer ? "pointer" :
                 type instanceof Array ? "array" : type instanceof Structure ? "struct" :
                 type instanceof Union ? "union" : type instanceof Enum ? "enum" :
-                type instanceof VoidDataType ? "void" : type instanceof AbstractIntegerDataType ? "integer" :
-                type instanceof AbstractFloatDataType ? "float" : (type instanceof Undefined || type instanceof DefaultDataType) ? "undefined" : "unsupported";
-            if (kind.equals("unsupported") || type instanceof Dynamic || type instanceof BitFieldDataType)
-                throw new PrototypeRejected(PrototypeRefusalCode.UNSUPPORTED_SHAPE, "TYPE_CONSTRUCTOR");
-            if ((isNamed || type instanceof Pointer || type instanceof Array) && type.getLength() <= 0)
-                throw new PrototypeRejected(PrototypeRefusalCode.UNSUPPORTED_SHAPE, "UNSIZED_TYPE");
-            StringBuilder descriptor = new StringBuilder(kind + ";" + field(path) + ";" + type.getLength() + ";");
-            if (isNamed) {
-                String name = budget.text(type.getName());
-                if (!validCName(name)) throw new PrototypeRejected(PrototypeRefusalCode.INVALID_NAME, "TYPE_NAME");
+                type instanceof VoidDataType ? "void" : type instanceof AbstractIntegerDataType ? "integer" : "unsupported";
+            if (kind.equals("unsupported") || type instanceof Dynamic || type instanceof BitFieldDataType || type instanceof Undefined)
+                throw unsupported("TYPE_CONSTRUCTOR");
+            if (!(type instanceof VoidDataType) && type.getLength() <= 0) throw unsupported("UNSIZED_TYPE");
+            StringBuilder descriptor = new StringBuilder(kind + ";" + field(path) + ";" + type.getLength() + ";align=" + type.getAlignment() + ";");
+            if (namedType) {
+                name(type);
                 if (recording) {
                     named.putIfAbsent(path, type);
                     if (namedInstances.put(type, Boolean.TRUE) == null) definitions.add(type);
                 }
             }
             if (type instanceof Pointer) {
-                append(descriptor, describe(((Pointer)type).getDataType(), depth + 1, active, activeNames));
+                if (type.getLength() != target.pointerSize || type.getAlignment() != target.pointerSize) throw unsupported("POINTER_TARGET_LAYOUT");
+                append(descriptor, describe(((Pointer)type).getDataType(), depth + 1, active, activeNames, true));
             } else if (type instanceof TypeDef) {
-                append(descriptor, describe(((TypeDef)type).getDataType(), depth + 1, active, activeNames));
+                DataType underlying = ((TypeDef)type).getDataType();
+                append(descriptor, describe(underlying, depth + 1, active, activeNames, pointerTarget));
+                if (type.getLength() != underlying.getLength() || type.getAlignment() != underlying.getAlignment()) throw unsupported("TYPEDEF_LAYOUT");
             } else if (type instanceof Array) {
                 Array array = (Array)type;
                 if (array.getNumElements() <= 0 || array.getElementLength() <= 0 ||
-                    (long)array.getNumElements() * array.getElementLength() != array.getLength())
-                    throw new PrototypeRejected(PrototypeRefusalCode.UNSUPPORTED_SHAPE, "UNSIZED_ARRAY");
+                    (long)array.getNumElements() * array.getElementLength() != array.getLength()) throw unsupported("UNSIZED_ARRAY");
                 append(descriptor, array.getNumElements() + ";" + array.getElementLength() + ";");
-                append(descriptor, describe(array.getDataType(), depth + 1, active, activeNames));
+                append(descriptor, describe(array.getDataType(), depth + 1, active, activeNames, false));
+                if (array.getElementLength() != array.getDataType().getLength() || array.getAlignment() != array.getDataType().getAlignment())
+                    throw unsupported("ARRAY_LAYOUT");
             } else if (type instanceof Composite) {
                 Composite aggregate = (Composite)type;
-                int count = aggregate.getNumComponents();
+                int count = aggregate.getNumDefinedComponents();
                 if (count < 0 || count > 4096) throw new PrototypeRejected(PrototypeRefusalCode.LIMIT, "AGGREGATE_FIELDS");
+                if (count == 0) throw unsupported("INCOMPLETE_AGGREGATE");
+                if (aggregate.hasExplicitPackingValue()) throw unsupported("EXPLICIT_PACKING");
+                prototypeCancellation(taskMonitor);
+                DataTypeComponent[] components = components(aggregate);
+                if (components.length != count) throw unsupported("AGGREGATE_COMPONENT_COUNT");
+                append(descriptor, "packing=" + field(aggregate.getPackingType().name()) + ";alignment=" + field(aggregate.getAlignmentType().name()) + ";");
+                long size = 0; int alignment = 1; Set<String> names = new TreeSet<>();
                 for (int i = 0; i < count; i++) {
                     prototypeCancellation(taskMonitor);
-                    DataTypeComponent component = aggregate.getComponent(i);
+                    DataTypeComponent component = components[i];
                     if (component == null || component.isBitFieldComponent() || component.getLength() <= 0 || component.getOffset() < 0 ||
-                        (long)component.getOffset() + component.getLength() > aggregate.getLength())
-                        throw new PrototypeRejected(PrototypeRefusalCode.UNSUPPORTED_SHAPE, "AGGREGATE_COMPONENT");
-                    append(descriptor, i + ";" + field(component.getFieldName() == null ? "" : component.getFieldName()) +
-                        ";" + component.getOffset() + ";" + component.getLength() + ";");
-                    append(descriptor, describe(component.getDataType(), depth + 1, active, activeNames));
+                        (long)component.getOffset() + component.getLength() > aggregate.getLength()) throw unsupported("AGGREGATE_COMPONENT");
+                    String member = budget.text(component.getFieldName());
+                    if (!validCName(member) || !names.add(member)) throw new PrototypeRejected(PrototypeRefusalCode.INVALID_NAME, "MEMBER_NAME");
+                    DataType memberType = component.getDataType();
+                    append(descriptor, i + ";" + field(member) + ";" + component.getOffset() + ";" + component.getLength() + ";");
+                    append(descriptor, describe(memberType, depth + 1, active, activeNames, false));
+                    int memberAlignment = memberType.getAlignment();
+                    if (memberAlignment <= 0 || component.getLength() != memberType.getLength()) throw unsupported("MEMBER_LAYOUT");
+                    long offset = aggregate instanceof Union ? 0 : aligned(size, memberAlignment);
+                    if (component.getOffset() != offset) throw unsupported("MEMBER_OFFSET_MISMATCH");
+                    size = aggregate instanceof Union ? Math.max(size, memberType.getLength()) : offset + memberType.getLength();
+                    alignment = Math.max(alignment, memberAlignment);
                 }
+                if (aggregate.getAlignment() != alignment || aggregate.getLength() != aligned(size, alignment))
+                    throw unsupported("AGGREGATE_LAYOUT_MISMATCH");
             } else if (type instanceof Enum) {
                 Enum enumeration = (Enum)type;
                 int count = enumeration.getCount();
                 if (count < 0 || count > 4096) throw new PrototypeRejected(PrototypeRefusalCode.LIMIT, "ENUM_VALUES");
-                String[] names = boundedEnumNames(enumeration.getNames(), count, depth, budget,
-                    () -> prototypeCancellation(taskMonitor));
-                for (String name : names) {
+                String[] names = enumNames(enumeration, depth);
+                if (count == 0) throw unsupported("EMPTY_ENUM");
+                boolean negative = false; Set<String> unique = new TreeSet<>();
+                for (String entry : names) {
                     prototypeCancellation(taskMonitor);
-                    // Name text/node costs were charged before sorting; descriptor bytes are charged below.
-                    append(descriptor, name.length() + ":" + name + ";" + enumeration.getValue(name) + ";");
+                    if (!validCName(entry) || entry.equals(enumeration.getName()) || !unique.add(entry)) throw new PrototypeRejected(PrototypeRefusalCode.INVALID_NAME, "ENUMERATOR_NAME");
+                    long value = enumeration.getValue(entry);
+                    if (value < Integer.MIN_VALUE || value > Integer.MAX_VALUE) throw unsupported("ENUM_REPRESENTATION");
+                    negative |= value < 0;
+                    append(descriptor, entry.length() + ":" + entry + ";" + value + ";");
                 }
+                if (enumeration.getSignedState() == null || enumeration.getLength() != 4 || enumeration.getAlignment() != 4 || enumeration.isSigned() != negative)
+                    throw unsupported("ENUM_TARGET_REPRESENTATION");
+                append(descriptor, "observed-signed-state=" + field(enumeration.getSignedState().toString()) +
+                    ";gcc-compatible=" + (negative ? "int" : "unsigned int") + ";");
+            } else {
+                append(descriptor, "class=" + field(type.getClass().getSimpleName()) + ";C=" + field(scalar(type)) +
+                    ";signed=" + (type instanceof AbstractIntegerDataType && ((AbstractIntegerDataType)type).isSigned()) + ";");
             }
-            active.remove(type);
-            if (isNamed) activeNames.remove(path);
+            active.remove(type); if (namedType) activeNames.remove(path);
             budget.total(descriptor.toString().getBytes(StandardCharsets.UTF_8).length);
             return descriptor.toString();
         }
+        long aligned(long size, int alignment) throws PrototypeRejected {
+            if (alignment <= 0 || alignment > 16 || (alignment & (alignment - 1)) != 0) throw unsupported("ALIGNMENT_UNPROVEN");
+            return (size + alignment - 1) & -(long)alignment;
+        }
+        void precheck(DataType type, int depth, java.util.IdentityHashMap<DataType, Boolean> active, boolean pointerTarget) throws Exception {
+            prototypeCancellation(taskMonitor); budget.node(depth);
+            if (type == null) throw new PrototypeRejected(PrototypeRefusalCode.NULL_TYPE, "MISSING_DATA_TYPE");
+            if (active.put(type, Boolean.TRUE) != null) {
+                if (type instanceof Composite && pointerTarget) return;
+                throw unsupported(type instanceof Composite ? "BY_VALUE_TYPE_CYCLE" : "WRAPPER_CYCLE");
+            }
+            // Wrapper length/alignment getters recurse in Ghidra. Check constructor depth/cycles
+            // before calling any of them, not merely before our own declaration rendering.
+            if (type instanceof Pointer) precheck(((Pointer)type).getDataType(), depth + 1, active, true);
+            else if (type instanceof TypeDef) precheck(((TypeDef)type).getDataType(), depth + 1, active, pointerTarget);
+            else if (type instanceof Array) precheck(((Array)type).getDataType(), depth + 1, active, false);
+            else if (type instanceof Composite) for (DataTypeComponent member : components((Composite)type)) {
+                if (member == null || member.isBitFieldComponent()) throw unsupported("AGGREGATE_COMPONENT");
+                precheck(member.getDataType(), depth + 1, active, false);
+            }
+            active.remove(type);
+        }
         void validate(DataType type) throws Exception {
-            describe(type, 0, new java.util.IdentityHashMap<>(), new TreeMap<>());
+            precheck(type, 0, new java.util.IdentityHashMap<>(), false);
+            String descriptor = describe(type, 0, new java.util.IdentityHashMap<>(), new TreeMap<>(), false);
+            rootObservations.add(descriptor);
+        }
+        String surface(DataType type, boolean canonicalInteger, int depth) throws Exception {
+            prototypeCancellation(taskMonitor); budget.node(depth);
+            if (type instanceof Pointer) {
+                DataType pointee = ((Pointer)type).getDataType();
+                if (pointee instanceof Array) throw unsupported("POINTER_TO_ARRAY_DECLARATOR");
+                // A genuine tag reference permits self-recursive pointers without an invented body.
+                String pointed = pointee instanceof Composite ? (pointee instanceof Union ? "union " : "struct ") + name(pointee) : surface(pointee, false, depth + 1);
+                return budget.text(pointed + " *");
+            }
+            if (type instanceof TypeDef || type instanceof Composite || type instanceof Enum) return name(type);
+            if (type instanceof Array) throw unsupported("DIRECT_ARRAY_DECLARATOR");
+            String canonical = scalar(type);
+            return canonicalInteger || canonical.equals(type.getName()) ? canonical : name(type);
+        }
+        // Ordinary names actually used by surface(), copied from typed constructors. Do not
+        // inspect display C, unfold a typedef that the spelling retains, or rename HighSymbols.
+        void requireUncapturedSurface(DataType type, Set<String> bindings, int depth) throws Exception {
+            prototypeCancellation(taskMonitor); budget.node(depth);
+            if (type instanceof Pointer) {
+                DataType pointee = ((Pointer)type).getDataType();
+                if (!(pointee instanceof Composite)) requireUncapturedSurface(pointee, bindings, depth + 1);
+                return; // Direct composite pointers use the separate tag namespace.
+            }
+            if (type instanceof TypeDef || type instanceof Composite || type instanceof Enum ||
+                (type instanceof AbstractIntegerDataType && !scalar(type).equals(type.getName()))) {
+                if (bindings.contains(name(type))) throw unsupported("PARAMETER_TYPEDEF_CAPTURE");
+            }
+        }
+        String declarator(DataType type, String identifier, int depth, boolean canonicalInteger) throws Exception {
+            prototypeCancellation(taskMonitor); budget.node(depth);
+            if (type instanceof Array) {
+                Array array = (Array)type;
+                return declarator(array.getDataType(), budget.text(identifier + "[" + array.getNumElements() + "]"), depth + 1, canonicalInteger);
+            }
+            return budget.text(surface(type, canonicalInteger, depth + 1) + " " + identifier);
+        }
+        void dependencies(DataType type, Set<String> deps, int depth, boolean root) throws Exception {
+            prototypeCancellation(taskMonitor); budget.node(depth);
+            if (!root && isNamed(type)) { deps.add(budget.text(typeId(type.getPathName()))); return; }
+            if (type instanceof Pointer) dependencies(((Pointer)type).getDataType(), deps, depth + 1, false);
+            else if (type instanceof TypeDef) dependencies(((TypeDef)type).getDataType(), deps, depth + 1, false);
+            else if (type instanceof Array) dependencies(((Array)type).getDataType(), deps, depth + 1, false);
+            else if (type instanceof Composite) for (DataTypeComponent component : components((Composite)type))
+                dependencies(component.getDataType(), deps, depth + 1, false);
+        }
+        String definition(DataType type, Set<String> exports) throws Exception {
+            String name = name(type); exports.add("name:" + name);
+            if (type instanceof Composite) {
+                String tag = type instanceof Union ? "union" : "struct";
+                exports.add("tag:" + name);
+                StringBuilder output = new StringBuilder("typedef " + tag + " " + name + " {\n");
+                for (DataTypeComponent component : components((Composite)type)) {
+                    prototypeCancellation(taskMonitor);
+                    append(output, "    " + declarator(component.getDataType(), component.getFieldName(), 0, false) + ";\n");
+                }
+                append(output, "} " + name + ";"); return output.toString();
+            }
+            if (type instanceof Enum) {
+                exports.add("tag:" + name);
+                Enum enumeration = (Enum)type;
+                String[] names = enumNames(enumeration, 0);
+                StringBuilder output = new StringBuilder("typedef enum " + name + " {\n");
+                for (int i = 0; i < names.length; i++) {
+                    prototypeCancellation(taskMonitor); exports.add("name:" + names[i]);
+                    append(output, "    " + names[i] + " = " + enumeration.getValue(names[i]) + (i + 1 == names.length ? "\n" : ",\n"));
+                }
+                append(output, "} " + name + ";"); return output.toString();
+            }
+            return "typedef " + declarator(type instanceof TypeDef ? ((TypeDef)type).getDataType() : type, name, 0, true) + ";";
         }
         void finish() throws Exception {
-            // A standalone root for each definition makes its digest independent of discovery order.
             recording = false;
             for (DataType definition : definitions) {
                 prototypeCancellation(taskMonitor);
-                String descriptor = describe(definition, 0, new java.util.IdentityHashMap<>(), new TreeMap<>());
-                String name = budget.text(definition.getName());
-                String path = definition.getPathName();
-                TypeRequirement requirement = new TypeRequirement(budget.text(path), budget.text(typeId(path)), budget.text(name),
-                    budget.text(sha256(descriptor.getBytes(StandardCharsets.UTF_8))));
+                budget.total(target.identity.getBytes(StandardCharsets.UTF_8).length + 1);
+                String descriptor = target.identity + ";" + describe(definition, 0, new java.util.IdentityHashMap<>(), new TreeMap<>(), false);
+                Set<String> deps = new TreeSet<>(), exports = new TreeSet<>();
+                dependencies(definition, deps, 0, true);
+                String path = budget.text(definition.getPathName()), id = budget.text(typeId(path));
+                deps.remove(id);
+                String declaration = definition(definition, exports);
+                budget.total(declaration.getBytes(StandardCharsets.UTF_8).length);
+                for (String key : exports) budget.text(key);
+                TypeRequirement requirement = new TypeRequirement(path, id, name(definition),
+                    budget.text(sha256(descriptor.getBytes(StandardCharsets.UTF_8))), declaration,
+                    budget.text(sha256(declaration.getBytes(StandardCharsets.UTF_8))), new ArrayList<>(deps), new ArrayList<>(exports), descriptor);
                 TypeRequirement previous = requirements.putIfAbsent(path, requirement);
-                if (previous != null && !previous.same(requirement))
-                    throw new PrototypeRejected(PrototypeRefusalCode.TYPE_MISMATCH, "NAMED_TYPE_CHANGED");
+                if (previous != null && !previous.same(requirement)) throw new PrototypeRejected(PrototypeRefusalCode.TYPE_MISMATCH, "NAMED_TYPE_CHANGED");
             }
         }
         String signatureText(DataType type, boolean allowVoid) throws Exception {
-            prototypeCancellation(taskMonitor);
-            DataType leaf = type;
-            int depth = 0;
+            DataType leaf = type; int depth = 0; boolean pointer = false;
             while (leaf instanceof Pointer || leaf instanceof TypeDef) {
-                prototypeCancellation(taskMonitor);
-                if (++depth > 32) throw new PrototypeRejected(PrototypeRefusalCode.LIMIT, "SIGNATURE_DEPTH");
-                if (leaf instanceof Pointer) { allowVoid = true; leaf = ((Pointer)leaf).getDataType(); }
+                prototypeCancellation(taskMonitor); budget.node(++depth);
+                if (leaf instanceof Pointer) { pointer = true; leaf = ((Pointer)leaf).getDataType(); }
                 else leaf = ((TypeDef)leaf).getDataType();
-                if (leaf == null) throw new PrototypeRejected(PrototypeRefusalCode.NULL_TYPE, "POINTER_TARGET");
             }
-            if (!(leaf instanceof AbstractIntegerDataType) && !(leaf instanceof AbstractFloatDataType) &&
-                !(leaf instanceof Composite) && !(leaf instanceof Enum) && !(allowVoid && leaf instanceof VoidDataType))
-                throw new PrototypeRejected(PrototypeRefusalCode.UNSUPPORTED_SHAPE, "SIGNATURE_CONSTRUCTOR");
-            if (!(leaf instanceof VoidDataType) && leaf.getLength() <= 0)
-                throw new PrototypeRejected(PrototypeRefusalCode.UNSUPPORTED_SHAPE, "UNSIZED_SIGNATURE");
-            if ((leaf instanceof AbstractIntegerDataType || leaf instanceof AbstractFloatDataType || leaf instanceof VoidDataType) &&
-                !supportedBuiltinSpelling(budget.text(leaf.getDisplayName())))
-                throw new PrototypeRejected(PrototypeRefusalCode.UNSUPPORTED_SHAPE, "BUILTIN_C_SPELLING");
-            String text = budget.text(type.getDisplayName());
-            // Validated simple constructors only. This is a spelling guard, never C-signature parsing.
-            if (!text.matches("[A-Za-z_][A-Za-z0-9_ ]*(?: *\\* *)*"))
-                throw new PrototypeRejected(PrototypeRefusalCode.UNSUPPORTED_SHAPE, "TYPE_SPELLING");
-            return text;
+            if ((!pointer && (leaf instanceof Array || leaf instanceof Composite)) || (!allowVoid && !pointer && leaf instanceof VoidDataType))
+                throw unsupported("SIGNATURE_FORMAL_RELATION_UNPROVEN");
+            return surface(type, false, 0);
         }
     }
 
     private static String typeId(String path) throws Exception { return "type_" + sha256(path.getBytes(StandardCharsets.UTF_8)); }
 
-    static PrototypeResult extractTypedPrototype(DecompileResults result, String functionName, TaskMonitor taskMonitor) throws Exception {
+    static PrototypeResult extractTypedPrototype(DecompileResults result, String functionName, TaskMonitor taskMonitor, TargetContext target) throws Exception {
         prototypeCancellation(taskMonitor);
         HighFunction high = result == null ? null : result.getHighFunction();
         prototypeCancellation(taskMonitor);
@@ -1966,15 +2237,18 @@ public class ExportProgramModelOwned extends GhidraScript {
         prototypeCancellation(taskMonitor);
         if (prototype == null)
             return new PrototypeResult(null, new Refusal(PrototypeRefusalCode.NO_HIGH_FUNCTION, "MISSING_HIGH_PROTOTYPE"));
-        return extractTypedPrototype(prototype, functionName, taskMonitor);
+        if (high.getFunction() == null) return new PrototypeResult(null, new Refusal(PrototypeRefusalCode.UNSUPPORTED_SHAPE, "HIGH_FUNCTION_CONTEXT_UNKNOWN"));
+        return extractTypedPrototype(prototype, functionName, taskMonitor, target,
+            high.getFunction().hasCustomVariableStorage() || high.getFunction().getCallFixup() != null);
     }
 
     // The typed overload is also the public-API fixture boundary; no listing parameters are accepted.
-    static PrototypeResult extractTypedPrototype(FunctionPrototype prototype, String functionName, TaskMonitor taskMonitor) throws Exception {
+    static PrototypeResult extractTypedPrototype(FunctionPrototype prototype, String functionName, TaskMonitor taskMonitor, TargetContext target, boolean customStorage) throws Exception {
         prototypeCancellation(taskMonitor);
+        TypedGraph graph = null;
         try {
             if (prototype == null) return new PrototypeResult(null, new Refusal(PrototypeRefusalCode.NO_HIGH_FUNCTION, "MISSING_HIGH_PROTOTYPE"));
-            TypedGraph graph = new TypedGraph(taskMonitor);
+            graph = new TypedGraph(taskMonitor, target);
             if (functionName == null) throw new PrototypeRejected(PrototypeRefusalCode.INVALID_NAME, "FUNCTION_NAME");
             graph.budget.text(functionName);
             if (!validCName(functionName)) throw new PrototypeRejected(PrototypeRefusalCode.INVALID_NAME, "FUNCTION_NAME");
@@ -1984,6 +2258,7 @@ public class ExportProgramModelOwned extends GhidraScript {
             DataType returnType = prototype.getReturnType();
             graph.validate(returnType);
             List<DataType> types = new ArrayList<>();
+            List<HighSymbol> symbols = new ArrayList<>();
             List<String> names = new ArrayList<>();
             Set<String> uniqueNames = new TreeSet<>();
             for (int index = 0; index < count; index++) {
@@ -1996,15 +2271,45 @@ public class ExportProgramModelOwned extends GhidraScript {
                 if (!validCName(name) || !uniqueNames.add(name)) throw new PrototypeRejected(PrototypeRefusalCode.INVALID_NAME, "PARAMETER_NAME");
                 DataType type = symbol.getDataType();
                 graph.validate(type);
-                names.add(name); types.add(type);
+                names.add(name); types.add(type); symbols.add(symbol);
             }
+            StringBuilder observations = new StringBuilder(target.identity);
+            for (String root : graph.rootObservations) graph.append(observations, ";root=" + root);
+            if (prototype.getModelName() == null) throw graph.unsupported("PROTOTYPE_MODEL_UNKNOWN");
+            graph.budget.text(prototype.getModelName());
+            PrototypeAttributes attributes = PrototypeAttributes.read(prototype, taskMonitor);
+            if (!target.convention.equals(prototype.getModelName()) || !prototype.getModelName().equals(attributes.model) ||
+                attributes.custom || attributes.variadic != variadic || attributes.constructor || attributes.destructor ||
+                customStorage || prototype.hasThisPointer() || prototype.isConstructor() || prototype.isDestructor())
+                throw graph.unsupported("PROTOTYPE_CONVENTION_OR_ROLE");
+            if (prototype.getExtraPop() != target.pointerSize) throw graph.unsupported("PROTOTYPE_STACK_EFFECT_UNKNOWN");
+            observations.append(";model=").append(prototype.getModelName()).append(";varargs=").append(variadic).append(";custom=false");
+            observations.append(";return=").append(storageFacts(prototype.getReturnStorage(), returnType, graph, true, null));
+            Map<String, TreeMap<Long, Long>> parameterStorage = new TreeMap<>();
+            for (int index = 0; index < count; index++) {
+                prototypeCancellation(taskMonitor);
+                HighSymbol symbol = symbols.get(index);
+                if (!symbol.isParameter() || symbol.getCategoryIndex() != index || symbol.isThisPointer() || symbol.isHiddenReturn())
+                    throw graph.unsupported("HIGH_PARAMETER_ROLE");
+                observations.append(";param=").append(index).append(':').append(names.get(index)).append(':')
+                    .append(storageFacts(highStorage(symbol, graph), types.get(index), graph, false, parameterStorage));
+            }
+            graph.budget.total(observations.toString().getBytes(StandardCharsets.UTF_8).length);
             graph.finish();
+            for (TypeRequirement requirement : graph.requirements.values()) {
+                prototypeCancellation(taskMonitor);
+                if (requirement.namespaceKeys.contains("name:" + functionName))
+                    throw new PrototypeRejected(PrototypeRefusalCode.TYPE_MISMATCH, "ORDINARY_NAMESPACE_COLLISION");
+            }
             String returnText = graph.signatureText(returnType, true);
             List<ParameterText> parameters = new ArrayList<>();
             StringBuilder expected = new StringBuilder(returnText + " " + functionName + "(");
+            Set<String> parameterBindings = new TreeSet<>();
             for (int index = 0; index < count; index++) {
                 prototypeCancellation(taskMonitor);
                 String text = graph.signatureText(types.get(index), false);
+                graph.requireUncapturedSurface(types.get(index), parameterBindings, 0);
+                parameterBindings.add(names.get(index));
                 parameters.add(new ParameterText(names.get(index), text));
                 if (index > 0) expected.append(", ");
                 expected.append(text).append(' ').append(names.get(index));
@@ -2013,33 +2318,128 @@ public class ExportProgramModelOwned extends GhidraScript {
             else if (count == 0) expected.append("void");
             expected.append(')');
             graph.budget.text(expected.toString());
-            // All graph, string and constructor rejection precedes the first cloning/rendering call.
             prototypeCancellation(taskMonitor);
-            FunctionDefinitionDataType definition = new FunctionDefinitionDataType(functionName);
-            definition.setReturnType(returnType);
-            ParameterDefinition[] arguments = new ParameterDefinition[count];
-            for (int index = 0; index < count; index++) {
-                prototypeCancellation(taskMonitor);
-                arguments[index] = new ParameterDefinitionImpl(names.get(index), types.get(index), null);
-            }
-            definition.setArguments(arguments);
-            definition.setVarArgs(variadic);
-            prototypeCancellation(taskMonitor);
-            String declaration = definition.getPrototypeString(false);
-            prototypeCancellation(taskMonitor);
-            if (!expected.toString().equals(declaration))
-                throw new PrototypeRejected(PrototypeRefusalCode.UNSUPPORTED_SHAPE, "RENDERED_SHAPE_CHANGED");
-            return new PrototypeResult(new TypedPrototype(declaration, parameters, returnText, variadic,
-                new ArrayList<>(graph.requirements.values())), null);
+            // Render exclusively from validated typed constructors; never clone through a default manager.
+            return new PrototypeResult(new TypedPrototype(expected.toString(), parameters, returnText, variadic,
+                new ArrayList<>(graph.requirements.values()), observations.toString()), null);
         } catch (PrototypeRejected rejected) {
             prototypeCancellation(taskMonitor);
-            return new PrototypeResult(null, rejected.refusal);
+            return new PrototypeResult(null, rejected.refusal, graph == null ? target.identity :
+                target.identity + ";lastScalarObservation=" + graph.lastObservation);
         } catch (IllegalArgumentException unsupported) {
             prototypeCancellation(taskMonitor);
             return new PrototypeResult(null, new Refusal(PrototypeRefusalCode.UNSUPPORTED_SHAPE, "TYPED_API_REJECTED"));
         }
     }
 
+    /** The public prototype API exposes custom-storage only through its typed encoder. Stop at
+     * RETURNSYM, before any datatype/storage traversal. This copies attributes, never parses C/XML. */
+    private static final class PrototypeAttributes implements ghidra.program.model.pcode.Encoder {
+        private static final class HeaderComplete extends RuntimeException {
+            private static final long serialVersionUID = 1L;
+            HeaderComplete() { super(null, null, false, false); }
+        }
+        private static final class InvalidHeader extends RuntimeException {
+            private static final long serialVersionUID = 1L;
+            final String detail;
+            InvalidHeader(String detail) { super(null, null, false, false); this.detail = detail; }
+        }
+        final TaskMonitor monitor;
+        String model;
+        boolean custom, variadic, constructor, destructor, opened;
+        int operations;
+        PrototypeAttributes(TaskMonitor monitor) { this.monitor = monitor; }
+        void tick() throws IOException {
+            if (monitor.isCancelled() || Thread.currentThread().isInterrupted()) throw new java.io.InterruptedIOException("prototype attribute capture cancelled");
+            if (++operations > 32) throw new InvalidHeader("PROTOTYPE_ATTRIBUTE_LIMIT");
+        }
+        static PrototypeAttributes read(FunctionPrototype prototype, TaskMonitor monitor) throws Exception {
+            PrototypeAttributes result = new PrototypeAttributes(monitor);
+            try { prototype.encodePrototype(result, null, -1); }
+            catch (HeaderComplete done) { return result; }
+            catch (InvalidHeader invalid) { throw new PrototypeRejected(PrototypeRefusalCode.UNSUPPORTED_SHAPE, invalid.detail); }
+            throw new PrototypeRejected(PrototypeRefusalCode.UNSUPPORTED_SHAPE, "PROTOTYPE_ATTRIBUTES_UNKNOWN");
+        }
+        public void openElement(ghidra.program.model.pcode.ElementId id) throws IOException {
+            tick();
+            if (!opened && id == ghidra.program.model.pcode.ElementId.ELEM_PROTOTYPE) { opened = true; return; }
+            if (opened && id == ghidra.program.model.pcode.ElementId.ELEM_RETURNSYM) throw new HeaderComplete();
+            throw new InvalidHeader("PROTOTYPE_ATTRIBUTE_ELEMENT");
+        }
+        public void closeElement(ghidra.program.model.pcode.ElementId id) throws IOException { tick(); throw new InvalidHeader("PROTOTYPE_ATTRIBUTES_UNKNOWN"); }
+        public void writeBool(ghidra.program.model.pcode.AttributeId id, boolean value) throws IOException {
+            tick();
+            if (id == ghidra.program.model.pcode.AttributeId.ATTRIB_CUSTOM) custom = value;
+            else if (id == ghidra.program.model.pcode.AttributeId.ATTRIB_DOTDOTDOT) variadic = value;
+            else if (id == ghidra.program.model.pcode.AttributeId.ATTRIB_CONSTRUCTOR) constructor = value;
+            else if (id == ghidra.program.model.pcode.AttributeId.ATTRIB_DESTRUCTOR) destructor = value;
+        }
+        public void writeString(ghidra.program.model.pcode.AttributeId id, String value) throws IOException {
+            tick();
+            if (value != null && (value.length() > 4096 || value.getBytes(StandardCharsets.UTF_8).length > 4096))
+                throw new InvalidHeader("PROTOTYPE_ATTRIBUTE_TEXT_LIMIT");
+            if (id == ghidra.program.model.pcode.AttributeId.ATTRIB_MODEL) model = value;
+        }
+        public void writeSignedInteger(ghidra.program.model.pcode.AttributeId id, long value) throws IOException { tick(); }
+        public void writeUnsignedInteger(ghidra.program.model.pcode.AttributeId id, long value) throws IOException { tick(); }
+        public void writeStringIndexed(ghidra.program.model.pcode.AttributeId id, int index, String value) throws IOException { throw new InvalidHeader("PROTOTYPE_ATTRIBUTE_INDEX"); }
+        public void writeSpace(ghidra.program.model.pcode.AttributeId id, ghidra.program.model.address.AddressSpace value) throws IOException { throw new InvalidHeader("PROTOTYPE_ATTRIBUTE_SPACE"); }
+        public void writeSpace(ghidra.program.model.pcode.AttributeId id, int index, String value) throws IOException { throw new InvalidHeader("PROTOTYPE_ATTRIBUTE_SPACE"); }
+        public void writeOpcode(ghidra.program.model.pcode.AttributeId id, ghidra.pcodeCPort.opcodes.OpCode value) throws IOException { throw new InvalidHeader("PROTOTYPE_ATTRIBUTE_OPCODE"); }
+        public void writeOpcode(ghidra.program.model.pcode.AttributeId id, int value) throws IOException { throw new InvalidHeader("PROTOTYPE_ATTRIBUTE_OPCODE"); }
+    }
+
+    private static ghidra.program.model.listing.VariableStorage highStorage(HighSymbol symbol, TypedGraph graph) throws Exception {
+        prototypeCancellation(graph.taskMonitor);
+        try { return symbol.getStorage(); }
+        catch (NullPointerException | IndexOutOfBoundsException missingMapping) {
+            prototypeCancellation(graph.taskMonitor);
+            throw graph.unsupported("HIGH_STORAGE_UNAVAILABLE");
+        }
+    }
+
+    private static String storageFacts(ghidra.program.model.listing.VariableStorage storage, DataType type,
+                                       TypedGraph graph, boolean result, Map<String, TreeMap<Long, Long>> usedStorage) throws Exception {
+        prototypeCancellation(graph.taskMonitor);
+        if (storage == null || storage.isBadStorage() || storage.isUnassignedStorage()) throw graph.unsupported("STORAGE_UNKNOWN");
+        if (storage.isForcedIndirect() || storage.isAutoStorage()) throw graph.unsupported("HIDDEN_STORAGE_ROLE");
+        boolean isVoid = type instanceof VoidDataType;
+        if (storage.isVoidStorage()) {
+            if (!result || !isVoid) throw graph.unsupported("VOID_STORAGE_CONTRADICTION");
+            return "void";
+        }
+        if (isVoid || storage.size() != type.getLength()) throw graph.unsupported("STORAGE_TYPE_SIZE");
+        int count = storage.getVarnodeCount();
+        if (count <= 0 || count > 16) throw graph.unsupported("STORAGE_PIECES");
+        if (!(storage.isRegisterStorage() || (!result && storage.isStackStorage()))) throw graph.unsupported("STORAGE_KIND");
+        StringBuilder facts = new StringBuilder();
+        var pieces = storage.getVarnodes();
+        if (pieces.length != count) throw graph.unsupported("STORAGE_PIECES");
+        for (var piece : pieces) {
+            prototypeCancellation(graph.taskMonitor); graph.budget.node(0);
+            if (piece == null || piece.getSize() <= 0 || piece.getOffset() > Long.MAX_VALUE - piece.getSize())
+                throw graph.unsupported("STORAGE_RANGE");
+            if (usedStorage != null) {
+                String space = graph.budget.text(piece.getAddress().getAddressSpace().getName());
+                TreeMap<Long, Long> ranges = usedStorage.computeIfAbsent(space, ignored -> new TreeMap<>());
+                long start = piece.getOffset(), end = start + piece.getSize();
+                Map.Entry<Long, Long> floor = ranges.floorEntry(start), ceiling = ranges.ceilingEntry(start);
+                if ((floor != null && floor.getValue() > start) || (ceiling != null && ceiling.getKey() < end))
+                    throw graph.unsupported("PARAMETER_STORAGE_OVERLAP");
+                ranges.put(start, end);
+            }
+            String value = graph.budget.text(piece.getAddress().getAddressSpace().getName() + ":" +
+                Long.toUnsignedString(piece.getOffset(), 16) + ":" + piece.getSize());
+            facts.append(value).append(';');
+        }
+        return facts.toString();
+    }
+
+    private TargetContext targetContext;
+    private TargetContext targetContext() throws Exception {
+        if (targetContext == null) targetContext = TargetContext.capture(currentProgram);
+        return targetContext;
+    }
     private final PlannedTypeCatalog plannedTypes = new PlannedTypeCatalog();
 
     private static void mergeCoverage(Map<String, TypeRequirement> coverage, PlannedTypeCoverage additional) throws PrototypeRejected {
@@ -2058,11 +2458,15 @@ public class ExportProgramModelOwned extends GhidraScript {
     private PlannedTypeCoverage planTypeCoverage(List<DataType> roots, Path typesDirectory,
                                                  PlanningBatchEvidence planningEvidence, Address source,
                                                  boolean catalogOnly) throws Exception {
-        TypedGraph graph = new TypedGraph(monitor);
+        TypedGraph graph = new TypedGraph(monitor, targetContext());
         for (DataType root : roots) { prototypeCancellation(monitor); graph.validate(root); }
         graph.finish();
         plannedTypes.admit(graph.requirements, () -> prototypeCancellation(monitor));
-        for (DataType type : graph.named.values()) retainType(typesDirectory, planningEvidence, type, source, catalogOnly);
+        if (!catalogOnly) for (TypeRequirement requirement : graph.requirements.values()) {
+            observeTypes("planned", requirement.id, requirement.descriptor + ";declaration=" + requirement.declaration +
+                ";definitionSha256=" + requirement.definitionDigest + ";dependencies=" + requirement.dependencyIds, monitor);
+        }
+        for (TypeRequirement type : graph.requirements.values()) retainType(typesDirectory, planningEvidence, type, source, catalogOnly);
         // Only this function's deterministic metadata closure is admitted; future functions cannot enlarge it.
         return new PlannedTypeCoverage(graph.requirements);
     }
@@ -2084,6 +2488,7 @@ public class ExportProgramModelOwned extends GhidraScript {
         Set<String> strings = new TreeSet<>();
         String failure = null;
         boolean evidenceComplete = true;
+        boolean reportedDataTypeConstructor = false;
         Map<String, TypeRequirement> coverage = new TreeMap<>();
 
         try {
@@ -2125,6 +2530,9 @@ public class ExportProgramModelOwned extends GhidraScript {
                     }
                     {
                         GlobalEvidence global = globalAt(resolved);
+                        // Reserve before publishing either the global or its type closure. A
+                        // late collision with a previously retained alias is an explicit refusal.
+                        plannedTypes.reserveOrdinary(global.name, () -> prototypeCancellation(monitor));
                         String globalRecord = renderGlobal(global);
                         if (catalogOnly) {
                             // Replay reads the same metadata and charges traversal, but publishes no evidence.
@@ -2135,8 +2543,22 @@ public class ExportProgramModelOwned extends GhidraScript {
                         }
                         referencedGlobals.add(global.id);
                         if (data != null) {
-                            mergeCoverage(coverage, planTypeCoverage(java.util.Collections.singletonList(data.getDataType()),
-                                typesDirectory, planningEvidence, global.address, catalogOnly));
+                            List<DataType> dataTypes = java.util.Collections.singletonList(data.getDataType());
+                            PlannedTypeCoverage dataCoverage;
+                            try {
+                                dataCoverage = planTypeCoverage(dataTypes, typesDirectory, planningEvidence, global.address, catalogOnly);
+                            } catch (PrototypeRejected problem) {
+                                rethrowInfrastructureFailure(problem);
+                                if (problem.refusal.code != PrototypeRefusalCode.UNSUPPORTED_SHAPE ||
+                                    !"TYPE_CONSTRUCTOR".equals(problem.refusal.detail)) throw problem;
+                                evidenceComplete = false;
+                                if (!reportedDataTypeConstructor) {
+                                    failure = appendFailure(failure, exceptionMessage("data-reference recovery", problem));
+                                    reportedDataTypeConstructor = true;
+                                }
+                                continue;
+                            }
+                            mergeCoverage(coverage, dataCoverage);
                         }
                     }
                 }
@@ -2148,6 +2570,7 @@ public class ExportProgramModelOwned extends GhidraScript {
         }
 
         try {
+            plannedTypes.reserveOrdinary(function.getName(), () -> prototypeCancellation(monitor));
             List<DataType> signatureTypes = new ArrayList<>();
             signatureTypes.add(function.getReturnType());
             Parameter[] listingParameters = function.getParameters();
@@ -2181,7 +2604,7 @@ public class ExportProgramModelOwned extends GhidraScript {
             throw new PlanningIntegrityException("function metadata exceeds its byte bound: " + functionId(function));
         }
         return new FunctionMetadata(function, prefix.toString(), function.getName(), listingPrototype, evidence.toString(),
-            failure, evidenceComplete, new PlannedTypeCoverage(coverage));
+            failure, evidenceComplete, new PlannedTypeCoverage(coverage), targetContext());
     }
 
     /** Replay only in address order, interleaved with new preparation for sparse full checkpoints.
@@ -2195,12 +2618,24 @@ public class ExportProgramModelOwned extends GhidraScript {
         }
     }
 
+    private static final java.util.concurrent.atomic.AtomicLong observationBytes = new java.util.concurrent.atomic.AtomicLong();
+    private static void observeTypes(String channel, String function, String facts, TaskMonitor monitor) throws Exception {
+        if (!Boolean.getBoolean("decompengine.owned.typeObservations")) return;
+        prototypeCancellation(monitor);
+        if (facts.length() > 65536) throw new PlanningIntegrityException("typed observations exceed descriptor bound");
+        String line = "OWNED_TYPED_OBSERVATION " + channel + " " + function + " " + facts;
+        int bytes = line.getBytes(StandardCharsets.UTF_8).length;
+        if (observationBytes.addAndGet(bytes) <= 1024 * 1024) System.out.println(line);
+        else throw new PlanningIntegrityException("typed observation retention budget exhausted");
+    }
+
     private static NativeOutcome decompileFunction(
         Function function,
         String functionName,
         DecompInterface decompiler,
         int timeoutSeconds,
-        TaskMonitor taskMonitor
+        TaskMonitor taskMonitor,
+        TargetContext target
     ) throws Exception {
         String source = null;
         String failure = null;
@@ -2226,7 +2661,9 @@ public class ExportProgramModelOwned extends GhidraScript {
                 failure = appendFailure(null, "decompilation failed or timed out" +
                     (detail == null || detail.trim().isEmpty() ? "" : ": " + detail));
             }
-            prototype = extractTypedPrototype(result, functionName, taskMonitor);
+            prototype = extractTypedPrototype(result, functionName, taskMonitor, target);
+            observeTypes("high", functionName, prototype.observations +
+                (prototype.refusal == null ? ";admitted-extraction" : ";" + prototype.refusal.evidence()), taskMonitor);
         } catch (Exception problem) {
             if (taskMonitor.isCancelled() || Thread.currentThread().isInterrupted() ||
                 problem instanceof InterruptedException || problem instanceof IOException ||
@@ -2266,7 +2703,7 @@ public class ExportProgramModelOwned extends GhidraScript {
     ) throws Exception {
         FunctionMetadata metadata = collectFunctionMetadata(function, globalsDirectory, typesDirectory, planningEvidence);
         NativeOutcome nativeOutcome = includeDecompiledC
-            ? decompileFunction(function, metadata.name, decompiler, decompileTimeoutSeconds, monitor) : null;
+            ? decompileFunction(function, metadata.name, decompiler, decompileTimeoutSeconds, monitor, metadata.target) : null;
         return renderFunction(metadata, nativeOutcome, includeDecompiledC);
     }
 
@@ -2305,7 +2742,7 @@ public class ExportProgramModelOwned extends GhidraScript {
             long started = observation.begin(nativePhase);
             NativeOutcome outcome;
             try { outcome = decompileFunction(metadata.function, metadata.name, decompiler,
-                retry ? DECOMPILE_RETRY_TIMEOUT_SECONDS : DECOMPILE_TIMEOUT_SECONDS, taskMonitor); }
+                retry ? DECOMPILE_RETRY_TIMEOUT_SECONDS : DECOMPILE_TIMEOUT_SECONDS, taskMonitor, metadata.target); }
             finally { observation.end(nativePhase, started); }
             long rendering = observation.begin(ExporterPhaseObservationOwnedV1.Phase.RENDER);
             try { return renderFunction(metadata, outcome, true); }
@@ -2336,8 +2773,16 @@ public class ExportProgramModelOwned extends GhidraScript {
         }
     }
 
+    private void reserveFunctionNames(List<Function> functions) throws Exception {
+        // The complete callable inventory is known before address-order catalog admission;
+        // future functions must not acquire names already published as automatic aliases.
+        for (Function function : functions)
+            plannedTypes.reserveOrdinary(function.getName(), () -> prototypeCancellation(monitor));
+    }
+
     private PlanningSemanticState computePlanningSemanticState(List<Function> functions) throws Exception {
         plannedTypes.clear();
+        reserveFunctionNames(functions);
         ExporterSemanticFingerprintOwnedV1 fingerprint = new ExporterSemanticFingerprintOwnedV1();
         Set<String> ownedGlobalIds = new TreeSet<>();
         Set<String> ownedTypeIds = new TreeSet<>();
@@ -3325,6 +3770,7 @@ public class ExportProgramModelOwned extends GhidraScript {
             ",\"compilerSpec\":" + json(currentProgram.getCompilerSpec().getCompilerSpecID().toString()) +
             ",\"semanticStateBinding\":" + semanticState + "}\n";
         plannedTypes.clear();
+        reserveFunctionNames(functions);
         Path statePath = stateDirectory.resolve("state.json");
 
         // No output-state mutation occurs until the complete planning semantic boundary has been

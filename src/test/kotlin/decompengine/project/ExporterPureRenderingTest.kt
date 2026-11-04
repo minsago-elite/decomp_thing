@@ -308,20 +308,64 @@ private val OWNED_PROTOTYPE_VALUES_HARNESS = """
         check(catalog.definitions.size() == 4096, "exact catalog boundary permits repeat/replay");
         TypeRequirement extra = new TypeRequirement("/extra", "extra", "extra", "extra");
         rejected(PrototypeRefusalCode.LIMIT, () -> catalog.admit(Map.of(first.path, first, extra.path, extra), () -> {}));
-        check(catalog.definitions.size() == 4096 && !catalog.spellings.containsKey("extra"), "overflow admission atomic");
+        check(catalog.definitions.size() == 4096 && !catalog.spellings.containsKey("name:extra"), "overflow admission atomic");
         rejected(PrototypeRefusalCode.TYPE_MISMATCH, () -> catalog.admit(Map.of("/other", new TypeRequirement("/other", "other", "T0", "d")), () -> {}));
         rejected(PrototypeRefusalCode.TYPE_MISMATCH, () -> catalog.admit(Map.of("/0", new TypeRequirement("/0", "id0", "T0", "changed")), () -> {}));
         catalog.clear();
         try { catalog.admit(Map.of(first.path, first), () -> { throw new InterruptedException("cancel"); }); throw new AssertionError("catalog cancellation"); }
         catch (InterruptedException expected) { check(catalog.definitions.isEmpty(), "cancelled admission leaves no owner"); }
-        for (String spelling : new String[]{"uint", "longlong", "ulong", "undefined8", "int128"})
-            check(!supportedBuiltinSpelling(spelling), "unsupported builtin spelling " + spelling);
-        for (String spelling : new String[]{"int", "char", "unsigned int", "long long", "double"})
-            check(supportedBuiltinSpelling(spelling), "C language spelling " + spelling);
+    }
+    static void faithfulCoverage() throws Exception {
+        List<String> dependencies = new ArrayList<>(List.of("type_Base"));
+        List<String> namespaces = new ArrayList<>(List.of("name:Alias"));
+        TypeRequirement base = new TypeRequirement("/Base", "type_Base", "Base", "semantic-base", "typedef int Base;", "emitted-base", List.of(), List.of("name:Base"), "target-bound-base");
+        TypeRequirement alias = new TypeRequirement("/Alias", "type_Alias", "Alias", "semantic-alias", "typedef Base Alias;", "emitted-alias", dependencies, namespaces, "target-bound-alias");
+        dependencies.clear(); namespaces.clear();
+        check(alias.dependencyIds.equals(List.of("type_Base")) && alias.namespaceKeys.equals(List.of("name:Alias")), "copied dependency and namespace inventories");
+        PlannedTypeCatalog catalog = new PlannedTypeCatalog();
+        rejected(PrototypeRefusalCode.UNPLANNED_TYPE, () -> catalog.admit(Map.of(alias.path, alias), () -> {}));
+        check(catalog.definitions.isEmpty(), "incomplete dependency closure admission is atomic");
+        catalog.admit(Map.of(base.path, base, alias.path, alias), () -> {});
+        PlannedTypeCoverage coverage = new PlannedTypeCoverage(catalog.definitions);
+        TypeRequirement changedBytes = new TypeRequirement(alias.path, alias.id, alias.cSpelling, alias.semanticDigest,
+            "typedef unsigned char Alias[4];", alias.definitionDigest, alias.dependencyIds, alias.namespaceKeys, alias.descriptor);
+        TypeRequirement changedTarget = new TypeRequirement(alias.path, alias.id, alias.cSpelling, "different-target",
+            alias.declaration, alias.definitionDigest, alias.dependencyIds, alias.namespaceKeys, alias.descriptor);
+        for (TypeRequirement changed : List.of(changedBytes, changedTarget)) {
+            check(checkCoverage(typed(List.of(base, changed)), coverage).code == PrototypeRefusalCode.TYPE_MISMATCH, "same path cannot cover changed emitted bytes or target semantics");
+        }
+        TypeRequirement enumCollision = new TypeRequirement("/Enum", "type_Enum", "Enum", "semantic", "enum Enum { Alias = 0 };", "emitted", List.of(), List.of("tag:Enum", "name:Alias"), "");
+        rejected(PrototypeRefusalCode.TYPE_MISMATCH, () -> catalog.admit(Map.of(enumCollision.path, enumCollision), () -> {}));
+        check(catalog.definitions.size() == 2, "enumerator collision cannot partially publish a graph");
+    }
+    static void ordinaryNamespaces() throws Exception {
+        TypeRequirement alias = new TypeRequirement("/Event", "event", "Event", "digest");
+        PlannedTypeCatalog catalog = new PlannedTypeCatalog();
+        catalog.reserveOrdinary("Event", () -> {});
+        rejected(PrototypeRefusalCode.TYPE_MISMATCH, () -> catalog.admit(Map.of(alias.path, alias), () -> {}));
+        check(catalog.definitions.isEmpty() && catalog.spellings.isEmpty(), "reserved callable or global blocks alias atomically");
+        catalog.clear(); catalog.admit(Map.of(alias.path, alias), () -> {});
+        rejected(PrototypeRefusalCode.TYPE_MISMATCH, () -> catalog.reserveOrdinary("Event", () -> {}));
+        check(catalog.ordinaryNames.isEmpty() && catalog.definitions.size() == 1, "late ordinary collision refuses before publication");
+        catalog.clear();
+        TypeRequirement tag = new TypeRequirement("/Event", "event", "struct Event", "semantic", "struct Event { int value; };",
+            "definition", List.of(), List.of("tag:Event"), "authored tag-only constructor facts");
+        catalog.reserveOrdinary("Event", () -> {});
+        catalog.admit(Map.of(tag.path, tag), () -> {});
+        check(catalog.definitions.size() == 1, "separate tag namespace remains supported where evidenced");
+        catalog.reserveOrdinary("Event", () -> {});
+        check(catalog.ordinaryNames.size() == 1, "repeat or replay does not consume another slot");
+        catalog.clear();
+        try { catalog.reserveOrdinary("cancelled", () -> { throw new InterruptedException("cancel"); });
+            throw new AssertionError("reservation cancellation"); }
+        catch (InterruptedException expected) { check(catalog.ordinaryNames.isEmpty(), "cancelled reservation is atomic"); }
+        rejected(PrototypeRefusalCode.LIMIT, () -> catalog.reserveOrdinary("x".repeat(4097), () -> {}));
     }
     public static void run() throws Exception {
         enumBounds();
+        faithfulCoverage();
         catalogBounds();
+        ordinaryNamespaces();
         catalogReplay();
         new PrototypeBudget().parameters(256, false);
         new PrototypeBudget().parameters(0, false);

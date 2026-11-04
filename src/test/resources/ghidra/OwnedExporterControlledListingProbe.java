@@ -93,6 +93,61 @@ public final class OwnedExporterControlledListingProbe {
             new Class<?>[]{Function.class, Path.class, Path.class, planning}, function,
             Files.createDirectories(work.resolve("owned-globals")), Files.createDirectories(work.resolve("owned-types")), null);
         OwnedExporterReferencedBytesProbe.check(((String)OwnedExporterReferencedBytesProbe.get(metadata, "evidence")).contains(id), "metadata and byte collector share leaf key");
+        Set<String> expectedIds = Set.of("global_0000000000002000", "global_0000000000002008", "global_0000000000002010", id);
+        try (var paths = Files.list(work.resolve("owned-globals"))) {
+            OwnedExporterReferencedBytesProbe.check(paths.map(p -> p.getFileName().toString().replace(".json", "")).collect(java.util.stream.Collectors.toSet()).equals(expectedIds),
+                "mixed listing retains exactly all four raw globals");
+        }
+        for (long offset : new long[]{0x2000, 0x2008, 0x2010, 0x3008}) {
+            Address address = base.getAddressSpace().getAddress(offset);
+            Object raw = OwnedExporterReferencedBytesProbe.invoke(exporter, "globalAt", new Class<?>[]{Address.class}, address);
+            String record = (String)OwnedExporterReferencedBytesProbe.invoke(exporter, "renderGlobal", new Class<?>[]{raw.getClass()}, raw);
+            String globalId = (String)OwnedExporterReferencedBytesProbe.get(raw, "id");
+            OwnedExporterReferencedBytesProbe.check(OwnedExporterReferencedBytesProbe.get(raw, "address").equals(address), "exact observed global address " + address);
+            OwnedExporterReferencedBytesProbe.check(Files.readString(work.resolve("owned-globals").resolve(globalId + ".json")).equals(record),
+                "published raw address/type/initializer/origin are unchanged: " + globalId);
+            OwnedExporterReferencedBytesProbe.check(((String)OwnedExporterReferencedBytesProbe.get(metadata, "evidence")).contains(globalId), "raw ID retained " + globalId);
+            if (offset != 0x3008) {
+                Data rawData = program.getListing().getDataAt(address);
+                OwnedExporterReferencedBytesProbe.check(rawData.getLength() == 1 &&
+                    OwnedExporterReferencedBytesProbe.get(raw, "type").equals(rawData.getDataType().getDisplayName()) &&
+                    OwnedExporterReferencedBytesProbe.get(raw, "initializer").equals("00h") && record.contains("\"requestedLength\":8"),
+                    "unsupported listing stays one byte with separate eight-byte observation");
+            }
+        }
+        String failure = (String)OwnedExporterReferencedBytesProbe.get(metadata, "failure");
+        OwnedExporterReferencedBytesProbe.check(!(boolean)OwnedExporterReferencedBytesProbe.get(metadata, "evidenceComplete") &&
+            failure.equals("data-reference recovery refused: metadataRefusal=UNSUPPORTED_SHAPE;detail=TYPE_CONSTRUCTOR; type recovery refused: metadataRefusal=UNSUPPORTED_SHAPE;detail=TYPE_CONSTRUCTOR"),
+            "exact independent data-reference and signature refusals: " + failure);
+        var coverage = (ExportProgramModelOwned.PlannedTypeCoverage)OwnedExporterReferencedBytesProbe.get(metadata, "coverage");
+        OwnedExporterReferencedBytesProbe.check(coverage.byPath.isEmpty(), "neither Undefined nor OwnedSlots contributes declarations to selected void-pointer leaf");
+        OwnedExporterPrototypeProbe.program = program;
+        OwnedExporterPrototypeProbe.manager = program.getDataTypeManager();
+        OwnedExporterPrototypeProbe.target = ExportProgramModelOwned.TargetContext.capture(program);
+        OwnedExporterPrototypeProbe.I = new IntegerDataType(program.getDataTypeManager());
+        OwnedExporterPrototypeProbe.collectorStatuses(metadata, false);
+        System.out.println("owned mixed listing raw globals two phase refusals and failed partial statuses passed");
+
+        Address cleanCode = base.add(0x340);
+        program.getMemory().setByte(cleanCode, (byte)0xc3);
+        OwnedExporterReferencedBytesProbe.check(new DisassembleCommand(cleanCode, null, true).applyTo(program, TaskMonitor.DUMMY), "clean positive disassembly");
+        Function clean = program.getFunctionManager().createFunction("clean_probe", cleanCode, new AddressSet(cleanCode), SourceType.USER_DEFINED);
+        clean.setReturnType(new IntegerDataType(program.getDataTypeManager()), SourceType.USER_DEFINED);
+        clean.replaceParameters(Function.FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, SourceType.USER_DEFINED,
+            new ParameterImpl("value", new IntegerDataType(program.getDataTypeManager()), program));
+        program.getReferenceManager().addMemoryReference(cleanCode, slot, RefType.INDIRECTION, SourceType.USER_DEFINED, 0);
+        ExportProgramModelOwned cleanExporter = new ExportProgramModelOwned();
+        OwnedExporterReferencedBytesProbe.field(cleanExporter, "currentProgram", program);
+        OwnedExporterReferencedBytesProbe.field(cleanExporter, "monitor", TaskMonitor.DUMMY);
+        OwnedExporterReferencedBytesProbe.invoke(cleanExporter, "collectReferencedByteEvidence", new Class<?>[]{List.class}, List.of(clean));
+        Object cleanMetadata = OwnedExporterReferencedBytesProbe.invoke(cleanExporter, "collectFunctionMetadata",
+            new Class<?>[]{Function.class, Path.class, Path.class, planning}, clean,
+            Files.createDirectories(work.resolve("clean-globals")), Files.createDirectories(work.resolve("clean-types")), null);
+        OwnedExporterReferencedBytesProbe.check((boolean)OwnedExporterReferencedBytesProbe.get(cleanMetadata, "evidenceComplete") &&
+            OwnedExporterReferencedBytesProbe.get(cleanMetadata, "failure") == null &&
+            ((String)OwnedExporterReferencedBytesProbe.get(cleanMetadata, "evidence")).contains(id), "clean admitted selected-leaf metadata is complete");
+        OwnedExporterPrototypeProbe.collectorStatuses(cleanMetadata, true);
+        System.out.println("owned clean admitted listing and authored typed full positive passed");
         System.out.println("owned addressed primitive and indirect origin controls passed");
     }
 
@@ -101,7 +156,9 @@ public final class OwnedExporterControlledListingProbe {
             new HeadlessGhidraApplicationConfiguration());
         var language = DefaultLanguageService.getLanguageService().getLanguage(new LanguageID("x86:LE:64:default"));
         Object consumer = new Object();
-        ProgramDB program = new ProgramDB("controlled-one-byte-listing", language, language.getDefaultCompilerSpec(), consumer);
+        // This authored C listing must use the same explicit target policy as the owned type extractor.
+        ProgramDB program = new ProgramDB("controlled-one-byte-listing", language,
+            language.getCompilerSpecByID(new ghidra.program.model.lang.CompilerSpecID("gcc")), consumer);
         try {
             int transaction = program.startTransaction("authored byte listing fixture");
             try {

@@ -90,9 +90,11 @@ class GhidraReferencedBytesExporterTest {
         assertTrue(work.resolve("controlled-listing.log").readText().contains("controlled real listing passed"))
         if (owned) {
             assertTrue(work.resolve("controlled-listing.log").readText().contains("owned addressed primitive and indirect origin controls passed"))
+            assertTrue(work.resolve("controlled-listing.log").readText().contains("owned mixed listing raw globals two phase refusals and failed partial statuses passed"))
+            assertTrue(work.resolve("controlled-listing.log").readText().contains("owned clean admitted listing and authored typed full positive passed"))
             run("typed-prototype", listOf(javaBin.resolve("java").toString(), "-Djava.io.tmpdir=$temporary", "-Duser.home=$home",
                 "-Djava.util.prefs.userRoot=$home/prefs", "-Djna.tmpdir=$temporary", "-XX:-UsePerfData", "-cp", classpath,
-                "OwnedExporterPrototypeProbe", work.resolve("prototype-controls").toString()))
+                "OwnedExporterPrototypeProbe", work.resolve("prototype-controls").toString(), applicationRoots.single().toString()))
             val typedLog = work.resolve("typed-prototype.log").readText()
             assertTrue(typedLog.contains("owned typed prototype API probe passed"))
             assertTrue(typedLog.contains("owned builtin alias extraction and fallback controls passed"))
@@ -102,6 +104,17 @@ class GhidraReferencedBytesExporterTest {
             assertTrue(typedLog.contains("owned prototype bounds and cancellation passed"))
             assertTrue(typedLog.contains("owned deterministic type closure and immutable coverage controls passed"))
             assertTrue(typedLog.contains("owned full status schema refusal and checkpoint binding controls passed"))
+            assertTrue(typedLog.contains("owned faithful scalar record enum array definitions and coverage controls passed"))
+            assertTrue(typedLog.contains("owned target rank manager convention role and storage controls passed"))
+            assertTrue(typedLog.contains("owned typed alias parameter and catalog ordinary namespace controls passed"))
+            assertTrue(typedLog.contains("owned actual collector local refusal normal planning catalog replay and bindings passed"))
+            assertTrue(typedLog.contains("owned actual collector repeated refusal charged bound and graph atomicity passed"))
+            assertTrue(typedLog.contains("owned actual collector cancellation IO integrity origin target conflict and limits passed"))
+            assertTrue(typedLog.contains("owned local refusal 514 function sparse contiguous replay four commitments passed"))
+            run("faithful-header-compiler-identity", listOf("gcc", "-v"))
+            assertTrue(work.resolve("faithful-header-compiler-identity.log").readText().contains("Target: x86_64"), "header controls require the recorded x86-64 GCC policy")
+            run("faithful-header", listOf("gcc", "-std=c11", "-Wall", "-Wextra", "-Werror", "-fsyntax-only", "-x", "c",
+                work.resolve("prototype-controls/faithful/faithful-types.h").toString()))
             assertEquals(exporterHash, sha256(Files.readAllBytes(exporterSource)), "source remained exact during probe execution")
         }
     }

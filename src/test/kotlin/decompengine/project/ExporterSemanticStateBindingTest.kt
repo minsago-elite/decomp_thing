@@ -23,9 +23,9 @@ class ExporterSemanticStateBindingTest {
         assertNotEquals(digest, harness.fingerprint(original.mutateRecord(0, "prototype=int alpha(void)", "prototype=int alpha(int x)")))
         assertNotEquals(digest, harness.fingerprint(original.mutateRecord(original.frames.lastIndex,
             "prototype=int future(void)", "prototype=int future(int drifted)")))
-        val current = """{"schemaVersion":2,"exporterVersion":19,"exporterSha256":"current","recoveryMode":"full","decompilationWorkers":1,"semanticStateBinding":null}"""
+        val current = """{"schemaVersion":2,"exporterVersion":20,"exporterSha256":"current","recoveryMode":"full","decompilationWorkers":1,"semanticStateBinding":null}"""
         harness.requireReusableState(current, current)
-        listOf(current.replace(":19", ":18"), current.replace("current", "changed"),
+        listOf(current.replace(":20", ":19"), current.replace(":20", ":18"), current.replace("current", "changed"),
             current.replace("full", "planning"), current.replace("Workers\":1", "Workers\":4")).forEach { stale ->
             val failure = assertFailsWith<InvocationTargetException> { harness.requireReusableState(stale, current) }
             assertTrue(failure.cause is IllegalStateException)
