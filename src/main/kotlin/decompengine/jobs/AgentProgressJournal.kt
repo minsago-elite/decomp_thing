@@ -100,6 +100,7 @@ class AgentProgressJournal private constructor(
                     hooks.maximumQueuedEvents,
                     hooks.beforeFinalize,
                     hooks.beforeAppend,
+                    hooks.afterBatchWritten,
                 )
             }
             requireSequenceCapacity()
