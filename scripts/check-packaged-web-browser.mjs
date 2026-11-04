@@ -16,6 +16,7 @@ import { finalizePublication } from './packaged-browser-report.mjs';
 import { qualifyUpgrade, qualifyUpgradeCache } from './packaged-browser-upgrade.mjs';
 import { qualifyAudit, assertAudit } from './packaged-browser-audit.mjs';
 import { createResponsiveSection, responsiveFixtures, qualifyResponsive, assessResponsiveReport } from './packaged-browser-responsive.mjs';
+import { boundedArgv, createRealZoomSection, qualifyRealZoom, assessRealZoomReport } from './packaged-browser-real-zoom.mjs';
 import { PackagedBrowserCdpDiagnostics } from './packaged-browser-cdp-diagnostics.mjs';
 import { AXE_VERSION, createNoticeSection, qualifyAvailabilityNotices, assessNoticeReport } from './packaged-browser-a11y-notices.mjs';
 
@@ -166,6 +167,7 @@ class Protocol {
       this.socket.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
     });
   }
+  close() { this.socket.close(); }
   on(method, listener, sessionId) {
     const key = `${sessionId ?? ''}:${method}`;
     if (!this.listeners.has(key)) this.listeners.set(key, []);
@@ -185,6 +187,9 @@ async function snapshot(directory, relative = '') {
   }
   return result;
 }
+
+/** Shared by the main browser and the #619 real-zoom processes, so both launch with the same flags. */
+const chromeFlags = (headless) => [...(headless ? ['--headless=new'] : []), '--disable-gpu', ...(values['no-sandbox'] ? ['--no-sandbox'] : []), '--no-first-run', '--no-default-browser-check', '--disable-background-networking', '--disable-extensions', '--disable-default-apps', '--disable-sync', '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1'];
 
 const forcedKill = new WeakSet();
 async function stop(process) {
@@ -542,7 +547,9 @@ try {
   browserTmp = await fs.mkdtemp(join(repo, '.ct-'));
   report.browserTempDirectory = browserTmp;
   await fs.mkdir(profile);
-  browser = startOwned(chromeBinary, [...(observeNativeVisibility ? [] : ['--headless=new']), '--disable-gpu', ...(values['no-sandbox'] ? ['--no-sandbox'] : []), '--no-first-run', '--no-default-browser-check', '--disable-background-networking', '--disable-extensions', '--disable-default-apps', '--disable-sync', '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1', `--user-data-dir=${profile}`, 'about:blank'], {
+  const browserArgv = [...chromeFlags(!observeNativeVisibility), `--user-data-dir=${profile}`, 'about:blank'];
+  report.browserArgv = boundedArgv(browserArgv); // #619: the real-zoom gate compares its processes' argv against this.
+  browser = startOwned(chromeBinary, browserArgv, {
     env: { ...process.env, TMPDIR: browserTmp }, stdio: ['ignore', 'ignore', 'pipe'],
   });
   browser.stderr.on('data', (chunk) => { browserError = (browserError + chunk).slice(-1048576); });
@@ -733,6 +740,14 @@ try {
       fixtures: () => responsiveFixtures({ repo, python: values.python, buildId: manifest.buildId }) });
     const responsiveFailures = assessResponsiveReport(responsive);
     assert.deepEqual(responsiveFailures, [], `Packaged #619 responsive failures:\n${responsiveFailures.join('\n')}`);
+    // #619 genuine 200%/400% page zoom: three fresh owned Chrome processes (1x calibration, 2x, 4x) with the same
+    // executable and flags. Attached before any launch so partial evidence and cleanup records are published.
+    const realZoom = report.auditRealZoom = createRealZoomSection();
+    await qualifyRealZoom({ section: realZoom, repo, chromeBinary, chromeSha256: report.tools.chromeSha256, baseArgs: chromeFlags(true), env: process.env,
+      spawnChrome: startOwned, stop, connect: async (url) => new Protocol(await connectDevTools(url)), root, origin, delay,
+      fixtures: () => responsiveFixtures({ repo, python: values.python, buildId: manifest.buildId }) });
+    const realZoomFailures = assessRealZoomReport(realZoom, { chromeSha256: report.tools.chromeSha256, browser: report.browser, browserArgv: report.browserArgv, fixtures: responsive.fixtures });
+    assert.deepEqual(realZoomFailures, [], `Packaged #619 real browser zoom failures:\n${realZoomFailures.join('\n')}`);
     assert.ok(targets.filter((target) => !target.cspProbe).every((target) => target.requests.every((entry) => entry.url.startsWith(origin + '/') || entry.url.startsWith('data:'))), 'Audit fetched an external dependency');
     assert.equal(await fs.stat(data).then(() => true, () => false), false, 'Fixture-backed audit created job data');
     report.jobDataCreated = false;

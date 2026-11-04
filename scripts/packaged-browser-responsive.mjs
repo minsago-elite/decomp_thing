@@ -244,8 +244,20 @@ function ledgerSummary(entries) {
     failed: entries.filter((e) => e.status >= 400 || e.unmapped).length, truncated: rows.length > LEDGER_CAP, paths: rows.slice(0, LEDGER_CAP) };
 }
 
-/** Drives the matrix; appends each observation as built; records failure and restores state without masking errors. */
-export async function qualifyResponsive({ cdp, makeTarget, evaluate, ready, delay, root, origin, fixtures, section = createResponsiveSection() }) {
+const emulateProfile = async (profile, call) => {
+  await call('Emulation.setDeviceMetricsOverride', { width: profile.width, height: profile.height, deviceScaleFactor: profile.deviceScaleFactor, mobile: profile.mobile });
+  await call('Emulation.setTouchEmulationEnabled', { enabled: profile.narrow, maxTouchPoints: profile.narrow ? 5 : 1 });
+};
+const emulateControl = (call) => call('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+
+/**
+ * Drives the matrix; appends each observation as built; records failure and restores state without masking errors.
+ * The defaults are the v2 emulation audit. The real-zoom section (packaged-browser-real-zoom.mjs) passes its own
+ * profiles, a sizer that only enables labelled touch emulation and observes size, a per-navigation probe, and
+ * restoreMetrics:false so no device-metrics method is ever sent on a zoomed target.
+ */
+export async function qualifyResponsive({ cdp, makeTarget, evaluate, ready, delay, root, origin, fixtures, section = createResponsiveSection(),
+  profiles = RESPONSIVE_PROFILES, sizing = RESPONSIVE_SIZING, sizeProfile = emulateProfile, sizeControl = emulateControl, afterNavigate = null, restoreMetrics = true }) {
   let target = null; let failed = false; let fetchHandler = null;
   const call = (method, params = {}) => cdp.call(method, params, target.sessionId);
   const served = [];
@@ -274,6 +286,7 @@ export async function qualifyResponsive({ cdp, makeTarget, evaluate, ready, dela
     await call('Page.navigate', { url: origin + path });
     await ready(target, `document.querySelector('main h1') !== null && document.querySelector('main [aria-busy="true"]') === null`, label);
     await evaluate(target, INPUT_RECORDER);
+    if (afterNavigate) await afterNavigate(target, label);
   };
   const input = () => evaluate(target, 'window.__responsiveInput.splice(0)');
   // Forward first where the target follows main h1 in DOM order (regions); backward first for header controls.
@@ -350,10 +363,9 @@ export async function qualifyResponsive({ cdp, makeTarget, evaluate, ready, dela
     cdp.on('Fetch.requestPaused', fetchHandler, target.sessionId);
     await call('Fetch.enable', { patterns: [{ urlPattern: `${origin}/nested/api/v1/*`, requestStage: 'Request' }] });
 
-    for (const profile of RESPONSIVE_PROFILES) {
-      await call('Emulation.setDeviceMetricsOverride', { width: profile.width, height: profile.height, deviceScaleFactor: profile.deviceScaleFactor, mobile: profile.mobile });
-      await call('Emulation.setTouchEmulationEnabled', { enabled: profile.narrow, maxTouchPoints: profile.narrow ? 5 : 1 });
-      const base = { profile: profile.key, profileName: profile.name, sizing: RESPONSIVE_SIZING };
+    for (const profile of profiles) {
+      await sizeProfile(profile, call, target);
+      const base = { profile: profile.key, profileName: profile.name, sizing };
 
       // Display preferences disclosure: trusted Tab to the trigger, Enter opens, Tab enters, Escape closes and returns focus.
       phase = `${profile.key}/preferences/disclosure`; let ledgerStart = phaseStart();
@@ -464,7 +476,7 @@ export async function qualifyResponsive({ cdp, makeTarget, evaluate, ready, dela
     // byte is refused with the product's case-refusal copy (tamper). Its reads are ledgered separately.
     const control = RESPONSIVE_REGIONS[0];
     const contentPath = [...fixtures.artifacts.entries()].find(([, value]) => value.kind === control.artifact)[0];
-    await call('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+    await sizeControl(call, target);
     const alerts = `[...document.querySelectorAll('main [role="alert"]')].map(e => e.textContent.trim().slice(0, 240))`;
     const runControl = async (label) => {
       phase = `digest/${label}`;
@@ -501,9 +513,9 @@ export async function qualifyResponsive({ cdp, makeTarget, evaluate, ready, dela
         await call('Fetch.disable');
         if (fetchHandler) cdp.off?.('Fetch.requestPaused', fetchHandler, target.sessionId);
         await call('Emulation.setTouchEmulationEnabled', { enabled: false });
-        await call('Emulation.clearDeviceMetricsOverride');
+        if (restoreMetrics) await call('Emulation.clearDeviceMetricsOverride');
         await evaluate(target, `(document.activeElement?.blur?.(), true)`);
-        section.restored = { touch: false, metricsCleared: true, focus: await evaluate(target, `document.activeElement === document.body || document.activeElement === null`) };
+        section.restored = { touch: false, metricsCleared: restoreMetrics ? true : 'never-overridden', focus: await evaluate(target, `document.activeElement === document.body || document.activeElement === null`) };
         await cdp.call('Target.closeTarget', { targetId: target.targetId });
       } catch (restoreError) {
         section.restored = null;
@@ -573,7 +585,7 @@ function ledgerFailures(ledger, exact = []) {
 }
 
 /** Whole-run ledger: setup, teardown and between-phase requests included; nothing dropped, failed, mutating or storming. */
-function runLedgerFailures(l) {
+export function runLedgerFailures(l) {
   if (!l || typeof l !== 'object' || !Array.isArray(l.paths) || !l.unledgered || !Array.isArray(l.unledgered.paths)) return ['run request ledger missing'];
   const out = [];
   if (!(Number.isInteger(l.dropped) && l.dropped === 0)) out.push(`run request ledger truncated (${cap(String(l.dropped))} dropped beyond ${MAX_RUN_REQUESTS})`);
@@ -592,17 +604,19 @@ function runLedgerFailures(l) {
 }
 
 /** Semantic failures for one observation. */
-export function assessResponsiveObservation(o, expected, identity, regions = RESPONSIVE_REGIONS) {
+export function assessResponsiveObservation(o, expected, identity, regions = RESPONSIVE_REGIONS, options = {}) {
   const failures = [];
   const where = `${expected.profile}/${expected.kind}/${expected.subject}`;
   const fail = (message) => failures.push(`${where}: ${message}`);
-  const profile = RESPONSIVE_PROFILES.find((p) => p.key === expected.profile);
-  if (o.profileName !== profile.name || o.sizing !== RESPONSIVE_SIZING) fail('profile identity or sizing label differs');
+  const profile = options.profile ?? RESPONSIVE_PROFILES.find((p) => p.key === expected.profile);
+  if (o.profileName !== profile.name || o.sizing !== (options.sizing ?? RESPONSIVE_SIZING)) fail('profile identity or sizing label differs');
   const s = o.screenshot ?? {};
   const page = o.page ?? o.afterKeys ?? o.routed;
   if (s.name !== screenshotName(expected) || !HEX64.test(s.sha256 ?? '') || !(s.bytes > 0 && s.bytes <= MAX_RESPONSIVE_PNG_BYTES)) fail('bounded screenshot evidence missing');
-  else { const problem = screenshotFailure(s, profile); if (problem) fail(problem); }
-  if (page && (page.innerWidth !== profile.width || page.devicePixelRatio !== profile.deviceScaleFactor)) fail(`observed ${page.innerWidth}px @${page.devicePixelRatio}x differs from the profile`);
+  else { const problem = (options.screenshotFailure ?? screenshotFailure)(s, profile); if (problem) fail(problem); }
+  if (options.pageFailure) { for (const [label, value] of [['page', page], ['before', o.before], ['afterDrag', o.afterDrag], ['routed', o.routed]]) {
+    const problem = value ? options.pageFailure(value) : null; if (problem) fail(`${label}: ${problem}`); } }
+  else if (page && (page.innerWidth !== profile.width || page.devicePixelRatio !== profile.deviceScaleFactor)) fail(`observed ${page.innerWidth}px @${page.devicePixelRatio}x differs from the profile`);
   const region = expected.kind === 'region' ? regions.find((r) => r.key === expected.subject) : null;
   const artifactPath = region?.artifact ? identity?.artifactPaths?.[region.artifact] : null;
   const exact = [...(artifactPath ? [{ path: artifactPath, count: 1 }] : []), ...(region?.hexRows && identity?.hex?.chunkPath ? [{ path: identity.hex.chunkPath, count: 1 }] : [])];
@@ -665,7 +679,7 @@ export function assessResponsiveObservation(o, expected, identity, regions = RES
 }
 
 /** Digest control: positive exact read renders; tampered read of the same single artifact is refused with product copy only. */
-function digestFailures(d, f) {
+export function digestFailures(d, f) {
   const out = [];
   const bound = f.artifacts?.find?.((a) => a?.kind === d?.kind && a.sha256 === d?.expectedSha256 && a.sizeBytes === d?.expectedBytes);
   if (!bound || d.kind !== RESPONSIVE_REGIONS[0].artifact) return ['real-client digest control missing or not bound to the fixture artifact'];
@@ -692,15 +706,7 @@ export function assessResponsiveReport(section) {
   if (section.schema !== RESPONSIVE_SCHEMA) failures.push(`auditResponsive schema ${JSON.stringify(section.schema ?? null)}`);
   if (section.sizing !== RESPONSIVE_SIZING || section.touch !== RESPONSIVE_TOUCH) failures.push('sizing/touch provenance labels changed');
   const f = section.fixtures ?? {};
-  if (f.generator !== 'frontend/dev/generate-fixtures.py' || !HEX64.test(f.generatorSha256 ?? '') || !HEX64.test(f.outputSha256 ?? '') || !HEX64.test(f.schemaSha256 ?? '')) failures.push('fixture generator identity missing');
-  if (f.jobId !== RESPONSIVE_JOB || f.runId !== RESPONSIVE_RUN || f.revisionId !== RESPONSIVE_REVISION
-    || JSON.stringify(f.explorationRuns) !== JSON.stringify(RESPONSIVE_EXPLORATION.map((k) => `${RESPONSIVE_RUN}_${k}`))) failures.push('fixture identities differ from the #619 scenario');
-  for (const [name, pattern] of Object.entries(LONG_NAME_CLASSES)) if (typeof f.longName !== 'string' || !pattern.test(f.longName)) failures.push(`long name lacks ${name} text`);
-  if (!(typeof f.longName === 'string' && f.longName.length >= 160)) failures.push('long name is not long');
-  if (!Array.isArray(f.artifacts) || RESPONSIVE_EXPLORATION.some((kind) => f.artifacts.filter((a) => a?.kind === kind && a.sizeBytes > 0 && HEX64.test(a.sha256 ?? '')).length !== 1)
-    || RESPONSIVE_EXPLORATION.some((kind) => typeof f.artifactPaths?.[kind] !== 'string'))
-    failures.push('bound exploration artifacts missing');
-  if (!(f.hex?.rows >= 1) || !HEX64.test(f.hex?.textSha256 ?? '') || typeof f.hex?.chunkPath !== 'string' || !(f.hex?.hexChars >= 1024)) failures.push('bound hex source chunk missing');
+  failures.push(...fixtureFailures(f));
   const observations = Array.isArray(section.observations) ? section.observations : [];
   const matrix = expectedObservations();
   if (observations.length !== matrix.length) failures.push(`expected ${matrix.length} observations, found ${observations.length}`);
@@ -725,9 +731,24 @@ export function assessResponsiveReport(section) {
   return failures;
 }
 
+/** Fixture generator identity and #619 scenario bindings (shared by the v2 gate and the real-zoom gate). */
+export function fixtureFailures(f) {
+  const failures = [];
+  if (f.generator !== 'frontend/dev/generate-fixtures.py' || !HEX64.test(f.generatorSha256 ?? '') || !HEX64.test(f.outputSha256 ?? '') || !HEX64.test(f.schemaSha256 ?? '')) failures.push('fixture generator identity missing');
+  if (f.jobId !== RESPONSIVE_JOB || f.runId !== RESPONSIVE_RUN || f.revisionId !== RESPONSIVE_REVISION
+    || JSON.stringify(f.explorationRuns) !== JSON.stringify(RESPONSIVE_EXPLORATION.map((k) => `${RESPONSIVE_RUN}_${k}`))) failures.push('fixture identities differ from the #619 scenario');
+  for (const [name, pattern] of Object.entries(LONG_NAME_CLASSES)) if (typeof f.longName !== 'string' || !pattern.test(f.longName)) failures.push(`long name lacks ${name} text`);
+  if (!(typeof f.longName === 'string' && f.longName.length >= 160)) failures.push('long name is not long');
+  if (!Array.isArray(f.artifacts) || RESPONSIVE_EXPLORATION.some((kind) => f.artifacts.filter((a) => a?.kind === kind && a.sizeBytes > 0 && HEX64.test(a.sha256 ?? '')).length !== 1)
+    || RESPONSIVE_EXPLORATION.some((kind) => typeof f.artifactPaths?.[kind] !== 'string'))
+    failures.push('bound exploration artifacts missing');
+  if (!(f.hex?.rows >= 1) || !HEX64.test(f.hex?.textSha256 ?? '') || typeof f.hex?.chunkPath !== 'string' || !(f.hex?.hexChars >= 1024)) failures.push('bound hex source chunk missing');
+  return failures;
+}
+
 /** Bounded, no-symlink regular-file read of one fixed-name PNG; returns size, sha256 and IHDR dimensions. */
-export async function readResponsivePng(directory, name, { maxBytes = MAX_RESPONSIVE_PNG_BYTES } = {}) {
-  if (!FIXED_NAMES.has(name)) throw new Error(`unexpected screenshot name ${JSON.stringify(cap(String(name)))}`);
+export async function readResponsivePng(directory, name, { maxBytes = MAX_RESPONSIVE_PNG_BYTES, names = FIXED_NAMES } = {}) {
+  if (!names.has(name)) throw new Error(`unexpected screenshot name ${JSON.stringify(cap(String(name)))}`);
   const path = join(directory, name);
   const link = await fs.lstat(path);
   if (link.isSymbolicLink() || !link.isFile()) throw new Error(`${name} is not a regular file`);
@@ -749,12 +770,12 @@ export async function readResponsivePng(directory, name, { maxBytes = MAX_RESPON
   } finally { await handle.close(); }
 }
 
-export async function verifyResponsiveScreenshots(directory, section) {
+export async function verifyResponsiveScreenshots(directory, section, { names = FIXED_NAMES } = {}) {
   const failures = [];
   for (const o of section?.observations ?? []) {
     const s = o?.screenshot ?? {};
     try {
-      const actual = await readResponsivePng(directory, s.name);
+      const actual = await readResponsivePng(directory, s.name, { names });
       if (actual.bytes !== s.bytes || actual.sha256 !== s.sha256 || actual.width !== s.width || actual.height !== s.height) failures.push(`${s.name}: retained PNG differs from recorded size/sha256/dimensions`);
     } catch (error) {
       failures.push(`${cap(String(s.name))}: retained PNG invalid (${error?.code === 'ENOENT' ? 'missing' : cap(String(error?.message ?? error))})`);

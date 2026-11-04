@@ -7,27 +7,32 @@
 // to equal the recorded values; the PNGs are not part of the format-integrity manifest.
 // With --require-responsive-audit, every passed audit report must also pass the #619 responsive gate
 // (fixed-name, PNG-validated clips). Opt-in so reports retained before #619 coverage keep their format verdict.
+// With --require-real-zoom, every passed audit report must also carry passing auditRealZoom evidence (1x calibration,
+// genuine 200%/400% page zoom, counted methods, cleanup records, Chrome identity) and its retained PNGs must match.
 import { isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { loadReport, verifyRetainedReports } from './packaged-browser-report.mjs';
 import { applySessionNoticeGate } from './packaged-browser-a11y-notices.mjs';
 import { applyAuditResponsiveGate } from './packaged-browser-responsive.mjs';
+import { applyRealZoomGate } from './packaged-browser-real-zoom.mjs';
 
-let parent, requiredModes, requireResponsive;
+let parent, requiredModes, requireResponsive, requireRealZoom;
 try {
-  const { values, positionals } = parseArgs({ options: { 'require-modes': { type: 'string' }, 'require-responsive-audit': { type: 'boolean' } }, allowPositionals: true });
+  const { values, positionals } = parseArgs({ options: { 'require-modes': { type: 'string' }, 'require-responsive-audit': { type: 'boolean' }, 'require-real-zoom': { type: 'boolean' } }, allowPositionals: true });
   parent = positionals[0] ?? join(fileURLToPath(new URL('..', import.meta.url)), 'build');
   requireResponsive = values['require-responsive-audit'] === true;
+  requireRealZoom = values['require-real-zoom'] === true;
   requiredModes = values['require-modes'] === undefined ? [] : values['require-modes'].split(',');
   if (positionals.length > 1 || !isAbsolute(parent) || requiredModes.some(mode => !/^[a-z][a-z0-9-]*$/.test(mode)) || new Set(requiredModes).size !== requiredModes.length)
     throw new Error('Invalid parent or required modes');
 } catch {
-  console.error('Usage: node scripts/verify-packaged-browser-reports.mjs [/absolute/parent] [--require-modes mode1,mode2,...] [--require-responsive-audit]');
+  console.error('Usage: node scripts/verify-packaged-browser-reports.mjs [/absolute/parent] [--require-modes mode1,mode2,...] [--require-responsive-audit] [--require-real-zoom]');
   process.exit(2);
 }
 const noticed = await applySessionNoticeGate(await verifyRetainedReports(parent, { requiredModes }), directory => loadReport(directory));
-const results = requireResponsive ? await applyAuditResponsiveGate(noticed, directory => loadReport(directory)) : noticed;
-for (const r of results) console.log(`${r.ok ? 'verified' : 'INVALID '} ${r.directory}${r.ok ? ` status=${r.status}${r.gate ? ` notice-gate=${r.gate}` : ''}${r.responsiveGate ? ` responsive-gate=${r.responsiveGate}` : ''}` : `: ${r.error}`}`);
+const responsive = requireResponsive ? await applyAuditResponsiveGate(noticed, directory => loadReport(directory)) : noticed;
+const results = requireRealZoom ? await applyRealZoomGate(responsive, directory => loadReport(directory)) : responsive;
+for (const r of results) console.log(`${r.ok ? 'verified' : 'INVALID '} ${r.directory}${r.ok ? ` status=${r.status}${r.gate ? ` notice-gate=${r.gate}` : ''}${r.responsiveGate ? ` responsive-gate=${r.responsiveGate}` : ''}${r.realZoomGate ? ` real-zoom-gate=${r.realZoomGate}` : ''}` : `: ${r.error}`}`);
 if (results.length === 0) console.log(`No retained packaged-browser report directories under ${parent}`);
 if (results.some(r => !r.ok)) process.exitCode = 1;

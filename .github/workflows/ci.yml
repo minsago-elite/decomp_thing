@@ -71,6 +71,11 @@ jobs:
           node --check scripts/packaged-browser-engines.mjs
       - name: Verify packaged upload route readiness controls
         run: node scripts/test-packaged-browser-upload.mjs
+      - name: Verify packaged real browser zoom controls
+        timeout-minutes: 4
+        run: |
+          node --check scripts/packaged-browser-real-zoom.mjs
+          node --test --test-timeout=240000 scripts/test-packaged-browser-real-zoom.mjs
       - name: Verify bounded packaged report retention controls
         run: |
           node --check scripts/packaged-browser-report.mjs
@@ -256,7 +261,7 @@ jobs:
       NPM_CONFIG_CACHE: ${{ github.workspace }}/build/npm-download-cache
     name: Packaged web contracts and browser
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 35
     permissions:
       contents: read
     defaults:
@@ -398,7 +403,7 @@ jobs:
         run: >-
           node scripts/verify-packaged-browser-reports.mjs "$GITHUB_WORKSPACE/build"
           --require-modes legacy,session,upload,metadata,live,scale,restart,audit,proxy
-          --require-responsive-audit
+          --require-responsive-audit --require-real-zoom
       - name: Retain sanitized packaged web evidence
         uses: actions/upload-artifact@v7
         if: always()
