@@ -437,9 +437,9 @@ internal object WebProgramStructureBuilder {
 
         private fun table(parser: JsonParser, kind: WebStructureKind, maximum: Int): WebStructureTable {
             expect(parser.nextToken(), JsonToken.START_ARRAY)
-            val ids = ArrayList<String>(); val names = ArrayList<String?>(); val offsets = ArrayList<Long>()
-            val addresses = ArrayList<Long>(); val hasAddress = ArrayList<Boolean>(); val status = ArrayList<WebExtractionStatus>()
-            val calls = ArrayList<Array<String>>(); val globals = ArrayList<Array<String>>(); val strings = ArrayList<Int>()
+            val ids = ArrayList<String>(); val names = ArrayList<String?>(); val offsets = LongColumn()
+            val addresses = LongColumn(); val hasAddress = BooleanColumn(); val status = ArrayList<WebExtractionStatus>()
+            val calls = ArrayList<Array<String>>(); val globals = ArrayList<Array<String>>(); val strings = IntColumn()
             val expectedFields = fields(kind)
             while (true) {
                 val token = parser.nextToken()
@@ -447,7 +447,7 @@ internal object WebProgramStructureBuilder {
                 expect(token, JsonToken.START_OBJECT)
                 if (ids.size >= maximum) throw WebStructureFailure("limit-exceeded", "MODEL_ENTITIES_EXCEEDED")
                 budget.charge(512)
-                offsets += parser.currentTokenLocation().byteOffset
+                offsets.add(parser.currentTokenLocation().byteOffset)
                 var seenFieldCount = 0
                 var id: String? = null; var name: String? = null; var address: String? = null
                 var label: String? = null; var assessment: String? = null
@@ -481,15 +481,45 @@ internal object WebProgramStructureBuilder {
                 val parsedAddress = address?.let(::parseAddress)
                 if (address != null && parsedAddress == null) malformed()
                 ids += id; names += name
-                addresses += parsedAddress ?: 0L; hasAddress += address != null
+                addresses.add(parsedAddress ?: 0L); hasAddress.add(address != null)
                 status += WebExtractionStatus.of(label ?: malformed()) ?: malformed()
-                calls += called; globals += referenced; strings += stringCount
+                calls += called; globals += referenced; strings.add(stringCount)
             }
             val size = ids.size
-            return WebStructureTable(kind, ids.toTypedArray(), names.toTypedArray(), addresses.toLongArray(),
-                hasAddress.toBooleanArray(), status.toTypedArray(), offsets.toLongArray(), IntArray(size) { OWNER_UNOWNED },
+            return WebStructureTable(kind, ids.toTypedArray(), names.toTypedArray(), addresses.toArray(),
+                hasAddress.toArray(), status.toTypedArray(), offsets.toArray(), IntArray(size) { OWNER_UNOWNED },
                 BooleanArray(size) { ids[it] in implementationUnresolved }, BooleanArray(size) { ids[it] in recoveryUnresolved },
-                calls.toTypedArray(), globals.toTypedArray(), strings.toIntArray())
+                calls.toTypedArray(), globals.toTypedArray(), strings.toArray())
+        }
+
+        private class LongColumn(initialCapacity: Int = 16) {
+            private var values = LongArray(initialCapacity)
+            private var size = 0
+            fun add(value: Long) {
+                if (size == values.size) values = values.copyOf(values.size * 2)
+                values[size++] = value
+            }
+            fun toArray(): LongArray = values.copyOf(size)
+        }
+
+        private class IntColumn(initialCapacity: Int = 16) {
+            private var values = IntArray(initialCapacity)
+            private var size = 0
+            fun add(value: Int) {
+                if (size == values.size) values = values.copyOf(values.size * 2)
+                values[size++] = value
+            }
+            fun toArray(): IntArray = values.copyOf(size)
+        }
+
+        private class BooleanColumn(initialCapacity: Int = 16) {
+            private var values = BooleanArray(initialCapacity)
+            private var size = 0
+            fun add(value: Boolean) {
+                if (size == values.size) values = values.copyOf(values.size * 2)
+                values[size++] = value
+            }
+            fun toArray(): BooleanArray = values.copyOf(size)
         }
 
         /** Bound the nested document before allocating a JSON tree, then reuse the producer's closed validator. */
