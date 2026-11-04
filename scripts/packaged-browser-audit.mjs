@@ -70,7 +70,7 @@ export function auditFixtures(repo, buildId) {
   const failureBytes = Buffer.from(JSON.stringify({ schema: 'decomp-exploration-failure', schemaVersion: 1,
     state: 'partial', failure: { phase: 'baseline', candidateIndex: 0, kind: 'timeout', code: 'behavior-deadline-exceeded' },
     samples: { baselineInputs: 1, expandedInputs: 0, baselineObserved: 0, expandedObserved: 0 },
-    details: { baselineInputs: [{ id: 'seed_default', source: 'SEED', args: ['--audit'], stdinHex: '0041' }],
+    details: { baselineInputs: [{ id: 'seed_default', source: 'SEED', args: Array.from({ length: 33 }, (_, index) => `arg-${String(index).padStart(2, '0')}`), stdinHex: 'aa'.repeat(129) }],
       expandedInputs: [], baselineObservations: [], expandedObservations: [] }, detailsOmitted: null, coverage: null, confidence: null }), 'utf8');
   const failureSha256 = createHash('sha256').update(failureBytes).digest('hex');
   const explorationBinding = createHash('sha256').update(`${jobId}\0${runId}`).digest('hex').slice(0, 32);
@@ -127,7 +127,9 @@ export function auditFixtures(repo, buildId) {
     ] },
     { action: 'Inspect case: baseline position 0: seed_default', reads: [], content: [
       { selector: 'section[aria-labelledby="retained-case-title"] p[role="status"]', text: 'behavior-deadline-exceeded' },
-      { selector: 'section[aria-labelledby="retained-case-title"] dd code', text: '00 41' },
+      { selector: 'section[aria-labelledby="retained-case-title"] ol + p', text: 'Showing the first 32 of 33 arguments.' },
+      { selector: 'section[aria-labelledby="retained-case-title"] section p', text: '129 recorded bytes. Preview is limited to the first 128 bytes.' },
+      { selector: 'section[aria-labelledby="retained-case-title"] dd code', text: 'aa aa' },
     ] },
     { action: 'Read validation evidence', reads: [`${api}/validation-history`],
       content: [{ selector: '[aria-label="Recorded validation operations"] tbody', text: owner.ownerId }] },
