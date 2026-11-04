@@ -201,6 +201,10 @@ test('fixtures bind one job, attempt and revision with long names and a self-con
   assert.equal(retained.candidateCount, 1);
   assert.equal(retained.candidates[0].id, 'seed_default');
   assert.equal(retained.observations[0].exitCode, 0);
+  const inspectStep = fixtures.pages.find((page) => page.name === 'attempt overview').preparation
+    .find((step) => step.action.startsWith('Inspect case'));
+  assert.equal(inspectStep.action, 'Inspect case "seed_default"');
+  assert.equal(inspectStep.content[0].text, 'Observed exit code: 0');
 });
 
 // Dependency-free DOM models test the actual measurement/predicate strings. These controls

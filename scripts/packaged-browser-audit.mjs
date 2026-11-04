@@ -127,7 +127,7 @@ export function auditFixtures(repo, buildId) {
     { action: 'Read retained case details', reads: [`/jobs/${jobId}/artifacts/${retainedArtifactId}/content`], content: [
       { selector: '[aria-label="Retained candidate records"] tbody', text: 'seed_default' },
     ] },
-    { action: 'Inspect case: baseline position 0: seed_default', reads: [], content: [
+    { action: 'Inspect case "seed_default"', reads: [], content: [
       { selector: 'section[aria-labelledby="retained-case-title"] p', text: 'Observed exit code: 0' },
       { selector: 'section[aria-labelledby="retained-case-title"] ol + p', text: 'Showing the first 32 of 33 arguments.' },
       { selector: 'section[aria-labelledby="retained-case-title"] section p', text: '129 recorded bytes. Preview is limited to the first 128 bytes.' },
