@@ -4,11 +4,23 @@ import decompengine.jobs.AgentProgressJournal
 import decompengine.jobs.JobStore
 import decompengine.jobs.NewWorkflowAttempt
 import decompengine.jobs.WorkflowAttemptStore
+import decompengine.jobs.WorkflowCandidate
 import decompengine.jobs.WorkflowExecutionLimits
 import decompengine.jobs.WorkflowJobInspection
 import decompengine.jobs.WorkflowKind
+import decompengine.jobs.WorkflowRunState
+import decompengine.jobs.WorkflowTerminalReason
+import decompengine.jobs.WorkflowTransition
 import decompengine.jobs.elfFixture
+import decompengine.project.GeneratedCMakeReconstructionProfile
+import decompengine.project.GeneratedFileEvidence
+import decompengine.project.ProjectFileRole
+import decompengine.project.SourceTreeManifest
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.int
+import kotlinx.serialization.json.put
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -20,6 +32,7 @@ import java.util.concurrent.TimeUnit
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertContentEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
@@ -27,7 +40,7 @@ import kotlin.test.assertTrue
 /**
  * Upload cleanup, snapshot-bound pagination and read limits through the real v1 listener. Failed uploads
  * leave no staging entry and no job; continuations stay inside their captured snapshot and selection.
- * This qualifies job/event pagination, not populated persisted source snapshots (#640 remains open).
+ * Persisted source snapshots are qualified through the listener below; this does not qualify production analysis.
  */
 class WebBoundedReadsHttpTest {
     private val root: Path = Files.createTempDirectory(Files.createDirectories(Path.of("build/test-tmp")), "web-bounded-reads-")
@@ -108,6 +121,7 @@ class WebBoundedReadsHttpTest {
             WebTestBrowser(server).use { browser ->
                 val accepted = browser.upload("first.elf", elfFixture(), "bounded-upload-key-0001")
                 assertEquals(201, accepted.statusCode(), accepted.text())
+                awaitHandlers(server) // Audit publication can finish after the response.
                 val before = digest()
                 val names = entries()
                 fun refused(response: java.net.http.HttpResponse<ByteArray>, status: Int, code: String, label: String) {
@@ -230,4 +244,144 @@ class WebBoundedReadsHttpTest {
             }
         } finally { server.stop() }
     }
+
+    @Test
+    fun `persisted candidate source pages and bounded reads stay bound to exact stored artifacts`() {
+        val inputBytes = elfFixture()
+        val job = JobStore(root).createFromUpload("source-snapshot.elf", inputBytes)
+        val inputSha = sha256(inputBytes)
+        val profile = GeneratedCMakeReconstructionProfile.descriptor
+        val runningAttempt = WorkflowAttemptStore.open(root).use { owner ->
+            val current = (owner.inspect(job.id) as WorkflowJobInspection.Available).snapshot
+            val queued = owner.create(job.id, current.version, NewWorkflowAttempt(WorkflowKind.RECONSTRUCT,
+                WorkflowExecutionLimits(60_000u, 15_000u, 1_048_576u, 16u))).attempt
+            owner.transition(job.id, queued.runId, queued.version, WorkflowTransition.Start).attempt
+        }
+        val runId = runningAttempt.runId
+        val sourceRoot = Files.createDirectories(root.resolve(job.id).resolve("reports/runs/$runId/source-tree"))
+        val sourceFiles = linkedMapOf<String, ByteArray>()
+        sourceFiles["Makefile"] = "all:\n\t@echo inert-source-fixture\n".toByteArray()
+        repeat(203) { index ->
+            val module = "unit_${index.toString().padStart(3, '0')}"
+            sourceFiles["src/modules/$module.c"] = "int $module(void) { return $index; }\n".toByteArray()
+        }
+        val tooLargeModule = "unit_203"
+        sourceFiles["src/modules/$tooLargeModule.c"] = ByteArray((WebRevisionSourceContent.MAXIMUM_FILE_BYTES + 1).toInt()) { 'x'.code.toByte() }
+
+        val inputs = sourceFiles.toSortedMap().map { (path, bytes) ->
+            val declaration = profile.layout.declarationForPath(path)
+            GeneratedFileEvidence(path, sha256(bytes), "bounded-http-fixture",
+                acceptedImplementation = if (ProjectFileRole.MODULE_IMPLEMENTATION in declaration.roles) false else null,
+                roles = declaration.roles, contentKind = declaration.contentKind)
+        }
+        val sourceSha = sha256(sourceFiles.toSortedMap().entries.joinToString("") { (path, bytes) ->
+            "${path.length}:$path:${bytes.size}:${sha256(bytes)}\n"
+        }.toByteArray())
+        val revisionId = webSourceRevisionId(sourceSha)
+        for ((path, bytes) in sourceFiles) {
+            val destination = sourceRoot.resolve(path)
+            Files.createDirectories(destination.parent)
+            Files.write(destination, bytes)
+        }
+        Files.writeString(sourceRoot.resolve("source_tree_manifest.json"), SourceTreeManifest(
+            profileId = profile.id, profileSha256 = profile.sha256, inputSha256 = inputSha,
+            files = inputs, unresolvedEntityIds = emptyList()).toJson())
+        val descriptor = buildJsonObject {
+            put("schemaVersion", 3)
+            put("sourceRevisionSha256", sourceSha)
+            put("sourceInputs", JsonArray(sourceFiles.toSortedMap().map { (path, bytes) -> buildJsonObject {
+                put("path", path); put("bytes", bytes.size); put("sha256", sha256(bytes))
+            } }))
+        }
+        val descriptorPath = sourceRoot.resolve("reports/build_contract.json")
+        Files.createDirectories(descriptorPath.parent)
+        Files.writeString(descriptorPath, descriptor.toString())
+
+        WorkflowAttemptStore.open(root).use { owner -> owner.transition(job.id, runningAttempt.runId, runningAttempt.version,
+            WorkflowTransition.Finish(WorkflowRunState.COMPLETED, WorkflowTerminalReason.COMPLETED,
+                WorkflowCandidate(revisionId, sourceSha))) }
+        WebSourceCatalogEvidence(listOf(profile), { id -> JobStore(root).readInput(id) },
+            { id, path, maximum -> JobStore(root).readArtifact(id, path, maximum) })
+            .readRevision(WebRevisionSourceReference(job.id, runId, revisionId, sourceSha, "fixture-version"))
+
+        val server = server()
+        try {
+            WebTestBrowser(server).use { browser ->
+                val base = "/w/api/v1/jobs/${job.id}/runs/$runId/revisions/$revisionId"
+                awaitHandlers(server) // Include post-response sign-in auditing in the baseline.
+                val beforeNames = entries()
+                val beforeBytes = digest()
+                val first = browser.get("$base/sources?limit=200")
+                assertEquals(200, first.statusCode(), first.text())
+                val firstData = first.data()
+                assertEquals(job.id, firstData.getValue("binding").jsonObject.getValue("jobId").jsonPrimitive.content)
+                assertEquals(runId, firstData.getValue("binding").jsonObject.getValue("runId").jsonPrimitive.content)
+                assertEquals(revisionId, firstData.getValue("binding").jsonObject.getValue("revisionId").jsonPrimitive.content)
+                assertEquals("source-input-commitments", firstData.getValue("authority").jsonPrimitive.content)
+                assertEquals(205, firstData.getValue("totalFiles").jsonPrimitive.int)
+                assertEquals(200, firstData.getValue("items").jsonArray.size)
+                val cursor = firstData.getValue("page").jsonObject.getValue("nextCursor").jsonPrimitive.content
+                val manifestPath = sourceRoot.resolve("source_tree_manifest.json")
+                val originalManifest = Files.readAllBytes(manifestPath)
+                Files.write(manifestPath, originalManifest + byteArrayOf('\n'.code.toByte()))
+                val expired = browser.get("$base/sources?limit=200&cursor=$cursor")
+                assertEquals(410, expired.statusCode(), expired.text())
+                assertEquals("CURSOR_EXPIRED", expired.errorCode())
+                Files.write(manifestPath, originalManifest)
+
+                val paths = mutableListOf<String>()
+                val ids = mutableListOf<String>()
+                var continuation: String? = null
+                do {
+                    val page = browser.get("$base/sources?limit=200" + (continuation?.let { "&cursor=$it" } ?: ""))
+                    assertEquals(200, page.statusCode(), page.text())
+                    val data = page.data()
+                    val rows = data.getValue("items").jsonArray
+                    assertTrue(rows.size in 1..200)
+                    paths += rows.map { it.jsonObject.getValue("displayName").jsonPrimitive.content }
+                    ids += rows.map { it.jsonObject.getValue("fileId").jsonPrimitive.content }
+                    continuation = data.getValue("page").jsonObject.getValue("nextCursor").jsonPrimitive.contentOrNull
+                } while (continuation != null)
+                assertEquals(sourceFiles.keys.sorted(), paths)
+                assertEquals(205, ids.distinct().size, "source file selectors are unique across all pages")
+
+                val metadata = firstData.getValue("items").jsonArray.first().jsonObject
+                val fileId = metadata.getValue("fileId").jsonPrimitive.content
+                val metadataVersion = firstData.getValue("metadataVersion").jsonPrimitive.content
+                val contentPath = "$base/source-files/$fileId/content?metadataVersion=$metadataVersion"
+                val content = browser.get(contentPath, mapOf("Accept" to "application/octet-stream"))
+                assertEquals(200, content.statusCode(), content.text())
+                assertEquals("application/octet-stream", content.headers().firstValue("Content-Type").orElse(null))
+                assertEquals(sha256(sourceFiles.getValue("Makefile")), content.headers().firstValue("X-Decomp-Content-SHA256").orElse(null))
+                assertContentEquals(sourceFiles.getValue("Makefile"), content.body())
+
+                val chunk = browser.get("$base/source-files/$fileId/chunk?offset=0&maxBytes=8&metadataVersion=$metadataVersion")
+                assertEquals(200, chunk.statusCode(), chunk.text())
+                val chunkData = chunk.data()
+                assertEquals(8, chunkData.getValue("lengthBytes").jsonPrimitive.content.toInt())
+                assertEquals(String(sourceFiles.getValue("Makefile").copyOfRange(0, 8)), chunkData.getValue("text").jsonPrimitive.content)
+                val invalidChunk = browser.get("$base/source-files/$fileId/chunk?offset=0&maxBytes=131073")
+                assertEquals(422, invalidChunk.statusCode(), invalidChunk.text())
+                assertEquals("VALIDATION_FAILED", invalidChunk.errorCode())
+
+                val largeId = ids[paths.indexOf("src/modules/$tooLargeModule.c")]
+                val tooLarge = browser.get("$base/source-files/$largeId/chunk?offset=0&maxBytes=8")
+                assertEquals(413, tooLarge.statusCode(), tooLarge.text())
+                assertEquals("SOURCE_FILE_TOO_LARGE", tooLarge.errorCode())
+
+                val changedSource = sourceRoot.resolve("Makefile")
+                Files.write(changedSource, "all:\n\t@echo changed\n".toByteArray())
+                val refusedChangedBody = browser.get(contentPath, mapOf("Accept" to "application/octet-stream"))
+                assertEquals(409, refusedChangedBody.statusCode(), refusedChangedBody.text())
+                assertEquals("SOURCE_REVISION_CHANGED", refusedChangedBody.errorCode())
+                Files.write(changedSource, sourceFiles.getValue("Makefile"))
+
+                assertEquals(beforeNames, entries(), "read requests create no storage entries")
+                assertEquals(beforeBytes, digest(), "read requests do not mutate persisted upload or source artifacts")
+            }
+        } finally { server.stop() }
+    }
+
+    private fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256").digest(bytes)
+        .joinToString("") { "%02x".format(it) }
 }

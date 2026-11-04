@@ -29,11 +29,12 @@ export function createBrowserSession(gateway: SessionGateway, basePath: string) 
   let disposed = false;
   let fragmentBlocked = false;
   let pending: Promise<void> | null = null;
-  let pendingKind: 'read' | 'exchange' | 'logout' | null = null;
+  let pendingKind: 'read' | 'revalidate' | 'exchange' | 'logout' | null = null;
   let activeBootstrapToken: string | null = null;
   let queuedBootstrapToken: string | null = null;
   let queuedConnection: Promise<void> | null = null;
   let generation = 0;
+  let lastRevalidationAt = Number.NEGATIVE_INFINITY;
   let previousInstanceId: string | null | undefined;
   let controller: AbortController | null = null;
   let expiry: ReturnType<typeof setTimeout> | null = null;
@@ -82,8 +83,9 @@ export function createBrowserSession(gateway: SessionGateway, basePath: string) 
       publish({ status: 'unavailable', reason: 'incompatible', ...reference });
     } else publish({ status: 'unavailable', reason: logout ? 'logout-unconfirmed' : 'connection', ...reference });
   }
-  function authenticated(bootstrap: Bootstrap) {
+  function authenticated(bootstrap: Bootstrap, preserveViewGeneration = false) {
     if (disposed) return;
+    const previous = state;
     const remaining = Date.parse(bootstrap.sessionExpiresAt) - Date.now();
     if (normalizeBasePath(bootstrap.basePath) !== expectedBase || !Number.isFinite(remaining)) {
       forget();
@@ -96,6 +98,9 @@ export function createBrowserSession(gateway: SessionGateway, basePath: string) 
       const instanceId = bootstrap.serverInstanceId ?? null;
       const serverChanged = previousInstanceId !== undefined && previousInstanceId !== null
         && instanceId !== null && previousInstanceId !== instanceId;
+      const viewGeneration = preserveViewGeneration && previous.status === 'authenticated'
+        && instanceId !== null && previous.runtime.serverInstanceId === instanceId
+        ? previous.generation : generation;
       // Missing older-server metadata is unknown; never reuse instance-bound state on that basis.
       if (previousInstanceId !== undefined && (instanceId === null || previousInstanceId !== instanceId)) notifyInvalidated(false);
       previousInstanceId = instanceId;
@@ -108,7 +113,7 @@ export function createBrowserSession(gateway: SessionGateway, basePath: string) 
         limits: { ...bootstrap.limits }, runtime: { ...bootstrap.runtime },
       };
       // A new bootstrap generation replaces private views even when intermediate renders coalesce.
-      publish({ status: 'authenticated', expiresAt: bootstrap.sessionExpiresAt, generation, runtime, runtimeReceipt: captureReceiptTime(),
+      publish({ status: 'authenticated', expiresAt: bootstrap.sessionExpiresAt, generation: viewGeneration, runtime, runtimeReceipt: captureReceiptTime(),
         ...(serverChanged ? { serverChanged: true as const } : {}) });
       expiry = setTimeout(() => {
         forget();
@@ -126,7 +131,7 @@ export function createBrowserSession(gateway: SessionGateway, basePath: string) 
     queuedBootstrapToken = null;
     queuedConnection = null;
   }
-  function run(operation: (signal: AbortSignal) => Promise<void>, kind: 'read' | 'exchange' | 'logout'): Promise<void> {
+  function run(operation: (signal: AbortSignal) => Promise<void>, kind: 'read' | 'revalidate' | 'exchange' | 'logout'): Promise<void> {
     if (disposed) return Promise.resolve();
     if (pending) return pending;
     const operationGeneration = ++generation;
@@ -154,6 +159,29 @@ export function createBrowserSession(gateway: SessionGateway, basePath: string) 
       if (!signal.aborted) authenticated(bootstrap);
     }, 'read');
   }
+  function revalidate(): Promise<void> {
+    if (fragmentBlocked || disposed || pending) return Promise.resolve();
+    const connectionUnavailable = state.status === 'unavailable' && state.reason === 'connection';
+    if (state.status !== 'authenticated' && !connectionUnavailable) return Promise.resolve();
+    const now = Date.now();
+    if (now - lastRevalidationAt < 5_000) return Promise.resolve();
+    lastRevalidationAt = now;
+    // Unlike an explicit refresh, this background GET does not publish `checking`
+    // or discard the current CSRF/session view before the server confirms a change.
+    const request = run(async (signal) => {
+      const bootstrap = await gateway.bootstrap(signal);
+      if (!signal.aborted) {
+        const sameInstance = state.status === 'authenticated' && state.runtime.serverInstanceId !== undefined
+          && state.runtime.serverInstanceId !== null && state.runtime.serverInstanceId === bootstrap.serverInstanceId;
+        authenticated(bootstrap, sameInstance);
+      }
+    }, 'revalidate');
+    return request.then(() => {
+      // A failed connection check must not suppress a later activity recovery or
+      // connectivity event that can now reach the server.
+      if (state.status === 'unavailable' && state.reason === 'connection') lastRevalidationAt = Number.NEGATIVE_INFINITY;
+    });
+  }
   function connect(fragment: BootstrapFragment): Promise<void> {
     if (fragment.kind === 'absent' || disposed) return Promise.resolve();
     // A URL we could not scrub blocks every older completion and future read.
@@ -166,7 +194,7 @@ export function createBrowserSession(gateway: SessionGateway, basePath: string) 
       return Promise.resolve();
     }
     fragmentBlocked = false;
-    if (pendingKind === 'read') {
+    if (pendingKind === 'read' || pendingKind === 'revalidate') {
       // An explicit new sign-in intent supersedes an old read; stale results
       // cannot restore authorization after the new intent has begun.
       invalidatePending();
@@ -229,9 +257,12 @@ export function createBrowserSession(gateway: SessionGateway, basePath: string) 
     },
     connect,
     refresh,
+    revalidate,
     csrf: () => state.status === 'authenticated' ? csrfToken : null,
     logout(): Promise<void> {
-      if (pending || state.status !== 'authenticated' || csrfToken === null) return pending ?? Promise.resolve();
+      if (pendingKind === 'revalidate' && state.status === 'authenticated') invalidatePending();
+      else if (pending || state.status !== 'authenticated' || csrfToken === null) return pending ?? Promise.resolve();
+      if (state.status !== 'authenticated' || csrfToken === null) return Promise.resolve();
       const token = csrfToken;
       forget();
       publish({ status: 'signing-out' });

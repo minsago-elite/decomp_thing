@@ -102,9 +102,10 @@ during retention remains set; a failed write is suppressed without retrying.
 
 The record identifies the baseline or expanded sample and the zero-based failed
 input position. Planned and completed sample counts remain separate. Fixed reason
-codes distinguish a typed deadline, unavailable sandbox, output limit, unverified
-completion, interruption, I/O failure and an unclassified exception. Exit codes
-and arbitrary exception messages are never used to infer these categories.
+codes distinguish a typed deadline, unavailable sandbox, sandbox invocation wrapper
+process start failure, output limit, unverified completion, interruption, I/O failure
+and an unclassified exception. Exit codes and arbitrary exception messages are never
+used to infer these categories.
 The record does not claim whether an ambiguous I/O error occurred before launch,
 inside the program or during cleanup.
 
