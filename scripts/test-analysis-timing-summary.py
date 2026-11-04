@@ -11,6 +11,8 @@ from pathlib import Path
 
 
 SCRIPT = Path(__file__).with_name("summarize-analysis-timings.py")
+REPOSITORY_ROOT = SCRIPT.resolve().parents[1]
+LOCAL_TEMP_ROOT = REPOSITORY_ROOT / "build" / "analysis-timing-summary-tests"
 SPEC = importlib.util.spec_from_file_location("analysis_timing_summary", SCRIPT)
 assert SPEC is not None and SPEC.loader is not None
 SUMMARY = importlib.util.module_from_spec(SPEC)
@@ -63,7 +65,14 @@ def sidecar() -> dict[str, object]:
 
 class AnalysisTimingSummaryTests(unittest.TestCase):
     def read_record(self, value: dict[str, object]) -> dict[str, object]:
-        with tempfile.TemporaryDirectory() as directory:
+        build_root = REPOSITORY_ROOT / "build"
+        if build_root.is_symlink():
+            self.fail("repository build directory must not be a symlink")
+        LOCAL_TEMP_ROOT.mkdir(parents=True, exist_ok=True)
+        resolved_temp_root = LOCAL_TEMP_ROOT.resolve(strict=True)
+        if REPOSITORY_ROOT not in resolved_temp_root.parents or not resolved_temp_root.is_dir():
+            self.fail("timing summary tests must use a real repository-local temporary directory")
+        with tempfile.TemporaryDirectory(dir=resolved_temp_root) as directory:
             path = Path(directory) / "timing.json"
             path.write_text(json.dumps(value), encoding="utf-8")
             return SUMMARY.load_record(path)

@@ -612,8 +612,14 @@ def host_pins(cli: Path) -> dict[str, Any]:
     if not java_path.is_file():
         raise MatrixError("resolved java executable is not a regular file")
     java_sha256 = sha256_file(java_path)
-    java_environment = {key: value for key, value in os.environ.items()
-        if key in {"PATH", "JAVA_HOME", "LANG", "LC_ALL", "TZ"}}
+    local_runtime_root = require_repo_child(ROOT / "build" / "profile-1833-host-pins", "runtime identity probe")
+    home = local_runtime_root / "home"
+    temporary = local_runtime_root / "tmp"
+    for directory in (home, temporary):
+        if directory.is_symlink():
+            raise MatrixError("runtime identity probe directories cannot be symbolic links")
+        directory.mkdir(parents=True, exist_ok=True)
+    java_environment = safe_environment(home, temporary)
     result = subprocess.run([java, "-version"], cwd=ROOT, env=java_environment,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False, timeout=10)
     if result.returncode != 0:

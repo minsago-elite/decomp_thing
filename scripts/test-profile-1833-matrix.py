@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -23,6 +24,53 @@ SPEC.loader.exec_module(MATRIX)
 
 
 class Profile1833MatrixTests(unittest.TestCase):
+    def test_runtime_identity_probe_pins_jvm_writable_paths_inside_build(self) -> None:
+        build_root = MATRIX.ROOT / "build"
+        build_root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=build_root) as scratch:
+            root = Path(scratch)
+            java = root / "jdk/bin/java"
+            java.parent.mkdir(parents=True)
+            java.write_bytes(b"fake pinned java executable")
+            install = root / "install"
+            cli = install / "bin/llm_bin_patch"
+            cli.parent.mkdir(parents=True)
+            cli.write_bytes(b"fake cli")
+            library = install / "lib"
+            library.mkdir()
+            (library / "gcc-bundled-ghidra-reference-v1.json").write_text("{}", encoding="utf-8")
+            (library / "app.jar").write_bytes(b"jar")
+
+            calls: list[tuple[list[str], dict[str, object]]] = []
+
+            def run(command, **kwargs):
+                calls.append((command, kwargs))
+                if command == [str(java), "-version"]:
+                    return subprocess.CompletedProcess(command, 0, stdout=b"OpenJDK test version\n")
+                if command == ["git", "rev-parse", "HEAD"]:
+                    return subprocess.CompletedProcess(command, 0, stdout="test-commit\n", stderr="")
+                raise AssertionError(f"unexpected runtime identity command: {command}")
+
+            with mock.patch.object(MATRIX, "ROOT", root), \
+                    mock.patch.dict(os.environ, {"JAVA_HOME": str(root / "jdk"), "PATH": os.environ.get("PATH", "")}), \
+                    mock.patch.object(MATRIX.platform, "platform", return_value="Linux-test"), \
+                    mock.patch.object(MATRIX.subprocess, "run", side_effect=run):
+                result = MATRIX.host_pins(cli)
+
+            self.assertEqual(result["javaPath"], str(java.resolve()))
+            self.assertEqual(result["javaVersion"], "OpenJDK test version\n")
+            java_call, kwargs = calls[0]
+            self.assertEqual(java_call, [str(java), "-version"])
+            self.assertEqual(kwargs["cwd"], root)
+            environment = kwargs["env"]
+            self.assertIn("-Duser.home=\"", environment["JAVA_TOOL_OPTIONS"])
+            self.assertIn("-Djava.io.tmpdir=\"", environment["JAVA_TOOL_OPTIONS"])
+            self.assertIn("-Djna.tmpdir=\"", environment["JAVA_TOOL_OPTIONS"])
+            self.assertIn("-XX:-UsePerfData", environment["JAVA_TOOL_OPTIONS"])
+            for key in ("user.home", "java.io.tmpdir", "jna.tmpdir"):
+                value = environment["JAVA_TOOL_OPTIONS"].split(f"-D{key}=\"", 1)[1].split('"', 1)[0]
+                self.assertTrue(Path(value).is_relative_to(root / "build" / "profile-1833-host-pins"))
+
     def test_archival_and_gcc_inputs_match_repository_pins(self) -> None:
         inputs = MATRIX.fixtures()
         self.assertEqual(inputs["large_project_mtu"]["sha256"],
