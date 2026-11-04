@@ -170,6 +170,8 @@ jobs:
           key: ${{ steps.gcc-source-cache.outputs.cache-primary-key }}
       - name: Run mandatory-resource admission controls
         run: python3 -m unittest tests.oracle.test_gcc_mandatory_resources -v
+      - name: Verify final evidence inventory ordering
+        run: python3 -m unittest tests.oracle.test_gcc_final_evidence -v
       - name: Run GCC builder command and archive controls
         env:
           TMPDIR: ${{ steps.gcc-builder-init.outputs.job-root }}/tmp

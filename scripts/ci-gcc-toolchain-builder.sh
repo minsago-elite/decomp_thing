@@ -531,16 +531,28 @@ cleanup() {
     owner_call stop --role buildkit || failure=1
     owner_call stop --role rootless || failure=1
     if (( failure == 0 )); then
-      if [[ "${PRIMARY_STATUS:-}" == "success" ]]; then owner_call stage-upload --success || failure=1
-      else owner_call stage-upload || failure=1; fi
-      owner_call release || failure=1
+      need_owned_path "$job_root"
+      [[ ! -f "$state/buildkitd.toml" ]] || cp "$state/buildkitd.toml" "$evidence/buildkitd.toml" || failure=1
+      [[ ! -f "$state/docker-daemon.json" ]] || cp "$state/docker-daemon.json" "$evidence/docker-daemon.json" || failure=1
+      find "$evidence" -type f -printf '%P %s bytes\n' | sort > "$evidence/file-inventory.txt" || failure=1
+      du -sb "$evidence" > "$evidence/evidence-byte-count.txt" || failure=1
+      evidence_bytes=$(cut -f1 "$evidence/evidence-byte-count.txt") || failure=1
+      evidence_files=$(find "$evidence" -type f | wc -l) || failure=1
+      if (( evidence_bytes > 13958643712 || evidence_files > 128 )); then
+        printf 'evidence budget exceeded bytes=%s files=%s maxBytes=13958643712 maxFiles=128\n' \
+          "$evidence_bytes" "$evidence_files" > "$evidence/artifact-budget-refusal.txt"
+        failure=1
+      fi
+      if (( failure == 0 )); then
+        if [[ "${PRIMARY_STATUS:-}" == "success" ]]; then owner_call stage-upload --success || failure=1
+        else owner_call stage-upload || failure=1; fi
+        if (( failure == 0 )); then owner_call release || failure=1; fi
+      fi
     fi
   fi
-  if (( failure != 0 )); then echo 'owned cleanup could not prove process absence' >&2; return "$failure"; fi
+  if (( failure != 0 )); then echo 'owned cleanup prerequisites failed; quarantine retained' >&2; return "$failure"; fi
   if [[ -e "$job_root" ]]; then
     need_owned_path "$job_root"
-    [[ ! -f "$state/buildkitd.toml" ]] || cp "$state/buildkitd.toml" "$evidence/buildkitd.toml"
-    [[ ! -f "$state/docker-daemon.json" ]] || cp "$state/docker-daemon.json" "$evidence/docker-daemon.json"
     python3 - "$job_root" <<'PY'
 import pathlib,sys
 root=str(pathlib.Path(sys.argv[1]).resolve())
@@ -565,15 +577,7 @@ PY
     for item in "$job_root/ambient-client"; do
       [[ ! -e "$item" ]] || { need_owned_path "$item"; rmdir -- "$item" || die 'private client config is nonempty; cleanup retained'; }
     done
-    find "$evidence" -type f -printf '%P %s bytes\n' | sort > "$evidence/file-inventory.txt"
-    du -sb "$evidence" > "$evidence/evidence-byte-count.txt"
-    evidence_bytes=$(cut -f1 "$evidence/evidence-byte-count.txt")
-    evidence_files=$(find "$evidence" -type f | wc -l)
-    if (( evidence_bytes > 13958643712 || evidence_files > 128 )); then
-      printf 'evidence budget exceeded bytes=%s files=%s maxBytes=13958643712 maxFiles=128\n' \
-        "$evidence_bytes" "$evidence_files" > "$evidence/artifact-budget-refusal.txt"
-      failure=1
-    fi
+
   fi
   (( failure == 0 )) || die 'owned cleanup or evidence budget failed'
 }
