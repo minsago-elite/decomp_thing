@@ -144,14 +144,18 @@ internal storage optimization and must not merge identity, permissions or histor
 | `GET /api/v1/uploads/{uploadId}` | `200 uploadProgress` | Ephemeral session-bound transfer bytes and publication phase; #169 |
 | `POST /api/v1/jobs` | `201 job`, `Location: J` | Multipart, upload limits, idempotency; #162 |
 | `GET J` | `200 job`, ETag | Snapshot read; #159/#160 |
-| `PATCH J` | `200 job` | Allowlisted label/archive metadata, If-Match and idempotency; #173 |
-| `DELETE J` | `202 operation` | Reviewed retention/deletion policy and If-Match; #172 |
+| `PATCH J` | `200 job`, strong ETag | Strict `jobOrganizationRequest` (only `label`, `archived`), session/Origin/CSRF, job If-Match and idempotency; changes no evidence; #510 |
+| `DELETE J` | `202 operation`, `Location: J/operations/{operationId}` | Strict `jobDeletionRequest` (`confirmJobId`), session/Origin/CSRF, job If-Match, idempotency; refused with `409 RETENTION_PROTECTED` while protected; #507/#508 |
+| `GET J/deletion-preview` | `200 jobDeletionPreview` | Read-only dry run: affected storage categories, protections, finality; #506/#511 |
+| `GET J/operations/{operationId}` | `200 operation` | Durable `job.delete` audit/progress record, readable after the job is gone; #508 |
+| `GET /api/v1/storage` | `200 storageSummary` | Read-only tolerant logical-byte accounting by category; #506 |
+| `GET /api/v1/storage/maintenance-preview` | `200 maintenancePreview` | Read-only dry run of real maintenance; never writes or starts work; #506 |
 | `GET J/runs`, `GET R` | `200 runs`, `200 run` | Bounded attempts or durable attempt snapshot; #160 |
 | `GET R/progress-pin` | `200 progressPin`, strong run ETag | Current per-attempt journal pin; #172 |
 | `PUT R/progress-pin` | `200 progressPin`, original result on keyed replay | Strict `progressPinRequest`, session/Origin/CSRF, run If-Match and idempotency; #172/#177 |
-| `GET /agent/preflight` | `200 agentPreflight` | Last explicit agent inspection result; never starts the agent; #493 |
-| `POST /agent/preflight` | `202 agentPreflight`, `409` while one runs | Strict `agentPreflightRequest` (`{"action":"inspect"}`), session/Origin/CSRF; starts one single-flight `preflight(WEB)`; #493 |
-| `POST J/runs` | `202 run`, `Location: R` | `workflowStart` request, capability/limits/input checks, job If-Match; #163 |
+| `GET /api/v1/agent/preflight` | `200 agentPreflight` | Last explicit agent inspection result; never starts the agent; #493 |
+| `POST /api/v1/agent/preflight` | `202 agentPreflight`, `409` while one runs | Strict `agentPreflightRequest` (`{"action":"inspect"}`), session/Origin/CSRF; starts one single-flight `preflight(WEB)`; #493 |
+| `POST J/runs` | `202 run`, `Location: R` | `workflowStart` request, explicit option, server-approved limits, input policy and fresh readiness checks, job If-Match; #163/#478 |
 | `POST R/cancel` | `202 run` or `200 run` if already terminal | Closed `workflowCancel` request, idempotent recorded intent, run If-Match; #163 |
 | `POST R/recover` | `202 run`, `Location` of a new attempt | Closed `recover` request; explicit `retry` or capability-gated `resume`; run If-Match and idempotency; #486 |
 | `GET R/controls` | `200 attemptControls`, strong run ETag | Read-only cancel/retry/resume eligibility with closed reasons; reserves nothing; #528/#529 |
@@ -162,13 +166,15 @@ internal storage optimization and must not merge identity, permissions or histor
 | `GET R/reports/{reportId}` | `200 report` | State may be missing/partial/unsupported/unknown; #165 |
 | `GET R/source-catalog` | `200 sourceCatalog` | Bounded flat manifest metadata; selected durable job/run; #490 |
 | `GET`, `HEAD R/reports/revision-validation` | `200 report` | Explicit graph and evidence-owner selection; checked normal summary and bounded case pages; #489, #543 |
+| `GET`, `HEAD R/validation-history` | `200 validationHistory` | Bounded finalized-attempt, baseline and failed-operation history windows; see validation history discovery |
 | `GET`, `HEAD R/revisions/{revisionId}/sources` | `200 revisionSources` | Bounded canonical input commitments for the selected persisted candidate; #490 |
 | `GET`, `HEAD R/revisions/{revisionId}/source-directories/{directoryId}` | `200 revisionDirectory` | Lazy immediate children of canonical input prefixes; use `root` for the first directory; #188 |
 | `GET`, `HEAD R/revisions/{revisionId}/source-files/{fileId}` | `200 revisionFile` | Recorded file metadata and opaque parent directory, without requesting its body; #188 |
 | `GET`, `HEAD R/revisions/{revisionId}/source-files/{fileId}/chunk` | `200 sourceChunk` | Digest-verified bounded UTF-8 or hex ranges of a committed input; #490, #545 |
 | `GET`, `HEAD R/revisions/{revisionId}/source-files/{fileId}/content` | `200 application/octet-stream` | Complete authorized input download, at most 8 MiB; #491, #545 |
 | `GET`, `HEAD R/revisions/{revisionId}/functions` | `200 functionInventory` | Bounded, signed, filtered/sorted pages of the manifest-committed program model; explicit model/plan states; [program structure](web-program-structure.md); #534, #536 |
-| `GET`, `HEAD R/revisions/{revisionId}/modules`, `R/revisions/{revisionId}/modules/{moduleId}` | `200 moduleInventory`, `200 moduleDetail` | Recorded totals/diagnostics and module pages; owned-entity pages with revision source links; #535 |
+| `GET`, `HEAD R/revisions/{revisionId}/modules` | `200 moduleInventory` | Recorded totals/diagnostics and module pages; #535 |
+| `GET`, `HEAD R/revisions/{revisionId}/modules/{moduleId}` | `200 moduleDetail` | Owned-entity pages with revision source links; #535 |
 | `GET`, `HEAD R/revisions/{revisionId}/{functions,globals,types}/{entityId}` | `200 entityDetail` | Bounded entity facts, cross-links and unrecorded fact families; optional `structureVersion` pin; #539, #540 |
 | `GET J/revisions`, `GET V` | `200 revisions`, `200 revision` | Immutable source/acceptance bindings; #165/#199 |
 | `GET V/sources`, `GET V/sources/{fileId}` | `200 files`, `200 file` | Bounded tree/page/read; #165/#188/#189 |
@@ -197,10 +203,31 @@ filter, sort, admission snapshot and last key. New inserts cannot appear midway 
 snapshot or duplicate prior rows. Removed entries may be absent, and deletion is not repaired by
 offset shifting. Expired snapshots return `410 CURSOR_EXPIRED` with guidance to refresh. Supported
 job filters are bounded display-name search (256 characters), exact known status, inclusive
-`createdAfter` and exclusive `createdBefore` RFC3339 instants, and `sort=newest`
-(default) or `sort=oldest` creation/identity ordering. Cursors cannot be reused across
+`createdAfter` and exclusive `createdBefore` RFC3339 instants, `sort=newest`
+(default) or `sort=oldest` creation/identity ordering, and `archived=exclude` (default),
+`all` or `only`. The search also matches a job's display label. Cursors cannot be reused across
 resources, revisions or filters. Counts are optional and explicitly exact/estimated/unknown;
 absence of a total never prevents page navigation.
+
+### Route matrix qualification
+
+`WebRouteMatrixTest` parses the table above and probes every documented method and route through
+the real SPA listener. Foreign `Origin`, cross-site `Sec-Fetch-Site` and forwarding headers are
+refused before route selection; private routes require a session and mutations the exact Origin,
+JSON or multipart media type and CSRF token. A `405` lists every live method of the resource in
+`Allow`, HEAD matches its GET status without a body, and wrong `Accept`, unknown queries and
+out-of-range page limits are typed refusals. Every JSON body, including each error, validates
+against `contract.schema.json`, and the route's success kind must be one the row names. Contract
+request fixtures and malformed bodies are refused without changing stored bytes. A documented row
+without a live matrix entry is reserved and must stay an authenticated `404 NOT_FOUND`; enabling it
+requires adding its live methods and fixture outcome to the matrix. `verify.py` checks that every
+success document named here is a schema kind or one of the reserved collection documents. Each
+documented error status is produced by the matrix or owned by a named suite; `501` and `504` are
+reserved and not emitted by the current producer, whose request deadline closes the exchange.
+
+An exploration report whose file is missing, linked, nonregular, multiply named or over its byte
+bound is an `unknown` report without an artifact descriptor, and its download is `404`. Browser
+readable job artifacts and selected source inputs must have exactly one filesystem name.
 
 ## Errors, deadlines and concurrent mutations
 
@@ -224,13 +251,23 @@ publication returns a recovery failure without a success location. A scheduler
 refusal that was durably recorded returns its failed run; another scheduling
 exception requires reconciliation through the job and retained key.
 
-Production durable adapters remain unregistered, and bootstrap continues to
-report them unavailable. Without registered adapters or retained keyed starts,
-POST retains the existing 405 response without consuming a body. A retained
+The SPA server registers production durable adapters for exploration, agent
+reconstruction, evidence-only reconstruction and repair; see
+[production workflow adapters](#production-workflow-adapters-and-restart-reconciliation).
+Admission rechecks the selected option's runtime prerequisites against a fresh
+readiness snapshot after any keyed replay: a missing or undetermined
+prerequisite returns `503 CAPABILITY_UNAVAILABLE` with its fixed reason message
+and records nothing. The harness is an explicit choice: `harnessCapabilityId`
+must name one registered option for the workflow (or null where the option has
+none) and never falls back to another option. Limits must equal the advertised
+defaults or, for options whose launch facts set `limitsAdjustable`, lower one or
+more fields; a raised field returns 503. An input revision is refused with 422
+`INPUT_REVISION_UNAVAILABLE` unless the option's `input` policy admits it, and an
+option that requires a recorded revision returns 422 `INPUT_REVISION_REQUIRED`
+when none is selected. Servers without registrations (the legacy UI and inert
+embeddings) keep the existing 405 response without consuming a body. A retained
 receipt keeps the route available for authenticated read-only replay after
-registrations are removed; it does not enable fresh work. Injected inert
-adapters qualify transport/storage behavior, not runtime readiness or upstream
-model/binary execution and accepted-publication integration.
+registrations are removed; it does not enable fresh work.
 
 The reserved cancellation transport has a closed `workflowCancel` data object:
 exactly `{"action":"cancel"}`, bounded to 1024 bytes. The fixture wrapper is not
@@ -265,9 +302,9 @@ diagnostic preservation, guards, strict JSON, actor isolation, revocation,
 capacity and publication faults. Service/storage restart coverage retains the
 same listener's in-memory authorization service. It does not establish replay by
 a new session after a full listener restart. These authored methods await their
-own Actions qualification; browser and production-adapter/runtime qualification
-remain unfinished. Bootstrap continues to report workflows unavailable, and
-fresh starts without registrations or retained start receipts retain 405.
+own Actions qualification; browser and live model/binary runtime qualification
+remain unfinished. Fresh starts on a server without registrations or retained
+start receipts retain 405.
 
 The recovery transport accepts only the closed `recover` data object (not its
 fixture wrapper), bounded to 1024 bytes: `mode` is `retry` or `resume`, and
@@ -381,6 +418,73 @@ Retry/resume create a distinct run referencing the previous attempt and preserve
 Restart marks abandoned active attempts interrupted and reconciles committed publication journals;
 it never silently launches execution or duplicates accepted publication.
 
+### Production workflow adapters and restart reconciliation
+
+Each adapter reuses the CLI implementation: `explore` is wired to the existing
+automatic explorer but production dispatch is disabled pending helper ownership
+and cancellation qualification (#71); `reconstruct`
+runs archival reconstruction with the bundled Ghidra analyzer and either the
+configured agent harness (ACP or the deprecated legacy adapter selected by
+`ACP_HARNESS`) or the explicit agent-free evidence-only profile, with no
+credential-based fallback between them; `repair` copies the selected recorded
+revision's retained source tree into the new attempt and runs the secure repair
+runtime there, so the selected revision's evidence is never modified.
+
+Every adapter runs its body on an owned child thread and enforces the attempt's
+recorded limits: wall-clock time, idle time (no new output or agent progress),
+the byte total of the attempt's own report directory and, where metered, agent
+tool calls (identities are distinct within each agent invocation and summed across
+invocations; a returned receipt reporting more calls raises the count). Limits are
+checked again when a body finishes between samples. A breach or cancellation
+interrupts the child, and the adapter does not return while that child thread is
+alive. Exploration's angr and strings helpers still have an ownership gap: a
+leader can fork a pipe-holding child and exit between descendant samples, leaving
+cancellation blocked on an unobserved writer. Observed-descendant cleanup does
+not fix this race. Production exploration is therefore refused at admission and
+at direct adapter execution; the explicit inert test seam qualifies only executor
+and service controls, not process cleanup. Breaches in enabled adapters record
+`LIMIT_EXHAUSTED`; cancellation and shutdown keep their existing `CANCELLED` and
+`PROCESS_INTERRUPTED` outcomes. Repair's tool-call ceiling is structural (five
+iterations, each one agent invocation bounded at 256 tool calls), so its limits
+are fixed. Usage records wall-clock time and, for agent reconstruction, tool
+calls and any returned token counts. Report paths stay internal.
+
+Reconstruction and repair record a candidate whenever a canonical source digest
+exists: the schema-3 build contract's `sourceRevisionSha256`, or the repair
+graph's published head. The revision identifier is derived from the digest, so
+one identifier can never name different sources. A candidate is never
+acceptance. Production repair acceptance publication is **disabled** pending a
+qualified workflow-owned, bounded, read-only attestation of installed canonical
+sources, retained blobs and receipt bodies, including binary/profile/corpus and
+invocation bindings (#478). The recorded repair-history reader is diagnostic
+metadata only and must never authorize acceptance, even for a recorded accepted
+head or baseline. The explicit test-only publication seam exercises service/store
+integration with inert graphs; it is not production acceptance evidence. The
+service publication infrastructure rechecks the persisted candidate, versions and
+that the attempt is still the latest before recording any trusted reference.
+
+Production options declare no checkpoint policy yet, so `POST R/recover` and
+`GET R/controls` report resume as `RESUME_UNSUPPORTED`; an explicit retry starts a
+fresh linked attempt with the predecessor's own option and recorded (possibly
+lowered) limits; recovery never raises them. A new recovery command passes the same
+runtime-prerequisite admission as a fresh start, including the bounded sandbox check
+at submission, while a keyed replay stays read-only. A repair retry
+re-resolves the predecessor's recorded input revision (accepted or completed
+candidate) and copies its retained source afresh; if that revision is no longer
+retained, retry is refused with `INPUT_UNVERIFIED`.
+
+Startup recovery keeps its existing transitions and then reconciles. Queued
+attempts become `interrupted` with no `startedAt`: they never executed. Active
+attempts become `interrupted` with their `startedAt` and partial evidence. Neither
+is resumed or re-executed. Completed production repair candidates remain
+unpublished until qualified attestation exists; existing acceptances are never
+repeated or replaced. Registered trusted publication adapters (currently inert
+test controls) share the recovery operation's admitted inventory, aggregate read
+and retention allowances, and cancellation checkpoints, including final mutation
+rechecks. A limit or cancellation after recovery changes began retains outcome
+uncertainty; an earlier durable acceptance is not rolled back or repeated.
+Reconciliation never executes a binary, model or adapter body.
+
 ### Admission and overload
 
 The server admits at most 16 concurrent requests, with 64 more waiting in a bounded queue. A request that finds
@@ -412,6 +516,48 @@ also retain every decimal digit, including values above JavaScript's exact integ
 range. Missing metadata is labelled not reported. A reported zero stays zero;
 the view assigns it no unlimited or unsupported meaning. Reports without an
 assigned workflow stay in the general capability section.
+
+Workflow capabilities name one launchable option each (`workflow-explore-tools`,
+`workflow-reconstruct-agent`, `workflow-reconstruct-evidence-only`,
+`workflow-repair-agent`). Their `launch` object carries the server's launch
+facts: the `harnessCapabilityId` a start must submit, the execution `mode`
+(`tools`, `agent` or `evidence-only`), whether the option executes the uploaded
+binary or contacts the configured agent, its required tools, its input-revision
+policy (`none`, `accepted-optional` or `recorded-required`) and whether its
+`limits` are adjustable. For a launch option, `limits` are the server-approved
+defaults and, when adjustable, per-field ceilings. `agentContractVersion` is
+reported exactly for options that contact an agent. `supported` means every
+declared prerequisite (sandbox helpers, bundled Ghidra, a configured agent
+harness, qualified exploration helper ownership and, for repair, a
+production-qualified contained repair validator) was
+established by the current readiness observation. Workflow prerequisites follow the
+same passive rule as harness readiness: a page load reads configuration and file
+metadata only (helper executability, bundled Ghidra presence) and launches no
+helper. Otherwise-qualified options that execute the binary report `unknown` with
+`SANDBOX_HELPER_UNCHECKED` ("checked when this workflow starts") unless a recent
+explicit agent preflight already checked the helpers. Starting a workflow is itself
+an explicit operator action: when the selected option needs the sandbox, its other
+prerequisites hold and the helpers are unchecked, `POST J/runs` runs the same
+bounded helper check (at most five seconds) before admission; a keyed replay still
+returns its recorded run whatever the check reports. It needs no configured agent and no prior
+preflight. A failed or timed-out check refuses the start, with
+`503 CAPABILITY_UNAVAILABLE` and its fixed reason message; nothing is recorded.
+Evidence-only reconstruction needs only Ghidra presence. Production exploration
+reports `unavailable` / `EXPLORATION_HELPERS_UNQUALIFIED` when readiness facts are
+present, even if sandbox inspection succeeded. It refuses fresh starts and retries
+without recording a new attempt, skips the unnecessary helper probe, and refuses
+direct execution before starting an engine or worker. No environment flag opens
+this qualification gate. A missing readiness snapshot remains `unknown` and also
+cannot authorize execution. Until the secure repair runtime's validator
+qualification gate opens, repair reports
+`REPAIR_VALIDATOR_UNQUALIFIED` and is refused at admission. A missing prerequisite
+is `unavailable` with its fixed reason code, and a probe that did not finish makes
+the option `unknown`. Workflows without a production adapter (`build`,
+`validate`) are reported `unsupported` with `WORKFLOW_NOT_IMPLEMENTED`. Every
+other capability has `launch: null`. `launch` is optional within v1: an older
+producer omits it, and clients treat absence like null (no launch facts, no start
+control). Launch facts describe adapters; admission
+rechecks registration, limits, input and readiness.
 
 These are report-level observations, separate from an individual attempt's
 recorded limits and job-specific admission. Displaying them performs no new
@@ -489,6 +635,34 @@ binding, `state`, completeness, provenance limitations and explicit acceptance s
 `available`, `partial`, `missing`, `unsupported`, `unknown`, `invalid` or `incompatible`.
 Missing is a known absent report; unknown means the association/meaning cannot be established.
 Partial means available observations cover less than the declared scope. None implies pass.
+
+Both implemented report adapters (`reports/exploration` and `reports/revision-validation`)
+map the evidence conditions onto these states the same way, and withhold `summary` in every
+state except `available`:
+
+| Evidence condition | `state` | Exploration adapter | Revision-validation adapter |
+| --- | --- | --- | --- |
+| Unavailable: bytes missing, unreadable or changed during the bounded read | `unknown` | no captured report bytes | no normal receipt, or receipt bytes not captured |
+| Incomplete: fewer observations than the declared scope | `partial` | absent producer fields, versioned failure records | missing required scope, diff or identity evidence |
+| Unsupported producer version | `unsupported` | declared `schema`/`schemaVersion` it does not support | unsupported producer schema |
+| Corrupt or inconsistent bytes | `invalid` | malformed JSON, count/array mismatch, non-decimal counts | malformed or inconsistent receipt evidence |
+| Structurally checked observations | `available` | exact counts with `authority: observations` | checked normal receipt and result |
+
+`WebExplorationReportTest`, `WebExplorationPreparationReportTest`,
+`RecordedRepairValidationDiagnosticTest` and `RecordedRepairValidationCasesTest` cover each row.
+
+`available` means the adapter verified the report's structure and bindings, not that the
+reconstruction was accepted: `acceptance` stays `not-evaluated` unless an acceptance artifact
+supplies it.
+
+Sizes, counts and addresses keep their exact values on the wire and in the SPA. Unsigned
+counts and byte sizes are canonical decimal strings, and the SPA prints them unchanged
+(`formatExactBytes` adds only a unit label, never `Number` rounding). ELF entry addresses are
+hexadecimal strings shown as sent. Timestamps keep their original fractional digits and
+offset; the SPA only replaces `T` with a space and a trailing `Z` with ` UTC`. The exploration
+confidence `score` is the one JSON number, a producer ratio in `[0, 1]`, shown as received.
+Each report carries its provenance: the `binding` (job, run, revision), `sourceArtifact`
+digest descriptor, `producerSchemaVersion`, `adapterVersion` and `limitations`.
 
 An exploration confidence score reports observed input/output breadth and active isolation,
 never universal equivalence. A graph root is an initial snapshot, not an accepted repair.
@@ -911,7 +1085,8 @@ currently expose v1 job routes, so no successor link or sunset date is advertise
 Existing persisted `job.json`
 files stay readable through a versioned, recoverable migration; public response changes do not
 rewrite raw report bytes. Legacy URLs redirect/map per the navigation/parity contract and never
-auto-start a workflow. Unsupported legacy automation dependencies receive a documented migration
+auto-start a workflow; the per-route outcomes, upgrade writes and rollback rules are in
+[legacy migration](web-legacy-migration.md). Unsupported legacy automation dependencies receive a documented migration
 error, not an empty success response.
 
 The optional upload progress transport, state semantics and bounded retention are defined
@@ -1489,9 +1664,135 @@ that the agent started, but a result for another configuration cannot make that 
 running, cancelled or mismatched agent observations leave agent readiness unproven. These fields
 do not establish that any job can start work; unavailable workflow adapters remain unavailable.
 
+## Job organization, retention and deletion
+
+Issues: [#172](https://github.com/minsago-elite/decomp_thing/issues/172) (#506–#509) and
+[#173](https://github.com/minsago-elite/decomp_thing/issues/173) (#510–#512).
+
+**Organization (`PATCH J`).** The body may contain only `label` (1–120 printable characters
+without surrounding spaces, or `null` to clear) and `archived` (boolean); at least one is
+required and anything else is refused before a write. The values live in a separate
+`organization.json` beside `job.json`, so the uploaded input, `job.json`, workflow state and
+every report keep their exact bytes and hashes. `job` responses gain optional `label` and
+`archived` fields (older producers omit them). The public version includes them only once they
+differ from the default, so unorganized jobs keep their previous version. A replay of the same
+key and request returns the current job with `Idempotency-Replayed: true`; a different request
+under the key is `409 IDEMPOTENCY_CONFLICT`, a stale guard `412`. Up to 64 receipts are kept per
+job and a receipt younger than 24 hours is never evicted (`429 ORGANIZATION_RECEIPT_CAPACITY`).
+Archiving only hides the job from the default `GET /jobs` view (`archived=exclude`); it is
+unrelated to source-archive export and removes nothing.
+
+**Retention policy.** Jobs are never deleted automatically (`automaticJobDeletion: false`).
+Explicit deletion and every maintenance preview evaluate the same fixed protections under the
+service monitor: a nonterminal attempt (`ACTIVE_ATTEMPT`), a worker that still owns the job
+(`OWNED_WORKER`), completed output awaiting publication (`PUBLICATION_PENDING`), a pinned
+progress journal (`PINNED_EVIDENCE`), an artifact or source download still being delivered
+(`DOWNLOAD_IN_PROGRESS`, held by a per-request lease), an upload measuring storage
+(`STORAGE_BUSY`), uncertain publication (`RECOVERY_REQUIRED`), and any registered
+`JobRetentionHold`. The server registers the managed Git repositories as a hold (#509) with
+source `git`. It reports these reasons:
+
+- `GIT_OPERATION_ACTIVE`: a repository operation is queued or running and owns its staging and
+  records.
+- `GIT_UNCOMMITTED_CHANGES`: a managed work tree has uncommitted changes. A fresh
+  initialization has no commit yet. While its work tree still holds exactly the recorded candidate
+  source it was copied from, it contains no user work, so it does not hold deletion. Any added,
+  modified or deleted file does hold it; `build/` output is excluded, as it is from the copy.
+- `GIT_UNPUSHED_COMMITS`: a local branch/tag tip or detached HEAD is contained by no remote-tracking
+  ref. A repository without remote-tracking refs retains all committed history: absence of a remote
+  does not prove that work was pushed. An unchanged unborn initialization still has no commit to retain.
+  Annotated tags are peeled for containment; uninspectable tag targets retain the repository conservatively.
+- `GIT_STATE_UNAVAILABLE`: a repository could not be inspected, so it is retained.
+
+Git admission takes the job service's lock before the Git service's lock, and deletion decides
+under the same lock. A job whose deletion was admitted therefore refuses new Git work with `410`,
+and an admitted Git operation is always visible to the next deletion check. A hold that throws fails closed
+(`RETENTION_HOLD_UNAVAILABLE`). A refused `DELETE` is `409 RETENTION_PROTECTED` with one error
+`details` entry (pointer `/protections/N`, protection code, recovery message) per reason.
+
+These holds and admission locks cover retention and active-operation coordination only. They
+are not a backup/restore protocol or qualification of managed Git history/worktree recovery.
+The backup participation acceptance criterion in #509 and its parent #172 remains open until
+implementation and backup/restore evidence are supplied; deletion protection alone does not
+complete either issue.
+
+**Deletion (`DELETE J`).** The body repeats the reviewed job identity
+(`{"confirmJobId": "<jobId>"}`; a mismatch is `422`). The key lookup precedes all other checks,
+so an exact replay returns the original operation (`Idempotency-Replayed: true`) even after the
+job is gone. Order of effects: a durable intent record in `.job-deletions/<operationId>.json`;
+an atomic no-replace rename of the job directory to `.job-deletions/<operationId>.removing`,
+after which the job is absent from every listing and lookup; a descriptor-relative purge that
+opens every entry with `O_NOFOLLOW`, unlinks symbolic and hard links as names without opening
+their targets, and refuses mount crossings and foreign owners; and a terminal record. Retained
+job-collection snapshots are retired so continuation cursors report expiry instead of showing
+a deleted row. The purge has a five-second budget per request; an unfinished pass stays
+`running` and resumes during periodic maintenance (SPA mode) or at the next startup, before any
+request is admitted. If a process stopped after the intent but before the rename, startup marks
+the operation `failed` (`INTERRUPTED_BEFORE_REMOVAL`) and the job is retained unchanged; nothing
+is deleted that was not detached. Cleanup that meets an entry outside owned storage (a mount, or any descendant whose owner
+differs from the job root) stops with `recoveryRequired: true`, preserves the remaining bytes and
+keeps the tombstone, since the job was already detached. Only one purge pass runs per operation,
+and maintenance rotates through pending operations so one failing purge cannot starve the rest.
+A collection snapshot whose scan overlapped a deletion is discarded and collected again. Removed bytes are charged only after an unlink succeeds, so retries never inflate the audit
+count. A keyed upload retry whose original job was deleted is refused with `410 RESOURCE_GONE`
+before its body is read, rather than recreating storage behind the tombstone; upload again with
+a new key. The maintenance preview checks its five-second and 64 MiB budgets before every
+journal read and holds the service monitor only for that read.
+
+The operation record keeps the job identity, a domain-separated session digest, request
+digests, times, outcome and the removed byte/entry counts; it never keeps the filename, label,
+binary facts or contents. Journal schema v2 also persists `removedCountsExact`. Reloaded
+unfinished operations conservatively treat their saved counts as lower bounds: a purge may
+have removed entries before its count update reached disk. Legacy v1 records are also treated
+as lower bounds, including terminal records whose earlier recovery may have lost counts.
+The completed public operation message explicitly says "at least" and "exact totals are
+unknown after interrupted cleanup" in these cases; it never presents recovered zero counters
+as exact totals. Completion and the deletion tombstone remain authoritative even when totals
+are unknown. Uninterrupted v2 completion retains exact accounting across restart.
+Up to 1024 records are retained and a record is evicted only once
+it is older than 24 hours (`tombstoneRetentionMs`). While a record exists, reads of the job and
+its children (`GET J`, runs, reports, progress, the event stream before headers) return
+`410 RESOURCE_GONE`; afterwards they return `404`. There is no undo: `undoAvailable` is always
+false and a deleted job cannot be restored by the server.
+
+**Storage failures.** If the intent record or the rename fails (disk full, read-only, permission)
+the response is `503 STORAGE_UNAVAILABLE` and the job and its metadata are unchanged. An
+organization write uses temp file, fsync, atomic rename and directory fsync; a failure before
+the rename is `503 STORAGE_UNAVAILABLE` with the previous record intact, and a failure after it
+is `503 STORAGE_UNCONFIRMED` (refresh before editing again). Later deletion record updates that
+fail leave the earlier valid record; resume re-derives the state from the detached directory.
+
+**Accounting and dry run.** `GET /storage` scans the owned root with no-follow secure
+directory streams (200,000 entries, five seconds) and reports logical regular-file bytes and
+entry counts for `originalInputs`, `reports`, `sourceSnapshots`, `logs` (progress journals and
+logs), `archives` (`*.zip`, `*.tar*`), `metadata`, `temporary` (staging, temp files, pending
+purges) and `other`; an incomplete scan sets `complete: false` and its totals are lower bounds.
+`GET /storage/maintenance-preview` lists what maintenance would really do now: terminal,
+unpinned progress journals past the 24-hour threshold (bytes the replacement would reclaim,
+computed with the same pure function maintenance uses) and pending deletion purges, plus the
+protected jobs. It reads only; no journal, record or job is modified and no workflow starts.
+
+**Browser.** These five kinds are decoded only by lazily loaded routes; the generator emits
+their schema to `generated-schema-lazy.ts`, which those routes register with
+`registerContractExtension`, and strips schema annotations from the runtime bundle. Another
+tab is told about a deletion or organization edit through a deployment-scoped
+`BroadcastChannel` hint that carries no job or session material; open job, attempt and
+history views re-read and show the deletion, and the dashboard reads a fresh first page.
+
+Verification: `WebJobLifecycleTest` (real HTTP): organization bytes/hashes unchanged, replay,
+conflict, stale guard, archive filtering; strict body and authorization; read-only job
+directory; active/pinned/download/hold protections and fail-closed holds; deletion with
+escaping symbolic and hard links, tombstone `410`s, replay and audit record contents;
+interrupted purge resumed after restart and a crash between intent and rename; complete and
+partial unrecorded purges with accepted/running records and truthful operation messages;
+disk-full and
+read-only journals; storage categories and a dry run that leaves journal bytes unchanged.
+Frontend: `job-lifecycle.test.tsx` and `job-deletion-reconciliation.test.tsx`. Repository
+workspace holds and packaged-browser deletion journeys remain outstanding.
+
 ## Implemented progress-pin policy endpoint
 
-`GET` and `PUT /api/v1/jobs/{jobId}/runs/{runId}/progress-pin` are available under the configured deployment prefix. This pin protects only the selected persisted progress journal. It does not pin the full job, source revisions, reports or downloaded evidence. Unpinning neither resets the retention deadline nor restores removed history; SPA periodic progress maintenance is enabled by default; legacy mode keeps it disabled.
+`GET` and `PUT /api/v1/jobs/{jobId}/runs/{runId}/progress-pin` are available under the configured deployment prefix. This pin protects only the selected persisted progress journal. It does not pin the full job, source revisions, reports or downloaded evidence. A pinned journal does, however, prevent deletion of its whole job (`PINNED_EVIDENCE`); see [job organization, retention and deletion](#job-organization-retention-and-deletion). Unpinning neither resets the retention deadline nor restores removed history; SPA periodic progress maintenance is enabled by default; legacy mode keeps it disabled.
 
 GET requires a local session and returns `{jobId, runId, version, pinned}` in a `progressPin` envelope, with an ETag for the current run version and `Cache-Control: no-store`. Conditional read headers are rejected. The `progressPinRequest` wire body for PUT is exactly `{pinned: boolean}`, at most 1024 bytes, with duplicate JSON keys and unknown fields rejected. Authorization precedes body parsing. PUT requires the existing same-origin JSON mutation policy, cookie session, CSRF token, one strong If-Match version and one 16–128 character idempotency key. Caller-supplied actors, query parameters and extra conditional headers are rejected.
 

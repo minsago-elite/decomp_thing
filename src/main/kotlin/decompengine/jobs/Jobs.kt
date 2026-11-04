@@ -11,6 +11,7 @@ import decompengine.oracle.core.StrictJsonLimits
 import decompengine.oracle.core.StrictJsonException
 import decompengine.project.ArchiveTransportLayout
 import decompengine.repair.StableRegularFile
+import decompengine.repair.readStableJobMetadataFile
 import decompengine.repair.readStableRegularFile
 import decompengine.repair.RepairHistoryReadResult
 import decompengine.repair.readSelectedJobRecordedRepairHistory
@@ -168,18 +169,29 @@ class JobStore internal constructor(
     }
 
     @Synchronized
-    fun get(jobId: String): Job {
+    fun get(jobId: String): Job = getInternal(jobId, null)
+
+    @Synchronized
+    internal fun getWithMetadataAuthorization(jobId: String, afterAuthorization: () -> Unit): Job =
+        getInternal(jobId, afterAuthorization)
+
+    private fun getInternal(jobId: String, afterAuthorization: (() -> Unit)?): Job {
         jobDirectory(jobId)
         val payload = try {
-            OracleJson.parse(readStableRegularFile(root, "$jobId/job.json", MAX_METADATA_BYTES.toLong()).bytes).jsonObject
+            OracleJson.parse(
+                readStableJobMetadataFile(root, jobId, MAX_METADATA_BYTES.toLong(), afterAuthorization).bytes,
+            ).jsonObject
         } catch (_: IOException) {
             throw JobStoreException("job metadata is unavailable or its path changed")
         }
         return decodeJobRecord(jobId, payload)
     }
 
-    /** Display-only collection read; the caller supplies one namespace-bound accounting reader. */
-    @Synchronized
+    /**
+     * Display-only collection read; the caller supplies one namespace-bound accounting reader.
+     * It takes no store monitor: the descriptor-stable reader refuses a replaced record, and a
+     * stalled listing read must not block other jobs' status reads or updates (#162).
+     */
     internal fun getForListing(jobId: String, read: (String, Int) -> ByteArray): Job {
         jobDirectory(jobId)
         return decodeJobRecord(jobId, OracleJson.parse(read("$jobId/job.json", MAX_METADATA_BYTES)).jsonObject)
@@ -301,7 +313,9 @@ class JobStore internal constructor(
                 parts.size <= 32 && parts.none { it.isBlank() || it == "." || it == ".." }
             }
         ) { "artifact path must be a canonical report path" }
-        return contained("artifact") { readStableRegularFile(root, "$jobId/$relativePath", maximumBytes) }
+        return contained("artifact") {
+            readStableRegularFile(root, "$jobId/$relativePath", maximumBytes).requireSingleName("artifact")
+        }
     }
 
     /**
@@ -417,7 +431,10 @@ class JobStore internal constructor(
         require(runId.matches(Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}"))) { "source attempt identity is invalid" }
         decompengine.project.requireNormalizedProjectPath(sourcePath, "selected source input")
         require(maximumBytes in 1..8L * 1024 * 1024) { "source input read limit is invalid" }
-        return contained("source input") { readStableRegularFile(root, "$jobId/reports/runs/$runId/source-tree/$sourcePath", maximumBytes) }
+        return contained("source input") {
+            readStableRegularFile(root, "$jobId/reports/runs/$runId/source-tree/$sourcePath", maximumBytes)
+                .requireSingleName("source input")
+        }
     }
 
     internal fun sourceArchiveInventory(
@@ -621,6 +638,15 @@ class JobStore internal constructor(
         val STATUS_MESSAGE_RESERVE = "\u0001".repeat(500)
         const val MAXIMUM_UPDATE_TIMESTAMP = "9999-12-31T23:59:59.999999999Z"
     }
+}
+
+/**
+ * A second name can be a hard link created inside the job tree to bytes owned elsewhere. Descriptor
+ * pinning contains the path, not the inode, so browser-readable job files must have exactly one name.
+ */
+private fun StableRegularFile.requireSingleName(kind: String): StableRegularFile {
+    if (identity.linkCount != 1) throw JobStoreException("$kind has more than one filesystem name")
+    return this
 }
 
 fun ElfMetadata.toJson(): JsonObject = buildJsonObject {

@@ -17,24 +17,29 @@ async function waitForUploadControl(tab, ready, label = 'workspace upload contro
     document.querySelector('section[aria-labelledby="upload-title"] input#binary-file[type="file"]:not(:disabled)') !== null`, label);
 }
 
+// Master uses this named helper in its readiness controls.
+async function readyForUpload(tab, ready) {
+  return waitForUploadControl(tab, ready);
+}
+
 /** SessionStatus can settle before the lazy upload form has its authenticated limits. */
-export const uploadFormReady = `document.body.innerText.includes('Local session connected.') &&
+export const uploadFormReady = `location.pathname === '/nested/' && document.body.innerText.includes('Local session connected.') &&
   document.querySelector('#upload-guidance')?.textContent.includes('The complete request limit is 33554432 bytes') &&
-  document.querySelector('#binary-file:not(:disabled)') !== null`;
+  document.querySelector('section[aria-labelledby=\"upload-title\"] input#binary-file[type=\"file\"]:not(:disabled)') !== null`;
 
 /** Wait for Preact to commit this exact selection, not just the file-input change event. */
-export function uploadSubmitReady(label) {
+export function uploadSubmitReady(label, fileName = 'inert-browser-fixture.elf') {
   return `(() => {
     const picker = document.querySelector('#binary-file');
     const submit = document.querySelector('.upload-panel button[type="submit"]');
-    return picker?.files?.[0]?.name === 'inert-browser-fixture.elf' &&
+    return picker?.files?.[0]?.name === ${JSON.stringify(fileName)} &&
       submit?.textContent === ${JSON.stringify(label)} && !submit.disabled;
   })()`;
 }
 
 /** Wait for the upload control, then select the isolated non-executable fixture. */
-export async function selectUploadFixture({ tab, evaluate, ready }) {
-  await waitForUploadControl(tab, ready);
+export async function selectUploadFixture({ tab, evaluate, ready, waitForControl = true }) {
+  if (waitForControl) await readyForUpload(tab, ready);
   await evaluate(tab, `(() => {
     const bytes = new Uint8Array(64); bytes.set([127, 69, 76, 70, 2, 1, 1]);
     const view = new DataView(bytes.buffer); view.setUint16(16, 2, true); view.setUint16(18, 62, true);
@@ -45,6 +50,7 @@ export async function selectUploadFixture({ tab, evaluate, ready }) {
     picker.dispatchEvent(new Event('change', { bubbles: true }));
   })()`);
   await ready(tab, `document.body.innerText.includes('Selected: inert-browser-fixture.elf') && document.querySelector('button[type="submit"]')?.disabled === false`, 'upload selection rendered');
+  await ready(tab, uploadSubmitReady('Upload binary'), 'selected fixture and enabled upload');
 }
 
 /** Isolated packaged-browser fixture: valid header only, never executable behavior. */
@@ -77,10 +83,9 @@ export async function qualifyUpload({ makeTarget, cdp, evaluate, ready, browserO
     };
   })();` }, tab.sessionId);
   await cdp.call('Page.navigate', { url: `${browserOrigin}/nested/` }, tab.sessionId);
-  await ready(tab, uploadFormReady, 'authenticated upload form and limits');
-  const selectFixture = () => selectUploadFixture({ tab, evaluate, ready });
+  await ready(tab, uploadFormReady, 'workspace upload control');
+  const selectFixture = () => selectUploadFixture({ tab, evaluate, ready, waitForControl: false });
   await selectFixture();
-  await ready(tab, uploadSubmitReady('Upload binary'), 'selected fixture and enabled upload');
   assert.equal(await evaluate(tab, `document.activeElement.id`), 'binary-file');
   await evaluate(tab, `[...document.querySelectorAll('button')].find(button => button.textContent === 'Upload binary').focus()`);
   await cdp.call('Page.bringToFront', {}, tab.sessionId);
@@ -187,13 +192,14 @@ export async function qualifyUploadFailures({ makeTarget, cdp, evaluate, ready, 
   await cdp.call('Page.navigate', { url: `${browserOrigin}/nested/` }, tab.sessionId);
   const ids = (await fs.readdir(data)).filter(name => /^[a-f0-9]{32}$/.test(name));
   async function select(size, name) {
-    await waitForUploadControl(tab, ready, 'failure workspace upload control');
+    await readyForUpload(tab, ready);
     await evaluate(tab, `(() => {
       const transfer = new DataTransfer(); transfer.items.add(new File([new Uint8Array(${size})], ${JSON.stringify(name)}));
       const picker = document.querySelector('#binary-file'); picker.files = transfer.files;
       picker.dispatchEvent(new Event('change', { bubbles: true }));
     })()`);
     await ready(tab, `document.body.innerText.includes(${JSON.stringify(`Selected: ${name}`)}) && document.querySelector('button[type="submit"]')?.disabled === false`, 'upload selection rendered');
+    await ready(tab, uploadSubmitReady('Upload binary', name), 'selected fixture and enabled upload');
   }
   async function button(label) {
     await evaluate(tab, `[...document.querySelectorAll('button')].find(button => button.textContent === ${JSON.stringify(label)}).click()`);
@@ -237,7 +243,7 @@ export async function qualifyMeasuredUpload({ makeTarget, cdp, evaluate, ready, 
   }, tab.sessionId);
   const before = (await fs.readdir(data)).filter(name => /^[a-f0-9]{32}$/.test(name));
   await cdp.call('Page.navigate', { url: `${browserOrigin}/nested/` }, tab.sessionId);
-  await waitForUploadControl(tab, ready, 'measured workspace upload control');
+  await waitForUploadControl(tab, ready);
   await evaluate(tab, `(() => {
     const bytes = new Uint8Array(512 * 1024); bytes.set([127, 69, 76, 70, 2, 1, 1]);
     const view = new DataView(bytes.buffer); view.setUint16(16, 2, true); view.setUint16(18, 62, true);
@@ -262,6 +268,7 @@ export async function qualifyMeasuredUpload({ makeTarget, cdp, evaluate, ready, 
   await cdp.call('Network.emulateNetworkConditions', {
     offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1,
   }, tab.sessionId);
+  await ready(tab, uploadSubmitReady('Retry this upload', 'measured-inert.elf'), 'reselected fixture and enabled retry');
   await evaluate(tab, `[...document.querySelectorAll('button')].find(button => button.textContent === 'Retry this upload').click()`);
   await ready(tab, `location.pathname.startsWith('/nested/jobs/') && document.body.innerText.includes('measured-inert.elf')`, 'measured upload publication');
   const id = await evaluate(tab, 'location.pathname.split("/").at(-1)');

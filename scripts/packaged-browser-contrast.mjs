@@ -16,7 +16,7 @@ function contrast(a, b) {
 export async function qualifyFilterContrast({ tab, cdp, evaluate }) {
   await evaluate(tab, `document.querySelector('[name="search"]').focus()`);
   const measurements = [];
-  for (const name of ['search', 'status', 'createdAfter', 'createdBefore', 'sort', 'limit']) {
+  for (const name of ['search', 'status', 'createdAfter', 'createdBefore', 'sort', 'archived', 'limit']) {
     const style = await evaluate(tab, `(() => {
       const field = document.activeElement;
       const style = getComputedStyle(field);

@@ -769,10 +769,19 @@ internal class ExportProcessTree(
                 try { if (handle.isAlive) { if (force) handle.destroyForcibly() else handle.destroy() } }
                 catch (failure: Throwable) { observationFailure = observationFailure ?: failure }
             }
-            try { if (process.isAlive) { if (force) process.destroyForcibly() else process.destroy() } }
-            catch (failure: Throwable) { observationFailure = observationFailure ?: failure }
-            try {
-                rootHandle?.let { if (it.isAlive) { if (force) it.destroyForcibly() else it.destroy() } }
+            val root = rootHandle
+            var rootAlive: Boolean? = null
+            if (root != null) try { rootAlive = root.isAlive } catch (failure: Throwable) {
+                observationFailure = observationFailure ?: failure
+            }
+            // A ProcessHandle can report native exit before its owning Process acknowledges exit.
+            // Do not signal that already-absent process through the stale Java view; waitFor below
+            // settles the acknowledgement inside this same bounded cleanup window.
+            if (rootAlive != false) try {
+                if (process.isAlive) { if (force) process.destroyForcibly() else process.destroy() }
+            } catch (failure: Throwable) { observationFailure = observationFailure ?: failure }
+            if (rootAlive == true && root != null) try {
+                if (force) root.destroyForcibly() else root.destroy()
             } catch (failure: Throwable) { observationFailure = observationFailure ?: failure }
         }
         fun remaining(allowance: Long): Long {

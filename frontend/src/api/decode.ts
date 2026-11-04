@@ -15,15 +15,28 @@ variants.set('event', { $ref: '#/definitions/event' });
 
 const groupChecks = new Map<string, (document: ContractDocument) => void>();
 
-/** Admit a generated lazy response group and its semantic checks; its kinds stay unsupported until the owning route loads. */
-export function registerContractGroup(group: Schema, check: (document: ContractDocument) => void): void {
-  registerDefinitions(group.definitions ?? {});
-  for (const schema of group.oneOf ?? []) {
+/** Lazily loaded routes add their generated contract extension before decoding those kinds. */
+export function registerContractExtension(
+  extension: Schema,
+  check?: (document: ContractDocument) => void,
+): void {
+  registerDefinitions(extension.definitions ?? {});
+  for (const schema of extension.oneOf ?? []) {
     const kind = schema.properties?.kind?.const;
-    if (typeof kind !== 'string' || (variants.has(kind) && variants.get(kind) !== schema)) throw new ApiClientError('unsupported_contract');
+    const existing = typeof kind === 'string' ? variants.get(kind) : undefined;
+    if (typeof kind !== 'string' || (existing !== undefined && JSON.stringify(existing) !== JSON.stringify(schema))) {
+      throw new ApiClientError('unsupported_contract');
+    }
+    const existingCheck = groupChecks.get(kind);
+    if (check && existingCheck !== undefined && existingCheck !== check) throw new ApiClientError('unsupported_contract');
     variants.set(kind, schema);
-    groupChecks.set(kind, check);
+    if (check) groupChecks.set(kind, check);
   }
+}
+
+/** Admit a generated route group and its semantic checks while retaining the shared extension path. */
+export function registerContractGroup(group: Schema, check: (document: ContractDocument) => void): void {
+  registerContractExtension(group, check);
 }
 
 /** Producer mode checks shared closed fixtures; response mode projects additive v1 fields. */

@@ -228,6 +228,11 @@ regular XML input, including nested/case-variant XML. Gradle's regular binary
 result files remain allowed; symlink files/directories and nonregular entries
 refuse. Missing, linked, malformed, oversized, foreign, duplicate and empty reports refuse; the retained receipt binds the exact
 XML bytes/hash. Core runs the report gate's positive and negative controls.
+The `restart` packaged-browser mode (see `docs/web-browser-support.md`) runs pinned Chrome headfully
+under Xvfb, restarts the packaged JVM with SIGTERM only, and exercises background-tab suspension,
+two-tab observation and a stale progress-pin write; its sanitized report and screenshots are retained
+in `packaged-web-verification`.
+
 The focused `packaged-browser-expiry-test-reports` artifact retains the exact
 expiry XML and gate receipt for independent byte/hash checks without restoring
 browser journey payloads. The existing full packaged evidence upload is retained.
@@ -247,6 +252,10 @@ existing destination. Ubuntu CI installs the archive's `deb.deps`, following the
 The browser is separate from all application distributions. CI explicitly uses
 `--no-sandbox` on its disposable runner; each report records that setting and the
 actual executable digest/CDP version. It does not qualify browser sandbox behavior.
+Packaged-browser reports also retain a bounded target lifecycle trace and
+per-target initialization phase timings/outcomes. The trace hashes target/session
+identifiers and omits page URLs, titles and CDP payloads so an initialization
+timeout can be localized without retaining browser-private navigation data.
 
 The packaged lane retains JSON reports, screenshots, tool pins and JVM test
 reports as `packaged-web-verification` for 14 days even after failure. Session
@@ -279,7 +288,7 @@ their checks. GitHub branch-protection requirements remain separate as noted abo
 | Kotlin core / oracle / live / live-fulltree / aggregate | Normal; complementary ordinary core/oracle namespaces and tagged full-tree/complement live groups run with required hosted fixtures. Oracle owns the isolated RSS/class-data checks; core owns real Angr and quota snapshot follow-up. Primary live retains the pinned credential-free Goose initialize and Codex authentication-boundary preflights. The `kotlin` aggregate requires every shard to succeed. | [ci.yml](../.github/workflows/ci.yml), [ci.sh](../scripts/ci.sh), `build.gradle.kts` |
 | Bundled Ghidra / archival Ghidra / Clang | Normal, including the heavier direct-API/native, Docker archival and strict Clang/sanitizer checks. | [ci.yml](../.github/workflows/ci.yml), `scripts/validate-archival-docker.sh`, `scripts/validate-clang.sh` |
 | ACP contract / Built-in core contract | Normal and dispatchable; required host and strict fixture inventories, with missing/failed/skipped required verification refused. | [acp-contract.yml](../.github/workflows/acp-contract.yml), [builtin-contract.yml](../.github/workflows/builtin-contract.yml) |
-| GCC / LLVM oracle-model normal jobs | Normal; their existing source, provenance, artifact/reference and generation checks retain their separate oracle authority. Manual dispatch does not rerun these normal jobs. | [gcc-oracle-model.yml](../.github/workflows/gcc-oracle-model.yml), [llvm-oracle-model.yml](../.github/workflows/llvm-oracle-model.yml) |
+| GCC / LLVM oracle-model normal jobs | Normal; their existing source, provenance, artifact/reference and generation checks retain their separate oracle authority. The LLVM workflow also emits a dedicated `required-contract` check that succeeds only after the normal provenance lane succeeds; manual dispatch does not rerun these normal jobs. | [gcc-oracle-model.yml](../.github/workflows/gcc-oracle-model.yml), [llvm-oracle-model.yml](../.github/workflows/llvm-oracle-model.yml) |
 | Retained GCC driver DWARF interfaces | Explicit dispatch, or a triggered PR run already carrying `qualify:driver-dwarf-interfaces`. Applying the label alone is not a configured workflow trigger. | `driver-dwarf-interfaces` in [gcc-oracle-model.yml](../.github/workflows/gcc-oracle-model.yml) |
 | LLVM native runtime measurement | Explicit dispatch with `qualification=native-runtime-measurement`; measurement does not approve a production runtime. | `native-runtime-measurement` in [llvm-oracle-model.yml](../.github/workflows/llvm-oracle-model.yml) |
 | LLVM oracle clean rebuild | Manual dispatch only; run when the locked source/toolchain/flags/artifact pair needs fresh rebuild evidence. | [llvm-oracle-rebuild.yml](../.github/workflows/llvm-oracle-rebuild.yml) |
@@ -441,6 +450,10 @@ toolchain recipe and checks its immutable base, Dockerfile, build-record
 binding, platform, and every recorded live tool's exact executable bytes and
 version output. The Docker image ID is retained as origin provenance rather
 than used as a false layer-reproducibility claim.
+On push/PR events, `llvm-oracle-model.yml` publishes the uniquely named
+`LLVM oracle required-contract` check (job ID `llvm-required-contract`). It fails
+if the normal provenance lane does not pass, so branch protection can require
+this LLVM status independently of the ACP workflow's `required-contract` check.
 
 The expensive source rebuild is intentionally manual. Run the `LLVM oracle
 clean rebuild` workflow when the source lock, toolchain, flags, or artifact

@@ -215,6 +215,8 @@ class UploadServer(
     private val startupCancellation: () -> Boolean = { false },
     // Operator-admitted directory whose immediate children may be imported by name; never browser-selected.
     gitImportRoot: Path? = null,
+    // Null selects the production registrations for the SPA; admission still follows runtime readiness.
+    durableAdapters: List<DurableWebWorkflowAdapter>? = null,
 ) {
     init {
         require(listenBacklog in 1..4096) { "HTTP listen backlog must be between 1 and 4096" }
@@ -269,6 +271,7 @@ class UploadServer(
             WorkflowAttemptStore.open(root)
         },
         progressRetentionIntervalMs = if (uiMode == WebUiMode.SPA) 1000 else null,
+        durableAdapters = durableAdapters ?: if (uiMode == WebUiMode.SPA) productionDurableWebWorkflows(sensitiveValues = sensitiveValues) else emptyList(),
         shutdownTimeoutMs = 5000, failureDiagnostic = { diagnostic(it, "Background operation failed") },
         sourceProfiles = admittedSourceProfiles)
     private val sourceEvidence = WebSourceEvidence(store, admittedSourceProfiles, jobs::readArtifact)
@@ -278,7 +281,16 @@ class UploadServer(
         requestDiagnosticOutput = requestDiagnosticOutput)
     private val jobMutations = WebJobMutationBoundary(access, jobs)
     private val legacySessions = WebSessionController(access)
-    internal val streamResources = WebStreamResources()
+    // A stream that outlives stop's bounded wait releases store ownership when it finally ends.
+    // Before stop has finished its own shutdown sequence, stop alone decides when ownership is released.
+    private val stopSequenceFinished = java.util.concurrent.atomic.AtomicBoolean(false)
+    internal val streamResources = WebStreamResources(onDrained = {
+        try {
+            if (stopSequenceFinished.get()) releaseOwnershipIfIdle()
+        } catch (_: Exception) {
+            System.err.println("Event stream cleanup did not release store ownership; recovery is required")
+        }
+    })
     private val harnessReadiness = WebHarnessReadinessProjector()
     private val agentPreflight = WebAgentPreflight(configurationIdentity = {
         (authenticationInspector as? WebObservedAuthenticationInspector)?.configurationIdentity()
@@ -297,6 +309,8 @@ class UploadServer(
     private val gitAvailability = decompengine.git.GitRuntime.detect()
     private val gitRepositories = decompengine.git.ManagedGitRepositories(store.storageRoot, gitAvailability,
         jobs::gitSourceSnapshot, gitImportRoot)
+    // Deletion and maintenance retain jobs whose Git work is in progress, uncommitted or unpushed (#509).
+    private val gitRetention = jobs.registerRetentionHold(WebGitRetentionHold(gitRepositories))
     private val api = spaAssets?.let { WebApiController(access, it, jobs, jobMutations, streamResources,
         harnessReadiness = harnessReadiness, agentPreflight = agentPreflight,
         git = WebGitCapability(gitAvailability, gitRepositories)) }
@@ -326,6 +340,10 @@ class UploadServer(
     private val requestsDrained = java.util.concurrent.CountDownLatch(1)
     private val stopRequested = java.util.concurrent.atomic.AtomicBoolean(false)
     val serverPort: Int get() = server.address.port
+
+    /** Approximate admission occupancy; test evidence helper for overload and release qualification. */
+    internal data class AdmissionSnapshot(val workers: Int, val queued: Int, val responders: Int)
+    internal fun admissionSnapshot() = AdmissionSnapshot(requestExecutor.activeCount, requestExecutor.queue.size, overloadResponders.activeCount)
     val browserOrigin: String = devFrontendOrigin ?: webOrigin(host, serverPort)
 
     /** The CLI calls this explicitly; no HTTP route can issue a local link. */
@@ -481,6 +499,7 @@ class UploadServer(
             catch (_: InterruptedException) { requestWaitInterrupted = true }
         }
         if (callerWasInterrupted || inspectionWaitInterrupted || requestWaitInterrupted) Thread.currentThread().interrupt()
+        stopSequenceFinished.set(true)
         if (!releaseOwnershipIfIdle()) throw IllegalStateException("HTTP requests remain active after server stop")
     }
 

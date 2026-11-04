@@ -402,6 +402,9 @@ def check_structure(kind: str, data: dict) -> None:
             raise ValueError("text previews exist exactly for recorded fields")
 
 
+def check_job_label(label) -> None:
+    if isinstance(label, str) and (label.strip() != label or any(ord(c) < 32 or ord(c) == 127 or ord(c) in (0x2028, 0x2029) for c in label)):
+        raise ValueError("a job label must be printable and unpadded")
 def check_source_search(data: dict) -> None:
     page, limits, scope, progress, query = data["page"], data["limits"], data["scope"], data["progress"], data["query"]
     items = data["items"]
@@ -516,6 +519,15 @@ def check_semantics(document: dict) -> None:
                 raise ValueError("invalid recorded source path component")
         if (data["parentDirectoryId"] == "root") != ("/" not in path):
             raise ValueError("recorded source parent is inconsistent")
+    elif kind == "jobDeletionPreview":
+        if data["deletable"] != (len(data["protections"]) == 0):
+            raise ValueError("a deletion preview is deletable exactly when no protection applies")
+        check_job_label(data["label"])
+    elif kind == "storageSummary":
+        if data["complete"] and data["uninspectedEntries"] != "0":
+            raise ValueError("a complete storage summary cannot have uninspected entries")
+    elif kind in ("job", "jobOrganizationRequest"):
+        check_job_label(data.get("label"))
     elif kind == "recovery":
         candidates = data["retainedUploadStages"] + data["retainedMetadataFiles"]
         if candidates > 128 or candidates > data["scannedEntries"] or int(data["observedBytes"]) > 67108864:
@@ -559,6 +571,11 @@ def check_semantics(document: dict) -> None:
         capabilities = [item["id"] for item in data["capabilities"]]
         if len(capabilities) != len(set(capabilities)):
             raise ValueError("duplicate capability identity")
+        for item in data["capabilities"]:
+            launch = item.get("launch")  # Optional: older v1 producers omit it.
+            # An agent contract version is reported exactly for launch options that contact an agent.
+            if launch is not None and launch["contactsAgent"] != (item["agentContractVersion"] is not None):
+                raise ValueError("launch agent contact and agent contract version disagree")
     elif kind == "report":
         artifact = data["sourceArtifact"]
         if artifact is not None and artifact["binding"] != data["binding"]:
@@ -821,6 +838,32 @@ def check_validation_mismatch_controls(validate) -> int:
     return checked
 
 
+# Collection/detail documents the route matrix reserves until their owning issues add exact schemas.
+RESERVED_ROUTE_DOCUMENTS = {"artifacts", "file", "files", "matches", "revisions"}
+
+
+def check_route_matrix_documents(schema: dict) -> int:
+    """Every success document named by the documented HTTP route matrix is a schema kind or reserved."""
+    kinds = {branch["properties"]["kind"]["const"] for branch in schema["oneOf"]
+             if "kind" in branch.get("properties", {})}
+    lines = (ROOT.parents[2] / "docs" / "web-api.md").read_text().splitlines()
+    start = lines.index("## HTTP route matrix")
+    header = next(index for index in range(start, len(lines)) if lines[index].startswith("| Method and route"))
+    rows = []
+    for line in lines[header + 2:]:
+        if not line.startswith("|"):
+            break
+        rows.append(line)
+    named = {match.group(1) for row in rows
+             for match in re.finditer(r"`[0-9]{3} ([A-Za-z]+)`", row.split(" | ")[1])}
+    if len(rows) < 30 or not named:
+        raise ValueError("docs/web-api.md HTTP route matrix was not found or parsed")
+    unknown = named - kinds - RESERVED_ROUTE_DOCUMENTS
+    if unknown:
+        raise ValueError(f"route matrix documents lack a schema kind or reservation: {sorted(unknown)}")
+    return len(rows)
+
+
 def main() -> int:
     try:
         manifest = load_json(ROOT / "fixtures.json")
@@ -876,6 +919,10 @@ def main() -> int:
         mismatch_controls = check_validation_mismatch_controls(validate)
     except (fastjsonschema.JsonSchemaException, KeyError, TypeError, ValueError) as error:
         failures.append(f"validation mismatch controls: {error}")
+    try:
+        route_rows = check_route_matrix_documents(schema)
+    except (KeyError, StopIteration, ValueError) as error:
+        failures.append(f"docs/web-api.md route matrix: {error}")
     if failures:
         print("\n".join(failures), file=sys.stderr)
         return 1
@@ -883,6 +930,7 @@ def main() -> int:
     print(f"run lifecycle metadata: {lifecycle_controls} envelope controls verified")
     print(f"validation display metadata: {validation_display_controls} authored envelope controls verified")
     print(f"validation mismatch navigation: {mismatch_controls} authored envelope controls verified")
+    print(f"route matrix documents: {route_rows} documented rows name schema kinds or reservations")
     return 0
 
 

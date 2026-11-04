@@ -288,6 +288,11 @@ internal class LinuxGeneratedCRepairValidationBoundary private constructor(
             return LinuxGeneratedCRepairValidationBoundary(registration)
         }
         private val PROGRAM_DESTINATION = Path.of("/decomp-generated-c-program")
+
+        /** Passive answer from the same gate availability and validation call; it launches nothing. */
+        internal fun productionQualified(): Boolean = try {
+            requireProductionQualification()
+        } catch (_: SandboxUnavailableException) { false }
         private fun requireProductionQualification(): Nothing = throw SandboxUnavailableException(
             "generated-C validation remains unavailable pending qualification of its complete " +
                 "provisioned compiler, executable runtime and public-factory validation path",

@@ -228,6 +228,16 @@
               "type": "null"
             }
           ]
+        },
+        "launch": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/workflowLaunch"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -239,7 +249,32 @@
         "agentContractVersion",
         "limits"
       ],
-      "additionalProperties": false
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "launch": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "launch"
+            ]
+          },
+          "then": {
+            "properties": {
+              "workflows": {
+                "minItems": 1,
+                "maxItems": 1
+              },
+              "limits": {
+                "$ref": "#/definitions/executionLimits"
+              }
+            }
+          }
+        }
+      ]
     },
     "bootstrap": {
       "type": "object",
@@ -429,6 +464,23 @@
               "type": "null"
             }
           ]
+        },
+        "label": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Display-only label (1-120 characters); never changes identity, run configuration or evidence. Optional for older producers."
+        },
+        "archived": {
+          "type": "boolean",
+          "description": "Organization only: hidden from the default library view. Unrelated to source-archive export. Optional for older producers."
         }
       },
       "required": [
@@ -3622,6 +3674,311 @@
       ],
       "additionalProperties": false
     },
+    "sourceSearchMatch": {
+      "type": "object",
+      "properties": {
+        "fileId": {
+          "$ref": "#/definitions/id"
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "^(?!/)[^\\\\\\u0000-\\u001f\\u007f:]+$"
+        },
+        "sha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "line": {
+          "$ref": "#/definitions/uint64"
+        },
+        "column": {
+          "$ref": "#/definitions/uint64"
+        },
+        "offsetBytes": {
+          "$ref": "#/definitions/uint64"
+        },
+        "lineOffsetBytes": {
+          "$ref": "#/definitions/uint64"
+        },
+        "before": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "match": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "after": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "truncatedBefore": {
+          "type": "boolean"
+        },
+        "truncatedAfter": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "fileId",
+        "displayName",
+        "sha256",
+        "line",
+        "column",
+        "offsetBytes",
+        "lineOffsetBytes",
+        "before",
+        "match",
+        "after",
+        "truncatedBefore",
+        "truncatedAfter"
+      ],
+      "additionalProperties": false
+    },
+    "sourceSearch": {
+      "type": "object",
+      "properties": {
+        "binding": {
+          "type": "object",
+          "properties": {
+            "jobId": {
+              "$ref": "#/definitions/id"
+            },
+            "runId": {
+              "$ref": "#/definitions/id"
+            },
+            "revisionId": {
+              "$ref": "#/definitions/id"
+            }
+          },
+          "required": [
+            "jobId",
+            "runId",
+            "revisionId"
+          ],
+          "additionalProperties": false
+        },
+        "authority": {
+          "const": "source-input-commitments"
+        },
+        "sourceSha256": {
+          "$ref": "#/definitions/sha256"
+        },
+        "metadataVersion": {
+          "$ref": "#/definitions/sha256"
+        },
+        "query": {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "match": {
+              "enum": [
+                "text",
+                "symbol"
+              ]
+            },
+            "caseSensitive": {
+              "type": "boolean"
+            },
+            "directoryId": {
+              "$ref": "#/definitions/id"
+            },
+            "path": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 512
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "text",
+            "match",
+            "caseSensitive",
+            "directoryId",
+            "path"
+          ],
+          "additionalProperties": false
+        },
+        "index": {
+          "const": "none"
+        },
+        "status": {
+          "enum": [
+            "complete",
+            "partial"
+          ]
+        },
+        "stopReason": {
+          "anyOf": [
+            {
+              "enum": [
+                "result-limit",
+                "byte-limit",
+                "deadline"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "scope": {
+          "type": "object",
+          "properties": {
+            "filesInScope": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            },
+            "searchableFiles": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            },
+            "notViewable": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            },
+            "declaredBinary": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            },
+            "tooLarge": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            }
+          },
+          "required": [
+            "filesInScope",
+            "searchableFiles",
+            "notViewable",
+            "declaredBinary",
+            "tooLarge"
+          ],
+          "additionalProperties": false
+        },
+        "progress": {
+          "type": "object",
+          "properties": {
+            "scannedFiles": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            },
+            "scannedBytes": {
+              "$ref": "#/definitions/uint64"
+            },
+            "unsearchableText": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            },
+            "unavailableFiles": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            },
+            "remainingFiles": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            }
+          },
+          "required": [
+            "scannedFiles",
+            "scannedBytes",
+            "unsearchableText",
+            "unavailableFiles",
+            "remainingFiles"
+          ],
+          "additionalProperties": false
+        },
+        "coverageGaps": {
+          "type": "object",
+          "properties": {
+            "unsearchableText": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            },
+            "unavailableFiles": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25000
+            }
+          },
+          "required": [
+            "unsearchableText",
+            "unavailableFiles"
+          ],
+          "additionalProperties": false
+        },
+        "limits": {
+          "type": "object",
+          "properties": {
+            "maxResults": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            },
+            "maxScannedBytes": {
+              "$ref": "#/definitions/uint64"
+            },
+            "deadlineMs": {
+              "$ref": "#/definitions/uint64"
+            }
+          },
+          "required": [
+            "maxResults",
+            "maxScannedBytes",
+            "deadlineMs"
+          ],
+          "additionalProperties": false
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/sourceSearchMatch"
+          },
+          "maxItems": 100
+        },
+        "page": {
+          "$ref": "#/definitions/page"
+        }
+      },
+      "required": [
+        "binding",
+        "authority",
+        "sourceSha256",
+        "metadataVersion",
+        "query",
+        "index",
+        "status",
+        "stopReason",
+        "scope",
+        "progress",
+        "coverageGaps",
+        "limits",
+        "items",
+        "page"
+      ],
+      "additionalProperties": false
+    },
     "revisionFileDetail": {
       "type": "object",
       "properties": {
@@ -4932,6 +5289,157 @@
             "CLEANUP_UNVERIFIED"
           ]
         }
+      ]
+    },
+    "gitRepositoryInit": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "git.init"
+        },
+        "runId": {
+          "$ref": "#/definitions/id"
+        },
+        "revisionId": {
+          "$ref": "#/definitions/id"
+        },
+        "initialBranch": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "action",
+        "runId",
+        "revisionId",
+        "initialBranch"
+      ],
+      "additionalProperties": false
+    },
+    "gitRepositoryAttach": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "git.attach"
+        },
+        "sourceName": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+        }
+      },
+      "required": [
+        "action",
+        "sourceName"
+      ],
+      "additionalProperties": false
+    },
+    "gitRepositorySummary": {
+      "type": "object",
+      "properties": {
+        "repositoryId": {
+          "$ref": "#/definitions/id"
+        },
+        "worktreeId": {
+          "$ref": "#/definitions/id"
+        },
+        "operationId": {
+          "$ref": "#/definitions/id"
+        },
+        "origin": {
+          "$ref": "#/definitions/gitRepositoryOrigin"
+        },
+        "objectFormat": {
+          "$ref": "#/definitions/gitObjectFormat"
+        },
+        "trackingPolicy": {
+          "const": "source-only-v1"
+        },
+        "createdAt": {
+          "$ref": "#/definitions/instant"
+        },
+        "runId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "candidateRevisionId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "repositoryId",
+        "worktreeId",
+        "operationId",
+        "origin",
+        "objectFormat",
+        "trackingPolicy",
+        "createdAt",
+        "runId",
+        "candidateRevisionId"
+      ],
+      "additionalProperties": false
+    },
+    "gitRepositories": {
+      "type": "object",
+      "properties": {
+        "jobId": {
+          "$ref": "#/definitions/id"
+        },
+        "repositories": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/gitRepositorySummary"
+          },
+          "maxItems": 1
+        },
+        "operations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/operation"
+          },
+          "maxItems": 20
+        }
+      },
+      "required": [
+        "jobId",
+        "repositories",
+        "operations"
+      ],
+      "additionalProperties": false
+    },
+    "gitRepositoryOrigin": {
+      "type": "string",
+      "enum": [
+        "initialized",
+        "imported"
+      ]
+    },
+    "gitObjectFormat": {
+      "type": "string",
+      "enum": [
+        "sha1",
+        "sha256",
+        "unknown"
       ]
     },
     "queuePosition": {
@@ -7216,461 +7724,546 @@
         }
       }
     },
-    "sourceSearchMatch": {
+    "workflowLaunch": {
       "type": "object",
+      "description": "Server-reported launch facts for one registered workflow option. They describe the adapter; admission rechecks capability, limits and readiness.",
       "properties": {
-        "fileId": {
-          "$ref": "#/definitions/id"
-        },
-        "displayName": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 4096,
-          "pattern": "^(?!/)[^\\\\\\u0000-\\u001f\\u007f:]+$"
-        },
-        "sha256": {
-          "$ref": "#/definitions/sha256"
-        },
-        "line": {
-          "$ref": "#/definitions/uint64"
-        },
-        "column": {
-          "$ref": "#/definitions/uint64"
-        },
-        "offsetBytes": {
-          "$ref": "#/definitions/uint64"
-        },
-        "lineOffsetBytes": {
-          "$ref": "#/definitions/uint64"
-        },
-        "before": {
-          "type": "string",
-          "maxLength": 160
-        },
-        "match": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 256
-        },
-        "after": {
-          "type": "string",
-          "maxLength": 160
-        },
-        "truncatedBefore": {
-          "type": "boolean"
-        },
-        "truncatedAfter": {
-          "type": "boolean"
-        }
-      },
-      "required": [
-        "fileId",
-        "displayName",
-        "sha256",
-        "line",
-        "column",
-        "offsetBytes",
-        "lineOffsetBytes",
-        "before",
-        "match",
-        "after",
-        "truncatedBefore",
-        "truncatedAfter"
-      ],
-      "additionalProperties": false
-    },
-    "sourceSearch": {
-      "type": "object",
-      "properties": {
-        "binding": {
-          "type": "object",
-          "properties": {
-            "jobId": {
-              "$ref": "#/definitions/id"
-            },
-            "runId": {
-              "$ref": "#/definitions/id"
-            },
-            "revisionId": {
-              "$ref": "#/definitions/id"
-            }
-          },
-          "required": [
-            "jobId",
-            "runId",
-            "revisionId"
-          ],
-          "additionalProperties": false
-        },
-        "authority": {
-          "const": "source-input-commitments"
-        },
-        "sourceSha256": {
-          "$ref": "#/definitions/sha256"
-        },
-        "metadataVersion": {
-          "$ref": "#/definitions/sha256"
-        },
-        "query": {
-          "type": "object",
-          "properties": {
-            "text": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 256
-            },
-            "match": {
-              "enum": [
-                "text",
-                "symbol"
-              ]
-            },
-            "caseSensitive": {
-              "type": "boolean"
-            },
-            "directoryId": {
-              "$ref": "#/definitions/id"
-            },
-            "path": {
-              "anyOf": [
-                {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 512
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "text",
-            "match",
-            "caseSensitive",
-            "directoryId",
-            "path"
-          ],
-          "additionalProperties": false
-        },
-        "index": {
-          "const": "none"
-        },
-        "status": {
-          "enum": [
-            "complete",
-            "partial"
-          ]
-        },
-        "stopReason": {
+        "harnessCapabilityId": {
           "anyOf": [
             {
-              "enum": [
-                "result-limit",
-                "byte-limit",
-                "deadline"
-              ]
+              "$ref": "#/definitions/id"
             },
             {
               "type": "null"
             }
           ]
         },
-        "scope": {
-          "type": "object",
-          "properties": {
-            "filesInScope": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 25000
-            },
-            "searchableFiles": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 25000
-            },
-            "notViewable": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 25000
-            },
-            "declaredBinary": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 25000
-            },
-            "tooLarge": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 25000
-            }
-          },
-          "required": [
-            "filesInScope",
-            "searchableFiles",
-            "notViewable",
-            "declaredBinary",
-            "tooLarge"
-          ],
-          "additionalProperties": false
+        "mode": {
+          "type": "string",
+          "enum": [
+            "tools",
+            "agent",
+            "evidence-only"
+          ]
         },
-        "progress": {
-          "type": "object",
-          "properties": {
-            "scannedFiles": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 25000
-            },
-            "scannedBytes": {
-              "$ref": "#/definitions/uint64"
-            },
-            "unsearchableText": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 25000
-            },
-            "unavailableFiles": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 25000
-            },
-            "remainingFiles": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 25000
-            }
-          },
-          "required": [
-            "scannedFiles",
-            "scannedBytes",
-            "unsearchableText",
-            "unavailableFiles",
-            "remainingFiles"
-          ],
-          "additionalProperties": false
+        "executesBinary": {
+          "type": "boolean"
         },
-        "coverageGaps": {
-          "type": "object",
-          "properties": {
-            "unsearchableText": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 25000
-            },
-            "unavailableFiles": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 25000
-            }
-          },
-          "required": [
-            "unsearchableText",
-            "unavailableFiles"
-          ],
-          "additionalProperties": false
+        "contactsAgent": {
+          "type": "boolean"
         },
-        "limits": {
-          "type": "object",
-          "properties": {
-            "maxResults": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 100
-            },
-            "maxScannedBytes": {
-              "$ref": "#/definitions/uint64"
-            },
-            "deadlineMs": {
-              "$ref": "#/definitions/uint64"
-            }
-          },
-          "required": [
-            "maxResults",
-            "maxScannedBytes",
-            "deadlineMs"
-          ],
-          "additionalProperties": false
-        },
-        "items": {
+        "requiredTools": {
           "type": "array",
           "items": {
-            "$ref": "#/definitions/sourceSearchMatch"
+            "type": "string",
+            "enum": [
+              "sandbox",
+              "ghidra",
+              "agent-harness",
+              "c-toolchain",
+              "angr"
+            ]
           },
-          "maxItems": 100
+          "maxItems": 8,
+          "uniqueItems": true
         },
-        "page": {
-          "$ref": "#/definitions/page"
+        "input": {
+          "type": "string",
+          "enum": [
+            "none",
+            "accepted-optional",
+            "recorded-required"
+          ]
+        },
+        "limitsAdjustable": {
+          "type": "boolean"
         }
       },
       "required": [
-        "binding",
-        "authority",
-        "sourceSha256",
-        "metadataVersion",
-        "query",
-        "index",
-        "status",
-        "stopReason",
-        "scope",
-        "progress",
-        "coverageGaps",
-        "limits",
-        "items",
-        "page"
+        "harnessCapabilityId",
+        "mode",
+        "executesBinary",
+        "contactsAgent",
+        "requiredTools",
+        "input",
+        "limitsAdjustable"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "agent"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "contactsAgent": {
+                "const": true
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "contactsAgent": {
+                "const": false
+              }
+            }
+          }
+        }
+      ]
+    },
+    "storageCategories": {
+      "type": "object",
+      "description": "Logical regular-file bytes and entry counts by fixed store-layout category.",
+      "properties": {
+        "originalInputs": {
+          "$ref": "#/definitions/storageTally"
+        },
+        "reports": {
+          "$ref": "#/definitions/storageTally"
+        },
+        "sourceSnapshots": {
+          "$ref": "#/definitions/storageTally"
+        },
+        "logs": {
+          "$ref": "#/definitions/storageTally"
+        },
+        "archives": {
+          "$ref": "#/definitions/storageTally"
+        },
+        "metadata": {
+          "$ref": "#/definitions/storageTally"
+        },
+        "temporary": {
+          "$ref": "#/definitions/storageTally"
+        },
+        "other": {
+          "$ref": "#/definitions/storageTally"
+        }
+      },
+      "required": [
+        "originalInputs",
+        "reports",
+        "sourceSnapshots",
+        "logs",
+        "archives",
+        "metadata",
+        "temporary",
+        "other"
       ],
       "additionalProperties": false
     },
-    "gitRepositoryInit": {
+    "storageTally": {
       "type": "object",
       "properties": {
-        "action": {
-          "const": "git.init"
+        "bytes": {
+          "$ref": "#/definitions/uint64"
         },
-        "runId": {
-          "$ref": "#/definitions/id"
+        "entries": {
+          "$ref": "#/definitions/uint64"
+        }
+      },
+      "required": [
+        "bytes",
+        "entries"
+      ],
+      "additionalProperties": false
+    },
+    "retentionProtection": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Z0-9_]{0,63}$"
         },
-        "revisionId": {
-          "$ref": "#/definitions/id"
+        "source": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{0,47}$"
         },
-        "initialBranch": {
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        }
+      },
+      "required": [
+        "code",
+        "source",
+        "message"
+      ],
+      "additionalProperties": false
+    },
+    "jobOrganizationChange": {
+      "type": "object",
+      "description": "Allowlisted PATCH J body; at least one field. A null label clears it.",
+      "properties": {
+        "label": {
           "anyOf": [
             {
               "type": "string",
               "minLength": 1,
-              "maxLength": 200
+              "maxLength": 120,
+              "pattern": "^[^\\x00-\\x20\\x7f](?:[^\\x00-\\x1f\\x7f\\u2028\\u2029]*[^\\x00-\\x20\\x7f])?$"
             },
             {
               "type": "null"
             }
           ]
+        },
+        "archived": {
+          "type": "boolean"
         }
       },
-      "required": [
-        "action",
-        "runId",
-        "revisionId",
-        "initialBranch"
-      ],
-      "additionalProperties": false
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "label"
+            ]
+          },
+          "then": {},
+          "else": {
+            "required": [
+              "archived"
+            ]
+          }
+        }
+      ]
     },
-    "gitRepositoryAttach": {
+    "jobDeletionRequest": {
       "type": "object",
+      "description": "DELETE J body. The client repeats the job identity it reviewed; the route, If-Match and session select everything else.",
       "properties": {
-        "action": {
-          "const": "git.attach"
-        },
-        "sourceName": {
+        "confirmJobId": {
           "type": "string",
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+          "pattern": "^[0-9a-f]{32}$"
         }
       },
       "required": [
-        "action",
-        "sourceName"
+        "confirmJobId"
       ],
       "additionalProperties": false
     },
-    "gitRepositorySummary": {
+    "jobDeletionPreview": {
       "type": "object",
-      "properties": {
-        "repositoryId": {
-          "$ref": "#/definitions/id"
-        },
-        "worktreeId": {
-          "$ref": "#/definitions/id"
-        },
-        "operationId": {
-          "$ref": "#/definitions/id"
-        },
-        "origin": {
-          "$ref": "#/definitions/gitRepositoryOrigin"
-        },
-        "objectFormat": {
-          "$ref": "#/definitions/gitObjectFormat"
-        },
-        "trackingPolicy": {
-          "const": "source-only-v1"
-        },
-        "createdAt": {
-          "$ref": "#/definitions/instant"
-        },
-        "runId": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/id"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "candidateRevisionId": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/id"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        }
-      },
-      "required": [
-        "repositoryId",
-        "worktreeId",
-        "operationId",
-        "origin",
-        "objectFormat",
-        "trackingPolicy",
-        "createdAt",
-        "runId",
-        "candidateRevisionId"
-      ],
-      "additionalProperties": false
-    },
-    "gitRepositories": {
-      "type": "object",
+      "description": "Read-only per-job dry run of deletion: affected storage, protections and finality.",
       "properties": {
         "jobId": {
           "$ref": "#/definitions/id"
         },
-        "repositories": {
-          "type": "array",
-          "items": {
-            "$ref": "#/definitions/gitRepositorySummary"
-          },
-          "maxItems": 1
+        "version": {
+          "$ref": "#/definitions/version"
         },
-        "operations": {
+        "displayFilename": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "label": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120,
+              "pattern": "^[^\\x00-\\x20\\x7f](?:[^\\x00-\\x1f\\x7f\\u2028\\u2029]*[^\\x00-\\x20\\x7f])?$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "attemptCount": {
+          "$ref": "#/definitions/uint64"
+        },
+        "pinnedAttemptCount": {
+          "$ref": "#/definitions/uint64"
+        },
+        "storage": {
+          "$ref": "#/definitions/storageCategories"
+        },
+        "totalBytes": {
+          "$ref": "#/definitions/uint64"
+        },
+        "storageComplete": {
+          "type": "boolean"
+        },
+        "protections": {
           "type": "array",
           "items": {
-            "$ref": "#/definitions/operation"
+            "$ref": "#/definitions/retentionProtection"
           },
-          "maxItems": 20
+          "maxItems": 32
+        },
+        "deletable": {
+          "type": "boolean"
+        },
+        "finality": {
+          "const": "permanent"
+        },
+        "undoAvailable": {
+          "const": false
+        },
+        "tombstoneRetentionMs": {
+          "$ref": "#/definitions/uint64"
         }
       },
       "required": [
         "jobId",
-        "repositories",
-        "operations"
+        "version",
+        "displayFilename",
+        "label",
+        "attemptCount",
+        "pinnedAttemptCount",
+        "storage",
+        "totalBytes",
+        "storageComplete",
+        "protections",
+        "deletable",
+        "finality",
+        "undoAvailable",
+        "tombstoneRetentionMs"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "deletable": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "protections": {
+                "maxItems": 0
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "protections": {
+                "minItems": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "storageSummary": {
+      "type": "object",
+      "description": "Read-only, tolerant logical-byte accounting of the owned job root. Partial totals are lower bounds.",
+      "properties": {
+        "sampledAt": {
+          "$ref": "#/definitions/instant"
+        },
+        "accounting": {
+          "const": "logical-bytes"
+        },
+        "complete": {
+          "type": "boolean"
+        },
+        "scannedEntries": {
+          "$ref": "#/definitions/uint64"
+        },
+        "uninspectedEntries": {
+          "$ref": "#/definitions/uint64"
+        },
+        "jobCount": {
+          "$ref": "#/definitions/uint64"
+        },
+        "categories": {
+          "$ref": "#/definitions/storageCategories"
+        },
+        "totalBytes": {
+          "$ref": "#/definitions/uint64"
+        },
+        "pendingDeletions": {
+          "$ref": "#/definitions/uint64"
+        },
+        "pendingDeletionBytes": {
+          "$ref": "#/definitions/uint64"
+        }
+      },
+      "required": [
+        "sampledAt",
+        "accounting",
+        "complete",
+        "scannedEntries",
+        "uninspectedEntries",
+        "jobCount",
+        "categories",
+        "totalBytes",
+        "pendingDeletions",
+        "pendingDeletionBytes"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "complete": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "uninspectedEntries": {
+                "const": "0"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "maintenanceAction": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "enum": [
+            "progress-journal-expiry",
+            "deletion-resume"
+          ]
+        },
+        "jobId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "runId": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "bytes": {
+          "$ref": "#/definitions/uint64"
+        },
+        "schedule": {
+          "enum": [
+            "periodic",
+            "startup",
+            "not-scheduled"
+          ]
+        }
+      },
+      "required": [
+        "action",
+        "jobId",
+        "runId",
+        "bytes",
+        "schedule"
       ],
       "additionalProperties": false
     },
-    "gitRepositoryOrigin": {
-      "type": "string",
-      "enum": [
-        "initialized",
-        "imported"
-      ]
-    },
-    "gitObjectFormat": {
-      "type": "string",
-      "enum": [
-        "sha1",
-        "sha256",
-        "unknown"
-      ]
+    "maintenancePreview": {
+      "type": "object",
+      "description": "Dry run of the maintenance the server performs. Computing it writes nothing and starts no workflow.",
+      "properties": {
+        "sampledAt": {
+          "$ref": "#/definitions/instant"
+        },
+        "dryRun": {
+          "const": true
+        },
+        "complete": {
+          "type": "boolean"
+        },
+        "policy": {
+          "type": "object",
+          "properties": {
+            "automaticJobDeletion": {
+              "const": false
+            },
+            "periodicMaintenance": {
+              "type": "boolean"
+            },
+            "terminalProgressRetentionMs": {
+              "$ref": "#/definitions/uint64"
+            },
+            "deletionTombstoneRetentionMs": {
+              "$ref": "#/definitions/uint64"
+            }
+          },
+          "required": [
+            "automaticJobDeletion",
+            "periodicMaintenance",
+            "terminalProgressRetentionMs",
+            "deletionTombstoneRetentionMs"
+          ],
+          "additionalProperties": false
+        },
+        "actions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/maintenanceAction"
+          },
+          "maxItems": 200
+        },
+        "omittedActions": {
+          "$ref": "#/definitions/uint64"
+        },
+        "affectedJobs": {
+          "$ref": "#/definitions/uint64"
+        },
+        "reclaimableBytes": {
+          "$ref": "#/definitions/uint64"
+        },
+        "protectedJobs": {
+          "type": "array",
+          "maxItems": 200,
+          "items": {
+            "type": "object",
+            "properties": {
+              "jobId": {
+                "$ref": "#/definitions/id"
+              },
+              "protections": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/definitions/retentionProtection"
+                },
+                "minItems": 1,
+                "maxItems": 32
+              }
+            },
+            "required": [
+              "jobId",
+              "protections"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "omittedProtectedJobs": {
+          "$ref": "#/definitions/uint64"
+        }
+      },
+      "required": [
+        "sampledAt",
+        "dryRun",
+        "complete",
+        "policy",
+        "actions",
+        "omittedActions",
+        "affectedJobs",
+        "reclaimableBytes",
+        "protectedJobs",
+        "omittedProtectedJobs"
+      ],
+      "additionalProperties": false
     }
   },
   "oneOf": [
@@ -8396,6 +8989,30 @@
           "const": 1
         },
         "kind": {
+          "const": "sourceSearch"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/sourceSearch"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
           "const": "revisionFile"
         },
         "requestId": {
@@ -8457,6 +9074,70 @@
         "apiVersion",
         "kind",
         "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "gitRepositories"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
+        },
+        "data": {
+          "$ref": "#/definitions/gitRepositories"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "gitRepositoryInitRequest"
+        },
+        "data": {
+          "$ref": "#/definitions/gitRepositoryInit"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "gitRepositoryAttachRequest"
+        },
+        "data": {
+          "$ref": "#/definitions/gitRepositoryAttach"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
         "data"
       ],
       "additionalProperties": false
@@ -8564,13 +9245,13 @@
           "const": 1
         },
         "kind": {
-          "const": "sourceSearch"
+          "const": "jobDeletionPreview"
         },
         "requestId": {
           "$ref": "#/definitions/requestId"
         },
         "data": {
-          "$ref": "#/definitions/sourceSearch"
+          "$ref": "#/definitions/jobDeletionPreview"
         }
       },
       "required": [
@@ -8588,13 +9269,13 @@
           "const": 1
         },
         "kind": {
-          "const": "gitRepositories"
+          "const": "storageSummary"
         },
         "requestId": {
           "$ref": "#/definitions/requestId"
         },
         "data": {
-          "$ref": "#/definitions/gitRepositories"
+          "$ref": "#/definitions/storageSummary"
         }
       },
       "required": [
@@ -8612,10 +9293,34 @@
           "const": 1
         },
         "kind": {
-          "const": "gitRepositoryInitRequest"
+          "const": "maintenancePreview"
+        },
+        "requestId": {
+          "$ref": "#/definitions/requestId"
         },
         "data": {
-          "$ref": "#/definitions/gitRepositoryInit"
+          "$ref": "#/definitions/maintenancePreview"
+        }
+      },
+      "required": [
+        "apiVersion",
+        "kind",
+        "requestId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "apiVersion": {
+          "const": 1
+        },
+        "kind": {
+          "const": "jobOrganizationRequest"
+        },
+        "data": {
+          "$ref": "#/definitions/jobOrganizationChange"
         }
       },
       "required": [
@@ -8632,10 +9337,10 @@
           "const": 1
         },
         "kind": {
-          "const": "gitRepositoryAttachRequest"
+          "const": "jobDeletionRequest"
         },
         "data": {
-          "$ref": "#/definitions/gitRepositoryAttach"
+          "$ref": "#/definitions/jobDeletionRequest"
         }
       },
       "required": [

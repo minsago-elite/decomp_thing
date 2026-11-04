@@ -5523,10 +5523,14 @@ private fun recordedHistoryCapture(
                     RepairRecordedValidationContext(state.profileId, state.budget))
             }, normalObservation(it.id, it.baselineId))
     }
+    // An assessed baseline accepts the root itself; expose it only with a proof bound to the root's source.
+    val acceptedBaseline = state.nodes.singleOrNull { it.id == state.fullyAcceptedHeadId && it.status == ModuleRevisionStatus.ROOT }
+        ?.let { root -> state.acceptedProof?.takeIf { it.sourceRevisionSha256 == root.sourceRevisionSha256 }
+            ?.let { proof -> RepairRecordedAcceptedBaseline(identities.revision(root.id), root.sourceRevisionSha256, proof.assurance) } }
     val snapshot = RepairHistorySnapshot(graphSha256, state.schemaVersion, RepairRecordedGraphWire.valueOf(wire.name),
         state.regressionCorpusSha256, identities.revision(state.headId), identity(state.provisionalHeadId),
         identity(state.fullyAcceptedHeadId), runs, attempts, pending,
-        state.retainedRegressionInputs.map { identities.case(it.id) })
+        state.retainedRegressionInputs.map { identities.case(it.id) }, acceptedBaseline)
     return RepairHistoryArtifactCapture(snapshot, artifactPaths)
 }
 
@@ -7307,6 +7311,37 @@ internal fun readStableRegularFile(
     afterAuthorization: (() -> Unit)? = null,
     afterRead: (() -> Unit)? = null,
     cancellationCheck: () -> Unit = {},
+): StableRegularFile = readStableRegularFileInternal(
+    root, relative, maximumBytes, afterAuthorization, afterRead, cancellationCheck,
+    allowFinalDirectoryLinkCountChange = false,
+)
+
+/** Job metadata alone tolerates job-directory link-count changes while every other binding remains pinned. */
+internal fun readStableJobMetadataFile(
+    root: Path,
+    jobId: String,
+    maximumBytes: Long,
+    afterAuthorization: (() -> Unit)? = null,
+): StableRegularFile {
+    val relative = "$jobId/job.json"
+    val parts = normalizedRelative(relative).split('/')
+    require(parts.size == 2 && parts[0] == jobId && parts[1] == "job.json") {
+        "stable job-metadata path is invalid"
+    }
+    return readStableRegularFileInternal(
+        root, relative, maximumBytes, afterAuthorization, null, {},
+        allowFinalDirectoryLinkCountChange = true,
+    )
+}
+
+private fun readStableRegularFileInternal(
+    root: Path,
+    relative: String,
+    maximumBytes: Long,
+    afterAuthorization: (() -> Unit)?,
+    afterRead: (() -> Unit)?,
+    cancellationCheck: () -> Unit,
+    allowFinalDirectoryLinkCountChange: Boolean,
 ): StableRegularFile {
     cancellationCheck()
     require(maximumBytes in 1 until Int.MAX_VALUE.toLong()) { "stable file-read limit is invalid" }
@@ -7358,7 +7393,10 @@ internal fun readStableRegularFile(
                 before.lastModifiedTime() == after.lastModifiedTime() &&
                 LinuxFilesystemSyscalls.identity(readable.fd) == readable.identity,
         ) { "stable file-read descriptor changed while it was read: $relative" }
-        revalidateDescriptorPath(base, parts, pinnedDirectories.map { it.identity }, authorized.identity)
+        revalidateDescriptorPath(
+            base, parts, pinnedDirectories.map { it.identity }, authorized.identity,
+            allowFinalDirectoryLinkCountChange,
+        )
         cancellationCheck()
         return StableRegularFile(bytes, sha256(bytes), authorized.identity)
     } finally {
@@ -7373,6 +7411,7 @@ private fun revalidateDescriptorPath(
     parts: List<String>,
     expectedDirectories: List<LinuxFileIdentity>,
     expectedFile: LinuxFileIdentity,
+    allowFinalDirectoryLinkCountChange: Boolean = false,
 ) {
     val opened = mutableListOf<decompengine.acp.LinuxDescriptor>()
     var target: decompengine.acp.LinuxDescriptor? = null
@@ -7383,9 +7422,12 @@ private fun revalidateDescriptorPath(
         parts.dropLast(1).forEachIndexed { index, segment ->
             parent = LinuxFilesystemSyscalls.openDirectoryAt(parent.fd, segment)
             opened += parent
-            requireUnchanged(parent.identity == expectedDirectories[index + 1]) {
-                "stable file-read directory binding changed"
-            }
+            val expected = expectedDirectories[index + 1]
+            val allowLinkCountChange = allowFinalDirectoryLinkCountChange && index + 1 == expectedDirectories.lastIndex
+            val sameBinding = if (allowLinkCountChange) {
+                expected.copy(linkCount = parent.identity.linkCount) == parent.identity
+            } else expected == parent.identity
+            requireUnchanged(sameBinding) { "stable file-read directory binding changed" }
         }
         target = LinuxFilesystemSyscalls.openPathAtOrNull(parent.fd, parts.last())
             ?: throw StableFileChangedException("stable file-read target disappeared during revalidation")

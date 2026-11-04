@@ -14,10 +14,10 @@ vi.mock('../src/api/client', async load => ({ ...await load<typeof ClientModule>
 vi.mock('../src/jobs/RecoverySummary', () => ({ RecoverySummary: () => null }));
 const sample = (JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/job-lossless.json'), 'utf8')) as { data: Job }).data;
 const first: JobFilters = { search: 'first % + selection', status: 'failed', createdAfter: '2026-09-01T00:00:00.000000001Z',
-  createdBefore: '2026-09-02T00:00:00.000000002Z', limit: '100', sort: 'oldest' };
+  createdBefore: '2026-09-02T00:00:00.000000002Z', limit: '100', sort: 'oldest', archived: 'all' };
 const second: JobFilters = { search: 'second selection', status: 'completed', createdAfter: '2026-09-03T00:00:00Z',
-  createdBefore: '2026-09-04T00:00:00Z', limit: '200', sort: 'newest' };
-const labels: Record<keyof JobFilters, string> = { search: 'Filename search', status: 'Workflow state',
+  createdBefore: '2026-09-04T00:00:00Z', limit: '200', sort: 'newest', archived: 'only' };
+const labels: Record<keyof JobFilters, string> = { search: 'Filename or label search', archived: 'Archived jobs', status: 'Workflow state',
   createdAfter: 'Created at or after', createdBefore: 'Created before', limit: 'Jobs per page', sort: 'Sort by' };
 function page(name: string) {
   return { data: { items: [{ ...sample, displayFilename: name }], page: { nextCursor: null, limit: 50, snapshotVersion: 'snapshot_history_fixture' } } };
