@@ -35,6 +35,9 @@ class AgentProgressJournal private constructor(
     private val onPhase: (AgentWorkflowPhase) -> Unit,
     private val afterSnapshotWrite: (() -> Unit)?,
     private val beforeSnapshotEncode: (() -> Unit)?,
+    private val recordFullRun: Boolean,
+    private val maximumFullRunBytes: Long,
+    private val fullRunWriterHooks: FullRunJournalWriterHooks? = null,
 ) : AgentWorkflowProgress, AutoCloseable {
     constructor(
         reportsDirectory: Path,
@@ -44,8 +47,10 @@ class AgentProgressJournal private constructor(
         maximumQueuedEvents: Int = 128,
         maximumSnapshotBytes: Int = 512 * 1024,
         onPhase: (AgentWorkflowPhase) -> Unit = {},
+        recordFullRun: Boolean = false,
+        maximumFullRunBytes: Long = FullRunJournal.MAXIMUM_RUN_BYTES,
     ) : this(reportsDirectory, workflow, sensitiveValues, maximumEvents, maximumQueuedEvents,
-        maximumSnapshotBytes, onPhase, null, null)
+        maximumSnapshotBytes, onPhase, null, null, recordFullRun, maximumFullRunBytes)
 
     private val monitor = Object()
     private val queue = ArrayDeque<JsonObject>()
@@ -56,6 +61,7 @@ class AgentProgressJournal private constructor(
     private val runId = UUID.randomUUID().toString()
     internal val journalRunId: String get() = runId
     override val workflowRunId: String get() = runId
+    internal val writerAlive: Boolean get() = writer.isAlive
     private var sequence = 0L
     private var queueDropped = 0L
     private var historyDropped = 0L
@@ -63,11 +69,15 @@ class AgentProgressJournal private constructor(
     private var dirty = false
     private val writerLease: AgentProgressJournalLease
     private val writer: Thread
+    private var fullRun: FullRunJournalWriter? = null
+    internal val fullRunDirectory: Path? get() = fullRun?.directory
+    internal val persistenceFailure: Throwable? get() = failure.get() ?: fullRun?.recordingFailure
 
     init {
         require(workflow.matches(Regex("[a-z][a-z0-9-]{0,63}"))) { "invalid progress workflow" }
         require(maximumEvents in 1..1024 && maximumQueuedEvents in 1..1024)
         require(maximumSnapshotBytes in 4096..MAXIMUM_READ_BYTES)
+        require(maximumFullRunBytes in 4096..FullRunJournal.MAXIMUM_RUN_BYTES)
         Files.createDirectories(reportsDirectory)
         writerLease = requireNotNull(AgentProgressJournalLease.tryAcquire(reportsDirectory) {
             FileChannel.open(reportsDirectory.resolve("agent-progress.lock"), CREATE, WRITE, NOFOLLOW_LINKS)
@@ -82,6 +92,16 @@ class AgentProgressJournal private constructor(
                 previous.getValue("events").jsonArray.forEach { retained.add(replayProgressRecord(it.jsonObject)) }
                 while (retained.size > maximumEvents) { retained.removeFirst(); historyDropped++ }
             }
+            if (recordFullRun) {
+                val hooks = fullRunWriterHooks ?: FullRunJournalWriterHooks()
+                fullRun = FullRunJournalWriter(
+                    FullRunJournal.create(reportsDirectory, runId, workflow, sequence, maximumFullRunBytes,
+                        hooks.beforeMetadataDirectoryFsync),
+                    hooks.maximumQueuedEvents,
+                    hooks.beforeFinalize,
+                    hooks.beforeAppend,
+                )
+            }
             requireSequenceCapacity()
             writer = Thread(::writeLoop, "decomp-progress-$workflow").apply { isDaemon = true }
             startedWriter = writer
@@ -90,7 +110,15 @@ class AgentProgressJournal private constructor(
         } catch (problem: Throwable) {
             synchronized(monitor) { closed = true; monitor.notifyAll() }
             // A started writer keeps ownership until its own final publication is over.
-            if (startedWriter?.isAlive != true) writerLease.close()
+            if (startedWriter?.isAlive != true) {
+                try {
+                    fullRun?.close()
+                } catch (cleanup: Throwable) {
+                    problem.addSuppressed(cleanup)
+                } finally {
+                    writerLease.close()
+                }
+            }
             throw problem
         }
     }
@@ -273,6 +301,23 @@ class AgentProgressJournal private constructor(
         onPhase(observation.phase)
     }
 
+    override fun runContext(inputSha256: String, profileSha256: String) {
+        require(inputSha256.matches(Regex("[0-9a-f]{64}")) && profileSha256.matches(Regex("[0-9a-f]{64}")))
+        enqueue("run_context") { put("inputSha256", inputSha256); put("profileSha256", profileSha256) }
+    }
+
+    override fun checkpointReused(moduleId: String, sourceSha256: String) {
+        require(moduleId.isNotBlank() && moduleId.length <= 4096)
+        require(sourceSha256.matches(Regex("[0-9a-f]{64}")))
+        enqueue("module_checkpoint_reused") {
+            put("moduleIdSha256", digest(moduleId))
+            put("sourceSha256", sourceSha256)
+        }
+    }
+
+    /** Bounded, redacted diagnostic observation; it is never used as workflow authority. */
+    internal fun diagnostic(message: String) = enqueue("diagnostic") { put("text", redactor.text(message, 2048)) }
+
     private fun enqueue(kind: String, preserveTerminal: Boolean = false, body: JsonObjectBuilder.() -> Unit) = synchronized(monitor) {
         check(!closed) { "progress journal is closed" }
         failure.get()?.let { throw IllegalStateException("progress journal persistence failed", it) }
@@ -285,6 +330,7 @@ class AgentProgressJournal private constructor(
             put("kind", kind)
             body()
         }
+        fullRun?.append(record)
         if (queue.size < maximumQueuedEvents) {
             queue.add(record)
         } else if (preserveTerminal) {
@@ -343,11 +389,21 @@ class AgentProgressJournal private constructor(
                 afterSnapshotWrite?.invoke()
             }
         } catch (problem: Throwable) {
-            failure.set(problem)
+            failure.compareAndSet(null, problem)
+            try { fullRun?.markIncomplete() } catch (markFailure: Throwable) {
+                failure.compareAndSet(null, markFailure)
+            }
         } finally {
-            // Close may already have exhausted its join budget. The writer still retires
-            // its own lease once no further snapshot can be published.
-            try { writerLease.close() } catch (problem: Throwable) { failure.compareAndSet(null, problem) }
+            // The snapshot writer owns final history shutdown and lease retirement. If its caller
+            // times out or is interrupted, this finalizer still drains/marks history and retains
+            // ownership until both publications have stopped.
+            try {
+                fullRun?.close()
+            } catch (problem: Throwable) {
+                failure.compareAndSet(null, problem)
+            } finally {
+                try { writerLease.close() } catch (problem: Throwable) { failure.compareAndSet(null, problem) }
+            }
         }
     }
 
@@ -367,11 +423,30 @@ class AgentProgressJournal private constructor(
 
     override fun close() {
         synchronized(monitor) { closed = true; monitor.notifyAll() }
-        writer.join(5_000)
-        // Do not release a lock while a live writer could still publish a snapshot.
+        try {
+            writer.join(5_000)
+        } catch (interrupted: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw interrupted
+        }
+        // The writer, not this caller, owns both finalization and the lease. A timeout leaves
+        // that owner alive; another close may wait for its completion without racing cleanup.
         check(!writer.isAlive) { "progress writer did not stop within five seconds" }
-        writerLease.close()
-        failure.get()?.let { throw IllegalStateException("progress journal persistence failed", it) }
+        persistenceFailure?.let { throw IllegalStateException("progress journal persistence failed", it) }
+    }
+
+    /** Wait without a timeout when another owner must retain resources until publication stops. */
+    internal fun awaitWriterTermination() {
+        if (Thread.currentThread() === writer) return
+        var interrupted = false
+        while (writer.isAlive) {
+            try {
+                writer.join()
+            } catch (_: InterruptedException) {
+                interrupted = true
+            }
+        }
+        if (interrupted) Thread.currentThread().interrupt()
     }
 
     companion object {
@@ -381,7 +456,8 @@ class AgentProgressJournal private constructor(
             workflow: String,
             afterSnapshotWrite: () -> Unit,
         ): AgentProgressJournal = AgentProgressJournal(
-            reportsDirectory, workflow, emptyList(), 256, 128, 512 * 1024, {}, afterSnapshotWrite, null,
+            reportsDirectory, workflow, emptyList(), 256, 128, 512 * 1024, {}, afterSnapshotWrite, null, false,
+            FullRunJournal.MAXIMUM_RUN_BYTES,
         )
 
         /** Controlled cut/publication boundaries for producer-isolation qualification. */
@@ -394,7 +470,19 @@ class AgentProgressJournal private constructor(
             maximumQueuedEvents: Int = 128,
         ): AgentProgressJournal = AgentProgressJournal(
             reportsDirectory, workflow, emptyList(), 256, maximumQueuedEvents, maximumSnapshotBytes, {},
-            afterSnapshotWrite, beforeSnapshotEncode,
+            afterSnapshotWrite, beforeSnapshotEncode, false, FullRunJournal.MAXIMUM_RUN_BYTES,
+        )
+
+        /** Test-only full-history writer controls; production always uses its fixed bounded defaults. */
+        internal fun withFullRunWriterHooks(
+            reportsDirectory: Path,
+            workflow: String,
+            hooks: FullRunJournalWriterHooks,
+            maximumFullRunBytes: Long = FullRunJournal.MAXIMUM_RUN_BYTES,
+            afterSnapshotWrite: () -> Unit = {},
+        ): AgentProgressJournal = AgentProgressJournal(
+            reportsDirectory, workflow, emptyList(), 256, 128, 512 * 1024, {}, afterSnapshotWrite, null, true,
+            maximumFullRunBytes, hooks,
         )
 
         const val FILE_NAME = "agent-progress.json"

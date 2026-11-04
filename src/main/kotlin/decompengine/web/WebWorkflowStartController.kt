@@ -13,6 +13,8 @@ internal class WebWorkflowStartController(
     private val jobs: WebJobService,
     private val jobMutations: WebJobMutationBoundary,
     private val basePath: String,
+    // Fresh readiness for admission; read before the service monitor so a slow probe never holds it.
+    private val prerequisites: (NewWorkflowAttempt) -> WebWorkflowPrerequisites? = { WebWorkflowPrerequisites.UNCHECKED },
 ) {
     fun handle(exchange: HttpExchange, jobId: String) {
         val mutation = jobMutations.authorizeDurableStart(exchange)
@@ -38,7 +40,8 @@ internal class WebWorkflowStartController(
             throw WebAccessDenied(400, "UNSUPPORTED_HEADER", "Only If-Match is supported for workflow starts.")
         }
         val request = readStart(exchange)
-        val result = try { mutation.request(jobId, match.removeSurrounding("\""), request, key) }
+        val readiness = prerequisites(request)
+        val result = try { mutation.request(jobId, match.removeSurrounding("\""), request, key, readiness) }
         catch (failure: WebJobServiceException) {
             when (failure.code) {
                 "VERSION_CONFLICT" -> throw WebAccessDenied(412, failure.code, "The job version changed. Refresh before starting new work.")
@@ -47,7 +50,11 @@ internal class WebWorkflowStartController(
                 "CAPACITY_UNAVAILABLE", "UPLOAD_CAPACITY" -> throw WebAccessDenied(429, "QUOTA_EXCEEDED", "Workflow admission is at capacity. Inspect current work before a new request.")
                 "WORKFLOW_UNAVAILABLE", "WORKFLOW_LIMITS_UNAVAILABLE", "HARNESS_UNAVAILABLE" ->
                     throw WebAccessDenied(503, "CAPABILITY_UNAVAILABLE", "The requested workflow, harness or limits are unavailable.")
+                // Prerequisite messages are fixed server vocabulary, never probe or exception text.
+                "WORKFLOW_PREREQUISITE_UNAVAILABLE" -> throw WebAccessDenied(503, "CAPABILITY_UNAVAILABLE",
+                    "A runtime prerequisite for this workflow is unavailable. ${failure.message}")
                 "INPUT_REVISION_UNAVAILABLE" -> throw WebAccessDenied(422, failure.code, "The selected input revision is unavailable for this job.")
+                "INPUT_REVISION_REQUIRED" -> throw WebAccessDenied(422, failure.code, "This workflow starts from a revision recorded by this job. Select one before starting.")
                 "SCHEDULING_FAILED" -> throw WebAccessDenied(503, failure.code, "Scheduling did not finish. Inspect the retained run before retrying.")
                 else -> throw failure
             }

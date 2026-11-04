@@ -115,6 +115,10 @@ internal class LinuxGeneratedCRepairValidationBoundary private constructor(
                 snapshot.populate(request)
                 receipt.snapshot(snapshot)
                 original = request.originalBinary?.let(snapshot::captureOriginal)
+                require(request.expectedOriginalBinarySha256 == null ||
+                    original?.sha256 == request.expectedOriginalBinarySha256) {
+                    "captured original binary differs from the exploration snapshot"
+                }
                 val output = snapshot.beginBuild()
                 receipt.buildOutputLink(output)
                 val compiler = config.tools.getValue("compiler").destination
@@ -288,6 +292,11 @@ internal class LinuxGeneratedCRepairValidationBoundary private constructor(
             return LinuxGeneratedCRepairValidationBoundary(registration)
         }
         private val PROGRAM_DESTINATION = Path.of("/decomp-generated-c-program")
+
+        /** Passive answer from the same gate availability and validation call; it launches nothing. */
+        internal fun productionQualified(): Boolean = try {
+            requireProductionQualification()
+        } catch (_: SandboxUnavailableException) { false }
         private fun requireProductionQualification(): Nothing = throw SandboxUnavailableException(
             "generated-C validation remains unavailable pending qualification of its complete " +
                 "provisioned compiler, executable runtime and public-factory validation path",

@@ -8,11 +8,12 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.io.path.createTempDirectory
+import kotlinx.serialization.json.jsonPrimitive
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
-import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 
@@ -30,6 +31,39 @@ class BestEffortProgressJournalTest {
             val snapshot = AgentProgressJournal.read(reports)!!
             assertEquals(runId, snapshot.getValue("events").jsonArray.first().jsonObject.getValue("runId").jsonPrimitive.content)
         } finally { reports.toFile().deleteRecursively() }
+    }
+
+    @Test
+    fun `asynchronous full history failure warns once without replacing workflow failure`() {
+        val parent = java.nio.file.Files.createDirectories(
+            java.nio.file.Path.of("build/test-tmp/progress-full-run-warning").toAbsolutePath(),
+        )
+        val reports = createTempDirectory(parent, "journal-")
+        val entered = CountDownLatch(1)
+        val warnings = AtomicInteger()
+        val workflowFailure = IllegalStateException("original workflow failure")
+        val failure = assertFailsWith<IllegalStateException> {
+            BestEffortProgressJournal(
+                reports,
+                "reconstruction",
+                recordFullRun = true,
+                onUnavailable = { warnings.incrementAndGet() },
+                fullRunWriterHooks = FullRunJournalWriterHooks(beforeAppend = {
+                    entered.countDown()
+                    error("private full history failure")
+                }),
+            ).use { progress ->
+                assertTrue(entered.await(10, TimeUnit.SECONDS))
+                throw workflowFailure
+            }
+        }
+        assertEquals("original workflow failure", failure.message)
+        assertEquals(1, warnings.get())
+        val historyRoot = reports.resolve(FullRunJournal.DIRECTORY)
+        val history = java.nio.file.Files.list(historyRoot).use { it.findFirst().orElseThrow() }
+        assertEquals("logging-failed", FullRunJournal.metadata(history)
+            .getValue("state").jsonPrimitive.content)
+        assertFalse(java.nio.file.Files.readString(history.resolve("run.json")).contains("private full history failure"))
     }
 
     @Test
