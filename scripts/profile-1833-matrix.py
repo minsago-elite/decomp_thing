@@ -1,0 +1,581 @@
+#!/usr/bin/env python3
+"""Collect bounded, replay-verified analysis timing observations for issue #1833.
+
+This is an evidence-only profiler. It does not authorize reconstruction, mutate
+accepted source, or claim source/interface/receipt/compiler-validation coverage.
+Those cells require the normal reconstruction and compiler acceptance path.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import importlib.util
+import json
+import os
+import platform
+import re
+import resource
+import shutil
+import subprocess
+import sys
+import time
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+
+ROOT = Path(__file__).resolve().parents[1]
+RUN_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+GCC_DRIVER_SHA256 = "3c0cfef73a02b06b40456e89d9d9e33727144c2f473b8b7256b361a7699d48a4"
+MAX_TOTAL_BYTES = 4 * 1024 * 1024 * 1024
+MAX_RUN_DIRECTORY_BYTES = 256 * 1024 * 1024
+MAX_INDIVIDUAL_FILE_BYTES = MAX_TOTAL_BYTES
+MAX_PROGRESS_BYTES = 16 * 1024
+SIDECAR_WAIT_SECONDS = 5.0
+
+SUMMARY_SPEC = importlib.util.spec_from_file_location(
+    "analysis_timing_summary", ROOT / "scripts" / "summarize-analysis-timings.py"
+)
+if SUMMARY_SPEC is None or SUMMARY_SPEC.loader is None:
+    raise RuntimeError("analysis timing summarizer is unavailable")
+SUMMARY = importlib.util.module_from_spec(SUMMARY_SPEC)
+SUMMARY_SPEC.loader.exec_module(SUMMARY)
+
+
+class MatrixError(RuntimeError):
+    pass
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def require_repo_child(path: Path, label: str) -> Path:
+    resolved = path.resolve()
+    build_root = (ROOT / "build").resolve()
+    if resolved == build_root or build_root not in resolved.parents:
+        raise MatrixError(f"{label} must be a new directory beneath repository build/")
+    lexical = Path(os.path.abspath(path))
+    if lexical == ROOT or ROOT not in lexical.parents:
+        raise MatrixError(f"{label} must be beneath the repository root")
+    current = lexical
+    while current != ROOT:
+        if current.exists() and current.is_symlink():
+            raise MatrixError(f"{label} cannot traverse a symbolic link")
+        current = current.parent
+    return resolved
+
+
+def load_archival_fixture(fixture_id: str, binary_kind: str) -> dict[str, Any]:
+    manifest_path = ROOT / "benchmarks/archival/manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    fixture = next((item for item in manifest["fixtures"] if item["id"] == fixture_id), None)
+    if fixture is None:
+        raise MatrixError(f"unknown archival fixture: {fixture_id}")
+    binary = next((item for item in fixture["binaries"] if item["symbols"] == binary_kind), None)
+    if binary is None:
+        raise MatrixError(f"fixture {fixture_id} has no {binary_kind} binary")
+    path = ROOT / "benchmarks/archival" / binary["path"]
+    if path.is_symlink() or not path.is_file():
+        raise MatrixError(f"pinned input is absent or not a regular file: {binary['path']}")
+    actual = sha256_file(path)
+    if actual != binary["sha256"]:
+        raise MatrixError(f"fixture digest mismatch for {binary['path']}")
+    return {"id": fixture_id, "path": path, "sha256": actual, "manifest": str(manifest_path.relative_to(ROOT))}
+
+
+def fixtures() -> dict[str, dict[str, Any]]:
+    gcc_path = ROOT / "oracle/gcc/16.2.0/artifacts/gcc-driver.stripped"
+    if gcc_path.is_symlink() or not gcc_path.is_file() or sha256_file(gcc_path) != GCC_DRIVER_SHA256:
+        raise MatrixError("pinned GCC driver input is absent or does not match the retained SHA-256")
+    return {
+        "large_project_mtu": load_archival_fixture("large_project_mtu", "stripped"),
+        "large_project": load_archival_fixture("large_project", "stripped"),
+        "gcc_driver": {
+            "id": "gcc_driver",
+            "path": gcc_path,
+            "sha256": GCC_DRIVER_SHA256,
+            "manifest": "oracle/gcc/16.2.0/reconstruction-neutrality-identities.json",
+        },
+    }
+
+
+def safe_environment(home: Path, temporary: Path) -> dict[str, str]:
+    """Run the agent-free CLI without inheriting provider credentials or GHIDRA_HOME."""
+    env = {key: value for key, value in os.environ.items() if key in {
+        "PATH", "JAVA_HOME", "LANG", "LC_ALL", "TZ", "SYSTEMROOT", "WINDIR"
+    }}
+    env["HOME"] = str(home)
+    env["TMPDIR"] = str(temporary)
+    env["TMP"] = str(temporary)
+    env["TEMP"] = str(temporary)
+    return env
+
+
+def history_ids(output: Path) -> set[str]:
+    root = output / "run-history"
+    if not root.exists():
+        return set()
+    if root.is_symlink() or not root.is_dir():
+        raise MatrixError("run-history is not a real directory")
+    found = set()
+    for entry in root.iterdir():
+        if RUN_ID.fullmatch(entry.name) and not entry.is_symlink() and entry.is_dir():
+            found.add(entry.name)
+    return found
+
+
+def copy_bounded(source: Path, destination: Path, budget: list[int]) -> None:
+    if source.is_symlink():
+        raise MatrixError(f"refusing to retain linked evidence entry: {source}")
+    if source.is_dir():
+        destination.mkdir(parents=True, exist_ok=False)
+        for child in sorted(source.iterdir()):
+            copy_bounded(child, destination / child.name, budget)
+        return
+    if not source.is_file():
+        raise MatrixError(f"refusing to retain special evidence entry: {source}")
+    size = source.stat().st_size
+    budget[0] += size
+    if budget[0] > MAX_TOTAL_BYTES:
+        raise MatrixError("retained matrix evidence exceeds the 4 GiB total byte limit")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, destination)
+
+
+def directory_bytes(path: Path) -> int:
+    total = 0
+    for root, directories, files in os.walk(path, followlinks=False):
+        base = Path(root)
+        for name in directories + files:
+            entry = base / name
+            if entry.is_symlink():
+                raise MatrixError(f"matrix workspace contains a link: {entry}")
+            if entry.is_file():
+                total += entry.stat().st_size
+    return total
+
+
+def run_logged(command: list[str], cwd: Path, env: dict[str, str], log_dir: Path) -> dict[str, Any]:
+    log_dir.mkdir(parents=True, exist_ok=True)
+    stdout_path = log_dir / "stdout.log"
+    stderr_path = log_dir / "stderr.log"
+    started = time.monotonic_ns()
+    with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
+        completed = subprocess.run(command, cwd=cwd, env=env, stdout=stdout, stderr=stderr,
+            check=False, preexec_fn=limit_child_files)
+    duration = max(0, time.monotonic_ns() - started)
+    return {
+        "command": command,
+        "returnCode": completed.returncode,
+        "durationNanos": duration,
+        "stdoutPath": str(stdout_path.relative_to(ROOT)),
+        "stderrPath": str(stderr_path.relative_to(ROOT)),
+        "stdoutSha256": sha256_file(stdout_path),
+        "stderrSha256": sha256_file(stderr_path),
+    }
+
+
+def limit_child_files() -> None:
+    resource.setrlimit(resource.RLIMIT_FSIZE, (MAX_INDIVIDUAL_FILE_BYTES, MAX_INDIVIDUAL_FILE_BYTES))
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+
+
+def read_context(run_directory: Path) -> dict[str, Any]:
+    path = run_directory / "events.jsonl"
+    contexts: list[dict[str, Any]] = []
+    event_kinds: dict[str, int] = {}
+    if path.is_symlink() or not path.is_file():
+        raise MatrixError("run history has no regular events.jsonl")
+    with path.open("rb") as stream:
+        for raw in stream:
+            if len(raw) > 64 * 1024 + 1:
+                raise MatrixError("run history contains an oversized event")
+            envelope = json.loads(raw)
+            event = envelope.get("event")
+            if isinstance(event, dict):
+                kind = event.get("kind")
+                if isinstance(kind, str):
+                    event_kinds[kind] = event_kinds.get(kind, 0) + 1
+                    if kind == "run_context":
+                        contexts.append(event)
+    if len(contexts) != 1:
+        raise MatrixError("successful run history must contain exactly one run_context event")
+    context = contexts[0]
+    for key in ("inputSha256", "profileSha256"):
+        if not isinstance(context.get(key), str) or not re.fullmatch(r"[0-9a-f]{64}", context[key]):
+            raise MatrixError(f"run_context has no valid {key}")
+    return {
+        "inputSha256": context["inputSha256"],
+        "profileSha256": context["profileSha256"],
+        "agentTasks": event_kinds.get("task_started", 0),
+        "reusedModuleCheckpoints": event_kinds.get("module_checkpoint_reused", 0),
+        "eventKinds": event_kinds,
+    }
+
+
+def wait_for_sidecar(timing_dir: Path, run_id: str) -> Path:
+    deadline = time.monotonic() + SIDECAR_WAIT_SECONDS
+    while time.monotonic() <= deadline:
+        if timing_dir.exists():
+            matches = []
+            for path in timing_dir.glob("*.json"):
+                if path.is_symlink() or not path.is_file():
+                    continue
+                if path.stat().st_size > 1024 * 1024:
+                    continue
+                try:
+                    if json.loads(path.read_text(encoding="utf-8")).get("workflowRunId") == run_id:
+                        matches.append(path)
+                except (OSError, UnicodeError, json.JSONDecodeError):
+                    continue
+            if len(matches) == 1:
+                return matches[0]
+            if len(matches) > 1:
+                raise MatrixError("multiple timing sidecars claim one workflow run")
+        time.sleep(0.05)
+    raise MatrixError("no timing sidecar correlated to the completed workflow run")
+
+
+def read_exporter_progress(output: Path) -> tuple[dict[str, Any], Path]:
+    path = output / "analysis/reports/program_model.json.progress.json"
+    if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_PROGRESS_BYTES:
+        raise MatrixError("bounded exporter progress record is absent, linked, or oversized")
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict) or value.get("schemaVersion") != 1:
+        raise MatrixError("unsupported exporter progress record")
+    if value.get("phase") != "complete":
+        raise MatrixError("exporter did not publish a terminal progress phase")
+    for key in ("completed", "total", "recovered", "partial", "failed", "reused"):
+        if not isinstance(value.get(key), int) or isinstance(value[key], bool) or value[key] < 0:
+            raise MatrixError(f"exporter progress has invalid {key}")
+    if value["completed"] > value["total"] or value["reused"] > value["completed"]:
+        raise MatrixError("exporter progress counters are inconsistent")
+    return value, path
+
+
+def capture_run(cli: Path, output: Path, fixture: dict[str, Any], profile: str,
+                label: str, evidence: Path, budget: list[int]) -> dict[str, Any]:
+    before = history_ids(output)
+    attempt_dir = evidence / "observations" / label
+    home = attempt_dir / "home"
+    temporary = attempt_dir / "tmp"
+    home.mkdir(parents=True, exist_ok=False)
+    temporary.mkdir(parents=True, exist_ok=False)
+    command = [str(cli), "reconstruct", str(fixture["path"]), "--output", str(output),
+        "--profile", profile, "--evidence-only"]
+    host_before = host_sample()
+    result = run_logged(command, ROOT, safe_environment(home, temporary), attempt_dir / "cli")
+    host_after = host_sample()
+    after = history_ids(output)
+    new_ids = sorted(after - before)
+    observation: dict[str, Any] = {
+        "label": label,
+        "input": {"path": str(fixture["path"].relative_to(ROOT)), "sha256": fixture["sha256"]},
+        "profile": profile,
+        "cli": result,
+        "hostBefore": host_before,
+        "hostAfter": host_after,
+        "newRunIds": new_ids,
+        "replayReturnCodes": {},
+        "status": "failed",
+    }
+    if directory_bytes(evidence) > MAX_TOTAL_BYTES:
+        raise MatrixError("matrix workspace and evidence exceeded the 4 GiB total byte limit")
+    if result["returnCode"] != 0:
+        return observation
+    if len(new_ids) != 1:
+        raise MatrixError(f"{label}: expected one new run id, found {len(new_ids)}")
+    run_id = new_ids[0]
+    run_directory = output / "run-history" / run_id
+    if directory_bytes(run_directory) > MAX_RUN_DIRECTORY_BYTES:
+        raise MatrixError(f"{label}: run history exceeds its 256 MiB per-run bound")
+    metadata_path = run_directory / "run.json"
+    if metadata_path.is_symlink() or not metadata_path.is_file() or metadata_path.stat().st_size > 16 * 1024:
+        raise MatrixError(f"{label}: run history metadata is absent, linked, or oversized")
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    if metadata.get("state") != "closed" or metadata.get("complete") is not True:
+        raise MatrixError(f"{label}: run history is not durably complete")
+    context = read_context(run_directory)
+    if context["inputSha256"] != fixture["sha256"]:
+        raise MatrixError(f"{label}: run history input binding differs from the pinned binary")
+    if metadata.get("runId") != run_id:
+        raise MatrixError(f"{label}: run history metadata is bound to a different run")
+
+    list_log = run_logged([str(cli), "runs", "list", str(output)], ROOT,
+        safe_environment(home, temporary), attempt_dir / "list")
+    replay_log = run_logged([str(cli), "runs", "replay", str(output), run_id], ROOT,
+        safe_environment(home, temporary), attempt_dir / "replay")
+    observation["replayReturnCodes"]["list"] = list_log["returnCode"]
+    observation["replayReturnCodes"]["replay"] = replay_log["returnCode"]
+    if list_log["returnCode"] != 0 or replay_log["returnCode"] != 0:
+        raise MatrixError(f"{label}: run history list/replay failed")
+    listed_stdout = ROOT / list_log["stdoutPath"]
+    if listed_stdout.stat().st_size > 1024 * 1024:
+        raise MatrixError(f"{label}: run history listing output exceeded its 1 MiB limit")
+    listed_ids = {
+        fields[0]
+        for line in listed_stdout.read_text(encoding="utf-8").splitlines()
+        if (fields := line.split(maxsplit=1))
+    }
+    if run_id not in listed_ids:
+        raise MatrixError(f"{label}: the completed run does not appear in runs list")
+
+    timing_dir = output / "analysis/reports/analysis-timings"
+    sidecar = wait_for_sidecar(timing_dir, run_id)
+    if sidecar.stat().st_size > 1024 * 1024:
+        raise MatrixError(f"{label}: timing sidecar exceeded its 1 MiB limit")
+    timing_record = SUMMARY.load_record(sidecar)
+    if timing_record.get("workflowRunId") != run_id:
+        raise MatrixError(f"{label}: timing sidecar workflowRunId mismatch")
+    if timing_record.get("inputSha256") != fixture["sha256"]:
+        raise MatrixError(f"{label}: timing sidecar input binding differs from the pinned binary")
+    if timing_record.get("profileSha256") != context["profileSha256"]:
+        raise MatrixError(f"{label}: timing sidecar profile binding differs from run history")
+    exporter_progress, exporter_progress_path = read_exporter_progress(output)
+
+    retained_history = attempt_dir / "evidence" / "run-history" / run_id
+    copy_bounded(run_directory, retained_history, budget)
+    retained_timing = attempt_dir / "evidence" / "analysis-timing.json"
+    copy_bounded(sidecar, retained_timing, budget)
+    retained_progress = attempt_dir / "evidence" / "exporter-progress.json"
+    copy_bounded(exporter_progress_path, retained_progress, budget)
+    archive = output / "source-tree.zip"
+    archive_hash = sha256_file(archive) if archive.is_file() and not archive.is_symlink() else None
+    observation.update({
+        "runId": run_id,
+        "context": context,
+        "timingSidecar": str(retained_timing.relative_to(ROOT)),
+        "timingSidecarSha256": sha256_file(retained_timing),
+        "exporterProgress": exporter_progress,
+        "exporterProgressPath": str(retained_progress.relative_to(ROOT)),
+        "exporterProgressSha256": sha256_file(retained_progress),
+        "runHistoryPath": str(retained_history.relative_to(ROOT)),
+        "runHistoryMetadata": metadata,
+        "archiveSha256": archive_hash,
+        "reconstructionManifestSha256": sha256_file(output / "reconstruction.json")
+            if (output / "reconstruction.json").is_file() and not (output / "reconstruction.json").is_symlink()
+            else None,
+        "status": "passed",
+    })
+    if directory_bytes(evidence) > MAX_TOTAL_BYTES:
+        raise MatrixError("matrix workspace and retained evidence exceed the 4 GiB total byte limit")
+    return observation
+
+
+def host_pins(cli: Path) -> dict[str, Any]:
+    java_home = os.environ.get("JAVA_HOME")
+    java_candidate = Path(java_home) / "bin/java" if java_home else None
+    java = str(java_candidate) if java_candidate is not None and java_candidate.is_file() else shutil.which("java")
+    if java is None:
+        raise MatrixError("java is not available for runtime identity capture")
+    java_version = None
+    java_sha256 = None
+    java_path = Path(java).resolve()
+    if not java_path.is_file():
+        raise MatrixError("resolved java executable is not a regular file")
+    java_sha256 = sha256_file(java_path)
+    java_environment = {key: value for key, value in os.environ.items()
+        if key in {"PATH", "JAVA_HOME", "LANG", "LC_ALL", "TZ"}}
+    result = subprocess.run([java, "-version"], cwd=ROOT, env=java_environment,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False, timeout=10)
+    if result.returncode != 0:
+        raise MatrixError("java -version failed during runtime identity capture")
+    java_version = result.stdout.decode("utf-8", errors="replace")[:4096]
+    cpu_model = None
+    cpuinfo = Path("/proc/cpuinfo")
+    if cpuinfo.is_file():
+        for line in cpuinfo.read_text(errors="replace").splitlines():
+            if line.lower().startswith("model name"):
+                cpu_model = line.split(":", 1)[-1].strip()
+                break
+    install_root = cli.parent.parent
+    bundle_manifest = install_root / "lib/gcc-bundled-ghidra-reference-v1.json"
+    app_jars = sorted((path.relative_to(install_root).as_posix(), sha256_file(path))
+        for path in (install_root / "lib").glob("*.jar") if path.is_file() and not path.is_symlink())
+    if not bundle_manifest.is_file() or bundle_manifest.is_symlink():
+        raise MatrixError("installed bundled-Ghidra identity manifest is missing")
+    if not app_jars:
+        raise MatrixError("installed application JAR inventory is empty")
+    return {
+        "commit": subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT,
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False).stdout.strip(),
+        "kernel": platform.release(),
+        "platform": platform.platform(),
+        "cpuCount": os.cpu_count(),
+        "cpuModel": cpu_model,
+        "hostSample": host_sample(),
+        "javaVersion": java_version,
+        "javaPath": str(java_path),
+        "javaSha256": java_sha256,
+        "ghidraBundleManifestSha256": sha256_file(bundle_manifest),
+        "applicationJars": [{"path": path, "sha256": digest} for path, digest in app_jars],
+        "cliSha256": sha256_file(cli),
+    }
+
+
+def host_sample() -> dict[str, Any]:
+    memory_total = None
+    memory_available = None
+    meminfo = Path("/proc/meminfo")
+    if meminfo.is_file():
+        for line in meminfo.read_text(errors="replace").splitlines():
+            if line.startswith("MemTotal:"):
+                fields = line.split()
+                if len(fields) >= 2 and fields[1].isdigit():
+                    memory_total = int(fields[1]) * 1024
+            elif line.startswith("MemAvailable:"):
+                fields = line.split()
+                if len(fields) >= 2 and fields[1].isdigit():
+                    memory_available = int(fields[1]) * 1024
+    return {
+        "observedAt": datetime.now(timezone.utc).isoformat(),
+        "loadAverage": list(os.getloadavg()) if hasattr(os, "getloadavg") else None,
+        "memoryTotalBytes": memory_total,
+        "memoryAvailableBytes": memory_available,
+    }
+
+
+def run_matrix(cli_arg: Path, evidence_arg: Path, repetitions: int) -> dict[str, Any]:
+    if not cli_arg.is_absolute():
+        cli_arg = ROOT / cli_arg
+    if not evidence_arg.is_absolute():
+        evidence_arg = ROOT / evidence_arg
+    cli_lexical = Path(os.path.abspath(cli_arg))
+    if cli_lexical.is_symlink():
+        raise MatrixError("--cli cannot name a symbolic link")
+    cli = cli_arg.resolve(strict=True)
+    if cli.is_symlink() or not cli.is_file() or not os.access(cli, os.X_OK):
+        raise MatrixError("--cli must name a regular executable file")
+    evidence = require_repo_child(evidence_arg, "evidence directory")
+    if evidence.exists():
+        raise MatrixError("evidence directory already exists; refusing to overwrite retained data")
+    workspace = evidence / "workspace"
+    workspace.mkdir(parents=True)
+    budget = [0]
+    available = fixtures()
+    report: dict[str, Any] = {
+        "schemaVersion": 1,
+        "issue": 1833,
+        "startedAt": datetime.now(timezone.utc).isoformat(),
+        "status": "running",
+        "scope": "agent-free evidence-only analysis; no reconstruction acceptance authority",
+        "hostPins": host_pins(cli),
+        "repetitions": repetitions,
+        "fixtures": {},
+        "unrunCells": {
+            "partial-resume": "No deterministic checkpoint interruption control is provided by this harness.",
+            "exporter-invalidation": "Requires a controlled exporter replacement and verified recapture.",
+            "analysis-tool-invalidation": "Requires a separate authenticated bundled-tool replacement.",
+            "source-invalidation": "Requires the full reconstruction/compiler acceptance path.",
+            "interface-invalidation": "Requires the full reconstruction/compiler acceptance path.",
+            "receipt-invalidation": "Requires the full reconstruction/compiler acceptance path.",
+            "compiler-validation-invalidation": "Requires configured compiler acceptance.",
+            "binary_01": "The retained canonical binary pin is not available in the repository manifest.",
+            "compiler-identity": "No compiler is executed by the evidence-only profiling path.",
+        },
+        "evidenceBytesCopied": 0,
+    }
+    report_path = evidence / "matrix.json"
+
+    def persist() -> None:
+        report["evidenceBytesCopied"] = budget[0]
+        temporary = report_path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        temporary.replace(report_path)
+
+    def observe(collection: dict[str, Any], output: Path, fixture: dict[str, Any], profile: str,
+                label: str) -> dict[str, Any]:
+        row: dict[str, Any] = {"label": label, "status": "running"}
+        collection["observations"].append(row)
+        persist()
+        try:
+            result = capture_run(cli, output, fixture, profile, label, evidence, budget)
+        except Exception as failure:
+            row.update({"status": "failed", "failureType": type(failure).__name__,
+                "failure": str(failure)[:512]})
+            persist()
+            raise
+        row.clear()
+        row.update(result)
+        persist()
+        if row["status"] != "passed":
+            raise MatrixError(f"{label}: CLI returned failure; stdout/stderr remain retained")
+        return row
+
+    try:
+        for fixture_id in ("large_project_mtu", "gcc_driver"):
+            fixture = available[fixture_id]
+            fixture_dir = workspace / fixture_id
+            fixture_dir.mkdir()
+            fixture_record = report["fixtures"].setdefault(fixture_id, {
+                "input": {"path": str(fixture["path"].relative_to(ROOT)), "sha256": fixture["sha256"],
+                    "manifest": fixture["manifest"]},
+                "observations": [],
+            })
+            for repetition in range(1, repetitions + 1):
+                output = fixture_dir / f"baseline-{repetition:02d}"
+                output.mkdir()
+                observe(fixture_record, output, fixture, "generated-c-make-v1",
+                    f"{fixture_id}-fresh-{repetition:02d}")
+                for resume_index in range(1, repetitions + 1):
+                    observe(fixture_record, output, fixture, "generated-c-make-v1",
+                        f"{fixture_id}-complete-resume-{repetition:02d}-{resume_index:02d}")
+
+        switch_fixture = available["large_project_mtu"]
+        other_input = available["large_project"]
+        switch_output = workspace / "shared-input-switch"
+        switch_output.mkdir()
+        switch_records = report["fixtures"].setdefault("shared-input-switch", {"observations": []})
+        for index, fixture in enumerate((switch_fixture, other_input, switch_fixture), start=1):
+            observe(switch_records, switch_output, fixture, "generated-c-make-v1", f"input-switch-{index}")
+
+        profile_output = workspace / "profile-switch"
+        profile_output.mkdir()
+        profile_records = report["fixtures"].setdefault("profile-switch", {"observations": []})
+        for index, profile in enumerate(("generated-c-make-v1", "generated-c-ninja-v1", "generated-c-make-v1"), start=1):
+            observe(profile_records, profile_output, switch_fixture, profile, f"profile-switch-{index}")
+
+        sidecars = sorted(evidence.glob("observations/*/evidence/analysis-timing.json"))
+        summary = SUMMARY.summarize(sidecars)
+        summary_path = evidence / "timing-summary.json"
+        summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        report["timingSummaryPath"] = str(summary_path.relative_to(ROOT))
+        report["timingSummarySha256"] = sha256_file(summary_path)
+        report["status"] = "partial-evidence-collected"
+    except BaseException as failure:
+        report["status"] = "failed"
+        report["failure"] = f"{type(failure).__name__}: {str(failure)[:512]}"
+        persist()
+        raise
+    finally:
+        report["completedAt"] = datetime.now(timezone.utc).isoformat()
+        persist()
+    return report
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--cli", type=Path, required=True, help="installed llm_bin_patch executable")
+    parser.add_argument("--evidence-dir", type=Path, required=True, help="new directory under repository build/")
+    parser.add_argument("--repetitions", type=int, default=3)
+    args = parser.parse_args(argv)
+    if args.repetitions not in range(2, 6):
+        parser.error("--repetitions must be between 2 and 5")
+    try:
+        report = run_matrix(args.cli, args.evidence_dir, args.repetitions)
+    except (MatrixError, OSError, subprocess.SubprocessError, json.JSONDecodeError) as failure:
+        print(f"#1833 matrix stopped with retained failure evidence: {type(failure).__name__}", file=sys.stderr)
+        return 1
+    print(f"#1833 partial evidence: {report['status']} ({report['evidenceBytesCopied']} retained bytes)")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
