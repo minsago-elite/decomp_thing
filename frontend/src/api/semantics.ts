@@ -532,6 +532,9 @@ export function checkSemantics(document: ContractDocument, basePath = '/'): void
       const recognizedProducer = (reportType === 'exploration' && (producerSchemaVersion === null
         || (producerSchemaVersion === 1 && state === 'partial' && summary === null
           && document.data.authority === 'observations' && acceptance === 'not-evaluated'
+          && document.data.acceptanceArtifactId === null)
+        || (producerSchemaVersion === 2 && state === 'available' && summary !== null
+          && document.data.authority === 'observations' && acceptance === 'not-evaluated'
           && document.data.acceptanceArtifactId === null)))
         || (reportType === 'revision-validation' && producerSchemaVersion === 2);
       if (adapterVersion !== 1 || ((state === 'available' || state === 'partial') && !recognizedProducer)) {

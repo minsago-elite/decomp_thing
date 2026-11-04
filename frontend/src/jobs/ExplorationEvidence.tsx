@@ -70,7 +70,7 @@ export function ExplorationEvidence({ jobId, runId, basePath }: { jobId: string;
             <a href={report.sourceArtifact.contentHref} download="exploration.json">{copy.downloadObservedExplorationJSON}</a></>}
         {report.sourceArtifact.content?.projection !== 'unavailable' &&
           (report.state === 'available' || report.state === 'partial') && report.adapterVersion === 1 &&
-          (report.producerSchemaVersion === null || (report.producerSchemaVersion === 1 && report.state === 'partial')) &&
+          (report.producerSchemaVersion === null || report.producerSchemaVersion === 2 || (report.producerSchemaVersion === 1 && report.state === 'partial')) &&
           <ExplorationCases key={`${jobId}/${runId}/${report.sourceArtifact.sha256}`} artifact={report.sourceArtifact} jobId={jobId} runId={runId}
             basePath={basePath} producerSchemaVersion={report.producerSchemaVersion} />}
       </>}
