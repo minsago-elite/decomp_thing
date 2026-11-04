@@ -19,8 +19,13 @@ class GhidraDotDirectoryInvocationQualificationTest {
         InvocationQualification.requireProof(System.getProperty("os.name") == "Linux")
         val repository = Path.of("").toAbsolutePath().normalize()
         val installed = repository.resolve("build/install/llm_bin_patch")
-        val evidence = repository.resolve("build/orchestration/ghidra-invocation-qualification").createDirectories()
+        val evidence = repository.resolve("build/orchestration/ghidra-invocation-qualification")
+        var failureDirectory = evidence
+        var processDiagnosticEmitted = false
+        try {
+        evidence.createDirectories()
         val run = Files.createTempDirectory(evidence, "run-")
+        failureDirectory = run
         val jars = Files.list(installed.resolve("lib")).use { paths ->
             paths.filter { it.toString().endsWith(".jar") }.sorted().limit(257).toList()
         }
@@ -34,7 +39,11 @@ class GhidraDotDirectoryInvocationQualificationTest {
             "-Ddecompengine.oracle.nativeLibraryDirectory=${installed.resolve("libexec/oracle-native")}",
             "-cp", InvocationQualification.installedProbeClasspath(jars, tests),
             GhidraInstalledInvocationProbe::class.java.name, repository.toString(), run.toString(),
-        ), repository, 12 * 60)
+        ), repository, 12 * 60, diagnosticSink = { diagnostic ->
+            processDiagnosticEmitted = true
+            InvocationQualification.writeFailure(run.resolve("parent-process-failure.json"), diagnostic.json())
+        })
+        processDiagnosticEmitted = true
         InvocationQualification.requireProof(result.toString(Charsets.UTF_8) == "installed-invocation-qualified\n")
         // Publish only a completed same-run set. The run manifest binds exact report/observation bytes.
         val provenance = Json.parseToJsonElement(InvocationQualification.read(run.resolve("provenance.json")).toString(Charsets.UTF_8)).jsonObject
@@ -44,15 +53,26 @@ class GhidraDotDirectoryInvocationQualificationTest {
             InvocationQualification.publish(evidence.resolve(name), InvocationQualification.read(run.resolve(name)))
         }
         InvocationQualification.publish(evidence.resolve("provenance.json"), provenance)
+        } catch (problem: Throwable) {
+            if (!processDiagnosticEmitted) InvocationQualification.setupFailure(problem, InvocationQualification.Phase.SETUP) {
+                InvocationQualification.writeFailure(failureDirectory.resolve("parent-setup-failure.json"), it.json())
+            }
+            if (problem is InterruptedException) Thread.currentThread().interrupt()
+            throw problem
+        }
     }
 }
 
 /** Executed ONLY in a child whose application classpath consists of installed JARs. */
 object GhidraInstalledInvocationProbe {
     @JvmStatic fun main(args: Array<String>) {
+        val q = InvocationQualification
+        var phase = InvocationQualification.Phase.PROVENANCE_VERIFICATION
+        var failureDirectory: Path? = null
+        try {
         val repository = Path.of(args[0]).toRealPath()
         val run = Path.of(args[1]).toRealPath()
-        val q = InvocationQualification
+        failureDirectory = run
         q.requireProof(run.startsWith(repository.resolve("build/orchestration/ghidra-invocation-qualification")))
         val pinPath = repository.resolve("build/orchestration/ghidra-invocation-build-provenance.json")
         val pinBytes = q.read(pinPath)
@@ -82,7 +102,9 @@ object GhidraInstalledInvocationProbe {
             val verified = q.run(listOf("python3", "src/test/python/ghidra_invocation_provenance.py", "verify"), repository, 30)
             q.requireProof(verified.toString(Charsets.UTF_8) == "invocation-build-provenance-verified\n")
         }
+        phase = InvocationQualification.Phase.PROVENANCE_VERIFICATION
         verify()
+        phase = InvocationQualification.Phase.BUNDLE_SOURCE_CHECKS
         val bundle = BundledGhidra.locate().root.toRealPath()
         q.requireProof(bundle == installed.resolve("libexec/ghidra"))
         val bridge = bundle.resolve("decomp-ghidra-bridge.jar")
@@ -100,6 +122,7 @@ object GhidraInstalledInvocationProbe {
         val authored = run.resolve("authored-input.c")
         q.publish(authored, "int main(void) { return 0; }\n".toByteArray())
         val input = run.resolve("authored-input.elf")
+        phase = InvocationQualification.Phase.INPUT_COMPILE
         val compilerOutput = q.run(listOf("gcc", "-g", "-O0", "-fno-pie", "-no-pie", "-Wl,--build-id=none",
             authored.toString(), "-o", input.toString()), repository, 30)
         // Retain only bounded counts/digests, never arbitrary compiler output or the JVM vector.
@@ -150,12 +173,14 @@ object GhidraInstalledInvocationProbe {
             } catch (problem: InterruptedException) { if (!stop.get()) failure.set(problem) }
             catch (problem: Throwable) { failure.set(problem) }
         }, "ghidra-invocation-observer").apply { isDaemon = true }
+        phase = InvocationQualification.Phase.ANALYSIS_OBSERVER_OWNERSHIP
         val analysis = q.owned(cleanup = { q.settle(observer, { stop.set(true) }) }) {
             observer.start()
             GhidraJvmAnalyzer().analyze(input, work)
         }
         failure.get()?.let { throw it }
         inventory.finish()
+        phase = InvocationQualification.Phase.RECEIPT_COMPARISON
         val worker = checkNotNull(observed.get()) { "Invocation qualification did not observe its worker" }
         val reportBytes = q.read(analysis.reportPath)
         val report = Json.parseToJsonElement(reportBytes.toString(Charsets.UTF_8)).jsonObject
@@ -177,9 +202,12 @@ object GhidraInstalledInvocationProbe {
         val diagnostic = listOf("ghidra_stdout.log", "ghidra_stderr.log").joinToString("\n") {
             q.read(work.resolve("reports/$it"), 16 * 1024 * 1024).toString(Charsets.UTF_8)
         }
+        phase = InvocationQualification.Phase.RESULT_VALIDATION
         q.validateResult(report, analysis.programModel.functions.map { it.name },
             Files.isRegularFile(project.resolve("archival_reconstruction.gpr")), diagnostic)
+        phase = InvocationQualification.Phase.FINAL_PROVENANCE_VERIFICATION
         verify()
+        phase = InvocationQualification.Phase.PUBLICATION
         q.publish(run.resolve("retained-invocation.json"), reportBytes)
         q.publish(run.resolve("observed-worker.json"), buildJsonObject {
             put("runId", run.fileName.toString()); put("pid", worker.identity.pid); put("startTicks", worker.identity.start)
@@ -197,6 +225,10 @@ object GhidraInstalledInvocationProbe {
             })
         })
         println("installed-invocation-qualified")
+        } catch (problem: Throwable) {
+            failureDirectory?.let { q.publishFailure(it.resolve("child-failure.json"), q.childFailure(phase, problem), problem) }
+            throw problem
+        }
     }
     private data class ObservedWorker(val identity: InvocationQualification.Identity, val command: List<String>,
         val cwd: Path, val project: Path, val projectKey: String)

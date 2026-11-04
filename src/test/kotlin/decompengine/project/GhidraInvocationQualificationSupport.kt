@@ -14,6 +14,7 @@ import kotlinx.serialization.json.*
 /** Hosted qualification mechanics, never production authority. All failures use fixed diagnostics. */
 internal object InvocationQualification {
     const val ARTIFACT_LIMIT = 1024 * 1024
+    const val FAILURE_RECORD_LIMIT = 4096
     const val CHILD_LIMIT = 256
     private val privateMode = PosixFilePermissions.fromString("rw-------")
     fun requireProof(value: Boolean) { check(value) { "Invocation qualification proof is missing or inconsistent" } }
@@ -21,7 +22,7 @@ internal object InvocationQualification {
         // Path is Iterable<Path>; append its whole location, never its individual components.
         (jars + listOf(tests)).joinToString(java.io.File.pathSeparator)
     fun bytes(input: InputStream, limit: Int = ARTIFACT_LIMIT): ByteArray = input.use {
-        it.readNBytes(limit + 1).also { result -> requireProof(result.size <= limit) }
+        it.readNBytes(limit + 1).also { result -> if (result.size > limit) throw QualificationFailure(FailureCategory.OUTPUT_BOUND) }
     }
     fun read(path: Path, limit: Int = ARTIFACT_LIMIT): ByteArray = bytes(Files.newInputStream(path, NOFOLLOW_LINKS), limit)
     fun command(bytes: ByteArray): List<String> {
@@ -58,6 +59,115 @@ internal object InvocationQualification {
         } finally { Files.deleteIfExists(staged) }
     }
     fun publish(path: Path, value: JsonObject) = publish(path, (value.toString() + "\n").toByteArray())
+
+    enum class Phase(val wire: String) {
+        PROVENANCE_VERIFICATION("provenance_verification"), BUNDLE_SOURCE_CHECKS("bundle_source_checks"),
+        INPUT_COMPILE("input_compile"), ANALYSIS_OBSERVER_OWNERSHIP("analysis_observer_ownership"),
+        RECEIPT_COMPARISON("receipt_comparison"), RESULT_VALIDATION("result_validation"),
+        FINAL_PROVENANCE_VERIFICATION("final_provenance_verification"), PUBLICATION("publication"),
+        PROCESS_EXECUTION("process_execution"), SETUP("setup"), PROCESS_START("process_start"),
+    }
+    enum class FailureCategory(val wire: String) {
+        ASSERTION("assertion"), IO("io"), INTERRUPTED("interrupted"), TIMEOUT("timeout"),
+        OUTPUT_BOUND("output_bound"), ABNORMAL_EXIT("abnormal_exit"), READER_FAILURE("reader_failure"),
+        CLEANUP_FAILURE("cleanup_failure"), OTHER("other"),
+    }
+    private class QualificationFailure(val fixedCategory: FailureCategory) :
+        IllegalStateException("Invocation qualification proof is missing or inconsistent")
+    data class CleanupFact(val attempted: Boolean = false, val acknowledged: Boolean = false, val succeeded: Boolean? = null) {
+        fun json() = buildJsonObject {
+            put("attempted", attempted); put("acknowledged", acknowledged)
+            put("succeeded", succeeded?.let(::JsonPrimitive) ?: JsonNull)
+        }
+    }
+    data class ProcessDiagnostic(
+        val category: FailureCategory, val phase: Phase, val exitCode: Int?,
+        val capturedBytes: Int?, val capturedSha256: String?, val processSettled: Boolean,
+        val readerSettled: Boolean, val descendantsSettled: Boolean, val cleanupFailure: Boolean,
+        val primaryCategory: FailureCategory? = category, val processAcquired: Boolean = true,
+        val processCleanup: CleanupFact = CleanupFact(), val descendantCleanup: CleanupFact = CleanupFact(),
+        val readerCleanup: CleanupFact = CleanupFact(), val closerCleanup: CleanupFact = CleanupFact(),
+        val inputCleanup: CleanupFact = CleanupFact(), val errorCleanup: CleanupFact = CleanupFact(),
+        val outputCleanup: CleanupFact = CleanupFact(),
+    ) {
+        fun json() = buildJsonObject {
+            put("schemaVersion", 1); put("kind", "process_failure")
+            put("category", category.wire); put("phase", phase.wire)
+            put("primaryCategory", primaryCategory?.let { JsonPrimitive(it.wire) } ?: JsonNull)
+            put("exitCode", exitCode?.let(::JsonPrimitive) ?: JsonNull)
+            put("capturedBytes", capturedBytes?.let(::JsonPrimitive) ?: JsonNull)
+            put("capturedSha256", capturedSha256?.let(::JsonPrimitive) ?: JsonNull)
+            put("processAcquired", processAcquired)
+            put("processSettled", processSettled); put("readerSettled", readerSettled)
+            put("descendantsSettled", descendantsSettled); put("cleanupFailure", cleanupFailure)
+            put("processCleanup", processCleanup.json()); put("descendantCleanup", descendantCleanup.json())
+            put("readerCleanup", readerCleanup.json()); put("closerCleanup", closerCleanup.json())
+            put("inputCleanup", inputCleanup.json()); put("errorCleanup", errorCleanup.json())
+            put("outputCleanup", outputCleanup.json())
+        }
+    }
+    private fun emit(problem: Throwable, diagnostic: ProcessDiagnostic, sink: ((ProcessDiagnostic) -> Unit)?) {
+        try { sink?.invoke(diagnostic) }
+        catch (_: Throwable) { problem.addSuppressed(IllegalStateException("Invocation qualification diagnostic publication failed")) }
+    }
+    /** Covers setup before process ownership, with unavailable capture/cleanup facts. */
+    fun setupFailure(problem: Throwable, phase: Phase, sink: ((ProcessDiagnostic) -> Unit)?) {
+        emit(problem, ProcessDiagnostic(failureCategory(problem), phase, null, null, null,
+            false, false, false, false, processAcquired = false), sink)
+    }
+    fun failureCategory(problem: Throwable): FailureCategory = when (problem) {
+        is QualificationFailure -> problem.fixedCategory
+        is InterruptedException -> FailureCategory.INTERRUPTED
+        is java.io.IOException -> FailureCategory.IO
+        is IllegalStateException, is IllegalArgumentException -> FailureCategory.ASSERTION
+        else -> FailureCategory.OTHER
+    }
+    fun sourceAnchors(problem: Throwable): JsonArray = buildJsonArray {
+        problem.stackTrace.asSequence().filter { it.fileName == "GhidraInvocationQualificationSupport.kt" ||
+            it.fileName == "GhidraDotDirectoryInvocationQualificationTest.kt" }
+            .filter { it.lineNumber in 1..10000 }.take(4)
+            .forEach { add(buildJsonObject { put("file", it.fileName); put("line", it.lineNumber) }) }
+    }
+    fun childFailure(phase: Phase, problem: Throwable) = buildJsonObject {
+        put("schemaVersion", 1); put("kind", "child_failure"); put("category", failureCategory(problem).wire)
+        put("phase", phase.wire); put("sourceAnchors", sourceAnchors(problem)); put("cleanup", "unknown")
+    }
+    fun publishFailure(path: Path, value: JsonObject, original: Throwable) {
+        try { writeFailure(path, value) }
+        catch (_: Throwable) { original.addSuppressed(IllegalStateException("Invocation qualification diagnostic publication failed")) }
+    }
+
+    /** Exclusive failure-only publication. Success publication intentionally remains unchanged. */
+    fun writeFailure(path: Path, value: JsonObject) {
+        val content = (value.toString() + "\n").toByteArray()
+        requireProof(content.size <= FAILURE_RECORD_LIMIT)
+        Files.newByteChannel(path, setOf(java.nio.file.StandardOpenOption.CREATE_NEW,
+            java.nio.file.StandardOpenOption.WRITE, NOFOLLOW_LINKS),
+            PosixFilePermissions.asFileAttribute(privateMode)).use { channel ->
+            val buffer = java.nio.ByteBuffer.wrap(content)
+            while (buffer.hasRemaining()) channel.write(buffer)
+        }
+        requireProof(Files.getPosixFilePermissions(path, NOFOLLOW_LINKS) == privateMode)
+    }
+
+    data class CapturedOutput(val byteCount: Int, val sha256: String?, val outputBound: Boolean)
+    private fun capture(input: InputStream, limit: Int, facts: AtomicReference<CapturedOutput>): ByteArray {
+        requireProof(limit in 0..ARTIFACT_LIMIT)
+        val collected = java.io.ByteArrayOutputStream()
+        val buffer = ByteArray(minOf(8192, limit + 1))
+        // Acquisition is now observed, even when the first read fails. The closer owns close().
+        facts.set(CapturedOutput(0, digest(byteArrayOf()), false))
+        while (true) {
+            val count = input.read(buffer, 0, minOf(buffer.size, limit - collected.size() + 1))
+            if (count < 0) return collected.toByteArray()
+            if (count == 0) continue
+            val retained = minOf(count, limit - collected.size())
+            collected.write(buffer, 0, retained)
+            val overflow = count > retained
+            facts.set(CapturedOutput(collected.size(), digest(collected.toByteArray()), overflow))
+            if (overflow) throw QualificationFailure(FailureCategory.OUTPUT_BOUND)
+        }
+    }
 
     data class Identity(val pid: Long, val start: String)
     /** Accumulates identities across ALL polls, including after a snapshot has been selected. */
@@ -97,12 +207,18 @@ internal object InvocationQualification {
         finally {
             try { cleanup() } catch (failure: Throwable) {
                 if (primary != null) primary.addSuppressed(failure) else throw failure
-            }
+            } finally { if (primary is InterruptedException) Thread.currentThread().interrupt() }
         }
     }
 
     /** A separate session keeps compiler/probe descendants identifiable after their parent exits. */
-    fun run(command: List<String>, directory: Path, timeoutSeconds: Long, outputLimit: Int = 65536): ByteArray {
+    fun run(command: List<String>, directory: Path, timeoutSeconds: Long, outputLimit: Int = 65536,
+        diagnosticSink: ((ProcessDiagnostic) -> Unit)? = null,
+        starter: (ProcessBuilder) -> Process = { it.start() },
+        memberSource: ((Process) -> List<ProcessHandle>)? = null): ByteArray {
+        var acquired = false
+        var phase = Phase.SETUP
+        try {
         val temporaryParent = directory.resolve("build/orchestration")
         Files.createDirectories(temporaryParent)
         val temporary = Files.createTempDirectory(temporaryParent, "invocation-process-")
@@ -113,22 +229,19 @@ internal object InvocationQualification {
             // This controlled installed probe must not inherit a Java agent or alternate bootstrap path.
             listOf("JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS", "_JAVA_OPTIONS").forEach(::remove)
         }
-        val process = builder.start()
-        val output = AtomicReference<ByteArray>()
-        val failure = AtomicReference<Throwable>()
-        val reader = Thread({
-            try { output.set(bytes(process.inputStream, outputLimit)) }
-            catch (problem: Throwable) { failure.set(problem) }
-        }, "invocation-bounded-capture").apply { isDaemon = true }
-        val group = process.pid()
+        lateinit var process: Process
+        var group: Long? = null
         val retained = linkedSetOf<ProcessHandle>()
-        fun members(): List<ProcessHandle> = try { Files.list(Path.of("/proc")).use { paths ->
+        fun members(): List<ProcessHandle> {
+            memberSource?.let { return it(process) }
+            return Files.list(Path.of("/proc")).use { paths ->
             process.descendants().use { descendants ->
                 val handles = descendants.limit((CHILD_LIMIT + 1).toLong()).toList()
                 requireProof(handles.size <= CHILD_LIMIT)
                 retained.addAll(handles)
                 requireProof(retained.size <= CHILD_LIMIT)
             }
+            requireProof(group != null)
             val all = paths.limit(32769).toList()
             requireProof(all.size <= 32768)
             all.filter { it.fileName.toString().all(Char::isDigit) }.mapNotNull { proc ->
@@ -146,73 +259,166 @@ internal object InvocationQualification {
                 retained.toList()
             }
         }
-        } catch (failure: Throwable) {
-            retained.forEach { handle ->
-                try { if (handle.isAlive) handle.destroyForcibly() } catch (cleanup: Throwable) { failure.addSuppressed(cleanup) }
-            }
-            throw failure
         }
-        return runOwned(process, ::members, TimeUnit.SECONDS.toMillis(timeoutSeconds), outputLimit, output, failure, reader)
+        phase = Phase.PROCESS_START
+        process = starter(builder)
+        acquired = true
+        return runOwned(process, ::members, TimeUnit.SECONDS.toMillis(timeoutSeconds), outputLimit,
+            diagnosticSink = diagnosticSink, afterAcquisition = { group = process.pid() },
+            retainedMembers = { retained.toList() })
+        } catch (problem: Throwable) {
+            if (!acquired) setupFailure(problem, phase, diagnosticSink)
+            if (problem is InterruptedException) Thread.currentThread().interrupt()
+            throw problem
+        }
     }
 
-    /** Injectable ownership boundary for deterministic controls; no fake can create installed evidence. */
+    /** Injectable ownership boundary for synthetic controls; no fake can create installed evidence. */
     fun runOwned(process: Process, members: () -> List<ProcessHandle>, timeoutMillis: Long, outputLimit: Int = 65536,
         output: AtomicReference<ByteArray> = AtomicReference(), failure: AtomicReference<Throwable> = AtomicReference(),
-        reader: Thread = Thread({
-            try { output.set(bytes(process.inputStream, outputLimit)) } catch (problem: Throwable) { failure.set(problem) }
-        }, "invocation-controlled-capture").apply { isDaemon = true }, cleanupMillis: Long = 5000,
+        reader: Thread? = null, cleanupMillis: Long = 5000,
+        diagnosticSink: ((ProcessDiagnostic) -> Unit)? = null,
+        captureFacts: AtomicReference<CapturedOutput> = AtomicReference(),
+        afterAcquisition: () -> Unit = {}, retainedMembers: () -> List<ProcessHandle> = { emptyList() },
     ): ByteArray {
-        return owned(cleanup = {
-            var interrupted = Thread.interrupted()
-            val end = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(cleanupMillis)
-            try {
-              owned(cleanup = {
-                // A pipe close may itself block behind an in-flight read. Own its thread too;
-                // never run close synchronously on the bounded cleanup caller.
-                val closeFailure = AtomicReference<Throwable?>()
-                val closer = Thread({
-                    listOf(process.inputStream, process.errorStream, process.outputStream).forEach { stream ->
-                        try { stream.close() } catch (problem: Throwable) {
-                            val prior = closeFailure.get()
-                            if (prior == null) closeFailure.set(problem) else prior.addSuppressed(problem)
-                        }
-                    }
-                }, "invocation-stream-close").apply { isDaemon = true }
-                owned(cleanup = {
-                    settle(reader, {}, maxOf(1, TimeUnit.NANOSECONDS.toMillis(end - System.nanoTime())))
-                }) {
-                    closer.start()
-                    settle(closer, {}, maxOf(1, TimeUnit.NANOSECONDS.toMillis(end - System.nanoTime())))
-                    closeFailure.get()?.let { throw it }
-                }
-              }) {
-                process.destroyForcibly()
-                do {
-                    val remaining = members().filter(ProcessHandle::isAlive)
-                    remaining.forEach { it.destroyForcibly() }
-                    if (!process.isAlive && remaining.isEmpty()) break
-                    try { Thread.sleep(10) } catch (_: InterruptedException) { interrupted = true }
-                } while (System.nanoTime() < end)
-                requireProof(!process.isAlive && members().none(ProcessHandle::isAlive))
-                requireProof(process.waitFor(maxOf(1, TimeUnit.NANOSECONDS.toMillis(end - System.nanoTime())), TimeUnit.MILLISECONDS))
-              }
-            } finally { if (interrupted) Thread.currentThread().interrupt() }
-        }) {
-            reader.start()
+        var primary: Throwable? = null
+        var primaryCategory: FailureCategory? = null
+        var result: ByteArray? = null
+        var ownedReader: Thread? = null
+        val readerAck = java.util.concurrent.atomic.AtomicBoolean()
+        var processFact = CleanupFact()
+        var descendantFact = CleanupFact()
+        var readerFact = CleanupFact()
+        val closerFact = AtomicReference(CleanupFact())
+        val streamFacts = List(3) { AtomicReference(CleanupFact()) }
+        val cleanupErrors = java.util.concurrent.ConcurrentLinkedQueue<Throwable>()
+        var processSettled = false
+        var descendantsSettled = false
+        var interrupted = false
+        try {
+            afterAcquisition()
+            ownedReader = Thread({
+                try {
+                    if (reader != null) reader.run()
+                    else output.set(capture(process.inputStream, outputLimit, captureFacts))
+                } catch (problem: Throwable) { failure.set(problem) }
+                finally { readerAck.set(true) }
+            }, "invocation-controlled-capture").apply { isDaemon = true }
+            ownedReader.start()
             val end = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis)
             while (!process.waitFor(20, TimeUnit.MILLISECONDS)) {
                 failure.get()?.let { throw it }
-                requireProof(System.nanoTime() < end)
-                members() // Complete bounded session inventory; errors cannot become uniqueness proof.
+                if (System.nanoTime() >= end) throw QualificationFailure(FailureCategory.TIMEOUT)
+                members()
             }
             val remaining = end - System.nanoTime()
-            requireProof(remaining > 0)
-            reader.join(maxOf(1, TimeUnit.NANOSECONDS.toMillis(remaining)))
-            requireProof(!reader.isAlive)
+            if (remaining <= 0) throw QualificationFailure(FailureCategory.TIMEOUT)
+            ownedReader.join(maxOf(1, TimeUnit.NANOSECONDS.toMillis(remaining)))
+            requireProof(!ownedReader.isAlive && readerAck.get())
             failure.get()?.let { throw it }
-            requireProof(process.exitValue() == 0)
-            checkNotNull(output.get())
+            if (process.exitValue() != 0) throw QualificationFailure(FailureCategory.ABNORMAL_EXIT)
+            result = checkNotNull(output.get())
+        } catch (problem: Throwable) {
+            primary = problem
+            // Freeze the original reason before cleanup can reveal late overflow facts.
+            primaryCategory = if (problem is QualificationFailure) problem.fixedCategory
+                else if (problem is InterruptedException) FailureCategory.INTERRUPTED
+                else if (failure.get() === problem) FailureCategory.READER_FAILURE else failureCategory(problem)
+            interrupted = problem is InterruptedException
+        } finally {
+            interrupted = Thread.interrupted() || interrupted
+            val end = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(cleanupMillis)
+            fun remaining() = maxOf(1, TimeUnit.NANOSECONDS.toMillis(end - System.nanoTime()))
+            fun attempt(body: () -> Unit): Boolean = try { body(); true } catch (problem: Throwable) {
+                if (problem is InterruptedException) interrupted = true
+                cleanupErrors.add(problem); false
+            }
+            try {
+                // Process reap and descendant inventory have independent outcomes, even on errors.
+                var processOk = attempt { process.destroyForcibly() }
+                var descendantsOk = true
+                processFact = CleanupFact(attempted = true)
+                descendantFact = CleanupFact(attempted = true)
+                do {
+                    val inventoryOk = attempt {
+                        val alive = members().filter(ProcessHandle::isAlive)
+                        alive.forEach { handle -> if (!attempt { handle.destroyForcibly() }) descendantsOk = false }
+                        descendantsSettled = alive.isEmpty()
+                    }
+                    descendantsOk = inventoryOk && descendantsOk
+                    if (!inventoryOk) {
+                        attempt { retainedMembers().forEach { handle -> attempt { if (handle.isAlive) handle.destroyForcibly() } } }
+                        break
+                    }
+                    var alive = true
+                    if (!attempt { alive = process.isAlive }) { processOk = false; break }
+                    if (!alive && descendantsSettled) break
+                    try { Thread.sleep(10) } catch (_: InterruptedException) { interrupted = true }
+                } while (System.nanoTime() < end)
+                // Always try process reap, even when descendant enumeration failed.
+                if (!attempt { requireProof(process.waitFor(remaining(), TimeUnit.MILLISECONDS) && !process.isAlive)
+                    processSettled = true }) processOk = false
+                descendantsSettled = false
+                if (!attempt { descendantsSettled = members().none(ProcessHandle::isAlive); requireProof(descendantsSettled) })
+                    descendantsOk = false
+                processFact = CleanupFact(true, true, processOk && processSettled)
+                descendantFact = CleanupFact(true, true, descendantsOk && descendantsSettled)
+            } catch (problem: Throwable) {
+                cleanupErrors.add(problem)
+            } finally {
+                // Getter and close are one independent attempt for EACH stream. A dead thread is not a result.
+                val closerAck = java.util.concurrent.atomic.AtomicBoolean()
+                var closer: Thread? = null
+                closerFact.set(CleanupFact(attempted = true))
+                val started = attempt {
+                    closer = Thread({
+                        var ok = true
+                        try {
+                            for (index in 0..2) {
+                                streamFacts[index].set(CleanupFact(attempted = true))
+                                var streamOk = false
+                                try {
+                                    val stream: java.io.Closeable = when (index) {
+                                        0 -> process.inputStream; 1 -> process.errorStream; else -> process.outputStream
+                                    }
+                                    stream.close(); streamOk = true
+                                } catch (problem: Throwable) { ok = false; cleanupErrors.add(problem) }
+                                finally { streamFacts[index].set(CleanupFact(true, true, streamOk)) }
+                            }
+                        } catch (problem: Throwable) { ok = false; cleanupErrors.add(problem) }
+                        finally { closerFact.set(CleanupFact(true, true, ok)); closerAck.set(true) }
+                    }, "invocation-stream-close").apply { isDaemon = true }
+                    closerFact.set(CleanupFact(attempted = true))
+                    closer.start()
+                }
+                if (started) attempt {
+                    settle(closer!!, {}, remaining())
+                    requireProof(closerAck.get() && closerFact.get().acknowledged && closerFact.get().succeeded == true)
+                }
+                ownedReader?.let { thread ->
+                    readerFact = CleanupFact(attempted = true)
+                    val ok = attempt { settle(thread, {}, remaining()); requireProof(readerAck.get()) }
+                    readerFact = CleanupFact(true, !thread.isAlive && readerAck.get(), ok)
+                }
+                interrupted = Thread.interrupted() || interrupted
+            }
         }
+        try {
+            val cleanupFailure = cleanupErrors.isNotEmpty()
+            val problem = primary ?: cleanupErrors.peek()
+            if (problem != null) {
+                cleanupErrors.forEach { if (it !== problem) problem.addSuppressed(it) }
+                val captured = captureFacts.get() ?: output.get()?.let { CapturedOutput(it.size, digest(it), false) }
+                emit(problem, ProcessDiagnostic(primaryCategory ?: FailureCategory.CLEANUP_FAILURE, Phase.PROCESS_EXECUTION,
+                    runCatching { process.exitValue() }.getOrNull(), captured?.byteCount, captured?.sha256,
+                    processSettled, readerFact.acknowledged, descendantsSettled, cleanupFailure,
+                    primaryCategory, processCleanup = processFact, descendantCleanup = descendantFact,
+                    readerCleanup = readerFact, closerCleanup = closerFact.get(), inputCleanup = streamFacts[0].get(),
+                    errorCleanup = streamFacts[1].get(), outputCleanup = streamFacts[2].get()), diagnosticSink)
+                throw problem
+            }
+            return checkNotNull(result)
+        } finally { if (interrupted) Thread.currentThread().interrupt() }
     }
 
     fun verifyExporterBytes(source: ByteArray, vararg copies: ByteArray) {
