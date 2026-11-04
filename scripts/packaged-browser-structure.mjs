@@ -152,6 +152,42 @@ export function nearestRankP95(values) {
   return sorted[Math.ceil(sorted.length * 0.95) - 1];
 }
 
+/** Retain a selected response body as soon as Chrome reports the request complete. */
+export function createStructureResponseRecorder(readBody) {
+  if (typeof readBody !== 'function') throw new TypeError('Structure response reader is required');
+  const byPath = new Map();
+  const byRequest = new Map();
+  return {
+    responseReceived(path, requestId) {
+      let resolve;
+      let reject;
+      const promise = new Promise((accept, refuse) => { resolve = accept; reject = refuse; });
+      promise.catch(() => undefined);
+      const capture = { promise, resolve, reject, requestId };
+      byPath.set(path, capture);
+      byRequest.set(requestId, capture);
+    },
+    async loadingFinished(requestId) {
+      const capture = byRequest.get(requestId);
+      if (!capture) return;
+      byRequest.delete(requestId);
+      try { capture.resolve(await readBody(requestId)); }
+      catch (error) { capture.reject(error); }
+    },
+    loadingFailed(requestId, reason) {
+      const capture = byRequest.get(requestId);
+      if (!capture) return;
+      byRequest.delete(requestId);
+      capture.reject(new Error(`Structure response ${capture.requestId} failed: ${reason}`));
+    },
+    async bodyForPath(path) {
+      const capture = byPath.get(path);
+      if (!capture) throw new Error('Missing completed module response');
+      return capture.promise;
+    },
+  };
+}
+
 /** Accept only bounded scalar timing samples from the isolated browser target. */
 export function appendStructureFeedbackSample(samples, payload) {
   if (!Array.isArray(samples) || samples.length >= LOCAL_FEEDBACK_SAMPLE_LIMIT || typeof payload !== 'string'
@@ -208,12 +244,25 @@ export async function qualifyStructure({ fixture, makeTarget, cdp, evaluate, rea
   const inventoryReads = [];
   const inventoryRequests = new Map();
   const inventoryRequestDurationsMs = [];
-  const moduleResponses = new Map();
+  const moduleResponseBodies = createStructureResponseRecorder((requestId) =>
+    cdp.call('Network.getResponseBody', { requestId }, tab.sessionId));
+  const moduleResponsePaths = new Map();
   cdp.on('Network.responseReceived', (event) => {
     const url = new URL(event.response.url);
     if (url.origin === new URL(browserOrigin).origin && event.response.status === 200
       && /\/api\/v1\/jobs\/[^/]+\/runs\/[^/]+\/revisions\/[^/]+\/modules\/[^/]+$/.test(url.pathname)) {
-      moduleResponses.set(url.pathname, event.requestId);
+      moduleResponsePaths.set(event.requestId, url.pathname);
+      moduleResponseBodies.responseReceived(url.pathname, event.requestId);
+    }
+  }, tab.sessionId);
+  cdp.on('Network.loadingFinished', (event) => {
+    if (moduleResponsePaths.delete(event.requestId)) void moduleResponseBodies.loadingFinished(event.requestId);
+  }, tab.sessionId);
+  cdp.on('Network.loadingFailed', (event) => {
+    const path = moduleResponsePaths.get(event.requestId);
+    if (path) {
+      moduleResponsePaths.delete(event.requestId);
+      moduleResponseBodies.loadingFailed(event.requestId, event.errorText);
     }
   }, tab.sessionId);
   cdp.on('Network.requestWillBeSent', (event) => {
@@ -287,10 +336,8 @@ export async function qualifyStructure({ fixture, makeTarget, cdp, evaluate, rea
   const owned = Math.min(24, OWNED - Math.floor(99998 / 24) * 24);
   assert.equal(await evaluate(tab, `document.querySelectorAll('table tbody tr').length`), owned);
   const implementation = await evaluate(tab, `[...document.querySelectorAll('a')].find(a => a.textContent === 'src/modules/${module}.c')?.getAttribute('href')`);
-  const requestId = moduleResponses.get(`/nested/api/v1/jobs/${fixture.jobId}/runs/${fixture.runId}/revisions/${fixture.revisionId}/modules/${module}`);
-  assert.ok(requestId, 'Missing originating module detail response');
-  // Rendering has completed, so the response body consumed by the UI is available without another API read.
-  const response = await cdp.call('Network.getResponseBody', { requestId }, tab.sessionId);
+  const response = await moduleResponseBodies.bodyForPath(
+    `/nested/api/v1/jobs/${fixture.jobId}/runs/${fixture.runId}/revisions/${fixture.revisionId}/modules/${module}`);
   const snapshot = JSON.parse(response.base64Encoded ? Buffer.from(response.body, 'base64').toString('utf8') : response.body).data;
   assert.equal(snapshot.module.moduleId, module);
   assertStructureSourceLink(implementation, { revision, browserOrigin, snapshot });

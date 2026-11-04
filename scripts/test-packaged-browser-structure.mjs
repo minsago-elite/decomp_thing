@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { runInNewContext } from 'node:vm';
-import { appendStructureFeedbackSample, assertStructureSourceLink, nearestRankP95, structureFeedbackInstrumentation } from './packaged-browser-structure.mjs';
+import { appendStructureFeedbackSample, assertStructureSourceLink, createStructureResponseRecorder, nearestRankP95, structureFeedbackInstrumentation } from './packaged-browser-structure.mjs';
 
 const revision = `/nested/jobs/${'f'.repeat(32)}/runs/run_structure_scale/revisions/revision_structure_scale`;
 const browserOrigin = 'http://127.0.0.1:12345';
@@ -17,6 +17,31 @@ test('structure scale p95 uses nearest rank and refuses missing or invalid timin
   for (const values of [[], [Number.NaN], [Number.POSITIVE_INFINITY], [-1], null]) {
     assert.throws(() => nearestRankP95(values), TypeError);
   }
+});
+
+test('module response bodies are captured at loadingFinished, before later navigation can evict them', async () => {
+  const expected = { body: '{"data":{"module":"recorded"}}', base64Encoded: false };
+  const reads = [];
+  const recorder = createStructureResponseRecorder(async (requestId) => {
+    reads.push(requestId);
+    return expected;
+  });
+  recorder.responseReceived('/modules/module_0041', 'request-41');
+  assert.deepEqual(reads, [], 'Response arrival alone must not attempt body retrieval');
+  const body = recorder.bodyForPath('/modules/module_0041');
+  await recorder.loadingFinished('request-41');
+  assert.deepEqual(reads, ['request-41']);
+  assert.equal(await body, expected);
+});
+
+test('module response body capture preserves request failure instead of reading an incomplete body', async () => {
+  const reads = [];
+  const recorder = createStructureResponseRecorder(async (requestId) => { reads.push(requestId); return {}; });
+  recorder.responseReceived('/modules/module_0002', 'request-2');
+  const body = recorder.bodyForPath('/modules/module_0002');
+  recorder.loadingFailed('request-2', 'net::ERR_ABORTED');
+  await assert.rejects(body, /Structure response request-2 failed: net::ERR_ABORTED/);
+  assert.deepEqual(reads, []);
 });
 
 test('structure feedback samples survive document replacement through the parent binding', () => {
