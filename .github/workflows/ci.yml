@@ -286,6 +286,7 @@ jobs:
           path: |
             build/packaged-web-ci
             build/packaged-browser-*/report.json
+            build/packaged-browser-*/audit-evidence.json.gz
             build/packaged-browser-*/*.png
             build/reports/tests/test
             build/test-results/test

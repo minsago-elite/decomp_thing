@@ -4,7 +4,8 @@ import { dirname, resolve } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { runInNewContext } from 'node:vm';
-import { assertAudit, auditContentReady, auditFixtures, auditPageNames, auditPageReady, auditTokenKinds, auditViewports, measureContrast, measureFocus, measurePage, prepareAuditPage, qualifyAudit } from './packaged-browser-audit.mjs';
+import { gunzipSync } from 'node:zlib';
+import { assertAudit, auditContentReady, auditFixtures, auditPageNames, auditPageReady, auditTokenKinds, auditViewports, encodeAuditEvidence, measureContrast, measureFocus, measurePage, prepareAuditPage, qualifyAudit, summarizeAuditEvidence } from './packaged-browser-audit.mjs';
 
 // Controls for the packaged audit's own verdict: each injected defect must be reported, so a
 // passing CI audit cannot be a vacuous one.
@@ -43,6 +44,35 @@ test('a clean audit with every packaged asset and the worker has no failures', (
   assert.deepEqual(auditFixtures(repo, manifest.buildId).pages.map(page => page.name), auditPageNames);
   assert.deepEqual([audit.layout.length, audit.contrast.length, audit.focus.length], [130, 52, 26]);
   assert.deepEqual(verdict(audit), []);
+});
+
+test('compact report retains complete audit evidence coverage and timing while pointing to full measurements', () => {
+  const audit = clean();
+  const summary = summarizeAuditEvidence(audit, { file: 'audit-evidence.json.gz', sha256: 'a'.repeat(64),
+    compressedBytes: 1024, uncompressedBytes: 8192 });
+  assert.equal(summary.evidence.file, 'audit-evidence.json.gz');
+  assert.equal(summary.evidence.sha256.length, 64);
+  assert.deepEqual(summary.coverage.layout, audit.layout.map(({ page, viewport, scheme }) => ({ page, viewport, scheme })));
+  assert.deepEqual(summary.coverage.contrast, audit.contrast.map(({ page, viewport, scheme }) => ({ page, viewport, scheme })));
+  assert.deepEqual(summary.coverage.focus, audit.focus.map(({ page, scheme, stops }) => ({ page, scheme, stopCount: stops.length })));
+  assert.equal(summary.coverage.focusStops, audit.focus.reduce((count, entry) => count + entry.stops.length, 0));
+  assert.deepEqual(summary.timing, audit.timing);
+  assert.equal(summary.unmapped.length, 0);
+  assert.deepEqual(summary.interactions, audit.interactions);
+  assert.equal(summary.layout, undefined, 'the full layout measurements are retained in the sidecar');
+  assert.equal(audit.layout.length, 130, 'summarizing must not mutate the complete audit report');
+});
+
+test('audit evidence sidecar is bounded, deterministic and digest-bound to the complete measurements', () => {
+  const audit = clean();
+  const first = encodeAuditEvidence(audit);
+  const second = encodeAuditEvidence(audit);
+  assert.deepEqual(first.bytes, second.bytes);
+  assert.equal(first.metadata.sha256, createHash('sha256').update(first.bytes).digest('hex'));
+  assert.equal(first.metadata.compressedBytes, first.bytes.byteLength);
+  assert.equal(first.metadata.uncompressedBytes, Buffer.byteLength(JSON.stringify(audit), 'utf8'));
+  assert.deepEqual(JSON.parse(gunzipSync(first.bytes).toString('utf8')), audit);
+  assert.throws(() => encodeAuditEvidence({ oversized: 'x'.repeat(1024) }, 100), /raw bound/);
 });
 
 test('rejects absent, empty, partial, duplicate and unexpected measurement matrices', () => {

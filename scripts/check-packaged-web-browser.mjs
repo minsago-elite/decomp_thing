@@ -14,7 +14,7 @@ import { seedHistory, qualifyHistory } from './packaged-browser-history.mjs';
 import { seedLegacy, qualifyLegacy } from './packaged-browser-legacy.mjs';
 import { qualifyRestart, assertGracefulShutdown, scrubTokens, boundReport } from './packaged-browser-restart.mjs';
 import { qualifyUpgrade, qualifyUpgradeCache } from './packaged-browser-upgrade.mjs';
-import { qualifyAudit, assertAudit } from './packaged-browser-audit.mjs';
+import { qualifyAudit, assertAudit, encodeAuditEvidence, summarizeAuditEvidence } from './packaged-browser-audit.mjs';
 import { PackagedBrowserCdpDiagnostics } from './packaged-browser-cdp-diagnostics.mjs';
 
 // Test driver only: the application is launched with a separate Node-free PATH.
@@ -1196,6 +1196,19 @@ try {
       report.workCleanupConfirmed = false;
       report.workCleanupError = safeDiagnostic(error.stack);
       process.exitCode = 1;
+    }
+  }
+  if (report.audit) {
+    try {
+      const { bytes, metadata } = encodeAuditEvidence(scrubTokens(report.audit, sensitiveValues));
+      const file = 'audit-evidence.json.gz';
+      await fs.writeFile(join(root, file), bytes, { flag: 'wx', mode: 0o600 });
+      report.audit = summarizeAuditEvidence(report.audit, { file, ...metadata });
+    } catch (error) {
+      report.status = 'failed';
+      report.auditEvidenceError = safeDiagnostic(error.stack);
+      process.exitCode = 1;
+      report.audit = summarizeAuditEvidence(report.audit, { status: 'unavailable' });
     }
   }
   const retained = scrubTokens(boundReport(report), sensitiveValues);

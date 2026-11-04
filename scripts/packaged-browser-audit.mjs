@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { gzipSync } from 'node:zlib';
 
 // Packaged accessibility, reflow, asset and timing audit (#615 #616 #619 #623 #633).
 // The document, CSP header, base path, entry/lazy chunks and worker are the real packaged
@@ -575,6 +576,34 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
   return { fixtures: fixtures.pages.map(({ name, path }) => ({ name, path })), layout, contrast, focus, fulfilled, unmapped, interactions,
     workers: { highlightedTokens: highlighted, targets: workers }, keyboard,
     timing: { coldLoad: summary(cold), routeFeedback: summary(feedback), routeData: summary(data), raw: { cold, feedback, data } } };
+}
+
+/** Compact pointer for report.json; the complete measurements remain in the hashed audit sidecar. */
+export function summarizeAuditEvidence(audit, evidence) {
+  return {
+    evidence,
+    fixtures: audit.fixtures,
+    coverage: {
+      layout: audit.layout.map(({ page, viewport, scheme }) => ({ page, viewport, scheme })),
+      contrast: audit.contrast.map(({ page, viewport, scheme }) => ({ page, viewport, scheme })),
+      focus: audit.focus.map(({ page, scheme, stops }) => ({ page, scheme, stopCount: stops.length })),
+      focusStops: audit.focus.reduce((count, entry) => count + entry.stops.length, 0),
+    },
+    unmapped: audit.unmapped,
+    interactions: audit.interactions,
+    workers: { highlightedTokens: audit.workers.highlightedTokens,
+      targets: audit.workers.targets.map(({ url, responses }) => ({ url, responses })) },
+    keyboard: audit.keyboard,
+    timing: audit.timing,
+  };
+}
+
+export function encodeAuditEvidence(audit, maxBytes = 8 * 1024 * 1024) {
+  const json = Buffer.from(JSON.stringify(audit), 'utf8');
+  assert.ok(json.byteLength <= maxBytes, `Audit evidence exceeds its ${maxBytes}-byte raw bound`);
+  const bytes = gzipSync(json, { level: 9, mtime: 0 });
+  return { bytes, metadata: { sha256: createHash('sha256').update(bytes).digest('hex'),
+    compressedBytes: bytes.byteLength, uncompressedBytes: json.byteLength } };
 }
 
 /** Assertions are separate from measurement so the full report is retained when one fails. */
