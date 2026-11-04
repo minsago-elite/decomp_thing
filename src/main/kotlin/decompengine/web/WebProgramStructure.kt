@@ -458,8 +458,8 @@ internal object WebProgramStructureBuilder {
                         "calls" -> called = identifiers(parser)
                         "referencedGlobals" -> referenced = identifiers(parser)
                         "strings" -> stringCount = count(parser)
-                        "prototype", "type", "declaration" -> text(parser)
-                        "decompiledC", "initializer" -> nullableText(parser)
+                        "prototype", "type", "declaration" -> discardString(parser, nullable = false)
+                        "decompiledC", "initializer" -> discardString(parser, nullable = true)
                         "byteEvidence" -> byteEvidence(parser)
                     }
                 }
@@ -510,6 +510,10 @@ internal object WebProgramStructureBuilder {
 
         private fun field(parser: JsonParser, name: String) {
             if (parser.nextToken() != JsonToken.FIELD_NAME || parser.currentName() != name) malformed()
+        }
+        private fun discardString(parser: JsonParser, nullable: Boolean) {
+            val token = parser.nextToken()
+            if (token != JsonToken.VALUE_STRING && !(nullable && token == JsonToken.VALUE_NULL)) malformed()
         }
         private fun text(parser: JsonParser): String { expect(parser.nextToken(), JsonToken.VALUE_STRING); return parser.text }
         private fun nullableText(parser: JsonParser): String? = when (parser.nextToken()) {

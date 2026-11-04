@@ -117,7 +117,7 @@ internal class WebSourceCatalogEvidence(
                 val record = try { readArtifact(reference.jobId, "$root/${entry.path}", maximum.toLong()) }
                     catch (_: RepairBudgetExceededException) { return null }
                 if (record.bytes.size > maximum) return null
-                if (record.sha256 != entry.sha256 || WebExplorationArtifact.sha256(record.bytes) != entry.sha256) revisionSourceChanged()
+                if (record.sha256 != entry.sha256) revisionSourceChanged()
                 return record.bytes
             }
             val key = WebProgramStructureCache.Key(reference.jobId, reference.runId, reference.revisionId,
@@ -143,7 +143,7 @@ internal class WebSourceCatalogEvidence(
             val result = project(index) {
                 val model = checkNotNull(index.model)
                 val record = readArtifact(reference.jobId, "$root/${model.path}", WebProgramStructureBuilder.MAXIMUM_MODEL_BYTES.toLong())
-                if (record.sha256 != model.sha256 || WebExplorationArtifact.sha256(record.bytes) != model.sha256) revisionSourceChanged()
+                if (record.sha256 != model.sha256) revisionSourceChanged()
                 record.bytes
             }
             requireSame(descriptor, readArtifact(reference.jobId, descriptorPath, MAXIMUM_MANIFEST_BYTES))

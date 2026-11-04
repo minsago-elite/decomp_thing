@@ -72,10 +72,14 @@ class WebProgramStructureTest {
             file
         }
         val cache = WebProgramStructureCache()
-        val pages = WebProgramStructurePages { job, run, revision, project ->
-            assertEquals(Triple(jobId, runId, revisionId), Triple(job, run, revision))
-            evidence.readStructure(reference, cache, project)
+        fun pagesWithCache(cache: WebProgramStructureCache): WebProgramStructurePages {
+            return WebProgramStructurePages { job, run, revision, project ->
+                assertEquals(Triple(jobId, runId, revisionId), Triple(job, run, revision))
+                evidence.readStructure(reference, cache, project)
+            }
         }
+        fun pagesWithFreshCache() = pagesWithCache(WebProgramStructureCache())
+        val pages = pagesWithCache(cache)
     }
 
     private fun model(functions: List<RecoveredFunction>, globals: List<RecoveredGlobal> = emptyList(),
@@ -212,12 +216,20 @@ class WebProgramStructureTest {
         val nonCanonicalAddress = model(functions).toString(Charsets.UTF_8).replace(
             "\"address\": \"0x401000\"", "\"address\": \"0x0401000\"")
         assertNotEquals(model(functions).toString(Charsets.UTF_8), nonCanonicalAddress)
+        val nonStringPrototype = model(functions).toString(Charsets.UTF_8).replace(
+            "\"prototype\": \"int main(void)\"", "\"prototype\": 1")
+        assertNotEquals(model(functions).toString(Charsets.UTF_8), nonStringPrototype)
+        val duplicatePrototypeField = model(functions).toString(Charsets.UTF_8).replace(
+            "\"prototype\": \"int main(void)\"", "\"prototype\": \"int main(void)\", \"prototype\": \"other\"")
+        assertNotEquals(model(functions).toString(Charsets.UTF_8), duplicatePrototypeField)
         val cases = listOf(
             Revision(null, null, listOf("core")) to ("not-recorded" to "MODEL_NOT_RECORDED"),
             Revision("{\"schemaVersion\": 9, \"inputSha256\": \"$inputSha\"}".toByteArray(), null, listOf("core")) to ("unsupported" to "MODEL_SCHEMA_UNSUPPORTED"),
             Revision("{\"schemaVersion\": 2, \"inputSha256\": \"$inputSha\", \"functions\": [".toByteArray(), null, listOf("core")) to ("invalid" to "MODEL_MALFORMED"),
             Revision(duplicateFunctionId.toByteArray(), null, listOf("core")) to ("invalid" to "MODEL_MALFORMED"),
             Revision(nonCanonicalAddress.toByteArray(), null, listOf("core")) to ("invalid" to "MODEL_MALFORMED"),
+            Revision(nonStringPrototype.toByteArray(), null, listOf("core")) to ("invalid" to "MODEL_MALFORMED"),
+            Revision(duplicatePrototypeField.toByteArray(), null, listOf("core")) to ("invalid" to "MODEL_MALFORMED"),
             Revision(model(functions, schema = 2).toString(Charsets.UTF_8).replace("\"unassessed\"", "\"exact\"").toByteArray(), null, listOf("core")) to ("invalid" to "MODEL_MALFORMED"),
             Revision(model(functions, input = "f".repeat(64)), null, listOf("core")) to ("invalid" to "MODEL_INPUT_MISMATCH"),
             Revision(ByteArray(WebProgramStructureBuilder.MAXIMUM_MODEL_BYTES + 1) { ' '.code.toByte() }, null, listOf("core")) to ("limit-exceeded" to "MODEL_BYTES_EXCEEDED"),
@@ -616,9 +628,23 @@ class WebProgramStructureTest {
         var started = System.nanoTime()
         val first = revision.pages.functions("owner", jobId, runId, revisionId, "limit=200")
         val coldMs = (System.nanoTime() - started) / 1_000_000
+        val coldSamples = mutableListOf(coldMs)
         System.gc(); val retained = runtime.totalMemory() - runtime.freeMemory() - before
         assertEquals(count, first.getValue("totalFunctions").jsonPrimitive.int)
         assertEquals(200, first.items().size)
+        repeat(19) {
+            System.gc()
+            val freshPages = revision.pagesWithFreshCache()
+            started = System.nanoTime()
+            val sample = freshPages.functions("owner", jobId, runId, revisionId, "limit=200")
+            coldSamples += (System.nanoTime() - started) / 1_000_000
+            assertEquals(count, sample.getValue("totalFunctions").jsonPrimitive.int)
+            assertEquals(first.items(), sample.items())
+        }
+        val orderedCold = coldSamples.sorted()
+        val coldP50 = orderedCold[orderedCold.size / 2]
+        val coldP95 = orderedCold[((orderedCold.size * 95 + 99) / 100 - 1).coerceAtMost(orderedCold.lastIndex)]
+        assertTrue(coldP95 < 500, "cold first-page p95 exceeded 500 ms: $coldSamples")
         val warm = mutableListOf<Long>()
         var cursor = next(first)
         var bytes = first.toString().length
@@ -644,7 +670,8 @@ class WebProgramStructureTest {
         val modulePage = revision.pages.modules("owner", jobId, runId, revisionId, "limit=200")
         assertEquals(modules.size, modulePage.getValue("totalModules").jsonPrimitive.int)
         warm.sort()
-        println("program-structure-scale functions=$count modelBytes=${revision.model!!.size} coldMs=$coldMs " +
+        println("program-structure-scale functions=$count modelBytes=${revision.model!!.size} coldMs=$coldSamples " +
+            "coldP50Ms=$coldP50 coldP95Ms=$coldP95 coldMaxMs=${orderedCold.last()} " +
             "warmP50Ms=${warm[warm.size / 2]} warmMaxMs=${warm.last()} detailMs=$detailMs retainedBytes=$retained maxPageChars=$bytes")
         // D0 budgets: bounded responses (≤200 rows, <1 MiB), first-data-page latency and incremental JVM memory.
         assertTrue(bytes < 1_000_000, "page bytes $bytes")

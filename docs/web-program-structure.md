@@ -144,8 +144,9 @@ Two checks qualify the 100,000-function budget (#536):
 
 - `WebProgramStructureTest` builds a 100,000-function synthetic revision (4,167
   modules) through the real capture path and requires pages of at most 200 rows and
-  under 1 MiB, a median warm page read under 500 ms and a retained projection inside
-  the 256 MiB incremental JVM budget. It prints the measured values.
+  under 1 MiB, a p95 across 20 fresh-cache first-page reads below 500 ms, a median
+  warm page read below 500 ms and a retained projection inside the 256 MiB
+  incremental JVM budget. It prints each cold sample plus the median, p95 and max.
 - `node scripts/check-packaged-web-browser.mjs --mode structure` seeds a persisted
   100,000-function revision (`scripts/packaged-browser-structure.mjs`) into the
   packaged application and drives pinned Chrome: it opens the inventory from the
@@ -157,10 +158,10 @@ Two checks qualify the 100,000-function budget (#536):
   Its seed writes manifests directly, so `WebProgramStructureTest` keeps
   `scripts/packaged-browser-structure-profile.json` equal to the current profile.
 
-A local run on a heavily loaded host (load average about 40) measured: 100 rows per
-page, peak browser heap 12 MB, keypress-to-rendered next page p50 81 ms and p95 84 ms,
-full-population search 161 ms, and 23 bounded inventory reads; on the server, warm
-page reads p50 2 ms, entity detail 22 ms and a retained projection of about 47 MB.
-The first read of a revision builds its projection and took 0.84–1.07 s there, above
-the 500 ms first-data-page budget; later reads reuse it. That first-read latency is
-the remaining gap for this budget and is not hidden by the checks.
+Five local 20-sample runs measured cold projection p50/p95/max of 323/438/569 ms,
+392/487/595 ms, 398/588/751 ms, 270/362/521 ms, and 333/493/502 ms; retained
+projection was about 47 MB. Four runs met the 500 ms p95 budget and one did not, so
+local timing is variable and does not establish stable qualification. These are synthetic
+projection measurements, not hosted production qualification. The packaged browser
+measurements above remain separate evidence for response paging, heap, keyboard
+interaction and reflow.
