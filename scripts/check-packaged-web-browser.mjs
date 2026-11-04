@@ -16,6 +16,7 @@ import { finalizePublication } from './packaged-browser-report.mjs';
 import { qualifyUpgrade, qualifyUpgradeCache } from './packaged-browser-upgrade.mjs';
 import { qualifyAudit, assertAudit } from './packaged-browser-audit.mjs';
 import { PackagedBrowserCdpDiagnostics } from './packaged-browser-cdp-diagnostics.mjs';
+import { AXE_VERSION, createNoticeSection, qualifyAvailabilityNotices, assessNoticeReport } from './packaged-browser-a11y-notices.mjs';
 
 // Test driver only: the application is launched with a separate Node-free PATH.
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -883,6 +884,26 @@ try {
     }, 'explicit Vite backend proxy');
     report.frontendOrigin = browserOrigin;
     report.requests = {};
+  }
+
+  if (values.mode === 'session') {
+    // #1894/#1895: unauthenticated notices before any sign-in, on their own target; axe-core is the
+    // lockfile-pinned frontend dependency installed by the packaged build, injected only through CDP.
+    // The report owns the section before anything can throw, so partial evidence survives a failure.
+    const notices = report.availabilityNotices = createNoticeSection();
+    const axeLock = JSON.parse(readFileSync(join(repo, 'frontend/package-lock.json'), 'utf8')).packages['node_modules/axe-core'].version;
+    const axePackage = JSON.parse(readFileSync(join(repo, 'frontend/node_modules/axe-core/package.json'), 'utf8')).version;
+    assert.equal(axePackage, axeLock, 'Installed axe-core differs from the frontend lockfile');
+    assert.equal(axePackage, AXE_VERSION, 'Installed axe-core differs from the pinned notice axe version');
+    const axeSource = readFileSync(join(repo, 'frontend/node_modules/axe-core/axe.min.js'), 'utf8');
+    const priorCookies = (await cdp.call('Network.getCookies', { urls: [origin + '/nested/'] }, lastTarget.sessionId)).cookies;
+    notices.authenticatedBefore = priorCookies.length > 0;
+    await qualifyAvailabilityNotices({ cdp, makeTarget, evaluate, ready, waitFor, root, origin, axeSource, section: notices,
+      authenticatedBefore: notices.authenticatedBefore,
+      axeSha256: createHash('sha256').update(axeSource).digest('hex') });
+    const noticeFailures = assessNoticeReport(notices);
+    assert.deepEqual(noticeFailures, [], 'Availability notice accessibility evidence failed its semantic gate');
+    console.log('Unauthenticated Home/Runtime notices verified at 1440x900 and 390x844 (Chrome AX tree, scoped axe, trusted keyboard).');
   }
 
   if (values.mode === 'session' || values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'history' || values.mode === 'scale' || values.mode === 'live' || values.mode === 'proxy') {
