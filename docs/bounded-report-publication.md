@@ -80,6 +80,14 @@ so report bytes/hashes change. `reportPublication` is appended after the existin
 fields. Field names in these fixed schemas are unique; the streaming writer does
 not maintain a separate set to enforce uniqueness for arbitrary callers.
 
+Packaged-browser report compatibility: since #1894/#1895, the packaged-browser
+report verifier applies an availability-notice semantic gate to every
+integrity-verified passed session report. Passed session reports retained before
+that gate, such as the #1882 evidence, show INVALID under the current verifier.
+Their results under the verifier at the commit that produced them remain valid,
+but they do not qualify the new notice criteria. Re-verify archived evidence with
+that commit's `scripts/verify-packaged-browser-reports.mjs`.
+
 ## Enforced native staging
 
 The fixed report helper receives only its unique candidate path and byte allowance;

@@ -92,16 +92,29 @@ export function summarizeAxNotices(nodes, expected) {
   const statuses = live.filter((node) => role(node) === 'status');
   const actions = live.filter((node) => role(node) === 'button' && name(node) === SESSION_NOTICE.action);
   const within = (node, set) => ancestors(node).some((ancestor) => set.includes(ancestor));
-  const focused = live.find((node) => (node.properties ?? []).some((p) => p.name === 'focused' && p.value?.value === true));
+  // Chrome marks the focused document (RootWebArea) focused as well as the active element, so the
+  // document node is excluded and the remaining focused node must be unique (hosted run 41904229666).
+  const isFocused = (node) => (node.properties ?? []).some((p) => p.name === 'focused' && p.value?.value === true);
+  const focusedNodes = live.filter((node) => isFocused(node) && role(node) !== 'RootWebArea');
+  const focused = focusedNodes.length === 1 ? focusedNodes[0] : null;
+  const landmark = (node) => {
+    const hit = ancestors(node).find((a) => ['complementary', 'main', 'region', 'navigation', 'banner', 'contentinfo'].includes(role(a)));
+    return hit ? `${role(hit)}${name(hit) ? `:${cap(name(hit))}` : ''}` : 'none';
+  };
   return {
     computed: true,
     region: { count: regions.length, role: role(regions[0] ?? namedAny[0]) , name: cap(name(regions[0] ?? namedAny[0])), nameFrom: nameFrom(regions[0] ?? namedAny[0]) },
     complementary: { count: complementary.length, name: cap(name(complementary[0])) },
+    // Page-wide statuses (e.g. the shell's empty sr-only route announcer in <main>) are recorded, not
+    // asserted; the notice semantics are scoped to the complementary session notice and the region.
     status: { count: statuses.length, withinComplementary: statuses.filter((node) => within(node, complementary)).length,
-      text: cap(statuses.map((node) => name(node) ?? '').join(' ')) },
+      withinRegion: statuses.filter((node) => within(node, regions)).length,
+      text: cap(statuses.filter((node) => within(node, complementary)).map((node) => name(node) ?? '').join(' ')),
+      outside: statuses.filter((node) => !within(node, complementary)).slice(0, 8).map((node) => ({ name: cap(name(node) ?? ''), landmark: landmark(node) })) },
     action: { count: actions.length, withinComplementary: actions.filter((node) => within(node, complementary)).length,
       insideStatus: actions.filter((node) => within(node, statuses)).length },
-    focused: focused ? { role: role(focused), name: cap(name(focused)) } : null,
+    focused: focused ? { role: role(focused), name: cap(name(focused)), withinComplementary: within(focused, complementary) } : null,
+    focusedCount: focusedNodes.length,
   };
 }
 
@@ -127,7 +140,8 @@ export function assessNoticeObservation(observation, expected, viewport) {
   if (ax.region?.count !== 1 || ax.region?.role !== 'region' || ax.region?.name !== expected.regionName) fail(`availability notice is not one region named "${expected.regionName}"`);
   if (ax.region?.nameFrom !== 'aria-labelledby') fail('region name is not computed from its heading via aria-labelledby');
   if (ax.complementary?.count !== 1 || ax.complementary?.name !== SESSION_NOTICE.label) fail('session notice is not one complementary landmark named Local session');
-  if (ax.status?.count !== 1 || ax.status?.withinComplementary !== 1) fail('expected exactly one status inside the complementary session notice');
+  if (ax.status?.withinComplementary !== 1) fail('expected exactly one status inside the complementary session notice');
+  if (ax.status?.withinRegion !== 0) fail('availability region must not contain a status');
   if (ax.action?.count !== 1 || ax.action?.withinComplementary !== 1 || ax.action?.insideStatus !== 0) fail('Check session must be one button in the session notice and outside the live region');
   const dom = o.dom ?? {};
   if (dom.region?.tag !== 'section' || dom.region?.containsHeading !== true || dom.region?.actions !== 0) fail('notice must be a section containing its heading and no actions');
@@ -149,7 +163,8 @@ export function assessNoticeObservation(observation, expected, viewport) {
   if (r.activationBootstrap !== 1 || r.activationOtherApi !== 0 || r.activationMutations !== 0) fail(`Check session must issue exactly one bootstrap GET (${r.activationBootstrap}/${r.activationOtherApi}/${r.activationMutations})`);
   const k = o.keyboard ?? {};
   if (k.source !== 'cdp-Input.dispatchKeyEvent' || !(k.shiftTabs >= 1 && k.shiftTabs <= MAX_SHIFT_TABS)) fail('focus must be reached with trusted Shift+Tab presses');
-  if (k.focusedBeforeActivation?.role !== 'button' || k.focusedBeforeActivation?.name !== SESSION_NOTICE.action) fail('computed focus before Enter is not the Check session button');
+  if (k.focusedBeforeActivation?.role !== 'button' || k.focusedBeforeActivation?.name !== SESSION_NOTICE.action
+    || k.focusedBeforeActivation?.withinComplementary !== true || k.focusedCount !== 1) fail('computed focus before Enter is not the Check session button');
   if (!(k.keydownEvents >= k.shiftTabs + 1) || k.untrustedEvents !== 0 || k.trustedClick !== true) fail('keyboard input/activation was not trusted');
   if (k.noticeRestored !== true) fail('session notice did not return after Check session');
   const s = o.screenshot ?? {};
@@ -323,12 +338,13 @@ export async function qualifyAvailabilityNotices({ cdp, makeTarget, evaluate, re
         const navigationStart = target.requests.length;
         let shiftTabs = 0;
         let focused = null;
+        let focusedCount = null;
         while (shiftTabs < MAX_SHIFT_TABS) {
           await call('Input.dispatchKeyEvent', key('rawKeyDown', 'Tab', 'Tab', 9, { modifiers: SHIFT }));
           await call('Input.dispatchKeyEvent', key('keyUp', 'Tab', 'Tab', 9, { modifiers: SHIFT }));
           shiftTabs++;
           if (await evaluate(target, `document.activeElement?.tagName === 'BUTTON' && document.activeElement.textContent === ${JSON.stringify(SESSION_NOTICE.action)} && document.activeElement.closest('aside.session-notice') !== null`)) {
-            focused = summarizeAxNotices((await call('Accessibility.getFullAXTree')).nodes, page).focused;
+            ({ focused, focusedCount } = summarizeAxNotices((await call('Accessibility.getFullAXTree')).nodes, page));
             break;
           }
         }
@@ -348,12 +364,12 @@ export async function qualifyAvailabilityNotices({ cdp, makeTarget, evaluate, re
         const keydowns = input.filter((event) => event.type === 'keydown');
         observations.push({
           page: page.page, viewportName: viewport.name, observedRoute: dom.route, observedViewport: dom.viewport,
-          accessibilityTree: { source: 'chrome-cdp-getFullAXTree', ...ax, focused: undefined },
+          accessibilityTree: { source: 'chrome-cdp-getFullAXTree', ...ax, focused: undefined, focusedCount: undefined },
           dom: { h1: dom.h1, heading: dom.heading, region: dom.region, statuses: dom.statuses, sessionAsides: dom.sessionAsides, invalid: dom.invalid },
           axe: { ...axe, rules: AXE_RULES, sha256: axeSha256 },
           requests: { initialBootstrap: initial.bootstrap, initialOtherApi: initial.otherApi, initialMutations: initial.mutations, duringNavigation,
             activationBootstrap: activation.bootstrap, activationOtherApi: activation.otherApi, activationMutations: activation.mutations },
-          keyboard: { source: 'cdp-Input.dispatchKeyEvent', start: 'programmatic focus on main h1', shiftTabs, focusedBeforeActivation: focused,
+          keyboard: { source: 'cdp-Input.dispatchKeyEvent', start: 'programmatic focus on main h1', shiftTabs, focusedBeforeActivation: focused, focusedCount,
             keydownEvents: keydowns.length, untrustedEvents: input.filter((event) => !event.trusted).length,
             trustedClick: input.some((event) => event.type === 'click' && event.trusted && event.text === SESSION_NOTICE.action),
             focusAfterActivation: cap(await evaluate(target, `document.activeElement?.tagName ?? null`)), noticeRestored },

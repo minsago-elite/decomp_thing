@@ -49,7 +49,16 @@ async function axeIn(window, page) {
 const probeIn = (window, page) => JSON.parse(JSON.stringify(window.eval(`(${noticeDomProbe.toString()})(${JSON.stringify(page)})`)));
 
 // ---- Chrome-shaped AX fixtures (shapes from CDP Accessibility.getFullAXTree) ----
-function axNodes(page, { former = false, focusAction = false } = {}) {
+// Hosted shape (run 41904229666, observed in the retained report): Chrome reports RootWebArea focused
+// alongside the active element, and page-wide statuses exist beyond the session notice with empty names
+// (home 3, runtime 2). Observed: counts/empty names. Inferred (raw AX not retained): one is the shell's
+// sr-only <main> route announcer (App.tsx), and home's extra one sits in <main> outside the region.
+function hostedExtras(page, n) {
+  const focusedDoc = [{ name: 'focused', value: { type: 'booleanOrUndefined', value: true } }];
+  return { root: n(1, null, 'RootWebArea', `${page.h1} · Decomp Workbench`, { properties: focusedDoc }),
+    extras: [n(10, 5, 'status', ''), ...(page.page === 'home' ? [n(11, 5, 'status', '')] : [])] };
+}
+function axNodes(page, { former = false, focusAction = false, hosted = true, statusInRegion = false, secondFocus = false } = {}) {
   const n = (nodeId, parentId, role, name, extra = {}) => ({ nodeId: String(nodeId), parentId: parentId === null ? undefined : String(parentId), ignored: false,
     role: { type: 'role', value: role }, ...(name === null ? {} : { name: { type: 'computedString', value: name, sources: extra.sources ?? [] } }),
     properties: extra.properties ?? [] });
@@ -59,10 +68,12 @@ function axNodes(page, { former = false, focusAction = false } = {}) {
   if (former) return [n(1, null, 'RootWebArea', 't'),
     n(2, 1, 'status', SESSION_NOTICE.label, { sources: label }), n(3, 2, 'StaticText', SESSION_NOTICE.required), n(4, 2, 'button', SESSION_NOTICE.action, { properties: focused }),
     n(5, 1, 'main', null), n(6, 5, 'heading', page.h1), n(7, 5, 'generic', null), n(8, 7, 'heading', page.regionName)];
-  return [n(1, null, 'RootWebArea', 't'),
+  const h = hosted ? hostedExtras(page, n) : { root: n(1, null, 'RootWebArea', 't'), extras: [] };
+  return [h.root,
     n(2, 1, 'complementary', SESSION_NOTICE.label, { sources: label }), n(3, 2, 'status', ''), n(9, 3, 'StaticText', SESSION_NOTICE.required),
     n(4, 2, 'button', SESSION_NOTICE.action, { properties: focused }),
-    n(5, 1, 'main', null), n(6, 5, 'heading', page.h1), n(7, 5, 'region', page.regionName, { sources: labelledby }), n(8, 7, 'heading', page.regionName)];
+    n(5, 1, 'main', null), n(6, 5, 'heading', page.h1, { properties: secondFocus ? focused : [] }), n(7, 5, 'region', page.regionName, { sources: labelledby }), n(8, 7, 'heading', page.regionName),
+    ...h.extras, ...(statusInRegion ? [n(12, 7, 'status', '')] : [])];
 }
 
 // ---- jsdom-backed fake CDP for the real browser driver ----
@@ -177,11 +188,40 @@ test('AX summarizer: names come from the computed tree, not DOM fallback', () =>
   const page = NOTICE_PAGES[0];
   const ax = summarizeAxNotices(axNodes(page, { focusAction: true }), page);
   assert.deepEqual(ax.region, { count: 1, role: 'region', name: page.regionName, nameFrom: 'aria-labelledby' });
-  assert.deepEqual(ax.status, { count: 1, withinComplementary: 1, text: '' });
+  assert.deepEqual(ax.status, { count: 3, withinComplementary: 1, withinRegion: 0, text: '',
+    outside: [{ name: '', landmark: 'main' }, { name: '', landmark: 'main' }] });
   assert.deepEqual(ax.action, { count: 1, withinComplementary: 1, insideStatus: 0 });
-  assert.deepEqual(ax.focused, { role: 'button', name: SESSION_NOTICE.action });
+  assert.deepEqual(ax.focused, { role: 'button', name: SESSION_NOTICE.action, withinComplementary: true });
+  assert.equal(ax.focusedCount, 1);
   assert.deepEqual(summarizeAxNotices([], page), { computed: false });
 });
+
+// Targeted hosted-shape controls (run 41904229666): the pre-correction helper fails these.
+for (const page of NOTICE_PAGES) {
+  test(`${page.page}: hosted AX shape - page-wide statuses and focused RootWebArea do not mask the notice`, () => {
+    const ax = summarizeAxNotices(axNodes(page, { focusAction: true }), page);
+    assert.equal(ax.status.count, page.page === 'home' ? 3 : 2, 'observed hosted page-wide status count');
+    assert.equal(ax.status.withinComplementary, 1);
+    assert.equal(ax.status.withinRegion, 0);
+    assert.deepEqual(ax.focused, { role: 'button', name: SESSION_NOTICE.action, withinComplementary: true });
+  });
+  test(`${page.page}: hosted AX shape - focused document alone is not focus on Check session`, () => {
+    const ax = summarizeAxNotices(axNodes(page), page);
+    assert.equal(ax.focused, null);
+    assert.equal(ax.focusedCount, 0);
+  });
+  test(`${page.page}: hosted AX shape - two focused non-document nodes are ambiguous`, () => {
+    const ax = summarizeAxNotices(axNodes(page, { focusAction: true, secondFocus: true }), page);
+    assert.equal(ax.focused, null);
+    assert.equal(ax.focusedCount, 2);
+  });
+  test(`${page.page}: hosted AX shape - status inside the region or missing from the notice still fails`, () => {
+    const inRegion = summarizeAxNotices(axNodes(page, { focusAction: true, statusInRegion: true }), page);
+    assert.equal(inRegion.status.withinRegion, 1);
+    const former = summarizeAxNotices(axNodes(page, { former: true, focusAction: true }), page);
+    assert.equal(former.status.withinComplementary, 0);
+  });
+}
 
 test('driver: clean jsdom-backed run passes the semantic gate', async () => {
   const section = await drive();
@@ -248,6 +288,14 @@ const mutations = {
   'initial mutation count missing': (s) => { delete s.observations[1].requests.initialMutations; },
   'driver failure recorded': (s) => { s.failure = 'timeout'; },
   'restore failure recorded': (s) => { s.restoreFailure = 'detached'; },
+  'no status in session notice': (s) => { s.observations[0].accessibilityTree.status.withinComplementary = 0; },
+  'two statuses in session notice': (s) => { s.observations[1].accessibilityTree.status.withinComplementary = 2; },
+  'status inside availability region': (s) => { s.observations[2].accessibilityTree.status.withinRegion = 1; },
+  'region status count missing': (s) => { delete s.observations[3].accessibilityTree.status.withinRegion; },
+  'hosted focused document recorded as focus': (s) => { s.observations[0].keyboard.focusedBeforeActivation = { role: 'RootWebArea', name: 'Jobs · Decomp Workbench' }; },
+  'focused button outside session notice': (s) => { s.observations[1].keyboard.focusedBeforeActivation.withinComplementary = false; },
+  'ambiguous focused nodes': (s) => { s.observations[2].keyboard.focusedCount = 2; },
+  'focused count missing': (s) => { delete s.observations[3].keyboard.focusedCount; },
 };
 for (const [name, mutate] of Object.entries(mutations)) {
   test(`report gate red control: ${name}`, async () => {
@@ -433,4 +481,23 @@ test('readNoticeScreenshot refuses names outside the fixed set and path traversa
   for (const name of ['../report.json', 'notice-home-desktop.png/../x', 'report.json', undefined])
     await assert.rejects(readNoticeScreenshot(scratchParent, name), /unexpected screenshot name/);
   assert.deepEqual(await verifyNoticeScreenshots(scratchParent, { observations: [{ screenshot: { name: '../x.png' } }] }).then((f) => f.length), 1);
+});
+
+// Replays the AX/keyboard facts of the four retained hosted observations (run 41904229666, artifact
+// 13358099839) verbatim; reference IDs are not part of these facts. Old evidence lacks the new scoped
+// fields, so the corrected gate must still fail it (the run needs a fresh hosted capture).
+const HOSTED_OBSERVED = [['home', 'desktop', 3, 4], ['runtime', 'desktop', 2, 5], ['home', 'narrow', 3, 2], ['runtime', 'narrow', 2, 3]];
+test('retained hosted evidence: recorded failure reproduces and is not silently accepted', async () => {
+  const section = await drive();
+  for (const [pageName, viewportName, statusCount, shiftTabs] of HOSTED_OBSERVED) {
+    const o = section.observations.find((x) => x.page === pageName && x.viewportName === viewportName);
+    const page = NOTICE_PAGES.find((p) => p.page === pageName);
+    o.accessibilityTree.status = { count: statusCount, withinComplementary: 1, text: ' '.repeat(statusCount - 1) };
+    o.keyboard.shiftTabs = shiftTabs; o.keyboard.keydownEvents = shiftTabs + 1;
+    o.keyboard.focusedBeforeActivation = { role: 'RootWebArea', name: `${page.h1 === 'Runtime status' ? 'Runtime status' : 'Jobs'} · Decomp Workbench` };
+    delete o.keyboard.focusedCount;
+  }
+  const failures = assessNoticeReport(section);
+  assert.equal(failures.filter((f) => /computed focus before Enter/.test(f)).length, 4);
+  assert.equal(failures.filter((f) => /region must not contain a status/.test(f)).length, 4);
 });
