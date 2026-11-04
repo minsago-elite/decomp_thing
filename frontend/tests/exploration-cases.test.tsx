@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/preact
 import { beforeEach, expect, it, vi } from 'vitest';
 import type { Artifact } from '../src/api/generated';
 import { ExplorationCases } from '../src/jobs/ExplorationCases';
-import { bytePreview, MAX_RETAINED_CASES, parseRetainedCases, textPreview } from '../src/jobs/explorationCases';
+import { bytePreview, MAX_RETAINED_CASES, MAX_RETAINED_CORPUS, parseRetainedCases, textPreview } from '../src/jobs/explorationCases';
 
 const transport = vi.hoisted(() => ({ readArtifactText: vi.fn<(artifact: Artifact, expected: { jobId: string; runId: string }, options: { signal: AbortSignal }) => Promise<string>>() }));
 vi.mock('../src/api/client', () => ({ createApiClient: () => transport }));
@@ -25,6 +25,48 @@ it('joins the exact retained identities and leaves missing observations explicit
   expect(parsed.cases[0]?.observation?.exitCode).toBe(124);
   expect(parsed.cases[1]?.observation).toBeNull(); expect(parsed.observationCount).toBe(1);
   expect(parsed.sources).toEqual(['SEED']);
+});
+
+it('lists versioned retained regression inputs as display-only cases without observations', async () => {
+  const value = { ...report(1), schema: 'decomp-exploration', schemaVersion: 2, state: 'complete',
+    retainedInputs: [{ id: 'regression_a', args: ['known'], stdinHex: '00ff' }], retainedInputsOmitted: 2 };
+  const parsed = parseRetainedCases(JSON.stringify(value), 2);
+  expect(parsed.cases.map(item => [item.id, item.source, item.observation])).toEqual([
+    ['case_0', 'SEED', expect.objectContaining({ exitCode: 124 })],
+    ['retained:regression_a', 'RETAINED_REGRESSION', null],
+  ]);
+  expect(parsed.retainedInputsOmitted).toBe(2);
+  transport.readArtifactText.mockResolvedValue(JSON.stringify(value));
+  render(<ExplorationCases artifact={artifact} jobId="job_example" runId="run_example" basePath="/nested" producerSchemaVersion={2} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Read retained case details' }));
+  expect(await screen.findByText('1 retained regression input(s) are shown for inspection only; they were not run by this exploration.')).toBeTruthy();
+  expect(screen.getByText('2 retained regression input(s) were omitted by the display budget. Download the report artifact for its bounded record.')).toBeTruthy();
+  const retained = screen.getByRole<HTMLOptionElement>('option', { name: '"RETAINED_REGRESSION"' });
+  fireEvent.change(screen.getByRole('combobox', { name: 'Filter reported source' }), { target: { value: retained.value } });
+  expect(screen.getByText('Showing 1 of 1 matching retained cases, page 1. Filters cover this artifact only.')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Inspect case "retained:regression_a"' }));
+  expect(screen.getByText(/No observation record is retained/)).toBeTruthy();
+});
+
+it('rejects observations that try to join a retained input identity', () => {
+  const value = { ...report(1), schema: 'decomp-exploration', schemaVersion: 2, state: 'complete',
+    retainedInputs: [{ id: 'regression_a', args: ['known'], stdinHex: '00ff' }], retainedInputsOmitted: 0,
+    observations: [...report(1).observations, { candidateId: 'retained:regression_a', signature: '0::', exitCode: 0,
+      stdoutHex: '', stderrHex: '', networkIsolated: true }] };
+  expect(() => parseRetainedCases(JSON.stringify(value), 2)).toThrow();
+});
+
+it('accepts bounded display rows with the producer maximum retained corpus omission count', () => {
+  const retainedInputs = Array.from({ length: MAX_RETAINED_CASES - 1 }, (_, index) => ({
+    id: `regression_${index}`, args: [], stdinHex: '',
+  }));
+  const omitted = MAX_RETAINED_CORPUS - retainedInputs.length;
+  const value = { ...report(1), schema: 'decomp-exploration', schemaVersion: 2, state: 'complete',
+    retainedInputs, retainedInputsOmitted: omitted };
+  const parsed = parseRetainedCases(JSON.stringify(value), 2);
+  expect(parsed.cases).toHaveLength(MAX_RETAINED_CASES);
+  expect(parsed.retainedInputsOmitted).toBe(omitted);
+  expect(() => parseRetainedCases(JSON.stringify({ ...value, retainedInputsOmitted: omitted + 1 }), 2)).toThrow();
 });
 
 it('refuses duplicate, orphan, cross-paired and unsupported observation records', () => {

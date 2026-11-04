@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import { act, cleanup, render, screen } from '@testing-library/preact';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as ClientModule from '../src/api/client';
+import { ApiClientError } from '../src/api/errors';
 import type { Bootstrap, Run } from '../src/api/generated';
 import { App } from '../src/app/App';
 import { SessionStatus } from '../src/session/SessionStatus';
@@ -117,4 +118,88 @@ it('retains the selected run URL and rejects a late obsolete run read after an a
   ]);
   expect(transport.get.mock.calls[1]![2].signal.aborted).toBe(false);
   expect(gateway.bootstrap).toHaveBeenCalledTimes(2); noMutations(gateway);
+});
+
+it('revalidates the server instance after connectivity returns with jitter and a session-level throttle', async () => {
+  vi.spyOn(Math, 'random').mockReturnValue(0);
+  const { session, gateway, data } = setup();
+  await session.initialize({ kind: 'absent' });
+  render(<App basePath="/nested" session={session} />); await settle();
+
+  Object.defineProperty(navigator, 'onLine', { configurable: true, value: false });
+  await act(async () => { window.dispatchEvent(new Event('offline')); await Promise.resolve(); });
+  gateway.bootstrap.mockResolvedValueOnce({ ...data, serverInstanceId: 'server_fixture_after_outage' });
+  Object.defineProperty(navigator, 'onLine', { configurable: true, value: true });
+  await act(async () => { window.dispatchEvent(new Event('online')); await Promise.resolve(); });
+  await act(async () => { await vi.advanceTimersByTimeAsync(249); });
+  expect(gateway.bootstrap).toHaveBeenCalledOnce();
+  await act(async () => { await vi.advanceTimersByTimeAsync(1); await Promise.resolve(); });
+  expect(gateway.bootstrap).toHaveBeenCalledTimes(2);
+  expect(screen.getByText(notice)).toBeTruthy();
+
+  Object.defineProperty(navigator, 'onLine', { configurable: true, value: false });
+  await act(async () => { window.dispatchEvent(new Event('offline')); await Promise.resolve(); });
+  Object.defineProperty(navigator, 'onLine', { configurable: true, value: true });
+  await act(async () => { window.dispatchEvent(new Event('online')); await vi.advanceTimersByTimeAsync(1250); });
+  expect(gateway.bootstrap).toHaveBeenCalledTimes(2);
+  noMutations(gateway);
+});
+
+it('allows a new revalidation immediately after the previous connectivity check failed', async () => {
+  const { session, gateway, data } = setup();
+  await session.initialize({ kind: 'absent' });
+  gateway.bootstrap.mockRejectedValueOnce(new ApiClientError('network_error'));
+  await session.revalidate();
+  expect(session.snapshot()).toMatchObject({ status: 'unavailable', reason: 'connection' });
+  gateway.bootstrap.mockResolvedValueOnce({ ...data, serverInstanceId: 'server_fixture_after_recovery' });
+  await session.revalidate();
+  expect(session.snapshot()).toMatchObject({ status: 'authenticated', serverChanged: true });
+  expect(gateway.bootstrap).toHaveBeenCalledTimes(3);
+  noMutations(gateway);
+});
+
+it('preserves the private view generation when background revalidation confirms the same server', async () => {
+  const { session, gateway, data } = setup();
+  const run = fixture<{ data: Run }>('run-completed-unaccepted').data;
+  const path = `/nested/jobs/${run.jobId}/runs/${run.runId}`;
+  transport.get.mockImplementation((_kind, requestPath) => {
+    if (requestPath === `/jobs/${run.jobId}/runs/${run.runId}`) return Promise.resolve({ data: run });
+    return Promise.reject(new ApiClientError('http_error', { status: 404 }));
+  });
+  await session.initialize({ kind: 'absent' });
+  history.replaceState(null, '', path);
+  render(<App basePath="/nested" session={session} />); await settle();
+  const initialState = session.snapshot();
+  expect(initialState.status).toBe('authenticated');
+  const generation = initialState.status === 'authenticated' ? initialState.generation : -1;
+  const receipt = screen.getByLabelText('Attempt metadata');
+  gateway.bootstrap.mockResolvedValueOnce(data);
+
+  await act(async () => { await session.revalidate(); }); await settle();
+
+  expect(session.snapshot()).toMatchObject({ status: 'authenticated', generation });
+  expect(screen.getByLabelText('Attempt metadata')).toBe(receipt);
+  expect(screen.getByText(run.runId)).toBeTruthy();
+  noMutations(gateway);
+});
+
+it('lets explicit sign-out cancel a pending background revalidation', async () => {
+  const { session, gateway, data } = setup();
+  await session.initialize({ kind: 'absent' });
+  let finishBootstrap!: (value: Bootstrap) => void;
+  gateway.bootstrap.mockReturnValueOnce(new Promise(resolve => { finishBootstrap = resolve; }));
+
+  const revalidation = session.revalidate();
+  const pendingSignal = gateway.bootstrap.mock.calls[1]![0];
+  expect(session.snapshot().status).toBe('authenticated');
+  const logout = session.logout();
+
+  expect(pendingSignal.aborted).toBe(true);
+  expect(gateway.logout).toHaveBeenCalledOnce();
+  await logout;
+  finishBootstrap(data);
+  await revalidation;
+
+  expect(session.snapshot()).toMatchObject({ status: 'required', reason: 'signed-out' });
+  expect(gateway.logout).toHaveBeenCalledOnce();
 });

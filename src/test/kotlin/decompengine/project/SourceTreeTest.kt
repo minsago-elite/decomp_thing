@@ -9,6 +9,7 @@ import decompengine.agent.AgentHarness
 import decompengine.agent.AgentOperation
 import decompengine.agent.AgentStopReason
 import decompengine.agent.AgentWorkspacePath
+import decompengine.agent.AgentWorkflowProgress
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.nio.file.Files
@@ -44,6 +45,28 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
 
 class SourceTreeTest {
+    @Test
+    fun `cached checkpoint reconciliation uses cached prompt fingerprint only on reuse`() {
+        val model = oneModuleModel()
+        val module = DeterministicModulePlanner().plan(model).modules.single()
+        val request = ModuleReconstructionRequest(
+            module = module,
+            model = model,
+            sharedHeader = "",
+            moduleHeader = "",
+            privateHeader = "",
+            dependencyHeaders = emptyMap(),
+            workspaceRoot = Path.of("build/test-work/reconciliation-fingerprint"),
+            sessionEvidenceFingerprint = "a".repeat(64),
+        )
+        val cachedFingerprint = "b".repeat(64)
+
+        assertEquals(cachedFingerprint,
+            requestForCheckpointReconciliation(request, cachedFingerprint, checkpointReused = true).sessionEvidenceFingerprint)
+        assertEquals(request.sessionEvidenceFingerprint,
+            requestForCheckpointReconciliation(request, cachedFingerprint, checkpointReused = false).sessionEvidenceFingerprint)
+    }
+
     @Test
     fun `inactive unowned build definitions survive both profile selections`(): Unit {
         for (profile in ReconstructionProfiles.builtIn) {
@@ -1448,7 +1471,16 @@ class SourceTreeTest {
             override fun cacheIdentity(): String = "agent-free"
         }
 
-        SourceTreeGenerator.generate(input, project, reconstructor = refusing)
+        val reused = mutableListOf<Pair<String, String>>()
+        val progress = object : AgentWorkflowProgress by AgentWorkflowProgress.NONE {
+            override fun checkpointReused(moduleId: String, sourceSha256: String) {
+                reused += moduleId to sourceSha256
+            }
+        }
+
+        SourceTreeGenerator.generate(input, project, reconstructor = refusing, progress = progress)
+        assertEquals(listOf("parse"), reused.map { it.first })
+        assertTrue(reused.single().second.matches(Regex("[0-9a-f]{64}")))
     }
 
     @Test
