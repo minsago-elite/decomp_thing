@@ -121,6 +121,31 @@ class WebProgramStructureTest {
     private fun JsonObject.text(name: String) = getValue(name).jsonPrimitive.contentOrNull
     private fun next(page: JsonObject) = page.getValue("page").jsonObject.text("nextCursor")
 
+    @Test fun `redacted structure responses preserve recorded module selectors across inventories and details`() {
+        val moduleId = "sk-abcdefghijklmnop"
+        val function = functions.first().copy(calls = emptySet(), referencedGlobals = emptySet())
+        val revision = Revision(model(listOf(function)), plan(planned(moduleId, listOf(function.id))), listOf(moduleId))
+        val policy = WebRedactionPolicy.create(emptyMap(), emptyList(), emptyList())
+        val before = revision.records.mapValues { sha(it.value) }
+        val modules = policy.json(revision.pages.modules("owner", jobId, runId, revisionId, null)).jsonObject
+        assertContract("moduleInventory", modules)
+        val listed = modules.items().single()
+        assertEquals(moduleId, listed.text("moduleId")); assertEquals(moduleId, listed.text("selector"))
+        val inventory = policy.json(revision.pages.functions("owner", jobId, runId, revisionId, null)).jsonObject
+        assertContract("functionInventory", inventory)
+        val owned = inventory.items().single()
+        assertEquals(function.id, owned.text("entityId")); assertEquals(function.id, owned.text("selector"))
+        assertEquals(moduleId, owned.text("moduleId")); assertEquals(moduleId, owned.text("moduleSelector"))
+        val module = policy.json(revision.pages.module("owner", jobId, runId, revisionId, moduleId, null)).jsonObject
+        assertContract("moduleDetail", module)
+        assertEquals(moduleId, module.getValue("module").jsonObject.text("selector"))
+        assertEquals(moduleId, module.getValue("owned").jsonObject.items().single().text("moduleSelector"))
+        val detail = policy.json(revision.pages.entity(WebStructureKind.FUNCTION, jobId, runId, revisionId, function.id, null)).jsonObject
+        assertContract("entityDetail", detail)
+        assertEquals(moduleId, detail.getValue("entity").jsonObject.text("moduleSelector"))
+        assertEquals(before, revision.records.mapValues { sha(it.value) }, "projection never changes committed records")
+    }
+
     @Test fun `structure previews redact complete configured credentials before any prefix is bounded`() {
         val stringSecret = "StringCredential9".repeat(40).take(512)
         val textSecret = "BodyCredential8".repeat(300).take(4096)

@@ -381,4 +381,5 @@ private val opaqueKeySuffixes = listOf("Id", "Ids", "Sha256", "sha256", "Digest"
 private fun routingKey(key: String): Boolean = key == "basePath" || key.endsWith("Href")
 
 /** Closed-syntax protocol fields whose exact bytes are load-bearing. */
-private fun opaqueKey(key: String): Boolean = key == "id" || key == "version" || opaqueKeySuffixes.any(key::endsWith)
+private fun opaqueKey(key: String): Boolean = key == "id" || key == "version" ||
+    key == "selector" || key == "moduleSelector" || opaqueKeySuffixes.any(key::endsWith)

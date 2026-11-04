@@ -174,6 +174,33 @@ class WebRedactionPolicyTest {
         assertFalse(safe.toString().contains(canary))
     }
 
+    @Test fun `structure selectors preserve opaque identities but never configured literals or private paths`() {
+        val moduleId = "sk-abcdefghijklmnop"
+        for (key in listOf("selector", "moduleSelector")) {
+            val public = buildJsonObject { put(key, moduleId); put("moduleId", moduleId) }
+            assertEquals(public, policy.json(public), key)
+            assertEquals("[redacted]", policy.json(buildJsonObject { put(key, "prefix_$canary") })
+                .jsonObject.getValue(key).jsonPrimitive.content, key)
+            assertEquals("[private-path]", policy.json(buildJsonObject { put(key, "/home/private/record") })
+                .jsonObject.getValue(key).jsonPrimitive.content, key)
+            val absent = buildJsonObject { put(key, kotlinx.serialization.json.JsonNull) }
+            assertEquals(absent, policy.json(absent), key)
+            // Arbitrary downloaded JSON does not receive fixed-DTO field exemptions.
+            val download = Json.parseToJsonElement(policy.document(public.toString().toByteArray()).decodeToString()).jsonObject
+            assertEquals("[redacted]", download.getValue(key).jsonPrimitive.content, key)
+        }
+        // The exemption is exact, not a suffix match or an exception for ordinary prose.
+        val prose = policy.json(buildJsonObject { put("functionSelector", moduleId); put("message", moduleId) }).jsonObject
+        assertEquals("[redacted]", prose.getValue("functionSelector").jsonPrimitive.content)
+        assertEquals("[redacted]", prose.getValue("message").jsonPrimitive.content)
+        val configured = WebRedactionPolicy.create(mapOf("API_TOKEN" to moduleId), emptyList(), emptyList())
+        val protected = configured.json(buildJsonObject {
+            put("moduleId", moduleId); put("selector", moduleId); put("moduleSelector", moduleId)
+        }).jsonObject
+        assertTrue(protected.values.all { it.jsonPrimitive.content == "[redacted]" })
+        assertFalse(protected.toString().contains(moduleId))
+    }
+
     @Test fun `downloads keep identical bytes when clean and are rewritten structurally otherwise`() {
         val clean = "{\n  \"candidateCount\": 3,\n  \"note\": \"ok\"\n}\n".toByteArray()
         assertSame(clean, policy.document(clean))
