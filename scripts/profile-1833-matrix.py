@@ -177,13 +177,32 @@ def fixtures() -> dict[str, dict[str, Any]]:
 
 def safe_environment(home: Path, temporary: Path) -> dict[str, str]:
     """Run the agent-free CLI without inheriting provider credentials or GHIDRA_HOME."""
+    resolved_home = home.resolve(strict=True)
+    resolved_temporary = temporary.resolve(strict=True)
+    for label, directory in (("home", resolved_home), ("temporary", resolved_temporary)):
+        if directory == ROOT or ROOT not in directory.parents or not directory.is_dir():
+            raise MatrixError(f"profiling JVM {label} directory must be a real repository-local directory")
+
+    def java_path_option(name: str, value: Path) -> str:
+        rendered = str(value)
+        if '"' in rendered or "\\" in rendered or any(ord(char) < 0x20 for char in rendered):
+            raise MatrixError("profiling JVM directory path has characters unsafe for its option parser")
+        return f'-D{name}="{rendered}"'
+
+    java_tool_options = " ".join((
+        java_path_option("user.home", resolved_home),
+        java_path_option("java.io.tmpdir", resolved_temporary),
+        java_path_option("jna.tmpdir", resolved_temporary),
+        "-XX:-UsePerfData",
+    ))
     env = {key: value for key, value in os.environ.items() if key in {
         "PATH", "JAVA_HOME", "LANG", "LC_ALL", "TZ", "SYSTEMROOT", "WINDIR"
     }}
-    env["HOME"] = str(home)
-    env["TMPDIR"] = str(temporary)
-    env["TMP"] = str(temporary)
-    env["TEMP"] = str(temporary)
+    env["HOME"] = str(resolved_home)
+    env["TMPDIR"] = str(resolved_temporary)
+    env["TMP"] = str(resolved_temporary)
+    env["TEMP"] = str(resolved_temporary)
+    env["JAVA_TOOL_OPTIONS"] = java_tool_options
     return env
 
 

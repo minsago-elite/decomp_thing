@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+import uuid
 
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "summarize-analysis-timings.py"
@@ -14,23 +15,33 @@ SPEC.loader.exec_module(summary)
 def record(invocation, duration, *, input_hash="a" * 64, complete=True, truncated=False):
     return {
         "schemaVersion": 1,
-        "analysisInvocationId": invocation,
+        "analysisInvocationId": str(uuid.uuid5(uuid.NAMESPACE_URL, f"analysis-timing-summary:{invocation}")),
         "recoveryMode": "full",
         "analysisToolSha256": "b" * 64,
         "profileSha256": "c" * 64,
         "configurationSha256": "d" * 64,
         "inputSha256": input_hash,
         "exporterSha256": "e" * 64,
+        "parentTotalElapsedNanos": duration,
+        "workerTerminalElapsedNanos": duration,
         "terminalStatus": "succeeded",
         "workerTerminalStatus": "succeeded",
         "spans": [
-            {"phase": "analysis", "clockDomain": "parent-monotonic", "startOffsetNanos": 0,
+            {"phase": "analysis-invocation", "clockDomain": "parent-monotonic", "startOffsetNanos": 0,
              "durationNanos": duration, "status": "succeeded"},
             {"phase": "process-launch-request-to-worker-entry-frame", "clockDomain": "parent-monotonic",
              "startOffsetNanos": 1, "durationNanos": duration // 4, "status": "succeeded"},
         ],
-        "workerSpans": [{"phase": "analysis", "clockDomain": "worker-monotonic", "startOffsetNanos": 0,
-                         "durationNanos": duration // 2, "status": "completed"}],
+        "workerSpans": [
+            {"phase": "worker-entry-to-parent-permit", "clockDomain": "worker-monotonic", "startOffsetNanos": 0,
+             "durationNanos": duration // 8, "status": "completed"},
+            {"phase": "application-initialization", "clockDomain": "worker-monotonic", "startOffsetNanos": duration // 8,
+             "durationNanos": duration // 8, "status": "completed"},
+            {"phase": "project-import-analysis-pre-script", "clockDomain": "worker-monotonic", "startOffsetNanos": duration // 4,
+             "durationNanos": duration // 4, "status": "completed"},
+            {"phase": "exporter:ExportProgramModelOwned.java", "clockDomain": "worker-monotonic", "startOffsetNanos": duration // 2,
+             "durationNanos": duration // 2, "status": "completed"},
+        ],
         "coverage": {"complete": complete, "missingPhases": [] if complete else ["export"], "truncated": truncated},
     }
 
@@ -62,9 +73,9 @@ class AnalysisTimingSummaryTest(unittest.TestCase):
         parent = by_key[("a" * 64, "parent-monotonic")]
         worker = by_key[("a" * 64, "worker-monotonic")]
         self.assertEqual(parent["invocations"], worker["invocations"], 2)
-        self.assertEqual(parent["phases"]["analysis"],
+        self.assertEqual(parent["phases"]["analysis-invocation"],
                          {"samples": 2, "minNanos": 10, "medianNanos": 20.0, "maxNanos": 30})
-        self.assertEqual(worker["phases"]["analysis"]["maxNanos"], 15)
+        self.assertEqual(worker["phases"]["exporter:ExportProgramModelOwned.java"]["maxNanos"], 15)
         self.assertEqual(parent["phases"]["process-launch-request-to-worker-entry-frame"],
                          {"samples": 2, "minNanos": 2, "medianNanos": 4.5, "maxNanos": 7})
         self.assertEqual(by_key[("f" * 64, "parent-monotonic")]["invocations"], 1)

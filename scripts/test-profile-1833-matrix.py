@@ -7,6 +7,8 @@ import importlib.util
 import json
 import os
 import hashlib
+import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -90,17 +92,45 @@ class Profile1833MatrixTests(unittest.TestCase):
         try:
             os.environ.update({"OPENAI_API_KEY": "secret", "GHIDRA_HOME": "/external/ghidra",
                 "JAVA_TOOL_OPTIONS": "-Dcredential=secret"})
-            with tempfile.TemporaryDirectory(dir=MATRIX.ROOT) as scratch:
+            with tempfile.TemporaryDirectory(dir=MATRIX.ROOT, prefix="matrix JVM env ") as scratch:
                 path = Path(scratch)
-                env = MATRIX.safe_environment(path / "home", path / "tmp")
+                home = path / "home dir"
+                temporary = path / "tmp dir"
+                home.mkdir()
+                temporary.mkdir()
+                env = MATRIX.safe_environment(home, temporary)
                 self.assertNotIn("OPENAI_API_KEY", env)
                 self.assertNotIn("GHIDRA_HOME", env)
-                self.assertNotIn("JAVA_TOOL_OPTIONS", env)
-                self.assertEqual(env["HOME"], str(path / "home"))
-                self.assertEqual(env["TMPDIR"], str(path / "tmp"))
+                self.assertNotIn("credential", env["JAVA_TOOL_OPTIONS"])
+                self.assertIn(f'-Duser.home="{home}"', env["JAVA_TOOL_OPTIONS"])
+                self.assertIn(f'-Djava.io.tmpdir="{temporary}"', env["JAVA_TOOL_OPTIONS"])
+                self.assertIn(f'-Djna.tmpdir="{temporary}"', env["JAVA_TOOL_OPTIONS"])
+                self.assertIn("-XX:-UsePerfData", env["JAVA_TOOL_OPTIONS"])
+                self.assertEqual(env["HOME"], str(home))
+                self.assertEqual(env["TMPDIR"], str(temporary))
+
+                java_home = env.get("JAVA_HOME")
+                java = Path(java_home) / "bin/java" if java_home else Path(shutil.which("java", path=env["PATH"]) or "")
+                self.assertTrue(java.is_file(), "the matrix runner must have a Java runtime")
+                completed = subprocess.run(
+                    [str(java), "-XshowSettings:properties", "-version"], env=env,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=15, check=False,
+                )
+                self.assertEqual(completed.returncode, 0, completed.stdout[-2000:])
+                for name, expected in (("user.home", str(home)), ("java.io.tmpdir", str(temporary)),
+                    ("jna.tmpdir", str(temporary))):
+                    self.assertIn(f"{name} = {expected}", completed.stdout)
         finally:
             os.environ.clear()
             os.environ.update(old)
+
+    def test_child_environment_rejects_external_jvm_directories(self) -> None:
+        with tempfile.TemporaryDirectory(dir=MATRIX.ROOT) as scratch:
+            path = Path(scratch)
+            home = path / "home"
+            home.mkdir()
+            with self.assertRaisesRegex(MATRIX.MatrixError, "repository-local directory"):
+                MATRIX.safe_environment(home, Path("/tmp"))
 
     def test_only_new_regular_uuid_run_directories_are_counted(self) -> None:
         run_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
