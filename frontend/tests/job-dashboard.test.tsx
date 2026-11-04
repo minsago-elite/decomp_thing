@@ -636,3 +636,102 @@ it.each(['STORE_LIMIT', 'RECOVERY_REQUIRED'] as const)('clears retained job meta
     expect(transport.get.mock.calls.map(call => call[0])).toEqual(['job', 'job']);
   } finally { auth.dispose(); }
 });
+
+it.each([
+  ['unsupported_contract', 'This server returned a job listing format this page does not support. No rows are shown.'],
+  ['invalid_response', 'The job listing could not be verified, so no rows are shown.'],
+  ['invalid_json', 'The job listing could not be verified, so no rows are shown.'],
+  ['response_too_large', 'The job listing could not be verified, so no rows are shown.'],
+  ['unexpected_response', 'The job listing could not be verified, so no rows are shown.'],
+  ['invalid_headers', 'The job listing could not be verified, so no rows are shown.'],
+] as const)('clears retained rows and gives distinct recovery copy for a %s listing refusal', async (code, message) => {
+  const requestId = '123e4567-e89b-42d3-a456-426614174000';
+  transport.get.mockResolvedValueOnce(page([job(1)]))
+    .mockRejectedValueOnce(new ApiClientError(code, { status: 200, requestId }))
+    .mockResolvedValueOnce(page([job(2)]));
+  render(<Dashboard basePath="" />);
+  expect(await screen.findByText('program-1.elf')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' }));
+  const alert = await screen.findByRole('alert');
+  expect(alert.textContent).toContain(message);
+  expect(alert.textContent).not.toContain(requestId);
+  expect(alert.textContent).not.toContain(code);
+  expect(alert.textContent).not.toContain('The server may be unavailable');
+  expect(alert.textContent).not.toContain('Previously loaded rows');
+  expect(screen.queryByText('program-1.elf')).toBeNull();
+  expect(screen.queryByRole('list', { name: 'Uploaded jobs' })).toBeNull();
+  expect(screen.getByRole('button', { name: 'Next page' })).toHaveProperty('disabled', true);
+  expect(transport.get).toHaveBeenCalledTimes(2);
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' }));
+  expect(await screen.findByText('program-2.elf')).toBeTruthy();
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(transport.get).toHaveBeenCalledTimes(3);
+});
+
+const damaged = 'The job listing could not be verified, so no rows are shown.';
+it.each([
+  ['CORRUPT_WORKFLOW_STATE', damaged],
+  ['CORRUPT_LEGACY_JOB', damaged],
+  ['INVALID_STORAGE_ENTRY', damaged],
+  ['RECOVERY_REQUIRED', damaged],
+  ['JOB_STORAGE_UNAVAILABLE', damaged],
+  ['STORE_LIMIT', 'This job library exceeds a storage limit, so no rows are shown.'],
+] as const)('clears retained rows with a canonical reference after a %s storage refusal', async (serverCode, message) => {
+  const requestId = '123e4567-e89b-42d3-a456-426614174000';
+  transport.get.mockResolvedValueOnce(page([job(1)]))
+    .mockRejectedValueOnce(new ApiClientError('http_error', { status: 503, serverCode, requestId }))
+    .mockResolvedValueOnce(page([job(2)]));
+  render(<Dashboard basePath="" />);
+  expect(await screen.findByText('program-1.elf')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' }));
+  const alert = await screen.findByRole('alert');
+  expect(alert.textContent).toContain(message);
+  expect(alert.textContent).toContain(`Reference ID: ${requestId}.`);
+  expect(document.body.textContent).not.toContain(serverCode);
+  expect(alert.textContent).not.toContain('http_error');
+  expect(alert.textContent).not.toContain('The server has not returned a partial library');
+  expect(alert.textContent).not.toContain('Previously loaded rows');
+  if (serverCode === 'STORE_LIMIT') expect(alert.textContent).not.toContain('damaged');
+  expect(screen.queryByText('program-1.elf')).toBeNull();
+  expect(screen.queryByRole('list', { name: 'Uploaded jobs' })).toBeNull();
+  expect(screen.getByRole('button', { name: 'Next page' })).toHaveProperty('disabled', true);
+  expect(transport.get).toHaveBeenCalledTimes(2);
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' }));
+  expect(await screen.findByText('program-2.elf')).toBeTruthy();
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(transport.get).toHaveBeenCalledTimes(3);
+  expect(transport.get.mock.calls[2]?.[1]).toEqual(transport.get.mock.calls[0]?.[1]);
+});
+
+it.each([
+  ['unsupported_contract', 406, 'This server returned a job listing format this page does not support.'],
+  ['invalid_response', 502, damaged],
+] as const)('keeps only the canonical reference for a %s %d listing refusal', async (code, status, message) => {
+  const requestId = '123e4567-e89b-42d3-a456-426614174000';
+  transport.get.mockResolvedValueOnce(page([job(1)]))
+    .mockRejectedValueOnce(new ApiClientError(code, { status, requestId }));
+  render(<Dashboard basePath="" />);
+  expect(await screen.findByText('program-1.elf')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' }));
+  const alert = await screen.findByRole('alert');
+  expect(alert.textContent).toContain(message);
+  expect(alert.textContent).toContain(`Reference ID: ${requestId}.`);
+  expect(alert.textContent).not.toContain(code);
+  expect(screen.queryByText('program-1.elf')).toBeNull();
+  expect(transport.get).toHaveBeenCalledTimes(2);
+});
+
+it.each(['JOB_RECORD_UNAVAILABLE', 'LISTING_UNAVAILABLE'] as const)('keeps qualified stale rows with a canonical reference after a %s page refusal', async serverCode => {
+  const requestId = '123e4567-e89b-42d3-a456-426614174000';
+  transport.get.mockResolvedValueOnce(page([job(1)]))
+    .mockRejectedValueOnce(new ApiClientError('http_error', { status: 503, serverCode, requestId }));
+  render(<Dashboard basePath="" />);
+  expect(await screen.findByText('program-1.elf')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' }));
+  const alert = await screen.findByRole('alert');
+  expect(alert.textContent).toContain('The server has not returned a partial library');
+  expect(alert.textContent).toContain(`Reference ID: ${requestId}.`);
+  expect(document.body.textContent).not.toContain(serverCode);
+  expect(screen.getByText('program-1.elf')).toBeTruthy();
+  expect(transport.get).toHaveBeenCalledTimes(2);
+});
