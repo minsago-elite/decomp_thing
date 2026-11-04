@@ -66,16 +66,19 @@ export function auditFixtures(repo, buildId) {
   Object.assign(retried.data, { jobId, previousRunId: runId });
   const cancelling = structuredClone(run);
   Object.assign(cancelling.data, { state: 'cancelling', terminalReason: null, endedAt: null, version: 'run_version_cancelling' });
-  const exploration = bound('report-exploration', selected);
+  // Exploration artifacts belong to the job/attempt, not a reconstructed revision.
+  // The retained-case reader deliberately refuses revision-bound evidence.
+  const explorationBinding = { jobId, runId, revisionId: null };
+  const exploration = bound('report-exploration', explorationBinding);
   const retainedBytes = Buffer.from(JSON.stringify({ candidateCount: 1, coverageIncreased: false,
     baselineOutputSignatures: 1, expandedOutputSignatures: 1, newOutputSignatures: [], angr: {},
     confidence: { score: 0, newOutputSignatureCount: 0 },
     candidates: [{ id: 'seed_default', source: 'SEED', args: Array.from({ length: 33 }, (_, index) => `arg-${String(index).padStart(2, '0')}`), stdinHex: 'aa'.repeat(129) }],
     observations: [{ candidateId: 'seed_default', signature: '0::', exitCode: 0, stdoutHex: '', stderrHex: '', networkIsolated: true }] }), 'utf8');
   const retainedSha256 = createHash('sha256').update(retainedBytes).digest('hex');
-  const explorationBinding = createHash('sha256').update(`${jobId}\0${runId}`).digest('hex').slice(0, 32);
-  const retainedArtifactId = `exploration_${explorationBinding}_${retainedSha256}`;
-  Object.assign(exploration.data.sourceArtifact, { binding: selected, artifactId: retainedArtifactId,
+  const retainedArtifactBindingId = createHash('sha256').update(`${jobId}\0${runId}`).digest('hex').slice(0, 32);
+  const retainedArtifactId = `exploration_${retainedArtifactBindingId}_${retainedSha256}`;
+  Object.assign(exploration.data.sourceArtifact, { binding: explorationBinding, artifactId: retainedArtifactId,
     sha256: retainedSha256, sizeBytes: String(retainedBytes.length), contentHref: `/nested/api/v1/jobs/${jobId}/artifacts/${retainedArtifactId}/content` });
   const history = bound('validation-history', { jobId, runId, revisionId: null });
   const sourceSearch = bound('source-search-complete', selected);

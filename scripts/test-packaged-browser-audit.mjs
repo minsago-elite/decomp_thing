@@ -189,7 +189,8 @@ test('fixtures bind one job, attempt and revision with long names and a self-con
   assert.equal(fixtures.respond('GET', events, 'application/json').status, 200);
   const report = fixtures.respond('GET', `/jobs/${chunk.binding.jobId}/runs/${chunk.binding.runId}/reports/exploration`, 'application/json').document.data;
   assert.equal(report.producerSchemaVersion, null);
-  assert.deepEqual(report.sourceArtifact.binding, chunk.binding);
+  assert.deepEqual(report.binding, { jobId: chunk.binding.jobId, runId: chunk.binding.runId, revisionId: null });
+  assert.deepEqual(report.sourceArtifact.binding, report.binding);
   const artifactPath = new URL(report.sourceArtifact.contentHref, 'https://audit.invalid').pathname.replace('/nested/api/v1', '');
   const artifact = fixtures.respond('GET', artifactPath, 'application/json');
   assert.equal(artifact.status, 200);
