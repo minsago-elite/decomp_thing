@@ -10,6 +10,9 @@ const PER_MODULE = 24;
 const OWNED = FUNCTIONS - 1; // The last function is deliberately owned by no module.
 const FIRST_DATA_BUDGET_MS = 500;
 const LOCAL_FEEDBACK_BUDGET_MS = 100;
+const LOCAL_FEEDBACK_SAMPLE_LIMIT = 51;
+const LOCAL_FEEDBACK_SAMPLE_MAX_MS = 60_000;
+const LOCAL_FEEDBACK_BINDING = '__decompRecordStructureFeedback';
 const sha = (bytes) => createHash('sha256').update(bytes).digest('hex');
 const hex = (value) => value.toString(16);
 const functionAddress = (index) => 0x400000 + index * 16;
@@ -149,13 +152,62 @@ export function nearestRankP95(values) {
   return sorted[Math.ceil(sorted.length * 0.95) - 1];
 }
 
+/** Accept only bounded scalar timing samples from the isolated browser target. */
+export function appendStructureFeedbackSample(samples, payload) {
+  if (!Array.isArray(samples) || samples.length >= LOCAL_FEEDBACK_SAMPLE_LIMIT || typeof payload !== 'string'
+    || payload.length > 128) return false;
+  let value;
+  try { value = JSON.parse(payload); }
+  catch { return false; }
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || Object.keys(value).length !== 1 || !Object.hasOwn(value, 'durationMs')
+    || !Number.isFinite(value.durationMs) || value.durationMs < 0 || value.durationMs > LOCAL_FEEDBACK_SAMPLE_MAX_MS) return false;
+  samples.push(value.durationMs);
+  return true;
+}
+
+/** Installed for each document so reloads/navigation cannot erase samples already sent to the parent. */
+export function structureFeedbackInstrumentation() {
+  return `(() => {
+    const install = () => {
+      if (!document.body || globalThis.__decompStructureFeedbackInstalled) return;
+      globalThis.__decompStructureFeedbackInstalled = true;
+      let started = null;
+      const observer = new MutationObserver(() => {
+        if (started === null) return;
+        const loading = [...document.querySelectorAll('[role="status"]')]
+          .some(node => node.textContent.includes('Loading recorded structure'));
+        if (loading) {
+          const durationMs = performance.now() - started;
+          started = null;
+          try { globalThis.${LOCAL_FEEDBACK_BINDING}(JSON.stringify({ durationMs })); } catch {}
+        }
+      });
+      observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+      document.addEventListener('click', event => {
+        const button = event.target.closest('button');
+        if (button && ['Next page', 'Apply filters'].includes(button.textContent.trim())) started = performance.now();
+      }, true);
+    };
+    if (document.readyState === 'loading') addEventListener('DOMContentLoaded', install, { once: true });
+    else install();
+  })();`;
+}
+
 export async function qualifyStructure({ fixture, makeTarget, cdp, evaluate, ready, browserOrigin }) {
   const tab = await makeTarget();
+  const localFeedbackMs = [];
+  let invalidFeedbackSamples = 0;
+  await tab.initialize('Runtime.addBinding', { name: LOCAL_FEEDBACK_BINDING });
+  cdp.on('Runtime.bindingCalled', (event) => {
+    if (event.name !== LOCAL_FEEDBACK_BINDING) return;
+    if (!appendStructureFeedbackSample(localFeedbackMs, event.payload)) invalidFeedbackSamples++;
+  }, tab.sessionId);
+  await tab.initialize('Page.addScriptToEvaluateOnNewDocument', { source: structureFeedbackInstrumentation() });
   await cdp.call('Performance.enable', {}, tab.sessionId);
   const inventoryReads = [];
   const inventoryRequests = new Map();
   const inventoryRequestDurationsMs = [];
-  const localFeedbackMs = [];
   const moduleResponses = new Map();
   cdp.on('Network.responseReceived', (event) => {
     const url = new URL(event.response.url);
@@ -191,22 +243,6 @@ export async function qualifyStructure({ fixture, makeTarget, cdp, evaluate, rea
   const address = (index) => `0x${fixture.functionAddress(index).toString(16)}`;
   await cdp.call('Page.navigate', { url: browserOrigin + run }, tab.sessionId);
   await ready(tab, `[...document.querySelectorAll('a')].some(a => a.textContent === 'Browse recovered functions')`, 'structure links on the result revision');
-  await evaluate(tab, `(() => {
-    window.__structureLocalFeedbackMs = [];
-    let started = null;
-    new MutationObserver(() => {
-      if (started === null) return;
-      const loading = [...document.querySelectorAll('[role="status"]')].some(node => node.textContent.includes('Loading recorded structure'));
-      if (loading) {
-        window.__structureLocalFeedbackMs.push(performance.now() - started);
-        started = null;
-      }
-    }).observe(document.body, { childList: true, subtree: true, characterData: true });
-    document.addEventListener('click', event => {
-      const button = event.target.closest('button');
-      if (button && ['Next page', 'Apply filters'].includes(button.textContent.trim())) started = performance.now();
-    }, true);
-  })()`);
   let started = performance.now();
   await evaluate(tab, `[...document.querySelectorAll('a')].find(a => a.textContent === 'Browse recovered functions').click()`);
   await ready(tab, `(${ROWS}).length === 100 && document.body.innerText.includes('of 100000 matching functions (100000 recorded)')`, 'first page of 100000 recorded functions');
@@ -267,7 +303,6 @@ export async function qualifyStructure({ fixture, makeTarget, cdp, evaluate, rea
     const dimensions = await evaluate(tab, `({ available: document.documentElement.clientWidth, document: document.documentElement.scrollWidth })`);
     assert.ok(dimensions.document <= dimensions.available, `Structure view overflows at ${width}px: ${JSON.stringify(dimensions)}`);
   }
-  localFeedbackMs.push(...await evaluate(tab, 'window.__structureLocalFeedbackMs'));
   const pageDataP95Ms = nearestRankP95(pageMs);
   const requestP95Ms = nearestRankP95(inventoryRequestDurationsMs);
   const localFeedbackP95Ms = nearestRankP95(localFeedbackMs);
@@ -276,6 +311,7 @@ export async function qualifyStructure({ fixture, makeTarget, cdp, evaluate, rea
   assert.ok(searchMs <= FIRST_DATA_BUDGET_MS, `Function search first data ${searchMs}ms exceeds the D0 ${FIRST_DATA_BUDGET_MS}ms budget`);
   assert.ok(requestP95Ms <= FIRST_DATA_BUDGET_MS, `Function inventory request p95 ${requestP95Ms}ms exceeds the D0 ${FIRST_DATA_BUDGET_MS}ms budget`);
   assert.equal(localFeedbackMs.length, 51, 'Every page/filter interaction must expose immediate loading feedback');
+  assert.equal(invalidFeedbackSamples, 0, 'Browser feedback telemetry must be valid, bounded, and complete');
   assert.ok(localFeedbackP95Ms <= LOCAL_FEEDBACK_BUDGET_MS,
     `Local function-inventory feedback p95 ${localFeedbackP95Ms}ms exceeds the D0 ${LOCAL_FEEDBACK_BUDGET_MS}ms budget`);
   assert.equal(inventoryRequests.size, 0, 'Every function inventory request must finish before evidence is retained');

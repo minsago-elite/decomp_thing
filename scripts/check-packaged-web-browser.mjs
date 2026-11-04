@@ -336,6 +336,7 @@ async function makeTarget({ cspProbe = false, cacheEnabled = false, newWindow = 
       sourceFile: event.sourceFile, statusCode: event.statusCode, violatedDirective: event.violatedDirective,
     }));
   });` });
+  state.initialize = initialize;
   await initialize('Network.setCacheDisabled', { cacheDisabled: !cacheEnabled });
   await initialize('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
   state.initializationComplete = true;
