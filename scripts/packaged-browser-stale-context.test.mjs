@@ -1,9 +1,24 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { promises as fs } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { assertRetainedObservation, countRequestsForPath, hasSuccessfulResponseAfter } from './packaged-browser-stale-context.mjs';
+import { seedHistory } from './packaged-browser-history.mjs';
 
 const retained = { identityMarker: 'fixture', focusedTarget: true, selectionLength: 12, scrollY: 160,
   receiptAt: '2026-11-04T00:00:00.000Z', age: 'less than 10 seconds ago', staleNotice: true };
+
+test('seeds a workflow version admitted by the packaged job reader', async t => {
+  const root = fileURLToPath(new URL('../build/', import.meta.url));
+  await fs.mkdir(root, { recursive: true });
+  const work = await fs.mkdtemp(join(root, 'stale-context-fixture-'));
+  t.after(() => fs.rm(work, { recursive: true, force: true }));
+  const fixture = await seedHistory(join(work, 'jobs'));
+  const state = JSON.parse(await fs.readFile(join(fixture.directory, 'workflow-state.json'), 'utf8'));
+  assert.match(state.version, /^version_[a-f0-9]{32}$/);
+  assert.deepEqual(await fs.readFile(join(fixture.directory, 'workflow-state.json')), Buffer.from(fixture.retained['workflow-state.json']));
+});
 
 test('accepts a bounded retained-view observation', () => {
   assertRetainedObservation(retained, { ...retained, age: 'about 10 seconds ago' }, 'Dashboard');
