@@ -285,6 +285,7 @@ export const explorationCasesCopy = {
   failureReasons: {
     'behavior-deadline-exceeded': 'Producer-reported observation timeout.',
     'sandbox-unavailable': 'Producer-reported unavailable sandbox tooling.',
+    'sandbox-wrapper-start-failed': 'Producer-reported that the sandbox invocation wrapper process could not start.',
     'output-limit-exceeded': 'Producer-reported output-limit failure.',
     'completion-unverified': 'Producer-reported unverified execution completion.',
     'producer-interrupted': 'Producer-reported observation interruption.',

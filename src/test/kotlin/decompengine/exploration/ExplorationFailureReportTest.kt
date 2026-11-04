@@ -1,5 +1,6 @@
 package decompengine.exploration
 
+import decompengine.validation.BehaviorExecutionLaunchException
 import decompengine.validation.BehaviorExecutionOutcomeException
 import decompengine.validation.BehaviorExecutionTimeoutException
 import decompengine.validation.BehaviorOutputLimitException
@@ -58,6 +59,7 @@ class ExplorationFailureReportTest {
         for ((failure, reason) in listOf(
             BehaviorExecutionTimeoutException("124") to ExplorationFailureReason.TIMEOUT,
             SandboxUnavailableException("124") to ExplorationFailureReason.SANDBOX_UNAVAILABLE,
+            BehaviorExecutionLaunchException(IOException("124")) to ExplorationFailureReason.LAUNCH_FAILURE,
             BehaviorOutputLimitException("124") to ExplorationFailureReason.OUTPUT_LIMIT,
             BehaviorExecutionOutcomeException("124") to ExplorationFailureReason.UNVERIFIED_COMPLETION,
             InterruptedException("124") to ExplorationFailureReason.INTERRUPTED,
@@ -69,6 +71,9 @@ class ExplorationFailureReportTest {
             assertTrue(explorationFailureLimitation(root).contains(reason.description))
         }
         assertEquals("0:00ff:", observed.signature)
+        val launchRoot = Json.parseToJsonElement(valid().copy(reason = ExplorationFailureReason.LAUNCH_FAILURE).toJson()).jsonObject
+        assertEquals("sandbox-wrapper-start-failed", launchRoot.getValue("failure").jsonObject.getValue("code").jsonPrimitive.content)
+        assertTrue(explorationFailureLimitation(launchRoot).contains("sandbox invocation wrapper process start failure"))
     }
 
     @Test fun `retention errors are suppressed once without replacing or retrying the original failure`() {
