@@ -203,8 +203,13 @@ function salvage(report, sensitiveValues) {
   return out;
 }
 
-async function writeNew(path, text) {
-  await fs.writeFile(path, text, { flag: 'wx', mode: 0o600 });
+async function writeNew(path, text, created = () => {}) {
+  const handle = await fs.open(path, 'wx', 0o600);
+  try {
+    // Register ownership after exclusive creation, before a write can fail partway.
+    created();
+    await handle.writeFile(text);
+  } finally { await handle.close(); }
 }
 const DEFAULT_IO = Object.freeze({ writeNew, rm: (path, options) => fs.rm(path, options) });
 
@@ -238,11 +243,16 @@ export async function publishReport(directory, report, sensitiveValues = [], { l
   const plan = planReport(scrubbed, limits);
   if (!plan.ok) return writeFailure(directory, scrubbed, plan.reason, plan.totals, limits, io, sensitiveValues);
   const written = [];
+  let completed = 0;
   try {
-    for (const file of plan.files) { await io.writeNew(join(directory, file.name), file.text); written.push(file.name); }
+    for (const file of plan.files) {
+      const created = () => { if (!written.includes(file.name)) written.push(file.name); };
+      await io.writeNew(join(directory, file.name), file.text, created);
+      created(); // Also track successful writes from injected two-argument writers.
+      completed++;
+    }
   } catch (error) {
-    const count = written.length;
-    return writeFailure(directory, scrubbed, `Report write failed after ${count} file(s): ${scrubReport({ m: String(error?.message) }, sensitiveValues).m}; partial files removed`,
+    return writeFailure(directory, scrubbed, `Report write failed after ${completed} complete file(s): ${scrubReport({ m: String(error?.message) }, sensitiveValues).m}; partial-file cleanup attempted`,
       plan.totals, limits, io, sensitiveValues, written.filter(name => name !== PRIMARY_NAME));
   }
   const primary = plan.files.at(-1);
@@ -251,7 +261,7 @@ export async function publishReport(directory, report, sensitiveValues = [], { l
 
 /** Opens a regular, non-symlink file, checks its size before reading, and reads exactly that many bytes. */
 async function readBounded(path, { exactBytes, maxBytes }) {
-  const handle = await fs.open(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW).catch(error => {
+  const handle = await fs.open(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK).catch(error => {
     throw new Error(error.code === 'ELOOP' ? `Evidence file ${path} is a symlink` : `Evidence file ${path} is unreadable: ${error.code ?? error.message}`);
   });
   try {

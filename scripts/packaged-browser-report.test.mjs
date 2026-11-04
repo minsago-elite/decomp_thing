@@ -7,6 +7,7 @@ import { boundReport } from './packaged-browser-restart.mjs';
 import { REPORT_LIMITS, PRIMARY_NAME, finalizePublication, loadReport, planReport, publishReport, scrubReport, verifyRetainedReports } from './packaged-browser-report.mjs';
 import { symlink, unlink } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
+import { promises as fileSystem } from 'node:fs';
 
 const repo = fileURLToPath(new URL('..', import.meta.url));
 const scratch = join(repo, 'build/test-packaged-browser-report');
@@ -53,6 +54,75 @@ async function fresh(name) {
   return dir;
 }
 const allText = async dir => (await Promise.all((await readdir(dir)).map(n => readFile(join(dir, n), 'utf8')))).join('\n');
+
+test('review: failed write after exclusive creation removes its partial part', async t => {
+  const dir = await fresh('partial-created');
+  const originalOpen = fileSystem.open.bind(fileSystem);
+  let injected = false;
+  t.mock.method(fileSystem, 'open', async (path, flags, mode) => {
+    const handle = await originalOpen(path, flags, mode);
+    if (flags === 'wx' && String(path).endsWith('.jsonpart') && !injected) {
+      injected = true;
+      const write = handle.writeFile.bind(handle);
+      handle.writeFile = async text => {
+        await write(text.slice(0, 32));
+        throw Object.assign(new Error('simulated disk full after partial write'), { code: 'ENOSPC' });
+      };
+    }
+    return handle;
+  });
+  const result = await publishReport(dir, { status: 'failed', error: 'original scenario failure', payload: 'x'.repeat(600000) });
+  assert.equal(injected, true);
+  assert.equal(result.ok, false);
+  assert.equal(result.recordWritten, true);
+  assert.deepEqual(await readdir(dir), [PRIMARY_NAME]);
+  const restored = await loadReport(dir);
+  assert.equal(restored.status, 'failed');
+  assert.equal(restored.error, 'original scenario failure');
+});
+
+test('review: exclusive-create refusal does not delete a pre-existing part', async () => {
+  const dir = await fresh('part-collision');
+  const report = { status: 'passed', payload: 'x'.repeat(600000) };
+  const part = planReport(report).files[0].name;
+  await writeFile(join(dir, part), 'existing evidence');
+  const result = await publishReport(dir, report);
+  assert.equal(result.ok, false);
+  assert.equal(await readFile(join(dir, part), 'utf8'), 'existing evidence');
+});
+
+test('review: a partially emitted part is removed before retaining the failure record', async () => {
+  const dir = await fresh('partial-io');
+  const io = { rm, writeNew: async (path, text, created = () => {}) => {
+    const handle = await fileSystem.open(path, 'wx', 0o600);
+    try {
+      created();
+      if (path.endsWith('.jsonpart')) {
+        await handle.writeFile(text.slice(0, 32));
+        throw Object.assign(new Error('ENOSPC after creating part'), { code: 'ENOSPC' });
+      }
+      await handle.writeFile(text);
+    } finally { await handle.close(); }
+  } };
+  const result = await publishReport(dir, { status: 'failed', error: 'original failure', payload: 'x'.repeat(600000) }, [], { io });
+  assert.equal(result.ok, false);
+  assert.equal(result.recordWritten, true);
+  assert.deepEqual(await readdir(dir), [PRIMARY_NAME]);
+  assert.equal((await loadReport(dir)).error, 'original failure');
+});
+
+for (const member of ['primary', 'part']) test(`review: ${member} FIFO is refused without waiting for a writer`, { skip: process.platform === 'win32' }, async () => {
+  const dir = await fresh(`fifo-${member}`);
+  const publication = await publishReport(dir, { status: 'passed', payload: 'x'.repeat(600000) });
+  assert.equal(publication.ok, true);
+  const target = join(dir, member === 'primary' ? PRIMARY_NAME : publication.files[0]);
+  await unlink(target);
+  const fifo = spawnSync('mkfifo', [target], { encoding: 'utf8', timeout: 2000 });
+  assert.equal(fifo.status, 0, fifo.stderr);
+  const code = `import assert from 'node:assert/strict'; import {loadReport} from ${JSON.stringify(new URL('./packaged-browser-report.mjs', import.meta.url).href)}; await assert.rejects(loadReport(process.argv[1]), /not a regular file/);`;
+  const child = spawnSync(process.execPath, ['--input-type=module', '--eval', code, dir], { encoding: 'utf8', timeout: 2000 });
+  assert.equal(child.status, 0, child.stderr || String(child.error));
+});
 
 test('red baseline: the prior boundReport cannot retain a source-shaped audit report', () => {
   const report = sourceShapedReport();
