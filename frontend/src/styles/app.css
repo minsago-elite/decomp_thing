@@ -96,6 +96,18 @@ small { font-size: 0.8125rem; }
 code, kbd, samp, pre { font-family: var(--mono); font-size: 0.8125rem; }
 code { padding: 0.05em 0.35em; border-radius: 0.25rem; background: var(--code-surface); overflow-wrap: anywhere; }
 pre code { padding: 0; background: none; }
+/*
+ * Reflow (#619): long names, addresses and identifiers wrap inside their own box instead of
+ * widening the page. Only source, diff and table regions scroll in two dimensions, and they
+ * scroll inside their own focusable container.
+ */
+main { overflow-wrap: break-word; }
+/* break-word (not anywhere) keeps min-content at whole words: rendered 390px evidence showed `anywhere`
+   squeezing flex/table items so short words split mid-word. Identifier containers keep `anywhere`. */
+h1, h2, h3, h4, h5, h6, summary, label, legend, caption, .breadcrumbs li { overflow-wrap: break-word; min-width: 0; }
+/* Only focusable preformatted regions scroll; source rows and search excerpts wrap instead. */
+main pre[tabindex] { max-width: 100%; overflow: auto; }
+.byte-preview { margin: 0.5rem 0; padding: 0.5rem 0.75rem; white-space: pre; border: 1px solid var(--line); border-radius: var(--radius-control); background: var(--surface-sunken); }
 hr { border: 0; border-top: 1px solid var(--line); margin: 1.5rem 0; }
 
 main ul:not([class]), main ol:not([class]) { padding-inline-start: 1.25rem; }
@@ -140,6 +152,8 @@ button, .button-link {
   line-height: 1.2;
   text-align: center;
   text-decoration: none;
+  max-width: 100%;
+  overflow-wrap: break-word;
 }
 button:hover:not(:disabled), .button-link:hover { border-color: var(--accent); background: var(--selected); }
 button[type="submit"], .button-primary { border-color: var(--accent); background: var(--accent); color: var(--on-accent); }
@@ -186,7 +200,8 @@ main:focus-visible { outline: 3px solid var(--focus); outline-offset: -5px; }
 .brand strong { font-weight: 650; }
 .build-label { padding: 0.1rem 0.5rem; border: 1px solid var(--line); border-radius: 999px; font-size: 0.75rem; color: var(--muted); }
 .app-header .session-notice { margin: 0; }
-.app-header button { min-height: 2.25rem; padding: 0.35rem 0.8rem; }
+/* docs/web-navigation.md: controls target at least 44px height; the header was a 36px override. */
+.app-header button { min-height: 2.75rem; padding: 0.35rem 0.8rem; }
 .display-preferences { margin-inline-start: auto; }
 .display-preferences.is-open { flex-basis: 100%; margin-inline-start: 0; }
 .display-preferences-panel { max-width: 36rem; margin-top: 0.75rem; padding: 1rem; border: 1px solid var(--line); border-radius: var(--radius-panel); background: var(--surface); }
@@ -248,6 +263,8 @@ main a + button, main button + button, main button + a { margin-inline-start: 0.
 .job-filters .job-actions { grid-column: 1 / -1; margin: 0.25rem 0 0; }
 .job-filters input:not([type="checkbox"]), .job-filters select { width: 100%; }
 .job-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.6rem; margin: 1rem 0; }
+/* Standalone links in an action row are controls too (44px height target), not inline sentence links. */
+.job-actions > a { display: inline-flex; align-items: center; min-height: 2.75rem; }
 .job-list { list-style: none; margin: 1rem 0; padding: 0; border: 1px solid var(--line); border-radius: var(--radius-panel); background: var(--surface); overflow: hidden; }
 .job-list > li { max-width: none; padding: 1rem 1.25rem; overflow-wrap: anywhere; }
 .job-list > li + li { border-top: 1px solid var(--line); }
@@ -299,8 +316,11 @@ main a + button, main button + button, main button + a { margin-inline-start: 0.
 .retained-cases { min-width: 0; margin-block: 1.5rem; overflow-wrap: anywhere; }
 .retained-cases button, .retained-cases select { max-width: 100%; }
 .retained-case-table { max-width: 100%; overflow: auto; margin-block: 1rem; border: 1px solid var(--line); border-radius: var(--radius-panel); background: var(--surface); }
-.retained-case-table table { width: 100%; }
+/* Dense tables keep whole words and scroll inside their focusable region; identifiers in code still wrap. */
+.retained-case-table table { width: 100%; overflow-wrap: break-word; }
 .retained-case-table caption { padding: 0.75rem 0.75rem 0.5rem; }
+/* A byte preview in a dense table keeps a readable width; the table region scrolls instead (390px evidence: 68px). */
+.retained-case-table .byte-preview { min-width: 16rem; }
 .output-signature-chart { max-width: 40rem; margin: 1.5rem 0; }
 .output-signature-chart figcaption { font-weight: 650; }
 .output-signature-series { margin-block: 1rem; overflow-wrap: anywhere; }

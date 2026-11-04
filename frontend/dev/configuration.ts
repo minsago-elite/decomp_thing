@@ -89,8 +89,10 @@ function serveFixture(request: IncomingMessage, response: ServerResponse, url: U
     json(response, 405, fixtures.errors.METHOD_NOT_ALLOWED);
     return;
   }
-  const document = fixtures.routes[url.pathname];
-  if (url.search && !(document?.kind === 'events' && url.search === '?transport=poll')) {
+  // A generated route may name one exact query (bounded read-only fixture); other queries stay rejected.
+  const exact = url.search ? fixtures.routes[url.pathname + url.search] : undefined;
+  const document = exact ?? fixtures.routes[url.pathname];
+  if (url.search && !exact && !(document?.kind === 'events' && url.search === '?transport=poll')) {
     json(response, 400, fixtures.errors.VALIDATION_FAILED, head);
   } else if (url.pathname === fixtures.download.path) {
     response.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8',

@@ -125,17 +125,17 @@ function CaseReader({ artifact, jobId, runId, basePath, producerSchemaVersion = 
       {partial && <>
         <p role="status">{copy.failureReasons[partial.failure.code]} <code>{partial.failure.code}</code></p>
         <p>{message(copy.failurePosition, { sample: copy.sampleLabels[partial.failure.phase], index: partial.failure.candidateIndex })}</p>
-        <table><caption>{copy.progress}</caption><thead><tr><th scope="col">{copy.sample}</th><th scope="col">{copy.planned}</th><th scope="col">{copy.completed}</th></tr></thead>
+        <div class="retained-case-table" role="region" aria-label={copy.progress} tabIndex={0}><table><caption>{copy.progress}</caption><thead><tr><th scope="col">{copy.sample}</th><th scope="col">{copy.planned}</th><th scope="col">{copy.completed}</th></tr></thead>
           <tbody>{(['baseline', 'expanded'] as const).map(sample => <tr key={sample}><th scope="row">{copy.sampleLabels[sample]}</th>
-            <td>{partial.samples[sample].planned}</td><td>{partial.samples[sample].completed}</td></tr>)}</tbody></table>
+            <td>{partial.samples[sample].planned}</td><td>{partial.samples[sample].completed}</td></tr>)}</tbody></table></div>
       </>}
       {preparation && <>
         <p role="status">{copy.preparationReasons[preparation.preparation.code]} <code>{preparation.preparation.code}</code></p>
         <p>{message(copy.preparationStage, { stage: copy.preparationStages[preparation.preparation.stage] })}</p>
         <p>{copy.preparationScope}</p>
-        <table><caption>{copy.preparationAvailability}</caption><thead><tr><th scope="col">{copy.preparationGroup}</th><th scope="col">{copy.availableCount}</th></tr></thead>
+        <div class="retained-case-table" role="region" aria-label={copy.preparationAvailability} tabIndex={0}><table><caption>{copy.preparationAvailability}</caption><thead><tr><th scope="col">{copy.preparationGroup}</th><th scope="col">{copy.availableCount}</th></tr></thead>
           <tbody>{(['seeds', 'angr', 'staticHints', 'expanded'] as const).map(group => <tr key={group}>
-            <th scope="row">{copy.preparationGroups[group]}</th><td>{preparation.preparation.available[group] ?? copy.unknownCount}</td></tr>)}</tbody></table>
+            <th scope="row">{copy.preparationGroups[group]}</th><td>{preparation.preparation.available[group] ?? copy.unknownCount}</td></tr>)}</tbody></table></div>
       </>}
       {producerSchemaVersion === 2 && data && 'retainedInputsOmitted' in data && data.cases.some(value => value.source === 'RETAINED_REGRESSION') &&
         <p role="status">{message(copy.retainedDisplayOnly, { count: data.cases.filter(value => value.source === 'RETAINED_REGRESSION').length })}</p>}

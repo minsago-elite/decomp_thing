@@ -396,7 +396,7 @@ function MismatchComparison({ first, second, page, onPageChange, onInspectPage, 
 function Preview({ title, value }: { title: string; value: ValidationBytePreview | null }) {
   return <details><summary>{title}</summary>{value === null ? <p>{copy.notCompared}</p> : <>
     <p>{textMessage(copy.previewSize, { bytes: copy.bytes, total: value.totalBytes, prefix: copy.prefix, prefixBytes: value.prefixBytes, completeness: value.truncated ? copy.truncated : copy.complete })}</p>
-    <pre aria-label={textMessage(copy.previewPart, { title, part: copy.hex })}>{value.hex === '' ? copy.empty : value.hex}</pre>
-    <pre aria-label={textMessage(copy.previewPart, { title, part: copy.text })}>{value.text === null ? copy.noText : value.text === '' ? copy.empty : value.text}</pre>
+    <pre class="byte-preview" tabIndex={0} aria-label={textMessage(copy.previewPart, { title, part: copy.hex })}>{value.hex === '' ? copy.empty : value.hex}</pre>
+    <pre class="byte-preview" tabIndex={0} aria-label={textMessage(copy.previewPart, { title, part: copy.text })}>{value.text === null ? copy.noText : value.text === '' ? copy.empty : value.text}</pre>
   </>}</details>;
 }

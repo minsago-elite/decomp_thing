@@ -187,3 +187,16 @@ it('refuses a substituted artifact before projecting any structured failure case
   expect(screen.queryByRole('table', { name: 'Recorded sample progress' })).toBeNull();
   expect(screen.queryByRole('table', { name: 'Retained candidate records' })).toBeNull(); expect(fetcher).toHaveBeenCalledTimes(2);
 });
+
+it('scrolls the partial progress table only inside its own focusable region (#619)', async () => {
+  const { mounted } = await read(fixture());
+  await screen.findByRole('table', { name: 'Retained candidate records' });
+  const tables = [...mounted.container.querySelectorAll('table')];
+  expect(tables.length).toBeGreaterThan(0);
+  for (const table of tables) {
+    const region = table.closest('.retained-case-table');
+    expect(region?.getAttribute('role')).toBe('region');
+    expect(region?.getAttribute('tabindex')).toBe('0');
+    expect(region?.getAttribute('aria-label')).toBeTruthy();
+  }
+});
