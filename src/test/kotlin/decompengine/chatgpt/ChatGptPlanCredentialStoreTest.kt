@@ -500,7 +500,7 @@ class ChatGptPlanCredentialStoreTest {
         add(); val original = contents()
         val intent = "{\"operationId\":\"${UUID.randomUUID()}\",\"authEpoch\":0,\"generation\":0}"
         val bad = listOf<(String) -> String>(
-            { it.replace("\"schemaVersion\":1", "\"schemaVersion\":\"1\"") },
+            { it.replace("\"schemaVersion\":2", "\"schemaVersion\":\"2\"") },
             { it.replace("\"authEpoch\":0", "\"authEpoch\":\"0\"") },
             { it.replace("\"generation\":0", "\"generation\":1.0") },
             { it.replace("\"generation\":0", "\"generation\":9223372036854775808") },
@@ -513,7 +513,7 @@ class ChatGptPlanCredentialStoreTest {
             { it.replace("\"renewalIntent\":null", "\"renewalIntent\":${intent.dropLast(1)},\"extra\":0}") },
             { it.replace("\"renewalIntent\":null", "\"renewalIntent\":${intent.replace("\"generation\":0", "\"generation\":1")}") },
             { it.replace("\"renewalIntent\":null", "\"renewalIntent\":$intent").replace("\"state\":\"ready\"", "\"state\":\"signed_out\"") },
-            { it.replace("\"schemaVersion\":1", "\"schemaVersion\":1,\"schemaVersion\":1") },
+            { it.replace("\"schemaVersion\":2", "\"schemaVersion\":2,\"schemaVersion\":2") },
             { it.replace("\"subject\":\"subject\"", "\"subject\":\"subject\",\"subject\":\"subject\"") },
             { it.replace("\"tokenType\":\"Bearer\"", "\"tokenType\":\"Bearer\",\"tokenType\":\"Bearer\"") },
             { it.replace("\"renewalIntent\":null", "\"renewalIntent\":${intent.dropLast(1)},\"operationId\":\"${UUID.randomUUID()}\"}") },

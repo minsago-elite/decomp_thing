@@ -26,6 +26,7 @@ import java.util.concurrent.locks.ReentrantLock
 class ChatGptPlanCredentialStore private constructor(
     private val directory: Path,
     private val hook: (ChatGptLinuxFiles.Stage) -> Unit = {},
+    private val wallClock: () -> Instant = Instant::now,
 ) {
     private val coordination = COORDINATION.computeIfAbsent(directory) { Coordination() }
 
@@ -44,13 +45,175 @@ class ChatGptPlanCredentialStore private constructor(
 
     internal fun add(registration: ChatGptPlanValidatedRegistration, select: Boolean = false,
         operation: ChatGptStoreOperation = ChatGptStoreOperation.start()): ChatGptPlanAccount = mutate(operation) { d ->
-        require(d.accounts.size < MAX_ACCOUNTS)
+        require(d.accounts.size + d.enrollments.size < MAX_ACCOUNTS)
         validateRegistration(registration)
-        require(d.accounts.none { it.clientId == registration.clientId })
+        require(d.accounts.none { it.clientId == registration.clientId } && d.enrollments.none { it.clientId == registration.clientId })
         val a = Record(UUID.randomUUID().toString(), registration.issuer, registration.clientId, registration.subject,
             d.hostId ?: "urn:uuid:${UUID.randomUUID()}", registration.label, registration.email, null, 0, 0,
             stateFor(registration.tokenSet.scopes), registration.tokenSet, null)
         d.copy(hostId = a.hostId, accounts = d.accounts + a, selectedAccountId = if (select) a.accountId else d.selectedAccountId) to a.public()
+    }
+
+    internal fun captureAuthorization(target: ChatGptAuthorizationTarget, attemptId: UUID,
+        operation: ChatGptStoreOperation): ChatGptAuthorizationSnapshot = locked(operation) { files, d ->
+        requireId(attemptId.toString())
+        // A host must supply a fresh ID, including after abandonment. Process-lifetime
+        // tombstones prevent reusing an old proof ID; durable enrollment fences survive restart.
+        // Never evict old IDs to make room: restart is required after this per-root ceiling.
+        if (coordination.attemptIds.size >= MAX_AUTHORIZATION_ATTEMPTS)
+            throw StoreInputFailure("ChatGPT authorization attempt limit reached; restart the application")
+        require(attemptId !in coordination.attemptIds && d.enrollments.none { it.activeAttemptId == attemptId.toString() })
+        val snapshot: AuthorizationSnapshot
+        val next: Document
+        when (target) {
+            is ChatGptAuthorizationTarget.New -> {
+                require(d.accounts.size + d.enrollments.size < MAX_ACCOUNTS)
+                val host = d.hostId ?: "urn:uuid:${UUID.randomUUID()}"
+                val enrollment = Enrollment(UUID.randomUUID().toString(), host, null, 0, attemptId.toString())
+                next = d.copy(hostId = host, enrollments = d.enrollments + enrollment)
+                snapshot = AuthorizationSnapshot(coordination, enrollment.enrollmentId, host, null, null, null, 0, attemptId, null, null)
+            }
+            is ChatGptAuthorizationTarget.Account -> {
+                val a = requireAccount(d, target.accountId)
+                synchronized(coordination) { if (a.accountId in coordination.logoutPending) throw CancellationException() }
+                requireOAuthClient(a.clientId)
+                increment(a.authEpoch); increment(a.generation) // cannot begin an uncommittable authorization
+                next = d
+                snapshot = AuthorizationSnapshot(coordination, a.accountId, a.hostId, a.issuer, a.clientId, a.subject,
+                    a.authEpoch, attemptId, a.tokens?.idToken, a.email?.takeIf { a.tokens != null && it.isNotBlank() })
+            }
+            is ChatGptAuthorizationTarget.Enrollment -> {
+                requireId(target.enrollmentId)
+                val e = d.enrollments.singleOrNull { it.enrollmentId == target.enrollmentId } ?: throw NoSuchElementException()
+                require(e.clientId != null) // unknown issuance cannot silently repeat dynamic registration
+                val epoch = increment(e.authEpoch)
+                increment(epoch) // reserve room for promotion/abandonment before any dispatch
+                val updated = e.copy(authEpoch = epoch, activeAttemptId = attemptId.toString())
+                next = d.replace(updated)
+                snapshot = AuthorizationSnapshot(coordination, e.enrollmentId, e.hostId, null, e.clientId, null, epoch, attemptId, null, null)
+            }
+        }
+        // Admission scans cover snapshot host/attempt, including read-only account captures.
+        rejectSecretMetadata(next.accounts, operation, next.enrollments, listOf(snapshot.host, attemptId.toString()))
+        operation.check()
+        coordination.attemptIds.add(attemptId)
+        if (next !== d) write(files, next, operation)
+        snapshot
+    }
+
+    internal fun pendingEnrollments(operation: ChatGptStoreOperation): List<ChatGptPendingEnrollment> =
+        locked(operation) { _, d -> java.util.Collections.unmodifiableList(d.enrollments.map { e ->
+            object : ChatGptPendingEnrollment() {
+                override val enrollmentId = e.enrollmentId
+                override val hasIssuedClient = e.clientId != null
+            }
+        }) }
+
+    /** Called only with the owning protocol's accepted Code, before its code exchange is submitted. */
+    internal fun retainIssuedClient(snapshot: ChatGptAuthorizationSnapshot, issuedClientId: String,
+        operation: ChatGptStoreOperation) = mutate(operation) { d ->
+        val s = own(snapshot); requireOAuthClient(issuedClientId)
+        if (s.expectedSubject != null) {
+            val a = boundAccount(d, s)
+            require(a.clientId == issuedClientId)
+            increment(a.authEpoch); increment(a.generation)
+            d to Unit
+        } else {
+            val e = boundEnrollment(d, s)
+            increment(e.authEpoch)
+            require(e.clientId == null || e.clientId == issuedClientId)
+            require(s.expectedClientId == null || s.expectedClientId == issuedClientId)
+            require(d.accounts.none { it.clientId == issuedClientId } &&
+                d.enrollments.none { it.enrollmentId != e.enrollmentId && it.clientId == issuedClientId })
+            if (e.clientId == issuedClientId) d to Unit else d.replace(e.copy(clientId = issuedClientId)) to Unit
+        }
+    }
+
+    internal fun commitAuthorization(snapshot: ChatGptAuthorizationSnapshot, proof: ChatGptAuthorizationProof,
+        select: Boolean, publication: ChatGptAuthPublication, operation: ChatGptStoreOperation): ChatGptAuthCommit {
+        var entered = false
+        var completing = false
+        return locked(operation, completed = { result ->
+            completing = true
+            publication.complete(result)
+        }, failed = { failure ->
+            if (!entered) throw failure
+            // Once publication starts, never replay a possibly committed transaction. Even a
+            // pre-rename error is conservatively unknown; a fresh status read resolves local state.
+            val result = AuthorizationCommit(ChatGptAuthCommitState.COMMIT_UNKNOWN, null)
+            if (!completing) { completing = true; publication.complete(result) }
+            result
+        }) { files, d ->
+            val s = own(snapshot)
+            val registration = proof.registration
+            val proofAttempt = proof.attemptId
+            val nonceHash = proof.authorizationNonceHash
+            val expires = proof.idTokenExpiresAt
+            val verified = proof.verifiedAt
+            validateRegistration(registration)
+            require(proofAttempt == s.attemptId && nonceHash.matches(NONCE_HASH) &&
+                registration.tokenSet.authorizationNonceHash == nonceHash)
+            val updated: Record
+            var next: Document
+            if (s.expectedSubject != null) {
+                val a = boundAccount(d, s)
+                require(registration.issuer == s.issuer && registration.clientId == s.expectedClientId && registration.subject == s.expectedSubject)
+                updated = a.copy(label = registration.label, email = registration.email, tokens = registration.tokenSet,
+                    authEpoch = increment(a.authEpoch), generation = increment(a.generation),
+                    state = stateFor(registration.tokenSet.scopes), renewalIntent = null)
+                next = d.replace(updated)
+            } else {
+                val e = boundEnrollment(d, s)
+                require(e.clientId != null && registration.clientId == e.clientId)
+                updated = Record(e.enrollmentId, registration.issuer, e.clientId, registration.subject, e.hostId,
+                    registration.label, registration.email, null, increment(e.authEpoch), 0,
+                    stateFor(registration.tokenSet.scopes), registration.tokenSet, null)
+                next = d.copy(accounts = d.accounts + updated, enrollments = d.enrollments.filterNot { it.enrollmentId == e.enrollmentId })
+            }
+            if (select) next = next.copy(selectedAccountId = updated.accountId)
+            // Check the complete candidate BEFORE granting publication authority; no public view
+            // may contain any old or new credential, including credentials removed by this write.
+            decode(Json.parseToJsonElement(encode(next)).jsonObject, operation)
+            rejectSecretMetadata(d.accounts + next.accounts, operation, d.enrollments + next.enrollments,
+                listOf(s.host, s.attemptId.toString()))
+            val now = wallClock()
+            require(expires > minusSkew(now) && verified <= plusSkew(now) && expires > minusSkew(verified))
+            operation.check()
+            if (!publication.enterCommit()) { s.active = false; throw CancellationException() }
+            entered = true
+            s.active = false
+            operation.check()
+            write(files, next, operation)
+            AuthorizationCommit(ChatGptAuthCommitState.DURABLE, updated.public())
+        }
+    }
+
+    internal fun abandonAuthorization(snapshot: ChatGptAuthorizationSnapshot,
+        operation: ChatGptStoreOperation) = mutate(operation) { d ->
+        val s = own(snapshot, requireActive = false)
+        s.active = false // also revoke account completions without changing account credentials
+        val e = d.enrollments.singleOrNull { it.enrollmentId == s.targetId }
+        if (s.expectedSubject != null || e == null || e.hostId != s.host ||
+            e.authEpoch != s.expectedAuthEpoch || e.activeAttemptId != s.attemptId.toString()) d to Unit
+        else if (e.clientId == null) d.copy(enrollments = d.enrollments.filterNot { it.enrollmentId == e.enrollmentId }) to Unit
+        else d.replace(e.copy(authEpoch = increment(e.authEpoch), activeAttemptId = null)) to Unit
+    }
+
+    private fun own(snapshot: ChatGptAuthorizationSnapshot, requireActive: Boolean = true): AuthorizationSnapshot {
+        require(snapshot is AuthorizationSnapshot && snapshot.origin === coordination && (!requireActive || snapshot.active))
+        return snapshot
+    }
+    private fun boundAccount(d: Document, s: AuthorizationSnapshot): Record {
+        val a = requireAccount(d, s.targetId)
+        require(d.hostId == s.host && a.hostId == s.host && a.issuer == s.issuer &&
+            a.clientId == s.expectedClientId && a.subject == s.expectedSubject && a.authEpoch == s.expectedAuthEpoch)
+        return a
+    }
+    private fun boundEnrollment(d: Document, s: AuthorizationSnapshot): Enrollment {
+        val e = d.enrollments.singleOrNull { it.enrollmentId == s.targetId } ?: throw NoSuchElementException()
+        require(d.hostId == s.host && e.hostId == s.host && e.authEpoch == s.expectedAuthEpoch &&
+            e.activeAttemptId == s.attemptId.toString() && (s.expectedClientId == null || e.clientId == s.expectedClientId))
+        return e
     }
 
     fun select(accountId: String, operation: ChatGptStoreOperation = ChatGptStoreOperation.start()) = mutate(operation) { d ->
@@ -195,31 +358,34 @@ class ChatGptPlanCredentialStore private constructor(
             value
         }
 
-    private fun <T> locked(operation: ChatGptStoreOperation, action: (ChatGptLinuxFiles, Document) -> T): T = storeBoundary {
+    private fun <T> locked(operation: ChatGptStoreOperation, completed: ((T) -> Unit)? = null,
+        failed: ((Throwable) -> T)? = null, action: (ChatGptLinuxFiles, Document) -> T): T = storeBoundary {
         require(!IN_TRANSACTION.get()) // callback cannot nest ANY public store operation
         operation.check()
         while (!coordination.lock.tryLock(minOf(operation.remainingNanos(), ChatGptStoreOperation.POLL_NANOS), TimeUnit.NANOSECONDS)) operation.check()
         IN_TRANSACTION.set(true)
-        var files: ChatGptLinuxFiles? = null
-        var primary: Throwable? = null
         try {
+            var files: ChatGptLinuxFiles? = null
+            var primary: Throwable? = null
+            val value = try {
+                operation.check()
+                files = ChatGptLinuxFiles(operation, hook)
+                files.open(directory)
+                val document = read(files, operation)
+                // A new lock owner cannot replay an unresolved renewal's old token.
+                val recovered = document.copy(accounts = document.accounts.map {
+                    if (it.renewalIntent != null) it.copy(state = ChatGptPlanAccount.State.REFRESH_UNCERTAIN) else it
+                })
+                if (recovered != document) write(files, recovered, operation)
+                operation.check()
+                action(files, recovered).also { operation.check() }
+            } catch (t: Throwable) { primary = t; throw t }
+            finally { try { files?.close() } catch (t: Throwable) { if (primary == null) throw t } }
             operation.check()
-            files = ChatGptLinuxFiles(operation, hook)
-            files.open(directory)
-            val document = read(files, operation)
-            // Only a new lock owner sees an outstanding intent. No completion API exists outside
-            // the original lock scope, and uncertain state forbids any redispatch until reauth.
-            val recovered = document.copy(accounts = document.accounts.map {
-                if (it.renewalIntent != null) it.copy(state = ChatGptPlanAccount.State.REFRESH_UNCERTAIN) else it
-            })
-            if (recovered != document) write(files, recovered, operation)
-            operation.check()
-            action(files, recovered).also { operation.check() }
-        } catch (t: Throwable) { primary = t; throw t }
-        finally {
-            try { files?.close() } catch (t: Throwable) { if (primary == null) throw t }
-            finally { IN_TRANSACTION.remove(); coordination.lock.unlock() }
-        }
+            completed?.invoke(value) // trusted completion only after native cleanup, still on JVM lock
+            value
+        } catch (t: Throwable) { if (failed != null) failed(t) else throw t }
+        finally { IN_TRANSACTION.remove(); coordination.lock.unlock() }
     }
 
     private fun read(files: ChatGptLinuxFiles, operation: ChatGptStoreOperation): Document {
@@ -247,7 +413,26 @@ class ChatGptPlanCredentialStore private constructor(
         files.write(bytes)
     }
 
-    private data class Document(val hostId: String?, val selectedAccountId: String?, val accounts: List<Record>)
+    private data class Document(val hostId: String?, val selectedAccountId: String?, val accounts: List<Record>,
+        val enrollments: List<Enrollment> = emptyList()) {
+        override fun toString() = "ChatGptPrivateDocument([redacted])"
+    }
+    private data class Enrollment(val enrollmentId: String, val hostId: String, val clientId: String?,
+        val authEpoch: Long, val activeAttemptId: String?) {
+        override fun toString() = "ChatGptPrivateEnrollment([redacted])"
+    }
+    private class AuthorizationSnapshot(val origin: Coordination, val targetId: String, val host: String,
+        val issuer: String?, override val expectedClientId: String?, override val expectedSubject: String?,
+        override val expectedAuthEpoch: Long, override val attemptId: UUID,
+        private val idHint: String?, private val emailHint: String?) : ChatGptAuthorizationSnapshot() {
+        // Revocation is separate from the immutable original identity, and accessed under the store lock.
+        var active = true
+        override fun oauthRegistration(): ChatGptPlanOAuthRegistration =
+            if (expectedClientId == null) ChatGptPlanOAuthRegistration.New(host, "decomp_engine")
+            else ChatGptPlanOAuthRegistration.Returning(expectedClientId, host, idHint, emailHint)
+    }
+    private class AuthorizationCommit(override val state: ChatGptAuthCommitState,
+        override val account: ChatGptPlanAccount?) : ChatGptAuthCommit()
     private data class Record(val accountId: String, val issuer: String, val clientId: String, val subject: String, val hostId: String,
         val label: String, val email: String?, val selectedModel: String?, val authEpoch: Long, val generation: Long,
         val state: ChatGptPlanAccount.State, val tokens: ChatGptPlanTokenSet?, val renewalIntent: ChatGptPlanRenewalIntent?) {
@@ -256,7 +441,9 @@ class ChatGptPlanCredentialStore private constructor(
             java.util.Collections.unmodifiableSet(tokens?.scopes.orEmpty().intersect(PUBLIC_SCOPES)), tokens?.expiresAt)
     }
     private fun Document.replace(a: Record) = copy(accounts = accounts.map { if (it.accountId == a.accountId) a else it })
+    private fun Document.replace(e: Enrollment) = copy(enrollments = enrollments.map { if (it.enrollmentId == e.enrollmentId) e else it })
     private class Coordination {
+        val attemptIds = mutableSetOf<UUID>()
         val lock = ReentrantLock()
         val active = mutableMapOf<String, AtomicBoolean>()
         val logoutPending = mutableMapOf<String, Int>()
@@ -265,7 +452,10 @@ class ChatGptPlanCredentialStore private constructor(
     companion object {
         private const val MAX_BYTES = 4 * 1024 * 1024
         private const val MAX_ACCOUNTS = 32
+        private const val MAX_AUTHORIZATION_ATTEMPTS = 1024
         private val MODEL = Regex("[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}")
+        private val OAUTH_CLIENT = Regex("oaiapp_[A-Za-z0-9_-]{1,160}")
+        private val NONCE_HASH = Regex("[a-f0-9]{64}")
         private val CLIENT = Regex("oaiapp_[A-Za-z0-9_-]{1,249}")
         private val SCOPE = Regex("[\\x21\\x23-\\x5B\\x5D-\\x7E]{1,256}") // RFC 6749 scope-token
         private val UUID_ID = Regex("[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
@@ -279,6 +469,14 @@ class ChatGptPlanCredentialStore private constructor(
         internal fun withHook(root: Path, hook: (ChatGptLinuxFiles.Stage) -> Unit) = storeBoundary {
             require(root.isAbsolute); ChatGptPlanCredentialStore(root.normalize(), hook)
         }
+        internal fun withWallClock(root: Path, clock: () -> Instant, hook: (ChatGptLinuxFiles.Stage) -> Unit = {}) = storeBoundary {
+            require(root.isAbsolute); ChatGptPlanCredentialStore(root.normalize(), hook, clock)
+        }
+        private fun requireOAuthClient(client: String) {
+            if (!client.matches(OAUTH_CLIENT)) throw StoreInputFailure("ChatGPT registration is unsupported for authorization")
+        }
+        private fun minusSkew(now: Instant): Instant = if (now < Instant.MIN.plusSeconds(5)) Instant.MIN else now.minusSeconds(5)
+        private fun plusSkew(now: Instant): Instant = if (now > Instant.MAX.minusSeconds(5)) Instant.MAX else now.plusSeconds(5)
         private fun requireId(id: String) { require(id.matches(UUID_ID)) }
         private fun requireAccount(d: Document, id: String): Record {
             requireId(id); return d.accounts.find { it.accountId == id } ?: throw NoSuchElementException()
@@ -332,11 +530,15 @@ class ChatGptPlanCredentialStore private constructor(
     }
 
     private fun encode(d: Document): String = buildJsonObject {
-        put("schemaVersion", 1); put("hostId", d.hostId); put("selectedAccountId", d.selectedAccountId)
+        put("schemaVersion", 2); put("hostId", d.hostId); put("selectedAccountId", d.selectedAccountId)
         put("accounts", buildJsonArray { d.accounts.forEach { a -> add(buildJsonObject {
             put("accountId", a.accountId); put("issuer", a.issuer); put("clientId", a.clientId); put("subject", a.subject); put("hostId", a.hostId)
             put("label", a.label); put("email", a.email); put("selectedModel", a.selectedModel); put("authEpoch", a.authEpoch); put("generation", a.generation); put("state", a.state.name.lowercase())
             put("tokenSet", a.tokens?.let(::encodeTokens) ?: JsonNull); put("renewalIntent", a.renewalIntent?.let { buildJsonObject { put("operationId", it.operationId); put("authEpoch", it.authEpoch); put("generation", it.generation) } } ?: JsonNull)
+        }) } })
+        put("enrollments", buildJsonArray { d.enrollments.forEach { e -> add(buildJsonObject {
+            put("enrollmentId", e.enrollmentId); put("hostId", e.hostId); put("clientId", e.clientId)
+            put("authEpoch", e.authEpoch); put("activeAttemptId", e.activeAttemptId)
         }) } })
     }.toString()
     private fun encodeTokens(t: ChatGptPlanTokenSet) = buildJsonObject {
@@ -345,7 +547,9 @@ class ChatGptPlanCredentialStore private constructor(
     }
 
     private fun decode(root: JsonObject, operation: ChatGptStoreOperation): Document {
-        require(root.keys == setOf("schemaVersion", "hostId", "selectedAccountId", "accounts") && root.int("schemaVersion") == 1) { "unexpected credential document shape" }
+        val version = root.int("schemaVersion")
+        val oldKeys = setOf("schemaVersion", "hostId", "selectedAccountId", "accounts")
+        require((version == 1 && root.keys == oldKeys) || (version == 2 && root.keys == oldKeys + "enrollments"))
         val host = root.strOrNull("hostId"); require(host == null || (host.startsWith("urn:uuid:") && host.removePrefix("urn:uuid:").matches(UUID_ID)))
         val accounts = root.getValue("accounts").jsonArray; require(accounts.size <= MAX_ACCOUNTS)
         val records = accounts.map { e ->
@@ -368,16 +572,36 @@ class ChatGptPlanCredentialStore private constructor(
         require(records.map { it.accountId }.distinct().size == records.size && records.map { it.clientId }.distinct().size == records.size)
         require(records.map { Triple(it.issuer, it.clientId, it.subject) }.distinct().size == records.size)
         val selected = root.strOrNull("selectedAccountId"); require(selected == null || records.any { it.accountId == selected })
-        require(records.isEmpty() || host != null)
-        rejectSecretMetadata(records, operation)
-        return Document(host, selected, records)
+        val pending = if (version == 1) JsonArray(emptyList()) else root.getValue("enrollments").jsonArray
+        require(records.size + pending.size <= MAX_ACCOUNTS)
+        val enrollments = pending.map { element ->
+            operation.check()
+            val e = element.jsonObject
+            require(e.keys == setOf("enrollmentId", "hostId", "clientId", "authEpoch", "activeAttemptId"))
+            Enrollment(e.str("enrollmentId"), e.str("hostId"), e.strOrNull("clientId"), e.long("authEpoch"), e.strOrNull("activeAttemptId")).also {
+                requireId(it.enrollmentId)
+                require(it.hostId == host)
+                it.clientId?.let { client -> require(client.matches(OAUTH_CLIENT)); metadata(client, 167) }
+                it.activeAttemptId?.let(::requireId)
+            }
+        }
+        require(records.size + enrollments.size <= MAX_ACCOUNTS)
+        val ids = records.map { it.accountId } + enrollments.map { it.enrollmentId }
+        val clients = records.map { it.clientId } + enrollments.mapNotNull { it.clientId }
+        val attempts = enrollments.mapNotNull { it.activeAttemptId }
+        require(ids.distinct().size == ids.size && clients.distinct().size == clients.size && attempts.distinct().size == attempts.size)
+        require((records.isEmpty() && enrollments.isEmpty()) || host != null)
+        rejectSecretMetadata(records, operation, enrollments)
+        return Document(host, selected, records, enrollments)
     }
     /** Public metadata is checked against all retained secrets, including common encodings and splits.
      * Unknown granted scopes remain private; only fixed protocol scope names reach the projection. */
-    private fun rejectSecretMetadata(records: List<Record>, operation: ChatGptStoreOperation) {
+    private fun rejectSecretMetadata(records: List<Record>, operation: ChatGptStoreOperation,
+        enrollments: List<Enrollment> = emptyList(), extra: List<String> = emptyList()) {
         val secrets = records.flatMap { listOfNotNull(it.tokens?.accessToken, it.tokens?.refreshToken, it.tokens?.idToken) }
         val publicFields = records.flatMap { listOfNotNull(it.accountId, it.issuer, it.clientId, it.label, it.email, it.selectedModel, it.tokens?.expiresAt?.toString()) +
-            it.tokens?.scopes.orEmpty().intersect(PUBLIC_SCOPES) }
+            it.tokens?.scopes.orEmpty().intersect(PUBLIC_SCOPES) } +
+            enrollments.flatMap { listOfNotNull(it.enrollmentId, it.hostId, it.clientId, it.activeAttemptId) } + extra
         fun normalized(value: String) = value.filter { it.isLetterOrDigit() }.lowercase()
         val fields = publicFields.map { it to normalized(it) }
         for (secret in secrets) {
