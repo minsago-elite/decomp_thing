@@ -170,7 +170,7 @@ test('evidence carries only fixed labels and bounded integers', async () => {
   const forbidden = [jobId, sessionId, canary, origin, 'http', '/nested', 'document.', 'querySelector', 'Showing lines',
     'source-bound', 'DevTools', 'run_fixture', 'log-canary', 'api_key'];
   const keys = ['activeMs', 'activePhase', 'activeStep', 'completed', 'exceptions', 'logApiCountsIncomplete', 'logApiErrorResponses',
-    'logApiRequests', 'logApiResponses', 'totalMs'];
+    'logApiRequests', 'logApiResponses', 'projectionReceipts', 'totalMs'];
   for (const [name, fault] of Object.entries({ ...faults, pending: () => (k, e) => e.startsWith('(async') ? 'pending-fetch' : null })) {
     const { error } = await run({ fault: fault() }, h => h.tab.exceptions.push(`Uncaught ${canary} ${origin}${api}`));
     const evidence = logsFailureEvidence(error);
@@ -186,7 +186,7 @@ test('evidence carries only fixed labels and bounded integers', async () => {
       assert.ok(Number.isSafeInteger(entry.step) && entry.step >= 0 && entry.step < 16);
       assert.ok(Number.isSafeInteger(entry.ms) && entry.ms >= 0 && entry.ms <= 3_600_000);
     }
-    for (const key of keys.filter(key => !['activePhase', 'completed'].includes(key)))
+    for (const key of keys.filter(key => !['activePhase', 'completed', 'projectionReceipts'].includes(key)))
       assert.ok(Number.isSafeInteger(evidence[key]) && evidence[key] >= 0 && evidence[key] <= 3_600_000, key);
     assert.equal(evidence.exceptions, 1);
   }

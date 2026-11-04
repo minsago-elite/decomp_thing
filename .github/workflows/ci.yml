@@ -78,7 +78,7 @@ jobs:
       - name: Verify packaged browser target setup integration
         run: node scripts/test-packaged-browser-target-setup-integration.mjs
       - name: Verify packaged logs failure-phase evidence controls
-        run: node --test scripts/test-packaged-browser-logs-phase-evidence.mjs
+        run: node --test scripts/test-packaged-browser-logs-phase-evidence.mjs scripts/test-packaged-browser-log-projection-evidence.mjs
       - name: Verify bounded archival cleanup controls
         timeout-minutes: 1
         run: python3 -B scripts/test-archival-diagnostics.py --verbose

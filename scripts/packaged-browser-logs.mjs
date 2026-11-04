@@ -3,6 +3,7 @@ import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { seedHistory } from './packaged-browser-history.mjs';
+import { PROJECTION_RECEIPT_MARKER, observeProjection } from './packaged-browser-log-projection-evidence.mjs';
 
 const canary = 'synthetic-log-credential-0123456789';
 const count = 20_000;
@@ -41,6 +42,7 @@ export async function qualifyLogs({ fixture, makeTarget, cdp, evaluate, ready, w
   let phaseStarted = started;
   let tab = null;
   let apiPath = null;
+  let projectionReceipts = null;
   const phase = (name, step = 0) => {
     assert.ok(LOG_PHASES.includes(name) && Number.isSafeInteger(step) && step >= 0 && step < 16);
     if (progress.active) progress.completed.push({ phase: progress.active, step: progress.step, ms: elapsed(phaseStarted) });
@@ -75,7 +77,9 @@ export async function qualifyLogs({ fixture, makeTarget, cdp, evaluate, ready, w
       failures.set(error, Object.freeze({ activePhase: progress.active, activeStep: progress.step, activeMs: elapsed(phaseStarted),
         totalMs: elapsed(started), completed: Object.freeze(progress.completed.map(entry => Object.freeze({ ...entry }))),
         ...apiCounts(),
-        exceptions: Array.isArray(tab?.exceptions) ? Math.min(100_000, tab.exceptions.length) : 0 }));
+        exceptions: Array.isArray(tab?.exceptions) ? Math.min(100_000, tab.exceptions.length) : 0,
+        // Fixed projection receipt bits (#1872); null when the projection was never started.
+        projectionReceipts: projectionReceipts ? projectionReceipts.snapshot() : null }));
     }
     throw error;
   }
@@ -125,14 +129,35 @@ export async function qualifyLogs({ fixture, makeTarget, cdp, evaluate, ready, w
   assert.equal(await evaluate(tab, `document.querySelector('.log-viewport script') !== null`), false);
   assert.equal(await evaluate(tab, `document.querySelector('.log-viewport').innerText.includes(${JSON.stringify(canary)})`), false);
   phase('projection');
-  const projection = await evaluate(tab, `(async () => {
-    const range = (await (await fetch('${api}?fromLine=1&limit=2')).json()).data;
-    const search = (await (await fetch('${api}?search=${canary}')).json()).data.search;
-    const download = await (await fetch('${api}/content')).text();
-    return { state: range.state, redacted: range.lines.every(l => l.redacted), matchCount: search.matchCount,
+  // Same single evaluate, fetches, awaits and result; fixed console.debug codes only label its boundaries.
+  projectionReceipts = observeProjection({ cdp, sessionId: tab.sessionId, origin: browserOrigin, api, canary });
+  let projection;
+  try {
+    projection = await evaluate(tab, `(async () => {
+    const mark = code => { try { console.debug('${PROJECTION_RECEIPT_MARKER}', code); } catch {} };
+    mark(1);
+    const rangeResponse = await fetch('${api}?fromLine=1&limit=2');
+    mark(2);
+    const range = (await rangeResponse.json()).data;
+    mark(3);
+    mark(4);
+    const searchResponse = await fetch('${api}?search=${canary}');
+    mark(5);
+    const search = (await searchResponse.json()).data.search;
+    mark(6);
+    mark(7);
+    const downloadResponse = await fetch('${api}/content');
+    mark(8);
+    const download = await downloadResponse.text();
+    mark(9);
+    mark(10);
+    const result = { state: range.state, redacted: range.lines.every(l => l.redacted), matchCount: search.matchCount,
       absent: !download.includes('${canary}') && !download.includes('/home/log-canary'),
       parity: range.lines.every(l => download.includes(l.text)), provenance: download.includes(range.sourceSha256) };
+    mark(11);
+    return result;
   })()`);
+  } finally { projectionReceipts.close(); }
   assert.deepEqual(projection, { state: 'available', redacted: true, matchCount: '0', absent: true, parity: true, provenance: true });
 
   phase('whole-log-search');
