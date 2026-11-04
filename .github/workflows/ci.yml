@@ -133,6 +133,110 @@ jobs:
             build/frontend/bundle-report.json
             build/frontend/bundle-composition.json
 
+  atomic-install:
+    needs: frontend
+    env:
+      NPM_CONFIG_CACHE: ${{ github.workspace }}/build/npm-download-cache
+    name: Atomic install qualification
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: ./.github/actions/setup-gradle-compiler-cache
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/master' }}
+      - name: Cache Gradle dependencies
+        uses: actions/cache@v6
+        with:
+          path: build/.gradle-user-home/caches/modules-2
+          key: atomic-install-gradle-modules-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/*.gradle.kts', '**/gradle.properties', 'gradle/libs.versions.toml', 'gradle/wrapper/gradle-wrapper.properties') }}
+      - name: Cache locked npm downloads
+        uses: actions/cache@v6
+        with:
+          path: build/npm-download-cache/_cacache
+          key: frontend-npm-downloads-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('frontend/package-lock.json', 'frontend/package.json', 'frontend/.npmrc', '.node-version', 'scripts/install-frontend-node.sh', 'scripts/frontend-node-sha256.txt') }}
+      - name: Cache reviewed Node downloads
+        uses: actions/cache@v6
+        with:
+          path: build/frontend-node-downloads
+          key: frontend-node-archives-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/install-frontend-node.sh', 'scripts/frontend-node-sha256.txt', '.node-version', 'frontend/package.json') }}
+      - name: Install pinned build-only frontend toolchain
+        env:
+          DECOMP_FRONTEND_NODE_DOWNLOAD_CACHE: '1'
+        run: |
+          mkdir -p build/atomic-install-ci
+          bash scripts/install-frontend-node.sh "$GITHUB_WORKSPACE/build/atomic-install-ci/node"
+          echo "$GITHUB_WORKSPACE/build/atomic-install-ci/node/bin" >> "$GITHUB_PATH"
+          export PATH="$GITHUB_WORKSPACE/build/atomic-install-ci/node/bin:$PATH"
+          node --version
+          npm --version
+      - name: Verify installed qualification record controls
+        run: |
+          mkdir -p build/orchestration/atomic-install-ci
+          python3 -B scripts/test-atomic-install-qualification.py 2>&1 | tee build/orchestration/atomic-install-ci/verifier-controls.log
+      - name: Check the configured native helper compiler
+        run: |
+          test -x /usr/bin/cc
+          /usr/bin/cc --version | head -n 1
+      - name: Run publisher controls and build the probe agent
+        run: |
+          mkdir -p build/atomic-install-ci/home build/atomic-install-ci/tmp build/.gradle-user-home
+          unset JAVA_OPTS GRADLE_OPTS JDK_JAVA_OPTIONS JAVA_TOOL_OPTIONS _JAVA_OPTIONS LLM_BIN_PATCH_OPTS
+          export GRADLE_USER_HOME="$GITHUB_WORKSPACE/build/.gradle-user-home"
+          export JAVA_OPTS="-Djava.io.tmpdir=$GITHUB_WORKSPACE/build/atomic-install-ci/tmp -Duser.home=$GITHUB_WORKSPACE/build/atomic-install-ci/home -XX:-UsePerfData -XX:-CreateCoredumpOnCrash -XX:-DumpReplayDataOnError"
+          ./gradlew --no-daemon "-Dorg.gradle.jvmargs=$JAVA_OPTS" verifyAtomicApplicationPublication atomicInstallProbeAgentJar
+      - name: Run Gradle writer and Java-agent controls
+        run: python3 -B scripts/test-atomic-install-controls.py --gradle-writers --java-agent
+      - name: Mark this run's installed qualification start
+        run: |
+          mkdir -p build/orchestration/atomic-install-ci
+          python3 -B - "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" <<'PY'
+          import json, pathlib, sys, time
+          target = pathlib.Path("build/orchestration/atomic-install-ci/driver-started.json")
+          target.write_text(json.dumps({"sourceHead": sys.argv[1], "runId": sys.argv[2],
+                                        "runAttempt": sys.argv[3], "startedAtUnixNs": time.time_ns()}) + "\n")
+          PY
+      - name: Run full installed atomic-install qualification
+        run: python3 -B scripts/test-atomic-install.py
+      - name: Verify the retained installed qualification record
+        run: python3 -B scripts/verify-atomic-install-qualification.py --expected-head "$GITHUB_SHA"
+      - name: Retain atomic-install qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: atomic-install-qualification
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            build/orchestration/atomic-install-remediation/**
+            !build/orchestration/atomic-install-remediation/installed-*/root-build/**
+            !build/orchestration/atomic-install-remediation/installed-*/home/**
+            !build/orchestration/atomic-install-remediation/installed-*/tmp/**
+            !build/orchestration/atomic-install-remediation/driver-controls-*/root-build/**
+            !build/orchestration/atomic-install-remediation/driver-controls-*/home/**
+            !build/orchestration/atomic-install-remediation/driver-controls-*/tmp/**
+            !build/orchestration/atomic-install-remediation/driver-controls-*/jdk with spaces/**
+            !build/orchestration/atomic-install-remediation/driver-controls-*/shared-install/**
+            !build/orchestration/atomic-install-remediation/driver-controls-*/writer-*/project-cache/**
+            !build/orchestration/atomic-install-remediation/driver-controls-*/writer-*/build/**
+            !build/orchestration/atomic-install-remediation/driver-controls-*/java-fixture/classes/**
+            !build/orchestration/atomic-install-remediation/driver-controls-*/java-fixture/budget-classes/**
+            !build/orchestration/atomic-install-remediation/driver-controls-*/java-fixture/*.jar
+            build/orchestration/atomic-install-ci/*.json
+            build/orchestration/atomic-install-ci/*.log
+            build/atomic-install/publisher-controls/run-*/passed.txt
+            build/atomic-install/atomic-install-probe-agent.jar
+            build/test-results/test/**
+
   web-packaged:
     needs: frontend
     env:
