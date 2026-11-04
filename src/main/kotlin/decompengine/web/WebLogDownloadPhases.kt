@@ -41,6 +41,18 @@ internal class WebLogDownloadPhases(private val nanoClock: () -> Long = System::
         }
     }
 
+    /**
+     * Preserve the original capacity-only wire record when no content entrant has been observed.
+     * This is an availability decision, not a census: a concurrent later entrant may be omitted.
+     * An empty result neither samples nor freezes, and the consumer treats it as unavailable.
+     */
+    fun summarySuffixIfEntered(): String = try {
+        if (claimed.get()) summarySuffix() else ""
+    } catch (_: Throwable) {
+        faulted.set(true)
+        ""
+    }
+
     /** Freeze once, before sampling. A competing caller never waits or samples. */
     fun summarySuffix(): String {
         try {

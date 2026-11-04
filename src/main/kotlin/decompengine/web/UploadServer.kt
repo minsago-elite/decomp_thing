@@ -568,7 +568,7 @@ class UploadServer(
         }
         val streamsClosed = streamResources.shutdown()
         server.stop(delaySeconds)
-        recordWebCapacityEvent(capacity.summaryLine() + logDownloadPhases.summarySuffix(), requestDiagnosticOutput)
+        recordWebCapacityEvent(capacity.summaryLine() + logDownloadPhases.summarySuffixIfEntered(), requestDiagnosticOutput)
         if (!streamsClosed && !streamResources.shutdown()) System.err.println("Event stream shutdown did not complete cleanly.")
         // Close admission without interrupting an in-flight post-response audit append. The
         // existing bounded request-drain below retains ownership if a handler cannot finish.

@@ -19,6 +19,25 @@ class WebLogDownloadPhasesTest {
             "lp_exchange_ms=0 lp_exit_ms=0 lp_snapshot_ms=0", suffix)
     }
 
+    @Test fun `capacity-only wrapper neither samples nor freezes before a later entrant`() {
+        val values = listOf(0L, 4_000_000L, 5_000_000L).iterator()
+        val reads = AtomicInteger()
+        val phases = WebLogDownloadPhases { reads.incrementAndGet(); values.next() }
+        repeat(2) { assertEquals("", phases.summarySuffixIfEntered()) }
+        assertEquals(0, reads.get(), "an unavailable record performs no clock read")
+        val owner = checkNotNull(phases.enter())
+        owner.exit(false)
+        assertEquals(2, reads.get(), "the empty wrapper did not freeze a later entrant")
+        val expected = " lp_v=1 lp_entries=1 lp_present=769 lp_saturated=0 lp_invalid=0 lp_incomplete=0 lp_terminal=2 lp_cap_ms=60000 " +
+            "lp_enter_ms=0 lp_validated_ms=0 lp_read_ms=0 lp_capture_ms=0 lp_bytes_ms=0 lp_headers_ms=0 lp_body_ms=0 " +
+            "lp_exchange_ms=0 lp_exit_ms=4 lp_snapshot_ms=5"
+        assertEquals(expected, phases.summarySuffixIfEntered())
+        assertEquals(3, reads.get())
+        assertEquals(expected, phases.summarySuffixIfEntered())
+        assertEquals(expected, phases.summarySuffix())
+        assertEquals(3, reads.get(), "an entered record retains the existing cached snapshot")
+    }
+
     @Test fun `normal G1 golden uses ten or fewer clock reads`() {
         val values = longArrayOf(0, 1, 5, 9, 12, 13, 14, 14, 14, 900).map { it * 1_000_000L }.iterator()
         val reads = AtomicInteger()

@@ -161,7 +161,7 @@ class UploadServerShutdownTest {
     }
 
 
-    @Test fun `stop appends the frozen no-entrant phase suffix to the existing capacity summary`() {
+    @Test fun `stop preserves the original capacity summary when no content request entered`() {
         val root = createTempDirectory("web-phase-summary-")
         val line = java.util.concurrent.atomic.AtomicReference<String?>()
         val emitted = CountDownLatch(1)
@@ -173,10 +173,7 @@ class UploadServerShutdownTest {
             server.stop()
             assertTrue(emitted.await(2, TimeUnit.SECONDS))
             val value = line.get() ?: error("capacity line missing")
-            val suffix = " lp_v=1 lp_entries=0 lp_present=0 lp_saturated=0 lp_invalid=0 lp_incomplete=0 lp_terminal=0 lp_cap_ms=60000 " +
-                "lp_enter_ms=0 lp_validated_ms=0 lp_read_ms=0 lp_capture_ms=0 lp_bytes_ms=0 lp_headers_ms=0 lp_body_ms=0 " +
-                "lp_exchange_ms=0 lp_exit_ms=0 lp_snapshot_ms=0"
-            assertEquals(prefix + suffix, value)
+            assertEquals(prefix, value)
         } finally {
             server.stop()
             root.toFile().deleteRecursively()
