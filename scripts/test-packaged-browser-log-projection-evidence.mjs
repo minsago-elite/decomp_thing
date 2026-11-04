@@ -32,7 +32,7 @@ const vm = await import('node:vm');
 const { default: test } = await import('node:test');
 const { logsFailureEvidence, qualifyLogs } = await import('./packaged-browser-logs.mjs');
 const { DEVTOOLS_DEADLINE_MS, TargetProtocol } = await import('./packaged-browser-target-lifecycle.mjs');
-const { PROJECTION_RECEIPTS, PROJECTION_RECEIPT_MARKER, observeProjection } = await import('./packaged-browser-log-projection-evidence.mjs');
+const { PROJECTION_RECEIPTS, PROJECTION_RECEIPT_MARKER, TIMING_CAP_MS, observeProjection } = await import('./packaged-browser-log-projection-evidence.mjs');
 
 const tmpParent = resolve(dirname(fileURLToPath(import.meta.url)), '../build/test-tmp/packaged-log-projection-evidence');
 const canary = 'synthetic-log-credential-0123456789';
@@ -45,8 +45,12 @@ const urls = [`${origin}${api}?fromLine=1&limit=2`, `${origin}${api}?search=${ca
 const ORIGINAL_TEMPLATE = "(async () => {\n    const range = (await (await fetch('${api}?fromLine=1&limit=2')).json()).data;\n    const search = (await (await fetch('${api}?search=${canary}')).json()).data.search;\n    const download = await (await fetch('${api}/content')).text();\n    return { state: range.state, redacted: range.lines.every(l => l.redacted), matchCount: search.matchCount,\n      absent: !download.includes('${canary}') && !download.includes('/home/log-canary'),\n      parity: range.lines.every(l => download.includes(l.text)), provenance: download.includes(range.sourceSha256) };\n  })()";
 const original = ORIGINAL_TEMPLATE.replaceAll('${api}', api).replaceAll('${canary}', canary);
 const EXPECTED = { state: 'available', redacted: true, matchCount: '0', absent: true, parity: true, provenance: true };
-const KEYS = ['ambiguousRequests', 'duplicateMarkers', 'incomplete', 'malformedMarkers', 'malformedNetworkEvents', 'network',
+// Original closed key list, kept verbatim; the snapshot extends it with exactly one `timing` key.
+const ORIGINAL_KEYS = ['ambiguousRequests', 'duplicateMarkers', 'incomplete', 'malformedMarkers', 'malformedNetworkEvents', 'network',
   'outOfOrderMarkers', 'reason', 'receipts', 'redirectedRequests', 'scope', 'status', 'wrongSessionEvents'];
+const KEYS = [...ORIGINAL_KEYS, 'timing'].sort();
+const TIMING_KEYS = ['closedElapsedMs', 'networkElapsedMs', 'receiptElapsedMs', 'scope', 'timingInvalid', 'timingSaturated'];
+const withoutTiming = snapshot => { const { timing, ...rest } = snapshot; return rest; };
 const OWN = ['Runtime.consoleAPICalled', 'Network.requestWillBeSent', 'Network.responseReceived'];
 
 /** Manual timers: nothing fires unless a control fires it. */
@@ -414,12 +418,15 @@ test('state and output are bounded, closed-schema, deeply frozen and private', (
   for (let i = 0; i < 5000; i++) p.deliver({ method: 'Network.requestWillBeSent', sessionId, params: { requestId: `id-${i}`, request: { url: urls[0], method: 'GET' } } });
   const snapshot = observer.close();
   assert.deepEqual(Object.keys(snapshot).sort(), KEYS);
+  assert.deepEqual(Object.keys(withoutTiming(snapshot)).sort(), ORIGINAL_KEYS);
+  assert.deepEqual(Object.keys(snapshot.timing).sort(), TIMING_KEYS);
   assert.deepEqual(Object.keys(snapshot.receipts), PROJECTION_RECEIPTS);
   assert.equal(snapshot.duplicateMarkers, 1000);
   assert.equal(snapshot.ambiguousRequests, 1000);
   assert.ok(deepFrozen(snapshot));
   assert.throws(() => { snapshot.receipts['range-invoked'] = 0; }, TypeError);
-  assert.ok(JSON.stringify(snapshot).length < 1024);
+  assert.ok(JSON.stringify(withoutTiming(snapshot)).length < 1024, 'original fields keep their own bound');
+  assert.ok(Buffer.byteLength(JSON.stringify(snapshot), 'utf8') <= 2048);
   assert.equal(snapshot.scope, 'page-console-and-protocol-events-unauthenticated');
   for (const value of [sessionId, canary, jobId, origin, PROJECTION_RECEIPT_MARKER, 'id-'])
     assert.ok(!JSON.stringify(snapshot).includes(value), value);
@@ -455,6 +462,7 @@ test('missing or incompatible capability and registration failure are bounded un
     assert.equal(snapshot.reason, 'capability');
     assert.equal(snapshot.incomplete, 1);
     assert.deepEqual(Object.keys(snapshot).sort(), KEYS);
+    assert.deepEqual(Object.keys(withoutTiming(snapshot)).sort(), ORIGINAL_KEYS);
   }
   assert.equal(observeProjection({ cdp: protocol().cdp, sessionId: undefined, origin, api, canary }).close().reason, 'capability');
   const p = protocol();
@@ -512,4 +520,278 @@ test('all page markers without network events still leave the combined observati
   assert.ok(bits(PROJECTION_RECEIPTS, snapshot));
   assert.deepEqual(snapshot.network, { range: { sent: 0, response: 0 }, search: { sent: 0, response: 0 }, download: { sent: 0, response: 0 } });
   assert.equal(snapshot.incomplete, 1);
+});
+
+// ---- #1872 host-monotonic receipt timing: deterministic injected clocks over the actual observer ----
+
+/** Scripted clock: each read returns the next scripted value (or calls it); reads are counted. */
+function scripted(values) {
+  const clock = () => {
+    const value = values[clock.reads++];
+    if (typeof value === 'function') return value();
+    return value;
+  };
+  clock.reads = 0;
+  return clock;
+}
+const ALL_NULL = Object.freeze({
+  receiptElapsedMs: Object.fromEntries(PROJECTION_RECEIPTS.map(label => [label, null])),
+  networkElapsedMs: { range: { sent: null, response: null }, search: { sent: null, response: null }, download: { sent: null, response: null } },
+  closedElapsedMs: null,
+});
+const slots = timing => [...Object.values(timing.receiptElapsedMs), ...Object.values(timing.networkElapsedMs).flatMap(e => [e.sent, e.response]), timing.closedElapsedMs];
+const nullTiming = (invalid, saturated = 0) => ({ scope: 'host-monotonic-event-receipt-times-unauthenticated', ...ALL_NULL, timingInvalid: invalid, timingSaturated: saturated });
+
+/** A complete, in-order projection on the real protocol: request/response around each body marker. */
+function fullRun(o) {
+  const sent = index => o.p.deliver({ method: 'Network.requestWillBeSent', sessionId, params: { requestId: `r${index}`, request: { url: urls[index], method: 'GET' } } });
+  const got = index => o.p.deliver({ method: 'Network.responseReceived', sessionId, params: { requestId: `r${index}`, response: { status: 200 } } });
+  o.marker(1); sent(0); got(0); o.marker(2); o.marker(3);
+  o.marker(4); sent(1); got(1); o.marker(5); o.marker(6);
+  o.marker(7); sent(2); got(2); o.marker(8); o.marker(9); o.marker(10); o.marker(11);
+}
+
+test('timing: exact floored elapsed per first accepted event, equal and zero gaps valid, 19 reads, fixed schema', () => {
+  // epoch, then the 17 accepted slots in fullRun order, then close.
+  const values = [1000.75, 1000.75, 1001.7, 1002, 1003, 1003, 1010, 1011, 1012, 1013, 1014, 1015, 1100, 1200, 1300, 1301, 1302, 1303, 1500.2];
+  const clock = scripted(values);
+  const o = observed({ clock });
+  fullRun(o);
+  const snapshot = o.observer.close();
+  assert.equal(clock.reads, 19, 'epoch + 17 first slots + close');
+  assert.equal(snapshot.incomplete, 0);
+  assert.deepEqual(Object.keys(snapshot.timing).sort(), TIMING_KEYS);
+  assert.deepEqual(snapshot.timing, {
+    scope: 'host-monotonic-event-receipt-times-unauthenticated',
+    receiptElapsedMs: { 'range-invoked': 0, 'range-resolved': 2, 'range-body': 2, 'search-invoked': 9, 'search-resolved': 12,
+      'search-body': 13, 'download-invoked': 14, 'download-resolved': 299, 'download-body': 300, 'compute-entered': 301, 'compute-completed': 302 },
+    networkElapsedMs: { range: { sent: 0, response: 1 }, search: { sent: 10, response: 11 }, download: { sent: 99, response: 199 } },
+    closedElapsedMs: 499, timingInvalid: 0, timingSaturated: 0 });
+  assert.equal(slots(snapshot.timing).length, 18);
+  assert.ok(slots(snapshot.timing).every(Number.isSafeInteger));
+  assert.ok(deepFrozen(snapshot));
+  assert.throws(() => { snapshot.timing.networkElapsedMs.download.sent = 1; }, TypeError);
+  for (const raw of ['1000.75', '1500.2', '1001.7', '1303']) assert.ok(!JSON.stringify(snapshot).includes(raw), raw);
+});
+
+test('timing: an early versus late download.sent receipt is reported as data only, with no verdict field', () => {
+  const run = sentAt => {
+    const o = observed({ clock: scripted([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, sentAt, sentAt, sentAt, sentAt, sentAt, sentAt, sentAt, 15_002]) });
+    fullRun(o);
+    return o.observer.close().timing;
+  };
+  const early = run(20), late = run(15_000);
+  assert.equal(early.networkElapsedMs.download.sent, 20);
+  assert.equal(late.networkElapsedMs.download.sent, 15_000);
+  assert.equal(early.closedElapsedMs, 15_002);
+  assert.equal(late.closedElapsedMs, 15_002, 'the retained 15,002 ms close is representable, not clamped to 15,000');
+  assert.equal(late.timingSaturated, 0);
+  assert.deepEqual(Object.keys(late).sort(), TIMING_KEYS, 'no early/late/cause field');
+});
+
+test('timing: missing observations stay null and never sample; responses are null when absent', () => {
+  const clock = scripted([5, 6, 7, 8, 9]);
+  const o = observed({ clock });
+  o.marker(1);
+  o.p.deliver({ method: 'Network.requestWillBeSent', sessionId, params: { requestId: 'r2', request: { url: urls[2], method: 'GET' } } });
+  o.marker(7);
+  const snapshot = o.observer.close();
+  assert.equal(clock.reads, 5, 'epoch, three accepted slots and close');
+  assert.equal(snapshot.timing.receiptElapsedMs['range-invoked'], 1);
+  assert.equal(snapshot.timing.receiptElapsedMs['download-invoked'], 3, 'out-of-order but accepted');
+  assert.equal(snapshot.outOfOrderMarkers, 1);
+  assert.deepEqual(snapshot.timing.networkElapsedMs, { range: { sent: null, response: null }, search: { sent: null, response: null }, download: { sent: 2, response: null } });
+  assert.equal(snapshot.timing.closedElapsedMs, 4);
+  assert.equal(slots(snapshot.timing).filter(value => value === null).length, 14);
+});
+
+test('timing: duplicates, ambiguous, redirected, malformed and wrong-session events neither sample nor overwrite', () => {
+  let t = 0;
+  const clock = () => { clock.reads++; return t; };
+  clock.reads = 0;
+  const o = observed({ clock });
+  t = 10; o.marker(1);
+  const sent = (requestId, url, extra = {}) => o.p.deliver({ method: 'Network.requestWillBeSent', sessionId, params: { requestId, request: { url, method: 'GET' }, ...extra } });
+  const got = requestId => o.p.deliver({ method: 'Network.responseReceived', sessionId, params: { requestId, response: { status: 200 } } });
+  t = 20; sent('r0', urls[0]); t = 30; got('r0');
+  const reads = clock.reads;
+  t = 40;
+  o.marker(1); o.marker(1); got('r0'); sent('r0-again', urls[0]); sent('r0', urls[0], { redirectResponse: { status: 302 } });
+  sent('x'.repeat(129), urls[1]); sent('post', urls[1], { request: { url: urls[1], method: 'POST' } });
+  sent('redir', urls[2], { redirectResponse: { status: 302 } });
+  o.p.deliver({ method: 'Runtime.consoleAPICalled', sessionId, params: { type: 'debug', args: [{ type: 'string', value: PROJECTION_RECEIPT_MARKER }, { type: 'number', value: 99 }] } });
+  assert.doesNotThrow(() => o.p.dispatch('Runtime.consoleAPICalled', new Proxy({}, { get() { throw new Error(canary); } })));
+  for (const listener of o.p.cdp.listeners.get(`${sessionId}:Runtime.consoleAPICalled`)) listener({ type: 'debug', args: [{ type: 'string', value: PROJECTION_RECEIPT_MARKER }, { type: 'number', value: 2 }] }, 'SESSION-other');
+  for (const listener of o.p.cdp.listeners.get(`${sessionId}:Network.requestWillBeSent`)) listener({ requestId: 'w', request: { url: urls[1], method: 'GET' } }, 'SESSION-other');
+  assert.equal(clock.reads, reads, 'rejected events read no clock');
+  t = 50;
+  const snapshot = o.observer.close();
+  assert.equal(snapshot.timing.receiptElapsedMs['range-invoked'], 10);
+  assert.deepEqual(snapshot.timing.networkElapsedMs.range, { sent: 20, response: 30 });
+  assert.equal(snapshot.timing.receiptElapsedMs['range-resolved'], null);
+  assert.deepEqual(snapshot.timing.networkElapsedMs.search, { sent: null, response: null });
+  assert.equal(snapshot.timing.closedElapsedMs, 50);
+  assert.ok(snapshot.duplicateMarkers === 2 && snapshot.ambiguousRequests === 2 && snapshot.redirectedRequests === 2 && snapshot.wrongSessionEvents === 2);
+  assert.equal(snapshot.malformedNetworkEvents, 2);
+  assert.equal(snapshot.malformedMarkers, 2);
+});
+
+test('timing: throwing, non-number, non-finite and regressing clocks are sticky invalid with every original field unchanged', () => {
+  const reference = observed({ clock: scripted(Array.from({ length: 19 }, (_, i) => i)) });
+  fullRun(reference);
+  const good = reference.observer.close();
+  assert.equal(good.timing.timingInvalid, 0);
+  const bad = {
+    'throws at epoch': [() => { throw new Error(canary); }],
+    'throws mid-run': [0, 1, 2, () => { throw new Error(canary); }],
+    'throws at close': [...Array.from({ length: 18 }, (_, i) => i), () => { throw new Error(canary); }],
+    'NaN': [0, 1, NaN], 'Infinity': [0, Infinity], '-Infinity': [-Infinity], 'string': [0, '5'], 'bigint': [0, 5n], 'undefined': [0, 1, undefined],
+    'object': [0, { valueOf: () => 3 }], 'regression': [100, 101, 99], 'regression at close': [...Array.from({ length: 18 }, (_, i) => i + 10), 0],
+  };
+  for (const [name, values] of Object.entries(bad)) {
+    const clock = scripted(values);
+    const o = observed({ clock });
+    assert.doesNotThrow(() => fullRun(o), name);
+    const snapshot = o.observer.close();
+    assert.deepEqual(snapshot.timing, nullTiming(1), name);
+    assert.deepEqual(withoutTiming(snapshot), withoutTiming(good), `${name}: original observation identical`);
+    assert.equal(snapshot.malformedMarkers + snapshot.malformedNetworkEvents, 0, `${name}: not a malformed event`);
+    assert.equal(clock.reads, values.length, `${name}: sticky, no reads after the first failure`);
+    assert.ok(!JSON.stringify(snapshot).includes(canary));
+    assert.ok(deepFrozen(snapshot));
+  }
+  for (const clock of [5, 'clock', null, {}]) {
+    const o = observed({ clock });
+    fullRun(o);
+    const snapshot = o.observer.close();
+    assert.deepEqual(snapshot.timing, nullTiming(1), String(clock));
+    assert.deepEqual(withoutTiming(snapshot), withoutTiming(good));
+  }
+});
+
+test('timing: values floor, clamp at 60,000 ms with explicit saturation, and huge gaps stay bounded', () => {
+  assert.equal(TIMING_CAP_MS, 60_000);
+  const o = observed({ clock: scripted([0, 59_999.999, 60_000, 60_000.5, 60_001, 1e300]) });
+  o.marker(1); o.marker(2); o.marker(3); o.marker(4);
+  const snapshot = o.observer.close();
+  assert.deepEqual(Object.values(snapshot.timing.receiptElapsedMs).slice(0, 4), [59_999, 60_000, 60_000, 60_000]);
+  assert.equal(snapshot.timing.closedElapsedMs, 60_000);
+  assert.equal(snapshot.timing.timingSaturated, 1);
+  const exact = observed({ clock: scripted([0, 60_000, 60_000]) });
+  exact.marker(1);
+  const at = exact.observer.close().timing;
+  assert.equal(at.receiptElapsedMs['range-invoked'], 60_000);
+  assert.equal(at.timingSaturated, 0, 'exactly the cap is not saturated');
+});
+
+test('timing: worst-case extended snapshot stays within 2048 UTF-8 bytes and leaks nothing private', () => {
+  const o = observed({ clock: scripted([0, ...Array.from({ length: 18 }, () => 1e9)]) });
+  fullRun(o);
+  for (let i = 0; i < 2000; i++) { o.marker(3); o.p.deliver({ method: 'Network.requestWillBeSent', sessionId, params: { requestId: `r0`, request: { url: urls[0], method: 'GET' } } }); }
+  for (let i = 0; i < 2000; i++) o.p.deliver({ method: 'Network.requestWillBeSent', sessionId, params: { requestId: 'x'.repeat(200), request: { url: urls[1], method: 'GET' } } });
+  for (let i = 0; i < 2000; i++) o.p.deliver({ method: 'Runtime.consoleAPICalled', sessionId, params: { type: 'debug', args: [{ type: 'string', value: PROJECTION_RECEIPT_MARKER }] } });
+  for (const listener of o.p.cdp.listeners.get(`${sessionId}:Runtime.consoleAPICalled`)) for (let i = 0; i < 2000; i++) listener({}, 'other');
+  const snapshot = o.observer.close();
+  assert.ok(slots(snapshot.timing).every(value => value === TIMING_CAP_MS));
+  assert.equal(snapshot.timing.timingSaturated, 1);
+  assert.ok(Buffer.byteLength(JSON.stringify(snapshot), 'utf8') <= 2048);
+  assert.ok(JSON.stringify(withoutTiming(snapshot)).length < 1024);
+  for (const value of [sessionId, canary, jobId, origin, PROJECTION_RECEIPT_MARKER, '1000000000', 'r0', 'http'])
+    assert.ok(!JSON.stringify(snapshot).includes(value), value);
+});
+
+test('timing: unavailable capability/registration records are all-null and read no clock', () => {
+  for (const cdp of [undefined, {}, { on() {}, listeners: {} }]) {
+    const clock = scripted([1, 2, 3]);
+    const snapshot = observeProjection({ cdp, sessionId, origin, api, canary, clock }).close();
+    assert.equal(snapshot.status, 'unavailable');
+    assert.deepEqual(snapshot.timing, nullTiming(0));
+    assert.equal(clock.reads, 0);
+    assert.ok(deepFrozen(snapshot));
+  }
+  const q = protocol();
+  const before = keyCounts(q.cdp);
+  q.cdp.on = () => {};
+  const clock = scripted([1, 2, 3]);
+  const snapshot = observeProjection({ cdp: q.cdp, sessionId, origin, api, canary, clock }).close();
+  assert.equal(snapshot.reason, 'registration');
+  assert.deepEqual(snapshot.timing, nullTiming(0));
+  assert.equal(clock.reads, 0);
+  assert.deepEqual(keyCounts(q.cdp), before);
+});
+
+test('timing: close is idempotent, restores listeners, and late events or snapshots read no clock', () => {
+  const clock = scripted([0, 3, 9, 100, 200]);
+  const o = observed({ clock });
+  o.marker(1);
+  const snapshot = o.observer.snapshot();
+  assert.equal(clock.reads, 3, 'epoch, marker and the single close');
+  assert.equal(snapshot.timing.closedElapsedMs, 9);
+  assert.deepEqual(keyCounts(o.p.cdp), o.before);
+  o.marker(2);
+  o.p.deliver({ method: 'Network.requestWillBeSent', sessionId, params: { requestId: 'r0', request: { url: urls[0], method: 'GET' } } });
+  assert.equal(o.observer.close(), snapshot);
+  assert.equal(o.observer.snapshot(), snapshot);
+  assert.equal(clock.reads, 3);
+  assert.equal(o.p.sent.length, 0);
+  assert.equal(o.p.timers.timers.length, 0);
+});
+
+/** Replaces the host monotonic source seen by the observer's default clock for one qualifier run. */
+async function withHostClock(now, run) {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'performance');
+  Object.defineProperty(globalThis, 'performance', { configurable: true, value: { now } });
+  try { return await run(); } finally { Object.defineProperty(globalThis, 'performance', descriptor); }
+}
+
+test('qualifier: the default host clock yields bounded timing without changing calls, result or listeners', async () => {
+  let reads = 0, t = 0;
+  const { h, result, error } = await withHostClock(() => { reads++; return t += 7; }, () => attempt());
+  assert.equal(error, undefined);
+  assert.deepEqual(result.redactionRangeSearchDownload, EXPECTED);
+  assert.equal(reads, 19);
+  assert.equal(h.p.sent.filter(message => message.params?.expression?.startsWith('(async')).length, 1);
+  assert.ok(h.p.timers.timers.every(timer => timer.delay === DEVTOOLS_DEADLINE_MS));
+  assert.deepEqual(keyCounts(h.p.cdp), h.state.keysBefore);
+  assert.deepEqual(h.state.page.log.filter(entry => entry.kind !== 'debug').map(entry => `${entry.kind}:${entry.index}`), ['fetch:0', 'json:0', 'fetch:1', 'json:1', 'fetch:2', 'text:2']);
+});
+
+test('qualifier: a throwing or regressing host clock keeps the identical result, deadline error and original receipts', async () => {
+  const ok = await attempt();
+  for (const now of [() => { throw new Error(canary); }, (() => { let t = 1e6; return () => (t -= 1); })(), () => NaN]) {
+    const normal = await withHostClock(now, () => attempt());
+    assert.equal(normal.error, undefined);
+    assert.deepEqual(normal.result, ok.result);
+    for (let hold = 0; hold < 6; hold += 5) {
+      const reference = await attempt({ pageOptions: { hold } });
+      const { h, error } = await withHostClock(now, () => attempt({ pageOptions: { hold } }));
+      assert.equal(error, h.state.lastError);
+      assert.equal(error.message, 'DevTools deadline: Runtime.evaluate');
+      assert.equal(h.state.projectionTimer.delay, DEVTOOLS_DEADLINE_MS);
+      const receipts = logsFailureEvidence(error).projectionReceipts;
+      assert.deepEqual(receipts.timing, nullTiming(1));
+      assert.deepEqual(withoutTiming(receipts), withoutTiming(logsFailureEvidence(reference.error).projectionReceipts));
+      assert.deepEqual(h.state.page.log, reference.h.state.page.log);
+      assert.deepEqual(keyCounts(h.p.cdp), h.state.keysBefore);
+    }
+  }
+});
+
+test('qualifier: the deadline exit retains first-receipt timing and late page progress cannot add samples', async () => {
+  let reads = 0, t = 0;
+  await withHostClock(() => { reads++; return t += 1000; }, async () => {
+    const { h, error } = await attempt({ pageOptions: { hold: 5 } });
+    const receipts = logsFailureEvidence(error).projectionReceipts;
+    const timing = receipts.timing;
+    assert.equal(timing.timingInvalid, 0);
+    assert.equal(timing.receiptElapsedMs['download-body'], null);
+    assert.equal(timing.networkElapsedMs.download.response !== null && timing.networkElapsedMs.download.sent < timing.networkElapsedMs.download.response, true);
+    assert.ok(timing.closedElapsedMs > timing.networkElapsedMs.download.response);
+    const at = reads;
+    h.state.page.release();
+    for (let i = 0; i < 20; i++) await new Promise(resolve => setImmediate(resolve));
+    assert.equal(reads, at);
+    assert.equal(logsFailureEvidence(error).projectionReceipts, receipts);
+    assert.ok(deepFrozen(receipts));
+  });
 });

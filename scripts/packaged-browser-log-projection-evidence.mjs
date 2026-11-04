@@ -2,6 +2,8 @@
 // DevTools command, evaluate, timer, fetch or body read, and it never decides qualification.
 // Markers are page console telemetry and network bits are protocol events; neither is a trusted
 // server, body or kernel receipt. Missing receipts never prove an operation did not happen.
+// Timing (#1872) is host-monotonic receipt elapsed ms since observer activation (just before the
+// evaluate), including delivery and scheduling; it is not a server, CDP-deadline or causal measure.
 
 /** Fixed console marker emitted by the projection expression with one numeric code. */
 export const PROJECTION_RECEIPT_MARKER = 'decomp-logs-projection-receipt-1872';
@@ -14,14 +16,39 @@ const URL_CAP = 8192;
 const ID_CAP = 128;
 const METHODS = Object.freeze(['Runtime.consoleAPICalled', 'Network.requestWillBeSent', 'Network.responseReceived']);
 const SCOPE = 'page-console-and-protocol-events-unauthenticated';
+const TIMING_SCOPE = 'host-monotonic-event-receipt-times-unauthenticated';
+/** Finite diagnostic value cap; a telemetry clamp, not a runtime budget (the deadline is unchanged). */
+export const TIMING_CAP_MS = 60_000;
+const SLOTS = PROJECTION_RECEIPTS.length + OPERATIONS.length * 2 + 1;
+const hostClock = () => globalThis.performance.now();
 
-const freezeSnapshot = ({ status, reason, receipts, network, counters }) => Object.freeze({
+// Raw readings stay private; only floored, clamped elapsed integers (or null) leave the observer.
+const freezeTiming = ({ epoch = null, times = [], closedAt = null, invalid = false } = {}) => {
+  let saturated = 0;
+  const elapsed = at => {
+    if (invalid || epoch === null || at === null || at === undefined) return null;
+    const ms = Math.floor(at - epoch);
+    if (!(ms >= 0)) return null;
+    if (ms > TIMING_CAP_MS) { saturated = 1; return TIMING_CAP_MS; }
+    return ms;
+  };
+  const labels = PROJECTION_RECEIPTS.length;
+  const receiptElapsedMs = Object.freeze(Object.fromEntries(PROJECTION_RECEIPTS.map((label, index) => [label, elapsed(times[index])])));
+  const networkElapsedMs = Object.freeze(Object.fromEntries(OPERATIONS.map((name, index) => [name,
+    Object.freeze({ sent: elapsed(times[labels + index * 2]), response: elapsed(times[labels + index * 2 + 1]) })])));
+  const closedElapsedMs = elapsed(closedAt);
+  return Object.freeze({ scope: TIMING_SCOPE, receiptElapsedMs, networkElapsedMs, closedElapsedMs,
+    timingInvalid: invalid ? 1 : 0, timingSaturated: saturated });
+};
+
+const freezeSnapshot = ({ status, reason, receipts, network, counters, timing = freezeTiming() }) => Object.freeze({
   scope: SCOPE, status, reason,
   receipts: Object.freeze(Object.fromEntries(PROJECTION_RECEIPTS.map((label, index) => [label, receipts[index] ? 1 : 0]))),
   network: Object.freeze(Object.fromEntries(OPERATIONS.map((name, index) => [name,
     Object.freeze({ sent: network[index].sent ? 1 : 0, response: network[index].response ? 1 : 0 })]))),
   ...counters,
   incomplete: status !== 'observed' || receipts.some(bit => !bit) || network.some(entry => !entry.sent || !entry.response) || Object.values(counters).some(value => value > 0) ? 1 : 0,
+  timing,
 });
 const emptyCounters = () => ({ duplicateMarkers: 0, outOfOrderMarkers: 0, malformedMarkers: 0, wrongSessionEvents: 0,
   ambiguousRequests: 0, redirectedRequests: 0, malformedNetworkEvents: 0 });
@@ -34,14 +61,33 @@ const UNAVAILABLE = Object.freeze({ capability: unavailable('capability'), regis
  * Observes one projection on `sessionId` through already-enabled Runtime/Network events, using
  * the known public `cdp.listeners` registration. Never throws; `close()` stops observation,
  * removes only its own callbacks and fixes the snapshot. Unsupported protocols yield `unavailable`.
+ * `clock` is an injectable monotonic millisecond source (default host `performance.now`); it is read
+ * only at activation, on each first accepted receipt/network slot and on first close (at most 19).
+ * Any throwing, non-number, non-finite or regressing reading makes timing invalid and all-null.
  */
-export function observeProjection({ cdp, sessionId, origin, api, canary }) {
+export function observeProjection({ cdp, sessionId, origin, api, canary, clock = hostClock }) {
   let active = false;
   let closed = null;
   const receipts = PROJECTION_RECEIPTS.map(() => false);
   const network = emptyNetwork();
   const counters = emptyCounters();
   const bump = key => { if (counters[key] < COUNTER_CAP) counters[key]++; };
+  const times = Array.from({ length: SLOTS - 1 }, () => null);
+  let epoch = null;
+  let closedAt = null;
+  let lastReading = null;
+  let invalid = false;
+  // Never throws and never touches observation state; a bad reading only makes timing invalid.
+  const read = () => {
+    if (invalid) return null;
+    try {
+      const value = typeof clock === 'function' ? clock() : undefined;
+      if (typeof value !== 'number' || !Number.isFinite(value) || (lastReading !== null && value < lastReading)) { invalid = true; return null; }
+      lastReading = value;
+      return value;
+    } catch { invalid = true; return null; }
+  };
+  const stamp = slot => { if (times[slot] === null) times[slot] = read(); };
   let expected = [];
   const registered = [];
 
@@ -59,6 +105,7 @@ export function observeProjection({ cdp, sessionId, origin, api, canary }) {
       if (receipts[code - 1]) { bump('duplicateMarkers'); return; }
       if (receipts.slice(0, code - 1).some(bit => !bit)) bump('outOfOrderMarkers');
       receipts[code - 1] = true;
+      stamp(code - 1);
     } catch { bump('malformedMarkers'); }
   };
   const onRequest = (params, eventSession) => {
@@ -80,6 +127,7 @@ export function observeProjection({ cdp, sessionId, origin, api, canary }) {
       if (network[index].sent || tracked >= 0) { bump('ambiguousRequests'); return; }
       network[index].sent = true;
       network[index].requestId = requestId;
+      stamp(PROJECTION_RECEIPTS.length + index * 2);
     } catch { bump('malformedNetworkEvents'); }
   };
   const onResponse = (params, eventSession) => {
@@ -92,6 +140,7 @@ export function observeProjection({ cdp, sessionId, origin, api, canary }) {
       if (index < 0) return;
       if (network[index].response) { bump('ambiguousRequests'); return; }
       network[index].response = true;
+      stamp(PROJECTION_RECEIPTS.length + index * 2 + 1);
     } catch { bump('malformedNetworkEvents'); }
   };
 
@@ -109,10 +158,15 @@ export function observeProjection({ cdp, sessionId, origin, api, canary }) {
     expected = [];
   };
   const finish = reason => {
+    const wasActive = active;
     active = false;
     dispose();
     if (closed === null) {
-      try { closed = reason ? UNAVAILABLE[reason] : freezeSnapshot({ status: 'observed', reason: 'none', receipts, network, counters }); }
+      if (wasActive && !reason) closedAt = read();
+      try {
+        closed = reason ? UNAVAILABLE[reason] : freezeSnapshot({ status: 'observed', reason: 'none', receipts, network, counters,
+          timing: freezeTiming({ epoch, times, closedAt, invalid }) });
+      }
       catch { closed = UNAVAILABLE.internal; }
     }
     return closed;
@@ -132,6 +186,7 @@ export function observeProjection({ cdp, sessionId, origin, api, canary }) {
         if (!Array.isArray(list) || list.at(-1) !== listener) throw new Error('unexpected registration');
       }
       active = true;
+      epoch = read();
     }
   } catch { finish('registration'); }
 
