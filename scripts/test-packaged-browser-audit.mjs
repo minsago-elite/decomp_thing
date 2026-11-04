@@ -188,14 +188,17 @@ test('fixtures bind one job, attempt and revision with long names and a self-con
   assert.equal(fixtures.respond('GET', events, 'text/event-stream').status, 406);
   assert.equal(fixtures.respond('GET', events, 'application/json').status, 200);
   const report = fixtures.respond('GET', `/jobs/${chunk.binding.jobId}/runs/${chunk.binding.runId}/reports/exploration`, 'application/json').document.data;
-  assert.equal(report.producerSchemaVersion, 1);
+  assert.equal(report.producerSchemaVersion, null);
   assert.deepEqual(report.sourceArtifact.binding, chunk.binding);
   const artifactPath = new URL(report.sourceArtifact.contentHref, 'https://audit.invalid').pathname.replace('/nested/api/v1', '');
   const artifact = fixtures.respond('GET', artifactPath, 'application/json');
   assert.equal(artifact.status, 200);
   assert.equal(createHash('sha256').update(artifact.bytes).digest('hex'), report.sourceArtifact.sha256);
   assert.equal(artifact.bytes.length, Number(report.sourceArtifact.sizeBytes));
-  assert.equal(JSON.parse(artifact.bytes.toString('utf8')).failure.code, 'behavior-deadline-exceeded');
+  const retained = JSON.parse(artifact.bytes.toString('utf8'));
+  assert.equal(retained.candidateCount, 1);
+  assert.equal(retained.candidates[0].id, 'seed_default');
+  assert.equal(retained.observations[0].exitCode, 0);
 });
 
 // Dependency-free DOM models test the actual measurement/predicate strings. These controls

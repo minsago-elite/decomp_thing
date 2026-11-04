@@ -67,17 +67,16 @@ export function auditFixtures(repo, buildId) {
   const cancelling = structuredClone(run);
   Object.assign(cancelling.data, { state: 'cancelling', terminalReason: null, endedAt: null, version: 'run_version_cancelling' });
   const exploration = bound('report-exploration', selected);
-  const failureBytes = Buffer.from(JSON.stringify({ schema: 'decomp-exploration-failure', schemaVersion: 1,
-    state: 'partial', failure: { phase: 'baseline', candidateIndex: 0, kind: 'timeout', code: 'behavior-deadline-exceeded' },
-    samples: { baselineInputs: 1, expandedInputs: 0, baselineObserved: 0, expandedObserved: 0 },
-    details: { baselineInputs: [{ id: 'seed_default', source: 'SEED', args: Array.from({ length: 33 }, (_, index) => `arg-${String(index).padStart(2, '0')}`), stdinHex: 'aa'.repeat(129) }],
-      expandedInputs: [], baselineObservations: [], expandedObservations: [] }, detailsOmitted: null, coverage: null, confidence: null }), 'utf8');
-  const failureSha256 = createHash('sha256').update(failureBytes).digest('hex');
+  const retainedBytes = Buffer.from(JSON.stringify({ candidateCount: 1, coverageIncreased: false,
+    baselineOutputSignatures: 1, expandedOutputSignatures: 1, newOutputSignatures: [], angr: {},
+    confidence: { score: 0, newOutputSignatureCount: 0 },
+    candidates: [{ id: 'seed_default', source: 'SEED', args: Array.from({ length: 33 }, (_, index) => `arg-${String(index).padStart(2, '0')}`), stdinHex: 'aa'.repeat(129) }],
+    observations: [{ candidateId: 'seed_default', signature: '0::', exitCode: 0, stdoutHex: '', stderrHex: '', networkIsolated: true }] }), 'utf8');
+  const retainedSha256 = createHash('sha256').update(retainedBytes).digest('hex');
   const explorationBinding = createHash('sha256').update(`${jobId}\0${runId}`).digest('hex').slice(0, 32);
-  const failureArtifactId = `exploration_${explorationBinding}_${failureSha256}`;
-  Object.assign(exploration.data, { state: 'partial', summary: null, producerSchemaVersion: 1 });
-  Object.assign(exploration.data.sourceArtifact, { binding: selected, artifactId: failureArtifactId,
-    sha256: failureSha256, sizeBytes: String(failureBytes.length), contentHref: `/nested/api/v1/jobs/${jobId}/artifacts/${failureArtifactId}/content` });
+  const retainedArtifactId = `exploration_${explorationBinding}_${retainedSha256}`;
+  Object.assign(exploration.data.sourceArtifact, { binding: selected, artifactId: retainedArtifactId,
+    sha256: retainedSha256, sizeBytes: String(retainedBytes.length), contentHref: `/nested/api/v1/jobs/${jobId}/artifacts/${retainedArtifactId}/content` });
   const history = bound('validation-history', { jobId, runId, revisionId: null });
   const sourceSearch = bound('source-search-complete', selected);
   const owner = history.data.items[0];
@@ -99,7 +98,7 @@ export function auditFixtures(repo, buildId) {
       ? error(406, 'STREAM_UNSUPPORTED') : ok(load('events-poll'))],
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/progress-pin$`), () => ok(load('progress-pin'))],
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/reports/exploration$`), () => ok(exploration)],
-    [new RegExp(`^/jobs/${jobId}/artifacts/${failureArtifactId}/content$`), () => ({ status: 200, bytes: failureBytes, contentType: 'application/json' })],
+    [new RegExp(`^/jobs/${jobId}/artifacts/${retainedArtifactId}/content$`), () => ({ status: 200, bytes: retainedBytes, contentType: 'application/json' })],
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/validation-history$`), () => ok(history)],
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/reports/revision-validation$`), () => ok(validation)],
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-search$`), () => ok(sourceSearch)],
@@ -119,12 +118,14 @@ export function auditFixtures(repo, buildId) {
   const evidence = [
     { action: 'Read exploration evidence', reads: [`${api}/reports/exploration`], content: [
       { selector: '#exploration-report-binding', text: exploration.data.reportId },
+      { selector: '.output-signature-chart [role="img"]', text: '' },
+      { selector: '[aria-labelledby="output-signature-breadth-title"] .retained-case-table tbody', text: 'New distinct exit/output signatures' },
     ] },
-    { action: 'Read retained case details', reads: [`/jobs/${jobId}/artifacts/${failureArtifactId}/content`], content: [
+    { action: 'Read retained case details', reads: [`/jobs/${jobId}/artifacts/${retainedArtifactId}/content`], content: [
       { selector: '[aria-label="Retained candidate records"] tbody', text: 'seed_default' },
     ] },
     { action: 'Inspect case: baseline position 0: seed_default', reads: [], content: [
-      { selector: 'section[aria-labelledby="retained-case-title"] p[role="status"]', text: 'behavior-deadline-exceeded' },
+      { selector: 'section[aria-labelledby="retained-case-title"] p', text: 'Observed exit code: 0' },
       { selector: 'section[aria-labelledby="retained-case-title"] ol + p', text: 'Showing the first 32 of 33 arguments.' },
       { selector: 'section[aria-labelledby="retained-case-title"] section p', text: '129 recorded bytes. Preview is limited to the first 128 bytes.' },
       { selector: 'section[aria-labelledby="retained-case-title"] dd code', text: 'aa aa' },
