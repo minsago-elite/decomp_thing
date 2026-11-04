@@ -18,6 +18,368 @@ class GhidraInvocationQualificationControlsTest {
     private val one = InvocationQualification.Identity(101, "1")
     private val two = InvocationQualification.Identity(102, "2")
 
+    private class ScriptProc : InvocationQualification.ProcSource {
+        val calls = mutableListOf<String>()
+        var childrenValue = listOf(101L)
+        var command = "java\u0000WORKER\u0000bundle\u0000await-parent-launch\u0000analyze\u0000/proc/self/cwd/ghidra_project\u0000name\u0000INPUT\u0000scripts\u0000".toByteArray()
+        var projectValue: Path? = Path.of("/authored/cwd/ghidra_project")
+        var hook: (String, Int) -> Unit = { _, _ -> }
+        var statValue: (Long, Int) -> ByteArray = { pid, _ -> statBytes(pid) }
+        var liveValue: (Int) -> Boolean = { true }
+        var cwdValue: (Int) -> Path = { Path.of("/authored/cwd") }
+        var keyValue: (Int) -> String = { "1:2" }
+        private val counts = mutableMapOf<String, Int>()
+        private fun call(name: String): Int {
+            calls += name
+            val count = (counts[name] ?: 0) + 1; counts[name] = count
+            hook(name, count); return count
+        }
+        override fun children(): List<Long> { call("children"); return childrenValue }
+        override fun stat(pid: Long) = statValue(pid, call("stat"))
+        override fun alive(pid: Long) = liveValue(call("alive"))
+        override fun cmdline(pid: Long): ByteArray { call("cmdline"); return command }
+        override fun cwd(pid: Long) = cwdValue(call("cwd"))
+        override fun project(pid: Long): Path? { call("project"); return projectValue }
+        override fun projectKey(path: Path) = keyValue(call("key"))
+        companion object {
+            fun statBytes(pid: Long = 101, start: Long = 7, ppid: Long = 1, state: String = "S") =
+                "$pid (CANARY_COMM) $state $ppid ${List(17) { "0" }.joinToString(" ")} $start\n".toByteArray()
+        }
+    }
+    private fun sampler(source: ScriptProc, records: MutableList<JsonObject> = mutableListOf()) =
+        InvocationQualification.ProcSampler(source, 1, "WORKER", "INPUT", "run-authored", sink = records::add)
+
+    @Test fun `sampler ordered coherent snapshot continues and pre exec identities stay unresolved`() {
+        val source = ScriptProc()
+        val sample = sampler(source)
+        sample.poll(); sample.finish()
+        assertEquals(listOf("children", "stat", "alive", "cmdline", "stat", "alive", "cwd", "project", "key",
+            "cmdline", "cwd", "project", "key", "stat", "alive"), source.calls)
+        assertNotNull(sample.observed)
+        source.childrenValue = listOf(102)
+        assertFails { sample.poll() }
+        assertEquals(2, sample.fault.get()!!.record.getValue("matchingIdentities").jsonPrimitive.int)
+        val pre = ScriptProc()
+        val worker = pre.command
+        pre.command = "java\u0000pre-exec\u0000".toByteArray()
+        val pending = sampler(pre); pending.poll()
+        assertNull(pending.observed)
+        pre.command = worker; pending.poll(); pending.finish()
+        val lost = ScriptProc().apply { command = "java\u0000pre-exec\u0000".toByteArray() }
+        val unresolved = sampler(lost); unresolved.poll(); lost.childrenValue = emptyList(); unresolved.poll()
+        assertFails { unresolved.finish() }
+        assertEquals(1, unresolved.fault.get()!!.record.getValue("unresolvedIdentities").jsonPrimitive.int)
+        // A child entirely between enumeration samples cannot be attested by this source.
+    }
+
+    @Test fun `sampler framing facts preserve unknown false bounds and original error`() {
+        data class Frame(val bytes: ByteArray, val stage: String, val nonempty: Boolean, val nul: Boolean?, val utf8: Boolean?, val count: Int?)
+        val frames = listOf(
+            Frame(byteArrayOf(), "frame", false, null, null, null),
+            Frame("CANARY_NO_NUL".toByteArray(), "frame", true, false, null, null),
+            Frame(byteArrayOf(0xc0.toByte(), 0xaf.toByte(), 0), "utf8", true, true, false, null),
+            Frame(("a\u0000".repeat(257)).toByteArray(), "argument_count", true, true, true, 257),
+            Frame(ByteArray(q.ARTIFACT_LIMIT + 1), "cmdline", true, true, null, null))
+        frames.forEach { frame ->
+            val records = mutableListOf<JsonObject>()
+            val sample = sampler(ScriptProc().apply { command = frame.bytes }, records)
+            val original = assertFails { sample.poll() }
+            val fault = sample.fault.get()!!
+            assertSame(original, fault.original)
+            val record = Json.parseToJsonElement(fault.record.toString()).jsonObject
+            assertEquals(frame.stage, record.getValue("operation").jsonPrimitive.content)
+            assertEquals(frame.bytes.size, record.getValue("byteCount").jsonPrimitive.int)
+            assertEquals(JsonPrimitive(frame.nonempty), record["nonempty"])
+            assertEquals(frame.nul?.let(::JsonPrimitive) ?: JsonNull, record["finalNul"])
+            assertEquals(frame.utf8?.let(::JsonPrimitive) ?: JsonNull, record["utf8"])
+            assertEquals(frame.count?.let(::JsonPrimitive) ?: JsonNull, record["argumentCount"])
+            assertEquals(JsonNull, record["inputMatch"])
+            assertEquals(JsonNull, record["workerTokenCount"])
+            assertEquals(JsonPrimitive(true), record["cmdlineAcquired"])
+            assertEquals("S", record.getValue("stateBefore").jsonPrimitive.content)
+            assertEquals(JsonNull, record["stateAfter"])
+            assertEquals(JsonPrimitive(true), record["aliveBefore"])
+            assertFalse(record.toString().contains("CANARY"))
+            assertTrue(record.toString().toByteArray().size + 1 <= 4096)
+            assertSame(original, assertFails { sample.finish() })
+            assertEquals(listOf(fault.record), records)
+        }
+        val original = java.io.IOException("CANARY_PATH_ARGV_ENV")
+        val records = mutableListOf<JsonObject>()
+        val sample = sampler(ScriptProc().apply { hook = { op, _ -> if (op == "cmdline") throw original } }, records)
+        assertSame(original, assertFails { sample.poll() })
+        assertEquals(JsonPrimitive(false), records.single()["cmdlineAcquired"])
+        assertEquals(JsonNull, records.single()["byteCount"])
+        assertEquals(JsonNull, records.single()["nonempty"])
+    }
+
+    @Test fun `sampler lifecycle invalidations and read failures never become non workers`() {
+        val cases = listOf<(ScriptProc) -> Unit>(
+            { it.hook = { op, n -> if (op == "stat" && n == 1) throw java.nio.file.NoSuchFileException("CANARY") } },
+            { it.hook = { op, _ -> if (op == "cmdline") throw java.nio.file.NoSuchFileException("CANARY") } },
+            { it.hook = { op, n -> if (op == "stat" && n == 2) throw java.nio.file.NoSuchFileException("CANARY") } },
+            { it.statValue = { pid, n -> ScriptProc.statBytes(pid, start = if (n == 2) 8 else 7) } },
+            { it.statValue = { pid, n -> ScriptProc.statBytes(pid, start = if (n == 3) 8 else 7) } },
+            { it.statValue = { pid, n -> ScriptProc.statBytes(pid, ppid = if (n == 2) 99 else 1) } },
+            { it.statValue = { pid, n -> ScriptProc.statBytes(pid, state = if (n == 2) "Z" else "S") } },
+            { it.liveValue = { n -> n != 2 } },
+            { it.liveValue = { n -> n != 3 } },
+            { it.keyValue = { n -> if (n == 2) "1:3" else "1:2" } },
+            { it.keyValue = { n -> if (n == 2) "2:2" else "1:2" } },
+            { it.cwdValue = { n -> if (n == 2) Path.of("/CANARY/changed") else Path.of("/authored/cwd") } },
+            { it.hook = { op, _ -> if (op == "cwd") throw java.nio.file.NoSuchFileException("CANARY") } },
+            { it.hook = { op, _ -> if (op == "project") throw java.nio.file.AccessDeniedException("CANARY") } },
+            { it.statValue = { _, _ -> "CANARY malformed stat".toByteArray() } },
+            { it.hook = { op, n -> if (op == "cmdline" && n == 2) it.command = "CANARY\u0000".toByteArray() } },
+            { it.hook = { op, n -> if (op == "project" && n == 2) it.projectValue = null } },
+            { it.command = "java\u0000WORKER\u0000WORKER\u0000INPUT\u0000".toByteArray() },
+        )
+        cases.forEachIndexed { index, configure ->
+            val source = ScriptProc().also(configure); val records = mutableListOf<JsonObject>()
+            val sample = sampler(source, records)
+            val original = assertFails("case $index") { sample.poll() }
+            assertSame(original, sample.fault.get()!!.original)
+            assertEquals(1, records.size)
+            assertNull(sample.observed)
+            assertFalse(records.single().toString().contains("CANARY"))
+            assertFails { sample.finish() }
+        }
+    }
+
+    @Test fun `sampler ambiguity retained overflow unresolved and followup faults refuse proof`() {
+        for (project in listOf(Path.of("/authored/cwd/ghidra_project"), null)) {
+            val source = ScriptProc().apply { childrenValue = listOf(101, 102); projectValue = project }
+            val sample = sampler(source); assertFails { sample.poll() }
+            assertEquals("ambiguous", sample.fault.get()!!.record.getValue("outcome").jsonPrimitive.content)
+        }
+        val reuse = ScriptProc(); val sample = sampler(reuse); sample.poll()
+        reuse.statValue = { pid, _ -> ScriptProc.statBytes(pid, start = 8) }
+        assertFails { sample.poll() }
+        val count = sampler(ScriptProc().apply { childrenValue = List(257) { it.toLong() + 1 } })
+        assertFails { count.poll() }
+        assertEquals(257, count.fault.get()!!.record.getValue("directChildren").jsonPrimitive.int)
+        val retained = ScriptProc().apply { command = "non-worker\u0000".toByteArray() }
+        val accumulated = sampler(retained)
+        repeat(256) { retained.childrenValue = listOf(it.toLong() + 10); accumulated.poll() }
+        retained.childrenValue = listOf(1000); assertFails { accumulated.poll() }
+        assertEquals(256, accumulated.fault.get()!!.record.getValue("distinctIdentities").jsonPrimitive.int)
+        assertEquals(JsonPrimitive(true), accumulated.fault.get()!!.record["unboundSighting"])
+        val unresolved = ScriptProc().apply { command = "non-worker\u0000".toByteArray() }
+        val pending = sampler(unresolved); pending.poll()
+        unresolved.command = ScriptProc().command; unresolved.childrenValue = listOf(102); pending.poll()
+        assertFails { pending.finish() }
+        val primary = java.io.IOException("CANARY_PRIMARY")
+        val failed = ScriptProc().apply { hook = { op, n ->
+            if (op == "cmdline") throw primary
+            if (op == "stat" && n > 1 || op == "alive" && n > 1) error("CANARY_FOLLOWUP")
+        } }
+        val failure = sampler(failed); assertSame(primary, assertFails { failure.poll() })
+        assertEquals("failed", failure.followup.get()!!.getValue("followupStat").jsonPrimitive.content)
+        assertEquals("failed", failure.followup.get()!!.getValue("followupLive").jsonPrimitive.content)
+        assertEquals("cmdline", failure.fault.get()!!.record.getValue("operation").jsonPrimitive.content)
+    }
+
+    @Test fun `observer publishes first immutable failure before analysis failure and separate acknowledged cleanup`() = fixture { root ->
+        val published = CountDownLatch(1)
+        val primary = java.io.IOException("CANARY_OBSERVER")
+        val bodyError = IllegalArgumentException("CANARY_ANALYSIS")
+        val sample = InvocationQualification.ProcSampler(ScriptProc().apply { hook = { op, _ ->
+            if (op == "cmdline") throw primary
+        } }, 1, "WORKER", "INPUT", "run-authored") {
+            q.writeFailure(root.resolve("observer-failure.json"), it); published.countDown()
+        }
+        val thrown = assertFails {
+            q.observe(sample, cleanupSink = { q.writeFailure(root.resolve("observer-cleanup.json"), it) }) {
+                assertTrue(published.await(5, TimeUnit.SECONDS))
+                throw bodyError
+            }
+        }
+        assertSame(bodyError, thrown); assertSame(primary, thrown.suppressed.single())
+        val first = Files.readAllBytes(root.resolve("observer-failure.json"))
+        val cleanup = Json.parseToJsonElement(Files.readString(root.resolve("observer-cleanup.json"))).jsonObject
+        assertEquals("threw", cleanup.getValue("analysisBody").jsonPrimitive.content)
+        assertEquals(InvocationQualification.CleanupFact(true, true, true).json(), cleanup["observerCleanup"])
+        assertEquals("unknown", cleanup.getValue("workerCleanup").jsonPrimitive.content)
+        sample.latch(IllegalStateException("CANARY_LATER"))
+        assertContentEquals(first, Files.readAllBytes(root.resolve("observer-failure.json")))
+        assertEquals(PosixFilePermissions.fromString("rw-------"), Files.getPosixFilePermissions(root.resolve("observer-failure.json")))
+        assertTrue(first.size <= 4096); assertFalse(first.toString(Charsets.UTF_8).contains("CANARY"))
+        assertFalse(Files.exists(root.resolve("provenance.json")))
+        val duplicate = InvocationQualification.ProcSampler(ScriptProc().apply { command = byteArrayOf() },
+            1, "WORKER", "INPUT", "run-authored") { q.writeFailure(root.resolve("observer-failure.json"), it) }
+        val failedPublish = assertFails { duplicate.poll() }
+        assertSame(failedPublish, duplicate.fault.get()!!.original)
+        assertEquals("Invocation qualification diagnostic publication failed", failedPublish.suppressed.single().message)
+        assertContentEquals(first, Files.readAllBytes(root.resolve("observer-failure.json")))
+    }
+
+    @Test fun `observer explicit barriers prove interruption delayed acknowledgement and final refusal`() {
+        val entered = CountDownLatch(1); val release = CountDownLatch(1); val exited = CountDownLatch(1)
+        val thread = java.util.concurrent.atomic.AtomicReference<Thread>()
+        val source = ScriptProc().apply { hook = { op, _ -> if (op == "children") {
+            thread.set(Thread.currentThread()); entered.countDown()
+            try { while (true) { try { release.await(); break } catch (_: InterruptedException) {} } }
+            finally { exited.countDown() }
+        } } }
+        val sample = sampler(source)
+        val cleanup = mutableListOf<JsonObject>()
+        try {
+            assertFails { q.observe(sample, cleanup::add, cleanupMillis = 1) {
+                assertTrue(entered.await(5, TimeUnit.SECONDS))
+            } }
+            val facts = cleanup.single().getValue("observerCleanup").jsonObject
+            assertEquals(JsonPrimitive(false), facts["acknowledged"])
+            assertEquals(JsonPrimitive(false), facts["succeeded"])
+            assertEquals("returned", cleanup.single().getValue("analysisBody").jsonPrimitive.content)
+        } finally { release.countDown(); assertTrue(exited.await(5, TimeUnit.SECONDS)); thread.get()?.join(5000) }
+        assertFalse(thread.get().isAlive)
+        val paused = CountDownLatch(1); val faulted = CountDownLatch(1)
+        val unexpected = InterruptedException("CANARY_INTERRUPT")
+        val interrupted = InvocationQualification.ProcSampler(ScriptProc(), 1, "WORKER", "INPUT", "run-authored") { faulted.countDown() }
+        val cleanup2 = mutableListOf<JsonObject>()
+        val original = assertFails { q.observe(interrupted, cleanup2::add, pause = { paused.countDown(); throw unexpected }) {
+            assertTrue(paused.await(5, TimeUnit.SECONDS)); assertTrue(faulted.await(5, TimeUnit.SECONDS))
+        } }
+        assertSame(unexpected, original)
+        assertEquals("wait", interrupted.fault.get()!!.record.getValue("operation").jsonPrimitive.content)
+        val pending = CountDownLatch(1)
+        val noWorker = sampler(ScriptProc().apply { command = "non-worker\u0000".toByteArray() })
+        assertFails { q.observe(noWorker, {}, pause = { pending.countDown(); CountDownLatch(1).await() }) {
+            assertTrue(pending.await(5, TimeUnit.SECONDS))
+        } }
+        assertEquals("finish", noWorker.fault.get()!!.record.getValue("operation").jsonPrimitive.content)
+    }
+
+    @Test fun `observer successful mechanics require barrier settlement and emit no failure records`() {
+        val sampled = CountDownLatch(1)
+        val records = mutableListOf<JsonObject>()
+        val sample = sampler(ScriptProc(), records)
+        val result = q.observe(sample, records::add, pause = { sampled.countDown(); CountDownLatch(1).await() }) {
+            assertTrue(sampled.await(5, TimeUnit.SECONDS)); 17
+        }
+        assertEquals(17, result); assertTrue(records.isEmpty()); assertNotNull(sample.observed)
+    }
+
+    @Test fun `observer sink errors preserve first throwable and current thread interruption is restored`() {
+        val published = CountDownLatch(1)
+        val original = java.io.IOException("CANARY_ORIGINAL")
+        val source = ScriptProc().apply { hook = { op, _ -> if (op == "cmdline") throw original } }
+        val sample = InvocationQualification.ProcSampler(source, 1, "WORKER", "INPUT", "run-authored") {
+            published.countDown(); error("CANARY_SINK")
+        }
+        val thrown = assertFails { q.observe(sample, { error("CANARY_CLEANUP_SINK") }) {
+            assertTrue(published.await(5, TimeUnit.SECONDS))
+        } }
+        assertSame(original, thrown)
+        assertEquals(2, original.suppressed.size)
+        assertTrue(original.suppressed.all { it.message == "Invocation qualification diagnostic publication failed" })
+        val ready = CountDownLatch(1); val sampled = CountDownLatch(1)
+        val expected = java.util.concurrent.atomic.AtomicReference<Throwable>()
+        val actual = java.util.concurrent.atomic.AtomicReference<Throwable>()
+        val restored = AtomicBoolean()
+        val caller = Thread {
+            try { q.observe(sampler(ScriptProc()), {}, pause = { sampled.countDown(); CountDownLatch(1).await() }) {
+                assertTrue(sampled.await(5, TimeUnit.SECONDS)); ready.countDown()
+                try { CountDownLatch(1).await() }
+                catch (problem: InterruptedException) { expected.set(problem); throw problem }
+            } } catch (problem: Throwable) { actual.set(problem); restored.set(Thread.currentThread().isInterrupted) }
+        }
+        caller.start()
+        try { assertTrue(ready.await(5, TimeUnit.SECONDS)); caller.interrupt(); caller.join(5000) }
+        finally { if (caller.isAlive) { caller.interrupt(); caller.join(5000) } }
+        assertFalse(caller.isAlive); assertNotNull(expected.get()); assertSame(expected.get(), actual.get()); assertTrue(restored.get())
+    }
+
+    @Test fun `sampler frozen state liveness selection counts and final diagnostics retain exact predicates`() {
+        val records = mutableListOf<JsonObject>()
+        val terminal = ScriptProc().apply { statValue = { pid, n -> ScriptProc.statBytes(pid, state = if (n > 1) "Z" else "S") } }
+        val sample = sampler(terminal, records); assertFails { sample.poll() }
+        val record = records.single()
+        assertEquals(JsonPrimitive("S"), record["stateBefore"]); assertEquals(JsonPrimitive("Z"), record["stateAfter"])
+        assertEquals(JsonPrimitive(true), record["aliveBefore"]); assertEquals(JsonPrimitive(true), record["aliveAfter"])
+        assertEquals(JsonPrimitive(101L), record["pid"]); assertEquals(JsonPrimitive("7"), record["startTicks"])
+        assertEquals(JsonPrimitive(1L), record["ppid"]); assertEquals(JsonPrimitive("invalidated"), record["outcome"])
+        assertEquals(JsonPrimitive("Z"), sample.followup.get()!!["followupState"])
+        assertEquals(JsonPrimitive(true), sample.followup.get()!!["followupIdentitySame"])
+        assertEquals(JsonPrimitive(1), record["distinctIdentities"]); assertEquals(JsonPrimitive(1), record["unresolvedIdentities"])
+        assertEquals(JsonPrimitive(0), record["matchingIdentities"])
+        assertEquals(JsonNull, record["inputMatch"])
+        val absent = ScriptProc().apply { projectValue = null }
+        val pending = sampler(absent); pending.poll(); assertFails { pending.finish() }
+        assertEquals(JsonPrimitive(1), pending.fault.get()!!.record["unresolvedIdentities"])
+        val mismatch = ScriptProc().apply { command = "java\u0000CANARY\u0000".toByteArray() }
+        val unclassified = sampler(mismatch)
+        mismatch.hook = { op, n -> if (op == "children" && n == 2) throw java.io.IOException("CANARY") }
+        unclassified.poll(); assertFails { unclassified.poll() }
+        assertEquals(JsonPrimitive(1), unclassified.fault.get()!!.record["unresolvedIdentities"])
+        val parent = ScriptProc().apply { statValue = { pid, _ -> ScriptProc.statBytes(pid, ppid = 2) } }
+        val badParent = sampler(parent); assertFails { badParent.poll() }
+        assertEquals(JsonPrimitive(2L), badParent.fault.get()!!.record["ppid"])
+        val dead = ScriptProc().apply { liveValue = { false } }; val nonlive = sampler(dead)
+        assertFails { nonlive.poll() }; assertEquals(JsonPrimitive(false), nonlive.fault.get()!!.record["aliveBefore"])
+    }
+
+    @Test fun `first observer failure is published before blocked followup with returned or throwing body`() = fixture { root ->
+        for (bodyThrows in listOf(false, true)) {
+            val entered = CountDownLatch(1); val release = CountDownLatch(1)
+            val observer = java.util.concurrent.atomic.AtomicReference<Thread>()
+            val original = java.io.IOException("CANARY_FIRST")
+            val bodyFailure = IllegalArgumentException("CANARY_BODY")
+            val source = ScriptProc().apply { hook = { op, n ->
+                if (op == "cmdline") throw original
+                if (op == "stat" && n == 2) {
+                    observer.set(Thread.currentThread()); entered.countDown()
+                    while (release.count > 0) try { release.await() } catch (_: InterruptedException) { }
+                }
+            } }
+            val path = root.resolve("primary-$bodyThrows.json")
+            val sample = InvocationQualification.ProcSampler(source, 1, "WORKER", "INPUT", "run-authored") {
+                q.writeFailure(path, it)
+            }
+            val cleanup = mutableListOf<JsonObject>()
+            try {
+                val thrown = assertFails { q.observe(sample, cleanup::add, cleanupMillis = 5) {
+                    assertTrue(entered.await(5, TimeUnit.SECONDS))
+                    if (bodyThrows) throw bodyFailure
+                } }
+                if (bodyThrows) assertSame(bodyFailure, thrown)
+                assertTrue(thrown === original || thrown.suppressed.any { it === original })
+                assertSame(original, sample.fault.get()!!.original)
+                val first = Files.readAllBytes(path)
+                assertEquals(sample.fault.get()!!.record, Json.parseToJsonElement(first.toString(Charsets.UTF_8)))
+                assertEquals(JsonPrimitive("not_attempted"), sample.fault.get()!!.record["followupStat"])
+                assertNull(sample.followup.get())
+                assertEquals(JsonPrimitive(false), cleanup.single()["observerCleanup"]!!.jsonObject["acknowledged"])
+                release.countDown(); observer.get().join(5000); assertFalse(observer.get().isAlive)
+                assertContentEquals(first, Files.readAllBytes(path))
+                assertNotNull(sample.followup.get())
+            } finally {
+                release.countDown(); observer.get()?.let { it.join(5000); assertFalse(it.isAlive) }
+            }
+        }
+    }
+
+    @Test fun `final stage stat and live failures never reuse post command facts`() {
+        for (project in listOf(Path.of("/authored/cwd/ghidra_project"), null)) {
+            for (failedOperation in listOf("stat", "alive")) {
+                val original = java.io.IOException("CANARY_FINAL")
+                val source = ScriptProc().apply {
+                    projectValue = project
+                    statValue = { pid, n -> ScriptProc.statBytes(pid, state = if (n >= 3) "Z" else "S") }
+                    hook = { op, n -> if (op == failedOperation && n == 3) throw original }
+                }
+                val sample = sampler(source)
+                assertSame(original, assertFails { sample.poll() })
+                val record = sample.fault.get()!!.record
+                assertEquals(JsonPrimitive("S"), record["stateBefore"])
+                assertEquals(JsonPrimitive(true), record["aliveBefore"])
+                assertEquals(if (failedOperation == "stat") JsonNull else JsonPrimitive("Z"), record["stateAfter"])
+                assertEquals(JsonNull, record["aliveAfter"])
+                assertEquals(JsonPrimitive("${failedOperation}_after_project".replace("alive_", "live_")), record["operation"])
+            }
+        }
+    }
+
     @Test fun `installed probe classpath keeps whole test location after application jars`() {
         val repository = Path.of("").toAbsolutePath().normalize()
         val jars = listOf(repository.resolve("build/install/app/lib/app.jar"),
@@ -614,7 +976,7 @@ class GhidraInvocationQualificationControlsTest {
     }
 
     private fun fixture(body: (Path) -> Unit) {
-        val parent = Path.of("build/orchestration/ghidra-invocation-failure-remediation/pure-fixtures")
+        val parent = Path.of("build/orchestration/ghidra-invocation-046-diagnostics/pure-fixtures")
         Files.createDirectories(parent)
         val root = Files.createTempDirectory(parent, "control-")
         try { body(root) } finally { root.toFile().deleteRecursively() }

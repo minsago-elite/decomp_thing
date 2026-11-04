@@ -4,8 +4,6 @@ import decompengine.analysis.BundledGhidra
 import decompengine.analysis.GhidraJvmAnalyzer
 import java.nio.file.Files
 import java.nio.file.Path
-import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicReference
 import java.util.jar.JarFile
 import kotlin.io.path.createDirectories
 import kotlin.test.Test
@@ -32,6 +30,10 @@ class GhidraDotDirectoryInvocationQualificationTest {
         InvocationQualification.requireProof(jars.size in 1..256)
         // Test helpers are LAST. Application classes and resources must define themselves from the installed JAR.
         val tests = Path.of(GhidraInstalledInvocationProbe::class.java.protectionDomain.codeSource.location.toURI())
+        val buildPin = Json.parseToJsonElement(InvocationQualification.read(
+            repository.resolve("build/orchestration/ghidra-invocation-build-provenance.json")).toString(Charsets.UTF_8)).jsonObject
+        InvocationQualification.requireProof(tests.toRealPath() == repository.resolve(
+            buildPin.getValue("testHelpers").jsonObject.getValue("directory").jsonPrimitive.content).toRealPath())
         val result = InvocationQualification.run(listOf(
             Path.of(System.getProperty("java.home"), "bin/java").toString(),
             "-XX:-UsePerfData", "-XX:-CreateCoredumpOnCrash", "-XX:-DumpReplayDataOnError",
@@ -98,12 +100,25 @@ object GhidraInstalledInvocationProbe {
             })
             verifyMap(pin.getValue("sources").jsonObject, 16L * 1024 * 1024)
             verifyMap(artifacts, 512L * 1024 * 1024)
+            val helpers = pin.getValue("testHelpers").jsonObject
+            val helperDirectory = repository.resolve(helpers.getValue("directory").jsonPrimitive.content).normalize()
+            q.requireProof(helperDirectory.startsWith(repository) && helperDirectory.toRealPath() == helperDirectory)
+            val loader = GhidraInstalledInvocationProbe::class.java.classLoader
+            helpers.getValue("classes").jsonObject.forEach { (name, expected) ->
+                val helper = helperDirectory.resolve(name).normalize()
+                q.requireProof(helper.startsWith(helperDirectory) && q.hash(helper) == expected.jsonPrimitive.content)
+                val defining = Class.forName(name.removeSuffix(".class").replace('/', '.'), false, loader)
+                q.requireProof(Path.of(defining.protectionDomain.codeSource.location.toURI()).toRealPath() == helperDirectory)
+                val locations = loader.getResources(name).asSequence().take(2).toList()
+                q.requireProof(locations.size == 1 && locations.single().toURI() == helper.toUri())
+            }
             q.requireProof(q.read(pinPath).contentEquals(pinBytes))
             val verified = q.run(listOf("python3", "src/test/python/ghidra_invocation_provenance.py", "verify"), repository, 30)
             q.requireProof(verified.toString(Charsets.UTF_8) == "invocation-build-provenance-verified\n")
         }
         phase = InvocationQualification.Phase.PROVENANCE_VERIFICATION
         verify()
+        q.publish(run.resolve("build-provenance.json"), pinBytes)
         phase = InvocationQualification.Phase.BUNDLE_SOURCE_CHECKS
         val bundle = BundledGhidra.locate().root.toRealPath()
         q.requireProof(bundle == installed.resolve("libexec/ghidra"))
@@ -129,59 +144,30 @@ object GhidraInstalledInvocationProbe {
         q.publish(run.resolve("compiler.json"), buildJsonObject {
             put("exitCode", 0); put("bytes", compilerOutput.size); put("sha256", q.digest(compilerOutput))
         })
-        val observed = AtomicReference<ObservedWorker?>()
-        val failure = AtomicReference<Throwable?>()
-        val stop = AtomicBoolean(false)
-        val inventory = InvocationQualification.Inventory()
-        val observer = Thread({
-            try {
-                while (!stop.get()) {
-                    val children = ProcessHandle.current().children().use { it.limit(257).toList() }
-                    q.requireProof(children.size <= q.CHILD_LIMIT)
-                    val candidates = children.mapNotNull { child ->
-                        try {
-                            val proc = Path.of("/proc", child.pid().toString())
-                            val stat = q.read(proc.resolve("stat"), 8192).toString(Charsets.UTF_8)
-                            val fields = stat.substring(stat.lastIndexOf(')') + 2).trim().split(' ')
-                            q.requireProof(fields[1].toLong() == ProcessHandle.current().pid())
-                            InvocationQualification.Identity(child.pid(), fields[19]) to child
-                        } catch (problem: Exception) { throw problem }
-                    }
-                    inventory.poll(candidates.map { it.first }) { identity ->
-                        try {
-                            val proc = Path.of("/proc", identity.pid.toString())
-                            val bytes = q.read(proc.resolve("cmdline"))
-                            val command = q.command(bytes)
-                            val indexes = command.indices.filter { command[it] == BundledGhidra.WORKER_CLASS }
-                            if (indexes.isEmpty() || input.toString() !in command) false else {
-                                q.requireProof(indexes.size == 1)
-                                val index = indexes.single()
-                                val workerArgs = command.drop(index + 1)
-                                // Project may not yet exist at launch. Still count this identity immediately.
-                                if (Files.exists(proc.resolve("cwd/ghidra_project"))) {
-                                    val target = q.observedProject(workerArgs, identity.pid)
-                                    val cwd = proc.resolve("cwd").toRealPath()
-                                    val key = Files.readAttributes(target, "unix:dev,ino")
-                                    observed.compareAndSet(null, ObservedWorker(identity, command, cwd, target, "${key.getValue("dev")}:${key.getValue("ino")}"))
-                                }
-                                true
-                            }
-                        } catch (problem: Exception) { throw problem }
-                    }
-                    Thread.sleep(10)
-                }
-            } catch (problem: InterruptedException) { if (!stop.get()) failure.set(problem) }
-            catch (problem: Throwable) { failure.set(problem) }
-        }, "ghidra-invocation-observer").apply { isDaemon = true }
+        val sampler = InvocationQualification.ProcSampler(object : InvocationQualification.ProcSource {
+            override fun children() = ProcessHandle.current().children().use { children ->
+                children.limit(257).map { it.pid() }.toList()
+            }
+            private fun proc(pid: Long) = Path.of("/proc", pid.toString())
+            override fun stat(pid: Long) = q.read(proc(pid).resolve("stat"), 8192)
+            override fun alive(pid: Long) = ProcessHandle.of(pid).map { it.isAlive }.orElse(false)
+            override fun cmdline(pid: Long) = Files.newInputStream(proc(pid).resolve("cmdline"),
+                java.nio.file.LinkOption.NOFOLLOW_LINKS).use { it.readNBytes(q.ARTIFACT_LIMIT + 1) }
+            override fun cwd(pid: Long) = proc(pid).resolve("cwd").toRealPath()
+            override fun project(pid: Long): Path? = try { proc(pid).resolve("cwd/ghidra_project").toRealPath() }
+                catch (_: java.nio.file.NoSuchFileException) { null }
+            override fun projectKey(path: Path) = Files.readAttributes(path, "unix:dev,ino").let {
+                "${it.getValue("dev")}:${it.getValue("ino")}" }
+        }, ProcessHandle.current().pid(), BundledGhidra.WORKER_CLASS, input.toString(), run.fileName.toString(),
+            followupSink = { q.writeFailure(run.resolve("observer-followup.json"), it) }) {
+            q.writeFailure(run.resolve("observer-failure.json"), it)
+        }
         phase = InvocationQualification.Phase.ANALYSIS_OBSERVER_OWNERSHIP
-        val analysis = q.owned(cleanup = { q.settle(observer, { stop.set(true) }) }) {
-            observer.start()
+        val analysis = q.observe(sampler, cleanupSink = { q.writeFailure(run.resolve("observer-cleanup.json"), it) }) {
             GhidraJvmAnalyzer().analyze(input, work)
         }
-        failure.get()?.let { throw it }
-        inventory.finish()
         phase = InvocationQualification.Phase.RECEIPT_COMPARISON
-        val worker = checkNotNull(observed.get()) { "Invocation qualification did not observe its worker" }
+        val worker = checkNotNull(sampler.observed) { "Invocation qualification did not observe its worker" }
         val reportBytes = q.read(analysis.reportPath)
         val report = Json.parseToJsonElement(reportBytes.toString(Charsets.UTF_8)).jsonObject
         val invocation = report.getValue("invocation").jsonObject
@@ -230,6 +216,4 @@ object GhidraInstalledInvocationProbe {
             throw problem
         }
     }
-    private data class ObservedWorker(val identity: InvocationQualification.Identity, val command: List<String>,
-        val cwd: Path, val project: Path, val projectKey: String)
 }

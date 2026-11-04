@@ -181,6 +181,290 @@ internal object InvocationQualification {
         fun finish() { requireProof(matches.size == 1) }
     }
 
+    /** Injected ordered reads. Only the hosted adapter touches /proc; controls supply authored bytes. */
+    interface ProcSource {
+        fun children(): List<Long>
+        fun stat(pid: Long): ByteArray
+        fun alive(pid: Long): Boolean
+        fun cmdline(pid: Long): ByteArray
+        fun cwd(pid: Long): Path
+        fun project(pid: Long): Path?
+        fun projectKey(path: Path): String
+    }
+    data class ProcStat(val identity: Identity, val ppid: Long, val state: String)
+    fun procStat(pid: Long, bytes: ByteArray): ProcStat {
+        requireProof(bytes.size in 1..8192)
+        val text = Charsets.UTF_8.newDecoder().decode(java.nio.ByteBuffer.wrap(bytes)).toString()
+        val close = text.lastIndexOf(')')
+        requireProof(close > 0 && text.substringBefore(' ').toLong() == pid && text[close + 1] == ' ')
+        val fields = text.substring(close + 2).trim().split(' ')
+        requireProof(fields.size >= 20 && fields[0] in setOf("R", "S", "D", "Z", "T", "t", "X", "x", "K", "W", "P", "I"))
+        val start = fields[19].toLong()
+        val ppid = fields[1].toLong()
+        requireProof(pid > 0 && start >= 0 && ppid >= 0)
+        return ProcStat(Identity(pid, start.toString()), ppid, fields[0])
+    }
+    enum class SampleOperation { ENUMERATE, STAT_BEFORE, LIVE_BEFORE, CMDLINE, FRAME, UTF8, ARGUMENT_COUNT,
+        SELECT, STAT_AFTER_COMMAND, LIVE_AFTER_COMMAND, COHERENCE, CWD, PROJECT, PROJECT_KEY,
+        COMMAND_RECHECK, CWD_RECHECK, PROJECT_RECHECK, KEY_RECHECK, STAT_AFTER_PROJECT, LIVE_AFTER_PROJECT,
+        INVENTORY, FINISH, WAIT }
+    enum class SampleOutcome { READ, PREDICATE, INVALIDATED, OVERFLOW, UNRESOLVED, AMBIGUOUS, INTERRUPTED }
+    data class WorkerSnapshot(val identity: Identity, val command: List<String>, val cwd: Path,
+        val project: Path, val projectKey: String)
+    data class ObserverFault(val original: Throwable, val record: JsonObject)
+
+    /** One immutable fault, bounded identity memory, no raw command/stat/path in diagnostic JSON. */
+    class ProcSampler(private val source: ProcSource, private val parentPid: Long, private val workerClass: String,
+        private val input: String, val runId: String, private val followupSink: (JsonObject) -> Unit = {},
+        private val sink: (JsonObject) -> Unit) {
+        init { requireProof(runId.matches(Regex("run-[A-Za-z0-9-]{1,80}"))) }
+        private val seen = linkedSetOf<Identity>()
+        private val matches = linkedSetOf<Identity>()
+        private val unresolved = linkedSetOf<Identity>()
+        val fault = AtomicReference<ObserverFault?>()
+        val followup = AtomicReference<JsonObject?>()
+        var observed: WorkerSnapshot? = null; private set
+        private var poll = 0L
+        private var ordinal = 0L
+        private var operation = SampleOperation.ENUMERATE
+        private var outcome = SampleOutcome.READ
+        private var childCount: Int? = null
+        private var pid: Long? = null
+        private var before: ProcStat? = null
+        private var after: ProcStat? = null
+        private var liveBefore: Boolean? = null
+        private var liveAfter: Boolean? = null
+        private var acquired = false
+        private var byteCount: Int? = null
+        private var nonempty: Boolean? = null
+        private var finalNul: Boolean? = null
+        private var utf8: Boolean? = null
+        private var argumentCount: Int? = null
+        private var workerTokens: Int? = null
+        private var inputMatch: Boolean? = null
+        private var unboundSighting = false
+        private fun <T> step(op: SampleOperation, result: SampleOutcome = SampleOutcome.READ, body: () -> T): T {
+            operation = op; outcome = result
+            requireProof(ordinal < Long.MAX_VALUE); ordinal++
+            return body()
+        }
+        private fun coherent(first: ProcStat, last: ProcStat, live: Boolean) {
+            step(SampleOperation.COHERENCE, SampleOutcome.INVALIDATED) {
+                requireProof(first.identity == last.identity && first.ppid == last.ppid && last.ppid == parentPid &&
+                    live && last.state !in setOf("Z", "X", "x"))
+            }
+        }
+        private fun reset(child: Long?) {
+            pid = child; before = null; after = null; liveBefore = null; liveAfter = null
+            acquired = false; byteCount = null; nonempty = null; finalNul = null; utf8 = null
+            argumentCount = null; workerTokens = null; inputMatch = null; unboundSighting = child != null
+        }
+        fun guard(body: () -> Unit) {
+            fault.get()?.let { throw it.original }
+            try { body() } catch (problem: Throwable) { latch(problem); throw problem }
+        }
+        fun latch(problem: Throwable) {
+            if (fault.get() != null) return
+            // Latch and publish the immutable original before any optional diagnostic I/O.
+            val record = buildJsonObject {
+                put("schemaVersion", 1); put("kind", "observer_failure"); put("runId", runId)
+                put("poll", poll); put("operationOrdinal", ordinal); put("operation", operation.name.lowercase())
+                put("outcome", if (problem is InterruptedException) "interrupted" else outcome.name.lowercase())
+                put("category", failureCategory(problem).wire)
+                put("directChildren", childCount?.let(::JsonPrimitive) ?: JsonNull)
+                put("distinctIdentities", seen.size); put("matchingIdentities", matches.size)
+                put("unresolvedIdentities", unresolved.size); put("unboundSighting", unboundSighting)
+                put("pid", pid?.let(::JsonPrimitive) ?: JsonNull)
+                put("startTicks", before?.identity?.start?.let(::JsonPrimitive) ?: JsonNull)
+                put("ppid", before?.ppid?.let(::JsonPrimitive) ?: JsonNull)
+                put("stateBefore", before?.state?.let(::JsonPrimitive) ?: JsonNull)
+                put("stateAfter", after?.state?.let(::JsonPrimitive) ?: JsonNull)
+                put("aliveBefore", liveBefore?.let(::JsonPrimitive) ?: JsonNull)
+                put("aliveAfter", liveAfter?.let(::JsonPrimitive) ?: JsonNull)
+                put("followupStat", "not_attempted"); put("followupState", JsonNull)
+                put("followupIdentitySame", JsonNull); put("followupLive", "not_attempted"); put("followupAlive", JsonNull)
+                put("cmdlineAcquired", acquired); put("byteCount", byteCount?.let(::JsonPrimitive) ?: JsonNull)
+                put("nonempty", nonempty?.let(::JsonPrimitive) ?: JsonNull)
+                put("finalNul", finalNul?.let(::JsonPrimitive) ?: JsonNull)
+                put("utf8", utf8?.let(::JsonPrimitive) ?: JsonNull)
+                put("argumentCount", argumentCount?.let(::JsonPrimitive) ?: JsonNull)
+                put("workerTokenCount", workerTokens?.let(::JsonPrimitive) ?: JsonNull)
+                put("inputMatch", inputMatch?.let(::JsonPrimitive) ?: JsonNull)
+                put("analysisBody", "unknown"); put("observerCleanup", CleanupFact().json()); put("workerCleanup", "unknown")
+            }
+            val first = ObserverFault(problem, record)
+            if (fault.compareAndSet(null, first)) {
+                try { sink(record) } catch (_: Throwable) {
+                    problem.addSuppressed(IllegalStateException("Invocation qualification diagnostic publication failed"))
+                }
+                // A blocked follow-up can prevent observer settlement, but cannot hide the first fault.
+                // This separate record never rewrites the exclusive primary record or its sampled facts.
+                val followStat = pid?.let { runCatching { procStat(it, source.stat(it)) } }
+                val followLive = pid?.let { runCatching { source.alive(it) } }
+                val supplemental = buildJsonObject {
+                    put("schemaVersion", 1); put("kind", "observer_followup"); put("runId", runId)
+                    put("poll", poll); put("operationOrdinal", ordinal)
+                put("followupStat", if (followStat == null) "not_attempted" else if (followStat.isSuccess) "read" else "failed")
+                put("followupState", followStat?.getOrNull()?.state?.let(::JsonPrimitive) ?: JsonNull)
+                put("followupIdentitySame", followStat?.getOrNull()?.let { last -> before?.let {
+                    JsonPrimitive(it.identity == last.identity && it.ppid == last.ppid) } } ?: JsonNull)
+                put("followupLive", if (followLive == null) "not_attempted" else if (followLive.isSuccess) "read" else "failed")
+                put("followupAlive", followLive?.getOrNull()?.let(::JsonPrimitive) ?: JsonNull)
+                }
+                followup.set(supplemental)
+                try { followupSink(supplemental) } catch (_: Throwable) {
+                    problem.addSuppressed(IllegalStateException("Invocation qualification diagnostic publication failed"))
+                }
+            }
+        }
+        fun poll() = guard {
+            reset(null); childCount = null
+            step(SampleOperation.ENUMERATE) { requireProof(poll < Long.MAX_VALUE); poll++ }
+            val children = step(SampleOperation.ENUMERATE) { source.children() }
+            childCount = children.size
+            step(SampleOperation.ENUMERATE, SampleOutcome.OVERFLOW) { requireProof(children.size <= CHILD_LIMIT) }
+            step(SampleOperation.ENUMERATE, SampleOutcome.PREDICATE) { requireProof(children.distinct().size == children.size) }
+            // Keep the original stat-all-children, then command-per-child order.
+            val candidates = children.map { child ->
+                reset(child)
+                before = step(SampleOperation.STAT_BEFORE) { procStat(child, source.stat(child)) }
+                val first = before!!
+                step(SampleOperation.INVENTORY, SampleOutcome.OVERFLOW) {
+                    if (first.identity !in seen) { requireProof(seen.size < CHILD_LIMIT); seen += first.identity }
+                    unresolved += first.identity; unboundSighting = false
+                }
+                step(SampleOperation.COHERENCE, SampleOutcome.INVALIDATED) { requireProof(first.ppid == parentPid) }
+                first
+            }
+            candidates.forEach { first ->
+                reset(first.identity.pid); before = first; unboundSighting = false
+                val child = first.identity.pid
+                liveBefore = step(SampleOperation.LIVE_BEFORE) { source.alive(child) }
+                coherent(first, first, liveBefore!!)
+                val bytes = step(SampleOperation.CMDLINE) { source.cmdline(child) }
+                acquired = true; byteCount = bytes.size; nonempty = bytes.isNotEmpty()
+                finalNul = if (bytes.isEmpty()) null else bytes.last() == 0.toByte()
+                step(SampleOperation.CMDLINE, SampleOutcome.OVERFLOW) { requireProof(bytes.size <= ARTIFACT_LIMIT) }
+                step(SampleOperation.FRAME, SampleOutcome.PREDICATE) { requireProof(nonempty == true && finalNul == true) }
+                val text = step(SampleOperation.UTF8, SampleOutcome.PREDICATE) {
+                    try { Charsets.UTF_8.newDecoder().decode(java.nio.ByteBuffer.wrap(bytes)).toString().also { utf8 = true } }
+                    catch (problem: java.nio.charset.CharacterCodingException) { utf8 = false; throw problem }
+                }
+                val command = text.dropLast(1).split('\u0000')
+                argumentCount = command.size
+                step(SampleOperation.ARGUMENT_COUNT, SampleOutcome.OVERFLOW) { requireProof(command.size <= CHILD_LIMIT) }
+                after = step(SampleOperation.STAT_AFTER_COMMAND) { procStat(child, source.stat(child)) }
+                liveAfter = step(SampleOperation.LIVE_AFTER_COMMAND) { source.alive(child) }
+                coherent(first, after!!, liveAfter!!)
+                val indexes = command.indices.filter { command[it] == workerClass }
+                workerTokens = indexes.size; inputMatch = input in command
+                if (indexes.isNotEmpty() && inputMatch == true) {
+                    step(SampleOperation.SELECT, SampleOutcome.PREDICATE) { requireProof(indexes.size == 1) }
+                    step(SampleOperation.INVENTORY, SampleOutcome.AMBIGUOUS) {
+                        matches += first.identity; requireProof(matches.size <= 1)
+                    }
+                    val workerArgs = command.drop(indexes.single() + 1)
+                    val cwd = step(SampleOperation.CWD) { source.cwd(child) }
+                    val target = step(SampleOperation.PROJECT) { source.project(child) }
+                    if (target != null) {
+                        step(SampleOperation.PROJECT, SampleOutcome.PREDICATE) {
+                            requireProof(workerArgs.size >= 7 && workerArgs[1] == "await-parent-launch" && workerArgs[2] == "analyze")
+                            requireProof(workerArgs[3] == "/proc/self/cwd/ghidra_project" && target == cwd.resolve("ghidra_project"))
+                        }
+                        val key = step(SampleOperation.PROJECT_KEY) { source.projectKey(target) }
+                        step(SampleOperation.COMMAND_RECHECK, SampleOutcome.INVALIDATED) {
+                            requireProof(source.cmdline(child).contentEquals(bytes))
+                        }
+                        step(SampleOperation.CWD_RECHECK, SampleOutcome.INVALIDATED) { requireProof(source.cwd(child) == cwd) }
+                        step(SampleOperation.PROJECT_RECHECK, SampleOutcome.INVALIDATED) { requireProof(source.project(child) == target) }
+                        step(SampleOperation.KEY_RECHECK, SampleOutcome.INVALIDATED) { requireProof(source.projectKey(target) == key) }
+                        after = null; liveAfter = null
+                        after = step(SampleOperation.STAT_AFTER_PROJECT) { procStat(child, source.stat(child)) }
+                        liveAfter = step(SampleOperation.LIVE_AFTER_PROJECT) { source.alive(child) }
+                        coherent(first, after!!, liveAfter!!)
+                        val snapshot = WorkerSnapshot(first.identity, command, cwd, target, key)
+                        step(SampleOperation.COHERENCE, SampleOutcome.INVALIDATED) { requireProof(observed == null || observed == snapshot) }
+                        if (observed == null) observed = snapshot
+                        unresolved.remove(first.identity)
+                    } else {
+                        // Absence is pending project creation, never a coherent selected snapshot.
+                        step(SampleOperation.CWD_RECHECK, SampleOutcome.INVALIDATED) { requireProof(source.cwd(child) == cwd) }
+                        after = null; liveAfter = null
+                        after = step(SampleOperation.STAT_AFTER_PROJECT) { procStat(child, source.stat(child)) }
+                        liveAfter = step(SampleOperation.LIVE_AFTER_PROJECT) { source.alive(child) }
+                        coherent(first, after!!, liveAfter!!)
+                    }
+                }
+                // A non-worker vector cannot prove that this identity never execs a worker.
+            }
+        }
+        fun finish() = guard {
+            reset(null)
+            step(SampleOperation.FINISH, SampleOutcome.UNRESOLVED) {
+                requireProof(matches.size == 1 && unresolved.isEmpty() && observed != null)
+            }
+        }
+        fun waitFault(problem: Throwable) { operation = SampleOperation.WAIT; outcome = SampleOutcome.INTERRUPTED; latch(problem) }
+    }
+
+    enum class AnalysisBody { UNKNOWN, RETURNED, THREW }
+    /** The observer publishes before exit; the owner publishes separate final acknowledgement facts. */
+    fun <T> observe(sampler: ProcSampler, cleanupSink: (JsonObject) -> Unit,
+        pause: () -> Unit = { Thread.sleep(10) }, cleanupMillis: Long = 5000, body: () -> T): T {
+        val stop = java.util.concurrent.atomic.AtomicBoolean()
+        val ack = java.util.concurrent.atomic.AtomicBoolean()
+        var bodyState = AnalysisBody.UNKNOWN
+        var cleanup = CleanupFact()
+        var primary: Throwable? = null
+        var result: T? = null
+        var interrupted = false
+        val observer = Thread({
+            try {
+                while (!stop.get()) {
+                    sampler.poll()
+                    try { pause() } catch (problem: InterruptedException) {
+                        if (!stop.get()) throw problem else break
+                    }
+                }
+            } catch (problem: Throwable) { sampler.waitFault(problem) }
+            finally { ack.set(true) }
+        }, "ghidra-invocation-observer").apply { isDaemon = true }
+        try {
+            observer.start()
+            try { result = body(); bodyState = AnalysisBody.RETURNED }
+            catch (problem: Throwable) { bodyState = AnalysisBody.THREW; throw problem }
+        } catch (problem: Throwable) { primary = problem; interrupted = problem is InterruptedException }
+        finally {
+            cleanup = CleanupFact(attempted = true)
+            try { settle(observer, { stop.set(true) }, cleanupMillis); requireProof(ack.get())
+                cleanup = CleanupFact(true, true, true)
+            } catch (problem: Throwable) {
+                cleanup = CleanupFact(true, !observer.isAlive && ack.get(), false)
+                if (primary == null) primary = problem else primary.addSuppressed(problem)
+            }
+        }
+        try {
+            if (cleanup.succeeded == true) {
+                try { sampler.finish() } catch (problem: Throwable) {
+                    if (primary == null) primary = problem else if (primary !== problem) primary.addSuppressed(problem)
+                }
+            }
+            sampler.fault.get()?.original?.let { problem ->
+                if (primary == null) primary = problem
+                else if (primary !== problem && primary.suppressed.none { it === problem }) primary.addSuppressed(problem)
+            }
+            primary?.let { problem ->
+                try { cleanupSink(buildJsonObject {
+                    put("schemaVersion", 1); put("kind", "observer_cleanup"); put("runId", sampler.runId)
+                    put("analysisBody", bodyState.name.lowercase())
+                    put("observerCleanup", cleanup.json()); put("workerCleanup", "unknown")
+                }) } catch (_: Throwable) { problem.addSuppressed(IllegalStateException("Invocation qualification diagnostic publication failed")) }
+                throw problem
+            }
+            @Suppress("UNCHECKED_CAST") return result as T
+        } finally { if (interrupted) Thread.currentThread().interrupt() }
+    }
+
     /** Joins with one allowance, even if entry is interrupted. Never mistakes a timed join for settlement. */
     fun settle(thread: Thread, signal: () -> Unit, allowanceMillis: Long = 5000) {
         var interrupted = Thread.interrupted()

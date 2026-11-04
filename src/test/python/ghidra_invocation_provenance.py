@@ -99,6 +99,114 @@ def archive_bytes(archive, name):
     return data
 
 
+HELPER_ROOTS = ('GhidraDotDirectoryInvocationQualificationTest', 'GhidraInstalledInvocationProbe', 'InvocationQualification')
+HELPER_PACKAGE = 'decompengine/project/'
+HELPER_SOURCES = {
+    'GhidraDotDirectoryInvocationQualificationTest': 'GhidraDotDirectoryInvocationQualificationTest.kt',
+    'GhidraInstalledInvocationProbe': 'GhidraDotDirectoryInvocationQualificationTest.kt',
+    'InvocationQualification': 'GhidraInvocationQualificationSupport.kt',
+}
+HELPER_DIRECTORIES = ('build/classes/kotlin/test', 'build/classes/java/test')
+
+
+def helper_name(name):
+    return any(name == HELPER_PACKAGE + root + '.class' or
+               name.startswith(HELPER_PACKAGE + root + '$') and name.endswith('.class') for root in HELPER_ROOTS)
+
+
+def class_binding(data):
+    """Read only class identity/references/SourceFile, never execute the helper."""
+    import struct
+    offset = 0
+    def take(size):
+        nonlocal offset
+        need(0 <= size <= len(data) - offset)
+        value = data[offset:offset + size]
+        offset += size
+        return value
+    def u2(): return struct.unpack('>H', take(2))[0]
+    def u4(): return struct.unpack('>I', take(4))[0]
+    need(take(4) == b'\xca\xfe\xba\xbe')
+    take(4)
+    pool = [None] * u2()
+    index = 1
+    while index < len(pool):
+        tag = take(1)[0]
+        if tag == 1:
+            # Modified UTF-8 strings unrelated to class identity need not be decoded.
+            pool[index] = (tag, take(u2()))
+        elif tag in (7, 8, 16, 19, 20): pool[index] = (tag, u2())
+        elif tag in (3, 4, 9, 10, 11, 12, 17, 18): take(4)
+        elif tag in (5, 6): take(8); index += 1
+        elif tag == 15: take(3)
+        else: need(False)
+        index += 1
+    def text(index):
+        need(0 < index < len(pool) and pool[index] is not None and pool[index][0] == 1)
+        return pool[index][1].decode('ascii')
+    def class_name(index):
+        need(0 < index < len(pool) and pool[index] is not None and pool[index][0] == 7)
+        return text(pool[index][1])
+    take(2)
+    defining = class_name(u2())
+    take(2)
+    take(2 * u2())
+    def attributes():
+        return [(text(u2()), take(u4())) for _ in range(u2())]
+    for _ in range(2):
+        for _ in range(u2()):
+            take(6)
+            attributes()
+    source_files = [value for name, value in attributes() if name == 'SourceFile']
+    need(offset == len(data) and len(source_files) == 1 and len(source_files[0]) == 2)
+    source = text(struct.unpack('>H', source_files[0])[0])
+    references = {class_name(i) + '.class' for i, entry in enumerate(pool) if entry and entry[0] == 7}
+    return defining + '.class', source, {name for name in references if helper_name(name)}
+
+
+def helper_closure(pin, jars):
+    locations = []
+    for directory in HELPER_DIRECTORIES:
+        root = ROOT / directory
+        paths = sorted(p for p in (root / HELPER_PACKAGE).glob('*.class') if helper_name(p.relative_to(root).as_posix()))
+        need(len(paths) <= 1024)
+        if paths: locations.append((directory, paths))
+    need(len(locations) == 1)
+    directory, paths = locations[0]
+    root = ROOT / directory
+    need(root.resolve() == root and not root.is_symlink())
+    classes, references = {}, {}
+    sources = {}
+    for path in paths:
+        need(path.resolve() == path and path.stat().st_mtime_ns >= pin['pinnedAtNanos'])
+        name = path.relative_to(root).as_posix()
+        classes[name] = digest(path, 16 * 1024 * 1024)
+        defining, source, refs = class_binding(path.read_bytes())
+        need(defining == name)
+        owner = name.removeprefix(HELPER_PACKAGE).removesuffix('.class').split('$')[0]
+        need(source == HELPER_SOURCES[owner])
+        source_path = 'src/test/kotlin/decompengine/project/' + source
+        need(pin['sources'].get(source_path) == digest(ROOT / source_path, 16 * 1024 * 1024))
+        sources[source_path] = pin['sources'][source_path]
+        references[name] = refs
+    pending = [HELPER_PACKAGE + name + '.class' for name in HELPER_ROOTS]
+    reached = set()
+    while pending:
+        name = pending.pop()
+        if name in reached: continue
+        need(name in classes)
+        reached.add(name)
+        pending.extend(references[name] - reached)
+    need(reached == set(classes))
+    # Installed application JARs remain first; no helper may hide in any of them.
+    for jar in jars:
+        with zipfile.ZipFile(jar) as archive:
+            need(len(archive.infolist()) <= 65536)
+            need(not any(helper_name(name) for name in archive.namelist()))
+    return dict(directory=directory, classes=classes, sources=sources,
+                closureSha256=hashlib.sha256(json.dumps(classes, sort_keys=True).encode()).hexdigest())
+
+
 def seal():
     pin = read(PIN)
     validate_sources(pin)
@@ -159,6 +267,7 @@ def seal():
     # Class closure digest is bounded even for large application JARs; application bytes are also pinned.
     pin['compiledClassClosureSha256'] = hashlib.sha256(json.dumps(classes, sort_keys=True).encode()).hexdigest()
     pin['artifacts'] = {p.relative_to(ROOT).as_posix(): digest(p) for p in artifacts}
+    pin['testHelpers'] = helper_closure(pin, jars)
     pin['sourcePinSha256'] = digest(PIN)
     validate_sources(pin)
     publish(SEALED, pin)
@@ -172,6 +281,12 @@ def verify():
         path = ROOT / name
         need(not Path(name).is_absolute() and path.resolve().is_relative_to(ROOT))
         need(digest(path) == expected)
+    jars = sorted((ROOT / 'build/install/llm_bin_patch/lib').glob('*.jar'))
+    need(0 < len(jars) <= 256)
+    library = Path('build/install/llm_bin_patch/lib')
+    sealed_jars = {name for name in pin['artifacts'] if Path(name).parent == library and Path(name).suffix == '.jar'}
+    need({path.relative_to(ROOT).as_posix() for path in jars} == sealed_jars)
+    need(helper_closure(pin, jars) == pin['testHelpers'])
     print('invocation-build-provenance-verified')
 
 
@@ -188,10 +303,34 @@ def verify_uploaded(expected, downloaded):
     print('invocation-uploaded-evidence-verified')
 
 
+DIAGNOSTIC_NAMES = frozenset(('observer-failure.json', 'observer-followup.json', 'observer-cleanup.json', 'child-failure.json',
+                            'parent-process-failure.json', 'parent-setup-failure.json', 'build-provenance.json'))
+
+
+def verify_uploaded_diagnostics(expected, downloaded):
+    """Failure retention check only. No success manifest or runtime acceptance is inferred."""
+    def members(root):
+        need(root.is_dir() and not root.is_symlink())
+        runs = sorted(root.glob('run-*'))
+        need(len(runs) <= 256)
+        files = {}
+        for directory in [root] + runs:
+            need(directory.is_dir() and not directory.is_symlink())
+            for name in sorted(DIAGNOSTIC_NAMES):
+                path = directory / name
+                if path.exists() or path.is_symlink():
+                    files[path.relative_to(root).as_posix()] = digest(path, LIMIT if name == 'build-provenance.json' else 4096)
+        return files
+    original = members(expected)
+    need(original and any(Path(name).name.endswith('failure.json') for name in original))
+    need(original == members(downloaded))
+    print('invocation-uploaded-diagnostics-verified')
+
+
 if __name__ == '__main__':
     try:
         mode, *arguments = sys.argv[1:]
-        need(len(arguments) == (2 if mode == 'verify-uploaded' else 0))
+        need(len(arguments) == (2 if mode in ('verify-uploaded', 'verify-uploaded-diagnostics') else 0))
         if mode == 'pin':
             publish(PIN, dict(schemaVersion=1, pinnedAtNanos=time.time_ns(), **current()))
         elif mode == 'seal':
@@ -200,6 +339,8 @@ if __name__ == '__main__':
             verify()
         elif mode == 'verify-uploaded':
             verify_uploaded(Path(arguments[0]), Path(arguments[1]))
+        elif mode == 'verify-uploaded-diagnostics':
+            verify_uploaded_diagnostics(Path(arguments[0]), Path(arguments[1]))
         else:
             need(False)
     except Exception:
