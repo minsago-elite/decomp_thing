@@ -262,6 +262,11 @@ class WebProgramStructureTest {
         val modules = unsupported.pages.modules("owner", jobId, runId, revisionId, null)
         assertContract("moduleInventory", modules)
         assertEquals(JsonNull, modules["totalModules"]); assertTrue(modules.items().isEmpty())
+        val unavailableSummary = modules.getValue("summary").jsonObject
+        assertEquals(JsonNull, unavailableSummary["modules"])
+        assertEquals(JsonNull, unavailableSummary["modulesDeclaredAccepted"])
+        assertEquals(JsonNull, unavailableSummary["unknownPlanReferences"])
+        assertEquals(JsonNull, unavailableSummary["totalPlanReferences"])
         assertEquals("unsupported", modules.getValue("capabilities").jsonArray.single { it.jsonObject.text("id") == "module-ownership" }.jsonObject.text("state"))
         val detail = unsupported.pages.module("owner", jobId, runId, revisionId, "core", null)
         assertContract("moduleDetail", detail); assertEquals(JsonNull, detail["module"])
@@ -277,6 +282,11 @@ class WebProgramStructureTest {
         val summary = modules.getValue("summary").jsonObject
         assertEquals(1, summary.getValue("modulesDeclaredAccepted").jsonPrimitive.int)
         assertEquals(1, summary.getValue("unknownPlanReferences").jsonPrimitive.int)
+        assertEquals(2, summary.getValue("modules").jsonPrimitive.int)
+        assertEquals(8, summary.getValue("totalPlanReferences").jsonPrimitive.int)
+        assertEquals(2, summary.getValue("totalCallTargets").jsonPrimitive.int)
+        assertEquals(2, summary.getValue("totalReferencedGlobalTargets").jsonPrimitive.int)
+        assertEquals("program-structure-summary-v1", summary.getValue("measurementVersion").jsonPrimitive.content)
         assertEquals(1, summary.getValue("unresolvedCallTargets").jsonPrimitive.int)
         assertEquals(1, summary.getValue("unresolvedGlobalReferences").jsonPrimitive.int)
         assertEquals(1, summary.getValue("nameCollisions").jsonPrimitive.int)

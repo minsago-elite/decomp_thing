@@ -154,7 +154,13 @@
       "unknownPlanReferences": 1,
       "nameCollisions": 1,
       "unresolvedCallTargets": 1,
-      "unresolvedGlobalReferences": 1
+      "unresolvedGlobalReferences": 1,
+      "measurementVersion": "program-structure-summary-v1",
+      "modulesInDependencyCycles": 0,
+      "totalPlanReferences": 8,
+      "namedFunctionGlobalRecords": 6,
+      "totalCallTargets": 2,
+      "totalReferencedGlobalTargets": 2
     },
     "totalModules": 2,
     "items": [

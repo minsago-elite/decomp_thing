@@ -336,6 +336,8 @@ internal class WebProgramStructurePages(
     private fun summary(index: WebProgramStructureIndex): JsonObject = buildJsonObject {
         val functions = index.table(WebStructureKind.FUNCTION)
         val globals = index.table(WebStructureKind.GLOBAL)
+        val planAvailable = index.planOutcome.state == "available"
+        put("measurementVersion", "program-structure-summary-v1")
         for (table in index.tables) put(table.kind.route, buildJsonObject {
             put("total", table.size)
             val evidence = IntArray(WebEvidenceState.entries.size)
@@ -349,12 +351,18 @@ internal class WebProgramStructurePages(
             put("extraction", buildJsonObject { WebExtractionStatus.entries.forEach { put(it.wire, extraction[it.ordinal]) } })
             put("ownership", buildJsonObject { ownership.forEach { (key, value) -> put(key, value) } })
         })
-        put("modules", index.modules.size)
-        put("modulesDeclaredAccepted", index.modules.count { it.implementationDeclaration == "accepted" })
-        put("dependencyCycles", index.modules.map { it.cycle }.filter { it.isNotEmpty() }.distinct().size)
-        put("unknownPlanReferences", index.unknownPlanReferences)
+        put("modules", if (planAvailable) JsonPrimitive(index.modules.size) else JsonNull)
+        put("modulesDeclaredAccepted", if (planAvailable) JsonPrimitive(index.modules.count { it.implementationDeclaration == "accepted" }) else JsonNull)
+        put("dependencyCycles", if (planAvailable) JsonPrimitive(index.modules.map { it.cycle }.filter { it.isNotEmpty() }.distinct().size) else JsonNull)
+        put("modulesInDependencyCycles", if (planAvailable) JsonPrimitive(index.modules.count { it.cycle.isNotEmpty() }) else JsonNull)
+        put("unknownPlanReferences", if (planAvailable) JsonPrimitive(index.unknownPlanReferences) else JsonNull)
+        put("totalPlanReferences", if (planAvailable) JsonPrimitive(index.totalPlanReferences) else JsonNull)
         put("nameCollisions", index.collisions.size)
+        put("namedFunctionGlobalRecords", (0 until functions.size).count { functions.names[it] != null } +
+            (0 until globals.size).count { globals.names[it] != null })
+        put("totalCallTargets", (0 until functions.size).sumOf { row -> functions.calls[row].size })
         put("unresolvedCallTargets", (0 until functions.size).sumOf { row -> functions.calls[row].count { it !in functions.index } })
+        put("totalReferencedGlobalTargets", (0 until functions.size).sumOf { row -> functions.referencedGlobals[row].size })
         put("unresolvedGlobalReferences", (0 until functions.size).sumOf { row -> functions.referencedGlobals[row].count { it !in globals.index } })
     }
 
