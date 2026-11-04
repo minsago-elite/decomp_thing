@@ -118,9 +118,12 @@ The GUI provides persistent ELF uploads, recent-job navigation, metadata inspect
 For a non-Docker angr installation, set `ANGR_PYTHON` to the Python executable that can import angr before starting the GUI.
 
 An embedded SPA preview is available with `web --ui spa`. It uploads binaries and browses jobs, attempts and runtime
-status, but does not yet start workflows; the default remains the existing workbench. Choose a `--data-dir` whose
-absolute path has no dot-prefixed component: bundled Ghidra rejects such project paths, including the default
-`.decomp_engine/jobs` ([#1785](https://github.com/minsago-elite/decomp_thing/issues/1785)). See the
+status, but does not yet start workflows; the default remains the existing workbench. Data directories with a
+dot-prefixed component, including the default `.decomp_engine/jobs`, are supported by current builds: Ghidra itself
+rejects such project paths, so on Linux the bundled worker opens the same job-owned project through its working
+directory instead; elsewhere, or when that route is unavailable, the job is refused before Ghidra starts with an
+actionable message. Distributions built before that change still fail; see
+[#1785](https://github.com/minsago-elite/decomp_thing/issues/1785) and the guide's troubleshooting table. See the
 [workbench user guide](docs/workbench-user-guide.md) for launch, sessions, the end-to-end legacy walkthrough, data,
 support information and Git, and [packaging and preview usage](docs/web-packaging.md) for building it.
 
