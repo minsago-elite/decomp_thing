@@ -145,7 +145,8 @@ test('no-data rejection: same error object and message, no retry, frozen bounded
   assert.ok(STRUCTURE_BODY_STAGES.includes(evidence.stage));
   assert.deepEqual({ ...evidence.selected, responseToBodyCallMs: 0, bodyCallMs: 0 }, { observationAvailable: true, sameRouteResponses: 1, responseObserved: true, status: 200,
     servedFromCache: false, fromDiskCache: false, fromServiceWorker: false, loadingFinished: true, finishedBeforeBodyCall: true,
-    loadingFailed: false, loadingCanceled: false, encodedDataLength: 1235, responseToBodyCallMs: 0, bodyCallMs: 0, bodyOutcome: 'rejected' });
+    failedBeforeBodyCall: false, loadingFailed: false, loadingCanceled: false, encodedDataLength: 1235, responseToBodyCallMs: 0, bodyCallMs: 0,
+    responseToFailedMs: null, bodyOutcome: 'rejected' });
   assert.equal(evidence.moduleRequests, 1);
   assert.equal(evidence.moduleOkResponses, 1);
   assert.equal(evidence.trackedIncomplete, false);
@@ -160,6 +161,7 @@ test('observations discriminate finished, unfinished and canceled selections', a
   assert.equal(pending.selected.encodedDataLength, null);
   const canceled = await harness({ moduleEvents: 'canceled', body: noData }).run().catch(structureFailureEvidence);
   assert.deepEqual([canceled.selected.loadingFailed, canceled.selected.loadingCanceled, canceled.selected.loadingFinished], [true, true, false]);
+  assert.equal(canceled.selected.failedBeforeBodyCall, true);
   const repeated = await harness({ extraModuleResponses: 2, body: noData }).run().catch(structureFailureEvidence);
   assert.equal(repeated.selected.sameRouteResponses, 3);
 });
@@ -276,4 +278,253 @@ test('a synchronous protocol failure is recorded as rejected and rethrown unchan
   const error=await h.run().then(()=>null,e=>e);assert.equal(error,original);
   assert.equal(structureFailureEvidence(error).selected.bodyOutcome,'rejected');
   assert.equal(h.calls.filter(m=>m==='Network.getResponseBody').length,1);
+});
+
+// Failure-event host receipt order (#1879). Receipt order only, never a cancellation actor, browser/server order or cause.
+// The fake clock is advanced externally; reading it never advances time. `mode` faults exactly one later read.
+async function withClock(start, body) {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'performance');
+  const clock = { now: start, reads: 0, mode: null };
+  Object.defineProperty(globalThis, 'performance', { configurable: true, value: { now: () => {
+    clock.reads++;
+    const mode = clock.mode; clock.mode = null;
+    if (mode === 'throw') throw new Error('clock canary 1879');
+    if (mode === 'nan') return NaN;
+    if (mode === 'infinity') return Infinity;
+    if (mode === 'string') return String(clock.now);
+    return clock.now;
+  } } });
+  const wallClock = Date.now; Date.now = () => { throw new Error('Wall clock must not be used'); };
+  try { return await body(clock); }
+  finally { Date.now = wallClock; Object.defineProperty(globalThis, 'performance', descriptor); }
+}
+const failed = (fire, requestId, extra = {}) => fire('Network.loadingFailed', { requestId, canceled: true, errorText: 'net::ERR_ABORTED', timestamp: 555555.5, ...extra });
+const NEW_KEYS = ['failedBeforeBodyCall', 'responseToFailedMs'];
+const SELECTED_KEYS = ['bodyCallMs', 'bodyOutcome', 'encodedDataLength', 'failedBeforeBodyCall', 'finishedBeforeBodyCall', 'fromDiskCache', 'fromServiceWorker',
+  'loadingCanceled', 'loadingFailed', 'loadingFinished', 'observationAvailable', 'responseObserved', 'responseToBodyCallMs', 'responseToFailedMs',
+  'sameRouteResponses', 'servedFromCache', 'status'];
+const pick = (selected) => [selected.failedBeforeBodyCall, selected.responseToFailedMs];
+
+test('failure received before the body call: true and response-to-failure receipt gap', async () => {
+  await withClock(100, async (clock) => {
+    const h = harness({ moduleEvents: 'pending', body: noData, events: (fire, id) => { clock.now = 120; failed(fire, id); clock.now = 150; } });
+    const error = await h.run().then(() => null, (e) => e);
+    assert.equal(error.message, NO_DATA); assert.equal(error, h.thrown());
+    const evidence = structureFailureEvidence(error);
+    assert.deepEqual(pick(evidence.selected), [true, 20]);
+    assert.equal(evidence.selected.responseToBodyCallMs, 50);
+    assert.deepEqual([evidence.selected.loadingFailed, evidence.selected.loadingCanceled, evidence.selected.loadingFinished], [true, true, false]);
+    assert.deepEqual(Object.keys(evidence.selected).sort(), SELECTED_KEYS);
+    assert.equal(evidence.trackedIncomplete, false);
+    assert.equal(h.calls.filter((m) => m === 'Network.getResponseBody').length, 1);
+    assert.equal(h.calls.at(-1), 'Network.getResponseBody');
+  });
+});
+
+test('failure received during the body call: false and gap from response', async () => {
+  await withClock(100, async (clock) => {
+    let late;
+    const h = harness({ moduleEvents: 'pending', body: noData, events: (fire) => { late = fire; clock.now = 110; },
+      onBody: () => { clock.now = 130; failed(late, REQUEST); } });
+    const evidence = await h.run().catch(structureFailureEvidence);
+    assert.deepEqual(pick(evidence.selected), [false, 30]);
+    assert.equal(evidence.selected.loadingFailed, true);
+    assert.equal(evidence.selected.responseToBodyCallMs, 10);
+    assert.equal(h.calls.filter((m) => m === 'Network.getResponseBody').length, 1);
+  });
+});
+
+test('finished without failure: false and null gap; finishedAt is not a failure receipt', async () => {
+  await withClock(100, async (clock) => {
+    const evidence = await harness({ body: noData, events: () => { clock.now = 150; } }).run().catch(structureFailureEvidence);
+    assert.deepEqual(pick(evidence.selected), [false, null]);
+    assert.equal(evidence.selected.finishedBeforeBodyCall, true);
+    assert.equal(evidence.selected.loadingFailed, false);
+  });
+});
+
+test('failure received before the stored response receipt keeps the flag and nulls the gap', async () => {
+  await withClock(100, async (clock) => {
+    const evidence = await harness({ moduleEvents: 'pending', body: noData, events: (fire, id) => {
+      clock.now = 120; failed(fire, id);
+      clock.now = 140; fire('Network.responseReceived', { requestId: id, response: { url: origin + apiPath, status: 200 } });
+      clock.now = 150;
+    } }).run().catch(structureFailureEvidence);
+    assert.deepEqual(pick(evidence.selected), [true, null]);
+    assert.equal(evidence.selected.sameRouteResponses, 2);
+    assert.equal(evidence.trackedIncomplete, false, 'a regressing receipt gap is null without marking incomplete');
+  });
+});
+
+test('equal receipt instants are zero, fractional gaps floor and the gap is capped', async () => {
+  await withClock(100, async (clock) => {
+    const equal = await harness({ moduleEvents: 'pending', body: noData, events: (fire, id) => { failed(fire, id); clock.now = 150; } }).run().catch(structureFailureEvidence);
+    assert.deepEqual(pick(equal.selected), [true, 0]);
+  });
+  await withClock(987654.25, async (clock) => {
+    const evidence = await harness({ moduleEvents: 'pending', body: noData, events: (fire, id) => { clock.now = 987674.75; failed(fire, id); } }).run().catch(structureFailureEvidence);
+    assert.deepEqual(pick(evidence.selected), [true, 20]);
+    const text = JSON.stringify(evidence);
+    for (const secret of ['98765', '98767', '555555', 'ERR_ABORTED', REQUEST, SESSION, 'clock canary']) assert.ok(!text.includes(secret), `evidence leaks ${secret}`);
+  });
+  await withClock(100, async (clock) => {
+    const capped = await harness({ moduleEvents: 'pending', body: noData, events: (fire, id) => { clock.now = 100 + 3_600_000 + 5000; failed(fire, id); } }).run().catch(structureFailureEvidence);
+    assert.deepEqual(pick(capped.selected), [true, 3_600_000]);
+    assert.ok(Number.isSafeInteger(capped.selected.responseToFailedMs));
+  });
+});
+
+test('only the first loadingFailed per tracked entry is sampled; duplicates and untracked events read no clock', async () => {
+  await withClock(100, async (clock) => {
+    const reads = [];
+    const evidence = await harness({ moduleEvents: 'pending', extraModuleResponses: 70, body: noData, events: (fire, id) => {
+      clock.now = 120; let before = clock.reads; failed(fire, 'extra-0'); reads.push(clock.reads - before);
+      before = clock.reads; failed(fire, 'extra-69'); reads.push(clock.reads - before);
+      before = clock.reads; failed(fire, 'unmatched-request'); reads.push(clock.reads - before);
+      before = clock.reads; failed(fire, 'X'.repeat(257)); reads.push(clock.reads - before);
+      before = clock.reads; failed(fire, 'extra-0'); reads.push(clock.reads - before);
+      before = clock.reads; failed(fire, id); reads.push(clock.reads - before);
+    } }).run().catch(structureFailureEvidence);
+    assert.deepEqual(reads, [1, 0, 0, 0, 0, 0], 'one sample for the first tracked failure; none for over-cap, unmatched, invalid or duplicate events');
+    assert.equal(evidence.trackedRequests, 64);
+    assert.equal(evidence.selected.observationAvailable, false);
+    assert.deepEqual(pick(evidence.selected), [null, null]);
+  });
+  await withClock(100, async (clock) => {
+    const evidence = await harness({ moduleEvents: 'pending', body: noData, events: (fire, id) => {
+      clock.now = 120; failed(fire, id);
+      clock.now = 125; const before = clock.reads; failed(fire, id, { canceled: false }); assert.equal(clock.reads, before);
+      clock.now = 150;
+    } }).run().catch(structureFailureEvidence);
+    assert.deepEqual(pick(evidence.selected), [true, 20], 'duplicate never overwrites the first receipt');
+    assert.equal(evidence.selected.loadingCanceled, false, 'original duplicate canceled assignment is preserved');
+    assert.equal(evidence.trackedIncomplete, false);
+  });
+});
+
+test('a faulted failure-clock sample leaves original flags, error and incomplete unchanged and is never refilled', async () => {
+  for (const mode of ['throw', 'nan', 'infinity', 'string']) {
+    await withClock(100, async (clock) => {
+      const h = harness({ moduleEvents: 'pending', body: noData, events: (fire, id) => {
+        clock.now = 120; clock.mode = mode; failed(fire, id);
+        assert.equal(clock.mode, null, 'the faulted read happened inside the failure listener');
+        clock.now = 130; failed(fire, id); clock.now = 150;
+      } });
+      const error = await h.run().then(() => null, (e) => e);
+      assert.equal(error, h.thrown()); assert.equal(error.message, NO_DATA); assert.equal(error.cause, undefined);
+      const evidence = structureFailureEvidence(error);
+      assert.deepEqual(pick(evidence.selected), [true, null], `${mode}: observed failure stays visible; gap unavailable`);
+      assert.deepEqual([evidence.selected.loadingFailed, evidence.selected.loadingCanceled], [true, true]);
+      assert.equal(evidence.trackedIncomplete, false, `${mode}: clock fault is not an incomplete observation`);
+      assert.equal(evidence.selected.bodyOutcome, 'rejected');
+      assert.equal(evidence.stage, 'body-call');
+      assert.ok(!JSON.stringify(evidence).includes('clock canary'));
+    });
+  }
+});
+
+test('late failure after the retained snapshot leaves saved evidence unchanged', async () => {
+  await withClock(100, async (clock) => {
+    let late;
+    const evidence = await harness({ moduleEvents: 'pending', body: noData, events: (fire) => { late = fire; clock.now = 150; } }).run().catch(structureFailureEvidence);
+    const saved = JSON.stringify(evidence);
+    assert.deepEqual(pick(evidence.selected), [false, null]);
+    clock.now = 200; failed(late, REQUEST);
+    assert.equal(JSON.stringify(evidence), saved);
+    assert.ok(Object.isFrozen(evidence) && Object.isFrozen(evidence.selected));
+    assert.equal(evidence.selected.loadingFailed, false);
+  });
+});
+
+test('missing, untracked and not-called selections export null failure-order fields', async () => {
+  const missing = await harness({ moduleEvents: 'none' }).run().then(() => null, (e) => e);
+  assert.equal(structureFailureEvidence(missing).selected, null);
+  const untracked = await harness({ requestId: 'X'.repeat(257), body: noData, events: (fire, id) => failed(fire, id) }).run().catch(structureFailureEvidence);
+  assert.deepEqual(pick(untracked.selected), [null, null]);
+  const over = await harness({ extraModuleResponses: 80, body: noData, events: (fire, id) => failed(fire, id) }).run().catch(structureFailureEvidence);
+  assert.deepEqual(pick(over.selected), [null, null]);
+  for (const key of NEW_KEYS) assert.ok(key in over.selected);
+});
+
+test('failure-order fields leave the qualifier call sequence and body request unchanged', async () => {
+  for (const options of [{}, { moduleEvents: 'canceled' }, { moduleEvents: 'pending', events: (fire, id) => failed(fire, id) }]) {
+    const h = harness(options);
+    await h.run().catch(() => {});
+    assert.deepEqual(h.calls, BASE_SEQUENCE);
+    assert.equal(h.calls.length, 69);
+    assert.deepEqual(h.sent.filter(c=>c.method==='Network.getResponseBody'), [{method:'Network.getResponseBody',params:{requestId:REQUEST},sessionId:SESSION}]);
+  }
+  const pinned = await harness({ moduleEvents: 'canceled', href: `${revision}/source-files/${pins.fileId}?sourceSha256=${pins.sourceSha256}&metadataVersion=${'e'.repeat(64)}` }).run().then(() => null, (e) => e);
+  assert.match(pinned.message, /originating source and metadata pins/);
+  assert.equal(structureFailureEvidence(pinned).stage, 'source-link');
+  assert.equal(structureFailureEvidence(pinned).selected.failedBeforeBodyCall, true);
+  assert.equal(typeof sequence, 'function');
+});
+
+
+// Parent controls cover actual delivery and an event after body-promise settlement.
+test('failure-order receipt fields survive real TargetProtocol event delivery', async () => {
+  for (const beforeCall of [true, false]) {
+    await withClock(100, async (clock) => {
+      let deliver;
+      const h = harness({ real: true, moduleEvents: 'pending', body: noData,
+        events: (fire, id) => {
+          deliver = fire;
+          if (beforeCall) { clock.now = 120; failed(fire, id); clock.now = 150; }
+          else clock.now = 110;
+        },
+        onBody: () => { if (!beforeCall) { clock.now = 130; failed(deliver, REQUEST); } },
+      });
+      const error = await h.run().then(() => null, (value) => value);
+      assert.equal(error.message, NO_DATA);
+      assert.match(error.stack, /packaged-browser-target-lifecycle\.mjs/);
+      const evidence = structureFailureEvidence(error);
+      assert.deepEqual(pick(evidence.selected), beforeCall ? [true, 20] : [false, 30]);
+      assert.equal(evidence.trackedIncomplete, false);
+      assert.equal(evidence.selected.loadingFailed, true);
+      assert.equal(evidence.selected.loadingCanceled, true);
+      assert.deepEqual(h.sent.filter(call => call.method === 'Network.getResponseBody'),
+        [{ method: 'Network.getResponseBody', params: { requestId: REQUEST }, sessionId: SESSION }]);
+    });
+  }
+});
+
+test('failure after body settlement preserves the entry flag and the settled body duration', async () => {
+  for (const real of [false, true]) {
+    await withClock(100, async (clock) => {
+      let deliver;
+      const h = harness({ real, moduleEvents: 'pending', body: noData,
+        events: (fire) => { deliver = fire; clock.now = 110; },
+        // First microtask precedes the body's rejection handler; the nested one follows it
+        // and runs before the qualifier resumes to retain its failure snapshot.
+        onBody: () => queueMicrotask(() => queueMicrotask(() => { clock.now = 130; failed(deliver, REQUEST); })),
+      });
+      const error = await h.run().then(() => null, (value) => value);
+      assert.equal(error.message, NO_DATA);
+      if (!real) assert.equal(error, h.thrown());
+      const evidence = structureFailureEvidence(error);
+      assert.equal(evidence.selected.bodyOutcome, 'rejected');
+      assert.deepEqual(pick(evidence.selected), [false, 30]);
+      assert.equal(evidence.selected.bodyCallMs, 0, 'settlement preceded the later failure receipt');
+      assert.equal(evidence.selected.responseToBodyCallMs, 10);
+      assert.equal(evidence.selected.loadingFailed, true);
+      assert.equal(evidence.trackedIncomplete, false);
+      assert.equal(h.calls.filter(method => method === 'Network.getResponseBody').length, 1);
+    });
+  }
+});
+
+
+test('a selected request whose body call never begins retains null ordering fields', async () => {
+  await withClock(100, async (clock) => {
+    const h = harness({ moduleEvents: 'pending', body: noData, events: () => { clock.mode = 'throw'; } });
+    const error = await h.run().then(() => null, (value) => value);
+    assert.equal(error.message, 'clock canary 1879');
+    const evidence = structureFailureEvidence(error);
+    assert.equal(evidence.stage, 'body-call');
+    assert.equal(evidence.selected.observationAvailable, true);
+    assert.equal(evidence.selected.bodyOutcome, 'not-called');
+    assert.deepEqual(pick(evidence.selected), [null, null]);
+    assert.equal(h.calls.filter(method => method === 'Network.getResponseBody').length, 0);
+  });
 });

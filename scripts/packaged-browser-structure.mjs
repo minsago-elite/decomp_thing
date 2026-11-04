@@ -166,6 +166,14 @@ function moduleBodyObserver() {
     return Math.round(value);
   };
   const elapsed = (from, to = performance.now()) => from === null || to === null ? null : clamp(to - from, MAX_MS);
+  // Host receipt instant in the same performance.now domain; a clock fault yields null and changes nothing else (#1879).
+  const hostNow = () => {
+    try { const value = performance.now(); return typeof value === 'number' && Number.isFinite(value) ? value : null; }
+    catch { return null; }
+  };
+  // Ordered host receipt gap only; never marks incomplete and never exports either instant.
+  const receiptGap = (from, to) => typeof from === 'number' && typeof to === 'number' && Number.isFinite(from)
+    && Number.isFinite(to) && to >= from ? Math.min(Math.floor(to - from), MAX_MS) : null;
   const increment = (value) => { if (value >= MAX_COUNT) { incomplete = true; return MAX_COUNT; } return value + 1; };
   const counts = { moduleRequests: 0, moduleResponses: 0, moduleOkResponses: 0 };
   const entries = new Map();
@@ -182,7 +190,7 @@ function moduleBodyObserver() {
     if (entries.has(requestId) || !create) return entries.get(requestId) ?? null;
     if (entries.size >= MAX_TRACKED) { incomplete = true; return null; }
     const value = { responseAt: null, status: null, servedFromCache: false, fromDiskCache: false, fromServiceWorker: false,
-      finishedAt: null, encodedDataLength: null, failed: false, canceled: false };
+      finishedAt: null, encodedDataLength: null, failed: false, canceled: false, failedAt: null };
     entries.set(requestId, value);
     return value;
   };
@@ -223,8 +231,10 @@ function moduleBodyObserver() {
       cdp.on('Network.loadingFailed', guarded((event) => {
         const value = entry(event.requestId, false);
         if (!value) return;
+        const firstFailure = value.failed !== true;
         value.failed = true;
         value.canceled = event.canceled === true;
+        if (firstFailure) value.failedAt = hostNow();
       }), sessionId);
     },
     stage(name) {
@@ -236,13 +246,14 @@ function moduleBodyObserver() {
       const value = entry(requestId, false);
       if (!value || !routeResponses.has(path)) incomplete = true;
       selected = { value, sameRouteResponses: routeResponses.get(path) ?? 0,
-        calledAt: null, settledAt: null, finishedBeforeCall: null, outcome: 'not-called' };
+        calledAt: null, settledAt: null, finishedBeforeCall: null, failedBeforeCall: null, outcome: 'not-called' };
     },
     /** Observes the one existing body call; the same promise outcome and error object propagate. */
     bodyCall(call) {
       if (selected) {
         selected.calledAt = performance.now();
         selected.finishedBeforeCall = selected.value ? selected.value.finishedAt !== null : null;
+        selected.failedBeforeCall = selected.value ? selected.value.failed === true : null;
         selected.outcome = 'pending';
       }
       const record = (outcome) => { if (selected) { selected.outcome = outcome; selected.settledAt = performance.now(); } };
@@ -255,6 +266,8 @@ function moduleBodyObserver() {
       const totalMs = elapsed(started);
       const responseToBodyCallMs = value?.responseAt != null && selected?.calledAt != null ? elapsed(value.responseAt, selected.calledAt) : null;
       const bodyCallMs = selected?.calledAt != null ? elapsed(selected.calledAt, selected.settledAt ?? performance.now()) : null;
+      const failedBeforeBodyCall = selected && value ? selected.failedBeforeCall : null;
+      const responseToFailedMs = failedBeforeBodyCall === null ? null : receiptGap(value.responseAt, value.failedAt);
       const detail = selected && Object.freeze({
         observationAvailable: value !== null,
         sameRouteResponses: selected.sameRouteResponses,
@@ -265,10 +278,11 @@ function moduleBodyObserver() {
         fromServiceWorker: value?.fromServiceWorker ?? false,
         loadingFinished: value?.finishedAt != null,
         finishedBeforeBodyCall: selected.finishedBeforeCall,
+        failedBeforeBodyCall,
         loadingFailed: value?.failed ?? false,
         loadingCanceled: value?.canceled ?? false,
         encodedDataLength: value?.encodedDataLength ?? null,
-        responseToBodyCallMs, bodyCallMs,
+        responseToBodyCallMs, bodyCallMs, responseToFailedMs,
         bodyOutcome: BODY_OUTCOMES.includes(selected.outcome) ? selected.outcome : 'not-called',
       });
       return Object.freeze({ stage, totalMs, ...counts, trackedRequests: entries.size, trackedRoutes: routeResponses.size, trackedIncomplete: incomplete, selected: detail });
