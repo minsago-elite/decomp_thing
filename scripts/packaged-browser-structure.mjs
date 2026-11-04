@@ -225,7 +225,7 @@ export async function qualifyStructure({ fixture, makeTarget, cdp, evaluate, rea
     assert.ok(await evaluate(tab, `document.querySelectorAll('tr').length`) <= 500, 'Mounted table rows exceed the D0 DOM budget');
     await heap();
   }
-  assert.ok(await evaluate(tab, `document.body.innerText.includes('Showing 2001–2100 of 100000 matching functions')`));
+  assert.ok(await evaluate(tab, `document.body.innerText.includes('Showing 5001–5100 of 100000 matching functions')`));
   await cdp.call('Page.reload', {}, tab.sessionId);
   await ready(tab, `(${ROWS})[0] === ${JSON.stringify(address(5000))}`, 'function cursor restored after reload');
 
