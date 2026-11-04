@@ -163,6 +163,21 @@ class Profile1833MatrixTests(unittest.TestCase):
                 }), encoding="utf-8")
             self.assertEqual(MATRIX.history_ids_started_during(output, started, completed), [new_input_run])
 
+    def test_profile_switch_is_recorded_only_for_exact_refusal_without_output_changes(self) -> None:
+        before = {"source-tree.zip": "a" * 64, "reconstruction.json": "b" * 64}
+        classified = MATRIX.classify_profile_switch_refusal(1,
+            "reconstruction failed: " + MATRIX.PROFILE_SWITCH_REFUSAL, before, dict(before))
+        self.assertEqual(classified["status"], "refused")
+        self.assertTrue(classified["generatedOutputUnchanged"])
+        with self.assertRaisesRegex(MATRIX.MatrixError, "expected evidence-carrier refusal"):
+            MATRIX.classify_profile_switch_refusal(1, "compiler failed", before, dict(before))
+        with self.assertRaisesRegex(MATRIX.MatrixError, "unexpectedly succeeded"):
+            MATRIX.classify_profile_switch_refusal(0, MATRIX.PROFILE_SWITCH_REFUSAL, before, dict(before))
+        after = dict(before, **{"source-tree.zip": "c" * 64})
+        with self.assertRaisesRegex(MATRIX.MatrixError, "changed generated output"):
+            MATRIX.classify_profile_switch_refusal(1,
+                "reconstruction failed: " + MATRIX.PROFILE_SWITCH_REFUSAL, before, after)
+
     def test_run_context_binds_input_profile_and_observation_counts(self) -> None:
         run_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
         with tempfile.TemporaryDirectory(dir=MATRIX.ROOT) as scratch:

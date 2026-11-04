@@ -34,6 +34,7 @@ MAX_RUN_DIRECTORY_BYTES = 256 * 1024 * 1024
 MAX_INDIVIDUAL_FILE_BYTES = MAX_TOTAL_BYTES
 MAX_PROGRESS_BYTES = 16 * 1024
 SIDECAR_WAIT_SECONDS = 5.0
+PROFILE_SWITCH_REFUSAL = "cannot reuse an implementation or different-purpose workspace for evidence-carrier generation"
 
 SUMMARY_SPEC = importlib.util.spec_from_file_location(
     "analysis_timing_summary", ROOT / "scripts" / "summarize-analysis-timings.py"
@@ -245,6 +246,111 @@ def history_ids_started_during(output: Path, started_at: datetime, completed_at:
         if started_at <= run_started <= completed_at:
             matches.append(run_id)
     return matches
+
+
+def profile_output_hashes(output: Path) -> dict[str, str]:
+    """Bind the generated result around a refused evidence-carrier profile switch."""
+    paths = (
+        "source-tree.zip",
+        "reconstruction.json",
+        "analysis/reports/program_model.json",
+        "analysis/reports/program_model.json.progress.json",
+    )
+    result: dict[str, str] = {}
+    for relative in paths:
+        path = output / relative
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_INDIVIDUAL_FILE_BYTES:
+            raise MatrixError(f"profile-switch output is absent, linked, or oversized: {relative}")
+        result[relative] = sha256_file(path)
+    return result
+
+
+def classify_profile_switch_refusal(return_code: int, stderr: str,
+                                    before: dict[str, str], after: dict[str, str]) -> dict[str, Any]:
+    if return_code == 0:
+        raise MatrixError("evidence-carrier profile switch unexpectedly succeeded")
+    if PROFILE_SWITCH_REFUSAL not in stderr:
+        raise MatrixError("profile switch failed without the expected evidence-carrier refusal")
+    if before != after:
+        raise MatrixError("refused evidence-carrier profile switch changed generated output")
+    return {"status": "refused", "reason": "evidence-carrier profile identity is fixed for an output",
+        "diagnostic": PROFILE_SWITCH_REFUSAL, "generatedOutputUnchanged": True}
+
+
+def capture_profile_switch_refusal(cli: Path, output: Path, fixture: dict[str, Any], label: str,
+                                   evidence: Path, budget: list[int]) -> dict[str, Any]:
+    attempt_dir = evidence / "observations" / label
+    home = attempt_dir / "home"
+    temporary = attempt_dir / "tmp"
+    home.mkdir(parents=True, exist_ok=False)
+    temporary.mkdir(parents=True, exist_ok=False)
+    before = profile_output_hashes(output)
+    command = [str(cli), "reconstruct", str(fixture["path"]), "--output", str(output),
+        "--profile", "generated-c-ninja-v1", "--evidence-only"]
+    host_before = host_sample()
+    invocation_started = datetime.now(timezone.utc)
+    result = run_logged(command, ROOT, safe_environment(home, temporary), attempt_dir / "cli")
+    invocation_completed = datetime.now(timezone.utc)
+    host_after = host_sample()
+    stderr_path = ROOT / result["stderrPath"]
+    if stderr_path.stat().st_size > 64 * 1024:
+        raise MatrixError("profile-switch refusal diagnostic exceeded its 64 KiB bound")
+    refusal = classify_profile_switch_refusal(result["returnCode"],
+        stderr_path.read_text(encoding="utf-8", errors="replace"), before, profile_output_hashes(output))
+    run_ids = history_ids_started_during(output, invocation_started, invocation_completed)
+    if len(run_ids) != 1:
+        raise MatrixError(f"{label}: expected one journal for the refused invocation, found {len(run_ids)}")
+    run_id = run_ids[0]
+    run_directory = output / "run-history" / run_id
+    metadata_path = run_directory / "run.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    if metadata.get("state") != "closed" or metadata.get("complete") is not True or \
+            metadata.get("lastPhase") != "failed" or metadata.get("runId") != run_id:
+        raise MatrixError(f"{label}: refused profile invocation has no complete failed run record")
+    list_log = run_logged([str(cli), "runs", "list", str(output)], ROOT,
+        safe_environment(home, temporary), attempt_dir / "list")
+    replay_log = run_logged([str(cli), "runs", "replay", str(output), run_id], ROOT,
+        safe_environment(home, temporary), attempt_dir / "replay")
+    if list_log["returnCode"] != 0 or replay_log["returnCode"] != 0:
+        raise MatrixError(f"{label}: refused profile run history does not list/replay")
+    retained_history = attempt_dir / "evidence" / "run-history" / run_id
+    copy_bounded(run_directory, retained_history, budget)
+    timing_dir = output / "analysis/reports/analysis-timings"
+    retained_timing = None
+    timing_digest = None
+    try:
+        sidecar = wait_for_sidecar(timing_dir, run_id)
+    except MatrixError as missing_sidecar:
+        if str(missing_sidecar) != "no timing sidecar correlated to the completed workflow run":
+            raise
+    else:
+        retained_timing = attempt_dir / "evidence" / "analysis-timing.json"
+        copy_bounded(sidecar, retained_timing, budget)
+        timing_digest = sha256_file(retained_timing)
+    observation: dict[str, Any] = {
+        "label": label,
+        "input": {"path": str(fixture["path"].relative_to(ROOT)), "sha256": fixture["sha256"]},
+        "profile": "generated-c-ninja-v1",
+        "cli": result,
+        "hostBefore": host_before,
+        "hostAfter": host_after,
+        "invocationStartedAt": invocation_started.isoformat(),
+        "invocationCompletedAt": invocation_completed.isoformat(),
+        "runId": run_id,
+        "runHistoryMetadata": metadata,
+        "runHistoryPath": str(retained_history.relative_to(ROOT)),
+        "timingSidecar": str(retained_timing.relative_to(ROOT)) if retained_timing else None,
+        "timingSidecarSha256": timing_digest,
+        "timingCoverage": "present" if retained_timing else "no sidecar matched the refused invocation; no phase timing claimed",
+        "runsListReturnCode": list_log["returnCode"],
+        "runsReplayReturnCode": replay_log["returnCode"],
+        "beforeOutputSha256": before,
+        "afterOutputSha256": profile_output_hashes(output),
+        **refusal,
+    }
+    if directory_bytes(evidence) > MAX_TOTAL_BYTES:
+        raise MatrixError("matrix workspace and retained evidence exceed the 4 GiB total byte limit")
+    return observation
 
 
 def copy_bounded(source: Path, destination: Path, budget: list[int]) -> None:
@@ -598,6 +704,7 @@ def run_matrix(cli_arg: Path, evidence_arg: Path, repetitions: int) -> dict[str,
             "partial-resume": "No deterministic checkpoint interruption control is provided by this harness.",
             "exporter-invalidation": "Requires a controlled exporter replacement and verified recapture.",
             "analysis-tool-invalidation": "Requires a separate authenticated bundled-tool replacement.",
+            "profile-invalidation": "Evidence-carrier output is bound to one exact profile. The matrix records the refusal and runs Ninja independently; accepted implementation-profile invalidation requires the full reconstruction/compiler path.",
             "source-invalidation": "Requires the full reconstruction/compiler acceptance path.",
             "interface-invalidation": "Requires the full reconstruction/compiler acceptance path.",
             "receipt-invalidation": "Requires the full reconstruction/compiler acceptance path.",
@@ -667,8 +774,19 @@ def run_matrix(cli_arg: Path, evidence_arg: Path, repetitions: int) -> dict[str,
         profile_output = workspace / "profile-switch"
         profile_output.mkdir()
         profile_records = report["fixtures"].setdefault("profile-switch", {"observations": []})
-        for index, profile in enumerate(("generated-c-make-v1", "generated-c-ninja-v1", "generated-c-make-v1"), start=1):
-            observe(profile_records, profile_output, switch_fixture, profile, f"profile-switch-{index}")
+        observe(profile_records, profile_output, switch_fixture, "generated-c-make-v1", "profile-switch-make-before")
+        refusal = capture_profile_switch_refusal(cli, profile_output, switch_fixture,
+            "profile-switch-ninja-refused", evidence, budget)
+        profile_records["observations"].append(refusal)
+        persist()
+        observe(profile_records, profile_output, switch_fixture, "generated-c-make-v1", "profile-switch-make-after")
+
+        independent_ninja_output = workspace / "profile-ninja-independent"
+        independent_ninja_output.mkdir()
+        observe(profile_records, independent_ninja_output, switch_fixture,
+            "generated-c-ninja-v1", "ninja-independent-fresh")
+        observe(profile_records, independent_ninja_output, switch_fixture,
+            "generated-c-ninja-v1", "ninja-independent-complete-resume")
 
         sidecars = sorted(evidence.glob("observations/*/evidence/analysis-timing.json"))
         summary = SUMMARY.summarize(sidecars)
