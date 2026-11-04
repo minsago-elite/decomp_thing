@@ -152,6 +152,8 @@ class ProjectLayoutProfile(
 ) {
     val declarations: List<ProjectFileDeclaration>
     private val declarationsById: Map<String, ProjectFileDeclaration>
+    private val declarationsByFirstPathComponent: Map<String, List<ProjectFileDeclaration>>
+    private val declarationsWithDynamicFirstPathComponent: List<ProjectFileDeclaration>
 
     init {
         require(schemaVersion == CURRENT_SCHEMA_VERSION) {
@@ -167,6 +169,17 @@ class ProjectLayoutProfile(
         }
         this.declarations = Collections.unmodifiableList(sorted)
         declarationsById = Collections.unmodifiableMap(sorted.associateByTo(TreeMap(), ProjectFileDeclaration::id))
+        val byFirstComponent = TreeMap<String, MutableList<ProjectFileDeclaration>>()
+        val dynamicFirstComponent = ArrayList<ProjectFileDeclaration>()
+        sorted.forEach { declaration ->
+            val first = declaration.pathTemplate.substringBefore('/')
+            if ('{' in first) dynamicFirstComponent += declaration
+            else byFirstComponent.getOrPut(first) { ArrayList() } += declaration
+        }
+        declarationsByFirstPathComponent = Collections.unmodifiableMap(byFirstComponent.mapValues { (_, values) ->
+            Collections.unmodifiableList(values)
+        })
+        declarationsWithDynamicFirstPathComponent = Collections.unmodifiableList(dynamicFirstComponent)
     }
 
     fun declaration(id: String): ProjectFileDeclaration =
@@ -174,12 +187,16 @@ class ProjectLayoutProfile(
 
     fun declarationForPath(path: String): ProjectFileDeclaration {
         val normalized = requireNormalizedProjectPath(path, "project path")
-        val matching = declarations.filter { it.matches(normalized) }
-        require(matching.size == 1) {
-            if (matching.isEmpty()) "project path is not declared by the layout profile: $normalized"
-            else "project path matches multiple layout declarations: $normalized"
+        var matching: ProjectFileDeclaration? = null
+        fun consider(declaration: ProjectFileDeclaration) {
+            if (!declaration.matches(normalized)) return
+            require(matching == null) { "project path matches multiple layout declarations: $normalized" }
+            matching = declaration
         }
-        return matching.single()
+        val first = normalized.substringBefore('/')
+        declarationsByFirstPathComponent[first].orEmpty().forEach(::consider)
+        declarationsWithDynamicFirstPathComponent.forEach(::consider)
+        return matching ?: throw IllegalArgumentException("project path is not declared by the layout profile: $normalized")
     }
 
     internal fun canonicalJson(): String = buildString {

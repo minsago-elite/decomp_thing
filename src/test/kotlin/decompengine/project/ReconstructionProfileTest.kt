@@ -116,6 +116,22 @@ class ReconstructionProfileTest {
     }
 
     @Test
+    fun `layout path index preserves exact and overlapping template resolution`() {
+        val exact = ProjectFileDeclaration("exact", "reports/fixed.json",
+            setOf(ProjectFileRole.EVIDENCE), ProjectContentKind.UTF8_TEXT)
+        val templated = ProjectFileDeclaration("templated", "reports/{name}.json",
+            setOf(ProjectFileRole.VIEWABLE), ProjectContentKind.UTF8_TEXT)
+        val otherRoot = ProjectFileDeclaration("other", "sources/{name}.c",
+            setOf(ProjectFileRole.EDITABLE), ProjectContentKind.UTF8_TEXT)
+        val layout = ProjectLayoutProfile(ProjectLayoutProfile.CURRENT_SCHEMA_VERSION, listOf(exact, templated, otherRoot))
+
+        assertEquals(otherRoot, layout.declarationForPath("sources/main.c"))
+        assertEquals(templated, layout.declarationForPath("reports/current.json"))
+        assertFailsWith<IllegalArgumentException> { layout.declarationForPath("reports/fixed.json") }
+        assertFailsWith<IllegalArgumentException> { layout.declarationForPath("unknown/file") }
+    }
+
+    @Test
     fun `host safety contract rejects a profile request above any ceiling`() {
         val requested = budgets()
         val host = ReconstructionHostSafetyLimits(requested)

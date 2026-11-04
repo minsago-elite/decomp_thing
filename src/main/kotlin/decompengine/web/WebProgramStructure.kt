@@ -428,8 +428,7 @@ internal object WebProgramStructureBuilder {
             val ids = ArrayList<String>(); val names = ArrayList<String?>(); val offsets = ArrayList<Long>()
             val addresses = ArrayList<Long>(); val hasAddress = ArrayList<Boolean>(); val status = ArrayList<WebExtractionStatus>()
             val calls = ArrayList<Array<String>>(); val globals = ArrayList<Array<String>>(); val strings = ArrayList<Int>()
-            val expectedBits = fields(kind).withIndex().associate { (index, field) -> field to (1 shl index) }
-            val expectedMask = expectedBits.values.fold(0) { mask, bit -> mask or bit }
+            val expectedFields = fields(kind)
             while (true) {
                 val token = parser.nextToken()
                 if (token == JsonToken.END_ARRAY) break
@@ -437,7 +436,7 @@ internal object WebProgramStructureBuilder {
                 if (ids.size >= maximum) throw WebStructureFailure("limit-exceeded", "MODEL_ENTITIES_EXCEEDED")
                 budget.charge(512)
                 offsets += parser.currentTokenLocation().byteOffset
-                var seenFields = 0
+                var seenFieldCount = 0
                 var id: String? = null; var name: String? = null; var address: String? = null
                 var label: String? = null; var assessment: String? = null
                 var called: Array<String> = emptyArray(); var referenced: Array<String> = emptyArray(); var stringCount = 0
@@ -446,9 +445,9 @@ internal object WebProgramStructureBuilder {
                     if (next == JsonToken.END_OBJECT) break
                     expect(next, JsonToken.FIELD_NAME)
                     val key = parser.currentName()
-                    val fieldBit = expectedBits[key] ?: malformed()
-                    if (seenFields and fieldBit != 0) malformed()
-                    seenFields = seenFields or fieldBit
+                    if (key !in expectedFields) malformed()
+                    // Jackson's STRICT_DUPLICATE_DETECTION rejects repeated names at tokenization.
+                    seenFieldCount++
                     when (key) {
                         "id" -> id = identifier(parser)
                         "name" -> name = identifier(parser)
@@ -464,7 +463,7 @@ internal object WebProgramStructureBuilder {
                         "byteEvidence" -> byteEvidence(parser)
                     }
                 }
-                if (seenFields != expectedMask || id == null) malformed()
+                if (seenFieldCount != expectedFields.size || id == null) malformed()
                 if (schema >= 2 && assessment != "unassessed") malformed()
                 if (kind != WebStructureKind.TYPE && address == null) malformed()
                 val parsedAddress = address?.let(::parseAddress)
