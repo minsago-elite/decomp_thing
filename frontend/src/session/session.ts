@@ -4,6 +4,7 @@ import { normalizeBasePath } from '../app/paths';
 import { createInvalidationChannel } from './invalidationChannel';
 import { captureReceiptTime } from '../shared/receiptTime';
 import type { ReceiptTime } from '../shared/receiptTime';
+import { canRetainMetadata } from '../shared/retainMetadata';
 import type { BootstrapFragment } from './fragment';
 
 export type SessionGateway = {
@@ -87,7 +88,8 @@ export function createBrowserSession(gateway: SessionGateway, basePath: string) 
     } else if (!logout) {
       const retained = state.status === 'checking' ? state : null;
       publish({ status: 'unavailable', reason: 'connection', ...reference,
-        ...(retained?.runtime && retained.runtimeReceipt ? { runtime: retained.runtime, runtimeReceipt: retained.runtimeReceipt } : {}) });
+        ...(retained?.runtime && retained.runtimeReceipt && canRetainMetadata(error)
+          ? { runtime: retained.runtime, runtimeReceipt: retained.runtimeReceipt } : {}) });
     }
     else publish({ status: 'unavailable', reason: 'logout-unconfirmed', ...reference });
   }

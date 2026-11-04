@@ -74,7 +74,7 @@ it('retains only the last runtime receipt across a transient reconnect read and 
   vi.spyOn(performance, 'now').mockImplementation(() => monotonic);
   const fixture = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/bootstrap.json'), 'utf8')) as { data: Bootstrap };
   const data = { ...fixture.data, sessionExpiresAt: new Date(Date.now() + 60_000).toISOString() };
-  const gateway = { bootstrap: vi.fn().mockResolvedValueOnce(data).mockRejectedValueOnce(new Error('offline')).mockResolvedValueOnce(data), exchange: vi.fn(), logout: vi.fn() };
+  const gateway = { bootstrap: vi.fn().mockResolvedValueOnce(data).mockRejectedValueOnce(new ApiClientError('network_error')).mockResolvedValueOnce(data), exchange: vi.fn(), logout: vi.fn() };
   const session = createBrowserSession(gateway, '/');
   try {
     await session.initialize({ kind: 'absent' });
@@ -116,7 +116,7 @@ it('retains only the last runtime receipt across a transient reconnect read and 
 it('keeps the Runtime retry control focused after a transient session check failure', async () => {
   const fixture = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/bootstrap.json'), 'utf8')) as { data: Bootstrap };
   const data = { ...fixture.data, sessionExpiresAt: new Date(Date.now() + 60_000).toISOString() };
-  const gateway = { bootstrap: vi.fn().mockResolvedValueOnce(data).mockRejectedValueOnce(new Error('offline')),
+  const gateway = { bootstrap: vi.fn().mockResolvedValueOnce(data).mockRejectedValueOnce(new ApiClientError('network_error')),
     exchange: vi.fn(), logout: vi.fn() };
   const session = createBrowserSession(gateway, '/');
   try {
@@ -191,6 +191,30 @@ it('clears retained Runtime facts after a non-transient session refusal', async 
     expect(screen.queryByLabelText('Runtime report')).toBeNull();
   } finally { session.dispose(); }
 });
+
+it.each(['invalid_json', 'invalid_response', 'unexpected_response'] as const)(
+  'clears previously verified Runtime facts after an unverified bootstrap response (%s)', async code => {
+    const fixture = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/bootstrap.json'), 'utf8')) as { data: Bootstrap };
+    const data = { ...fixture.data, sessionExpiresAt: new Date(Date.now() + 60_000).toISOString() };
+    const gateway = { bootstrap: vi.fn().mockResolvedValueOnce(data).mockRejectedValueOnce(new ApiClientError(code)),
+      exchange: vi.fn(), logout: vi.fn() };
+    const session = createBrowserSession(gateway, '/');
+    try {
+      await session.initialize({ kind: 'absent' });
+      render(<Runtime identity={{ applicationVersion: '0.1.0', uiBuildId: data.uiBuildId }} session={session} />);
+      expect(screen.getByText('server_fixture_1')).toBeTruthy();
+      await act(async () => { await session.refresh(); });
+      expect(session.snapshot()).toMatchObject({ status: 'unavailable', reason: 'connection' });
+      expect(session.snapshot()).not.toHaveProperty('runtime');
+      expect(session.snapshot()).not.toHaveProperty('runtimeReceipt');
+      expect(screen.queryByText('server_fixture_1')).toBeNull();
+      expect(screen.queryByLabelText('Runtime report')).toBeNull();
+      expect(screen.queryByText(/Previously loaded metadata may be outdated/)).toBeNull();
+      expect(screen.getByText('Runtime information is not connected')).toBeTruthy();
+      expect(gateway.bootstrap).toHaveBeenCalledTimes(2);
+    } finally { session.dispose(); }
+  },
+);
 
 it('clears connection-retained Runtime facts when another tab invalidates the session', async () => {
   const fixture = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/bootstrap.json'), 'utf8')) as { data: Bootstrap };
