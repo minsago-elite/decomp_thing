@@ -22,7 +22,8 @@
           "reconstruct"
         ],
         "agentContractVersion": 1,
-        "limits": null
+        "limits": null,
+        "launch": null
       },
       {
         "id": "git_local",
@@ -31,7 +32,8 @@
         "message": "This fixture does not claim managed Git is implemented.",
         "workflows": [],
         "agentContractVersion": null,
-        "limits": null
+        "limits": null,
+        "launch": null
       }
     ],
     "limits": {

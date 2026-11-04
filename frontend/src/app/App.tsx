@@ -1,7 +1,7 @@
 import { appCopy as copy } from '../copy/shell';
 import { sourceTitleCopy } from '../copy/sourceTitles';
 import { message as displayMessage, textMessage } from '../shared/messages';
-import { useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { LocationProvider, Route, Router, useLocation } from 'preact-iso/router';
 import { NotFound } from '../routes/NotFound';
 import { ViewBoundary } from '../shared/ViewBoundary';
@@ -32,8 +32,7 @@ type ShellProps = {
 };
 
 /** Browser connectivity is a hint; it never establishes freshness or server-work lifetime. */
-function ConnectionNotice() {
-  const availability = useBrowserAvailability();
+function ConnectionNotice({ availability }: { availability: ReturnType<typeof useBrowserAvailability> }) {
   if (!availability.hasBeenOffline) return null;
   return <aside class="connection-notice notice" role="status" aria-label={copy.connectionStatus}>
     <h2>{availability.online ? copy.refreshLoadedInformation : copy.browserReportsOffline}</h2>
@@ -46,6 +45,19 @@ function ConnectionNotice() {
 
 function Shell({ basePath, guard, identity, recovery, reload, session }: ShellProps) {
   const sessionState = useSession(session);
+  const availability = useBrowserAvailability();
+  const wasOnline = useRef(availability.online);
+  useEffect(() => {
+    if (!availability.online) {
+      wasOnline.current = false;
+      return;
+    }
+    if (wasOnline.current) return;
+    wasOnline.current = true;
+    if (!session) return;
+    const timer = setTimeout(() => { void session.revalidate(); }, 250 + Math.random() * 1000);
+    return () => clearTimeout(timer);
+  }, [availability.online, session]);
   // Every route, including the workspace landing page, loads on demand so the initial
   // closure stays the shell, session and transport (#622).
   const Home = useMemo(() => lazyRoute(() => import('../routes/Home'), recovery), [recovery]);
@@ -161,7 +173,7 @@ function Shell({ basePath, guard, identity, recovery, reload, session }: ShellPr
       <AssetRecoveryNotice recovery={recovery} identity={identity} reload={reload} guard={guard} />
       {sessionState?.status === 'authenticated' && <BuildMismatchNotice identity={identity} serverBuild={sessionState.runtime.uiBuildId}
         reload={reload} guard={guard} />}
-      <ConnectionNotice />
+      <ConnectionNotice availability={availability} />
       {session && <SessionStatus session={session} placement="page" />}
       <div class="app-layout">
         <nav class="app-nav" aria-label={copy.mainNavigation} ref={navigation} onKeyDown={event => {
