@@ -7,8 +7,11 @@ import decompengine.validation.BehaviorComparisonReport;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 
 /**
  * Caller-visible lifetime for the vetted repair workflow.
@@ -19,6 +22,8 @@ import java.util.Objects;
 public final class SecureRepairSession implements AutoCloseable {
     private final TraceGuidedRepairLoop loop;
     private final String harnessProvenance;
+    private final Set<RepairExplorationSnapshot> explorationSnapshots =
+        Collections.newSetFromMap(new IdentityHashMap<>());
     private boolean closed;
 
     SecureRepairSession(TraceGuidedRepairLoop loop, String harnessProvenance) {
@@ -98,10 +103,43 @@ public final class SecureRepairSession implements AutoCloseable {
             result.getValidation() == null ? null : copyReport(result.getValidation()), result.getRunState());
     }
 
+    /** Read retained inputs through the graph authority without exposing the graph or its lock. */
+    public synchronized RepairExplorationSnapshot prepareExploration(Path projectDirectory, Path originalBinary) {
+        requireOpen();
+        RepairExplorationSnapshot snapshot = new RepairExplorationSnapshot(loop.prepareExplorationSnapshot(
+            Objects.requireNonNull(projectDirectory, "projectDirectory"),
+            Objects.requireNonNull(originalBinary, "originalBinary")
+        ));
+        explorationSnapshots.clear();
+        explorationSnapshots.add(snapshot);
+        return snapshot;
+    }
+
+    /** Consume an issued snapshot once, validating it against the locked graph before any mutation. */
+    public synchronized RepairRunOutcome runRepair(
+        Path projectDirectory, Path originalBinary, List<ProcessInput> inputs,
+        Path reportsDirectory, int maximumIterations, RepairExplorationSnapshot snapshot
+    ) {
+        requireOpen();
+        Objects.requireNonNull(snapshot, "snapshot");
+        if (!explorationSnapshots.remove(snapshot)) {
+            throw new IllegalArgumentException("exploration snapshot was not issued by this open session or was already consumed");
+        }
+        RepairRunOutcome result = loop.runRepairWithExplorationSnapshot(
+            Objects.requireNonNull(projectDirectory), Objects.requireNonNull(originalBinary), copyInputs(inputs),
+            Objects.requireNonNull(reportsDirectory), maximumIterations, snapshot.binding()
+        );
+        ArrayList<RepairIteration> iterations = new ArrayList<>(result.getIterations().size());
+        for (RepairIteration iteration : result.getIterations()) iterations.add(copyIteration(iteration));
+        return new RepairRunOutcome(List.copyOf(iterations),
+            result.getValidation() == null ? null : copyReport(result.getValidation()), result.getRunState());
+    }
+
     @Override
     public synchronized void close() {
         if (closed) return;
         closed = true;
+        explorationSnapshots.clear();
         loop.close();
     }
 

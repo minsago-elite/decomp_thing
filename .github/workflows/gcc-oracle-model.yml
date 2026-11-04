@@ -145,6 +145,12 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             apparmor binutils build-essential dbus-user-session gnupg \
             slirp4netns=1.2.1-1build2 uidmap
+      - name: Test bounded GCC reproduction inspect controls
+        run: |
+          mkdir -p build/gcc-reproduction-adapter/tmp
+          TMPDIR="$GITHUB_WORKSPACE/build/gcc-reproduction-adapter/tmp" \
+            python3 -B -m unittest tests.oracle.test_gcc_reproduction_inspect \
+              tests.oracle.test_toolchain_reproduction -v
       - name: Verify source provenance metadata
         run: python3 scripts/verify-gcc-oracle-source.py --metadata-only
       - name: Initialize private GCC builder workspace

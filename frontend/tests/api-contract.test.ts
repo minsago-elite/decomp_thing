@@ -255,6 +255,22 @@ describe('generated v1 contract pipeline', () => {
         .toThrow(expect.objectContaining({ code: 'unsupported_contract' }));
     }
   });
+  it('accepts only completed version-two exploration reports through the API decoder', () => {
+    const original = JSON.parse(fixture('report-exploration')) as ResponseOf<'report'>;
+    const versioned = { ...original, data: { ...original.data, producerSchemaVersion: 2 } };
+    for (const mode of ['producer', 'response'] as const) {
+      expect(decodeContract(JSON.stringify(versioned), { mode })).toEqual(versioned);
+      const invalid = [
+        { ...versioned.data, state: 'partial' },
+        { ...versioned.data, summary: null },
+        { ...versioned.data, authority: 'derived-presentation' },
+        { ...versioned.data, acceptance: 'accepted' },
+      ];
+      for (const data of invalid) {
+        expect(() => decodeContract(JSON.stringify({ ...versioned, data }), { mode })).toThrow(ApiClientError);
+      }
+    }
+  });
   it('keeps reported module validation optional and excludes private compiler fields', () => {
     const original = decodeResponse(fixture('revision-file-unicode'), 'revisionFile');
     const compilation = { sourceSha256: original.data.item.sha256, outcome: 'passed', returnCode: 0,
