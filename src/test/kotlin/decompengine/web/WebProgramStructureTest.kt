@@ -72,13 +72,14 @@ class WebProgramStructureTest {
             file
         }
         val cache = WebProgramStructureCache()
-        fun pagesWithCache(cache: WebProgramStructureCache): WebProgramStructurePages {
+        fun pagesWithCache(cache: WebProgramStructureCache, timing: ((String, Long) -> Unit)? = null): WebProgramStructurePages {
             return WebProgramStructurePages { job, run, revision, project ->
                 assertEquals(Triple(jobId, runId, revisionId), Triple(job, run, revision))
-                evidence.readStructure(reference, cache, project)
+                if (timing == null) evidence.readStructure(reference, cache, project)
+                else evidence.readStructureMeasured(reference, cache, timing, project)
             }
         }
-        fun pagesWithFreshCache() = pagesWithCache(WebProgramStructureCache())
+        fun pagesWithFreshCache(timing: ((String, Long) -> Unit)? = null) = pagesWithCache(WebProgramStructureCache(), timing)
         val pages = pagesWithCache(cache)
     }
 
@@ -625,8 +626,15 @@ class WebProgramStructureTest {
         val revision = Revision(model(synthetic), plan(*modules.toTypedArray()), modules.map { it.id })
         val runtime = Runtime.getRuntime()
         System.gc(); val before = runtime.totalMemory() - runtime.freeMemory()
+        val coldPhases = mutableListOf<Map<String, Long>>()
+        fun timingCollector(): (String, Long) -> Unit {
+            val phases = linkedMapOf<String, Long>()
+            coldPhases += phases
+            return { phase, nanos -> phases[phase] = (phases[phase] ?: 0L) + nanos }
+        }
         var started = System.nanoTime()
-        val first = revision.pages.functions("owner", jobId, runId, revisionId, "limit=200")
+        val measuredPages = revision.pagesWithFreshCache(timingCollector())
+        val first = measuredPages.functions("owner", jobId, runId, revisionId, "limit=200")
         val coldMs = (System.nanoTime() - started) / 1_000_000
         val coldSamples = mutableListOf(coldMs)
         System.gc(); val retained = runtime.totalMemory() - runtime.freeMemory() - before
@@ -634,7 +642,7 @@ class WebProgramStructureTest {
         assertEquals(200, first.items().size)
         repeat(19) {
             System.gc()
-            val freshPages = revision.pagesWithFreshCache()
+            val freshPages = revision.pagesWithFreshCache(timingCollector())
             started = System.nanoTime()
             val sample = freshPages.functions("owner", jobId, runId, revisionId, "limit=200")
             coldSamples += (System.nanoTime() - started) / 1_000_000
@@ -644,13 +652,15 @@ class WebProgramStructureTest {
         val orderedCold = coldSamples.sorted()
         val coldP50 = orderedCold[orderedCold.size / 2]
         val coldP95 = orderedCold[((orderedCold.size * 95 + 99) / 100 - 1).coerceAtMost(orderedCold.lastIndex)]
-        assertTrue(coldP95 < 500, "cold first-page p95 exceeded 500 ms: $coldSamples")
+        val slowestIndex = coldSamples.indices.maxBy { coldSamples[it] }
+        assertTrue(coldP95 < 500, "cold first-page p95 exceeded 500 ms: $coldSamples; " +
+            "slowestPhases=${coldPhases[slowestIndex].mapValues { (_, nanos) -> nanos / 1_000_000 }}")
         val warm = mutableListOf<Long>()
         var cursor = next(first)
         var bytes = first.toString().length
         repeat(20) {
             started = System.nanoTime()
-            val page = revision.pages.functions("owner", jobId, runId, revisionId, "limit=200&cursor=$cursor")
+            val page = measuredPages.functions("owner", jobId, runId, revisionId, "limit=200&cursor=$cursor")
             warm += (System.nanoTime() - started) / 1_000_000
             bytes = maxOf(bytes, page.toString().length)
             cursor = next(page)
@@ -672,6 +682,7 @@ class WebProgramStructureTest {
         warm.sort()
         println("program-structure-scale functions=$count modelBytes=${revision.model!!.size} coldMs=$coldSamples " +
             "coldP50Ms=$coldP50 coldP95Ms=$coldP95 coldMaxMs=${orderedCold.last()} " +
+            "slowestPhases=${coldPhases[slowestIndex].mapValues { (_, nanos) -> nanos / 1_000_000 }} " +
             "warmP50Ms=${warm[warm.size / 2]} warmMaxMs=${warm.last()} detailMs=$detailMs retainedBytes=$retained maxPageChars=$bytes")
         // D0 budgets: bounded responses (≤200 rows, <1 MiB), first-data-page latency and incremental JVM memory.
         assertTrue(bytes < 1_000_000, "page bytes $bytes")

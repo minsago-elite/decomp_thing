@@ -197,10 +197,18 @@ internal object WebProgramStructureBuilder {
         profile: ReconstructionProfile,
         manifest: SourceTreeManifest,
         readEvidence: (GeneratedFileEvidence, Int) -> ByteArray?,
+        timing: ((String, Long) -> Unit)? = null,
     ): WebProgramStructureIndex {
+        fun <T> measured(phase: String, action: () -> T): T {
+            if (timing == null) return action()
+            val started = System.nanoTime()
+            return try { action() } finally { timing(phase, System.nanoTime() - started) }
+        }
         val ref = snapshot.reference
-        val fileIds = snapshot.files.withIndex().associate { (index, file) ->
-            file.evidence.path to revisionSourceFileId(ref, index, file.evidence.path)
+        val fileIds = measured("index-source-files") {
+            snapshot.files.withIndex().associate { (index, file) ->
+                file.evidence.path to revisionSourceFileId(ref, index, file.evidence.path)
+            }
         }
         val shared = declaredPath(profile, "shared-interface")?.takeIf { it in fileIds }
         val budget = RetainedBudget(64 * 1024L + fileIds.entries.sumOf { 128L + 2L * (it.key.length + it.value.length) })
@@ -213,14 +221,14 @@ internal object WebProgramStructureBuilder {
         val modelFile = evidenceFile(profile, manifest, "program-model-evidence")
             ?: return result(WebStructureOutcome("not-recorded",
                 if (declaredPath(profile, "program-model-evidence") == null) "PROFILE_DECLARES_NO_MODEL" else "MODEL_NOT_RECORDED"))
-        val modelBytes = readEvidence(modelFile, MAXIMUM_MODEL_BYTES)
+        val modelBytes = measured("read-model-evidence") { readEvidence(modelFile, MAXIMUM_MODEL_BYTES) }
             ?: return result(WebStructureOutcome("limit-exceeded", "MODEL_BYTES_EXCEEDED"))
         val model = WebStructureRecord(modelFile.path, modelFile.sha256, modelBytes.size.toLong())
         val implementationUnresolved = manifest.unresolvedImplementationIds.toHashSet()
         val recoveryUnresolved = manifest.unresolvedEntityIds.toHashSet()
         val parsed = try {
             budget.charge(0) // Also admit the snapshot/file-identity baseline when the model is empty.
-            ModelReader(modelBytes, implementationUnresolved, recoveryUnresolved, budget).read()
+            measured("parse-model") { ModelReader(modelBytes, implementationUnresolved, recoveryUnresolved, budget).read() }
         }
             catch (failure: WebStructureFailure) { return result(WebStructureOutcome(failure.state, failure.reason), model) }
             catch (failure: Exception) {
@@ -236,14 +244,16 @@ internal object WebProgramStructureBuilder {
         var planRecord: WebStructureRecord? = null
         var plan: ModulePlan? = null
         if (planFile != null) {
-            val bytes = readEvidence(planFile, MAXIMUM_PLAN_BYTES)
+            val bytes = measured("read-plan-evidence") { readEvidence(planFile, MAXIMUM_PLAN_BYTES) }
             if (bytes == null) planOutcome = WebStructureOutcome("limit-exceeded", "PLAN_BYTES_EXCEEDED")
             else {
                 planRecord = WebStructureRecord(planFile.path, planFile.sha256, bytes.size.toLong())
                 planOutcome = try {
-                    val candidate = ModulePlanJson.readCanonical(bytes, MAXIMUM_PLAN_BYTES)
+                    val candidate = measured("parse-canonical-plan") {
+                        ModulePlanJson.readCanonical(bytes, MAXIMUM_PLAN_BYTES, {}, timing)
+                    }
                     val planBudget = RetainedBudget(retainedBytes, "PLAN_RETAINED_BYTES_EXCEEDED")
-                    validatePlan(candidate, planBudget)
+                    measured("validate-plan") { validatePlan(candidate, planBudget) }
                     plan = candidate
                     retainedBytes = planBudget.bytes
                     WebStructureOutcome.AVAILABLE
@@ -266,25 +276,27 @@ internal object WebProgramStructureBuilder {
             if (ids.distinct().size != ids.size || plan.modules.size > WebSourceCatalogSnapshot.MAXIMUM_FILES) {
                 planOutcome = WebStructureOutcome("invalid", "PLAN_DUPLICATE_MODULE")
             } else {
-                plan.modules.sortedBy { it.id }.forEach { planned ->
-                    val implementationFile = filesByPath[planned.sourcePath]
-                    modules += WebStructureModule(planned.id, planned.sourcePath, planned.headerPath, planned.functionIds,
-                        planned.globalIds, planned.typeIds, planned.boundaryEvidence,
-                        // The source-tree manifest was already checked against this profile by
-                        // SourceTreeManifestReader; repeating the declaration's regex match for
-                        // every planned module adds substantial cold-path cost at scale.
-                        when (implementationFile?.acceptedImplementation) {
-                            true -> "accepted"; false -> "unaccepted"; null -> "not-classified"
-                        }, cycles[planned.id].orEmpty())
-                }
-                for ((moduleIndex, module) in modules.withIndex()) {
-                    for ((kind, owned) in listOf(WebStructureKind.FUNCTION to module.functionIds,
-                        WebStructureKind.GLOBAL to module.globalIds, WebStructureKind.TYPE to module.typeIds)) {
-                        val table = parsed.tables[kind.ordinal]
-                        for (id in owned) {
-                            val row = table.index[id]
-                            if (row == null) { unknown++; continue }
-                            table.owners[row] = if (table.owners[row] == OWNER_UNOWNED) moduleIndex else OWNER_AMBIGUOUS
+                measured("form-modules-and-owners") {
+                    plan.modules.sortedBy { it.id }.forEach { planned ->
+                        val implementationFile = filesByPath[planned.sourcePath]
+                        modules += WebStructureModule(planned.id, planned.sourcePath, planned.headerPath, planned.functionIds,
+                            planned.globalIds, planned.typeIds, planned.boundaryEvidence,
+                            // The source-tree manifest was already checked against this profile by
+                            // SourceTreeManifestReader; repeating the declaration's regex match for
+                            // every planned module adds substantial cold-path cost at scale.
+                            when (implementationFile?.acceptedImplementation) {
+                                true -> "accepted"; false -> "unaccepted"; null -> "not-classified"
+                            }, cycles[planned.id].orEmpty())
+                    }
+                    for ((moduleIndex, module) in modules.withIndex()) {
+                        for ((kind, owned) in listOf(WebStructureKind.FUNCTION to module.functionIds,
+                            WebStructureKind.GLOBAL to module.globalIds, WebStructureKind.TYPE to module.typeIds)) {
+                            val table = parsed.tables[kind.ordinal]
+                            for (id in owned) {
+                                val row = table.index[id]
+                                if (row == null) { unknown++; continue }
+                                table.owners[row] = if (table.owners[row] == OWNER_UNOWNED) moduleIndex else OWNER_AMBIGUOUS
+                            }
                         }
                     }
                 }

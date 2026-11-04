@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { runInNewContext } from 'node:vm';
 import { appendStructureFeedbackSample, assertStructureSourceLink, createJvmRssSummary, createStructureResponseRecorder,
-  nearestRankP95, recordJvmRssSample, structureFeedbackInstrumentation, summarizeJvmRss } from './packaged-browser-structure.mjs';
+  createStructureTimingRecorder, nearestRankP95, recordJvmRssSample, structureFeedbackInstrumentation, summarizeJvmRss } from './packaged-browser-structure.mjs';
 
 const revision = `/nested/jobs/${'f'.repeat(32)}/runs/run_structure_scale/revisions/revision_structure_scale`;
 const browserOrigin = 'http://127.0.0.1:12345';
@@ -18,6 +18,30 @@ test('structure scale p95 uses nearest rank and refuses missing or invalid timin
   for (const values of [[], [Number.NaN], [Number.POSITIVE_INFINITY], [-1], null]) {
     assert.throws(() => nearestRankP95(values), TypeError);
   }
+});
+
+test('structure phase timings retain only bounded same-origin GET route and inventory requests', () => {
+  const recorder = createStructureTimingRecorder(browserOrigin);
+  recorder.requestWillBeSent({ requestId: 'chunk', timestamp: 1, request: { method: 'GET',
+    url: `${browserOrigin}/nested/assets/ui/assets/Structure-abcd.js` } });
+  recorder.responseReceived({ requestId: 'chunk', response: { status: 200,
+    timing: { requestTime: 1, receiveHeadersEnd: 40 } } });
+  recorder.loadingFinished({ requestId: 'chunk', timestamp: 1.08 });
+  recorder.requestWillBeSent({ requestId: 'inventory', timestamp: 2, request: { method: 'GET',
+    url: `${browserOrigin}/nested/api/v1/jobs/${'a'.repeat(32)}/runs/run/revisions/rev/functions?limit=100` } });
+  recorder.responseReceived({ requestId: 'inventory', response: { status: 200,
+    timing: { requestTime: 2.01, receiveHeadersEnd: 90 } } });
+  recorder.loadingFinished({ requestId: 'inventory', timestamp: 2.12 });
+  recorder.requestWillBeSent({ requestId: 'foreign', timestamp: 3, request: { method: 'GET',
+    url: 'http://example.test/nested/assets/ui/assets/Structure-foreign.js' } });
+  recorder.requestWillBeSent({ requestId: 'write', timestamp: 3, request: { method: 'POST',
+    url: `${browserOrigin}/nested/api/v1/jobs/${'a'.repeat(32)}/runs/run/revisions/rev/functions` } });
+  recorder.requestWillBeSent({ requestId: 'failed', timestamp: 3, request: { method: 'GET',
+    url: `${browserOrigin}/nested/assets/ui/assets/Structure-failed.js` } });
+  recorder.loadingFailed({ requestId: 'failed', errorText: 'private request detail' });
+  assert.deepEqual(recorder.summary(), { routeChunkRequests: [{ durationMs: 80, status: 200 }],
+    functionRequests: [{ durationMs: 120, status: 200, headersMs: 100 }],
+    failedRequests: [{ phase: 'route-chunk' }], pendingRequestCount: 0 });
 });
 
 test('JVM RSS budget is measured above warmed baseline and incomplete sampling stays explicit', () => {

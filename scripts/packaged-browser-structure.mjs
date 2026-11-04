@@ -154,6 +154,61 @@ export function nearestRankP95(values) {
   return sorted[Math.ceil(sorted.length * 0.95) - 1];
 }
 
+/** Retain bounded, same-origin phase timings without storing request URLs or response bodies. */
+export function createStructureTimingRecorder(browserOrigin) {
+  const origin = new URL(browserOrigin).origin;
+  const pending = new Map();
+  const routeChunks = [];
+  const functionRequests = [];
+  const failedRequests = [];
+  function relevant(url) {
+    try { return new URL(url).origin === origin; } catch { return false; }
+  }
+  function requestWillBeSent(event) {
+    if (pending.size >= 64 || event.request.method !== 'GET' || !relevant(event.request.url)) return;
+    const pathname = new URL(event.request.url).pathname;
+    const routeChunk = /\/assets\/ui\/assets\/[^/]*Structure[^/]*\.js$/.test(pathname);
+    const functionRequest = /\/api\/v1\/jobs\/[^/]+\/runs\/[^/]+\/revisions\/[^/]+\/functions$/.test(pathname);
+    if (!routeChunk && !functionRequest) return;
+    pending.set(event.requestId, { routeChunk, functionRequest, start: event.timestamp, response: null });
+  }
+  function responseReceived(event) {
+    const value = pending.get(event.requestId);
+    if (!value) return;
+    const timing = event.response.timing;
+    value.response = {
+      status: event.response.status,
+      headersMs: timing && Number.isFinite(timing.requestTime) && Number.isFinite(timing.receiveHeadersEnd)
+        ? Math.max(0, (timing.requestTime + timing.receiveHeadersEnd / 1000 - value.start) * 1000) : null,
+    };
+  }
+  function loadingFinished(event) {
+    const value = pending.get(event.requestId);
+    if (!value) return;
+    pending.delete(event.requestId);
+    const sample = { durationMs: Math.max(0, (event.timestamp - value.start) * 1000),
+      status: value.response?.status ?? null, headersMs: value.response?.headersMs ?? null };
+    if (value.routeChunk && routeChunks.length < 16) routeChunks.push(sample);
+    if (value.functionRequest && functionRequests.length < 16) functionRequests.push(sample);
+  }
+  function loadingFailed(event) {
+    const value = pending.get(event.requestId);
+    if (!value) return;
+    pending.delete(event.requestId);
+    if (failedRequests.length < 16) failedRequests.push({ phase: value.routeChunk ? 'route-chunk' : 'function-request' });
+  }
+  return {
+    requestWillBeSent, responseReceived, loadingFinished, loadingFailed,
+    summary() {
+      return { routeChunkRequests: routeChunks.map(({ durationMs, status }) => ({ durationMs: Math.round(durationMs), status })),
+        functionRequests: functionRequests.map(({ durationMs, status, headersMs }) => ({ durationMs: Math.round(durationMs),
+          status, headersMs: headersMs === null ? null : Math.round(headersMs) })),
+        failedRequests: [...failedRequests],
+        pendingRequestCount: pending.size };
+    },
+  };
+}
+
 export function createJvmRssSummary(baselineBytes) {
   if (!Number.isSafeInteger(baselineBytes) || baselineBytes <= 0) throw new TypeError('JVM RSS baseline is invalid');
   return { baselineBytes, peakBytes: baselineBytes, baselineSampleCount: 1, baselineSpreadBytes: 0,
@@ -329,6 +384,11 @@ async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evalua
   const inventoryReads = [];
   const inventoryRequests = new Map();
   const inventoryRequestDurationsMs = [];
+  const structureTiming = createStructureTimingRecorder(browserOrigin);
+  cdp.on('Network.requestWillBeSent', structureTiming.requestWillBeSent, tab.sessionId);
+  cdp.on('Network.responseReceived', structureTiming.responseReceived, tab.sessionId);
+  cdp.on('Network.loadingFinished', structureTiming.loadingFinished, tab.sessionId);
+  cdp.on('Network.loadingFailed', structureTiming.loadingFailed, tab.sessionId);
   const moduleResponseBodies = createStructureResponseRecorder((requestId) =>
     cdp.call('Network.getResponseBody', { requestId }, tab.sessionId));
   const moduleResponsePaths = new Map();
@@ -439,7 +499,9 @@ async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evalua
   const requestP95Ms = nearestRankP95(inventoryRequestDurationsMs);
   const localFeedbackP95Ms = nearestRankP95(localFeedbackMs);
   const jvmMemory = await jvmRssSampler.stop();
-  assert.ok(firstPageMs <= FIRST_DATA_BUDGET_MS, `First function data page ${firstPageMs}ms exceeds the D0 ${FIRST_DATA_BUDGET_MS}ms budget`);
+  const structureTimingSummary = structureTiming.summary();
+  assert.ok(firstPageMs <= FIRST_DATA_BUDGET_MS,
+    `First function data page ${firstPageMs}ms exceeds the D0 ${FIRST_DATA_BUDGET_MS}ms budget; phase timings: ${JSON.stringify(structureTimingSummary)}`);
   assert.ok(pageDataP95Ms <= FIRST_DATA_BUDGET_MS, `Paged function data p95 ${pageDataP95Ms}ms exceeds the D0 ${FIRST_DATA_BUDGET_MS}ms budget`);
   assert.ok(searchMs <= FIRST_DATA_BUDGET_MS, `Function search first data ${searchMs}ms exceeds the D0 ${FIRST_DATA_BUDGET_MS}ms budget`);
   assert.ok(requestP95Ms <= FIRST_DATA_BUDGET_MS, `Function inventory request p95 ${requestP95Ms}ms exceeds the D0 ${FIRST_DATA_BUDGET_MS}ms budget`);
@@ -458,7 +520,8 @@ async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evalua
   pageMs.sort((a, b) => a - b);
   return { recordedFunctions: fixture.functions, modules: fixture.modules, modelBytes: fixture.modelBytes, rowsPerPage: 100,
     pagesVisited: 51, measuredInteractions: localFeedbackMs.length, maximumMountedRows: 100,
-    firstPageMs: Math.round(firstPageMs), pageMsP50: Math.round(pageMs[Math.ceil(pageMs.length * 0.5) - 1]), pageMsP95: Math.round(pageDataP95Ms),
+    firstPageMs: Math.round(firstPageMs), structureTiming: structureTimingSummary,
+    pageMsP50: Math.round(pageMs[Math.ceil(pageMs.length * 0.5) - 1]), pageMsP95: Math.round(pageDataP95Ms),
     functionRequestP95Ms: Math.round(requestP95Ms), localFeedbackP95Ms: Math.round(localFeedbackP95Ms),
     firstPageBudgetMs: FIRST_DATA_BUDGET_MS, localFeedbackBudgetMs: LOCAL_FEEDBACK_BUDGET_MS, jvmMemory,
     searchMs: Math.round(searchMs), peakBrowserHeapBytes, cursorReload: true,

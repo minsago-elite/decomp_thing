@@ -27,6 +27,7 @@ import { canRetainMetadata, isDeletedJob, metadataFailureKind } from '../shared/
 import { onLibraryChange } from '../jobs/libraryChannel';
 import { attemptOutcomeCopy as outcomeCopy, stopOutcomeCopy } from '../copy/attemptOutcome';
 import { QueuePosition } from '../jobs/QueuePosition';
+import { loadStructureRoute } from './loadStructureRoute';
 
 function Details({ jobId, runId, basePath, session, view, navigation }: {
   jobId: string; runId: string; basePath: string; session: BrowserSession; view: RunView; navigation?: ValidationNavigation;
@@ -39,6 +40,9 @@ function Details({ jobId, runId, basePath, session, view, navigation }: {
   const run = observation?.value;
   const [refresh, setRefresh] = useState(0);
   useEffect(() => onLibraryChange(basePath, () => setRefresh(value => value + 1)), [basePath]);
+  useEffect(() => {
+    if (run?.resultRevisionId) void loadStructureRoute().catch(() => undefined);
+  }, [run?.resultRevisionId]);
   useEffect(() => {
     const controller = new AbortController();
     setStored(previous => ({ binding, data: previous.binding === binding ? previous.data : null, error: '', loading: true }));

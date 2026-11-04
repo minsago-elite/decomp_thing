@@ -22,6 +22,7 @@ import type { BuildIdentity } from './buildIdentity';
 import { appPath } from './paths';
 import { DisplayPreferences } from './DisplayPreferences';
 import mark from './mark.svg';
+import { loadStructureRoute } from '../routes/loadStructureRoute';
 
 type ShellProps = {
   basePath: string;
@@ -56,7 +57,7 @@ function Shell({ basePath, guard, identity, recovery, reload, session }: ShellPr
   const Run = useMemo(() => lazyRoute(() => import('../routes/Run'), recovery), [recovery]);
   const Runtime = useMemo(() => lazyRoute(() => import('../routes/Runtime'), recovery), [recovery]);
   const Sources = useMemo(() => lazyRoute(() => import('../routes/Sources'), recovery), [recovery]);
-  const Structure = useMemo(() => lazyRoute(() => import('../routes/Structure'), recovery), [recovery]);
+  const Structure = useMemo(() => lazyRoute(loadStructureRoute, recovery), [recovery]);
   const location = useLocation();
   const main = useRef<HTMLElement>(null);
   const navigation = useRef<HTMLElement>(null);
