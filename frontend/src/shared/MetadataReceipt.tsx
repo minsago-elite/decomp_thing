@@ -17,6 +17,7 @@ function ReceiptText({ receipt, visible }: { receipt: ReceiptTime; visible: bool
 /** A local display clock never refreshes data or announces repeated live-region updates. */
 export function MetadataReceipt({ kind, receipt }: { kind: keyof typeof copy.labels; receipt: ReceiptTime | undefined }) {
   const { visible } = useBrowserAvailability();
-  return <p class="metadata-receipt" aria-label={copy.labels[kind]}>{message(commonCopy.labeledValue, { label: copy.labels[kind], value: receipt
+  // Paragraph role prohibits aria-label (ARIA 1.2, axe aria-prohibited-attr); a named group keeps the receipt name.
+  return <p class="metadata-receipt" role="group" aria-label={copy.labels[kind]}>{message(commonCopy.labeledValue, { label: copy.labels[kind], value: receipt
     ? <ReceiptText receipt={receipt} visible={visible} /> : copy.unknown })}</p>;
 }

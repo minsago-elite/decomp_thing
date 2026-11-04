@@ -1,4 +1,5 @@
 // @vitest-environment node
+import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { createServer as createHttpServer } from 'node:http';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
@@ -155,6 +156,19 @@ describe('shared-schema deterministic fixtures', () => {
     expect(((await exact.json()) as { kind: string }).kind).toBe('sourceSearch');
     const otherQuery = await fetch(`${frontend.api}/jobs/f619f619f619f619f619f619f619f619/runs/fixture_run_responsive/revisions/fixture_revision_responsive/source-search?q=other&limit=50`);
     expect(otherQuery.status).toBe(400);
+    // #619 exploration partial/preparation raw evidence: exact octet-stream bytes; queries stay rejected.
+    for (const kind of ['partial', 'preparation']) {
+      const path = `${frontend.api}/jobs/f619f619f619f619f619f619f619f619/artifacts/fixture_exploration_${kind}/content`;
+      const report = await fetch(`${frontend.api}/jobs/f619f619f619f619f619f619f619f619/runs/fixture_run_responsive_${kind}/reports/exploration`)
+        .then(async (response) => await response.json() as { data: { sourceArtifact: { sha256: string; sizeBytes: string } } });
+      const content = await fetch(path);
+      expect(content.headers.get('content-type')).toBe('application/octet-stream');
+      expect(content.headers.get('x-request-id')).toBe('request_simulated_artifact');
+      const bytes = Buffer.from(await content.arrayBuffer());
+      expect(String(bytes.byteLength)).toBe(report.data.sourceArtifact.sizeBytes);
+      expect(createHash('sha256').update(bytes).digest('hex')).toBe(report.data.sourceArtifact.sha256);
+      expect((await fetch(`${path}?x=1`)).status).toBe(400);
+    }
     const unknown = await fetch(`${frontend.api}/not-present`);
     expect(unknown.status).toBe(404);
     expect(unknown.headers.get('content-type')).toContain('application/json');

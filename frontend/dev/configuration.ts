@@ -20,6 +20,8 @@ type FixtureSet = {
   scenarios: { name: string; description: string; jobPath: string; runPath: string; reportPath: string }[];
   errors: Record<string, unknown>;
   download: { path: string; body: string; sha256: string };
+  /** Exact raw-evidence JSON bytes, served as the private artifact-content octet stream. */
+  artifactContents?: Record<string, { body: string; sha256: string }>;
 };
 
 const frontendRoot = fileURLToPath(new URL('../', import.meta.url));
@@ -100,6 +102,12 @@ function serveFixture(request: IncomingMessage, response: ServerResponse, url: U
       'Content-Length': Buffer.byteLength(fixtures.download.body), 'Cache-Control': 'no-store',
       'X-Content-Type-Options': 'nosniff', ETag: `"${fixtures.download.sha256}"` });
     response.end(head ? undefined : fixtures.download.body);
+  } else if (!url.search && fixtures.artifactContents && Object.hasOwn(fixtures.artifactContents, url.pathname)) {
+    const content = fixtures.artifactContents[url.pathname]!;
+    response.writeHead(200, { 'Content-Type': 'application/octet-stream', 'X-Request-ID': 'request_simulated_artifact',
+      'Content-Length': Buffer.byteLength(content.body), 'Cache-Control': 'no-store',
+      'X-Content-Type-Options': 'nosniff', ETag: `"${content.sha256}"` });
+    response.end(head ? undefined : content.body);
   } else if (document?.kind === 'events' && !url.search) {
     response.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store',
       'X-Content-Type-Options': 'nosniff' });

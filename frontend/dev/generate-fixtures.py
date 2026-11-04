@@ -34,7 +34,79 @@ RESPONSIVE_HEX = "".join(("" if i == 0 else "\n" if i % 16 == 0 else " ") + f"{b
                          for i, b in enumerate(RESPONSIVE_PREVIEW_TEXT.encode()))
 
 
-def responsive_fixtures(api: str, record) -> dict:
+def _responsive_input(source: str, arg: str) -> dict:
+    return {"id": "case-" + "\u05d0\u0628" + "x" * 40, "source": source,
+            "args": [arg, RESPONSIVE_LONG_NAME, "<img src=x>"], "stdinHex": RESPONSIVE_PREVIEW_TEXT.encode().hex()[:256]}
+
+
+def _responsive_observation(exit_code: int) -> dict:
+    out = RESPONSIVE_PREVIEW_TEXT.encode().hex()[:256]
+    return {"candidateId": "case-" + "\u05d0\u0628" + "x" * 40, "exitCode": exit_code, "stdoutHex": out,
+            "stderrHex": "1b", "signature": f"{exit_code}:{out}:1b", "networkIsolated": True}
+
+
+# Exploration partial-case artifacts (producer schema 1), rendered by ExplorationCases' two progress tables.
+RESPONSIVE_PARTIAL_CASES = {
+    "schema": "decomp-exploration-failure", "schemaVersion": 1, "state": "partial", "coverage": None, "confidence": None,
+    "failure": {"phase": "expanded", "candidateIndex": 1, "kind": "timeout", "code": "behavior-deadline-exceeded"},
+    "samples": {"baselineInputs": 2, "expandedInputs": 3, "baselineObserved": 2, "expandedObserved": 1},
+    "details": {"baselineInputs": [_responsive_input("SEED", RESPONSIVE_SOURCE_LINE[:200]), _responsive_input("SEED", "second")],
+                "expandedInputs": [_responsive_input("MUTATION", "a"), _responsive_input("MUTATION", "failed"),
+                                   _responsive_input("MUTATION", "unobserved")],
+                "baselineObservations": [_responsive_observation(124), _responsive_observation(0)],
+                "expandedObservations": [_responsive_observation(124)]},
+    "detailsOmitted": None}
+RESPONSIVE_PREPARATION_CASES = {
+    "schema": "decomp-exploration-preparation-failure", "schemaVersion": 1, "state": "partial",
+    "observationState": "not-started",
+    "failure": {"stage": "static-hints", "kind": "generation-failure", "code": "candidate-generation-failed"},
+    "availableInputs": {"seeds": 1, "angr": 1, "staticHints": None, "expanded": None},
+    "details": {"seeds": [_responsive_input("SEED", RESPONSIVE_SOURCE_LINE[:200])],
+                "angr": [_responsive_input("ANGR", "angr")], "staticHints": None},
+    "detailsOmitted": None, "coverage": None, "confidence": None}
+
+
+def responsive_exploration(job_path: str, job_id: str, base_run: dict, kind: str, cases: dict, record, artifacts) -> dict:
+    """One completed attempt whose partial exploration report binds an exact raw-evidence JSON artifact."""
+    run_id = f"fixture_run_responsive_{kind}"
+    run = deepcopy(base_run)
+    run["data"].update(runId=run_id)
+    run_path = job_path + "/runs/" + run_id
+    record(run_path, run)
+    events = source("events-poll")
+    event = events["data"]["items"][0]
+    event.update(jobId=job_id, runId=run_id, cursor=f"fixture_cursor_responsive_{kind}")
+    event["payload"].update(state="completed", version=run["data"]["version"])
+    events["data"]["nextCursor"] = event["cursor"]
+    record(run_path + "/events", events)
+    snapshot = source("snapshot")
+    snapshot["data"].update(run=deepcopy(run["data"]), throughCursor=event["cursor"],
+                            throughSequence=event["sequence"], oldestCursor=event["cursor"])
+    record(run_path + "/snapshot", snapshot)
+    controls = source("attempt-controls-retry")
+    controls["data"].update(jobId=job_id, runId=run_id, runVersion=run["data"]["version"], state="completed",
+                            inputRevisionId=None, resumeRestores=None, successorRunId=None,
+                            cancel={"available": False, "reason": "ATTEMPT_TERMINAL"},
+                            retry={"available": False, "reason": "ATTEMPT_COMPLETED"},
+                            resume={"available": False, "reason": "ATTEMPT_COMPLETED"})
+    record(run_path + "/controls", controls)
+    body = json.dumps(cases, ensure_ascii=False, separators=(",", ":"))
+    data = body.encode()
+    artifact_id = f"fixture_exploration_{kind}"
+    content = job_path + "/artifacts/" + artifact_id + "/content"
+    report = source("report-exploration")
+    report["data"].update(state="partial", summary=None, producerSchemaVersion=1)
+    report["data"]["binding"].update(jobId=job_id, runId=run_id, revisionId=None)
+    report["data"]["sourceArtifact"].update(artifactId=artifact_id, displayName="exploration.json",
+                                            sizeBytes=str(len(data)), sha256=hashlib.sha256(data).hexdigest(),
+                                            contentHref=content)
+    report["data"]["sourceArtifact"]["binding"].update(jobId=job_id, runId=run_id, revisionId=None)
+    record(run_path + "/reports/exploration", report)
+    artifacts[content] = {"body": body, "sha256": report["data"]["sourceArtifact"]["sha256"]}
+    return {"kind": kind, "runPath": run_path, "contentPath": content}
+
+
+def responsive_fixtures(api: str, record, artifact: dict) -> dict:
     """Long Unicode/RTL names, dense tables, a long unbroken source line and long hex previews."""
     job_id, run_id, revision_id = "f619f619f619f619f619f619f619f619", "fixture_run_responsive", "fixture_revision_responsive"
     job = source("job-lossless")
@@ -93,9 +165,12 @@ def responsive_fixtures(api: str, record) -> dict:
     record(f"{run_path}/reports/revision-validation?historyGraph={history['data']['graphSha256']}"
            f"&historyPage={history['data']['page']}&{owner_key}={owner['ownerId']}&historyValidationPage=1", cases)
     responsive_sources(run_path, {"jobId": job_id, "runId": run_id, "revisionId": revision_id}, record)
+    exploration = [responsive_exploration(job_path, job_id, run, kind, body, record, artifact)
+                   for kind, body in (("partial", RESPONSIVE_PARTIAL_CASES), ("preparation", RESPONSIVE_PREPARATION_CASES))]
     return {"name": "responsive", "description": "Named #619 reflow fixtures: long Unicode/RTL identifiers, "
             "long hex byte previews, dense tables and a long unbroken source line. Synthetic only.",
-            "jobPath": job_path, "runPath": run_path, "reportPath": report_path, "job": deepcopy(job["data"])}
+            "jobPath": job_path, "runPath": run_path, "reportPath": report_path, "job": deepcopy(job["data"]),
+            "explorationRunPaths": {value["kind"]: value["runPath"] for value in exploration}}
 
 
 def responsive_sources(run_path: str, binding: dict, record) -> None:
@@ -228,7 +303,8 @@ def generate(base_path: str, schema_path: Path) -> dict:
         scenarios.append({"name": name, "description": description, "jobPath": job_path,
                           "runPath": run_path, "reportPath": report_path})
 
-    responsive = responsive_fixtures(api, record)
+    artifact_contents: dict[str, dict] = {}
+    responsive = responsive_fixtures(api, record, artifact_contents)
     jobs.append(responsive.pop("job"))
     scenarios.append(responsive)
 
@@ -257,7 +333,7 @@ def generate(base_path: str, schema_path: Path) -> dict:
         check_semantics(error)
         errors[code] = error
     return {"label": "SIMULATED_DEVELOPMENT_DATA", "schemaSha256": hashlib.sha256(schema_bytes).hexdigest(),
-            "routes": routes, "scenarios": scenarios, "errors": errors,
+            "routes": routes, "scenarios": scenarios, "errors": errors, "artifactContents": artifact_contents,
             "download": {"path": artifact_path + "/content", "body": download,
                          "sha256": artifact["data"]["sha256"]}}
 
