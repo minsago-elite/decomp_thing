@@ -326,6 +326,8 @@ def generate(base_path: str, schema_path: Path) -> dict:
         ("NOT_FOUND", "No simulated record exists for this route."),
         ("METHOD_NOT_ALLOWED", "Simulated development data is read-only; no action was performed."),
         ("VALIDATION_FAILED", "This deterministic fixture does not support those query parameters."),
+        # #1894: rendered availability-notice fixture; served only when a browser harness substitutes /bootstrap.
+        ("SESSION_REQUIRED", "Simulated development session is not connected."),
     ]:
         error = source("error-validation")
         error["error"].update(code=code, message=message, details=[])
