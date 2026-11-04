@@ -94,12 +94,13 @@ test('module response body capture ignores an aborted duplicate when a same-path
 test('module response body capture refuses when every same-path response fails', async () => {
   const reads = [];
   const recorder = createStructureResponseRecorder(async (requestId) => { reads.push(requestId); return {}; });
-  recorder.responseReceived('/modules/module_0002', 'request-2', { status: 200 });
+  recorder.responseReceived('/modules/module_0002', 'request-2', { status: 200 },
+    { resourceType: 'Fetch', initiator: 'script', mainFrame: true, currentMainLoader: true });
   recorder.responseReceived('/modules/module_0002', 'request-3', { status: 200, fromServiceWorker: true });
   const body = recorder.bodyForPath('/modules/module_0002');
   recorder.loadingFailed('request-2', { errorText: 'net::ERR_ABORTED', canceled: true });
   recorder.loadingFailed('request-3', { errorText: 'private text with possible URL', blockedReason: 'private reason' });
-  await assert.rejects(body, /No module response completed for \/modules\/module_0002: .*status=200.*diskCache=false.*error=net::ERR_ABORTED,canceled=true.*serviceWorker=true.*error=other/);
+  await assert.rejects(body, /No module response completed for \/modules\/module_0002: .*status=200,type=Fetch,initiator=script,mainFrame=true,currentMainLoader=true,diskCache=false.*error=net::ERR_ABORTED,canceled=true.*serviceWorker=true.*error=other/);
   assert.deepEqual(reads, []);
 });
 

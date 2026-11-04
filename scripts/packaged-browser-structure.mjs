@@ -285,13 +285,17 @@ export function createStructureResponseRecorder(readBody) {
   const byPath = new Map();
   const byRequest = new Map();
   return {
-    responseReceived(path, requestId, response = {}) {
+    responseReceived(path, requestId, response = {}, request = {}) {
       let resolve;
       let reject;
       const promise = new Promise((accept, refuse) => { resolve = accept; reject = refuse; });
       promise.catch(() => undefined);
       const capture = { promise, resolve, reject, requestId, status: Number.isInteger(response.status) ? response.status : null,
         fromDiskCache: response.fromDiskCache === true, fromServiceWorker: response.fromServiceWorker === true,
+        resourceType: typeof request.resourceType === 'string' && /^[A-Za-z]{1,32}$/.test(request.resourceType) ? request.resourceType : 'other',
+        initiator: ['parser', 'script', 'preload', 'other', 'preflight', 'signedExchange', 'preload', 'earlyHints']
+          .includes(request.initiator) ? request.initiator : 'other',
+        mainFrame: request.mainFrame === true, currentMainLoader: request.currentMainLoader === true,
         terminal: 'pending', failure: null };
       const captures = byPath.get(path) ?? [];
       if (captures.length >= 8) throw new Error('Too many module response candidates for one path');
@@ -333,7 +337,7 @@ export function createStructureResponseRecorder(readBody) {
         const id = typeof capture.requestId === 'string' && /^[A-Za-z0-9_.:-]{1,64}$/.test(capture.requestId) ? capture.requestId : 'unknown';
         const error = capture.failure?.error ?? 'none';
         const blocked = capture.failure?.blocked ?? 'none';
-        return `id=${id},status=${capture.status ?? 'unknown'},diskCache=${capture.fromDiskCache},serviceWorker=${capture.fromServiceWorker},terminal=${capture.terminal},error=${error},canceled=${capture.failure?.canceled ?? false},blocked=${blocked}`;
+        return `id=${id},status=${capture.status ?? 'unknown'},type=${capture.resourceType},initiator=${capture.initiator},mainFrame=${capture.mainFrame},currentMainLoader=${capture.currentMainLoader},diskCache=${capture.fromDiskCache},serviceWorker=${capture.fromServiceWorker},terminal=${capture.terminal},error=${error},canceled=${capture.failure?.canceled ?? false},blocked=${blocked}`;
       });
       throw new Error(`No module response completed for ${path}: ${failures.join('; ')}`);
     },
@@ -410,23 +414,48 @@ async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evalua
   const moduleResponseBodies = createStructureResponseRecorder((requestId) =>
     cdp.call('Network.getResponseBody', { requestId }, tab.sessionId));
   const moduleResponsePaths = new Map();
+  const moduleRequestContexts = new Map();
+  let mainFrameId = null;
+  let mainLoaderId = null;
+  cdp.on('Page.frameNavigated', (event) => {
+    if (!event.frame.parentId) {
+      mainFrameId = event.frame.id;
+      mainLoaderId = event.frame.loaderId;
+    }
+  }, tab.sessionId);
+  cdp.on('Network.requestWillBeSent', (event) => {
+    if (moduleRequestContexts.size < 64
+      && /\/api\/v1\/jobs\/[^/]+\/runs\/[^/]+\/revisions\/[^/]+\/modules\/[^/]+$/.test(new URL(event.request.url).pathname)) {
+      moduleRequestContexts.set(event.requestId, {
+        resourceType: event.type,
+        initiator: event.initiator?.type,
+        mainFrame: event.frameId === mainFrameId,
+        currentMainLoader: mainLoaderId !== null && event.loaderId === mainLoaderId,
+      });
+    }
+  }, tab.sessionId);
   cdp.on('Network.responseReceived', (event) => {
     const url = new URL(event.response.url);
     if (url.origin === new URL(browserOrigin).origin && event.response.status === 200
       && /\/api\/v1\/jobs\/[^/]+\/runs\/[^/]+\/revisions\/[^/]+\/modules\/[^/]+$/.test(url.pathname)) {
       moduleResponsePaths.set(event.requestId, url.pathname);
-      moduleResponseBodies.responseReceived(url.pathname, event.requestId, event.response);
+      moduleResponseBodies.responseReceived(url.pathname, event.requestId, event.response,
+        moduleRequestContexts.get(event.requestId) ?? {});
     }
   }, tab.sessionId);
   cdp.on('Network.loadingFinished', (event) => {
-    if (moduleResponsePaths.delete(event.requestId)) void moduleResponseBodies.loadingFinished(event.requestId);
+    if (moduleResponsePaths.delete(event.requestId)) {
+      moduleRequestContexts.delete(event.requestId);
+      void moduleResponseBodies.loadingFinished(event.requestId);
+    }
   }, tab.sessionId);
   cdp.on('Network.loadingFailed', (event) => {
     const path = moduleResponsePaths.get(event.requestId);
     if (path) {
       moduleResponsePaths.delete(event.requestId);
+      moduleRequestContexts.delete(event.requestId);
       moduleResponseBodies.loadingFailed(event.requestId, event);
-    }
+    } else moduleRequestContexts.delete(event.requestId);
   }, tab.sessionId);
   cdp.on('Network.requestWillBeSent', (event) => {
     const url = new URL(event.request.url);
@@ -499,8 +528,21 @@ async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evalua
   const owned = Math.min(24, OWNED - Math.floor(99998 / 24) * 24);
   assert.equal(await evaluate(tab, `document.querySelectorAll('table tbody tr').length`), owned);
   const implementation = await evaluate(tab, `[...document.querySelectorAll('a')].find(a => a.textContent === 'src/modules/${module}.c')?.getAttribute('href')`);
-  const response = await moduleResponseBodies.bodyForPath(
-    `/nested/api/v1/jobs/${fixture.jobId}/runs/${fixture.runId}/revisions/${fixture.revisionId}/modules/${module}`);
+  let response;
+  try {
+    response = await moduleResponseBodies.bodyForPath(
+      `/nested/api/v1/jobs/${fixture.jobId}/runs/${fixture.runId}/revisions/${fixture.revisionId}/modules/${module}`);
+  } catch (failure) {
+    let rendered = { path: false, moduleHeading: false, ownedTable: false };
+    try {
+      rendered = await evaluate(tab, `({
+        path: location.pathname === ${JSON.stringify(`${revision}/modules/${module}`)},
+        moduleHeading: [...document.querySelectorAll('h2 bdi')].some(node => node.textContent === ${JSON.stringify(module)}),
+        ownedTable: [...document.querySelectorAll('table caption')].some(node => node.textContent === 'Functions'),
+      })`);
+    } catch { /* Preserve the original response failure if the document is already detached. */ }
+    throw new Error(`${failure instanceof Error ? failure.message : 'Module response failed'}; renderedModule=${JSON.stringify(rendered)}`);
+  }
   const snapshot = JSON.parse(response.base64Encoded ? Buffer.from(response.body, 'base64').toString('utf8') : response.body).data;
   assert.equal(snapshot.module.moduleId, module);
   assertStructureSourceLink(implementation, { revision, browserOrigin, snapshot });
