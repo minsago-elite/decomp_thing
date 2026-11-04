@@ -34,10 +34,16 @@ class ExporterParallelCoordinatorTest {
     @Test
     fun `worker infrastructure failure stops peers and cannot become a failed function`() =
         withParallelHarness("infrastructure")
+    @Test
+    fun `owned coordinator executes ordering retry cancellation and infrastructure controls`() {
+        listOf("reordering", "retry-success", "retry-failure", "retry-partial", "cancellation", "infrastructure")
+            .forEach { withParallelHarness(it, owned = true) }
+    }
+
 }
 
-private fun withParallelHarness(scenario: String) {
-    val exporter = Path.of("src/main/resources/ghidra_scripts/ExportProgramModel.java").readText()
+private fun withParallelHarness(scenario: String, owned: Boolean = false) {
+    val exporter = Path.of("src/main/resources/ghidra_scripts/${if (owned) "ExportProgramModelOwned" else "ExportProgramModel"}.java").readText()
     val beginMarker = "// PARALLEL_EXPORT_TEST_BEGIN\n"
     val endMarker = "// PARALLEL_EXPORT_TEST_END"
     val begin = exporter.indexOf(beginMarker)
@@ -47,7 +53,7 @@ private fun withParallelHarness(scenario: String) {
     val temporary = Files.createTempDirectory(Path.of("build").createDirectories(), "exporter-parallel-test-")
     try {
         val source = temporary.resolve("ParallelExporterHarness.java").also {
-            it.writeText(PARALLEL_HARNESS_PREFIX + implementation + PARALLEL_HARNESS_BODY)
+            it.writeText(PARALLEL_HARNESS_PREFIX + implementation + if (owned) PARALLEL_HARNESS_BODY.replace("ExporterParallelCoordinatorV1", "ExporterParallelCoordinatorOwnedV1") else PARALLEL_HARNESS_BODY)
         }
         val compiler = ToolProvider.getSystemJavaCompiler() ?: error("parallel exporter tests require a JDK")
         val diagnostics = ByteArrayOutputStream()

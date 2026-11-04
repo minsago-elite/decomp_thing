@@ -3,9 +3,10 @@ package decompengine.project
 import java.io.ByteArrayOutputStream
 import java.lang.reflect.InvocationTargetException
 import java.net.URLClassLoader
+import java.nio.file.Files
 import java.nio.file.Path
 import javax.tools.ToolProvider
-import kotlin.io.path.createTempDirectory
+import kotlin.io.path.createDirectories
 import kotlin.io.path.readText
 import kotlin.io.path.writeText
 import kotlin.test.Test
@@ -15,6 +16,27 @@ import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 
 class ExporterSemanticStateBindingTest {
+    @Test
+    fun `owned exact planning records and failure fragments bind prototype changes and all state identities`() = withHarness(owned = true) { harness ->
+        val original = semanticFixture()
+        val digest = harness.fingerprint(original)
+        assertNotEquals(digest, harness.fingerprint(original.mutateRecord(0, "prototype=int alpha(void)", "prototype=int alpha(int x)")))
+        assertNotEquals(digest, harness.fingerprint(original.mutateRecord(original.frames.lastIndex,
+            "prototype=int future(void)", "prototype=int future(int drifted)")))
+        val current = """{"schemaVersion":2,"exporterVersion":19,"exporterSha256":"current","recoveryMode":"full","decompilationWorkers":1,"semanticStateBinding":null}"""
+        harness.requireReusableState(current, current)
+        listOf(current.replace(":19", ":18"), current.replace("current", "changed"),
+            current.replace("full", "planning"), current.replace("Workers\":1", "Workers\":4")).forEach { stale ->
+            val failure = assertFailsWith<InvocationTargetException> { harness.requireReusableState(stale, current) }
+            assertTrue(failure.cause is IllegalStateException)
+        }
+        val batch = BatchFragments("prototype=int alpha(void)", "globals", "types", "prototypeRefusal=UNPLANNED_TYPE")
+        listOf(batch.copy(functions = "prototype=int alpha(int x)"), batch.copy(failures = ""),
+            batch.copy(failures = "prototypeRefusal=NULL_TYPE"), batch.copy(globals = "changed"), batch.copy(types = "changed")).forEach { changed ->
+            assertFailsWith<InvocationTargetException> { harness.requireBatchMatch(batch, changed) }
+        }
+    }
+
     @Test
     fun `exact production accumulator is deterministic and sensitive to every exported semantic category`() =
         withHarness { harness ->
@@ -279,8 +301,8 @@ private class FingerprintHarness(
     }
 }
 
-private fun <T> withHarness(action: (FingerprintHarness) -> T): T {
-    val exporter = Path.of("src/main/resources/ghidra_scripts/ExportProgramModel.java").readText()
+private fun <T> withHarness(owned: Boolean = false, action: (FingerprintHarness) -> T): T {
+    val exporter = Path.of("src/main/resources/ghidra_scripts/${if (owned) "ExportProgramModelOwned" else "ExportProgramModel"}.java").readText()
     val beginMarker = "// SEMANTIC_FINGERPRINT_TEST_BEGIN\n"
     val endMarker = "// SEMANTIC_FINGERPRINT_TEST_END"
     val begin = exporter.indexOf(beginMarker)
@@ -363,8 +385,8 @@ private fun <T> withHarness(action: (FingerprintHarness) -> T): T {
             }
         }
     """.trimIndent()
-    val temporary = createTempDirectory("exporter-semantic-fingerprint-")
-    val source = temporary.resolve("SemanticFingerprintHarness.java").also { it.writeText(harnessSource) }
+    val temporary = Files.createTempDirectory(Path.of("build/exporter-semantic-tests").createDirectories(), "fingerprint-")
+    val source = temporary.resolve("SemanticFingerprintHarness.java").also { it.writeText(if (owned) harnessSource.replace("ExporterSemanticFingerprintV1", "ExporterSemanticFingerprintOwnedV1") else harnessSource) }
     val compiler = ToolProvider.getSystemJavaCompiler() ?: error("semantic-fingerprint tests require a JDK")
     val diagnostics = ByteArrayOutputStream()
     val result = compiler.run(

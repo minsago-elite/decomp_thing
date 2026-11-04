@@ -52,6 +52,24 @@ import ghidra.program.model.data.Composite;
 import ghidra.program.model.data.DataType;
 import ghidra.program.model.data.Enum;
 import ghidra.program.model.data.TypeDef;
+import ghidra.program.model.data.Pointer;
+import ghidra.program.model.data.Array;
+import ghidra.program.model.data.Structure;
+import ghidra.program.model.data.Union;
+import ghidra.program.model.data.Dynamic;
+import ghidra.program.model.data.BitFieldDataType;
+import ghidra.program.model.data.Undefined;
+import ghidra.program.model.data.DefaultDataType;
+import ghidra.program.model.data.VoidDataType;
+import ghidra.program.model.data.AbstractIntegerDataType;
+import ghidra.program.model.data.AbstractFloatDataType;
+import ghidra.program.model.data.DataTypeComponent;
+import ghidra.program.model.data.FunctionDefinitionDataType;
+import ghidra.program.model.data.ParameterDefinition;
+import ghidra.program.model.data.ParameterDefinitionImpl;
+import ghidra.program.model.pcode.FunctionPrototype;
+import ghidra.program.model.pcode.HighSymbol;
+import ghidra.program.model.pcode.HighFunction;
 import ghidra.program.model.listing.Data;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.FunctionIterator;
@@ -715,7 +733,7 @@ public class ExportProgramModelOwned extends GhidraScript {
         catch (Throwable diagnosticFailure) { /* Never replace the primary outcome. */ }
     }
 
-    private static final int EXPORTER_VERSION = 18;
+    private static final int EXPORTER_VERSION = 19;
     private static final int DECOMPILE_TIMEOUT_SECONDS = 60;
     private static final int DECOMPILE_RETRY_TIMEOUT_SECONDS = 180;
     private static final int MAXIMUM_DECOMPILE_INSTRUCTIONS = 500_000;
@@ -1129,10 +1147,15 @@ public class ExportProgramModelOwned extends GhidraScript {
         if (next == null || next.trim().isEmpty()) return existing;
         String bounded = next.replace('\n', ' ').replace('\r', ' ').trim();
         if (bounded.length() > 2048) bounded = bounded.substring(0, 2048) + "...";
+        if (existing != null && existing.equals(bounded)) return existing;
         return existing == null ? bounded : existing + "; " + bounded;
     }
 
     private static String exceptionMessage(String phase, Exception failure) {
+        if (failure instanceof PrototypeRejected) {
+            Refusal refusal = ((PrototypeRejected)failure).refusal;
+            return phase + " refused: metadataRefusal=" + refusal.code + ";detail=" + refusal.detail;
+        }
         String message = failure.getMessage();
         return phase + " failed: " + failure.getClass().getSimpleName() +
             (message == null || message.trim().isEmpty() ? "" : ": " + message);
@@ -1154,11 +1177,12 @@ public class ExportProgramModelOwned extends GhidraScript {
         Path typesDirectory,
         PlanningBatchEvidence planningEvidence,
         DataType type,
-        Address sourceAddress
+        Address sourceAddress,
+        boolean catalogOnly
     ) throws Exception {
         if (!(type instanceof Composite) && !(type instanceof Enum) && !(type instanceof TypeDef)) return;
         String key = type.getPathName();
-        String id = "type_" + sha256(key.getBytes(StandardCharsets.UTF_8));
+        String id = typeId(key);
         int length = Math.max(type.getLength(), 1);
         String cName = ExporterPureRenderingOwnedV1.typeName(type.getName());
         if (cName.isEmpty() || Character.isDigit(cName.charAt(0))) cName = "recovered_" + id;
@@ -1174,6 +1198,7 @@ public class ExportProgramModelOwned extends GhidraScript {
         }
         TypeEvidence evidence = new TypeEvidence(id, declaration, sourceAddress);
         String record = renderType(evidence);
+        if (catalogOnly) return; // Preserve metadata/render refusals during replay without filesystem effects.
         if (planningEvidence == null) {
             writeIfAbsentAtomic(typesDirectory.resolve(id + ".json"), record, phaseObservation, true);
         } else {
@@ -1313,6 +1338,9 @@ public class ExportProgramModelOwned extends GhidraScript {
     // ReferenceIterator is streaming; retain at most the remaining work allowance and inspect
     // one nonretained lookahead. A whole oversized instruction batch is left unadmitted.
     private List<Reference> referenceBatch(Instruction instruction, int remaining) throws Exception {
+        return referenceBatch(instruction, remaining, true);
+    }
+    private List<Reference> referenceBatch(Instruction instruction, int remaining, boolean byteCollection) throws Exception {
         List<Reference> batch = new ArrayList<>();
         ReferenceIterator references = currentProgram.getReferenceManager().getReferenceIterator(instruction.getAddress());
         while (references.hasNext()) {
@@ -1320,7 +1348,7 @@ public class ExportProgramModelOwned extends GhidraScript {
             Reference reference = references.next();
             if (!reference.getFromAddress().equals(instruction.getAddress())) break;
             if (batch.size() == remaining) {
-                referenceCollectionCutoff = "reference_work_limit";
+                if (byteCollection) referenceCollectionCutoff = "reference_work_limit";
                 return null;
             }
             batch.add(reference);
@@ -1393,14 +1421,12 @@ public class ExportProgramModelOwned extends GhidraScript {
                 candidates += batch.size();
                 for (Reference reference : batch) {
                     checkByteCancellation();
-                    if (!reference.getReferenceType().isData()) continue;
+                    if (!dataReference(reference)) continue;
                     Address target = reference.getToAddress();
-                    if (!target.isMemoryAddress()) continue;
-                    byteAddress(target);
-                    Data data = currentProgram.getListing().getDataContaining(target);
-                    if (data != null && data.hasStringValue() && data.getValue() != null) continue;
-                    if (currentProgram.getFunctionManager().getFunctionContaining(target) != null) continue;
-                    Address base = data == null ? target : data.getAddress();
+                    if (!dataTarget(target)) continue;
+                    ResolvedData resolved = resolveAddressedData(target);
+                    if (resolved.stringValue) continue;
+                    Address base = resolved.base;
                     byteAddress(base);
                     String id = globalId(base);
                     GlobalByteWindows global = globals.get(id);
@@ -1459,11 +1485,96 @@ public class ExportProgramModelOwned extends GhidraScript {
         checkByteCancellation();
     }
 
-    private GlobalEvidence globalAt(Address address) throws Exception {
+    enum ResolutionKind { ABSENT, PRIMITIVE, ORIGINAL_CONTAINER }
+    static final class ResolvedData {
+        final Data selected;
+        final Address base;
+        final boolean stringValue;
+        final ResolutionKind kind;
+        ResolvedData(Data selected, Address base, ResolutionKind kind) {
+            this.selected = selected; this.base = base; this.kind = kind;
+            stringValue = selected != null && selected.hasStringValue() && selected.getValue() != null;
+        }
+    }
+    private static boolean dataReference(Reference reference) {
+        return reference.getReferenceType().isData() || reference.getReferenceType().isIndirect();
+    }
+    private boolean dataTarget(Address target) {
+        return target.isMemoryAddress() &&
+            currentProgram.getFunctionManager().getFunctionContaining(target) == null &&
+            currentProgram.getListing().getInstructionContaining(target) == null;
+    }
+    private ResolvedData resolveAddressedData(Address target) throws Exception {
         checkByteCancellation();
-        Data data = currentProgram.getListing().getDataContaining(address);
-        Address base = data == null ? address : data.getAddress();
-        byteAddress(address);
+        byteAddress(target);
+        Data original = currentProgram.getListing().getDataContaining(target);
+        if (original == null) return new ResolvedData(null, target, ResolutionKind.ABSENT);
+        byteAddress(original.getAddress());
+        ResolvedData fallback = new ResolvedData(original, original.getAddress(), ResolutionKind.ORIGINAL_CONTAINER);
+        if (fallback.stringValue) return fallback;
+        Data data = original;
+        java.util.IdentityHashMap<Data, Boolean> seen = new java.util.IdentityHashMap<>();
+        for (int depth = 0; depth <= 32; depth++) {
+            checkByteCancellation();
+            if (data == null || seen.put(data, Boolean.TRUE) != null || !data.isDefined() || data.getLength() <= 0)
+                return fallback;
+            Address start = data.getAddress();
+            if (start == null || !start.getAddressSpace().equals(target.getAddressSpace())) return fallback;
+            long relative = target.subtract(start);
+            if (relative < 0 || relative >= data.getLength()) return fallback;
+            if (data.hasStringValue() && data.getValue() != null)
+                return new ResolvedData(data, start, ResolutionKind.ORIGINAL_CONTAINER);
+            DataType baseType = data.getBaseDataType();
+            if (baseType == null || baseType instanceof Union || baseType instanceof Dynamic ||
+                baseType instanceof BitFieldDataType || baseType instanceof Undefined || baseType.getLength() <= 0 ||
+                baseType.getLength() != data.getLength()) return fallback;
+            if (!(baseType instanceof Structure) && !(baseType instanceof Array)) {
+                if (relative == 0 && data.getNumComponents() == 0 &&
+                    (baseType instanceof Pointer || baseType instanceof Enum || baseType instanceof AbstractIntegerDataType ||
+                     baseType instanceof AbstractFloatDataType))
+                    return new ResolvedData(data, start, ResolutionKind.PRIMITIVE);
+                return fallback;
+            }
+            if (depth == 32) return fallback;
+            int offset = (int)relative;
+            Data next;
+            int expectedOffset, expectedLength;
+            if (baseType instanceof Structure) {
+                Structure structure = (Structure)baseType;
+                if (structure.getNumComponents() <= 0 || structure.getNumComponents() > 4096) return fallback;
+                List<DataTypeComponent> components = structure.getComponentsContaining(offset);
+                if (components == null || components.size() != 1) return fallback;
+                DataTypeComponent component = components.get(0);
+                if (component == null || component.isBitFieldComponent() || component.getLength() <= 0 ||
+                    component.getOffset() < 0 || component.getDataType() == null || component.getDataType() instanceof Undefined)
+                    return fallback;
+                expectedOffset = component.getOffset(); expectedLength = component.getLength();
+                next = data.getComponent(component.getOrdinal());
+            } else {
+                Array array = (Array)baseType;
+                int elementLength = array.getElementLength();
+                if (elementLength <= 0 || array.getNumElements() <= 0 ||
+                    (long)elementLength * array.getNumElements() != data.getLength()) return fallback;
+                int index = offset / elementLength;
+                expectedOffset = index * elementLength; expectedLength = elementLength;
+                next = data.getComponent(index);
+            }
+            if (next == null || next == data || next.getAddress() == null ||
+                !next.getAddress().getAddressSpace().equals(start.getAddressSpace()) ||
+                next.getAddress().subtract(start) != expectedOffset || next.getLength() != expectedLength ||
+                (long)expectedOffset + expectedLength > data.getLength() ||
+                offset < expectedOffset || offset - expectedOffset >= expectedLength) return fallback;
+            data = next;
+        }
+        return fallback;
+    }
+
+    // Kept as a probe boundary; all production consumers pass the same resolved selection.
+    private GlobalEvidence globalAt(Address address) throws Exception { return globalAt(resolveAddressedData(address)); }
+    private GlobalEvidence globalAt(ResolvedData resolved) throws Exception {
+        checkByteCancellation();
+        Data data = resolved.selected;
+        Address base = resolved.base;
         byteAddress(base);
         Symbol symbol = currentProgram.getSymbolTable().getPrimarySymbol(base);
         String name = symbol == null ? "DAT_" + base.toString() : symbol.getName();
@@ -1477,27 +1588,483 @@ public class ExportProgramModelOwned extends GhidraScript {
         return global;
     }
 
+    // OWNED_PROTOTYPE_VALUES_TEST_BEGIN
+    enum PrototypeOrigin { LISTING, HIGH_FUNCTION }
+    enum PrototypeRefusalCode {
+        NO_HIGH_FUNCTION, NULL_SYMBOL, NULL_TYPE, UNSUPPORTED_SHAPE, INVALID_NAME,
+        LIMIT, UNPLANNED_TYPE, TYPE_MISMATCH
+    }
+    static final class Refusal {
+        final PrototypeRefusalCode code;
+        final String detail;
+        Refusal(PrototypeRefusalCode code, String detail) {
+            this.code = java.util.Objects.requireNonNull(code);
+            this.detail = java.util.Objects.requireNonNull(detail);
+            if (!detail.matches("[A-Z0-9_]{1,80}")) throw new IllegalArgumentException("unstable refusal detail");
+        }
+        String evidence() { return "prototypeSource=listing;prototypeRefusal=" + code + ";detail=" + detail; }
+    }
+    @SuppressWarnings("serial") // Internal control flow only; the immutable refusal DTO is never serialized.
+    static final class PrototypeRejected extends Exception {
+        private static final long serialVersionUID = 1L;
+        final Refusal refusal;
+        PrototypeRejected(PrototypeRefusalCode code, String detail) { refusal = new Refusal(code, detail); }
+    }
+    static final class PrototypeBudget {
+        int nodes, bytes;
+        void node(int depth) throws PrototypeRejected {
+            if (depth > 32 || ++nodes > 4096) throw new PrototypeRejected(PrototypeRefusalCode.LIMIT, "TYPE_GRAPH");
+        }
+        String text(String value) throws PrototypeRejected {
+            if (value == null) throw new PrototypeRejected(PrototypeRefusalCode.NULL_TYPE, "NULL_TEXT");
+            // Check UTF-16 length first so encoding a malformed giant value cannot allocate unboundedly.
+            if (value.length() > 4096) throw new PrototypeRejected(PrototypeRefusalCode.LIMIT, "FIELD_BYTES");
+            int size = value.getBytes(StandardCharsets.UTF_8).length;
+            if (size > 4096) throw new PrototypeRejected(PrototypeRefusalCode.LIMIT, "FIELD_BYTES");
+            total(size);
+            return value;
+        }
+        void total(int size) throws PrototypeRejected {
+            if (size < 0 || size > 65536 - bytes) throw new PrototypeRejected(PrototypeRefusalCode.LIMIT, "TOTAL_BYTES");
+            bytes += size;
+        }
+        void parameters(int count, boolean variadic) throws PrototypeRejected {
+            if (count < 0 || count > 256) throw new PrototypeRejected(PrototypeRefusalCode.LIMIT, "PARAMETER_COUNT");
+            if (variadic && count == 0) throw new PrototypeRejected(PrototypeRefusalCode.UNSUPPORTED_SHAPE, "VARARGS_WITHOUT_FIXED_PARAMETER");
+        }
+    }
+    static final class TypeRequirement {
+        final String path, id, cSpelling, definitionDigest;
+        TypeRequirement(String path, String id, String cSpelling, String definitionDigest) {
+            this.path = java.util.Objects.requireNonNull(path);
+            this.id = java.util.Objects.requireNonNull(id);
+            this.cSpelling = java.util.Objects.requireNonNull(cSpelling);
+            this.definitionDigest = java.util.Objects.requireNonNull(definitionDigest);
+        }
+        boolean same(TypeRequirement other) {
+            return id.equals(other.id) && path.equals(other.path) && cSpelling.equals(other.cSpelling) &&
+                definitionDigest.equals(other.definitionDigest);
+        }
+    }
+    static final class PlannedTypeCoverage {
+        final Map<String, TypeRequirement> byPath;
+        final Map<String, String> bySpelling;
+        PlannedTypeCoverage(Map<String, TypeRequirement> requirements) {
+            byPath = java.util.Collections.unmodifiableMap(new TreeMap<>(requirements));
+            Map<String, String> spellings = new TreeMap<>();
+            for (TypeRequirement requirement : byPath.values()) {
+                String previous = spellings.putIfAbsent(requirement.cSpelling, requirement.path);
+                if (previous != null && !previous.equals(requirement.path)) spellings.put(requirement.cSpelling, "");
+            }
+            bySpelling = java.util.Collections.unmodifiableMap(spellings);
+        }
+    }
+    @FunctionalInterface
+    interface PrototypeCancellation { void check() throws InterruptedException; }
+    private static final class PrototypeSortCancelled extends RuntimeException {
+        private static final long serialVersionUID = 1L;
+        final InterruptedException interruption;
+        PrototypeSortCancelled(InterruptedException interruption) { this.interruption = interruption; }
+    }
+    static String[] boundedEnumNames(String[] names, int count, int depth, PrototypeBudget budget,
+                                      PrototypeCancellation cancellation) throws Exception {
+        cancellation.check();
+        if (count < 0 || count > 4096) throw new PrototypeRejected(PrototypeRefusalCode.LIMIT, "ENUM_VALUES");
+        if (names == null || names.length != count)
+            throw new PrototypeRejected(PrototypeRefusalCode.UNSUPPORTED_SHAPE, "ENUM_VALUES");
+        // Charge every input before copying or comparing any names. Each comparison is now bounded.
+        for (String name : names) {
+            cancellation.check();
+            budget.node(depth + 1);
+            budget.text(name);
+        }
+        cancellation.check();
+        String[] sorted = names.clone();
+        try {
+            java.util.Arrays.sort(sorted, (left, right) -> {
+                try { cancellation.check(); }
+                catch (InterruptedException interruption) { throw new PrototypeSortCancelled(interruption); }
+                return left.compareTo(right);
+            });
+        } catch (PrototypeSortCancelled cancelled) { throw cancelled.interruption; }
+        cancellation.check();
+        return sorted;
+    }
+    static final class PlannedTypeCatalog {
+        final Map<String, TypeRequirement> definitions = new TreeMap<>();
+        final Map<String, String> spellings = new TreeMap<>();
+        void clear() { definitions.clear(); spellings.clear(); }
+        void admit(Map<String, TypeRequirement> requirements, PrototypeCancellation cancellation) throws Exception {
+            Map<String, String> incomingSpellings = new TreeMap<>();
+            int additions = 0;
+            for (TypeRequirement requirement : requirements.values()) {
+                cancellation.check();
+                String previous = incomingSpellings.putIfAbsent(requirement.cSpelling, requirement.path);
+                String published = spellings.get(requirement.cSpelling);
+                TypeRequirement known = definitions.get(requirement.path);
+                if ((previous != null && !previous.equals(requirement.path)) ||
+                    (published != null && !published.equals(requirement.path)))
+                    throw new PrototypeRejected(PrototypeRefusalCode.TYPE_MISMATCH, "C_SPELLING_COLLISION");
+                if (known != null && !known.same(requirement))
+                    throw new PrototypeRejected(PrototypeRefusalCode.TYPE_MISMATCH, "NAMED_TYPE_CHANGED");
+                if (known == null) additions++;
+            }
+            if (additions > 4096 - definitions.size())
+                throw new PrototypeRejected(PrototypeRefusalCode.LIMIT, "PLANNED_NAMED_TYPES");
+            cancellation.check();
+            // No partial admission on rejection. Existing paths are not charged twice on replay/retry.
+            for (TypeRequirement requirement : requirements.values()) {
+                definitions.putIfAbsent(requirement.path, requirement);
+                spellings.putIfAbsent(requirement.cSpelling, requirement.path);
+            }
+        }
+    }
+    static boolean supportedBuiltinSpelling(String spelling) {
+        // These are C language spellings, not Ghidra identifiers requiring an invented typedef.
+        return java.util.Set.of("void", "char", "signed char", "unsigned char", "short", "short int",
+            "signed short", "signed short int", "unsigned short", "unsigned short int", "int", "signed",
+            "signed int", "unsigned", "unsigned int", "long", "long int", "signed long", "signed long int",
+            "unsigned long", "unsigned long int", "long long", "long long int", "signed long long",
+            "signed long long int", "unsigned long long", "unsigned long long int", "float", "double",
+            "long double", "_Bool").contains(spelling);
+    }
+    static final class ParameterText {
+        final String name, typeText;
+        ParameterText(String name, String typeText) {
+            this.name = java.util.Objects.requireNonNull(name);
+            this.typeText = java.util.Objects.requireNonNull(typeText);
+        }
+    }
+    static final class TypedPrototype {
+        final String declaration, returnText;
+        final List<ParameterText> parameters;
+        final boolean variadic;
+        final List<TypeRequirement> requirements;
+        TypedPrototype(String declaration, List<ParameterText> parameters, String returnText,
+                       boolean variadic, List<TypeRequirement> requirements) {
+            this.declaration = java.util.Objects.requireNonNull(declaration);
+            this.parameters = java.util.Collections.unmodifiableList(new ArrayList<>(parameters));
+            this.returnText = java.util.Objects.requireNonNull(returnText);
+            this.variadic = variadic;
+            List<TypeRequirement> sorted = new ArrayList<>(requirements);
+            sorted.sort(Comparator.comparing(requirement -> requirement.path));
+            this.requirements = java.util.Collections.unmodifiableList(sorted);
+        }
+    }
+    static final class PrototypeResult {
+        final TypedPrototype typed;
+        final Refusal refusal;
+        final PrototypeOrigin origin;
+        PrototypeResult(TypedPrototype typed, Refusal refusal) {
+            if ((typed == null) == (refusal == null)) throw new IllegalArgumentException("exclusive prototype result required");
+            this.typed = typed;
+            this.refusal = refusal;
+            origin = typed == null ? PrototypeOrigin.LISTING : PrototypeOrigin.HIGH_FUNCTION;
+        }
+    }
+    static final class NativeOutcome {
+        final String source, nativeFailure;
+        final PrototypeResult prototype;
+        NativeOutcome(String source, String nativeFailure, PrototypeResult prototype) {
+            this.source = source;
+            this.nativeFailure = nativeFailure;
+            this.prototype = java.util.Objects.requireNonNull(prototype);
+        }
+    }
+    static Refusal checkCoverage(TypedPrototype typed, PlannedTypeCoverage planned) {
+        Map<String, TypeRequirement> seen = new TreeMap<>();
+        Map<String, String> spellings = new TreeMap<>();
+        for (TypeRequirement requirement : typed.requirements) {
+            TypeRequirement previous = seen.putIfAbsent(requirement.path, requirement);
+            String previousPath = spellings.putIfAbsent(requirement.cSpelling, requirement.path);
+            if ((previous != null && !previous.same(requirement)) ||
+                (previousPath != null && !previousPath.equals(requirement.path)))
+                return new Refusal(PrototypeRefusalCode.TYPE_MISMATCH, "CONFLICTING_REQUIREMENTS");
+            TypeRequirement known = planned.byPath.get(requirement.path);
+            if (known == null) return new Refusal(PrototypeRefusalCode.UNPLANNED_TYPE, "NAMED_TYPE_NOT_PLANNED");
+            if (!known.same(requirement)) return new Refusal(PrototypeRefusalCode.TYPE_MISMATCH, "NAMED_TYPE_CHANGED");
+            if (!requirement.path.equals(planned.bySpelling.get(requirement.cSpelling)))
+                return new Refusal(PrototypeRefusalCode.TYPE_MISMATCH, "C_SPELLING_COLLISION");
+        }
+        return null;
+    }
+    static boolean validCName(String name) {
+        if (name == null || !name.matches("[A-Za-z_][A-Za-z0-9_]*")) return false;
+        return !(" auto break case char const continue default do double else enum extern float for goto if inline int long register restrict return short signed sizeof static struct switch typedef union unsigned void volatile while _Alignas _Alignof _Atomic _Bool _Complex _Generic _Imaginary _Noreturn _Static_assert _Thread_local ")
+            .contains(" " + name + " ");
+    }
+    static String prototypeStatus(boolean full, String source, boolean metadataComplete, Refusal refusal) {
+        if (!full) return metadataComplete ? "partial" : "failed";
+        return source == null ? "failed" : metadataComplete && refusal == null ? "recovered" : "partial";
+    }
+    // OWNED_PROTOTYPE_VALUES_TEST_END
+
     private static final class FunctionMetadata {
         final Function function;
-        final String prefix, evidence, failure;
+        final String identity, name, listingPrototype, evidence, failure;
         final boolean evidenceComplete;
-
-        FunctionMetadata(Function function, String prefix, String evidence, String failure, boolean evidenceComplete) {
+        final PlannedTypeCoverage coverage;
+        FunctionMetadata(Function function, String identity, String name, String listingPrototype, String evidence,
+                         String failure, boolean evidenceComplete, PlannedTypeCoverage coverage) {
             this.function = function;
-            this.prefix = prefix;
+            this.identity = identity;
+            this.name = name;
+            this.listingPrototype = listingPrototype;
             this.evidence = evidence;
             this.failure = failure;
             this.evidenceComplete = evidenceComplete;
+            this.coverage = coverage;
         }
     }
 
-    private static final class NativeOutcome {
-        final String source, failure;
+    private static void prototypeCancellation(TaskMonitor taskMonitor) throws InterruptedException {
+        if (taskMonitor.isCancelled() || Thread.currentThread().isInterrupted())
+            throw new InterruptedException("typed prototype extraction was cancelled");
+    }
 
-        NativeOutcome(String source, String failure) {
-            this.source = source;
-            this.failure = failure;
+    /** Lives only during coordinator preparation or a single native call, never in a worker result. */
+    private static final class TypedGraph {
+        final PrototypeBudget budget = new PrototypeBudget();
+        final TaskMonitor taskMonitor;
+        final Map<String, DataType> named = new TreeMap<>();
+        final java.util.IdentityHashMap<DataType, Boolean> namedInstances = new java.util.IdentityHashMap<>();
+        final List<DataType> definitions = new ArrayList<>();
+        boolean recording = true;
+        final Map<String, TypeRequirement> requirements = new TreeMap<>();
+        TypedGraph(TaskMonitor taskMonitor) { this.taskMonitor = taskMonitor; }
+        String field(String value) throws PrototypeRejected { return budget.text(value).length() + ":" + value; }
+        void append(StringBuilder output, String value) throws PrototypeRejected {
+            if (value.length() > 65536 - output.length()) throw new PrototypeRejected(PrototypeRefusalCode.LIMIT, "DESCRIPTOR_BYTES");
+            output.append(value);
         }
+        String describe(DataType type, int depth, java.util.IdentityHashMap<DataType, Boolean> active,
+                        Map<String, DataType> activeNames) throws Exception {
+            prototypeCancellation(taskMonitor);
+            budget.node(depth);
+            if (type == null) throw new PrototypeRejected(PrototypeRefusalCode.NULL_TYPE, "MISSING_DATA_TYPE");
+            boolean isNamed = type instanceof Composite || type instanceof Enum || type instanceof TypeDef;
+            String path = type instanceof Pointer ? "<pointer>" : type instanceof Array ? "<array>" : budget.text(type.getPathName());
+            if (isNamed && activeNames.containsKey(path)) {
+                if (activeNames.get(path) != type) throw new PrototypeRejected(PrototypeRefusalCode.TYPE_MISMATCH, "RECURSIVE_PATH_CONFLICT");
+                return "ref:" + field(path);
+            }
+            if (active.put(type, Boolean.TRUE) != null)
+                throw new PrototypeRejected(PrototypeRefusalCode.UNSUPPORTED_SHAPE, "WRAPPER_CYCLE");
+            if (isNamed) activeNames.put(path, type);
+            String kind = type instanceof TypeDef ? "typedef" : type instanceof Pointer ? "pointer" :
+                type instanceof Array ? "array" : type instanceof Structure ? "struct" :
+                type instanceof Union ? "union" : type instanceof Enum ? "enum" :
+                type instanceof VoidDataType ? "void" : type instanceof AbstractIntegerDataType ? "integer" :
+                type instanceof AbstractFloatDataType ? "float" : (type instanceof Undefined || type instanceof DefaultDataType) ? "undefined" : "unsupported";
+            if (kind.equals("unsupported") || type instanceof Dynamic || type instanceof BitFieldDataType)
+                throw new PrototypeRejected(PrototypeRefusalCode.UNSUPPORTED_SHAPE, "TYPE_CONSTRUCTOR");
+            if ((isNamed || type instanceof Pointer || type instanceof Array) && type.getLength() <= 0)
+                throw new PrototypeRejected(PrototypeRefusalCode.UNSUPPORTED_SHAPE, "UNSIZED_TYPE");
+            StringBuilder descriptor = new StringBuilder(kind + ";" + field(path) + ";" + type.getLength() + ";");
+            if (isNamed) {
+                String name = budget.text(type.getName());
+                if (!validCName(name)) throw new PrototypeRejected(PrototypeRefusalCode.INVALID_NAME, "TYPE_NAME");
+                if (recording) {
+                    named.putIfAbsent(path, type);
+                    if (namedInstances.put(type, Boolean.TRUE) == null) definitions.add(type);
+                }
+            }
+            if (type instanceof Pointer) {
+                append(descriptor, describe(((Pointer)type).getDataType(), depth + 1, active, activeNames));
+            } else if (type instanceof TypeDef) {
+                append(descriptor, describe(((TypeDef)type).getDataType(), depth + 1, active, activeNames));
+            } else if (type instanceof Array) {
+                Array array = (Array)type;
+                if (array.getNumElements() <= 0 || array.getElementLength() <= 0 ||
+                    (long)array.getNumElements() * array.getElementLength() != array.getLength())
+                    throw new PrototypeRejected(PrototypeRefusalCode.UNSUPPORTED_SHAPE, "UNSIZED_ARRAY");
+                append(descriptor, array.getNumElements() + ";" + array.getElementLength() + ";");
+                append(descriptor, describe(array.getDataType(), depth + 1, active, activeNames));
+            } else if (type instanceof Composite) {
+                Composite aggregate = (Composite)type;
+                int count = aggregate.getNumComponents();
+                if (count < 0 || count > 4096) throw new PrototypeRejected(PrototypeRefusalCode.LIMIT, "AGGREGATE_FIELDS");
+                for (int i = 0; i < count; i++) {
+                    prototypeCancellation(taskMonitor);
+                    DataTypeComponent component = aggregate.getComponent(i);
+                    if (component == null || component.isBitFieldComponent() || component.getLength() <= 0 || component.getOffset() < 0 ||
+                        (long)component.getOffset() + component.getLength() > aggregate.getLength())
+                        throw new PrototypeRejected(PrototypeRefusalCode.UNSUPPORTED_SHAPE, "AGGREGATE_COMPONENT");
+                    append(descriptor, i + ";" + field(component.getFieldName() == null ? "" : component.getFieldName()) +
+                        ";" + component.getOffset() + ";" + component.getLength() + ";");
+                    append(descriptor, describe(component.getDataType(), depth + 1, active, activeNames));
+                }
+            } else if (type instanceof Enum) {
+                Enum enumeration = (Enum)type;
+                int count = enumeration.getCount();
+                if (count < 0 || count > 4096) throw new PrototypeRejected(PrototypeRefusalCode.LIMIT, "ENUM_VALUES");
+                String[] names = boundedEnumNames(enumeration.getNames(), count, depth, budget,
+                    () -> prototypeCancellation(taskMonitor));
+                for (String name : names) {
+                    prototypeCancellation(taskMonitor);
+                    // Name text/node costs were charged before sorting; descriptor bytes are charged below.
+                    append(descriptor, name.length() + ":" + name + ";" + enumeration.getValue(name) + ";");
+                }
+            }
+            active.remove(type);
+            if (isNamed) activeNames.remove(path);
+            budget.total(descriptor.toString().getBytes(StandardCharsets.UTF_8).length);
+            return descriptor.toString();
+        }
+        void validate(DataType type) throws Exception {
+            describe(type, 0, new java.util.IdentityHashMap<>(), new TreeMap<>());
+        }
+        void finish() throws Exception {
+            // A standalone root for each definition makes its digest independent of discovery order.
+            recording = false;
+            for (DataType definition : definitions) {
+                prototypeCancellation(taskMonitor);
+                String descriptor = describe(definition, 0, new java.util.IdentityHashMap<>(), new TreeMap<>());
+                String name = budget.text(definition.getName());
+                String path = definition.getPathName();
+                TypeRequirement requirement = new TypeRequirement(budget.text(path), budget.text(typeId(path)), budget.text(name),
+                    budget.text(sha256(descriptor.getBytes(StandardCharsets.UTF_8))));
+                TypeRequirement previous = requirements.putIfAbsent(path, requirement);
+                if (previous != null && !previous.same(requirement))
+                    throw new PrototypeRejected(PrototypeRefusalCode.TYPE_MISMATCH, "NAMED_TYPE_CHANGED");
+            }
+        }
+        String signatureText(DataType type, boolean allowVoid) throws Exception {
+            prototypeCancellation(taskMonitor);
+            DataType leaf = type;
+            int depth = 0;
+            while (leaf instanceof Pointer || leaf instanceof TypeDef) {
+                prototypeCancellation(taskMonitor);
+                if (++depth > 32) throw new PrototypeRejected(PrototypeRefusalCode.LIMIT, "SIGNATURE_DEPTH");
+                if (leaf instanceof Pointer) { allowVoid = true; leaf = ((Pointer)leaf).getDataType(); }
+                else leaf = ((TypeDef)leaf).getDataType();
+                if (leaf == null) throw new PrototypeRejected(PrototypeRefusalCode.NULL_TYPE, "POINTER_TARGET");
+            }
+            if (!(leaf instanceof AbstractIntegerDataType) && !(leaf instanceof AbstractFloatDataType) &&
+                !(leaf instanceof Composite) && !(leaf instanceof Enum) && !(allowVoid && leaf instanceof VoidDataType))
+                throw new PrototypeRejected(PrototypeRefusalCode.UNSUPPORTED_SHAPE, "SIGNATURE_CONSTRUCTOR");
+            if (!(leaf instanceof VoidDataType) && leaf.getLength() <= 0)
+                throw new PrototypeRejected(PrototypeRefusalCode.UNSUPPORTED_SHAPE, "UNSIZED_SIGNATURE");
+            if ((leaf instanceof AbstractIntegerDataType || leaf instanceof AbstractFloatDataType || leaf instanceof VoidDataType) &&
+                !supportedBuiltinSpelling(budget.text(leaf.getDisplayName())))
+                throw new PrototypeRejected(PrototypeRefusalCode.UNSUPPORTED_SHAPE, "BUILTIN_C_SPELLING");
+            String text = budget.text(type.getDisplayName());
+            // Validated simple constructors only. This is a spelling guard, never C-signature parsing.
+            if (!text.matches("[A-Za-z_][A-Za-z0-9_ ]*(?: *\\* *)*"))
+                throw new PrototypeRejected(PrototypeRefusalCode.UNSUPPORTED_SHAPE, "TYPE_SPELLING");
+            return text;
+        }
+    }
+
+    private static String typeId(String path) throws Exception { return "type_" + sha256(path.getBytes(StandardCharsets.UTF_8)); }
+
+    static PrototypeResult extractTypedPrototype(DecompileResults result, String functionName, TaskMonitor taskMonitor) throws Exception {
+        prototypeCancellation(taskMonitor);
+        HighFunction high = result == null ? null : result.getHighFunction();
+        prototypeCancellation(taskMonitor);
+        FunctionPrototype prototype = high == null ? null : high.getFunctionPrototype();
+        prototypeCancellation(taskMonitor);
+        if (prototype == null)
+            return new PrototypeResult(null, new Refusal(PrototypeRefusalCode.NO_HIGH_FUNCTION, "MISSING_HIGH_PROTOTYPE"));
+        return extractTypedPrototype(prototype, functionName, taskMonitor);
+    }
+
+    // The typed overload is also the public-API fixture boundary; no listing parameters are accepted.
+    static PrototypeResult extractTypedPrototype(FunctionPrototype prototype, String functionName, TaskMonitor taskMonitor) throws Exception {
+        prototypeCancellation(taskMonitor);
+        try {
+            if (prototype == null) return new PrototypeResult(null, new Refusal(PrototypeRefusalCode.NO_HIGH_FUNCTION, "MISSING_HIGH_PROTOTYPE"));
+            TypedGraph graph = new TypedGraph(taskMonitor);
+            if (functionName == null) throw new PrototypeRejected(PrototypeRefusalCode.INVALID_NAME, "FUNCTION_NAME");
+            graph.budget.text(functionName);
+            if (!validCName(functionName)) throw new PrototypeRejected(PrototypeRefusalCode.INVALID_NAME, "FUNCTION_NAME");
+            int count = prototype.getNumParams();
+            boolean variadic = prototype.isVarArg();
+            graph.budget.parameters(count, variadic);
+            DataType returnType = prototype.getReturnType();
+            graph.validate(returnType);
+            List<DataType> types = new ArrayList<>();
+            List<String> names = new ArrayList<>();
+            Set<String> uniqueNames = new TreeSet<>();
+            for (int index = 0; index < count; index++) {
+                prototypeCancellation(taskMonitor);
+                HighSymbol symbol = prototype.getParam(index);
+                if (symbol == null) throw new PrototypeRejected(PrototypeRefusalCode.NULL_SYMBOL, "MISSING_HIGH_PARAMETER");
+                String name = symbol.getName();
+                if (name == null) throw new PrototypeRejected(PrototypeRefusalCode.INVALID_NAME, "MISSING_PARAMETER_NAME");
+                graph.budget.text(name);
+                if (!validCName(name) || !uniqueNames.add(name)) throw new PrototypeRejected(PrototypeRefusalCode.INVALID_NAME, "PARAMETER_NAME");
+                DataType type = symbol.getDataType();
+                graph.validate(type);
+                names.add(name); types.add(type);
+            }
+            graph.finish();
+            String returnText = graph.signatureText(returnType, true);
+            List<ParameterText> parameters = new ArrayList<>();
+            StringBuilder expected = new StringBuilder(returnText + " " + functionName + "(");
+            for (int index = 0; index < count; index++) {
+                prototypeCancellation(taskMonitor);
+                String text = graph.signatureText(types.get(index), false);
+                parameters.add(new ParameterText(names.get(index), text));
+                if (index > 0) expected.append(", ");
+                expected.append(text).append(' ').append(names.get(index));
+            }
+            if (variadic) expected.append(", ...");
+            else if (count == 0) expected.append("void");
+            expected.append(')');
+            graph.budget.text(expected.toString());
+            // All graph, string and constructor rejection precedes the first cloning/rendering call.
+            prototypeCancellation(taskMonitor);
+            FunctionDefinitionDataType definition = new FunctionDefinitionDataType(functionName);
+            definition.setReturnType(returnType);
+            ParameterDefinition[] arguments = new ParameterDefinition[count];
+            for (int index = 0; index < count; index++) {
+                prototypeCancellation(taskMonitor);
+                arguments[index] = new ParameterDefinitionImpl(names.get(index), types.get(index), null);
+            }
+            definition.setArguments(arguments);
+            definition.setVarArgs(variadic);
+            prototypeCancellation(taskMonitor);
+            String declaration = definition.getPrototypeString(false);
+            prototypeCancellation(taskMonitor);
+            if (!expected.toString().equals(declaration))
+                throw new PrototypeRejected(PrototypeRefusalCode.UNSUPPORTED_SHAPE, "RENDERED_SHAPE_CHANGED");
+            return new PrototypeResult(new TypedPrototype(declaration, parameters, returnText, variadic,
+                new ArrayList<>(graph.requirements.values())), null);
+        } catch (PrototypeRejected rejected) {
+            prototypeCancellation(taskMonitor);
+            return new PrototypeResult(null, rejected.refusal);
+        } catch (IllegalArgumentException unsupported) {
+            prototypeCancellation(taskMonitor);
+            return new PrototypeResult(null, new Refusal(PrototypeRefusalCode.UNSUPPORTED_SHAPE, "TYPED_API_REJECTED"));
+        }
+    }
+
+    private final PlannedTypeCatalog plannedTypes = new PlannedTypeCatalog();
+
+    private static void mergeCoverage(Map<String, TypeRequirement> coverage, PlannedTypeCoverage additional) throws PrototypeRejected {
+        for (TypeRequirement requirement : additional.byPath.values()) {
+            TypeRequirement previous = coverage.putIfAbsent(requirement.path, requirement);
+            if (previous != null && !previous.same(requirement))
+                throw new PrototypeRejected(PrototypeRefusalCode.TYPE_MISMATCH, "NAMED_TYPE_CHANGED");
+        }
+    }
+
+    private PlannedTypeCoverage planTypeCoverage(List<DataType> roots, Path typesDirectory,
+                                                 PlanningBatchEvidence planningEvidence, Address source) throws Exception {
+        return planTypeCoverage(roots, typesDirectory, planningEvidence, source, false);
+    }
+
+    private PlannedTypeCoverage planTypeCoverage(List<DataType> roots, Path typesDirectory,
+                                                 PlanningBatchEvidence planningEvidence, Address source,
+                                                 boolean catalogOnly) throws Exception {
+        TypedGraph graph = new TypedGraph(monitor);
+        for (DataType root : roots) { prototypeCancellation(monitor); graph.validate(root); }
+        graph.finish();
+        plannedTypes.admit(graph.requirements, () -> prototypeCancellation(monitor));
+        for (DataType type : graph.named.values()) retainType(typesDirectory, planningEvidence, type, source, catalogOnly);
+        // Only this function's deterministic metadata closure is admitted; future functions cannot enlarge it.
+        return new PlannedTypeCoverage(graph.requirements);
     }
 
     private FunctionMetadata collectFunctionMetadata(
@@ -1506,11 +2073,18 @@ public class ExportProgramModelOwned extends GhidraScript {
         Path typesDirectory,
         PlanningBatchEvidence planningEvidence
     ) throws Exception {
+        return collectFunctionMetadata(function, globalsDirectory, typesDirectory, planningEvidence, false);
+    }
+
+    private FunctionMetadata collectFunctionMetadata(Function function, Path globalsDirectory, Path typesDirectory,
+                                                       PlanningBatchEvidence planningEvidence, boolean catalogOnly) throws Exception {
+        prototypeCancellation(monitor);
         Set<String> callIds = new TreeSet<>();
         Set<String> referencedGlobals = new TreeSet<>();
         Set<String> strings = new TreeSet<>();
         String failure = null;
         boolean evidenceComplete = true;
+        Map<String, TypeRequirement> coverage = new TreeMap<>();
 
         try {
             for (Function target : function.getCalledFunctions(monitor)) {
@@ -1524,32 +2098,45 @@ public class ExportProgramModelOwned extends GhidraScript {
 
         try {
             InstructionIterator instructions = currentProgram.getListing().getInstructions(function.getBody(), true);
+            int metadataCandidates = 0;
             while (instructions.hasNext()) {
                 if (monitor.isCancelled() || Thread.currentThread().isInterrupted()) {
                     throw new InterruptedException("program-model metadata recovery was cancelled");
                 }
                 Instruction instruction = instructions.next();
                 byteAddress(instruction.getAddress());
-                for (Reference reference : instruction.getReferencesFrom()) {
+                List<Reference> batch = referenceBatch(instruction, MAXIMUM_REFERENCE_CANDIDATES - metadataCandidates, false);
+                if (batch == null) {
+                    evidenceComplete = false;
+                    failure = appendFailure(failure, "metadataRefusal=REFERENCE_WORK_LIMIT");
+                    break;
+                }
+                metadataCandidates += batch.size();
+                for (Reference reference : batch) {
+                    checkByteCancellation();
+                    if (!dataReference(reference)) continue;
                     Address target = reference.getToAddress();
-                    if (!target.isMemoryAddress()) continue;
-                    byteAddress(target);
-                    Data data = currentProgram.getListing().getDataContaining(target);
-                    if (data != null && data.hasStringValue() && data.getValue() != null) {
+                    if (!dataTarget(target)) continue;
+                    ResolvedData resolved = resolveAddressedData(target);
+                    Data data = resolved.selected;
+                    if (resolved.stringValue) {
                         strings.add(data.getValue().toString());
                         continue;
                     }
-                    if (reference.getReferenceType().isData() && currentProgram.getFunctionManager().getFunctionContaining(target) == null) {
-                        GlobalEvidence global = globalAt(target);
+                    {
+                        GlobalEvidence global = globalAt(resolved);
                         String globalRecord = renderGlobal(global);
-                        if (planningEvidence == null) {
+                        if (catalogOnly) {
+                            // Replay reads the same metadata and charges traversal, but publishes no evidence.
+                        } else if (planningEvidence == null) {
                             writeIfAbsentAtomic(globalsDirectory.resolve(global.id + ".json"), globalRecord, phaseObservation, false);
                         } else {
                             planningEvidence.retainGlobal(global.id, globalRecord);
                         }
                         referencedGlobals.add(global.id);
                         if (data != null) {
-                            retainType(typesDirectory, planningEvidence, data.getDataType(), global.address);
+                            mergeCoverage(coverage, planTypeCoverage(java.util.Collections.singletonList(data.getDataType()),
+                                typesDirectory, planningEvidence, global.address, catalogOnly));
                         }
                     }
                 }
@@ -1561,10 +2148,15 @@ public class ExportProgramModelOwned extends GhidraScript {
         }
 
         try {
-            retainType(typesDirectory, planningEvidence, function.getReturnType(), function.getEntryPoint());
-            for (Parameter parameter : function.getParameters()) {
-                retainType(typesDirectory, planningEvidence, parameter.getDataType(), function.getEntryPoint());
+            List<DataType> signatureTypes = new ArrayList<>();
+            signatureTypes.add(function.getReturnType());
+            Parameter[] listingParameters = function.getParameters();
+            if (listingParameters.length > 256) throw new PrototypeRejected(PrototypeRefusalCode.LIMIT, "PARAMETER_COUNT");
+            for (Parameter parameter : listingParameters) {
+                prototypeCancellation(monitor);
+                signatureTypes.add(parameter.getDataType());
             }
+            mergeCoverage(coverage, planTypeCoverage(signatureTypes, typesDirectory, planningEvidence, function.getEntryPoint(), catalogOnly));
         } catch (Exception problem) {
             rethrowInfrastructureFailure(problem);
             evidenceComplete = false;
@@ -1576,28 +2168,43 @@ public class ExportProgramModelOwned extends GhidraScript {
         prefix.append("      \"id\": ").append(json(functionId(function))).append(",\n");
         prefix.append("      \"name\": ").append(json(function.getName())).append(",\n");
         prefix.append("      \"address\": ").append(json(String.format("0x%x", function.getEntryPoint().getOffset()))).append(",\n");
-        prefix.append("      \"prototype\": ").append(json(function.getPrototypeString(false, false))).append(",\n");
+        String listingPrototype = function.getPrototypeString(false, false);
         StringBuilder evidence = new StringBuilder();
         evidence.append("      \"recoveryAssessment\": \"unassessed\",\n");
         evidence.append("      \"calls\": ["); appendStrings(evidence, callIds); evidence.append("],\n");
         evidence.append("      \"referencedGlobals\": ["); appendStrings(evidence, referencedGlobals); evidence.append("],\n");
         evidence.append("      \"strings\": ["); appendStrings(evidence, strings); evidence.append("],\n");
-        if ((long) prefix.length() + evidence.length() > MAXIMUM_FULL_FUNCTION_RECORD_BYTES ||
+        if ((long) prefix.length() + evidence.length() + listingPrototype.length() > MAXIMUM_FULL_FUNCTION_RECORD_BYTES ||
             (long) prefix.toString().getBytes(StandardCharsets.UTF_8).length +
-                evidence.toString().getBytes(StandardCharsets.UTF_8).length > MAXIMUM_FULL_FUNCTION_RECORD_BYTES) {
+                evidence.toString().getBytes(StandardCharsets.UTF_8).length +
+                listingPrototype.getBytes(StandardCharsets.UTF_8).length > MAXIMUM_FULL_FUNCTION_RECORD_BYTES) {
             throw new PlanningIntegrityException("function metadata exceeds its byte bound: " + functionId(function));
         }
-        return new FunctionMetadata(function, prefix.toString(), evidence.toString(), failure, evidenceComplete);
+        return new FunctionMetadata(function, prefix.toString(), function.getName(), listingPrototype, evidence.toString(),
+            failure, evidenceComplete, new PlannedTypeCoverage(coverage));
+    }
+
+    /** Replay only in address order, interleaved with new preparation for sparse full checkpoints.
+     * One bounded metadata closure is discarded per function; no native calls or evidence writes.
+     * The same graph/reference/cancellation limits apply, including partially admitted failed metadata.
+     */
+    private void replayTypeCatalog(List<Function> functions, int start, int end) throws Exception {
+        for (int index = start; index < end; index++) {
+            prototypeCancellation(monitor);
+            collectFunctionMetadata(functions.get(index), null, null, null, true);
+        }
     }
 
     private static NativeOutcome decompileFunction(
         Function function,
+        String functionName,
         DecompInterface decompiler,
         int timeoutSeconds,
         TaskMonitor taskMonitor
     ) throws Exception {
         String source = null;
         String failure = null;
+        PrototypeResult prototype = new PrototypeResult(null, new Refusal(PrototypeRefusalCode.NO_HIGH_FUNCTION, "NO_NATIVE_RESULT"));
         try {
             if (taskMonitor.isCancelled() || Thread.currentThread().isInterrupted()) {
                 throw new InterruptedException("program-model native decompilation was cancelled");
@@ -1606,34 +2213,41 @@ public class ExportProgramModelOwned extends GhidraScript {
             if (taskMonitor.isCancelled() || Thread.currentThread().isInterrupted()) {
                 throw new InterruptedException("program-model native decompilation was cancelled");
             }
-            DecompiledFunction rendered = result.decompileCompleted() ? result.getDecompiledFunction() : null;
+            DecompiledFunction rendered = result != null && result.decompileCompleted() ? result.getDecompiledFunction() : null;
             if (rendered != null) {
                 source = rendered.getC();
+                if (source == null) failure = appendFailure(failure, "nativeRefusal=NULL_SOURCE");
                 if (source != null && (source.length() > MAXIMUM_FULL_FUNCTION_RECORD_BYTES ||
                     source.getBytes(StandardCharsets.UTF_8).length > MAXIMUM_FULL_FUNCTION_RECORD_BYTES)) {
                     throw new PlanningIntegrityException("decompiled source exceeds its byte bound");
                 }
             } else {
-                String detail = result.getErrorMessage();
+                String detail = result == null ? null : result.getErrorMessage();
                 failure = appendFailure(null, "decompilation failed or timed out" +
                     (detail == null || detail.trim().isEmpty() ? "" : ": " + detail));
             }
+            prototype = extractTypedPrototype(result, functionName, taskMonitor);
         } catch (Exception problem) {
             if (taskMonitor.isCancelled() || Thread.currentThread().isInterrupted() ||
                 problem instanceof InterruptedException || problem instanceof IOException ||
                 problem instanceof PlanningIntegrityException) throw problem;
-            failure = appendFailure(null, exceptionMessage("decompilation", problem));
+            failure = appendFailure(failure, exceptionMessage("decompilation", problem));
         }
-        return new NativeOutcome(source, failure);
+        prototypeCancellation(taskMonitor);
+        return new NativeOutcome(source, failure, prototype);
     }
 
     private static FunctionExport renderFunction(FunctionMetadata metadata, NativeOutcome nativeOutcome, boolean full) {
+        if (full && nativeOutcome == null) throw new IllegalArgumentException("full rendering requires native outcome");
         String source = nativeOutcome == null ? null : nativeOutcome.source;
-        String failure = nativeOutcome == null ? metadata.failure : appendFailure(metadata.failure, nativeOutcome.failure);
-        String status = full
-            ? (source == null ? "failed" : (metadata.evidenceComplete ? "recovered" : "partial"))
-            : (metadata.evidenceComplete ? "partial" : "failed");
-        String record = metadata.prefix + "      \"extractionStatus\": " + json(status) + ",\n" +
+        String failure = nativeOutcome == null ? metadata.failure : appendFailure(metadata.failure, nativeOutcome.nativeFailure);
+        Refusal refusal = nativeOutcome == null ? null : nativeOutcome.prototype.refusal;
+        if (full && refusal == null) refusal = checkCoverage(nativeOutcome.prototype.typed, metadata.coverage);
+        PrototypeOrigin origin = full && refusal == null ? PrototypeOrigin.HIGH_FUNCTION : PrototypeOrigin.LISTING;
+        String prototype = origin == PrototypeOrigin.HIGH_FUNCTION ? nativeOutcome.prototype.typed.declaration : metadata.listingPrototype;
+        if (full && refusal != null) failure = appendFailure(failure, refusal.evidence());
+        String status = prototypeStatus(full, source, metadata.evidenceComplete, refusal);
+        String record = metadata.identity + "      \"prototype\": " + json(prototype) + ",\n" + "      \"extractionStatus\": " + json(status) + ",\n" +
             metadata.evidence + "      \"decompiledC\": " + json(source) + "\n    }";
         if (record.getBytes(StandardCharsets.UTF_8).length > MAXIMUM_FULL_FUNCTION_RECORD_BYTES) {
             throw new PlanningIntegrityException("function record exceeds its byte bound");
@@ -1652,30 +2266,34 @@ public class ExportProgramModelOwned extends GhidraScript {
     ) throws Exception {
         FunctionMetadata metadata = collectFunctionMetadata(function, globalsDirectory, typesDirectory, planningEvidence);
         NativeOutcome nativeOutcome = includeDecompiledC
-            ? decompileFunction(function, decompiler, decompileTimeoutSeconds, monitor) : null;
+            ? decompileFunction(function, metadata.name, decompiler, decompileTimeoutSeconds, monitor) : null;
         return renderFunction(metadata, nativeOutcome, includeDecompiledC);
     }
 
     private final class NativeWorker implements ExporterParallelCoordinatorOwnedV1.Worker<FunctionMetadata, FunctionExport> {
-        private final DecompInterface decompiler = new DecompInterface();
+        private final DecompInterface decompiler;
         private final TaskMonitorAdapter taskMonitor = new TaskMonitorAdapter(true);
 
         private final int workerIndex;
         private final ExporterPhaseObservationOwnedV1 observation;
-        NativeWorker(int workerIndex) {
+        NativeWorker(int workerIndex) { this(workerIndex, new DecompInterface()); }
+        NativeWorker(int workerIndex, DecompInterface decompiler) {
+            this.decompiler = java.util.Objects.requireNonNull(decompiler);
             this.workerIndex = workerIndex;
             this.observation = phaseObservation;
             try {
                 DecompileOptions decompileOptions = new DecompileOptions();
                 decompileOptions.setMaxInstructions(MAXIMUM_DECOMPILE_INSTRUCTIONS);
                 decompiler.setOptions(decompileOptions);
-                decompiler.toggleSyntaxTree(false);
+                if (!decompiler.toggleSyntaxTree(true) || !decompiler.toggleCCode(true)) {
+                    throw new IllegalStateException("Ghidra decompiler rejected source/syntax-tree configuration");
+                }
                 if (!decompiler.openProgram(currentProgram)) {
                     throw new IllegalStateException("Ghidra decompiler could not open the current program");
                 }
             } catch (RuntimeException | Error failure) {
-                decompiler.stopProcess();
-                decompiler.dispose();
+                try { decompiler.stopProcess(); } catch (Throwable cleanup) { failure.addSuppressed(cleanup); }
+                try { decompiler.dispose(); } catch (Throwable cleanup) { failure.addSuppressed(cleanup); }
                 throw failure;
             }
         }
@@ -1686,7 +2304,7 @@ public class ExportProgramModelOwned extends GhidraScript {
                 ExporterPhaseObservationOwnedV1.Phase.NATIVE_0_INITIAL.ordinal() + workerIndex * 2 + (retry ? 1 : 0)];
             long started = observation.begin(nativePhase);
             NativeOutcome outcome;
-            try { outcome = decompileFunction(metadata.function, decompiler,
+            try { outcome = decompileFunction(metadata.function, metadata.name, decompiler,
                 retry ? DECOMPILE_RETRY_TIMEOUT_SECONDS : DECOMPILE_TIMEOUT_SECONDS, taskMonitor); }
             finally { observation.end(nativePhase, started); }
             long rendering = observation.begin(ExporterPhaseObservationOwnedV1.Phase.RENDER);
@@ -1719,6 +2337,7 @@ public class ExportProgramModelOwned extends GhidraScript {
     }
 
     private PlanningSemanticState computePlanningSemanticState(List<Function> functions) throws Exception {
+        plannedTypes.clear();
         ExporterSemanticFingerprintOwnedV1 fingerprint = new ExporterSemanticFingerprintOwnedV1();
         Set<String> ownedGlobalIds = new TreeSet<>();
         Set<String> ownedTypeIds = new TreeSet<>();
@@ -1815,6 +2434,29 @@ public class ExportProgramModelOwned extends GhidraScript {
             "      \"status\": " + json(exported.status) + ",\n" +
             "      \"message\": " + json(exported.failure) + "\n" +
             "    }";
+    }
+
+    private static Path fullBindingPath(Path record) { return record.resolveSibling(record.getFileName() + ".binding"); }
+    private static String fullBinding(String functionDigest, String failureDigest) {
+        return "owned-function-v19\n" + functionDigest + "\n" + failureDigest + "\n";
+    }
+    private static String currentFullBinding(Path record, Path failure) throws Exception {
+        long size = Files.size(record);
+        if (size <= 0 || size > MAXIMUM_FULL_FUNCTION_RECORD_BYTES)
+            throw new PlanningIntegrityException("full function checkpoint exceeds its byte bound");
+        if (Files.exists(failure) && (!Files.isRegularFile(failure) || Files.size(failure) > MAXIMUM_PLANNING_EVIDENCE_RECORD_BYTES))
+            throw new PlanningIntegrityException("full failure checkpoint exceeds its byte bound");
+        return fullBinding(sha256(record), Files.isRegularFile(failure) ? sha256(failure) : "absent");
+    }
+    private static void requireFullBinding(Path binding, String expected) throws Exception {
+        if (!Files.isRegularFile(binding) || Files.size(binding) != expected.getBytes(StandardCharsets.UTF_8).length ||
+            !Files.readString(binding, StandardCharsets.UTF_8).equals(expected))
+            throw new PlanningIntegrityException("full function/failure checkpoint binding differs or is missing");
+    }
+    private static boolean acceptedFullCheckpoint(Path record, Path failuresDirectory) throws Exception {
+        if (!isAcceptedRecord(record)) return false;
+        requireFullBinding(fullBindingPath(record), currentFullBinding(record, failuresDirectory.resolve(record.getFileName())));
+        return true;
     }
 
     private static boolean isAcceptedRecord(Path record) throws IOException {
@@ -2682,6 +3324,7 @@ public class ExportProgramModelOwned extends GhidraScript {
             ",\"language\":" + json(currentProgram.getLanguageID().toString()) +
             ",\"compilerSpec\":" + json(currentProgram.getCompilerSpec().getCompilerSpecID().toString()) +
             ",\"semanticStateBinding\":" + semanticState + "}\n";
+        plannedTypes.clear();
         Path statePath = stateDirectory.resolve("state.json");
 
         // No output-state mutation occurs until the complete planning semantic boundary has been
@@ -2736,7 +3379,7 @@ public class ExportProgramModelOwned extends GhidraScript {
             }
             for (String id : functionIds) {
                 Path record = functionsDirectory.resolve(id + ".json");
-                if (!isAcceptedRecord(record)) continue;
+                if (!acceptedFullCheckpoint(record, failuresDirectory)) continue;
                 completed++;
                 String status = acceptedRecordStatus(record, id);
                 if (status.equals("recovered")) recovered++;
@@ -2768,7 +3411,10 @@ public class ExportProgramModelOwned extends GhidraScript {
                     @Override
                     public boolean accepted(int index) throws Exception {
                         Path record = functionsDirectory.resolve(functionIds.get(index) + ".json");
-                        return isAcceptedRecord(record);
+                        boolean accepted = acceptedFullCheckpoint(record, failuresDirectory);
+                        // accepted() is visited once per index in address order, even across holes.
+                        if (accepted) replayTypeCatalog(functions, index, index + 1);
+                        return accepted;
                     }
 
                     @Override
@@ -2802,7 +3448,9 @@ public class ExportProgramModelOwned extends GhidraScript {
                         long publication = phaseBegin(ExporterPhaseObservationOwnedV1.Phase.FUNCTION_PUBLICATION);
                         try {
                             writeFunctionFailure(failuresDirectory, id, exported);
-                            writeAtomic(functionsDirectory.resolve(id + ".json"), exported.record);
+                            Path record = functionsDirectory.resolve(id + ".json");
+                            writeAtomic(record, exported.record);
+                            writeAtomic(fullBindingPath(record), currentFullBinding(record, failuresDirectory.resolve(id + ".json")));
                         } finally { phaseEnd(ExporterPhaseObservationOwnedV1.Phase.FUNCTION_PUBLICATION, publication); }
                         counts[0]++;
                         if (exported.status.equals("recovered")) counts[1]++;
@@ -2822,9 +3470,19 @@ public class ExportProgramModelOwned extends GhidraScript {
             failed = counts[3];
             for (String id : functionIds) {
                 Path record = functionsDirectory.resolve(id + ".json");
-                if (!isAcceptedRecord(record)) throw new IllegalStateException("missing durable function record: " + id);
+                if (!acceptedFullCheckpoint(record, failuresDirectory)) throw new IllegalStateException("missing durable function record: " + id);
                 acceptedRecordStatus(record, id);
-                functionRecords.add(bindCurrentFile(record, java.util.Collections.singletonList(id)));
+                BoundFragment functionBinding = bindCurrentFile(record, java.util.Collections.singletonList(id));
+                Path failure = failuresDirectory.resolve(id + ".json");
+                BoundFragment failureBinding = Files.isRegularFile(failure) ? bindCurrentFile(failure, new ArrayList<>()) : null;
+                String identity = fullBinding(functionBinding.sha256, failureBinding == null ? "absent" : failureBinding.sha256);
+                requireFullBinding(fullBindingPath(record), identity);
+                BoundFragment identityBinding = bindCurrentFile(fullBindingPath(record), new ArrayList<>());
+                if (!identityBinding.sha256.equals(sha256(identity.getBytes(StandardCharsets.UTF_8))))
+                    throw new PlanningIntegrityException("full checkpoint identity changed during binding");
+                functionRecords.add(functionBinding);
+                if (failureBinding != null) auxiliaryEvidence.add(failureBinding);
+                auxiliaryEvidence.add(identityBinding);
             }
             for (Path record : sortedRecords(globalsDirectory)) {
                 String name = record.getFileName().toString();
@@ -2938,6 +3596,9 @@ public class ExportProgramModelOwned extends GhidraScript {
             reused = completed;
             observedProgress(progressPath, "planning", completed, total, recovered, partial, failed, reused, null);
 
+            // Preflight's final catalog cannot seed the prefix: that would admit future owners.
+            // Rebuild only accepted batches; orphan/partial batches are prepared normally below.
+            replayTypeCatalog(functions, 0, completed);
             for (int start = completed; start < total; start += PLANNING_BATCH_FUNCTIONS) {
                 int end = Math.min(start + PLANNING_BATCH_FUNCTIONS, total);
                 ExporterSemanticFingerprintOwnedV1.BatchCommitment expectedBatch =
