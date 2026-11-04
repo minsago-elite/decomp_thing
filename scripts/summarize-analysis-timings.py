@@ -14,6 +14,7 @@ from typing import Any
 
 
 DIGEST = re.compile(r"^[0-9a-f]{64}$")
+UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 BINDINGS = (
     "inputSha256",
     "exporterSha256",
@@ -32,11 +33,14 @@ def load_record(path: Path) -> dict[str, Any]:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise TimingEvidenceError(f"{path}: cannot read timing JSON: {error}") from error
-    if not isinstance(value, dict) or value.get("schemaVersion") != 1:
+    if not isinstance(value, dict) or type(value.get("schemaVersion")) is not int or value["schemaVersion"] != 1:
         raise TimingEvidenceError(f"{path}: unsupported timing record schema")
     invocation = value.get("analysisInvocationId")
-    if not isinstance(invocation, str) or not invocation:
+    if not isinstance(invocation, str) or not UUID.fullmatch(invocation):
         raise TimingEvidenceError(f"{path}: missing analysisInvocationId")
+    workflow_run = value.get("workflowRunId")
+    if workflow_run is not None and (not isinstance(workflow_run, str) or not UUID.fullmatch(workflow_run)):
+        raise TimingEvidenceError(f"{path}: malformed workflowRunId")
     if value.get("terminalStatus") != "succeeded" or value.get("workerTerminalStatus") != "succeeded":
         raise TimingEvidenceError(f"{path}: timing sample is not a successful parent and worker invocation")
     coverage = value.get("coverage")
@@ -51,6 +55,14 @@ def load_record(path: Path) -> dict[str, Any]:
     if not isinstance(value.get("recoveryMode"), str) or not value["recoveryMode"]:
         raise TimingEvidenceError(f"{path}: missing recoveryMode")
 
+    parent_total = value.get("parentTotalElapsedNanos")
+    worker_total = value.get("workerTerminalElapsedNanos")
+    if not isinstance(parent_total, int) or isinstance(parent_total, bool) or parent_total < 0:
+        raise TimingEvidenceError(f"{path}: invalid parentTotalElapsedNanos")
+    if not isinstance(worker_total, int) or isinstance(worker_total, bool) or worker_total < 0:
+        raise TimingEvidenceError(f"{path}: invalid workerTerminalElapsedNanos")
+
+    phases: dict[str, set[str]] = {}
     for list_name, expected_domain in (("spans", "parent-monotonic"), ("workerSpans", "worker-monotonic")):
         spans = value.get(list_name)
         if not isinstance(spans, list) or not spans:
@@ -73,7 +85,24 @@ def load_record(path: Path) -> dict[str, Any]:
                 raise TimingEvidenceError(f"{path}: invalid start offset for {phase}")
             if not isinstance(duration, int) or isinstance(duration, bool) or duration < 0:
                 raise TimingEvidenceError(f"{path}: invalid duration for {phase}")
+            total = parent_total if expected_domain == "parent-monotonic" else worker_total
+            if offset + duration > total:
+                raise TimingEvidenceError(f"{path}: {phase} extends past its clock-domain terminal time")
             seen.add(phase)
+        phases[expected_domain] = seen
+
+    required_parent = {"analysis-invocation", "process-launch-request-to-worker-entry-frame"}
+    required_worker = {
+        "worker-entry-to-parent-permit",
+        "application-initialization",
+        "project-import-analysis-pre-script",
+    }
+    if not required_parent <= phases["parent-monotonic"]:
+        raise TimingEvidenceError(f"{path}: required parent analysis or worker-entry span is missing")
+    if not required_worker <= phases["worker-monotonic"]:
+        raise TimingEvidenceError(f"{path}: required worker phase span is missing")
+    if not any(phase.startswith("exporter:") for phase in phases["worker-monotonic"]):
+        raise TimingEvidenceError(f"{path}: inclusive exporter span is missing")
     return value
 
 

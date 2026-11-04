@@ -72,6 +72,9 @@ jobs:
       - name: Verify bounded archival cleanup controls
         timeout-minutes: 1
         run: python3 -B scripts/test-archival-diagnostics.py --verbose
+      - name: Verify analysis timing evidence controls
+        timeout-minutes: 1
+        run: python3 -B scripts/test-analysis-timing-summary.py
       - name: Verify bounded sanitizer invocation controls
         timeout-minutes: 1
         run: python3 -B scripts/test-clang-sanitizer.py --verbose
