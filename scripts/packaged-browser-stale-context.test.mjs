@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { assertRetainedObservation, countRequestsForPath, hasSuccessfulResponseAfter, requireVisibleTarget } from './packaged-browser-stale-context.mjs';
 import { seedHistory } from './packaged-browser-history.mjs';
 
-const retained = { identityMarker: 'fixture', focusedTarget: true, selectionLength: 12, scrollY: 160, targetTop: 240,
+const retained = { identityMarker: 'fixture', focusedTarget: true, selectionLength: 12, scrollY: 160, targetTop: 240, targetVisible: true,
   visibilityState: 'visible', receiptAt: '2026-11-04T00:00:00.000Z', age: 'less than 10 seconds ago', staleNotice: true };
 
 test('seeds a workflow version admitted by the packaged job reader', async t => {
@@ -30,7 +30,7 @@ test('accepts browser scroll anchoring when the selected content stays at the sa
 
 test('rejects changed focus, selection, viewport target, scroll reset, node identity, receipt or stale status', () => {
   for (const changed of [
-    { focusedTarget: false }, { selectionLength: 0 }, { targetTop: 242 }, { scrollY: 0 }, { identityMarker: null }, { visibilityState: 'hidden' },
+    { focusedTarget: false }, { selectionLength: 0 }, { targetTop: 242 }, { targetVisible: false }, { scrollY: 0 }, { identityMarker: null }, { visibilityState: 'hidden' },
     { receiptAt: null }, { staleNotice: false },
   ]) assert.throws(() => assertRetainedObservation(retained, { ...retained, ...changed }, 'view'));
 });

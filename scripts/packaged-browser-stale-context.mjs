@@ -7,6 +7,8 @@ export function assertRetainedObservation(before, after, label, expectedStaleNot
   assert.equal(after.focusedTarget, true, `${label}: focus left the selected metadata row`);
   assert.equal(after.selectionLength, before.selectionLength, `${label}: selected text changed`);
   assert.ok(before.scrollY > 0 && after.scrollY > 0, `${label}: the viewport returned to the top`);
+  assert.equal(before.targetVisible, true, `${label}: selected target was not visible before the read`);
+  assert.equal(after.targetVisible, true, `${label}: selected target left the viewport`);
   assert.ok(Number.isFinite(before.targetTop) && Number.isFinite(after.targetTop), `${label}: selected target position is missing`);
   assert.ok(Math.abs(after.targetTop - before.targetTop) <= 1,
     `${label}: selected target moved in the viewport (${before.targetTop} -> ${after.targetTop})`);
@@ -84,20 +86,24 @@ export async function qualifyStaleContext({ fixture, tab, cdp, evaluate, ready, 
       const maxScroll = Math.max(0, document.documentElement.scrollHeight - innerHeight);
       if (maxScroll < 80) return false;
       scrollTo(0, Math.min(160, maxScroll));
+      node.scrollIntoView({ block: 'nearest' });
       const targetTop = node.getBoundingClientRect().top;
+      const targetVisible = targetTop >= 0 && node.getBoundingClientRect().bottom <= innerHeight;
       return { receiptAt: receipt.dataset.receivedAt, visibilityState: document.visibilityState,
-        scrollY, targetTop, selectionLength: getSelection()?.toString().length ?? 0 };
+        scrollY, targetTop, targetVisible, selectionLength: getSelection()?.toString().length ?? 0 };
     })()`);
-    assert.ok(setup && setup.receiptAt && setup.visibilityState === 'visible' && setup.scrollY > 0 && setup.selectionLength > 0,
+    assert.ok(setup && setup.receiptAt && setup.visibilityState === 'visible' && setup.scrollY > 0 && setup.targetVisible && setup.selectionLength > 0,
       `${view.name}: fixture must support a visible retained receipt, selection and scroll`);
     const before = await evaluate(tab, `(() => {
       const node = document.querySelector(${JSON.stringify(view.target)});
       const receipt = document.querySelector(${JSON.stringify(`[aria-label="${view.receipt}"] [data-received-at]`)});
       const age = receipt?.parentElement?.textContent.match(/\\(([^()]+)\\)/)?.[1] ?? '';
-      const targetTop = node?.getBoundingClientRect().top ?? null;
+      const rect = node?.getBoundingClientRect();
+      const targetTop = rect?.top ?? null;
+      const targetVisible = Boolean(rect && rect.top >= 0 && rect.bottom <= innerHeight);
       return { identityMarker: node?.dataset.staleContextIdentity ?? null,
         focusedTarget: document.activeElement === node, selectionLength: getSelection()?.toString().length ?? 0,
-        scrollY, targetTop, visibilityState: document.visibilityState, receiptAt: receipt?.dataset.receivedAt ?? null, age };
+        scrollY, targetTop, targetVisible, visibilityState: document.visibilityState, receiptAt: receipt?.dataset.receivedAt ?? null, age };
     })()`);
     assert.equal(before.focusedTarget, true, `${view.name}: target did not receive focus`);
     const readCount = () => countRequestsForPath(tab.requests, 'GET', view.apiPath, browserOrigin);
@@ -116,10 +122,12 @@ export async function qualifyStaleContext({ fixture, tab, cdp, evaluate, ready, 
       const node = document.querySelector(${JSON.stringify(view.target)});
       const receipt = document.querySelector(${JSON.stringify(`[aria-label="${view.receipt}"] [data-received-at]`)});
       const age = receipt?.parentElement?.textContent.match(/\\(([^()]+)\\)/)?.[1] ?? '';
-      const targetTop = node?.getBoundingClientRect().top ?? null;
+      const rect = node?.getBoundingClientRect();
+      const targetTop = rect?.top ?? null;
+      const targetVisible = Boolean(rect && rect.top >= 0 && rect.bottom <= innerHeight);
       return { identityMarker: node?.dataset.staleContextIdentity ?? null,
         focusedTarget: document.activeElement === node, selectionLength: getSelection()?.toString().length ?? 0,
-        scrollY, targetTop, visibilityState: document.visibilityState, receiptAt: receipt?.dataset.receivedAt ?? null, age,
+        scrollY, targetTop, targetVisible, visibilityState: document.visibilityState, receiptAt: receipt?.dataset.receivedAt ?? null, age,
         staleNotice: document.body.innerText.includes(${JSON.stringify(STALE_COPY)}) };
     })()`);
     assertRetainedObservation(before, failed, view.name + ' failed read');
@@ -144,10 +152,12 @@ export async function qualifyStaleContext({ fixture, tab, cdp, evaluate, ready, 
       const node = document.querySelector(${JSON.stringify(view.target)});
       const receipt = document.querySelector(${JSON.stringify(`[aria-label="${view.receipt}"] [data-received-at]`)});
       const age = receipt?.parentElement?.textContent.match(/\\(([^()]+)\\)/)?.[1] ?? '';
-      const targetTop = node?.getBoundingClientRect().top ?? null;
+      const rect = node?.getBoundingClientRect();
+      const targetTop = rect?.top ?? null;
+      const targetVisible = Boolean(rect && rect.top >= 0 && rect.bottom <= innerHeight);
       return { identityMarker: node?.dataset.staleContextIdentity ?? null,
         focusedTarget: document.activeElement === node, selectionLength: getSelection()?.toString().length ?? 0,
-        scrollY, targetTop, visibilityState: document.visibilityState, receiptAt: receipt?.dataset.receivedAt ?? null, age,
+        scrollY, targetTop, targetVisible, visibilityState: document.visibilityState, receiptAt: receipt?.dataset.receivedAt ?? null, age,
         staleNotice: document.body.innerText.includes(${JSON.stringify(STALE_COPY)}) };
     })()`);
     assertRetainedObservation(before, recovered, view.name + ' recovered read', false, false);
