@@ -11,7 +11,8 @@ import { seedScale, qualifyScale, dashboardFiltersWithSnapshot } from './package
 import { seedLive, qualifyLive } from './packaged-browser-live.mjs';
 import { seedHistory, qualifyHistory } from './packaged-browser-history.mjs';
 import { seedLegacy, qualifyLegacy } from './packaged-browser-legacy.mjs';
-import { qualifyRestart, assertGracefulShutdown, scrubTokens, boundReport } from './packaged-browser-restart.mjs';
+import { qualifyRestart, assertGracefulShutdown } from './packaged-browser-restart.mjs';
+import { finalizePublication } from './packaged-browser-report.mjs';
 import { qualifyUpgrade, qualifyUpgradeCache } from './packaged-browser-upgrade.mjs';
 import { qualifyAudit, assertAudit } from './packaged-browser-audit.mjs';
 import { PackagedBrowserCdpDiagnostics } from './packaged-browser-cdp-diagnostics.mjs';
@@ -1195,8 +1196,8 @@ try {
       process.exitCode = 1;
     }
   }
-  const retained = scrubTokens(boundReport(report), sensitiveValues);
-  await fs.writeFile(join(root, 'report.json'), JSON.stringify(retained, null, 2) + '\n');
-  console.log(JSON.stringify(retained, null, 2));
+  // Publication never replaces the scenario's own failure: refusals and read-back
+  // failures leave a bounded failed record, explain on stderr and force exit 1.
+  await finalizePublication(root, report, sensitiveValues);
   console.log(`Shutdown ${report.shutdownConfirmed ? 'confirmed' : 'UNCONFIRMED'}. Report: ${join(root, 'report.json')}`);
 }
