@@ -228,6 +228,7 @@ class UploadServer(
     }
     private val limits = admissionLimits.copy(listenBacklog = listenBacklog)
     internal val capacity = WebCapacityMetrics()
+    internal val logDownloadPhases = WebLogDownloadPhases()
     private val lastOverloadLog = java.util.concurrent.atomic.AtomicLong(Long.MIN_VALUE)
     internal val redaction = WebRedactionPolicy.create(redactionEnvironment, sensitiveValues,
         WebRedactionPolicy.defaultPrivateRoots(dataDir))
@@ -323,7 +324,8 @@ class UploadServer(
     private val gitRetention = jobs.registerRetentionHold(WebGitRetentionHold(gitRepositories))
     private val api = spaAssets?.let { WebApiController(access, it, jobs, jobMutations, streamResources,
         harnessReadiness = harnessReadiness, agentPreflight = agentPreflight, archiveEvidence = archiveEvidence,
-        git = WebGitCapability(gitAvailability, gitRepositories), audit = audit, capacity = ::capacitySnapshot) }
+        git = WebGitCapability(gitAvailability, gitRepositories), audit = audit, capacity = ::capacitySnapshot,
+        logDownloadPhases = logDownloadPhases) }
     /** Admitted artifact downloads that have not yet released their stream; test evidence helper. */
     internal fun activeArtifactDownloads(): Int = api?.artifactDownloads?.activeCount() ?: 0
     // A request that finds every worker and queue slot taken is answered by this tiny pool with a stable 429
@@ -566,7 +568,7 @@ class UploadServer(
         }
         val streamsClosed = streamResources.shutdown()
         server.stop(delaySeconds)
-        recordWebCapacityEvent(capacity.summaryLine(), requestDiagnosticOutput)
+        recordWebCapacityEvent(capacity.summaryLine() + logDownloadPhases.summarySuffix(), requestDiagnosticOutput)
         if (!streamsClosed && !streamResources.shutdown()) System.err.println("Event stream shutdown did not complete cleanly.")
         // Close admission without interrupting an in-flight post-response audit append. The
         // existing bounded request-drain below retains ownership if a handler cannot finish.

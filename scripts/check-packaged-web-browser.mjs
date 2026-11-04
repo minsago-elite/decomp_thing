@@ -19,6 +19,7 @@ import { qualifyUpgrade, qualifyUpgradeCache } from './packaged-browser-upgrade.
 import { qualifyAudit, assertAudit } from './packaged-browser-audit.mjs';
 import { TargetLifecycle, TargetProtocol } from './packaged-browser-target-lifecycle.mjs';
 import { PackagedBrowserCdpDiagnostics } from './packaged-browser-cdp-diagnostics.mjs';
+import { createServerPhaseCollector, serverPhaseReport } from './packaged-browser-log-server-phases.mjs';
 
 // Test driver only: the application is launched with a separate Node-free PATH.
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -85,6 +86,7 @@ async function fileHash(path) {
 }
 const root = await fs.mkdtemp(join(repo, 'build/packaged-browser-'));
 let application;
+let applicationPhases = null;
 let browser;
 let vite;
 let work;
@@ -457,12 +459,14 @@ function recordInstallation(installation) {
 async function launchApplication(installation, port = '0', frontendOrigin) {
   applicationOutput = '';
   applicationError = '';
+  const phases = values.mode === 'logs' ? createServerPhaseCollector() : null;
+  applicationPhases = phases;
   application = startOwned(join(installation.app, 'bin/llm_bin_patch'), ['web', '--ui', values.mode === 'legacy' ? 'legacy' : 'spa', '--host', '127.0.0.1', '--port', port,
     '--base-path', values.mode === 'legacy' ? '/' : '/nested/', '--data-dir', installation.data, ...(frontendOrigin ? ['--dev-frontend-origin', frontendOrigin] : [])], {
     cwd: installation.working, env: installation.environment, stdio: ['ignore', 'pipe', 'pipe'],
   });
   application.stdout.on('data', (chunk) => { applicationOutput = (applicationOutput + chunk).slice(-1048576); });
-  application.stderr.on('data', (chunk) => { applicationError = (applicationError + chunk).slice(-1048576); });
+  application.stderr.on('data', (chunk) => { applicationError = (applicationError + chunk).slice(-1048576); phases?.push(chunk); });
   const origin = await waitFor(() => {
     if (application.exitCode !== null || application.signalCode !== null) throw new Error(`Packaged application exited: ${applicationError}`);
     return applicationOutput.match(/http:\/\/127\.0\.0\.1:\d+/)?.[0];
@@ -1177,6 +1181,7 @@ try {
 } finally {
   if (cdp) await cdp.call('Browser.close').catch(() => {});
   const cleanup = await Promise.allSettled([stop(browser), stop(application), stop(vite)]);
+  if (values.mode === 'logs') report.serverDownloadPhases = serverPhaseReport(applicationPhases);
   if (values.mode === 'restart' && application && forcedKill.has(application)) {
     report.status = 'failed'; report.forcedShutdown = true; process.exitCode = 1;
   }

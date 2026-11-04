@@ -494,6 +494,119 @@ class WebApiControllerTest {
         } finally { server.stop(); root.toFile().deleteRecursively() }
     }
 
+    @Test
+    fun `generated content download records same normal response boundaries`() = withPhaseLogServer { server, store, jobId, runId ->
+        val log = Files.createDirectories(store.storageRoot.resolve(jobId).resolve("reports/runs/$runId/source-tree/reports"))
+            .resolve("build.log")
+        Files.writeString(log, "phase-test-line\n")
+        val path = "/workbench/api/v1/jobs/$jobId/runs/$runId/logs/build/content"
+        val cookie = establish(server)
+        val response = request(server, path, headers = mapOf("Cookie" to cookie, "Accept" to "text/plain"))
+        assertEquals(200, response.statusCode())
+        assertTrue(response.headers().firstValue("Content-Type").orElseThrow().startsWith("text/plain"))
+        assertTrue(response.headers().firstValue("Content-Disposition").orElseThrow().contains("build-$runId.log"))
+        assertTrue(response.body().contains("phase-test-line\n"))
+        assertEquals(response.body().toByteArray(Charsets.UTF_8).size.toString(),
+            response.headers().firstValue("Content-Length").orElseThrow())
+        awaitPhaseRequestFinished(server)
+        val suffix = server.logDownloadPhases.summarySuffix()
+        assertTrue(suffix.contains("lp_entries=1 lp_present=1023 lp_saturated=0 lp_invalid=0 lp_incomplete=0 lp_terminal=1"), suffix)
+    }
+
+    @Test
+    fun `content route denials and missing files retain truthful reached prefixes`() {
+        withServer { server, _, jobId ->
+            val path = "/workbench/api/v1/jobs/$jobId/runs/missing/logs/build/content"
+            assertError(request(server, path), 401, "SESSION_REQUIRED")
+            awaitPhaseRequestFinished(server)
+            val suffix = server.logDownloadPhases.summarySuffix()
+            assertTrue(suffix.contains("lp_entries=1 lp_present=769"), suffix)
+            assertTrue(suffix.contains("lp_terminal=2"), suffix)
+        }
+        withPhaseLogServer { server, _, jobId, runId ->
+            val path = "/workbench/api/v1/jobs/$jobId/runs/$runId/logs/build/content"
+            val cookie = establish(server)
+            assertError(request(server, path, headers = mapOf("Cookie" to cookie, "Accept" to "text/plain")), 404, "NOT_FOUND")
+            awaitPhaseRequestFinished(server)
+            val suffix = server.logDownloadPhases.summarySuffix()
+            assertTrue(suffix.contains("lp_entries=1 lp_present=775"), suffix)
+            assertTrue(suffix.contains("lp_terminal=2"), suffix)
+        }
+    }
+
+    @Test
+    fun `content route preserves gate read and capture refusal prefixes`() {
+        fun runCase(suffixPath: String, headers: Map<String, String>, code: String, expectedPresent: Int,
+                    fileBytes: ByteArray? = null, session: Boolean = true) = withPhaseLogServer { server, store, jobId, runId ->
+            if (fileBytes != null) {
+                val log = Files.createDirectories(store.storageRoot.resolve(jobId).resolve("reports/runs/$runId/source-tree/reports"))
+                    .resolve("build.log")
+                Files.write(log, fileBytes)
+            }
+            val cookie = if (session) establish(server) else null
+            val requestHeaders = buildMap {
+                put("Accept", "text/plain")
+                if (cookie != null) put("Cookie", cookie)
+                putAll(headers)
+            }
+            val path = "/workbench/api/v1/jobs/$jobId/runs/$runId/logs/build/content$suffixPath"
+            assertError(request(server, path, headers = requestHeaders), when (code) {
+                "SESSION_REQUIRED" -> 401
+                "NOT_ACCEPTABLE" -> 406
+                "VALIDATION_FAILED" -> 400
+                "UNSUPPORTED_HEADER" -> 400
+                "NOT_FOUND" -> 404
+                "LOG_TOO_LARGE" -> 413
+                else -> error("unexpected expected code: $code")
+            }, code)
+            awaitPhaseRequestFinished(server)
+            val record = server.logDownloadPhases.summarySuffix()
+            assertTrue(record.contains("lp_entries=1 lp_present=$expectedPresent"), record)
+            assertTrue(record.contains("lp_terminal=2"), record)
+        }
+        runCase("", emptyMap(), "SESSION_REQUIRED", 769, session = false)
+        runCase("?ignored=true", emptyMap(), "VALIDATION_FAILED", 769)
+        runCase("", mapOf("Accept" to "application/json"), "NOT_ACCEPTABLE", 769)
+        runCase("", mapOf("Range" to "bytes=0-1"), "UNSUPPORTED_HEADER", 769)
+        runCase("", mapOf("If-None-Match" to "*"), "UNSUPPORTED_HEADER", 769)
+        runCase("", emptyMap(), "NOT_FOUND", 775)
+        runCase("", emptyMap(), "LOG_TOO_LARGE", 775,
+            ByteArray(WebRunLogs.MAXIMUM_LOG_BYTES + 1) { 'x'.code.toByte() })
+        runCase("", emptyMap(), "LOG_TOO_LARGE", 783,
+            ByteArray(1_000_001) { '\n'.code.toByte() })
+    }
+
+    /** Match the existing log fixture: commit the attempt before the listener acquires its store. */
+    private fun withPhaseLogServer(block: (UploadServer, JobStore, String, String) -> Unit) {
+        val parent = Files.createDirectories(Path.of("build/test-tmp/web-api-phases").toAbsolutePath())
+        val root = createTempDirectory(parent, "phase-")
+        val store = JobStore(root)
+        val job = store.createFromUpload("phase.elf", elfFixture())
+        val run = decompengine.jobs.WorkflowAttemptStore.open(root).use { owner ->
+            val snapshot = (owner.inspect(job.id) as decompengine.jobs.WorkflowJobInspection.Available).snapshot
+            owner.create(job.id, snapshot.version, decompengine.jobs.NewWorkflowAttempt(
+                decompengine.jobs.WorkflowKind.RECONSTRUCT,
+                decompengine.jobs.WorkflowExecutionLimits(60_000u, 15_000u, 1_048_576u, 16u),
+            )).attempt
+        }
+        val server = UploadServer("127.0.0.1", 0, root, JobAnalyzer { _, _ -> error("Unexpected analysis") },
+            JobReconstructor { _, _ -> error("Unexpected reconstruction") }, uiMode = WebUiMode.SPA, basePath = "/workbench/")
+        server.start()
+        try { block(server, store, job.id, run.runId) }
+        finally { server.stop(); root.toFile().deleteRecursively() }
+    }
+
+    /** Client body completion can precede the route finally; await only this test server's admitted handlers. */
+    private fun awaitPhaseRequestFinished(server: UploadServer) {
+        val lock = UploadServer::class.java.getDeclaredField("lifecycleLock").apply { isAccessible = true }.get(server)
+        val active = UploadServer::class.java.getDeclaredField("activeRequests").apply { isAccessible = true }
+        val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(2)
+        while (!synchronized(lock) { active.getInt(server) == 0 }) {
+            check(System.nanoTime() < deadline) { "phase fixture handler did not finish" }
+            Thread.sleep(1)
+        }
+    }
+
     /** Envelope for oneOf documents whose field set depends on their state. */
     private fun assertEnvelopeRaw(response: HttpResponse<String>, kind: String): JsonObject {
         assertEquals(200, response.statusCode(), response.body())

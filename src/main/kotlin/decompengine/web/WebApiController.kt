@@ -27,6 +27,7 @@ internal class WebApiController(
     audit: WebAuditLog? = null,
     private val capacity: (() -> JsonObject)? = null,
     private val readExplorationArtifact: (String, String, Long) -> decompengine.repair.StableRegularFile = jobs::readArtifact,
+    private val logDownloadPhases: WebLogDownloadPhases = WebLogDownloadPhases(),
 ) : AutoCloseable {
     private val auditRecorder = WebAuditRecorder(access, audit)
     private val supportExport = WebSupportExport(jobs, audit, ::runtimeJson, ::limitsJson, ::capabilitiesJson, clock)
@@ -472,27 +473,44 @@ internal class WebApiController(
                         oversized || (file != null && capture == null), query, clock.instant()))
                 }
                 resource.matches(Regex("jobs/[^/]+/runs/[^/]+/logs/build/content")) -> {
-                    access.authorize(exchange, WebEndpointPolicy.privateRead())
-                    requireNoWebApiQuery(exchange)
-                    if (!acceptsWebMediaType(exchange, "text/plain")) throw WebAccessDenied(406, "NOT_ACCEPTABLE", "This endpoint returns text/plain.")
-                    if (exchange.requestHeaders.keys.any { it.equals("Range", true) || it.startsWith("If-", true) }) {
-                        throw WebAccessDenied(400, "UNSUPPORTED_HEADER", "This bounded log download does not support Range or conditional requests.")
-                    }
-                    val parts = resource.split('/')
-                    val (attempt, file, oversized) = jobs.readRunBuildLog(parts[1], parts[3], WebRunLogs.MAXIMUM_LOG_BYTES.toLong())
-                    if (oversized) throw WebAccessDenied(413, "LOG_TOO_LARGE", "The build log exceeds its byte budget and cannot be downloaded here.")
-                    if (file == null) throw WebAccessDenied(404, "NOT_FOUND", "This attempt has no downloadable build log.")
-                    val capture = runLogs.capture(file.bytes, file.sha256, WebRedactionPolicy.of(exchange))
-                        ?: throw WebAccessDenied(413, "LOG_TOO_LARGE", "The build log exceeds its line budget and cannot be downloaded here.")
-                    val bytes = runLogs.download(parts[1], attempt, capture, clock.instant())
-                    webApiHeaders(exchange, UUID.randomUUID().toString())
-                    exchange.responseHeaders.set("Content-Type", "text/plain; charset=utf-8")
-                    exchange.responseHeaders.set("Content-Disposition", "attachment; filename=\"build-${attempt.runId}.log\"")
-                    exchange.responseHeaders.set("Content-Length", bytes.size.toString())
+                    val phase = logDownloadPhases.enter()
+                    var normal = false
                     try {
-                        exchange.sendResponseHeaders(200, bytes.size.toLong())
-                        exchange.responseBody.use { it.write(bytes) }
-                    } finally { exchange.close() }
+                        access.authorize(exchange, WebEndpointPolicy.privateRead())
+                        requireNoWebApiQuery(exchange)
+                        if (!acceptsWebMediaType(exchange, "text/plain")) throw WebAccessDenied(406, "NOT_ACCEPTABLE", "This endpoint returns text/plain.")
+                        if (exchange.requestHeaders.keys.any { it.equals("Range", true) || it.startsWith("If-", true) }) {
+                            throw WebAccessDenied(400, "UNSUPPORTED_HEADER", "This bounded log download does not support Range or conditional requests.")
+                        }
+                        phase?.mark(WebLogDownloadPhases.Phase.VALIDATED)
+                        val parts = resource.split('/')
+                        val (attempt, file, oversized) = jobs.readRunBuildLog(parts[1], parts[3], WebRunLogs.MAXIMUM_LOG_BYTES.toLong())
+                        phase?.mark(WebLogDownloadPhases.Phase.READ_RETURNED)
+                        if (oversized) throw WebAccessDenied(413, "LOG_TOO_LARGE", "The build log exceeds its byte budget and cannot be downloaded here.")
+                        if (file == null) throw WebAccessDenied(404, "NOT_FOUND", "This attempt has no downloadable build log.")
+                        val captured = runLogs.capture(file.bytes, file.sha256, WebRedactionPolicy.of(exchange))
+                        phase?.mark(WebLogDownloadPhases.Phase.CAPTURE_RETURNED)
+                        val capture = captured
+                            ?: throw WebAccessDenied(413, "LOG_TOO_LARGE", "The build log exceeds its line budget and cannot be downloaded here.")
+                        val bytes = runLogs.download(parts[1], attempt, capture, clock.instant())
+                        phase?.mark(WebLogDownloadPhases.Phase.BYTES_READY)
+                        webApiHeaders(exchange, UUID.randomUUID().toString())
+                        exchange.responseHeaders.set("Content-Type", "text/plain; charset=utf-8")
+                        exchange.responseHeaders.set("Content-Disposition", "attachment; filename=\"build-${attempt.runId}.log\"")
+                        exchange.responseHeaders.set("Content-Length", bytes.size.toString())
+                        try {
+                            exchange.sendResponseHeaders(200, bytes.size.toLong())
+                            phase?.mark(WebLogDownloadPhases.Phase.HEADERS_RETURNED)
+                            exchange.responseBody.use { it.write(bytes) }
+                            phase?.mark(WebLogDownloadPhases.Phase.BODY_CLOSED)
+                        } finally {
+                            exchange.close()
+                            phase?.mark(WebLogDownloadPhases.Phase.EXCHANGE_CLOSED)
+                        }
+                        normal = true
+                    } finally {
+                        phase?.exit(normal)
+                    }
                 }
                 resource.matches(Regex("jobs/[^/]+/runs/[^/]+")) -> {
                     access.authorize(exchange, WebEndpointPolicy.privateRead())
