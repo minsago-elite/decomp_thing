@@ -41,7 +41,7 @@ const verdict = (audit, served = responses) => assertAudit(audit, manifest, serv
 test('a clean audit with every packaged asset and the worker has no failures', () => {
   const audit = clean();
   assert.deepEqual(auditFixtures(repo, manifest.buildId).pages.map(page => page.name), auditPageNames);
-  assert.deepEqual([audit.layout.length, audit.contrast.length, audit.focus.length], [120, 48, 24]);
+  assert.deepEqual([audit.layout.length, audit.contrast.length, audit.focus.length], [130, 52, 26]);
   assert.deepEqual(verdict(audit), []);
 });
 
@@ -173,6 +173,13 @@ test('fixtures bind one job, attempt and revision with long names and a self-con
   const search = fixtures.respond('GET', searchRoute, 'application/json').document;
   assert.equal(search.data.query.text, 'needle');
   assert.equal(search.data.items.length, 4);
+  const structure = fixtures.pages.find((page) => page.name === 'structure');
+  assert.ok(structure);
+  const structureRoute = structure.path.slice('/nested'.length).split('?')[0];
+  const inventory = fixtures.respond('GET', structureRoute, 'application/json').document;
+  assert.equal(inventory.kind, 'functionInventory');
+  assert.deepEqual(inventory.data.binding, { jobId: search.data.binding.jobId, runId: fixtures.runId, revisionId: 'revision_1' });
+  assert.equal(inventory.data.items[0].name, 'main');
   const file = fixtures.pages.find((page) => page.name === 'source file');
   const fileRoute = file.path.slice('/nested'.length).split('?')[0];
   const metadata = fixtures.respond('GET', fileRoute, 'application/json').document.data;
@@ -287,7 +294,7 @@ test('qualifyAudit prepares every fresh layout/contrast/focus navigation before 
       return current.evaluate(tab, expression);
     },
   }), error => error === completed);
-  assert.deepEqual(counts, { layout: 120, contrast: 48, focus: 48, navigations: 84 });
+  assert.deepEqual(counts, { layout: 130, contrast: 52, focus: 52, navigations: 91 });
 });
 
 test('content checks require visible, distinctive rows rather than an empty or hidden table', () => {

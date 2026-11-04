@@ -10,7 +10,7 @@ import { join } from 'node:path';
 // response is a schema fixture the SPA validates exactly as it would a server response.
 
 export const auditPageNames = ['workspace', 'upload', 'runtime', 'job detail', 'attempt history',
-  'attempt overview', 'attempt activity', 'attempt evidence', 'source directory', 'source search form', 'source search results', 'source file'];
+  'attempt overview', 'attempt activity', 'attempt evidence', 'source directory', 'source search form', 'source search results', 'source file', 'structure'];
 export const auditTokenKinds = ['plain', 'keyword', 'string', 'comment', 'number'];
 
 const fixtureRoot = (repo) => join(repo, 'contracts/web/v1/fixtures');
@@ -71,6 +71,7 @@ export function auditFixtures(repo, buildId) {
   exploration.data.sourceArtifact.contentHref = `/nested${exploration.data.sourceArtifact.contentHref}`;
   const history = bound('validation-history', { jobId, runId, revisionId: null });
   const sourceSearch = bound('source-search-complete', selected);
+  const functionInventory = bound('function-inventory', selected);
   const owner = history.data.items[0];
   const validation = bound('report-normal-cases', { jobId, runId, revisionId: owner.candidateId });
   const routes = [
@@ -93,6 +94,7 @@ export function auditFixtures(repo, buildId) {
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/validation-history$`), () => ok(history)],
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/reports/revision-validation$`), () => ok(validation)],
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-search$`), () => ok(sourceSearch)],
+    [new RegExp(`^/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/functions$`), () => ok(functionInventory)],
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-directories/${id}$`), () => ok(directory)],
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-files/${id}/chunk$`), () => ok(chunk)],
     [new RegExp(`^/jobs/${jobId}/runs/${runId}/revisions/${revisionId}/source-files/${id}$`), () => ok(file)],
@@ -139,6 +141,7 @@ export function auditFixtures(repo, buildId) {
         { selector: '.source-token-comment', text: 'Synthetic audit source' },
         { selector: '.source-token-number', text: '0x00' },
       ] }] },
+    { name: 'structure', path: `${base}/revisions/${revisionId}/functions`, rendered: 'Showing 1–3 of 5 matching functions' },
   ];
   return {
     pages, controls, csrfToken: bootstrap.data.csrfToken, sourceBytes: bytes, sourceName: file.data.item.displayName, runId, runVersion: run.data.version, retriedRunId: retried.data.runId,
