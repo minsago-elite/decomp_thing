@@ -738,6 +738,7 @@ jobs:
           bash scripts/install-frontend-node.sh "$RUNNER_TEMP/frontend-node"
           echo "$RUNNER_TEMP/frontend-node/bin" >> "$GITHUB_PATH"
       - name: Verify installed direct-API Ghidra without an external installation
+        id: bundled-ghidra-subject
         env:
           RUN_REAL_GHIDRA: "true"
           RUN_REAL_GHIDRA_CALL_SITES: "true"
@@ -764,8 +765,11 @@ jobs:
             --tests decompengine.mvp.GhidraDecompilerTest \
             --tests decompengine.project.ReconstructionPipelineTest \
             --tests decompengine.web.SourceTreeJobReconstructorTest
-          python3 -B src/test/python/ghidra_invocation_provenance.py verify
           python3 scripts/verify-bundled-ghidra-probes.py build/test-results/test
+      - name: Verify installed invocation provenance after subject completion
+        if: always()
+        timeout-minutes: 1
+        run: python3 -B src/test/python/ghidra_invocation_provenance.py verify
       - name: Verify ZIP and TAR bundle contents and native executable modes
         run: ./gradlew --no-daemon --offline verifyGhidraDistributionArchives
       - uses: actions/upload-artifact@v7
@@ -778,20 +782,28 @@ jobs:
             build/test-results/test
             build/reports/junit-signatures
             build/orchestration/ghidra-invocation-qualification
-      - name: Download completed bundled invocation evidence
-        if: success()
+      - name: Download retained bundled invocation evidence
+        if: always() && steps.bundled-ghidra-reports.outputs.artifact-id != ''
+        id: bundled-ghidra-download
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ steps.bundled-ghidra-reports.outputs.artifact-id }}
           path: build/ghidra-invocation-upload-check
           merge-multiple: true
+          digest-mismatch: error
       - name: Verify uploaded invocation evidence bytes
-        if: success()
+        if: always() && steps.bundled-ghidra-download.outcome == 'success'
         timeout-minutes: 1
         run: |
-          python3 -B src/test/python/ghidra_invocation_provenance.py verify-uploaded \
-            build/orchestration/ghidra-invocation-qualification \
-            build/ghidra-invocation-upload-check/orchestration/ghidra-invocation-qualification
+          if test -f build/orchestration/ghidra-invocation-qualification/retained-invocation.json; then
+            python3 -B src/test/python/ghidra_invocation_provenance.py verify-uploaded \
+              build/orchestration/ghidra-invocation-qualification \
+              build/ghidra-invocation-upload-check/orchestration/ghidra-invocation-qualification
+          else
+            python3 -B src/test/python/ghidra_invocation_provenance.py verify-uploaded-diagnostics \
+              build/orchestration/ghidra-invocation-qualification \
+              build/ghidra-invocation-upload-check/orchestration/ghidra-invocation-qualification
+          fi
       - uses: actions/upload-artifact@v7
         if: always()
         with:
