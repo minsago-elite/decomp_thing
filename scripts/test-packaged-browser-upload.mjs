@@ -5,7 +5,7 @@ import { resolve, join } from 'node:path';
 import test, { after } from 'node:test';
 import vm from 'node:vm';
 import { runInNewContext } from 'node:vm';
-import { uploadFormReady, uploadSubmitReady, qualifyUpload, qualifyUploadFailures, qualifyMeasuredUpload } from './packaged-browser-upload.mjs';
+import { uploadFormReady, uploadSubmitReady, selectUploadFixture, qualifyUpload, qualifyUploadFailures, qualifyMeasuredUpload } from './packaged-browser-upload.mjs';
 
 // Use the already locked frontend DOM dependency; these controls launch no browser or JVM.
 const { JSDOM } = createRequire(new URL('../frontend/package.json', import.meta.url))('jsdom');
@@ -166,6 +166,7 @@ function page({ connected = true, limits = true, picker = true, selected = true,
       '#binary-file:not(:disabled)': input,
       '#binary-file': input,
       '.upload-panel button[type="submit"]': submit,
+      'button[type="submit"]': submit,
       'section[aria-labelledby="upload-title"] input#binary-file[type="file"]:not(:disabled)': input,
     })[selector] ?? null };
 }
@@ -194,4 +195,22 @@ test('retry readiness requires the restored fixture and enabled retry button wit
   }
   assert.equal(ready(expression), false);
   assert.equal(ready(expression, { label: 'Retry this upload' }), true);
+});
+
+test('fixture reselection accepts the retained upload retry label', async () => {
+  const document = page({ label: 'Retry this upload' });
+  document.body.innerText += ' Selected: inert-browser-fixture.elf';
+  const observed = [];
+  await selectUploadFixture({
+    tab: { sessionId: 'fixture' },
+    evaluate: async () => {},
+    ready: async (_tab, expression) => {
+      observed.push(expression);
+      assert.equal(Boolean(runInNewContext(expression, { document })), true);
+    },
+    waitForControl: false,
+    submitLabel: 'Retry this upload',
+  });
+  assert.equal(observed.length, 2);
+  assert.match(observed[1], /Retry this upload/);
 });

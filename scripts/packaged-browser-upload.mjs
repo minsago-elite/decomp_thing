@@ -38,7 +38,7 @@ export function uploadSubmitReady(label, fileName = 'inert-browser-fixture.elf')
 }
 
 /** Wait for the upload control, then select the isolated non-executable fixture. */
-export async function selectUploadFixture({ tab, evaluate, ready, waitForControl = true }) {
+export async function selectUploadFixture({ tab, evaluate, ready, waitForControl = true, submitLabel = 'Upload binary' }) {
   if (waitForControl) await readyForUpload(tab, ready);
   await evaluate(tab, `(() => {
     const bytes = new Uint8Array(64); bytes.set([127, 69, 76, 70, 2, 1, 1]);
@@ -50,7 +50,7 @@ export async function selectUploadFixture({ tab, evaluate, ready, waitForControl
     picker.dispatchEvent(new Event('change', { bubbles: true }));
   })()`);
   await ready(tab, `document.body.innerText.includes('Selected: inert-browser-fixture.elf') && document.querySelector('button[type="submit"]')?.disabled === false`, 'upload selection rendered');
-  await ready(tab, uploadSubmitReady('Upload binary'), 'selected fixture and enabled upload');
+  await ready(tab, uploadSubmitReady(submitLabel), 'selected fixture and enabled upload');
 }
 
 /** Isolated packaged-browser fixture: valid header only, never executable behavior. */
@@ -84,7 +84,8 @@ export async function qualifyUpload({ makeTarget, cdp, evaluate, ready, browserO
   })();` }, tab.sessionId);
   await cdp.call('Page.navigate', { url: `${browserOrigin}/nested/` }, tab.sessionId);
   await ready(tab, uploadFormReady, 'workspace upload control');
-  const selectFixture = () => selectUploadFixture({ tab, evaluate, ready, waitForControl: false });
+  const selectFixture = (submitLabel = 'Upload binary') =>
+    selectUploadFixture({ tab, evaluate, ready, waitForControl: false, submitLabel });
   await selectFixture();
   assert.equal(await evaluate(tab, `document.activeElement.id`), 'binary-file');
   await evaluate(tab, `[...document.querySelectorAll('button')].find(button => button.textContent === 'Upload binary').focus()`);
@@ -111,7 +112,7 @@ export async function qualifyUpload({ makeTarget, cdp, evaluate, ready, browserO
   await cdp.call('Page.reload', {}, tab.sessionId);
   await ready(tab, `document.body.innerText.includes('An unconfirmed upload is retained') && (${uploadFormReady})`, 'retry ticket and authenticated upload form restored after reload');
   assert.equal(await evaluate(tab, 'window.__uploadProof().requests'), 0, 'Reload must not retry automatically');
-  await selectFixture();
+  await selectFixture('Retry this upload');
   await ready(tab, uploadSubmitReady('Retry this upload'), 'reselected fixture and enabled retry');
   await evaluate(tab, `[...document.querySelectorAll('button')].find(button => button.textContent === 'Retry this upload').click()`);
   await ready(tab, `location.pathname === '/nested/jobs/${ids[0]}' && document.body.innerText.includes('inert-browser-fixture.elf')`, 'retry recovers durable job route');
