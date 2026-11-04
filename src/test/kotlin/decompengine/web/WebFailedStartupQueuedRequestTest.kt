@@ -258,7 +258,7 @@ class WebFailedStartupQueuedRequestTest {
 
         fun prepare() {
             val evidenceParent = Files.createDirectories(Path.of("build/orchestration/queued-startup/remediation/runs").toAbsolutePath())
-            val run = Files.createTempDirectory(evidenceParent, "$mode-")
+            val run = createTempDirectory(evidenceParent, "$mode-")
             receiptPath = run.resolve("receipt.json")
             sourcePins = sourceHashes()
         }
