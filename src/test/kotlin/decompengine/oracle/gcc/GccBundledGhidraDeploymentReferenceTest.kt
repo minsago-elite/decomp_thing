@@ -390,7 +390,9 @@ class GccBundledGhidraDeploymentReferenceTest {
         }
         val tests = Path.of(GccBundledGhidraInstalledReferenceProbe::class.java.protectionDomain.codeSource.location.toURI())
         assertTrue(Files.isDirectory(tests))
-        val temporary = Files.createTempDirectory("gcc-installed-reference-probe-")
+        val temporaryRoot = Path.of("build/test-tmp/gcc-installed-reference-probes").toAbsolutePath().normalize()
+        Files.createDirectories(temporaryRoot)
+        val temporary = Files.createTempDirectory(temporaryRoot, "probe-")
         try {
             val shadow = temporary.resolve("shadow")
             val exporter = shadow.resolve("ghidra_scripts/ExportProgramModel.java")

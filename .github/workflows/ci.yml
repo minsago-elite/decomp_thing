@@ -608,6 +608,7 @@ jobs:
           RUN_REAL_GHIDRA_PURE_RENDERING: "true"
         run: |
           unset GHIDRA_HOME
+          python3 -B scripts/test-verify-bundled-ghidra-probes.py
           mkdir -p build/exporter-rendering-v16
           ./gradlew --no-daemon test \
             --tests decompengine.analysis.BundledGhidraTest \
@@ -618,9 +619,11 @@ jobs:
             --tests decompengine.project.NativeCallCollectorRealTest \
             --tests decompengine.project.NativeCallObservationsV1Test \
             --tests decompengine.oracle.gcc.GccBundledNativeCallCaptureTest \
+            --tests decompengine.oracle.gcc.GccBundledGhidraDeploymentReferenceTest \
             --tests decompengine.mvp.GhidraDecompilerTest \
             --tests decompengine.project.ReconstructionPipelineTest \
             --tests decompengine.web.SourceTreeJobReconstructorTest
+          python3 scripts/verify-bundled-ghidra-probes.py build/test-results/test
       - name: Verify ZIP and TAR bundle contents and native executable modes
         run: ./gradlew --no-daemon --offline verifyGhidraDistributionArchives
       - uses: actions/upload-artifact@v7
