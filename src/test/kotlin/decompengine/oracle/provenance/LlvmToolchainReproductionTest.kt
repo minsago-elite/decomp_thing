@@ -161,7 +161,15 @@ class LlvmToolchainReproductionTest {
         assertFalse(llvm.contains("python3 scripts/verify-toolchain-reproduction.py"))
         assertFalse(llvm.contains("tests.oracle.test_stable_toolchain_reproduction"))
 
-        assertTrue(gcc.contains("python3 scripts/verify-gcc-toolchain-reproduction.py"))
+        assertTrue(gcc.contains("python3 scripts/capture-gcc-reproduction-inspect.py"))
+        val gccCapture = Path.of("scripts/capture-gcc-reproduction-inspect.py").readText()
+        assertTrue(gccCapture.contains("VERIFIER = \"scripts/verify-gcc-toolchain-reproduction.py\""))
+        assertTrue(gccCapture.contains("LOCK = \"oracle/gcc/16.2.0/toolchain-reproduction.json\""))
+        assertTrue(gccCapture.contains("RECORD = \"oracle/gcc/16.2.0/build-record.json\""))
+        assertTrue(gccCapture.contains("command(\"strict-verifier\", [sys.executable, \"-B\", str(root / VERIFIER)"))
+        assertTrue(gccCapture.contains("\"--lock\", str(root / LOCK)"))
+        assertTrue(gccCapture.contains("\"--build-record\", str(root / RECORD)"))
+        assertTrue(gccCapture.contains("\"--inspect-json\", str(evidence.path / \"image-inspect.json\")"))
         assertTrue(gcc.contains("tests/oracle/test_stable_toolchain_reproduction.py"))
         assertFalse(gcc.contains("tests.oracle.test_stable_toolchain_reproduction"))
 
