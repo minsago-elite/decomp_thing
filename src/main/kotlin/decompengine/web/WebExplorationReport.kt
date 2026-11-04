@@ -19,6 +19,9 @@ internal fun webExplorationReport(jobId: String, runId: String, bytes: ByteArray
             require(bytes.size <= 1_048_576)
             val root = OracleJson.parse(bytes).jsonObject
             val schema = root["schema"]?.jsonPrimitive?.contentOrNull
+            val versionedSuccess = schema == "decomp-exploration" &&
+                root["schemaVersion"]?.jsonPrimitive?.intOrNull == 2 &&
+                root["state"]?.jsonPrimitive?.contentOrNull == "complete"
             if (schema == EXPLORATION_FAILURE_SCHEMA || schema == EXPLORATION_PREPARATION_FAILURE_SCHEMA) {
                 if (root["schemaVersion"]?.jsonPrimitive?.intOrNull == 1) {
                     limitation = if (schema == EXPLORATION_FAILURE_SCHEMA) explorationFailureLimitation(root)
@@ -28,11 +31,43 @@ internal fun webExplorationReport(jobId: String, runId: String, bytes: ByteArray
                 } else {
                     state = "unsupported"; limitation = "This adapter does not support the declared exploration producer schema."
                 }
-            } else if ("schema" in root || "schemaVersion" in root || "schema_version" in root) {
+            } else if (("schema" in root || "schemaVersion" in root || "schema_version" in root) && !versionedSuccess) {
                 state = "unsupported"; limitation = "This adapter does not support the declared exploration producer schema."
             } else if (!root.keys.containsAll(setOf("candidateCount", "coverageIncreased", "baselineOutputSignatures", "expandedOutputSignatures", "newOutputSignatures", "angr", "confidence", "candidates", "observations"))) {
                 state = "partial"; limitation = "Required producer fields are absent; no summary is inferred."
             } else {
+                if (versionedSuccess) {
+                    val fields = setOf("schema", "schemaVersion", "state", "candidateCount", "coverageIncreased",
+                        "baselineOutputSignatures", "expandedOutputSignatures", "newOutputSignatures", "angr",
+                        "confidence", "candidates", "observations", "retainedInputs", "retainedInputsOmitted")
+                    require(root.keys == fields)
+                    val retained = root.getValue("retainedInputs").jsonArray
+                    val candidates = root.getValue("candidates").jsonArray
+                    require(retained.size <= 1000 && candidates.size + retained.size <= 1000)
+                    val candidateIds = candidates.map { candidate ->
+                        candidate.jsonObject.getValue("id").jsonPrimitive.content.also {
+                            require(it.isNotEmpty() && it.length <= 128)
+                        }
+                    }
+                    require(candidateIds.distinct().size == candidateIds.size)
+                    val retainedIds = HashSet<String>()
+                    retained.forEach { item ->
+                        val input = item.jsonObject
+                        require(input.keys == setOf("id", "args", "stdinHex"))
+                        val id = input.getValue("id").jsonPrimitive.content
+                        require(id.isNotEmpty() && id.length <= 128 && retainedIds.add(id))
+                        require("retained:$id" !in candidateIds)
+                        val args = input.getValue("args").jsonArray
+                        require(args.size <= 256 && args.all { it.jsonPrimitive.isString && it.jsonPrimitive.content.length <= 8192 })
+                        val stdinHex = input.getValue("stdinHex").jsonPrimitive.content
+                        require(stdinHex.length % 2 == 0 && stdinHex.length <= 524_288 && stdinHex.matches(Regex("(?:[0-9a-f]{2})*")))
+                    }
+                    val omitted = root.getValue("retainedInputsOmitted").jsonPrimitive
+                    val omittedCount = omitted.intOrNull
+                    require(!omitted.isString && omittedCount?.let { it in 0..10_000 } == true)
+                    require(retained.size + requireNotNull(omittedCount) <= 10_000)
+                    producerSchemaVersion = 2
+                }
                 fun count(objectValue: JsonObject, name: String): String {
                     val value = objectValue.getValue(name).jsonPrimitive
                     require(!value.isString && value.content.matches(Regex("0|[1-9][0-9]{0,19}")) && value.content.toULongOrNull() != null)
