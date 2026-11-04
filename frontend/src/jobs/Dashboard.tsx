@@ -57,7 +57,7 @@ export function Dashboard({ basePath, draftOwner = null }: { basePath: string; d
   const results = useRef<HTMLHeadingElement>(null);
   const moveFocus = useRef(false);
   const errorNotice = useRef<HTMLParagraphElement>(null);
-  const retainedFocusPosition = useRef<{ target: HTMLElement; top: number } | null>(null);
+  const retainedFocusPosition = useRef<{ target: HTMLElement; top: number; stage: 'error' | 'retained' } | null>(null);
   // Transfer focus after the accepted page has committed, including cached pages
   // whose rows are replaced synchronously without a loading render.
   useLayoutEffect(() => {
@@ -125,7 +125,7 @@ export function Dashboard({ basePath, draftOwner = null }: { basePath: string; d
   const failRead = useCallback((failure: unknown) => {
     const active = document.activeElement;
     retainedFocusPosition.current = currentData.current && active instanceof HTMLElement && list.current?.contains(active)
-      ? { target: active, top: active.getBoundingClientRect().top }
+      ? { target: active, top: active.getBoundingClientRect().top, stage: 'error' }
       : null;
     setPhase('error');
     if (failure instanceof ApiClientError && (failure.status === 401 || failure.status === 403)) {
@@ -144,13 +144,20 @@ export function Dashboard({ basePath, draftOwner = null }: { basePath: string; d
   }, []);
   useLayoutEffect(() => {
     const retained = retainedFocusPosition.current;
-    if (!error || phase !== 'error' || !data || !retained) return;
-    retainedFocusPosition.current = null;
-    if (!retained.target.isConnected || document.activeElement !== retained.target) return;
+    if (!retained || !data) return;
+    if (!retained.target.isConnected || document.activeElement !== retained.target) {
+      retainedFocusPosition.current = null;
+      return;
+    }
+    if (retained.stage === 'error' && (phase !== 'error' || !error)) return;
+    if (retained.stage === 'retained' && phase !== 'loading' && (phase !== 'ready' || error !== '')) return;
     const delta = retained.target.getBoundingClientRect().top - retained.top;
-    if (!Number.isFinite(delta) || Math.abs(delta) <= 1) return;
-    const scroller = document.scrollingElement ?? document.documentElement;
-    scroller.scrollTop += delta;
+    if (Number.isFinite(delta) && Math.abs(delta) > 1) {
+      const scroller = document.scrollingElement ?? document.documentElement;
+      scroller.scrollTop += delta;
+    }
+    if (retained.stage === 'error') retained.stage = 'retained';
+    else if (phase === 'ready') retainedFocusPosition.current = null;
   }, [error, phase, data]);
   const reloadLatest = useRef(reload);
   reloadLatest.current = reload;
@@ -325,6 +332,9 @@ export function Dashboard({ basePath, draftOwner = null }: { basePath: string; d
   }
   function reload() {
     if (location.pathname !== dashboardPath.current || pageTransition.current !== null) return;
+    const retained = retainedFocusPosition.current;
+    if (retained?.stage === 'retained' && retained.target.isConnected && document.activeElement === retained.target)
+      retained.top = retained.target.getBoundingClientRect().top;
     activeBinding.current = null;
     const current = currentFilters(), query = filterSearch(selection.filters);
     if (data && snapshotPagination(data.page) && current.valid && !current.invalidCursor &&

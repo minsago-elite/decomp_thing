@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/preact';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/preact';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as ClientModule from '../src/api/client';
 import type { Job, Recovery } from '../src/api/generated';
@@ -127,6 +127,16 @@ it('keeps a focused job row and its selected text in place when a failed read ad
   expect(row.getBoundingClientRect().top).toBe(originalTop);
   expect(row.getBoundingClientRect().bottom).toBeLessThanOrEqual(window.innerHeight);
   expect(scroller.scrollTop).toBeGreaterThan(300);
+
+  fail = false;
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' }));
+  await waitFor(() => expect(screen.queryByText(/Previously loaded metadata may be outdated/)).toBeNull());
+  expect(document.activeElement).toBe(row);
+  expect(selection?.toString()).toBe(selectedText);
+  expect(row.getBoundingClientRect().top).toBe(originalTop);
+  expect(row.getBoundingClientRect().bottom).toBeLessThanOrEqual(window.innerHeight);
+  expect(scroller.scrollTop).toBe(300);
+  expect(calls('jobs')).toHaveLength(3);
   rect.mockRestore();
 });
 
