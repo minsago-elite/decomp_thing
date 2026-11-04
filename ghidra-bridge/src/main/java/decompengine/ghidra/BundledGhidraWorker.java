@@ -17,16 +17,24 @@ public final class BundledGhidraWorker {
     private static String timingInvocationId;
     private static long timingSequence;
     private static long workerStartedNanos;
-    private static long analysisStartNanos;
+    private static boolean preAnalysisBoundaryObserved;
 
     public static void beginTimingPhase(String phase) { timingEvent("begin", phase); }
 
     public static void endTimingPhase(String phase) { timingEvent("end", phase); }
 
+    public static synchronized void preAnalysisBoundary() {
+        if (preAnalysisBoundaryObserved) {
+            throw new IllegalStateException("Bundled Ghidra pre-analysis timing boundary was observed twice");
+        }
+        preAnalysisBoundaryObserved = true;
+        endTimingPhase("project-open-import-pre-analysis");
+        beginTimingPhase("auto-analysis");
+    }
+
     public static void postScriptEntry() {
-        if (analysisStartNanos != 0L) {
-            endTimingPhase("project-import-analysis-pre-script");
-            analysisStartNanos = 0L;
+        if (preAnalysisBoundaryObserved) {
+            endTimingPhase("auto-analysis");
         }
     }
 
@@ -170,9 +178,9 @@ public final class BundledGhidraWorker {
         }
         analyzer.getOptions().setPostScriptsWithArgs(List.of(new Pair<>(
             "RunBundledExports.class", guardedArguments.toArray(String[]::new))));
+        analyzer.getOptions().setPreScriptsWithArgs(List.of(new Pair<>("AnalysisTimingPreScript.java", new String[0])));
         if (diagnostics != null) diagnostics.phase(JvmMxBeanDiagnostics.Phase.IMPORT_AND_ANALYSIS, null);
-        analysisStartNanos = System.nanoTime();
-        beginTimingPhase("project-import-analysis-pre-script");
+        beginTimingPhase("project-open-import-pre-analysis");
         try {
             analyzer.processLocal(projectLocation.toString(), projectName, "/", List.of(binary.toFile()));
         } finally {

@@ -305,8 +305,9 @@ if sys.argv[1] == "reconstruct":
               span("process-launch-request-to-worker-entry-frame","parent-monotonic","succeeded")]
     worker = [span(p,"worker-monotonic","completed") for p in (
         "worker-entry-to-parent-permit","application-initialization",
-        "project-import-analysis-pre-script","exporter:ExportProgramModelOwned.java")]
-    record = {"schemaVersion":1,"analysisInvocationId":"cccccccc-cccc-cccc-cccc-cccccccccccc",
+        "project-open-import-pre-analysis","auto-analysis","exporter:ExportProgramModelOwned.java")]
+    record = {"schemaVersion":1,"instrumentationVersion":"analysis-timing-pre-analysis-boundary-v2",
+      "analysisInvocationId":"cccccccc-cccc-cccc-cccc-cccccccccccc",
       "workflowRunId":run_id,"recoveryMode":"reuse","analysisToolSha256":"a"*64,
       "profileSha256":"b"*64,"configurationSha256":"c"*64,"inputSha256":input_sha,
       "exporterSha256":"d"*64,"parentTotalElapsedNanos":100,"workerTerminalElapsedNanos":100,

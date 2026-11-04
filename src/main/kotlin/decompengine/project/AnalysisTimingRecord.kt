@@ -27,6 +27,7 @@ internal class AnalysisTimingRecord(
     private val analysisToolSha256: String,
     private val profileSha256: String?,
     private val configurationSha256: String,
+    private val instrumentationVersion: String = INSTRUMENTATION_VERSION,
     private val workflowRunId: String? = null,
     private val publicationExecutor: ExecutorService = SIDECAR_PUBLICATION_EXECUTOR,
     private val publicationWaitMillis: Long = DEFAULT_PUBLICATION_WAIT_MILLIS,
@@ -194,6 +195,7 @@ internal class AnalysisTimingRecord(
             put("analysisToolSha256", analysisToolSha256)
             profileSha256?.let { put("profileSha256", it) }
             put("configurationSha256", configurationSha256)
+            put("instrumentationVersion", instrumentationVersion)
             inputSha256?.let { put("inputSha256", it) }
             exporterSha256?.let { put("exporterSha256", it) }
             put("parentTotalElapsedNanos", (System.nanoTime() - startedAtNanos).coerceAtLeast(0L))
@@ -204,7 +206,7 @@ internal class AnalysisTimingRecord(
             put("workerSpans", JsonArray(workerSpans.toList()))
             put("coverage", buildJsonObject {
                 val expected = setOf("worker-entry-to-parent-permit", "application-initialization",
-                    "project-import-analysis-pre-script")
+                    "project-open-import-pre-analysis", "auto-analysis")
                 val observed = workerSpans.map { (it["phase"] as JsonPrimitive).content }.toSet()
                 val missing = (expected + if (workerSpans.none { (it["phase"] as JsonPrimitive).content.startsWith("exporter:") }) {
                     setOf("exporter-inclusive")
@@ -256,8 +258,10 @@ internal class AnalysisTimingRecord(
             }, ThreadPoolExecutor.AbortPolicy(),
         )
 
+        const val INSTRUMENTATION_VERSION = "analysis-timing-pre-analysis-boundary-v2"
+
         fun isWorkerPhase(phase: String): Boolean = phase in setOf("worker-entry-to-parent-permit",
-            "application-initialization", "project-import-analysis-pre-script") ||
+            "application-initialization", "project-open-import-pre-analysis", "auto-analysis") ||
             phase in setOf("exporter:ExportProgramModel.java", "exporter:ExportProgramModelOwned.java",
                 "exporter:ExportRecoveredCallSites.java", "exporter:ExportDecompiledC.java",
                 "exporter:ExportNativeCallsV1.class", "exporter:ExportNativeInterfacesV1.class")

@@ -33,7 +33,8 @@ class AnalysisTimingRecordTest {
         val phases = listOf(
             "worker-entry-to-parent-permit",
             "application-initialization",
-            "project-import-analysis-pre-script",
+            "project-open-import-pre-analysis",
+            "auto-analysis",
             "exporter:ExportProgramModelOwned.java",
         )
         val events = buildList {
@@ -52,7 +53,9 @@ class AnalysisTimingRecordTest {
         assertEquals(workflowRunId, document.getValue("workflowRunId").jsonPrimitive.content)
         assertEquals("succeeded", document.getValue("terminalStatus").jsonPrimitive.content)
         assertEquals("succeeded", document.getValue("workerTerminalStatus").jsonPrimitive.content)
-        assertEquals(4, document.getValue("workerSpans").jsonArray.size)
+        assertEquals(5, document.getValue("workerSpans").jsonArray.size)
+        assertEquals("analysis-timing-pre-analysis-boundary-v2",
+            document.getValue("instrumentationVersion").jsonPrimitive.content)
         val startupEnvelope = document.getValue("spans").jsonArray.single { span ->
             span.jsonObject.getValue("phase").jsonPrimitive.content == "process-launch-request-to-worker-entry-frame"
         }.jsonObject

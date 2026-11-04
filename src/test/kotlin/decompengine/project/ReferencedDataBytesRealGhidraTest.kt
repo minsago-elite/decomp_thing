@@ -87,7 +87,8 @@ class ReferencedDataBytesRealGhidraTest {
         }.toSet()
         assertTrue("worker-entry-to-parent-permit" in fullWorkerPhases)
         assertTrue("application-initialization" in fullWorkerPhases)
-        assertTrue("project-import-analysis-pre-script" in fullWorkerPhases)
+        assertTrue("project-open-import-pre-analysis" in fullWorkerPhases)
+        assertTrue("auto-analysis" in fullWorkerPhases)
         assertTrue(fullWorkerPhases.any { it.startsWith("exporter:") })
         assertEquals(4, model.schemaVersion)
         model.globals.forEach { global ->

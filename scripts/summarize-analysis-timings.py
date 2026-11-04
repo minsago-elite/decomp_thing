@@ -54,6 +54,12 @@ def load_record(path: Path) -> dict[str, Any]:
             raise TimingEvidenceError(f"{path}: missing or malformed {field}")
     if not isinstance(value.get("recoveryMode"), str) or not value["recoveryMode"]:
         raise TimingEvidenceError(f"{path}: missing recoveryMode")
+    instrumentation_version = value.get("instrumentationVersion", "analysis-timing-v1")
+    if not isinstance(instrumentation_version, str) or instrumentation_version not in {
+        "analysis-timing-v1",
+        "analysis-timing-pre-analysis-boundary-v2",
+    }:
+        raise TimingEvidenceError(f"{path}: unsupported instrumentationVersion")
 
     parent_total = value.get("parentTotalElapsedNanos")
     worker_total = value.get("workerTerminalElapsedNanos")
@@ -95,8 +101,11 @@ def load_record(path: Path) -> dict[str, Any]:
     required_worker = {
         "worker-entry-to-parent-permit",
         "application-initialization",
-        "project-import-analysis-pre-script",
     }
+    if instrumentation_version == "analysis-timing-v1":
+        required_worker.add("project-import-analysis-pre-script")
+    else:
+        required_worker.update({"project-open-import-pre-analysis", "auto-analysis"})
     if not required_parent <= phases["parent-monotonic"]:
         raise TimingEvidenceError(f"{path}: required parent analysis or worker-entry span is missing")
     if not required_worker <= phases["worker-monotonic"]:
@@ -124,13 +133,14 @@ def summarize(paths: list[Path]) -> dict[str, Any]:
                     record["recoveryMode"],
                     record["terminalStatus"],
                     record["workerTerminalStatus"],
+                    record.get("instrumentationVersion", "analysis-timing-v1"),
                     domain,
                 )
                 groups[key][span["phase"]].append(span["durationNanos"])
 
     summaries = []
     for key, phases in sorted(groups.items(), key=lambda item: item[0]):
-        bindings_tuple, recovery_mode, parent_status, worker_status, domain = key
+        bindings_tuple, recovery_mode, parent_status, worker_status, instrumentation_version, domain = key
         phase_summaries = {
             phase: {
                 "samples": len(values),
@@ -145,12 +155,14 @@ def summarize(paths: list[Path]) -> dict[str, Any]:
             "recoveryMode": recovery_mode,
             "terminalStatus": parent_status,
             "workerTerminalStatus": worker_status,
+            "instrumentationVersion": instrumentation_version,
             "clockDomain": domain,
             "invocations": len({record["analysisInvocationId"] for record in records
                                  if all(record[field] == dict(bindings_tuple)[field] for field in BINDINGS)
                                  and record["recoveryMode"] == recovery_mode
                                  and record["terminalStatus"] == parent_status
-                                 and record["workerTerminalStatus"] == worker_status}),
+                                 and record["workerTerminalStatus"] == worker_status
+                                 and record.get("instrumentationVersion", "analysis-timing-v1") == instrumentation_version}),
             "phases": phase_summaries,
         })
     return {"schemaVersion": 1, "sidecars": len(paths), "summaries": summaries}

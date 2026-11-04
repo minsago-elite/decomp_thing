@@ -27,7 +27,8 @@ def sidecar() -> dict[str, object]:
     worker_phases = (
         "worker-entry-to-parent-permit",
         "application-initialization",
-        "project-import-analysis-pre-script",
+        "project-open-import-pre-analysis",
+        "auto-analysis",
         "exporter:ExportProgramModelOwned.java",
     )
 
@@ -45,6 +46,7 @@ def sidecar() -> dict[str, object]:
 
     return {
         "schemaVersion": 1,
+        "instrumentationVersion": "analysis-timing-pre-analysis-boundary-v2",
         "analysisInvocationId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
         "workflowRunId": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
         "recoveryMode": "reuse",
@@ -103,6 +105,12 @@ class AnalysisTimingSummaryTests(unittest.TestCase):
         record = sidecar()
         record["workflowRunId"] = "not-a-run-id"
         with self.assertRaisesRegex(SUMMARY.TimingEvidenceError, "malformed workflowRunId"):
+            self.read_record(record)
+
+    def test_rejects_non_string_instrumentation_version(self) -> None:
+        record = sidecar()
+        record["instrumentationVersion"] = {"version": 2}
+        with self.assertRaisesRegex(SUMMARY.TimingEvidenceError, "unsupported instrumentationVersion"):
             self.read_record(record)
 
 
