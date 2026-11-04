@@ -23,6 +23,7 @@ import decompengine.agent.AgentWorkflowPhase
 import decompengine.agent.AgentWorkflowProgress
 import decompengine.agent.receiptCommitmentBytes
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.booleanOrNull
@@ -1812,7 +1813,11 @@ object SourceTreeManifestReader {
 
     fun parse(text: String, expectedProfile: ReconstructionProfile): SourceTreeManifest {
         UniqueJsonObjectKeyValidator(text).validate()
-        val root = Json.parseToJsonElement(text).jsonObject
+        return parse(Json.parseToJsonElement(text).jsonObject, expectedProfile)
+    }
+
+    /** Parse an object already decoded by a bounded strict JSON reader which rejects duplicate keys. */
+    internal fun parse(root: JsonObject, expectedProfile: ReconstructionProfile): SourceTreeManifest {
         require(root.keys == rootKeys) { "source tree manifest fields do not match schema version 3" }
         val schemaPrimitive = root.getValue("schemaVersion").jsonPrimitive
         require(!schemaPrimitive.isString) { "source tree manifest schemaVersion must be an integer" }

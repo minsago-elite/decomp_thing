@@ -130,7 +130,7 @@ internal class WebSourceCatalogEvidence(
                 val profile = profiles[profileId to profileSha256]
                     ?: throw IllegalArgumentException("Source catalog profile is unavailable.")
                 require(((document["files"] as? JsonArray)?.size ?: Int.MAX_VALUE) <= WebSourceCatalogSnapshot.MAXIMUM_FILES)
-                val manifest = SourceTreeManifestReader.parse(document.toString(), profile)
+                val manifest = SourceTreeManifestReader.parse(document, profile)
                 require(manifest.inputSha256 == input.sha256)
                 val descriptorDocument = OracleJson.parse(descriptor.bytes, JSON_LIMITS) as? JsonObject
                     ?: throw IllegalArgumentException("Source input descriptor is invalid.")

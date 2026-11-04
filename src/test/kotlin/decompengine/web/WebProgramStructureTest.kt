@@ -206,10 +206,18 @@ class WebProgramStructureTest {
     }
 
     @Test fun `unsupported incomplete or foreign records never appear as an empty successful inventory`() {
+        val duplicateFunctionId = model(functions).toString(Charsets.UTF_8).replace(
+            "\"id\": \"fn_0000000000401100\"", "\"id\": \"fn_0000000000401000\"")
+        assertNotEquals(model(functions).toString(Charsets.UTF_8), duplicateFunctionId)
+        val nonCanonicalAddress = model(functions).toString(Charsets.UTF_8).replace(
+            "\"address\": \"0x401000\"", "\"address\": \"0x0401000\"")
+        assertNotEquals(model(functions).toString(Charsets.UTF_8), nonCanonicalAddress)
         val cases = listOf(
             Revision(null, null, listOf("core")) to ("not-recorded" to "MODEL_NOT_RECORDED"),
             Revision("{\"schemaVersion\": 9, \"inputSha256\": \"$inputSha\"}".toByteArray(), null, listOf("core")) to ("unsupported" to "MODEL_SCHEMA_UNSUPPORTED"),
             Revision("{\"schemaVersion\": 2, \"inputSha256\": \"$inputSha\", \"functions\": [".toByteArray(), null, listOf("core")) to ("invalid" to "MODEL_MALFORMED"),
+            Revision(duplicateFunctionId.toByteArray(), null, listOf("core")) to ("invalid" to "MODEL_MALFORMED"),
+            Revision(nonCanonicalAddress.toByteArray(), null, listOf("core")) to ("invalid" to "MODEL_MALFORMED"),
             Revision(model(functions, schema = 2).toString(Charsets.UTF_8).replace("\"unassessed\"", "\"exact\"").toByteArray(), null, listOf("core")) to ("invalid" to "MODEL_MALFORMED"),
             Revision(model(functions, input = "f".repeat(64)), null, listOf("core")) to ("invalid" to "MODEL_INPUT_MISMATCH"),
             Revision(ByteArray(WebProgramStructureBuilder.MAXIMUM_MODEL_BYTES + 1) { ' '.code.toByte() }, null, listOf("core")) to ("limit-exceeded" to "MODEL_BYTES_EXCEEDED"),

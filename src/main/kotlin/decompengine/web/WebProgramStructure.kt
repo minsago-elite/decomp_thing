@@ -60,7 +60,9 @@ internal class WebStructureTable(
     val stringCounts: IntArray,
 ) {
     val size: Int get() = ids.size
-    val index: Map<String, Int> = HashMap<String, Int>(ids.size * 2).also { map -> ids.forEachIndexed { i, id -> map[id] = i } }
+    val index: Map<String, Int> = HashMap<String, Int>(ids.size * 2).also { map ->
+        ids.forEachIndexed { i, id -> check(map.put(id, i) == null) { "Recorded entity ID is duplicated." } }
+    }
     // Unsigned 64-bit order; entities without a recorded address (types only) follow all addresses.
     private val addressOrder = Comparator<Int> { a, b ->
         val recorded = hasAddress[b].compareTo(hasAddress[a])
@@ -173,7 +175,6 @@ internal object WebProgramStructureBuilder {
     const val MAXIMUM_MODEL_REFERENCES = 500_000
     const val MAXIMUM_RETAINED_BYTES = 96L * 1024 * 1024
     private val MODULE_ID = Regex("[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}")
-    private val ADDRESS = Regex("0x(0|[1-9a-f][0-9a-f]{0,15})")
 
     internal val JSON: JsonFactory = JsonFactory.builder()
         .enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION)
@@ -258,18 +259,21 @@ internal object WebProgramStructureBuilder {
         var unknown = 0
         val modules = ArrayList<WebStructureModule>()
         if (plan != null) {
-            val implementation = declaredTemplate(profile, "module-implementation")
             val cycles = HashMap<String, List<String>>()
             plan.dependencyCycles.forEach { cycle -> cycle.forEach { cycles[it] = cycle } }
+            val filesByPath = manifest.files.associateBy(GeneratedFileEvidence::path)
             val ids = plan.modules.map { it.id }
             if (ids.distinct().size != ids.size || plan.modules.size > WebSourceCatalogSnapshot.MAXIMUM_FILES) {
                 planOutcome = WebStructureOutcome("invalid", "PLAN_DUPLICATE_MODULE")
             } else {
                 plan.modules.sortedBy { it.id }.forEach { planned ->
-                    val implementationFile = manifest.files.singleOrNull { it.path == planned.sourcePath }
+                    val implementationFile = filesByPath[planned.sourcePath]
                     modules += WebStructureModule(planned.id, planned.sourcePath, planned.headerPath, planned.functionIds,
                         planned.globalIds, planned.typeIds, planned.boundaryEvidence,
-                        when (implementationFile?.takeIf { implementation?.matches(it.path) != false }?.acceptedImplementation) {
+                        // The source-tree manifest was already checked against this profile by
+                        // SourceTreeManifestReader; repeating the declaration's regex match for
+                        // every planned module adds substantial cold-path cost at scale.
+                        when (implementationFile?.acceptedImplementation) {
                             true -> "accepted"; false -> "unaccepted"; null -> "not-classified"
                         }, cycles[planned.id].orEmpty())
                 }
@@ -350,6 +354,24 @@ internal object WebProgramStructureBuilder {
     private fun declaredTemplate(profile: ReconstructionProfile, id: String) =
         profile.layout.declarations.singleOrNull { it.id == id }
 
+    /** Parse the canonical unsigned address spelling without allocating a regex matcher per row. */
+    private fun parseAddress(value: String): Long? {
+        if (!value.startsWith("0x")) return null
+        val firstDigit = 2
+        val digits = value.length - firstDigit
+        if (digits !in 1..16 || (digits > 1 && value[firstDigit] == '0')) return null
+        var parsed = 0L
+        for (index in firstDigit until value.length) {
+            val digit = when (val character = value[index]) {
+                in '0'..'9' -> character.code - '0'.code
+                in 'a'..'f' -> character.code - 'a'.code + 10
+                else -> return null
+            }
+            parsed = (parsed shl 4) or digit.toLong()
+        }
+        return parsed
+    }
+
     private fun planSchema(bytes: ByteArray): Long? = try {
         JSON.createParser(bytes).use { parser ->
             if (parser.nextToken() != JsonToken.START_OBJECT || parser.nextToken() != JsonToken.FIELD_NAME ||
@@ -406,8 +428,8 @@ internal object WebProgramStructureBuilder {
             val ids = ArrayList<String>(); val names = ArrayList<String?>(); val offsets = ArrayList<Long>()
             val addresses = ArrayList<Long>(); val hasAddress = ArrayList<Boolean>(); val status = ArrayList<WebExtractionStatus>()
             val calls = ArrayList<Array<String>>(); val globals = ArrayList<Array<String>>(); val strings = ArrayList<Int>()
-            val expected = fields(kind)
-            val seen = HashSet<String>()
+            val expectedBits = fields(kind).withIndex().associate { (index, field) -> field to (1 shl index) }
+            val expectedMask = expectedBits.values.fold(0) { mask, bit -> mask or bit }
             while (true) {
                 val token = parser.nextToken()
                 if (token == JsonToken.END_ARRAY) break
@@ -415,7 +437,7 @@ internal object WebProgramStructureBuilder {
                 if (ids.size >= maximum) throw WebStructureFailure("limit-exceeded", "MODEL_ENTITIES_EXCEEDED")
                 budget.charge(512)
                 offsets += parser.currentTokenLocation().byteOffset
-                val keys = HashSet<String>()
+                var seenFields = 0
                 var id: String? = null; var name: String? = null; var address: String? = null
                 var label: String? = null; var assessment: String? = null
                 var called: Array<String> = emptyArray(); var referenced: Array<String> = emptyArray(); var stringCount = 0
@@ -424,7 +446,9 @@ internal object WebProgramStructureBuilder {
                     if (next == JsonToken.END_OBJECT) break
                     expect(next, JsonToken.FIELD_NAME)
                     val key = parser.currentName()
-                    if (key !in expected || !keys.add(key)) malformed()
+                    val fieldBit = expectedBits[key] ?: malformed()
+                    if (seenFields and fieldBit != 0) malformed()
+                    seenFields = seenFields or fieldBit
                     when (key) {
                         "id" -> id = identifier(parser)
                         "name" -> name = identifier(parser)
@@ -440,13 +464,13 @@ internal object WebProgramStructureBuilder {
                         "byteEvidence" -> byteEvidence(parser)
                     }
                 }
-                if (keys != expected || id == null) malformed()
+                if (seenFields != expectedMask || id == null) malformed()
                 if (schema >= 2 && assessment != "unassessed") malformed()
-                if (!seen.add(id)) malformed()
                 if (kind != WebStructureKind.TYPE && address == null) malformed()
-                if (address != null && !ADDRESS.matches(address)) malformed()
+                val parsedAddress = address?.let(::parseAddress)
+                if (address != null && parsedAddress == null) malformed()
                 ids += id; names += name
-                addresses += address?.removePrefix("0x")?.toULong(16)?.toLong() ?: 0L; hasAddress += address != null
+                addresses += parsedAddress ?: 0L; hasAddress += address != null
                 status += WebExtractionStatus.of(label ?: malformed()) ?: malformed()
                 calls += called; globals += referenced; strings += stringCount
             }
