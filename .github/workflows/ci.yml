@@ -91,6 +91,12 @@ jobs:
         run: |
           node --check scripts/packaged-browser-a11y-notices.mjs
           node --test scripts/test-packaged-browser-a11y-notices.mjs
+      - name: Verify packaged connection-notice controls
+        timeout-minutes: 2
+        run: |
+          node --check scripts/packaged-browser-connection-notice.mjs
+          node --check scripts/packaged-browser-report-test-fixtures.mjs
+          node --test scripts/test-packaged-browser-connection-notice.mjs
       - name: Verify bounded archival cleanup controls
         timeout-minutes: 1
         run: python3 -B scripts/test-archival-diagnostics.py --verbose

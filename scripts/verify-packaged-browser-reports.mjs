@@ -5,6 +5,8 @@
 // semantic gate (#1894/#1895): status=passed alone is not accepted as notice coverage.
 // That gate also bounded-reads each fixed notice-*.png beside the report and requires its size and sha256
 // to equal the recorded values; the PNGs are not part of the format-integrity manifest.
+// Passed session reports must then also pass the #1896 connection-notice gate (offline/reconnected evidence
+// and its four fixed connection-*.png files, cross-checked the same way); a missing section fails closed.
 // With --require-responsive-audit, every passed audit report must also pass the #619 responsive gate
 // (fixed-name, PNG-validated clips). Opt-in so reports retained before #619 coverage keep their format verdict.
 // With --require-real-zoom, every passed audit report must also carry passing auditRealZoom evidence (1x calibration,
@@ -14,6 +16,7 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { loadReport, verifyRetainedReports } from './packaged-browser-report.mjs';
 import { applySessionNoticeGate } from './packaged-browser-a11y-notices.mjs';
+import { applyConnectionNoticeGate } from './packaged-browser-connection-notice.mjs';
 import { applyAuditResponsiveGate } from './packaged-browser-responsive.mjs';
 import { applyRealZoomGate } from './packaged-browser-real-zoom.mjs';
 
@@ -30,9 +33,9 @@ try {
   console.error('Usage: node scripts/verify-packaged-browser-reports.mjs [/absolute/parent] [--require-modes mode1,mode2,...] [--require-responsive-audit] [--require-real-zoom]');
   process.exit(2);
 }
-const noticed = await applySessionNoticeGate(await verifyRetainedReports(parent, { requiredModes }), directory => loadReport(directory));
+const noticed = await applyConnectionNoticeGate(await applySessionNoticeGate(await verifyRetainedReports(parent, { requiredModes }), directory => loadReport(directory)), directory => loadReport(directory));
 const responsive = requireResponsive ? await applyAuditResponsiveGate(noticed, directory => loadReport(directory)) : noticed;
 const results = requireRealZoom ? await applyRealZoomGate(responsive, directory => loadReport(directory)) : responsive;
-for (const r of results) console.log(`${r.ok ? 'verified' : 'INVALID '} ${r.directory}${r.ok ? ` status=${r.status}${r.gate ? ` notice-gate=${r.gate}` : ''}${r.responsiveGate ? ` responsive-gate=${r.responsiveGate}` : ''}${r.realZoomGate ? ` real-zoom-gate=${r.realZoomGate}` : ''}` : `: ${r.error}`}`);
+for (const r of results) console.log(`${r.ok ? 'verified' : 'INVALID '} ${r.directory}${r.ok ? ` status=${r.status}${r.gate ? ` notice-gate=${r.gate}` : ''}${r.connectionGate ? ` connection-gate=${r.connectionGate}` : ''}${r.responsiveGate ? ` responsive-gate=${r.responsiveGate}` : ''}${r.realZoomGate ? ` real-zoom-gate=${r.realZoomGate}` : ''}` : `: ${r.error}`}`);
 if (results.length === 0) console.log(`No retained packaged-browser report directories under ${parent}`);
 if (results.some(r => !r.ok)) process.exitCode = 1;

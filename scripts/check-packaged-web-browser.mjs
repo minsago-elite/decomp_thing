@@ -20,6 +20,7 @@ import { boundedArgv, createRealZoomSection, qualifyRealZoom, assessRealZoomRepo
 import { createGeometryProbeSection, createGeometryProbe, assessGeometryProbe } from './packaged-browser-zoom-geometry-probe.mjs';
 import { PackagedBrowserCdpDiagnostics } from './packaged-browser-cdp-diagnostics.mjs';
 import { AXE_VERSION, createNoticeSection, qualifyAvailabilityNotices, assessNoticeReport } from './packaged-browser-a11y-notices.mjs';
+import { createConnectionSection, qualifyConnectionNotice, assessConnectionReport } from './packaged-browser-connection-notice.mjs';
 
 // Test driver only: the application is launched with a separate Node-free PATH.
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -936,6 +937,23 @@ try {
     const noticeFailures = assessNoticeReport(notices);
     assert.deepEqual(noticeFailures, [], 'Availability notice accessibility evidence failed its semantic gate');
     console.log('Unauthenticated Home/Runtime notices verified at 1440x900 and 390x844 (Chrome AX tree, scoped axe, trusted keyboard).');
+    // #1896: offline/reconnected connection notice on two owned signed-out targets, still before sign-in.
+    // The section is attached before any read; the helper closes its own targets, so on failure the
+    // still-open availability-notice target stays the failure-screenshot target.
+    const connection = report.connectionNotice = createConnectionSection();
+    const connectionFallbackTarget = lastTarget;
+    try {
+      connection.authenticatedBefore = (await cdp.call('Network.getCookies', { urls: [origin + '/nested/'] }, lastTarget.sessionId)).cookies.length > 0;
+      await qualifyConnectionNotice({ cdp, makeTarget, evaluate, root, origin, axeSource, section: connection,
+        authenticatedBefore: connection.authenticatedBefore,
+        axeSha256: createHash('sha256').update(axeSource).digest('hex') });
+      const connectionFailures = assessConnectionReport(connection);
+      assert.deepEqual(connectionFailures, [], `Connection notice evidence failed its semantic gate:\n${connectionFailures.join('\n')}`);
+    } catch (error) {
+      lastTarget = connectionFallbackTarget;
+      throw error;
+    }
+    console.log('Signed-out connection notice verified offline/reconnected at 1440x900 and 390x844 (CDP network conditions, trusted events, AX tree, scoped axe).');
   }
 
   if (values.mode === 'session' || values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'history' || values.mode === 'scale' || values.mode === 'live' || values.mode === 'proxy') {

@@ -87,6 +87,11 @@ that gate, such as the #1882 evidence, show INVALID under the current verifier.
 Their results under the verifier at the commit that produced them remain valid,
 but they do not qualify the new notice criteria. Re-verify archived evidence with
 that commit's `scripts/verify-packaged-browser-reports.mjs`.
+Since #1896 the verifier also applies a connection-notice gate to every passed
+session report that passes the availability-notice gate: it requires a
+`connectionNotice` section and its four fixed `connection-*.png` files. Session
+reports retained before #1896 keep their availability-notice result but show
+INVALID for the connection criterion; the same re-verification rule applies.
 
 ## Enforced native staging
 
