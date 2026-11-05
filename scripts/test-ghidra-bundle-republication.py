@@ -132,6 +132,325 @@ class InventoryControls(Fixture):
             H.stable_file(root / "native")
 
 
+class SourcePinControls(Fixture):
+    COMMIT = "a" * 40
+
+    def setUp(self):
+        super().setUp()
+        (self.root / "scripts").mkdir()
+        for name in H.SOURCE_DRIVERS:
+            (self.root / name).write_bytes(b"inert driver")
+        self.records = self.record("160000", "module")
+        self.calls = []
+        self.head = (self.COMMIT + "\n").encode()
+        self.status = b""
+        self.subindex = b""
+        self.toplevel = None
+
+    def record(self, mode, name, commit=None, stage="0"):
+        return f"{mode} {commit or self.COMMIT} {stage}\t{name}\0".encode()
+
+    def command(self, label, args, timeout):
+        self.calls.append((label, args, timeout))
+        self.assertEqual(60, timeout)
+        self.assertEqual(["git", "--no-optional-locks", "-c", "core.fsmonitor=false",
+                          "-c", "core.untrackedCache=false", "-C"], args[:7])
+        root, operation = Path(args[7]), args[8:]
+        if operation == ["ls-files", "--stage", "-z"]:
+            return self.records if root == self.root else self.subindex
+        if operation == ["rev-parse", "--show-toplevel"]:
+            return os.fsencode(self.toplevel or root) + b"\n"
+        if operation == ["rev-parse", "--verify", "HEAD"]:
+            return self.head
+        if operation == ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none"]:
+            return self.status
+        self.fail(f"unexpected Git operation: {operation}")
+
+    def snapshot(self, phase="before"):
+        return H.SourcePins(self.root, self.command, phase).snapshot()
+
+    def initialized(self):
+        path = self.root / "module"
+        path.mkdir(exist_ok=True)
+        (path / ".git").mkdir()
+        return path
+
+    def test_missing_and_empty_gitlinks_explicitly_attested_without_git_discovery(self):
+        for state in ("absent-uninitialized", "empty-uninitialized"):
+            with self.subTest(state=state):
+                if state.startswith("empty"):
+                    (self.root / "module").mkdir()
+                self.calls.clear()
+                snapshot = self.snapshot()
+                pin = snapshot["tracked"]["module"]
+                self.assertEqual(state, pin["state"])
+                self.assertEqual(self.COMMIT, pin["index_commit"])
+                self.assertEqual("160000", pin["index"]["mode"])
+                self.assertEqual("none", pin["content_hash_scope"])
+                self.assertEqual(2, len(self.calls))
+                self.assertEqual(set(H.SOURCE_DRIVERS), set(snapshot["untracked_drivers"]))
+                H.verify_source_pins(snapshot, self.snapshot("after"))
+
+    def test_initialized_matching_clean_checkout_is_accepted_with_honest_evidence(self):
+        path = self.initialized()
+        self.subindex = self.record("100644", "inert-source")
+        before = self.snapshot()
+        pin = before["tracked"]["module"]
+        self.assertEqual("initialized", pin["state"])
+        self.assertEqual(str(path), pin["repository_root"])
+        self.assertEqual(self.COMMIT, pin["head"])
+        self.assertEqual("none", pin["content_hash_scope"])
+        self.assertEqual(1, pin["index_entries"])
+        self.assertEqual(H.digest(H.encode(H.source_index(self.subindex))), pin["index_sha256"])
+        self.assertEqual("", pin["status_porcelain_hex"])
+        self.assertNotIn("sha256", pin)
+        H.verify_source_pins(before, self.snapshot("after"))
+        self.assertEqual(len(self.calls), len({label for label, _, _ in self.calls}))
+
+    def test_wrong_commit_dirty_untracked_and_dirty_submodule_are_refused(self):
+        self.initialized()
+        for head, status in ((b"b" * 40 + b"\n", b""), (self.head, b" M source\0"),
+                             (self.head, b"M  source\0"), (self.head, b"?? untracked\0"),
+                             (self.head, b" m nested\0"), (self.head, b" ? nested\0")):
+            with self.subTest(head=head, status=status):
+                self.head, self.status = head, status
+                with self.assertRaises(H.Refusal):
+                    self.snapshot()
+
+    def test_nonempty_directory_cannot_mistake_parent_repository_for_own_root(self):
+        path = self.root / "module"
+        path.mkdir()
+        (path / "inert").write_bytes(b"not a Git checkout")
+        self.toplevel = self.root
+        with self.assertRaisesRegex(H.Refusal, "own repository root"):
+            self.snapshot()
+
+    def test_initialized_gitfile_marker_supported_but_linked_or_fifo_marker_refused(self):
+        path = self.initialized()
+        marker = path / ".git"
+        marker.rmdir()
+        marker.write_bytes(b"gitdir: ../inert-git-metadata\n")
+        snapshot = self.snapshot()
+        self.assertEqual("F", snapshot["tracked"]["module"]["repository_marker"]["type"])
+        H.verify_source_pins(snapshot, self.snapshot("after"))
+        marker.unlink()
+        marker.symlink_to("../scripts")
+        with self.assertRaisesRegex(H.Refusal, "repository marker"):
+            self.snapshot()
+        marker.unlink()
+        os.mkfifo(marker)
+        with self.assertRaisesRegex(H.Refusal, "repository marker"):
+            self.snapshot()
+
+    def test_initialized_checkout_is_revalidated_for_final_head_index_and_status(self):
+        self.initialized()
+        before = self.snapshot()
+        for change in ("head", "index", "dirty", "untracked", "conflict"):
+            self.head = (("b" * 40 if change == "head" else self.COMMIT) + "\n").encode()
+            self.subindex = self.record("100644", "changed") if change == "index" else b""
+            if change == "conflict":
+                self.subindex = self.record("100644", "source", stage="1")
+            self.status = {"dirty": b" M source\0", "untracked": b"?? extra\0"}.get(change, b"")
+            with self.subTest(change=change), self.assertRaises(H.Refusal):
+                H.verify_source_pins(before, self.snapshot("after"))
+
+    def test_nested_gitlink_state_is_pinned_and_rechecked(self):
+        path = self.initialized()
+        self.subindex = self.record("160000", "nested")
+        before = self.snapshot()
+        self.assertEqual("absent-uninitialized", before["tracked"]["module"]["gitlinks"]["nested"]["state"])
+        (path / "nested").mkdir()
+        with self.assertRaises(H.Refusal):
+            H.verify_source_pins(before, self.snapshot("after"))
+
+    def test_regular_files_keep_hash_mode_and_full_stable_identity(self):
+        self.records = self.record("100644", "source") + self.record("100755", "executable")
+        for name in ("source", "executable"):
+            (self.root / name).write_bytes(b"inert bytes")
+        (self.root / "executable").chmod(0o755)
+        before = self.snapshot()
+        for name in ("source", "executable"):
+            pin = before["tracked"][name]
+            for key, value in H.stable_file(self.root / name).items():
+                self.assertEqual(value, pin[key])
+            self.assertEqual(list(H.file_identity((self.root / name).lstat())), pin["identity"])
+        (self.root / "source").write_bytes(b"other bytes")
+        with self.assertRaises(H.Refusal):
+            H.verify_source_pins(before, self.snapshot("after"))
+
+    def test_tracked_drivers_preserve_index_metadata_and_untracked_driver_changes_fail(self):
+        self.records = self.record("100755", H.SOURCE_DRIVERS[0])
+        before = self.snapshot()
+        self.assertEqual("100755", before["tracked"][H.SOURCE_DRIVERS[0]]["index"]["mode"])
+        self.assertEqual({H.SOURCE_DRIVERS[1]}, set(before["untracked_drivers"]))
+        (self.root / H.SOURCE_DRIVERS[1]).write_bytes(b"changed driver")
+        with self.assertRaises(H.Refusal):
+            H.verify_source_pins(before, self.snapshot("after"))
+
+    def test_symlink_mode_target_and_identity_are_pinned_without_following_target(self):
+        self.records = self.record("120000", "link")
+        path = self.root / "link"
+        path.symlink_to("missing-target")
+        before = self.snapshot()
+        pin = before["tracked"]["link"]
+        self.assertEqual("L", pin["type"])
+        self.assertEqual("missing-target", pin["target"])
+        self.assertEqual("120000", pin["index"]["mode"])
+        self.assertEqual(list(H.file_identity(path.lstat())), pin["identity"])
+        H.verify_source_pins(before, self.snapshot("after"))
+        path.unlink()
+        path.symlink_to("other-target")
+        with self.assertRaises(H.Refusal):
+            H.verify_source_pins(before, self.snapshot("after"))
+
+    def test_symlink_mutation_during_read_is_refused(self):
+        self.records = self.record("120000", "link")
+        path = self.root / "link"
+        path.symlink_to("before")
+        original = H.os.readlink
+
+        def change(value, *args, **kwargs):
+            target = original(value, *args, **kwargs)
+            if Path(value) == path:
+                path.unlink()
+                path.symlink_to("after")
+            return target
+
+        with patch.object(H.os, "readlink", side_effect=change), self.assertRaises(H.Refusal):
+            self.snapshot()
+
+    def test_index_modes_refuse_wrong_filesystem_type_including_symlink_and_fifo(self):
+        path = self.root / "item"
+        for kind in ("file", "directory", "symlink", "fifo"):
+            if kind == "file":
+                path.write_bytes(b"inert")
+            elif kind == "directory":
+                path.mkdir()
+            elif kind == "symlink":
+                path.symlink_to("scripts")
+            else:
+                os.mkfifo(path)
+            for mode in ("100644", "100755", "120000", "160000"):
+                if ((kind == "file" and mode in ("100644", "100755"))
+                        or (kind == "directory" and mode == "160000")
+                        or (kind == "symlink" and mode == "120000")):
+                    continue
+                self.records = self.record(mode, "item")
+                with self.subTest(kind=kind, mode=mode), self.assertRaises(H.Refusal):
+                    self.snapshot()
+            path.rmdir() if kind == "directory" else path.unlink()
+
+    def test_linked_or_special_ancestors_fail_even_for_missing_gitlink(self):
+        alias = self.root / "alias"
+        for kind in ("symlink", "fifo", "file"):
+            if kind == "symlink":
+                alias.symlink_to(self.root / "scripts", target_is_directory=True)
+            elif kind == "fifo":
+                os.mkfifo(alias)
+            else:
+                alias.write_bytes(b"inert")
+            for mode in ("100644", "120000", "160000"):
+                self.records = self.record(mode, "alias/missing")
+                with self.subTest(kind=kind, mode=mode), self.assertRaises(H.Refusal):
+                    self.snapshot()
+            alias.unlink()
+
+    def test_malformed_index_conflicts_duplicates_unsafe_paths_and_unknown_modes_fail(self):
+        valid = self.record("100644", "source")
+        invalid = [valid[:-1], b"\0", valid + b"\0", valid + valid,
+                   valid.replace(b"100644", b"100664"), valid.replace(b"100644", b"040000"),
+                   valid.replace(b" 0\t", b" 1\t"), valid.replace(b" 0\t", b" 2\t"),
+                   valid + valid.replace(b" 0\t", b" 3\t"), valid.replace(b" 0\t", b" 00\t"),
+                   valid.replace(b"a" * 40, b"0" * 40), valid.replace(b"a" * 40, b"g" * 40),
+                   valid.replace(b"a" * 40, b"a" * 39), valid.replace(b"\t", b" "),
+                   valid + self.record("100644", "source/child")]
+        invalid += [self.record("100644", name) for name in
+                    ("", "/absolute", "../escape", "a/../escape", "a//b", "a/./b", "a/",
+                     ".git/config", "a/.GIT/config", "a\\b", "a\nb", "a\tb")]
+        for data in invalid:
+            with self.subTest(data=data), self.assertRaises(H.Refusal):
+                H.source_index(data)
+        self.assertEqual({}, H.source_index(b""))
+        self.assertEqual("b" * 64, H.source_index(self.record("100644", "sha256", "b" * 64))["sha256"]["object"])
+
+    def test_source_count_bytes_and_index_bounds_are_enforced(self):
+        with patch.object(H, "MAX_ENTRIES", 0), self.assertRaises(H.Refusal):
+            self.snapshot()
+        with patch.object(H, "MAX_LOG", 1), self.assertRaises(H.Refusal):
+            self.snapshot()
+        with patch.object(H, "MAX_TREE", 1), self.assertRaises(H.Refusal):
+            self.snapshot()
+        collector = H.SourcePins(self.root, self.command, "bound")
+        collector.gitlinks = 128
+        with self.assertRaises(H.Refusal):
+            collector.snapshot()
+        with self.assertRaises(H.Refusal):
+            collector.gitlink(self.root / "module", None, self.COMMIT, 16)
+
+    def test_added_removed_index_swapped_and_type_changed_sources_fail_final_verification(self):
+        (self.root / "source").write_bytes(b"inert")
+        (self.root / "added").write_bytes(b"inert")
+        original = self.record("100644", "source")
+        self.records = original
+        before = self.snapshot()
+        for changed in (b"", original + self.record("100644", "added"),
+                        self.record("100644", "source", "b" * 40), self.record("100755", "source")):
+            self.records = changed
+            with self.subTest(index=changed), self.assertRaises(H.Refusal):
+                H.verify_source_pins(before, self.snapshot("after"))
+        self.records = original
+        (self.root / "source").unlink()
+        (self.root / "source").symlink_to("added")
+        with self.assertRaises(H.Refusal):
+            H.verify_source_pins(before, self.snapshot("after"))
+
+    def test_every_gitlink_initialization_transition_fails_final_verification(self):
+        missing = self.snapshot()
+        path = self.root / "module"
+        path.mkdir()
+        empty = self.snapshot()
+        self.initialized()
+        initialized = self.snapshot()
+        for before, after in ((missing, empty), (empty, missing), (empty, initialized),
+                              (initialized, empty), (missing, initialized), (initialized, missing)):
+            with self.subTest(before=before["tracked"]["module"]["state"],
+                              after=after["tracked"]["module"]["state"]), self.assertRaises(H.Refusal):
+                H.verify_source_pins(before, after)
+
+    def test_index_or_submodule_state_change_during_snapshot_is_refused(self):
+        original = self.command
+        for change in ("index", "head", "subindex", "directory", "status"):
+            if change == "head":
+                self.initialized()
+            self.head = (self.COMMIT + "\n").encode()
+            self.subindex = b""
+            self.status = b""
+            head_reads = index_reads = 0
+
+            def command(label, args, timeout):
+                nonlocal head_reads, index_reads
+                result = original(label, args, timeout)
+                if change == "index" and args[-3:] == ["ls-files", "--stage", "-z"]:
+                    index_reads += 1
+                    if index_reads == 2:
+                        return b""
+                if args[-3:] == ["rev-parse", "--verify", "HEAD"]:
+                    head_reads += 1
+                    if change == "head" and head_reads == 2:
+                        return b"b" * 40 + b"\n"
+                if "status" in args:
+                    if change == "subindex":
+                        self.subindex = self.record("100644", "added")
+                    if change == "directory":
+                        (self.root / "module/new").write_bytes(b"inert")
+                    if change == "status":
+                        self.status = b"?? new\0"
+                return result
+
+            with self.subTest(change=change), patch.object(self, "command", side_effect=command), self.assertRaises(H.Refusal):
+                self.snapshot()
+
+
 class MarkerControls(Fixture):
     def test_order_and_selection_controls(self):
         self.assertEqual((30, 40), H.validate_markers(marker_set(), "source"))
@@ -403,7 +722,7 @@ class OrchestrationControls(Fixture):
         with self.assertRaisesRegex(H.Refusal, "no waiver"):
             harness.finish_case(run, self.root)
 
-    def mocked_execution(self, missed=False):
+    def mocked_execution(self, missed=False, source_change=False):
         """Exercise the actual fixed orchestration with inert process/marker providers."""
         self.tree("ghidra-bridge/build/bundle")
         self.tree("build/install/llm_bin_patch/libexec/ghidra")
@@ -431,8 +750,12 @@ class OrchestrationControls(Fixture):
         def command(label, args, timeout=60):
             if label == "source-head":
                 return b"a" * 40
-            if label == "source-files":
-                return b"build.gradle.kts\0src/test/fixtures/c/hello_world.c\0"
+            if "ls-files" in args:
+                self.assertEqual(["ls-files", "--stage", "-z"], args[-3:])
+                if source_change and label.startswith("source-after-"):
+                    return b"100644 " + b"c" * 40 + b" 0\tbuild.gradle.kts\0"
+                return b"100644 " + b"a" * 40 + b" 0\tbuild.gradle.kts\0" + \
+                    b"100644 " + b"b" * 40 + b" 0\tsrc/test/fixtures/c/hello_world.c\0"
             if label == "compile-fixture":
                 (harness.attempt / "hello_world").write_bytes(b"inert, never executed")
             return b"mocked version output"
@@ -487,6 +810,12 @@ class OrchestrationControls(Fixture):
                 outcomes = [[{"spans_begin": True}], []] if missed == "second" else [[], []]
                 with patch.object(H, "overlap_proofs", side_effect=outcomes), self.assertRaisesRegex(H.Refusal, "two publications"):
                     harness.execute()
+            elif source_change:
+                with self.assertRaisesRegex(H.Refusal, "source index or pins changed"):
+                    harness.execute()
+                self.assertEqual("FAIL", harness.evidence["status"])
+                self.assertNotEqual(harness.evidence["source_pins_sha256"], harness.evidence["final_source_pins_sha256"])
+                self.assertTrue((harness.attempt / "source-pins-final.json").exists())
             else:
                 harness.execute()
                 self.assertTrue(harness.evidence["all_installed_bundle_regular_file_inodes_retained"])
@@ -510,6 +839,9 @@ class OrchestrationControls(Fixture):
 
     def test_one_proven_and_one_missed_publication_cannot_pass(self):
         self.mocked_execution(missed="second")
+
+    def test_completed_cases_and_overlaps_cannot_pass_changed_authoritative_source_index(self):
+        self.mocked_execution(source_change=True)
 
 
 if __name__ == "__main__":

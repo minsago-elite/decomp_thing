@@ -104,6 +104,169 @@ def stable_file(path):
             "mode": stat.S_IMODE(before.st_mode), "inode": before.st_ino, "device": before.st_dev}
 
 
+SOURCE_DRIVERS = ("scripts/qualify-ghidra-bundle-republication.py",
+                  "scripts/test-ghidra-bundle-republication.py")
+
+
+def source_name(raw):
+    require(0 < len(raw) <= 4096 and not raw.startswith(b"/") and b"\\" not in raw
+            and all(byte >= 32 and byte != 127 for byte in raw), "unsafe source path")
+    parts = raw.split(b"/")
+    require(len(parts) <= 40 and all(part not in (b"", b".", b"..") and part.lower() != b".git"
+                                   for part in parts), "unsafe source path")
+    return os.fsdecode(raw)
+
+
+def source_index(data):
+    """Parse the authoritative index, including gitlinks; never flatten conflicts."""
+    require(len(data) <= MAX_LOG and (not data or data.endswith(b"\0")), "malformed or oversized source index")
+    records = data[:-1].split(b"\0") if data else []
+    require(len(records) <= MAX_ENTRIES, "tracked source count exceeds bound")
+    entries = {}
+    for record in records:
+        match = re.fullmatch(rb"(100644|100755|120000|160000) ([0-9a-f]{40}|[0-9a-f]{64}) 0\t(.+)", record)
+        require(match is not None, "malformed source index mode/stage/record")
+        mode, oid, raw = match.groups()
+        require(any(byte != ord("0") for byte in oid), "invalid source index object")
+        name = source_name(raw)
+        require(name not in entries, "duplicate source index path")
+        entries[name] = {"mode": mode.decode(), "object": oid.decode()}
+    # A file, symlink or gitlink cannot also be an ancestor of another entry.
+    for name in entries:
+        require(not any(parent.as_posix() in entries for parent in Path(name).parents if parent != Path(".")),
+                "conflicting source index paths")
+    return entries
+
+
+def source_ancestors(root, name, missing=False):
+    """Never resolve through symlink ancestors, including for an absent gitlink."""
+    require(root.is_absolute() and root.resolve() == root, "source root uses symlink")
+    pins = []
+    for path in (root, *(root / parent for parent in reversed(Path(name).parents) if parent != Path("."))):
+        try:
+            value = path.lstat()
+        except FileNotFoundError:
+            require(missing, "missing source ancestor")
+            pins.append(None)
+            continue
+        require(stat.S_ISDIR(value.st_mode), "linked or non-directory source ancestor")
+        # Ancestor timestamps/link counts may change as qualification writes build/.
+        pins.append([value.st_dev, value.st_ino, value.st_mode, value.st_uid, value.st_gid])
+    return pins
+
+
+class SourcePins:
+    """Bounded source snapshots through Harness.command (including its run evidence).
+
+    Initialized gitlinks attest commit + clean Git state, NOT a complete content
+    hash. Their index digest and recursive gitlink states make that scope explicit.
+    """
+
+    def __init__(self, root, command, phase):
+        self.root, self.command, self.phase = root, command, phase
+        self.commands = self.gitlinks = self.index_bytes = self.file_bytes = 0
+
+    def git(self, root, *args):
+        self.commands += 1
+        return self.command(f"source-{self.phase}-{self.commands:04d}",
+                            ["git", "--no-optional-locks", "-c", "core.fsmonitor=false",
+                             "-c", "core.untrackedCache=false", "-C", str(root), *args], 60)
+
+    def index(self, root):
+        data = self.git(root, "ls-files", "--stage", "-z")
+        self.index_bytes += len(data)
+        require(self.index_bytes <= 4 * MAX_LOG, "aggregate source index exceeds bound")
+        return source_index(data)
+
+    def pin(self, root, name, entry, depth=0):
+        mode = entry["mode"]
+        ancestors = source_ancestors(root, name, missing=mode == "160000")
+        path = root / name
+        try:
+            before = path.lstat()
+        except FileNotFoundError:
+            require(mode == "160000", "tracked source missing")
+            before = None
+        if mode == "160000":
+            observed = self.gitlink(path, before, entry["object"], depth)
+        elif mode == "120000":
+            require(stat.S_ISLNK(before.st_mode), "tracked symlink changed type")
+            target = os.readlink(path)
+            require(len(os.fsencode(target)) <= 4096, "source symlink target exceeds bound")
+            observed = {"type": "L", "target": target, "mode": stat.S_IMODE(before.st_mode)}
+        else:
+            require(mode in ("100644", "100755"), "unsupported source mode")
+            observed = stable_file(path)
+            self.file_bytes += observed["bytes"]
+            require(self.file_bytes <= MAX_TREE, "tracked source bytes exceed bound")
+        try:
+            after = path.lstat()
+        except FileNotFoundError:
+            after = None
+        before_id = list(file_identity(before)) if before is not None else None
+        after_id = list(file_identity(after)) if after is not None else None
+        require(before_id == after_id, "source changed while pinning")
+        require(ancestors == source_ancestors(root, name, missing=mode == "160000"),
+                "source ancestors changed while pinning")
+        return {"index": entry, "identity": before_id, "ancestors": ancestors, **observed}
+
+    def gitlink(self, path, before, commit, depth):
+        self.gitlinks += 1
+        require(self.gitlinks <= 128 and depth < 16, "source gitlink count/depth exceeds bound")
+        result = {"type": "G", "index_commit": commit, "content_hash_scope": "none"}
+        if before is None:
+            return {**result, "state": "absent-uninitialized"}
+        require(stat.S_ISDIR(before.st_mode), "gitlink is linked or non-directory")
+        with os.scandir(path) as children:
+            empty = next(children, None) is None
+        if empty:
+            return {**result, "state": "empty-uninitialized"}
+        # An empty/non-repository child must never inherit the parent's Git root.
+        require(self.git(path, "rev-parse", "--show-toplevel") == os.fsencode(path) + b"\n",
+                "gitlink is not its own repository root")
+        marker = path / ".git"
+        marker_before = marker.lstat()
+        require(stat.S_ISREG(marker_before.st_mode) or stat.S_ISDIR(marker_before.st_mode),
+                "gitlink repository marker is linked or nonregular")
+        marker_pin = (stable_file(marker) if stat.S_ISREG(marker_before.st_mode)
+                      else {"type": "D"})
+        head = self.git(path, "rev-parse", "--verify", "HEAD")
+        require(head == commit.encode() + b"\n", "gitlink HEAD differs from index commit")
+        index = self.index(path)
+        status = self.git(path, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none")
+        require(status == b"", "gitlink has dirty tracked/untracked/submodule state")
+        nested = {name: self.pin(path, name, entry, depth + 1) for name, entry in index.items()
+                  if entry["mode"] == "160000"}
+        require(self.git(path, "rev-parse", "--verify", "HEAD") == head and self.index(path) == index,
+                "gitlink HEAD/index changed while pinning")
+        require(self.git(path, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none") == status,
+                "gitlink status changed while pinning")
+        require(file_identity(marker.lstat()) == file_identity(marker_before), "gitlink repository marker changed")
+        return {**result, "state": "initialized", "repository_root": str(path), "head": commit,
+                "attestation": "matching HEAD/index commit and clean tracked/untracked/submodule Git status",
+                "repository_marker": {**marker_pin, "identity": list(file_identity(marker_before))},
+                "status_porcelain_hex": status.hex(), "index_entries": len(index),
+                "index_sha256": digest(encode(index)), "gitlinks": nested}
+
+    def snapshot(self):
+        index = self.index(self.root)
+        pins = {name: self.pin(self.root, name, entry) for name, entry in index.items()}
+        # Keep the pre-commit untracked-driver protection without replacing index metadata.
+        drivers = {}
+        for name in SOURCE_DRIVERS:
+            if name in index:
+                require(index[name]["mode"] in ("100644", "100755"), "driver must be a regular file")
+            else:
+                drivers[name] = self.pin(self.root, name, {"mode": "100644", "object": None})
+        require(self.index(self.root) == index, "source index changed while pinning")
+        return {"schema": "mode-aware-source-pins-v1", "index": index, "tracked": pins,
+                "untracked_drivers": drivers}
+
+
+def verify_source_pins(before, after):
+    require(before == after, "source index or pins changed during qualification")
+
+
 def inventory(root):
     """No symlinks/special files; include root and empty directories, not just files."""
     entries = {}
@@ -774,24 +937,7 @@ class Harness:
                                     "clock": "Linux CLOCK_MONOTONIC; JVM ready timestamp checked against Python bounds",
                                     "boot_id": bounded_read(Path("/proc/sys/kernel/random/boot_id"), 128).decode().strip()}
         self.evidence["head"] = self.command("source-head", ["git", "rev-parse", "HEAD"]).decode().strip()
-        tracked = self.command("source-files", ["git", "ls-files", "-z"]).split(b"\0")
-        require(len(tracked) <= MAX_ENTRIES, "tracked source count exceeds bound")
-        source_pins = {}
-        source_bytes = 0
-        for raw in tracked:
-            if not raw:
-                continue
-            name = os.fsdecode(raw)
-            path = self.root / name
-            if path.is_symlink():
-                source_pins[name] = {"symlink": os.readlink(path)}
-            else:
-                source_pins[name] = stable_file(path)
-                source_bytes += source_pins[name]["bytes"]
-                require(source_bytes <= MAX_TREE, "tracked source bytes exceed bound")
-        # New untracked harness files are also pinned before the parent commits.
-        for name in ("scripts/qualify-ghidra-bundle-republication.py", "scripts/test-ghidra-bundle-republication.py"):
-            source_pins[name] = stable_file(self.root / name)
+        source_pins = SourcePins(self.root, self.command, "before").snapshot()
         write_json(self.attempt / "source-pins.json", source_pins)
         self.evidence["source_pins_sha256"] = digest(encode(source_pins))
         source_hash = stable_file(self.root / "build.gradle.kts")["sha256"]
@@ -835,10 +981,10 @@ class Harness:
                 "two publications require proven actual publisher/owned-worker overlap")
         require(len(self.evidence["cases"]) == 3 and all(c["status"] == "PASS" for c in self.evidence["cases"]),
                 "fixed reconstruction cases did not all pass")
-        for name, pinned in source_pins.items():
-            path = self.root / name
-            observed = {"symlink": os.readlink(path)} if path.is_symlink() else stable_file(path)
-            require(observed == pinned, "source changed during qualification")
+        final_source_pins = SourcePins(self.root, self.command, "after").snapshot()
+        write_json(self.attempt / "source-pins-final.json", final_source_pins)
+        self.evidence["final_source_pins_sha256"] = digest(encode(final_source_pins))
+        verify_source_pins(source_pins, final_source_pins)
         self.evidence["all_installed_bundle_regular_file_inodes_retained"] = True
         self.evidence["application_jar_classification"] = (
             "unchanged" if before["application_jar"] == after["application_jar"] and
