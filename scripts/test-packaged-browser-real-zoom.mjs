@@ -719,29 +719,40 @@ const cfg = {
   'slow-version': { deadlines: { calibrationMs: 150 }, hangVersion: true },
   'launch-timeout': { deadlines: { calibrationMs: 200 }, mode: 'hang' },
   'prep-deadline': { deadlines: { calibrationMs: 0 } },
-  'late-connect': { deadlines: { calibrationMs: 100, cancelSettleMs: 200 }, connectMs: 1500 },
+  'late-connect': { deadlines: { calibrationMs: 5000, cancelSettleMs: 200 }, deferConnect: true },
 }[scenario];
 const pids = []; const log = { spawns: 0, connects: 0, closes: 0, calls: [] };
 const spawnChrome = (binary, argv, options) => { log.spawns++; const c = spawn(process.execPath, ['-e', FAKE_CHROME, '--', ...argv], { ...options, env: { ...options.env, FAKE_CHROME_MODE: cfg.mode ?? 'ok' } }); pids.push(c.pid); return c; };
-const connect = async () => {
-  log.connects++;
-  if (cfg.connectMs) await wait(cfg.connectMs);
+let releaseLateConnect;
+const lateConnect = new Promise((resolve) => { releaseLateConnect = resolve; });
+const makeConnection = () => {
   let closed = false; const pending = new Set();
   return { on() {}, close() { log.closes++; closed = true; for (const r of pending) r(new Error('DevTools connection closed')); },
     call(method) { log.calls.push(method); if (closed) return Promise.reject(new Error('closed'));
       if (method === 'Browser.getVersion' && cfg.hangVersion) return new Promise((_, reject) => pending.add(reject));
       return Promise.resolve(method === 'Browser.getVersion' ? { product: 'P' } : {}); } };
 };
+const connect = async () => {
+  log.connects++;
+  if (cfg.deferConnect) return lateConnect;
+  if (cfg.connectMs) await wait(cfg.connectMs);
+  return makeConnection();
+};
 const section = createRealZoomSection();
 const started = Date.now();
+// The late-connect case deliberately has no referenced work while connect is held; keep the subprocess alive until its
+// unref'd bounded deadline resolves, then clear this guard before releasing the late connection.
+const connectDeadlineKeepAlive = cfg.deferConnect ? setTimeout(() => {}, 10000) : null;
 await qualifyRealZoom({ section, repo, chromeBinary: '/fake/chrome', chromeSha256: 'c', baseArgs: ['--headless=new'], spawnChrome, stop, connect,
   // Unref'd so the losing bounded-settle timers do not hold this subprocess open; the bounds themselves are unchanged.
   delay: (ms) => new Promise((r) => setTimeout(r, ms).unref()),
   fixtures: () => { throw new Error('fixtures must not be reached'); }, root: repo, origin: 'http://127.0.0.1:1', deadlines: { ...REAL_ZOOM_DEADLINES, ...cfg.deadlines } });
+if (connectDeadlineKeepAlive) clearTimeout(connectDeadlineKeepAlive);
 const returnedMs = Date.now() - started;
 const snapshot = JSON.stringify(section);
 const callsAtReturn = log.calls.length;
-await wait(scenario === 'late-connect' ? 2000 : 300);
+if (cfg.deferConnect) releaseLateConnect(makeConnection());
+await wait(scenario === 'late-connect' ? 100 : 300);
 const alive = pids.filter((pid) => { try { process.kill(pid, 0); return true; } catch { return false; } });
 process.stdout.write(JSON.stringify({ section: JSON.parse(snapshot), returnedMs, unchangedAfterReturn: JSON.stringify(section) === snapshot,
   callsAfterReturn: log.calls.length - callsAtReturn, log, alive }));
