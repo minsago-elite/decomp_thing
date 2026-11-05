@@ -548,6 +548,32 @@ test('connection accessibility summary keeps only exposed region and status name
   assert.deepEqual(connectionAxSummary(undefined), { regions: [], statuses: [] });
 });
 
+test('connection DOM check ignores legacy status asides outside the notice section', () => {
+  const status = { getAttribute: name => name === 'aria-label' ? connectionNoticeNames.status : null };
+  const section = { getAttribute: () => 'connection-notice-heading', contains: element => element === status,
+    querySelectorAll: selector => selector === 'aside[role="status"]' ? [] : [] };
+  const h1 = { tagName: 'H1', id: '', textContent: 'Workspace' };
+  const document = {
+    activeElement: h1,
+    querySelectorAll(selector) {
+      if (selector === 'section.connection-notice') return [section];
+      if (selector === '[role="status"]') return [status];
+      if (selector === 'aside[role="status"]') return [{ tagName: 'ASIDE' }]; // unrelated session notice
+      throw new Error(`unexpected selector ${selector}`);
+    },
+    getElementById: () => ({ textContent: connectionNoticeNames.offline }),
+  };
+  const storage = { length: 0, key: () => null, getItem: () => null };
+  const performance = { getEntriesByType: type => type === 'navigation' ? [{}] : [] };
+  const state = runInNewContext(measureConnectionState, {
+    document, window: { __auditConnection: { token: 't', events: [] } }, navigator: { onLine: false },
+    location: { href: 'http://x/nested/' }, history: { length: 1 }, performance, localStorage: storage, sessionStorage: storage,
+  });
+  assert.equal(state.dom.sections, 1);
+  assert.equal(state.dom.statuses, 1);
+  assert.equal(state.dom.invalidAsides, 0);
+});
+
 // A modeled browser: emulation toggles navigator.onLine and dispatches trusted events.
 function connectionModel({ failAt = null, sideEffect = null, revalidationDelayMs = 750 } = {}) {
   const calls = []; const shots = []; const fulfilled = []; let online = true; let installed = false; let removed = false;
