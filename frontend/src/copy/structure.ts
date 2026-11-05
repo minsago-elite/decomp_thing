@@ -104,6 +104,7 @@ export const structureCopy = {
   unresolvedGlobals: 'Global references with no global record',
   notMeasured: 'Not measured: module plan unavailable',
   countOf: '{count} / {total}',
+  evidenceOfPopulation: '{label} / recorded population',
   extractionCounts: 'recovered {recovered}, partial {partial}, failed {failed}, synthetic {synthetic} / {total} recorded',
   moduleResults: 'Module results', moduleRange: 'Showing {first}–{last} of {total} modules.',
   noModules: 'No module plan is available for this revision.',

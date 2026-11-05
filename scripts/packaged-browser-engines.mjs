@@ -6,6 +6,7 @@ import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import { assertAudit, auditFixtures, auditViewports, measureContrast, measureFocus, measurePage } from './packaged-browser-audit.mjs';
+import { createEngineDiagnostics, diagnosticOverflowFailure } from './packaged-browser-engine-diagnostics.mjs';
 import { isPlaywrightScreenshotCspViolation, openEngineAuditPage, serveEngineAuditFixtures } from './packaged-browser-engine-adapter.mjs';
 
 // Cross-engine packaged smoke and audit (#631). The DevTools-based check-packaged-web-browser.mjs
@@ -31,6 +32,7 @@ for (const option of ['archive', 'java-home', 'python', 'playwright', 'work-pare
 }
 const playwright = await import(pathToFileURL(join(values.playwright, 'index.mjs')).href);
 const engine = playwright[values.engine];
+let diagnostics = null;
 const delay = (ms) => new Promise((done) => setTimeout(done, ms));
 const root = await fs.mkdtemp(join(repo, 'build/packaged-engines-'));
 const ownerToken = randomUUID();
@@ -99,6 +101,8 @@ async function stop(child) {
 async function context(options = {}) {
   const created = await browser.newContext({ acceptDownloads: true, ...options });
   const record = { responses: [], csp: [], documents: [], exceptions: [], workers: [], apiRequests: [] };
+  const diag = diagnostics.context(diagnostics.currentPhase() ?? 'unscoped');
+  record.diagnosticContext = diag.id;
   await created.exposeBinding('__decompRecordCspViolation', (_source, payload) => {
     try { record.csp.push(JSON.parse(payload)); }
     catch (cause) { throw new Error('CSP instrumentation returned invalid JSON', { cause }); }
@@ -355,16 +359,23 @@ async function context(options = {}) {
     });
   });
   created.on('request', (request) => {
+    if (request.url().includes('/api/v1/')) diag.requestStarted(request);
     if (request.url().includes('/api/v1/') && record.apiRequests.length < 8) void request.allHeaders().then((headers) => record.apiRequests.push({ method: request.method(), url: request.url().split('?')[0],
       origin: headers.origin ?? null, site: headers['sec-fetch-site'] ?? null, host: headers.host ?? null }));
   });
+  created.on('requestfinished', (request) => {
+    const finished = diag.requestFinished(request);
+    if (finished) void request.response().then((response) => { finished.status = response?.status() ?? null; }, () => {});
+  });
+  created.on('requestfailed', (request) => diag.requestFailed(request));
   created.on('response', (response) => {
     const url = response.url().split('#')[0].split('?')[0];
     record.responses.push({ url, status: response.status() });
     if (response.request().resourceType() === 'document') record.documents.push({ url, csp: response.headers()['content-security-policy'] ?? null });
   });
   created.on('page', (page) => {
-    page.on('pageerror', (error) => record.exceptions.push(String(error)));
+    diag.page(page);
+    page.on('pageerror', (error) => { record.exceptions.push(String(error)); diag.exception(error, page); });
     page.on('worker', (worker) => record.workers.push({ url: worker.url(), responses: [] }));
   });
   return { context: created, record };
@@ -512,7 +523,7 @@ async function auditWithFixtures(origin, fixtures, fulfilled, unmapped) {
     && document.body.innerText.includes(${JSON.stringify(page.rendered)}) && !document.querySelector('main [role="alert"]')`;
   const open = async (target, page, context, prepare = true) => {
     try {
-      interactions.push(...await openEngineAuditPage(target, { origin, page, fulfilled, context, prepare }));
+      interactions.push(...await diagnostics.phase(`navigate:${context}:${page.name}`, () => openEngineAuditPage(target, { origin, page, fulfilled, context, prepare })));
     } catch (failure) {
       const record = records.at(-1);
       const state = await target.evaluate(() => ({
@@ -528,6 +539,7 @@ async function auditWithFixtures(origin, fixtures, fulfilled, unmapped) {
         apiRequests: record?.apiRequests.slice(-8) ?? [],
         recentResponses: record?.responses.slice(-12) ?? [],
         exceptions: record?.exceptions.slice(-8) ?? [],
+        diagnosticContext: record?.diagnosticContext ?? null, phase: diagnostics.currentPhase(),
         csp: record?.csp.slice(-8) ?? [],
       };
       if (failure instanceof Error) {
@@ -539,7 +551,7 @@ async function auditWithFixtures(origin, fixtures, fulfilled, unmapped) {
     }
   };
   const layout = []; const contrast = []; const focus = [];
-  for (const viewport of auditViewports) {
+  for (const viewport of auditViewports) await diagnostics.phase(`viewport:${viewport.name}`, async () => {
     const { context: created, record } = await context({ viewport: { width: viewport.width, height: viewport.height },
       deviceScaleFactor: viewport.deviceScaleFactor, ...(values.engine === 'firefox' ? {} : { isMobile: viewport.mobile }) });
     records.push(record);
@@ -585,7 +597,7 @@ async function auditWithFixtures(origin, fixtures, fulfilled, unmapped) {
         const phase = `screenshot:${viewport.name}:${page.name}`;
         await target.evaluate((value) => { globalThis.__decompAuditPhase = value; }, phase);
         try {
-          await target.screenshot({ path: join(root, `${values.engine}-${viewport.width}x${viewport.height}@${viewport.deviceScaleFactor}-${page.name.replaceAll(' ', '-')}.png`) });
+          await diagnostics.phase(phase, () => target.screenshot({ path: join(root, `${values.engine}-${viewport.width}x${viewport.height}@${viewport.deviceScaleFactor}-${page.name.replaceAll(' ', '-')}.png`) }));
         } finally {
           await target.evaluate(() => { globalThis.__decompAuditPhase = null; }).catch(() => undefined);
         }
@@ -595,7 +607,7 @@ async function auditWithFixtures(origin, fixtures, fulfilled, unmapped) {
           await target.emulateMedia({ colorScheme: scheme, reducedMotion: 'reduce' });
           await open(target, page, `focus ${scheme}`);
           const stops = [];
-          for (const backward of [false, true]) {
+          for (const backward of [false, true]) await diagnostics.phase(`focus:${viewport.name}:${page.name}:${scheme}:${backward ? 'backward' : 'forward'}`, async () => {
             await target.evaluate(() => document.querySelector('main h1').focus());
             const seen = new Set();
             for (let index = 0; index < 80; index += 1) {
@@ -604,13 +616,13 @@ async function auditWithFixtures(origin, fixtures, fulfilled, unmapped) {
               if (stop === null || seen.has(stop.key) || stop.heading) break;
               seen.add(stop.key); stops.push({ ...stop, direction: backward ? 'backward' : 'forward' });
             }
-          }
+          });
           focus.push({ page: page.name, scheme, stops });
         }
       }
     }
     // Keyboard commands, download and the highlight worker, once at desktop size.
-    if (viewport.width === 1440) {
+    if (viewport.width === 1440) await diagnostics.phase(`keyboard:${viewport.name}`, async () => {
       // Each walk starts at the route heading: past the last stop, Firefox moves focus to browser
       // chrome and does not wrap back into the page.
       const tabTo = async (label) => {
@@ -647,12 +659,12 @@ async function auditWithFixtures(origin, fixtures, fulfilled, unmapped) {
       keyboard.download = { suggestedFilename: download.suggestedFilename(), bytes: saved.length, matches: true };
       await open(target, source, 'worker/CSP qualification');
       highlightedTokens = await target.locator('.source-token').count();
-    }
+    });
     await created.close();
-  }
+  });
   // Timing: initial-route metadata only; explicit-read population is recorded in interactions.
   const cold = []; const feedback = []; const data = [];
-  for (let sample = 0; sample < 20; sample += 1) {
+  for (let sample = 0; sample < 20; sample += 1) await diagnostics.phase(`timing:sample-${sample}`, async () => {
     const { context: created, record } = await context();
     records.push(record);
     const target = await created.newPage();
@@ -663,7 +675,7 @@ async function auditWithFixtures(origin, fixtures, fulfilled, unmapped) {
       const cycle = fixtures.pages.filter((page) => page.name !== 'upload');
       for (let index = 0; index < 50; index += 1) {
         const page = cycle[(index + 1) % cycle.length];
-        const timing = await target.evaluate(`new Promise((resolve, reject) => {
+        const timing = await diagnostics.phase(`timing:route-${index}:${page.name}`, () => target.evaluate(`new Promise((resolve, reject) => {
           const target = ${JSON.stringify(page.path)};
           const link = document.createElement('a'); link.href = target; link.textContent = 'audit'; document.querySelector('main').append(link);
           const started = performance.now(); let focused = null; link.click();
@@ -675,12 +687,12 @@ async function auditWithFixtures(origin, fixtures, fulfilled, unmapped) {
             else requestAnimationFrame(check);
           };
           requestAnimationFrame(check);
-        })`);
+        })`));
         feedback.push(timing.focused); data.push(timing.populated);
       }
     }
     await created.close();
-  }
+  });
   const summary = (list) => { const sorted = [...list].sort((a, b) => a - b); const at = (f) => Number(sorted[Math.min(sorted.length - 1, Math.ceil(f * sorted.length) - 1)].toFixed(1));
     return { samples: list.length, median: at(0.5), p95: at(0.95) }; };
   const workerTargets = records.flatMap((record) => record.workers ?? []);
@@ -692,17 +704,18 @@ async function auditWithFixtures(origin, fixtures, fulfilled, unmapped) {
   return { result, records, responses, origin };
 }
 
+diagnostics = createEngineDiagnostics({ safe });
 try {
   const installation = await prepare();
   report.buildId = installation.manifest.buildId;
   const origin = await launch(installation);
   browser = await engine.launch({ headless: true });
   report.browserVersion = browser.version();
-  const smoked = await smoke(origin, installation.manifest);
+  const smoked = await diagnostics.phase('smoke', () => smoke(origin, installation.manifest));
   report.smoke = smoked.result;
-  report.nativeControlCspProbe = await probeNativeControlCsp();
-  report.applicationShellCspProbe = await probeApplicationShellCsp(origin);
-  const audited = await audit(origin, installation.manifest);
+  report.nativeControlCspProbe = await diagnostics.phase('probe:native-control-csp', () => probeNativeControlCsp());
+  report.applicationShellCspProbe = await diagnostics.phase('probe:application-shell-csp', () => probeApplicationShellCsp(origin));
+  const audited = await diagnostics.phase('audit', () => audit(origin, installation.manifest));
   report.audit = audited.result;
   report.auditOrigins = { packaged: origin, fixtures: audited.origin };
   report.auditVerdict = assertAudit(audited.result, installation.manifest, audited.responses, audited.origin);
@@ -730,6 +743,16 @@ try {
   report.status = 'failed'; report.error = safe(error.stack); report.applicationError = safe(errors.slice(-8000));
   console.error(report.error); process.exitCode = 1;
 } finally {
+  // Structured, bounded companion to contentSecurityPolicy.exceptions (strings, unchanged). Overflow
+  // is counted per kind in diagnostics.overflow rather than dropped silently.
+  report.diagnostics = diagnostics.snapshot();
+  const diagnosticFailure = diagnosticOverflowFailure(report.diagnostics);
+  if (diagnosticFailure) {
+    report.diagnosticOverflow = diagnosticFailure;
+    (report.failures ??= []).push(diagnosticFailure);
+    report.status = 'failed';
+    process.exitCode = 1;
+  }
   await browser?.close().catch(() => undefined);
   await stop(application).catch((error) => { report.cleanupError = String(error); process.exitCode = 1; });
   if (work && !values['keep-workdir']) {

@@ -64,16 +64,17 @@ internal class WebStructureTable(
         ids.forEachIndexed { i, id -> check(map.put(id, i) == null) { "Recorded entity ID is duplicated." } }
     }
     // Unsigned 64-bit order; entities without a recorded address (types only) follow all addresses.
-    private val addressOrder = Comparator<Int> { a, b ->
+    private fun compareAddress(a: Int, b: Int): Int {
         val recorded = hasAddress[b].compareTo(hasAddress[a])
-        if (recorded != 0) recorded else {
+        return if (recorded != 0) recorded else {
             val address = java.lang.Long.compareUnsigned(addresses[a], addresses[b])
             if (address != 0) address else ids[a].compareTo(ids[b])
         }
     }
+    private val addressOrder = Comparator<Int> { a, b -> compareAddress(a, b) }
     // Total orders with an identity tie-break, built on first use; canonical models are already address-ordered.
     val byAddress: IntArray by lazy {
-        if ((1 until ids.size).all { addressOrder.compare(it - 1, it) < 0 }) IntArray(ids.size) { it } else order(addressOrder)
+        if ((1 until ids.size).all { compareAddress(it - 1, it) < 0 }) IntArray(ids.size) { it } else order(addressOrder)
     }
     val byName: IntArray by lazy {
         order(Comparator { a, b ->
@@ -154,17 +155,82 @@ internal class WebProgramStructureIndex(
     /** Exact name collisions among recorded functions and globals; types are keyed by declaration identity. */
     val collisions: Map<String, List<Pair<WebStructureKind, Int>>> by lazy { collisionGroups() }
 
-    private fun collisionGroups(): Map<String, List<Pair<WebStructureKind, Int>>> = HashMap<String, MutableList<Pair<WebStructureKind, Int>>>().also { groups ->
-        for (table in tables) if (table.kind != WebStructureKind.TYPE) {
-            for (row in 0 until table.size) table.names[row]?.let { groups.getOrPut(it) { ArrayList(1) } += table.kind to row }
+    private fun collisionGroups(): Map<String, List<Pair<WebStructureKind, Int>>> {
+        if (tables.isEmpty()) return emptyMap()
+        val functions = table(WebStructureKind.FUNCTION)
+        val globals = table(WebStructureKind.GLOBAL)
+        check(functions.size <= WebProgramStructureBuilder.MAXIMUM_FUNCTIONS)
+        check(globals.size <= WebProgramStructureBuilder.MAXIMUM_GLOBALS_OR_TYPES)
+        val rows = functions.size + globals.size
+        if (rows < 2) return emptyMap()
+        // At most half full, bounded by the admitted row counts (at most 4 MiB).
+        // Zero is empty; bit 0 selects the kind, bits 1..30 hold row + 1, and the sign marks duplicates.
+        var capacity = 1
+        while (capacity < rows * 2) capacity = capacity shl 1
+        val slots = IntArray(capacity)
+        val mask = capacity - 1
+        fun slot(name: String): Int {
+            val hash = name.hashCode()
+            var slot = (hash xor (hash ushr 16)) and mask
+            // Bound hostile equal-hash chains; the fallback uses HashMap's String-key tree bins.
+            repeat(64) {
+                val entry = slots[slot]
+                if (entry == 0) return slot
+                val names = if (entry and 1 == 0) functions.names else globals.names
+                if (names[((entry and Int.MAX_VALUE) ushr 1) - 1] == name) return slot
+                slot = (slot + 1) and mask
+            }
+            return -1
         }
-    }.filterValues { it.size > 1 }
+        for (kind in 0..1) {
+            val table = if (kind == 0) functions else globals
+            for (row in 0 until table.size) {
+                val name = table.names[row] ?: continue
+                val slot = slot(name)
+                if (slot < 0) return collisionGroupsFallback()
+                slots[slot] = if (slots[slot] == 0) ((row + 1) shl 1) or kind else slots[slot] or Int.MIN_VALUE
+            }
+        }
+        val groups = HashMap<String, MutableList<Pair<WebStructureKind, Int>>>()
+        for (kind in 0..1) {
+            val table = if (kind == 0) functions else globals
+            for (row in 0 until table.size) {
+                val name = table.names[row] ?: continue
+                val slot = slot(name)
+                check(slot >= 0)
+                if (slots[slot] < 0) groups.getOrPut(name) { ArrayList(2) } += table.kind to row
+            }
+        }
+        return groups
+    }
+
+    private fun collisionGroupsFallback(): Map<String, List<Pair<WebStructureKind, Int>>> =
+        HashMap<String, MutableList<Pair<WebStructureKind, Int>>>().also { groups ->
+            for (table in tables) if (table.kind != WebStructureKind.TYPE) {
+                for (row in 0 until table.size) table.names[row]?.let { name ->
+                    groups.getOrPut(name) { ArrayList(1) } += table.kind to row
+                }
+            }
+        }.filterValues { it.size > 1 }
 
     fun table(kind: WebStructureKind): WebStructureTable = tables[kind.ordinal]
     val available: Boolean get() = outcome.state == "available"
 }
 
 internal class WebStructureRecord(val path: String, val sha256: String, val sizeBytes: Long)
+
+/** Fixed-size accounting only; emitted on demand and never retained by an index or sent on the wire. */
+internal enum class WebStructureCharge {
+    BASELINE, SOURCE_FILES, MODEL_ENTITIES, MODEL_STRINGS, MODEL_REFERENCE_STRINGS,
+    MODEL_REFERENCE_SLOTS, MODEL_REFERENCE_ARRAYS, PLAN_MODULES, PLAN_MODULE_STRINGS,
+    PLAN_REFERENCE_STRINGS, PLAN_REFERENCE_SLOTS, PLAN_REFERENCE_LISTS, PLAN_BOUNDARY_STRINGS, PLAN_CYCLE_STRINGS,
+}
+
+internal class WebStructureRetention(charges: LongArray) {
+    private val charges = charges.copyOf()
+    val bytes: Long get() = charges.sum()
+    operator fun get(category: WebStructureCharge): Long = charges[category.ordinal]
+}
 
 internal object WebProgramStructureBuilder {
     const val MAXIMUM_MODEL_BYTES = 64 * 1024 * 1024
@@ -184,6 +250,11 @@ internal object WebProgramStructureBuilder {
             .maxStringLength(MAXIMUM_MODEL_BYTES).maxNameLength(64).maxNumberLength(32).build())
         .build()
 
+    // Only the closed model reader supplies its own duplicate checks. Detail and plan readers stay strict.
+    internal val MODEL_JSON: JsonFactory = JSON.rebuild()
+        .disable(StreamReadFeature.STRICT_DUPLICATE_DETECTION)
+        .build()
+
     fun declaredPath(profile: ReconstructionProfile, id: String): String? =
         profile.layout.declarations.singleOrNull { it.id == id }?.let { runCatching { it.materialize() }.getOrNull() }
 
@@ -199,6 +270,15 @@ internal object WebProgramStructureBuilder {
         manifest: SourceTreeManifest,
         readEvidence: (GeneratedFileEvidence, Int) -> ByteArray?,
         timing: ((String, Long) -> Unit)? = null,
+    ): WebProgramStructureIndex = buildDiagnosed(snapshot, profile, manifest, readEvidence, timing, null)
+
+    fun buildDiagnosed(
+        snapshot: WebRevisionSourceSnapshot,
+        profile: ReconstructionProfile,
+        manifest: SourceTreeManifest,
+        readEvidence: (GeneratedFileEvidence, Int) -> ByteArray?,
+        timing: ((String, Long) -> Unit)?,
+        retention: ((WebStructureRetention) -> Unit)?,
     ): WebProgramStructureIndex {
         fun <T> measured(phase: String, action: () -> T): T {
             if (timing == null) return action()
@@ -207,12 +287,16 @@ internal object WebProgramStructureBuilder {
         }
         val ref = snapshot.reference
         val fileIds = measured("index-source-files") {
-            snapshot.files.withIndex().associate { (index, file) ->
-                file.evidence.path to revisionSourceFileId(ref, index, file.evidence.path)
-            }
+            revisionSourceFileIds(ref, snapshot.files.map { it.evidence.path })
         }
         val shared = declaredPath(profile, "shared-interface")?.takeIf { it in fileIds }
-        val budget = RetainedBudget(64 * 1024L + fileIds.entries.sumOf { 128L + 2L * (it.key.length + it.value.length) })
+        val sourceBytes = fileIds.entries.sumOf { 128L + 2L * (it.key.length + it.value.length) }
+        val initialCharges = LongArray(WebStructureCharge.entries.size).also {
+            it[WebStructureCharge.BASELINE.ordinal] = 64 * 1024L
+            it[WebStructureCharge.SOURCE_FILES.ordinal] = sourceBytes
+        }
+        val budget = RetainedBudget(64 * 1024L + sourceBytes, initialCharges = initialCharges)
+        var retainedCharges = initialCharges
         var retainedBytes = budget.bytes
         fun result(outcome: WebStructureOutcome, model: WebStructureRecord? = null, schema: Int? = null,
             planOutcome: WebStructureOutcome = WebStructureOutcome("not-recorded", "MODEL_UNAVAILABLE"), plan: WebStructureRecord? = null,
@@ -220,7 +304,9 @@ internal object WebProgramStructureBuilder {
             totalPlanReferences: Int = 0) =
             WebProgramStructureIndex(ref, snapshot.manifestSha256, snapshot.descriptorSha256, manifest.inputSha256,
                 snapshot.metadataVersion, outcome, model, schema, planOutcome, plan, tables, modules, fileIds, shared, unknown,
-                totalPlanReferences, retainedBytes)
+                totalPlanReferences, retainedBytes).also {
+                    retention?.invoke(WebStructureRetention(retainedCharges).also { check(it.bytes == retainedBytes) })
+                }
         val modelFile = evidenceFile(profile, manifest, "program-model-evidence")
             ?: return result(WebStructureOutcome("not-recorded",
                 if (declaredPath(profile, "program-model-evidence") == null) "PROFILE_DECLARES_NO_MODEL" else "MODEL_NOT_RECORDED"))
@@ -241,11 +327,21 @@ internal object WebProgramStructureBuilder {
         if (parsed.inputSha256 != manifest.inputSha256) {
             return result(WebStructureOutcome("invalid", "MODEL_INPUT_MISMATCH"), model, parsed.schemaVersion)
         }
+        measured("canonicalize-references") {
+            val functions = parsed.tables[WebStructureKind.FUNCTION.ordinal]
+            val globals = parsed.tables[WebStructureKind.GLOBAL.ordinal]
+            for (row in 0 until functions.size) {
+                canonicalizeReferences(functions.calls[row], functions, budget)
+                canonicalizeReferences(functions.referencedGlobals[row], globals, budget)
+            }
+        }
         retainedBytes = budget.bytes
+        retainedCharges = budget.charges()
         val planFile = evidenceFile(profile, manifest, "module-plan-evidence")
         var planOutcome = WebStructureOutcome("not-recorded", "PLAN_NOT_RECORDED")
         var planRecord: WebStructureRecord? = null
         var plan: ModulePlan? = null
+        var resolutions: List<List<IntArray>> = emptyList()
         if (planFile != null) {
             val bytes = measured("read-plan-evidence") { readEvidence(planFile, MAXIMUM_PLAN_BYTES) }
             if (bytes == null) planOutcome = WebStructureOutcome("limit-exceeded", "PLAN_BYTES_EXCEEDED")
@@ -255,10 +351,11 @@ internal object WebProgramStructureBuilder {
                     val candidate = measured("parse-canonical-plan") {
                         ModulePlanJson.readCanonical(bytes, MAXIMUM_PLAN_BYTES, {}, timing)
                     }
-                    val planBudget = RetainedBudget(retainedBytes, "PLAN_RETAINED_BYTES_EXCEEDED")
-                    measured("validate-plan") { validatePlan(candidate, planBudget) }
+                    val planBudget = RetainedBudget(retainedBytes, "PLAN_RETAINED_BYTES_EXCEEDED", retainedCharges)
+                    resolutions = measured("validate-plan") { validatePlan(candidate, parsed.tables, planBudget) }
                     plan = candidate
                     retainedBytes = planBudget.bytes
+                    retainedCharges = planBudget.charges()
                     WebStructureOutcome.AVAILABLE
                 } catch (failure: WebStructureFailure) {
                     WebStructureOutcome(failure.state, failure.reason)
@@ -281,10 +378,17 @@ internal object WebProgramStructureBuilder {
                 planOutcome = WebStructureOutcome("invalid", "PLAN_DUPLICATE_MODULE")
             } else {
                 measured("form-modules-and-owners") {
-                    plan.modules.sortedBy { it.id }.forEach { planned ->
+                    plan.modules.withIndex().sortedBy { it.value.id }.forEach { (plannedIndex, planned) ->
+                        fun owned(kind: WebStructureKind, raw: List<String>): List<String> {
+                            if (raw.isEmpty()) return emptyList()
+                            val rows = resolutions[plannedIndex][kind.ordinal]
+                            val ids = parsed.tables[kind.ordinal].ids
+                            return List(raw.size) { slot -> rows[slot].let { if (it < 0) raw[slot] else ids[it] } }
+                        }
                         val implementationFile = filesByPath[planned.sourcePath]
-                        modules += WebStructureModule(planned.id, planned.sourcePath, planned.headerPath, planned.functionIds,
-                            planned.globalIds, planned.typeIds, planned.boundaryEvidence,
+                        modules += WebStructureModule(planned.id, planned.sourcePath, planned.headerPath,
+                            owned(WebStructureKind.FUNCTION, planned.functionIds),
+                            owned(WebStructureKind.GLOBAL, planned.globalIds), owned(WebStructureKind.TYPE, planned.typeIds), planned.boundaryEvidence,
                             // The source-tree manifest was already checked against this profile by
                             // SourceTreeManifestReader; repeating the declaration's regex match for
                             // every planned module adds substantial cold-path cost at scale.
@@ -317,78 +421,98 @@ internal object WebProgramStructureBuilder {
 
     /** Conservative retained allocation charge, including maps, lazy orders/collisions and array growth.
      * Strings are charged as UTF-16 even on compact-string JVMs; no interning assumption is needed. */
-    internal class RetainedBudget(initialBytes: Long, private val reason: String = "MODEL_RETAINED_BYTES_EXCEEDED") {
+    internal class RetainedBudget(private val initialBytes: Long,
+        private val reason: String = "MODEL_RETAINED_BYTES_EXCEEDED",
+        initialCharges: LongArray = LongArray(WebStructureCharge.entries.size).also { it[WebStructureCharge.BASELINE.ordinal] = initialBytes },
+    ) {
+        private val categories = initialCharges.copyOf()
+        private val floors = initialCharges.copyOf()
+        init { require(initialBytes >= 0 && categories.size == WebStructureCharge.entries.size &&
+            categories.all { it >= 0 } && categories.sum() == initialBytes) }
         var bytes: Long = initialBytes; private set
-        fun charge(amount: Long) {
+        fun charges(): LongArray = categories.copyOf()
+        fun charge(amount: Long, category: WebStructureCharge = WebStructureCharge.MODEL_STRINGS) {
             require(amount >= 0)
             if (amount > MAXIMUM_RETAINED_BYTES - bytes) throw WebStructureFailure("limit-exceeded", reason)
             bytes += amount
+            categories[category.ordinal] += amount
         }
-        fun string(value: String) = charge(64L + 2L * value.length)
+        fun release(amount: Long, category: WebStructureCharge = WebStructureCharge.MODEL_STRINGS) {
+            require(amount >= 0 && amount <= bytes - initialBytes &&
+                amount <= categories[category.ordinal] - floors[category.ordinal])
+            bytes -= amount
+            categories[category.ordinal] -= amount
+        }
+        fun string(value: String, category: WebStructureCharge = WebStructureCharge.MODEL_STRINGS) =
+            charge(64L + 2L * value.length, category)
+    }
+
+    /** Release only the duplicate object actually displaced from this retained slot. */
+    internal fun canonicalizeReferences(values: Array<String>, table: WebStructureTable, budget: RetainedBudget) {
+        for (slot in values.indices) {
+            val original = values[slot]
+            val row = table.index[original] ?: continue
+            val canonical = table.ids[row]
+            if (original !== canonical) {
+                values[slot] = canonical
+                budget.release(64L + 2L * original.length, WebStructureCharge.MODEL_REFERENCE_STRINGS)
+            }
+        }
     }
 
     /** Projection admission, not exact producer ownership: ambiguous and missing entity references remain visible. */
-    private fun validatePlan(plan: ModulePlan, budget: RetainedBudget) {
+    private fun validatePlan(plan: ModulePlan, tables: List<WebStructureTable>, budget: RetainedBudget): List<List<IntArray>> {
         fun invalid(): Nothing = throw WebStructureFailure("invalid", "PLAN_MALFORMED")
         fun identifier(value: String) {
             if (value.isEmpty()) invalid()
             if (value.length > MAXIMUM_IDENTIFIER_CHARACTERS) throw WebStructureFailure("limit-exceeded", "PLAN_IDENTIFIER_EXCEEDED")
-            budget.string(value)
         }
-        fun moduleId(value: String) {
+        fun moduleId(value: String, category: WebStructureCharge = WebStructureCharge.PLAN_MODULE_STRINGS) {
             if (value.length > 128) throw WebStructureFailure("limit-exceeded", "PLAN_IDENTIFIER_EXCEEDED")
             if (!MODULE_ID.matches(value)) invalid()
-            budget.string(value)
+            budget.string(value, category)
         }
         fun path(value: String) {
             if (value.length > 4096) throw WebStructureFailure("limit-exceeded", "PLAN_PATH_EXCEEDED")
             if (value.isEmpty() || value.startsWith('/') || value.any { it == '\\' || it == ':' || it.code < 32 || it.code == 127 } ||
                 value.split('/').any { it.isEmpty() || it == "." || it == ".." }) invalid()
-            budget.string(value)
+            budget.string(value, WebStructureCharge.PLAN_MODULE_STRINGS)
         }
         if (plan.modules.size > WebSourceCatalogSnapshot.MAXIMUM_FILES) throw WebStructureFailure("limit-exceeded", "PLAN_MODULES_EXCEEDED")
         val ids = HashSet<String>()
+        val resolutions = ArrayList<List<IntArray>>(plan.modules.size)
         for (module in plan.modules) {
-            budget.charge(512)
+            budget.charge(512, WebStructureCharge.PLAN_MODULES)
             moduleId(module.id)
             if (!ids.add(module.id)) throw WebStructureFailure("invalid", "PLAN_DUPLICATE_MODULE")
             path(module.sourcePath); path(module.headerPath)
-            for (owned in listOf(module.functionIds, module.globalIds, module.typeIds)) {
+            resolutions += listOf(module.functionIds, module.globalIds, module.typeIds).mapIndexed { kind, owned ->
                 if (owned.size > MAXIMUM_REFERENCES) throw WebStructureFailure("limit-exceeded", "PLAN_REFERENCES_EXCEEDED")
-                owned.forEach(::identifier)
+                if (owned.isNotEmpty()) budget.charge(64, WebStructureCharge.PLAN_REFERENCE_LISTS)
+                IntArray(owned.size) { slot ->
+                    val id = owned[slot]
+                    identifier(id)
+                    val row = tables[kind].index[id] ?: -1
+                    budget.charge(8, WebStructureCharge.PLAN_REFERENCE_SLOTS)
+                    if (row < 0) budget.string(id, WebStructureCharge.PLAN_REFERENCE_STRINGS)
+                    row
+                }
             }
-            module.boundaryEvidence.forEach { budget.string(it) }
+            module.boundaryEvidence.forEach { budget.string(it, WebStructureCharge.PLAN_BOUNDARY_STRINGS) }
         }
         val cycleMembers = HashSet<String>()
         for (cycle in plan.dependencyCycles) {
             if (cycle.size < 2) invalid()
             for (id in cycle) {
-                moduleId(id)
+                moduleId(id, WebStructureCharge.PLAN_CYCLE_STRINGS)
                 if (id !in ids || !cycleMembers.add(id)) invalid()
             }
         }
+        return resolutions
     }
 
     private fun declaredTemplate(profile: ReconstructionProfile, id: String) =
         profile.layout.declarations.singleOrNull { it.id == id }
-
-    /** Parse the canonical unsigned address spelling without allocating a regex matcher per row. */
-    private fun parseAddress(value: String): Long? {
-        if (!value.startsWith("0x")) return null
-        val firstDigit = 2
-        val digits = value.length - firstDigit
-        if (digits !in 1..16 || (digits > 1 && value[firstDigit] == '0')) return null
-        var parsed = 0L
-        for (index in firstDigit until value.length) {
-            val digit = when (val character = value[index]) {
-                in '0'..'9' -> character.code - '0'.code
-                in 'a'..'f' -> character.code - 'a'.code + 10
-                else -> return null
-            }
-            parsed = (parsed shl 4) or digit.toLong()
-        }
-        return parsed
-    }
 
     private fun planSchema(bytes: ByteArray): Long? = try {
         JSON.createParser(bytes).use { parser ->
@@ -412,8 +536,12 @@ internal object WebProgramStructureBuilder {
         private var schema = 1
         private var references = 0
         private val byteEvidenceBudget = ReferencedDataByteEvidenceJson.Budget()
+        private val identifierScratch = ArrayList<String>()
+        private enum class ScalarState { ABSENT, NULL, INVALID, VALUE }
+        private var decodedAddress = 0L
+        private var decodedStatus: WebExtractionStatus? = null
 
-        fun read(): ParsedModel = JSON.createParser(bytes).use { parser ->
+        fun read(): ParsedModel = MODEL_JSON.createParser(bytes).use { parser ->
             expect(parser.nextToken(), JsonToken.START_OBJECT)
             field(parser, "schemaVersion")
             expect(parser.nextToken(), JsonToken.VALUE_NUMBER_INT)
@@ -433,12 +561,37 @@ internal object WebProgramStructureBuilder {
             ParsedModel(schema, input, listOf(functions, globals, types))
         }
 
-        private fun statusFields(): Set<String> = if (schema == 1) setOf("status") else setOf("extractionStatus", "recoveryAssessment")
+        private fun fieldBit(name: String): Int = when (name) {
+            "id" -> 1 shl 0
+            "name" -> 1 shl 1
+            "address" -> 1 shl 2
+            "prototype" -> 1 shl 3
+            "calls" -> 1 shl 4
+            "referencedGlobals" -> 1 shl 5
+            "strings" -> 1 shl 6
+            "decompiledC" -> 1 shl 7
+            "type" -> 1 shl 8
+            "initializer" -> 1 shl 9
+            "byteEvidence" -> 1 shl 10
+            "declaration" -> 1 shl 11
+            "sourceAddress" -> 1 shl 12
+            "status" -> 1 shl 13
+            "extractionStatus" -> 1 shl 14
+            "recoveryAssessment" -> 1 shl 15
+            else -> 0
+        }
 
-        private fun fields(kind: WebStructureKind): Set<String> = statusFields() + when (kind) {
-            WebStructureKind.FUNCTION -> setOf("id", "name", "address", "prototype", "calls", "referencedGlobals", "strings", "decompiledC")
-            WebStructureKind.GLOBAL -> setOf("id", "name", "address", "type", "initializer") + if (schema >= 3) setOf("byteEvidence") else emptySet()
-            WebStructureKind.TYPE -> setOf("id", "declaration", "sourceAddress")
+        private fun fields(kind: WebStructureKind): Int {
+            val status = if (schema == 1) fieldBit("status") else fieldBit("extractionStatus") or fieldBit("recoveryAssessment")
+            val body = when (kind) {
+                WebStructureKind.FUNCTION -> fieldBit("id") or fieldBit("name") or fieldBit("address") or
+                    fieldBit("prototype") or fieldBit("calls") or fieldBit("referencedGlobals") or
+                    fieldBit("strings") or fieldBit("decompiledC")
+                WebStructureKind.GLOBAL -> fieldBit("id") or fieldBit("name") or fieldBit("address") or
+                    fieldBit("type") or fieldBit("initializer") or (if (schema >= 3) fieldBit("byteEvidence") else 0)
+                WebStructureKind.TYPE -> fieldBit("id") or fieldBit("declaration") or fieldBit("sourceAddress")
+            }
+            return status or body
         }
 
         private fun table(parser: JsonParser, kind: WebStructureKind, maximum: Int): WebStructureTable {
@@ -452,27 +605,38 @@ internal object WebProgramStructureBuilder {
                 if (token == JsonToken.END_ARRAY) break
                 expect(token, JsonToken.START_OBJECT)
                 if (ids.size >= maximum) throw WebStructureFailure("limit-exceeded", "MODEL_ENTITIES_EXCEEDED")
-                budget.charge(512)
+                budget.charge(512, WebStructureCharge.MODEL_ENTITIES)
                 offsets.add(parser.currentTokenLocation().byteOffset)
-                var seenFieldCount = 0
-                var id: String? = null; var name: String? = null; var address: String? = null
-                var label: String? = null; var assessment: String? = null
-                var called: Array<String> = emptyArray(); var referenced: Array<String> = emptyArray(); var stringCount = 0
+                var seenFields = 0
+                var id: String? = null; var name: String? = null
+                var addressState = ScalarState.ABSENT; var parsedAddress = 0L
+                var labelState = ScalarState.ABSENT; var label: WebExtractionStatus? = null
+                var assessmentState = ScalarState.ABSENT
+                var called: Array<String> = noIdentifiers; var referenced: Array<String> = noIdentifiers; var stringCount = 0
                 while (true) {
                     val next = parser.nextToken()
                     if (next == JsonToken.END_OBJECT) break
                     expect(next, JsonToken.FIELD_NAME)
                     val key = parser.currentName()
-                    if (key !in expectedFields) malformed()
-                    // Jackson's STRICT_DUPLICATE_DETECTION rejects repeated names at tokenization.
-                    seenFieldCount++
+                    val bit = fieldBit(key)
+                    // currentName is decoded, so escaped aliases collide before their value is consumed.
+                    if (bit and expectedFields == 0 || bit and seenFields != 0) malformed()
+                    seenFields = seenFields or bit
                     when (key) {
                         "id" -> id = identifier(parser)
                         "name" -> name = identifier(parser)
-                        "address" -> address = text(parser)
-                        "sourceAddress" -> address = nullableText(parser)
-                        "status", "extractionStatus" -> label = text(parser)
-                        "recoveryAssessment" -> assessment = text(parser)
+                        "address", "sourceAddress" -> {
+                            addressState = address(parser, nullable = key == "sourceAddress")
+                            parsedAddress = decodedAddress
+                        }
+                        "status", "extractionStatus" -> {
+                            labelState = extractionStatus(parser)
+                            label = decodedStatus
+                        }
+                        "recoveryAssessment" -> {
+                            expect(parser.nextToken(), JsonToken.VALUE_STRING)
+                            assessmentState = if (decodedTextEquals(parser, "unassessed")) ScalarState.VALUE else ScalarState.INVALID
+                        }
                         "calls" -> called = identifiers(parser)
                         "referencedGlobals" -> referenced = identifiers(parser)
                         "strings" -> stringCount = count(parser)
@@ -481,14 +645,15 @@ internal object WebProgramStructureBuilder {
                         "byteEvidence" -> byteEvidence(parser)
                     }
                 }
-                if (seenFieldCount != expectedFields.size || id == null) malformed()
-                if (schema >= 2 && assessment != "unassessed") malformed()
-                if (kind != WebStructureKind.TYPE && address == null) malformed()
-                val parsedAddress = address?.let(::parseAddress)
-                if (address != null && parsedAddress == null) malformed()
+                if (seenFields != expectedFields || id == null) malformed()
+                // Token errors are immediate; semantic errors retain their end-of-object precedence.
+                if (schema >= 2 && assessmentState != ScalarState.VALUE) malformed()
+                if (kind != WebStructureKind.TYPE && addressState != ScalarState.VALUE) malformed()
+                if (addressState != ScalarState.VALUE && addressState != ScalarState.NULL) malformed()
                 ids += id; names += name
-                addresses.add(parsedAddress ?: 0L); hasAddress.add(address != null)
-                status += WebExtractionStatus.of(label ?: malformed()) ?: malformed()
+                addresses.add(parsedAddress); hasAddress.add(addressState == ScalarState.VALUE)
+                if (labelState != ScalarState.VALUE) malformed()
+                status += label ?: malformed()
                 calls += called; globals += referenced; strings.add(stringCount)
             }
             val size = ids.size
@@ -537,17 +702,22 @@ internal object WebProgramStructureBuilder {
             }
             expect(token, JsonToken.START_OBJECT)
             val start = parser.currentTokenLocation().byteOffset.toInt()
-            var depth = 1
+            // Arrays occupy a stack frame too: sibling objects and nested objects have independent names.
+            val containers = ArrayList<MutableSet<String>?>()
+            containers.add(HashSet())
             var tokens = 0
-            while (depth > 0) {
+            while (containers.isNotEmpty()) {
                 val next = parser.nextToken() ?: malformed()
+                // Strict Jackson detects a duplicate in nextToken, before the scan's token/byte limits.
+                if (next == JsonToken.FIELD_NAME && !containers.last()!!.add(parser.currentName())) malformed()
                 if (++tokens > 200_000 || parser.currentLocation().byteOffset - start > 2 * 1024 * 1024) {
                     throw WebStructureFailure("limit-exceeded", "MODEL_BYTE_EVIDENCE_EXCEEDED")
                 }
                 if (next == JsonToken.VALUE_STRING && parser.text.length > 512) malformed()
                 when (next) {
-                    JsonToken.START_OBJECT, JsonToken.START_ARRAY -> depth++
-                    JsonToken.END_OBJECT, JsonToken.END_ARRAY -> depth--
+                    JsonToken.START_OBJECT -> containers.add(HashSet())
+                    JsonToken.START_ARRAY -> containers.add(null)
+                    JsonToken.END_OBJECT, JsonToken.END_ARRAY -> containers.removeAt(containers.lastIndex)
                     else -> Unit
                 }
             }
@@ -564,29 +734,75 @@ internal object WebProgramStructureBuilder {
             if (token != JsonToken.VALUE_STRING && !(nullable && token == JsonToken.VALUE_NULL)) malformed()
         }
         private fun text(parser: JsonParser): String { expect(parser.nextToken(), JsonToken.VALUE_STRING); return parser.text }
-        private fun nullableText(parser: JsonParser): String? = when (parser.nextToken()) {
-            JsonToken.VALUE_NULL -> null
-            JsonToken.VALUE_STRING -> parser.text
-            else -> malformed()
+        /** Jackson has already decoded escapes; consume its buffer before advancing the token. */
+        private fun decodedTextEquals(parser: JsonParser, expected: String): Boolean {
+            val chars = parser.textCharacters
+            val offset = parser.textOffset
+            if (parser.textLength != expected.length) return false
+            for (index in expected.indices) if (chars[offset + index] != expected[index]) return false
+            return true
+        }
+
+        private fun extractionStatus(parser: JsonParser): ScalarState {
+            expect(parser.nextToken(), JsonToken.VALUE_STRING)
+            decodedStatus = null
+            for (candidate in WebExtractionStatus.entries) {
+                if (decodedTextEquals(parser, candidate.wire)) {
+                    decodedStatus = candidate
+                    return ScalarState.VALUE
+                }
+            }
+            return ScalarState.INVALID
+        }
+
+        /** Canonical unsigned hex, accumulated as raw Long bits without boxing a per-row value. */
+        private fun address(parser: JsonParser, nullable: Boolean): ScalarState {
+            decodedAddress = 0L
+            val token = parser.nextToken()
+            if (nullable && token == JsonToken.VALUE_NULL) return ScalarState.NULL
+            expect(token, JsonToken.VALUE_STRING)
+            val chars = parser.textCharacters
+            val offset = parser.textOffset
+            val length = parser.textLength
+            val digits = length - 2
+            if (digits !in 1..16 || chars[offset] != '0' || chars[offset + 1] != 'x' ||
+                (digits > 1 && chars[offset + 2] == '0')) return ScalarState.INVALID
+            var parsed = 0L
+            for (index in offset + 2 until offset + length) {
+                val digit = when (val character = chars[index]) {
+                    in '0'..'9' -> character.code - '0'.code
+                    in 'a'..'f' -> character.code - 'a'.code + 10
+                    else -> return ScalarState.INVALID
+                }
+                parsed = (parsed shl 4) or digit.toLong()
+            }
+            decodedAddress = parsed
+            return ScalarState.VALUE
         }
         private fun identifier(parser: JsonParser): String = text(parser).also {
             if (it.isEmpty()) malformed()
             if (it.length > MAXIMUM_IDENTIFIER_CHARACTERS) throw WebStructureFailure("limit-exceeded", "MODEL_IDENTIFIER_EXCEEDED")
             budget.string(it)
         }
+        private val noIdentifiers = emptyArray<String>()
+
         private fun identifiers(parser: JsonParser): Array<String> {
+            val values = identifierScratch
+            values.clear()
             expect(parser.nextToken(), JsonToken.START_ARRAY)
-            val values = ArrayList<String>()
-            while (parser.nextToken() != JsonToken.END_ARRAY) {
+            if (parser.nextToken() == JsonToken.END_ARRAY) return noIdentifiers
+            budget.charge(24, WebStructureCharge.MODEL_REFERENCE_ARRAYS)
+            do {
                 if (parser.currentToken() != JsonToken.VALUE_STRING) malformed()
                 if (values.size >= MAXIMUM_REFERENCES) throw WebStructureFailure("limit-exceeded", "MODEL_REFERENCES_EXCEEDED")
                 if (references >= MAXIMUM_MODEL_REFERENCES) throw WebStructureFailure("limit-exceeded", "MODEL_REFERENCES_EXCEEDED")
                 val value = parser.text
                 if (value.isEmpty() || value.length > MAXIMUM_IDENTIFIER_CHARACTERS) malformed()
-                budget.string(value)
+                budget.string(value, WebStructureCharge.MODEL_REFERENCE_STRINGS)
+                budget.charge(8, WebStructureCharge.MODEL_REFERENCE_SLOTS)
                 references++
                 values += value
-            }
+            } while (parser.nextToken() != JsonToken.END_ARRAY)
             return values.toTypedArray()
         }
         private fun count(parser: JsonParser): Int {
@@ -658,17 +874,56 @@ internal fun readWebStructureEntity(bytes: ByteArray, offset: Long, maximumStrin
 }
 
 /** Count and conservative byte bounds apply together; a commitment change always selects a new build. */
-internal class WebProgramStructureCache(private val capacity: Int = 2, private val maximumRetainedBytes: Long = 128L * 1024 * 1024) {
+internal class WebProgramStructureCache(private val capacity: Int = 2,
+    private val maximumRetainedBytes: Long = 128L * 1024 * 1024,
+    private val maximumEntryBytes: Long = 96L * 1024 * 1024) {
+    init {
+        require(capacity in 0..2)
+        require(maximumRetainedBytes in 0..128L * 1024 * 1024)
+        require(maximumEntryBytes in 0..96L * 1024 * 1024)
+    }
+    data class Prefix(val jobId: String, val runId: String, val revisionId: String,
+        val sourceSha256: String, val inputSha256: String)
     data class Key(val jobId: String, val runId: String, val revisionId: String, val sourceSha256: String,
-        val manifestSha256: String, val descriptorSha256: String, val inputSha256: String)
-
-    private val entries = LinkedHashMap<Key, WebProgramStructureIndex>(4, 0.75f, true)
-
-    @Synchronized fun get(key: Key): WebProgramStructureIndex? = entries[key]
-    @Synchronized fun put(key: Key, value: WebProgramStructureIndex) {
-        entries.remove(key)
-        if (value.retainedBytes > maximumRetainedBytes) return
-        entries[key] = value
+        val manifestSha256: String, val descriptorSha256: String, val inputSha256: String) {
+        val prefix: Prefix get() = Prefix(jobId, runId, revisionId, sourceSha256, inputSha256)
+    }
+    class Entry(val key: Key, val index: WebProgramStructureIndex,
+        manifest: decompengine.repair.StableRegularFile, descriptor: decompengine.repair.StableRegularFile) {
+        val manifest = manifest.copy(bytes = manifest.bytes.copyOf())
+        val descriptor = descriptor.copy(bytes = descriptor.bytes.copyOf())
+        val retainedBytes: Long
+        init {
+            val reference = index.reference
+            require(key.jobId == reference.jobId && key.runId == reference.runId &&
+                key.revisionId == reference.revisionId && key.sourceSha256 == reference.sourceSha256)
+            require(key.inputSha256 == index.inputSha256)
+            require(key.manifestSha256 == index.manifestSha256 && key.descriptorSha256 == index.descriptorSha256)
+            for ((file, sha) in listOf(this.manifest to key.manifestSha256, this.descriptor to key.descriptorSha256)) {
+                require(file.bytes.size.toLong() <= WebSourceCatalogEvidence.MAXIMUM_MANIFEST_BYTES)
+                require(file.sha256 == sha && java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(file.bytes).joinToString("") { "%02x".format(it) } == sha)
+                require(file.identity.isRegularFile && !file.identity.isDirectory &&
+                    !file.identity.isSymbolicLink && file.identity.linkCount == 1 && file.identity.mode and 0xf000 == 0x8000)
+            }
+            require(index.retainedBytes >= 0)
+            retainedBytes = Math.addExact(index.retainedBytes, this.manifest.bytes.size.toLong() + this.descriptor.bytes.size + 2 * 512L)
+        }
+    }
+    private val entries = LinkedHashMap<Key, Entry>()
+    @Synchronized fun candidates(prefix: Prefix): List<Entry> = entries.values.filter { it.key.prefix == prefix }.asReversed()
+    @Synchronized fun peek(key: Key): Entry? = entries[key]
+    @Synchronized fun getEntry(key: Key): Entry? = entries[key]
+    @Synchronized fun get(key: Key): WebProgramStructureIndex? = entries[key]?.index
+    @Synchronized fun touch(entry: Entry) {
+        if (entries[entry.key] !== entry) return
+        entries.remove(entry.key)
+        entries[entry.key] = entry
+    }
+    @Synchronized fun put(entry: Entry) {
+        entries.remove(entry.key)
+        if (entry.retainedBytes > maximumEntryBytes || entry.retainedBytes > maximumRetainedBytes) return
+        entries[entry.key] = entry
         while (entries.size > capacity || entries.values.sumOf { it.retainedBytes } > maximumRetainedBytes) {
             entries.remove(entries.keys.first())
         }

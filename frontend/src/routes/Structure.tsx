@@ -226,7 +226,7 @@ function Modules({ selected, basePath, search }: { selected: SourceSelection; ba
       <div class="structure-table"><table>
         <caption>{copy.summaryTitle}</caption>
         <thead><tr><th scope="col">{copy.summaryColumns.kind}</th><th scope="col">{copy.summaryColumns.total}</th>
-          {EVIDENCE_CLASSES.map(value => <th scope="col" key={value}>{copy.evidence[value]} / total</th>)}
+          {EVIDENCE_CLASSES.map(value => <th scope="col" key={value}>{message(copy.evidenceOfPopulation, { label: copy.evidence[value] })}</th>)}
           <th scope="col">{copy.summaryColumns.extraction}</th>
           <th scope="col">{copy.summaryColumns.owned}</th><th scope="col">{copy.summaryColumns.unowned}</th><th scope="col">{copy.summaryColumns.ambiguous}</th>
           <th scope="col">{copy.summaryColumns.notRecorded}</th></tr></thead>

@@ -380,6 +380,8 @@ private class ModuleReconstructionAgentOutcomeException(
 private class ModuleReconstructionEvidencePersistenceException(cause: Exception) :
     IllegalStateException("failed to persist invocation-bound agent execution evidence", cause)
 
+private val SHA256_HEX_PATTERN = Regex("[0-9a-f]{64}")
+
 class GeneratedFileEvidence(
     val path: String,
     val sha256: String,
@@ -397,11 +399,11 @@ class GeneratedFileEvidence(
 
     init {
         requireNormalizedProjectPath(path, "source tree manifest path")
-        require(sha256.matches(Regex("[0-9a-f]{64}"))) { "source tree manifest file hash is invalid: $path" }
+        require(sha256.matches(SHA256_HEX_PATTERN)) { "source tree manifest file hash is invalid: $path" }
         require(generator.isNotBlank() && generator.length <= 4_096 && '\n' !in generator && '\r' !in generator) {
             "source tree manifest generator is invalid: $path"
         }
-        require(promptSha256 == null || promptSha256.matches(Regex("[0-9a-f]{64}"))) {
+        require(promptSha256 == null || promptSha256.matches(SHA256_HEX_PATTERN)) {
             "source tree manifest prompt hash is invalid: $path"
         }
         require(this.roles.isNotEmpty()) { "source tree manifest file roles are empty: $path" }
@@ -1871,6 +1873,41 @@ private fun String.jsonEscape(): String = buildString {
     }
 }
 
+/** Diagnostic boundaries only; starting a stage closes the previous stage. */
+internal interface SourceTreeManifestProbe {
+    fun start(stage: SourceTreeManifestStage)
+    fun end()
+}
+
+internal enum class SourceTreeManifestStage(val marker: String) {
+    ROOT("manifest-root"),
+    FILE_FIELDS("manifest-file-fields"),
+    FILE_EVIDENCE_INIT("manifest-file-evidence-init"),
+    // Includes input identity and unresolved-ID argument validation, in its original order.
+    PATH_ORDER("manifest-path-order"),
+    CONSTRUCT("manifest-construct"),
+    PROFILE_POLICY("manifest-profile-policy"),
+}
+
+// A broken diagnostic collector must not replace the reader's result or original refusal.
+private fun SourceTreeManifestProbe.startSafely(stage: SourceTreeManifestStage) {
+    try { start(stage) } catch (failure: Throwable) { rethrowManifestProbeCancellation(failure) }
+}
+
+private fun SourceTreeManifestProbe.endSafely() {
+    try { end() } catch (failure: Throwable) { rethrowManifestProbeCancellation(failure) }
+}
+
+private fun rethrowManifestProbeCancellation(failure: Throwable) {
+    if (failure is InterruptedException || failure is InterruptedIOException) {
+        Thread.currentThread().interrupt()
+        throw failure
+    }
+    if (failure is java.util.concurrent.CancellationException || failure is VirtualMachineError
+        || failure is ThreadDeath || Thread.currentThread().isInterrupted) throw failure
+    // Ordinary diagnostic failures cannot change validation results or refusals.
+}
+
 object SourceTreeManifestReader {
     private val rootKeys = setOf(
         "schemaVersion",
@@ -1908,89 +1945,118 @@ object SourceTreeManifestReader {
     }
 
     /** Parse an object already decoded by a bounded strict JSON reader which rejects duplicate keys. */
-    internal fun parse(root: JsonObject, expectedProfile: ReconstructionProfile): SourceTreeManifest {
-        require(root.keys == rootKeys) { "source tree manifest fields do not match schema version 3" }
-        val schemaPrimitive = root.getValue("schemaVersion").jsonPrimitive
-        require(!schemaPrimitive.isString) { "source tree manifest schemaVersion must be an integer" }
-        val schemaVersion = schemaPrimitive.intOrNull
-            ?: throw IllegalArgumentException("source tree manifest schemaVersion must be an integer")
-        require(schemaVersion == 3) { "unsupported source tree manifest schemaVersion: $schemaVersion" }
-        val profileId = requiredManifestString(root, "profileId")
-        val profileSha256 = requiredManifestString(root, "profileSha256")
-        val files = root.getValue("files").jsonArray.map { element ->
-            val item = element.jsonObject
-            require(item.keys == fileKeys) { "source tree manifest file fields do not match schema version 3" }
-            val roles = item.getValue("roles").jsonArray.map { role ->
-                require(role.jsonPrimitive.isString) { "source tree manifest file roles must be strings" }
-                ProjectFileRole.fromWireName(role.jsonPrimitive.content)
-            }
-            require(roles.map(ProjectFileRole::wireName) == roles.map(ProjectFileRole::wireName).distinct().sorted()) {
-                "source tree manifest file roles must be unique and sorted"
-            }
-            val entityIds = item.getValue("entityIds").jsonArray.map {
-                require(it.jsonPrimitive.isString) { "source tree manifest entity IDs must be strings" }
-                it.jsonPrimitive.content
-            }
-            require(entityIds == entityIds.distinct().sorted()) {
-                "source tree manifest entity IDs must be unique and sorted"
-            }
-            val accepted = item.getValue("acceptedImplementation").let { value ->
-                if (value is JsonNull) {
-                    null
-                } else {
-                    require(!value.jsonPrimitive.isString) {
-                        "source tree manifest acceptance value must be Boolean or null"
+    internal fun parse(
+        root: JsonObject,
+        expectedProfile: ReconstructionProfile,
+        probe: SourceTreeManifestProbe? = null,
+    ): SourceTreeManifest {
+        probe?.startSafely(SourceTreeManifestStage.ROOT)
+        try {
+            require(root.keys == rootKeys) { "source tree manifest fields do not match schema version 3" }
+            val schemaPrimitive = root.getValue("schemaVersion").jsonPrimitive
+            require(!schemaPrimitive.isString) { "source tree manifest schemaVersion must be an integer" }
+            val schemaVersion = schemaPrimitive.intOrNull
+                ?: throw IllegalArgumentException("source tree manifest schemaVersion must be an integer")
+            require(schemaVersion == 3) { "unsupported source tree manifest schemaVersion: $schemaVersion" }
+            val profileId = requiredManifestString(root, "profileId")
+            val profileSha256 = requiredManifestString(root, "profileSha256")
+            probe?.endSafely()
+            val files = root.getValue("files").jsonArray.map { element ->
+                probe?.startSafely(SourceTreeManifestStage.FILE_FIELDS)
+                try {
+                    val item = element.jsonObject
+                    require(item.keys == fileKeys) { "source tree manifest file fields do not match schema version 3" }
+                    val roles = item.getValue("roles").jsonArray.map { role ->
+                        require(role.jsonPrimitive.isString) { "source tree manifest file roles must be strings" }
+                        ProjectFileRole.fromWireName(role.jsonPrimitive.content)
                     }
-                    value.jsonPrimitive.booleanOrNull
-                        ?: throw IllegalArgumentException("source tree manifest acceptance value must be Boolean or null")
+                    require(roles.map(ProjectFileRole::wireName) == roles.map(ProjectFileRole::wireName).distinct().sorted()) {
+                        "source tree manifest file roles must be unique and sorted"
+                    }
+                    val entityIds = item.getValue("entityIds").jsonArray.map {
+                        require(it.jsonPrimitive.isString) { "source tree manifest entity IDs must be strings" }
+                        it.jsonPrimitive.content
+                    }
+                    require(entityIds == entityIds.distinct().sorted()) {
+                        "source tree manifest entity IDs must be unique and sorted"
+                    }
+                    val accepted = item.getValue("acceptedImplementation").let { value ->
+                        if (value is JsonNull) {
+                            null
+                        } else {
+                            require(!value.jsonPrimitive.isString) {
+                                "source tree manifest acceptance value must be Boolean or null"
+                            }
+                            value.jsonPrimitive.booleanOrNull
+                                ?: throw IllegalArgumentException("source tree manifest acceptance value must be Boolean or null")
+                        }
+                    }
+                    // Preserve constructor argument evaluation order; measure the constructor separately.
+                    val path = requiredManifestString(item, "path")
+                    val sha256 = requiredManifestString(item, "sha256")
+                    val generator = requiredManifestString(item, "generator")
+                    val promptSha256 = item.getValue("promptSha256").let { value ->
+                        if (value is JsonNull) null else {
+                            require(value.jsonPrimitive.isString) {
+                                "source tree manifest prompt hash must be a string or null"
+                            }
+                            value.jsonPrimitive.contentOrNull
+                        }
+                    }
+                    val roleSet = roles.toSet()
+                    val contentKind = ProjectContentKind.fromWireName(requiredManifestString(item, "contentKind"))
+                    probe?.startSafely(SourceTreeManifestStage.FILE_EVIDENCE_INIT)
+                    GeneratedFileEvidence(
+                        path = path,
+                        sha256 = sha256,
+                        generator = generator,
+                        promptSha256 = promptSha256,
+                        entityIds = entityIds,
+                        acceptedImplementation = accepted,
+                        roles = roleSet,
+                        contentKind = contentKind,
+                    )
+                } finally {
+                    probe?.endSafely()
                 }
             }
-            GeneratedFileEvidence(
-                path = requiredManifestString(item, "path"),
-                sha256 = requiredManifestString(item, "sha256"),
-                generator = requiredManifestString(item, "generator"),
-                promptSha256 = item.getValue("promptSha256").let { value ->
-                    if (value is JsonNull) null else {
-                        require(value.jsonPrimitive.isString) {
-                            "source tree manifest prompt hash must be a string or null"
-                        }
-                        value.jsonPrimitive.contentOrNull
-                    }
-                },
-                entityIds = entityIds,
-                acceptedImplementation = accepted,
-                roles = roles.toSet(),
-                contentKind = ProjectContentKind.fromWireName(requiredManifestString(item, "contentKind")),
-            )
-        }
-        require(files.map(GeneratedFileEvidence::path) == files.map(GeneratedFileEvidence::path).distinct().sorted()) {
-            "source tree manifest files must be unique and sorted"
-        }
-        fun sortedIds(name: String): List<String> = root.getValue(name).jsonArray.map {
-            require(it.jsonPrimitive.isString) { "source tree manifest $name values must be strings" }
-            it.jsonPrimitive.content
-        }.also { ids ->
-            require(ids == ids.distinct().sorted()) { "source tree manifest $name must be unique and sorted" }
-        }
-        val manifest = SourceTreeManifest(
-            schemaVersion = schemaVersion,
-            profileId = profileId,
-            profileSha256 = profileSha256,
-            inputSha256 = requiredManifestString(root, "inputSha256"),
-            files = files,
-            unresolvedEntityIds = sortedIds("unresolvedEntityIds"),
-            unresolvedImplementationIds = sortedIds("unresolvedImplementationIds"),
-        )
-        require(manifest.profileId == expectedProfile.id && manifest.profileSha256 == expectedProfile.sha256) {
-            "source tree manifest reconstruction profile does not match the expected profile"
-        }
-        manifest.files.forEach { file ->
-            val declaration = expectedProfile.layout.declarationForPath(file.path)
-            require(file.roles == declaration.roles && file.contentKind == declaration.contentKind) {
-                "source tree manifest file policy does not match the reconstruction profile: ${file.path}"
+            probe?.startSafely(SourceTreeManifestStage.PATH_ORDER)
+            require(files.map(GeneratedFileEvidence::path) == files.map(GeneratedFileEvidence::path).distinct().sorted()) {
+                "source tree manifest files must be unique and sorted"
             }
+            fun sortedIds(name: String): List<String> = root.getValue(name).jsonArray.map {
+                require(it.jsonPrimitive.isString) { "source tree manifest $name values must be strings" }
+                it.jsonPrimitive.content
+            }.also { ids ->
+                require(ids == ids.distinct().sorted()) { "source tree manifest $name must be unique and sorted" }
+            }
+            val inputSha256 = requiredManifestString(root, "inputSha256")
+            val unresolvedEntityIds = sortedIds("unresolvedEntityIds")
+            val unresolvedImplementationIds = sortedIds("unresolvedImplementationIds")
+            probe?.startSafely(SourceTreeManifestStage.CONSTRUCT)
+            val manifest = SourceTreeManifest(
+                schemaVersion = schemaVersion,
+                profileId = profileId,
+                profileSha256 = profileSha256,
+                inputSha256 = inputSha256,
+                files = files,
+                unresolvedEntityIds = unresolvedEntityIds,
+                unresolvedImplementationIds = unresolvedImplementationIds,
+            )
+            probe?.startSafely(SourceTreeManifestStage.PROFILE_POLICY)
+            require(manifest.profileId == expectedProfile.id && manifest.profileSha256 == expectedProfile.sha256) {
+                "source tree manifest reconstruction profile does not match the expected profile"
+            }
+            manifest.files.forEach { file ->
+                val declaration = expectedProfile.layout.declarationForPath(file.path)
+                require(file.roles == declaration.roles && file.contentKind == declaration.contentKind) {
+                    "source tree manifest file policy does not match the reconstruction profile: ${file.path}"
+                }
+            }
+            return manifest
+        } finally {
+            probe?.endSafely()
         }
-        return manifest
     }
 
     fun editablePaths(

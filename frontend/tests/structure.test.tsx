@@ -258,6 +258,7 @@ it('summarizes recorded totals and diagnostics in the module inventory', async (
     render(<App basePath="/nested" session={auth} />);
     const summary = await screen.findByRole('table', { name: copy.summaryTitle });
     expect(within(summary).getByRole('rowheader', { name: copy.summaryKinds.functions })).toBeTruthy();
+    expect(within(summary).getByRole('columnheader', { name: `${copy.evidence.recovered} / recorded population` })).toBeTruthy();
     expect(screen.getByText(copy.unresolvedCalls).nextElementSibling?.textContent).toBe('1 / 2');
     expect(screen.getByText(copy.modulesAccepted).nextElementSibling?.textContent).toBe('1 / 2');
     expect(screen.getByText(copy.cycles).nextElementSibling?.textContent).toBe('0 / 2');
