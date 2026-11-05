@@ -257,6 +257,157 @@ class AcpAgentHarnessTest {
     }
 
     @Test
+    fun `post-launch timeout mapper preserves owned prefix diagnostics without changing timeout`() {
+        fun prefix(prepareDuration: Long): RuntimeCopyStatistics.Prefix = authoredPrefix(prepareDuration)
+
+        val firstCause = authoredPhaseTimeout("wall-clock")
+        val originalStack = firstCause.stackTrace.toList()
+        val priorCauseRecord = java.io.IOException("preexisting authored cause record")
+        firstCause.addSuppressed(priorCauseRecord)
+        val firstPrefix = prefix(20)
+        val session = decompengine.agent.AgentSessionReference("authored-harness", "authored-session")
+        val first = mapTimeoutFailureForTest(firstCause, 4242L, session, firstPrefix)
+        assertEquals(AgentFailureKind.TIMEOUT, first.failure.kind)
+        assertEquals(firstCause.message, first.failure.message)
+        assertTrue(first.failure.retryable)
+        assertEquals(mapOf("pid" to "4242"), first.failure.details)
+        assertSame(session, first.failure.session)
+        assertSame(firstCause, first.cause)
+        assertEquals(originalStack, firstCause.stackTrace.toList())
+        assertEquals(listOf(priorCauseRecord), firstCause.suppressed.toList())
+        val diagnostic = first.suppressed.single().message.orEmpty()
+        assertTrue(diagnostic.contains("firstObservedFailure=unobserved,kind=TIMEOUT"), diagnostic)
+        assertTrue(diagnostic.contains("failureElapsedNs=1001,failureRemainingNs=0"), diagnostic)
+        assertTrue(diagnostic.contains("PREPARE:2,entryNs=10,exitNs=30,remainingEntryNs=990,remainingExitNs=970,inclusiveNs=20"), diagnostic)
+        assertTrue(diagnostic.contains("LAUNCH:2,entryNs=40,exitNs=45"), diagnostic)
+        assertTrue(diagnostic.contains("PREPARE:COPY[observed=true,supported=true,files=1/1,readBytes=2,writtenBytes=2"), diagnostic)
+        assertTrue(Regex("""LAUNCH:COPY\[[^]]*],HASH\[observed=true,supported=true,files=1/1,readBytes=3,writtenBytes=0""").containsMatchIn(diagnostic), diagnostic)
+        assertTrue(diagnostic.contains("BOUNDARY_CLOSE:2,entryNs=1005,exitNs=1010"), diagnostic)
+        assertTrue(diagnostic.contains("inclusive-overlap-do-not-sum"), diagnostic)
+        assertFalse(diagnostic.contains("INITIALIZE"), diagnostic)
+        assertFalse(diagnostic.contains("SHUTDOWN"), diagnostic)
+        assertFalse(diagnostic.contains("FINAL_EVIDENCE"), diagnostic)
+        assertTrue(mapTimeoutFailureForTest(firstCause, 4242L, null, firstPrefix).suppressed.isEmpty())
+
+        val second = mapTimeoutFailureForTest(authoredPhaseTimeout("wall-clock"), 4242L, null, prefix(200))
+        val secondDiagnostic = second.suppressed.single().message.orEmpty()
+        assertTrue(secondDiagnostic.contains("PREPARE:2,entryNs=10,exitNs=210"), secondDiagnostic)
+        assertTrue(secondDiagnostic.contains("firstObservedFailure=unobserved,kind=TIMEOUT"), secondDiagnostic)
+        assertFalse(secondDiagnostic.contains("INITIALIZE"), secondDiagnostic)
+        assertFalse(secondDiagnostic.contains("SHUTDOWN"), secondDiagnostic)
+        assertFalse(secondDiagnostic.contains("FINAL_EVIDENCE"), secondDiagnostic)
+    }
+
+    @Test
+    fun `timeout mapping keeps typed cause when optional prefix is absent or malformed`() {
+        val cause = authoredPhaseTimeout("authored timeout")
+        val noObserver = mapTimeoutFailureForTest(cause, 7L, null, null)
+        assertTimeoutMapping(noObserver, cause)
+        assertTrue(noObserver.suppressed.isEmpty())
+
+        var samples = 0
+        val unavailable = requireNotNull(RuntimeCopyStatistics.Prefix.create {
+            samples++
+            if (samples == 3) error("authored unavailable sample")
+            longArrayOf(samples.toLong(), 100L - samples)
+        })
+        unavailable.measure(RuntimeCopyStatistics.Prefix.Phase.PREPARE) { Unit }
+        val unavailableMapped = mapTimeoutFailureForTest(cause, 7L, null, unavailable)
+        assertTimeoutMapping(unavailableMapped, cause)
+        assertTrue(unavailableMapped.suppressed.single().message.orEmpty().contains("supported=false"))
+
+        val wrongOwner = requireNotNull(RuntimeCopyStatistics.Prefix.create { longArrayOf(0L, 10L) })
+        wrongOwner.javaClass.getDeclaredField("ownerThread").apply { isAccessible = true }
+            .set(wrongOwner, Thread("unstarted-timeout-observation-owner"))
+        val wrongOwnerMapped = mapTimeoutFailureForTest(cause, 7L, null, wrongOwner)
+        assertTimeoutMapping(wrongOwnerMapped, cause)
+        assertTrue(wrongOwnerMapped.suppressed.isEmpty())
+
+        val duplicate = requireNotNull(RuntimeCopyStatistics.Prefix.create { longArrayOf(0L, 10L) })
+        duplicate.measure(RuntimeCopyStatistics.Prefix.Phase.PREPARE) { Unit }
+        duplicate.measure(RuntimeCopyStatistics.Prefix.Phase.PREPARE) { Unit }
+        val duplicateMapped = mapTimeoutFailureForTest(cause, 7L, null, duplicate)
+        assertTimeoutMapping(duplicateMapped, cause)
+        assertTrue(duplicateMapped.suppressed.single().message.orEmpty().contains("supported=false"))
+        assertFalse(duplicateMapped.suppressed.single().message.orEmpty().contains("authored timeout"))
+
+        val incomplete = requireNotNull(RuntimeCopyStatistics.Prefix.create { longArrayOf(0L, 10L) })
+        incomplete.start(RuntimeCopyStatistics.Prefix.Phase.PREPARE)
+        val incompleteMapped = mapTimeoutFailureForTest(cause, 7L, null, incomplete)
+        assertTimeoutMapping(incompleteMapped, cause)
+        val incompleteDiagnostic = incompleteMapped.suppressed.single().message.orEmpty()
+        assertTrue(incompleteDiagnostic.contains("PREPARE:1,"), incompleteDiagnostic)
+        assertTrue(incompleteDiagnostic.contains("inclusiveNs=unknown"), incompleteDiagnostic)
+        assertFalse(incompleteDiagnostic.contains("authored timeout"), incompleteDiagnostic)
+
+        val exceptional = requireNotNull(RuntimeCopyStatistics.Prefix.create { longArrayOf(0L, 10L) })
+        val actionFailure = IllegalStateException("authored phase action failure")
+        assertSame(actionFailure, assertFailsWith<IllegalStateException> {
+            exceptional.measure(RuntimeCopyStatistics.Prefix.Phase.PREPARE) { throw actionFailure }
+        })
+        val exceptionalMapped = mapTimeoutFailureForTest(cause, 7L, null, exceptional)
+        assertTimeoutMapping(exceptionalMapped, cause)
+        val exceptionalDiagnostic = exceptionalMapped.suppressed.single().message.orEmpty()
+        assertTrue(exceptionalDiagnostic.contains("PREPARE:3,"), exceptionalDiagnostic)
+        assertTrue(exceptionalDiagnostic.contains("inclusiveNs=unknown"), exceptionalDiagnostic)
+        assertFalse(exceptionalDiagnostic.contains("authored phase action failure"), exceptionalDiagnostic)
+    }
+
+    private fun authoredPrefix(prepareDuration: Long): RuntimeCopyStatistics.Prefix {
+        val prepareEnd = 10L + prepareDuration
+        val launchStart = prepareEnd + 10L
+        val launchEnd = launchStart + 5L
+        val failureAt = 1_001L // Original wall budget is already expired outside any observed phase.
+        val closeStart = failureAt + 4L
+        val closeEnd = closeStart + 5L
+        fun budgetSample(elapsed: Long) = elapsed to (1_000L - elapsed).coerceAtLeast(0)
+        val samples = ArrayDeque(listOf(
+            budgetSample(0), budgetSample(1), // ENTRY
+            budgetSample(10), budgetSample(prepareEnd), // PREPARE
+            budgetSample(launchStart), budgetSample(launchEnd), // LAUNCH
+            budgetSample(failureAt), // observed timeout outside any active phase
+            budgetSample(closeStart), budgetSample(closeEnd), // BOUNDARY_CLOSE
+        ))
+        val observer = requireNotNull(RuntimeCopyStatistics.Prefix.create {
+            samples.removeFirst().let { longArrayOf(it.first, it.second) }
+        })
+        val prepareStatistics = RuntimeCopyStatistics()
+        prepareStatistics.copy.apply { started(); read(2); written(2); completed() }
+        observer.retain(RuntimeCopyStatistics.Prefix.Owner.PREPARE, prepareStatistics)
+        val launchStatistics = RuntimeCopyStatistics()
+        launchStatistics.hash.apply { started(); read(3); completed() }
+        observer.retain(RuntimeCopyStatistics.Prefix.Owner.LAUNCH, launchStatistics)
+        observer.measure(RuntimeCopyStatistics.Prefix.Phase.PREPARE) { Unit }
+        observer.measure(RuntimeCopyStatistics.Prefix.Phase.LAUNCH) { Unit }
+        observer.failureCurrent(RuntimeCopyStatistics.Prefix.Failure.TIMEOUT)
+        observer.measure(RuntimeCopyStatistics.Prefix.Phase.BOUNDARY_CLOSE) { Unit }
+        return observer
+    }
+
+    private fun authoredPhaseTimeout(phase: String): Throwable = Class.forName("decompengine.acp.AcpPhaseTimeout")
+        .getDeclaredConstructor(String::class.java).apply { isAccessible = true }
+        .newInstance(phase) as Throwable
+
+    private fun mapTimeoutFailureForTest(
+        cause: Throwable,
+        pid: Long,
+        session: decompengine.agent.AgentSessionReference?,
+        observation: RuntimeCopyStatistics.Prefix?,
+    ): AgentExecutionException = Class.forName("decompengine.acp.AcpAgentHarnessKt")
+        .getDeclaredMethod("mapTimeoutFailure", Throwable::class.java, java.lang.Long.TYPE,
+            decompengine.agent.AgentSessionReference::class.java, RuntimeCopyStatistics.Prefix::class.java)
+        .apply { isAccessible = true }.invoke(null, cause, pid, session, observation) as AgentExecutionException
+
+    private fun assertTimeoutMapping(mapped: AgentExecutionException, cause: Throwable) {
+        assertEquals(AgentFailureKind.TIMEOUT, mapped.failure.kind)
+        assertEquals(cause.message, mapped.failure.message)
+        assertTrue(mapped.failure.retryable)
+        assertEquals(mapOf("pid" to "7"), mapped.failure.details)
+        assertNull(mapped.failure.session)
+        assertSame(cause, mapped.cause)
+    }
+
+    @Test
     fun `reused cleanup latch is inert across two receipts and never accumulates timing records`() {
         val prefix = requireNotNull(RuntimeCopyStatistics.Prefix.create { longArrayOf(0, 1) })
         val cleanup = AcpCleanupProofFailure("authored retained cleanup failure")
@@ -1195,7 +1346,7 @@ class AcpAgentHarnessTest {
                 }
             }
         }
-        assertEquals(103, acpTestMethods.size, acpTestMethods.joinToString { it.name })
+        assertEquals(105, acpTestMethods.size, acpTestMethods.joinToString { it.name })
         assertTrue(
             acpTestMethods.all { it.returnType == Void.TYPE },
             acpTestMethods.filter { it.returnType != Void.TYPE }.joinToString {
