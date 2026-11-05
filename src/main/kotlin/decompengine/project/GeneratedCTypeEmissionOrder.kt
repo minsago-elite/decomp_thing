@@ -2,12 +2,11 @@ package decompengine.project
 
 import java.util.PriorityQueue
 
-/** Orders retained declarations without modifying them or manufacturing definitions.
- * The existing selector supplies a conservative, transitive dependency inventory. Its ambiguity
- * checks remain authoritative; a conservative cycle is refused, never broken by hash order.
- */
-internal fun generatedCTypeEmissionOrder(types: List<RecoveredType>): List<RecoveredType> {
+/** Sort indivisible original records by direct declaration and completeness prerequisites. */
+@JvmOverloads
+internal fun generatedCTypeEmissionOrder(types: List<RecoveredType>, checkpoint: () -> Unit = {}): List<RecoveredType> {
     fun cancellation() {
+        checkpoint()
         if (Thread.currentThread().isInterrupted) throw InterruptedException("generated-C type ordering cancelled")
     }
     cancellation()
@@ -19,126 +18,101 @@ internal fun generatedCTypeEmissionOrder(types: List<RecoveredType>): List<Recov
         text += type.id.length + type.declaration.length
         require(text <= 4L * 1024 * 1024) { "generated-C type source exceeds its bound" }
     }
-    // The selector builds an inventory per query. Bound that aggregate work *before* invoking it.
+    // This legacy admission guard is independent of the actual shared inventory meter.
     require(text * types.size <= 64L * 1024 * 1024) { "generated-C dependency inventory work exceeds its bound" }
-    val byId = types.associateBy { it.id }
+    val byId = types.associateBy { cancellation(); it.id }
     require(byId.size == types.size) { "duplicate generated-C type identity" }
-    val sorted = types.sortedWith { left, right -> cancellation(); left.id.compareTo(right.id) }
-    // Lexical spans only: the frozen selector remains the authority for declarations and
-    // file/prototype scope. Keep comments and quoted literals out of reference evidence.
-    val tokenPattern = Regex("""(?s)/\*.*?\*/|//[^\r\n]*|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[A-Za-z_][A-Za-z0-9_]*|[^\s]""")
-    val identifier = Regex("[A-Za-z_][A-Za-z0-9_]*")
-    val standaloneForward = Regex("\\s*(?:struct|union)\\s+[A-Za-z_][A-Za-z0-9_]*\\s*;\\s*")
-    var inventoryWork = text * types.size
-    fun inventory(context: List<RecoveredType>, evidence: String): List<RecoveredType> {
+    var work = 0L
+    fun charge(units: Long) {
         cancellation()
-        inventoryWork += context.sumOf { it.declaration.length.toLong() } + evidence.length
-        require(inventoryWork <= 64L * 1024 * 1024) { "generated-C dependency inventory work exceeds its bound" }
-        return selectRequiredGeneratedCTypes(context, listOf(evidence))
+        require(units >= 0 && units <= 64L * 1024 * 1024 - work) { "generated-C dependency inventory work exceeds its bound" }
+        work += units
     }
-    val dependencies = linkedMapOf<String, MutableSet<String>>()
+    val sorted = types.sortedWith { left, right -> charge(1); left.id.compareTo(right.id) }
+    val inventory = generatedCTypeOrderInventory(sorted, ::cancellation, ::charge)
+    val dependencies = sorted.associateTo(linkedMapOf()) { charge(1); it.id to linkedSetOf<String>() }
     val users = mutableMapOf<String, MutableList<String>>()
-    val introductions = mutableMapOf<String, MutableSet<String>>()
-    val bodies = mutableMapOf<String, MutableSet<String>>()
-    var edges = 0L
-    for (type in sorted) {
-        cancellation()
-        val selected = selectRequiredGeneratedCTypes(sorted, listOf(type.declaration))
-        // Query prerequisites separately from the transitive retention inventory. A file-scope
-        // pointer or bodyless typedef introduces a tag without requiring its complete body.
-        // Suppress only those reference tokens in *query evidence*, never in emitted source.
-        // Excluding this record prevents its own exports from reintroducing the suppressed
-        // references through the selector's transitive walk. Alias and by-value uses remain.
-        val tokens = tokenPattern.findAll(type.declaration).filterNot {
-            it.value.startsWith("/*") || it.value.startsWith("//")
-        }.map { cancellation(); CToken(it.value, it.range.first, it.range.last + 1) }.toList()
-        val evidence = StringBuilder(type.declaration)
-        var refined = false
-        for (index in tokens.indices) {
-            cancellation()
-            val kind = tokens[index]
-            if (kind.text !in setOf("struct", "union")) continue
-            val tag = tokens.getOrNull(index + 1) ?: continue
-            if (!tag.text.matches(identifier)) continue
-            var next = index + 2
-            while (tokens.getOrNull(next)?.text in setOf("const", "volatile", "restrict", "_Atomic")) next++
-            val statementStart = (index - 1 downTo 0).firstOrNull { tokens[it].text in setOf(";", "{", "}") }?.plus(1) ?: 0
-            val bodylessAlias = tokens[statementStart].text == "typedef" &&
-                tokens.getOrNull(next)?.text?.matches(identifier) == true &&
-                tokens.getOrNull(next + 1)?.text == ";"
-            val incompleteUse = tokens.getOrNull(next)?.text in setOf("*", ";") || bodylessAlias
-            val definesBody = tokens.getOrNull(next)?.text == "{"
-            if (!incompleteUse && !definesBody) continue
-            val reference = "${kind.text} ${tag.text}"
-            // The frozen selector's scope inventory proves authentic introductions, including
-            // nested aggregate members, and excludes function-pointer parameter scopes.
-            if (inventory(listOf(type), reference).isEmpty()) continue
-            if (definesBody) bodies.getOrPut(reference) { mutableSetOf() }.add(type.id)
-            else introductions.getOrPut(reference) { mutableSetOf() }.add(type.id)
-            // A body defines its own tag; it does not require records that merely mention
-            // that tag by value. Authentic incomplete introductions are ordered separately.
-            for (offset in kind.start until tag.end) evidence.setCharAt(offset, ' ')
-            refined = true
+    var edges = 0
+    fun edge(user: String, provider: String) {
+        charge(1)
+        if (user != provider && provider !in dependencies.getValue(user)) {
+            require(edges < 65_536) { "generated-C dependency edges exceed their bound" }
+            dependencies.getValue(user).add(provider)
+            edges++
         }
-        val retained = selected.mapTo(hashSetOf()) { it.id }
-        val required = (if (refined) inventory(sorted.filter { it.id != type.id }, evidence.toString()) else selected)
-            .asSequence().map { it.id }.filter { it != type.id && it in retained }.toMutableSet()
-        if ('(' in type.declaration) {
-            // Hoisting a later tag body in front of a prototype-local tag would silently change C
-            // type identity. The selector can prove a prior file-scope introduction; absent that
-            // proof, refuse the ambiguous dependency instead of changing the declaration's meaning.
-            for (reference in tokens.zipWithNext().filter { (kind, tag) ->
-                kind.text in setOf("struct", "union", "enum") && tag.text.matches(identifier)
-            }.map { (kind, tag) -> "${kind.text} ${tag.text}" }.distinct()) {
-                cancellation()
-                val earlier = sorted.takeWhile { it.id < type.id }
-                if (inventory(earlier, reference).isNotEmpty()) continue
-                for (dependency in selected.filter { it.id > type.id }) {
-                    require(inventory(listOf(dependency), reference).isEmpty()) {
-                        "ambiguous generated-C prototype tag dependency in ${type.id}: $reference"
-                    }
-                }
-            }
-        }
-        edges += required.size
-        require(edges <= 65_536) { "generated-C dependency edges exceed their bound" }
-        dependencies[type.id] = required
     }
-    for ((reference, definitions) in bodies) for (body in definitions) {
-        cancellation()
-        for (intro in introductions[reference].orEmpty()) {
-            cancellation()
-            // An aggregate may both introduce Foo through a pointer and need Foo by value
-            // elsewhere. That record must follow the body, not form an artificial cycle.
-            if ((intro < body || standaloneForward.matches(byId.getValue(intro).declaration)) &&
-                intro != body && body !in dependencies.getValue(intro) && dependencies.getValue(body).add(intro)) {
-                require(++edges <= 65_536) { "generated-C dependency edges exceed their bound" }
-            }
+    val exports = inventory.exports.groupBy { charge(1); it.symbol }
+    fun precedes(export: COrderExport, at: COrderSite): Boolean = export.site.ownerId < at.ownerId ||
+        export.site.ownerId == at.ownerId && export.availableOffset <= at.originalOffset
+    val canonical = Comparator<COrderExport> { left, right ->
+        charge(1)
+        val owner = left.site.ownerId.compareTo(right.site.ownerId)
+        if (owner == 0) left.availableOffset.compareTo(right.availableOffset) else owner
+    }
+    val introduction = Comparator<COrderExport> { left, right ->
+        charge(1)
+        val owner = left.site.ownerId.compareTo(right.site.ownerId)
+        if (owner == 0) left.site.originalOffset.compareTo(right.site.originalOffset) else owner
+    }
+    for (use in inventory.uses) {
+        charge(1)
+        val candidates = exports[use.symbol].orEmpty().filter { charge(1); it.site.scopeId == 0 }
+        val chosen = when (use.need) {
+            COrderNeed.ALIAS_DECL, COrderNeed.ENUM_VALUE -> candidates.minWithOrNull(canonical)
+            COrderNeed.COMPLETE_BODY -> candidates.filter { charge(1); it.definition }
+                .minWithOrNull(canonical)
+            COrderNeed.TAG_VISIBLE -> candidates.filter { charge(1); precedes(it.copy(availableOffset = it.site.originalOffset), use.site) }
+                .minWithOrNull(introduction)
+        }
+        require(chosen != null) { "unresolved generated-C ${use.need} prerequisite in ${use.site.ownerId}: ${use.symbol}" }
+        val available = if (use.need == COrderNeed.TAG_VISIBLE) chosen.site.originalOffset else chosen.availableOffset
+        // Retained same-record alias syntax remains compiler-owned. In particular, existing
+        // function/global shape validation supplies the affected entity for cyclic typedefs.
+        // Keep the use in the inventory; record sorting cannot repair its internal order.
+        require(use.need == COrderNeed.ALIAS_DECL || chosen.site.ownerId != use.site.ownerId || available <= use.site.originalOffset) {
+            "unresolved generated-C ${use.need} prerequisite within ${use.site.ownerId}: ${use.symbol}"
+        }
+        edge(use.site.ownerId, chosen.site.ownerId)
+    }
+    // Standalone forwards are harmless and preserve the established forward-before-body policy.
+    val standalone = Regex("\\s*(?:struct|union)\\s+[A-Za-z_][A-Za-z0-9_]*\\s*;\\s*")
+    val standaloneIds = hashSetOf<String>()
+    for (type in sorted) {
+        charge(type.declaration.length.toLong())
+        for (offset in type.declaration.indices step 256) cancellation()
+        if (standalone.matches(type.declaration)) standaloneIds += type.id
+    }
+    for ((symbol, candidates) in exports) {
+        charge(1)
+        if (symbol !is COrderSymbol.Tag) continue
+        val forwards = candidates.filter {
+            charge(1); !it.definition && it.site.scopeId == 0 && it.site.ownerId in standaloneIds
+        }
+        for (body in candidates.filter { charge(1); it.definition && it.site.scopeId == 0 }) for (forward in forwards) {
+            edge(body.site.ownerId, forward.site.ownerId)
         }
     }
     for ((id, required) in dependencies) {
-        cancellation()
+        charge(1)
         for (dependency in required) {
-            cancellation()
-            require(dependency in byId) { "unresolved generated-C dependency $dependency" }
+            charge(1)
             users.getOrPut(dependency) { mutableListOf() }.add(id)
         }
     }
-    require(dependencies.values.sumOf { it.size.toLong() } <= 65_536) { "generated-C dependency edges exceed their bound" }
     val ready = PriorityQueue<String>()
-    dependencies.filterValues { it.isEmpty() }.keys.forEach(ready::add)
+    for ((id, required) in dependencies) { charge(1); if (required.isEmpty()) ready.add(id) }
     val ordered = ArrayList<RecoveredType>(types.size)
     while (ready.isNotEmpty()) {
-        cancellation()
+        charge(1)
         val id = ready.remove()
         ordered += byId.getValue(id)
         for (user in users[id].orEmpty()) {
-            cancellation()
+            charge(1)
             if (dependencies.getValue(user).remove(id) && dependencies.getValue(user).isEmpty()) ready.add(user)
         }
     }
     require(ordered.size == types.size) {
-        "unresolved generated-C type dependency cycle: " + dependencies.filterValues { it.isNotEmpty() }.keys.joinToString(",")
+        "unresolved generated-C type dependency cycle: " + dependencies.filterValues { charge(1); it.isNotEmpty() }.keys.joinToString(",")
     }
     return ordered.toList()
 }

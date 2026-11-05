@@ -292,29 +292,36 @@ internal class GeneratedCDeclarationContextCache {
  * conservative lexical dependency because recovered bodies need not be parseable C yet.
  * A recovered record can contain several declarations and remains an indivisible evidence unit.
  */
-internal fun selectRequiredGeneratedCTypes(types: List<RecoveredType>, evidence: List<String>): List<RecoveredType> {
-    data class Export(val type: RecoveredType, val signature: List<String>, val definition: Boolean)
+private data class CTypeExport(val type: RecoveredType, val signature: List<String>, val definition: Boolean, val enumerator: Boolean)
+private data class CTypeIndex(val exports: Map<String, List<CTypeExport>>, val references: Map<String, Set<String>>)
+
+private val cTypeIdentifier = Regex("[A-Za-z_][A-Za-z0-9_]*")
+
+private fun cTypeNames(tokens: List<CToken>, work: COrderWork? = null): Set<String> = buildSet {
+    tokens.forEachIndexed { index, token ->
+        work?.step()
+        if (token.text.matches(cTypeIdentifier) && token.text !in setOf("struct", "union", "enum")) {
+            add(if (tokens.getOrNull(index - 1)?.text in setOf("struct", "union", "enum")) "tag:${token.text}" else "name:${token.text}")
+        }
+    }
+}
+
+private fun cTypeIndex(types: List<RecoveredType>, work: COrderWork? = null): CTypeIndex {
     val identifier = Regex("[A-Za-z_][A-Za-z0-9_]*")
     val aggregateKeywords = setOf("struct", "union", "enum")
-    val exports = linkedMapOf<String, MutableList<Export>>()
+    val exports = linkedMapOf<String, MutableList<CTypeExport>>()
     val references = linkedMapOf<String, Set<String>>()
     var characters = 0L
     var exportCount = 0
 
-    fun names(tokens: List<CToken>): Set<String> = buildSet {
-        tokens.forEachIndexed { index, token ->
-            if (token.text.matches(identifier) && token.text !in aggregateKeywords) {
-                add(if (tokens.getOrNull(index - 1)?.text in aggregateKeywords) "tag:${token.text}" else "name:${token.text}")
-            }
-        }
-    }
-
-    fun export(key: String, type: RecoveredType, signature: List<String>, definition: Boolean = true) {
+    fun export(key: String, type: RecoveredType, signature: List<String>, definition: Boolean = true, enumerator: Boolean = false) {
+        work?.step()
         require(++exportCount <= 131_072) { "recovered type dependency inventory exceeds its bound" }
-        exports.getOrPut(key) { mutableListOf() } += Export(type, signature, definition)
+        exports.getOrPut(key) { mutableListOf() } += CTypeExport(type, signature, definition, enumerator)
     }
 
-    for (type in types.sortedBy { it.id }) declarationFor(type.id) {
+    for (type in types.sortedWith { left, right -> work?.step(); left.id.compareTo(right.id) }) declarationFor(type.id) {
+        work?.span(type.declaration.length)
         characters += type.declaration.length.toLong()
         require(type.declaration.length <= 1024 * 1024 && characters <= 64L * 1024 * 1024) {
             "recovered type dependency context exceeds its source bounds"
@@ -322,68 +329,76 @@ internal fun selectRequiredGeneratedCTypes(types: List<RecoveredType>, evidence:
         require(generatedCAttributionPreprocessorIssue(type.declaration, allowIncludes = false) == null) {
             "preprocessor-dependent type declarations cannot establish dependencies"
         }
-        val tokens = cDeclarationTokens(type.declaration)
-        require(tokens.none { it.text == "#" }) { "preprocessor-dependent type declarations cannot establish dependencies" }
-        references[type.id] = names(tokens)
-        for (statement in splitCTypeSource(type.declaration, ";")) {
-            val statementTokens = cDeclarationTokens(statement)
-            val scope = cTypeDeclarationScope(statement)
+        val tokens = cDeclarationTokens(type.declaration, work = work)
+        require(tokens.none { work?.step(); it.text == "#" }) { "preprocessor-dependent type declarations cannot establish dependencies" }
+        references[type.id] = cTypeNames(tokens, work)
+        for (statement in splitCTypeSource(type.declaration, ";", work)) {
+            val statementTokens = cDeclarationTokens(statement, work = work)
+            val scope = cTypeDeclarationScope(statement, work)
             scope.introductions.forEach { (kind, tag) ->
                 export("tag:$tag", type, listOf(kind, tag), definition = false)
             }
-            if (statementTokens.any { it.text == "typedef" }) {
-                val parsingView = aliasParsingSourceView(statement)
-                val parts = splitCTypeSourceParts(parsingView.source, ",")
-                val first = CDeclarationParser(parts.first().source).parse()
+            if (statementTokens.any { work?.step(); it.text == "typedef" }) {
+                val parsingView = aliasParsingSourceView(statement, work = work)
+                val parts = splitCTypeSourceParts(parsingView.source, ",", work)
+                val first = CDeclarationParser(parts.first().source, work = work).parse()
                 // Preserve previously admitted bodyless enum typedef introductions. The
                 // strict compiler, not this additional scope inventory, owns their validity.
                 if (parsingView.source == statement) first.specifiers.zipWithNext().firstOrNull { (kind, tag) ->
                     kind == "enum" && tag.matches(identifier)
                 }?.let { (kind, tag) -> export("tag:$tag", type, listOf(kind, tag), definition = false) }
-                val prefix = first.source.substring(0, first.declaratorOffset)
-                val originalPrefix = statement.substring(0, parsingView.originalOffset(first.declaratorOffset))
+                val prefix = first.source.cOrderSlice(0, first.declaratorOffset, work = work)
+                val originalPrefix = statement.cOrderSlice(0, parsingView.originalOffset(first.declaratorOffset), work = work)
                 for ((index, part) in parts.withIndex()) {
-                    val declaration = if (index == 0) first else CDeclarationParser(prefix + part.source).parse()
+                    work?.span(prefix.length + part.source.length)
+                    val declaration = if (index == 0) first else CDeclarationParser(prefix + part.source, work = work).parse()
                     val name = requireNotNull(declaration.name) { "typedef has no alias name" }.text
                     // Identity belongs to this alias, not its sibling declarators. Restore
                     // original aggregate bodies rather than comparing synthetic parsing tags.
                     // Selection still retains the entire recovered record as evidence.
-                    val originalPart = statement.substring(parsingView.originalOffset(part.start),
-                        parsingView.originalOffset(part.start + part.source.length))
+                    val originalPart = statement.cOrderSlice(parsingView.originalOffset(part.start),
+                        parsingView.originalOffset(part.start + part.source.length), work = work)
+                    work?.span(originalPrefix.length + originalPart.length)
                     val aliasSource = if (index == 0) originalPart else originalPrefix + originalPart
-                    export("name:$name", type, cDeclarationTokens(aliasSource).map { it.text })
+                    export("name:$name", type, cDeclarationTokens(aliasSource, work = work).map { work?.step(); it.text })
                 }
             }
             statementTokens.forEachIndexed { index, token ->
+                work?.step()
                 if (token.text !in aggregateKeywords) return@forEachIndexed
                 if (scope.isPrototypeOffset(token.start)) return@forEachIndexed
                 val tag = statementTokens.getOrNull(index + 1)?.takeIf { it.text.matches(identifier) }
                 val body = index + if (tag == null) 1 else 2
                 if (statementTokens.getOrNull(body)?.text == "{") {
-                    val end = matchingCTypeBody(statementTokens, body)
-                    val signature = statementTokens.subList(index, end + 1).map { it.text }
+                    val end = matchingCTypeBody(statementTokens, body, work)
+                    val signature = statementTokens.subList(index, end + 1).map { work?.step(); it.text }
                     if (tag != null) export("tag:${tag.text}", type, signature)
                     if (token.text == "enum") {
-                        val bodyText = statement.substring(statementTokens[body].end, statementTokens[end].start)
-                        for (entry in splitCTypeSource(bodyText, ",")) {
-                            val enumerator = cDeclarationTokens(entry).firstOrNull()
+                        val bodyText = statement.cOrderSlice(statementTokens[body].end, statementTokens[end].start, work = work)
+                        for (entry in splitCTypeSource(bodyText, ",", work)) {
+                            val enumerator = cDeclarationTokens(entry, work = work).firstOrNull()
                             require(enumerator?.text?.matches(identifier) == true) { "enum member lacks an identifier" }
-                            export("name:${enumerator!!.text}", type, signature)
+                            export("name:${enumerator.text}", type, signature, enumerator = true)
                         }
                     }
                 } else if (tag != null && index == 0 && body == statementTokens.size && token.text == "enum") {
-                    export("tag:${tag.text}", type, statementTokens.map { it.text }, definition = false)
+                    export("tag:${tag.text}", type, statementTokens.map { work?.step(); it.text }, definition = false)
                 }
             }
         }
     }
 
+    return CTypeIndex(exports.mapValues { it.value.toList() }, references.toMap())
+}
+
+internal fun selectRequiredGeneratedCTypes(types: List<RecoveredType>, evidence: List<String>): List<RecoveredType> {
+    val (exports, references) = cTypeIndex(types)
     val pending = ArrayDeque<String>()
     var evidenceCharacters = 0L
     evidence.forEach { source ->
         evidenceCharacters += source.length.toLong()
         require(evidenceCharacters <= 64L * 1024 * 1024) { "recovered type dependency evidence exceeds its source bound" }
-        names(cDeclarationTokens(source)).sorted().forEach(pending::addLast)
+        cTypeNames(cDeclarationTokens(source)).sorted().forEach(pending::addLast)
     }
     val visited = hashSetOf<String>()
     val selected = linkedMapOf<String, RecoveredType>()
@@ -409,15 +424,19 @@ internal fun selectRequiredGeneratedCTypes(types: List<RecoveredType>, evidence:
     return selected.values.sortedBy { it.id }
 }
 
-/** Aggregate members inherit file scope; function parameter lists do not. */
+/** Aggregate members inherit their containing scope; every parameter list has its own child scope. */
+private data class CTypePrototypeScope(val id: Int, val parent: Int?, val start: Int, val end: Int)
 private data class CTypeDeclarationScope(
     val introductions: List<Pair<String, String>>,
     val prototypeRanges: List<IntRange>,
+    val parameterScopes: List<CTypePrototypeScope>,
+    private val work: COrderWork? = null,
 ) {
     fun isPrototypeOffset(offset: Int): Boolean {
         var low = 0
         var high = prototypeRanges.size
         while (low < high) {
+            work?.step()
             val middle = (low + high) ushr 1
             if (prototypeRanges[middle].first <= offset) low = middle + 1 else high = middle
         }
@@ -425,9 +444,10 @@ private data class CTypeDeclarationScope(
     }
 }
 
-private fun cTypeDeclarationScope(source: String): CTypeDeclarationScope {
+private fun cTypeDeclarationScope(source: String, work: COrderWork? = null): CTypeDeclarationScope {
     val introductions = linkedSetOf<Pair<String, String>>()
     val prototypes = java.util.TreeMap<Int, Int>()
+    val parameterScopes = mutableListOf<CTypePrototypeScope>()
     val identifier = Regex("[A-Za-z_][A-Za-z0-9_]*")
 
     fun inPrototype(offset: Int): Boolean = prototypes.floorEntry(offset)?.value?.let { offset < it } == true
@@ -435,6 +455,7 @@ private fun cTypeDeclarationScope(source: String): CTypeDeclarationScope {
         if (prototypes.floorEntry(start)?.value?.let { it >= end } == true) return
         require(prototypes.floorEntry(start)?.value?.let { it > start } != true) { "overlapping type prototype scopes" }
         while (prototypes.ceilingEntry(start)?.key?.let { it < end } == true) {
+            work?.step()
             val nested = prototypes.ceilingEntry(start)
             require(nested.value <= end) { "overlapping type prototype scopes" }
             prototypes.remove(nested.key)
@@ -442,33 +463,47 @@ private fun cTypeDeclarationScope(source: String): CTypeDeclarationScope {
         prototypes[start] = end
     }
 
-    fun functionRanges(declaration: CDeclaration, offset: Int = 0): List<IntRange> = buildList {
-        declaration.derived.filterIsInstance<CDerived.Function>().forEach {
-            add(offset + it.start until offset + it.end)
+    fun functionScopes(declaration: CDeclaration, original: (Int) -> Int, parent: Int? = null, depth: Int = 0) {
+        work?.step()
+        require(depth < 64) { "declarator nesting exceeds 64" }
+        for (function in declaration.derived) {
+            work?.step()
+            if (function !is CDerived.Function) continue
+            val id = parameterScopes.size
+            val start = original(function.start)
+            val end = original(function.end)
+            parameterScopes += CTypePrototypeScope(id, parent, start, end)
+            // The selector consumes the historical merged view, derived from the same tree.
+            addPrototype(start, end)
+            for ((index, parameter) in function.parameters.withIndex()) {
+                val offset = function.parameterStarts[index]
+                functionScopes(parameter, { original(offset + it) }, id, depth + 1)
+            }
         }
         declaration.atomicType?.let { atomic ->
-            val tokens = cDeclarationTokens(declaration.source)
+            val tokens = cDeclarationTokens(declaration.source, work = work)
             val start = tokens.indices.first { index ->
+                work?.step()
                 tokens[index].start < declaration.declaratorOffset && tokens[index].text == "_Atomic" &&
                     tokens.getOrNull(index + 1)?.text == "("
             }
-            addAll(functionRanges(atomic, offset + tokens[start + 1].end))
+            functionScopes(atomic, { original(tokens[start + 1].end + it) }, parent, depth + 1)
         }
     }
 
     fun visit(declaration: String, originalStart: Int, depth: Int) {
         require(depth <= 64) { "recovered type aggregate nesting exceeds 64" }
-        val tokens = cDeclarationTokens(declaration)
+        val tokens = cDeclarationTokens(declaration, work = work)
         if (tokens.none { it.text in setOf("struct", "union", "enum") }) return
-        val view = aliasParsingSourceView(declaration, omitAlignmentSpecifiers = true)
-        val parts = splitCTypeSourceParts(view.source, ",")
+        val view = aliasParsingSourceView(declaration, omitAlignmentSpecifiers = true, work = work)
+        val parts = splitCTypeSourceParts(view.source, ",", work)
         // Non-typedef recovered records were never required to fit the declarator parser.
         // Keep their existing export handling when this additional analysis is unavailable.
         val parsed = if (parts.isEmpty()) null else try {
-            val first = CDeclarationParser(cTypeBeforeInitializer(parts.first().source)).parse(allowAbstract = true)
-            val prefix = first.source.substring(0, first.declaratorOffset)
+            val first = CDeclarationParser(cTypeBeforeInitializer(parts.first().source, work), work = work).parse(allowAbstract = true)
+            val prefix = first.source.cOrderSlice(0, first.declaratorOffset, work = work)
             val declarations = listOf(first to { offset: Int -> offset }) + parts.drop(1).map { part ->
-                CDeclarationParser(prefix + cTypeBeforeInitializer(part.source)).parse(allowAbstract = true) to
+                CDeclarationParser(prefix + cTypeBeforeInitializer(part.source, work), work = work).parse(allowAbstract = true) to
                     { offset: Int -> if (offset < prefix.length) offset else part.start + offset - prefix.length }
             }
             first to declarations
@@ -478,10 +513,8 @@ private fun cTypeDeclarationScope(source: String): CTypeDeclarationScope {
             null
         }
         parsed?.second?.forEach { (item, offset) ->
-            functionRanges(item).forEach { range ->
-                addPrototype(originalStart + view.originalOffset(offset(range.first)),
-                    originalStart + view.originalOffset(offset(range.last + 1)))
-            }
+            val parent = parameterScopes.lastOrNull { originalStart > it.start && originalStart < it.end }?.id
+            functionScopes(item, { originalStart + view.originalOffset(offset(it)) }, parent)
         }
         // A member's leading type specifiers have the surrounding scope even when its
         // declarator uses an extension that the optional parser above does not support.
@@ -489,13 +522,14 @@ private fun cTypeDeclarationScope(source: String): CTypeDeclarationScope {
         var index = 0
         var hasType = false
         while (index < tokens.size) {
+            work?.step()
             val token = tokens[index]
             when {
                 token.text in setOf("_Alignas", "_Atomic") && tokens.getOrNull(index + 1)?.text == "(" -> {
-                    val end = matchingCToken(tokens, index + 1)
+                    val end = matchingCToken(tokens, index + 1, work)
                     val innerStart = tokens[index + 1].end
-                    val inner = declaration.substring(innerStart, tokens[end].start)
-                    val first = cDeclarationTokens(inner).firstOrNull()?.text
+                    val inner = declaration.cOrderSlice(innerStart, tokens[end].start, work = work)
+                    val first = cDeclarationTokens(inner, work = work).firstOrNull()?.text
                     if (token.text == "_Atomic" || first in setOf("struct", "union", "enum", "_Atomic", "const", "volatile",
                             "restrict", "void", "char", "short", "int", "long", "float", "double", "signed", "unsigned", "_Bool", "_Complex")) {
                         visit(inner, originalStart + innerStart, depth + 1)
@@ -507,11 +541,11 @@ private fun cTypeDeclarationScope(source: String): CTypeDeclarationScope {
                     val tag = tokens.getOrNull(index + 1)?.takeIf { it.text.matches(identifier) }
                     val body = index + if (tag == null) 1 else 2
                     if (tokens.getOrNull(body)?.text == "{") {
-                        val end = matchingCTypeBody(tokens, body)
+                        val end = matchingCTypeBody(tokens, body, work)
                         if (token.text != "enum" && !inPrototype(originalStart + token.start)) {
                             val memberStart = tokens[body].end
-                            val members = declaration.substring(memberStart, tokens[end].start)
-                            splitCTypeSourceParts(members, ";").forEach { member ->
+                            val members = declaration.cOrderSlice(memberStart, tokens[end].start, work = work)
+                            splitCTypeSourceParts(members, ";", work).forEach { member ->
                                 visit(member.source, originalStart + memberStart + member.start, depth + 1)
                             }
                         }
@@ -536,39 +570,44 @@ private fun cTypeDeclarationScope(source: String): CTypeDeclarationScope {
         }
     }
     visit(source, 0, 0)
-    return CTypeDeclarationScope(introductions.toList(), prototypes.map { (start, end) -> start until end })
+    return CTypeDeclarationScope(introductions.toList(), prototypes.map { (start, end) -> start until end }, parameterScopes.toList(), work)
 }
 
-private fun cTypeBeforeInitializer(source: String): String {
+private fun cTypeBeforeInitializer(source: String, work: COrderWork? = null): String {
     var depth = 0
-    for (token in cDeclarationTokens(source)) when (token.text) {
+    for (token in cDeclarationTokens(source, work = work)) when (token.text) {
         "(", "[", "{" -> depth++
         ")", "]", "}" -> depth--
-        "=" -> if (depth == 0) return source.substring(0, token.start)
+        "=" -> if (depth == 0) return source.cOrderSlice(0, token.start, work = work)
     }
     return source
 }
 
-private fun matchingCTypeBody(tokens: List<CToken>, start: Int): Int {
+private fun matchingCTypeBody(tokens: List<CToken>, start: Int, work: COrderWork? = null): Int {
     var depth = 0
-    for (index in start until tokens.size) when (tokens[index].text) {
+    for (index in start until tokens.size) {
+        work?.step()
+        when (tokens[index].text) {
         "{" -> { require(++depth <= 64) { "recovered type aggregate nesting exceeds 64" } }
         "}" -> if (--depth == 0) return index
+        }
     }
     error("unclosed recovered type aggregate")
 }
 
 private data class CTypeSourcePart(val source: String, val start: Int)
 
-private fun splitCTypeSource(source: String, separator: String): List<String> =
-    splitCTypeSourceParts(source, separator).map { it.source }
+private fun splitCTypeSource(source: String, separator: String, work: COrderWork? = null): List<String> =
+    splitCTypeSourceParts(source, separator, work).map { it.source }
 
-private fun splitCTypeSourceParts(source: String, separator: String): List<CTypeSourcePart> {
-    val tokens = cDeclarationTokens(source)
+private fun splitCTypeSourceParts(source: String, separator: String, work: COrderWork? = null): List<CTypeSourcePart> {
+    work?.span(source.length)
+    val tokens = cDeclarationTokens(source, work = work)
     val stack = mutableListOf<String>()
     val parts = mutableListOf<CTypeSourcePart>()
     var start = 0
     for (token in tokens) {
+        work?.step()
         when (token.text) {
             "(", "[", "{" -> {
                 require(stack.size < 64) { "typedef declarator nesting exceeds 64" }
@@ -579,24 +618,25 @@ private fun splitCTypeSourceParts(source: String, separator: String): List<CType
                 require(stack.isNotEmpty() && stack.removeAt(stack.lastIndex) == expected) { "unbalanced type declaration" }
             }
             separator -> if (stack.isEmpty()) {
-                parts += CTypeSourcePart(source.substring(start, token.start), start)
+                parts += CTypeSourcePart(source.cOrderSlice(start, token.start, work = work), start)
                 start = token.end
             }
         }
     }
     require(stack.isEmpty()) { "unclosed type declaration" }
-    val tail = source.substring(start)
-    if (cDeclarationTokens(tail).isNotEmpty()) parts += CTypeSourcePart(tail, start)
-    return parts.filter { cDeclarationTokens(it.source).isNotEmpty() }
+    val tail = source.cOrderSlice(start, work = work)
+    if (cDeclarationTokens(tail, work = work).isNotEmpty()) parts += CTypeSourcePart(tail, start)
+    return parts.filter { cDeclarationTokens(it.source, work = work).isNotEmpty() }
 }
 
-private data class CTypeSourceReplacement(val originalEnd: Int, val viewStart: Int, val viewEnd: Int)
+private data class CTypeSourceReplacement(val originalEnd: Int, val viewStart: Int, val viewEnd: Int, val originalStart: Int)
 
-private data class CTypeAliasSourceView(val source: String, val replacements: List<CTypeSourceReplacement>) {
+private data class CTypeAliasSourceView(val source: String, val replacements: List<CTypeSourceReplacement>, private val work: COrderWork? = null) {
     fun originalOffset(offset: Int): Int {
         var low = 0
         var high = replacements.size
         while (low < high) {
+            work?.step()
             val middle = (low + high) ushr 1
             if (replacements[middle].viewEnd <= offset) low = middle + 1 else high = middle
         }
@@ -609,13 +649,15 @@ private data class CTypeAliasSourceView(val source: String, val replacements: Li
 
 private fun aliasParsingView(source: String): String = aliasParsingSourceView(source).source
 
-private fun aliasParsingSourceView(source: String, omitAlignmentSpecifiers: Boolean = false): CTypeAliasSourceView {
-    val tokens = cDeclarationTokens(source)
+private fun aliasParsingSourceView(source: String, omitAlignmentSpecifiers: Boolean = false, work: COrderWork? = null): CTypeAliasSourceView {
+    work?.span(source.length)
+    val tokens = cDeclarationTokens(source, work = work)
     val edits = mutableListOf<Triple<Int, Int, String>>()
     var index = 0
     while (index < tokens.size) {
+            work?.step()
         if (omitAlignmentSpecifiers && tokens[index].text == "_Alignas" && tokens.getOrNull(index + 1)?.text == "(") {
-            val end = matchingCToken(tokens, index + 1)
+            val end = matchingCToken(tokens, index + 1, work)
             edits += Triple(tokens[index].start, tokens[end].end, "")
             index = end + 1
             continue
@@ -628,6 +670,8 @@ private fun aliasParsingSourceView(source: String, omitAlignmentSpecifiers: Bool
                 var nesting = 1
                 var end = body + 1
                 while (end < tokens.size && nesting > 0) {
+                    work?.step()
+                    require(nesting <= 64) { "recovered type aggregate nesting exceeds 64" }
                     if (tokens[end].text == "{") nesting++
                     if (tokens[end].text == "}") nesting--
                     end++
@@ -647,12 +691,12 @@ private fun aliasParsingSourceView(source: String, omitAlignmentSpecifiers: Bool
             append(source, previous, start)
             val viewStart = length
             append(replacement)
-            replacements += CTypeSourceReplacement(end, viewStart, length)
+            replacements += CTypeSourceReplacement(end, viewStart, length, start)
             previous = end
         }
         append(source, previous, source.length)
     }
-    return CTypeAliasSourceView(view, replacements)
+    return CTypeAliasSourceView(view, replacements, work)
 }
 
 private fun retainedInitializer(raw: String): String {
@@ -938,12 +982,13 @@ private inline fun <T> declarationFor(entityId: String, block: () -> T): T = try
 internal data class CToken(val text: String, val start: Int, val end: Int)
 internal sealed interface CDerived {
     data class Pointer(val atomic: Boolean = false) : CDerived
-    data class Array(val hasBound: Boolean, val prototypeOnlyStar: Boolean = false) : CDerived
+    data class Array(val hasBound: Boolean, val prototypeOnlyStar: Boolean = false, val start: Int = 0, val end: Int = 0) : CDerived
     data class Function(
         val start: Int,
         val end: Int,
         val parameters: List<CDeclaration>,
         val explicitVoid: Boolean,
+        val parameterStarts: List<Int> = emptyList(),
     ) : CDerived
 }
 internal data class CDeclaration(
@@ -964,13 +1009,14 @@ internal data class CDeclaration(
  * position are retained even when undeclared; the strict compiler owns that diagnostic.
  * Unsupported extensions/inline type definitions fail explicitly rather than changing the ABI.
  */
-private class CDeclarationParser(raw: String, private val symbolicName: String? = null, private val depth: Int = 0) {
+private class CDeclarationParser(raw: String, private val symbolicName: String? = null, private val depth: Int = 0, private val work: COrderWork? = null) {
     private var trailingLineComment = false
-    private val tokens = cDeclarationTokens(raw, symbolicName) { trailingLineComment = true }
+    private val tokens = cDeclarationTokens(raw, symbolicName, work = work) { trailingLineComment = true }
     private val raw = if (trailingLineComment) "$raw\n" else raw
     private var cursor = 0
 
     fun parse(allowAbstract: Boolean = false, allowSemicolon: Boolean = true): CDeclaration {
+        work?.step()
         require(depth < 64) { "declarator nesting exceeds 64" }
         require(tokens.isNotEmpty()) { "empty declaration" }
         val specifiers = mutableListOf<String>()
@@ -978,18 +1024,19 @@ private class CDeclarationParser(raw: String, private val symbolicName: String? 
         var atomicType: CDeclaration? = null
         var hasType = false
         while (cursor < tokens.size) {
+            work?.step()
             val token = tokens[cursor].text
             when {
                 token == "_Atomic" && tokens.getOrNull(cursor + 1)?.text == "(" -> {
                     require(atomicType == null) { "multiple atomic type specifiers are unsupported" }
                     val start = tokens[cursor].start
-                    val end = matchingCToken(tokens, cursor + 1)
-                    atomicType = CDeclarationParser(raw.substring(tokens[cursor + 1].end, tokens[end].start), depth = depth + 1)
+                    val end = matchingCToken(tokens, cursor + 1, work)
+                    atomicType = CDeclarationParser(raw.cOrderSlice(tokens[cursor + 1].end, tokens[end].start, work = work), depth = depth + 1, work = work)
                         .parse(allowAbstract = true, allowSemicolon = false)
                     require(atomicType.name == null && atomicType.storageSpecifiers.isEmpty()) {
                         "an atomic type-name must be abstract and have no storage specifiers"
                     }
-                    specifiers += raw.substring(start, tokens[end].end)
+                    specifiers += raw.cOrderSlice(start, tokens[end].end, work = work)
                     hasType = true
                     cursor = end + 1
                 }
@@ -1025,12 +1072,15 @@ private class CDeclarationParser(raw: String, private val symbolicName: String? 
     private data class Declarator(val name: CToken?, val nameOffset: Int, val derived: List<CDerived>)
 
     private fun declarator(allowAbstract: Boolean, nesting: Int): Declarator {
+        work?.step()
         require(nesting < 64) { "declarator nesting exceeds 64" }
         val pointers = mutableListOf<CDerived.Pointer>()
         while (tokens.getOrNull(cursor)?.text == "*") {
+            work?.step()
             cursor++
             var atomic = false
             while (tokens.getOrNull(cursor)?.text in qualifiers) {
+                work?.step()
                 atomic = atomic || tokens[cursor].text == "_Atomic"
                 cursor++
             }
@@ -1059,22 +1109,23 @@ private class CDeclarationParser(raw: String, private val symbolicName: String? 
             !allowAbstract -> error("missing function or parameter declarator")
         }
         while (cursor < tokens.size) {
+            work?.step()
             when (tokens[cursor].text) {
                 "(" -> {
-                    val end = matchingCToken(tokens, cursor)
-                    derived += parameterList(raw, tokens, cursor, end, depth + 1)
+                    val end = matchingCToken(tokens, cursor, work)
+                    derived += parameterList(raw, tokens, cursor, end, depth + 1, work)
                     cursor = end + 1
                 }
                 "[" -> {
-                    val end = matchingCToken(tokens, cursor)
-                    val bound = tokens.subList(cursor + 1, end).map { it.text }.filterNot { it in qualifiers }
-                    derived += CDerived.Array(hasBound = end > cursor + 1, prototypeOnlyStar = bound == listOf("*"))
+                    val end = matchingCToken(tokens, cursor, work)
+                    val bound = tokens.subList(cursor + 1, end).map { work?.step(); it.text }.filterNot { work?.step(); it in qualifiers }
+                    derived += CDerived.Array(hasBound = end > cursor + 1, prototypeOnlyStar = bound == listOf("*"), start = tokens[cursor].start, end = tokens[end].end)
                     cursor = end + 1
                 }
                 else -> break
             }
         }
-        derived += pointers.asReversed()
+        for (pointer in pointers.asReversed()) { work?.step(); derived += pointer }
         return Declarator(name, nameOffset, derived)
     }
 
@@ -1083,32 +1134,36 @@ private class CDeclarationParser(raw: String, private val symbolicName: String? 
         private val qualifiers = setOf("const", "volatile", "restrict", "_Atomic")
         private val builtinTypes = setOf("void", "char", "short", "int", "long", "float", "double", "signed", "unsigned", "_Bool", "_Complex")
 
-        fun parameterList(source: String, tokens: List<CToken>, start: Int, end: Int, depth: Int = 0): CDerived.Function {
+        fun parameterList(source: String, tokens: List<CToken>, start: Int, end: Int, depth: Int = 0, work: COrderWork? = null): CDerived.Function {
             if (end == start + 2 && tokens[start + 1].text == "void") {
                 return CDerived.Function(tokens[start].start, tokens[end].end, emptyList(), true)
             }
             val parameters = mutableListOf<CDeclaration>()
+            val parameterStarts = mutableListOf<Int>()
             var cursor = start + 1
             while (cursor < end) {
+                work?.step()
                 val first = cursor
                 while (cursor < end && tokens[cursor].text != ",") {
-                    cursor = if (tokens[cursor].text in setOf("(", "[")) matchingCToken(tokens, cursor) + 1 else cursor + 1
+                    work?.step()
+                    cursor = if (tokens[cursor].text in setOf("(", "[")) matchingCToken(tokens, cursor, work) + 1 else cursor + 1
                 }
                 require(cursor > first) { "empty parameter declaration" }
                 if (cursor == first + 1 && tokens[first].text == "...") {
                     require(parameters.isNotEmpty() && cursor == end) { "ellipsis requires preceding parameters and must be last" }
                 } else {
-                    val parameter = CDeclarationParser(source.substring(tokens[first].start, tokens[cursor - 1].end), depth = depth)
+                    val parameter = CDeclarationParser(source.cOrderSlice(tokens[first].start, tokens[cursor - 1].end, work = work), depth = depth, work = work)
                         .parse(allowAbstract = true, allowSemicolon = false)
                     require(parameter.specifiers != listOf("void") || parameter.derived.isNotEmpty()) { "void must be the only parameter" }
                     parameters += parameter
+                    parameterStarts += tokens[first].start
                 }
                 if (cursor < end) {
                     cursor++
                     require(cursor < end) { "trailing parameter comma" }
                 }
             }
-            return CDerived.Function(tokens[start].start, tokens[end].end, parameters, false)
+            return CDerived.Function(tokens[start].start, tokens[end].end, parameters, false, parameterStarts.toList())
         }
     }
 }
@@ -1116,13 +1171,15 @@ private class CDeclarationParser(raw: String, private val symbolicName: String? 
 private val cStorageSpecifiers = setOf("extern", "static", "register", "auto", "inline", "_Noreturn", "_Thread_local", "typedef")
 
 /** End offset for C physical-line joining, including the already guarded trigraph/whitespace forms. */
-internal fun generatedCPhysicalLineSpliceEnd(source: String, start: Int): Int? {
+internal fun generatedCPhysicalLineSpliceEnd(source: String, start: Int): Int? = cPhysicalLineSpliceEnd(source, start)
+
+private fun cPhysicalLineSpliceEnd(source: String, start: Int, work: COrderWork? = null): Int? {
     var cursor = when {
         source[start] == '\\' -> start + 1
         source.startsWith("??/", start) -> start + 3
         else -> return null
     }
-    while (cursor < source.length && source[cursor] in " \t\u000b\u000c") cursor++
+    while (cursor < source.length && source[cursor] in " \t\u000b\u000c") { work?.step(); cursor++ }
     return when (source.getOrNull(cursor)) {
         '\n' -> cursor + 1
         '\r' -> cursor + if (source.getOrNull(cursor + 1) == '\n') 2 else 1
@@ -1135,22 +1192,27 @@ private fun cDeclarationTokens(
     source: String,
     symbolicName: String? = null,
     skipDirectives: Boolean = false,
+    work: COrderWork? = null,
     onTrailingLineComment: () -> Unit = {},
 ): List<CToken> {
+    work?.span(source.length)
     val result = mutableListOf<CToken>()
     var cursor = 0
     while (cursor < source.length) {
+        work?.step()
         val start = cursor
         when {
             source[cursor].isWhitespace() -> cursor++
-            skipDirectives && source[cursor] == '#' && source.substring(source.lastIndexOf('\n', cursor) + 1, cursor).isBlank() -> {
+            skipDirectives && source[cursor] == '#' && source.cOrderSlice(source.lastIndexOf('\n', cursor) + 1, cursor, work = work).isBlank() -> {
                 cursor = source.indexOf('\n', cursor).let { if (it < 0) source.length else it }
             }
             source.startsWith("//", cursor) -> {
-                val newline = source.indexOfAny(charArrayOf('\r', '\n'), cursor)
+                var newline = cursor
+                while (newline < source.length && source[newline] != '\r' && source[newline] != '\n') { work?.step(); newline++ }
+                if (newline == source.length) newline = -1
                 val end = if (newline < 0) source.length else newline
                 var last = end - 1
-                while (last > cursor && source[last].isWhitespace()) last--
+                while (last > cursor && source[last].isWhitespace()) { work?.step(); last-- }
                 // Translation splices escaped physical newlines before removing comments.
                 // Even a blank following line triggers -Wcomment under the strict profile.
                 val escaped = source[last] == '\\' || (last >= 2 && source.regionMatches(last - 2, "??/", 0, 3))
@@ -1158,8 +1220,9 @@ private fun cDeclarationTokens(
                 cursor = if (newline < 0) { onTrailingLineComment(); source.length } else newline
             }
             source.startsWith("/*", cursor) -> {
-                val end = source.indexOf("*/", cursor + 2)
-                require(end >= 0) { "unclosed comment" }
+                var end = cursor + 2
+                while (end + 1 < source.length && !source.startsWith("*/", end)) { work?.step(); end++ }
+                require(end + 1 < source.length) { "unclosed comment" }
                 cursor = end + 2
             }
             source[cursor] == '"' || source[cursor] == '\'' -> {
@@ -1167,7 +1230,8 @@ private fun cDeclarationTokens(
                 var escaped = false
                 var closed = false
                 while (cursor < source.length) {
-                    val spliceEnd = generatedCPhysicalLineSpliceEnd(source, cursor)
+                    work?.step()
+                    val spliceEnd = cPhysicalLineSpliceEnd(source, cursor, work)
                     if (spliceEnd != null) {
                         cursor = spliceEnd
                         continue
@@ -1180,7 +1244,7 @@ private fun cDeclarationTokens(
                     }
                 }
                 require(closed) { "unclosed literal" }
-                result += CToken(source.substring(start, cursor), start, cursor)
+                result += CToken(source.cOrderSlice(start, cursor, work = work), start, cursor)
             }
             symbolicName?.isNotEmpty() == true && source.startsWith(symbolicName, cursor) &&
                 source.getOrNull(cursor + symbolicName.length)?.let { !it.isLetterOrDigit() && it != '_' } != false -> {
@@ -1192,26 +1256,27 @@ private fun cDeclarationTokens(
                 // exponents. The zero recognizer then validates the entire numeric spelling.
                 cursor++
                 while (cursor < source.length && (source[cursor].isLetterOrDigit() || source[cursor] in "_." ||
-                    (source[cursor] in "+-" && source[cursor - 1] in "eEpP"))) cursor++
-                result += CToken(source.substring(start, cursor), start, cursor)
+                    (source[cursor] in "+-" && source[cursor - 1] in "eEpP"))) { work?.step(); cursor++ }
+                result += CToken(source.cOrderSlice(start, cursor, work = work), start, cursor)
             }
             source[cursor].isLetterOrDigit() || source[cursor] == '_' -> {
-                do { cursor++ } while (cursor < source.length && (source[cursor].isLetterOrDigit() || source[cursor] == '_'))
-                result += CToken(source.substring(start, cursor), start, cursor)
+                do { work?.step(); cursor++ } while (cursor < source.length && (source[cursor].isLetterOrDigit() || source[cursor] == '_'))
+                result += CToken(source.cOrderSlice(start, cursor, work = work), start, cursor)
             }
             source.startsWith("...", cursor) -> {
                 cursor += 3
                 result += CToken("...", start, cursor)
             }
-            else -> { cursor++; result += CToken(source.substring(start, cursor), start, cursor) }
+            else -> { cursor++; result += CToken(source.cOrderSlice(start, cursor, work = work), start, cursor) }
         }
     }
     return result
 }
 
-private fun matchingCToken(tokens: List<CToken>, start: Int): Int {
+private fun matchingCToken(tokens: List<CToken>, start: Int, work: COrderWork? = null): Int {
     val stack = mutableListOf<String>()
     for (index in start until tokens.size) {
+        work?.step()
         when (tokens[index].text) {
             "(", "[" -> stack += tokens[index].text
             ")", "]" -> {
@@ -1233,4 +1298,737 @@ internal fun safeCName(name: String): String {
         collision -> "recovered_$sanitized"
         else -> sanitized
     }
+}
+
+/** A single ordering operation owns this meter, including optional parsing and cache hits. */
+private class COrderWork(val checkpoint: () -> Unit, val charge: (Long) -> Unit) {
+    fun step() { checkpoint(); charge(1) }
+    fun span(length: Int) {
+        charge(length.toLong())
+        var offset = 0
+        while (offset < length) { checkpoint(); offset += 256 }
+        checkpoint()
+    }
+}
+
+internal sealed interface COrderSymbol {
+    data class Alias(val name: String) : COrderSymbol
+    data class Tag(val name: String) : COrderSymbol
+    data class Enumerator(val name: String) : COrderSymbol
+}
+internal data class COrderSite(val ownerId: String, val originalOffset: Int, val scopeId: Int)
+internal enum class COrderNeed { ALIAS_DECL, TAG_VISIBLE, COMPLETE_BODY, ENUM_VALUE }
+internal data class COrderUse(val site: COrderSite, val symbol: COrderSymbol, val need: COrderNeed)
+internal data class COrderExport(
+    val site: COrderSite, val symbol: COrderSymbol, val tagKind: String?,
+    val signature: List<String>, val availableOffset: Int, val definition: Boolean,
+)
+internal data class COrderScope(val id: Int, val parent: Int?, val ownerId: String, val start: Int, val end: Int)
+internal data class COrderInventory(
+    val exports: List<COrderExport>, val uses: List<COrderUse>, val scopes: List<COrderScope>,
+)
+
+/** The only bridge from the private declaration machinery to record ordering. */
+internal fun generatedCTypeOrderInventory(
+    types: List<RecoveredType>, checkpoint: () -> Unit, charge: (Long) -> Unit,
+): COrderInventory = COrderInventoryBuilder(types, COrderWork(checkpoint, charge)).build()
+
+private sealed interface COrderShape {
+    data object Scalar : COrderShape
+    // A member's container has been completed, but its field type is not inferred.
+    data object MemberResult : COrderShape
+    data class Tag(val name: String, val site: COrderSite) : COrderShape
+    data class Anonymous(val site: COrderSite, val completed: Int) : COrderShape
+    data class Alias(val name: String) : COrderShape
+    data class Pointer(val inner: COrderShape) : COrderShape
+    data class Array(val inner: COrderShape, val sized: Boolean) : COrderShape
+    data class Function(val result: COrderShape) : COrderShape
+    data class Atomic(val inner: COrderShape) : COrderShape
+}
+
+// Expression shapes keep declaration-site tag identities until aliases can be resolved.
+// They describe only direct operations; member result types are deliberately unproven.
+private sealed interface COrderExpression {
+    data object Unknown : COrderExpression
+    data class Value(val shape: COrderShape, val operand: COrderExpression? = null) : COrderExpression
+    data class Unary(val operator: String, val operand: COrderExpression) : COrderExpression
+    data class Member(val target: COrderExpression, val pointer: Boolean) : COrderExpression
+    data class Sequence(val operands: List<COrderExpression>, val comma: Boolean) : COrderExpression
+    data class Call(val operands: List<COrderExpression>) : COrderExpression
+}
+
+private data class COrderOpaqueUse(val site: COrderSite, val source: String)
+
+private class COrderInventoryBuilder(val types: List<RecoveredType>, val work: COrderWork) {
+    private val index = cTypeIndex(types, work)
+    private val exports = mutableListOf<COrderExport>()
+    private val uses = linkedSetOf<COrderUse>()
+    private val scopes = mutableListOf(COrderScope(0, null, "", 0, Int.MAX_VALUE))
+    private val aliases = linkedMapOf<String, COrderShape>()
+    private val objects = mutableListOf<Triple<COrderShape, COrderSite, Boolean>>()
+    private val expressions = mutableListOf<Pair<COrderExpression, COrderSite>>()
+    private val opaqueUses = mutableListOf<COrderOpaqueUse>()
+    private val bodies = hashSetOf<COrderSite>()
+    private val ordinary = mutableMapOf<Int, MutableList<Pair<String, COrderSite>>>()
+    private val ordinaryShapes = mutableMapOf<COrderSite, COrderShape>()
+    private val tagEvents = mutableListOf<COrderExport>()
+    private val tagEventSites = hashSetOf<COrderSite>()
+    private val tagBindings = mutableMapOf<COrderSite, COrderExport>()
+    private val sources = types.associate { work.step(); it.id to it.declaration }
+    private val identifier = Regex("[A-Za-z_][A-Za-z0-9_]*")
+    private val kinds = setOf("struct", "union", "enum")
+    private val qualifiers = setOf("const", "volatile", "restrict", "_Atomic")
+    private val builtins = setOf("void", "char", "short", "int", "long", "float", "double", "signed", "unsigned", "_Bool", "_Complex")
+    private val shapeCache = mutableMapOf<String, Pair<COrderShape, Int>>()
+
+    private fun addExport(value: COrderExport) {
+        work.step()
+        require(exports.size < 131_072) { "recovered type dependency inventory exceeds its bound" }
+        exports += value
+    }
+    private fun use(site: COrderSite, symbol: COrderSymbol, need: COrderNeed) {
+        work.step(); uses += COrderUse(site, symbol, need)
+    }
+    private fun site(owner: String, offset: Int, scope: Int) = COrderSite(owner, offset, scope)
+    private fun before(a: COrderSite, b: COrderSite): Boolean =
+        a.ownerId < b.ownerId || a.ownerId == b.ownerId && a.originalOffset <= b.originalOffset
+    private fun shadowed(name: String, at: COrderSite): Boolean {
+        var scope: Int? = at.scopeId
+        while (scope != null) {
+            work.step()
+            if (ordinary[scope].orEmpty().any { (n, position) -> work.step(); n == name && before(position, at) }) return true
+            scope = scopes[scope].parent
+        }
+        return false
+    }
+    private fun bind(name: String, at: COrderSite, shape: COrderShape = COrderShape.Scalar) {
+        work.step()
+        ordinary.getOrPut(at.scopeId) { mutableListOf() } += name to at
+        ordinaryShapes[at] = shape
+    }
+    private fun ordinaryShape(name: String, at: COrderSite): COrderShape? {
+        var scope: Int? = at.scopeId
+        while (scope != null) {
+            work.step()
+            val binding = ordinary[scope].orEmpty().lastOrNull { (n, position) -> work.step(); n == name && before(position, at) }
+            if (binding != null) return ordinaryShapes.getValue(binding.second)
+            scope = scopes[scope].parent
+        }
+        return null
+    }
+
+    fun build(): COrderInventory {
+        // Compatibility is the selector's original per-alias/original-body token comparison.
+        for ((name, candidates) in index.exports) {
+            work.step()
+            val definitions = candidates.filter { work.step(); it.definition }.ifEmpty { candidates }
+            val signature = definitions.first().signature
+            require(definitions.all { entry ->
+                entry.signature.size == signature.size && signature.indices.all { offset ->
+                    work.step(); entry.signature[offset] == signature[offset]
+                }
+            }) { "ambiguous recovered type dependency $name in ${definitions.map { it.type.id }.distinct().sorted()}" }
+            if (name.startsWith("tag:")) require(candidates.all { work.step(); it.signature.first() == signature.first() }) {
+                "ambiguous recovered type dependency $name"
+            }
+        }
+        for (type in types) {
+            work.step()
+            for (part in splitCTypeSourceParts(type.declaration, ";", work)) {
+                visit(part.source, type.id, part.start, 0, false, 0)
+            }
+        }
+        opaqueUses.forEach { opaque(it) }
+        bindTags()
+        for ((shape, at, complete) in objects) {
+            work.step()
+            constructors(shape, at, 0)
+            if (complete) complete(shape, at, 0)
+        }
+        for ((expression, at) in expressions) expressionShape(expression, at, 0)
+        val signatures = java.util.IdentityHashMap<List<String>, List<String>>()
+        val frozenExports = exports.map { export ->
+            work.step()
+            val signature = signatures.getOrPut(export.signature) { frozen(export.signature) }
+            export.copy(signature = signature)
+        }
+        return COrderInventory(frozen(frozenExports), frozen(uses), frozen(scopes))
+    }
+
+    private fun <T> frozen(values: Collection<T>): List<T> {
+        work.span(values.size)
+        return java.util.Collections.unmodifiableList(ArrayList(values))
+    }
+
+    /** Remove only parser envelopes, preserving offsets; their operands are visited separately. */
+    private fun envelopes(source: String, owner: String, start: Int, scope: Int, depth: Int): String {
+        work.span(source.length)
+        val text = StringBuilder(source)
+        val tokens = cDeclarationTokens(source, work = work)
+        var i = 0
+        while (i < tokens.size) {
+            work.step()
+            val token = tokens[i]
+            if (token.text in setOf("_Alignas", "__attribute__", "__attribute") && tokens.getOrNull(i + 1)?.text == "(") {
+                val end = matchingCToken(tokens, i + 1, work)
+                expression(source.cOrderSlice(tokens[i + 1].end, tokens[end].start, work = work), owner,
+                    start + tokens[i + 1].end, scope, depth + 1, typeOperand = token.text == "_Alignas")
+                for (offset in token.start until tokens[end].end) { work.step(); text.setCharAt(offset, ' ') }
+                i = end + 1
+            } else if (token.text in setOf("(", "[", "{")) {
+                i = if (token.text == "{") matchingCTypeBody(tokens, i, work) + 1 else matchingCToken(tokens, i, work) + 1
+            } else i++
+        }
+        return text.toString()
+    }
+
+    private fun visit(source: String, owner: String, start: Int, scope: Int, member: Boolean, depth: Int) {
+        work.step()
+        require(depth <= 64) { "recovered type aggregate nesting exceeds 64" }
+        val originalTokens = cDeclarationTokens(source, work = work)
+        if (originalTokens.isEmpty()) return
+        val cleaned = envelopes(source, owner, start, scope, depth)
+        val view = aliasParsingSourceView(cleaned, work = work)
+        val parts = splitCTypeSourceParts(view.source, ",", work)
+        var first: CDeclaration? = null
+        var prefix = ""
+        for ((number, part) in parts.withIndex()) {
+            work.step()
+            val fragment = if (number == 0) part.source else prefix + part.source
+            fun viewOffset(offset: Int) = if (number == 0 || offset < prefix.length) offset else part.start + offset - prefix.length
+            fun original(offset: Int): Int {
+                val v = viewOffset(offset)
+                val replacement = view.replacements.firstOrNull { work.step(); v >= it.viewStart && v < it.viewEnd }
+                return start + (replacement?.originalStart ?: view.originalOffset(v))
+            }
+            val tokens = cDeclarationTokens(fragment, work = work)
+            var stop = fragment.length
+            var i = 0
+            while (i < tokens.size) {
+                work.step()
+                when (tokens[i].text) {
+                    "(", "[" -> i = matchingCToken(tokens, i, work)
+                    "=", ":" -> {
+                        stop = tokens[i].start
+                        val expressionStart = tokens[i].end
+                        expression(fragment.cOrderSlice(expressionStart, work = work), owner, original(expressionStart), scope, depth + 1)
+                        break
+                    }
+                }
+                i++
+            }
+            val declaration = try {
+                CDeclarationParser(fragment.cOrderSlice(0, stop, work = work), work = work).parse(allowAbstract = true)
+            } catch (_: IllegalArgumentException) { null } catch (_: IllegalStateException) { null }
+            if (declaration == null) {
+                // Recover the proven leading specifiers even when an extension makes only
+                // the following declarator opaque. Aggregate bodies still get their own walk.
+                var leading = 0
+                var hasType = false
+                while (leading < tokens.size) {
+                    work.step()
+                    val token = tokens[leading].text
+                    when {
+                        token == "_Atomic" && tokens.getOrNull(leading + 1)?.text == "(" -> {
+                            hasType = true; leading = matchingCToken(tokens, leading + 1, work) + 1
+                        }
+                        token in kinds -> { hasType = true; leading += 2 }
+                        token in qualifiers || token in cStorageSpecifiers -> leading++
+                        token in builtins -> { hasType = true; leading++ }
+                        !hasType && token.matches(identifier) -> { hasType = true; leading++ }
+                        else -> break
+                    }
+                }
+                val boundary = tokens.getOrNull(leading)?.start ?: stop
+                if (hasType && boundary > 0) {
+                    val base = CDeclarationParser(fragment.cOrderSlice(0, boundary, work = work), work = work).parse(allowAbstract = true)
+                    val shape = declaration(base, owner, scope, ::original, depth)
+                    objects += Triple(shape, site(owner, original(boundary), scope), member || scope == 0 && "typedef" !in base.specifiers)
+                }
+                val residualStart = original(boundary)
+                opaqueUses += COrderOpaqueUse(site(owner, residualStart, scope),
+                    source.cOrderSlice(residualStart - start, work = work))
+                return
+            }
+            if (number == 0) {
+                first = declaration
+                prefix = declaration.source.cOrderSlice(0, declaration.declaratorOffset, work = work)
+            }
+            val shape = declaration(declaration, owner, scope, ::original, depth)
+            val at = site(owner, original(declaration.name?.start ?: declaration.declaratorOffset), scope)
+            if ("typedef" in declaration.specifiers && scope == 0) {
+                val name = requireNotNull(declaration.name) { "typedef has no alias name" }.text
+                aliases.putIfAbsent(name, shape)
+                val signature = index.exports["name:$name"].orEmpty().firstOrNull { it.type.id == owner }?.signature
+                    ?: error("missing original alias signature for $name")
+                addExport(COrderExport(at, COrderSymbol.Alias(name), null, signature,
+                    original(declaration.source.length), true))
+            } else if (declaration.name != null && scope != 0 && !member) {
+                bind(declaration.name.text, at.copy(originalOffset = original(declaration.source.length)), shape)
+            }
+            val objectComplete = (member || scope == 0 && declaration.name != null && "extern" !in declaration.specifiers) &&
+                "typedef" !in declaration.specifiers && declaration.derived.firstOrNull() !is CDerived.Function
+            objects += Triple(shape, at, objectComplete)
+        }
+        check(first != null)
+    }
+
+    private fun declaration(
+        decl: CDeclaration, owner: String, scope: Int, original: (Int) -> Int, depth: Int,
+    ): COrderShape {
+        work.step()
+        require(depth < 64) { "declarator nesting exceeds 64" }
+        val tokens = cDeclarationTokens(decl.source, work = work)
+        var shape: COrderShape = COrderShape.Scalar
+        var i = 0
+        var hasType = false
+        while (i < tokens.size && tokens[i].start < decl.declaratorOffset) {
+            work.step()
+            val token = tokens[i]
+            val at = site(owner, original(token.start), scope)
+            when {
+                token.text == "_Atomic" && tokens.getOrNull(i + 1)?.text == "(" -> {
+                    val end = matchingCToken(tokens, i + 1, work)
+                    val offset = tokens[i + 1].end
+                    shape = COrderShape.Atomic(declaration(requireNotNull(decl.atomicType), owner, scope,
+                        { original(offset + it) }, depth + 1))
+                    hasType = true; i = end + 1; continue
+                }
+                token.text in kinds -> {
+                    // A replacement's original start identifies the real aggregate, including anonymous bodies.
+                    val source = sources.getValue(owner)
+                    val tail = source.cOrderSlice(at.originalOffset, work = work)
+                    work.span(tail.length)
+                    val actual = cDeclarationTokens(tail, work = work)
+                    val tag = actual.getOrNull(1)?.takeIf { it.text.matches(identifier) }
+                    val body = if (tag == null) 1 else 2
+                    val end = if (actual.getOrNull(body)?.text == "{") matchingCTypeBody(actual, body, work) else null
+                    val signature = if (end == null) listOf(token.text, requireNotNull(tag).text) else {
+                        work.span(end + 1)
+                        actual.take(end + 1).map { work.step(); it.text }
+                    }
+                    if (tag != null) {
+                        val event = COrderExport(at, COrderSymbol.Tag(tag.text), token.text, signature,
+                            if (end == null) at.originalOffset else at.originalOffset + actual[end].end, end != null)
+                        if (tagEventSites.add(at)) {
+                            work.step()
+                            require(tagEvents.size < 131_072) { "recovered type dependency inventory exceeds its bound" }
+                            tagEvents += event
+                        }
+                        shape = COrderShape.Tag(tag.text, at)
+                    } else {
+                        shape = COrderShape.Anonymous(at, at.originalOffset + actual[requireNotNull(end)].end)
+                    }
+                    if (end != null && bodies.add(at)) {
+                        val bodyStart = at.originalOffset + actual[body].end
+                        val bodySource = source.cOrderSlice(bodyStart, at.originalOffset + actual[end].start, work = work)
+                        if (token.text == "enum") {
+                            for (entry in splitCTypeSourceParts(bodySource, ",", work)) {
+                                val entryTokens = cDeclarationTokens(entry.source, work = work)
+                                val name = entryTokens.first()
+                                val enumSite = site(owner, bodyStart + entry.start + name.start, scope)
+                                val equals = entryTokens.indexOfFirst { it.text == "=" }
+                                if (equals >= 0) {
+                                    val offset = entryTokens[equals].end
+                                    expression(entry.source.cOrderSlice(offset, work = work), owner, bodyStart + entry.start + offset, scope, depth + 1)
+                                }
+                                addExport(COrderExport(enumSite, COrderSymbol.Enumerator(name.text), null,
+                                    signature, bodyStart + entry.start + entry.source.length, true))
+                                if (scope != 0) bind(name.text, enumSite.copy(originalOffset = bodyStart + entry.start + entry.source.length))
+                            }
+                        } else for (member in splitCTypeSourceParts(bodySource, ";", work)) {
+                            visit(member.source, owner, bodyStart + member.start, scope, true, depth + 1)
+                        }
+                    }
+                    hasType = true; i += 2; continue
+                }
+                token.text in builtins -> { hasType = true }
+                token.text in qualifiers || token.text in cStorageSpecifiers -> Unit
+                !hasType && token.text.matches(identifier) -> {
+                    if (index.exports["name:${token.text}"].orEmpty().any { work.step(); !it.enumerator } && !shadowed(token.text, at)) {
+                        use(at, COrderSymbol.Alias(token.text), COrderNeed.ALIAS_DECL)
+                        shape = COrderShape.Alias(token.text)
+                    }
+                    hasType = true
+                }
+            }
+            i++
+        }
+        if ("_Atomic" in decl.specifiers) shape = COrderShape.Atomic(shape)
+        // Parameters are visited at their declaration once, never during alias expansion.
+        for (derived in decl.derived) {
+            work.step()
+            when (derived) {
+                is CDerived.Function -> {
+                    val id = scopes.size
+                    scopes += COrderScope(id, scope, owner, original(derived.start), original(derived.end))
+                    for ((index, parameter) in derived.parameters.withIndex()) {
+                        val offset = derived.parameterStarts[index]
+                        val parameterShape = declaration(parameter, owner, id, { original(offset + it) }, depth + 1)
+                        val at = site(owner, original(offset), id)
+                        objects += Triple(parameterShape, at, false)
+                        parameter.name?.let {
+                            val adjusted = when (parameterShape) {
+                                is COrderShape.Array -> COrderShape.Pointer(parameterShape.inner)
+                                is COrderShape.Function -> COrderShape.Pointer(parameterShape)
+                                else -> parameterShape
+                            }
+                            bind(it.text, site(owner, original(offset + parameter.source.length), id), adjusted)
+                        }
+                    }
+                }
+                is CDerived.Array -> if (derived.end > derived.start) {
+                    expression(decl.source.cOrderSlice(derived.start + 1, derived.end - 1, work = work), owner,
+                        original(derived.start + 1), scope, depth + 1)
+                }
+                is CDerived.Pointer -> Unit
+            }
+        }
+        for (derived in decl.derived.asReversed()) shape = when (derived) {
+            is CDerived.Pointer -> COrderShape.Pointer(shape)
+            is CDerived.Array -> COrderShape.Array(shape, derived.hasBound)
+            is CDerived.Function -> COrderShape.Function(shape)
+        }
+        return shape
+    }
+
+    private fun expression(source: String, owner: String, start: Int, scope: Int, depth: Int, typeOperand: Boolean = false) {
+        work.step()
+        require(depth < 64) { "type operand nesting exceeds 64" }
+        val parser = DirectExpressionParser(source, owner, start, scope, depth)
+        if (typeOperand) parser.typeName(0, parser.tokens.size)?.let { shape ->
+            objects += Triple(shape, site(owner, start + source.length, scope), true)
+            return
+        }
+        if (parser.tokens.isEmpty() || parser.tokens.map { work.step(); it.text } == listOf("*")) return
+        expressions += parser.parse() to site(owner, start + source.length, scope)
+    }
+
+    /** Bounded direct C operations, not a C type checker. Unknown result shapes cannot
+     * become member/dereference targets. Arithmetic with a known pointer, subscripting,
+     * conditional expressions and generic selections refuse instead of guessing a target. */
+    private inner class DirectExpressionParser(
+        val source: String, val owner: String, val start: Int, val scope: Int, val depth: Int,
+    ) {
+        val tokens = cDeclarationTokens(source, work = work)
+        var cursor = 0
+        fun unsupported(): Nothing = throw IllegalArgumentException(
+            "unsupported generated-C direct expression in $owner at ${start + (tokens.getOrNull(cursor)?.start ?: source.length)}")
+
+        fun typeName(first: Int, end: Int): COrderShape? {
+            work.step()
+            val head = tokens.getOrNull(first)?.takeIf { first < end } ?: return null
+            val at = site(owner, start + head.start, scope)
+            if (head.text !in kinds && head.text !in builtins && head.text !in qualifiers &&
+                (index.exports["name:${head.text}"].orEmpty().none { work.step(); !it.enumerator } || shadowed(head.text, at))) return null
+            val text = source.cOrderSlice(head.start, tokens[end - 1].end, work = work)
+            val view = aliasParsingSourceView(text, work = work)
+            val parsed = try { CDeclarationParser(view.source, work = work).parse(allowAbstract = true, allowSemicolon = false) }
+                catch (_: IllegalArgumentException) { return null } catch (_: IllegalStateException) { return null }
+            if (parsed.name != null) return null
+            val shape = declaration(parsed, owner, scope, { position ->
+                val replacement = view.replacements.firstOrNull { work.step(); position >= it.viewStart && position < it.viewEnd }
+                start + head.start + (replacement?.originalStart ?: view.originalOffset(position))
+            }, depth + 1)
+            objects += Triple(shape, site(owner, start + tokens[end - 1].end, scope), false)
+            return shape
+        }
+
+        fun parse(): COrderExpression {
+            // Array parameter qualifiers do not form part of the bound expression.
+            while (tokens.getOrNull(cursor)?.text in qualifiers || tokens.getOrNull(cursor)?.text == "static") { work.step(); cursor++ }
+            val result = sequence(0)
+            if (cursor != tokens.size) unsupported()
+            return result
+        }
+
+        private fun sequence(nesting: Int): COrderExpression {
+            val values = mutableListOf(binary(nesting))
+            while (tokens.getOrNull(cursor)?.text == ",") { work.step(); cursor++; values += binary(nesting) }
+            return if (values.size == 1) values.single() else COrderExpression.Sequence(values, true)
+        }
+
+        private fun binary(nesting: Int): COrderExpression {
+            // All supported binary operands must prove non-pointer shapes at evaluation.
+            // Their scalar result has no type-body prerequisite, so precedence is irrelevant
+            // to this shape projection. Comma alone preserves its final operand's shape.
+            val values = mutableListOf(unary(nesting))
+            while (tokens.getOrNull(cursor)?.text in setOf("+", "-", "/", "%", "*", "&", "|", "^", "<", ">", "=", "!")) {
+                work.step()
+                val operator = tokens[cursor++].text
+                val next = tokens.getOrNull(cursor)?.text
+                if (next == operator && operator in setOf("&", "|", "<", ">") || next == "=" && operator in setOf("=", "!", "<", ">")) { work.step(); cursor++ }
+                else if (operator in setOf("=", "!")) unsupported()
+                values += unary(nesting)
+            }
+            return if (values.size == 1) values.single() else COrderExpression.Sequence(values, false)
+        }
+
+        private fun unary(nesting: Int): COrderExpression {
+            work.step()
+            require(depth + nesting < 64) { "type expression nesting exceeds 64" }
+            val token = tokens.getOrNull(cursor) ?: unsupported()
+            if (token.text in setOf("sizeof", "_Alignof", "_Alignas")) {
+                cursor++
+                if (tokens.getOrNull(cursor)?.text == "(") {
+                    val end = matchingCToken(tokens, cursor, work)
+                    val shape = typeName(cursor + 1, end)
+                    if (shape != null) {
+                        cursor = end + 1
+                        return COrderExpression.Unary(token.text, COrderExpression.Value(shape))
+                    }
+                }
+                return COrderExpression.Unary(token.text, unary(nesting + 1))
+            }
+            if (token.text in setOf("*", "&", "+", "-", "!", "~")) {
+                cursor++
+                return COrderExpression.Unary(token.text, unary(nesting + 1))
+            }
+            var value: COrderExpression
+            if (token.text == "(") {
+                val end = matchingCToken(tokens, cursor, work)
+                val shape = typeName(cursor + 1, end)
+                if (shape != null) {
+                    cursor = end + 1
+                    if (tokens.getOrNull(cursor)?.text == "{") {
+                        // Only expression-list initializers are supported here. Designators
+                        // and nested initializer syntax must not bypass target analysis.
+                        cursor++
+                        val initializer = sequence(nesting + 1)
+                        if (tokens.getOrNull(cursor)?.text != "}") unsupported()
+                        cursor++
+                        objects += Triple(shape, site(owner, start + tokens[cursor - 1].end, scope), true)
+                        value = COrderExpression.Value(shape, initializer)
+                    } else return COrderExpression.Value(shape, unary(nesting + 1))
+                } else {
+                    cursor++
+                    value = sequence(nesting + 1)
+                    if (tokens.getOrNull(cursor)?.text != ")") unsupported()
+                    cursor++
+                }
+            } else {
+                if (token.text == "_Generic" || !(token.text.matches(identifier) || token.text.first().isDigit() ||
+                        token.text.first() in "\"'")) unsupported()
+                val at = site(owner, start + token.start, scope)
+                val enumerator = token.text.matches(identifier) && !shadowed(token.text, at) &&
+                    index.exports["name:${token.text}"].orEmpty().any { work.step(); it.enumerator }
+                if (enumerator) use(at, COrderSymbol.Enumerator(token.text), COrderNeed.ENUM_VALUE)
+                value = if (enumerator || token.text.first().isDigit() || token.text.first() == '\'')
+                    COrderExpression.Value(COrderShape.Scalar)
+                else if (token.text.first() == '"') COrderExpression.Value(COrderShape.Array(COrderShape.Scalar, true))
+                else ordinaryShape(token.text, at)?.let { COrderExpression.Value(it) } ?: COrderExpression.Unknown
+                cursor++
+            }
+            while (cursor < tokens.size) {
+                work.step()
+                val pointer = tokens[cursor].text == "-" && tokens.getOrNull(cursor + 1)?.text == ">"
+                when {
+                    pointer || tokens[cursor].text == "." -> {
+                        cursor += if (pointer) 2 else 1
+                        if (tokens.getOrNull(cursor)?.text?.matches(identifier) != true) unsupported()
+                        cursor++ // Member names never bind typedef or enumerator uses.
+                        value = COrderExpression.Member(value, pointer)
+                    }
+                    tokens[cursor].text == "(" -> {
+                        // These attribute envelopes carry expression arguments but no C
+                        // call result. General call/return type inference is unsupported.
+                        if (token.text !in setOf("aligned", "__aligned__", "packed", "__packed__") ||
+                            value !== COrderExpression.Unknown) unsupported()
+                        cursor++
+                        val arguments = if (tokens.getOrNull(cursor)?.text == ")") emptyList() else listOf(sequence(nesting + 1))
+                        if (tokens.getOrNull(cursor)?.text != ")") unsupported()
+                        cursor++
+                        value = COrderExpression.Call(listOf(value) + arguments)
+                    }
+                    else -> return value
+                }
+            }
+            return value
+        }
+    }
+
+    private fun expressionShape(expression: COrderExpression, at: COrderSite, depth: Int): COrderShape? {
+        work.step()
+        require(depth < 64) { "type expression resolution exceeds depth 64" }
+        fun shape(value: COrderExpression) = expressionShape(value, at, depth + 1)
+        fun resolved(value: COrderShape?) = value?.let { resolve(it, linkedSetOf(), 0).first }
+        fun target(value: COrderShape?): COrderShape {
+            val pointer = resolved(value)
+            require(pointer is COrderShape.Pointer) { "unsupported generated-C direct expression target in ${at.ownerId}" }
+            return pointer.inner
+        }
+        fun scalar(value: COrderShape?) {
+            require(value != null && resolved(value) == COrderShape.Scalar) {
+                "unsupported generated-C direct expression operator in ${at.ownerId}"
+            }
+        }
+        return when (expression) {
+            COrderExpression.Unknown -> null
+            is COrderExpression.Value -> { expression.operand?.let { shape(it) }; expression.shape }
+            is COrderExpression.Unary -> {
+                val operand = shape(expression.operand)
+                when (expression.operator) {
+                    "*" -> target(operand)
+                    "&" -> operand?.let { COrderShape.Pointer(it) }
+                    "sizeof", "_Alignof", "_Alignas" -> {
+                        require(operand != null) { "unsupported generated-C direct expression size operand in ${at.ownerId}" }
+                        complete(operand, at, 0)
+                        COrderShape.Scalar
+                    }
+                    else -> { scalar(operand); COrderShape.Scalar }
+                }
+            }
+            is COrderExpression.Member -> {
+                val operand = shape(expression.target)
+                val aggregate = if (expression.pointer) target(operand) else resolved(operand)
+                require(aggregate is COrderShape.Tag || aggregate is COrderShape.Anonymous) {
+                    "unsupported generated-C direct expression member target in ${at.ownerId}"
+                }
+                complete(aggregate, at, 0)
+                COrderShape.MemberResult // Subsequent dereference/member/arithmetic must refuse.
+            }
+            is COrderExpression.Sequence -> {
+                var result: COrderShape? = null
+                for (operand in expression.operands) {
+                    work.step(); result = shape(operand)
+                    if (!expression.comma) scalar(result)
+                }
+                if (expression.comma) result else COrderShape.Scalar
+            }
+            is COrderExpression.Call -> {
+                for (operand in expression.operands) { work.step(); shape(operand) }
+                COrderShape.Scalar // Only the explicitly parsed attribute envelopes reach here.
+            }
+        }
+    }
+
+    private fun opaque(span: COrderOpaqueUse) {
+        // Only the unproven residual is conservative. Proven enclosing specifiers and
+        // independent aggregate members never inherit an extension's unknown parameter scope.
+        val (origin, source) = span
+        val tokens = cDeclarationTokens(source, work = work)
+        var parentheses = 0
+        var i = 0
+        while (i < tokens.size) {
+            work.step()
+            val token = tokens[i]
+            val at = origin.copy(originalOffset = origin.originalOffset + token.start)
+            if (token.text == "(") parentheses++
+            if (token.text == ")") parentheses--
+            if (token.text in kinds && tokens.getOrNull(i + 1)?.text?.matches(identifier) == true) {
+                val name = tokens[i + 1].text
+                require(parentheses == 0) { "ambiguous generated-C prototype tag dependency in ${origin.ownerId}: ${token.text} $name" }
+                tagEvents += COrderExport(at, COrderSymbol.Tag(name), token.text, listOf(token.text, name), at.originalOffset, false)
+                use(at, COrderSymbol.Tag(name), COrderNeed.COMPLETE_BODY)
+                i++
+            } else if (!shadowed(token.text, at)) {
+                val candidates = index.exports["name:${token.text}"].orEmpty()
+                if (candidates.isNotEmpty()) use(at,
+                    if (candidates.first().enumerator) COrderSymbol.Enumerator(token.text) else COrderSymbol.Alias(token.text),
+                    if (candidates.first().enumerator) COrderNeed.ENUM_VALUE else COrderNeed.ALIAS_DECL)
+            }
+            i++
+        }
+    }
+
+    private fun bindTags() {
+        val visible = mutableMapOf<Pair<Int, COrderSymbol>, COrderExport>()
+        val global = tagEvents.filter { work.step(); it.site.scopeId == 0 }.groupBy { work.step(); it.symbol }
+        val sorted = tagEvents.sortedWith { left, right ->
+            work.step()
+            val owners = left.site.ownerId.compareTo(right.site.ownerId)
+            if (owners == 0) left.site.originalOffset.compareTo(right.site.originalOffset) else owners
+        }
+        for (event in sorted) {
+            work.step()
+            var cursor: Int? = event.site.scopeId
+            var binding: COrderExport? = null
+            if (!event.definition || event.site.scopeId == 0) while (cursor != null && binding == null) {
+                work.step(); binding = visible[cursor to event.symbol]; cursor = scopes[cursor].parent
+            }
+            if (binding == null) {
+                binding = event
+                visible[event.site.scopeId to event.symbol] = event
+            }
+            tagBindings[event.site] = binding
+            if (event.site.scopeId != 0) {
+                if (binding.site.scopeId != 0 && global[event.symbol].orEmpty().isNotEmpty()) {
+                    throw IllegalArgumentException("ambiguous generated-C prototype tag dependency in ${event.site.ownerId}: ${event.tagKind} ${(event.symbol as COrderSymbol.Tag).name}")
+                }
+                if (binding.site.scopeId == 0) use(event.site, event.symbol, COrderNeed.TAG_VISIBLE)
+            }
+            // References to an enclosing tag do not introduce a second local identity.
+            if (event.site.scopeId == 0 || binding === event || event.definition) addExport(event)
+        }
+    }
+
+    private fun resolve(shape: COrderShape, visiting: MutableSet<String>, depth: Int): Pair<COrderShape, Int> {
+        work.step()
+        require(depth < 64) { "typedef resolution exceeds depth 64" }
+        if (shape is COrderShape.Alias) {
+            require(visiting.add(shape.name)) { "unresolved generated-C typedef cycle at ${shape.name}" }
+            val cached = shapeCache[shape.name]
+            if (cached != null) {
+                require(depth + cached.second < 64) { "typedef resolution exceeds depth 64 at ${shape.name}" }
+                visiting.remove(shape.name); return cached
+            }
+            val underlying = aliases[shape.name] ?: return COrderShape.Scalar to 0
+            val inner = resolve(underlying, visiting, depth + 1)
+            val value = inner.first to inner.second + 1
+            visiting.remove(shape.name); shapeCache[shape.name] = value
+            return value
+        }
+        val child = when (shape) {
+            is COrderShape.Pointer -> shape.inner
+            is COrderShape.Array -> shape.inner
+            is COrderShape.Function -> shape.result
+            is COrderShape.Atomic -> shape.inner
+            else -> return shape to 0
+        }
+        val (inner, length) = resolve(child, visiting, depth + 1)
+        return when (shape) {
+            is COrderShape.Pointer -> COrderShape.Pointer(inner)
+            is COrderShape.Array -> COrderShape.Array(inner, shape.sized)
+            is COrderShape.Function -> COrderShape.Function(inner)
+            is COrderShape.Atomic -> COrderShape.Atomic(inner)
+            else -> error("terminal shape")
+        } to length + 1
+    }
+    private fun constructors(shape: COrderShape, at: COrderSite, depth: Int) {
+        work.step(); require(depth < 64) { "type constructor nesting exceeds 64" }
+        when (shape) {
+            is COrderShape.Pointer -> constructors(shape.inner, at, depth + 1)
+            is COrderShape.Array -> { constructors(shape.inner, at, depth + 1); complete(shape.inner, at, depth + 1) }
+            is COrderShape.Atomic -> { constructors(shape.inner, at, depth + 1); complete(shape.inner, at, depth + 1) }
+            is COrderShape.Function -> constructors(shape.result, at, depth + 1)
+            else -> Unit
+        }
+    }
+    private fun complete(shape: COrderShape, at: COrderSite, depth: Int) {
+        work.step(); require(depth < 64) { "type completeness nesting exceeds 64" }
+        when (shape) {
+            is COrderShape.Alias -> complete(resolve(shape, linkedSetOf(), 0).first, at, depth + 1)
+            is COrderShape.Tag -> {
+                val binding = tagBindings.getValue(shape.site)
+                if (binding.site.scopeId == 0) use(at, COrderSymbol.Tag(shape.name), COrderNeed.COMPLETE_BODY)
+                else {
+                    val body = exports.firstOrNull { work.step(); it.symbol == binding.symbol && it.definition && it.site.scopeId == binding.site.scopeId }
+                    require(body != null && before(body.site.copy(originalOffset = body.availableOffset), at)) {
+                        "unresolved generated-C complete body in ${at.ownerId}: ${shape.name}"
+                    }
+                }
+            }
+            is COrderShape.Anonymous -> require(shape.site.ownerId != at.ownerId || shape.completed <= at.originalOffset) {
+                "unresolved generated-C complete anonymous body in ${at.ownerId}"
+            }
+            is COrderShape.Array -> complete(shape.inner, at, depth + 1)
+            is COrderShape.Atomic -> complete(shape.inner, at, depth + 1)
+            else -> Unit
+        }
+    }
+}
+
+private fun String.cOrderSlice(start: Int, end: Int = length, work: COrderWork? = null): String {
+    work?.span(end - start)
+    return substring(start, end)
 }
