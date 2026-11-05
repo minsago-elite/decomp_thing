@@ -3,6 +3,7 @@ import { message as displayMessage } from '../shared/messages';
 import { PrivateSessionContext, usePrivateTransport } from '../session/PrivateTransport';
 import { useContext, useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import { ApiClientError, withApiFailureReference } from '../api/client';
+import { metadataFailureKind } from '../shared/retainMetadata';
 import type { Snapshot, WebEvent } from '../api/generated';
 import { ActivityReceiptAge } from './ActivityReceiptAge';
 import type { ActivityReceiptTime } from './ActivityReceiptAge';
@@ -173,16 +174,22 @@ function LiveActivity({ jobId, runId, basePath, windowLinks }: { jobId: string; 
           return;
         }
         if (transient && failures.current >= 4) void session?.revalidate();
-        if (failure instanceof ApiClientError && (failure.status === 401 || failure.status === 403)) {
+        const gap = failure instanceof ApiClientError && ['EVENT_GAP', 'PROGRESS_GAP'].includes(failure.serverCode ?? '');
+        // Fixed categories; a gap is a retention boundary, not a missing attempt, so it is classified before 404/410.
+        const kind = failure instanceof ApiClientError ? metadataFailureKind(failure) : 'unverified';
+        const missing = !gap && !transient && kind === 'missing' && failure instanceof ApiClientError && failure.code === 'http_error';
+        if (failure instanceof ApiClientError && (failure.status === 401 || failure.status === 403) || missing) {
           position.current = { initialized: false, cursor: null, rows: [], last: null }; setRows([]); setSnapshot(null); setLastRead(null);
         }
         setError(withApiFailureReference(failure instanceof ApiClientError && failure.status === 401
           ? copy.theLocalSessionExpiredOrIsUnavailableReconnectTheSession
           : failure instanceof ApiClientError && failure.status === 403
           ? copy.activityAccessWasDeniedCheckTheLocalSessionAndServer
+          : gap ? copy.retainedHistoryHasAGapReadAFreshHistoryTo
           : transient ? copy.activityReconnectAttemptsWereExhaustedDisplayedObservationsMayBeStale
-          : failure instanceof ApiClientError && ['EVENT_GAP', 'PROGRESS_GAP'].includes(failure.serverCode ?? '')
-          ? copy.retainedHistoryHasAGapReadAFreshHistoryTo
+          : missing ? copy.activityRunMissing
+          : kind === 'unsupported' ? copy.activityUnsupported
+          : kind === 'failed' ? copy.activityServerFailed
           : copy.activityCouldNotBeVerifiedDisplayedObservationsMayBeStale, failure));
         setFollowing(false);
       }

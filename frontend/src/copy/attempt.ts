@@ -131,7 +131,10 @@ export const activityCopy = {
   "pauseActivity": "Pause activity",
   "resumeActivity": "Resume activity",
   "followActivity": "Follow activity",
-  "activityObservations": "Activity observations"
+  "activityObservations": "Activity observations",
+  "activityRunMissing": "This attempt's activity was not found. Return to the job to choose an attempt.",
+  "activityUnsupported": "This server's activity format is not supported by this page. Update the server or interface; displayed observations may be stale.",
+  "activityServerFailed": "The server could not return activity. Displayed observations may be stale; read a fresh history to retry."
 } as const;
 
 
@@ -411,6 +414,9 @@ export const activityHistoryCopy = {
   invalid: 'The saved activity window is invalid or unsupported. Keep this address to inspect its selection, or explicitly open live activity.',
   unavailable: 'The requested activity window could not be verified within its read limits. No other window was substituted.',
   expired: 'The requested activity window is no longer retained. No fresh history was substituted.',
+  missing: 'This attempt or its activity was not found. No other window was substituted.',
+  unsupported: 'This server returned an activity format this page does not support. No other window was substituted.',
+  server: 'The server could not return the requested activity window. No other window was substituted; retry explicitly.',
   session: 'Reconnect the local session to read this activity window.',
   denied: 'Access to this activity window was denied.',
   loading: 'Reading the saved activity window…',

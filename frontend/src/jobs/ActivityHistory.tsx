@@ -4,7 +4,7 @@ import { ApiClientError, withApiFailureReference } from '../api/client';
 import { runViewPath } from '../app/paths';
 import { activityHistoryCopy as copy, activityCopy } from '../copy/attempt';
 import { message as displayMessage } from '../shared/messages';
-import { canRetainMetadata } from '../shared/retainMetadata';
+import { canRetainMetadata, metadataFailureKind } from '../shared/retainMetadata';
 import { usePrivateTransport } from '../session/PrivateTransport';
 import { ActivityRow } from './ActivityRow';
 import { ActivityStages } from './ActivityStages';
@@ -56,7 +56,13 @@ export function ActivityHistory({ jobId, runId, basePath, navigation, window }: 
         if (!current()) return;
         const message = failure instanceof ApiClientError && failure.status === 401 ? copy.session
           : failure instanceof ApiClientError && failure.status === 403 ? copy.denied
-          : failure instanceof ApiClientError && (failure.status === 410 || failure.serverCode === 'INVALID_CURSOR') ? copy.expired
+          : failure instanceof ApiClientError && failure.status === 410 && failure.serverCode === 'RESOURCE_GONE' ? copy.missing
+          : failure instanceof ApiClientError && failure.code === 'http_error'
+            && (failure.status === 410 || failure.serverCode === 'INVALID_CURSOR') ? copy.expired
+          : failure instanceof ApiClientError && failure.code === 'http_error' && metadataFailureKind(failure) === 'missing' ? copy.missing
+          : failure instanceof ApiClientError && metadataFailureKind(failure) === 'unsupported' ? copy.unsupported
+          // 'failed' covers network/timeout/408/429/5xx and other HTTP refusals; retention below is unchanged and no read is retried.
+          : failure instanceof ApiClientError && metadataFailureKind(failure) === 'failed' ? copy.server
           : copy.unavailable;
         setStored(previous => ({ binding,
           rows: previous.binding === binding && canRetainMetadata(failure) ? previous.rows : [],
