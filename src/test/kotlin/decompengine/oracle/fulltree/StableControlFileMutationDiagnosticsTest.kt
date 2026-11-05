@@ -11,6 +11,7 @@ import java.lang.reflect.Proxy
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.file.Files
+import java.nio.file.Path
 import java.util.ArrayDeque
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -359,7 +360,7 @@ class StableControlFileMutationDiagnosticsTest {
     }
 
     private fun withMonitor(block: (PrivateMonitor, Fixture) -> Unit) {
-        val root = Files.createTempDirectory("stable-monitor-diagnostics")
+        val root = temporaryDirectory("stable-monitor-diagnostics")
         val path = root.resolve("item.bin")
         Files.write(path, byteArrayOf(1, 2, 3))
         val parent = LinuxFilesystemSyscalls.openRoot(root)
@@ -386,12 +387,15 @@ class StableControlFileMutationDiagnosticsTest {
     private data class OtherFile(val root: java.nio.file.Path, val parent: LinuxDescriptor, val selected: LinuxDescriptor)
 
     private fun otherFile(): OtherFile {
-        val root = Files.createTempDirectory("stable-monitor-other")
+        val root = temporaryDirectory("stable-monitor-other")
         Files.write(root.resolve("other.bin"), byteArrayOf(4, 5, 6))
         val parent = LinuxFilesystemSyscalls.openRoot(root)
         val selected = LinuxFilesystemSyscalls.openPathAtOrNull(parent.fd, "other.bin")!!
         return OtherFile(root, parent, selected)
     }
+
+    private fun temporaryDirectory(prefix: String): Path =
+        Files.createTempDirectory(Files.createDirectories(Path.of("build", "test-tmp")), prefix)
 
     private class PrivateMonitor(adapter: Any) {
         private val monitorClass = Class.forName("decompengine.oracle.fulltree.StableControlFile\$MutationMonitor")
