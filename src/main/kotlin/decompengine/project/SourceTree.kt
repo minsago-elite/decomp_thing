@@ -380,6 +380,8 @@ private class ModuleReconstructionAgentOutcomeException(
 private class ModuleReconstructionEvidencePersistenceException(cause: Exception) :
     IllegalStateException("failed to persist invocation-bound agent execution evidence", cause)
 
+private val SHA256_HEX_PATTERN = Regex("[0-9a-f]{64}")
+
 class GeneratedFileEvidence(
     val path: String,
     val sha256: String,
@@ -397,11 +399,11 @@ class GeneratedFileEvidence(
 
     init {
         requireNormalizedProjectPath(path, "source tree manifest path")
-        require(sha256.matches(Regex("[0-9a-f]{64}"))) { "source tree manifest file hash is invalid: $path" }
+        require(sha256.matches(SHA256_HEX_PATTERN)) { "source tree manifest file hash is invalid: $path" }
         require(generator.isNotBlank() && generator.length <= 4_096 && '\n' !in generator && '\r' !in generator) {
             "source tree manifest generator is invalid: $path"
         }
-        require(promptSha256 == null || promptSha256.matches(Regex("[0-9a-f]{64}"))) {
+        require(promptSha256 == null || promptSha256.matches(SHA256_HEX_PATTERN)) {
             "source tree manifest prompt hash is invalid: $path"
         }
         require(this.roles.isNotEmpty()) { "source tree manifest file roles are empty: $path" }
