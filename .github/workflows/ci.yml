@@ -588,6 +588,28 @@ jobs:
             build/angr-qualification
             build/test-results/realAngrQualification
             build/reports/tests/realAngrQualification
+      - name: Require explicit ChatGPT operator regression suite
+        if: matrix.shard == 'core'
+        run: |
+          ./gradlew --no-daemon test --tests 'decompengine.chatgpt.operator.*'
+          python3 - <<'PY_OPERATOR'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+          reports = sorted(Path('build/test-results/test').glob('TEST-decompengine.chatgpt.operator.*.xml'))
+          required = {
+              'ChatGptPlanOperatorCliV1Test', 'OperatorProjectionJsonV1Test', 'OperatorReducerV1Test',
+              'OperatorRemediationV1Test', 'OperatorMutationBoundaryV1Test', 'OperatorLifecycleBoundaryV1Test',
+          }
+          roots = [ET.parse(path).getroot() for path in reports]
+          assert {root.attrib['name'].rsplit('.', 1)[-1] for root in roots} == required
+          cases = [case for root in roots for case in root.iter('testcase')]
+          assert len(cases) == 68, f'Expected 68 operator tests, observed {len(cases)}'
+          assert len({(case.get('classname'), case.get('name')) for case in cases}) == 68
+          assert not any(list(case.iter(tag)) for case in cases for tag in ('failure', 'error', 'skipped'))
+          print('ChatGPT operator: 68 passed; no failures, errors, skips or duplicate identities')
+          PY_OPERATOR
+          mv build/test-results/test build/test-results/chatgpt-operator
+          mv build/reports/tests/test build/reports/tests/chatgpt-operator
       - name: Run JVM and Kotlin checks
         env:
           DECOMP_REQUIRE_ORACLE_EXT4_SCRATCH: "true"
@@ -635,6 +657,8 @@ jobs:
           name: kotlin-${{ matrix.shard }}-test-reports
           if-no-files-found: error
           path: |
+            build/test-results/chatgpt-operator
+            build/reports/tests/chatgpt-operator
             build/reports/tests/full-suite
             build/test-results/full-suite
             build/reports/tests/test
