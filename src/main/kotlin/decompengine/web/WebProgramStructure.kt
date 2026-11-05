@@ -655,17 +655,56 @@ internal fun readWebStructureEntity(bytes: ByteArray, offset: Long, maximumStrin
 }
 
 /** Count and conservative byte bounds apply together; a commitment change always selects a new build. */
-internal class WebProgramStructureCache(private val capacity: Int = 2, private val maximumRetainedBytes: Long = 128L * 1024 * 1024) {
+internal class WebProgramStructureCache(private val capacity: Int = 2,
+    private val maximumRetainedBytes: Long = 128L * 1024 * 1024,
+    private val maximumEntryBytes: Long = 96L * 1024 * 1024) {
+    init {
+        require(capacity in 0..2)
+        require(maximumRetainedBytes in 0..128L * 1024 * 1024)
+        require(maximumEntryBytes in 0..96L * 1024 * 1024)
+    }
+    data class Prefix(val jobId: String, val runId: String, val revisionId: String,
+        val sourceSha256: String, val inputSha256: String)
     data class Key(val jobId: String, val runId: String, val revisionId: String, val sourceSha256: String,
-        val manifestSha256: String, val descriptorSha256: String, val inputSha256: String)
-
-    private val entries = LinkedHashMap<Key, WebProgramStructureIndex>(4, 0.75f, true)
-
-    @Synchronized fun get(key: Key): WebProgramStructureIndex? = entries[key]
-    @Synchronized fun put(key: Key, value: WebProgramStructureIndex) {
-        entries.remove(key)
-        if (value.retainedBytes > maximumRetainedBytes) return
-        entries[key] = value
+        val manifestSha256: String, val descriptorSha256: String, val inputSha256: String) {
+        val prefix: Prefix get() = Prefix(jobId, runId, revisionId, sourceSha256, inputSha256)
+    }
+    class Entry(val key: Key, val index: WebProgramStructureIndex,
+        manifest: decompengine.repair.StableRegularFile, descriptor: decompengine.repair.StableRegularFile) {
+        val manifest = manifest.copy(bytes = manifest.bytes.copyOf())
+        val descriptor = descriptor.copy(bytes = descriptor.bytes.copyOf())
+        val retainedBytes: Long
+        init {
+            val reference = index.reference
+            require(key.jobId == reference.jobId && key.runId == reference.runId &&
+                key.revisionId == reference.revisionId && key.sourceSha256 == reference.sourceSha256)
+            require(key.inputSha256 == index.inputSha256)
+            require(key.manifestSha256 == index.manifestSha256 && key.descriptorSha256 == index.descriptorSha256)
+            for ((file, sha) in listOf(this.manifest to key.manifestSha256, this.descriptor to key.descriptorSha256)) {
+                require(file.bytes.size.toLong() <= WebSourceCatalogEvidence.MAXIMUM_MANIFEST_BYTES)
+                require(file.sha256 == sha && java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(file.bytes).joinToString("") { "%02x".format(it) } == sha)
+                require(file.identity.isRegularFile && !file.identity.isDirectory &&
+                    !file.identity.isSymbolicLink && file.identity.linkCount == 1 && file.identity.mode and 0xf000 == 0x8000)
+            }
+            require(index.retainedBytes >= 0)
+            retainedBytes = Math.addExact(index.retainedBytes, this.manifest.bytes.size.toLong() + this.descriptor.bytes.size + 2 * 512L)
+        }
+    }
+    private val entries = LinkedHashMap<Key, Entry>()
+    @Synchronized fun candidates(prefix: Prefix): List<Entry> = entries.values.filter { it.key.prefix == prefix }.asReversed()
+    @Synchronized fun peek(key: Key): Entry? = entries[key]
+    @Synchronized fun getEntry(key: Key): Entry? = entries[key]
+    @Synchronized fun get(key: Key): WebProgramStructureIndex? = entries[key]?.index
+    @Synchronized fun touch(entry: Entry) {
+        if (entries[entry.key] !== entry) return
+        entries.remove(entry.key)
+        entries[entry.key] = entry
+    }
+    @Synchronized fun put(entry: Entry) {
+        entries.remove(entry.key)
+        if (entry.retainedBytes > maximumEntryBytes || entry.retainedBytes > maximumRetainedBytes) return
+        entries[entry.key] = entry
         while (entries.size > capacity || entries.values.sumOf { it.retainedBytes } > maximumRetainedBytes) {
             entries.remove(entries.keys.first())
         }

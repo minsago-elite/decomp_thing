@@ -566,13 +566,86 @@ class WebProgramStructureTest {
         val index = revision.evidence.readStructure(revision.reference, revision.cache) { index, _ -> index }
         assertTrue(index.retainedBytes > 0)
         val key = WebProgramStructureCache.Key(jobId, runId, revisionId, revision.sourceSha, index.manifestSha256, index.descriptorSha256, inputSha)
-        val other = key.copy(revisionId = "other")
-        val cache = WebProgramStructureCache(maximumRetainedBytes = index.retainedBytes * 2 - 1)
-        cache.put(key, index); cache.put(other, index)
-        assertNull(cache.get(key)); assertSame(index, cache.get(other))
-        val tooSmall = WebProgramStructureCache(maximumRetainedBytes = index.retainedBytes - 1)
-        tooSmall.put(key, index)
+        val entry = checkNotNull(revision.cache.peek(key))
+        assertEquals(index.retainedBytes + revision.manifest.size + revision.descriptor.size + 1024L, entry.retainedBytes)
+        val cache = WebProgramStructureCache(maximumRetainedBytes = entry.retainedBytes - 1)
+        cache.put(entry)
+        assertNull(cache.get(key))
+        val tooSmall = WebProgramStructureCache(maximumEntryBytes = entry.retainedBytes - 1)
+        tooSmall.put(entry)
         assertNull(tooSmall.get(key))
+
+    }
+
+    @Test fun `cache copies metadata validates bindings and touches only current objects`() {
+        val revision = standard()
+        revision.evidence.readStructure(revision.reference, revision.cache) { _, _ -> Unit }
+        val prefix = WebProgramStructureCache.Prefix(jobId, runId, revisionId, revision.sourceSha, inputSha)
+        val original = revision.cache.candidates(prefix).single()
+        val manifest = original.manifest.copy(bytes = original.manifest.bytes.copyOf())
+        val entry = WebProgramStructureCache.Entry(original.key, original.index, manifest, original.descriptor)
+        manifest.bytes[0] = 0
+        assertContentEquals(original.manifest.bytes, entry.manifest.bytes)
+        assertFailsWith<IllegalArgumentException> { WebProgramStructureCache.Entry(original.key.copy(inputSha256 = "bad"), original.index, original.manifest, original.descriptor) }
+        assertFailsWith<IllegalArgumentException> { WebProgramStructureCache.Entry(original.key.copy(revisionId = "bad"), original.index, original.manifest, original.descriptor) }
+        assertFailsWith<IllegalArgumentException> { WebProgramStructureCache.Entry(original.key, original.index, manifest, original.descriptor) }
+        assertFailsWith<IllegalArgumentException> { WebProgramStructureCache.Entry(original.key, original.index, original.manifest.copy(identity = original.manifest.identity.copy(linkCount = 2)), original.descriptor) }
+        revision.cache.put(entry)
+        revision.cache.touch(original)
+        assertSame(entry, revision.cache.peek(entry.key))
+        assertTrue(revision.cache.candidates(prefix.copy(inputSha256 = "other")).isEmpty())
+        assertFailsWith<IllegalArgumentException> { WebProgramStructureCache(capacity = 3) }
+        assertFailsWith<IllegalArgumentException> { WebProgramStructureCache(maximumEntryBytes = 96L * 1024 * 1024 + 1) }
+    }
+
+    @Test fun `candidate order is detached nonpromoting and total charge evicts LRU`() {
+        val revision = standard()
+        val prefix = WebProgramStructureCache.Prefix(jobId, runId, revisionId, revision.sourceSha, inputSha)
+        fun capture(): WebProgramStructureCache.Entry {
+            revision.evidence.readStructure(revision.reference, revision.cache) { _, _ -> Unit }
+            return revision.cache.candidates(prefix).first()
+        }
+        val first = capture()
+        val path = "reports/runs/$runId/source-tree/source_tree_manifest.json"
+        revision.files[path] = captured(revision.manifest + " ".toByteArray())
+        val second = capture()
+        val detached = revision.cache.candidates(prefix)
+        assertEquals(listOf(second, first), detached)
+        revision.cache.peek(first.key)
+        revision.cache.getEntry(first.key)
+        assertEquals(detached, revision.cache.candidates(prefix))
+        revision.cache.touch(first)
+        assertEquals(listOf(first, second), revision.cache.candidates(prefix))
+        assertEquals(listOf(second, first), detached)
+        val replacement = WebProgramStructureCache.Entry(first.key, first.index, first.manifest, first.descriptor)
+        revision.cache.put(replacement)
+        revision.cache.touch(second)
+        revision.cache.touch(first)
+        assertEquals(listOf(second, replacement), revision.cache.candidates(prefix))
+        val bounded = WebProgramStructureCache(maximumRetainedBytes = first.retainedBytes + second.retainedBytes - 1)
+        bounded.put(first)
+        bounded.put(second)
+        assertNull(bounded.peek(first.key))
+        assertSame(second, bounded.peek(second.key))
+        revision.files[path] = captured(revision.manifest + "  ".toByteArray())
+        val third = capture()
+        assertEquals(listOf(third, second), revision.cache.candidates(prefix))
+    }
+
+    @Test fun `failed projection and after verification publish no candidate`() {
+        val revision = standard()
+        val prefix = WebProgramStructureCache.Prefix(jobId, runId, revisionId, revision.sourceSha, inputSha)
+        assertFailsWith<IllegalStateException> {
+            revision.evidence.readStructure(revision.reference, revision.cache) { _, _ -> error("project failed") }
+        }
+        assertTrue(revision.cache.candidates(prefix).isEmpty())
+        assertFails {
+            revision.evidence.readStructure(revision.reference, revision.cache) { _, _ ->
+                val path = "reports/runs/$runId/source-tree/source_tree_manifest.json"
+                revision.files[path] = captured(revision.manifest)
+            }
+        }
+        assertTrue(revision.cache.candidates(prefix).isEmpty())
     }
 
     @Test fun `cursor filters cannot collide through map display delimiters`() {

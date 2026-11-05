@@ -138,7 +138,8 @@ internal class WebSourceCatalogEvidence(
             }
             val key = WebProgramStructureCache.Key(reference.jobId, reference.runId, reference.revisionId,
                 reference.sourceSha256, captured.sha256, descriptor.sha256, input.sha256)
-            val index = cache.get(key) ?: measured("build-projection") { run {
+            val entry = cache.peek(key)
+            val index = entry?.index ?: measured("build-projection") { run {
                 val document = measured("parse-manifest-json") { OracleJson.parse(captured.bytes, JSON_LIMITS) } as? JsonObject
                     ?: throw IllegalArgumentException("Source catalog manifest is invalid.")
                 val profileId = (document["profileId"] as? JsonPrimitive)?.takeIf { it.isString }?.content
@@ -151,7 +152,7 @@ internal class WebSourceCatalogEvidence(
                 val descriptorDocument = measured("parse-descriptor-json") { OracleJson.parse(descriptor.bytes, JSON_LIMITS) } as? JsonObject
                     ?: throw IllegalArgumentException("Source input descriptor is invalid.")
                 val snapshot = measured("parse-source-inputs") { parseWebRevisionSourceInputs(reference, manifest, captured.sha256, descriptorDocument, descriptor.sha256) }
-                WebProgramStructureBuilder.build(snapshot, profile, manifest, ::evidence, timing).also { cache.put(key, it) }
+                WebProgramStructureBuilder.build(snapshot, profile, manifest, ::evidence, timing)
             } }
             // Retention pins change the attempt version without changing the candidate; the projection depends
             // only on the keyed commitments, so it stays valid for the current reference.
@@ -165,6 +166,8 @@ internal class WebSourceCatalogEvidence(
             measured("verify-descriptor") { verifyCapturedArtifact(reference.jobId, descriptorPath, descriptor) }
             measured("verify-manifest") { verifyCapturedArtifact(reference.jobId, manifestPath, captured) }
             measured("verify-input") { verifyCapturedInput(reference.jobId, input) }
+            if (entry == null) cache.put(WebProgramStructureCache.Entry(key, index, captured, descriptor))
+            else cache.touch(entry)
             return result
         } finally { capturing.set(false) }
     }
