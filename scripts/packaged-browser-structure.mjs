@@ -123,7 +123,7 @@ export async function seedStructure(root) {
     await fs.mkdir(dirname(join(tree, path)), { recursive: true, mode: 0o700 });
     await fs.writeFile(join(tree, path), bytes, { flag: 'wx', mode: 0o600 });
   }
-  return { jobId, runId, revisionId, functions: FUNCTIONS, modules: modules.length, modelBytes: Buffer.byteLength(model),
+  return { jobId, runId, revisionId, functions: FUNCTIONS, globals: globals.length, modules: modules.length, modelBytes: Buffer.byteLength(model),
     functionAddress, functionId, moduleId };
 }
 
@@ -1436,7 +1436,7 @@ async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evalua
   await cdp.call('Fetch.disable', {}, tab.sessionId);
   await cdp.call('Page.navigate', { url: browserOrigin + `${revision}/modules` }, tab.sessionId);
   await ready(tab, `document.body.innerText.includes('Showing 1–100 of ${fixture.modules} modules.') && document.querySelector('table caption')?.textContent === 'Recorded totals'`, 'module inventory with recorded totals');
-  assert.ok(await evaluate(tab, `[...document.querySelectorAll('dt')].find(dt => dt.textContent === 'Names shared by several functions or globals')?.nextElementSibling.textContent === '1'`));
+  assert.ok(await evaluate(tab, `[...document.querySelectorAll('dt')].find(dt => dt.textContent === 'Name-collision groups among named function/global records')?.nextElementSibling.textContent === ${JSON.stringify(`1 / ${fixture.functions + fixture.globals}`)}`));
   await heap();
   for (const width of [390, 320]) {
     await cdp.call('Emulation.setDeviceMetricsOverride', { width, height: 844, deviceScaleFactor: 1, mobile: false }, tab.sessionId);
