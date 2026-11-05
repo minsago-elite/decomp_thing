@@ -10,7 +10,7 @@ import {
   MAX_PHASE_READS, MAX_RESPONSIVE_PNG_BYTES, MAX_SAME_PATH_READS, NAVIGATION_PAGE, PRODUCT_COPY, hexDisplayRows, RESPONSIVE_EXPLORATION, RESPONSIVE_HEX_FILE, RESPONSIVE_JOB, RESPONSIVE_PROFILES, RESPONSIVE_REGIONS,
   RESPONSIVE_REVISION, RESPONSIVE_RUN, RESPONSIVE_SCHEMA, RESPONSIVE_SIZING, RESPONSIVE_TOUCH, applyAuditResponsiveGate, assessResponsiveObservation, assessResponsiveReport,
   bindResponsiveFixtures, createResponsiveSection, expectedObservations, MAX_RUN_REQUESTS, pngDimensions, qualifyResponsive, responsiveFixtures, screenshotName,
-  snapClip, verifyResponsiveScreenshots,
+  JOB_DETAIL_READY, snapClip, verifyResponsiveScreenshots,
 } from './packaged-browser-responsive.mjs';
 import { auditViewports } from './packaged-browser-audit.mjs';
 
@@ -566,4 +566,42 @@ test('run ledger gate: missing, dropped, between-phase failures, mutations and s
   const storm = cleanSection().section; Object.assign(storm.requests.unledgered, { reads: MAX_SAME_PATH_READS + 1, phases: ['narrow/region/source-hex'],
     paths: [{ method: 'GET', path: BOOT, status: 200, count: MAX_SAME_PATH_READS + 1 }] }); fails(storm, /retry storm outside observation phases/);
   const over = cleanSection().section; over.requests.reads = MAX_RUN_REQUESTS + 1; fails(over, /totals are out of bounds/);
+});
+
+test('job detail readiness: copy and disabled={loading} are pinned to Job.tsx', () => {
+  const job = readFileSync(join(repo, 'frontend/src/copy/job.ts'), 'utf8');
+  assert.ok(job.includes(`"refreshJob": "${PRODUCT_COPY.refreshJob}"`), 'jobCopy.refreshJob');
+  const route = readFileSync(join(repo, 'frontend/src/routes/Job.tsx'), 'utf8');
+  assert.ok(route.includes('<button type="button" disabled={loading} onClick={() => setRefresh(value => value + 1)}>{copy.refreshJob}</button>'), 'enabled Refresh job means loading === false');
+  assert.ok(route.includes('{loading && <p role="status">{job ? copy.refreshingJob : copy.loadingJob}</p>}') && !/<p role="status"[^>]*aria-busy/.test(route),
+    'Loading job… carries no aria-busy, so the generic navigation predicate cannot see it');
+  assert.ok(JOB_DETAIL_READY.includes(JSON.stringify(PRODUCT_COPY.refreshJob)) && !JOB_DETAIL_READY.includes('innerText'), 'readiness never inspects the asserted long name');
+});
+
+// Hosted run 41955556093 missed the long name; retained evidence cannot establish its timing.
+// This control demonstrates the readiness gap independently of that unresolved historical cause.
+// Stand-in page: the job read settles only once a ready() poll observes the job detail predicate.
+async function longNameReadBy(qualify) {
+  let settled = false; let captured; const stop = new Error('stand-in stop after long-name read');
+  const cdp = { on() {}, off() {}, async call() { return {}; } };
+  const ready = async (_t, expr) => { if (expr === JOB_DETAIL_READY) settled = true; return true; };
+  const evaluate = async (_t, expr) => { if (expr.includes('innerText.includes(')) { captured = settled; throw stop; } return true; };
+  const fixtures = { identity: { jobId: RESPONSIVE_JOB, longName: 'long' }, artifacts: new Map(), tamper: {}, respond: () => ({ status: 404 }) };
+  await assert.rejects(qualify({ cdp, makeTarget: async () => ({ sessionId: 's', targetId: 't' }), evaluate, ready, delay: async () => undefined,
+    root: repo, origin: 'http://127.0.0.1:1', fixtures, section: createResponsiveSection() }), (e) => e === stop);
+  return captured;
+}
+
+test('job detail readiness: removing the detail wait reproduces a premature long-name read', async () => {
+  assert.equal(await longNameReadBy(qualifyResponsive), true);
+  const dir = await fs.mkdtemp(join(repo, 'build/test-responsive-readiness-'));
+  try {
+    const old = join(dir, 'packaged-browser-responsive.mjs');
+    const source = await fs.readFile(join(repo, 'scripts/packaged-browser-responsive.mjs'), 'utf8');
+    const wait = '      await ready(target, JOB_DETAIL_READY, `responsive job detail at ${profile.name}`);';
+    assert.equal(source.split(wait).length, 2, 'remove exactly the new readiness wait');
+    await fs.writeFile(old, source.replace(wait, ''));
+    const before = await import(old);
+    assert.equal(await longNameReadBy(before.qualifyResponsive), false, 'before: long name read while the job read was pending');
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });

@@ -35,7 +35,15 @@ export const PRODUCT_COPY = Object.freeze({
   caseRefusal: 'Case details are unavailable or exceed this viewer’s format or limits. Refresh the report or download its observed JSON.',
   // recordedValidationCopy titles of the four byte-preview <details> summaries.
   previewTitles: Object.freeze(['Original standard output', 'Rebuilt standard output', 'Original standard error', 'Rebuilt standard error']),
+  // jobCopy.refreshJob: Job.tsx renders this button with disabled={loading}, so enabled means the job read settled.
+  refreshJob: 'Refresh job',
 });
+/**
+ * Job detail readiness: JobDetails shows "Loading job…" as a role=status paragraph without aria-busy, so the generic
+ * navigation predicate can pass before /jobs/{id} renders (hosted run 41955556093, reflow320). Enabled Refresh job is
+ * exactly JobDetails.loading === false; it does not inspect the long name the gate asserts.
+ */
+export const JOB_DETAIL_READY = `[...document.querySelectorAll('main button')].some((b) => b.textContent === ${JSON.stringify(PRODUCT_COPY.refreshJob)} && !b.disabled)`;
 /** Per-phase read bounds: any repeated path beyond this, or more reads in one phase, is a retry storm. */
 export const MAX_SAME_PATH_READS = 2;
 export const MAX_PHASE_READS = 24;
@@ -370,6 +378,7 @@ export async function qualifyResponsive({ cdp, makeTarget, evaluate, ready, dela
       // Display preferences disclosure: trusted Tab to the trigger, Enter opens, Tab enters, Escape closes and returns focus.
       phase = `${profile.key}/preferences/disclosure`; let ledgerStart = phaseStart();
       await navigate(NAVIGATION_PAGE.path, `responsive job at ${profile.name}`);
+      await ready(target, JOB_DETAIL_READY, `responsive job detail at ${profile.name}`);
       const longNameRendered = await evaluate(target, `document.body.innerText.includes(${JSON.stringify(fixtures.identity.longName)})`);
       await input();
       const reach = await tabUntil('f.trigger', 'Display preferences');
