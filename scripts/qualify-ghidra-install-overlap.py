@@ -985,7 +985,10 @@ class Controls(unittest.TestCase):
                         link.external_attr = (stat.S_IFLNK | 0o777) << 16
                         archive.writestr(link, b'data.bin')
                     if duplicate:
-                        archive.writestr(file_info, payload)
+                        duplicate_info = zipfile.ZipInfo(prefix + '/data.bin')
+                        duplicate_info.create_system = 3
+                        duplicate_info.external_attr = (stat.S_IFREG | 0o644) << 16
+                        archive.writestr(duplicate_info, payload)
         else:
             with tarfile.open(archive_path, 'w') as archive:
                 empty = tarfile.TarInfo(prefix + '/empty')
