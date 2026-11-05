@@ -328,9 +328,16 @@ def generate(base_path: str, schema_path: Path) -> dict:
         ("VALIDATION_FAILED", "This deterministic fixture does not support those query parameters."),
         # #1894: rendered availability-notice fixture; served only when a browser harness substitutes /bootstrap.
         ("SESSION_REQUIRED", "Simulated development session is not connected."),
+        # #628: exact generated read-failure bodies; no backend outage is simulated outside the harness.
+        ("SERVICE_UNAVAILABLE", "Simulated service is temporarily unavailable."),
+        ("INTERNAL_ERROR", "Simulated server could not complete this read."),
     ]:
         error = source("error-validation")
         error["error"].update(code=code, message=message, details=[])
+        if code in ("SERVICE_UNAVAILABLE", "INTERNAL_ERROR"):
+            error["error"]["retryable"] = code == "SERVICE_UNAVAILABLE"
+            error["requestId"] = ("62800000-0000-4000-8000-000000000503" if code == "SERVICE_UNAVAILABLE"
+                                  else "62800000-0000-4000-8000-000000000500")
         validate(error)
         check_semantics(error)
         errors[code] = error
