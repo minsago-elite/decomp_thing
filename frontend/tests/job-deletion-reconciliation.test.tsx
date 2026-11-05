@@ -75,7 +75,8 @@ it.each(['hidden', 'offline'])('keeps an accepted running deletion and broadcast
     fireEvent.input(await screen.findByLabelText(/Type the file name/), { target: { value: sample.displayFilename } });
     fireEvent.click(screen.getByRole('button', { name: 'Delete permanently' }));
     // Acceptance must survive without completing (or even starting) a status read in the form.
-    expect(await screen.findByText(message)).toBeTruthy();
+    expect(await screen.findByText(jobDeletionCopy.operationStates.running)).toBeTruthy();
+    expect(screen.queryByText(message)).toBeNull();
     if (mode === 'hidden') {
       Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
       document.dispatchEvent(new Event('visibilitychange'));
@@ -89,7 +90,8 @@ it.each(['hidden', 'offline'])('keeps an accepted running deletion and broadcast
     Object.defineProperty(navigator, 'onLine', { configurable: true, value: true });
     Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
     window.dispatchEvent(new Event('online')); document.dispatchEvent(new Event('visibilitychange'));
-    expect(screen.getByText(message)).toBeTruthy();
+    expect(screen.getByText(jobDeletionCopy.operationStates.running)).toBeTruthy();
+    expect(screen.queryByText(message)).toBeNull();
     expect(transport.get.mock.calls.some(([kind]) => kind === 'operation')).toBe(false);
     expect(transport.put).toHaveBeenCalledOnce();
   } finally { stop(); auth.dispose(); }
