@@ -7,6 +7,37 @@ import kotlin.test.assertTrue
 
 class GeneratedCTypeSelectionTest {
     @Test
+    fun `expression selection remains lexical while direct order excludes unrelated cast bodies`() {
+        val aliases = RecoveredType("0", "typedef struct T T, *P; typedef struct Other *OtherP;")
+        val user = RecoveredType("a", "struct User { int values[sizeof(((void)(OtherP)0, (P)0)->value)]; };")
+        val other = RecoveredType("y", "struct Other { struct User value; };")
+        val body = RecoveredType("z", "struct T { int value; };")
+        val input = listOf(aliases, user, other, body)
+        for (types in listOf(input, input.reversed())) {
+            val selected = selectRequiredGeneratedCTypes(types, listOf("int consume(struct User *u)"))
+            assertEquals(input, selected)
+            selected.forEach { record -> assertTrue(record === input.single { it.id == record.id }) }
+            assertEquals(listOf(aliases, body, user, other), generatedCTypeEmissionOrder(selected))
+        }
+        val selectedWithoutOther = selectRequiredGeneratedCTypes(input - other, listOf("int consume(struct User *u)"))
+        assertEquals(listOf(aliases, body, user), generatedCTypeEmissionOrder(selectedWithoutOther))
+    }
+
+    @Test
+    fun `ordering shape analysis stays lazy and never narrows lexical selector retention`() {
+        val alias = RecoveredType("a", "typedef struct Complete CompleteAlias;")
+        val user = RecoveredType("b", "struct User { CompleteAlias *p; };")
+        val body = RecoveredType("c", "struct Complete { struct User value; };")
+        val types = listOf(alias, user, body)
+        val retained = selectRequiredGeneratedCTypes(types, listOf("CompleteAlias *get(void)"))
+        assertEquals(types, retained)
+        retained.forEachIndexed { index, record -> assertTrue(record === types[index]) }
+        val unsupported = RecoveredType("0", "struct Extended { int value __unproven_extension; };")
+        val safe = RecoveredType("z", "typedef int Safe;")
+        assertEquals(listOf(safe), selectRequiredGeneratedCTypes(listOf(unsupported, safe), listOf("Safe get(void)")))
+    }
+
+    @Test
     fun `typedef storage specifier can follow type qualifiers`() {
         val alias = RecoveredType("alias", "const typedef int Value;")
         assertEquals(listOf(alias), selectRequiredGeneratedCTypes(listOf(alias), listOf("Value get(void)")))

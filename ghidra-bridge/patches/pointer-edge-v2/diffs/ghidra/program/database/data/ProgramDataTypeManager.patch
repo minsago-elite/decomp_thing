@@ -1,0 +1,67 @@
+--- a/ghidra/program/database/data/ProgramDataTypeManager.java
++++ b/ghidra/program/database/data/ProgramDataTypeManager.java
+@@ -337,4 +337,64 @@
+ 		return ArchiveType.PROGRAM;
+ 	}
+ 
++
++
++    public final PointerReferenceObservation observePointerReference(
++            ghidra.program.model.listing.Data selected, TaskMonitor monitor)
++            throws IOException, CancelledException {
++        acquireOwned(monitor);
++        final long observedGeneration = ownedGeneration();
++        Throwable primary = null;
++        java.lang.UnsupportedOperationException localPolicy = null;
++        try {
++            if (program != ownedProgram() || program.getDataTypeManager() != this)
++                throw ownedFailure("Program manager identity mismatch");
++            DataType type = program.getCodeManager().requireOwnedPointerSelection(this, selected, monitor);
++            if (type == null || type.getClass() != PointerDB.class)
++                throw (localPolicy = new java.lang.UnsupportedOperationException("Selected datatype is not a direct pointer"));
++            PointerDB pointer = (PointerDB) type;
++            long child = readOwnedPointerEdge(pointer, monitor);
++            long id = pointer.getKey();
++            String language = program.getLanguageID().getIdAsString();
++            String compiler = program.getCompilerSpec().getCompilerSpecID().getIdAsString();
++            if (language.length() > 128 || compiler.length() > 128 ||
++                !"x86:LE:64:default".equals(language) || !"gcc".equals(compiler) ||
++                getDataOrganization() != program.getCompilerSpec().getDataOrganization() ||
++                getDataOrganization().getPointerSize() != 8 ||
++                (pointer.record.getByteValue(PointerDBAdapter.PTR_LENGTH_COL) != -1 &&
++                 pointer.record.getByteValue(PointerDBAdapter.PTR_LENGTH_COL) != 8) ||
++                pointer.getLength() != 8 || pointer.getAlignment() != 8)
++                throw (localPolicy = new java.lang.UnsupportedOperationException("Unsupported pointer target/layout"));
++            Boolean constant = readOwnedOpaqueSettings(id, selected.getAddress(), monitor);
++            if (constant == null)
++                throw (localPolicy = new java.lang.UnsupportedOperationException("Unsupported settings policy"));
++            checkOwnedCancellation(monitor); requireOwnedLive();
++            if (observedGeneration != ownedGeneration()) throw ownedFailure("Observation generation changed");
++            return new PointerReferenceObservation(program, this, selected, pointer, id, child,
++                ownedGeneration(), 8, 8, pointer.hasLanguageDependantLength(), language, compiler, constant);
++        }
++        catch (IOException | CancelledException | RuntimeException | Error e) {
++            primary = e;
++            // Only the exact exception allocated immediately at this invocation's local throw is clean.
++            // It is never exposed to a callback before this catch; saved/reentrant exceptions differ.
++            if (e != localPolicy) ownedFailure(e);
++            throw e;
++        }
++        finally {
++            try { lock.release(); }
++            catch (RuntimeException | Error e) {
++                ownedFailure(e);
++                if (primary != null) { if (primary != e) primary.addSuppressed(e); }
++                else { primary = e; throw e; }
++            }
++            finally {
++                try { checkOwnedCancellation(monitor); }
++                catch (CancelledException | RuntimeException | Error e) {
++                    if (primary != null) { if (primary != e) primary.addSuppressed(e); }
++                else { primary = e; throw e; }
++                }
++            }
++        }
++    }
++
+ }

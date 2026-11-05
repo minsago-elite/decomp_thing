@@ -1,0 +1,46 @@
+package ghidra.program.database.data;
+
+/** Ephemeral facts; re-observe for every use. Never serialize as authority. */
+public final class PointerReferenceObservation {
+    private final ghidra.program.database.ProgramDB program;
+    private final ProgramDataTypeManager manager;
+    private final ghidra.program.model.listing.Data selected;
+    private final ghidra.program.model.data.DataType pointer;
+    private final long pointerID;
+    private final long childID;
+    private final long generation;
+    private final int length;
+    private final int alignment;
+    private final boolean dynamic;
+    private final String languageID;
+    private final String compilerID;
+    private final boolean constantInstance;
+    PointerReferenceObservation(ghidra.program.database.ProgramDB program, ProgramDataTypeManager manager, ghidra.program.model.listing.Data selected, ghidra.program.model.data.DataType pointer, long pointerID, long childID, long generation, int length, int alignment, boolean dynamic, String languageID, String compilerID, boolean constantInstance) {
+        this.program = program;
+        this.manager = manager;
+        this.selected = selected;
+        this.pointer = pointer;
+        this.pointerID = pointerID;
+        this.childID = childID;
+        this.generation = generation;
+        this.length = length;
+        this.alignment = alignment;
+        this.dynamic = dynamic;
+        this.languageID = languageID;
+        this.compilerID = compilerID;
+        this.constantInstance = constantInstance;
+    }
+    public ghidra.program.database.ProgramDB program() { return program; }
+    public ProgramDataTypeManager manager() { return manager; }
+    public ghidra.program.model.listing.Data selected() { return selected; }
+    public ghidra.program.model.data.DataType pointer() { return pointer; }
+    public long pointerID() { return pointerID; }
+    public long childID() { return childID; }
+    public long generation() { return generation; }
+    public int length() { return length; }
+    public int alignment() { return alignment; }
+    public boolean dynamic() { return dynamic; }
+    public String languageID() { return languageID; }
+    public String compilerID() { return compilerID; }
+    public boolean constantInstance() { return constantInstance; }
+}

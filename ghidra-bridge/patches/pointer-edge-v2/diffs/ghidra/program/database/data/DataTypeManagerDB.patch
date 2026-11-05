@@ -1,0 +1,618 @@
+--- a/ghidra/program/database/data/DataTypeManagerDB.java
++++ b/ghidra/program/database/data/DataTypeManagerDB.java
+@@ -233,6 +233,7 @@
+ 	 * @throws RuntimeIOException if database error occurs during creation
+ 	 */
+ 	protected DataTypeManagerDB(DataOrganization dataOrganization) throws RuntimeIOException {
++		this.ownedProgram = null;
+ 		this.lock = new Lock("DataTypeManagerDB");
+ 		this.errHandler = new DbErrorHandler();
+ 		this.dataOrganization = dataOrganization;
+@@ -272,6 +273,7 @@
+ 	protected DataTypeManagerDB(ResourceFile packedDBfile, OpenMode openMode, TaskMonitor monitor)
+ 			throws IOException, CancelledException {
+ 
++		this.ownedProgram = null;
+ 		this.errHandler = new DbErrorHandler();
+ 		this.lock = new Lock("DataTypeManagerDB");
+ 		this.tablePrefix = "";
+@@ -388,16 +390,24 @@
+ 	protected DataTypeManagerDB(DBHandle handle, AddressMap addrMap, OpenMode openMode,
+ 			String tablePrefix, ErrorHandler errHandler, Lock lock, TaskMonitor monitor)
+ 			throws CancelledException, IOException, VersionException {
+-		this.tablePrefix = tablePrefix != null ? tablePrefix : "";
++		this.ownedProgram = getClass() == ProgramDataTypeManager.class && openMode == OpenMode.CREATE
++            && errHandler != null && errHandler.getClass() == ProgramDB.class
++            && handle == ((ProgramDB)errHandler).getDBHandle()
++            ? (ProgramDB) errHandler : null;
++        this.tablePrefix = tablePrefix != null ? tablePrefix : "";
+ 		this.dbHandle = handle;
+ 		this.readOnlyMode = (openMode == OpenMode.IMMUTABLE);
+ 		this.addrMap = addrMap;
+ 		this.errHandler = errHandler;
+ 		this.lock = lock;
+-		init(openMode, monitor);
+-	}
+-
+-	private void init(OpenMode openMode, TaskMonitor monitor)
++        try { init(openMode, monitor); }
++        catch (IOException | CancelledException | VersionException | RuntimeException | Error e) {
++            if (ownedProgram != null) ownedProgram.recordOwnedIntegrityFailure(e);
++            throw e;
++        }
++    }
++
++    private void init(OpenMode openMode, TaskMonitor monitor)
+ 			throws CancelledException, IOException, VersionException {
+ 		updateID();
+ 		initializeAdapters(openMode, monitor);
+@@ -832,7 +842,10 @@
+ 	protected void setProgramArchitecture(ProgramArchitecture programArchitecture,
+ 			VariableStorageManager variableStorageMgr, boolean store, TaskMonitor monitor)
+ 			throws IOException, CancelledException {
+-
++        try {
++
++
++		advanceOwnedGeneration();
+ 		this.programArchitecture = programArchitecture;
+ 		this.variableStorageMgr = programArchitecture != null ? variableStorageMgr : null;
+ 
+@@ -841,15 +854,34 @@
+ 				: DataOrganizationImpl.getDefaultOrganization();
+ 
+ 		if (store) {
++            Throwable primary = null;
+ 			try {
+ 				compilerSpecChanged(monitor);
+ 				updateLastChangeTime();
+ 			}
+-			finally {
+-				invalidateCache();
+-			}
+-		}
+-	}
++            catch (IOException | CancelledException | RuntimeException | Error failure) {
++                primary = failure;
++                if (isOwnedStrict()) ownedFailure(failure);
++                throw failure;
++            }
++            finally {
++                try { invalidateCache(); }
++                catch (RuntimeException | Error failure) {
++                    if (isOwnedStrict()) ownedFailure(failure);
++                    if (isOwnedStrict() && primary != null) {
++                        if (primary != failure) primary.addSuppressed(failure);
++                    }
++                    else throw failure;
++                }
++            }
++		}
++	
++        }
++        catch (IOException | CancelledException | RuntimeException | Error failure) {
++            if (isOwnedStrict()) ownedFailure(failure);
++            throw failure;
++        }
++    }
+ 
+ 	/**
+ 	 * Perform updates related to a compiler spec change, including:
+@@ -1234,6 +1266,7 @@
+ 
+ 	@Override
+ 	public DataType resolve(DataType dataType, DataTypeConflictHandler handler) {
++        ownedIngress(dataType);
+ 
+ 		if (dataType == DataType.DEFAULT) {
+ 			return dataType;
+@@ -1249,7 +1282,7 @@
+ 			return resolveBitFieldDataType((BitFieldDataType) dataType, handler);
+ 		}
+ 
+-		lock.acquire();
++		if (isOwnedStrict()) acquireOwnedUnchecked(); else lock.acquire();
+ 		DataTypeConflictHandler originalHandler = null;
+ 		boolean isEquivalenceCacheOwner = activateEquivalenceCache();
+ 		boolean isResolveCacheOwner = activateResolveCache();
+@@ -1258,8 +1291,9 @@
+ 			originalHandler = currentHandler;
+ 
+ 			if (contains(dataType)) {
+-				return dataType;
+-			}
++                resolvedDataType = dataType;
++            }
++            else {
+ 
+ 			if (handler != null) {
+ 				currentHandler = handler;
+@@ -1297,17 +1331,27 @@
+ 					setCachedEquivalence((DataTypeDB) resolvedDataType, dataType);
+ 				}
+ 			}
+-		}
+-		finally {
+-			try {
+-				if (isResolveCacheOwner) {
++            }
++        }
++        catch (RuntimeException | Error e) {
++            if (isOwnedStrict()) ownedFailure(e);
++            throw e;
++        }
++        finally {
++            try {
++                if (isResolveCacheOwner) {
+ 					// Process resolve queue and allowed resolvedDataType to be replaced
+ 					// during conflict processing
+ 					resolvedDataType = processResolveQueue(true, resolvedDataType);
+-				}
+-			}
+-			finally {
+-				if (isEquivalenceCacheOwner) {
++                    validateOwnedResolved(dataType, resolvedDataType);
++				}
++            }
++            catch (RuntimeException | Error e) {
++                if (isOwnedStrict()) ownedFailure(e);
++                throw e;
++            }
++            finally {
++                if (isEquivalenceCacheOwner) {
+ 					clearEquivalenceCache();
+ 				}
+ 				currentHandler = originalHandler;
+@@ -1340,6 +1384,7 @@
+ 				existingDataType.setName(dtName);
+ 			}
+ 			catch (Exception e) {
++            if (isOwnedStrict()) throw ownedFailure(e);
+ 				throw new AssertException(
+ 					"Failed to rename conflicting datatype: " + existingDataType.getPathName(), e);
+ 			}
+@@ -1790,7 +1835,7 @@
+ 	@Override
+ 	public void addDataTypes(Collection<DataType> dataTypes, DataTypeConflictHandler handler,
+ 			TaskMonitor monitor) throws CancelledException {
+-		lock.acquire();
++		if (isOwnedStrict()) acquireOwned(monitor); else lock.acquire();
+ 		boolean isEquivalenceCacheOwner = activateEquivalenceCache();
+ 		boolean isResolveCacheOwner = activateResolveCache();
+ 		// Note: extended hold time on lock may cause the GUI to become unresponsive.  Consider 
+@@ -1802,7 +1847,7 @@
+ 			monitor.setProgress(0);
+ 			int i = 0;
+ 			for (DataType dt : dataTypes) {
+-				monitor.checkCancelled();
++				if (isOwnedStrict()) checkOwnedCancellation(monitor); else monitor.checkCancelled();
+ 				resolve(dt, handler);
+ 				if (isResolveCacheOwner) {
+ 					processResolveQueue(false);
+@@ -1810,15 +1855,17 @@
+ 				monitor.setProgress(++i);
+ 			}
+ 		}
+-		finally {
+-			if (isResolveCacheOwner) {
+-				processResolveQueue(true);
+-			}
+-			if (isEquivalenceCacheOwner) {
+-				clearEquivalenceCache();
+-			}
+-			lock.release();
+-		}
++        catch (CancelledException | RuntimeException | Error failure) {
++            if (isOwnedStrict()) ownedFailure(failure);
++            throw failure;
++        }
++        finally {
++            try { if (isResolveCacheOwner) processResolveQueue(true); }
++            finally {
++                try { if (isEquivalenceCacheOwner) clearEquivalenceCache(); }
++                finally { lock.release(); }
++            }
++        }
+ 
+ 	}
+ 
+@@ -1887,7 +1934,9 @@
+ 	public DataType replaceDataType(DataType existingDt, DataType replacementDt,
+ 			boolean updateCategoryPath)
+ 			throws DataTypeDependencyException, IllegalArgumentException {
+-		lock.acquire();
++        ownedIngress(replacementDt);
++        if (isOwnedStrict() && existingDt instanceof Pointer) ownedIngress(existingDt);
++        if (isOwnedStrict()) acquireOwnedUnchecked(); else lock.acquire();
+ 		try {
+ 			if (!contains(existingDt)) {
+ 				throw new IllegalArgumentException(
+@@ -1915,7 +1964,8 @@
+ 
+ 			if (existingDt == replacementDt) {
+ 				// replacement was exact match
+-				return existingDt;
++				validateOwnedResolved(replacementDt, existingDt);
++                return existingDt;
+ 			}
+ 
+ 			replace(existingDt, replacementDt);
+@@ -1927,6 +1977,7 @@
+ 					replacementDt.setLastChangeTime(lastChangeTime);
+ 				}
+ 				catch (Exception e) {
++            if (isOwnedStrict()) throw ownedFailure(e);
+ 					Msg.error(this, "Unable to set the name to " + existingDt.getName() + "on " +
+ 						replacementDt + " while replacing the original datatype", e);
+ 				}
+@@ -1938,13 +1989,16 @@
+ 					replacementDt.setCategoryPath(path);
+ 				}
+ 				catch (Exception e) {
++            if (isOwnedStrict()) throw ownedFailure(e);
+ 					// not sure what to do here
+ 					Msg.error(this, "Unable to set the CatagoryPath to " + path + "on " +
+ 						replacementDt + " while replacing the original datatype", e);
+ 				}
+ 			}
+-			return replacementDt;
+-		}
++			validateOwnedResolved(replacementDt, replacementDt);
++            return replacementDt;
++		}
++        catch (RuntimeException | Error e) { if (isOwnedStrict()) ownedFailure(e); throw e; }
+ 		finally {
+ 			lock.release();
+ 		}
+@@ -2010,6 +2064,7 @@
+ 
+ 			// Provide replacement notification
+ 			dataTypeReplaced(replacedId, replacedDt.getDataTypePath(), replacementDt);
++            validateOwnedResolved(replacementDt, replacementDt);
+ 		}
+ 	}
+ 
+@@ -2959,6 +3014,7 @@
+ 				dt = builtInDt;
+ 			}
+ 			catch (Exception e) {
++            if (isOwnedStrict()) throw ownedFailure(e);
+ 				Msg.error(this, e);
+ 				dt = new MissingBuiltInDataType(catPath, name, classPath, this);
+ 			}
+@@ -3164,7 +3220,8 @@
+ 			}
+ 			else if (dt instanceof Pointer ptr) {
+ 				int len = ptr.hasLanguageDependantLength() ? -1 : ptr.getLength();
+-				newDataType = createPointer(ptr.getDataType(), cat, (byte) len, handler);
++				DataType child = isOwnedStrict() ? ownedPointerChild(ptr) : ptr.getDataType();
++                newDataType = createPointer(child, cat, (byte) len, handler);
+ 			}
+ 			else if (dt instanceof BuiltInDataType builtInDataType) {
+ 				newDataType = createBuiltIn(builtInDataType, cat);
+@@ -3331,10 +3388,15 @@
+ 	private Pointer createPointer(DataType dt, Category cat, byte length,
+ 			DataTypeConflictHandler handler) throws IOException {
+ 
+-		if (dt != null) {
+-			dt = resolve(dt, handler);
+-		}
+-		long dataTypeID = getResolvedID(dt);
++        long dataTypeID;
++        if (isOwnedStrict()) {
++            dataTypeID = resolveOwnedPointerChildID(dt, handler);
++            dt = dataTypeID == NULL_DATATYPE_ID ? null : getDataType(dataTypeID);
++        }
++        else {
++            if (dt != null) dt = resolve(dt, handler);
++            dataTypeID = getResolvedID(dt);
++        }
+ 
+ 		DBRecord record = pointerAdapter.createRecord(dataTypeID, cat.getID(), length);
+ 		PointerDB ptrDB = new PointerDB(this, dtCache, pointerAdapter, record);
+@@ -3719,8 +3781,15 @@
+ 	}
+ 
+ 	public void dispose() {
+-		sortedDataTypes = null;
+-		enumValueMap = null;
++        try {
++            if (isOwnedStrict()) {
++                ownedDisposed = true;
++                // A latched overflow must not prevent ProgramDB from disposing the other managers.
++                if (ownedGeneration == Long.MAX_VALUE) ownedFailure("Owned generation overflow at dispose");
++                else advanceOwnedGeneration();
++            }
++        }
++        finally { sortedDataTypes = null; enumValueMap = null; }
+ 	}
+ 
+ 	@Override
+@@ -3732,8 +3801,12 @@
+ 	 * Invalidates the cache.
+ 	 */
+ 	public void invalidateCache() {
++        try {
++
+ 		lock.acquire();
+-		try {
++        Throwable primary = null;
++		try {
++			advanceOwnedGeneration();
+ 			callingConventionAdapter.invalidateCache();
+ 			knownCallingConventions = null;
+ 			definedCallingConventions = null;
+@@ -3752,10 +3825,19 @@
+ 			updateFavorites();
+ 			idsToDataTypeMap.clear();
+ 		}
+-		finally {
+-			lock.release();
+-		}
+-	}
++        catch (RuntimeException | Error failure) {
++            primary = failure;
++            if (isOwnedStrict()) ownedFailure(failure);
++            throw failure;
++        }
++        finally { releaseOwnedLock(primary); }
++	
++        }
++        catch (RuntimeException | Error failure) {
++            if (isOwnedStrict()) ownedFailure(failure);
++            throw failure;
++        }
++    }
+ 
+ 	private void updateFavorites() {
+ 		Iterator<DataType> it = favoritesList.iterator();
+@@ -4829,9 +4911,26 @@
+ 				}
+ 			}
+ 			if (deactivateCache) {
+-				return processConflictQueue(dataType);
+-			}
+-		}
++				DataType surviving = processConflictQueue(dataType);
++                if (isOwnedStrict() && resolveCache != null) {
++                    // Reuse existing resolve state; no persistent ledger and no graph scan.
++                    for (var entry : resolveCache.entrySet()) {
++                        DataType resolved = entry.getValue();
++                        if (resolved instanceof DataTypeDB db) {
++                            if (db.dataMgr != this) throw ownedFailure("Foreign queued resolution");
++                            if (db.deleting || db.isDeleted()) continue; // surviving replacements checked separately
++                        }
++                        validateOwnedResolved(entry.getKey(), resolved);
++                    }
++                    if (surviving != null) validateOwnedResolved(surviving, surviving);
++                }
++                return surviving;
++			}
++		}
++        catch (RuntimeException | Error failure) {
++            if (isOwnedStrict()) ownedFailure(failure);
++            throw failure;
++        }
+ 		finally {
+ 			resolveQueue = null;
+ 			if (deactivateCache) {
+@@ -5118,6 +5217,219 @@
+ 		}
+ 	}
+ 
++
++
++    private final ProgramDB ownedProgram;
++    private volatile long ownedGeneration;
++    private volatile boolean ownedDisposed;
++
++    final boolean isOwnedStrict() { return ownedProgram != null; }
++    final ProgramDB ownedProgram() { return ownedProgram; }
++    final long ownedGeneration() { return ownedGeneration; }
++    final ghidra.framework.data.OwnedProgramIntegrityException ownedFailure(Throwable cause) {
++        if (ownedProgram == null) throw new IllegalStateException("Not an owned manager", cause);
++        return ownedProgram.recordOwnedIntegrityFailure(cause);
++    }
++    final ghidra.framework.data.OwnedProgramIntegrityException ownedFailure(String reason) {
++        return ownedFailure(new IllegalStateException(reason));
++    }
++    final void requireOwnedLive() {
++        if (ownedProgram == null) throw new java.lang.UnsupportedOperationException("Unowned manager");
++        ownedProgram.checkOwnedIntegrity();
++        if (ownedDisposed || ownedProgram.isClosed()) throw ownedFailure("Disposed owned manager");
++    }
++    final void checkOwnedCancellation(TaskMonitor monitor) throws CancelledException {
++        try {
++            if (monitor == null) throw new IllegalArgumentException("Missing monitor");
++            if (Thread.currentThread().isInterrupted()) throw new CancelledException();
++            monitor.checkCancelled();
++            if (Thread.currentThread().isInterrupted()) throw new CancelledException();
++        }
++        catch (CancelledException | RuntimeException | Error e) { ownedFailure(e); throw e; }
++    }
++    final void acquireOwned(TaskMonitor monitor) throws CancelledException {
++        requireOwnedLive();
++        checkOwnedCancellation(monitor);
++        synchronized (lock) {
++            if (lock.getOwner() != null && lock.getOwner() != Thread.currentThread())
++                throw ownedFailure("Owned lock contention");
++            lock.acquire();
++        }
++        try { checkOwnedCancellation(monitor); }
++        catch (CancelledException | RuntimeException | Error e) {
++            releaseOwnedLock(e);
++            throw e;
++        }
++    }
++    // Negative-only cleanup: retain the first failure and suppress a later release failure.
++    final void releaseOwnedLock(Throwable primary) {
++        try { lock.release(); }
++        catch (RuntimeException | Error failure) {
++            if (isOwnedStrict()) ownedFailure(failure);
++            if (isOwnedStrict() && primary != null) {
++                if (primary != failure) primary.addSuppressed(failure);
++            }
++            else throw failure;
++        }
++    }
++    private synchronized void advanceOwnedGeneration() {
++        if (!isOwnedStrict()) return;
++        if (ownedGeneration == Long.MAX_VALUE) throw ownedFailure("Owned generation overflow");
++        ++ownedGeneration;
++    }
++    final void acquireOwnedUnchecked() {
++        try { acquireOwned(TaskMonitor.DUMMY); }
++        catch (CancelledException e) { throw ownedFailure(e); }
++    }
++    private void ownedIngress(DataType input) {
++        if (!isOwnedStrict()) return;
++        requireOwnedLive();
++        if (input == null) throw ownedFailure("Null non-edge input");
++        if (input instanceof Pointer p) checkOwnedPointerCopy(p, this);
++    }
++    /** Negative-only cross-package ingress hook. Cannot grant authority or clear a receipt. */
++    public static void recordOwnedPointerFailure(DataTypeManager destination, Throwable cause) {
++        if (destination instanceof DataTypeManagerDB manager && manager.isOwnedStrict())
++            manager.ownedFailure(cause);
++    }
++    public static void checkOwnedPointerCopy(Pointer source, DataTypeManager destination) {
++        if (!(destination instanceof DataTypeManagerDB manager) || !manager.isOwnedStrict()) return;
++        manager.requireOwnedLive();
++        try {
++            // Check exact DB class and its field owner BEFORE ANY virtual getters or cloning.
++            if (source != null && source.getClass() == PointerDB.class) {
++                PointerDB pointer = (PointerDB) source;
++                if (pointer.dataMgr != manager) throw manager.ownedFailure("Foreign DB pointer ingress");
++                manager.acquireOwned(TaskMonitor.DUMMY);
++                try { manager.readOwnedPointerEdge(pointer, TaskMonitor.DUMMY); }
++                finally { manager.lock.release(); }
++            }
++            else if (source instanceof PointerDataType pointer) {
++                pointer.strictReferencedDataType(manager);
++            }
++            else throw manager.ownedFailure("Unknown pointer ingress");
++        }
++        catch (IOException | CancelledException | RuntimeException | Error e) {
++            throw manager.ownedFailure(e);
++        }
++    }
++    final long readOwnedPointerEdge(PointerDB selected, TaskMonitor monitor)
++            throws IOException, CancelledException {
++        requireOwnedLive();
++        try {
++            checkOwnedCancellation(monitor);
++            if (lock.getOwner() != Thread.currentThread() || selected == null ||
++                selected.getClass() != PointerDB.class || selected.dataMgr != this)
++                throw ownedFailure("Pointer owner/lock mismatch");
++            // No dtCache.get/contains/getID before the cached/current row comparison.
++            long edge = selected.readOwnedEdgeChecked(monitor);
++            if (!dtCache.isCachedIdentity(selected.getKey(), selected))
++                throw ownedFailure("Pointer cache identity mismatch");
++            if (edge != NULL_DATATYPE_ID) {
++                DataType child = getDataType(edge);
++                requireOwnedChildIdentity(child, edge);
++            }
++            checkOwnedCancellation(monitor);
++            return edge;
++        }
++        catch (IOException | CancelledException | RuntimeException | Error e) {
++            ownedFailure(e); throw e;
++        }
++    }
++    private void requireOwnedChildIdentity(DataType child, long id) throws IOException {
++        if (id == DEFAULT_DATATYPE_ID) {
++            if (child != DataType.DEFAULT) throw ownedFailure("DEFAULT identity mismatch");
++            return;
++        }
++        if (id == BAD_DATATYPE_ID) {
++            if (child != BadDataType.dataType) throw ownedFailure("BAD identity mismatch");
++            return;
++        }
++        if (child == null || id == NULL_DATATYPE_ID || child.getDataTypeManager() != this)
++            throw ownedFailure("Missing/unowned child");
++        if (child instanceof DataTypeDB db) {
++            DBRecord live = switch (getTableID(id)) {
++                case POINTER -> pointerAdapter.getRecord(id);
++                case ARRAY -> arrayAdapter.getRecord(id);
++                case COMPOSITE -> compositeAdapter.getRecord(id);
++                case TYPEDEF -> typedefAdapter.getRecord(id);
++                case FUNCTION_DEF -> functionDefAdapter.getRecord(id);
++                case ENUM -> enumAdapter.getRecord(id);
++                default -> null;
++            };
++            if (live == null || live.getKey() != id || !live.hasSameSchema(db.record) ||
++                !dtCache.isCachedIdentity(id, db) || db.isDeleted() || getDataType(id) != child)
++                throw ownedFailure("Child row identity mismatch");
++        }
++        else if (builtInMap.get(id) != child || !Long.valueOf(id).equals(builtIn2IdMap.get(child)) ||
++                builtinAdapter.getRecord(id) == null || child instanceof MissingBuiltInDataType)
++            throw ownedFailure("Builtin row identity mismatch");
++    }
++    final long resolveOwnedPointerChildID(DataType original, DataTypeConflictHandler handler) {
++        if (original == null) return NULL_DATATYPE_ID; // caller has already checked pointer authority
++        ownedIngress(original);
++        try {
++            DataType first = resolve(original, handler);
++            if (first == null) throw ownedFailure("First child resolution lost identity");
++            if (first instanceof DataTypeDB db && db.dataMgr != this)
++                throw ownedFailure("Foreign first child before second resolution");
++            DataType canonical = resolve(first, currentHandler);
++            if (canonical == null) throw ownedFailure("Final child resolution lost identity");
++            if (canonical instanceof DataTypeDB db && db.dataMgr != this)
++                throw ownedFailure("Foreign final child before ID lookup");
++            long id = getID(canonical);
++            requireOwnedChildIdentity(canonical, id);
++            return id;
++        }
++        catch (IOException | RuntimeException | Error e) { throw ownedFailure(e); }
++    }
++    private void validateOwnedResolved(DataType original, DataType result) {
++        if (!isOwnedStrict()) return;
++        try {
++            requireOwnedLive();
++            if (result == null) throw ownedFailure("Resolution lost original input");
++            if (result instanceof DataTypeDB db && db.dataMgr != this)
++                throw ownedFailure("Foreign resolution before ID lookup");
++            if (original instanceof Pointer && !(result instanceof PointerDB))
++                throw ownedFailure("Resolution changed pointer kind");
++            if (result instanceof PointerDB pointer) readOwnedPointerEdge(pointer, TaskMonitor.DUMMY);
++            requireOwnedChildIdentity(result, getID(result));
++        }
++        catch (IOException | CancelledException | RuntimeException | Error e) { throw ownedFailure(e); }
++    }
++    final boolean hasOwnedEmptyTypeSettings(long typeID, TaskMonitor monitor)
++            throws IOException, CancelledException {
++        try {
++            requireOwnedLive(); checkOwnedCancellation(monitor);
++            RecordIterator iterator = settingsAdapter.getRecords(typeID, typeID);
++            checkOwnedCancellation(monitor);
++            if (!iterator.hasNext()) return true;
++            checkOwnedCancellation(monitor);
++            DBRecord row = iterator.next();
++            checkOwnedCancellation(monitor);
++            requireOwnedSettingRow(row, typeID);
++            return false;
++        }
++        catch (IOException | CancelledException | RuntimeException | Error e) { ownedFailure(e); throw e; }
++    }
++    final void requireOwnedSettingRow(DBRecord row, long association) {
++        if (row == null || !row.hasSameSchema(SettingsDBAdapter.SETTINGS_SCHEMA) ||
++            row.getLongValue(SettingsDBAdapter.SETTINGS_ASSOCIATION_ID_COL) != association)
++            throw ownedFailure("Malformed settings association/schema");
++    }
++
++
++
++    private DataType ownedPointerChild(Pointer pointer) {
++        checkOwnedPointerCopy(pointer, this);
++        if (pointer instanceof PointerDataType memory) return memory.strictReferencedDataType(this);
++        try {
++            long edge = readOwnedPointerEdge((PointerDB) pointer, TaskMonitor.DUMMY);
++            return edge == NULL_DATATYPE_ID ? null : getDataType(edge);
++        }
++        catch (IOException | CancelledException e) { throw ownedFailure(e); }
++    }
++
+ }
+ 
+ class CategoryCache extends FixedSizeHashMap<String, Category> {

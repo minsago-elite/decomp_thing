@@ -1,0 +1,64 @@
+--- a/ghidra/program/database/code/DataDB.java
++++ b/ghidra/program/database/code/DataDB.java
+@@ -15,6 +15,8 @@
+  */
+ package ghidra.program.database.code;
+ 
++import java.io.IOException;
++
+ import java.util.*;
+ 
+ import db.DBRecord;
+@@ -795,4 +797,52 @@
+ 		return dataType.getDefaultSettings();
+ 	}
+ 
++
++
++    final DataType requireOwnedPointerSelection(CodeManager owner, ProgramDataTypeManager manager,
++            ghidra.util.task.TaskMonitor monitor) throws IOException, ghidra.util.exception.CancelledException {
++        DataDB node = this;
++        // Fixed storage; no reconstructed path or composite-table traversal.
++        DataDB[] seen = new DataDB[33];
++        int depth = 0;
++        long totalOffset = 0;
++        while (true) {
++            monitor.checkCancelled();
++            if (Thread.currentThread().isInterrupted()) throw new ghidra.util.exception.CancelledException();
++            if (node == null || (node.getClass() != DataDB.class && node.getClass() != DataComponent.class) ||
++                node.codeMgr != owner || node.dataMgr != manager || node.program != owner.getProgram() ||
++                node.isInvalid() || !node.checkIsValid())
++                throw new IOException("Stale/foreign listing identity");
++            for (int i = 0; i < depth; ++i) if (seen[i] == node) throw new IOException("Component cycle");
++            seen[depth] = node;
++            if (node.getClass() == DataDB.class) break;
++            if (depth == 32) return null; // bounded component policy refusal, never authority
++            DataComponent child = (DataComponent) node;
++            DataDB parent = child.parent;
++            if (parent == null || parent.componentCache == null ||
++                !parent.componentCache.isCachedIdentity(child.getKey(), child) ||
++                child.getKey() != child.getComponentIndex() || child.getParentOffset() < 0 || child.length < 1)
++                throw new IOException("Component parent-local identity mismatch");
++            try {
++                totalOffset = Math.addExact(totalOffset, child.getParentOffset());
++                if (!parent.address.addNoWrap(child.getParentOffset()).equals(child.address))
++                    throw new IOException("Component address mismatch");
++                Math.addExact(child.getParentOffset(), child.length);
++            }
++            catch (ArithmeticException | ghidra.program.model.address.AddressOverflowException e) {
++                throw new IOException("Component offset overflow", e);
++            }
++            node = parent; ++depth;
++        }
++        DBRecord row = owner.readOwnedDataRecord(node);
++        if (!owner.getAddressMap().decodeAddress(row.getKey()).equals(node.address) ||
++            row.getLongValue(DataDBAdapter.DATA_TYPE_ID_COL) !=
++                (node.dataType instanceof ghidra.program.database.DatabaseObject db ? db.getKey() : manager.getID(node.dataType)))
++            throw new IOException("Listing datatype/address mismatch");
++        monitor.checkCancelled();
++        if (Thread.currentThread().isInterrupted()) throw new ghidra.util.exception.CancelledException();
++        if (depth != 0) return null; // component semantics are not qualified
++        return dataType;
++    }
++
+ }

@@ -15,6 +15,26 @@ import kotlin.test.assertTrue
 
 class GeneratedCDeclarationsTest {
     @Test
+    fun `owned typed scalar pointer declarations and partial fallback retain schema four admission`() {
+        val prototype = "int normalize_name(char *input, int length, char **output)"
+        val typed = function("normalize_name", prototype, "int normalize_name(char *input, int length, char **output) { return length; }")
+        assertEquals(prototype, normalizedPrototype(typed))
+        for (status in listOf(RecoveryStatus.RECOVERED, RecoveryStatus.PARTIAL, RecoveryStatus.FAILED)) {
+            val model = RecoveredProgramModel(schemaVersion = 4, inputSha256 = "owned-fixture", functions = listOf(typed.copy(status = status)))
+            val canonical = model.toJson()
+            assertEquals(canonical, ProgramModelJson.readCanonical(canonical.toByteArray()).toJson())
+            assertTrue(canonical.contains("\"recoveryAssessment\": \"unassessed\""))
+            val extra = canonical.replace("\"prototype\":", "\"prototypeSource\": \"high_function\", \"prototype\":")
+            assertFailsWith<IllegalArgumentException> { ProgramModelJson.readCanonical(extra.toByteArray()) }
+        }
+        // Exporter refusals must not remove parser support for these existing declarator shapes.
+        for (supported in listOf("int (*normalize_name(int count))(const char *text)",
+            "int normalize_name(int (*callback)(int value), int values[static 4])")) {
+            assertEquals(supported, normalizedPrototype(function("normalize_name", supported)))
+        }
+    }
+
+    @Test
     fun `recovered types reject every directive spelling before header publication`() {
         for (marker in listOf("#", "%:", "??=")) {
             for (directive in listOf("define target renamed", "include <stddef.h>", "if 0", "")) {

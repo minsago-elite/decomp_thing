@@ -1,3 +1,7 @@
+import com.sun.security.auth.module.UnixSystem
+import java.util.HexFormat
+import java.io.IOException
+import java.nio.file.attribute.PosixFilePermission
 import java.io.File
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
@@ -5,6 +9,11 @@ import java.nio.ByteOrder
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
+import java.nio.file.StandardCopyOption
+import java.nio.file.StandardOpenOption
+import java.nio.channels.FileChannel
+import java.nio.channels.FileLock
+import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.attribute.BasicFileAttributes
 import java.nio.file.attribute.PosixFilePermissions
 import java.security.MessageDigest
@@ -1110,48 +1119,138 @@ val generateLlvmHostedWorkerClasspathReference = tasks.register("generateLlvmHos
     }
 }
 
-val buildAcpGateHelper = tasks.register<Exec>("buildAcpGateHelper") {
+fun validateAcpGateHelper(helper: Path, engine: groovy.lang.GroovyObject): Int {
+    fun identity() = Files.readAttributes(helper, "unix:dev,ino,mode,size,lastModifiedTime,ctime", LinkOption.NOFOLLOW_LINKS)
+    val before = identity()
+    require(Files.isRegularFile(helper, LinkOption.NOFOLLOW_LINKS) &&
+        ((before["mode"] as Int) and 0xfff) == 0x1ed &&
+        Files.getPosixFilePermissions(helper, LinkOption.NOFOLLOW_LINKS) == PosixFilePermissions.fromString("rwxr-xr-x")) {
+        "ACP gate helper must be a regular executable with mode0755"
+    }
+    val helperSize = before["size"] as Long
+    require(helperSize in 64L..(4L * 1024 * 1024)) {
+        "ACP gate helper must be a bounded ELF64 executable"
+    }
+    val bytes = Files.newByteChannel(helper, setOf(StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)).use { channel ->
+        val buffer = ByteBuffer.allocate(helperSize.toInt() + 1)
+        while (buffer.hasRemaining() && channel.read(buffer) != -1) { /* bounded read */ }
+        require(buffer.position().toLong() == helperSize && channel.size() == helperSize && before == identity()) {
+            "ACP gate-helper changed during bounded validation read"
+        }
+        buffer.array().copyOf(helperSize.toInt())
+    }
+    require(
+        bytes[0] == 0x7f.toByte() && bytes[1] == 'E'.code.toByte() &&
+            bytes[2] == 'L'.code.toByte() && bytes[3] == 'F'.code.toByte() &&
+            bytes[4] == 2.toByte() && bytes[5] == 1.toByte(),
+    ) { "ACP gate helper must be a little-endian ELF64 executable" }
+    val elf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+    val expectedMachine = when (System.getProperty("os.arch", "")) {
+        "amd64", "x86_64" -> 62
+        "aarch64" -> 183
+        else -> error("unsupported ACP gate-helper architecture")
+    }
+    require(elf.getShort(18).toInt() and 0xffff == expectedMachine) {
+        "ACP gate-helper architecture does not match the build host"
+    }
+    val programOffset = elf.getLong(32)
+    val programEntrySize = elf.getShort(54).toInt() and 0xffff
+    val programCount = elf.getShort(56).toInt() and 0xffff
+    require(programOffset >= 0 && programEntrySize >= 56 && programCount > 0) {
+        "ACP gate helper has an invalid ELF program-header table"
+    }
+    repeat(programCount) { index ->
+        val offset = Math.addExact(
+            programOffset,
+            Math.multiplyExact(index.toLong(), programEntrySize.toLong()),
+        )
+        require(offset <= bytes.size.toLong() - programEntrySize) {
+            "ACP gate-helper program headers exceed the artifact"
+        }
+        when (elf.getInt(offset.toInt())) {
+            3 -> error("ACP gate helper must not contain PT_INTERP")
+            2 -> {
+                val dynamicOffset = elf.getLong(offset.toInt() + 8)
+                val dynamicSize = elf.getLong(offset.toInt() + 32)
+                require(
+                    dynamicOffset >= 0 && dynamicSize >= 0 && dynamicSize % 16L == 0L &&
+                        dynamicOffset <= bytes.size.toLong() - dynamicSize,
+                ) { "ACP gate-helper dynamic table is malformed" }
+                var cursor = dynamicOffset
+                var terminated = false
+                while (cursor < dynamicOffset + dynamicSize) {
+                    when (elf.getLong(cursor.toInt())) {
+                        0L -> {
+                            terminated = true
+                            break
+                        }
+                        1L -> error("ACP gate helper must not contain DT_NEEDED")
+                    }
+                    cursor += 16L
+                }
+                require(terminated) { "ACP gate-helper dynamic table is unterminated" }
+            }
+        }
+    }
+    // The build-only engine owns launch, bounded reap, every stream close and
+    // interruption restoration. This is a stable-namespace pathname observation.
+    engine.invokeMethod("validateProcess", arrayOf(helper, object : groovy.lang.Closure<Unit>(helper) {
+        @Suppress("unused")
+        fun doCall() {
+            require(before == identity()) { "ACP gate helper changed during protocol validation" }
+        }
+    }))
+
+    return 120
+}
+
+abstract class AcpCompilerExecution {
+    @get:javax.inject.Inject
+    abstract val operations: org.gradle.process.ExecOperations
+}
+val acpCompilerExecution = objects.newInstance(AcpCompilerExecution::class.java)
+
+val acpPublicationSource = layout.projectDirectory.file("scripts/atomic-install-acp-publication.groovy")
+val acpGateHelperFlags = listOf("-std=c11", "-O2", "-static", "-Wall", "-Wextra", "-Werror", "-Wl,--build-id=none")
+val buildAcpGateHelper = tasks.register("buildAcpGateHelper") {
     group = "build"
-    description = "Builds the production static ACP sandbox gate helper"
-    inputs.file(acpGateHelperSource)
+    description = "Freshly compiles and atomically publishes the production static ACP gate helper"
+    inputs.files(acpGateHelperSource, acpPublicationSource)
     inputs.property("compiler", acpGateHelperCompiler)
     inputs.property("hostArchitecture", providers.systemProperty("os.arch"))
     outputs.file(acpGateHelperBinary)
-    // A compiler upgrade is security-relevant but is not visible to Gradle's path-based inputs.
+    // Compiler changes remain security-relevant: ALWAYS execute the resolved compiler.
     outputs.upToDateWhen { false }
-
-    doFirst {
-        val osName = System.getProperty("os.name", "").lowercase()
-        val architecture = System.getProperty("os.arch", "")
-        require("linux" in osName && architecture in setOf("amd64", "x86_64", "aarch64")) {
+    doLast {
+        require("linux" in System.getProperty("os.name", "").lowercase() &&
+            System.getProperty("os.arch", "") in setOf("amd64", "x86_64", "aarch64")) {
             "the production ACP gate helper supports only Linux x86-64 or aarch64"
         }
-        val configuredCompiler = file(acpGateHelperCompiler.get()).toPath().toAbsolutePath().normalize()
-        val compiler = configuredCompiler.toRealPath()
+        val compiler = file(acpGateHelperCompiler.get()).toPath().toAbsolutePath().normalize().toRealPath()
         require(Files.isRegularFile(compiler, LinkOption.NOFOLLOW_LINKS) && Files.isExecutable(compiler)) {
             "ACP gate-helper compiler is not an executable regular file: $compiler"
         }
-        val output = acpGateHelperBinary.get().asFile.toPath()
-        Files.createDirectories(output.parent)
-        commandLine(
-            compiler.toString(),
-            "-std=c11",
-            "-O2",
-            "-static",
-            "-Wall",
-            "-Wextra",
-            "-Werror",
-            "-Wl,--build-id=none",
-            acpGateHelperSource.asFile.absolutePath,
-            "-o",
-            output.toString(),
+        val engine = groovy.lang.GroovyShell().evaluate(acpPublicationSource.asFile) as groovy.lang.GroovyObject
+        val config = mapOf(
+            "output" to acpGateHelperBinary.get().asFile.toPath(),
+            "scratch" to layout.buildDirectory.dir("acp-publication-private").get().asFile.toPath(),
+            "compiler" to compiler, "source" to acpGateHelperSource.asFile.toPath(),
+            "recipe" to rootProject.file("build.gradle.kts").toPath(),
+            "publication" to acpPublicationSource.asFile.toPath(), "flags" to acpGateHelperFlags,
+            "compile" to object : groovy.lang.Closure<Int>(this) {
+                @Suppress("unused")
+                fun doCall(arguments: List<String>): Int = acpCompilerExecution.operations.exec {
+                    commandLine(arguments)
+                    isIgnoreExitValue = true
+                }.exitValue
+            },
+            "validate" to object : groovy.lang.Closure<Int>(this) {
+                @Suppress("unused")
+                fun doCall(path: Path): Int = validateAcpGateHelper(path, engine)
+            },
         )
-    }
-    doLast {
-        Files.setPosixFilePermissions(
-            acpGateHelperBinary.get().asFile.toPath(),
-            PosixFilePermissions.fromString("rwxr-xr-x"),
-        )
+        val receipt = engine.invokeMethod("publish", arrayOf(config))
+        extensions.extraProperties.set("atomicAcpPublicationReceipt", receipt)
     }
 }
 
@@ -1244,79 +1343,14 @@ val verifyAcpGateHelper = tasks.register("verifyAcpGateHelper") {
     description = "Verifies the packaged ACP gate helper's static ELF and fail-closed contract"
     dependsOn(buildAcpGateHelper)
     inputs.file(acpGateHelperBinary)
-
     doLast {
+        val engine = groovy.lang.GroovyShell().evaluate(acpPublicationSource.asFile) as groovy.lang.GroovyObject
         val helper = acpGateHelperBinary.get().asFile.toPath()
-        val helperSize = Files.size(helper)
-        require(helperSize in 64L..(4L * 1024 * 1024)) {
-            "ACP gate helper must be a bounded ELF64 executable"
-        }
-        val bytes = Files.readAllBytes(helper)
-        require(
-            bytes[0] == 0x7f.toByte() && bytes[1] == 'E'.code.toByte() &&
-                bytes[2] == 'L'.code.toByte() && bytes[3] == 'F'.code.toByte() &&
-                bytes[4] == 2.toByte() && bytes[5] == 1.toByte(),
-        ) { "ACP gate helper must be a little-endian ELF64 executable" }
-        val elf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
-        val expectedMachine = when (System.getProperty("os.arch", "")) {
-            "amd64", "x86_64" -> 62
-            "aarch64" -> 183
-            else -> error("unsupported ACP gate-helper architecture")
-        }
-        require(elf.getShort(18).toInt() and 0xffff == expectedMachine) {
-            "ACP gate-helper architecture does not match the build host"
-        }
-        val programOffset = elf.getLong(32)
-        val programEntrySize = elf.getShort(54).toInt() and 0xffff
-        val programCount = elf.getShort(56).toInt() and 0xffff
-        require(programOffset >= 0 && programEntrySize >= 56 && programCount > 0) {
-            "ACP gate helper has an invalid ELF program-header table"
-        }
-        repeat(programCount) { index ->
-            val offset = Math.addExact(
-                programOffset,
-                Math.multiplyExact(index.toLong(), programEntrySize.toLong()),
-            )
-            require(offset <= bytes.size.toLong() - programEntrySize) {
-                "ACP gate-helper program headers exceed the artifact"
-            }
-            when (elf.getInt(offset.toInt())) {
-                3 -> error("ACP gate helper must not contain PT_INTERP")
-                2 -> {
-                    val dynamicOffset = elf.getLong(offset.toInt() + 8)
-                    val dynamicSize = elf.getLong(offset.toInt() + 32)
-                    require(
-                        dynamicOffset >= 0 && dynamicSize >= 0 && dynamicSize % 16L == 0L &&
-                            dynamicOffset <= bytes.size.toLong() - dynamicSize,
-                    ) { "ACP gate-helper dynamic table is malformed" }
-                    var cursor = dynamicOffset
-                    var terminated = false
-                    while (cursor < dynamicOffset + dynamicSize) {
-                        when (elf.getLong(cursor.toInt())) {
-                            0L -> {
-                                terminated = true
-                                break
-                            }
-                            1L -> error("ACP gate helper must not contain DT_NEEDED")
-                        }
-                        cursor += 16L
-                    }
-                    require(terminated) { "ACP gate-helper dynamic table is unterminated" }
-                }
-            }
-        }
-        val probe = ProcessBuilder(helper.toString()).also { builder ->
-            builder.environment().clear()
-        }.start()
-        probe.outputStream.close()
-        val exited = probe.waitFor(5, TimeUnit.SECONDS)
-        if (!exited) {
-            probe.destroyForcibly()
-            probe.waitFor(2, TimeUnit.SECONDS)
-        }
-        require(exited && probe.exitValue() == 120) {
-            "ACP gate helper did not fail closed on a missing protocol invocation"
-        }
+        val receipt = buildAcpGateHelper.get().extensions.extraProperties.get("atomicAcpPublicationReceipt") as Map<*, *>
+        engine.invokeMethod("consume", arrayOf(helper, receipt["final"], object : groovy.lang.Closure<Int>(this) {
+            @Suppress("unused")
+            fun doCall(observed: Map<*, *>): Int = validateAcpGateHelper(helper, engine)
+        }))
     }
 }
 
@@ -1430,13 +1464,29 @@ val generateAcpGateHelperChecksum = tasks.register("generateAcpGateHelperChecksu
 
     doLast {
         val helper = acpGateHelperBinary.get().asFile.toPath()
-        val digest = MessageDigest.getInstance("SHA-256")
-            .digest(Files.readAllBytes(helper))
-            .joinToString("") { byte -> "%02x".format(byte) }
-        Files.writeString(
-            acpGateHelperChecksum.get().asFile.toPath(),
-            "$digest  decomp-acp-gate-helper\n",
-        )
+        val engine = groovy.lang.GroovyShell().evaluate(acpPublicationSource.asFile) as groovy.lang.GroovyObject
+        val receipt = buildAcpGateHelper.get().extensions.extraProperties.get("atomicAcpPublicationReceipt") as Map<*, *>
+        // Match the producer generation before AND after the bounded nofollow read,
+        // holding its canonical destination lock through checksum publication.
+        engine.invokeMethod("consume", arrayOf(helper, receipt["final"], object : groovy.lang.Closure<Unit>(this) {
+            @Suppress("unused")
+            fun doCall(observed: Map<*, *>) {
+                val digest = (observed["receipt"] as Map<*, *>)["sha256"] as String
+                val checksum = acpGateHelperChecksum.get().asFile.toPath()
+                if (Files.exists(checksum, LinkOption.NOFOLLOW_LINKS)) {
+                    require(Files.isRegularFile(checksum, LinkOption.NOFOLLOW_LINKS)) { "ACP checksum is not regular" }
+                }
+                Files.newByteChannel(checksum, setOf(StandardOpenOption.CREATE, StandardOpenOption.WRITE,
+                    StandardOpenOption.TRUNCATE_EXISTING, LinkOption.NOFOLLOW_LINKS)).use { channel ->
+                    val bytes = ByteBuffer.wrap("$digest  decomp-acp-gate-helper\n".toByteArray(Charsets.UTF_8))
+                    while (bytes.hasRemaining()) channel.write(bytes)
+                }
+            }
+        }))
+        // Gradle's project/output ownership continues through distribution reads.
+        // Independent simultaneous builds require disjoint build outputs; clean or
+        // external output replacement during this build is unsupported.
+
     }
 }
 
@@ -1718,15 +1768,92 @@ tasks.withType<Test>().configureEach {
     dependsOn(verifyCompiledJunitSignatures)
 }
 
+// A single build invocation must finish installation and test compilation before sealing.
+// Starting another build after sealing regenerates native-helper provenance and changes the JAR.
+// CI cleans and records the source pin before invoking this opt-in route; the seal rejects stale output.
+if (providers.gradleProperty("qualifyGhidraInvocation").orNull == "true") {
+    require(providers.environmentVariable("RUN_REAL_GHIDRA").orNull == "true") {
+        "Ghidra invocation qualification requires the real bundled worker lane"
+    }
+    require(!gradle.startParameter.isBuildCacheEnabled &&
+        providers.gradleProperty("kotlin.incremental").orNull == "false") {
+        "Ghidra invocation qualification requires cache-disabled, nonincremental compilation"
+    }
+    val sealInvocationBuild = tasks.register<Exec>("sealGhidraInvocationBuild") {
+        group = "verification"
+        description = "Seals fresh compiled and installed bytes before the hosted invocation probe"
+        dependsOn("installDist", "testClasses")
+        inputs.file("src/test/python/ghidra_invocation_provenance.py")
+        inputs.file(layout.buildDirectory.file("orchestration/ghidra-invocation-source-pin.json"))
+        outputs.file(layout.buildDirectory.file("orchestration/ghidra-invocation-build-provenance.json"))
+        outputs.upToDateWhen { false }
+        timeout.set(Duration.ofMinutes(1))
+        commandLine("python3", "-B", "src/test/python/ghidra_invocation_provenance.py", "seal")
+    }
+    tasks.named<Test>("test") {
+        dependsOn(sealInvocationBuild)
+        outputs.upToDateWhen { false }
+    }
+}
+
+val c4aTestFixtures = layout.buildDirectory.dir("c4a-test-fixtures")
+val c4aTestKeytool = javaToolchains.launcherFor {
+    languageVersion.set(JavaLanguageVersion.of(21))
+}
+val generateC4aTestFixtures = tasks.register<Exec>("generateC4aTestFixtures") {
+    group = "verification"
+    description = "Generates fresh bounded synthetic certificates for C4a loopback TLS tests"
+    inputs.file("scripts/generate-chatgpt-transport-c4a-fixtures.py")
+    outputs.dir(c4aTestFixtures)
+    outputs.upToDateWhen { false }
+    timeout.set(Duration.ofMinutes(2))
+    onlyIf { providers.gradleProperty("ciTestShard").orNull in listOf(null, "core", "core-main") }
+    doFirst {
+        commandLine(
+            "python3", "-B", "scripts/generate-chatgpt-transport-c4a-fixtures.py",
+            "--keytool", c4aTestKeytool.get().metadata.installationPath.file("bin/keytool").asFile.absolutePath,
+            "--output", c4aTestFixtures.get().asFile.absolutePath,
+        )
+    }
+}
+val c4aShutdownIsolated = tasks.register<Test>("c4aShutdownIsolated") {
+    group = "verification"
+    description = "Runs the process-global C4a shutdown test in its own bounded JVM"
+    testClassesDirs = sourceSets["test"].output.classesDirs
+    classpath = sourceSets["test"].runtimeClasspath
+    useJUnitPlatform { includeTags("shutdown") }
+    filter {
+        includeTestsMatching("decompengine.builtin.provider.ChatGptPlanTransportLifetimeV1Test")
+        isFailOnNoMatchingTests = true
+    }
+    forkEvery = 1
+    maxParallelForks = 1
+    maxHeapSize = "512m"
+    timeout.set(Duration.ofMinutes(2))
+    outputs.upToDateWhen { false }
+    outputs.cacheIf("C4a shutdown must run in a fresh test JVM") { false }
+    onlyIf { providers.gradleProperty("ciTestShard").orNull in listOf(null, "core", "core-main") }
+    jvmArgs("-XX:-UsePerfData")
+    doFirst {
+        check(temporaryDir.isDirectory || temporaryDir.mkdirs()) { "C4a shutdown temporary directory unavailable" }
+        systemProperty("java.io.tmpdir", temporaryDir.absolutePath)
+        environment("TMPDIR", temporaryDir.absolutePath)
+    }
+}
+
 tasks.test {
     // The authenticated model boundary returns a real 512 MiB array in the largest ordinary test.
     maxHeapSize = "2g"
     val shard = providers.gradleProperty("ciTestShard").orNull
     when (shard) {
-        null -> useJUnitPlatform()
-        "core", "core-main", "core-oracle" -> useJUnitPlatform { excludeTags("ci-live") }
-        "live" -> useJUnitPlatform { includeTags("ci-live") }
+        null -> useJUnitPlatform { excludeTags("shutdown") }
+        "core", "core-main", "core-oracle" -> useJUnitPlatform { excludeTags("ci-live", "shutdown") }
+        "live" -> useJUnitPlatform { includeTags("ci-live"); excludeTags("shutdown") }
         else -> error("unsupported ciTestShard: $shard")
+    }
+    dependsOn(generateC4aTestFixtures, c4aShutdownIsolated)
+    doFirst {
+        systemProperty("c4.fixtures", c4aTestFixtures.get().asFile.absolutePath)
     }
     val livePackagePartition = providers.gradleProperty("ciLivePackagePartition").orNull
     if (livePackagePartition != null) {
@@ -1916,13 +2043,426 @@ tasks.named<JavaExec>("run") {
     systemProperty("decompengine.ghidra.bundle", project(":ghidra-bridge").layout.buildDirectory.dir("bundle").get().asFile.absolutePath)
 }
 
-tasks.named<Sync>("installDist") {
-    doLast {
-        destinationDir.resolve("libexec/ghidra").walkTopDown().filter { it.isFile }.forEach { file ->
-            check(file.setLastModified(315532800000L)) { "Could not normalize installed Ghidra timestamp: $file" }
+/** Cooperating writers only: ancestors must be trusted; arbitrary same-owner interference is excluded. */
+object AtomicInstallPublisher {
+    data class Replacement(val logicalName: String, val source: Path, val target: Path,
+        val mode: Set<java.nio.file.attribute.PosixFilePermission>, val expectedLength: Long, val expectedSha256: String)
+    fun digest(path: Path): String {
+        val hash = MessageDigest.getInstance("SHA-256")
+        Files.newInputStream(path, LinkOption.NOFOLLOW_LINKS).use { input ->
+            val bytes = ByteArray(65536)
+            while (true) { val count = input.read(bytes); if (count < 0) break; hash.update(bytes, 0, count) }
+        }
+        return HexFormat.of().formatHex(hash.digest())
+    }
+    fun mode(path: Path) = Files.getPosixFilePermissions(path, LinkOption.NOFOLLOW_LINKS)
+    private fun trusted(path: Path, owned: Boolean) {
+        require(!Files.isSymbolicLink(path)) { "Symbolic link in install trust boundary: $path" }
+        val ownerUid = (Files.getAttribute(path, "unix:uid", LinkOption.NOFOLLOW_LINKS) as Number).toLong()
+        val currentUid = UnixSystem().uid
+        require(ownerUid == currentUid || (!owned && ownerUid == 0L)) { "Untrusted install owner: $path (uid=$ownerUid)" }
+        require(Files.getFileStore(path).supportsFileAttributeView("posix")) { "Atomic installation requires a POSIX trust boundary: $path" }
+        val permissions = mode(path)
+        require(PosixFilePermission.GROUP_WRITE !in permissions &&
+            PosixFilePermission.OTHERS_WRITE !in permissions) { "Foreign-writable install path: $path" }
+    }
+    fun directory(path: Path, owned: Boolean = true) {
+        require(path.isAbsolute && path.normalize() == path) { "Noncanonical install directory: $path" }
+        path.parent?.let { directory(it, false) }
+        if (!Files.exists(path, LinkOption.NOFOLLOW_LINKS)) Files.createDirectory(path, PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwxr-xr-x")))
+        require(Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS) && path.toRealPath() == path) { "Invalid install directory: $path" }
+        trusted(path, owned)
+    }
+    fun prepare(root: Path): Path {
+        directory(root)
+        val key = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(root.toString().toByteArray(Charsets.UTF_8)))
+        return root.resolveSibling(".install-$key.lock")
+    }
+    class Writer : AutoCloseable {
+        private var channel: FileChannel? = null
+        private var lock: FileLock? = null
+        @Synchronized fun acquire(root: Path) {
+            check(channel == null) { "Install writer already acquired" }
+            val path = prepare(root)
+            if (!Files.exists(path, LinkOption.NOFOLLOW_LINKS)) {
+                try { Files.createFile(path, PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------"))) }
+                catch (_: java.nio.file.FileAlreadyExistsException) { /* another cooperating writer */ }
+            }
+            require(Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) { "Invalid install lock: $path" }
+            trusted(path, true)
+            require((Files.getAttribute(path, "unix:nlink", LinkOption.NOFOLLOW_LINKS) as Number).toInt() == 1) { "Hard-linked install lock: $path" }
+            val opened = FileChannel.open(path, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)
+            try {
+                val held = try { opened.tryLock() } catch (_: java.nio.channels.OverlappingFileLockException) { null }
+                check(held != null) { "Another installDist writer holds $path" }
+                channel = opened; lock = held
+                directory(root.resolve("lib")); directory(root.resolve("bin"))
+            } catch (failure: Throwable) { opened.close(); channel = null; lock = null; throw failure }
+        }
+        @Synchronized override fun close() { try { lock?.release() } finally { lock = null; channel?.close(); channel = null } }
+    }
+    // Test-only seams wrap actual production operations; no CLI bypass or non-atomic fallback.
+    open class IO {
+        open fun event(phase: String, path: Path) {}
+        open fun copy(source: Path, target: Path) { Files.copy(source, target, StandardCopyOption.REPLACE_EXISTING) }
+        open fun forceFile(path: Path) { FileChannel.open(path, StandardOpenOption.WRITE).use { it.force(true) } }
+        open fun move(source: Path, target: Path) { Files.move(source, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING) }
+        open fun forceDirectory(path: Path) { FileChannel.open(path, StandardOpenOption.READ).use { it.force(true) } }
+        open fun prune(path: Path) { Files.delete(path) }
+    }
+    private fun regular(path: Path) = Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) && !Files.isSymbolicLink(path)
+    private fun matches(path: Path, r: Replacement) = regular(path) && Files.size(path) == r.expectedLength && digest(path) == r.expectedSha256 && mode(path) == r.mode
+    fun publish(root: Path, replacements: List<Replacement>, appName: String, io: IO = IO()) {
+        val lib = root.resolve("lib"); val bin = root.resolve("bin")
+        directory(lib); directory(bin)
+        require(replacements.map { it.target }.toSet().size == replacements.size) { "Duplicate protected destination" }
+        require(replacements.sumOf { it.expectedLength } <= 4L * 1024 * 1024 * 1024) { "Protected byte limit exceeded" }
+        val staged = mutableListOf<Pair<Replacement, Path>>()
+        var phase = "preflight"
+        var renames = 0
+        var prunes = 0
+        var renameAttempts = 0
+        var pruneAttempts = 0
+        var primary: Throwable? = null
+        try {
+            for (r in replacements) {
+                require(r.target.parent == lib || r.target.parent == bin) { "Protected target escaped installation: ${r.target}" }
+                require(r.target.normalize() == r.target && r.logicalName == r.target.fileName.toString())
+                require(!Files.exists(r.target, LinkOption.NOFOLLOW_LINKS) || regular(r.target)) { "Invalid protected target: ${r.target}" }
+                require(regular(r.source) && r.expectedLength in 1..(512L * 1024 * 1024)) { "Invalid protected source: ${r.source}" }
+                require(Files.size(r.source) == r.expectedLength && digest(r.source) == r.expectedSha256) { "Source changed before copy: ${r.source}" }
+            }
+            for (r in replacements) {
+                phase = "stage ${r.target}"
+                val temp = Files.createTempFile(r.target.parent, ".install-", ".tmp")
+                staged += r to temp // register ownership immediately, including failed copies/forces
+                io.event("source-before-copy", r.source)
+                require(Files.size(r.source) == r.expectedLength && digest(r.source) == r.expectedSha256) { "Source changed before copy: ${r.source}" }
+                io.copy(r.source, temp)
+                Files.setPosixFilePermissions(temp, r.mode)
+                io.event("source-after-copy", r.source)
+                require(Files.size(r.source) == r.expectedLength && digest(r.source) == r.expectedSha256 && matches(temp, r)) { "Source/stage changed during copy: ${r.source}" }
+                io.forceFile(temp)
+                io.event("staged", r.target)
+            }
+            fun commit(pair: Pair<Replacement, Path>) {
+                val (r, temp) = pair
+                phase = "rename ${r.target}"
+                if (!matches(r.target, r)) {
+                    io.event("before-rename", r.target)
+                    renameAttempts++
+                    io.move(temp, r.target); renames++
+                }
+                phase = "directory-force ${r.target}"
+                io.forceDirectory(r.target.parent)
+                require(matches(r.target, r)) { "Published validation failed: ${r.target}" }
+                io.event("published", r.target)
+            }
+            staged.filter { it.first.target.parent == lib }.sortedWith(compareBy<Pair<Replacement, Path>> {
+                if (it.first.logicalName == appName) 1 else if (it.first.logicalName.endsWith(".jar")) 0 else 2
+            }.thenBy { it.first.logicalName }).forEach { commit(it) }
+            phase = "prune stale protected JARs"
+            val expected = replacements.filter { it.target.parent == lib }.map { it.logicalName }.toSet()
+            Files.list(lib).use { entries -> entries.filter { it.fileName.toString().endsWith(".jar") && it.fileName.toString() !in expected }.sorted().forEach {
+                require(regular(it)) { "Invalid stale JAR: $it" }; pruneAttempts++; io.prune(it); prunes++
+            } }
+            phase = "prune directory-force"
+            io.forceDirectory(lib)
+            phase = "validate protected lib closure"
+            val actual = Files.list(lib).use { entries -> entries.filter { it.fileName.toString().endsWith(".jar") || it.fileName.toString() in expected }.map { it.fileName.toString() }.toList().toSet() }
+            require(actual == expected) { "Protected installed lib set mismatch: $actual != $expected" }
+            replacements.filter { it.target.parent == lib }.forEach { require(matches(it.target, it)) { "Lib verification failed: ${it.target}" } }
+            io.event("lib-validated", lib)
+            staged.filter { it.first.target.parent == bin }.sortedBy { it.first.logicalName }.forEach { commit(it) }
+            phase = "final verification"
+            replacements.forEach { require(matches(it.target, it)) { "Final protected verification failed: ${it.target}" } }
+        } catch (failure: Throwable) {
+            val wrapped = IllegalStateException("installDist atomic publication failed during $phase; completed renames=$renames, prunes=$prunes, rename attempts=$renameAttempts, prune attempts=$pruneAttempts; " +
+                if (renameAttempts == 0 && pruneAttempts == 0) "protected targets unchanged (unprotected Sync files may have changed)" else "mixed complete generation possible; durability may be unconfirmed; retry under exclusive ownership", failure)
+            primary = wrapped; throw wrapped
+        } finally {
+            var cleanup: Throwable? = null
+            staged.forEach { (_, temp) -> try { Files.deleteIfExists(temp) } catch (failure: Throwable) {
+                if (cleanup == null) cleanup = failure else cleanup!!.addSuppressed(failure)
+            } }
+            cleanup?.let { if (primary != null) primary!!.addSuppressed(it) else throw IllegalStateException("Protected publication completed but own-temp cleanup failed", it) }
         }
     }
 }
+
+abstract class InstallWriterLockService : org.gradle.api.services.BuildService<org.gradle.api.services.BuildServiceParameters.None>, AutoCloseable {
+    private val writer = AtomicInstallPublisher.Writer()
+    fun acquire(root: Path) = writer.acquire(root)
+    override fun close() = writer.close()
+}
+val installWriterLock = gradle.sharedServices.registerIfAbsent("installDistWriterLock", InstallWriterLockService::class) { maxParallelUsages = 1 }
+fun installDigest(path: Path) = AtomicInstallPublisher.digest(path)
+
+val compileAtomicInstallProbeAgent = tasks.register<org.gradle.api.tasks.compile.JavaCompile>("compileAtomicInstallProbeAgent") {
+    group = "verification"
+    source(layout.projectDirectory.file("src/test/java/decompengine/install/AtomicInstallProbeAgent.java"))
+    classpath = files()
+    options.release.set(21)
+    javaCompiler.set(javaToolchains.compilerFor { languageVersion.set(JavaLanguageVersion.of(21)) })
+    destinationDirectory.set(layout.buildDirectory.dir("atomic-install/agent-classes"))
+    inputs.property("atomicProbeAgentVersion", 2)
+}
+
+val atomicInstallProbeAgentJar = tasks.register<Jar>("atomicInstallProbeAgentJar") {
+    group = "verification"
+    description = "Builds the test-only premain agent without application classes"
+    dependsOn(compileAtomicInstallProbeAgent)
+    archiveFileName.set("atomic-install-probe-agent.jar")
+    destinationDirectory.set(layout.buildDirectory.dir("atomic-install"))
+    from(compileAtomicInstallProbeAgent.flatMap { it.destinationDirectory }) { include("decompengine/install/AtomicInstallProbeAgent*.class") }
+    manifest { attributes["Premain-Class"] = "decompengine.install.AtomicInstallProbeAgent" }
+    inputs.file(layout.projectDirectory.file("src/test/java/decompengine/install/AtomicInstallProbeAgent.java"))
+    inputs.property("atomicProbeAgentVersion", 2)
+}
+
+tasks.named<Sync>("installDist") {
+    usesService(installWriterLock)
+    val appJar = tasks.named<Jar>("jar")
+    val launcherName = application.applicationName
+    val protectedRoot = "lib"
+    val referenceFiles = listOf(kotlinBootClasspathReference, gccBundledGhidraReference, llvmHostedWorkerClasspathReference)
+    val protectedReferenceNames = referenceFiles.map { it.get().asFile.name }.toSet()
+    dependsOn("startScripts", stageKotlinBootRuntime)
+    inputs.property("atomicInstallPublicationPolicy", "fixed-path-v3")
+    inputs.files(appJar.flatMap { it.archiveFile }, referenceFiles, tasks.named<org.gradle.jvm.application.tasks.CreateStartScripts>("startScripts").map { it.outputDir })
+    inputs.dir(kotlinBootRuntimeDirectory)
+    preserve {
+        include("lib/*.jar", "bin/$launcherName", "bin/$launcherName.bat")
+        protectedReferenceNames.forEach { include("lib/$it") }
+    }
+    eachFile {
+        val p = relativePath.pathString
+        if ((p.startsWith("lib/") && (p.substringAfter("lib/") in protectedReferenceNames || p.endsWith(".jar"))) || p == "bin/$launcherName" || p == "bin/$launcherName.bat") exclude()
+    }
+    doFirst {
+        // This runs before Sync, including on a first install. The lock is keyed by destination,
+        // not buildDir, and lives outside the tree Sync owns.
+        installWriterLock.get().acquire(destinationDir.toPath().toAbsolutePath().normalize())
+    }
+    doLast {
+        val destinationPath = destinationDir.toPath().toAbsolutePath().normalize()
+        val installRoot = destinationPath.toRealPath()
+        require(destinationPath == installRoot) { "installDist destination is not canonical: $destinationPath" }
+        val lib = installRoot.resolve("lib")
+        val bin = installRoot.resolve("bin")
+        require(!Files.isSymbolicLink(lib) && !Files.isSymbolicLink(bin)) { "Protected destination directory is a symbolic link" }
+        Files.createDirectories(lib)
+        Files.createDirectories(bin)
+        val stagedRuntimeRoot = kotlinBootRuntimeDirectory.get().asFile.toPath()
+        val stagedRuntimeNames = Files.list(stagedRuntimeRoot).use { entries -> entries.map { it.fileName.toString() }.sorted().toList() }
+        val appName = appJar.get().archiveFile.get().asFile.name
+        val jarNames = stagedRuntimeNames
+        require(appName in jarNames && jarNames.size == jarNames.toSet().size && jarNames.all { it.matches(Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,250}\\.jar")) }) { "Invalid or incomplete protected runtime JAR names" }
+        val refs = referenceFiles.map { it.get().asFile.toPath() }
+        val scripts = requireNotNull(tasks.named<org.gradle.jvm.application.tasks.CreateStartScripts>("startScripts").get().outputDir).toPath()
+        val sources = linkedMapOf<String, Path>()
+        stagedRuntimeNames.forEach { name ->
+            val source = stagedRuntimeRoot.resolve(name).normalize()
+            require(source.parent == stagedRuntimeRoot && Files.isRegularFile(source, LinkOption.NOFOLLOW_LINKS) && !Files.isSymbolicLink(source)) { "Invalid staged runtime source: $source" }
+            require(sources.put(name, source) == null) { "Duplicate staged JAR name $name" }
+        }
+        refs.forEach { p -> require(sources.put(p.fileName.toString(), p) == null) { "Protected reference name collides with runtime JAR: $p" } }
+        val replacements = sources.entries.map { (name, source) ->
+            val target = lib.resolve(name).normalize(); require(target.parent == lib && target.startsWith(installRoot))
+            require(Files.isRegularFile(source, LinkOption.NOFOLLOW_LINKS) && !Files.isSymbolicLink(source)) { "Protected source is not a regular file: $source" }
+            require(Files.size(source) in 1..(512L * 1024 * 1024)) { "Protected source exceeds its bounded file size: $source" }
+            require(Files.isDirectory(lib, LinkOption.NOFOLLOW_LINKS) && !Files.isSymbolicLink(lib)) { "Protected lib directory is not an owned real directory" }
+            require(!Files.isSymbolicLink(target) && (!Files.exists(target, LinkOption.NOFOLLOW_LINKS) || Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS))) { "Invalid protected destination: $target" }
+            val mode = if (Files.getFileStore(lib).supportsFileAttributeView("posix")) {
+                if (name.endsWith(".jar")) PosixFilePermissions.fromString("rw-r--r--") else PosixFilePermissions.fromString("rw-r--r--")
+            } else emptySet()
+            val actualMode = if (mode.isEmpty()) emptySet() else mode
+            AtomicInstallPublisher.Replacement(name, source, target, actualMode, Files.size(source), installDigest(source))
+        }.toMutableList()
+        require(replacements.sumOf { it.expectedLength } <= 4L * 1024 * 1024 * 1024) { "Protected runtime publication exceeds aggregate byte limit" }
+        val appEntry = sources.getValue(appName)
+        JarFile(appEntry.toFile(), false).use { jar -> require(jar.getEntry("decompengine/project/ProgramModelJson.class") != null) { "Application JAR is missing ProgramModelJson.class" } }
+        val launchers = listOf(launcherName, "$launcherName.bat").map { name ->
+            val source = scripts.resolve(name); require(Files.isRegularFile(source, LinkOption.NOFOLLOW_LINKS))
+            val target = bin.resolve(name).normalize(); require(target.parent == bin && target.startsWith(installRoot))
+            require(Files.isDirectory(bin, LinkOption.NOFOLLOW_LINKS) && !Files.isSymbolicLink(bin)) { "Protected bin directory is not an owned real directory" }
+            require(!Files.isSymbolicLink(target) && (!Files.exists(target, LinkOption.NOFOLLOW_LINKS) || Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS))) { "Invalid protected destination: $target" }
+            val mode = if (Files.getFileStore(bin).supportsFileAttributeView("posix") && name.endsWith(".bat").not()) PosixFilePermissions.fromString("rwxr-xr-x") else if (Files.getFileStore(bin).supportsFileAttributeView("posix")) PosixFilePermissions.fromString("rw-r--r--") else emptySet()
+            AtomicInstallPublisher.Replacement(name, source, target, mode, Files.size(source), installDigest(source))
+        }
+        @Suppress("UNCHECKED_CAST")
+        val testEvent = extensions.extraProperties.properties["atomicInstallTestEvent"] as? java.util.function.BiConsumer<String, Path>
+        AtomicInstallPublisher.publish(installRoot, replacements + launchers, appName, object : AtomicInstallPublisher.IO() {
+            override fun event(phase: String, path: Path) { testEvent?.accept(phase, path) }
+        })
+        destinationDir.resolve("libexec/ghidra").walkTopDown().filter { it.isFile }.forEach { file ->
+            check(file.setLastModified(315532800000L)) { "Could not normalize installed Ghidra timestamp: $file" }
+        }
+        installWriterLock.get().close()
+    }
+}
+
+val verifyAtomicApplicationPublication = tasks.register("verifyAtomicApplicationPublication") {
+    usesService(installWriterLock)
+    group = "verification"
+    description = "Exercises the production protected-file publisher and writer lock without product compilation"
+    outputs.upToDateWhen { false }
+    doLast {
+        // External build-control driver uses this lane to exercise the SAME BuildService on
+        // separate Gradle processes/buildDirs. It never invokes Sync or compiles product code.
+        @Suppress("UNCHECKED_CAST")
+        val writerControl = extensions.extraProperties.properties["atomicWriterControl"] as? Map<String, String>
+        if (writerControl != null) {
+            val destination = Path.of(writerControl.getValue("destination"))
+            installWriterLock.get().acquire(destination)
+            Files.writeString(Path.of(writerControl.getValue("ready")), "locked\n", StandardOpenOption.CREATE_NEW)
+            if (writerControl["failure"] == "true") error("injected writer task failure")
+            val release = Path.of(writerControl.getValue("release"))
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(120)
+            while (!Files.exists(release)) {
+                check(System.nanoTime() < deadline) { "writer control barrier timeout" }
+                Thread.sleep(20)
+            }
+            installWriterLock.get().close()
+            return@doLast
+        }
+        val base = layout.buildDirectory.dir("atomic-install/publisher-controls").get().asFile.toPath().toAbsolutePath().normalize()
+        AtomicInstallPublisher.directory(base)
+        val root = Files.createTempDirectory(base, "run-")
+        val passed = mutableListOf<String>()
+        fun fixture(name: String): Pair<Path, List<AtomicInstallPublisher.Replacement>> {
+            val install = root.resolve(name)
+            AtomicInstallPublisher.Writer().use { it.acquire(install) }
+            val sources = Files.createDirectory(root.resolve("$name-sources"))
+            val replacements = listOf("dep.jar", "app.jar", "classpath-reference-v1.json", "launcher", "launcher.bat").map { entry ->
+                val target = install.resolve(if (entry.startsWith("launcher")) "bin/$entry" else "lib/$entry")
+                val source = Files.writeString(sources.resolve(entry), "new generation $entry")
+                Files.writeString(target, "old generation $entry")
+                val mode = PosixFilePermissions.fromString(if (entry == "launcher") "rwxr-xr-x" else "rw-r--r--")
+                Files.setPosixFilePermissions(target, mode)
+                AtomicInstallPublisher.Replacement(entry, source, target, mode, Files.size(source), installDigest(source))
+            }
+            return install to replacements
+        }
+        fun failure(name: String, io: AtomicInstallPublisher.IO, changed: Boolean = false) {
+            val (install, replacements) = fixture(name)
+            val before = replacements.associate { it.target to installDigest(it.target) }
+            Files.writeString(install.resolve("lib/stale.jar"), "stale")
+            val foreign = Files.writeString(install.resolve("lib/.install-foreign.tmp"), "not ours")
+            var caught: Throwable? = null
+            try { AtomicInstallPublisher.publish(install, replacements, "app.jar", io) } catch (t: IllegalStateException) { caught = t }
+            check(caught != null) { "$name did not reject" }
+            if (!changed) check(before.all { (path, digest) -> installDigest(path) == digest }) { "$name changed protected targets before publication" }
+            else check(installDigest(replacements.first().target) == replacements.first().expectedSha256) { "$name did not reach a rename" }
+            check(Files.readString(replacements.first { it.logicalName == "launcher" }.target).startsWith("old")) { "$name published launcher before closure validation" }
+            check(Files.readString(foreign) == "not ours")
+            listOf("lib", "bin").forEach { dir -> check(Files.list(install.resolve(dir)).use { it.filter { p -> p.fileName.toString().startsWith(".install-") && p != foreign }.count() } == 0L) }
+            println("CONTROL $name PASS ${caught.message}")
+            passed += name
+        }
+        failure("source-before-copy", object : AtomicInstallPublisher.IO() {
+            override fun event(phase: String, path: Path) { if (phase == "source-before-copy") Files.writeString(path, "changed source") }
+        })
+        failure("source-after-copy", object : AtomicInstallPublisher.IO() {
+            override fun event(phase: String, path: Path) { if (phase == "source-after-copy") Files.writeString(path, "changed source") }
+        })
+        failure("copy-failure", object : AtomicInstallPublisher.IO() {
+            override fun copy(source: Path, target: Path) { Files.writeString(target, "partial"); throw IOException("injected copy") }
+        })
+        failure("file-force-failure", object : AtomicInstallPublisher.IO() {
+            override fun forceFile(path: Path) { throw IOException("injected file force") }
+        })
+        failure("last-stage-file-force", object : AtomicInstallPublisher.IO() {
+            private var count = 0
+            override fun forceFile(path: Path) { if (++count == 5) throw IOException("injected last stage force"); super.forceFile(path) }
+        })
+        failure("corrupt-copy", object : AtomicInstallPublisher.IO() {
+            override fun copy(source: Path, target: Path) { super.copy(source, target); Files.writeString(target, "corrupted stage") }
+        })
+        failure("unsupported-atomic-move", object : AtomicInstallPublisher.IO() {
+            override fun move(source: Path, target: Path) { throw AtomicMoveNotSupportedException(source.toString(), target.toString(), "injected unsupported") }
+        })
+        failure("post-rename-directory-force", object : AtomicInstallPublisher.IO() {
+            override fun forceDirectory(path: Path) { throw IOException("injected directory force") }
+        }, changed = true)
+        failure("stale-prune-failure", object : AtomicInstallPublisher.IO() {
+            override fun prune(path: Path) { throw IOException("injected prune") }
+        }, changed = true)
+        failure("stale-closure-mismatch", object : AtomicInstallPublisher.IO() {
+            override fun prune(path: Path) { /* simulate an unsuccessful deletion, caught by closure check */ }
+        }, changed = true)
+        failure("prune-directory-force", object : AtomicInstallPublisher.IO() {
+            private var count = 0
+            override fun forceDirectory(path: Path) { if (++count == 4) throw IOException("injected prune force"); super.forceDirectory(path) }
+        }, changed = true)
+        val (install, replacements) = fixture("success")
+        Files.writeString(install.resolve("lib/stale.jar"), "stale")
+        val events = mutableListOf<String>()
+        val io = object : AtomicInstallPublisher.IO() {
+            override fun event(phase: String, path: Path) { events += "$phase:${path.fileName}" }
+        }
+        // Actual first-install path as well as replacements, exact closure, modes and unchanged inode.
+        replacements.forEach { Files.delete(it.target) }
+        AtomicInstallPublisher.publish(install, replacements, "app.jar", io)
+        check(!Files.exists(install.resolve("lib/stale.jar")))
+        check(events.indexOf("lib-validated:lib") < events.indexOf("before-rename:launcher"))
+        check(events.count { it.startsWith("staged:") } == replacements.size)
+        check(events.indexOfLast { it.startsWith("staged:") } < events.indexOfFirst { it.startsWith("before-rename:") })
+        check(events.filter { it.startsWith("published:") } == listOf("dep.jar", "app.jar", "classpath-reference-v1.json", "launcher", "launcher.bat").map { "published:$it" })
+        val keys = replacements.associate { it.target to Files.readAttributes(it.target, BasicFileAttributes::class.java).fileKey() }
+        AtomicInstallPublisher.publish(install, replacements, "app.jar")
+        check(keys.all { (path, key) -> Files.readAttributes(path, BasicFileAttributes::class.java).fileKey() == key })
+        replacements.forEach { Files.writeString(it.source, "next generation ${it.logicalName}") }
+        val next = replacements.map { it.copy(expectedLength = Files.size(it.source), expectedSha256 = installDigest(it.source)) }
+        AtomicInstallPublisher.publish(install, next, "app.jar")
+        check(keys.all { (path, key) -> Files.readAttributes(path, BasicFileAttributes::class.java).fileKey() != key })
+        passed += "first-install/replacement/no-update/order/closure/modes"
+        val lockPath = AtomicInstallPublisher.prepare(install)
+        AtomicInstallPublisher.Writer().use { writer ->
+            writer.acquire(install)
+            val started = System.nanoTime()
+            var rejected = false
+            try { AtomicInstallPublisher.Writer().use { it.acquire(install) } } catch (_: IllegalStateException) { rejected = true }
+            check(rejected && System.nanoTime() - started < TimeUnit.SECONDS.toNanos(2))
+            check(lockPath == AtomicInstallPublisher.prepare(install)) // independent of either build output
+        }
+        for (kind in listOf("failure", "cancellation")) {
+            try { AtomicInstallPublisher.Writer().use { it.acquire(install); throw InterruptedException(kind) } } catch (_: InterruptedException) { }
+            AtomicInstallPublisher.Writer().use { it.acquire(install) }
+        }
+        check(Files.exists(lockPath)) // stable lock inode is never unlinked
+        passed += "writer-contention/release/cooperative-cancellation"
+        val invalidLockRoot = root.resolve("invalid-lock")
+        val invalidLock = AtomicInstallPublisher.prepare(invalidLockRoot)
+        Files.createSymbolicLink(invalidLock, lockPath)
+        var invalidLockRejected = false
+        try { AtomicInstallPublisher.Writer().use { it.acquire(invalidLockRoot) } } catch (_: IllegalArgumentException) { invalidLockRejected = true }
+        check(invalidLockRejected && Files.isSymbolicLink(invalidLock))
+        passed += "symlink-lock-rejection"
+        val badRoot = root.resolve("symlink-install")
+        Files.createSymbolicLink(badRoot, install)
+        var rejected = false
+        try { AtomicInstallPublisher.Writer().use { it.acquire(badRoot) } } catch (_: IllegalArgumentException) { rejected = true }
+        check(rejected)
+        val (badInstall, badReplacements) = fixture("bad-target")
+        Files.delete(badReplacements.first().target)
+        Files.createSymbolicLink(badReplacements.first().target, badReplacements.first().source)
+        rejected = false
+        try { AtomicInstallPublisher.publish(badInstall, badReplacements, "app.jar") } catch (_: IllegalStateException) { rejected = true }
+        check(rejected && Files.isSymbolicLink(badReplacements.first().target))
+        val foreignWritable = Files.createDirectory(root.resolve("foreign-writable"))
+        Files.setPosixFilePermissions(foreignWritable, PosixFilePermissions.fromString("rwxrwxr-x"))
+        rejected = false
+        try { AtomicInstallPublisher.Writer().use { it.acquire(foreignWritable.resolve("install")) } } catch (_: IllegalArgumentException) { rejected = true }
+        check(rejected && !Files.exists(foreignWritable.resolve("install")))
+        passed += "pre-Sync-symlink/foreign-write/target-rejection"
+        Files.writeString(root.resolve("passed.txt"), passed.joinToString("\n", postfix = "\n"))
+        println("publisher controls passed: ${passed.joinToString()}; evidence=$root")
+        println("Separate process writer controls: scripts/test-atomic-install-controls.py --gradle-writers; installed/authority qualification remains a separate gate.")
+    }
+}
+
+tasks.named("check") { dependsOn(verifyAtomicApplicationPublication) }
 
 tasks.register("verifyGhidraDistributionArchives") {
     group = "verification"
@@ -2128,4 +2668,42 @@ tasks.named("check") {
     dependsOn(verifyAcpGateHelperDistribution)
     dependsOn(verifyLlvmBehaviorHelperDistribution)
     dependsOn(verifyKotlinBootClasspathDistribution)
+}
+
+// Opt-in test-only wiring for #1799/#1530/#1551. No default lifecycle edge.
+val acpMountIsolationNative = layout.buildDirectory.file("acp-mount-isolation-native/acp-mount-isolation-fixture")
+val buildAcpMountIsolationFixtureNative = tasks.register<Exec>("buildAcpMountIsolationFixtureNative") {
+    group = "verification"
+    val source = layout.projectDirectory.file("src/test/c/acp_mount_isolation_fixture.c")
+    inputs.file(source)
+    outputs.file(acpMountIsolationNative)
+    doFirst {
+        acpMountIsolationNative.get().asFile.parentFile.mkdirs()
+        environment("TMPDIR", acpMountIsolationNative.get().asFile.parentFile.absolutePath)
+        commandLine("cc", "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
+            source.asFile.absolutePath, "-o", acpMountIsolationNative.get().asFile.absolutePath)
+    }
+}
+val acpMountIsolationClasspath = layout.buildDirectory.file("acp-mount-isolation-native/test-runtime-classpath.txt")
+val exportAcpMountIsolationFixtureClasspath = tasks.register("exportAcpMountIsolationFixtureClasspath") {
+    dependsOn(tasks.named("testClasses"))
+    inputs.files(sourceSets["test"].runtimeClasspath)
+    outputs.file(acpMountIsolationClasspath)
+    doLast {
+        val output = acpMountIsolationClasspath.get().asFile
+        output.parentFile.mkdirs()
+        output.writeText(sourceSets["test"].runtimeClasspath.files.joinToString(File.pathSeparator) { it.absolutePath })
+    }
+}
+tasks.register<Exec>("acpMountIsolationFixture") {
+    group = "verification"
+    description = "Explicit controlled-host-only synthetic mount isolation experiment"
+    dependsOn(buildAcpMountIsolationFixtureNative, exportAcpMountIsolationFixtureClasspath)
+    doFirst {
+        commandLine("bash", "scripts/test-acp-mount-isolation.sh", "--run",
+            "--native", acpMountIsolationNative.get().asFile.absolutePath,
+            "--classpath-file", acpMountIsolationClasspath.get().asFile.absolutePath,
+            "--java", javaToolchains.launcherFor { languageVersion.set(JavaLanguageVersion.of(21)) }
+                .get().executablePath.asFile.absolutePath)
+    }
 }

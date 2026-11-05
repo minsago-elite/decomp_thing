@@ -151,24 +151,43 @@ class GeneratedCSyntheticDefinitionTest {
                     .copy(types = types)
                 val contextRequest = request(program, root)
                 val plan = ModulePlan(modules = listOf(contextRequest.module))
-                val fullHeader = GeneratedCProjectRendering(program, plan).sharedInterface()
-                val selectedHeader = GeneratedCModuleContext.select(contextRequest).interfaces.getValue(
-                    contextRequest.profile.layout.declaration("shared-interface").materialize(),
-                )
-                val withoutIntroduction = GeneratedCProjectRendering(
-                    program.copy(types = types.filterNot { it.id == "a00_intro" }), plan,
-                ).sharedInterface()
-                for (compiler in compilers) {
-                    val full = compile(compiler, variant, "full", fullHeader + implementation)
-                    val selected = compile(compiler, variant, "selected", selectedHeader + implementation)
-                    for ((label, result) in listOf("full" to full, "selected" to selected)) {
-                        if (compatible) assertEquals(0, result.first, "$compiler $variant $label interface:\n${result.second}")
-                        else {
-                            assertTrue(result.first != 0, "$compiler $variant $label must retain prototype-local incompatibility")
-                            assertTrue(result.second.contains("callback lost file-scope tag identity"), result.second)
-                        }
+                fun refused(block: () -> Unit) {
+                    val failure = assertFailsWith<IllegalArgumentException>(block = block)
+                    assertEquals("ambiguous generated-C prototype tag dependency in a10_callback: struct Foo", failure.message)
+                }
+                val withoutIntroduction = program.copy(types = types.filterNot { it.id == "a00_intro" })
+                refused { GeneratedCProjectRendering(withoutIntroduction, plan).sharedInterface() }
+                refused { GeneratedCModuleContext.select(request(withoutIntroduction, root)) }
+                val headers = if (compatible) listOf(
+                    "full" to GeneratedCProjectRendering(program, plan).sharedInterface(),
+                    "selected" to GeneratedCModuleContext.select(contextRequest).interfaces.getValue(
+                        contextRequest.profile.layout.declaration("shared-interface").materialize()),
+                ) else {
+                    // A member function's parameter tag is prototype-local. Neither selection
+                    // nor full rendering may hoist its later body into a different identity.
+                    val full = assertFailsWith<IllegalArgumentException> {
+                        GeneratedCProjectRendering(program, plan).sharedInterface()
                     }
-                    val removed = compile(compiler, variant, "removed", withoutIntroduction + implementation)
+                    val selected = assertFailsWith<IllegalArgumentException> { GeneratedCModuleContext.select(contextRequest) }
+                    assertEquals("ambiguous generated-C prototype tag dependency in a00_intro: struct Foo", full.message)
+                    assertEquals("ambiguous generated-C prototype tag dependency in a10_callback: struct Foo", selected.message)
+                    emptyList()
+                }
+                for (compiler in compilers) {
+                    for ((label, header) in headers) {
+                        val result = compile(compiler, variant, label, header + implementation)
+                        assertEquals(0, result.first, "$compiler $variant $label interface:\n${result.second}")
+                    }
+                    // Keep compiler negatives over the original, unmodified declarations so
+                    // early refusal remains tied to actual C tag identity, not just a message.
+                    if (!compatible) {
+                        val raw = types.joinToString("\n") { it.declaration } + "\n" + implementation
+                        val result = compile(compiler, variant, "raw-prototype-local", raw)
+                        assertTrue(result.first != 0, "$compiler prototype-local tag must fail")
+                        assertTrue(result.second.contains("callback lost file-scope tag identity"), result.second)
+                    }
+                    val rawRemoved = withoutIntroduction.types.joinToString("\n") { it.declaration } + "\n" + implementation
+                    val removed = compile(compiler, variant, "raw-removed", rawRemoved)
                     assertTrue(removed.first != 0, "$compiler $variant removed introduction must fail:\n${removed.second}")
                     assertTrue(removed.second.contains("callback lost file-scope tag identity"), removed.second)
                 }

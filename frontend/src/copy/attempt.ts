@@ -22,7 +22,17 @@ export const recordedValidationCopy = {
   exportUnavailable: 'This observation cannot be exported within the supported format and 192 KiB limit.',
   title: 'Recorded validation evidence', read: 'Read validation evidence', loading: 'Reading validation evidence…',
   scope: 'Select a recorded operation to inspect its retained validation receipt or enclosing failure diagnostic. Reads never execute cases or start a workflow.',
-  failed: 'Validation evidence could not be verified. Read its latest history or check the session.',
+  savedSelectionReason: '{selection} {reason}',
+  failures: {
+    session: 'Validation evidence was not read because the local session is no longer valid. Sign in again, then read validation evidence.',
+    denied: 'This session is not permitted to read validation evidence for this attempt. Use a session with access to this job.',
+    missing: 'The requested validation evidence is not recorded for this attempt. It may never have been retained or was removed; no result is inferred.',
+    unsupported: 'This validation evidence uses a format this interface does not support. Update the interface, then read validation evidence again.',
+    unverified: 'Validation evidence could not be verified against this attempt and its recorded binding, so it is not shown. No result is inferred. Read validation evidence again; if this repeats, check the job storage.',
+    sizeLimit: 'This validation evidence exceeds the size this interface reads, so it is not shown. No result is inferred. Select another history page, operation or case page.',
+    transient: 'Validation evidence is temporarily unavailable. Wait a moment, then read validation evidence again.',
+    failed: 'Validation evidence could not be read. Check the session, then read validation evidence again.',
+  },
   historyState: 'History state', historyPage: 'History page', historyNavigation: 'Validation history pages',
   previousHistory: 'Newer validation operations', nextHistory: 'Earlier validation operations',
   owners: 'Recorded validation operations', operation: 'Recorded operation', candidate: 'Candidate', source: 'Source SHA-256',
@@ -69,7 +79,16 @@ export const recordedValidationCopy = {
   producerReportsComplete: 'Reported complete; not independently verified here', unverifiedCleanup: 'Unverified',
   sourceTitle: 'Source at this validation', findSource: 'Find matching source snapshot', readingSource: 'Reading retained source commitments…',
   sourceBoundary: 'A link is available only when retained workflow source metadata has this validation’s exact source commitment. Reading metadata does not verify file bytes or repair acceptance.',
-  sourceUnavailable: 'No retained source snapshot matching this validation could be verified. No source link is available.',
+  sourceFailures: {
+    session: 'Source commitments were not read because the local session is no longer valid. Sign in again, then find the matching source snapshot. No source link is available.',
+    denied: 'This session is not permitted to read the retained source commitments of this attempt. Use a session with access to this job. No source link is available.',
+    missing: 'The retained attempt or its source commitments are not recorded; they may never have been retained or were removed. No source link is available.',
+    unsupported: 'The retained source commitments use a format this interface does not support. No source link is available.',
+    unverified: 'No retained source snapshot matching this validation could be verified. No source link is available.',
+    sizeLimit: 'The retained source commitments exceed the size this interface reads, so they are not shown. No source link is available.',
+    transient: 'Retained source commitments are temporarily unavailable. Wait a moment, then find the matching source snapshot again. No source link is available.',
+    failed: 'Retained source commitments could not be read. Check the session, then find the matching source snapshot again. No source link is available.',
+  },
   retainedRevision: 'Retained workflow revision', openSource: 'Open source with this validated digest',
 } as const;
 
@@ -112,7 +131,10 @@ export const activityCopy = {
   "pauseActivity": "Pause activity",
   "resumeActivity": "Resume activity",
   "followActivity": "Follow activity",
-  "activityObservations": "Activity observations"
+  "activityObservations": "Activity observations",
+  "activityRunMissing": "This attempt's activity was not found. Return to the job to choose an attempt.",
+  "activityUnsupported": "This server's activity format is not supported by this page. Update the server or interface; displayed observations may be stale.",
+  "activityServerFailed": "The server could not return activity. Displayed observations may be stale; read a fresh history to retry."
 } as const;
 
 
@@ -190,6 +212,10 @@ export const progressPinCopy = {
   "pinRequestHistoryIsAtCapacityReadTheCurrentPolicy": "Pin request history is at capacity. Read the current policy and try a new action later.",
   "theChangeCouldNotBeConfirmedReadTheCurrentPolicy": "The change could not be confirmed. Read the current policy before choosing another action.",
   "theCurrentPinPolicyCouldNotBeVerifiedCheckThe": "The current pin policy could not be verified. Check the local session and server, then read it again.",
+  "sessionEndedReconnect": "The local session ended. Reconnect, then read the policy again.",
+  "attemptUnavailable": "This attempt’s pin policy is unavailable. Return to the attempt history.",
+  "policyResponseUnverified": "The current pin policy could not be verified from this response. Read it again; do not change retention until it verifies.",
+  "policyContractUnsupported": "The pin policy response uses an unsupported contract. Update the local application before changing retention.",
   "pinControlsArePausedWhileThisTabIsHiddenOr": "Pin controls are paused while this tab is hidden or offline. Read the policy again when you return.",
   "progressHistoryIsPinned": "Progress history is pinned.",
   "progressHistoryIsNotPinned": "Progress history is not pinned.",
@@ -246,6 +272,18 @@ export const explorationEvidenceCopy = {
   "explorationEvidenceCouldNotBeReadCheckTheSessionAnd": "Exploration evidence could not be read. Check the session and refresh this attempt.",
   "refreshExplorationEvidence": "Refresh exploration evidence",
   "readExplorationEvidence": "Read exploration evidence",
+  "refreshingExplorationEvidence": "Refreshing exploration evidence…",
+  "previousExplorationEvidenceMayBeOutdated": "The exploration evidence shown below was read earlier for this attempt and may be outdated until this refresh completes.",
+  "failures": {
+    "session": "Exploration evidence was not read because the local session is no longer valid. Sign in again, then read this evidence.",
+    "denied": "This session is not permitted to read exploration evidence for this attempt. Use a session with access to this job.",
+    "missing": "No exploration report is recorded for this attempt. Exploration may not have run or its report was removed; no result is inferred.",
+    "unsupported": "This exploration report uses a format this interface does not support. Update the interface, then read this evidence again.",
+    "unverified": "The exploration report could not be verified and is not shown. Its recorded data may be corrupt; refresh only after checking the job storage.",
+    "sizeLimit": "The exploration report exceeds the size this interface reads and is not shown. Download the report artifact from the job's artifacts instead.",
+    "transient": "Exploration evidence is temporarily unavailable. Wait a moment, then refresh exploration evidence.",
+    "failed": "Exploration evidence could not be read. Check the session and refresh this attempt."
+  },
   "yes": "Yes",
   "no": "No",
   "evidenceLimitations": "Evidence limitations"
@@ -380,6 +418,9 @@ export const activityHistoryCopy = {
   invalid: 'The saved activity window is invalid or unsupported. Keep this address to inspect its selection, or explicitly open live activity.',
   unavailable: 'The requested activity window could not be verified within its read limits. No other window was substituted.',
   expired: 'The requested activity window is no longer retained. No fresh history was substituted.',
+  missing: 'This attempt or its activity was not found. No other window was substituted.',
+  unsupported: 'This server returned an activity format this page does not support. No other window was substituted.',
+  server: 'The server could not return the requested activity window. No other window was substituted; retry explicitly.',
   session: 'Reconnect the local session to read this activity window.',
   denied: 'Access to this activity window was denied.',
   loading: 'Reading the saved activity window…',

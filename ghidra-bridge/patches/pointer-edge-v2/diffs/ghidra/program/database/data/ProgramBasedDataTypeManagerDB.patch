@@ -1,0 +1,88 @@
+--- a/ghidra/program/database/data/ProgramBasedDataTypeManagerDB.java
++++ b/ghidra/program/database/data/ProgramBasedDataTypeManagerDB.java
+@@ -77,7 +77,10 @@
+ 
+ 	@Override
+ 	public void invalidateCache() {
+-		lock.acquire();
++        try {
++
++		lock.acquire();
++        Throwable primary = null;
+ 		try {
+ 			super.invalidateCache();
+ 			if (instanceSettingsAdapter != null) {
+@@ -85,10 +88,19 @@
+ 				instanceSettingsCache.clear();
+ 			}
+ 		}
+-		finally {
+-			lock.release();
+-		}
+-	}
++        catch (RuntimeException | Error failure) {
++            primary = failure;
++            if (isOwnedStrict()) ownedFailure(failure);
++            throw failure;
++        }
++        finally { releaseOwnedLock(primary); }
++	
++        }
++        catch (RuntimeException | Error failure) {
++            if (isOwnedStrict()) ownedFailure(failure);
++            throw failure;
++        }
++    }
+ 
+ 	/**
+ 	 * Provides notification when a data instance setting has changed at a specific address.
+@@ -442,4 +454,49 @@
+ 		}
+ 		return addr;
+ 	}
++
++
++    final boolean hasOwnedOpaqueSettings(long typeID, Address address, TaskMonitor monitor)
++            throws IOException, CancelledException {
++        Boolean result = readOwnedOpaqueSettings(typeID, address, monitor);
++        if (result == null) throw new java.lang.UnsupportedOperationException("Unsupported settings policy");
++        return result;
++    }
++
++    // Null is a negative policy result, false is empty, true is the sole permitted instance.
++    // No exception from a monitor, adapter or dependency is a policy result.
++    final Boolean readOwnedOpaqueSettings(long typeID, Address address, TaskMonitor monitor)
++            throws IOException, CancelledException {
++        try {
++            requireOwnedLive(); checkOwnedCancellation(monitor);
++            if (!hasOwnedEmptyTypeSettings(typeID, monitor))
++                return null;
++            if (instanceSettingsAdapter == null) throw ownedFailure("Missing instance settings adapter");
++            long association = addrMap.getKey(address, false);
++            if (association == -1) throw ownedFailure("Unmapped listing address");
++            RecordIterator iterator = instanceSettingsAdapter.getRecords(association, association);
++            checkOwnedCancellation(monitor);
++            if (!iterator.hasNext()) return false;
++            checkOwnedCancellation(monitor);
++            DBRecord row = iterator.next();
++            checkOwnedCancellation(monitor);
++            requireOwnedSettingRow(row, association);
++            if (iterator.hasNext()) {
++                checkOwnedCancellation(monitor);
++                DBRecord second = iterator.next();
++                checkOwnedCancellation(monitor);
++                requireOwnedSettingRow(second, association);
++                return null;
++            }
++            short index = row.getShortValue(SettingsDBAdapter.SETTINGS_NAME_INDEX_COL);
++            String name = instanceSettingsAdapter.readSettingNameDirect(index);
++            checkOwnedCancellation(monitor);
++            if (!"mutability".equals(name) || row.getString(SettingsDBAdapter.SETTINGS_STRING_VALUE_COL) != null ||
++                row.getLongValue(SettingsDBAdapter.SETTINGS_LONG_VALUE_COL) != 2)
++                return null;
++            return true;
++        }
++        catch (IOException | CancelledException | RuntimeException | Error e) { ownedFailure(e); throw e; }
++    }
++
+ }

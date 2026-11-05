@@ -1,0 +1,226 @@
+{
+  "schema": "packaged-read-state-sequences/v1",
+  "probe": {
+    "test": "frontend/tests/packaged-read-states-probe.test.tsx",
+    "module": "scripts/packaged-browser-read-states.mjs",
+    "moduleSha256": "cee198a71796836f527c1aaaa4b00720b08fd351206476537f5a177919d762ea",
+    "generatorSha256": "28b996018b20735d4f36e6939ceb4cd6e36403c2dee64be8aca8f09a78835480",
+    "outputSha256": "dc82cd6f89555aaf296f324a1fbd55282d4536e8c0c01404f6a9986843c8d1ad",
+    "regenerate": "cd frontend && READ_STATES_WRITE_SEQUENCES=1 npx vitest run tests/packaged-read-states-probe.test.tsx"
+  },
+  "nonApi": "HTML, assets and /version are outside /nested/api/v1 and are not ledger entries; the JSDOM probe observed none through fetch.",
+  "sse": "No EventSource or text/event-stream read occurs in the covered cases (none observed).",
+  "s10": "Frontend-fixture: opt-in generator bootstrapVariants[\"628-git-supported\"] replaces the canonical unavailable git and git-import entries with supported git and unconfigured import, then receives the exact 503 CAPABILITY_UNAVAILABLE refusal; not backend-outage evidence.",
+  "axPinning": "unpinned-until-hosted",
+  "keyboard": {
+    "S1": {
+      "tag": "a",
+      "href": "/nested/",
+      "textSha256": "3506200cde97e6310a2d00a90bb9b5fbc87bc3207e113c0795298e7df76403fb",
+      "inMain": true
+    },
+    "S3": {
+      "tag": "input",
+      "href": null,
+      "textSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "inMain": true
+    },
+    "S5": {
+      "tag": "a",
+      "href": "/nested/",
+      "textSha256": "3506200cde97e6310a2d00a90bb9b5fbc87bc3207e113c0795298e7df76403fb",
+      "inMain": true
+    },
+    "S6": {
+      "tag": "a",
+      "href": "/nested/",
+      "textSha256": "3506200cde97e6310a2d00a90bb9b5fbc87bc3207e113c0795298e7df76403fb",
+      "inMain": true
+    },
+    "S7": {
+      "tag": "a",
+      "href": "/nested/",
+      "textSha256": "3506200cde97e6310a2d00a90bb9b5fbc87bc3207e113c0795298e7df76403fb",
+      "inMain": true
+    },
+    "S10": {
+      "tag": "a",
+      "href": "/nested/",
+      "textSha256": "3506200cde97e6310a2d00a90bb9b5fbc87bc3207e113c0795298e7df76403fb",
+      "inMain": true
+    },
+    "S13": {
+      "tag": "a",
+      "href": "/nested/",
+      "textSha256": "3506200cde97e6310a2d00a90bb9b5fbc87bc3207e113c0795298e7df76403fb",
+      "inMain": true
+    }
+  },
+  "cases": {
+    "S1": {
+      "route": "/nested/jobs/f619f619f619f619f619f619f619f619",
+      "waves": [
+        [
+          "GET /nested/api/v1/bootstrap"
+        ],
+        [
+          "GET /nested/api/v1/jobs/f619f619f619f619f619f619f619f619"
+        ]
+      ]
+    },
+    "S3": {
+      "route": "/nested/",
+      "waves": [
+        [
+          "GET /nested/api/v1/bootstrap"
+        ],
+        [
+          "GET /nested/api/v1/jobs?limit=50",
+          "GET /nested/api/v1/recovery"
+        ]
+      ]
+    },
+    "S5": {
+      "route": "/nested/jobs/62800000000000000000000000000005",
+      "waves": [
+        [
+          "GET /nested/api/v1/bootstrap"
+        ],
+        [
+          "GET /nested/api/v1/jobs/62800000000000000000000000000005"
+        ]
+      ]
+    },
+    "S6": {
+      "route": "/nested/jobs/62800000000000000000000000000006",
+      "waves": [
+        [
+          "GET /nested/api/v1/bootstrap"
+        ],
+        [
+          "GET /nested/api/v1/jobs/62800000000000000000000000000006"
+        ]
+      ]
+    },
+    "S7": {
+      "route": "/nested/jobs/62800000000000000000000000000007",
+      "waves": [
+        [
+          "GET /nested/api/v1/bootstrap"
+        ],
+        [
+          "GET /nested/api/v1/jobs/62800000000000000000000000000007"
+        ]
+      ]
+    },
+    "S10": {
+      "route": "/nested/jobs/f619f619f619f619f619f619f619f619",
+      "waves": [
+        [
+          "GET /nested/api/v1/bootstrap"
+        ],
+        [
+          "GET /nested/api/v1/jobs/f619f619f619f619f619f619f619f619"
+        ],
+        [
+          "GET /nested/api/v1/jobs/f619f619f619f619f619f619f619f619/repositories"
+        ]
+      ]
+    },
+    "S13": {
+      "route": "/nested/jobs/f619f619f619f619f619f619f619f619/runs/fixture_run_responsive",
+      "waves": [
+        [
+          "GET /nested/api/v1/bootstrap"
+        ],
+        [
+          "GET /nested/api/v1/jobs/f619f619f619f619f619f619f619f619/runs/fixture_run_responsive"
+        ]
+      ]
+    }
+  },
+  "states": {
+    "S1": {
+      "role": "button",
+      "domTextSha256": "a27bed2372565b56f82fafae4217b767b6c44ae9ed744c6a635e6a4e7f6f13d0",
+      "axTextSha256": null,
+      "headingSha256": "23eacf3c36d3f632d554a955925db84b1007a7175f2767324d60a88c7886a9a4"
+    },
+    "S3": {
+      "role": "text",
+      "domTextSha256": "085754f2ac9c73b5be68fdf733c7ac1ac607bbbc194131a8e1634e409f904101",
+      "axTextSha256": null,
+      "headingSha256": "4f26e56bbb1711626c51c52b3f03b25be9bd81b07b5b046cb63f05c607772f97"
+    },
+    "S5": {
+      "role": "alert",
+      "domTextSha256": "a0b2b4ff59d0821d8d09912b7140f1ab9ecf33dd1575c8eb197a4c12bbb475ae",
+      "axTextSha256": null,
+      "headingSha256": "23eacf3c36d3f632d554a955925db84b1007a7175f2767324d60a88c7886a9a4"
+    },
+    "S6": {
+      "role": "alert",
+      "domTextSha256": "9ee6aabe05bc0307b44547d31b914fee4830f723604dc741f9e314291870cff6",
+      "axTextSha256": null,
+      "headingSha256": "23eacf3c36d3f632d554a955925db84b1007a7175f2767324d60a88c7886a9a4"
+    },
+    "S7": {
+      "role": "status",
+      "domTextSha256": "d2d63d81309d4c8169a41c2d1f7d70b5b7b254adc0239797f840011db30caaec",
+      "axTextSha256": null,
+      "headingSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "S10": {
+      "role": "status",
+      "domTextSha256": "a79b65504b1c16a11e164746d9c4ac5020a68b9dffb464919190c870726f00ce",
+      "axTextSha256": null,
+      "headingSha256": "53db3b48e1ad4170808c3842c52f9bee1ed27c66b9b192e91ec3c2c678064994"
+    },
+    "S13": {
+      "role": "alert",
+      "domTextSha256": "1d73525267ef20ad0269ecc5bdf819f18bc905adfb036ffcacf52b2a4bee8760",
+      "axTextSha256": null,
+      "headingSha256": "1280f36b36ead5c29631194211fa57ed259aa47742846e80cebd463b0cc8329e"
+    }
+  },
+  "s15": {
+    "denied": {
+      "from": "S1",
+      "to": "S6",
+      "held": {
+        "key": "GET /nested/api/v1/jobs/f619f619f619f619f619f619f619f619",
+        "case": "S1",
+        "generation": "from"
+      },
+      "fromWaves": [
+        [
+          "GET /nested/api/v1/bootstrap"
+        ]
+      ],
+      "toWaves": [
+        [
+          "GET /nested/api/v1/jobs/62800000000000000000000000000006"
+        ]
+      ]
+    },
+    "session-ended": {
+      "from": "S1",
+      "to": "S7",
+      "held": {
+        "key": "GET /nested/api/v1/jobs/f619f619f619f619f619f619f619f619",
+        "case": "S1",
+        "generation": "from"
+      },
+      "fromWaves": [
+        [
+          "GET /nested/api/v1/bootstrap"
+        ]
+      ],
+      "toWaves": [
+        [
+          "GET /nested/api/v1/jobs/62800000000000000000000000000007"
+        ]
+      ]
+    }
+  }
+}

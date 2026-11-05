@@ -1,4 +1,5 @@
 // @vitest-environment node
+import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { createServer as createHttpServer } from 'node:http';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
@@ -85,7 +86,24 @@ describe('shared-schema deterministic fixtures', () => {
     const generated = command();
     expect(command()).toBe(generated);
     const fixture = JSON.parse(generated) as { scenarios: { name: string }[]; routes: Record<string, { data: { items: { sizeBytes: string }[] } }> };
-    expect(fixture.scenarios.map((scenario) => scenario.name)).toEqual(['running', 'failed', 'interrupted', 'unsupported', 'partial']);
+    expect(fixture.scenarios.map((scenario) => scenario.name)).toEqual(['running', 'failed', 'interrupted', 'unsupported', 'partial', 'responsive']);
+    // A fixed past expiry made every fixture session read as expired; the run route needs a 32-hex job id.
+    const bootstrap = fixture.routes['/nested/api/v1/bootstrap'] as unknown as { data: { sessionExpiresAt: string } };
+    expect(Date.parse(bootstrap.data.sessionExpiresAt)).toBeGreaterThan(Date.parse('2090-01-01T00:00:00Z'));
+    // Named #619 reflow fixtures: long Unicode/RTL name, long hex/text previews, long unbroken source line.
+    const job = '/nested/api/v1/jobs/f619f619f619f619f619f619f619f619';
+    const run = `${job}/runs/fixture_run_responsive`;
+    const revision = `${run}/revisions/fixture_revision_responsive`;
+    const named = JSON.stringify(fixture.routes[job]);
+    expect(named).toMatch(/[\u0590-\u05ff]/u);
+    expect(named).toMatch(/[\u0600-\u06ff]/u);
+    const validation = Object.entries(fixture.routes).find(([path]) => path.startsWith(`${run}/reports/revision-validation?`))?.[1] as unknown as
+      { data: { validationCases: { items: { originalStdoutPreview: { hex: string; prefixBytes: number } }[] } } };
+    expect(validation.data.validationCases.items[0]?.originalStdoutPreview).toMatchObject({ prefixBytes: 128 });
+    const chunk = fixture.routes[`${revision}/source-files/file_0_${'1'.repeat(64)}/chunk?offset=0&maxBytes=65536&metadataVersion=${'7'.repeat(64)}`] as unknown as { data: { text: string } };
+    expect(Math.max(...chunk.data.text.split('\n').map((line) => line.length))).toBeGreaterThan(500);
+    expect(Object.keys(fixture.routes).some((path) => path.startsWith(`${revision}/source-search?`))).toBe(true);
+    expect(generated.length).toBeLessThan(2 * 1024 * 1024);
     expect(fixture.routes['/nested/api/v1/jobs']?.data.items[0]?.sizeBytes).toBe('9007199254740993');
     expect(fixture.routes['/nested/api/v1/recovery']).toMatchObject({ kind: 'recovery',
       data: { displayOnly: true, inventoryComplete: true, retainedUploadStages: 0, retainedMetadataFiles: 0 } });
@@ -133,6 +151,24 @@ describe('shared-schema deterministic fixtures', () => {
     const rejected = await fetch(`${frontend.api}/jobs`, { method: 'POST', headers: { Origin: frontend.origin } });
     expect(rejected.status).toBe(405);
     expect(rejected.headers.get('allow')).toBe('GET, HEAD');
+    const exact = await fetch(`${frontend.api}/jobs/f619f619f619f619f619f619f619f619/runs/fixture_run_responsive/revisions/fixture_revision_responsive/source-search?q=A0b1C2d3&limit=50`);
+    expect(exact.status).toBe(200);
+    expect(((await exact.json()) as { kind: string }).kind).toBe('sourceSearch');
+    const otherQuery = await fetch(`${frontend.api}/jobs/f619f619f619f619f619f619f619f619/runs/fixture_run_responsive/revisions/fixture_revision_responsive/source-search?q=other&limit=50`);
+    expect(otherQuery.status).toBe(400);
+    // #619 exploration partial/preparation raw evidence: exact octet-stream bytes; queries stay rejected.
+    for (const kind of ['partial', 'preparation']) {
+      const path = `${frontend.api}/jobs/f619f619f619f619f619f619f619f619/artifacts/fixture_exploration_${kind}/content`;
+      const report = await fetch(`${frontend.api}/jobs/f619f619f619f619f619f619f619f619/runs/fixture_run_responsive_${kind}/reports/exploration`)
+        .then(async (response) => await response.json() as { data: { sourceArtifact: { sha256: string; sizeBytes: string } } });
+      const content = await fetch(path);
+      expect(content.headers.get('content-type')).toBe('application/octet-stream');
+      expect(content.headers.get('x-request-id')).toBe('request_simulated_artifact');
+      const bytes = Buffer.from(await content.arrayBuffer());
+      expect(String(bytes.byteLength)).toBe(report.data.sourceArtifact.sizeBytes);
+      expect(createHash('sha256').update(bytes).digest('hex')).toBe(report.data.sourceArtifact.sha256);
+      expect((await fetch(`${path}?x=1`)).status).toBe(400);
+    }
     const unknown = await fetch(`${frontend.api}/not-present`);
     expect(unknown.status).toBe(404);
     expect(unknown.headers.get('content-type')).toContain('application/json');

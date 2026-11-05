@@ -1,0 +1,34 @@
+--- a/ghidra/program/database/code/CodeManager.java
++++ b/ghidra/program/database/code/CodeManager.java
+@@ -3620,4 +3620,31 @@
+ 		return protoMgr.getPrototype(protoID);
+ 	}
+ 
++
++
++    /** Returns null only for a bounded component policy refusal; never a pointer witness. */
++    public final DataType requireOwnedPointerSelection(
++            ghidra.program.database.data.ProgramDataTypeManager owner, Data selected,
++            TaskMonitor monitor) throws IOException, CancelledException {
++        try {
++            program.checkOwnedIntegrity();
++            if (owner == null || program.getDataTypeManager() != owner || program.getCodeManager() != this ||
++                lock.getOwner() != Thread.currentThread() || selected == null ||
++                (selected.getClass() != DataDB.class && selected.getClass() != DataComponent.class))
++                throw program.recordOwnedIntegrityFailure(new IllegalStateException("Foreign/forged listing selection"));
++            return ((DataDB) selected).requireOwnedPointerSelection(this, owner, monitor);
++        }
++        catch (IOException | CancelledException | RuntimeException | Error e) {
++            program.recordOwnedIntegrityFailure(e); throw e;
++        }
++    }
++    final DBRecord readOwnedDataRecord(DataDB root) throws IOException {
++        if (!cache.isCachedIdentity(root.getKey(), root))
++            throw program.recordOwnedIntegrityFailure(new IllegalStateException("Listing cache mismatch"));
++        DBRecord row = dataAdapter.getRecord(root.addr);
++        if (row == null || row.getKey() != root.addr || !row.hasSameSchema(DataDBAdapter.DATA_SCHEMA))
++            throw program.recordOwnedIntegrityFailure(new IllegalStateException("Listing row mismatch"));
++        return row;
++    }
++
+ }

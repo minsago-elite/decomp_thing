@@ -194,6 +194,80 @@ private const val WEB_RECONSTRUCTION_HARNESS_REPORT = "reconstruction_harness_se
 
 enum class WebUiMode { LEGACY, SPA }
 
+/** Fixed, test-owned observations for a real request crossing failed-start cleanup. */
+internal class WebFailedStartupProbe(
+    private val nonce: String,
+    private val method: String,
+    private val path: String,
+) {
+    internal enum class Outcome { ADMITTED, REFUSED }
+    internal data class RouteRecord(val nonce: String, val method: String, val path: String, val outcome: Outcome)
+    internal data class CompletionRecord(val nonce: String, val method: String, val path: String, val completedNanos: Long)
+    internal data class CleanupRecord(val dispatcherStarted: Boolean, val lifecycleLockHeld: Boolean)
+
+    val cleanupDispatcherStarted = java.util.concurrent.CountDownLatch(1)
+    val permitStop = java.util.concurrent.CountDownLatch(1)
+    val admittedObserved = java.util.concurrent.CountDownLatch(1)
+    val refusedObserved = java.util.concurrent.CountDownLatch(1)
+    val admitted = java.util.concurrent.atomic.AtomicReference<RouteRecord?>()
+    val refused = java.util.concurrent.atomic.AtomicReference<RouteRecord?>()
+    val admittedCount = java.util.concurrent.atomic.AtomicInteger()
+    val refusedCount = java.util.concurrent.atomic.AtomicInteger()
+    val cleanup = java.util.concurrent.atomic.AtomicReference<CleanupRecord?>()
+    val observerFailure = java.util.concurrent.atomic.AtomicReference<String?>()
+    val admissionFinallyFinished = java.util.concurrent.atomic.AtomicReference<CompletionRecord?>()
+    val admissionFinallyFinishedCount = java.util.concurrent.atomic.AtomicInteger()
+    private val admissionFinallyFinishedObserved = java.util.concurrent.CountDownLatch(1)
+    val admittedCompletionRequired = java.util.concurrent.atomic.AtomicBoolean()
+    val cleanupDeadlineNanos = java.util.concurrent.atomic.AtomicLong()
+    val cleanupReturnedNanos = java.util.concurrent.atomic.AtomicLong()
+
+    internal fun observeRoute(actualMethod: String, actualPath: String, rawQuery: String?, outcome: Outcome) {
+        if (rawQuery != "queued=$nonce" || actualMethod != method || actualPath != path) return
+        val record = RouteRecord(nonce, actualMethod, actualPath, outcome)
+        when (outcome) {
+            Outcome.ADMITTED -> { admittedCount.incrementAndGet(); admitted.compareAndSet(null, record); admittedObserved.countDown() }
+            Outcome.REFUSED -> { refusedCount.incrementAndGet(); refused.compareAndSet(null, record); refusedObserved.countDown() }
+        }
+    }
+
+    internal fun observeAdmissionFinallyFinished(actualMethod: String, actualPath: String, rawQuery: String?) {
+        val entry = admitted.get() ?: return
+        if (actualMethod != entry.method || actualPath != entry.path || rawQuery != "queued=${entry.nonce}") return
+        admissionFinallyFinishedCount.incrementAndGet()
+        admissionFinallyFinished.compareAndSet(null, CompletionRecord(entry.nonce, actualMethod, actualPath, System.nanoTime()))
+        admissionFinallyFinishedObserved.countDown()
+    }
+
+    internal fun cleanupDispatcherStarted(lifecycleLockHeld: Boolean) {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+        cleanupDeadlineNanos.set(deadline)
+        cleanup.set(CleanupRecord(dispatcherStarted = true, lifecycleLockHeld = lifecycleLockHeld))
+        cleanupDispatcherStarted.countDown()
+        var interrupted = false
+        try {
+            val gateRemaining = deadline - System.nanoTime()
+            if (gateRemaining <= 0 || !permitStop.await(gateRemaining, TimeUnit.NANOSECONDS)) {
+                observerFailure.compareAndSet(null, "cleanup gate watchdog expired")
+            } else if (admitted.get() != null) {
+                admittedCompletionRequired.set(true)
+                val completionRemaining = deadline - System.nanoTime()
+                if (completionRemaining <= 0 || !admissionFinallyFinishedObserved.await(completionRemaining, TimeUnit.NANOSECONDS)) {
+                    observerFailure.compareAndSet(null, "admitted completion watchdog expired")
+                }
+            }
+        } catch (_: InterruptedException) {
+            interrupted = true
+            observerFailure.compareAndSet(null, "cleanup gate wait was interrupted")
+        } finally {
+            // An observer failure must never strand production cleanup.
+            permitStop.countDown()
+            cleanupReturnedNanos.set(System.nanoTime())
+            if (interrupted) Thread.currentThread().interrupt()
+        }
+    }
+}
+
 class UploadServer(
     host: String,
     port: Int,
@@ -339,7 +413,17 @@ class UploadServer(
     private var activeRequests = 0
     private val requestsDrained = java.util.concurrent.CountDownLatch(1)
     private val stopRequested = java.util.concurrent.atomic.AtomicBoolean(false)
+    @Volatile private var failedStartupProbe: WebFailedStartupProbe? = null
     val serverPort: Int get() = server.address.port
+
+    /** Install the fixed observation probe after construction and before start. */
+    internal fun installFailedStartupProbe(probe: WebFailedStartupProbe) {
+        synchronized(lifecycleLock) {
+            check(!started && !stopping) { "Failed-start probe must be installed before server start" }
+            check(failedStartupProbe == null) { "Failed-start probe is already installed" }
+            failedStartupProbe = probe
+        }
+    }
 
     /** Approximate admission occupancy; test evidence helper for overload and release qualification. */
     internal data class AdmissionSnapshot(val workers: Int, val queued: Int, val responders: Int)
@@ -453,6 +537,7 @@ class UploadServer(
         // completion may be published after the stop signal is observable.
         requestStop()
         val callerWasInterrupted = Thread.currentThread().isInterrupted
+        var cleanupDispatcherStarted = false
         val inspection = synchronized(lifecycleLock) {
             stopping = true
             if (activeRequests == 0) requestsDrained.countDown()
@@ -462,9 +547,13 @@ class UploadServer(
             if (!started) {
                 server.start()
                 started = true
+                cleanupDispatcherStarted = true
             }
             authenticationInspectionCancellation.set(true)
             authenticationInspectionWorker.get()
+        }
+        if (cleanupDispatcherStarted) {
+            failedStartupProbe?.cleanupDispatcherStarted(Thread.holdsLock(lifecycleLock))
         }
         val streamsClosed = streamResources.shutdown()
         server.stop(delaySeconds)
@@ -546,7 +635,24 @@ class UploadServer(
     }
 
     private fun route(exchange: HttpExchange) {
-        if (!withActiveRequest { routeAdmitted(exchange) }) exchange.close()
+        val probe = failedStartupProbe
+        val method = if (probe != null) exchange.requestMethod else ""
+        val path = if (probe != null) exchange.requestURI.rawPath else ""
+        val query = if (probe != null) exchange.requestURI.rawQuery else null
+        var entered = false
+        try {
+            if (!withActiveRequest {
+                    entered = true
+                    probe?.observeRoute(method, path, query, WebFailedStartupProbe.Outcome.ADMITTED)
+                    routeAdmitted(exchange)
+                }) {
+                probe?.observeRoute(method, path, query, WebFailedStartupProbe.Outcome.REFUSED)
+                exchange.close()
+            }
+        } finally {
+            // Observe only after withActiveRequest's accounting/release finally has unwound.
+            if (entered) probe?.observeAdmissionFinallyFinished(method, path, query)
+        }
     }
 
     private fun handleAuthenticationInspection(exchange: HttpExchange) {

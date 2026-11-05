@@ -32,7 +32,7 @@ export function ActivityStages({ run, events, onSelectTask }: {
       <p>{measure.kind === 'percent'
         ? displayMessage(copy.progressPercent, { completed: measure.completed.toString(), total: measure.total.toString(), percent: measure.percent })
         : displayMessage(copy.progressCount, { completed: measure.completed.toString() })}</p>
-      <div class="retained-case-table">
+      <div class="retained-case-table" role="region" aria-label={copy.taskList} tabIndex={0}>
         <table>
           <caption>{copy.taskList}</caption>
           <thead><tr><th scope="col">{copy.taskColumn}</th><th scope="col">{copy.stageColumn}</th><th scope="col">{copy.sinceColumn}</th><th scope="col">{copy.observationsColumn}</th></tr></thead>

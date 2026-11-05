@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest';
-import { ApiClientError, apiFailureReference, withApiFailureReference } from '../src/api/errors';
+import { ApiClientError, apiFailureReference, withApiFailureReference, withValidatedRequestReference } from '../src/api/errors';
 
 const canonical = '123e4567-e89b-42d3-a456-426614174000';
 const message = 'The request could not be completed.';
@@ -9,6 +9,13 @@ it('adds only a canonical UUID from an API failure to a fixed user message', () 
   expect(apiFailureReference(failure)).toBe(canonical);
   expect(withApiFailureReference(message, failure)).toBe(`${message} Reference ID: ${canonical}.`);
   expect(withApiFailureReference(message, new Error(`private ${canonical}`))).toBe(message);
+});
+
+it('adds a canonical reference from an identity-mismatched successful response', () => {
+  expect(withValidatedRequestReference(message, canonical)).toBe(`${message} Reference ID: ${canonical}.`);
+  expect(withValidatedRequestReference(message, 'request_example_1')).toBe(message);
+  expect(withValidatedRequestReference(message, `${canonical}/private`)).toBe(message);
+  expect(withValidatedRequestReference(message, null)).toBe(message);
 });
 
 it.each([

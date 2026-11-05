@@ -132,7 +132,8 @@ it('explains each protection and offers no deletion control while the job is pro
   render(<JobDeletion job={job()} client={typed} basePath="/" session={session} onDeleted={vi.fn()} />);
   fireEvent.click(screen.getByRole('button', { name: 'Review what would be deleted' }));
   expect(await screen.findByText(/Cancel it and wait/)).toBeTruthy();
-  expect(screen.getByText('The job worktree has 2 unpushed commits.')).toBeTruthy();
+  expect(screen.getByText('Managed Git history has commits that no remote-tracking branch contains. Preserve them before deleting the job.')).toBeTruthy();
+  expect(screen.queryByText('The job worktree has 2 unpushed commits.')).toBeNull();
   expect(screen.queryByRole('button', { name: 'Delete permanently' })).toBeNull();
 });
 

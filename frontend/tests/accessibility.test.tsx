@@ -13,7 +13,18 @@ import { createBrowserSession } from '../src/session/session';
 // jsdom cannot compute layout or colour, so contrast and reflow stay in the packaged
 // browser checks; this suite covers names, roles, structure, ARIA and form semantics.
 const transport = vi.hoisted(() => ({ get: vi.fn<(kind: string, path: string, options: { signal: AbortSignal }) => Promise<unknown>>() }));
-vi.mock('../src/api/client', async load => ({ ...await load<typeof ClientModule>(), createApiClient: () => transport }));
+// Kinds listed here go through the real API client (decoding, failure classification and the session
+// observeFailure hook from usePrivateTransport) over a replaced fetch; every other kind keeps the fixture transport.
+const realClient = vi.hoisted(() => ({ kinds: new Set<string>(), fetch: null as typeof fetch | null }));
+vi.mock('../src/api/client', async load => {
+  const actual = await load<typeof ClientModule>();
+  return { ...actual, createApiClient: (options: Parameters<typeof actual.createApiClient>[0]) => {
+    if (realClient.kinds.size === 0) return transport;
+    const real = actual.createApiClient({ ...options, fetch: (...args: Parameters<typeof fetch>) => realClient.fetch!(...args) });
+    return { ...transport, get: (kind: string, path: string, settings: { signal: AbortSignal }) =>
+      realClient.kinds.has(kind) ? real.get(kind as never, path, settings) : transport.get(kind, path, settings) };
+  } };
+});
 
 type Fixture = { data: Record<string, unknown> };
 const fixture = (name: string) => JSON.parse(readFileSync(resolve(process.cwd(), `../contracts/web/v1/fixtures/${name}.json`), 'utf8')) as Fixture;
@@ -231,6 +242,63 @@ it('has no automated WCAG A/AA violations with storage and the maintenance previ
     expect(await violations()).toEqual([]);
   } finally { delete responses.storageSummary; delete responses.maintenancePreview; }
 });
+// Partial and failed storage states (#628) through the real client and session observer: one polite
+// status carries the outcome, each part keeps its heading and its own failure guidance outside the live region.
+const STORAGE_REF = '0f0e0d0c-0b0a-4908-8706-050403020100';
+const storageReply = (status: number, body: Record<string, unknown>) => new Response(JSON.stringify(body),
+  { status, headers: { 'Content-Type': 'application/json', 'X-Request-ID': (body.requestId as string) } });
+const storageFailure = (status: number, code: string) => storageReply(status, { apiVersion: 1, kind: 'error', requestId: STORAGE_REF,
+  error: { code, message: `raw server text ${code}`, retryable: false, details: [], retryAfterMs: null } });
+const storageCases = [
+  ['storage incomplete and the maintenance preview unavailable', () => {
+    const summary = fixture('storage-summary') as Fixture & { requestId: string };
+    summary.data.complete = false;
+    return { storage: () => storageReply(200, summary), preview: () => storageFailure(503, 'STORAGE_UNAVAILABLE') };
+  }, 'Part of the storage information could not be read. Nothing was changed.',
+  [/^Maintenance preview could not be read: the server or connection was temporarily unavailable/], true],
+  ['both storage reads failing', () => ({ storage: () => storageFailure(403, 'ACCESS_DENIED'), preview: () => storageFailure(503, 'STORAGE_UNAVAILABLE') }),
+    'Storage could not be read. Nothing was changed.',
+    [/^Storage accounting could not be read: this session is not allowed/, /^Maintenance preview could not be read: the server or connection/], false],
+] as const;
+for (const [name, replies, announced, notices, partial] of storageCases) {
+  it(`has no automated WCAG A/AA violations with ${name}`, async () => {
+    const reply = replies();
+    const fetcher = vi.fn<typeof fetch>(input => {
+      const path = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url, 'http://localhost').pathname;
+      if (path === '/nested/api/v1/storage') return Promise.resolve(reply.storage());
+      if (path === '/nested/api/v1/storage/maintenance-preview') return Promise.resolve(reply.preview());
+      return Promise.reject(new Error(`unexpected ${path}`));
+    });
+    realClient.kinds = new Set(['storageSummary', 'maintenancePreview']); realClient.fetch = fetcher;
+    try {
+      const auth = await session();
+      history.replaceState(null, '', '/nested/runtime');
+      render(<App basePath="/nested" session={auth} />);
+      fireEvent.click(await screen.findByRole('button', { name: 'Read storage and maintenance preview' }));
+      const section = document.querySelector<HTMLElement>('[aria-labelledby="storage-summary-title"]')!;
+      const live = section.querySelectorAll('[role="status"], [role="alert"], [aria-live]');
+      await waitFor(() => { expect(live[0]?.textContent).toBe(announced); });
+      await settle();
+      expect(section.querySelectorAll('[role="status"], [role="alert"], [aria-live]')).toHaveLength(1);
+      expect(section.querySelector('[role="status"]')!.textContent).toBe(announced);
+      expect([...section.querySelectorAll('h4')].map(node => node.textContent)).toEqual(['Storage accounting', 'Maintenance preview (dry run)']);
+      for (const pattern of notices) {
+        const notice = screen.getByText(pattern);
+        expect(notice.closest('[role="status"], [role="alert"], [aria-live]')).toBeNull();
+        expect(notice.textContent).toContain(STORAGE_REF);
+      }
+      // A failed or incomplete read never claims an empty store or a no-op maintenance run.
+      expect(section.textContent).not.toMatch(/No job data is stored|Maintenance would change nothing now|raw server text/);
+      expect(section.textContent.includes('Not every entry could be inspected; totals are lower bounds.')).toBe(partial);
+      expect(auth.snapshot().status).toBe('authenticated');
+      expect(fetcher).toHaveBeenCalledTimes(2);
+      for (const [, init] of fetcher.mock.calls) expect(init?.method ?? 'GET').toBe('GET');
+      expect(transport.get.mock.calls.filter(([kind]) => kind === 'storageSummary' || kind === 'maintenancePreview')).toHaveLength(0);
+      expect(await violations()).toEqual([]);
+    } finally { realClient.kinds = new Set(); realClient.fetch = null; }
+  });
+}
+
 it('has no automated WCAG A/AA violations with a server version notice', async () => {
   const auth = await session();
   history.replaceState(null, '', `/nested/jobs/${jobId}`);

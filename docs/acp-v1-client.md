@@ -227,8 +227,10 @@ required afterward. It records successful initialize but lifecycle phase `INITIA
 After the verified download, neither required case needs network access. A positive Codex or Goose model session will
 require separately brokered provider credentials and network and is therefore not part of pull-request CI.
 
-Each CI attempt uploads the Goose results under `acp-goose-compatibility-evidence` and the Codex results under
-`acp-codex-authentication-evidence`. Results contain the strict private provisioning document, target metadata,
+The ordinary CI workflow's `live` shard uploads Goose results as `kotlin-live-acp-goose-compatibility-evidence` and
+Codex results as `kotlin-live-acp-codex-authentication-evidence`. The separate ACP required-contract workflow uploads
+its suite reports as `acp-required-contract`; that artifact does not replace either independent-agent result.
+The independent-agent results contain the strict private provisioning document, target metadata,
 artifact digests, and structured production-harness evidence. Receipts bind client/SDK/protocol, negotiated identity
 and capabilities, elapsed time, containment/tool hashes, resource limits, output accounting, lifecycle boundary,
 complete policy-audit counts, terminal outcome, and cleanup result. A skip is not accepted in either lane.

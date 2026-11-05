@@ -36,6 +36,8 @@ it('ages one accepted snapshot without changing focus selection URL or a live re
 it('keeps missing receipt time unknown without inventing a mount timestamp or clock', async () => {
   const view = render(<MetadataReceipt kind="runtime" receipt={undefined} />);
   expect(screen.getByLabelText('Runtime report').textContent).toContain('Receipt time was not recorded');
+  // #619: aria-label is prohibited on a paragraph role; the receipt is a named group (axe aria-prohibited-attr).
+  expect(screen.getByRole('group', { name: 'Runtime report' })).toBe(screen.getByLabelText('Runtime report'));
   expect(document.querySelector('time')).toBeNull();
   expect(document.querySelector<HTMLElement>('[data-received-at]')).toBeNull();
   expect(vi.getTimerCount()).toBe(0);

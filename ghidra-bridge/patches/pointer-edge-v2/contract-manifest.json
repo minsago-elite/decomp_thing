@@ -1,0 +1,120 @@
+{
+  "status": "DISABLED; dependency checkpoint only; no production activation",
+  "issues": [
+    1830,
+    1832,
+    1842
+  ],
+  "local_acceptance_policy": "local-acceptance-v1 ADOPTED; production implementation/qualification remains pending",
+  "architecture_sha256": "aab21b0bba33a63d7c07b9034ed35348cd1d3804cba48cd1575a48298ff97747",
+  "binding_review_sha256": "9207238749bd817e5882c103169b27214d7d79746812d386adc5394781435ac2",
+  "original_review_sha256": "99d4d53d7cba49985be08fec83f714f50538cb9ab8a704cad157f1c21c5dbb77",
+  "release": {
+    "archive": "ghidra_12.1.3_PUBLIC_20260817.zip",
+    "sha256": "93a5d11a9ad510622acaaf908c556a7b9b764d338e78a7567f3689bf5081fd54",
+    "provenance": "repository pin; full ZIP not rehashed"
+  },
+  "scope": "13 sources; precisely 24 outer/nested replacement class entries; CategoryCache compiler output discarded",
+  "E1": {
+    "identity": "actual selected DataDB/PointerDB; no refresh during observation; cache/current row before validity/layout reads",
+    "settings_fetch_limits": {
+      "default_rows": 1,
+      "instance_rows": 2,
+      "direct_name_rows": 1,
+      "global_name_maps": 0,
+      "component_inherited_rows": 0
+    },
+    "name_retention_limits": {
+      "utf16_units": 64,
+      "utf8_bytes_without_encoding_copy": 64
+    },
+    "allocation_limit": "Fetched settings-record counts only. Table may allocate an entire unbounded stored record/string first; no hard preallocation byte bound. B-tree/page allocation and latency remain subject to parent process limits.",
+    "component_depth_limit": 32,
+    "component_policy": "always refuse after bounded identity walk; not aggregate slot acceptance",
+    "target": "x86:LE:64:default/gcc; target organization identical; pointer size/length/alignment 8; raw length -1 or 8"
+  },
+  "E2": {
+    "special_ids": {
+      "unspecified": -1,
+      "DEFAULT": 0,
+      "canonical_BAD": -2
+    },
+    "ordinary_builtins": "builtin maps plus current adapter row; never a PointerDB-only identity check",
+    "factories": [
+      "PointerDataType",
+      "Pointer8DataType",
+      "Pointer16DataType",
+      "Pointer24DataType",
+      "Pointer32DataType",
+      "Pointer40DataType",
+      "Pointer48DataType",
+      "Pointer56DataType",
+      "Pointer64DataType"
+    ],
+    "foreign_DB_pointers": "refuse before original getters/clones, including typed inputs and archives",
+    "resolution": "single checked owning exit after queue; nested calls do not drain another owner; first/final child identities retained; canonical final parent registration",
+    "authority": "private immutable finite-factory bit; inherited/cross-manager copies cannot upgrade false authority",
+    "negative_only_error_hook": "DataTypeManagerDB.recordOwnedPointerFailure(DataTypeManager,Throwable) lets PointerDataType latch the original clone/callback cause even before setProgram; it cannot enable, clear, or manufacture authority. No extra replacement class."
+  },
+  "E3": {
+    "receipt": "atomic first cause, synchronous DB-free post-close check; no added consumer",
+    "revocation": "both invalidations, architecture store=false, actual dispose, rollback/undo/redo, nonwrapping generation overflow",
+    "refresh": "ordinary refresh allowed only for unchanged pointer row; changed cached/current rows poison; deleted key resurrection requires a new instance",
+    "cancellation": "monitor-only/thread-only before/after bounded reads and lock/release; atomic no-wait lock ownership test; monitor JVM latency still externally bounded",
+    "cleanup": "release primary failure preserved; later cancellation suppressed; overflow receipt does not abort other manager disposal"
+  },
+  "tests": {
+    "OwnedPointerIngressTest": [
+      "all nine factories; 116 discovered builtins; direct/inherited/intermediate forged copies; foreign fresh/typed/poisoned/builtin/standalone/create/read-only/update/real V1-to-V2 upgraded archive; original nonnull-to-null/throwing clones; both resolution paths; nested queue ownership; conflicts/contains/reuse/self/duplicate replacement"
+    ],
+    "OwnedPointerObservationTest": [
+      "real CREATE ProgramDB/listing/PointerDB; unspecified/DEFAULT/BAD/void/int/function; all fixed sizes; wrong/missing child; wrappers; raw0/target size/alignment refusal; actual x86_32 and windows compiler refusals; sizes9/127 fail upstream value conversion with sticky receipt before observation"
+    ],
+    "OwnedPointerSettingsTest": [
+      "cold 10000 unrelated names; iterator/name visit counters and no name maps; zero/one/two/duplicate/default rows; raw Long2 vs strings/other values; invalid/missing/max name index; exact name size limits; actual adapter IO/schema/association faults; zero inherited component reads",
+      "exact original/saved-policy UOE identity from default/instance range/hasNext/next/direct-name/invalidation; positive receipt-clean name limits"
+    ],
+    "OwnedPointerListingTest": [
+      "actual top-level and addressed array/structure components; depths32/33; cycle/parent-key/offset faults; foreign/forged/interior/stale/deleted/replaced selection; direct missing/changed listing rows"
+    ],
+    "OwnedPointerLifecycleTest": [
+      "clean/error close; first-cause race; direct dispose; both invalidations; store=false architecture; rename/category; unchanged/changed rollback and undo/redo; deleted key resurrection; failed adapter write; generation max/overflow; all14/17/37 cancellation checkpoints (empty/populated settings/depth32 component) in monitor and thread modes; contention; monitor Error and nested cleanup failure",
+      "exact14/17/37 UOE origin sweep, one-shot3/4, saved genuine policy rethrows, same receipt on reentry/retry, exact acquire/release/final monitor and architecture cleanup ordering"
+    ]
+  },
+  "future_gates": [
+    "owned worker registration/final receipt/all cleanup and consumer-release controls",
+    "authenticated ordered closure at startup/observation, code-source/defining-loader and OSGi/source-script controls",
+    "owned bridge/guard/profile/reference identity and all archive-bound GCC consumers preserved",
+    "both original native methods/four paired exports/zero skips or aborts; typed parameters2/1/2; C/model/all sidecar/state/progress parity; faithful header and41-sidecar parity",
+    "workers1/4, interrupt/resume/sparse holes, native handle cleanup, parent wall/RSS/termination, installed execution/exact-tree hosted checks",
+    "full binary_01:0x103fa8 not0x103fa0; normalize_name three typed parameters; all modules/clean build/archive; actual authenticated #1842 reconstruction/continuation/integration"
+  ],
+  "never_claims": [
+    "actual parent selected-object child provenance",
+    "constructor history or C intent",
+    "save success",
+    "component acceptance",
+    "native pass",
+    "issue closure",
+    "loader/profile production qualification"
+  ],
+  "origin_remediation": {
+    "review_sha256": "7a1d4a0896a8a5cce3a23c6d670d041c89c46e135b04adf60ee5293ac735ec60",
+    "policy": "Only exact stack-local exceptions allocated immediately at observation policy throws are receipt-clean; never subtype classification. All monitor/adapter/dependency exceptions latch before propagation.",
+    "new_runtime_classes": [],
+    "new_public_methods": [],
+    "new_package_final_methods": [
+      "ProgramBasedDataTypeManagerDB.readOwnedOpaqueSettings(long,Address,TaskMonitor): java.lang.Boolean",
+      "DataTypeManagerDB.releaseOwnedLock(Throwable): void"
+    ],
+    "reviewed_behavior_changes": [
+      "CodeManager.requireOwnedPointerSelection existing public signature returns null for bounded component refusal; null grants nothing",
+      "SettingsDBAdapterV1.readSettingNameDirect returns null at retention limit; malformed/missing rows throw",
+      "hasOwnedOpaqueSettings retains boolean compatibility wrapper; observation uses nullable read helper"
+    ],
+    "cleanup": "Acquire, both invalidations and architecture work latch before cleanup; original primary and first cause retained; cleanup suppressed in execution order",
+    "bounds_unchanged": true,
+    "audit_path": "build/orchestration/exporter-v20-pointer-dependency-remediation/origin-audit.md"
+  }
+}

@@ -1,0 +1,15 @@
+--- a/ghidra/program/database/DBObjectCache.java
++++ b/ghidra/program/database/DBObjectCache.java
+@@ -334,4 +334,12 @@
+ 			}
+ 		}
+ 	}
++
++
++    /** Identity only: never refresh, validate, enumerate, or manufacture an object. */
++    public final synchronized boolean isCachedIdentity(long key, DatabaseObject expected) {
++        var reference = map.get(key);
++        return expected != null && reference != null && reference.get() == expected;
++    }
++
+ }

@@ -50,10 +50,10 @@ internal class GeneratedCProjectRendering(private val model: RecoveredProgramMod
 
     override fun sharedInterface(): String = buildString {
         append("#ifndef DECOMP_TYPES_H\n#define DECOMP_TYPES_H\n\n#include <stddef.h>\n#include <stdint.h>\n\n")
-        model.types.sortedBy { it.id }.forEach { type ->
+        generatedCTypeEmissionOrder(model.types).forEach { type ->
             append("/* ${type.id}; status=${type.status.name.lowercase()}")
             type.sourceAddress?.let { append("; @ 0x${it.toString(16)}") }
-            append(" */\n").append(type.declaration.trim()).append("\n\n")
+            append(" */\n").append(type.declaration).append("\n\n")
         }
         append("#endif\n")
     }

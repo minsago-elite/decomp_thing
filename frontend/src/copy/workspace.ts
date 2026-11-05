@@ -40,6 +40,9 @@ export const dashboardCopy = {
   "thisLibraryExceedsAListingLimitNoPartialResultsWere": "This library exceeds a listing limit. No partial results were returned. Narrowing filters may help; if the limit persists, the stored library needs attention.",
   "thisPageSnapshotExpiredRefreshJobsToStartANew": "This page snapshot expired. Refresh jobs to start a new snapshot.",
   "jobsCouldNotBeLoadedTheServerMayBeUnavailable": "Jobs could not be loaded. The server may be unavailable or a stored job may need attention.",
+  "incompatibleJobListingResponse": "This server returned a job listing format this page does not support. No rows are shown. Update or reload the web interface, then refresh jobs.",
+  "jobLibraryExceedsAStorageLimit": "This job library exceeds a storage limit, so no rows are shown. No partial results were returned; the stored library needs attention before it can be listed.",
+  "jobListingCouldNotBeVerified": "The job listing could not be verified, so no rows are shown. Refresh jobs; if it persists, the stored library may be damaged.",
   "useValidFilterValues": "Use valid filter values.",
   "thePreviousFilteredResultHadNoMatchesCurrentResultsAre": " The previous filtered result had no matches; current results are unknown until refresh succeeds.",
   "thePreviousLibrarySnapshotWasEmptyCurrentResultsAreUnknown": " The previous library snapshot was empty; current results are unknown until refresh succeeds.",
@@ -70,7 +73,16 @@ export const recoverySummaryCopy = {
   "inspectionIsIncompleteAdditionalFilesOrBytesMayRemain": "Inspection is incomplete. Additional files or bytes may remain.",
   "preserveTheseFilesUntilRecoveryHasBeenVerifiedCountsAre": "Preserve these files until recovery has been verified. Counts are a display-only snapshot and do not authorize cleanup or establish accepted source revisions.",
   "refreshJobsToInspectRecoveryFilesAgain": "Refresh jobs to inspect recovery files again.",
-  "recoveryFilesCouldNotBeInspectedRecoveryStateIsUnknown": "Recovery files could not be inspected. Recovery state is unknown; preserve stored data before retrying.",
+  "failures": {
+    "session": "Recovery files were not inspected because the local session is no longer valid. Recovery state is unknown. Sign in again, then refresh jobs.",
+    "denied": "This session is not permitted to inspect recovery files. Recovery state is unknown; use a session with access to this service.",
+    "missing": "Recovery inspection is not available from this service. Recovery state is unknown; no files are inferred to be absent.",
+    "unsupported": "Recovery files were reported in a format this interface does not support. Recovery state is unknown; preserve stored data.",
+    "unverified": "Recovery files could not be verified. Recovery state is unknown; preserve stored data and check the job storage before retrying.",
+    "sizeLimit": "The recovery inventory exceeds the size this interface reads, so it is not shown. Recovery state is unknown; preserve stored data.",
+    "transient": "Recovery inspection is temporarily unavailable. Recovery state is unknown; preserve stored data, wait a moment, then refresh jobs.",
+    "failed": "Recovery files could not be inspected. Recovery state is unknown; preserve stored data before retrying."
+  },
   "recoveryInspectionPaused": "Recovery inspection paused",
   "retainedRecoveryFiles": "Retained recovery files"
 } as const;

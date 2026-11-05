@@ -11,10 +11,18 @@ import { seedScale, qualifyScale, dashboardFiltersWithSnapshot } from './package
 import { seedLive, qualifyLive } from './packaged-browser-live.mjs';
 import { seedHistory, qualifyHistory } from './packaged-browser-history.mjs';
 import { seedLegacy, qualifyLegacy } from './packaged-browser-legacy.mjs';
-import { qualifyRestart, assertGracefulShutdown, scrubTokens, boundReport } from './packaged-browser-restart.mjs';
+import { qualifyRestart, assertGracefulShutdown } from './packaged-browser-restart.mjs';
+import { finalizePublication } from './packaged-browser-report.mjs';
 import { qualifyUpgrade, qualifyUpgradeCache } from './packaged-browser-upgrade.mjs';
 import { qualifyAudit, assertAudit } from './packaged-browser-audit.mjs';
+import { createResponsiveSection, responsiveFixtures, qualifyResponsive, assessResponsiveReport } from './packaged-browser-responsive.mjs';
+import { boundedArgv, createRealZoomSection, qualifyRealZoom, assessRealZoomReport } from './packaged-browser-real-zoom.mjs';
+import { createGeometryProbeSection, createGeometryProbe, assessGeometryProbe } from './packaged-browser-zoom-geometry-probe.mjs';
 import { PackagedBrowserCdpDiagnostics } from './packaged-browser-cdp-diagnostics.mjs';
+import { AXE_VERSION, createNoticeSection, qualifyAvailabilityNotices, assessNoticeReport } from './packaged-browser-a11y-notices.mjs';
+import { createConnectionSection, qualifyConnectionNotice, assessConnectionReport } from './packaged-browser-connection-notice.mjs';
+import { createReadStatesSection, readStateFixtures, qualifyReadStates, assessReadStatesReport, verifyRetainedPng as verifyReadStatePng, withDeadline as readStateDeadline, FIXED_PNG_NAMES as READ_STATE_PNG_NAMES } from './packaged-browser-read-states.mjs';
+import { bindGitInitFixtures, createGitInitSection, qualifyGitInitialization, assessGitInitReport, verifyGitInitPng, GIT_INIT_CASES } from './packaged-browser-git-init.mjs';
 
 // Test driver only: the application is launched with a separate Node-free PATH.
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -28,10 +36,11 @@ const { values } = parseArgs({ options: {
   'java-home': { type: 'string' },
   python: { type: 'string', default: '/usr/bin/python3' },
   'no-sandbox': { type: 'boolean', default: false },
+  'real-zoom-geometry-probe': { type: 'boolean', default: false },
   help: { type: 'boolean', default: false },
 } });
 if (values.help) {
-  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|metadata|history|restart|scale|live|proxy|upgrade|legacy|audit] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
+  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|metadata|history|restart|scale|live|proxy|upgrade|legacy|audit] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox] [--real-zoom-geometry-probe]');
   console.log('restart: seeded history on one JVM, graceful SIGTERM-only restart on the same installation/data/port, fresh bootstrap and serverInstanceId, then two tabs with a progress-pin stale If-Match 412. No live worker, no restart-while-running, one Chromium only.');
   console.log('public: packaged home/Runtime/recovery; session: public plus local session journey; upload: session plus inert upload and lost-response retry; history: session plus preseeded inert multi-page attempts; scale: session plus 10,000 persisted jobs and keyboard pagination; proxy: real Vite HMR and session journey against packaged JVM; upgrade: previous JVM to current JVM on one origin with an old tab.');
   console.log('legacy: inert legacy HTML/polling with explicit test-owned state edits; no workflow execution.');
@@ -163,6 +172,7 @@ class Protocol {
       this.socket.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
     });
   }
+  close() { this.socket.close(); }
   on(method, listener, sessionId) {
     const key = `${sessionId ?? ''}:${method}`;
     if (!this.listeners.has(key)) this.listeners.set(key, []);
@@ -182,6 +192,9 @@ async function snapshot(directory, relative = '') {
   }
   return result;
 }
+
+/** Shared by the main browser and the #619 real-zoom processes, so both launch with the same flags. */
+const chromeFlags = (headless) => [...(headless ? ['--headless=new'] : []), '--disable-gpu', ...(values['no-sandbox'] ? ['--no-sandbox'] : []), '--no-first-run', '--no-default-browser-check', '--disable-background-networking', '--disable-extensions', '--disable-default-apps', '--disable-sync', '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1'];
 
 const forcedKill = new WeakSet();
 async function stop(process) {
@@ -539,7 +552,9 @@ try {
   browserTmp = await fs.mkdtemp(join(repo, '.ct-'));
   report.browserTempDirectory = browserTmp;
   await fs.mkdir(profile);
-  browser = startOwned(chromeBinary, [...(observeNativeVisibility ? [] : ['--headless=new']), '--disable-gpu', ...(values['no-sandbox'] ? ['--no-sandbox'] : []), '--no-first-run', '--no-default-browser-check', '--disable-background-networking', '--disable-extensions', '--disable-default-apps', '--disable-sync', '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1', `--user-data-dir=${profile}`, 'about:blank'], {
+  const browserArgv = [...chromeFlags(!observeNativeVisibility), `--user-data-dir=${profile}`, 'about:blank'];
+  report.browserArgv = boundedArgv(browserArgv); // #619: the real-zoom gate compares its processes' argv against this.
+  browser = startOwned(chromeBinary, browserArgv, {
     env: { ...process.env, TMPDIR: browserTmp }, stdio: ['ignore', 'ignore', 'pipe'],
   });
   browser.stderr.on('data', (chunk) => { browserError = (browserError + chunk).slice(-1048576); });
@@ -723,9 +738,147 @@ try {
     await delay(100); // Drain resource events from the last measured target.
     report.auditVerdict = assertAudit(report.audit, manifest, targets.filter((target) => !target.cspProbe).flatMap((target) => target.responses), origin);
     assert.deepEqual(report.auditVerdict.failures, [], `Packaged audit failures:\n${report.auditVerdict.failures.join('\n')}`);
-    assert.ok(targets.filter((target) => !target.cspProbe).every((target) => target.requests.every((entry) => entry.url.startsWith(origin + '/') || entry.url.startsWith('data:'))), 'Audit fetched an external dependency');
-    assert.equal(await fs.stat(data).then(() => true, () => false), false, 'Fixture-backed audit created job data');
-    report.jobDataCreated = false;
+    // #628: this is frontend-fixture read evidence from its own bounded targets. Attach before the
+    // first fixture or browser call so partial evidence remains in the primary report on failure.
+    const readStates = report.auditReadStates = createReadStatesSection();
+    const readStatesSequences = JSON.parse(readFileSync(join(repo, 'scripts/packaged-browser-read-state-sequences.json'), 'utf8'));
+    const axeLock = JSON.parse(readFileSync(join(repo, 'frontend/package-lock.json'), 'utf8')).packages['node_modules/axe-core'].version;
+    const axePackage = JSON.parse(readFileSync(join(repo, 'frontend/node_modules/axe-core/package.json'), 'utf8')).version;
+    assert.equal(axePackage, axeLock, 'Installed axe-core differs from the frontend lockfile');
+    assert.equal(axePackage, AXE_VERSION, 'Installed axe-core differs from the pinned packaged notice axe version');
+    const axeSource = readFileSync(join(repo, 'frontend/node_modules/axe-core/axe.min.js'), 'utf8');
+    const readStatesLateSink = [];
+    const readStatesStartedAt = Date.now();
+    const boundAuditFixtures = readStateFixtures({ repo, python: values.python, buildId: manifest.buildId });
+    await qualifyReadStates({ cdp, makeTarget, evaluate, ready, delay, root, origin, section: readStates,
+      sequences: readStatesSequences, axeSource, axeSha256: createHash('sha256').update(axeSource).digest('hex'), lateSink: readStatesLateSink,
+      cookie: { name: 'decomp_read_state_fixture', value: randomUUID() },
+      fixtures: () => boundAuditFixtures });
+    let readStatesFailures = [];
+    const finalizeReadStatesParentEvidence = async () => {
+      const parent = report.auditReadStatesParent = { schema: 'packaged-read-states-parent/v1', lateSink: [], lateTargetCleanup: [], elapsedMs: Date.now() - readStatesStartedAt };
+      for (const entry of readStatesLateSink) {
+        if (entry?.kind === 'request-after-close') {
+          parent.lateSink.push({ label: entry.label, kind: entry.kind, method: entry.method, path: entry.path });
+          continue;
+        }
+        if (entry?.kind === 'target-acquired-after-freeze') {
+          const cleanup = { label: entry.label, targetId: entry.targetId ?? null, outcome: 'unresolved' };
+          if (typeof entry.targetId === 'string' && entry.targetId.length > 0) {
+            try {
+              await readStateDeadline(cdp.call('Target.closeTarget', { targetId: entry.targetId }), 1000, 'late read-state target close');
+              cleanup.outcome = 'closed';
+            } catch (error) { cleanup.reason = String(error?.message ?? error).slice(0, 160); }
+          } else cleanup.reason = 'late target has no target id';
+          parent.lateTargetCleanup.push(cleanup);
+          continue;
+        }
+        parent.lateSink.push({ kind: 'unknown-late-sink-entry' });
+      }
+      const expectedPngs = [...READ_STATE_PNG_NAMES].sort();
+      const records = readStates.cases.map((entry) => entry?.screenshot).filter(Boolean);
+      const actualPngs = records.map((entry) => entry.name).sort();
+      if (JSON.stringify(actualPngs) !== JSON.stringify(expectedPngs)) parent.lateSink.push({ kind: 'fixed-png-record-set-mismatch' });
+      else for (const png of records) {
+        try { await verifyReadStatePng(root, png); }
+        catch (error) { parent.lateSink.push({ kind: 'retained-png-invalid', name: png.name, reason: String(error?.message ?? error).slice(0, 160) }); }
+      }
+      const owned = assessReadStatesReport(readStates, { sequences: readStatesSequences });
+      const cleanupFailures = parent.lateTargetCleanup.filter((item) => item.outcome !== 'closed').map((item) => `late target cleanup ${item.label}: ${item.reason ?? item.outcome}`);
+      const lateFailures = parent.lateSink.map((item) => `${item.kind}${item.name ? ` ${item.name}` : ''}`);
+      readStatesFailures = [...owned, ...cleanupFailures, ...lateFailures].slice(0, 64);
+      parent.assessment = [...cleanupFailures, ...lateFailures].slice(0, 32);
+      parent.elapsedMs = Date.now() - readStatesStartedAt;
+      report.auditReadStatesGate = { failures: readStatesFailures, passed: readStatesFailures.length === 0 };
+    };
+    const gitInit = report.auditGitInit = createGitInitSection();
+    const gitInitFixtures = bindGitInitFixtures(boundAuditFixtures, { readContract: (name) => readFileSync(join(repo, 'contracts/web/v1/fixtures', name)) });
+    const gitInitLateSink = [];
+    const gitInitStartedAt = Date.now();
+    let gitInitFailures = [];
+    const finalizeGitInitEvidence = async () => {
+      const parent = report.auditGitInitParent = { schema: 'packaged-git-init-parent/v1', lateSink: [], lateTargetCleanup: [], assessment: [], elapsedMs: Date.now() - gitInitStartedAt };
+      for (const item of gitInitLateSink) {
+        if (item?.kind === 'target-acquired-after-cutoff' && typeof item.targetId === 'string' && item.targetId) {
+          const cleanup = { targetId: item.targetId, outcome: 'unresolved' };
+          try { await readStateDeadline(cdp.call('Target.closeTarget', { targetId: item.targetId }), 1000, 'late Git-init target close'); cleanup.outcome = 'closed'; }
+          catch (error) { cleanup.reason = String(error?.message ?? error).slice(0, 160); }
+          parent.lateTargetCleanup.push(cleanup);
+        } else parent.lateSink.push({ kind: item?.kind ?? 'unknown-late-event', id: item?.id ?? null });
+      }
+      const expected = [...GIT_INIT_CASES.map(({ id }) => `git-init-${id}.png`)].sort();
+      const shots = gitInit.cases.map((item) => item?.screenshot).filter(Boolean);
+      const actual = shots.map((item) => item.name).sort();
+      if (JSON.stringify(actual) !== JSON.stringify(expected)) parent.lateSink.push({ kind: 'fixed-png-record-set-mismatch' });
+      else for (const shot of shots) {
+        try { await verifyGitInitPng(root, shot); }
+        catch (error) { parent.lateSink.push({ kind: 'retained-png-invalid', id: shot.name }); }
+      }
+      const owned = assessGitInitReport(gitInit);
+      const cleanupFailures = parent.lateTargetCleanup.filter((x) => x.outcome !== 'closed').map((x) => `late target cleanup: ${x.reason ?? x.outcome}`);
+      const lateFailures = parent.lateSink.map((x) => x.kind);
+      gitInitFailures = [...owned, ...cleanupFailures, ...lateFailures].slice(0, 64);
+      parent.assessment = [...cleanupFailures, ...lateFailures].slice(0, 32);
+      parent.elapsedMs = Date.now() - gitInitStartedAt;
+      report.auditGitInitGate = { failures: gitInitFailures, passed: gitInitFailures.length === 0 };
+    };
+    // #619: rich long-content fixtures and trusted keyboard/emulated-touch operability on a separate target.
+    // The section is attached before driving so partial evidence is published if the driver throws.
+    let auditRunError = null;
+    try {
+      // #1897: each command case runs in an owned packaged target. Request-stage interception is closed over
+      // exact generator/contract bytes; the POST is fulfilled locally and never reaches the backend.
+      await qualifyGitInitialization({ cdp, makeTarget, evaluate, delay, root, origin, section: gitInit,
+        fixtures: gitInitFixtures, cookie: { name: 'decomp_git_init_fixture', value: randomUUID() }, lateSink: gitInitLateSink });
+      const responsive = report.auditResponsive = createResponsiveSection();
+      await qualifyResponsive({ cdp, makeTarget, evaluate, ready, delay, root, origin, section: responsive,
+        fixtures: () => responsiveFixtures({ repo, python: values.python, buildId: manifest.buildId }) });
+      const responsiveFailures = assessResponsiveReport(responsive);
+      assert.deepEqual(responsiveFailures, [], `Packaged #619 responsive failures:\n${responsiveFailures.join('\n')}`);
+      // #619 genuine 200%/400% page zoom: three fresh owned Chrome processes (1x calibration, 2x, 4x) with the same
+      // executable and flags. Attached before any launch so partial evidence and cleanup records are published.
+      const realZoom = report.auditRealZoom = createRealZoomSection();
+      // Opt-in (--real-zoom-geometry-probe) diagnostic section, separate from the gate and attached before any launch.
+      const geometryProbeSection = values['real-zoom-geometry-probe'] ? (report.auditRealZoomGeometryProbe = createGeometryProbeSection()) : null;
+      await qualifyRealZoom({ section: realZoom, repo, chromeBinary, chromeSha256: report.tools.chromeSha256, baseArgs: chromeFlags(true), env: process.env,
+        spawnChrome: startOwned, stop, connect: async (url) => new Protocol(await connectDevTools(url)), root, origin, delay,
+        fixtures: () => responsiveFixtures({ repo, python: values.python, buildId: manifest.buildId }),
+        ...(geometryProbeSection ? { geometryProbe: createGeometryProbe({ section: geometryProbeSection, root }) } : {}) });
+      if (geometryProbeSection) {
+        try { geometryProbeSection.assessment = (await assessGeometryProbe(geometryProbeSection, { directory: root, realZoom })).slice(0, 24).map((f) => String(f).slice(0, 240)); }
+        catch (error) { geometryProbeSection.assessment = [`assessment failed: ${String(error?.message ?? error).slice(0, 200)}`]; }
+      }
+      const realZoomFailures = assessRealZoomReport(realZoom, { chromeSha256: report.tools.chromeSha256, browser: report.browser, browserArgv: report.browserArgv, fixtures: responsive.fixtures, geometryProbe: geometryProbeSection });
+      assert.deepEqual(realZoomFailures, [], `Packaged #619 real browser zoom failures:\n${realZoomFailures.join('\n')}`);
+      assert.ok(targets.filter((target) => !target.cspProbe).every((target) => target.requests.every((entry) => entry.url.startsWith(origin + '/') || entry.url.startsWith('data:'))), 'Audit fetched an external dependency');
+      assert.equal(await fs.stat(data).then(() => true, () => false), false, 'Fixture-backed audit created job data');
+      report.jobDataCreated = false;
+    } catch (error) {
+      auditRunError = error;
+      throw error;
+    } finally {
+      try { await finalizeReadStatesParentEvidence(); }
+      catch (error) {
+        const message = `read-state parent evidence finalization failed: ${String(error?.message ?? error).slice(0, 160)}`;
+        report.auditReadStatesParent ??= { schema: 'packaged-read-states-parent/v1', lateSink: [], lateTargetCleanup: [], assessment: [] };
+        report.auditReadStatesParent.assessment = [...(report.auditReadStatesParent.assessment ?? []), message].slice(0, 8);
+        readStatesFailures = [message];
+        report.auditReadStatesGate = { failures: readStatesFailures, passed: false };
+        // Keep a pre-existing responsive/zoom exception as the primary failure. If the body succeeded,
+        // surface the evidence-finalization failure directly instead of silently publishing it.
+        if (!auditRunError) throw error;
+      }
+      try { await finalizeGitInitEvidence(); }
+      catch (error) {
+        const message = `Git-init evidence finalization failed: ${String(error?.message ?? error).slice(0, 160)}`;
+        report.auditGitInitParent ??= { schema: 'packaged-git-init-parent/v1', lateSink: [], lateTargetCleanup: [], assessment: [] };
+        report.auditGitInitParent.assessment.push(message);
+        gitInitFailures = [message]; report.auditGitInitGate = { failures: gitInitFailures, passed: false };
+        if (!auditRunError) throw error;
+      }
+    }
+    assert.deepEqual(readStatesFailures, [], `Packaged #628 read-state failures:\n${readStatesFailures.join('\n')}`);
+    assert.deepEqual(gitInitFailures, [], `Packaged #1897 Git-init failures:\n${gitInitFailures.join('\n')}`);
   }
   if (values.mode === 'public' || values.mode === 'session' || values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'history' || values.mode === 'scale' || values.mode === 'live') {
     const identityExpression = `(() => ({ buildId: document.querySelector('meta[name="decomp-ui-build"]')?.content, applicationVersion: document.querySelector('meta[name="decomp-application-version"]')?.content, page: location.pathname, text: document.body.innerText }))()`;
@@ -882,6 +1035,43 @@ try {
     }, 'explicit Vite backend proxy');
     report.frontendOrigin = browserOrigin;
     report.requests = {};
+  }
+
+  if (values.mode === 'session') {
+    // #1894/#1895: unauthenticated notices before any sign-in, on their own target; axe-core is the
+    // lockfile-pinned frontend dependency installed by the packaged build, injected only through CDP.
+    // The report owns the section before anything can throw, so partial evidence survives a failure.
+    const notices = report.availabilityNotices = createNoticeSection();
+    const axeLock = JSON.parse(readFileSync(join(repo, 'frontend/package-lock.json'), 'utf8')).packages['node_modules/axe-core'].version;
+    const axePackage = JSON.parse(readFileSync(join(repo, 'frontend/node_modules/axe-core/package.json'), 'utf8')).version;
+    assert.equal(axePackage, axeLock, 'Installed axe-core differs from the frontend lockfile');
+    assert.equal(axePackage, AXE_VERSION, 'Installed axe-core differs from the pinned notice axe version');
+    const axeSource = readFileSync(join(repo, 'frontend/node_modules/axe-core/axe.min.js'), 'utf8');
+    const priorCookies = (await cdp.call('Network.getCookies', { urls: [origin + '/nested/'] }, lastTarget.sessionId)).cookies;
+    notices.authenticatedBefore = priorCookies.length > 0;
+    await qualifyAvailabilityNotices({ cdp, makeTarget, evaluate, ready, waitFor, root, origin, axeSource, section: notices,
+      authenticatedBefore: notices.authenticatedBefore,
+      axeSha256: createHash('sha256').update(axeSource).digest('hex') });
+    const noticeFailures = assessNoticeReport(notices);
+    assert.deepEqual(noticeFailures, [], 'Availability notice accessibility evidence failed its semantic gate');
+    console.log('Unauthenticated Home/Runtime notices verified at 1440x900 and 390x844 (Chrome AX tree, scoped axe, trusted keyboard).');
+    // #1896: offline/reconnected connection notice on two owned signed-out targets, still before sign-in.
+    // The section is attached before any read; the helper closes its own targets, so on failure the
+    // still-open availability-notice target stays the failure-screenshot target.
+    const connection = report.connectionNotice = createConnectionSection();
+    const connectionFallbackTarget = lastTarget;
+    try {
+      connection.authenticatedBefore = (await cdp.call('Network.getCookies', { urls: [origin + '/nested/'] }, lastTarget.sessionId)).cookies.length > 0;
+      await qualifyConnectionNotice({ cdp, makeTarget, evaluate, root, origin, axeSource, section: connection,
+        authenticatedBefore: connection.authenticatedBefore,
+        axeSha256: createHash('sha256').update(axeSource).digest('hex') });
+      const connectionFailures = assessConnectionReport(connection);
+      assert.deepEqual(connectionFailures, [], `Connection notice evidence failed its semantic gate:\n${connectionFailures.join('\n')}`);
+    } catch (error) {
+      lastTarget = connectionFallbackTarget;
+      throw error;
+    }
+    console.log('Signed-out connection notice verified offline/reconnected at 1440x900 and 390x844 (CDP network conditions, trusted events, AX tree, scoped axe).');
   }
 
   if (values.mode === 'session' || values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'history' || values.mode === 'scale' || values.mode === 'live' || values.mode === 'proxy') {
@@ -1195,8 +1385,8 @@ try {
       process.exitCode = 1;
     }
   }
-  const retained = scrubTokens(boundReport(report), sensitiveValues);
-  await fs.writeFile(join(root, 'report.json'), JSON.stringify(retained, null, 2) + '\n');
-  console.log(JSON.stringify(retained, null, 2));
+  // Publication never replaces the scenario's own failure: refusals and read-back
+  // failures leave a bounded failed record, explain on stderr and force exit 1.
+  await finalizePublication(root, report, sensitiveValues);
   console.log(`Shutdown ${report.shutdownConfirmed ? 'confirmed' : 'UNCONFIRMED'}. Report: ${join(root, 'report.json')}`);
 }

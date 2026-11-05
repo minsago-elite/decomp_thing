@@ -64,19 +64,68 @@ jobs:
       - name: Verify packaged accessibility and asset audit controls
         run: |
           node scripts/test-packaged-browser-audit.mjs
+          node --check scripts/packaged-browser-responsive.mjs
+          node --test scripts/test-packaged-browser-responsive.mjs
           node scripts/test-browser-engine-input.mjs
           node scripts/test-packaged-browser-engine-adapter.mjs
           node --check scripts/packaged-browser-engines.mjs
       - name: Verify packaged upload route readiness controls
         run: node scripts/test-packaged-browser-upload.mjs
+      - name: Verify packaged real browser zoom controls
+        timeout-minutes: 4
+        run: |
+          node --check scripts/packaged-browser-real-zoom.mjs
+          node --test --test-timeout=240000 scripts/test-packaged-browser-real-zoom.mjs
+      - name: Verify bounded packaged report retention controls
+        run: |
+          node --check scripts/packaged-browser-report.mjs
+          node --test scripts/packaged-browser-report.test.mjs
+          node --check scripts/verify-packaged-browser-reports.mjs
+      - name: Verify bounded real zoom geometry diagnostics
+        timeout-minutes: 2
+        run: |
+          node --check scripts/packaged-browser-zoom-geometry-probe.mjs
+          node --test --test-timeout=90000 scripts/test-packaged-browser-zoom-geometry-probe.mjs
+      - name: Verify packaged availability-notice accessibility controls
+        timeout-minutes: 2
+        run: |
+          node --check scripts/packaged-browser-a11y-notices.mjs
+          node --test scripts/test-packaged-browser-a11y-notices.mjs
+      - name: Verify packaged connection-notice controls
+        timeout-minutes: 2
+        run: |
+          node --check scripts/packaged-browser-connection-notice.mjs
+          node --check scripts/packaged-browser-report-test-fixtures.mjs
+          node --test scripts/test-packaged-browser-connection-notice.mjs
+      - name: Verify packaged read-state controls
+        timeout-minutes: 6
+        run: |
+          node --check scripts/packaged-browser-read-states.mjs
+          node --check scripts/packaged-browser-read-states-gate.mjs
+          node --check scripts/test-packaged-browser-read-states.mjs
+          node --check scripts/verify-packaged-browser-reports.mjs
+          node --test --test-concurrency=1 scripts/test-packaged-browser-read-states.mjs
+      - name: Verify packaged Git initialization controls
+        timeout-minutes: 2
+        run: |
+          node --check scripts/packaged-browser-git-init.mjs
+          node --check scripts/packaged-browser-git-init-gate.mjs
+          node --check scripts/test-packaged-browser-git-init.mjs
+          node --test scripts/test-packaged-browser-git-init.mjs
       - name: Verify bounded archival cleanup controls
         timeout-minutes: 1
         run: python3 -B scripts/test-archival-diagnostics.py --verbose
       - name: Verify bounded sanitizer invocation controls
         timeout-minutes: 1
         run: python3 -B scripts/test-clang-sanitizer.py --verbose
+      - name: Verify ChatGPT transport fixture wrapper controls
+        timeout-minutes: 1
+        run: python3 -B scripts/test-chatgpt-transport-c4a-fixtures.py --verbose
       - name: Validate versioned web contract fixtures
         run: python3 contracts/web/v1/verify.py | tee "$RUNNER_TEMP/frontend-ci/contracts.txt"
+      - name: Verify pure ACP mount fixture protocol controls
+        timeout-minutes: 1
+        run: python3 -B src/test/python/acp_mount_isolation_protocol_test.py
       - name: Validate ACP required-case metadata controls
         timeout-minutes: 1
         run: |
@@ -125,13 +174,126 @@ jobs:
             build/frontend/bundle-report.json
             build/frontend/bundle-composition.json
 
+  atomic-install:
+    needs: frontend
+    env:
+      NPM_CONFIG_CACHE: ${{ github.workspace }}/build/npm-download-cache
+    name: Atomic install qualification
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: ./.github/actions/setup-gradle-compiler-cache
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/master' }}
+      - name: Cache Gradle dependencies
+        uses: actions/cache@v6
+        with:
+          path: build/.gradle-user-home/caches/modules-2
+          key: atomic-install-gradle-modules-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/*.gradle.kts', '**/gradle.properties', 'gradle/libs.versions.toml', 'gradle/wrapper/gradle-wrapper.properties') }}
+      - name: Cache locked npm downloads
+        uses: actions/cache@v6
+        with:
+          path: build/npm-download-cache/_cacache
+          key: frontend-npm-downloads-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('frontend/package-lock.json', 'frontend/package.json', 'frontend/.npmrc', '.node-version', 'scripts/install-frontend-node.sh', 'scripts/frontend-node-sha256.txt') }}
+      - name: Cache reviewed Node downloads
+        uses: actions/cache@v6
+        with:
+          path: build/frontend-node-downloads
+          key: frontend-node-archives-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/install-frontend-node.sh', 'scripts/frontend-node-sha256.txt', '.node-version', 'frontend/package.json') }}
+      - name: Install pinned build-only frontend toolchain
+        env:
+          DECOMP_FRONTEND_NODE_DOWNLOAD_CACHE: '1'
+        run: |
+          mkdir -p build/atomic-install-ci
+          bash scripts/install-frontend-node.sh "$GITHUB_WORKSPACE/build/atomic-install-ci/node"
+          echo "$GITHUB_WORKSPACE/build/atomic-install-ci/node/bin" >> "$GITHUB_PATH"
+          export PATH="$GITHUB_WORKSPACE/build/atomic-install-ci/node/bin:$PATH"
+          node --version
+          npm --version
+      - name: Verify installed qualification record controls
+        run: |
+          mkdir -p build/orchestration/atomic-install-ci
+          python3 -B scripts/test-atomic-install-qualification.py 2>&1 | tee build/orchestration/atomic-install-ci/verifier-controls.log
+          python3 -B scripts/test-atomic-install-prepared.py 2>&1 | tee build/orchestration/atomic-install-ci/prepared-controls.log
+          python3 -B scripts/test-atomic-install-artifacts.py 2>&1 | tee build/orchestration/atomic-install-ci/artifact-controls.log
+          python3 -B scripts/atomic_install_artifacts.py check
+      - name: Check the configured native helper compiler
+        run: |
+          test -x /usr/bin/cc
+          /usr/bin/cc --version | head -n 1
+      - name: Run publisher controls and build the probe agent
+        run: |
+          mkdir -p build/atomic-install-ci/home build/atomic-install-ci/tmp build/.gradle-user-home
+          unset JAVA_OPTS GRADLE_OPTS JDK_JAVA_OPTIONS JAVA_TOOL_OPTIONS _JAVA_OPTIONS LLM_BIN_PATCH_OPTS
+          export GRADLE_USER_HOME="$GITHUB_WORKSPACE/build/.gradle-user-home"
+          export JAVA_OPTS="-Djava.io.tmpdir=$GITHUB_WORKSPACE/build/atomic-install-ci/tmp -Duser.home=$GITHUB_WORKSPACE/build/atomic-install-ci/home -XX:-UsePerfData -XX:-CreateCoredumpOnCrash -XX:-DumpReplayDataOnError"
+          ./gradlew --no-daemon "-Dorg.gradle.jvmargs=$JAVA_OPTS" verifyAtomicApplicationPublication atomicInstallProbeAgentJar
+      - name: Run Gradle writer, Java-agent, and ACP publication controls
+        env:
+          GRADLE_USER_HOME: ${{ github.workspace }}/build/.gradle-user-home
+        run: python3 -B scripts/test-atomic-install-controls.py --gradle-writers --java-agent --acp-publication
+      - name: Mark this run's installed qualification start
+        run: |
+          mkdir -p build/orchestration/atomic-install-ci
+          python3 -B - "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" <<'PY'
+          import json, pathlib, sys, time
+          target = pathlib.Path("build/orchestration/atomic-install-ci/driver-started.json")
+          target.write_text(json.dumps({"sourceHead": sys.argv[1], "runId": sys.argv[2],
+                                        "runAttempt": sys.argv[3], "startedAtUnixNs": time.time_ns()}) + "\n")
+          PY
+      - name: Run full installed atomic-install qualification
+        run: python3 -B scripts/test-atomic-install.py
+      - name: Verify the retained installed qualification record
+        run: python3 -B scripts/verify-atomic-install-qualification.py --expected-head "$GITHUB_SHA"
+      - name: Seal atomic-install upload membership
+        if: always()
+        run: python3 -B scripts/atomic_install_artifacts.py seal
+      - name: Retain atomic-install qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: atomic-install-qualification
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            build/orchestration/atomic-install-remediation/**
+            !build/orchestration/atomic-install-remediation/installed-*/root-build/**
+            !build/orchestration/atomic-install-remediation/installed-*/prepared-products/**
+            !build/orchestration/atomic-install-remediation/installed-*/home/**
+            !build/orchestration/atomic-install-remediation/installed-*/tmp/**
+            !build/orchestration/atomic-install-remediation/driver-controls-*/root-build/**
+            !build/orchestration/atomic-install-remediation/driver-controls-*/home/**
+            !build/orchestration/atomic-install-remediation/driver-controls-*/tmp/**
+            !build/orchestration/atomic-install-remediation/driver-controls-*/jdk with spaces/**
+            !build/orchestration/atomic-install-remediation/driver-controls-*/shared-install/**
+            !build/orchestration/atomic-install-remediation/driver-controls-*/writer-*/project-cache/**
+            !build/orchestration/atomic-install-remediation/driver-controls-*/writer-*/build/**
+            !build/orchestration/atomic-install-remediation/driver-controls-*/java-fixture/classes/**
+            !build/orchestration/atomic-install-remediation/driver-controls-*/java-fixture/budget-classes/**
+            !build/orchestration/atomic-install-remediation/driver-controls-*/java-fixture/*.jar
+            build/orchestration/atomic-install-ci/*.json
+            build/orchestration/atomic-install-ci/*.log
+            build/atomic-install/publisher-controls/run-*/passed.txt
+            build/atomic-install/atomic-install-probe-agent.jar
+            build/test-results/test/**
+
   web-packaged:
     needs: frontend
     env:
       NPM_CONFIG_CACHE: ${{ github.workspace }}/build/npm-download-cache
     name: Packaged web contracts and browser
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 35
     permissions:
       contents: read
     defaults:
@@ -260,7 +422,7 @@ jobs:
           node scripts/check-packaged-web-browser.mjs \
             --archive "$WEB_TEST_ARCHIVE" \
             --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
-            --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode audit --no-sandbox
+            --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode audit --no-sandbox --real-zoom-geometry-probe
       - name: Exercise explicit Vite proxy against the same packaged JVM
         run: |
           node scripts/check-packaged-web-browser.mjs \
@@ -268,6 +430,12 @@ jobs:
             --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
             --python "$(command -v python3)" --work-parent "$RUNNER_TEMP" --mode proxy --no-sandbox
           git diff --exit-code -- frontend/ contracts/web/v1/
+      - name: Verify retained bounded packaged reports read back
+        if: always()
+        run: >-
+          node scripts/verify-packaged-browser-reports.mjs "$GITHUB_WORKSPACE/build"
+          --require-modes legacy,session,upload,metadata,live,scale,restart,audit,proxy
+          --require-responsive-audit --require-real-zoom --require-read-states --require-git-init
       - name: Retain sanitized packaged web evidence
         uses: actions/upload-artifact@v7
         if: always()
@@ -278,6 +446,7 @@ jobs:
           path: |
             build/packaged-web-ci
             build/packaged-browser-*/report.json
+            build/packaged-browser-*/report.evidence-*.jsonpart
             build/packaged-browser-*/*.png
             build/reports/tests/test
             build/test-results/test
@@ -437,6 +606,28 @@ jobs:
             build/angr-qualification
             build/test-results/realAngrQualification
             build/reports/tests/realAngrQualification
+      - name: Require explicit ChatGPT operator regression suite
+        if: matrix.shard == 'core'
+        run: |
+          ./gradlew --no-daemon test --tests 'decompengine.chatgpt.operator.*' -x c4aShutdownIsolated
+          python3 - <<'PY_OPERATOR'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+          reports = sorted(Path('build/test-results/test').glob('TEST-decompengine.chatgpt.operator.*.xml'))
+          required = {
+              'ChatGptPlanOperatorCliV1Test', 'OperatorProjectionJsonV1Test', 'OperatorReducerV1Test',
+              'OperatorRemediationV1Test', 'OperatorMutationBoundaryV1Test', 'OperatorLifecycleBoundaryV1Test',
+          }
+          roots = [ET.parse(path).getroot() for path in reports]
+          assert {root.attrib['name'].rsplit('.', 1)[-1] for root in roots} == required
+          cases = [case for root in roots for case in root.iter('testcase')]
+          assert len(cases) == 68, f'Expected 68 operator tests, observed {len(cases)}'
+          assert len({(case.get('classname'), case.get('name')) for case in cases}) == 68
+          assert not any(list(case.iter(tag)) for case in cases for tag in ('failure', 'error', 'skipped'))
+          print('ChatGPT operator: 68 passed; no failures, errors, skips or duplicate identities')
+          PY_OPERATOR
+          mv build/test-results/test build/test-results/chatgpt-operator
+          mv build/reports/tests/test build/reports/tests/chatgpt-operator
       - name: Run JVM and Kotlin checks
         env:
           DECOMP_REQUIRE_ORACLE_EXT4_SCRATCH: "true"
@@ -484,10 +675,14 @@ jobs:
           name: kotlin-${{ matrix.shard }}-test-reports
           if-no-files-found: error
           path: |
+            build/test-results/chatgpt-operator
+            build/reports/tests/chatgpt-operator
             build/reports/tests/full-suite
             build/test-results/full-suite
             build/reports/tests/test
             build/test-results/test
+            build/reports/tests/c4aShutdownIsolated
+            build/test-results/c4aShutdownIsolated
             build/reports/junit-signatures
             build/web-job-recovery-inventory.json
             build/reports/tests/v3BoundaryFinalStagingIsolated
@@ -601,6 +796,7 @@ jobs:
           bash scripts/install-frontend-node.sh "$RUNNER_TEMP/frontend-node"
           echo "$RUNNER_TEMP/frontend-node/bin" >> "$GITHUB_PATH"
       - name: Verify installed direct-API Ghidra without an external installation
+        id: bundled-ghidra-subject
         env:
           RUN_REAL_GHIDRA: "true"
           RUN_REAL_GHIDRA_CALL_SITES: "true"
@@ -608,8 +804,12 @@ jobs:
           RUN_REAL_GHIDRA_PURE_RENDERING: "true"
         run: |
           unset GHIDRA_HOME
+          ./gradlew --no-daemon clean :ghidra-bridge:clean
+          python3 -B scripts/test-verify-bundled-ghidra-probes.py
+          python3 -B src/test/python/test_ghidra_invocation_provenance.py
+          python3 -B src/test/python/ghidra_invocation_provenance.py pin
           mkdir -p build/exporter-rendering-v16
-          ./gradlew --no-daemon test \
+          ./gradlew --no-daemon --no-build-cache -Pkotlin.incremental=false -PqualifyGhidraInvocation=true test \
             --tests decompengine.analysis.BundledGhidraTest \
             --tests decompengine.project.GhidraProgramModelExporterTest \
             --tests decompengine.project.ReferencedDataBytesRealGhidraTest \
@@ -618,19 +818,50 @@ jobs:
             --tests decompengine.project.NativeCallCollectorRealTest \
             --tests decompengine.project.NativeCallObservationsV1Test \
             --tests decompengine.oracle.gcc.GccBundledNativeCallCaptureTest \
+            --tests decompengine.oracle.gcc.GccBundledGhidraDeploymentReferenceTest \
+            --tests decompengine.project.GhidraDotDirectoryInvocationQualificationTest \
             --tests decompengine.mvp.GhidraDecompilerTest \
             --tests decompengine.project.ReconstructionPipelineTest \
             --tests decompengine.web.SourceTreeJobReconstructorTest
+          python3 scripts/verify-bundled-ghidra-probes.py build/test-results/test
+      - name: Verify installed invocation provenance after subject completion
+        if: always()
+        timeout-minutes: 1
+        run: python3 -B src/test/python/ghidra_invocation_provenance.py verify
       - name: Verify ZIP and TAR bundle contents and native executable modes
         run: ./gradlew --no-daemon --offline verifyGhidraDistributionArchives
       - uses: actions/upload-artifact@v7
         if: always()
+        id: bundled-ghidra-reports
         with:
           name: bundled-ghidra-test-reports
           path: |
             build/reports/tests/test
             build/test-results/test
             build/reports/junit-signatures
+            build/orchestration/ghidra-invocation-qualification
+      - name: Download retained bundled invocation evidence
+        if: always() && steps.bundled-ghidra-reports.outputs.artifact-id != ''
+        id: bundled-ghidra-download
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ steps.bundled-ghidra-reports.outputs.artifact-id }}
+          path: build/ghidra-invocation-upload-check
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Verify uploaded invocation evidence bytes
+        if: always() && steps.bundled-ghidra-download.outcome == 'success'
+        timeout-minutes: 1
+        run: |
+          if test -f build/orchestration/ghidra-invocation-qualification/retained-invocation.json; then
+            python3 -B src/test/python/ghidra_invocation_provenance.py verify-uploaded \
+              build/orchestration/ghidra-invocation-qualification \
+              build/ghidra-invocation-upload-check/orchestration/ghidra-invocation-qualification
+          else
+            python3 -B src/test/python/ghidra_invocation_provenance.py verify-uploaded-diagnostics \
+              build/orchestration/ghidra-invocation-qualification \
+              build/ghidra-invocation-upload-check/orchestration/ghidra-invocation-qualification
+          fi
       - uses: actions/upload-artifact@v7
         if: always()
         with:

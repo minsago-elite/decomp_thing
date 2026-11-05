@@ -27,6 +27,50 @@ internal data class GhidraInvocation(
     ) + postScripts.flatMap { listOf(it.name, it.arguments.size.toString()) + it.arguments }
 }
 
+/**
+ * Ghidra's ProjectLocator validates every element of the absolute project path with
+ * NamingUtilities.checkName: no element may be blank, start with '.', or contain a character other
+ * than a letter, digit or one of `.-=@ _()[]~`. User-selected data and output directories (the
+ * default `.decomp_engine/jobs`, `~/.local/...`, or a `.claude/worktrees/...` checkout) routinely
+ * violate that, so a project under them cannot be opened even though the directory itself is valid.
+ *
+ * When the real path is rejected, the worker receives the same directory through its own process
+ * working directory instead (`/proc/self/cwd/<relative>`). The kernel resolves that alias to the
+ * job-owned directory, so the project never moves outside the caller's containment root and no
+ * extra link or staging directory is created.
+ */
+internal object GhidraProjectLocation {
+    private val ALLOWED_SYMBOLS = setOf('.', '-', '=', '@', ' ', '_', '(', ')', '[', ']', '~')
+    private val PROCESS_DIRECTORY: Path = Path.of("/proc/self/cwd")
+
+    /** Mirrors Ghidra 12.1.3 `NamingUtilities.checkName` for one path element. */
+    fun acceptsElement(element: String): Boolean =
+        element.isNotBlank() && !element.startsWith(".") && element.codePoints().allMatch { codePoint ->
+            Character.isLetterOrDigit(codePoint) || (codePoint <= 0x7f && codePoint.toChar() in ALLOWED_SYMBOLS)
+        }
+
+    fun accepts(path: Path): Boolean = path.isAbsolute && path.all { acceptsElement(it.toString()) }
+
+    /** Returns the project path the worker started in [workerDirectory] should hand to Ghidra. */
+    fun forWorker(
+        project: Path,
+        workerDirectory: Path,
+        processDirectoryAvailable: Boolean = System.getProperty("os.name", "").equals("Linux", ignoreCase = true) &&
+            Files.isDirectory(PROCESS_DIRECTORY),
+    ): Path {
+        val absolute = project.toAbsolutePath().normalize()
+        if (accepts(absolute)) return absolute
+        val directory = workerDirectory.toAbsolutePath().normalize()
+        val relative = if (absolute.startsWith(directory) && absolute != directory) directory.relativize(absolute) else null
+        require(relative != null && relative.all { acceptsElement(it.toString()) } && processDirectoryAvailable) {
+            "Ghidra cannot open a project at $absolute: a path component starts with '.' or uses a character " +
+                "outside letters, digits and .-=@ _()[]~. Choose a data or output directory whose path uses only " +
+                "those characters."
+        }
+        return PROCESS_DIRECTORY.resolve(relative.toString())
+    }
+}
+
 class BundledGhidra private constructor(val root: Path) {
     val release: Path = root.resolve("ghidra_${VERSION}_PUBLIC")
 
@@ -50,11 +94,19 @@ class BundledGhidra private constructor(val root: Path) {
     }
 
     /** Only the generic exporter uses this opt-in gate; existing probe/oracle commands stay unchanged. */
-    internal fun analysisCommandForOwnedLaunch(invocation: GhidraInvocation, checkpoint: (String) -> Unit): List<String> {
+    internal fun analysisCommandForOwnedLaunch(invocation: GhidraInvocation, checkpoint: (String) -> Unit): PreparedGhidraCommand {
         val libraries = BundledGhidraVerificationProcess().verifyAndGetLibraries(root, checkpoint)
-        val command = workerCommand(checkpoint, libraries) + "await-parent-launch" + invocation.arguments()
+        val prefix = workerCommand(checkpoint, libraries)
+        val analysisArguments = invocation.arguments()
+        val command = prefix + "await-parent-launch" + analysisArguments
+        val classIndex = prefix.size - 2
+        require(command[classIndex] == WORKER_CLASS && command[prefix.size + 1] == "analyze") {
+            "Bundled Ghidra command layout is invalid"
+        }
         checkpoint("before returning owned bundled Ghidra analysis command")
-        return command
+        return PreparedGhidraCommand.bundled(command, classIndex, prefix.size + 1) {
+            checkpoint("while snapshotting bundled Ghidra command")
+        }
     }
 
     private fun workerCommand(checkpoint: (String) -> Unit, libraries: List<Path>): List<String> {

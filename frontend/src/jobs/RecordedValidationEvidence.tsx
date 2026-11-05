@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import type { Report, ValidationBytePreview, ValidationHistory, ValidationOwner } from '../api/generated';
-import { withApiFailureReference } from '../api/errors';
+import { ApiClientError, withApiFailureReference } from '../api/errors';
+import { canRetainMetadata, metadataFailureKind } from '../shared/retainMetadata';
 import { recordedValidationCopy as copy } from '../copy/attempt';
 import { commonCopy } from '../copy/common';
 import { usePrivateTransport } from '../session/PrivateTransport';
@@ -14,6 +15,20 @@ import { acceptReceipt, receiptOf } from '../shared/receiptTime';
 import type { ReceiptTime } from '../shared/receiptTime';
 import { MetadataReceipt } from '../shared/MetadataReceipt';
 import { message, textMessage } from '../shared/messages';
+
+type Failure = keyof typeof copy.failures;
+
+/** Fixed panel-local categories; local binding refusals stay unverified observations, never outages or results. */
+function failureKind(failure: unknown): Failure {
+  if (!(failure instanceof ApiClientError)) return 'unverified';
+  if (failure.code === 'response_too_large' || failure.status === 413) return 'sizeLimit';
+  if (canRetainMetadata(failure)) return 'transient';
+  return metadataFailureKind(failure);
+}
+function failureMessage(failure: unknown, restoring: boolean): string {
+  const reason = copy.failures[failureKind(failure)];
+  return withApiFailureReference(restoring ? textMessage(copy.savedSelectionReason, { selection: copy.savedSelectionUnavailable, reason }) : reason, failure);
+}
 
 function requestedValidation(search: string, preserveRouteContext = false) {
   try {
@@ -72,7 +87,7 @@ export function RecordedValidationEvidence({ jobId, runId, basePath, navigation 
     if (current(controller)) {
       setSavedBaseline(null); setComparisonPage(1);
       setStored({ binding, locationKey: requested.key, history: null, selected: null, report: null, loading: false,
-        error: withApiFailureReference(restoring ? copy.savedSelectionUnavailable : copy.failed, failure) });
+        error: failureMessage(failure, restoring) });
     }
   }
   function publish(history: ValidationHistory, owner: ValidationOwner | null, report: Report | null, saved: Baseline | null, window = 1): string | null {
@@ -396,7 +411,7 @@ function MismatchComparison({ first, second, page, onPageChange, onInspectPage, 
 function Preview({ title, value }: { title: string; value: ValidationBytePreview | null }) {
   return <details><summary>{title}</summary>{value === null ? <p>{copy.notCompared}</p> : <>
     <p>{textMessage(copy.previewSize, { bytes: copy.bytes, total: value.totalBytes, prefix: copy.prefix, prefixBytes: value.prefixBytes, completeness: value.truncated ? copy.truncated : copy.complete })}</p>
-    <pre aria-label={textMessage(copy.previewPart, { title, part: copy.hex })}>{value.hex === '' ? copy.empty : value.hex}</pre>
-    <pre aria-label={textMessage(copy.previewPart, { title, part: copy.text })}>{value.text === null ? copy.noText : value.text === '' ? copy.empty : value.text}</pre>
+    <pre class="byte-preview" tabIndex={0} aria-label={textMessage(copy.previewPart, { title, part: copy.hex })}>{value.hex === '' ? copy.empty : value.hex}</pre>
+    <pre class="byte-preview" tabIndex={0} aria-label={textMessage(copy.previewPart, { title, part: copy.text })}>{value.text === null ? copy.noText : value.text === '' ? copy.empty : value.text}</pre>
   </>}</details>;
 }
