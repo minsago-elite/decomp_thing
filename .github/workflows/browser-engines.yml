@@ -73,6 +73,7 @@ jobs:
         run: |
           node scripts/test-packaged-browser-audit.mjs
           node scripts/test-packaged-browser-engine-adapter.mjs
+          node --test scripts/test-packaged-browser-engine-diagnostics.mjs
       - name: Install test-only Playwright and browsers with host dependencies
         env:
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/pw-browsers
