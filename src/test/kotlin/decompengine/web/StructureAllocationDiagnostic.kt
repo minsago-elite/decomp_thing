@@ -1,6 +1,9 @@
 package decompengine.web
 
 import decompengine.jobs.JobStore
+import decompengine.project.SourceTreeManifestProbe
+import decompengine.project.SourceTreeManifestStage
+import java.util.function.LongSupplier
 import decompengine.repair.StableRegularFile
 import decompengine.repair.StableComparison
 import java.lang.management.ManagementFactory
@@ -28,6 +31,11 @@ object StructureAllocationDiagnostic {
         bean.isThreadAllocatedMemoryEnabled = true
         fun allocated() = bean.getThreadAllocatedBytes(Thread.currentThread().threadId())
         val events = mutableListOf<JsonObject>()
+        val manifestAttributions = mutableListOf<JsonObject>()
+        val manifestProbe = ManifestAllocationCollector(
+            LongSupplier { System.nanoTime() },
+            LongSupplier { bean.getThreadAllocatedBytes(Thread.currentThread().threadId()) },
+        )
         fun memory() = buildJsonObject {
             val heap = ManagementFactory.getMemoryMXBean().heapMemoryUsage
             put("heapUsed", heap.used); put("heapCommitted", heap.committed)
@@ -110,13 +118,17 @@ object StructureAllocationDiagnostic {
                         evidence.readStructureDiagnosed(reference, cache, { phase, nanos ->
                             val now = allocated()
                             events += buildJsonObject { put("kind", "phase"); put("name", phase); put("nanos", nanos); put("allocatedSincePreviousMarker", now - phaseAllocated) }
+                            if (phase == "validate-manifest") {
+                                manifestAttributions += manifestProbe.snapshot(nanos)
+                                manifestProbe.reset()
+                            }
                             phaseAllocated = allocated()
                         }, { charges ->
                             events += buildJsonObject {
                                 put("kind", "charges"); put("name", "build-${built.size + 1}"); put("total", charges.bytes)
                                 put("categories", buildJsonObject { WebStructureCharge.entries.forEach { put(it.name, charges[it]) } })
                             }
-                        }, measuredProject)
+                        }, manifestProbe, measuredProject)
                     }
                 }
                 val job = "f".repeat(32); val run = "run_structure_scale"; val revision = "revision_structure_scale"
@@ -134,7 +146,12 @@ object StructureAllocationDiagnostic {
                 repeat(51) { page ->
                     val result = measure("request", "page-$page") { pages.functions("owner", job, run, revision, "limit=100" + (cursor?.let { "&cursor=$it" } ?: "")) }
                     check(result.getValue("totalFunctions").jsonPrimitive.int == 100000)
-                    if (page == 0) firstVersion = result.getValue("page").jsonObject["snapshotVersion"]
+                    if (page == 0) {
+                        firstVersion = result.getValue("page").jsonObject["snapshotVersion"]
+                        // Cursor authenticators are process-local; all other response bytes are pinned.
+                        val normalized = JsonObject(result + ("page" to JsonObject(result.getValue("page").jsonObject - "nextCursor")))
+                        Files.writeString(Path.of(args[2] + ".first-page.json"), normalized.toString())
+                    }
                     cursor = result.getValue("page").jsonObject["nextCursor"]?.jsonPrimitive?.contentOrNull
                 }
                 measure("request", "reload") { pages.functions("owner", job, run, revision, "limit=100") }
@@ -204,6 +221,9 @@ object StructureAllocationDiagnostic {
             Files.writeString(Path.of(args[2]), buildJsonObject {
                 put("mode", mode); put("fixtureRestored", restored); put("fixtureFiles", sourcePins.size); put("baseline", baseline); put("events", JsonArray(events))
                 put("failure", failureMessage?.let(::JsonPrimitive) ?: JsonNull)
+                put("manifestAttribution", JsonArray(manifestAttributions))
+                put("coldMeasurementLimitation", "Fixture hashes are computed inside this JVM before its first request, warming filesystem/JVM state. These are attribution runs, not genuine-cold or D0 qualification evidence.")
+                put("manifestAttributionNote", "Stage totals are exclusive and omit collector overhead and inter-stage map bookkeeping. FILE_FIELDS includes argument evaluation; FILE_EVIDENCE_INIT is the entire constructor; PATH_ORDER includes input identity and unresolved-ID checks. Do not add sub-markers to the enclosing validate-manifest or other nested phase/request timings and allocation deltas.")
                 put("counters", buildJsonObject {
                     for (kind in listOf("read", "compare", "phase", "request")) {
                         put(kind, buildJsonObject {
@@ -216,5 +236,56 @@ object StructureAllocationDiagnostic {
             }.toString())
             check(restored) { "Fixture source pins changed" }
         }
+    }
+}
+
+/** Diagnostic-only allocation reads. Primitive suppliers also permit deterministic accounting controls. */
+internal class ManifestAllocationCollector(
+    private val nanoTime: LongSupplier,
+    private val allocatedBytes: LongSupplier,
+) : SourceTreeManifestProbe {
+    private val nanos = LongArray(SourceTreeManifestStage.entries.size)
+    private val bytes = LongArray(SourceTreeManifestStage.entries.size)
+    private val segments = IntArray(SourceTreeManifestStage.entries.size)
+    private var active: SourceTreeManifestStage? = null
+    private var startedNanos = 0L
+    private var startedBytes = 0L
+
+    override fun start(stage: SourceTreeManifestStage) {
+        end()
+        active = stage
+        startedBytes = allocatedBytes.asLong
+        startedNanos = nanoTime.asLong
+    }
+
+    override fun end() {
+        val stage = active ?: return
+        val endedNanos = nanoTime.asLong
+        val endedBytes = allocatedBytes.asLong
+        active = null
+        nanos[stage.ordinal] += endedNanos - startedNanos
+        bytes[stage.ordinal] += endedBytes - startedBytes
+        segments[stage.ordinal]++
+    }
+
+    fun snapshot(envelopeNanos: Long): JsonObject {
+        check(active == null) { "Manifest stage was not closed" }
+        return buildJsonObject {
+            put("envelopeNanos", envelopeNanos)
+            put("measuredNanos", nanos.sum())
+            put("measuredAllocatedBytes", bytes.sum())
+            put("stages", buildJsonObject {
+                for (stage in SourceTreeManifestStage.entries) put(stage.marker, buildJsonObject {
+                    put("nanos", nanos[stage.ordinal])
+                    put("allocatedBytes", bytes[stage.ordinal])
+                    put("segments", segments[stage.ordinal])
+                })
+            })
+        }
+    }
+
+    fun reset() {
+        check(active == null) { "Cannot reset an active manifest stage" }
+        nanos.fill(0); bytes.fill(0); segments.fill(0)
     }
 }

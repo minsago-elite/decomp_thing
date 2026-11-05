@@ -7,6 +7,7 @@ import decompengine.project.ProjectContentKind
 import decompengine.project.ProjectFileRole
 import decompengine.project.ReconstructionProfile
 import decompengine.project.SourceTreeManifestReader
+import decompengine.project.SourceTreeManifestProbe
 import decompengine.repair.RepairBudgetExceededException
 import decompengine.repair.StableRegularFile
 import decompengine.repair.StableComparison
@@ -118,6 +119,12 @@ internal class WebSourceCatalogEvidence(
 
     internal fun <T> readStructureDiagnosed(reference: WebRevisionSourceReference, cache: WebProgramStructureCache,
         timing: ((String, Long) -> Unit)?, retention: ((WebStructureRetention) -> Unit)?,
+        project: (WebProgramStructureIndex, () -> ByteArray) -> T): T =
+        readStructureDiagnosed(reference, cache, timing, retention, null, project)
+
+    internal fun <T> readStructureDiagnosed(reference: WebRevisionSourceReference, cache: WebProgramStructureCache,
+        timing: ((String, Long) -> Unit)?, retention: ((WebStructureRetention) -> Unit)?,
+        manifestProbe: SourceTreeManifestProbe?,
         project: (WebProgramStructureIndex, () -> ByteArray) -> T): T {
         fun <V> measured(phase: String, action: () -> V): V {
             if (timing == null) return action()
@@ -162,7 +169,7 @@ internal class WebSourceCatalogEvidence(
                 val profile = profiles[profileId to profileSha256]
                     ?: throw IllegalArgumentException("Source catalog profile is unavailable.")
                 require(((document["files"] as? JsonArray)?.size ?: Int.MAX_VALUE) <= WebSourceCatalogSnapshot.MAXIMUM_FILES)
-                val manifest = measured("validate-manifest") { SourceTreeManifestReader.parse(document, profile) }
+                val manifest = measured("validate-manifest") { SourceTreeManifestReader.parse(document, profile, manifestProbe) }
                 require(manifest.inputSha256 == input.sha256)
                 val descriptorDocument = measured("parse-descriptor-json") { OracleJson.parse(descriptor.bytes, JSON_LIMITS) } as? JsonObject
                     ?: throw IllegalArgumentException("Source input descriptor is invalid.")
