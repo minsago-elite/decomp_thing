@@ -157,7 +157,9 @@ export function nearestRankP95(values) {
 /** Node-side evidence only; timestamps use the click clock, never URL values. */
 export function createColdEvidenceRecorder(browserOrigin, now = () => performance.now()) {
   const origin = new URL(browserOrigin).origin;
-  const pending = new Map(), requests = [], functions = [], failedInventoryRequests = [];
+  const pending = new Map(), terminal = new Map(), resources = [], requests = [], functions = [], failedInventoryRequests = [];
+  let terminalOverflow = 0, resourceOverflow = 0, invalidTransportEvidence = 0;
+  const number = value => Number.isFinite(value) && value >= 0 ? value : null;
   let start = now(), active = false, phaseLabel = 'setup', seq = 0, windowCount = 0, failedCount = 0, pendingOverflow = 0;
   return {
     begin() { start = now(); active = true; phaseLabel = 'first-page'; },
@@ -167,7 +169,11 @@ export function createColdEvidenceRecorder(browserOrigin, now = () => performanc
       const url = new URL(event.request.url);
       if (url.origin !== origin || !['GET', 'HEAD'].includes(event.request.method)) return;
       const inventory = /\/functions$/.test(url.pathname);
-      const row = { seq: ++seq, startOffsetMs: now() - start, phaseLabel,
+      const row = { networkIdHash: sha(String(event.requestId)), urlHash: sha(event.request.url),
+        requestTimestamp: number(event.timestamp), requestWallTime: number(event.wallTime),
+        responseHeaders: {}, dataLength: 0, encodedDataLength: 0, dataReceivedCount: 0,
+        loadingFinishedEncodedDataLength: null, lateFinishedAfterFailed: false, resourceEventIndexes: [],
+        seq: ++seq, startOffsetMs: now() - start, phaseLabel,
         pathTemplate: url.pathname.replace(/\/(jobs|runs|revisions|functions|modules|globals|types|source-files)\/[^/]+/g, '/$1/{id}'),
         method: event.request.method, headersOffsetMs: null, endOffsetMs: null, status: null, failure: null };
       if (inventory && active && functions.length < 16) functions.push({ seq: row.seq, startOffsetMs: row.startOffsetMs });
@@ -177,19 +183,61 @@ export function createColdEvidenceRecorder(browserOrigin, now = () => performanc
         else pending.set(event.requestId, { row, inventory });
       }
     },
-    responseReceived(event) { const item = pending.get(event.requestId); if (item) { item.row.status = event.response.status; item.row.headersOffsetMs = now() - start; } },
+    responseReceived(event) { const item = pending.get(event.requestId); if (item) {
+      item.row.status = event.response.status; item.row.headersOffsetMs = now() - start;
+      for (const [key, value] of Object.entries(event.response.headers ?? {})) {
+        const name = key.toLowerCase();
+        if (!['content-length', 'transfer-encoding', 'content-encoding', 'x-request-id'].includes(name)) continue;
+        if (typeof value !== 'string' || value.length > 128 || !/^[A-Za-z0-9 .,;_:/+-]*$/.test(value)) { invalidTransportEvidence++; continue; }
+        item.row.responseHeaders[name] = value;
+      }
+    } },
+    dataReceived(event) {
+      const item = pending.get(event.requestId) ?? terminal.get(event.requestId); if (!item) return;
+      if (![event.dataLength, event.encodedDataLength].every(value => Number.isSafeInteger(value) && value >= 0)) { invalidTransportEvidence++; return; }
+      item.row.dataReceivedCount++;
+      item.row.dataLength += event.dataLength; item.row.encodedDataLength += event.encodedDataLength;
+      if (!Number.isSafeInteger(item.row.dataLength) || !Number.isSafeInteger(item.row.encodedDataLength)) invalidTransportEvidence++;
+    },
+    resourceTiming(payload) {
+      if (typeof payload !== 'string' || payload.length > 8192) { invalidTransportEvidence++; return; }
+      let value; try { value = JSON.parse(payload); } catch { invalidTransportEvidence++; return; }
+      if (value?.overflow === true) { resourceOverflow++; return; }
+      const fields = ['encodedBodySize', 'decodedBodySize', 'transferSize', 'startTime', 'responseStart', 'responseEnd', 'timeOrigin'];
+      if (!value || typeof value.name !== 'string' || value.name.length > 4096 || fields.some(key => number(value[key]) === null)) { invalidTransportEvidence++; return; }
+      let url; try { url = new URL(value.name); } catch { invalidTransportEvidence++; return; }
+      if (url.origin !== origin || !/\/functions$/.test(url.pathname)) return;
+      if (resources.length >= 128) { resourceOverflow++; return; }
+      resources.push({ urlHash: sha(value.name), ...Object.fromEntries(fields.map(key => [key, value[key]])) });
+    },
     finish(event, failed = false) {
-      const item = pending.get(event.requestId); if (!item) return;
-      pending.delete(event.requestId); item.row.endOffsetMs = now() - start;
-      if (failed) {
+      const item = pending.get(event.requestId) ?? terminal.get(event.requestId); if (!item) return;
+      if (!failed) {
+        item.row.loadingFinishedEncodedDataLength = number(event.encodedDataLength);
+        item.row.loadingFinishedTimestamp = number(event.timestamp);
+        item.row.lateFinishedAfterFailed ||= item.row.failure !== null;
+      }
+      if (failed && item.row.failure === null) {
         const failure = { errorText: String(event.errorText ?? '').slice(0, 128), canceled: event.canceled === true,
           blockedReason: String(event.blockedReason ?? '').slice(0, 128) };
+        item.row.lateFailedAfterFinished = !pending.has(event.requestId);
         item.row.failure = failure;
-        if (item.inventory) { failedCount++; if (failedInventoryRequests.length < 16) failedInventoryRequests.push({
-          seq: item.row.seq, startOffsetMs: item.row.startOffsetMs, phaseLabel: item.row.phaseLabel, ...failure }); }
+        if (item.inventory) { failedCount++; if (failedInventoryRequests.length < 16) failedInventoryRequests.push(item.row); Object.assign(item.row, failure); }
       }
+      if (!pending.has(event.requestId)) return;
+      if (terminal.size < 128) terminal.set(event.requestId, item); else terminalOverflow++;
+      pending.delete(event.requestId); item.row.endOffsetMs = now() - start;
     },
-    summary() { return { firstPageRequests: requests, firstPageRequestCount: windowCount, firstPageRequestLimit: 64,
+    summary() {
+      const rows = [...new Set([...requests, ...failedInventoryRequests, ...[...pending.values(), ...terminal.values()].map(item => item.row)])];
+      resources.forEach((resource, index) => {
+        resource.candidateRequestSeqs = rows.filter(row => row.urlHash === resource.urlHash).map(row => row.seq);
+        for (const row of rows) if (row.urlHash === resource.urlHash && !row.resourceEventIndexes.includes(index)) row.resourceEventIndexes.push(index);
+      });
+      return { resourceTimings: resources, resourceTimingLimit: 128, resourceTimingOverflow: resourceOverflow,
+      terminalEvidenceLimit: 128, terminalEvidenceOverflow: terminalOverflow, invalidTransportEvidence,
+      correlationPolicy: 'URL hash candidates only; duplicates retained; clocks and completion semantics not inferred',
+      firstPageRequests: requests, firstPageRequestCount: windowCount, firstPageRequestLimit: 64,
       firstPageRequestOverflow: Math.max(0, windowCount - 64), pendingEvidenceRequests: pending.size,
       pendingEvidenceRequestOverflow: pendingOverflow, firstFunctionRequestStartOffsetMs: functions[0]?.startOffsetMs ?? null,
       firstFunctionRequests: functions, failedInventoryRequests, failedInventoryRequestCount: failedCount,
@@ -610,6 +658,7 @@ export function evaluateStructureBudgets(m) {
   check(m.invalidFeedbackSamples === 0, 'Browser feedback telemetry must be valid, bounded, and complete');
   check(m.localFeedbackP95Ms <= LOCAL_FEEDBACK_BUDGET_MS,
     `Local function-inventory feedback p95 ${m.localFeedbackP95Ms}ms exceeds the D0 ${LOCAL_FEEDBACK_BUDGET_MS}ms budget`);
+  check(['terminalEvidenceOverflow', 'resourceTimingOverflow', 'invalidTransportEvidence'].every(key => (m[key] ?? 0) === 0), 'Transport evidence overflow or invalid data');
   check((m.failedInventoryRequestCount ?? 0) === 0, 'Function inventory requests failed explicitly');
   check((m.firstPageRequestOverflow ?? 0) === 0 && (m.pendingEvidenceRequestOverflow ?? 0) === 0,
     'Cold request evidence exceeded its bounded capture');
@@ -645,6 +694,24 @@ async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evalua
   const inventoryReads = [];
   const inventoryRequests = new Map();
   const coldEvidence = createColdEvidenceRecorder(browserOrigin);
+  await tab.initialize('Runtime.addBinding', { name: '__decompResourceTiming' });
+  cdp.on('Runtime.bindingCalled', event => {
+    if (event.name === '__decompResourceTiming') coldEvidence.resourceTiming(event.payload);
+  }, tab.sessionId);
+  await tab.initialize('Page.addScriptToEvaluateOnNewDocument', { source: `(() => {
+    let count = 0;
+    new PerformanceObserver(list => {
+      for (const entry of list.getEntries()) {
+        const url = new URL(entry.name);
+        if (url.origin !== location.origin || !url.pathname.endsWith('/functions')) continue;
+        if (++count > 128) { if (count === 129) __decompResourceTiming(JSON.stringify({overflow:true})); continue; }
+        __decompResourceTiming(JSON.stringify({name:entry.name, timeOrigin:performance.timeOrigin,
+          encodedBodySize:entry.encodedBodySize, decodedBodySize:entry.decodedBodySize, transferSize:entry.transferSize,
+          startTime:entry.startTime, responseStart:entry.responseStart, responseEnd:entry.responseEnd}));
+      }
+    }).observe({type:'resource', buffered:true});
+  })();` });
+  cdp.on('Network.dataReceived', coldEvidence.dataReceived, tab.sessionId);
   const phase = value => { coldEvidence.phase(value); jvmRssSampler.phase(value); };
   cdp.on('Network.requestWillBeSent', coldEvidence.requestWillBeSent, tab.sessionId);
   cdp.on('Network.responseReceived', coldEvidence.responseReceived, tab.sessionId);

@@ -386,3 +386,56 @@ test('cold evidence bounds simultaneous requests and records the first click-win
   assert.equal(evidence.firstFunctionRequests[0].seq, 2);
   assert.ok(evidence.firstFunctionRequestStartOffsetMs >= 0);
 });
+
+test('cold transport retains failed bytes, late finish, duplicate resource candidates and private URL hashes', async () => {
+  const { createColdEvidenceRecorder } = await import('./packaged-browser-structure.mjs');
+  let clock = 10;
+  const recorder = createColdEvidenceRecorder(browserOrigin, () => clock);
+  const url = browserOrigin.replace('http://', 'http://secret:password@') + '/api/functions?private=value';
+  const request = id => recorder.requestWillBeSent({ requestId: id, timestamp: 2, wallTime: 100, request: { method: 'GET', url } });
+  request('old'); clock = 20; recorder.begin(); clock = 25; request('first'); request('duplicate');
+  recorder.responseReceived({ requestId: 'first', response: { status: 200, headers: { 'Content-Length': '123', 'Content-Encoding': 'gzip', 'X-Request-ID': 'opaque-1', Authorization: 'secret' } } });
+  recorder.dataReceived({ requestId: 'first', dataLength: 100, encodedDataLength: 50 });
+  recorder.finish({ requestId: 'first', errorText: 'net::ERR_ABORTED', canceled: true }, true);
+  recorder.finish({ requestId: 'first', encodedDataLength: 60, timestamp: 3 });
+  recorder.resourceTiming(JSON.stringify({ name: url, encodedBodySize: 50, decodedBodySize: 100, transferSize: 60, startTime: 1, responseStart: 2, responseEnd: 3, timeOrigin: 1000 }));
+  const evidence = recorder.summary();
+  assert.equal(evidence.firstFunctionRequestStartOffsetMs, 5);
+  const failed = evidence.failedInventoryRequests[0];
+  assert.equal(failed.status, 200); assert.equal(failed.responseHeaders['content-length'], '123');
+  assert.equal(failed.dataLength, 100); assert.equal(failed.encodedDataLength, 50);
+  assert.equal(failed.loadingFinishedEncodedDataLength, 60); assert.equal(failed.lateFinishedAfterFailed, true);
+  assert.equal(failed.failure.canceled, true); assert.equal(evidence.failedInventoryRequestCount, 1);
+  assert.deepEqual(evidence.resourceTimings[0].candidateRequestSeqs.sort(), [1, 2, 3]);
+  assert.equal(failed.urlHash, evidence.resourceTimings[0].urlHash);
+  for (const privateText of ['secret', 'password', 'private=value', 'Authorization', url]) assert.equal(JSON.stringify(evidence).includes(privateText), false);
+});
+
+test('transport ledger and resource caps explicitly fail qualification', async () => {
+  const { createColdEvidenceRecorder } = await import('./packaged-browser-structure.mjs');
+  const recorder = createColdEvidenceRecorder(browserOrigin);
+  for (let index = 0; index < 129; index++) {
+    recorder.requestWillBeSent({ requestId: String(index), request: { method: 'GET', url: browserOrigin + '/functions' } });
+    recorder.finish({ requestId: String(index), encodedDataLength: 0 });
+    recorder.resourceTiming(JSON.stringify({ name: browserOrigin + '/functions', encodedBodySize: 0, decodedBodySize: 0, transferSize: 0, startTime: 0, responseStart: 0, responseEnd: 0, timeOrigin: 0 }));
+  }
+  const evidence = recorder.summary();
+  assert.equal(evidence.terminalEvidenceOverflow, 1); assert.equal(evidence.resourceTimingOverflow, 1);
+  assert.equal(evidence.resourceTimings.length, 128);
+  assert.ok(evaluateStructureBudgets(evidence).includes('Transport evidence overflow or invalid data'));
+  recorder.resourceTiming('x'.repeat(8193));
+  assert.equal(recorder.summary().invalidTransportEvidence, 1);
+});
+
+test('a late failure after loadingFinished is retained and still fails qualification', async () => {
+  const { createColdEvidenceRecorder } = await import('./packaged-browser-structure.mjs');
+  const recorder = createColdEvidenceRecorder(browserOrigin);
+  recorder.requestWillBeSent({ requestId: 'complete-then-failed', request: { method: 'GET', url: browserOrigin + '/functions' } });
+  recorder.finish({ requestId: 'complete-then-failed', encodedDataLength: 100 });
+  recorder.finish({ requestId: 'complete-then-failed', errorText: 'net::ERR_ABORTED', canceled: true }, true);
+  const evidence = recorder.summary();
+  assert.equal(evidence.failedInventoryRequestCount, 1);
+  assert.equal(evidence.failedInventoryRequests[0].lateFailedAfterFinished, true);
+  assert.equal(evidence.failedInventoryRequests[0].loadingFinishedEncodedDataLength, 100);
+  assert.ok(evaluateStructureBudgets(evidence).includes('Function inventory requests failed explicitly'));
+});
