@@ -223,7 +223,7 @@ internal class WebRedactionPolicy private constructor(
         // The containing text is already bounded. Keep the userinfo match unbounded within that
         // limit so long credentials are withheld too; possessive runs avoid backtracking over a
         // long URL that has no userinfo delimiter.
-        private val URL_USER_INFO = Regex("(?i)\\b([a-z][a-z0-9+.-]{1,31}://)[^/\\s:@\"'<>]++(?::[^/\\s@\"'<>]++)?@")
+        private val URL_USER_INFO = Regex("(?i)\\b([a-z][a-z0-9+.-]{1,31}://)[^/\\s:@\"'<>]*+(?::[^/\\s@\"'<>]*+)?@")
         private val CREDENTIAL_PATTERNS = listOf(
             // Recorded HTTP cookie headers may carry session secrets unknown to the listener's environment.
             // Keep the header name but withhold the entire value (including cookie attributes).

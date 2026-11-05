@@ -155,15 +155,19 @@ class WebRunLogsTest {
             "BuildSetCookieCanary0123456789",
             "BuildJsonCookieCanary0123456789",
             "BuildUrlCanary0123456789",
+            "BuildEmptyPasswordCanary0123456789",
+            "BuildEmptyUsernameCanary0123456789",
         )
         val input = listOf(
             "Cookie: session=${secrets[0]}",
             "Set-Cookie: session=${secrets[1]}; Path=/; HttpOnly; SameSite=Strict",
             "{\"Cookie\": \"session=${secrets[2]}\"}",
             "Fetching https://${secrets[3]}@example.com/repo.git",
+            "Fetching https://${secrets[4]}:@example.com/repo.git",
+            "Fetching https://:${secrets[5]}@example.com/repo.git",
         ).joinToString("\n")
         val capture = assertNotNull(logs.capture(input.toByteArray(), sha))
-        assertEquals(4, capture.redactedLines)
+        assertEquals(6, capture.redactedLines)
         val download = logs.download(jobId, run, capture, Instant.EPOCH).decodeToString()
         val range = logs.range(jobId, run, capture, false, WebRunLogs.Query(1, false, 10, null), Instant.EPOCH)
         for (secret in secrets) {
