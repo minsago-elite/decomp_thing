@@ -674,6 +674,405 @@ export function evaluateStructureBudgets(m) {
   return failures;
 }
 
+// ---------------------------------------------------------------------------------------------
+// #536 inventory consumption proof (evidence only). It never changes request behaviour, failure
+// classification or budgets: it only observes which response each of the 52 inventory actions
+// (first page, 50 next pages, reload) validated and consumed, and fails closed as "unproven".
+const PROOF_BODY_LIMIT_BYTES = 1024 * 1024;
+const PROOF_LEDGER_LIMIT = 128;
+const PROOF_ACTION_LIMIT = 52;
+const PROOF_PAYLOAD_LIMIT = 16384;
+const PROOF_READY_LIMIT = 4;
+const PROOF_DOCUMENT_BINDING = '__decompInventoryDocument';
+const PROOF_TIMING_BINDING = '__decompInventoryTiming';
+const PROOF_READY_BINDING = '__decompInventoryReady';
+export const INVENTORY_PROOF_BINDINGS = [PROOF_DOCUMENT_BINDING, PROOF_TIMING_BINDING, PROOF_READY_BINDING];
+const INVENTORY_PATH = /\/api\/v1\/jobs\/[^/]+\/runs\/[^/]+\/revisions\/[^/]+\/functions$/;
+const SUMMARY_PATTERN = 'Showing \\d+\\u2013\\d+ of \\d+ matching functions(?: \\(\\d+ recorded\\))?';
+
+/** Installed on every new document: nonce + timeOrigin announcement, nonce-tagged ResourceTiming and a ROWS observer. */
+export function inventoryDocumentInstrumentation() {
+  return `(() => {
+    if (window.__decompInventoryNonce) return;
+    const nonce = crypto.randomUUID();
+    const timeOrigin = performance.timeOrigin;
+    Object.defineProperty(window, '__decompInventoryNonce', { value: nonce });
+    const send = (name, value) => { try { window[name](JSON.stringify(value)); } catch {} };
+    send(${JSON.stringify(PROOF_DOCUMENT_BINDING)}, { nonce, timeOrigin });
+    let timings = 0;
+    try {
+      new PerformanceObserver(list => {
+        for (const e of list.getEntries()) {
+          let url; try { url = new URL(e.name); } catch { continue; }
+          if (url.origin !== location.origin || !url.pathname.endsWith('/functions')) continue;
+          if (++timings > ${PROOF_LEDGER_LIMIT}) { if (timings === ${PROOF_LEDGER_LIMIT + 1}) send(${JSON.stringify(PROOF_TIMING_BINDING)}, { nonce, overflow: true }); continue; }
+          send(${JSON.stringify(PROOF_TIMING_BINDING)}, { nonce, timeOrigin, name: e.name, initiatorType: e.initiatorType,
+            nextHopProtocol: e.nextHopProtocol, responseStatus: e.responseStatus ?? null, deliveryType: e.deliveryType ?? null,
+            encodedBodySize: e.encodedBodySize, decodedBodySize: e.decodedBodySize, transferSize: e.transferSize,
+            startTime: e.startTime, responseStart: e.responseStart, responseEnd: e.responseEnd });
+        }
+      }).observe({ type: 'resource', buffered: true });
+    } catch { send(${JSON.stringify(PROOF_TIMING_BINDING)}, { nonce, invalid: true }); }
+    const rows = () => ${ROWS};
+    const summaryPattern = new RegExp(${JSON.stringify(SUMMARY_PATTERN)});
+    let armed = null, emitted = 0, last = null;
+    const state = () => {
+      const list = rows();
+      const summary = (document.body?.innerText ?? '').match(summaryPattern)?.[0] ?? null;
+      return { list, summary, key: JSON.stringify([list, summary]) };
+    };
+    const emit = (current, token) => {
+      if (++emitted > ${PROOF_LEDGER_LIMIT}) { if (emitted === ${PROOF_LEDGER_LIMIT + 1}) send(${JSON.stringify(PROOF_READY_BINDING)}, { nonce, overflow: true }); return; }
+      send(${JSON.stringify(PROOF_READY_BINDING)}, { nonce, token, readyAt: performance.now(), count: current.list.length,
+        addresses: current.list, summary: current.summary });
+    };
+    const check = () => {
+      const current = state();
+      if (current.list.length !== 100 || current.list.some(value => typeof value !== 'string')) return;
+      if (armed) {
+        if (current.key === armed.baselineKey && armed.stale !== true) return;
+        if (JSON.stringify(current.list) !== armed.addresses || !current.summary?.startsWith(armed.summary)) return;
+        const token = armed.token; armed = null; last = current.key; emit(current, token);
+      } else if (current.key !== last) { last = current.key; emit(current, null); }
+    };
+    Object.defineProperty(window, '__decompArmInventory', { value: (token, addresses, summary) => {
+      const current = state();
+      const baselineMatches = JSON.stringify(current.list) === JSON.stringify(addresses) && current.summary?.startsWith(summary) === true;
+      armed = { token: String(token), addresses: JSON.stringify(addresses), summary: String(summary), baselineKey: current.key, stale: baselineMatches };
+      last = current.key;
+      return { nonce, baselineMatches };
+    } });
+    const install = () => {
+      new MutationObserver(check).observe(document.documentElement, { childList: true, subtree: true, characterData: true });
+      check();
+    };
+    if (document.documentElement) install(); else addEventListener('DOMContentLoaded', install, { once: true });
+  })();`;
+}
+
+/** Ordered id/address oracle for one inventory page of the seeded fixture. */
+export function inventoryPageOracle(fixture, start) {
+  const ids = [], addresses = [];
+  for (let index = start; index < start + 100; index++) {
+    ids.push(fixture.functionId(index)); addresses.push(`0x${fixture.functionAddress(index).toString(16)}`);
+  }
+  return { start, ids, addresses, digest: sha(JSON.stringify(ids.map((id, i) => [id, addresses[i]]))),
+    addressDigest: sha(JSON.stringify(addresses)), first: addresses[0], last: addresses[99] };
+}
+
+export function inventorySummaryPrefix(start, kind) {
+  return kind === 'first' ? `Showing 1–100 of 100000 matching functions (100000 recorded)` : `Showing ${start + 1}–${start + 100} of 100000 matching functions`;
+}
+
+/** Node-side consumption ledger; all inputs are CDP events/bindings already delivered to this session. */
+export function createInventoryConsumptionProof({ browserOrigin, fixture, bodyLimitBytes = PROOF_BODY_LIMIT_BYTES, ledgerLimit = PROOF_LEDGER_LIMIT }) {
+  const origin = new URL(browserOrigin).origin;
+  let ordinal = 0, mainFrameId = null, mainLoaderId = null, current = null, closed = false;
+  const counters = { invalid: 0, requestOverflow: 0, terminalOverflow: 0, bodyQueueOverflow: 0, actionOverflow: 0,
+    timingOverflow: 0, readyOverflow: 0, documentOverflow: 0, unattributedRequests: 0, unattributedReadies: 0 };
+  const contexts = new Map(); // executionContextId -> { frameId, isDefault }
+  const documents = new Map(); // nonce -> document record
+  const actions = [], byToken = new Map();
+  const requests = new Map(); // requestId -> record (bounded)
+  const bodyQueue = [];
+  const timings = [];
+  const tick = () => ++ordinal;
+  const finite = value => Number.isFinite(value) && value >= 0;
+  const parse = payload => {
+    if (typeof payload !== 'string' || payload.length > PROOF_PAYLOAD_LIMIT) { counters.invalid++; return null; }
+    try { const value = JSON.parse(payload); if (value && typeof value === 'object') return value; } catch {}
+    counters.invalid++; return null;
+  };
+  const inventoryUrl = raw => { try { const url = new URL(raw); return url.origin === origin && INVENTORY_PATH.test(url.pathname) ? url : null; } catch { return null; } };
+
+  function frameNavigated(event) {
+    tick();
+    if (!event?.frame?.parentId) { mainFrameId = event?.frame?.id ?? null; mainLoaderId = event?.frame?.loaderId ?? null; }
+  }
+  function executionContextCreated(event) {
+    tick();
+    const context = event?.context;
+    if (!context || !Number.isSafeInteger(context.id)) return;
+    if (contexts.size >= ledgerLimit) { counters.documentOverflow++; return; }
+    contexts.set(context.id, { frameId: context.auxData?.frameId ?? null, isDefault: context.auxData?.isDefault === true });
+  }
+  function documentAnnounced(event, value) {
+    if (typeof value.nonce !== 'string' || !/^[0-9a-f-]{36}$/.test(value.nonce) || !finite(value.timeOrigin) || documents.has(value.nonce)) { counters.invalid++; return; }
+    if (documents.size >= ledgerLimit) { counters.documentOverflow++; return; }
+    const context = contexts.get(event.executionContextId);
+    documents.set(value.nonce, { nonce: value.nonce, timeOrigin: value.timeOrigin, ordinal: ordinal,
+      contextId: event.executionContextId ?? null, frameId: context?.frameId ?? null, loaderId: mainLoaderId,
+      boundToMain: context !== undefined && context.isDefault && context.frameId !== null && context.frameId === mainFrameId });
+  }
+  function timingReported(value) {
+    if (value.overflow === true) { counters.timingOverflow++; return; }
+    if (value.invalid === true) { counters.invalid++; return; }
+    const fields = ['encodedBodySize', 'decodedBodySize', 'transferSize', 'startTime', 'responseStart', 'responseEnd', 'timeOrigin'];
+    if (typeof value.nonce !== 'string' || typeof value.name !== 'string' || fields.some(key => !finite(value[key]))) { counters.invalid++; return; }
+    if (!inventoryUrl(value.name)) return;
+    if (timings.length >= ledgerLimit) { counters.timingOverflow++; return; }
+    timings.push({ nonce: value.nonce, urlHash: sha(value.name), ordinal, ...Object.fromEntries(fields.map(key => [key, value[key]])),
+      initiatorType: String(value.initiatorType ?? '').slice(0, 32), nextHopProtocol: String(value.nextHopProtocol ?? '').slice(0, 32),
+      responseStatus: Number.isSafeInteger(value.responseStatus) ? value.responseStatus : null,
+      deliveryType: value.deliveryType === null || value.deliveryType === undefined ? null : String(value.deliveryType).slice(0, 32) });
+  }
+  function readyReported(value) {
+    if (value.overflow === true) { counters.readyOverflow++; return; }
+    if (typeof value.nonce !== 'string' || !finite(value.readyAt) || !Array.isArray(value.addresses) || value.addresses.length > 100
+      || value.addresses.some(address => typeof address !== 'string' || address.length > 32)) { counters.invalid++; return; }
+    const ready = { nonce: value.nonce, token: typeof value.token === 'string' ? value.token : null, readyAt: value.readyAt, ordinal,
+      count: value.count, addressDigest: sha(JSON.stringify(value.addresses)), first: value.addresses[0] ?? null, last: value.addresses.at(-1) ?? null,
+      summary: typeof value.summary === 'string' ? value.summary.slice(0, 128) : null, loaderAtReady: mainLoaderId };
+    const action = ready.token !== null ? byToken.get(ready.token) : current;
+    if (!action || closed) { counters.unattributedReadies++; return; }
+    if (action.readies.length >= PROOF_READY_LIMIT) { action.readyOverflow++; return; }
+    action.readies.push(ready);
+  }
+  function bindingCalled(event) {
+    if (!INVENTORY_PROOF_BINDINGS.includes(event?.name)) return;
+    tick();
+    const value = parse(event.payload); if (!value) return;
+    if (event.name === PROOF_DOCUMENT_BINDING) documentAnnounced(event, value);
+    else {
+      const document = documents.get(value.nonce);
+      if (!document || document.contextId !== event.executionContextId || !document.boundToMain) { counters.invalid++; return; }
+      if (event.name === PROOF_TIMING_BINDING) timingReported(value);
+      else readyReported(value);
+    }
+  }
+  function requestWillBeSent(event) {
+    tick();
+    const url = event?.request?.method === 'GET' ? inventoryUrl(event.request.url) : null;
+    if (!url) return;
+    if (!current || closed) { counters.unattributedRequests++; return; }
+    if (requests.size >= ledgerLimit) { counters.requestOverflow++; current.requestOverflow++; return; }
+    const record = { requestId: String(event.requestId), idHash: sha(String(event.requestId)), urlHash: sha(event.request.url), action: current,
+      requestOrdinal: ordinal, frameId: event.frameId ?? null, loaderId: event.loaderId ?? null, type: event.type ?? null,
+      initiator: typeof event.initiator?.type === 'string' ? event.initiator.type.slice(0, 32) : null,
+      mainFrameAtRequest: mainFrameId, mainLoaderAtRequest: mainLoaderId, response: null, dataLength: 0, dataEvents: 0,
+      finished: null, failure: null, servedFromCache: false, body: { state: 'pending' } };
+    if (requests.has(record.requestId)) { counters.invalid++; return; }
+    requests.set(record.requestId, record); current.requests.push(record);
+  }
+  function responseReceived(event) {
+    tick();
+    const record = requests.get(String(event?.requestId)); if (!record) return;
+    if (record.response) { counters.invalid++; return; }
+    const response = event.response ?? {};
+    let sameOrigin = false; try { sameOrigin = new URL(response.url).origin === origin; } catch {}
+    const headers = Object.fromEntries(Object.entries(response.headers ?? {}).map(([key, value]) => [key.toLowerCase(), value]));
+    const contentLength = /^\d{1,9}$/.test(String(headers['content-length'] ?? '')) ? Number(headers['content-length']) : null;
+    record.response = { ordinal, status: response.status, sameOrigin, fromDiskCache: response.fromDiskCache === true,
+      fromServiceWorker: response.fromServiceWorker === true, fromPrefetchCache: response.fromPrefetchCache === true,
+      fromEarlyHints: response.fromEarlyHints === true, serviceWorkerResponseSource: response.serviceWorkerResponseSource ?? null,
+      protocol: typeof response.protocol === 'string' ? response.protocol.slice(0, 32) : null, contentLength,
+      contentEncoding: typeof headers['content-encoding'] === 'string' ? headers['content-encoding'].slice(0, 32) : null,
+      type: event.type ?? null, frameId: event.frameId ?? null, loaderId: event.loaderId ?? null };
+  }
+  function dataReceived(event) {
+    tick();
+    const record = requests.get(String(event?.requestId)); if (!record) return;
+    if (!Number.isSafeInteger(event.dataLength) || event.dataLength < 0) { counters.invalid++; return; }
+    record.dataLength += event.dataLength; record.dataEvents++;
+  }
+  function requestServedFromCache(event) {
+    tick();
+    const record = requests.get(String(event?.requestId));
+    if (record) record.servedFromCache = true;
+  }
+  function terminal(event, failed) {
+    tick();
+    const record = requests.get(String(event?.requestId)); if (!record) return;
+    if (failed) {
+      if (record.failure) { counters.invalid++; return; }
+      record.failure = { ordinal, errorText: String(event.errorText ?? '').slice(0, 128), canceled: event.canceled === true };
+    } else {
+      if (record.finished) { counters.invalid++; return; }
+      record.finished = { ordinal, encodedDataLength: finite(event.encodedDataLength) ? event.encodedDataLength : null };
+    }
+    if (record.body.state !== 'pending' || record.queued) return;
+    if (bodyQueue.length >= ledgerLimit) { counters.bodyQueueOverflow++; record.body = { state: 'queue-overflow' }; return; }
+    record.queued = true; bodyQueue.push(record);
+  }
+  function validateBody(record, text) {
+    const reasons = [];
+    let doc; try { doc = JSON.parse(text); } catch { return { reasons: ['body-invalid-json'] }; }
+    const data = doc?.data;
+    const oracle = record.action.oracle;
+    if (doc?.apiVersion !== 1 || doc?.kind !== 'functionInventory' || !data) reasons.push('body-envelope');
+    if (data?.state !== 'available') reasons.push('body-state');
+    if (data?.binding?.jobId !== fixture.jobId || data?.binding?.runId !== fixture.runId || data?.binding?.revisionId !== fixture.revisionId) reasons.push('body-revision');
+    if (data?.totalFunctions !== fixture.functions || data?.matchedFunctions !== fixture.functions) reasons.push('body-total');
+    if (data?.page?.limit !== 100) reasons.push('body-limit');
+    if (!/^[a-f0-9]{64}$/.test(String(data?.structureVersion))) reasons.push('body-structure-version');
+    const items = Array.isArray(data?.items) ? data.items : [];
+    if (items.length !== 100) reasons.push('body-count');
+    if (items.some(item => item?.kind !== 'function' || item?.recorded !== true)) reasons.push('body-recorded');
+    const ids = items.map(item => item?.entityId), addresses = items.map(item => item?.address);
+    const digest = sha(JSON.stringify(ids.map((id, i) => [id, addresses[i]])));
+    if (digest !== oracle.digest) reasons.push('body-oracle-mismatch');
+    return { reasons, digest, first: addresses[0] ?? null, last: addresses.at(-1) ?? null,
+      binding: Object.fromEntries(['jobId', 'runId', 'revisionId'].map(key => [key, String(data?.binding?.[key] ?? '').slice(0, 128)])),
+      total: Number.isSafeInteger(data?.totalFunctions) ? data.totalFunctions : null,
+      matched: Number.isSafeInteger(data?.matchedFunctions) ? data.matchedFunctions : null,
+      limit: Number.isSafeInteger(data?.page?.limit) ? data.page.limit : null,
+      count: items.length, recordedCount: items.filter(item => item?.recorded === true).length,
+      structureVersion: String(data?.structureVersion ?? '').slice(0, 64),
+      snapshotVersion: String(data?.page?.snapshotVersion ?? '').slice(0, 128) };
+  }
+  /** Reads queued bodies through Network.getResponseBody only; never issues page network traffic. */
+  async function drain(call) {
+    while (bodyQueue.length) {
+      const record = bodyQueue.shift();
+      let result;
+      try { result = await call('Network.getResponseBody', { requestId: record.requestId }); }
+      catch (error) { record.body = { state: 'unavailable', error: String(error?.message ?? error).slice(0, 128) }; continue; }
+      if (typeof result?.body !== 'string' || result.body.length > Math.ceil(bodyLimitBytes * 4 / 3) + 4) { record.body = { state: 'oversize-or-invalid' }; continue; }
+      let bytes = result.base64Encoded ? Buffer.from(result.body, 'base64') : Buffer.from(result.body, 'utf8');
+      if (bytes.length > bodyLimitBytes) { record.body = { state: 'oversize-or-invalid', bytes: bytes.length }; continue; }
+      const text = bytes.toString('utf8');
+      const body = { state: 'parsed', bytes: Buffer.byteLength(text, 'utf8'), sha256: sha(bytes), validUtf8: Buffer.from(text, 'utf8').equals(bytes) };
+      bytes = null;
+      record.body = { ...body, ...validateBody(record, text) }; // raw body discarded after parse/hash
+    }
+  }
+  function beginAction({ label, kind, start }) {
+    tick();
+    if (actions.length >= PROOF_ACTION_LIMIT) { counters.actionOverflow++; current = null; return null; }
+    const token = `${label}:${crypto.randomUUID()}`;
+    const priorDocument = [...documents.values()].at(-1) ?? null;
+    current = { label, kind, token, start, oracle: inventoryPageOracle(fixture, start), summaryPrefix: inventorySummaryPrefix(start, kind),
+      startOrdinal: ordinal, priorNonce: priorDocument?.nonce ?? null, priorLoader: mainLoaderId, arm: null,
+      requests: [], readies: [], readyOverflow: 0, requestOverflow: 0 };
+    actions.push(current); byToken.set(token, current);
+    return { token, addresses: current.oracle.addresses, summary: current.summaryPrefix };
+  }
+  function armResult(result) {
+    if (!current) return;
+    current.arm = result && typeof result.nonce === 'string' ? { nonce: result.nonce, baselineMatches: result.baselineMatches === true, ordinal: tick() } : { invalid: true };
+  }
+  function freshReady(label) {
+    const action = actions.find(item => item.label === label);
+    return Boolean(action?.readies.some(ready => ready.nonce !== action.priorNonce && documents.get(ready.nonce)?.ordinal > action.startOrdinal));
+  }
+  function verdict(action, global) {
+    const reasons = [...global];
+    if (action.requestOverflow) reasons.push('request-overflow');
+    if (action.readyOverflow) reasons.push('ready-overflow');
+    if (action.requests.length !== 1) reasons.push(`request-count:${action.requests.length}`);
+    const request = action.requests.length === 1 ? action.requests[0] : null;
+    const readies = action.readies.filter(ready => action.kind !== 'reload' || (ready.nonce !== action.priorNonce && documents.get(ready.nonce)?.ordinal > action.startOrdinal));
+    if (readies.length !== 1) reasons.push(`ready-count:${readies.length}`);
+    const ready = readies.length === 1 ? readies[0] : null;
+    const doc = ready ? documents.get(ready.nonce) : null;
+    if (action.kind !== 'reload') {
+      if (!action.arm || action.arm.invalid) reasons.push('arm-missing');
+      else {
+        if (action.arm.baselineMatches) reasons.push('arm-stale-baseline');
+        if (ready && ready.token !== action.token) reasons.push('ready-token');
+        if (ready && action.arm.nonce !== ready.nonce) reasons.push('ready-document-changed');
+      }
+    } else if (doc && (doc.loaderId === action.priorLoader || doc.ordinal <= action.startOrdinal)) reasons.push('reload-prior-document');
+    if (ready) {
+      if (!doc) reasons.push('ready-unknown-document');
+      else if (!doc.boundToMain) reasons.push('ready-document-not-main-context');
+      if (ready.count !== 100 || ready.addressDigest !== action.oracle.addressDigest) reasons.push('ready-dom-mismatch');
+      if (!ready.summary?.startsWith(action.summaryPrefix)) reasons.push('ready-summary-mismatch');
+      if (doc && ready.loaderAtReady !== doc.loaderId) reasons.push('ready-loader-changed');
+    }
+    let timing = null;
+    if (request) {
+      const response = request.response;
+      if (request.frameId === null || request.frameId !== request.mainFrameAtRequest) reasons.push('request-not-main-frame');
+      if (request.loaderId === null || request.loaderId !== request.mainLoaderAtRequest) reasons.push('request-not-current-loader');
+      if (doc && request.loaderId !== doc.loaderId) reasons.push('request-loader-not-ready-document');
+      if (!['Fetch', 'XHR'].includes(request.type)) reasons.push('request-type');
+      if (!response) reasons.push('response-missing');
+      else {
+        if (response.status !== 200) reasons.push('response-status');
+        if (!response.sameOrigin) reasons.push('response-cross-origin');
+        if (request.servedFromCache || response.fromDiskCache || response.fromPrefetchCache) reasons.push('response-cache');
+        if (response.fromServiceWorker || response.serviceWorkerResponseSource) reasons.push('response-service-worker');
+        if (response.contentLength === null) reasons.push('content-length-missing');
+        if (ready && !(ready.ordinal > response.ordinal)) reasons.push('ready-before-response');
+      }
+      if (!request.finished && !request.failure) reasons.push('terminal-pending');
+      if (request.body.state !== 'parsed') reasons.push(`body-${request.body.state}`);
+      else {
+        reasons.push(...request.body.reasons);
+        if (!request.body.validUtf8) reasons.push('body-utf8');
+        if (response && !(request.dataLength === response.contentLength && response.contentLength === request.body.bytes)) reasons.push('byte-count-mismatch');
+      }
+      const matches = timings.filter(entry => entry.urlHash === request.urlHash && ready && entry.nonce === ready.nonce);
+      if (matches.length !== 1) reasons.push(`timing-count:${matches.length}`);
+      else {
+        timing = matches[0];
+        if (doc && timing.timeOrigin !== doc.timeOrigin) reasons.push('timing-time-origin');
+        if (!response || timing.encodedBodySize !== response.contentLength) reasons.push('timing-encoded-length');
+        if (request.body.state !== 'parsed' || timing.decodedBodySize !== request.body.bytes) reasons.push('timing-decoded-length');
+        if (timing.responseStatus !== null && timing.responseStatus !== 200) reasons.push('timing-status');
+        if (timing.deliveryType) reasons.push('timing-delivery-cache');
+        if (!(timing.responseEnd <= ready.readyAt)) reasons.push('ready-before-response-end');
+      }
+    }
+    const unique = [...new Set(reasons)];
+    return { label: action.label, kind: action.kind, validatedConsumption: unique.length === 0, reasons: unique.slice(0, 32),
+      expected: { start: action.oracle.start, first: action.oracle.first, last: action.oracle.last, digest: action.oracle.digest },
+      request: request && { idHash: request.idHash, urlHash: request.urlHash, type: request.type, initiator: request.initiator,
+        frameIdHash: request.frameId === null ? null : sha(request.frameId), loaderIdHash: request.loaderId === null ? null : sha(request.loaderId),
+        mainFrameAtRequestHash: request.mainFrameAtRequest === null ? null : sha(request.mainFrameAtRequest),
+        mainLoaderAtRequestHash: request.mainLoaderAtRequest === null ? null : sha(request.mainLoaderAtRequest),
+        ordinals: { request: request.requestOrdinal, response: request.response?.ordinal ?? null, finished: request.finished?.ordinal ?? null, failed: request.failure?.ordinal ?? null },
+        status: request.response?.status ?? null, protocol: request.response?.protocol ?? null, sameOrigin: request.response?.sameOrigin ?? null,
+        fromDiskCache: request.response?.fromDiskCache ?? null, fromServiceWorker: request.response?.fromServiceWorker ?? null,
+        fromPrefetchCache: request.response?.fromPrefetchCache ?? null, contentLength: request.response?.contentLength ?? null,
+        servedFromCache: request.servedFromCache,
+        contentEncoding: request.response?.contentEncoding ?? null, dataLength: request.dataLength, failure: request.failure,
+        body: request.body.state === 'parsed' ? { bytes: request.body.bytes, sha256: request.body.sha256, digest: request.body.digest,
+          first: request.body.first, last: request.body.last, structureVersion: request.body.structureVersion,
+          snapshotVersion: request.body.snapshotVersion, binding: request.body.binding, total: request.body.total,
+          matched: request.body.matched, count: request.body.count, recordedCount: request.body.recordedCount, limit: request.body.limit } : request.body },
+      requestIdHashes: action.requests.slice(0, 4).map(item => item.idHash),
+      timing: timing && { encodedBodySize: timing.encodedBodySize, decodedBodySize: timing.decodedBodySize, responseEnd: timing.responseEnd,
+        nextHopProtocol: timing.nextHopProtocol, initiatorType: timing.initiatorType, deliveryType: timing.deliveryType, responseStatus: timing.responseStatus },
+      ready: ready && { ordinal: ready.ordinal, readyAt: ready.readyAt, addressDigest: ready.addressDigest, first: ready.first, last: ready.last,
+        documentNonceHash: sha(ready.nonce), freshDocument: action.kind === 'reload' ? ready.nonce !== action.priorNonce : null } };
+  }
+  function summary({ exceptions = 0 } = {}) {
+    const global = [];
+    if (counters.invalid) global.push('invalid-evidence');
+    for (const key of ['requestOverflow', 'terminalOverflow', 'bodyQueueOverflow', 'actionOverflow', 'timingOverflow', 'readyOverflow', 'documentOverflow']) if (counters[key]) global.push(`overflow:${key}`);
+    if (exceptions !== 0) global.push('js-exceptions');
+    if ([...requests.values()].some(record => record.body.state === 'pending')) global.push('body-pending');
+    const proofs = actions.map(action => verdict(action, global));
+    const versions = new Set(proofs.map(proof => proof.request?.body?.structureVersion).filter(Boolean));
+    if (versions.size > 1) for (const proof of proofs) { proof.validatedConsumption = false; proof.reasons.push('structure-version-inconsistent'); }
+    const proven = proofs.filter(proof => proof.validatedConsumption).length;
+    return { policy: 'evidence-only; unproven means FAIL; does not change request handling, failure classification or budgets',
+      clockPolicy: 'CDP event ordinals give same-session event order only; responseEnd/readyAt compared only within one document clock',
+      structureVersionOracle: 'consistency across actions only; the fixture does not expose an absolute structureVersion',
+      expectedActions: PROOF_ACTION_LIMIT, recordedActions: actions.length, provenActions: proven,
+      consumptionProven: actions.length === PROOF_ACTION_LIMIT && proven === PROOF_ACTION_LIMIT,
+      counters: { ...counters }, documents: documents.size,
+      documentBindings: [...documents.values()].map(document => ({ nonceHash: sha(document.nonce), timeOrigin: document.timeOrigin,
+        announcedOrdinal: document.ordinal, executionContextId: document.contextId,
+        frameIdHash: document.frameId === null ? null : sha(document.frameId),
+        loaderIdHash: document.loaderId === null ? null : sha(document.loaderId), boundToMain: document.boundToMain })),
+      actions: proofs };
+  }
+  return { frameNavigated, executionContextCreated, bindingCalled, requestWillBeSent, responseReceived, dataReceived, requestServedFromCache,
+    loadingFinished: event => terminal(event, false), loadingFailed: event => terminal(event, true),
+    beginAction, armResult, drain, freshReady, close() { closed = true; current = null; }, summary };
+}
+
+/** Reports archived before this proof existed (no bodies or nonces) can never be proven. */
+export function assessArchivedConsumption(measurements) {
+  const proof = measurements?.inventoryConsumption;
+  const valid = proof?.consumptionProven === true && Array.isArray(proof.actions) && proof.actions.length === PROOF_ACTION_LIMIT
+    && proof.actions.every(action => action.validatedConsumption === true && action.request?.body?.sha256 && action.ready?.documentNonceHash);
+  return valid ? { validatedConsumption: true } : { validatedConsumption: false, status: 'FAIL', reason: 'unproven: report lacks response-body and document-nonce consumption evidence' };
+}
+
 export async function qualifyStructure(options) {
   const jvmRssSampler = await startJvmRssSampler(options.applicationPid);
   try { return await qualifyStructureWithRssSampler(options, jvmRssSampler); }
@@ -712,6 +1111,24 @@ async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evalua
     }).observe({type:'resource', buffered:true});
   })();` });
   cdp.on('Network.dataReceived', coldEvidence.dataReceived, tab.sessionId);
+  const proof = createInventoryConsumptionProof({ browserOrigin, fixture });
+  for (const name of INVENTORY_PROOF_BINDINGS) await tab.initialize('Runtime.addBinding', { name });
+  cdp.on('Runtime.bindingCalled', proof.bindingCalled, tab.sessionId);
+  cdp.on('Runtime.executionContextCreated', proof.executionContextCreated, tab.sessionId);
+  cdp.on('Page.frameNavigated', proof.frameNavigated, tab.sessionId);
+  cdp.on('Network.requestWillBeSent', proof.requestWillBeSent, tab.sessionId);
+  cdp.on('Network.responseReceived', proof.responseReceived, tab.sessionId);
+  cdp.on('Network.dataReceived', proof.dataReceived, tab.sessionId);
+  cdp.on('Network.requestServedFromCache', proof.requestServedFromCache, tab.sessionId);
+  cdp.on('Network.loadingFinished', proof.loadingFinished, tab.sessionId);
+  cdp.on('Network.loadingFailed', proof.loadingFailed, tab.sessionId);
+  await tab.initialize('Page.addScriptToEvaluateOnNewDocument', { source: inventoryDocumentInstrumentation() });
+  const proofCall = (method, params) => cdp.call(method, params, tab.sessionId);
+  const armProof = async (expectation) => {
+    if (!expectation) return;
+    try { proof.armResult(await evaluate(tab, `window.__decompArmInventory?.(${JSON.stringify(expectation.token)}, ${JSON.stringify(expectation.addresses)}, ${JSON.stringify(expectation.summary)}) ?? null`)); }
+    catch { proof.armResult(null); }
+  };
   const phase = value => { coldEvidence.phase(value); jvmRssSampler.phase(value); };
   cdp.on('Network.requestWillBeSent', coldEvidence.requestWillBeSent, tab.sessionId);
   cdp.on('Network.responseReceived', coldEvidence.responseReceived, tab.sessionId);
@@ -776,6 +1193,7 @@ async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evalua
   const address = (index) => `0x${fixture.functionAddress(index).toString(16)}`;
   await cdp.call('Page.navigate', { url: browserOrigin + run }, tab.sessionId);
   await ready(tab, `[...document.querySelectorAll('a')].some(a => a.textContent === 'Browse recovered functions')`, 'structure links on the result revision');
+  await armProof(proof.beginAction({ label: 'first', kind: 'first', start: 0 }));
   const beforeMetrics = (await cdp.call('Performance.getMetrics', {}, tab.sessionId)).metrics;
   phase('first-page');
   coldEvidence.begin();
@@ -789,22 +1207,30 @@ async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evalua
   assert.equal(await evaluate(tab, 'location.pathname'), `${revision}/functions`);
   assert.deepEqual(await evaluate(tab, ROWS), Array.from({ length: 100 }, (_, index) => address(index)));
   await heap();
+  await proof.drain(proofCall);
   const pageMs = [];
   for (let page = 1; page <= 50; page++) {
     phase(`page${page + 1}`);
     await evaluate(tab, `[...document.querySelectorAll('button')].find(b => b.textContent === 'Next page').focus()`);
+    await armProof(proof.beginAction({ label: `page${page + 1}`, kind: 'page', start: page * 100 }));
     started = performance.now();
     await enter();
     await ready(tab, `(${ROWS})[0] === ${JSON.stringify(address(page * 100))} && document.activeElement?.textContent === 'Function results'`, `function page ${page + 1}`);
     pageMs.push(performance.now() - started);
+    await proof.drain(proofCall);
     assert.equal((await evaluate(tab, ROWS)).length, 100);
     assert.ok(await evaluate(tab, `document.querySelectorAll('tr').length`) <= 500, 'Mounted table rows exceed the D0 DOM budget');
     await heap();
   }
   assert.ok(await evaluate(tab, `document.body.innerText.includes('Showing 5001–5100 of 100000 matching functions')`));
   phase('reload');
+  proof.beginAction({ label: 'reload', kind: 'reload', start: 5000 });
   await cdp.call('Page.reload', {}, tab.sessionId);
   await ready(tab, `(${ROWS})[0] === ${JSON.stringify(address(5000))}`, 'function cursor restored after reload');
+  // Handshake: the fresh document (new nonce/loader) must itself report the restored rows; bounded observation only.
+  for (let waited = 0; waited < 2000 && !proof.freshReady('reload'); waited += 25) await new Promise(resolve => setTimeout(resolve, 25));
+  await proof.drain(proofCall);
+  proof.close();
 
   phase('search');
   started = performance.now();
@@ -867,11 +1293,15 @@ async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evalua
   const localFeedbackP95Ms = nearestRankP95(localFeedbackMs);
   const jvmMemory = await jvmRssSampler.stop();
   const structureTimingSummary = structureTiming.summary();
+  const inventoryConsumption = proof.summary({ exceptions: tab.exceptions?.length ?? 1 });
+  if (!inventoryConsumption.consumptionProven) {
+    evidenceFailures.push(boundedFailure(`Inventory consumption unproven: ${inventoryConsumption.provenActions}/${inventoryConsumption.expectedActions} actions; ${JSON.stringify(inventoryConsumption.actions.filter(a => !a.validatedConsumption).slice(0, 4).map(a => [a.label, a.reasons.slice(0, 6)]))}`));
+  }
   const measurements = { firstPageMs, pageDataP95Ms, searchMs, requestP95Ms,
     localFeedbackSamples: localFeedbackMs.length, invalidFeedbackSamples, localFeedbackP95Ms,
     pendingInventoryRequests: inventoryRequests.size, inventoryReads, exceptions: tab.exceptions,
     requestMethods: tab.requests.map(request => request.method), peakBrowserHeapBytes, jvmMemory,
-    moduleResponse: moduleResponseEvidence, structureTiming: structureTimingSummary, firstPagePerformance, ...coldEvidence.summary() };
+    moduleResponse: moduleResponseEvidence, structureTiming: structureTimingSummary, firstPagePerformance, ...coldEvidence.summary(), inventoryConsumption };
   assertStructureQualification(measurements, evidenceFailures);
   pageMs.sort((a, b) => a - b);
   return { ...measurements, recordedFunctions: fixture.functions, modules: fixture.modules, modelBytes: fixture.modelBytes, rowsPerPage: 100,

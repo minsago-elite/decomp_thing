@@ -439,3 +439,239 @@ test('a late failure after loadingFinished is retained and still fails qualifica
   assert.equal(evidence.failedInventoryRequests[0].loadingFinishedEncodedDataLength, 100);
   assert.ok(evaluateStructureBudgets(evidence).includes('Function inventory requests failed explicitly'));
 });
+
+// #536 inventory consumption proof: synthetic controls (evidence only, no real browser).
+const proofModule = await import('./packaged-browser-structure.mjs');
+const { createInventoryConsumptionProof, inventoryDocumentInstrumentation, inventoryPageOracle, assessArchivedConsumption, INVENTORY_PROOF_BINDINGS } = proofModule;
+const proofFixture = { jobId: 'a'.repeat(32), runId: 'run_structure_scale', revisionId: 'revision_structure_scale', functions: 100000,
+  functionAddress: index => 0x400000 + index * 16, functionId: index => `fn_${(0x400000 + index * 16).toString(16).padStart(16, '0')}` };
+const inventoryUrl = cursor => `${browserOrigin}/nested/api/v1/jobs/${proofFixture.jobId}/runs/run_structure_scale/revisions/revision_structure_scale/functions?limit=100&cursor=${cursor}`;
+const NONCE_A = '11111111-1111-4111-8111-111111111111', NONCE_B = '22222222-2222-4222-8222-222222222222';
+const inventoryBody = (start, overrides = {}) => {
+  const oracle = inventoryPageOracle(proofFixture, start);
+  const data = { binding: { jobId: proofFixture.jobId, runId: proofFixture.runId, revisionId: proofFixture.revisionId }, state: 'available',
+    structureVersion: 'd'.repeat(64), totalFunctions: 100000, matchedFunctions: 100000,
+    items: oracle.ids.map((id, i) => ({ kind: 'function', entityId: id, recorded: true, address: oracle.addresses[i] })),
+    page: { limit: 100, snapshotVersion: 'v1', nextCursor: null }, ...overrides.data };
+  return JSON.stringify({ apiVersion: 1, kind: 'functionInventory', requestId: 'req', data });
+};
+
+function runProofScenario(o = {}) {
+  const start = o.start ?? 100, kind = o.kind ?? 'page';
+  const proof = createInventoryConsumptionProof({ browserOrigin, fixture: proofFixture, ...(o.limits ?? {}) });
+  const bind = (name, value, contextId = 1) => proof.bindingCalled({ name, executionContextId: contextId, payload: typeof value === 'string' ? value : JSON.stringify(value) });
+  proof.frameNavigated({ frame: { id: 'F', loaderId: 'L1' } });
+  proof.executionContextCreated({ context: { id: 1, auxData: { frameId: 'F', isDefault: true } } });
+  bind(INVENTORY_PROOF_BINDINGS[0], { nonce: NONCE_A, timeOrigin: 1000 });
+  let docNonce = NONCE_A, loader = 'L1', timeOrigin = 1000;
+  const expectation = proof.beginAction({ label: 'action', kind, start });
+  if (kind === 'reload') {
+    proof.frameNavigated({ frame: { id: 'F', loaderId: o.reloadLoader ?? 'L2' } });
+    proof.executionContextCreated({ context: { id: 2, auxData: { frameId: 'F', isDefault: true } } });
+    docNonce = o.reloadNonce ?? NONCE_B; loader = o.reloadLoader ?? 'L2'; timeOrigin = 2000;
+    if (docNonce !== NONCE_A) bind(INVENTORY_PROOF_BINDINGS[0], { nonce: docNonce, timeOrigin }, 2);
+  } else if (!o.noArm) proof.armResult({ nonce: NONCE_A, baselineMatches: o.staleBaseline === true });
+  const activeContext = kind === 'reload' ? 2 : 1;
+  const body = o.body ?? inventoryBody(start, o.bodyOverrides);
+  const bytes = Buffer.byteLength(body);
+  const url = inventoryUrl(start);
+  const requestIds = o.duplicateRequest ? ['r1', 'r2'] : ['r1'];
+  const extraRequests = o.overflowRequests ?? 0;
+  for (let i = 0; i < extraRequests; i++) proof.requestWillBeSent({ requestId: `x${i}`, frameId: 'F', loaderId: loader, type: 'Fetch', request: { method: 'GET', url: `${url}&n=${i}` } });
+  for (const requestId of requestIds) {
+    proof.requestWillBeSent({ requestId, frameId: 'F', loaderId: o.requestLoader ?? loader, type: 'Fetch', initiator: { type: 'script' }, request: { method: 'GET', url } });
+    if (o.memoryCache) proof.requestServedFromCache({ requestId });
+    if (o.readyBeforeResponse && requestId === 'r1') bind(INVENTORY_PROOF_BINDINGS[2], readyPayload(), o.readyContext ?? activeContext);
+    if (o.failBeforeResponse) { proof.loadingFailed({ requestId, errorText: 'net::ERR_ABORTED', canceled: true }); continue; }
+    proof.responseReceived({ requestId, type: 'Fetch', response: { url, status: o.status ?? 200, protocol: 'http/1.1',
+      fromDiskCache: o.diskCache === true, fromServiceWorker: o.serviceWorker === true, headers: { 'Content-Length': String(o.contentLength ?? bytes) } } });
+    proof.dataReceived({ requestId, dataLength: o.dataLength ?? bytes, encodedDataLength: bytes });
+    if (o.failBeforeBody) proof.loadingFailed({ requestId, errorText: 'net::ERR_ABORTED', canceled: true });
+    else if (!o.pending) proof.loadingFinished({ requestId, encodedDataLength: bytes });
+  }
+  function readyPayload() {
+    const oracle = inventoryPageOracle(proofFixture, o.readyStart ?? start);
+    return { nonce: o.readyNonce ?? docNonce, token: kind === 'reload' ? null : expectation.token, readyAt: o.readyAt ?? 60, count: 100,
+      addresses: o.staleDom ? inventoryPageOracle(proofFixture, start - 100).addresses : oracle.addresses, summary: expectation.summary };
+  }
+  const timingNonce = o.timingNonce ?? docNonce;
+  const timings = o.missingTiming ? 0 : o.duplicateTiming ? 2 : 1;
+  for (let i = 0; i < timings; i++) bind(INVENTORY_PROOF_BINDINGS[1], { nonce: timingNonce, timeOrigin, name: url, initiatorType: 'fetch', nextHopProtocol: 'http/1.1',
+    responseStatus: 200, deliveryType: o.timingDelivery ?? '', encodedBodySize: bytes, decodedBodySize: bytes, transferSize: bytes + 300, startTime: 10, responseStart: 40, responseEnd: o.responseEnd ?? 50 }, o.timingContext ?? activeContext);
+  if (!o.readyBeforeResponse && !o.noReady) bind(INVENTORY_PROOF_BINDINGS[2], readyPayload(), o.readyContext ?? activeContext);
+  if (o.invalidPayload) bind(INVENTORY_PROOF_BINDINGS[2], '{');
+  const calls = [];
+  const call = async (method, params) => {
+    calls.push([method, params.requestId]);
+    if (o.bodyUnavailable || o.failBeforeBody || o.failBeforeResponse) throw new Error('No resource with given identifier found');
+    return { body: o.truncate ? body.slice(0, -10) : body, base64Encoded: false };
+  };
+  return { proof, call, calls, expectation };
+}
+const proofVerdict = async (o = {}) => {
+  const { proof, call, calls } = runProofScenario(o);
+  if (!o.pending) await proof.drain(call);
+  const summary = proof.summary({ exceptions: o.exceptions ?? 0 });
+  assert.ok(calls.every(([method]) => method === 'Network.getResponseBody'), 'only buffered body reads');
+  return summary.actions[0];
+};
+
+test('consumption proof positive control validates exactly one consumed response', async () => {
+  const action = await proofVerdict();
+  assert.deepEqual(action.reasons, []);
+  assert.equal(action.validatedConsumption, true);
+  assert.equal(action.request.body.digest, inventoryPageOracle(proofFixture, 100).digest);
+  assert.deepEqual(action.request.body.binding, { jobId: proofFixture.jobId, runId: proofFixture.runId, revisionId: proofFixture.revisionId });
+  assert.equal(action.request.body.total, 100000);
+  assert.equal(action.request.body.recordedCount, 100);
+  assert.equal(action.request.frameIdHash, action.request.mainFrameAtRequestHash);
+  assert.equal(action.request.loaderIdHash, action.request.mainLoaderAtRequestHash);
+  assert.equal(action.ready.addressDigest, inventoryPageOracle(proofFixture, 100).addressDigest);
+  assert.ok(!JSON.stringify(action).includes(NONCE_A), 'nonces retained only as hashes');
+  assert.ok(JSON.stringify(action).length < 4096, 'bounded summary instead of 100 rows');
+  const reload = await proofVerdict({ kind: 'reload', start: 5000 });
+  assert.deepEqual(reload.reasons, []);
+  assert.equal(reload.ready.freshDocument, true);
+});
+
+for (const [name, options, reason] of [
+  ['truncated body', { truncate: true }, /body-invalid-json|byte-count-mismatch/],
+  ['failure before body', { failBeforeBody: true }, /body-unavailable/],
+  ['failure before response', { failBeforeResponse: true }, /response-missing/],
+  ['duplicate action request', { duplicateRequest: true }, /request-count:2/],
+  ['old loader request', { requestLoader: 'L0' }, /request-not-current-loader/],
+  ['old document nonce on reload', { kind: 'reload', start: 5000, reloadNonce: NONCE_A }, /ready-count:0/],
+  ['reload keeps prior loader', { kind: 'reload', start: 5000, reloadLoader: 'L1' }, /reload-prior-document/],
+  ['old document timing', { timingNonce: NONCE_B }, /timing-count:0/],
+  ['duplicate timing', { duplicateTiming: true }, /timing-count:2/],
+  ['missing timing', { missingTiming: true }, /timing-count:0/],
+  ['wrong page body', { body: inventoryBody(200) }, /body-oracle-mismatch/],
+  ['wrong total', { bodyOverrides: { data: { totalFunctions: 99999 } } }, /body-total/],
+  ['wrong revision', { bodyOverrides: { data: { binding: { jobId: proofFixture.jobId, runId: proofFixture.runId, revisionId: 'other' } } } }, /body-revision/],
+  ['body hash/length mismatch', { contentLength: 5 }, /byte-count-mismatch/],
+  ['body unavailable', { bodyUnavailable: true }, /body-unavailable/],
+  ['service worker', { serviceWorker: true }, /response-service-worker/],
+  ['disk cache', { diskCache: true }, /response-cache/],
+  ['memory cache without disk-cache flag', { memoryCache: true }, /response-cache/],
+  ['cache delivery timing', { timingDelivery: 'cache' }, /timing-delivery-cache/],
+  ['wrong document ready', { readyNonce: NONCE_B }, /invalid-evidence/],
+  ['ready nonce from another execution context', { readyContext: 99 }, /invalid-evidence/],
+  ['timing nonce from another execution context', { timingContext: 99 }, /invalid-evidence/],
+  ['ready before responseEnd', { responseEnd: 70 }, /ready-before-response-end/],
+  ['ready before response ordinal', { readyBeforeResponse: true }, /ready-before-response/],
+  ['stale DOM ready', { staleDom: true }, /ready-dom-mismatch/],
+  ['stale baseline at arm', { staleBaseline: true }, /arm-stale-baseline/],
+  ['missing arm', { noArm: true }, /arm-missing/],
+  ['missing ready', { noReady: true }, /ready-count:0/],
+  ['overflow 129 requests', { overflowRequests: 128 }, /overflow:requestOverflow/],
+  ['invalid JSON binding payload', { invalidPayload: true }, /invalid-evidence/],
+  ['pending terminal', { pending: true }, /terminal-pending|body-pending/],
+  ['JS exceptions', { exceptions: 1 }, /js-exceptions/],
+]) {
+  test(`consumption proof control stays unproven: ${name}`, async () => {
+    const action = await proofVerdict(options);
+    assert.equal(action.validatedConsumption, false, name);
+    assert.match(action.reasons.join(','), reason, `${name}: ${action.reasons}`);
+  });
+}
+
+test('a proof cannot be complete with fewer than 52 actions and adds no budget changes', async () => {
+  const { proof, call } = runProofScenario();
+  await proof.drain(call);
+  const summary = proof.summary();
+  assert.equal(summary.consumptionProven, false);
+  assert.equal(summary.provenActions, 1);
+  const failing = { firstPageMs: 1339, pageDataP95Ms: 100, searchMs: 100, requestP95Ms: 100, localFeedbackSamples: 51, invalidFeedbackSamples: 0,
+    localFeedbackP95Ms: 10, pendingInventoryRequests: 0, inventoryReads: Array(52).fill('100'), exceptions: [], requestMethods: ['GET'],
+    peakBrowserHeapBytes: 1, jvmMemory: { coverageComplete: true, incrementalPeakBytes: 311934976 }, failedInventoryRequestCount: 2, structureTiming: {} };
+  const before = evaluateStructureBudgets(failing);
+  const proven = { consumptionProven: true, actions: Array(52).fill({ validatedConsumption: true }) };
+  assert.deepEqual(evaluateStructureBudgets({ ...failing, inventoryConsumption: proven }), before, 'evidence additions never relax budgets');
+  assert.equal(before.length, 3);
+});
+
+test('archived seq20/seq82 metadata lacking bodies and nonces stays unproven FAIL', () => {
+  const archived = { failedInventoryRequests: [{ seq: 20, urlHash: 'a'.repeat(64), status: 200, errorText: 'net::ERR_ABORTED' },
+    { seq: 82, urlHash: 'b'.repeat(64), status: 200, errorText: 'net::ERR_ABORTED' }], resourceTimings: [], firstFunctionRequests: [{ seq: 20 }] };
+  assert.equal(assessArchivedConsumption(archived).status, 'FAIL');
+  assert.equal(assessArchivedConsumption({ inventoryConsumption: { consumptionProven: true, actions: Array(52).fill({ validatedConsumption: true }) } }).status, 'FAIL');
+});
+
+function fakeInventoryDocument(addresses, summary) {
+  const state = { addresses, summary, observer: null };
+  const table = { querySelector: () => ({ textContent: 'Recovered functions' }),
+    querySelectorAll: () => state.addresses.map(text => ({ querySelector: () => ({ textContent: text }) })) };
+  const document = { documentElement: {}, get body() { return { innerText: state.summary }; }, querySelectorAll: () => [table] };
+  return { state, document, mutate(next, text) { state.addresses = next; state.summary = text; state.observer(); } };
+}
+function loadInstrumentedDocument(fake, uuid) {
+  const sent = [];
+  const window = {};
+  let now = 5;
+  const context = { window, document: fake.document, location: { origin: browserOrigin }, URL, JSON, RegExp, Object,
+    crypto: { randomUUID: () => uuid }, performance: { timeOrigin: 1000, now: () => now++ },
+    PerformanceObserver: class { observe() {} }, MutationObserver: class { constructor(cb) { fake.state.observer = cb; } observe() {} },
+    addEventListener: () => {} };
+  for (const name of INVENTORY_PROOF_BINDINGS) window[name] = payload => sent.push([name, JSON.parse(payload)]);
+  context.window = window; Object.assign(context, window);
+  runInNewContext(`with (window) { ${inventoryDocumentInstrumentation()} }`, Object.assign(context, { window }));
+  return { sent, window };
+}
+
+test('injected observer arms before action, rejects stale DOM and emits once on the expected state', () => {
+  const page1 = inventoryPageOracle(proofFixture, 0).addresses, page2 = inventoryPageOracle(proofFixture, 100).addresses;
+  const fake = fakeInventoryDocument(page1, 'Showing 1–100 of 100000 matching functions (100000 recorded)');
+  const { sent, window } = loadInstrumentedDocument(fake, NONCE_A);
+  assert.deepEqual(sent[0], [INVENTORY_PROOF_BINDINGS[0], { nonce: NONCE_A, timeOrigin: 1000 }]);
+  sent.length = 0;
+  const arm = window.__decompArmInventory('tok', page2, 'Showing 101–200 of 100000 matching functions');
+  assert.deepEqual({ ...arm }, { nonce: NONCE_A, baselineMatches: false });
+  fake.mutate(page1, 'Showing 1–100 of 100000 matching functions (100000 recorded)');
+  assert.equal(sent.length, 0, 'prior DOM is not accepted');
+  fake.mutate(page2, 'Showing 101–200 of 100000 matching functions');
+  fake.mutate(page2, 'Showing 101–200 of 100000 matching functions');
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0][1].token, 'tok'); assert.equal(sent[0][1].nonce, NONCE_A); assert.equal(sent[0][1].addresses.length, 100);
+  const stale = window.__decompArmInventory('tok2', page2, 'Showing 101–200 of 100000 matching functions');
+  assert.equal(stale.baselineMatches, true);
+});
+
+test('fresh reload document announces a new nonce and reports restored rows unarmed', () => {
+  const page51 = inventoryPageOracle(proofFixture, 5000).addresses;
+  const fake = fakeInventoryDocument([], '');
+  const { sent } = loadInstrumentedDocument(fake, NONCE_B);
+  fake.mutate(page51, 'Showing 5001–5100 of 100000 matching functions');
+  assert.deepEqual(sent.map(([name, value]) => [name, value.nonce, value.token ?? null]),
+    [[INVENTORY_PROOF_BINDINGS[0], NONCE_B, null], [INVENTORY_PROOF_BINDINGS[2], NONCE_B, null]]);
+});
+
+test('one instrumented document records every pre-reload action without exhausting its bound', () => {
+  const fake = fakeInventoryDocument([], '');
+  const { sent, window } = loadInstrumentedDocument(fake, NONCE_A);
+  for (let page = 0; page <= 50; page++) {
+    const start = page * 100;
+    const addresses = inventoryPageOracle(proofFixture, start).addresses;
+    const summary = page === 0 ? 'Showing 1–100 of 100000 matching functions (100000 recorded)'
+      : `Showing ${start + 1}–${start + 100} of 100000 matching functions`;
+    assert.equal(window.__decompArmInventory(`page-${page}`, addresses, summary).baselineMatches, false);
+    fake.mutate(addresses, summary);
+  }
+  const readies = sent.filter(([name]) => name === INVENTORY_PROOF_BINDINGS[2]);
+  assert.equal(readies.length, 51);
+  assert.ok(readies.every(([, value], page) => value.token === `page-${page}` && value.overflow !== true));
+});
+
+test('injected readiness has a bounded document ledger and explicitly reports its 129th observation', () => {
+  const fake = fakeInventoryDocument([], '');
+  const { sent, window } = loadInstrumentedDocument(fake, NONCE_A);
+  for (let page = 0; page < 130; page++) {
+    const start = page * 100, addresses = inventoryPageOracle(proofFixture, start).addresses;
+    const summary = `Showing ${start + 1}–${start + 100} of 100000 matching functions`;
+    window.__decompArmInventory(`page-${page}`, addresses, summary);
+    fake.mutate(addresses, summary);
+  }
+  const readies = sent.filter(([name]) => name === INVENTORY_PROOF_BINDINGS[2]);
+  assert.equal(readies.length, 129);
+  assert.equal(readies.filter(([, value]) => value.overflow === true).length, 1);
+  assert.equal(readies[128][1].overflow, true);
+});
