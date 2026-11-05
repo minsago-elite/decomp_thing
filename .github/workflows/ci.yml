@@ -574,6 +574,7 @@ jobs:
     needs: frontend
     env:
       NPM_CONFIG_CACHE: ${{ github.workspace }}/build/npm-download-cache
+      GRADLE_USER_HOME: ${{ github.workspace }}/build/gradle-user-home
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
@@ -626,6 +627,20 @@ jobs:
         run: ./gradlew --no-daemon --offline verifyGhidraDistributionArchives
       - name: Verify atomic bundle publication and refusal controls
         run: ./gradlew --no-daemon --offline verifyAtomicGhidraBundlePublication
+      - name: Check republication harness with mocked controls only
+        run: python3 -B scripts/test-ghidra-bundle-republication.py
+      - name: Qualify same-bundle publication during owned Ghidra reconstruction
+        timeout-minutes: 55
+        run: |
+          unset GHIDRA_HOME
+          python3 -B scripts/qualify-ghidra-bundle-republication.py
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: bundled-ghidra-republication-qualification
+          path: build/qualification/ghidra-bundle-republication/
+          include-hidden-files: true
+          retention-days: 30
       - uses: actions/upload-artifact@v7
         if: always()
         with:
