@@ -41,7 +41,7 @@ const test = (name, options, fn) => {
   if (typeof options === 'function') { fn = options; options = {}; }
   options ??= {};
   const filter = process.env.READ_STATES_TEST_FILTER;
-  const selected = !filter || name.includes(filter);
+  const selected = !filter || filter.split('|').some((part) => name.includes(part));
   return testRunner(name, { ...options, ...(!selected ? { skip: `not selected by READ_STATES_TEST_FILTER: ${filter}` } : {}) }, fn);
 };
 const AX_ROLE = { alert: 'alert', status: 'status', button: 'button', text: 'paragraph' };
@@ -74,7 +74,15 @@ function fakeBrowser(options = {}) {
         }
         case 'Network.setCookie': cookies.set(params.name, { name: params.name, value: params.value, path: o.cookiePath ?? params.path, httpOnly: params.httpOnly, sameSite: params.sameSite, secure: params.secure ?? false }); return { success: true };
         case 'Network.getCookies': return { cookies: [...cookies.values()].map((c) => o.cookieReadValue === null ? c : { ...c, value: o.cookieReadValue }) };
-        case 'Fetch.disable': t.fetchDisabled = true; return {};
+        case 'Fetch.disable': {
+          t.fetchDisabled = true;
+          // Model the fail-open risk if interception is disabled while a request is still paused.
+          // Correct cleanup must fail every owned request before reaching this point.
+          if (o.continueHeld) for (const requestId of [...t.outstanding.keys()]) {
+            t.outstanding.delete(requestId); t.continuedIds.push(requestId); t.continued = (t.continued ?? 0) + 1;
+          }
+          return {};
+        }
         case 'Page.navigate': {
           t.shown = t.label.startsWith('S15') ? 'S1' : t.label; t.data = null;
           assert.equal(params.url, ORIGIN + M.READ_STATE_CASES.find((c) => c.id === t.shown).route);
@@ -93,8 +101,18 @@ function fakeBrowser(options = {}) {
           if (p.path === `${M.API}/jobs/${M.JOB}` && params.responseCode === 200 && t.shown !== 'S1' && t.shown !== 'S10' && o.leakOld) t.data = true;
           next(t); return {};
         }
-        case 'Fetch.continueRequest': { t.continued = (t.continued ?? 0) + 1; throw new Error('held request must never be continued to the real server'); }
-        case 'Fetch.failRequest': { t.outstanding.delete(params.requestId); t.refused.push(params.requestId); next(t); return {}; }
+        case 'Fetch.continueRequest': { t.continued = (t.continued ?? 0) + 1; t.continuedIds.push(params.requestId); throw new Error('held request must never be continued to the real server'); }
+        case 'Fetch.failRequest': {
+          t.outstanding.delete(params.requestId); t.refused.push(params.requestId);
+          if (o.injectStoppedRequest && !t.stoppedInjected && t.label?.startsWith('S15')) {
+            t.stoppedInjected = true;
+            const requestId = 'stopped-r1'; const path = `${M.API}/jobs/${M.JOB}/runs`;
+            t.outstanding.set(requestId, { path });
+            for (const h of handlers.get(sessionId) ?? []) h({ requestId, request: { url: ORIGIN + path, method: 'GET', headers: {} } });
+            o.afterPaused?.({ label: t.label, requestId, path, phase: 'cleaning' });
+          }
+          next(t); return {};
+        }
         case 'Input.dispatchKeyEvent': if (params.type === 'rawKeyDown') {
           t.focus = t.focus === 'main' || t.focus === 'inMain' ? 'inMain' : t.focus + 1 >= PRE_MAIN.length ? 'inMain' : t.focus + 1;
           t.input.push({ key: 'Tab', trusted: !o.untrusted }); } return {};
@@ -131,13 +149,13 @@ function fakeBrowser(options = {}) {
       const [method, path] = key.split(' '); const requestId = `r${++req}`;
       t.outstanding.set(requestId, { path });
       for (const h of handlers.get(t.sessionId) ?? []) h({ requestId, request: { url: ORIGIN + path, method, headers: {} } });
-      o.afterPaused?.({ label: t.label, requestId, path });
+      o.afterPaused?.({ label: t.label, requestId, path, phase: 'running' });
     } });
   }
   const labels = [...COVERED, ...M.S15_ARMS.map((a) => `S15-${a.arm}`)];
   const makeTarget = () => {
     n++; const t = { targetId: `t${n}`, sessionId: `s${n}`, label: labels[n - 1], shown: null, data: null, queue: [], outstanding: new Map(), cancelled: new Set(),
-      fulfilled: [], refused: [], focus: -1, input: [], unverified: false, closed: false, fetchDisabled: false };
+      fulfilled: [], refused: [], continuedIds: [], focus: -1, input: [], unverified: false, closed: false, fetchDisabled: false };
     targets.set(t.sessionId, t);
     o.onTarget?.(t);
     const value = { targetId: t.targetId, sessionId: t.sessionId };
@@ -162,7 +180,9 @@ function fakeBrowser(options = {}) {
     // Semantic, not identity: only an expression that focuses the real #main element starts there.
     if (expr === M.MAIN_FOCUS_EXPRESSION) {
       const main = o.focusMissing ? null : { id: 'main', tagName: 'MAIN', focus() { if (!o.unfocusableMain) document.activeElement = main; } };
-      const document = { activeElement: { id: '', tagName: 'BODY' }, getElementById: (id) => id === 'main' ? main : null };
+      const heading = main ? { id: '', tagName: 'H1', focus() { document.activeElement = heading; } } : null;
+      const document = { activeElement: { id: '', tagName: 'BODY' }, getElementById: (id) => id === 'main' ? main : null,
+        querySelector: (selector) => selector === 'main h1' ? heading : null };
       const result = vm.runInNewContext(expr, { document });
       // Model sequential keyboard input from the DOM's actual activeElement, not the expression's claimed boolean.
       t.focus = main && document.activeElement === main ? 'main' : -1;
@@ -422,22 +442,56 @@ test('M2: the AX node is bound to the DOM role and text, never the first node wi
 
 test('adversarial cleanup fails the exact held S15 read at the case deadline and never continues it', async () => {
   let offset = 0; const now = () => Date.now() + offset; const paused = [];
-  // Keep the test's case deadline real, but shorten only that deadline timer so the control also runs in each mutant child.
   const realSetTimeout = globalThis.setTimeout;
-  globalThis.setTimeout = (callback, ms, ...args) => realSetTimeout(callback,
-    ms > M.LIMITS.callMs && ms < M.LIMITS.sectionMs ? 5 : ms, ...args);
   let result;
   try {
-    result = await drive({ continueHeld: true, keepHeldOnNavigation: true, afterPaused: (e) => { if (e.label === 'S15-denied' && e.path === `${M.API}/jobs/${M.JOB}`) { paused.push(e); offset += M.LIMITS.caseMs; } } },
-      { now, delay: async () => { if (paused.length) return new Promise(() => undefined); await new Promise(setImmediate); } });
+    result = await drive({ continueHeld: true, keepHeldOnNavigation: true, afterPaused: (e) => {
+      if (e.phase === 'running' && e.label === 'S15-denied' && e.path === `${M.API}/jobs/${M.JOB}`) {
+        paused.push(e); offset = M.LIMITS.caseMs + 1;
+        // Start shortening only after the exact request has been handed to the hold path. The outer timer already exists;
+        // this only bounds the subsequent remaining-case timer and cannot race request acquisition.
+        globalThis.setTimeout = (callback, ms, ...args) => realSetTimeout(callback,
+          ms > M.LIMITS.callMs && ms < M.LIMITS.sectionMs ? 5 : ms, ...args);
+      }
+    } }, { now, delay: async () => { if (paused.length) return new Promise(() => undefined); await new Promise(setImmediate); } });
   } finally { globalThis.setTimeout = realSetTimeout; }
   const owned = [...result.browser.targets.values()].find((t) => t.label === 'S15-denied');
   assert.equal(paused.length, 1, 'one known job request remains held when the original case deadline expires');
   assert.ok(owned.refused.includes(paused[0].requestId), `the exact held interception id is failed: ${JSON.stringify({ paused, refused: owned.refused, continued: owned.continued, cleanup: result.section.cleanup.find((c) => c.label === 'S15-denied'), reason: result.section.cases.filter((c) => c.id === 'S15') })}`);
   assert.equal(owned.continued ?? 0, 0, 'no held request is continued to the real server');
+  assert.deepEqual(owned.continuedIds, [], 'Fetch.disable must see no outstanding interception to continue');
+  assert.equal(owned.outstanding.size, 0, 'all paused requests are settled before target cleanup');
   const cleanup = result.section.cleanup.find((c) => c.label === 'S15-denied');
   assert.equal(cleanup.heldFailed, 1, 'the held-request cleanup is positively recorded');
   assert.ok(result.section.assessment.some((x) => /S15|case exceeded|deadline/i.test(x)), 'the timed-out case cannot be assessed as passing');
+});
+
+test('adversarial cleanup refuses a stopped-phase request after case cutoff', async () => {
+  let offset = 0; const now = () => Date.now() + offset; const paused = [];
+  const realSetTimeout = globalThis.setTimeout;
+  let result;
+  try {
+    result = await drive({ continueHeld: true, keepHeldOnNavigation: true, injectStoppedRequest: true,
+      afterPaused: (e) => {
+        paused.push(e);
+        if (e.phase === 'running' && e.label === 'S15-denied' && e.path === `${M.API}/jobs/${M.JOB}`) {
+          offset = M.LIMITS.caseMs + 1;
+          globalThis.setTimeout = (callback, ms, ...args) => realSetTimeout(callback,
+            ms > M.LIMITS.callMs && ms < M.LIMITS.sectionMs ? 5 : ms, ...args);
+        }
+      } },
+    { now, delay: async () => { if (offset) return new Promise(() => undefined); await new Promise(setImmediate); } });
+  } finally { globalThis.setTimeout = realSetTimeout; }
+  const owned = [...result.browser.targets.values()].find((t) => t.label === 'S15-denied');
+  assert.ok(paused.some((e) => e.phase === 'running' && e.path === `${M.API}/jobs/${M.JOB}`), 'the case begins with its held request');
+  assert.ok(paused.some((e) => e.phase === 'cleaning' && e.requestId === 'stopped-r1'), 'a second request arrives only after cutoff');
+  assert.ok(owned.refused.includes('stopped-r1'), 'the exact request arriving during cleanup is failed');
+  assert.equal(owned.continued ?? 0, 0, 'stopped-phase traffic is never continued');
+  assert.deepEqual(owned.continuedIds, []);
+  assert.equal(owned.outstanding.size, 0);
+  const cleanup = result.section.cleanup.find((c) => c.label === 'S15-denied');
+  assert.equal(cleanup.stoppedFailed, 1, 'the stopped-phase refusal is counted');
+  assert.ok(result.section.afterStop.some((e) => e.label === 'S15-denied' && e.what.includes('/runs') && e.outcome === 'failed'));
 });
 
 test('cookie readback binds the exact configured value hash', async () => {
@@ -669,8 +723,8 @@ const MUTANTS = [
   ['ignore writes', "section.writes.length === 0, 'non-GET request observed'", "true, 'non-GET request observed'", 'adversarial fake browser'],
   ['waves always equal', 'if (!Array.isArray(actual) || actual.length !== expected.length) return false;', 'return true;', 'adversarial fake browser'],
   ['projection ignores role', 'raw.roles.find((r) => r.role === state.role && ', 'raw.roles.find((r) => ', 'projection requires the exact DOM role'],
-  ['axe inapplicable ignored', ' && !r.axe?.inapplicable?.includes(rule)', '', 'section mutations'],
-  ['no ledger attribution', "need(e.gen === r.gen && e.case === id && ", 'need(', 'section mutations'],
+  ['axe inapplicable ignored', ' && !r.axe?.inapplicable?.includes(rule)', '', 'section mutations', 'positive scripted drive'],
+  ['no ledger attribution', "need(e.gen === r.gen && e.case === id && ", 'need(', 'section mutations', 'positive scripted drive'],
   ['B1 axe main context', 'axe.run(document, ${JSON.stringify(options)})', "axe.run({ include: [['main']] }, ${JSON.stringify(options)})", 'B1: a main-scoped axe'],
   ['B2 heading start focus', "const m = document.getElementById('main'); if (m) m.focus();", "const m = document.querySelector('main h1'); if (m) m.focus();", 'missing or unfocusable'],
   ['B2 any reached element', '  need(expectedFocus && JSON.stringify(k?.reached) === JSON.stringify(expectedFocus), ', '  need(true || expectedFocus, ', 'B2: trusted Tab'],
@@ -678,12 +732,13 @@ const MUTANTS = [
   ['M1 stale handler not inert', "if (ctx.phase === 'closed') {", "if (false) {", 'listener teardown'],
   ['M2 first AX role node', '    if (normText(text) === want) return { role, matched: true,', '    return { role, matched: true,', 'M2: the AX node'],
   ['M3 merged S15 waves', 'const toGate = createWaveGate({ delay });', 'const toGate = fromGate;', 'S15: browser abort'],
-  ['M4 generator pins unchecked', "&& section?.fixtures?.outputSha256 === sequences.probe.outputSha256, 'generator", "|| true, 'generator", 'section mutations'],
+  ['M4 generator pins unchecked', "&& section?.fixtures?.outputSha256 === sequences.probe.outputSha256, 'generator", "|| true, 'generator", 'section mutations', 'positive scripted drive'],
   ['S10 variant served to S1', 'const map = new Map(base);', "const map = new Map(base); if (c.id === 'S1') map.set(`${API}/bootstrap`, bindVariant('628-git-supported'));", 'binding: exact sources'],
   ['forbidden scanned in main only', 'forbidden: forbid.filter((id) => whole.includes(id))', 'forbidden: forbid.filter((id) => raw.includes(id))', 'forbidden opaque IDs'],
   ['cookie value hash ignored', 'sha256(String(named[0].value)) === section.precondition.valueSha256', 'true', 'cookie readback binds'],
   ['focus expression accepts missing main', 'focused: !!m && a === m', 'focused: true', 'missing or unfocusable'],
   ['held request continued at deadline', "cdp.call('Fetch.failRequest', { requestId, errorReason: 'Aborted' }, target.sessionId), LIMITS.callMs, 'Fetch.failRequest'); record.heldFailed++", "cdp.call('Fetch.continueRequest', { requestId }, target.sessionId), LIMITS.callMs, 'Fetch.failRequest'); record.heldFailed++", 'adversarial cleanup fails the exact held S15'],
+  ['stopped-phase request continued after cutoff', "const work = withDeadline(cdp.call('Fetch.failRequest', { requestId, errorReason: 'Aborted' }, target.sessionId), LIMITS.callMs, 'Fetch.failRequest').then", "const work = withDeadline(cdp.call('Fetch.continueRequest', { requestId }, target.sessionId), LIMITS.callMs, 'Fetch.failRequest').then", 'adversarial cleanup refuses a stopped-phase request'],
   ['cookie root path', "url, path: `${BASE}/`, httpOnly: true", "url, path: '/', httpOnly: true", 'cookie: binds'],
 ];
 test('copied-source mutants of the module fail these controls', { skip: process.env.READ_STATES_MODULE !== undefined }, () => {
@@ -691,14 +746,18 @@ test('copied-source mutants of the module fail these controls', { skip: process.
   // The child must be its own test run, not a subtest reporting into this runner.
   const { NODE_TEST_CONTEXT: _context, ...childEnv } = process.env;
   const results = [];
-  for (const [name, from, to, pattern] of MUTANTS) {
+  for (const [name, from, to, pattern, prerequisite] of MUTANTS) {
     assert.equal(source.split(from).length, 2, `mutant anchor must occur once: ${name}`);
     const dir = mkdtempSync(join(evidence, 'mutant-'));
     const copy = join(dir, 'packaged-browser-read-states.mjs');
     writeFileSync(copy, source.replace(from, to));
-    const run = spawnSync(process.execPath, ['--test', '--test-reporter=tap', fileURLToPath(import.meta.url)], { env: { ...childEnv, READ_STATES_MODULE: copy, READ_STATES_FAST: '1', READ_STATES_TEST_FILTER: pattern }, encoding: 'utf8', timeout: 120_000, maxBuffer: 8 << 20 });
+    const childFilter = prerequisite ? `${prerequisite}|${pattern}` : pattern;
+    const run = spawnSync(process.execPath, ['--test', '--test-reporter=tap', fileURLToPath(import.meta.url)], { env: { ...childEnv, READ_STATES_MODULE: copy, READ_STATES_FAST: '1', READ_STATES_TEST_FILTER: childFilter }, encoding: 'utf8', timeout: 120_000, maxBuffer: 8 << 20 });
     const failed = [...run.stdout.matchAll(/^not ok \d+ - (.+)$/gm)].map((m) => m[1]);
-    results.push({ name, status: run.status, failed });
+    const failedBlocks = run.stdout.split(/(?=^# Subtest: )/m).filter((block) => /^# Subtest: [^\n]+\nnot ok \d+ - /m.test(block));
+    assert.equal(failedBlocks.length, failed.length, `mutant ${name} must report each failure as a Node test assertion, not only a process/setup error`);
+    const diagnostics = failedBlocks.map((block) => block.replaceAll('fixture-cookie-value', '<redacted-cookie>').slice(0, 2048));
+    results.push({ name, status: run.status, failed, diagnostics });
     rmSync(dir, { recursive: true, force: true });
   }
   if (process.env.READ_STATES_RESULTS) writeFileSync(process.env.READ_STATES_RESULTS, JSON.stringify(results, null, 2) + '\n');
