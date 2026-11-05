@@ -1,0 +1,29 @@
+{
+  "apiVersion": 1,
+  "kind": "gitRefs",
+  "requestId": "request_example_1",
+  "data": {
+    "repositoryId": "repository_example_2",
+    "refs": [
+      {
+        "refId": "ref_trunk",
+        "kind": "branch",
+        "displayName": "refs/heads/trunk",
+        "objectId": "0123456789abcdef0123456789abcdef01234567",
+        "peeledObjectId": null,
+        "version": "ref_v_1",
+        "current": true
+      },
+      {
+        "refId": "ref_v1",
+        "kind": "tag",
+        "displayName": "refs/tags/v1",
+        "objectId": "6123456789abcdef0123456789abcdef01234567",
+        "peeledObjectId": "0123456789abcdef0123456789abcdef01234567",
+        "version": "ref_v_2",
+        "current": false
+      }
+    ],
+    "nextCursor": "refs~2"
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "apiVersion": 1,
+  "kind": "gitHistory",
+  "requestId": "request_example_1",
+  "data": {
+    "repositoryId": "repository_example_2",
+    "worktreeId": "worktree_example_2",
+    "startObjectId": "0123456789abcdef0123456789abcdef01234567",
+    "entries": [
+      {
+        "objectId": "0123456789abcdef0123456789abcdef01234567",
+        "parentObjectIds": [
+          "1123456789abcdef0123456789abcdef01234567",
+          "2123456789abcdef0123456789abcdef01234567"
+        ],
+        "authorName": "Decomp Workbench",
+        "authorEmail": "workbench@localhost.invalid",
+        "authoredAt": "2026-10-25T00:00:00Z",
+        "committedAt": "2026-10-25T00:00:00Z",
+        "subject": "Merge reviewed source branch",
+        "subjectTruncated": false,
+        "mapping": null
+      }
+    ],
+    "nextCursor": "0123456789abcdef0123456789abcdef01234567~1"
+  }
+}

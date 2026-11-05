@@ -80,6 +80,10 @@ class WebRouteMatrixTest {
         "/api/v1/storage/maintenance-preview" to Live(setOf("GET"), Outcome(200, "maintenancePreview")),
         "$J/runs" to Live(setOf("GET", "POST"), Outcome(200, "runs"), Query.PAGED,
             mutationRefusal = Outcome(428, "PRECONDITION_REQUIRED")),
+        "$G/status" to Live(setOf("GET"), Outcome(404, "NOT_FOUND")),
+        "$G/history" to Live(setOf("GET"), Outcome(404, "NOT_FOUND")),
+        "$G/diff" to Live(setOf("GET"), Outcome(422, "VALIDATION_FAILED")),
+        "$G/refs" to Live(setOf("GET"), Outcome(404, "NOT_FOUND")),
         "$J/repositories" to Live(setOf("GET", "POST"), Outcome(200, "gitRepositories"),
             mutationRefusal = Outcome(428, "PRECONDITION_REQUIRED")),
         "$R" to Live(setOf("GET"), Outcome(200, "run")),
@@ -477,6 +481,7 @@ class WebRouteMatrixTest {
         private val MUTATIONS = setOf("POST", "PUT", "PATCH", "DELETE")
         private const val J = "/api/v1/jobs/{jobId}"
         private const val R = "$J/runs/{runId}"
+        private const val G = "$J/repositories/{repositoryId}"
         private val docs: List<String> by lazy { Files.readAllLines(Path.of("docs/web-api.md")) }
 
         private fun table(heading: String, firstColumn: String): List<List<String>> {
