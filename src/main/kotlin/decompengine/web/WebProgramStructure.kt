@@ -196,6 +196,11 @@ internal object WebProgramStructureBuilder {
             .maxStringLength(MAXIMUM_MODEL_BYTES).maxNameLength(64).maxNumberLength(32).build())
         .build()
 
+    // Only the closed model reader supplies its own duplicate checks. Detail and plan readers stay strict.
+    internal val MODEL_JSON: JsonFactory = JSON.rebuild()
+        .disable(StreamReadFeature.STRICT_DUPLICATE_DETECTION)
+        .build()
+
     fun declaredPath(profile: ReconstructionProfile, id: String): String? =
         profile.layout.declarations.singleOrNull { it.id == id }?.let { runCatching { it.materialize() }.getOrNull() }
 
@@ -493,7 +498,7 @@ internal object WebProgramStructureBuilder {
         private var references = 0
         private val byteEvidenceBudget = ReferencedDataByteEvidenceJson.Budget()
 
-        fun read(): ParsedModel = JSON.createParser(bytes).use { parser ->
+        fun read(): ParsedModel = MODEL_JSON.createParser(bytes).use { parser ->
             expect(parser.nextToken(), JsonToken.START_OBJECT)
             field(parser, "schemaVersion")
             expect(parser.nextToken(), JsonToken.VALUE_NUMBER_INT)
@@ -513,12 +518,37 @@ internal object WebProgramStructureBuilder {
             ParsedModel(schema, input, listOf(functions, globals, types))
         }
 
-        private fun statusFields(): Set<String> = if (schema == 1) setOf("status") else setOf("extractionStatus", "recoveryAssessment")
+        private fun fieldBit(name: String): Int = when (name) {
+            "id" -> 1 shl 0
+            "name" -> 1 shl 1
+            "address" -> 1 shl 2
+            "prototype" -> 1 shl 3
+            "calls" -> 1 shl 4
+            "referencedGlobals" -> 1 shl 5
+            "strings" -> 1 shl 6
+            "decompiledC" -> 1 shl 7
+            "type" -> 1 shl 8
+            "initializer" -> 1 shl 9
+            "byteEvidence" -> 1 shl 10
+            "declaration" -> 1 shl 11
+            "sourceAddress" -> 1 shl 12
+            "status" -> 1 shl 13
+            "extractionStatus" -> 1 shl 14
+            "recoveryAssessment" -> 1 shl 15
+            else -> 0
+        }
 
-        private fun fields(kind: WebStructureKind): Set<String> = statusFields() + when (kind) {
-            WebStructureKind.FUNCTION -> setOf("id", "name", "address", "prototype", "calls", "referencedGlobals", "strings", "decompiledC")
-            WebStructureKind.GLOBAL -> setOf("id", "name", "address", "type", "initializer") + if (schema >= 3) setOf("byteEvidence") else emptySet()
-            WebStructureKind.TYPE -> setOf("id", "declaration", "sourceAddress")
+        private fun fields(kind: WebStructureKind): Int {
+            val status = if (schema == 1) fieldBit("status") else fieldBit("extractionStatus") or fieldBit("recoveryAssessment")
+            val body = when (kind) {
+                WebStructureKind.FUNCTION -> fieldBit("id") or fieldBit("name") or fieldBit("address") or
+                    fieldBit("prototype") or fieldBit("calls") or fieldBit("referencedGlobals") or
+                    fieldBit("strings") or fieldBit("decompiledC")
+                WebStructureKind.GLOBAL -> fieldBit("id") or fieldBit("name") or fieldBit("address") or
+                    fieldBit("type") or fieldBit("initializer") or (if (schema >= 3) fieldBit("byteEvidence") else 0)
+                WebStructureKind.TYPE -> fieldBit("id") or fieldBit("declaration") or fieldBit("sourceAddress")
+            }
+            return status or body
         }
 
         private fun table(parser: JsonParser, kind: WebStructureKind, maximum: Int): WebStructureTable {
@@ -534,7 +564,7 @@ internal object WebProgramStructureBuilder {
                 if (ids.size >= maximum) throw WebStructureFailure("limit-exceeded", "MODEL_ENTITIES_EXCEEDED")
                 budget.charge(512, WebStructureCharge.MODEL_ENTITIES)
                 offsets.add(parser.currentTokenLocation().byteOffset)
-                var seenFieldCount = 0
+                var seenFields = 0
                 var id: String? = null; var name: String? = null; var address: String? = null
                 var label: String? = null; var assessment: String? = null
                 var called: Array<String> = noIdentifiers; var referenced: Array<String> = noIdentifiers; var stringCount = 0
@@ -543,9 +573,10 @@ internal object WebProgramStructureBuilder {
                     if (next == JsonToken.END_OBJECT) break
                     expect(next, JsonToken.FIELD_NAME)
                     val key = parser.currentName()
-                    if (key !in expectedFields) malformed()
-                    // Jackson's STRICT_DUPLICATE_DETECTION rejects repeated names at tokenization.
-                    seenFieldCount++
+                    val bit = fieldBit(key)
+                    // currentName is decoded, so escaped aliases collide before their value is consumed.
+                    if (bit and expectedFields == 0 || bit and seenFields != 0) malformed()
+                    seenFields = seenFields or bit
                     when (key) {
                         "id" -> id = identifier(parser)
                         "name" -> name = identifier(parser)
@@ -561,7 +592,7 @@ internal object WebProgramStructureBuilder {
                         "byteEvidence" -> byteEvidence(parser)
                     }
                 }
-                if (seenFieldCount != expectedFields.size || id == null) malformed()
+                if (seenFields != expectedFields || id == null) malformed()
                 if (schema >= 2 && assessment != "unassessed") malformed()
                 if (kind != WebStructureKind.TYPE && address == null) malformed()
                 val parsedAddress = address?.let(::parseAddress)
@@ -617,17 +648,22 @@ internal object WebProgramStructureBuilder {
             }
             expect(token, JsonToken.START_OBJECT)
             val start = parser.currentTokenLocation().byteOffset.toInt()
-            var depth = 1
+            // Arrays occupy a stack frame too: sibling objects and nested objects have independent names.
+            val containers = ArrayList<MutableSet<String>?>()
+            containers.add(HashSet())
             var tokens = 0
-            while (depth > 0) {
+            while (containers.isNotEmpty()) {
                 val next = parser.nextToken() ?: malformed()
+                // Strict Jackson detects a duplicate in nextToken, before the scan's token/byte limits.
+                if (next == JsonToken.FIELD_NAME && !containers.last()!!.add(parser.currentName())) malformed()
                 if (++tokens > 200_000 || parser.currentLocation().byteOffset - start > 2 * 1024 * 1024) {
                     throw WebStructureFailure("limit-exceeded", "MODEL_BYTE_EVIDENCE_EXCEEDED")
                 }
                 if (next == JsonToken.VALUE_STRING && parser.text.length > 512) malformed()
                 when (next) {
-                    JsonToken.START_OBJECT, JsonToken.START_ARRAY -> depth++
-                    JsonToken.END_OBJECT, JsonToken.END_ARRAY -> depth--
+                    JsonToken.START_OBJECT -> containers.add(HashSet())
+                    JsonToken.START_ARRAY -> containers.add(null)
+                    JsonToken.END_OBJECT, JsonToken.END_ARRAY -> containers.removeAt(containers.lastIndex)
                     else -> Unit
                 }
             }

@@ -532,6 +532,140 @@ class WebProgramStructureTest {
         }
     }
 
+    private fun rawModelOutcome(raw: String): JsonObject =
+        Revision(raw.toByteArray(), null, emptyList()).pages.functions("owner", jobId, runId, revisionId, null)
+
+    private fun assertRawModelOutcome(raw: String, state: String = "invalid", reason: String? = "MODEL_MALFORMED") {
+        val page = rawModelOutcome(raw)
+        assertEquals(state, page.text("state"))
+        assertEquals(reason, page.text("stateReason"))
+        if (state != "available") assertTrue(page.items().isEmpty())
+    }
+
+    @Test fun `fixed entity duplicate names and escaped aliases fail before consuming their values`() {
+        val root = Json.parseToJsonElement(model(functions.take(1)).decodeToString()).jsonObject
+        val entity = root.getValue("functions").jsonArray.single().jsonObject
+        fun withEntity(raw: String) = root.toString().replace(entity.toString(), raw)
+        for ((key, alias, value) in listOf(
+            Triple("id", "id", "\"replacement\""),
+            Triple("id", "\\u0069d", "\"replacement\""),
+            Triple("id", "id", "\"${"x".repeat(4097)}\""),
+            Triple("extractionStatus", "extractionStatus", "\"failed\""),
+            Triple("decompiledC", "decompiledC", "null"),
+            Triple("prototype", "prototype", "\"other\""),
+        )) {
+            // Put the duplicate immediately after a valid first value, before any subsequent fields.
+            val first = "\"$key\":${entity.getValue(key)}"
+            val changed = entity.toString().replace(first, "$first,\"$alias\":$value")
+            assertNotEquals(entity.toString(), changed, key)
+            assertRawModelOutcome(withEntity(changed))
+        }
+        // A decoded alias on its own is still a recognized field.
+        assertRawModelOutcome(withEntity(entity.toString().replace("\"id\":", "\"\\u0069d\":")), "available", null)
+    }
+
+    @Test fun `closed entity masks reject unknown missing and wrong family fields across model generations`() {
+        for (version in 1..4) {
+            val evidence = if (version == 3) ReferencedDataByteEvidenceJson.parse(Json.parseToJsonElement(
+                """{"schemaVersion":1,"windows":[${rawByteWindow()}],"omissionReason":null}""").jsonObject) else null
+            val versionGlobals = globals.map { it.copy(byteEvidence = evidence) }
+            val root = Json.parseToJsonElement(model(functions.take(1), versionGlobals, types, schema = version).decodeToString()).jsonObject
+            assertRawModelOutcome(root.toString(), "available", null)
+            for (family in listOf("functions", "globals", "types")) {
+                val entity = root.getValue(family).jsonArray.single().jsonObject
+                for (key in entity.keys) {
+                    assertRawModelOutcome(root.toString().replace(entity.toString(), JsonObject(entity - key).toString()))
+                    val duplicate = entity.toString().dropLast(1) + ",\"$key\":null}"
+                    assertRawModelOutcome(root.toString().replace(entity.toString(), duplicate))
+                }
+                for (key in listOf("unknown", if (family == "functions") "initializer" else "prototype")) {
+                    val unknown = "{\"$key\":\"${"x".repeat(4097)}\"," + entity.toString().drop(1)
+                    assertRawModelOutcome(root.toString().replace(entity.toString(), unknown))
+                }
+            }
+        }
+    }
+
+    @Test fun `root duplicate fields preserve first unsupported schema precedence`() {
+        val good = Json.parseToJsonElement(model(emptyList()).decodeToString()).jsonObject.toString()
+        for (key in listOf("schemaVersion", "inputSha256", "functions", "globals", "types")) {
+            val value = Json.parseToJsonElement(good).jsonObject.getValue(key)
+            assertRawModelOutcome(good.replace("\"$key\":$value", "\"$key\":$value,\"$key\":$value"))
+        }
+        assertRawModelOutcome(good.replace("\"schemaVersion\":2", "\"schemaVersion\":9,\"schemaVersion\":2"),
+            "unsupported", "MODEL_SCHEMA_UNSUPPORTED")
+    }
+
+    private fun rawByteEvidenceModel(evidence: String, version: Int = 3): String {
+        val root = Json.parseToJsonElement(model(emptyList(), globals).decodeToString()).jsonObject
+        val global = root.getValue("globals").jsonArray.single().jsonObject.toString().dropLast(1) +
+            ",\"byteEvidence\":$evidence}"
+        return root.toString().replace("\"schemaVersion\":2", "\"schemaVersion\":$version")
+            .replace(root.getValue("globals").toString(), "[$global]")
+    }
+
+    private fun rawByteWindow(address: String = "0x404000"): String =
+        """{"address":"$address","requestedLength":2,"origin":{"instructionAddress":"0x401000","referenceAddress":"$address","operandIndex":null,"widthBasis":"pcode_load"},"availability":"partial","segments":[{"offset":0,"length":1,"availability":"available","hex":"01","reason":null},{"offset":1,"length":1,"availability":"unavailable","hex":null,"reason":"unmapped"}]}"""
+
+    @Test fun `byte evidence objects reject top nested origin and escaped duplicate names`() {
+        for (version in 3..4) {
+            val evidence = """{"schemaVersion":${version - 2},"windows":[${rawByteWindow()}],"omissionReason":null${if (version == 4) ",\"collectionOmissions\":[]" else ""}}"""
+            assertRawModelOutcome(rawByteEvidenceModel(evidence, version), "available", null)
+            for ((first, duplicate) in listOf(
+                "\"schemaVersion\":${version - 2}" to "\"schemaVersion\":${version - 2}",
+                "\"schemaVersion\":${version - 2}" to "\"\\u0073chemaVersion\":${version - 2}",
+                "\"address\":\"0x404000\"" to "\"address\":\"0x404000\"",
+                "\"instructionAddress\":\"0x401000\"" to "\"instructionAddress\":\"0x401000\"",
+                "\"instructionAddress\":\"0x401000\"" to "\"\\u0069nstructionAddress\":\"0x401000\"",
+                "\"offset\":0" to "\"offset\":0",
+            )) {
+                val changed = evidence.replace(first, "$first,$duplicate")
+                assertNotEquals(evidence, changed)
+                assertRawModelOutcome(rawByteEvidenceModel(changed, version))
+            }
+        }
+    }
+
+    @Test fun `byte evidence accepts repeated names in siblings arrays and different object depths`() {
+        // Window and segment availability repeat at different depths; both windows and segments have siblings.
+        val evidence = """{"schemaVersion":1,"windows":[${rawByteWindow()},${rawByteWindow("0x404002")}],"omissionReason":null}"""
+        assertRawModelOutcome(rawByteEvidenceModel(evidence), "available", null)
+    }
+
+    @Test fun `byte evidence duplicate token wins over token and byte scan limits`() {
+        // Excluding START_OBJECT: schema name/value (2), windows name/array (2), values (199995), END_ARRAY (1).
+        val prefix = "{\"schemaVersion\":1,\"windows\":[" + List(199_995) { "0" }.joinToString(",") + "],"
+        val duplicate = prefix + "\"schemaVersion\":1}"
+        WebProgramStructureBuilder.MODEL_JSON.createParser(duplicate).use { parser ->
+            assertEquals(com.fasterxml.jackson.core.JsonToken.START_OBJECT, parser.nextToken())
+            repeat(200_001) { assertNotNull(parser.nextToken()) }
+            assertEquals(com.fasterxml.jackson.core.JsonToken.FIELD_NAME, parser.currentToken())
+            assertEquals("schemaVersion", parser.currentName())
+        }
+        assertRawModelOutcome(rawByteEvidenceModel(duplicate))
+        assertRawModelOutcome(rawByteEvidenceModel(prefix + "\"omissionReason\":null}"),
+            "limit-exceeded", "MODEL_BYTE_EVIDENCE_EXCEEDED")
+        val bytePrefix = "{\"schemaVersion\":1," + " ".repeat(2 * 1024 * 1024)
+        assertRawModelOutcome(rawByteEvidenceModel(bytePrefix + "\"schemaVersion\":1}"))
+        assertRawModelOutcome(rawByteEvidenceModel(bytePrefix + "\"windows\":[]}"),
+            "limit-exceeded", "MODEL_BYTE_EVIDENCE_EXCEEDED")
+    }
+
+    @Test fun `model parser shares strict stream constraints while detail parser retains duplicate detection`() {
+        val strict = WebProgramStructureBuilder.JSON
+        val model = WebProgramStructureBuilder.MODEL_JSON
+        assertSame(strict.streamReadConstraints(), model.streamReadConstraints())
+        assertTrue(strict.isEnabled(com.fasterxml.jackson.core.StreamReadFeature.STRICT_DUPLICATE_DETECTION.mappedFeature()))
+        assertFalse(model.isEnabled(com.fasterxml.jackson.core.StreamReadFeature.STRICT_DUPLICATE_DETECTION.mappedFeature()))
+        for (raw in listOf(
+            """{"prototype":"first","prototype":"second"}""",
+            """{"id":"first","\u0069d":"second"}""",
+            """{"byteEvidence":{"origin":{"address":1,"address":2}}}""",
+        )) {
+            assertFailsWith<com.fasterxml.jackson.core.JsonParseException> { readWebStructureEntity(raw.toByteArray(), 0) }
+        }
+    }
+
     @Test fun `aggregate references are charged across functions and reference families`() {
         val targets = (0 until 1000).map { "r$it" }.toSet()
         val dense = (0..WebProgramStructureBuilder.MAXIMUM_MODEL_REFERENCES / targets.size).map { i ->
