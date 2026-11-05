@@ -152,6 +152,34 @@ class WebProgramStructureTest {
             }
         }.filterValues { it.size > 1 }
 
+    @Test fun `module inventory counts shared cycles without hashing their members`() {
+        val large = (0 until 64).map { "m$it" }.reversed()
+        val small = listOf("small_b", "small_a")
+        val ids = large + small + "acyclic"
+        val revision = Revision(model(emptyList()), plan(*ids.map { planned(it, emptyList()) }.toTypedArray(),
+            cycles = listOf(large, small)), ids)
+        val original = revision.evidence.readStructure(revision.reference, revision.cache) { index, _ -> index }
+        assertEquals("available", original.planOutcome.state)
+        val modules = original.modules.map { module ->
+            val guarded = object : List<String> by module.cycle {
+                override fun hashCode(): Int = error("Cycle members must not be hashed by inventory summaries.")
+            }
+            WebStructureModule(module.id, module.sourcePath, module.headerPath, module.functionIds,
+                module.globalIds, module.typeIds, module.boundaryEvidence, module.implementationDeclaration, guarded)
+        }
+        val index = WebProgramStructureIndex(original.reference, original.manifestSha256, original.descriptorSha256,
+            original.inputSha256, original.metadataVersion, original.outcome, original.model, original.modelSchemaVersion,
+            original.planOutcome, original.plan, original.tables, modules, original.sourceFileIds,
+            original.sharedInterfacePath, original.unknownPlanReferences, original.retainedBytes)
+        val pages = WebProgramStructurePages { _, _, _, project -> project(index) { revision.model!! } }
+        val first = pages.modules("owner", jobId, runId, revisionId, "limit=1")
+        assertContract("moduleInventory", first)
+        assertEquals(2, first.getValue("summary").jsonObject.getValue("dependencyCycles").jsonPrimitive.int)
+        val cursor = first.getValue("page").jsonObject.getValue("nextCursor").jsonPrimitive.content
+        val second = pages.modules("owner", jobId, runId, revisionId, "limit=1&cursor=$cursor")
+        assertEquals(first["summary"], second["summary"])
+    }
+
     @Test fun `collision prepass matches original exact groups and function then global row order`() {
         val index = collisionIndex(
             listOf(null, "unique", "same", "intra", "same", "intra", "", "Case", "type-peer", "é"),

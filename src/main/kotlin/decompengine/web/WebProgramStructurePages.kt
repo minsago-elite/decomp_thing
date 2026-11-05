@@ -350,7 +350,8 @@ internal class WebProgramStructurePages(
         })
         put("modules", index.modules.size)
         put("modulesDeclaredAccepted", index.modules.count { it.implementationDeclaration == "accepted" })
-        put("dependencyCycles", index.modules.map { it.cycle }.filter { it.isNotEmpty() }.distinct().size)
+        // Validated cycles have disjoint members and name each recorded module once.
+        put("dependencyCycles", index.modules.count { it.cycle.firstOrNull() == it.id })
         put("unknownPlanReferences", index.unknownPlanReferences)
         put("nameCollisions", index.collisions.size)
         put("unresolvedCallTargets", (0 until functions.size).sumOf { row -> functions.calls[row].count { it !in functions.index } })
