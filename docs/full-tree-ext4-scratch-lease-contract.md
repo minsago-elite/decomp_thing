@@ -36,17 +36,60 @@ The coordinator and its operation journal remain separate authorities; this
 document does not promote the lease into worker START, output publication, or
 terminal release authority.
 
+## Actual mounted admission qualification
+
+The focused admission outcome in
+[#930](https://github.com/minsago-elite/decomp_thing/issues/930) has a separate
+hosted fixture and the 18 named controls in
+[`FullTreeDiskScratchAdmissionMountedTest.kt`](../src/test/kotlin/decompengine/oracle/fulltree/FullTreeDiskScratchAdmissionMountedTest.kt).
+These invoke the production admission API against real kernel state: pinned
+capacity, exclusive acquisition, total byte/inode maxima, available byte/inode
+minima, each required mount flag, read-only ext4, tmpfs, nested mounts, bind
+subtrees, visible device aliases, owner/mode, ordinary subdirectories, symlinks,
+and replacement of the mounted root while the old lease remains pinned. The
+replacement control verifies that stale release refuses and preserves both the
+original lease record and the replacement canary. These controls are distinct
+from the existing canonical-JSON mutation tests.
+
+The exclusive-acquisition control first holds an independent descriptor's lock
+on the empty mount and requires the production lock-conflict diagnostic without
+mutation. After unlocking, successful acquisition must retain a lock that an
+independent descriptor cannot acquire. The second API acquisition also requires
+the lock-conflict diagnostic. The nested-mount control requires the specific
+nested-mount diagnostic. Neither control can receive credit from the later
+nonempty-filesystem recovery refusal if its intended predicate is bypassed.
+
+The `live-fulltree` CI shard provisions two separate 64 MiB / 4096-inode ext4
+images using
+[`ci-oracle-ext4-admission.py`](../scripts/ci-oracle-ext4-admission.py).
+The helper accepts only named fixture actions, retains repository-local images
+and root-owned state, authenticates the owned loop backing objects and exact
+mount inventory, and uses the existing trusted `/var/lib` mount ancestry model.
+An owned 1 MiB / 32-inode tmpfs parent supplies private mount propagation for
+the replacement control without changing host-root propagation.
+It refuses unknown mounts, changed canaries, and ambiguous residue. It is a
+qualification fixture, not a production provisioner or a crash-reset capability.
+No local privileged mount experiments are required to develop these controls.
+
+CI sets `DECOMP_REQUIRE_ORACLE_EXT4_ADMISSION=true` and runs
+[`verify-oracle-ext4-admission.py`](../scripts/verify-oracle-ext4-admission.py)
+against the actual JUnit report. Every named control must execute exactly once
+and pass, with zero skipped tests. The retained `build/issue930-evidence`
+artifact includes helper observations, the JUnit report digest and the named
+qualification result. Local helper/report tests and an environment-gated local
+JUnit skip do not satisfy this gate. Closure requires successful hosted evidence
+at the qualified source, review/CI completion, and a post-merge acceptance audit.
+
 ## Gates still unavailable or unresolved
 
 The privileged integration cases require a trusted provisioner to publish
 `DECOMP_TEST_ORACLE_EXT4_SCRATCH`. CI creates the fixed-size ext4 image and
 mount with `rw,nodev,nosuid,noexec,noatime`, owner `0700`, and explicit byte and
 inode counts, then runs with
-`DECOMP_REQUIRE_ORACLE_EXT4_SCRATCH=true`. On the current host that environment
-variable is unset, `sudo` is unavailable, and no ext4 mount is present. Local
-execution therefore cannot qualify capacity/inode exhaustion, concurrent
+`DECOMP_REQUIRE_ORACLE_EXT4_SCRATCH=true`. Where the required fixture environment
+is absent, local execution cannot qualify capacity/inode exhaustion, concurrent
 acquisition, mount/path ABA, privileged quarantine cutoffs, or cold lease
-integration; those cases remain environment-gated skips rather than successes.
+integration; environment-gated skips remain distinct from hosted successes.
 
 The remaining production gates are also open: authenticated worker START and
 cgroup/process absence, publication under the retained lease and journal
