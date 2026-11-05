@@ -66,7 +66,8 @@ it('initializes once from the latest candidate, waits for the durable outcome an
 it('reports a failed operation and a refused request without retrying', async () => {
   transport.get.mockResolvedValueOnce({ data: { jobId, repositories: [], operations: [operation('failed').data] } }).mockResolvedValueOnce(run);
   mount();
-  expect(await screen.findByText(/last repository operation is failed: The selected source snapshot is unavailable/)).toBeTruthy();
+  expect(await screen.findByText('The last repository operation failed. No repository was created by it; refresh before trying again.')).toBeTruthy();
+  expect(document.body.textContent).not.toContain('The selected source snapshot is unavailable.');
   transport.post.mockRejectedValueOnce(new ApiClientError('http_error', { status: 412 }));
   fireEvent.click(screen.getByRole('button', { name: 'Initialize repository from the latest candidate' }));
   expect(await screen.findByText(/job changed/)).toBeTruthy();
