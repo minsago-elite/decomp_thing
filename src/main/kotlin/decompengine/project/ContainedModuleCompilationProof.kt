@@ -53,6 +53,9 @@ internal object ContainedModuleCompilationProof {
         require(runtime.profileId == request.profileId && runtime.compilerExecutable == request.compilerPath &&
             runtime.compilerSha256 == request.compilerSha256) { "module compiler request differs from its configured profile or compiler" }
         if (request.schemaVersion == 2) {
+            require(runtime.compilerInterpreter != null) {
+                "request schema 2 proof requires runtime schema 3 retained interpreter authority; runtime schema 2 cannot be verified portably"
+            }
             val roots = (runtime.isolation.systemLibraryMounts + runtime.compilerRuntimeMounts).map { it.destination }.distinct().sortedBy { it.toString() }
             require(request.trampolinePath == runtime.compilerExecHelperPath &&
                 request.trampolineSha256 == runtime.compilerExecHelperSha256 &&

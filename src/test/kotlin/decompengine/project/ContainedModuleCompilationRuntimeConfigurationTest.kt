@@ -1,6 +1,8 @@
 package decompengine.project
 
 import java.nio.file.Path
+import java.lang.reflect.InvocationTargetException
+import java.security.MessageDigest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -80,6 +82,69 @@ class ContainedModuleCompilationRuntimeConfigurationTest {
             "source" to JsonPrimitive("/opt/module-compiler/bin/helper"), "path" to JsonPrimitive("/opt/module-compiler/bin/other"),
             "sha256" to JsonPrimitive(DIGEST),
         ))))
+    }
+
+    @Test
+    fun `retained interpreters parse without host architecture or filesystem authority`() {
+        val previous = System.getProperty("os.arch")
+        try {
+            System.setProperty("os.arch", "unsupported-archive-auditor")
+            for (machine in listOf("x86_64", "aarch64")) {
+                val interpreter = JsonObject(mapOf("machine" to JsonPrimitive(machine),
+                    "source" to JsonPrimitive("/opt/keeper-libraries/absent-$machine.so"),
+                    "path" to JsonPrimitive("/lib64/absent-$machine.so"), "sha256" to JsonPrimitive(DIGEST)))
+                val record = JsonObject(valid() + mapOf("schemaVersion" to JsonPrimitive(3),
+                    "compilerInterpreter" to interpreter,
+                    "compilerExecHelper" to JsonObject(mapOf(
+                        "source" to JsonPrimitive("/opt/module-compiler/helper"),
+                        "path" to JsonPrimitive("/opt/module-compiler/helper"), "sha256" to JsonPrimitive(DIGEST)))))
+                assertEquals(listOf(Path.of("/lib64/absent-$machine.so")), parse(record).compilerRuntimeExecuteFiles)
+                for ((field, value) in mapOf("machine" to "mips", "source" to "/outside/loader",
+                    "path" to "/lib64/wrong.so", "sha256" to "bad")) {
+                    reject(record + ("compilerInterpreter" to JsonObject(interpreter + (field to JsonPrimitive(value)))))
+                }
+                reject(record + ("compilerInterpreter" to JsonObject(interpreter + ("extra" to JsonPrimitive(true)))))
+            }
+        } finally {
+            if (previous == null) System.clearProperty("os.arch") else System.setProperty("os.arch", previous)
+        }
+    }
+
+    @Test
+    fun `live interpreter verification rejects machine loader and digest mismatches`() {
+        val companion = ContainedModuleCompilationRuntimeConfiguration.Companion
+        val method = companion.javaClass.getDeclaredMethod(
+            "verifyInterpreter", ContainedModuleCompilationRuntimeConfiguration.Declaration::class.java)
+        method.isAccessible = true
+        val machine = System.getProperty("os.arch")
+        val reviewedMachine = when (machine) {
+            "amd64", "x86_64" -> "x86_64"
+            "arm64", "aarch64" -> "aarch64"
+            else -> error("live interpreter control requires a reviewed host architecture")
+        }
+        val loader = Path.of(if (reviewedMachine == "x86_64") "/lib64/ld-linux-x86-64.so.2" else "/lib/ld-linux-aarch64.so.1").toRealPath()
+        val bytes = java.nio.file.Files.readAllBytes(loader)
+        val digest = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+        val base = update(valid(), "isolation") {
+            it + ("systemLibraryMounts" to JsonArray(listOf(runtime(loader.parent.toString(), "/lib64"))))
+        }
+        fun declaration(machineName: String = reviewedMachine, source: Path = loader, pin: String = digest) =
+            parse(JsonObject(base + mapOf("schemaVersion" to JsonPrimitive(3),
+                "compilerInterpreter" to JsonObject(mapOf("machine" to JsonPrimitive(machineName),
+                    "source" to JsonPrimitive(source.toString()),
+                    "path" to JsonPrimitive(Path.of("/lib64").resolve(loader.parent.relativize(source)).toString()),
+                    "sha256" to JsonPrimitive(pin))),
+                "compilerExecHelper" to JsonObject(mapOf("source" to JsonPrimitive("/opt/module-compiler/helper"),
+                    "path" to JsonPrimitive("/opt/module-compiler/helper"), "sha256" to JsonPrimitive(DIGEST))))))
+        fun rejectReason(d: ContainedModuleCompilationRuntimeConfiguration.Declaration, reason: String) {
+            val error = assertFailsWith<InvocationTargetException> { method.invoke(companion, d) }.cause
+            assertEquals(reason, error?.message)
+        }
+        method.invoke(companion, declaration())
+        rejectReason(declaration(machineName = if (reviewedMachine == "x86_64") "aarch64" else "x86_64"),
+            "compiler interpreter machine differs from host")
+        rejectReason(declaration(source = loader.resolveSibling("wrong-loader")), "compiler interpreter differs from reviewed host loader")
+        rejectReason(declaration(pin = "0".repeat(64)), "runtime file differs from its pinned content digest")
     }
 
     @Test

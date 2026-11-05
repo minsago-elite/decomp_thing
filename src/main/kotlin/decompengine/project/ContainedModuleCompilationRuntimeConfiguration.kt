@@ -48,9 +48,10 @@ internal class ContainedModuleCompilationRuntimeConfiguration private constructo
     val managerControlGroup: String get() = declaration.managerControlGroup
 
     /** Required immediately before every launch; the directory manifest is not a content hash. */
-    fun verifyCompilerInput(): KotlinSystemdCgroupCommandInput = verifyPinnedFile(
-        compilerExecutable, compilerSha256, executable = true,
-    )
+    fun verifyCompilerInput(): KotlinSystemdCgroupCommandInput {
+        verifyInterpreter(declaration)
+        return verifyPinnedFile(compilerExecutable, compilerSha256, executable = true)
+    }
 
     fun verifyCompilerExecHelper(): KotlinSystemdCgroupCommandInput = verifyPinnedFile(
         requireNotNull(compilerExecHelperSource), requireNotNull(compilerExecHelperSha256), executable = true,
@@ -66,6 +67,7 @@ internal class ContainedModuleCompilationRuntimeConfiguration private constructo
         val compilerExecHelperSource: Path?,
         val compilerExecHelperPath: Path?,
         val compilerExecHelperSha256: String?,
+        val compilerInterpreter: Interpreter?,
         compilerRuntimeMounts: List<FullTreeFunctionObservationRuntimeMount>,
         val scratchMount: Path,
         val scratchPolicy: FullTreeDiskScratchPolicy,
@@ -75,28 +77,36 @@ internal class ContainedModuleCompilationRuntimeConfiguration private constructo
         val compilerRuntimeExecuteRoot: Path = this.compilerRuntimeMounts.single { mount ->
             compilerExecutable != mount.source && compilerExecutable.startsWith(mount.source) && mount.source == mount.destination
         }.destination
-        val compilerRuntimeExecuteFiles: List<Path> get() {
-            val hostInterpreter = when (System.getProperty("os.arch")) {
-                "amd64", "x86_64" -> Path.of("/lib64/ld-linux-x86-64.so.2")
-                "aarch64", "arm64" -> Path.of("/lib/ld-linux-aarch64.so.1")
-                else -> throw IllegalArgumentException("module compiler has no reviewed ELF interpreter mapping")
-            }.toRealPath()
-            val candidates = isolation.systemLibraryMounts.filter { hostInterpreter.startsWith(it.source) }
-            val mount = candidates.firstOrNull { it.source == it.destination } ?: candidates.singleOrNull()
-                ?: throw IllegalArgumentException("module compiler ELF interpreter is outside authenticated system libraries")
-            val result = mount.destination.resolve(mount.source.relativize(hostInterpreter))
-            require(result.isAbsolute && result.startsWith(mount.destination))
-            return listOf(result)
-        }
+        // Authenticated configuration/lease/attachment binding, not request-supplied paths,
+        // authorizes this retained mapping and digest. Archive decoding never probes the host.
+        val compilerRuntimeExecuteFiles: List<Path> = compilerInterpreter?.let { listOf(it.path) } ?: emptyList()
         val configurationSha256: String = sha256(OracleJson.canonicalBytes(JsonObject(mapOf(
             "provider" to JsonPrimitive(if (configurationRecord["schemaVersion"] == JsonPrimitive(1))
-                "contained-generated-c-module-runtime-v1" else "contained-generated-c-module-runtime-v2"),
+                "contained-generated-c-module-runtime-v1" else if (configurationRecord["schemaVersion"] == JsonPrimitive(2))
+                "contained-generated-c-module-runtime-v2" else "contained-generated-c-module-runtime-v3"),
             "configuration" to configurationRecord,
             "isolationConfigurationSha256" to JsonPrimitive(isolation.canonicalSha256),
         )), CONFIG_LIMITS))
     }
 
+    internal data class Interpreter(val machine: String, val source: Path, val path: Path, val sha256: String)
+
     companion object {
+        private fun verifyInterpreter(declaration: Declaration) {
+            val interpreter = requireNotNull(declaration.compilerInterpreter) {
+                "live module compilation requires runtime schema 3 retained interpreter authority"
+            }
+            val machine = when (System.getProperty("os.arch")) {
+                "amd64", "x86_64" -> "x86_64"
+                "aarch64", "arm64" -> "aarch64"
+                else -> error("module compiler has no reviewed ELF interpreter mapping")
+            }
+            require(interpreter.machine == machine) { "compiler interpreter machine differs from host" }
+            val loader = Path.of(if (machine == "x86_64") "/lib64/ld-linux-x86-64.so.2" else "/lib/ld-linux-aarch64.so.1")
+            require(loader.toRealPath() == interpreter.source) { "compiler interpreter differs from reviewed host loader" }
+            verifyPinnedFile(interpreter.source, interpreter.sha256, executable = true)
+        }
+
         const val ENVIRONMENT = "GENERATED_C_MODULE_COMPILE_CONFIG_FILE"
         const val DIRECTORY_ENVIRONMENT = "GENERATED_C_MODULE_COMPILE_CONFIG_DIRECTORY"
         const val PROFILE_ENVIRONMENT = "GENERATED_C_MODULE_COMPILE_PROFILE"
@@ -140,6 +150,7 @@ internal class ContainedModuleCompilationRuntimeConfiguration private constructo
             requireRootOwned(path, directory = false)
             val bytes = readStableRegularFile(requireNotNull(path.parent), path.fileName.toString(), MAXIMUM_CONFIG_BYTES.toLong()).bytes
             val declaration = parse(bytes)
+            verifyInterpreter(declaration)
             require(declaration.compilerExecHelperSource != null && declaration.compilerExecHelperPath != null &&
                 declaration.compilerExecHelperSha256 != null) {
                 "current contained module compiler runtime requires the pinned Landlock trampoline"
@@ -170,19 +181,33 @@ internal class ContainedModuleCompilationRuntimeConfiguration private constructo
             val document = OracleJson.parse(bytes, CONFIG_LIMITS) as? JsonObject
                 ?: throw IllegalArgumentException("contained module compiler configuration must be an object")
             val schemaVersion = document.integer("schemaVersion").toInt()
-            require(schemaVersion in 1..2) { "unsupported contained module compiler runtime schema" }
-            document.exact(if (schemaVersion == 1) ROOT_FIELDS_V1 else ROOT_FIELDS_V2, "runtime")
+            require(schemaVersion in 1..3) { "unsupported contained module compiler runtime schema" }
+            document.exact(if (schemaVersion == 1) ROOT_FIELDS_V1 else if (schemaVersion == 2) ROOT_FIELDS_V2 else ROOT_FIELDS_V2 + "compilerInterpreter", "runtime")
             val profileId = document.text("profileId")
             requireRegisteredProfile(profileId)
             val isolation = parseIsolation(document.objectField("isolation"))
             val compiler = document.objectField("compiler").also { it.exact(setOf("path", "sha256"), "compiler") }
             val compilerPath = compiler.path("path")
             val compilerSha256 = compiler.digest("sha256")
-            val helper = if (schemaVersion == 2) document.objectField("compilerExecHelper")
+            val helper = if (schemaVersion >= 2) document.objectField("compilerExecHelper")
                 .also { it.exact(setOf("source", "path", "sha256"), "compiler exec trampoline") } else null
             val helperSource = helper?.path("source")
             val helperPath = helper?.path("path")
             val helperSha256 = helper?.digest("sha256")
+            val interpreter = if (schemaVersion == 3) document.objectField("compilerInterpreter").let { record ->
+                record.exact(setOf("machine", "source", "path", "sha256"), "compiler interpreter")
+                val machine = record.text("machine")
+                require(machine in setOf("x86_64", "aarch64")) { "unsupported compiler interpreter machine" }
+                val source = record.path("source")
+                val destination = record.path("path")
+                val candidates = isolation.systemLibraryMounts.filter { source != it.source && source.startsWith(it.source) }
+                val mount = candidates.singleOrNull { it.source == it.destination } ?: candidates.singleOrNull()
+                    ?: throw IllegalArgumentException("compiler interpreter has no unambiguous authenticated mapping")
+                require(destination == mount.destination.resolve(mount.source.relativize(source))) {
+                    "compiler interpreter path differs from authenticated mapping"
+                }
+                Interpreter(machine, source, destination, record.digest("sha256"))
+            } else null
             val mounts = document.mounts("compilerRuntimeMounts")
             val scratch = document.path("scratchMount")
             val managerControlGroup = document.path("managerControlGroup").toString()
@@ -231,7 +256,7 @@ internal class ContainedModuleCompilationRuntimeConfiguration private constructo
             require(compilerMount != null && compilerMount.source == compilerMount.destination) {
                 "compiler executable must belong to exactly one same-path compiler runtime tree"
             }
-            if (schemaVersion == 2) {
+            if (schemaVersion >= 2) {
                 require(mounts.singleOrNull { mount ->
                     helperSource!!.startsWith(mount.source) && helperPath!!.startsWith(mount.destination) &&
                         mount.source.resolve(mount.destination.relativize(helperPath)) == helperSource
@@ -243,7 +268,7 @@ internal class ContainedModuleCompilationRuntimeConfiguration private constructo
             // Curated headers and compiler internals may retain their toolchain's compiled-in
             // lookup paths through explicit aliases. The executable's own path stays canonical.
             return Declaration(document, profileId, isolation, compilerPath, compilerSha256, helperSource, helperPath,
-                helperSha256, mounts, scratch,
+                helperSha256, interpreter, mounts, scratch,
                 scratchPolicy, managerControlGroup)
         }
 

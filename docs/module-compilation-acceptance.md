@@ -60,6 +60,22 @@ requires Landlock ABI 3 or newer, applies `no_new_privs`, enforces the policy, i
 the process restrictions, and then `execve`s the compiler in the same bounded session.
 Any setup failure stops before compiler execution.
 
+Live runtime declarations use schema 3. They retain the interpreter's reviewed machine,
+canonical host source path, exact mapped sandbox path, and SHA-256 digest. The runtime
+configuration commitment includes that record; the request's execute-file list must
+match its retained mapping. Archive parsing derives the mapping only from recorded
+system-library mounts and never discovers the auditing host's architecture or loader.
+Live loading still resolves the reviewed host loader, checks its machine/path/digest,
+and revalidates the interpreter before launch. A recorded mapping alone grants no live
+execution authority.
+
+Historical schema-1 declarations and requests keep their original interpretation.
+Earlier schema-2 declarations do not retain interpreter authority, so request-2 proofs
+using them fail closed rather than borrowing the auditing host's loader. Adding fields
+from the current host is not an archive migration or a substitute for authentication.
+Schema-3 changes require fresh configured qualification; earlier schema-2 qualification
+results do not qualify the new runtime contract.
+
 The compiler can read each authenticated snapshot file individually; snapshot
 directories grant enumeration only. Pinned runtime directories grant read access, while
 execute permission is limited to the compiler tool directory containing the pinned

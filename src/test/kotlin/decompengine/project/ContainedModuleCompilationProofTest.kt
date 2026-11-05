@@ -187,6 +187,53 @@ class ContainedModuleCompilationProofTest {
         }
     }
 
+    @Test
+    fun `full portable proofs and checkpoint decoding ignore auditor architecture`() {
+        val previous = System.getProperty("os.arch")
+        try {
+            System.setProperty("os.arch", "unsupported-archive-auditor")
+            for (machine in listOf("x86_64", "aarch64")) {
+                val fixture = fixture(machine = machine)
+                ContainedModuleCompilationProof.verify(fixture.proof)
+                val decoded = ModuleCompilationEvidence.decode(document(fixture.evidence().toJson().toByteArray(), false),
+                    7, fixture.request.profile, fixture.request.sourcePath, fixture.request.sourceSha256, true)
+                assertTrue(decoded.passed)
+                assertFalse(decoded.authorizesAcceptance(fixture.request.sourceSha256, fixture.request.profileSha256,
+                    ContainedModuleCompilationPolicy.POLICY_ID))
+                for (paths in listOf(emptyList(), listOf("/lib64/substituted.so"),
+                    listOf("/lib64/ld-2.99.so", "/lib64/extra.so"), listOf("/lib64/extra.so", "/lib64/ld-2.99.so"))) {
+                    reject(changeNested(fixture.proof, "request", "runtimeExecuteFiles", JsonArray(paths.map(::JsonPrimitive))))
+                }
+                // Rebuild every request/result/keeper commitment, so the retained runtime mapping,
+                // rather than a stale request hash, must reject these otherwise valid requests.
+                for (files in listOf(listOf(Path.of("/lib64/substituted.so")),
+                    listOf(Path.of("/lib64/ld-2.99.so"), Path.of("/lib64/extra.so")))) {
+                    val substituted = fixture(machine = machine, executeFiles = files)
+                    val mismatch = assertFailsWith<IllegalArgumentException> {
+                        ContainedModuleCompilationProof.verify(substituted.proof)
+                    }
+                    assertTrue(mismatch.message.orEmpty().contains("read-boundary request differs"))
+                }
+                val alteredRuntime = changeNested(fixture.proof.objectField("runtimeConfiguration"),
+                    "compilerInterpreter", "sha256", JsonPrimitive(SOURCE))
+                val digest = ContainedModuleCompilationRuntimeConfiguration.parse(bytes(alteredRuntime)).configurationSha256
+                var altered = change(change(fixture.proof, "runtimeConfiguration", alteredRuntime),
+                    "runtimeConfigurationSha256", JsonPrimitive(digest))
+                reject(altered)
+                altered = changeNested(altered, "intent", "runtimeConfigurationSha256", JsonPrimitive(digest))
+                reject(altered)
+                altered = change(altered, "diskLease", seal(change(change(altered.objectField("diskLease"),
+                    "scopeSha256", JsonPrimitive(digest)), "requestSha256", JsonPrimitive(sha256(bytes(altered.objectField("intent"))))), "evidenceSha256"))
+                reject(altered)
+                val legacy = fixture(machine = machine, legacyRuntime = true)
+                val error = assertFailsWith<IllegalArgumentException> { ContainedModuleCompilationProof.verify(legacy.proof) }
+                assertTrue(error.message.orEmpty().contains("runtime schema 3 retained interpreter authority"))
+            }
+        } finally {
+            if (previous == null) System.clearProperty("os.arch") else System.setProperty("os.arch", previous)
+        }
+    }
+
     private data class Fixture(val proof: JsonObject, val request: ContainedModuleCompilerRequest,
         val result: ContainedModuleCompilerResult, val command: KotlinContainedCommandRequest) {
         fun evidence() = ModuleCompilationEvidence(request.sourceSha256,
@@ -196,8 +243,15 @@ class ContainedModuleCompilationProofTest {
     }
 
     private fun fixture(success: Boolean = true, profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
-        serviceSeconds: Long = minOf(60L, moduleCompilerOperationWallMillis(profile) / 1000L)): Fixture {
-        val runtimeRecord = runtimeRecord(profile.id)
+        serviceSeconds: Long = minOf(60L, moduleCompilerOperationWallMillis(profile) / 1000L),
+        machine: String? = null, legacyRuntime: Boolean = false, executeFiles: List<Path>? = null): Fixture {
+        val runtimeRecord = if (machine == null) runtimeRecord(profile.id) else JsonObject(runtimeRecord(profile.id) +
+            mapOf("schemaVersion" to JsonPrimitive(if (legacyRuntime) 2 else 3),
+                "compilerExecHelper" to JsonObject(mapOf("source" to JsonPrimitive("/opt/module-compiler/helper"),
+                    "path" to JsonPrimitive("/opt/module-compiler/helper"), "sha256" to JsonPrimitive(OTHER)))) +
+            if (legacyRuntime) emptyMap() else mapOf("compilerInterpreter" to JsonObject(mapOf(
+                "machine" to JsonPrimitive(machine), "source" to JsonPrimitive("/opt/keeper-libraries/ld-2.99.so"),
+                "path" to JsonPrimitive("/lib64/ld-2.99.so"), "sha256" to JsonPrimitive(OTHER)))))
         val runtime = ContainedModuleCompilationRuntimeConfiguration.parse(bytes(runtimeRecord))
         val operationMillis = moduleCompilerOperationWallMillis(profile)
         val run = runtime.scratchMount.resolve(".decomp-oracle-lease-$NONCE").resolve(runDirectoryName(NONCE))
@@ -206,7 +260,13 @@ class ContainedModuleCompilationProofTest {
             "src/modules/sample.c", listOf(ContainedModuleCompilerInput("src/modules/sample.c", SOURCE, 16)),
             runtime.compilerExecutable, runtime.compilerSha256, run.resolve("reports"),
             minOf(30_000L, profile.budgets.buildWallClockMillis), minOf(2L * 1024 * 1024, profile.budgets.buildMaximumOutputBytes),
-            document(profile.canonicalJson().toByteArray(), canonical = false))
+            document(profile.canonicalJson().toByteArray(), canonical = false),
+            schemaVersion = if (machine == null) 1 else 2,
+            trampolinePath = runtime.compilerExecHelperPath, trampolineSha256 = runtime.compilerExecHelperSha256,
+            runtimeReadRoots = if (machine == null) emptyList() else
+                (runtime.isolation.systemLibraryMounts + runtime.compilerRuntimeMounts).map { it.destination }.distinct().sortedBy { it.toString() },
+            runtimeExecuteRoots = if (machine == null) emptyList() else listOf(runtime.compilerRuntimeExecuteRoot),
+            runtimeExecuteFiles = executeFiles ?: if (legacyRuntime) listOf(Path.of("/lib64/ld-2.99.so")) else runtime.compilerRuntimeExecuteFiles)
         val result = ContainedModuleCompilerResult(request.sha256, NONCE, profile.id, profile.sha256, request.snapshotSha256,
             request.sourceSha256, runtime.compilerSha256, if (success) "compiled-object" else "compiler-failed", if (success) 0 else 2,
             null, sha256(byteArrayOf()), 0, sha256(byteArrayOf()), 0, if (success) OTHER else null, if (success) 64 else null)
