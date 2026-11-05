@@ -4,7 +4,7 @@ import { dirname, resolve } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { runInNewContext } from 'node:vm';
-import { assertAudit, connectionAxSummary, connectionNoticeFailures, connectionNoticeNames, connectionNoticeShots, measureConnectionState, qualifyConnectionNotice, auditContentReady, auditFixtures, auditPageNames, auditPageReady, auditTokenKinds, auditViewports, measureContrast, measureFocus, measurePage, prepareAuditPage, qualifyAudit } from './packaged-browser-audit.mjs';
+import { assertAudit, connectedSessionText, connectionAxSummary, connectionNoticeFailures, connectionNoticeNames, connectionNoticeShots, measureConnectionState, qualifyConnectionNotice, auditContentReady, auditFixtures, auditPageNames, auditPageReady, auditTokenKinds, auditViewports, measureContrast, measureFocus, measurePage, prepareAuditPage, qualifyAudit } from './packaged-browser-audit.mjs';
 
 // Controls for the packaged audit's own verdict: each injected defect must be reported, so a
 // passing CI audit cannot be a vacuous one.
@@ -38,13 +38,14 @@ function clean() {
   };
 }
 function connectionEvidence() {
-  const phase = (name, requests) => ({ phase: name, screenshot: connectionNoticeShots[name], requests,
+  const phase = (name, requests) => ({ phase: name, screenshot: connectionNoticeShots[name], requestsAtCapture: requests, requests,
     dom: { sections: 1, sectionName: connectionNoticeNames[name], statuses: 1, statusInSection: true, invalidAsides: 0 },
     ax: { regions: [connectionNoticeNames[name]], statuses: [connectionNoticeNames.status] } });
   return {
     events: [{ type: 'offline', isTrusted: true, onLine: false }, { type: 'online', isTrusted: true, onLine: true }],
     phases: [phase('offline', []), phase('reconnected', [{ method: 'GET', path: '/bootstrap', status: 200 }])],
-    invariants: { token: true, href: true, history: true, reload: false, storage: true, focus: true, resources: 1, revalidationDelayMs: 750 },
+    invariants: { token: true, href: true, history: true, reload: false, storage: true, focus: true, authenticatedSession: true,
+      fetchResourceDelta: 1, revalidationDelayMs: 750 },
     restoration: { conditions: { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 }, offline: false,
       listenersRemoved: true, accessibilityDisabled: true, failed: [] },
   };
@@ -517,13 +518,15 @@ test('connection notice evidence fails closed when missing, misbound, mis-ordere
     fails(c => { delete c.invariants[key]; }, new RegExp(`${key} changed`));
   }
   fails(c => { c.invariants.reload = true; }, /page reloaded/);
-  fails(c => { c.invariants.resources = 2; }, /unexpected resource requests/);
-  fails(c => { delete c.invariants.resources; }, /unexpected resource requests/);
-  fails(c => { c.phases[1].requests = []; c.invariants.resources = 0; }, /reconnected: connectivity made requests/);
+  fails(c => { c.invariants.fetchResourceDelta = 2; }, /unexpected fetch-resource delta/);
+  fails(c => { delete c.invariants.fetchResourceDelta; }, /unexpected fetch-resource delta/);
+  fails(c => { c.phases[1].requests = []; c.invariants.fetchResourceDelta = 0; }, /reconnected: connectivity made requests/);
   fails(c => { c.phases[1].requests[0].status = 503; }, /reconnected: connectivity made requests/);
+  fails(c => { delete c.phases[1].requestsAtCapture; }, /missing screenshot-time request evidence/);
   fails(c => { c.invariants.revalidationDelayMs = 249; }, /session revalidation timing/);
   fails(c => { c.invariants.revalidationDelayMs = 2251; }, /session revalidation timing/);
   fails(c => { c.invariants.revalidationDelayMs = null; }, /session revalidation timing/);
+  fails(c => { c.invariants.authenticatedSession = false; }, /authenticatedSession changed/);
   fails(c => { c.restoration.offline = true; }, /cleanup/);
   fails(c => { c.restoration.conditions.latency = 500; }, /cleanup/);
   fails(c => { c.restoration.conditions = null; }, /cleanup/);
@@ -551,14 +554,17 @@ test('connection accessibility summary keeps only exposed region and status name
 test('connection DOM check ignores legacy status asides outside the notice section', () => {
   const status = { getAttribute: name => name === 'aria-label' ? connectionNoticeNames.status : null };
   const section = { getAttribute: () => 'connection-notice-heading', contains: element => element === status,
-    querySelectorAll: selector => selector === 'aside[role="status"]' ? [] : [] };
+    querySelectorAll: selector => selector === 'aside[role="status"]' ? [] : [{ tagName: 'ASIDE' }] };
+  const connectedSession = { querySelectorAll: () => [{ textContent: connectedSessionText }] };
   const h1 = { tagName: 'H1', id: '', textContent: 'Workspace' };
   const document = {
     activeElement: h1,
+    querySelector: selector => selector === 'aside.session-notice.is-connected' ? connectedSession : null,
     querySelectorAll(selector) {
       if (selector === 'section.connection-notice') return [section];
       if (selector === '[role="status"]') return [status];
       if (selector === 'aside[role="status"]') return [{ tagName: 'ASIDE' }]; // unrelated session notice
+      if (selector === 'aside.session-notice.is-connected') return connectedSession;
       throw new Error(`unexpected selector ${selector}`);
     },
     getElementById: () => ({ textContent: connectionNoticeNames.offline }),
@@ -572,10 +578,11 @@ test('connection DOM check ignores legacy status asides outside the notice secti
   assert.equal(state.dom.sections, 1);
   assert.equal(state.dom.statuses, 1);
   assert.equal(state.dom.invalidAsides, 0);
+  assert.equal(state.sessionAuthenticated, true);
 });
 
 // A modeled browser: emulation toggles navigator.onLine and dispatches trusted events.
-function connectionModel({ failAt = null, sideEffect = null, revalidationDelayMs = 750 } = {}) {
+function connectionModel({ failAt = null, sideEffect = null, revalidationDelayMs = 750, authenticatedSession = true } = {}) {
   const calls = []; const shots = []; const fulfilled = []; let online = true; let installed = false; let removed = false;
   const events = [];
   const state = () => {
@@ -584,6 +591,7 @@ function connectionModel({ failAt = null, sideEffect = null, revalidationDelayMs
     const fetches = onlineAt === undefined ? [] : [{ path: '/nested/api/v1/bootstrap', startTime: onlineAt + revalidationDelayMs }];
     return { token: 't', events: [...events], onLine: online, href: 'http://x/nested/', historyLength: 1, navigations: 1,
       resources: fulfilled.length, fetches, local: sideEffect === 'storage' && events.length ? '{"x":"1"}' : '{}', session: '{}', focus: 'h1 Workspace',
+      sessionAuthenticated: authenticatedSession,
       dom: { sections: name ? 1 : 0, sectionName: name, statuses: name ? 1 : 0, statusInSection: !!name, invalidAsides: 0 } };
   };
   const cdp = { async call(method, params) {
@@ -625,6 +633,9 @@ test('connection scenario records clean evidence and restores network, listeners
     assert.ok(connectionNoticeFailures(await connectionModel({ revalidationDelayMs }).run()).some(failure => failure.includes('session revalidation timing')),
       `revalidation delay ${revalidationDelayMs} must fail`);
   }
+  const signedOut = connectionModel({ authenticatedSession: false });
+  await assert.rejects(signedOut.run(), /requires an authenticated local session/);
+  assert.ok(signedOut.isOnline() && signedOut.isRemoved(), 'signed-out precondition failure must still clean up');
 });
 
 test('connection scenario restores the tab even when a step fails mid-way', async () => {

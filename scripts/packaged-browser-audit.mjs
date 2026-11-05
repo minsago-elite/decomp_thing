@@ -362,6 +362,7 @@ export async function prepareAuditPage({ tab, page, evaluate, ready, fulfilled }
 // Connection notice (#1896): the real offline/online path, driven by DevTools network emulation
 // so Chrome itself dispatches trusted `offline`/`online` events. Copy is from frontend/src/copy/shell.ts.
 export const connectionNoticeNames = { status: 'Connection status', offline: 'Browser reports offline', reconnected: 'Refresh loaded information' };
+export const connectedSessionText = 'Local session connected.';
 export const connectionNoticeShots = { offline: 'audit-connection-notice-offline.png', reconnected: 'audit-connection-notice-reconnected.png' };
 const onlineConditions = { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 };
 
@@ -378,11 +379,13 @@ export const measureConnectionState = `(() => {
   const focused = document.activeElement;
   const sections = [...document.querySelectorAll('section.connection-notice')];
   const statuses = [...document.querySelectorAll('[role="status"]')].filter(element => element.getAttribute('aria-label') === ${JSON.stringify(connectionNoticeNames.status)});
+  const session = document.querySelector('aside.session-notice.is-connected');
   return {
     token: window.__auditConnection?.token ?? null, events: [...(window.__auditConnection?.events ?? [])],
     onLine: navigator.onLine, href: location.href, historyLength: history.length,
     navigations: performance.getEntriesByType('navigation').length, resources: performance.getEntriesByType('resource').length,
     fetches: performance.getEntriesByType('resource').filter(entry => entry.initiatorType === 'fetch').map(entry => ({ path: new URL(entry.name).pathname, startTime: entry.startTime })),
+    sessionAuthenticated: !!session && [...session.querySelectorAll('p')].some(element => element.textContent.trim() === ${JSON.stringify(connectedSessionText)}),
     local: storage(localStorage), session: storage(sessionStorage),
     focus: focused ? focused.tagName.toLowerCase() + (focused.id ? '#' + focused.id : '') + ' ' + (focused.textContent || '').trim().slice(0, 40) : null,
     dom: {
@@ -413,8 +416,9 @@ export async function qualifyConnectionNotice({ tab, cdp, evaluate, capture, del
     }, `connection notice ${name}`, 5000);
     const { nodes } = await cdp.call('Accessibility.getFullAXTree', {}, tab.sessionId);
     await capture(tab, connectionNoticeShots[name]);
+    const requests = fulfilled.slice(sent).map(({ method, path, status }) => ({ method, path, status }));
     result.phases.push({ phase: name, dom: state.dom, ax: connectionAxSummary(nodes), screenshot: connectionNoticeShots[name],
-      requests: fulfilled.slice(sent).map(({ method, path, status }) => ({ method, path, status })) });
+      requestsAtCapture: requests, requests });
     return state;
   };
   try {
@@ -422,6 +426,7 @@ export async function qualifyConnectionNotice({ tab, cdp, evaluate, capture, del
     await cdp.call('Network.enable', {}, tab.sessionId);
     await cdp.call('Accessibility.enable', {}, tab.sessionId); accessibility = true;
     const baseline = await evaluate(tab, measureConnectionState);
+    if (baseline.sessionAuthenticated !== true) throw new Error('Connection notice qualification requires an authenticated local session');
     const start = fulfilled.length;
     await emulate({ offline: true, latency: 0, downloadThroughput: -1, uploadThroughput: -1 });
     await phase('offline', false, start);
@@ -439,7 +444,8 @@ export async function qualifyConnectionNotice({ tab, cdp, evaluate, capture, del
     const bootstrapFetch = newFetches.filter(entry => entry.path.endsWith('/api/v1/bootstrap'));
     result.invariants = { token: after.token === token, href: after.href === baseline.href, history: after.historyLength === baseline.historyLength,
       reload: after.navigations !== baseline.navigations, storage: after.local === baseline.local && after.session === baseline.session,
-      focus: after.focus === baseline.focus, resources: after.resources - baseline.resources,
+      focus: after.focus === baseline.focus, authenticatedSession: baseline.sessionAuthenticated === true && after.sessionAuthenticated === true,
+      fetchResourceDelta: newFetches.length,
       revalidationDelayMs: bootstrapFetch.length === 1 && Number.isFinite(onlineAt) ? Number((bootstrapFetch[0].startTime - onlineAt).toFixed(1)) : null };
   } finally {
     // Always leave the shared tab online with listeners and the AX domain released.
@@ -481,12 +487,14 @@ export function connectionNoticeFailures(evidence) {
     // Only the shell's documented session revalidation may follow a reconnect.
     else if (name === 'offline' ? requests.length !== 0 : requests.length !== 1 || requests.some(request => request.path !== '/bootstrap' || request.status !== 200))
       fail(`${name}: connectivity made requests ${JSON.stringify(requests)}`);
+    if (!Array.isArray(entry.requestsAtCapture)) fail(`${name}: missing screenshot-time request evidence`);
   }
   const invariants = evidence.invariants ?? {};
-  for (const key of ['token', 'href', 'history', 'storage', 'focus']) if (invariants[key] !== true) fail(`${key} changed or unmeasured`);
+  for (const key of ['token', 'href', 'history', 'storage', 'focus', 'authenticatedSession']) if (invariants[key] !== true) fail(`${key} changed or unmeasured`);
   if (invariants.reload !== false) fail('page reloaded or unmeasured');
   const revalidations = phases[1]?.requests?.length ?? 0;
-  if (!Number.isInteger(invariants.resources) || invariants.resources !== revalidations) fail(`unexpected resource requests ${invariants.resources}`);
+  if (!Number.isInteger(invariants.fetchResourceDelta) || invariants.fetchResourceDelta !== revalidations)
+    fail(`unexpected fetch-resource delta ${invariants.fetchResourceDelta}`);
   if (!Number.isFinite(invariants.revalidationDelayMs) || invariants.revalidationDelayMs < 250 || invariants.revalidationDelayMs > 2250)
     fail(`session revalidation timing ${invariants.revalidationDelayMs}`);
   const restoration = evidence.restoration ?? {};
