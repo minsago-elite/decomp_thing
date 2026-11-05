@@ -327,9 +327,9 @@ class ChatGptPlanOidcTest {
     @Test fun originalOperationCancellationTimeoutAndInterruptRemainSanitized() {
         val body = response()
         assertFailsWith<CancellationException> { validate(body, operation = ChatGptStoreOperation.start(cancelled = { true })) }
-        var clock = 0L
-        val op = ChatGptStoreOperation.create(Duration.ofNanos(2), { false }, { clock })
-        clock = 2
+        val clock = ChatGptDeadlineClock.controlled()
+        val op = ChatGptStoreOperation.createControlled(Duration.ofNanos(2), { false }, clock, clock::readNanos)
+        clock.advanceNanos(2)
         assertFailsWith<TimeoutException> { validate(body, operation = op) }
         Thread.currentThread().interrupt()
         try { assertFailsWith<CancellationException> { validate(body) }; assertTrue(Thread.currentThread().isInterrupted) }
@@ -360,4 +360,61 @@ class ChatGptPlanOidcTest {
             assertFalse(e.stackTraceToString().contains(sentinel)); assertTrue(e.stackTrace.isEmpty())
         }
     }
+    @Test fun immutableDiscoveryRevocationRejectsNormalizationDependentEndpoints() {
+        for (endpoint in listOf("https://auth.openai.com/revoke", "https://auth.openai.com:443/api/revoke")) {
+            val document = ChatGptPlanOidc.validateDiscoveryDocument(authDiscovery(endpoint), operation())
+            assertTrue(isOidcDiscovery(document)); assertTrue(isOidcRevocationEndpoint(document.revocation!!))
+            assertFalse(isLiveChatGptRevocationEndpoint(document.revocation!!), "raw OIDC endpoint is not dispatch authority")
+        }
+        for (endpoint in listOf("http://auth.openai.com/revoke", "https://AUTH.OPENAI.COM/revoke", "https://auth.openai.com:444/revoke",
+            "https://u@auth.openai.com/revoke", "https://auth.openai.com/revoke?q=1", "https://auth.openai.com/revoke#f",
+            "https://auth.openai.com/%72evoke", "https://auth.openai.com/a/../revoke", "https://auth.openai.com//revoke",
+            "//auth.openai.com/revoke", "https://auth.openai.com", "https://auth.openai.com/" + "a".repeat(2048))) {
+            failure { ChatGptPlanOidc.validateDiscoveryDocument(authDiscovery(endpoint), operation()) }
+        }
+    }
+    @Test fun wholeJwksAdmissionRejectsInvalidNonSelectedAndEmbeddedKeys() {
+        val key = json(jwks().toString(Charsets.UTF_8))["keys"]!!.jsonArray.single().toString()
+        for (field in listOf("d", "x5c", "jwk", "jku", "x5u")) {
+            val other = change(key, "kid" to JsonPrimitive("not-selected"), field to JsonPrimitive("forbidden"))
+            failure(ChatGptOidcFailure.Reason.INVALID_KEY_SET) {
+                ChatGptPlanOidc.validateJwksDocument(("{\"keys\":[" + key + "," + other + "]}").toByteArray(), operation())
+            }
+        }
+        assertTrue(isOidcJwks(ChatGptPlanOidc.validateJwksDocument(jwks(), operation())))
+        assertFalse(isOidcJwks(object : ChatGptOidcJwks() {}))
+    }
+    @Test fun actualProofRejectsForgedKeysAndUsesSignedExpiryAtValidationTime(): Unit = AuthTestRig().use { rig ->
+        val snapshot = authSnapshot(); val bound = authBound(rig, snapshot); val signing = AuthSigningKey()
+        val op = rig.clock.operation(); val time = rig.clock.now.get()
+        val response = signing.response(bound.code, time, exp = time.epochSecond + 10)
+        val keys = ChatGptPlanOidc.validateJwksDocument(signing.jwks(), op)
+        val proof = ChatGptPlanOidc.validateAuthorizationProof(response, keys, snapshot, bound.code, time, time.plusSeconds(2), op)
+        assertEquals(snapshot.attemptId, proof.attemptId); assertEquals(time.plusSeconds(10), proof.idTokenExpiresAt)
+        assertEquals(time.plusSeconds(3600), proof.registration.tokenSet.expiresAt)
+        failure(ChatGptOidcFailure.Reason.INVALID_CLAIMS) {
+            ChatGptPlanOidc.validateAuthorizationProof(response, keys, snapshot, bound.code, time, time.plusSeconds(15), op)
+        }
+        failure(ChatGptOidcFailure.Reason.INVALID_KEY_SET) {
+            ChatGptPlanOidc.validateAuthorizationProof(response, object : ChatGptOidcJwks() {}, snapshot, bound.code, time, time, op)
+        }
+    }
+
+    @Test fun unreservedEphemeralDocumentCannotBypassReplyValidation(): Unit = AuthTestRig().use { rig ->
+        val key = AuthSigningKey(); val op = rig.clock.operation(); val bound = authBound(rig)
+        val response = key.response(bound.code, rig.clock.now.get())
+        val reply = authToken(rig, bound, key, op, response)
+        rig.port.scripts.add(rig.document(key.jwks(), listOf("no-store"))); val use = rig.metadata.keys(op)
+        try {
+            authFailure(ChatGptAuthHttpFailure.INVALID_BINDING) {
+                ChatGptPlanOidc.validateAuthorizationProof(response, use.document, authSnapshot(), bound.code,
+                    rig.clock.now.get(), rig.clock.now.get(), op)
+            }
+            authFailure(ChatGptAuthHttpFailure.INVALID_BINDING) { reserveOidcJwks(use.document, reply, op) }
+            val proof = reply.validateAuthorization(use.document, rig.clock.now.get(), op, false)
+            assertTrue(proof.registration.subject == "test-subject", "owner-minted reply session succeeds")
+            authFailure(ChatGptAuthHttpFailure.INVALID_BINDING) { reserveOidcJwks(use.document, reply, op) }
+        } finally { use.close(); reply.discard() }
+    }
+
 }

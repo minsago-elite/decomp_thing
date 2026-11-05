@@ -318,8 +318,8 @@ class ChatGptPlanCredentialStoreTest {
         assertFailsWith<IllegalArgumentException> { ChatGptStoreOperation.start(Duration.ZERO) }
         assertFailsWith<IllegalArgumentException> { ChatGptStoreOperation.start(Duration.ofSeconds(31)) }
         assertFalse(Files.exists(root))
-        val now = AtomicReference(Long.MAX_VALUE - 10)
-        val operation = ChatGptStoreOperation.create(Duration.ofNanos(30), { false }) { now.get() }
+        val now = AuthControlledTicks(Long.MAX_VALUE - 10)
+        val operation = ChatGptStoreOperation.createControlled(Duration.ofNanos(30), { false }, now.authority) { now.get() }
         now.set(Long.MIN_VALUE + 4); operation.check()
         val shorter = operation.capped(Duration.ofNanos(100))
         assertEquals(operation.remainingNanos(), shorter.remainingNanos())
@@ -333,8 +333,8 @@ class ChatGptPlanCredentialStoreTest {
         val s = ChatGptPlanCredentialStore.withHook(root) { if (it == ChatGptLinuxFiles.Stage.WRITE_CHUNK) cancelled.set(true) }
         assertFailsWith<CancellationException> { s.setModel(a.accountId, "next", ChatGptStoreOperation.start(cancelled = cancelled::get)) }
         assertEquals(before, contents()); noTemps()
-        val now = AtomicReference(0L)
-        val expired = ChatGptStoreOperation.create(Duration.ofNanos(10), { false }) { now.get() }
+        val now = AuthControlledTicks(0L)
+        val expired = ChatGptStoreOperation.createControlled(Duration.ofNanos(10), { false }, now.authority) { now.get() }
         now.set(11)
         assertFailsWith<TimeoutException> { store().logout(a.accountId, expired) }
         assertEquals(before, contents())

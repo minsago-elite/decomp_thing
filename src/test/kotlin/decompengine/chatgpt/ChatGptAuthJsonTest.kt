@@ -61,9 +61,9 @@ class ChatGptAuthJsonTest {
             ChatGptAuthJson.parse(body, ChatGptStoreOperation.start(cancelled = { ++checks > 50 }))
         }
         assertTrue(checks > 50)
-        var clock = 0L
+        val clock = ChatGptDeadlineClock.controlled()
         assertFailsWith<TimeoutException> { ChatGptAuthJson.parse(body,
-            ChatGptStoreOperation.create(Duration.ofNanos(50), { false }, { clock++ })) }
+            ChatGptStoreOperation.createControlled(Duration.ofNanos(50), { false }, clock, { clock.advanceNanos(1); clock.readNanos() })) }
         assertEquals(1000, ChatGptAuthJson.parse(body, ChatGptStoreOperation.start()).required("a").elements().size)
     }
 }

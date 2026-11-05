@@ -4,53 +4,67 @@ import java.time.Duration
 import java.util.concurrent.CancellationException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
+import java.util.concurrent.atomic.AtomicReference
 
-/** One original monotonic budget, including admission, disk work, transport and validation. */
+/** Original trusted time and sticky cancellation, with owner-only cooperative probes. */
 class ChatGptStoreOperation private constructor(
-    private val allowance: Long,
+    internal val deadline: ChatGptDeadline,
+    internal val fence: ChatGptOperationFence,
     private val cancelled: () -> Boolean,
-    private val clock: () -> Long,
-    private val parent: ChatGptStoreOperation? = null,
+    private val probe: () -> Long,
+    private val failure: AtomicReference<Failure?> = AtomicReference(),
 ) {
-    private val start = clock()
-
-    fun check() { remainingNanos() }
-
-    internal fun remainingNanos(): Long {
-        if (Thread.currentThread().isInterrupted || cancelled())
-            throw CancellationException("ChatGPT store operation cancelled")
-        // Subtraction is valid across nanoTime's signed wrap for intervals shorter than 2^63 ns.
-        val elapsed = clock() - start
-        if (elapsed < 0 || elapsed >= allowance) throw TimeoutException("ChatGPT store operation timed out")
-        return minOf(allowance - elapsed, parent?.remainingNanos() ?: Long.MAX_VALUE)
-    }
-
-    /** An attempt may tighten its bound, but cannot renew the caller's original budget. */
-    internal fun capped(timeout: Duration): ChatGptStoreOperation {
-        validateDuration(timeout)
-        check()
-        return ChatGptStoreOperation(timeout.toNanos(), { false }, clock, this)
-    }
-
-    internal fun pause() {
-        try { TimeUnit.NANOSECONDS.sleep(minOf(remainingNanos(), POLL_NANOS)) }
-        catch (_: InterruptedException) {
-            Thread.currentThread().interrupt()
-            throw CancellationException("ChatGPT store operation cancelled")
+    private enum class Failure { CANCELLED, TIMEOUT, DEPENDENCY }
+    private fun reject(reason: Failure): Nothing {
+        failure.compareAndSet(null, reason)
+        fence.cancel()
+        when (failure.get()!!) {
+            Failure.CANCELLED -> throw CancellationException("ChatGPT store operation cancelled")
+            Failure.TIMEOUT -> throw TimeoutException("ChatGPT store operation timed out")
+            Failure.DEPENDENCY -> throw IllegalStateException("ChatGPT store operation dependency failed")
         }
     }
-
+    private fun trustedRemaining(): Long {
+        failure.get()?.let { reject(it) }
+        if (Thread.currentThread().isInterrupted || fence.isCancelled()) reject(Failure.CANCELLED)
+        return deadline.remainingNanos().also { if (it == 0L) reject(Failure.TIMEOUT) }
+    }
+    fun check() { remainingNanos() }
+    internal fun remainingNanos(): Long {
+        trustedRemaining()
+        try {
+            if (cancelled()) reject(Failure.CANCELLED)
+            probe() // arbitrary return values never supply time authority
+        } catch (_: CancellationException) { reject(Failure.CANCELLED) }
+        catch (_: TimeoutException) { reject(Failure.TIMEOUT) }
+        catch (_: InterruptedException) { Thread.currentThread().interrupt(); reject(Failure.CANCELLED) }
+        catch (_: Exception) { reject(Failure.DEPENDENCY) }
+        return trustedRemaining()
+    }
+    internal fun capped(timeout: Duration): ChatGptStoreOperation {
+        validateDuration(timeout)
+        val child = deadline.cap(timeout.toNanos()) // before any cooperative callback
+        check()
+        return ChatGptStoreOperation(child, fence, cancelled, probe, failure).also { it.trustedRemaining() }
+    }
+    internal fun pause() {
+        try { TimeUnit.NANOSECONDS.sleep(minOf(remainingNanos(), POLL_NANOS)) }
+        catch (_: InterruptedException) { Thread.currentThread().interrupt(); reject(Failure.CANCELLED) }
+    }
     override fun toString() = "ChatGptStoreOperation"
-
     companion object {
         internal const val POLL_NANOS = 25_000_000L
         fun start(timeout: Duration = Duration.ofSeconds(30), cancelled: () -> Boolean = { false }): ChatGptStoreOperation =
             create(timeout, cancelled, System::nanoTime)
-
-        internal fun create(timeout: Duration, cancelled: () -> Boolean, clock: () -> Long): ChatGptStoreOperation {
+        internal fun create(timeout: Duration, cancelled: () -> Boolean, clock: () -> Long): ChatGptStoreOperation =
+            createControlled(timeout, cancelled, ChatGptDeadlineClock.SYSTEM, clock)
+        internal fun createControlled(timeout: Duration, cancelled: () -> Boolean,
+            clock: ChatGptDeadlineClock, probe: () -> Long): ChatGptStoreOperation {
             validateDuration(timeout)
-            return ChatGptStoreOperation(timeout.toNanos(), cancelled, clock)
+            return ChatGptStoreOperation(ChatGptDeadline.start(clock, timeout.toNanos()), ChatGptOperationFence(), cancelled, probe)
         }
+        internal fun fromDeadline(deadline: ChatGptDeadline, fence: ChatGptOperationFence,
+            cancelled: () -> Boolean): ChatGptStoreOperation = ChatGptStoreOperation(deadline, fence, cancelled, { 0L })
         private fun validateDuration(timeout: Duration) {
             require(!timeout.isNegative && !timeout.isZero && timeout <= Duration.ofSeconds(30)) {
                 "invalid ChatGPT store operation duration"

@@ -27,6 +27,7 @@ internal class ChatGptOidcFailure(val reason: Reason) :
 /** Normalizes parser/JCA/caller callback errors without reflecting their messages or causes. */
 internal inline fun <T> oidcBoundary(block: () -> T): T = try { block() }
 catch (e: ChatGptOidcFailure) { throw e }
+catch (e: ChatGptAuthHttpException) { throw e }
 catch (_: InterruptedException) {
     Thread.currentThread().interrupt()
     throw CancellationException("ChatGPT identity validation cancelled")
@@ -56,8 +57,12 @@ internal object ChatGptPlanOidc {
     private val scopePattern = Regex("[\\x21\\x23-\\x5B\\x5D-\\x7E]{1,256}")
     private val base64Pattern = Regex("[A-Za-z0-9_-]+")
 
-    /** Returns no dispatchable endpoint or caller-controlled discovery object. */
-    fun validateDiscovery(bytes: ByteArray, operation: ChatGptStoreOperation) = oidcBoundary {
+    /** Compatibility wrapper; endpoint authority is only exposed by Metadata's scoped wrapper. */
+    fun validateDiscovery(bytes: ByteArray, operation: ChatGptStoreOperation) {
+        validateDiscoveryDocument(bytes, operation)
+    }
+
+    fun validateDiscoveryDocument(bytes: ByteArray, operation: ChatGptStoreOperation): ChatGptOidcDiscovery = oidcBoundary {
         operation.check()
         val discovery = ChatGptAuthJson.parse(bytes, operation)
         for ((name, pin) in mapOf("issuer" to ISSUER, "authorization_endpoint" to AUTHORIZATION,
@@ -65,7 +70,19 @@ internal object ChatGptPlanOidc {
             operation.check()
             check(discovery.required(name).string() == pin, ChatGptOidcFailure.Reason.INVALID_DISCOVERY)
         }
+        val endpoint = discovery.member("revocation_endpoint")?.string()?.let { value ->
+            check(value.length <= 2048 && value.all { it.code in 0x21..0x7e } &&
+                value.none { it == '%' || it == '\\' }, ChatGptOidcFailure.Reason.INVALID_DISCOVERY)
+            val uri = java.net.URI(value)
+            check(uri.scheme == "https" && uri.host == "auth.openai.com" &&
+                uri.rawAuthority in setOf("auth.openai.com", "auth.openai.com:443") &&
+                uri.rawUserInfo == null && uri.rawQuery == null && uri.rawFragment == null &&
+                uri.rawPath.startsWith('/') && !uri.rawPath.contains("//") &&
+                uri.rawPath.split('/').none { it == "." || it == ".." }, ChatGptOidcFailure.Reason.INVALID_DISCOVERY)
+            OidcEndpoint(uri)
+        }
         operation.check()
+        OidcDiscovery(endpoint)
     }
 
     /**
@@ -85,7 +102,38 @@ internal object ChatGptPlanOidc {
         clockSkewSeconds: Long = 5,
         jwksAlreadyRefetched: Boolean = false,
     ): ChatGptPlanValidatedRegistration = oidcBoundary {
+        verifyAuthorization(tokenResponse, validateJwksDocument(jwksBytes, operation), expectedClientId,
+            expectedNonce, receivedAt, receivedAt, operation, expectedSubject, clockSkewSeconds,
+            jwksAlreadyRefetched).registration
+    }
+
+    fun validateAuthorizationProof(
+        tokenResponse: ByteArray, keys: ChatGptOidcJwks,
+        snapshot: ChatGptAuthorizationSnapshot, code: ChatGptPlanOAuthAttempt.CallbackResult.Code,
+        receivedAt: Instant, validatedAt: Instant, operation: ChatGptStoreOperation,
+        jwksAlreadyRefetched: Boolean = false,
+    ): ChatGptAuthorizationProof = oidcBoundary {
         operation.check()
+        check(isOidcJwks(keys), ChatGptOidcFailure.Reason.INVALID_KEY_SET)
+        check(snapshot.expectedClientId == null || snapshot.expectedClientId == code.issuedClientId,
+            ChatGptOidcFailure.Reason.INVALID_CLAIMS)
+        val verified = verifyAuthorization(tokenResponse, keys, code.issuedClientId, code.nonceForValidation,
+            receivedAt, validatedAt, operation, snapshot.expectedSubject, 5, jwksAlreadyRefetched)
+        operation.check()
+        OidcProof(snapshot.attemptId, verified.registration, verified.idExp, validatedAt, verified.nonceHash)
+    }
+
+    private class VerifiedAuthorization(
+        val registration: ChatGptPlanValidatedRegistration, val idExp: Instant, val nonceHash: String,
+    )
+
+    private fun verifyAuthorization(
+        tokenResponse: ByteArray, keys: ChatGptOidcJwks, expectedClientId: String, expectedNonce: String,
+        receivedAt: Instant, validatedAt: Instant, operation: ChatGptStoreOperation, expectedSubject: String?,
+        clockSkewSeconds: Long, jwksAlreadyRefetched: Boolean,
+    ): VerifiedAuthorization {
+        operation.check()
+        check(isOidcJwks(keys), ChatGptOidcFailure.Reason.INVALID_KEY_SET)
         check(expectedClientId.matches(clientPattern) && clockSkewSeconds in 0..60,
             ChatGptOidcFailure.Reason.INVALID_INPUT)
         boundedText(expectedNonce, 1024, ChatGptOidcFailure.Reason.INVALID_INPUT)
@@ -106,8 +154,8 @@ internal object ChatGptPlanOidc {
         check(scopes.size <= 64 && scopes.distinct().size == scopes.size && scopes.all { it.matches(scopePattern) },
             ChatGptOidcFailure.Reason.INVALID_TOKEN_RESPONSE)
         operation.check()
-        val claims = verifiedClaims(idToken, jwksBytes, operation, jwksAlreadyRefetched)
-        validateClaims(claims, expectedClientId, expectedNonce, expectedSubject, receivedAt, clockSkewSeconds, operation)
+        val claims = verifiedClaims(idToken, keys, operation, jwksAlreadyRefetched)
+        validateClaims(claims, expectedClientId, expectedNonce, expectedSubject, validatedAt, clockSkewSeconds, operation)
         // Access tokens are opaque. Optional at_hash binds their exact bytes, never their decoded claims.
         claims.member("at_hash")?.let {
             operation.check()
@@ -121,13 +169,14 @@ internal object ChatGptPlanOidc {
         val nonceHash = MessageDigest.getInstance("SHA-256").digest(expectedNonce.toByteArray(Charsets.UTF_8))
             .joinToString("") { "%02x".format(it.toInt() and 255) }
         operation.check()
-        ChatGptPlanValidatedRegistration(ISSUER, expectedClientId, subject, label, email,
+        oidcKeys(keys, operation) // scope/expiry must still be live after signature and claims work
+        return VerifiedAuthorization(ChatGptPlanValidatedRegistration(ISSUER, expectedClientId, subject, label, email,
             ChatGptPlanTokenSet(accessToken, refreshToken, idToken, "Bearer", receivedAt, expiresAt,
-                scopes.toSet(), nonceHash))
+                scopes.toSet(), nonceHash)), numericDate(claims.required("exp")), nonceHash)
     }
 
     private fun verifiedClaims(
-        token: String, jwksBytes: ByteArray, operation: ChatGptStoreOperation, refetched: Boolean,
+        token: String, keys: ChatGptOidcJwks, operation: ChatGptStoreOperation, refetched: Boolean,
     ): ChatGptAuthJson {
         val parts = token.split('.')
         check(parts.size == 3, ChatGptOidcFailure.Reason.INVALID_ID_TOKEN)
@@ -138,7 +187,8 @@ internal object ChatGptPlanOidc {
         header.member("typ")?.let { check(it.string() == "JWT", ChatGptOidcFailure.Reason.INVALID_ID_TOKEN) }
         val kid = header.required("kid").string()
         boundedText(kid, 256, ChatGptOidcFailure.Reason.INVALID_ID_TOKEN)
-        val key = selectKey(jwksBytes, kid, operation, refetched)
+        val key = oidcKeys(keys, operation)[kid] ?: throw ChatGptOidcFailure(
+            if (refetched) ChatGptOidcFailure.Reason.UNKNOWN_KEY else ChatGptOidcFailure.Reason.UNKNOWN_KEY_REFETCH_ONCE)
         val signatureBytes = decode(parts[2], 1024)
         check(signatureBytes.size == (key.modulus.bitLength() + 7) / 8, ChatGptOidcFailure.Reason.INVALID_SIGNATURE)
         // Check the payload encoding before verify, but do not parse or use its claims yet.
@@ -156,21 +206,24 @@ internal object ChatGptPlanOidc {
         return ChatGptAuthJson.parse(decode(parts[1], MAX_TOKEN_BYTES), operation)
     }
 
-    private fun selectKey(bytes: ByteArray, kid: String, operation: ChatGptStoreOperation, refetched: Boolean): RSAPublicKey {
+    fun validateJwksDocument(bytes: ByteArray, operation: ChatGptStoreOperation): ChatGptOidcJwks = oidcBoundary {
         val keys = ChatGptAuthJson.parse(bytes, operation).required("keys").elements()
         check(keys.size in 1..32, ChatGptOidcFailure.Reason.INVALID_KEY_SET)
-        val ids = hashSetOf<String>()
-        var selected: ChatGptAuthJson? = null
+        val admitted = linkedMapOf<String, RSAPublicKey>()
         for (key in keys) {
             operation.check()
             val id = key.required("kid").string()
             boundedText(id, 256, ChatGptOidcFailure.Reason.INVALID_KEY_SET)
-            check(ids.add(id), ChatGptOidcFailure.Reason.INVALID_KEY_SET)
-            check(key.member("jku") == null && key.member("x5u") == null, ChatGptOidcFailure.Reason.INVALID_KEY_SET)
-            if (id == kid) selected = key
+            check(id !in admitted, ChatGptOidcFailure.Reason.INVALID_KEY_SET)
+            check(listOf("jku", "x5u", "jwk", "x5c").none { key.member(it) != null },
+                ChatGptOidcFailure.Reason.INVALID_KEY_SET)
+            admitted[id] = admitKey(key, operation)
         }
-        val key = selected ?: throw ChatGptOidcFailure(if (refetched) ChatGptOidcFailure.Reason.UNKNOWN_KEY
-            else ChatGptOidcFailure.Reason.UNKNOWN_KEY_REFETCH_ONCE)
+        operation.check()
+        OidcKeys(java.util.Collections.unmodifiableMap(admitted))
+    }
+
+    private fun admitKey(key: ChatGptAuthJson, operation: ChatGptStoreOperation): RSAPublicKey {
         check(key.required("kty").string() == "RSA", ChatGptOidcFailure.Reason.INVALID_KEY_SET)
         key.member("use")?.let { check(it.string() == "sig", ChatGptOidcFailure.Reason.INVALID_KEY_SET) }
         key.member("alg")?.let { check(it.string() == "RS256", ChatGptOidcFailure.Reason.INVALID_KEY_SET) }
@@ -254,4 +307,68 @@ internal object ChatGptPlanOidc {
         if (!condition) throw ChatGptOidcFailure(reason)
     }
     override fun toString() = "ChatGptPlanOidc"
+}
+
+internal abstract class ChatGptOidcDiscovery : ChatGptAuthSafeObject() {
+    abstract val revocation: ChatGptAuthRevocationEndpoint?
+}
+internal abstract class ChatGptOidcJwks : ChatGptAuthSafeObject()
+
+private class OidcDiscovery(override val revocation: ChatGptAuthRevocationEndpoint?) : ChatGptOidcDiscovery()
+private class OidcKeys(val keys: Map<String, RSAPublicKey>) : ChatGptOidcJwks()
+private class ScopedOidcKeys(val raw: OidcKeys, val use: ChatGptAuthKeysUse) : ChatGptOidcJwks()
+private class ValidationOidcKeys(val scope: ScopedOidcKeys) : ChatGptOidcJwks()
+private class OidcEndpoint(private val uri: java.net.URI) : ChatGptAuthRevocationEndpoint() {
+    override fun newRevocationRequest(logout: ChatGptLocalLogout, operation: ChatGptStoreOperation, httpDeadline: ChatGptDeadline): java.net.http.HttpRequest {
+        authHttpCheck(operation, httpDeadline)
+        val body = authRevocationPublisher(logout, operation, httpDeadline)
+        return java.net.http.HttpRequest.newBuilder(uri).version(java.net.http.HttpClient.Version.HTTP_1_1)
+            .timeout(java.time.Duration.ofNanos(authHttpCheck(operation, httpDeadline)))
+            .header("Content-Type", "application/x-www-form-urlencoded").header("Accept", "application/json")
+            .POST(body).build().also { authHttpCheck(operation, httpDeadline) }
+    }
+}
+private class OidcProof(
+    override val attemptId: java.util.UUID,
+    override val registration: ChatGptPlanValidatedRegistration,
+    override val idTokenExpiresAt: Instant,
+    override val verifiedAt: Instant,
+    override val authorizationNonceHash: String,
+) : ChatGptAuthorizationProof()
+
+internal fun isOidcDiscovery(document: ChatGptOidcDiscovery): Boolean = document is OidcDiscovery
+internal fun isOidcJwks(keys: ChatGptOidcJwks): Boolean = keys is OidcKeys || keys is ScopedOidcKeys || keys is ValidationOidcKeys
+internal fun isOidcRevocationEndpoint(endpoint: ChatGptAuthRevocationEndpoint): Boolean = endpoint is OidcEndpoint
+
+// A scoped key stays scoped even when a caller retains the document after closing its use.
+// Both owners check their private concrete types before calling across the boundary.
+internal fun scopeOidcJwks(keys: ChatGptOidcJwks, use: ChatGptAuthKeysUse): ChatGptOidcJwks {
+    if (keys !is OidcKeys || !isMetadataKeysUse(use)) throw ChatGptOidcFailure(ChatGptOidcFailure.Reason.INVALID_KEY_SET)
+    return ScopedOidcKeys(keys, use)
+}
+// Only an active concrete reply can reserve a scope. The verifier-only wrapper never escapes
+// that reply's stack, so retaining a public document cannot bypass session reservation.
+internal fun reserveOidcJwks(keys: ChatGptOidcJwks, reply: ChatGptAuthTokenReply,
+    operation: ChatGptStoreOperation): ChatGptOidcJwks {
+    if (!isTransportReplyValidation(reply, operation)) authFail(ChatGptAuthHttpFailure.INVALID_BINDING)
+    return when (keys) {
+        is OidcKeys -> keys
+        is ScopedOidcKeys -> {
+            reserveMetadataKeysUse(keys.use, reply, operation)
+            ValidationOidcKeys(keys)
+        }
+        else -> authFail(ChatGptAuthHttpFailure.INVALID_BINDING)
+    }
+}
+private fun oidcKeys(keys: ChatGptOidcJwks, operation: ChatGptStoreOperation): Map<String, RSAPublicKey> = when (keys) {
+    is OidcKeys -> keys.keys
+    is ScopedOidcKeys -> {
+        checkMetadataKeysUse(keys.use, operation)
+        authFail(ChatGptAuthHttpFailure.INVALID_BINDING)
+    }
+    is ValidationOidcKeys -> {
+        checkMetadataKeysUse(keys.scope.use, operation)
+        keys.scope.raw.keys
+    }
+    else -> throw ChatGptOidcFailure(ChatGptOidcFailure.Reason.INVALID_KEY_SET)
 }

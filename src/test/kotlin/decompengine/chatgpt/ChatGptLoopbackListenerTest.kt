@@ -282,8 +282,8 @@ class ChatGptLoopbackListenerTest {
     }
 
     @Test @Tag("socket") fun slowTrustedInitializationUsesAdmissionOriginAndClosesAlreadyBoundSocket() {
-        val now = java.util.concurrent.atomic.AtomicLong()
-        val life = ChatGptAuthLifetime.start(Duration.ofSeconds(1), clock = now::get)
+        val now = AuthControlledTicks()
+        val life = ChatGptAuthLifetime.startControlled(Duration.ofSeconds(1), deadlineClock = now.authority, clockProbe = now::get)
         val bound = ChatGptLoopbackListener().bind(life)
         var launches = 0
         try {
@@ -309,6 +309,7 @@ class ChatGptLoopbackListenerTest {
     @Test @Tag("socket") fun failureAfterActualBindClosesPartiallyAcquiredResourcesAndRedactsCause() {
         val ownerChecks = AtomicInteger()
         val life = ChatGptAuthLifetime.start(parent = object : ChatGptAuthParent() {
+            override val deadline = ChatGptDeadline.start(ChatGptDeadlineClock.SYSTEM, 300_000_000_000L)
             override fun remainingNanos(): Long {
                 if (Thread.currentThread().name == "chatgpt-auth-loopback" && ownerChecks.incrementAndGet() == 2) {
                     throw IllegalStateException("CANARY-bind-private-hint")

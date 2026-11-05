@@ -12,18 +12,81 @@ import org.junit.jupiter.api.Timeout
 
 @Timeout(5)
 class ChatGptAuthLifetimeTest {
+
+    @Test fun parentCapabilityGetterTimeIsChargedAtAdmission() {
+        val c = ChatGptDeadlineClock.controlled(); val root = ChatGptDeadline.start(c, 1_000)
+        val life = ChatGptAuthLifetime.startControlled(Duration.ofNanos(100), deadlineClock = c, parent = object : ChatGptAuthParent() {
+            override val deadline: ChatGptDeadline get() { c.advanceNanos(90); return root }
+            override fun remainingNanos() = 1_000L
+        })
+        try { assertEquals(10, life.remainingNanos()); c.advanceNanos(10); assertFails { life.check() } }
+        finally { life.settle() }
+    }
+    @Test fun parentCapabilityDomainMismatchAndLateRootReject() {
+        val c = ChatGptDeadlineClock.controlled()
+        assertEquals(ChatGptAuthFailure.INVALID_OWNER, assertFailsWith<ChatGptAuthException> {
+            ChatGptAuthLifetime.startControlled(deadlineClock = c, parent = object : ChatGptAuthParent() {
+                override val deadline = ChatGptDeadline.start(ChatGptDeadlineClock.controlled(), 100)
+                override fun remainingNanos() = 100L
+            })
+        }.failure)
+        val life = ChatGptAuthLifetime.startControlled(deadlineClock = c, parent = object : ChatGptAuthParent() {
+            override val deadline: ChatGptDeadline get() { c.advanceNanos(1); return ChatGptDeadline.start(c, 100) }
+            override fun remainingNanos() = 100L
+        })
+        try { assertFails { life.check() } } finally { life.settle() }
+    }
+    @Test fun blockedPhaseInitializationRemainsOwnedOutsideMonitor() = blockedInitialization("phase")
+    @Test fun blockedResourceInitializationRemainsOwnedOutsideMonitor() = blockedInitialization("resource")
+    @Test fun blockedListenerInitializationRemainsOwnedOutsideMonitor() = blockedInitialization("listener")
+    @Test fun blockedOwnerCheckpointRemainsOwnedOutsideMonitor() = blockedInitialization("check")
+    private fun blockedInitialization(stage: String) {
+        val c = ChatGptDeadlineClock.controlled(); val parent = ChatGptDeadline.start(c, 1_000_000_000L)
+        val entered = CountDownLatch(1); val release = CountDownLatch(1); val armed = AtomicBoolean()
+        val held = AtomicBoolean(); val published = AtomicBoolean()
+        lateinit var life: ChatGptAuthLifetime
+        life = ChatGptAuthLifetime.startControlled(deadlineClock = c, parent = object : ChatGptAuthParent() {
+            override val deadline = parent
+            override fun remainingNanos(): Long {
+                if (armed.compareAndSet(true, false)) {
+                    val monitor = life.javaClass.getDeclaredField("monitor").apply { isAccessible = true }.get(life)
+                    held.set(Thread.holdsLock(monitor)); entered.countDown(); authAwait(release)
+                }
+                return 1_000_000_000L
+            }
+        })
+        val worker = Thread({
+            try {
+                when (stage) {
+                    "phase" -> life.phaseOperation(ChatGptAuthPhase.EXCHANGE)
+                    "resource" -> life.own(object : ChatGptAuthResource() { override fun stopAndAwait() = true })
+                    "listener" -> life.admitListener()
+                    else -> life.check()
+                }
+                published.set(true)
+            } catch (_: ChatGptAuthException) { }
+        }, "chatgpt-auth-a2-initialization")
+        armed.set(true); worker.start()
+        try {
+            authAwait(entered); assertFalse(held.get())
+            assertEquals(ChatGptAuthSettlement.UNSETTLED, life.settle())
+            assertFalse(published.get())
+        } finally { release.countDown(); authJoin(worker); settleEventually(life) }
+        assertFalse(published.get())
+    }
     private fun commit(state: ChatGptAuthCommitState = ChatGptAuthCommitState.DURABLE) = object : ChatGptAuthCommit() {
         override val state = state
         override val account: ChatGptPlanAccount? = null
     }
 
     private class SlowPhase(val advance: Long = 31_000_000_000) {
-        val now = AtomicLong()
+        val now = AuthControlledTicks()
         val call = AtomicInteger()
         val armed = AtomicBoolean()
-        val life = ChatGptAuthLifetime.start(clock = now::get, parent = object : ChatGptAuthParent() {
+        val life = ChatGptAuthLifetime.startControlled(deadlineClock = now.authority, clockProbe = now::get, parent = object : ChatGptAuthParent() {
+            override val deadline = ChatGptDeadline.start(now.authority, 300_000_000_000L)
             override fun remainingNanos(): Long {
-                if (armed.get() && call.incrementAndGet() == 3) now.addAndGet(advance)
+                if (armed.get() && call.incrementAndGet() == 2) now.addAndGet(advance)
                 return 200_000_000_000
             }
         })
@@ -33,7 +96,7 @@ class ChatGptAuthLifetimeTest {
     @Test fun phaseClockMustChargeParentCallbackBeforeReturningPhaseAuthority() {
         val x = SlowPhase()
         try {
-            // StoreOperation cancellation invokes parent once; its clock invokes parent again.
+            // The retained parent callback advances actual trusted phase time.
             x.call.set(1); x.armed.set(true)
             assertFails { x.phase.check() }
         } finally { x.life.settle() }
@@ -66,8 +129,9 @@ class ChatGptAuthLifetimeTest {
         val life = ChatGptAuthLifetime.start(cancellation = object : ChatGptAuthCancellation() {
             override fun isCancelled() = flag.get()
         }, parent = object : ChatGptAuthParent() {
+            override val deadline = ChatGptDeadline.start(ChatGptDeadlineClock.SYSTEM, 300_000_000_000L)
             override fun remainingNanos(): Long {
-                if (armed.get() && calls.incrementAndGet() == 3) flag.set(true)
+                if (armed.get() && calls.incrementAndGet() == 2) flag.set(true)
                 return 100_000_000_000
             }
         })
@@ -103,8 +167,8 @@ class ChatGptAuthLifetimeTest {
     }
 
     @Test fun originalDeadlineIncludesInitializationAndNeverRestarts() {
-        val now = AtomicLong(100)
-        val life = ChatGptAuthLifetime.start(clock = now::get)
+        val now = AuthControlledTicks(100)
+        val life = ChatGptAuthLifetime.startControlled(deadlineClock = now.authority, clockProbe = now::get)
         now.addAndGet(299_000_000_000)
         assertEquals(1_000_000_000, life.remainingNanos())
         val phase = life.phaseOperation(ChatGptAuthPhase.EXCHANGE)
@@ -118,11 +182,12 @@ class ChatGptAuthLifetimeTest {
     }
 
     @Test fun phasesAreOnceOnlyAndClippedToOriginalParent() {
-        val now = AtomicLong()
+        val now = AuthControlledTicks()
         val parent = AtomicLong(4_000_000_000)
-        val life = ChatGptAuthLifetime.start(parent = object : ChatGptAuthParent() {
+        val life = ChatGptAuthLifetime.startControlled(deadlineClock = now.authority, parent = object : ChatGptAuthParent() {
+            override val deadline = ChatGptDeadline.start(now.authority, 300_000_000_000L)
             override fun remainingNanos() = parent.get()
-        }, clock = now::get)
+        }, clockProbe = now::get)
         for (name in ChatGptAuthPhase.entries) {
             val phase = life.phaseOperation(name)
             assertSame(phase, life.phaseOperation(name))
@@ -139,8 +204,8 @@ class ChatGptAuthLifetimeTest {
     }
 
     @Test fun everyPhaseHasThirtySecondMaximumWithoutRenewal() {
-        val now = AtomicLong()
-        val life = ChatGptAuthLifetime.start(clock = now::get)
+        val now = AuthControlledTicks()
+        val life = ChatGptAuthLifetime.startControlled(deadlineClock = now.authority, clockProbe = now::get)
         for (phase in ChatGptAuthPhase.entries) assertEquals(30_000_000_000, life.phaseOperation(phase).remainingNanos())
         now.set(30_000_000_000)
         for (phase in ChatGptAuthPhase.entries) assertFails { life.phaseOperation(phase).check() }
@@ -148,8 +213,9 @@ class ChatGptAuthLifetimeTest {
     }
 
     @Test fun parentTimeSpentDuringPhaseCreationCannotExtendBudget() {
-        val now = AtomicLong()
-        val life = ChatGptAuthLifetime.start(clock = now::get, parent = object : ChatGptAuthParent() {
+        val now = AuthControlledTicks()
+        val life = ChatGptAuthLifetime.startControlled(deadlineClock = now.authority, clockProbe = now::get, parent = object : ChatGptAuthParent() {
+            override val deadline = ChatGptDeadline.start(now.authority, 300_000_000_000L)
             override fun remainingNanos(): Long { now.addAndGet(100); return 500 }
         })
         val op = life.phaseOperation(ChatGptAuthPhase.PREPARATION)
@@ -159,8 +225,9 @@ class ChatGptAuthLifetimeTest {
     }
 
     @Test fun timeSpentReadingParentIsChargedBeforeReturningAuthority() {
-        val now = AtomicLong()
-        val life = ChatGptAuthLifetime.start(Duration.ofSeconds(1), clock = now::get, parent = object : ChatGptAuthParent() {
+        val now = AuthControlledTicks()
+        val life = ChatGptAuthLifetime.startControlled(Duration.ofSeconds(1), deadlineClock = now.authority, clockProbe = now::get, parent = object : ChatGptAuthParent() {
+            override val deadline = ChatGptDeadline.start(now.authority, 300_000_000_000L)
             override fun remainingNanos(): Long { now.set(1_000_000_000); return 5_000_000_000 }
         })
         try { assertEquals(ChatGptAuthFailure.TIMEOUT, assertFailsWith<ChatGptAuthException> { life.check() }.failure) }
@@ -171,8 +238,8 @@ class ChatGptAuthLifetimeTest {
         for (duration in listOf(Duration.ZERO, Duration.ofNanos(-1), Duration.ofMinutes(6), Duration.ofSeconds(Long.MAX_VALUE))) {
             assertFailsWith<IllegalArgumentException> { ChatGptAuthLifetime.start(duration) }
         }
-        val now = AtomicLong(Long.MAX_VALUE - 5)
-        val life = ChatGptAuthLifetime.start(Duration.ofNanos(20), clock = now::get)
+        val now = AuthControlledTicks(Long.MAX_VALUE - 5)
+        val life = ChatGptAuthLifetime.startControlled(Duration.ofNanos(20), deadlineClock = now.authority, clockProbe = now::get)
         now.addAndGet(10)
         assertEquals(10, life.remainingNanos())
         now.addAndGet(10)
@@ -259,8 +326,8 @@ class ChatGptAuthLifetimeTest {
     }
 
     @Test fun expiredExchangeCannotPublishWhileInteractiveDeadlineRemains() {
-        val now = AtomicLong()
-        val life = ChatGptAuthLifetime.start(clock = now::get)
+        val now = AuthControlledTicks()
+        val life = ChatGptAuthLifetime.startControlled(deadlineClock = now.authority, clockProbe = now::get)
         life.phaseOperation(ChatGptAuthPhase.EXCHANGE)
         now.set(30_000_000_000)
         assertTrue(life.remainingNanos() > 0)
@@ -270,8 +337,8 @@ class ChatGptAuthLifetimeTest {
     }
 
     @Test fun expiredExchangeCannotSubmitDespiteRemainingInteractiveTime() {
-        val now = AtomicLong()
-        val life = ChatGptAuthLifetime.start(clock = now::get)
+        val now = AuthControlledTicks()
+        val life = ChatGptAuthLifetime.startControlled(deadlineClock = now.authority, clockProbe = now::get)
         life.phaseOperation(ChatGptAuthPhase.EXCHANGE)
         now.set(30_000_000_000)
         assertFalse(life.claimDispatch())
@@ -369,6 +436,7 @@ class ChatGptAuthLifetimeTest {
         life.check(); flag.set(1); assertFails { life.check() }; flag.set(0)
         assertFalse(life.publication().enterCommit()); life.settle()
         val broken = ChatGptAuthLifetime.start(parent = object : ChatGptAuthParent() {
+            override val deadline = ChatGptDeadline.start(ChatGptDeadlineClock.SYSTEM, 300_000_000_000L)
             override fun remainingNanos(): Long = throw IllegalArgumentException("CANARY-state-code-hint")
         })
         val e = assertFailsWith<ChatGptAuthException> { broken.check() }

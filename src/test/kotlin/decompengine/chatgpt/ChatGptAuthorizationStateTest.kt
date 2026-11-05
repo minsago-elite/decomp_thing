@@ -451,12 +451,12 @@ class ChatGptAuthorizationStateTest {
         for ((i, stage) in stages.withIndex()) for (mode in 0..2) {
             val client = "oaiapp_fault_${i}_$mode"
             val s = ready(client); val id = store().pendingEnrollments(op()).last().enrollmentId
-            val before = contents(); val reached = AtomicBoolean(); val cancelled = AtomicBoolean(); var nanos = 0L
-            val operation = ChatGptStoreOperation.create(Duration.ofSeconds(1), cancelled::get) { nanos }
+            val before = contents(); val reached = AtomicBoolean(); val cancelled = AtomicBoolean(); val nanos = AuthControlledTicks()
+            val operation = ChatGptStoreOperation.createControlled(Duration.ofSeconds(1), cancelled::get, nanos.authority) { nanos.get() }
             val gate = AuthorizationFixtures.Publication()
             val failing = store { if (it == stage) {
                 reached.set(true)
-                when (mode) { 0 -> throw IllegalStateException("SYNTHETIC-FAULT-SECRET"); 1 -> cancelled.set(true); else -> nanos = 1_000_000_000L }
+                when (mode) { 0 -> throw IllegalStateException("SYNTHETIC-FAULT-SECRET"); 1 -> cancelled.set(true); else -> nanos.set(1_000_000_000L) }
             } }
             val result = failing.commitAuthorization(s, AuthorizationFixtures.proof(s, AuthorizationFixtures.registration(client)), true, gate, operation)
             assertTrue(reached.get()); assertEquals(ChatGptAuthCommitState.COMMIT_UNKNOWN, result.state); assertNull(result.account)

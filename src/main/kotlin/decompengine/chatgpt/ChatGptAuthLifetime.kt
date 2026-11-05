@@ -2,12 +2,12 @@ package decompengine.chatgpt
 
 import java.time.Duration
 import java.util.EnumMap
-import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 
 internal abstract class ChatGptAuthParent : ChatGptAuthSafeObject() {
-    /** Trusted bounded host callback; zero means expired or cancelled. */
+    internal abstract val deadline: ChatGptDeadline
+    /** Owner-only veto/tightening callback; never cleanup authority. */
     abstract fun remainingNanos(): Long
 }
 
@@ -36,8 +36,8 @@ internal abstract class ChatGptAuthResource : ChatGptAuthSafeObject() {
  * A permit is not proof that the peer received nothing: after submission ambiguity belongs to A3.
  */
 internal class ChatGptAuthLifetime private constructor(
-    private val origin: Long,
-    private val allowance: Long,
+    internal val deadline: ChatGptDeadline,
+    internal val fence: ChatGptOperationFence,
     private val clock: () -> Long,
     private val parent: ChatGptAuthParent?,
     private val cancellation: ChatGptAuthCancellation?,
@@ -52,8 +52,8 @@ internal class ChatGptAuthLifetime private constructor(
     @Volatile private var fenced = false
     private var listenerAdmitted = false
     private var slotHeld = false
-    private var cleanupOrigin: Long? = null
-    private var cleanupAllowance = 0L
+    private var cleanup: ChatGptCleanupWindow? = null
+    private var initializations = 0
 
     private class Cleanup(val resource: ChatGptAuthResource) {
         @Volatile var acknowledged = false
@@ -66,7 +66,12 @@ internal class ChatGptAuthLifetime private constructor(
             while (true) {
                 val old = authority.get()
                 if (old != Authority.OPEN && old != Authority.DISPATCHED) return false
-                if (authority.compareAndSet(old, Authority.COMMITTING)) return true
+                synchronized(monitor) {
+                    try { trustedRemaining(); publicationPhase.get()?.let {
+                        if (it.fence.isCancelled() || it.deadline.remainingNanos() == 0L) return false
+                    } } catch (_: Exception) { return false }
+                    if (authority.compareAndSet(old, Authority.COMMITTING)) return true
+                }
             }
         }
         override fun complete(result: ChatGptAuthCommit) {
@@ -85,47 +90,28 @@ internal class ChatGptAuthLifetime private constructor(
 
     fun check() { remainingNanos() }
 
-    fun remainingNanos(): Long {
-        if (fenced || authority.get() in setOf(Authority.FENCED, Authority.COMPLETE) || Thread.currentThread().isInterrupted) {
-            cancel()
-            throw ChatGptAuthException(ChatGptAuthFailure.CANCELLED)
-        }
-        val remaining = try {
-            if (cancellation?.isCancelled() == true) {
-                cancel()
-                throw ChatGptAuthException(ChatGptAuthFailure.CANCELLED)
-            }
-            originalRemaining {
-                // Parent evaluation may consume time or observe cancellation. Recheck after it,
-                // then sample the clock after this cancellation callback too.
-                if (cancellation?.isCancelled() == true || fenced ||
-                    authority.get() in setOf(Authority.FENCED, Authority.COMPLETE) ||
-                    Thread.currentThread().isInterrupted) {
-                    cancel()
-                    throw ChatGptAuthException(ChatGptAuthFailure.CANCELLED)
-                }
-            }
-        } catch (e: ChatGptAuthException) { throw e }
-        catch (_: Exception) {
-            cancel()
-            throw ChatGptAuthException(ChatGptAuthFailure.DEPENDENCY_FAILED)
-        }
-        if (remaining <= 0) {
-            cancel()
-            throw ChatGptAuthException(ChatGptAuthFailure.TIMEOUT)
-        }
-        return remaining
+    private fun trustedRemaining(): Long {
+        if (fence.isCancelled() || fenced || authority.get() in setOf(Authority.FENCED, Authority.COMPLETE) ||
+            Thread.currentThread().isInterrupted) throw ChatGptAuthException(ChatGptAuthFailure.CANCELLED)
+        return deadline.remainingNanos().also { if (it == 0L) throw ChatGptAuthException(ChatGptAuthFailure.TIMEOUT) }
     }
-
-    private fun originalRemaining(afterParent: () -> Unit = {}): Long {
-        val parentRemaining = parent?.remainingNanos() ?: Long.MAX_VALUE
-        afterParent()
-        val elapsed = clock() - origin // nanoTime wrap is valid for these short intervals.
-        if (elapsed < 0 || elapsed >= allowance) return 0
-        return minOf(allowance - elapsed, parentRemaining).coerceAtLeast(0)
+    fun remainingNanos(): Long {
+        synchronized(monitor) { initializations++ }
+        try {
+            trustedRemaining()
+            if (cancellation?.isCancelled() == true) throw ChatGptAuthException(ChatGptAuthFailure.CANCELLED)
+            val before = deadline.clock.readNanos()
+            parent?.let { deadline.tightenFrom(before, it.remainingNanos()) }
+            clock() // owned non-authoritative probe
+            if (cancellation?.isCancelled() == true) throw ChatGptAuthException(ChatGptAuthFailure.CANCELLED)
+            return trustedRemaining()
+        } catch (e: ChatGptAuthException) { cancel(); throw e }
+        catch (_: Exception) { cancel(); throw ChatGptAuthException(ChatGptAuthFailure.DEPENDENCY_FAILED) }
+        finally { synchronized(monitor) { initializations-- } }
     }
 
     fun cancel(): ChatGptAuthCancelResult {
+      synchronized(monitor) {
         while (true) {
             val old = authority.get()
             val answer = when (old) {
@@ -134,94 +120,109 @@ internal class ChatGptAuthLifetime private constructor(
                 Authority.FENCED -> ChatGptAuthCancelResult.CANCELLED
                 else -> if (authority.compareAndSet(old, Authority.FENCED)) ChatGptAuthCancelResult.CANCELLED else continue
             }
+            fence.cancel()
             fenced = true
             startCleanup()
             return answer
         }
+      }
     }
 
     /** Single dispatch owner even when Code.prepareExchange is called repeatedly. Never resets. */
     fun claimDispatch(): Boolean {
         try { check(); publicationPhase.get()?.check() } catch (_: Exception) { cancel(); return false }
-        return authority.compareAndSet(Authority.OPEN, Authority.DISPATCHED)
+        return synchronized(monitor) {
+            try { trustedRemaining(); publicationPhase.get()?.let {
+                if (it.fence.isCancelled() || it.deadline.remainingNanos() == 0L) return false
+            } } catch (_: Exception) { return false }
+            authority.compareAndSet(Authority.OPEN, Authority.DISPATCHED)
+        }
     }
 
-    fun phaseOperation(phase: ChatGptAuthPhase): ChatGptStoreOperation = synchronized(monitor) {
-        check()
-        phases.getOrPut(phase) {
-            val phaseOrigin = clock()
-            val budget = minOf(30_000_000_000L, remainingNanos())
-            val elapsedFloor = AtomicLong()
-            var initializing = true
-            ChatGptStoreOperation.create(Duration.ofNanos(budget), {
-                try { check(); false } catch (_: ChatGptAuthException) { true }
-            }, {
-                // StoreOperation exposes a clock and cancellation port, not a dynamic parent port.
-                // Its virtual clock charges initialization and parent shrinkage without restoring time.
-                if (initializing) { initializing = false; 0L } else {
-                    val remaining = remainingNanos()
-                    val elapsed = clock() - phaseOrigin
-                    val charged = if (elapsed < 0) budget else maxOf(elapsed, budget - remaining)
-                    elapsedFloor.accumulateAndGet(charged, ::maxOf)
+    fun phaseOperation(phase: ChatGptAuthPhase): ChatGptStoreOperation {
+        val child = synchronized(monitor) {
+            trustedRemaining()
+            initializations++
+            deadline.cap(30_000_000_000L)
+        }
+        try {
+            check()
+            val existing = synchronized(monitor) { phases[phase] }
+            if (existing != null) return existing
+            val operation = ChatGptStoreOperation.fromDeadline(child, fence) {
+                try { check(); false } catch (e: ChatGptAuthException) {
+                    when (e.failure) {
+                        ChatGptAuthFailure.TIMEOUT -> throw java.util.concurrent.TimeoutException("ChatGPT auth phase timed out")
+                        ChatGptAuthFailure.CANCELLED -> throw java.util.concurrent.CancellationException("ChatGPT auth phase cancelled")
+                        else -> throw IllegalStateException("ChatGPT auth phase dependency failed")
+                    }
                 }
-            }).also { publicationPhase.set(it) }
-        }
+            }
+            operation.check()
+            return synchronized(monitor) {
+                trustedRemaining()
+                if (child.remainingNanos() == 0L) throw ChatGptAuthException(ChatGptAuthFailure.TIMEOUT)
+                phases.getOrPut(phase) { operation.also { publicationPhase.set(it) } }
+            }
+        } finally { synchronized(monitor) { initializations-- } }
     }
 
-    /** Ownership is bounded and cannot be registered after the result fence. */
-    fun own(resource: ChatGptAuthResource) = synchronized(monitor) {
-        check()
-        if (resources.size == MAX_RESOURCES) throw ChatGptAuthException(ChatGptAuthFailure.RESOURCE_LIMIT)
-        if (resources.any { it.resource === resource }) throw ChatGptAuthException(ChatGptAuthFailure.INVALID_OWNER)
-        resources.add(Cleanup(resource))
-        Unit
+    /** Reserve ownership before a helper can block; cleanup retains the entire initialization. */
+    fun own(resource: ChatGptAuthResource) {
+        synchronized(monitor) {
+            trustedRemaining()
+            if (resources.size == MAX_RESOURCES) throw ChatGptAuthException(ChatGptAuthFailure.RESOURCE_LIMIT)
+            if (resources.any { it.resource === resource }) throw ChatGptAuthException(ChatGptAuthFailure.INVALID_OWNER)
+            resources.add(Cleanup(resource)); initializations++
+        }
+        try { check(); synchronized(monitor) { trustedRemaining() } }
+        catch (e: Exception) { cancel(); throw e }
+        finally { synchronized(monitor) { initializations-- } }
     }
 
-    internal fun admitListener() = synchronized(monitor) {
-        check()
-        if (listenerAdmitted) throw ChatGptAuthException(ChatGptAuthFailure.ATTEMPT_USED)
-        while (true) {
-            val count = liveAttempts.get()
-            if (count >= 4) throw ChatGptAuthException(ChatGptAuthFailure.RESOURCE_LIMIT)
-            if (liveAttempts.compareAndSet(count, count + 1)) break
+    internal fun admitListener() {
+        synchronized(monitor) {
+            trustedRemaining()
+            if (listenerAdmitted) throw ChatGptAuthException(ChatGptAuthFailure.ATTEMPT_USED)
+            while (true) {
+                val count = liveAttempts.get()
+                if (count >= 4) throw ChatGptAuthException(ChatGptAuthFailure.RESOURCE_LIMIT)
+                if (liveAttempts.compareAndSet(count, count + 1)) break
+            }
+            listenerAdmitted = true; slotHeld = true; initializations++
         }
-        listenerAdmitted = true
-        slotHeld = true
+        try { check(); synchronized(monitor) { trustedRemaining() } }
+        catch (e: Exception) { cancel(); throw e }
+        finally { synchronized(monitor) { initializations-- } }
     }
 
     private fun startCleanup() = synchronized(monitor) {
-        if (cleanupOrigin == null) {
-            cleanupOrigin = System.nanoTime()
-            cleanupAllowance = try { minOf(CLEANUP_NANOS, originalRemaining()) } catch (_: Exception) { 0 }
-        }
+        if (cleanup == null) cleanup = ChatGptCleanupWindow(deadline, CLEANUP_NANOS)
         for (entry in resources) if (entry.thread == null) {
             val worker = Thread({
                 try { entry.acknowledged = entry.resource.stopAndAwait() }
-                catch (_: Throwable) { /* fixed UNSETTLED, no raw diagnostics */ }
+                catch (_: Throwable) { /* sticky failed acknowledgement */ }
             }, "chatgpt-auth-cleanup")
-            // A stuck trusted adapter is quarantined, never force-stopped. Capacity stays occupied.
-            worker.isDaemon = true
-            entry.thread = worker
+            worker.isDaemon = true; entry.thread = worker
             try { worker.start() } catch (_: Throwable) { /* retained unacknowledged */ }
         }
     }
 
     fun settle(): ChatGptAuthSettlement {
-        // Revoke ordinary result/submission authority BEFORE invoking any cleanup callback.
         cancel()
         val entries = synchronized(monitor) { resources.toList() }
         for (entry in entries) {
-            val wait = synchronized(monitor) {
-                (cleanupAllowance - (System.nanoTime() - cleanupOrigin!!)).coerceAtLeast(0)
+            while (entry.thread?.isAlive == true) {
+                val wait = synchronized(monitor) { minOf(POLL_NANOS, cleanup!!.remainingNanos(), deadline.remainingNanos()) }
+                if (wait <= 0) break
+                try { entry.thread?.join(wait / 1_000_000, (wait % 1_000_000).toInt()) }
+                catch (_: InterruptedException) { Thread.currentThread().interrupt(); break }
             }
-            if (wait > 0) try {
-                entry.thread?.join(wait / 1_000_000, (wait % 1_000_000).toInt())
-            } catch (_: InterruptedException) { Thread.currentThread().interrupt() }
         }
         return synchronized(monitor) {
-            if (authority.get() == Authority.COMMITTING || resources.any { !it.acknowledged || it.thread?.isAlive == true }) {
-                ChatGptAuthSettlement.UNSETTLED
-            } else {
+            if (initializations != 0 || authority.get() == Authority.COMMITTING ||
+                resources.any { !it.acknowledged || it.thread?.isAlive == true }) ChatGptAuthSettlement.UNSETTLED
+            else {
                 if (slotHeld) { slotHeld = false; liveAttempts.decrementAndGet() }
                 ChatGptAuthSettlement.SETTLED
             }
@@ -240,9 +241,25 @@ internal class ChatGptAuthLifetime private constructor(
             cancellation: ChatGptAuthCancellation? = null,
             clock: () -> Long = System::nanoTime,
         ): ChatGptAuthLifetime {
-            val origin = clock() // first action, before validation or trusted parent initialization
+            return startControlled(timeout, parent, cancellation, ChatGptDeadlineClock.SYSTEM, clock)
+        }
+        internal fun startControlled(
+            timeout: Duration = Duration.ofMinutes(5), parent: ChatGptAuthParent? = null,
+            cancellation: ChatGptAuthCancellation? = null, deadlineClock: ChatGptDeadlineClock,
+            clockProbe: () -> Long = { 0L },
+        ): ChatGptAuthLifetime {
+            val root = ChatGptDeadline.start(deadlineClock, 300_000_000_000L)
+            val entry = deadlineClock.readNanos()
             require(!timeout.isNegative && !timeout.isZero && timeout <= Duration.ofMinutes(5)) { "INVALID_AUTH_BUDGET" }
-            return ChatGptAuthLifetime(origin, timeout.toNanos(), clock, parent, cancellation)
+            // Fresh roots must also be minted before the potentially blocking parent getter.
+            val own = root.capAt(entry, timeout.toNanos())
+            val parentDeadline = try { parent?.deadline } catch (_: Exception) {
+                throw ChatGptAuthException(ChatGptAuthFailure.DEPENDENCY_FAILED)
+            }
+            if (parentDeadline != null && parentDeadline.clock !== deadlineClock)
+                throw ChatGptAuthException(ChatGptAuthFailure.INVALID_OWNER)
+            val deadline = parentDeadline?.capAt(entry, timeout.toNanos()) ?: own
+            return ChatGptAuthLifetime(deadline, ChatGptOperationFence(), clockProbe, parent, cancellation)
         }
     }
 }
