@@ -1,0 +1,132 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { REQUIRED_AXE_PASSES, assertActivation, assertAxeResult, assertSessionFacts, assertStatusObservations, sessionSemanticsGate, statusRecorderSource, sessionFactsExpression } from './packaged-browser-session-semantics.mjs';
+
+const aside = (overrides = {}) => ({ role: null, label: 'Local session', session: true, ...overrides });
+const status = (overrides = {}) => ({ tag: 'p', text: 'You signed out of this browser. Public pages remain available.', inSession: true, controls: 0, ownTabIndex: false, ...overrides });
+const button = (label, overrides = {}) => ({ label, insideStatus: false, type: 'button', ...overrides });
+const required = { statusText: 'You signed out of this browser.', buttons: ['Check session'] };
+const validRequired = () => ({ asides: [aside()], sessionCount: 1, statuses: [status()], buttons: [button('Check session')] });
+
+test('accepts the current required and quiet connected semantics', () => {
+  assert.deepEqual(assertSessionFacts(validRequired(), required).controls, ['Check session']);
+  assert.equal(assertSessionFacts({ asides: [aside()], sessionCount: 1, statuses: [], buttons: [button('Sign out')] },
+    { statusText: null, buttons: ['Sign out'] }).sessionStatuses, 0);
+});
+
+test('scopes session semantics while recording the independent browser connection notice', () => {
+  const facts = { asides: [aside(), aside({ role: 'status', label: 'Connection status', session: false })], sessionCount: 1,
+    statuses: [{ tag: 'aside', text: 'Browser reports offline', inSession: false, controls: 1, ownTabIndex: false,
+      connectionNotice: true, role: 'status', label: 'Connection status' }], buttons: [button('Sign out')] };
+  assert.doesNotThrow(() => assertSessionFacts(facts, { statusText: null, externalStatusText: 'Browser reports offline', buttons: ['Sign out'] }));
+  assert.throws(() => assertSessionFacts(facts, { statusText: null, buttons: ['Sign out'] }), /Unexpected status outside/);
+});
+
+test('negative control: rejects the former aside[role=status] wrapping Check session', () => {
+  const former = { asides: [aside({ role: 'status' })], sessionCount: 1, statuses: [status({ tag: 'aside', controls: 1 })], buttons: [button('Check session', { insideStatus: true })] };
+  assert.throws(() => assertSessionFacts(former, required), /overrides its native role/);
+});
+
+test('rejects each invalid fragment independently', () => {
+  const cases = [
+    [(f) => { f.statuses[0].tag = 'div'; }, /text-only <p>/],
+    [(f) => { f.statuses[0].controls = 1; }, /button, link, input or tabindex/],
+    [(f) => { f.statuses[0].ownTabIndex = true; }, /not be focusable/],
+    [(f) => { f.buttons[0].insideStatus = true; }, /inside the status/],
+    [(f) => { f.asides[0].label = 'Session'; }, /named "Local session"/],
+    [(f) => { f.sessionCount = 0; }, /exactly one session aside/],
+    [(f) => { f.statuses[0].text = 'Something else'; }, /lacks/],
+    [(f) => { f.buttons = [button('Sign out')]; }, /Unexpected session controls/],
+    [(f) => { f.statuses.push(status()); }, /exactly one session status/],
+  ];
+  for (const [mutate, pattern] of cases) {
+    const facts = validRequired(); mutate(facts);
+    assert.throws(() => assertSessionFacts(facts, required), pattern);
+  }
+  assert.throws(() => assertSessionFacts(undefined, required), /facts are missing/);
+});
+
+const axe = (overrides = {}) => ({ violations: [], incomplete: [], inapplicable: [], passes: REQUIRED_AXE_PASSES.map((id) => ({ id, nodes: 1 })), ...overrides });
+test('axe must pass every required rule on the session region', () => {
+  assert.equal(assertAxeResult(axe()).violations, 0);
+  assert.throws(() => assertAxeResult(axe({ violations: [{ id: 'aria-allowed-role', nodes: 1 }] })), /Axe violations in session region/);
+  assert.equal(assertAxeResult(axe({ violations: [{ id: 'aria-allowed-role', nodes: 0 }],
+    passes: [{ id: 'aria-valid-attr', nodes: 1 }, { id: 'aria-valid-attr-value', nodes: 1 }, { id: 'landmark-complementary-is-top-level', nodes: 1 }] }),
+  ['aria-valid-attr', 'aria-valid-attr-value', 'landmark-complementary-is-top-level']).violations, 0);
+  assert.throws(() => assertAxeResult(axe({ passes: REQUIRED_AXE_PASSES.slice(1).map((id) => ({ id, nodes: 1 })), inapplicable: [{ id: 'aria-allowed-role' }] })), /inapplicable or incomplete\): aria-allowed-role/);
+  assert.throws(() => assertAxeResult(axe({ passes: REQUIRED_AXE_PASSES.map((id) => ({ id, nodes: 0 })) })), /did not pass/);
+  assert.throws(() => assertAxeResult(axe({ incomplete: [{ id: 'aria-roles', nodes: 1 }] })), /incomplete in session region/);
+  assert.equal(assertAxeResult(axe({ incomplete: [{ id: 'aria-roles', nodes: 0 }] })).violations, 0);
+  assert.throws(() => assertAxeResult(null), /missing/);
+});
+
+test('every recorded transient rendering must be a text-only, non-focusable paragraph', () => {
+  assert.deepEqual(assertStatusObservations([{ text: 'Signing out…', tag: 'p', controls: 0, ownTabIndex: false }], ['Signing out…']),
+    { renderings: 1, tag: 'p', controls: 0, focusable: false });
+  assert.throws(() => assertStatusObservations([{ text: 'Signing out…', tag: 'aside', controls: 1, ownTabIndex: true }]), /<aside>/);
+  assert.throws(() => assertStatusObservations([{ text: 'Checking', tag: 'p', controls: 0, ownTabIndex: false }], ['Signing out']), /No recorded status/);
+});
+
+test('held trusted DELETE checkpoints signing-out and always resumes the real request', async () => {
+  let fetchPaused;
+  const calls = [];
+  const target = { sessionId: 'sid', requests: [] };
+  const cdp = {
+    on(method, listener) { assert.equal(method, 'Fetch.requestPaused'); fetchPaused = listener; },
+    async call(method, params) {
+      calls.push(method);
+      if (method === 'Input.dispatchKeyEvent' && params.type === 'keyUp' && params.key === 'Enter') {
+        const request = { requestId: 'request-1', request: { method: 'DELETE', url: 'https://example.test/nested/api/v1/session' } };
+        target.requests.push({ requestId: 'request-1', type: 'XHR', method: 'DELETE', url: request.request.url });
+        queueMicrotask(() => fetchPaused(request));
+      }
+    },
+  };
+  const facts = { asides: [aside()], sessionCount: 1, statuses: [status({ text: 'Signing out…' })], buttons: [] };
+  const evaluate = async (_target, expression) => {
+    if (expression === 'window.__sessionActivationEvents.length') return 0;
+    if (expression === 'window.__sessionActivationEvents') return trusted('Sign out');
+    if (expression.includes('document.activeElement?.blur()')) return true;
+    if (expression.includes('document.activeElement?.closest')) return 'Sign out';
+    if (expression.includes(":focus-visible")) return true;
+    if (expression === sessionFactsExpression) return facts;
+    if (expression === 'typeof window.axe === "object"') return true;
+    if (expression.startsWith('axe.run(')) return { violations: [], incomplete: [], inapplicable: [],
+      passes: REQUIRED_AXE_PASSES.map((id) => ({ id, nodes: 1 })) };
+    throw new Error(`Unexpected evaluate expression: ${expression}`);
+  };
+  const captures = [];
+  const gate = sessionSemanticsGate({ cdp, evaluate, ready: async () => true, capture: async (_target, name) => captures.push(name),
+    axeSource: 'axe', origin: 'https://example.test' });
+  const activation = await gate.activate(target, 'Sign out', { allowed: { mutations: ['DELETE /nested/api/v1/session'], reads: [] },
+    holdRequest: { method: 'DELETE', pathSuffix: '/nested/api/v1/session', checkpointName: 'signing-out',
+      expected: { statusText: 'Signing out…', buttons: [] } }, settled: 'signed out' });
+  assert.equal(activation.during.name, 'signing-out');
+  assert.equal(activation.during.sessionStatuses, 1);
+  assert.equal(activation.during.controls.length, 0);
+  assert.deepEqual(captures, ['session-signing-out.png']);
+  assert.deepEqual(calls.filter((method) => method.startsWith('Fetch.')), ['Fetch.enable', 'Fetch.continueRequest', 'Fetch.disable']);
+});
+
+const trusted = (label) => [{ type: 'keydown', isTrusted: true, key: 'Enter', label }, { type: 'click', isTrusted: true, key: null, label }];
+const checkAllowed = { mutations: [], reads: ['GET /nested/api/v1/bootstrap'], requiredReads: ['GET /nested/api/v1/bootstrap'] };
+test('activation requires trusted keyboard input, correct focus and exact requests', () => {
+  const ok = { label: 'Check session', focused: 'Check session', events: trusted('Check session'), requests: [{ method: 'GET', path: '/nested/api/v1/bootstrap' }], allowed: checkAllowed };
+  assert.deepEqual(assertActivation(ok), { label: 'Check session', trustedEnter: true, requests: ['GET /nested/api/v1/bootstrap'], mutations: 0, reads: 1 });
+  assert.throws(() => assertActivation({ ...ok, focused: null }), /Keyboard focus reached/);
+  assert.throws(() => assertActivation({ ...ok, events: trusted('Check session').map((e) => ({ ...e, isTrusted: false })) }), /No trusted Enter/);
+  assert.throws(() => assertActivation({ ...ok, events: [...trusted('Check session'), { type: 'click', isTrusted: false, label: 'Sign out' }] }), /Untrusted/);
+  assert.throws(() => assertActivation({ ...ok, events: trusted('Check session').slice(0, 1) }), /No trusted activation/);
+  assert.throws(() => assertActivation({ ...ok, requests: [...ok.requests, { method: 'POST', path: '/nested/api/v1/session' }] }), /Unexpected mutation/);
+  assert.throws(() => assertActivation({ ...ok, requests: [...ok.requests, { method: 'GET', path: '/nested/api/v1/jobs' }] }), /exact allowlist/);
+  assert.throws(() => assertActivation({ ...ok, requests: [] }), /exact allowlist/);
+  assert.throws(() => assertActivation({ ...ok, requests: [...ok.requests, ok.requests[0]] }), /exact allowlist/);
+  const signOut = { label: 'Sign out', focused: 'Sign out', events: trusted('Sign out'), requests: [{ method: 'DELETE', path: '/nested/api/v1/session' }], allowed: { mutations: ['DELETE /nested/api/v1/session'], reads: [] } };
+  assert.equal(assertActivation(signOut).mutations, 1);
+  assert.throws(() => assertActivation({ ...signOut, requests: [...signOut.requests, signOut.requests[0]] }), /Unexpected mutation/);
+});
+
+test('gate fails closed without axe and browser sources parse', () => {
+  assert.throws(() => sessionSemanticsGate({ axeSource: '' }), /axe-core source is required/);
+  for (const source of [statusRecorderSource, sessionFactsExpression]) assert.doesNotThrow(() => new Function(source));
+});
