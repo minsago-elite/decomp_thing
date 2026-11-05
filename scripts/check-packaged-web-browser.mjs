@@ -21,6 +21,7 @@ import { createGeometryProbeSection, createGeometryProbe, assessGeometryProbe } 
 import { PackagedBrowserCdpDiagnostics } from './packaged-browser-cdp-diagnostics.mjs';
 import { AXE_VERSION, createNoticeSection, qualifyAvailabilityNotices, assessNoticeReport } from './packaged-browser-a11y-notices.mjs';
 import { createConnectionSection, qualifyConnectionNotice, assessConnectionReport } from './packaged-browser-connection-notice.mjs';
+import { createReadStatesSection, readStateFixtures, qualifyReadStates, assessReadStatesReport, verifyRetainedPng as verifyReadStatePng, withDeadline as readStateDeadline, FIXED_PNG_NAMES as READ_STATE_PNG_NAMES } from './packaged-browser-read-states.mjs';
 
 // Test driver only: the application is launched with a separate Node-free PATH.
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -736,31 +737,102 @@ try {
     await delay(100); // Drain resource events from the last measured target.
     report.auditVerdict = assertAudit(report.audit, manifest, targets.filter((target) => !target.cspProbe).flatMap((target) => target.responses), origin);
     assert.deepEqual(report.auditVerdict.failures, [], `Packaged audit failures:\n${report.auditVerdict.failures.join('\n')}`);
+    // #628: this is frontend-fixture read evidence from its own bounded targets. Attach before the
+    // first fixture or browser call so partial evidence remains in the primary report on failure.
+    const readStates = report.auditReadStates = createReadStatesSection();
+    const readStatesSequences = JSON.parse(readFileSync(join(repo, 'scripts/packaged-browser-read-state-sequences.json'), 'utf8'));
+    const axeLock = JSON.parse(readFileSync(join(repo, 'frontend/package-lock.json'), 'utf8')).packages['node_modules/axe-core'].version;
+    const axePackage = JSON.parse(readFileSync(join(repo, 'frontend/node_modules/axe-core/package.json'), 'utf8')).version;
+    assert.equal(axePackage, axeLock, 'Installed axe-core differs from the frontend lockfile');
+    assert.equal(axePackage, AXE_VERSION, 'Installed axe-core differs from the pinned packaged notice axe version');
+    const axeSource = readFileSync(join(repo, 'frontend/node_modules/axe-core/axe.min.js'), 'utf8');
+    const readStatesLateSink = [];
+    const readStatesStartedAt = Date.now();
+    await qualifyReadStates({ cdp, makeTarget, evaluate, ready, delay, root, origin, section: readStates,
+      sequences: readStatesSequences, axeSource, axeSha256: createHash('sha256').update(axeSource).digest('hex'), lateSink: readStatesLateSink,
+      cookie: { name: 'decomp_read_state_fixture', value: randomUUID() },
+      fixtures: () => readStateFixtures({ repo, python: values.python, buildId: manifest.buildId }) });
+    let readStatesFailures = [];
+    const finalizeReadStatesParentEvidence = async () => {
+      const parent = report.auditReadStatesParent = { schema: 'packaged-read-states-parent/v1', lateSink: [], lateTargetCleanup: [], elapsedMs: Date.now() - readStatesStartedAt };
+      for (const entry of readStatesLateSink) {
+        if (entry?.kind === 'request-after-close') {
+          parent.lateSink.push({ label: entry.label, kind: entry.kind, method: entry.method, path: entry.path });
+          continue;
+        }
+        if (entry?.kind === 'target-acquired-after-freeze') {
+          const cleanup = { label: entry.label, targetId: entry.targetId ?? null, outcome: 'unresolved' };
+          if (typeof entry.targetId === 'string' && entry.targetId.length > 0) {
+            try {
+              await readStateDeadline(cdp.call('Target.closeTarget', { targetId: entry.targetId }), 1000, 'late read-state target close');
+              cleanup.outcome = 'closed';
+            } catch (error) { cleanup.reason = String(error?.message ?? error).slice(0, 160); }
+          } else cleanup.reason = 'late target has no target id';
+          parent.lateTargetCleanup.push(cleanup);
+          continue;
+        }
+        parent.lateSink.push({ kind: 'unknown-late-sink-entry' });
+      }
+      const expectedPngs = [...READ_STATE_PNG_NAMES].sort();
+      const records = readStates.cases.map((entry) => entry?.screenshot).filter(Boolean);
+      const actualPngs = records.map((entry) => entry.name).sort();
+      if (JSON.stringify(actualPngs) !== JSON.stringify(expectedPngs)) parent.lateSink.push({ kind: 'fixed-png-record-set-mismatch' });
+      else for (const png of records) {
+        try { await verifyReadStatePng(root, png); }
+        catch (error) { parent.lateSink.push({ kind: 'retained-png-invalid', name: png.name, reason: String(error?.message ?? error).slice(0, 160) }); }
+      }
+      const owned = assessReadStatesReport(readStates, { sequences: readStatesSequences });
+      const cleanupFailures = parent.lateTargetCleanup.filter((item) => item.outcome !== 'closed').map((item) => `late target cleanup ${item.label}: ${item.reason ?? item.outcome}`);
+      const lateFailures = parent.lateSink.map((item) => `${item.kind}${item.name ? ` ${item.name}` : ''}`);
+      readStatesFailures = [...owned, ...cleanupFailures, ...lateFailures].slice(0, 64);
+      parent.assessment = [...cleanupFailures, ...lateFailures].slice(0, 32);
+      parent.elapsedMs = Date.now() - readStatesStartedAt;
+      report.auditReadStatesGate = { failures: readStatesFailures, passed: readStatesFailures.length === 0 };
+    };
     // #619: rich long-content fixtures and trusted keyboard/emulated-touch operability on a separate target.
     // The section is attached before driving so partial evidence is published if the driver throws.
-    const responsive = report.auditResponsive = createResponsiveSection();
-    await qualifyResponsive({ cdp, makeTarget, evaluate, ready, delay, root, origin, section: responsive,
-      fixtures: () => responsiveFixtures({ repo, python: values.python, buildId: manifest.buildId }) });
-    const responsiveFailures = assessResponsiveReport(responsive);
-    assert.deepEqual(responsiveFailures, [], `Packaged #619 responsive failures:\n${responsiveFailures.join('\n')}`);
-    // #619 genuine 200%/400% page zoom: three fresh owned Chrome processes (1x calibration, 2x, 4x) with the same
-    // executable and flags. Attached before any launch so partial evidence and cleanup records are published.
-    const realZoom = report.auditRealZoom = createRealZoomSection();
-    // Opt-in (--real-zoom-geometry-probe) diagnostic section, separate from the gate and attached before any launch.
-    const geometryProbeSection = values['real-zoom-geometry-probe'] ? (report.auditRealZoomGeometryProbe = createGeometryProbeSection()) : null;
-    await qualifyRealZoom({ section: realZoom, repo, chromeBinary, chromeSha256: report.tools.chromeSha256, baseArgs: chromeFlags(true), env: process.env,
-      spawnChrome: startOwned, stop, connect: async (url) => new Protocol(await connectDevTools(url)), root, origin, delay,
-      fixtures: () => responsiveFixtures({ repo, python: values.python, buildId: manifest.buildId }),
-      ...(geometryProbeSection ? { geometryProbe: createGeometryProbe({ section: geometryProbeSection, root }) } : {}) });
-    if (geometryProbeSection) {
-      try { geometryProbeSection.assessment = (await assessGeometryProbe(geometryProbeSection, { directory: root, realZoom })).slice(0, 24).map((f) => String(f).slice(0, 240)); }
-      catch (error) { geometryProbeSection.assessment = [`assessment failed: ${String(error?.message ?? error).slice(0, 200)}`]; }
+    let auditRunError = null;
+    try {
+      const responsive = report.auditResponsive = createResponsiveSection();
+      await qualifyResponsive({ cdp, makeTarget, evaluate, ready, delay, root, origin, section: responsive,
+        fixtures: () => responsiveFixtures({ repo, python: values.python, buildId: manifest.buildId }) });
+      const responsiveFailures = assessResponsiveReport(responsive);
+      assert.deepEqual(responsiveFailures, [], `Packaged #619 responsive failures:\n${responsiveFailures.join('\n')}`);
+      // #619 genuine 200%/400% page zoom: three fresh owned Chrome processes (1x calibration, 2x, 4x) with the same
+      // executable and flags. Attached before any launch so partial evidence and cleanup records are published.
+      const realZoom = report.auditRealZoom = createRealZoomSection();
+      // Opt-in (--real-zoom-geometry-probe) diagnostic section, separate from the gate and attached before any launch.
+      const geometryProbeSection = values['real-zoom-geometry-probe'] ? (report.auditRealZoomGeometryProbe = createGeometryProbeSection()) : null;
+      await qualifyRealZoom({ section: realZoom, repo, chromeBinary, chromeSha256: report.tools.chromeSha256, baseArgs: chromeFlags(true), env: process.env,
+        spawnChrome: startOwned, stop, connect: async (url) => new Protocol(await connectDevTools(url)), root, origin, delay,
+        fixtures: () => responsiveFixtures({ repo, python: values.python, buildId: manifest.buildId }),
+        ...(geometryProbeSection ? { geometryProbe: createGeometryProbe({ section: geometryProbeSection, root }) } : {}) });
+      if (geometryProbeSection) {
+        try { geometryProbeSection.assessment = (await assessGeometryProbe(geometryProbeSection, { directory: root, realZoom })).slice(0, 24).map((f) => String(f).slice(0, 240)); }
+        catch (error) { geometryProbeSection.assessment = [`assessment failed: ${String(error?.message ?? error).slice(0, 200)}`]; }
+      }
+      const realZoomFailures = assessRealZoomReport(realZoom, { chromeSha256: report.tools.chromeSha256, browser: report.browser, browserArgv: report.browserArgv, fixtures: responsive.fixtures, geometryProbe: geometryProbeSection });
+      assert.deepEqual(realZoomFailures, [], `Packaged #619 real browser zoom failures:\n${realZoomFailures.join('\n')}`);
+      assert.ok(targets.filter((target) => !target.cspProbe).every((target) => target.requests.every((entry) => entry.url.startsWith(origin + '/') || entry.url.startsWith('data:'))), 'Audit fetched an external dependency');
+      assert.equal(await fs.stat(data).then(() => true, () => false), false, 'Fixture-backed audit created job data');
+      report.jobDataCreated = false;
+    } catch (error) {
+      auditRunError = error;
+      throw error;
+    } finally {
+      try { await finalizeReadStatesParentEvidence(); }
+      catch (error) {
+        const message = `read-state parent evidence finalization failed: ${String(error?.message ?? error).slice(0, 160)}`;
+        report.auditReadStatesParent ??= { schema: 'packaged-read-states-parent/v1', lateSink: [], lateTargetCleanup: [], assessment: [] };
+        report.auditReadStatesParent.assessment = [...(report.auditReadStatesParent.assessment ?? []), message].slice(0, 8);
+        readStatesFailures = [message];
+        report.auditReadStatesGate = { failures: readStatesFailures, passed: false };
+        // Keep a pre-existing responsive/zoom exception as the primary failure. If the body succeeded,
+        // surface the evidence-finalization failure directly instead of silently publishing it.
+        if (!auditRunError) throw error;
+      }
     }
-    const realZoomFailures = assessRealZoomReport(realZoom, { chromeSha256: report.tools.chromeSha256, browser: report.browser, browserArgv: report.browserArgv, fixtures: responsive.fixtures, geometryProbe: geometryProbeSection });
-    assert.deepEqual(realZoomFailures, [], `Packaged #619 real browser zoom failures:\n${realZoomFailures.join('\n')}`);
-    assert.ok(targets.filter((target) => !target.cspProbe).every((target) => target.requests.every((entry) => entry.url.startsWith(origin + '/') || entry.url.startsWith('data:'))), 'Audit fetched an external dependency');
-    assert.equal(await fs.stat(data).then(() => true, () => false), false, 'Fixture-backed audit created job data');
-    report.jobDataCreated = false;
+    assert.deepEqual(readStatesFailures, [], `Packaged #628 read-state failures:\n${readStatesFailures.join('\n')}`);
   }
   if (values.mode === 'public' || values.mode === 'session' || values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'history' || values.mode === 'scale' || values.mode === 'live') {
     const identityExpression = `(() => ({ buildId: document.querySelector('meta[name="decomp-ui-build"]')?.content, applicationVersion: document.querySelector('meta[name="decomp-application-version"]')?.content, page: location.pathname, text: document.body.innerText }))()`;

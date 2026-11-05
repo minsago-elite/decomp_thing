@@ -97,6 +97,14 @@ jobs:
           node --check scripts/packaged-browser-connection-notice.mjs
           node --check scripts/packaged-browser-report-test-fixtures.mjs
           node --test scripts/test-packaged-browser-connection-notice.mjs
+      - name: Verify packaged read-state controls
+        timeout-minutes: 6
+        run: |
+          node --check scripts/packaged-browser-read-states.mjs
+          node --check scripts/packaged-browser-read-states-gate.mjs
+          node --check scripts/test-packaged-browser-read-states.mjs
+          node --check scripts/verify-packaged-browser-reports.mjs
+          node --test --test-concurrency=1 scripts/test-packaged-browser-read-states.mjs
       - name: Verify bounded archival cleanup controls
         timeout-minutes: 1
         run: python3 -B scripts/test-archival-diagnostics.py --verbose
@@ -420,7 +428,7 @@ jobs:
         run: >-
           node scripts/verify-packaged-browser-reports.mjs "$GITHUB_WORKSPACE/build"
           --require-modes legacy,session,upload,metadata,live,scale,restart,audit,proxy
-          --require-responsive-audit --require-real-zoom
+          --require-responsive-audit --require-real-zoom --require-read-states
       - name: Retain sanitized packaged web evidence
         uses: actions/upload-artifact@v7
         if: always()
