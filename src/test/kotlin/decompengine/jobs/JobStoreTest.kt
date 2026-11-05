@@ -18,7 +18,7 @@ import org.junit.jupiter.api.Assumptions.assumeTrue
 
 @ExtendWith(RecoveryMatrixEvidence::class)
 class JobStoreTest {
-    @Test fun artifactComparisonMappings() {
+    @Test fun `artifactComparisonMappings`() {
         val root = createTempDirectory("jobs-comparison-")
         val store = JobStore(root)
         val job = store.createFromUpload("snapshot.elf", elfFixture())
