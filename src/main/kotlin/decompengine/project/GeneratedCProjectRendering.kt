@@ -62,13 +62,14 @@ internal class GeneratedCProjectRendering(private val model: RecoveredProgramMod
         val guard = "DECOMP_MODULE_${module.id.uppercase()}_H"
         append("#ifndef $guard\n#define $guard\n\n#include \"decomp_types.h\"\n\n")
         module.globalIds.map { id -> globals.getValue(id) }.forEach { global ->
-            append(globalDeclaration(global, external = true, context = declarationContext)).append(" /* ${global.id} @ 0x${global.address.toString(16)} */\n")
+            append(globalDeclaration(global, external = true, context = declarationContext))
+                .append(" /* ${global.id} @ 0x${global.address.toString(16)}; extraction-status=${global.status.name.lowercase()} */\n")
         }
         if (module.globalIds.isNotEmpty()) append('\n')
         module.functionIds.map { id -> functions.getValue(id) }
             .filter { it.id in externallyCalled || safeCName(it.name) in setOf("main", "decomp_engine_main") }
             .forEach { function ->
-            append(normalizedPrototype(function)).append("; /* ${function.id} @ 0x${function.address.toString(16)} */\n")
+            append(normalizedPrototype(function)).append("; /* ${function.id} @ 0x${function.address.toString(16)}; extraction-status=${function.status.name.lowercase()} */\n")
         }
         append("\n#endif\n")
     }
@@ -83,7 +84,7 @@ internal class GeneratedCProjectRendering(private val model: RecoveredProgramMod
                 // A recovered inventory can retain functions with no callers. Keep their exact
                 // declaration and linkage while suppressing only this function's unused warning.
                 if (declaration.hasInternalLinkage) append("__attribute__((unused))\n")
-                append(declaration.prototype).append("; /* private ${function.id} @ 0x${function.address.toString(16)} */\n")
+                append(declaration.prototype).append("; /* private ${function.id} @ 0x${function.address.toString(16)}; extraction-status=${function.status.name.lowercase()} */\n")
             }
         append("\n#endif\n")
     }
