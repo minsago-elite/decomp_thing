@@ -17,7 +17,7 @@ for attempt in 1 2 3; do
     status=$?
   fi
   cat -- "$fetch_log"
-  if ! grep -Eq '^LLVM release artifact fetch failed: HTTPS exchange (failed|exceeded its wall-clock deadline)$' "$fetch_log"; then
+  if ! grep -Eq '^LLVM release artifact fetch failed: (HTTPS exchange (failed|exceeded its wall-clock deadline)|HTTPS download returned HTTP 504)$' "$fetch_log"; then
     exit "$status"
   fi
   if ((attempt == 3)); then
