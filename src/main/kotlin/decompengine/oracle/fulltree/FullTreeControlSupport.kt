@@ -221,6 +221,7 @@ private enum class MutationInvalidationScope { TARGETED, WATCH, GLOBAL }
 private enum class MutationInvalidationReason {
     FILE_EVENT, PARENT_NAME_MATCH, PARENT_NAMELESS, BOUND_IGNORED, QUEUE_SENTINEL,
     QUEUE_OVERFLOW, UNKNOWN_WATCH, INCOMPATIBLE_BINDING, REMOVE_WATCH_ERROR,
+    RETIRED_WATCH_REUSE, RETIRED_CAPACITY,
     READ_EOF, READ_ERROR, TRUNCATED_HEADER, INVALID_NAME_LENGTH, UNTERMINATED_NAME,
 }
 
@@ -991,6 +992,7 @@ internal class StableControlFile private constructor(
             }
 
             private const val INOTIFY_READ_BYTES = 64 * 1024
+            private const val MAX_RETIRED_WATCHES = 256
             private const val INOTIFY_EVENT_HEADER_BYTES = 4 * Int.SIZE_BYTES
             private const val INOTIFY_QUEUE_WATCH = -1
             private const val O_NONBLOCK = 0x800
@@ -1023,10 +1025,11 @@ internal class StableControlFile private constructor(
         private var bindingGenerationSaturated = false
         private var eventSequence = 0L
         private var sequenceSaturated = false
+        private var retiredCapacityExceeded = false
         private val startedNanos = clock()
         private val registrations = HashMap<Long, Registration>()
         private val watches = HashMap<Int, WatchBinding>()
-        private val retiredWatches = HashSet<Int>()
+        private val retiredWatches = HashMap<Int, RetiredWatch>()
 
         private class Registration(
             private val owner: MutationMonitor,
@@ -1060,6 +1063,8 @@ internal class StableControlFile private constructor(
             val registrations: MutableSet<Long> = LinkedHashSet(),
         )
 
+        private data class RetiredWatch(val kind: WatchKind, val generation: Long)
+
         private data class EventObservation(
             val sequence: Long,
             val elapsedNanos: Long,
@@ -1086,6 +1091,9 @@ internal class StableControlFile private constructor(
             var registration: Registration? = null
             try {
                 ensureOpen(label)
+                if (retiredCapacityExceeded) {
+                    throw FullTreeControlException("$label mutation monitor exceeded retired watch capacity")
+                }
                 // Keep this drain inside the catch boundary: while a later component is being
                 // installed, it may observe and retain an invalidation for an earlier component
                 // before the same read fails on a later record.
@@ -1191,6 +1199,33 @@ internal class StableControlFile private constructor(
         }
 
         private fun bind(watch: Int, kind: WatchKind, registrationId: Long, label: String): WatchBinding {
+            val retired = retiredWatches[watch]
+            if (retired != null) {
+                val observation = observeEvent(watch, 0, 0, retired.kind.name, retired.generation)
+                markAllChanged(
+                    observation,
+                    MutationInvalidationReason.RETIRED_WATCH_REUSE,
+                    MutationInvalidationScope.GLOBAL,
+                )
+                // inotify_add_watch has already created or selected this descriptor. It cannot
+                // be represented safely while queued records for the retired generation remain.
+                // Remove the newly returned watch best-effort; refusal remains authoritative even
+                // if this cleanup itself fails.
+                val removed = libc.inotify_rm_watch(descriptor, watch)
+                if (removed != 0) {
+                    val error = Native.getLastError()
+                    if (error != EINVAL) {
+                        val cleanupObservation = observeEvent(watch, 0, 0, "${kind.name}_REMOVE", 0L)
+                        markAllChanged(
+                            cleanupObservation,
+                            MutationInvalidationReason.REMOVE_WATCH_ERROR,
+                            MutationInvalidationScope.GLOBAL,
+                            error,
+                        )
+                    }
+                }
+                throw FullTreeControlException("$label mutation monitor reused a retired watch")
+            }
             val binding = watches[watch]
             if (binding != null && binding.kind != kind) {
                 val event = observeEvent(watch, 0, 0, binding.kind.name, binding.generation)
@@ -1218,7 +1253,17 @@ internal class StableControlFile private constructor(
             binding.registrations.remove(registrationId)
             if (binding.registrations.isNotEmpty()) return
             watches.remove(watch)
-            retiredWatches.add(watch)
+            if (retiredWatches.size < MAX_RETIRED_WATCHES) {
+                retiredWatches[watch] = RetiredWatch(binding.kind, binding.generation)
+            } else {
+                retiredCapacityExceeded = true
+                val observation = observeEvent(watch, 0, 0, binding.kind.name, binding.generation)
+                markAllChanged(
+                    observation,
+                    MutationInvalidationReason.RETIRED_CAPACITY,
+                    MutationInvalidationScope.GLOBAL,
+                )
+            }
             val result = libc.inotify_rm_watch(descriptor, watch)
             if (result != 0) {
                 val error = Native.getLastError()
@@ -1325,8 +1370,23 @@ internal class StableControlFile private constructor(
         ) {
             val binding = watches[watch]
             if (binding == null) {
-                if (watch in retiredWatches && mask and IN_IGNORED != 0) {
-                    retiredWatches.remove(watch)
+                if (watch in retiredWatches) {
+                    if (nameLength > 0) {
+                        val retiredName = buffer.getByteArray(
+                            (offset + INOTIFY_EVENT_HEADER_BYTES).toLong(),
+                            nameLength,
+                        )
+                        if (retiredName.indexOf(0) < 0) {
+                            malformedEvent(
+                                label,
+                                "unterminated-name",
+                                MutationInvalidationReason.UNTERMINATED_NAME,
+                                offset,
+                                observation,
+                            )
+                        }
+                    }
+                    if (mask and IN_IGNORED != 0) retiredWatches.remove(watch)
                     return
                 }
                 markAllChanged(
