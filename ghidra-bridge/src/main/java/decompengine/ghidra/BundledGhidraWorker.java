@@ -178,7 +178,9 @@ public final class BundledGhidraWorker {
         }
         analyzer.getOptions().setPostScriptsWithArgs(List.of(new Pair<>(
             "RunBundledExports.class", guardedArguments.toArray(String[]::new))));
-        analyzer.getOptions().setPreScriptsWithArgs(List.of(new Pair<>("AnalysisTimingPreScript.java", new String[0])));
+        if (timingInvocationId != null) {
+            analyzer.getOptions().setPreScriptsWithArgs(List.of(new Pair<>("AnalysisTimingPreScript.java", new String[0])));
+        }
         if (diagnostics != null) diagnostics.phase(JvmMxBeanDiagnostics.Phase.IMPORT_AND_ANALYSIS, null);
         beginTimingPhase("project-open-import-pre-analysis");
         try {
