@@ -13,6 +13,9 @@ import decompengine.jobs.prepareJobStoreDirectories
 import decompengine.jobs.elfFixture
 import java.nio.file.Files
 import java.nio.file.Path
+import java.time.Clock
+import java.time.Instant
+import java.time.ZoneOffset
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
@@ -29,6 +32,12 @@ import kotlin.test.assertTrue
 
 @ExtendWith(RecoveryMatrixEvidence::class)
 class WebJobServiceTest {
+    private class RetentionClock(var now: Instant) : Clock() {
+        override fun instant(): Instant = now
+        override fun getZone() = ZoneOffset.UTC
+        override fun withZone(zone: java.time.ZoneId): Clock = this
+    }
+
     @Test fun `startup durability refusal preserves its public type and the full private recovery context`() {
         val original = UnsupportedOperationException("PRIVATE directory provider")
         val maintenance = WebJobServiceException("STORE_DURABILITY_UNAVAILABLE", "PRIVATE directory failure", original)
@@ -734,11 +743,12 @@ class WebJobServiceTest {
     }
 
     @Test fun `listings remain available across retained progress cleanup`() {
-        for (api in listOf(false, true)) for (mode in listOf("recent", "active", "pinned", "protected", "invalid-duration")) withStore { store, _ ->
+        for (api in listOf(false, true)) for (mode in listOf("recent", "active", "pinned", "protected", "publication-pending", "invalid-duration")) withStore { store, _ ->
         val job = store.createFromUpload("retained.elf", elfFixture())
         lateinit var owner: WorkflowAttemptStore
+        val clock = RetentionClock(Instant.parse("2026-09-05T00:00:00Z"))
         WebJobService(store, JobAnalyzer { _, _ -> error("Unexpected execution") }, inertReconstructor,
-            attemptStoreFactory = { path -> WorkflowAttemptStore.open(path).also { owner = it } }).use { service ->
+            attemptStoreFactory = { path -> WorkflowAttemptStore.open(path, clock).also { owner = it } }).use { service ->
             service.initializeExistingStorage()
             val version = (service.inspectDurableJob(job.id) as decompengine.jobs.WorkflowJobInspection.Available).snapshot.version
             val queued = owner.create(job.id, version, decompengine.jobs.NewWorkflowAttempt(
@@ -747,8 +757,12 @@ class WebJobServiceTest {
             val running = owner.transition(job.id, queued.runId, queued.version, decompengine.jobs.WorkflowTransition.Start).attempt
             val finished = if (mode == "active") running else owner.transition(job.id, running.runId, running.version,
                 decompengine.jobs.WorkflowTransition.Finish(decompengine.jobs.WorkflowRunState.COMPLETED,
-                    decompengine.jobs.WorkflowTerminalReason.NO_CHANGES)).attempt
+                    decompengine.jobs.WorkflowTerminalReason.NO_CHANGES,
+                    candidate = if (mode == "publication-pending") decompengine.jobs.WorkflowCandidate("revision_candidate", "ab".repeat(32)) else null)).attempt
             if (mode == "pinned") owner.setProgressRetentionPinned(job.id, finished.runId, finished.version, true)
+            if (mode in setOf("pinned", "protected", "publication-pending")) {
+                clock.now = clock.now.plus(java.time.Duration.ofDays(2))
+            }
             var cleanups = 0
             service.listingReadObserver = { relative ->
                 if (relative == "${job.id}/workflow-state.json") {
