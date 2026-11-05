@@ -168,9 +168,48 @@ it('a foreign or same-version 412 readback is not adopted and the guard is uncha
   render(<Org fetcher={f} onChanged={changed} />);
   fireEvent.input(input(), { target: { value: 'Mine' } }); save();
   await settled();
-  expect(status()).toContain('changed in another tab');
+  expect(status()).toContain(copy.changed);
+  expect(status()).not.toContain('current version is shown');
   expect(changed).not.toHaveBeenCalled();
   expect(screen.queryByText(/current label is/)).toBeNull();
+  expect(input().value).toBe('Mine');
+});
+
+it('a same-version or failed 412 readback asks for refresh without claiming the refreshed version is shown', async () => {
+  for (const readback of [doc(base), netdown]) {
+    const f = seq(fail(412, 'VERSION_CONFLICT'), readback);
+    const view = render(<Org fetcher={f} />);
+    fireEvent.input(input(), { target: { value: 'Mine' } }); save();
+    await settled();
+    expect(status()).toContain(copy.changed);
+    expect(status()).not.toContain('current version is shown');
+    expect(input().value).toBe('Mine');
+    expect(f).toHaveBeenCalledTimes(2);
+    view.unmount();
+  }
+});
+
+it('a cancelled 412 readback reports an unconfirmed result without implying a write may have landed', async () => {
+  let readbackSignal: AbortSignal | undefined;
+  const f = vi.fn<typeof fetch>().mockImplementation((_url, init) => {
+    if (init?.method === 'PATCH') return Promise.resolve(fail(412, 'VERSION_CONFLICT')());
+    return new Promise((_resolve, reject) => {
+      readbackSignal = init?.signal ?? undefined;
+      readbackSignal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+    });
+  });
+  render(<Org fetcher={f} />);
+  fireEvent.input(input(), { target: { value: 'Mine' } }); save();
+  await waitFor(() => expect(f).toHaveBeenCalledTimes(2));
+  Object.defineProperty(navigator, 'onLine', { configurable: true, value: false });
+  await act(() => { window.dispatchEvent(new Event('offline')); });
+  await waitFor(() => expect(readbackSignal?.aborted).toBe(true));
+  expect(document.body.textContent).toContain(copy.paused);
+  Object.defineProperty(navigator, 'onLine', { configurable: true, value: true });
+  await act(() => { window.dispatchEvent(new Event('online')); });
+  await waitFor(() => expect(document.body.textContent).toContain(copy.unconfirmed));
+  expect(document.body.textContent).not.toContain('may have been written');
+  expect(f).toHaveBeenCalledTimes(2);
   expect(input().value).toBe('Mine');
 });
 

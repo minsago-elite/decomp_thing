@@ -73,7 +73,7 @@ export const jobOrganizationCopy = {
   "saving": "Saving and reading the current job…",
   "saved": "Saved. The job was read again from the server.",
   "unchanged": "Nothing changed.",
-  "changed": "The job changed in another tab or request. The current version is shown; review it before saving again.",
+  "changed": "The job changed in another tab or request. Refresh it before saving again.",
   "invalidLabel": "Use 1–120 printable characters without leading or trailing spaces.",
   "invalidChange": "The server rejected this change. Review the label and archive state before saving again.",
   "unverified": "The server response could not be verified, so the outcome is unknown. Refresh the job before editing again.",
@@ -81,7 +81,7 @@ export const jobOrganizationCopy = {
   "currentServerNoLabel": "The server's current version has no label.",
   "keptEdits": "Your edits are kept. Saving again applies them to the current version.",
   "storage": "The change was not saved: storage is full, read-only or unavailable. The previous label and archive state are kept.",
-  "unconfirmed": "The change may have been written but could not be confirmed. Refresh the job before editing again.",
+  "unconfirmed": "The save result could not be confirmed. Refresh the job before editing again.",
   "denied": "Reconnect the local session before changing this job.",
   "failed": "The change could not be confirmed. Refresh the job before trying again.",
   "paused": "Editing is paused while this tab is hidden or offline."
