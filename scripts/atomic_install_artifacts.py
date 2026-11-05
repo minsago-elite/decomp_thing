@@ -203,6 +203,11 @@ def seal(repo):
                         json_work += len(json.dumps(name).encode()) + 160
                         io.require(json_work <= io.MAX_JSON, 'artifact manifest member JSON bound')
                         files[name.removeprefix('build/')] = {k: receipt[k] for k in ('sha256', 'bytes')}
+                elif stat.S_ISREG(info.st_mode):
+                    # Recursive positive patterns can keep a lexical descendant
+                    # state after an exact negative pattern excludes this file.
+                    # A no-follow regular leaf cannot contain those descendants.
+                    pass
                 else:
                     # A relevant ancestor must really be a directory (including FIFO/dangling links).
                     raise RuntimeError('artifact possible ancestor is not directory')

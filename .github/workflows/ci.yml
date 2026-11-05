@@ -207,6 +207,7 @@ jobs:
           mkdir -p build/orchestration/atomic-install-ci
           python3 -B scripts/test-atomic-install-qualification.py 2>&1 | tee build/orchestration/atomic-install-ci/verifier-controls.log
           python3 -B scripts/test-atomic-install-prepared.py 2>&1 | tee build/orchestration/atomic-install-ci/prepared-controls.log
+          python3 -B scripts/test-atomic-install-artifacts.py 2>&1 | tee build/orchestration/atomic-install-ci/artifact-controls.log
           python3 -B scripts/atomic_install_artifacts.py check
       - name: Check the configured native helper compiler
         run: |
