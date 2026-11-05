@@ -155,17 +155,35 @@ class StableControlFileMutationDiagnosticsTest {
         }
 
         withMonitor { monitor, fixture ->
-            val original = monitor.register(fixture.parent, fixture.selected, "item.bin", 0, 1)
-            val retiredWatch = fieldInt(original.value, "parentWatch")
-            original.call("release")
+            val untouched = monitor.register(fixture.parent, fixture.selected, "item.bin", 0, 1)
+            val other = otherFile()
+            try {
+                val original = monitor.register(other.parent, other.selected, "other.bin", 0, 1)
+                val retiredWatch = fieldInt(original.value, "parentWatch")
+                original.call("release")
 
-            val removalsBeforeReuse = fixture.adapter.removeCalls.count { it == retiredWatch }
-            fixture.adapter.reuseNextWatchId = retiredWatch
-            val failure = assertFailure { monitor.register(fixture.parent, fixture.selected, "item.bin", 0, 1) }
-            assertTrue(diagnostic(failure).contains("reason=RETIRED_WATCH_REUSE"), diagnostic(failure))
-            assertTrue(diagnostic(failure).contains("scope=GLOBAL"), diagnostic(failure))
-            assertTrue(diagnostic(failure).contains("watch=$retiredWatch"), diagnostic(failure))
-            assertEquals(removalsBeforeReuse + 1, fixture.adapter.removeCalls.count { it == retiredWatch })
+                val removalsBeforeReuse = fixture.adapter.removeCalls.count { it == retiredWatch }
+                fixture.adapter.reuseNextWatchId = retiredWatch
+                val failure = assertFailure {
+                    monitor.register(other.parent, other.selected, "other.bin", 0, 1)
+                }
+                assertTrue(diagnostic(failure).contains("reason=RETIRED_WATCH_REUSE"), diagnostic(failure))
+                assertTrue(diagnostic(failure).contains("scope=GLOBAL"), diagnostic(failure))
+                assertTrue(diagnostic(failure).contains("watch=$retiredWatch"), diagnostic(failure))
+                assertEquals(removalsBeforeReuse + 1, fixture.adapter.removeCalls.count { it == retiredWatch })
+
+                val untouchedFailure = assertFailure { untouched.call("requireQuiet", "untouched live guard") }
+                assertTrue(
+                    diagnostic(untouchedFailure).contains("reason=RETIRED_WATCH_REUSE"),
+                    diagnostic(untouchedFailure),
+                )
+                assertTrue(diagnostic(untouchedFailure).contains("scope=GLOBAL"), diagnostic(untouchedFailure))
+            } finally {
+                untouched.call("release")
+                other.selected.close()
+                other.parent.close()
+                other.root.toFile().deleteRecursively()
+            }
         }
     }
 
@@ -518,6 +536,71 @@ class StableControlFileMutationDiagnosticsTest {
     }
 
     @Test
+    fun `real selected file and parent directory mutation events still invalidate`() {
+        val operations: List<Pair<String, (RealFixture) -> Unit>> = listOf(
+            "append" to { fixture ->
+                Files.newOutputStream(fixture.root.resolve("item.bin"), java.nio.file.StandardOpenOption.APPEND)
+                    .use { it.write(0x55) }
+            },
+            "chmod" to { fixture ->
+                Files.setPosixFilePermissions(
+                    fixture.root.resolve("item.bin"),
+                    java.nio.file.attribute.PosixFilePermissions.fromString("r--------"),
+                )
+            },
+            "hardlink" to { fixture ->
+                Files.createLink(fixture.root.resolve("alias.bin"), fixture.root.resolve("item.bin"))
+            },
+            "close-write" to { fixture ->
+                Files.newByteChannel(
+                    fixture.root.resolve("item.bin"),
+                    java.nio.file.StandardOpenOption.WRITE,
+                ).use { }
+            },
+            "rename" to { fixture ->
+                Files.move(fixture.root.resolve("item.bin"), fixture.root.resolve("renamed.bin"))
+            },
+            "unlink" to { fixture -> Files.delete(fixture.root.resolve("item.bin")) },
+            "directory-self-chmod" to { fixture ->
+                Files.setPosixFilePermissions(
+                    fixture.root,
+                    java.nio.file.attribute.PosixFilePermissions.fromString("r-x------"),
+                )
+            },
+        )
+
+        for ((name, mutate) in operations) {
+            withRealMonitor { monitor, fixture ->
+                val registration = monitor.register(fixture.parent, fixture.selected, "item.bin", 0, 1)
+                val originalParentPermissions = Files.getPosixFilePermissions(fixture.root)
+                try {
+                    mutate(fixture)
+                    val failure = assertFailure {
+                        registration.call("requireQuiet", "$name real mutation")
+                    }
+                    val text = diagnostic(failure)
+                    if (name == "directory-self-chmod") {
+                        assertTrue(text.contains("reason=PARENT_NAMELESS"), text)
+                        assertTrue(text.contains("scope=WATCH"), text)
+                    } else {
+                        assertTrue(text.contains("scope=TARGETED"), text)
+                        assertTrue(
+                            text.contains("reason=FILE_EVENT") || text.contains("reason=PARENT_NAME_MATCH"),
+                            "$name did not produce a selected-file event: $text",
+                        )
+                    }
+                    println("STAGE_C_REAL_MUTATION name=$name ${text.substringBefore(' ')}")
+                } finally {
+                    if (name == "directory-self-chmod") {
+                        Files.setPosixFilePermissions(fixture.root, originalParentPermissions)
+                    }
+                    registration.call("release")
+                }
+            }
+        }
+    }
+
+    @Test
     fun `remove watch failure invalidates remaining registrations but EINVAL does not`() {
         withMonitor { monitor, fixture ->
             val other = otherFile()
@@ -598,11 +681,34 @@ class StableControlFileMutationDiagnosticsTest {
         }
     }
 
+    private fun withRealMonitor(block: (PrivateMonitor, RealFixture) -> Unit) {
+        val root = temporaryDirectory("stable-monitor-real-mutation")
+        val input = root.resolve("item.bin")
+        Files.write(input, byteArrayOf(1, 2, 3))
+        val parent = LinuxFilesystemSyscalls.openRoot(root)
+        val selected = LinuxFilesystemSyscalls.openPathAtOrNull(parent.fd, "item.bin")!!
+        val monitor = PrivateMonitor(realInotifyProxy(beforeRemove = { _, _ -> }))
+        try {
+            block(monitor, RealFixture(root, parent, selected))
+        } finally {
+            monitor.close()
+            selected.close()
+            parent.close()
+            root.toFile().deleteRecursively()
+        }
+    }
+
     private data class Fixture(
         val root: java.nio.file.Path,
         val parent: LinuxDescriptor,
         val selected: LinuxDescriptor,
         val adapter: ScriptedInotify,
+    )
+
+    private data class RealFixture(
+        val root: Path,
+        val parent: LinuxDescriptor,
+        val selected: LinuxDescriptor,
     )
 
     private data class OtherFile(val root: java.nio.file.Path, val parent: LinuxDescriptor, val selected: LinuxDescriptor)
