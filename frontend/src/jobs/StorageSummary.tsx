@@ -8,7 +8,7 @@ import { lazyContractSchema } from '../api/generated-schema-lazy';
 import type { MaintenancePreview, StorageSummary as Summary } from '../api/generated';
 import { PrivateSessionContext, usePrivateTransport } from '../session/PrivateTransport';
 import type { BrowserSession } from '../session/session';
-import { formatExactBytes } from './metadataFormat';
+import { formatExactBytes, formatExactCount } from '../copy/format';
 
 registerContractExtension(lazyContractSchema);
 
@@ -110,7 +110,7 @@ export function StorageSummary({ basePath }: { basePath: string }) {
         <p>{copy.automaticDeletionDisabled}</p>
         {preview.data.complete && preview.data.actions.length === 0 && preview.data.omittedActions === '0' && <p>{copy.emptyMaintenance}</p>}
         <p>{textMessage(copy.affected, { jobs: preview.data.affectedJobs, bytes: formatExactBytes(preview.data.reclaimableBytes) })}</p>
-        <p>{textMessage(copy.protectedJobs, { count: String(preview.data.protectedJobs.length + Number(preview.data.omittedProtectedJobs)) })}</p>
+        <p>{textMessage(copy.protectedJobs, { count: formatExactCount((BigInt(preview.data.protectedJobs.length) + BigInt(preview.data.omittedProtectedJobs)).toString()) })}</p>
         {!preview.data.complete && <p>{copy.partial}</p>}
       </>}
     </>}
