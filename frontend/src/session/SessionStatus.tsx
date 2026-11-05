@@ -38,8 +38,8 @@ export function SessionStatus({ session, placement = 'any' }: { session: Browser
   if (state.status === 'public') return null;
   if (placement !== 'any' && (placement === 'header') !== (state.status === 'authenticated')) return null;
   if (state.status === 'checking' || state.status === 'signing-out') {
-    return <aside class="session-notice notice" role="status">
-      <p>{state.status === 'checking' ? copy.checkingLocalSession : copy.signingOut}</p>
+    return <aside class="session-notice notice" aria-label={copy.localSession}>
+      <p role="status">{state.status === 'checking' ? copy.checkingLocalSession : copy.signingOut}</p>
     </aside>;
   }
   if (state.status === 'authenticated') {
@@ -50,8 +50,8 @@ export function SessionStatus({ session, placement = 'any' }: { session: Browser
     </aside>;
   }
   const canCheck = state.status !== 'unavailable' || !['removal-failed', 'incompatible'].includes(state.reason);
-  return <aside class="session-notice notice" aria-label={copy.localSession} role="status">
-    <p>{explanation(state)}{'referenceId' in state && state.referenceId && <>{displayMessage(copy.reference, { reference: <code>{state.referenceId}</code> })}</>}</p>
+  return <aside class="session-notice notice" aria-label={copy.localSession}>
+    <p role="status">{explanation(state)}{'referenceId' in state && state.referenceId && <>{displayMessage(copy.reference, { reference: <code>{state.referenceId}</code> })}</>}</p>
     {canCheck && <button type="button" onClick={() => { void session.refresh(); }}>{copy.checkSession}</button>}
   </aside>;
 }

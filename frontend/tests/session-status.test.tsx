@@ -181,3 +181,115 @@ it('keeps the connected session in header chrome and every other state in the pa
   expect(screen.getByTestId('page').textContent).toContain('signed out');
   expect(screen.getAllByRole('button').map(button => button.textContent)).not.toContain('Sign out');
 });
+
+async function axeViolations(root: Element) {
+  const { default: axe } = await import('axe-core');
+  const result = await axe.run(root, { runOnly: { type: 'rule', values: ['aria-allowed-role', 'aria-required-children', 'nested-interactive', 'landmark-unique'] } });
+  return result.violations.map(violation => violation.id);
+}
+
+function expectStatusOnlyText() {
+  const statuses = screen.getAllByRole('status');
+  for (const status of statuses) {
+    expect(status.tagName).toBe('P');
+    expect(status.querySelector('button, a, input, [tabindex]')).toBeNull();
+  }
+  for (const aside of document.querySelectorAll('aside')) {
+    expect(aside.hasAttribute('role')).toBe(false);
+    expect(aside.getAttribute('aria-label')).toBe('Local session');
+  }
+  return statuses;
+}
+
+it('keeps live status semantics on text-only regions through every session transition', async () => {
+  let release!: () => void;
+  const { session, gateway, data } = setup();
+  gateway.bootstrap.mockImplementationOnce(() => new Promise(resolve => { release = () => resolve(data); }));
+  expect(gateway.bootstrap).not.toHaveBeenCalled();
+  expect(gateway.logout).not.toHaveBeenCalled();
+  let pending!: Promise<void>;
+  void act(() => { pending = session.initialize({ kind: 'absent' }); });
+  expect(session.snapshot().status).toBe('checking');
+  expect(expectStatusOnlyText().map(status => status.textContent)).toEqual(['Checking local session…']);
+  expect(screen.queryByRole('button')).toBeNull();
+  expect(screen.getByRole('complementary', { name: 'Local session' })).toBeTruthy();
+  expect(await axeViolations(document.body)).toEqual([]);
+  await act(async () => { release(); await pending; });
+
+  const signOut = screen.getByRole('button', { name: 'Sign out' });
+  expect(signOut.closest('[role="status"]')).toBeNull();
+  expect(screen.queryByRole('status')).toBeNull();
+  expect(gateway.logout).not.toHaveBeenCalled();
+  expect(await axeViolations(document.body)).toEqual([]);
+  signOut.focus();
+  expect(document.activeElement).toBe(signOut);
+  fireEvent.keyDown(signOut, { key: 'Enter' });
+  fireEvent.click(signOut);
+  expect(await screen.findByText(/You signed out of this browser/)).toBeTruthy();
+  expect(gateway.logout).toHaveBeenCalledOnce();
+  const [required] = expectStatusOnlyText();
+  expect(required?.textContent).toContain('You signed out of this browser');
+  const check = screen.getByRole('button', { name: 'Check session' });
+  expect(check.closest('[role="status"]')).toBeNull();
+  expect(await axeViolations(document.body)).toEqual([]);
+  const before = gateway.bootstrap.mock.calls.length;
+  check.focus();
+  expect(document.activeElement).toBe(check);
+  fireEvent.click(check);
+  expect(await screen.findByRole('button', { name: 'Sign out' })).toBeTruthy();
+  expect(gateway.bootstrap).toHaveBeenCalledTimes(before + 1);
+  expect(gateway.exchange).not.toHaveBeenCalled();
+});
+
+it('announces an application instance change as text only beside the Sign out action', async () => {
+  const { session, gateway, data } = setup();
+  await act(async () => { await session.initialize({ kind: 'absent' }); });
+  gateway.bootstrap.mockResolvedValueOnce({ ...data, serverInstanceId: `${data.serverInstanceId ?? 'instance'}-changed` });
+  await act(async () => { await session.refresh(); });
+  expect(session.snapshot()).toMatchObject({ status: 'authenticated', serverChanged: true });
+  const [status] = expectStatusOnlyText();
+  expect(status?.textContent).toMatch(/^Application instance changed\./);
+  expect(screen.getByText('Local session connected.').getAttribute('role')).toBeNull();
+  expect(screen.getByRole('button', { name: 'Sign out' }).closest('[role="status"]')).toBeNull();
+  expect(gateway.logout).not.toHaveBeenCalled();
+  expect(await axeViolations(document.body)).toEqual([]);
+});
+
+for (const reason of ['removal-failed', 'incompatible'] as const) {
+  it(`suppresses the refresh action for ${reason} while keeping a valid text status`, async () => {
+    const { session, gateway } = setup();
+    if (reason === 'removal-failed') await act(async () => { await session.initialize({ kind: 'removal-failed' }); });
+    else {
+      gateway.bootstrap.mockRejectedValueOnce(new ApiClientError('unsupported_contract'));
+      await act(async () => { await session.initialize({ kind: 'absent' }); });
+    }
+    expect(session.snapshot()).toMatchObject({ status: 'unavailable', reason });
+    expectStatusOnlyText();
+    expect(screen.queryByRole('button')).toBeNull();
+    expect(await axeViolations(document.body)).toEqual([]);
+  });
+}
+
+it('permits an explicit refresh for a connection failure outside the status region', async () => {
+  const { session, gateway } = setup();
+  gateway.bootstrap.mockRejectedValueOnce(new ApiClientError('network_error'));
+  await act(async () => { await session.initialize({ kind: 'absent' }); });
+  expect(session.snapshot()).toMatchObject({ status: 'unavailable', reason: 'connection' });
+  expectStatusOnlyText();
+  const check = screen.getByRole('button', { name: 'Check session' });
+  expect(check.closest('[role="status"]')).toBeNull();
+  expect(gateway.bootstrap).toHaveBeenCalledOnce();
+  expect(await axeViolations(document.body)).toEqual([]);
+  fireEvent.click(check);
+  expect(await screen.findByRole('button', { name: 'Sign out' })).toBeTruthy();
+  expect(gateway.bootstrap).toHaveBeenCalledTimes(2);
+});
+
+it('negative control: axe rejects the former aside[role=status] native-role override', async () => {
+  const host = document.createElement('div');
+  host.innerHTML = '<aside class="session-notice notice" aria-label="Local session" role="status"><p>Checking</p><button type="button">Check session</button></aside>';
+  document.body.append(host);
+  try {
+    expect(await axeViolations(host)).toContain('aria-allowed-role');
+  } finally { host.remove(); }
+});
