@@ -534,6 +534,9 @@ fun publishGhidraBundle(staged: Path, installed: Path, hooks: GhidraPublicationH
     }
     require(attributes(staged).isDirectory)
     val stagedFiles = inventory(staged)
+    val stagedDirectories = Files.walk(staged).use { paths ->
+        paths.filter { attributes(it).isDirectory }.map { staged.relativize(it).toString() }.toList().toSet()
+    }
     val manifestPath = staged.resolve("bundle.sha256")
     require(Files.size(manifestPath) <= 4 * 1024 * 1024)
     val manifest = Files.newInputStream(manifestPath, nofollow).use { it.readNBytes(4 * 1024 * 1024 + 1) }
@@ -577,6 +580,12 @@ fun publishGhidraBundle(staged: Path, installed: Path, hooks: GhidraPublicationH
             parent = parent.parent
         }
     }
+    stagedDirectories.forEach { name ->
+        val target = root.resolve(name)
+        if (Files.exists(target, nofollow)) require(attributes(target).isDirectory) {
+            "File/directory conflict: $target"
+        }
+    }
     fun syncDirectory(path: Path) { FileChannel.open(path, StandardOpenOption.READ).use { it.force(true) } }
     fun normalize(path: Path, mode: Set<PosixFilePermission>) {
         val attr = attributes(path)
@@ -584,6 +593,12 @@ fun publishGhidraBundle(staged: Path, installed: Path, hooks: GhidraPublicationH
         if (attr.lastModifiedTime() != timestamp) Files.setLastModifiedTime(path, timestamp)
     }
     Files.createDirectories(root)
+    val directoryMode = PosixFilePermissions.fromString("rwxr-xr-x")
+    stagedDirectories.forEach { name ->
+        val target = root.resolve(name)
+        Files.createDirectories(target)
+        if (attributes(target).permissions() != directoryMode) Files.setPosixFilePermissions(target, directoryMode)
+    }
     fun publish(name: String, hash: String, bytes: ByteArray? = null) {
         val target = root.resolve(name)
         val mode = modes[name] ?: PosixFilePermissions.fromString("rw-r--r--")
@@ -617,13 +632,16 @@ fun publishGhidraBundle(staged: Path, installed: Path, hooks: GhidraPublicationH
         Files.delete(path); syncDirectory(path.parent); hooks.onDeleted(name)
     }
     Files.walk(root).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach { path ->
-        if (path != root && attributes(path).isDirectory) {
+        if (path != root && attributes(path).isDirectory && root.relativize(path).toString() !in stagedDirectories) {
             val empty = Files.newDirectoryStream(path).use { !it.iterator().hasNext() }
             if (empty) { Files.delete(path); syncDirectory(path.parent) }
         }
     } }
     val expected = records + ("bundle.sha256" to manifestHash)
     require(inventory(root).keys == expected.keys)
+    require(Files.walk(root).use { paths ->
+        paths.filter { attributes(it).isDirectory }.map { root.relativize(it).toString() }.toList().toSet()
+    } == stagedDirectories) { "Installed bundle directory inventory differs" }
     expected.forEach { (name, hash) ->
         val path = root.resolve(name)
         require(sha256(path) == hash && attributes(path).permissions() ==
@@ -2277,6 +2295,8 @@ val verifyAtomicGhidraBundlePublication = tasks.register("verifyAtomicGhidraBund
         val staged = base.resolve("staged")
         val installed = base.resolve("installed")
         Files.createDirectories(staged.resolve("a")); Files.createDirectories(staged.resolve("bin"))
+        Files.createDirectories(staged.resolve("declared-empty/nested"))
+        Files.setPosixFilePermissions(staged.resolve("declared-empty/nested"), PosixFilePermissions.fromString("rwx------"))
         Files.writeString(staged.resolve("a/x"), "fixture")
         Files.writeString(staged.resolve("bin/tool"), "tool")
         Files.setPosixFilePermissions(staged.resolve("bin/tool"), PosixFilePermissions.fromString("rwxr-xr-x"))
@@ -2289,12 +2309,15 @@ val verifyAtomicGhidraBundlePublication = tasks.register("verifyAtomicGhidraBund
         val published = mutableListOf<String>()
         publishGhidraBundle(staged, installed, GhidraPublicationHooks(onPublished = { published.add(it) }))
         verify(published == listOf("a/x", "bin/tool", "bundle.sha256"))
+        verify(Files.isDirectory(installed.resolve("declared-empty/nested")))
+        verify(Files.getPosixFilePermissions(installed.resolve("declared-empty/nested")) == PosixFilePermissions.fromString("rwxr-xr-x"))
         fun snapshot() = Files.walk(installed).use { paths -> paths.filter { Files.isRegularFile(it) }.toList().associate {
             installed.relativize(it).toString() to Triple(sha256(it), Files.readAttributes(it, BasicFileAttributes::class.java).fileKey(), Files.getLastModifiedTime(it))
         } }
         val first = snapshot(); published.clear()
         publishGhidraBundle(staged, installed, GhidraPublicationHooks(onPublished = { published.add(it) }))
         verify(published.isEmpty()); verify(snapshot() == first)
+        verify(Files.isDirectory(installed.resolve("declared-empty/nested")))
         Files.writeString(installed.resolve("obsolete"), "obsolete")
         publishGhidraBundle(staged, installed)
         verify(snapshot() == first)
@@ -2364,6 +2387,10 @@ val verifyAtomicGhidraBundlePublication = tasks.register("verifyAtomicGhidraBund
         Files.delete(installed.resolve("a/x")); Files.createDirectory(installed.resolve("a/x"))
         refusal("file directory conflict", "File/directory conflict")
         Files.delete(installed.resolve("a/x")); publishGhidraBundle(staged, installed)
+        Files.delete(installed.resolve("declared-empty/nested"))
+        Files.writeString(installed.resolve("declared-empty/nested"), "directory conflict")
+        refusal("declared empty directory conflicts with file", "File/directory conflict")
+        Files.delete(installed.resolve("declared-empty/nested")); Files.createDirectory(installed.resolve("declared-empty/nested"))
         Files.writeString(staged.resolve("a/x"), "atomic unsupported")
         manifest()
         refusal("unsupported atomic move", "synthetic unsupported", AtomicMoveNotSupportedException::class.java,
@@ -2381,7 +2408,8 @@ val verifyAtomicGhidraBundlePublication = tasks.register("verifyAtomicGhidraBund
         verify(events.take(3) == listOf("publish:a/x", "publish:bin/tool", "publish:bundle.sha256"))
         verify(events.drop(3).toSet() == setOf("delete:obsolete", "delete:.ghidra-publication-stale.tmp"))
         verify(!Files.exists(installed.resolve("empty")))
-        verify(fullSnapshot(installed).keys == setOf("", "a", "a/x", "bin", "bin/tool", "bundle.sha256"))
+        verify(fullSnapshot(installed).keys == setOf("", "a", "a/x", "bin", "bin/tool", "bundle.sha256",
+            "declared-empty", "declared-empty/nested"))
         verify(Files.getPosixFilePermissions(installed.resolve("bin/tool")) == PosixFilePermissions.fromString("rwxr-xr-x"))
         verify(Files.getPosixFilePermissions(installed.resolve("a/x")) == PosixFilePermissions.fromString("rw-r--r--"))
         logger.lifecycle("control: changed manifest publication and cleanup ordering, inventory and modes")
