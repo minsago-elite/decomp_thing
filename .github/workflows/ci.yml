@@ -103,6 +103,9 @@ jobs:
       - name: Verify bounded sanitizer invocation controls
         timeout-minutes: 1
         run: python3 -B scripts/test-clang-sanitizer.py --verbose
+      - name: Verify ChatGPT transport fixture wrapper controls
+        timeout-minutes: 1
+        run: python3 -B scripts/test-chatgpt-transport-c4a-fixtures.py --verbose
       - name: Validate versioned web contract fixtures
         run: python3 contracts/web/v1/verify.py | tee "$RUNNER_TEMP/frontend-ci/contracts.txt"
       - name: Verify pure ACP mount fixture protocol controls
@@ -591,7 +594,7 @@ jobs:
       - name: Require explicit ChatGPT operator regression suite
         if: matrix.shard == 'core'
         run: |
-          ./gradlew --no-daemon test --tests 'decompengine.chatgpt.operator.*'
+          ./gradlew --no-daemon test --tests 'decompengine.chatgpt.operator.*' -x c4aShutdownIsolated
           python3 - <<'PY_OPERATOR'
           from pathlib import Path
           import xml.etree.ElementTree as ET
@@ -663,6 +666,8 @@ jobs:
             build/test-results/full-suite
             build/reports/tests/test
             build/test-results/test
+            build/reports/tests/c4aShutdownIsolated
+            build/test-results/c4aShutdownIsolated
             build/reports/junit-signatures
             build/web-job-recovery-inventory.json
             build/reports/tests/v3BoundaryFinalStagingIsolated

@@ -1796,15 +1796,64 @@ if (providers.gradleProperty("qualifyGhidraInvocation").orNull == "true") {
     }
 }
 
+val c4aTestFixtures = layout.buildDirectory.dir("c4a-test-fixtures")
+val c4aTestKeytool = javaToolchains.launcherFor {
+    languageVersion.set(JavaLanguageVersion.of(21))
+}
+val generateC4aTestFixtures = tasks.register<Exec>("generateC4aTestFixtures") {
+    group = "verification"
+    description = "Generates fresh bounded synthetic certificates for C4a loopback TLS tests"
+    inputs.file("scripts/generate-chatgpt-transport-c4a-fixtures.py")
+    outputs.dir(c4aTestFixtures)
+    outputs.upToDateWhen { false }
+    timeout.set(Duration.ofMinutes(2))
+    onlyIf { providers.gradleProperty("ciTestShard").orNull in listOf(null, "core", "core-main") }
+    doFirst {
+        commandLine(
+            "python3", "-B", "scripts/generate-chatgpt-transport-c4a-fixtures.py",
+            "--keytool", c4aTestKeytool.get().metadata.installationPath.file("bin/keytool").asFile.absolutePath,
+            "--output", c4aTestFixtures.get().asFile.absolutePath,
+        )
+    }
+}
+val c4aShutdownIsolated = tasks.register<Test>("c4aShutdownIsolated") {
+    group = "verification"
+    description = "Runs the process-global C4a shutdown test in its own bounded JVM"
+    testClassesDirs = sourceSets["test"].output.classesDirs
+    classpath = sourceSets["test"].runtimeClasspath
+    useJUnitPlatform { includeTags("shutdown") }
+    filter {
+        includeTestsMatching("decompengine.builtin.provider.ChatGptPlanTransportLifetimeV1Test")
+        isFailOnNoMatchingTests = true
+    }
+    forkEvery = 1
+    maxParallelForks = 1
+    maxHeapSize = "512m"
+    timeout.set(Duration.ofMinutes(2))
+    outputs.upToDateWhen { false }
+    outputs.cacheIf("C4a shutdown must run in a fresh test JVM") { false }
+    onlyIf { providers.gradleProperty("ciTestShard").orNull in listOf(null, "core", "core-main") }
+    jvmArgs("-XX:-UsePerfData")
+    doFirst {
+        check(temporaryDir.isDirectory || temporaryDir.mkdirs()) { "C4a shutdown temporary directory unavailable" }
+        systemProperty("java.io.tmpdir", temporaryDir.absolutePath)
+        environment("TMPDIR", temporaryDir.absolutePath)
+    }
+}
+
 tasks.test {
     // The authenticated model boundary returns a real 512 MiB array in the largest ordinary test.
     maxHeapSize = "2g"
     val shard = providers.gradleProperty("ciTestShard").orNull
     when (shard) {
-        null -> useJUnitPlatform()
-        "core", "core-main", "core-oracle" -> useJUnitPlatform { excludeTags("ci-live") }
-        "live" -> useJUnitPlatform { includeTags("ci-live") }
+        null -> useJUnitPlatform { excludeTags("shutdown") }
+        "core", "core-main", "core-oracle" -> useJUnitPlatform { excludeTags("ci-live", "shutdown") }
+        "live" -> useJUnitPlatform { includeTags("ci-live"); excludeTags("shutdown") }
         else -> error("unsupported ciTestShard: $shard")
+    }
+    dependsOn(generateC4aTestFixtures, c4aShutdownIsolated)
+    doFirst {
+        systemProperty("c4.fixtures", c4aTestFixtures.get().asFile.absolutePath)
     }
     val livePackagePartition = providers.gradleProperty("ciLivePackagePartition").orNull
     if (livePackagePartition != null) {
