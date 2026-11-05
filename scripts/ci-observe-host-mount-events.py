@@ -315,8 +315,14 @@ def process_identity(pid):
     fields = raw[end+2:].split()
     if end < 0 or len(fields) < 20:
         bad('PROCESS_UNAVAILABLE')
+    # This kernel-owned link intentionally identifies the process's directory.
+    # Path removes a trailing '/.', so no-follow identity() identifies the
+    # procfs symlink itself rather than the workspace it names.
+    cwd_info = os.stat(base / 'cwd', follow_symlinks=True)
+    if not stat.S_ISDIR(cwd_info.st_mode):
+        bad('PROCESS_UNAVAILABLE')
     return dict(pid=pid, ticks=int(fields[19]), commandHash=digest(bounded_file(base / 'cmdline')),
-                workspaceIdentity=identity(base / 'cwd' / '.'), uid=os.stat(base).st_uid)
+                workspaceIdentity=[cwd_info.st_dev, cwd_info.st_ino], uid=os.stat(base).st_uid)
 
 
 def paths(workspace):

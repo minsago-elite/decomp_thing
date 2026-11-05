@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Authored data only: never launches an observer or reads a real mount table."""
+"""Never launches an observer or reads a real mount table; checks own proc identity."""
 import importlib.util
 import io
 import json
@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import select
 import signal
+import stat
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
@@ -451,11 +452,16 @@ class LifecycleControls(unittest.TestCase):
         fields = [b'S'] + [b'0'] * 18 + [b'987']
         data = b'444 (name with ) parentheses) ' + b' '.join(fields)
         with patch.object(m, 'bounded_file', side_effect=[data, b'expected\0']), \
-             patch.object(m, 'identity', return_value=[1, 2]), \
-             patch.object(m.os, 'stat', return_value=Mock(st_uid=123)):
+             patch.object(m.os, 'stat', return_value=Mock(st_uid=123, st_mode=stat.S_IFDIR,
+                                                        st_dev=1, st_ino=2)):
             actual = m.process_identity(444)
         self.assertEqual(987, actual['ticks'])
         self.assertEqual(m.digest(b'expected\0'), actual['commandHash'])
+
+    def test_process_workspace_identity_follows_kernel_cwd_link(self):
+        actual = m.process_identity(os.getpid())
+        self.assertEqual(m.identity(Path.cwd()), actual['workspaceIdentity'])
+        self.assertNotEqual(m.identity(Path('/proc/self/cwd')), actual['workspaceIdentity'])
 
 
 if __name__ == '__main__':
