@@ -10,10 +10,11 @@ internal enum class DiagnosticStream { STDOUT, STDERR }
 
 /** Bounded recorded claims only; none grants ownership, edit or producer authority. */
 internal sealed class DiagnosticOwner {
-    class Module(context: DiagnosticComputationContext, val moduleId: String, val shardId: String) : DiagnosticOwner() {
+    internal abstract val context: DiagnosticComputationContext
+    class Module(internal override val context: DiagnosticComputationContext, val moduleId: String, val shardId: String) : DiagnosticOwner() {
         init { context.moduleId(moduleId); context.shardId(shardId) }
     }
-    class Shared(context: DiagnosticComputationContext, val headerOwnerId: String, consumerModuleIds: List<String>) : DiagnosticOwner() {
+    class Shared(internal override val context: DiagnosticComputationContext, val headerOwnerId: String, consumerModuleIds: List<String>) : DiagnosticOwner() {
         init {
             context.meter.checkAccess()
             diagnosticCapacity(consumerModuleIds.size in 0..context.limits.observations)
@@ -21,22 +22,22 @@ internal sealed class DiagnosticOwner {
         }
         val consumerModuleIds = context.strings(consumerModuleIds, modules = true)
     }
-    class External(context: DiagnosticComputationContext, val boundaryId: String) : DiagnosticOwner() {
+    class External(internal override val context: DiagnosticComputationContext, val boundaryId: String) : DiagnosticOwner() {
         init { context.text(boundaryId, nonempty = true, controls = false) }
     }
-    class Unknown(context: DiagnosticComputationContext, val reason: String) : DiagnosticOwner() {
+    class Unknown(internal override val context: DiagnosticComputationContext, val reason: String) : DiagnosticOwner() {
         init { context.text(reason) }
     }
-    class Unclassified(context: DiagnosticComputationContext, val reason: String) : DiagnosticOwner() {
+    class Unclassified(internal override val context: DiagnosticComputationContext, val reason: String) : DiagnosticOwner() {
         init { context.text(reason) }
     }
-    class Conflict(context: DiagnosticComputationContext, evidenceIds: List<String>) : DiagnosticOwner() {
+    class Conflict(internal override val context: DiagnosticComputationContext, evidenceIds: List<String>) : DiagnosticOwner() {
         val evidenceIds = context.strings(evidenceIds)
     }
 }
 
 internal class DiagnosticGraphVersion(
-    context: DiagnosticComputationContext,
+    internal val context: DiagnosticComputationContext,
     val schema: Int,
     val planningArtifactSha256: String,
     val planningReportSha256: String,
@@ -67,7 +68,7 @@ internal enum class DiagnosticBlockerCode {
     INCOMPLETE_CAPTURE, INCOMPLETE_GRAPH, UNVERIFIED_TRANSITION, MOVED_UNRESOLVED,
 }
 
-internal class DiagnosticBlocker(context: DiagnosticComputationContext, val code: DiagnosticBlockerCode, evidenceIds: List<String>) {
+internal class DiagnosticBlocker(internal val context: DiagnosticComputationContext, val code: DiagnosticBlockerCode, evidenceIds: List<String>) {
     val evidenceIds = context.strings(evidenceIds)
 }
 

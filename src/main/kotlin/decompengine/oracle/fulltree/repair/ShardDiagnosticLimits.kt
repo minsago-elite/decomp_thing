@@ -16,8 +16,44 @@ internal data class ShardDiagnosticLimits(
     val allocationBytes: Long = 256L * 1024 * 1024,
     val stringBytes: Int = 4096,
     val totalStringBytes: Long = 8L * 1024 * 1024,
+    val failedInvocations: Int = 4096,
+    val moduleMappings: Int = 4096,
+    val headerNodes: Int = 8192,
+    val graphNodes: Int = 16384,
+    val directEdges: Int = 65536,
+    val condensationEdges: Int = 65536,
+    val retainedCases: Int = 4096,
+    val diagnosticKeys: Int = 4096,
+    val rootMemberships: Int = 1000000,
+    val impactMemberships: Int = 1000000,
+    val canonicalBytes: Int = 16777216,
+    val jsonDepth: Int = 24,
+    val jsonNodes: Int = 1000000,
+    val jsonNumberCharacters: Int = 19,
+    val sourceOnlyUnits: Int = 16384,
+    val headerObservations: Int = 65536,
+    val graphBlockers: Int = 65536,
+    val ownershipMemberships: Int = 65536,
 ) {
     init {
+        diagnosticCapacity(failedInvocations in 0..4096)
+        diagnosticCapacity(moduleMappings in 0..4096)
+        diagnosticCapacity(headerNodes in 0..8192)
+        diagnosticCapacity(graphNodes in 0..16384)
+        diagnosticCapacity(directEdges in 0..65536)
+        diagnosticCapacity(condensationEdges in 0..65536)
+        diagnosticCapacity(retainedCases in 0..4096)
+        diagnosticCapacity(diagnosticKeys in 0..4096)
+        diagnosticCapacity(rootMemberships in 0..1000000)
+        diagnosticCapacity(impactMemberships in 0..1000000)
+        diagnosticCapacity(canonicalBytes in 0..16777216)
+        diagnosticCapacity(jsonDepth in 0..24)
+        diagnosticCapacity(jsonNodes in 0..1000000)
+        diagnosticCapacity(jsonNumberCharacters in 0..19)
+        diagnosticCapacity(sourceOnlyUnits in 0..16384)
+        diagnosticCapacity(headerObservations in 0..65536)
+        diagnosticCapacity(graphBlockers in 0..65536)
+        diagnosticCapacity(ownershipMemberships in 0..65536)
         diagnosticCapacity(failedActions in 0..HARD_MAX_ACTIONS)
         diagnosticCapacity(observations in 0..HARD_MAX_OBSERVATIONS)
         diagnosticCapacity(actionBytes in 0..HARD_MAX_ACTION_BYTES)
@@ -55,11 +91,33 @@ internal class DiagnosticWorkMeter(
     private val owner = Thread.currentThread()
     private var inCheckpoint = false
     private var inWorkSlice = false
+    private var inInput = false
     var used: Long = 0
         private set
 
     fun checkAccess() {
-        diagnosticCapacity(Thread.currentThread() === owner && !inCheckpoint && !inWorkSlice)
+        diagnosticCapacity(Thread.currentThread() === owner && !inCheckpoint && !inWorkSlice && !inInput)
+    }
+
+    /** Guard caller-controlled access; restore on every exception without wrapping it. */
+    fun <T> guardedInput(read: () -> T): T {
+        checkAccess()
+        inInput = true
+        try { return read() } finally { inInput = false }
+    }
+
+    // Actual new-code units for cadence controls. Accounting-only precharges do not advance these.
+    internal var graphCompletedUnits: Long = 0
+        private set
+    internal var graphLastPhase: String = ""
+        private set
+
+    fun graphStep(label: String, action: () -> Unit) {
+        work(1, label) { _, _ ->
+            action()
+            graphCompletedUnits++
+            graphLastPhase = label
+        }
     }
 
     fun begin(label: String) {
@@ -145,6 +203,46 @@ internal class DiagnosticComputationContext(
         }
         meter.end("after $label")
         return Collections.unmodifiableList(result)
+    }
+
+    /** Final admission follows the allocation callback and precedes iterator acquisition. */
+    fun <T> graphSnapshot(values: List<T>, maximum: Int, label: String): List<T> {
+        meter.checkAccess()
+        val count = meter.guardedInput { values.size }
+        diagnosticCapacity(count in 0..maximum)
+        meter.ensure(count.toLong())
+        reserve(diagnosticAdd(64, diagnosticMultiply(count.toLong(), 8)), "before $label allocation")
+        val iterator = meter.guardedInput {
+            val finalCount = values.size
+            diagnosticCapacity(finalCount in 0..maximum && finalCount == count)
+            values.iterator()
+        }
+        val result = ArrayList<T>(count)
+        repeat(count) {
+            meter.graphStep(label) {
+                // work guards caller size/next reentry; never recursively call the meter here.
+                diagnosticCapacity(values.size == count)
+                result.add(iterator.next())
+            }
+        }
+        meter.guardedInput { diagnosticCapacity(values.size == count) }
+        meter.end("after $label")
+        return Collections.unmodifiableList(result)
+    }
+
+    fun compareCodePoints(left: String, right: String): Int {
+        meter.checkAccess()
+        var l = 0
+        var r = 0
+        var result = 0
+        while (l < left.length && r < right.length && result == 0) {
+            var a = 0
+            var b = 0
+            meter.graphStep("graph comparator") { a = left.codePointAt(l); diagnosticCapacity(a !in 0xD800..0xDFFF); l += Character.charCount(a) }
+            meter.graphStep("graph comparator") { b = right.codePointAt(r); diagnosticCapacity(b !in 0xD800..0xDFFF); r += Character.charCount(b) }
+            result = a.compareTo(b)
+        }
+        return if (result != 0) result else (left.length - l).compareTo(right.length - r)
     }
 
     /** No encoding, substring, regex or copy before UTF-8 length and surrogate admission. */
@@ -243,4 +341,48 @@ internal class DiagnosticComputationContext(
         }
         return retained
     }
+}
+
+/** Stable, cancellable bottom-up mergesort; no library sort or caller indexed access. */
+internal fun <T> diagnosticMergeSort(
+    context: DiagnosticComputationContext, values: List<T>, maximum: Int, compare: (T, T) -> Int,
+): List<T> {
+    val meter = context.meter
+    meter.checkAccess()
+    val retained = context.graphSnapshot(values, maximum, "graph sort snapshot")
+    meter.begin("before graph sort")
+    val count = retained.size
+    context.reserve(diagnosticMultiply(count.toLong(), 16), "before graph sort scratch")
+    var source = arrayOfNulls<Any?>(count)
+    var target = arrayOfNulls<Any?>(count)
+    for (i in 0 until count) meter.graphStep("graph sort copy") { source[i] = retained[i] }
+    var width = 1
+    while (width < count) {
+        var base = 0
+        while (base < count) {
+            val middle = minOf(base + width, count)
+            val end = minOf(middle + width, count)
+            var left = base
+            var right = middle
+            var out = base
+            while (out < end) {
+                @Suppress("UNCHECKED_CAST")
+                val fromLeft = left < middle && (right == end || compare(source[left] as T, source[right] as T) <= 0)
+                meter.graphStep("graph sort merge") {
+                    target[out++] = if (fromLeft) source[left++] else source[right++]
+                }
+            }
+            base = end
+        }
+        val swap = source; source = target; target = swap
+        width = minOf(count.toLong(), diagnosticMultiply(width.toLong(), 2)).toInt()
+    }
+    context.reserve(diagnosticAdd(64, diagnosticMultiply(count.toLong(), 8)), "before graph sorted output")
+    val result = ArrayList<T>(count)
+    for (i in 0 until count) meter.graphStep("graph sorted output") {
+        @Suppress("UNCHECKED_CAST")
+        result.add(source[i] as T)
+    }
+    meter.end("after graph sort")
+    return Collections.unmodifiableList(result)
 }
