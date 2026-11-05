@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { promises as fs, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { createHash } from 'node:crypto';
+import { isUtf8 } from 'node:buffer';
 
 // Kept current by WebProgramStructureTest; the seed writes manifests without the JVM profile registry.
 const pins = JSON.parse(readFileSync(new URL('./packaged-browser-structure-profile.json', import.meta.url), 'utf8'));
@@ -679,6 +680,9 @@ export function evaluateStructureBudgets(m) {
 // classification or budgets: it only observes which response each of the 52 inventory actions
 // (first page, 50 next pages, reload) validated and consumed, and fails closed as "unproven".
 const PROOF_BODY_LIMIT_BYTES = 1024 * 1024;
+const PROOF_RAW_LIMIT_BYTES = 4 * 1024 * 1024;
+const PROOF_STREAM_PENDING_LIMIT = 16;
+const PROOF_DATA_EVENT_LIMIT = 4096;
 const PROOF_LEDGER_LIMIT = 128;
 const PROOF_ACTION_LIMIT = 52;
 const PROOF_PAYLOAD_LIMIT = 16384;
@@ -765,7 +769,13 @@ export function inventorySummaryPrefix(start, kind) {
 }
 
 /** Node-side consumption ledger; all inputs are CDP events/bindings already delivered to this session. */
-export function createInventoryConsumptionProof({ browserOrigin, fixture, bodyLimitBytes = PROOF_BODY_LIMIT_BYTES, ledgerLimit = PROOF_LEDGER_LIMIT }) {
+export function createInventoryConsumptionProof({ browserOrigin, fixture, call,
+  bodyLimitBytes = PROOF_BODY_LIMIT_BYTES, ledgerLimit = PROOF_LEDGER_LIMIT,
+  rawLimitBytes = PROOF_RAW_LIMIT_BYTES, pendingLimit = PROOF_STREAM_PENDING_LIMIT, dataEventLimit = PROOF_DATA_EVENT_LIMIT }) {
+  for (const [value, max] of [[bodyLimitBytes, PROOF_BODY_LIMIT_BYTES], [ledgerLimit, PROOF_LEDGER_LIMIT],
+    [rawLimitBytes, PROOF_RAW_LIMIT_BYTES], [pendingLimit, PROOF_STREAM_PENDING_LIMIT], [dataEventLimit, PROOF_DATA_EVENT_LIMIT]]) {
+    if (!Number.isSafeInteger(value) || value < 1 || value > max) throw new Error('Invalid inventory proof bound');
+  }
   const origin = new URL(browserOrigin).origin;
   let ordinal = 0, mainFrameId = null, mainLoaderId = null, current = null, closed = false;
   const counters = { invalid: 0, requestOverflow: 0, terminalOverflow: 0, bodyQueueOverflow: 0, actionOverflow: 0,
@@ -775,6 +785,9 @@ export function createInventoryConsumptionProof({ browserOrigin, fixture, bodyLi
   const actions = [], byToken = new Map();
   const requests = new Map(); // requestId -> record (bounded)
   const bodyQueue = [];
+  const pendingStreams = new Set();
+  let retainedRawBytes = 0, peakRawBytes = 0, peakPendingStreams = 0, streamCommands = 0, drainMs = 0;
+  let draining = null;
   const timings = [];
   const tick = () => ++ordinal;
   const finite = value => Number.isFinite(value) && value >= 0;
@@ -784,6 +797,75 @@ export function createInventoryConsumptionProof({ browserOrigin, fixture, bodyLi
     counters.invalid++; return null;
   };
   const inventoryUrl = raw => { try { const url = new URL(raw); return url.origin === origin && INVENTORY_PATH.test(url.pathname) ? url : null; } catch { return null; } };
+
+  function releaseRaw(record) {
+    retainedRawBytes -= record.capture.bytes;
+    record.capture = { prefix: null, chunks: [], bytes: 0 };
+  }
+  function streamProblem(record, reason, error) {
+    if (!record.stream.problem) {
+      record.stream.problem = reason.slice(0, 128);
+      if (error !== undefined) record.stream.error = String(error?.message ?? error).slice(0, 128);
+    }
+    record.body = { state: record.stream.problem };
+    releaseRaw(record);
+  }
+  // Check the encoded size before allocation and reject Node's permissive base64 decoding.
+  function binarySize(encoded) {
+    if (typeof encoded !== 'string') throw new Error('invalid-base64');
+    if (encoded.length > Math.ceil(bodyLimitBytes / 3) * 4) throw new Error('oversize');
+    if (encoded.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)) throw new Error('invalid-base64');
+    return encoded.length / 4 * 3 - (encoded.endsWith('==') ? 2 : encoded.endsWith('=') ? 1 : 0);
+  }
+  function reserveRaw(size) {
+    if (retainedRawBytes + size > rawLimitBytes) throw new Error('global-overflow');
+    retainedRawBytes += size; peakRawBytes = Math.max(peakRawBytes, retainedRawBytes);
+  }
+  function retainSpan(record, encoded, prefix = false, expectedSize) {
+    if (record.stream.problem) return;
+    try {
+      const size = binarySize(encoded);
+      if (record.capture.bytes + size > bodyLimitBytes) throw new Error('oversize');
+      if (expectedSize !== undefined && size !== expectedSize) throw new Error('chunk-length');
+      reserveRaw(size);
+      let bytes;
+      try {
+        bytes = Buffer.from(encoded, 'base64');
+        if (bytes.length !== size || bytes.toString('base64') !== encoded) throw new Error('invalid-base64');
+      } catch (error) { retainedRawBytes -= size; throw error; }
+      record.capture.bytes += size;
+      if (prefix) { record.capture.prefix = bytes; record.stream.bufferedBytes = size; }
+      else {
+        if (size) record.capture.chunks.push(bytes);
+        record.stream.streamedBytes += size;
+      }
+    } catch (error) { streamProblem(record, `stream-${error.message}`); }
+  }
+  function startStream(record) {
+    if (pendingStreams.size >= pendingLimit) { streamProblem(record, 'stream-pending-overflow'); return; }
+    record.stream.issueOrdinal = tick();
+    const started = performance.now();
+    let result;
+    try {
+      streamCommands++;
+      result = call('Network.streamResourceContent', { requestId: record.requestId });
+    } catch (error) { streamProblem(record, 'stream-command-error', error); return; }
+    // Chrome 149 revision 3188f8a607ae7e067593be8aab7f02d2451fec07:
+    // inspector_network_agent.cc:1697-1756 snapshots raw Data synchronously before future spans.
+    // Never await in CDP dispatch. Replies can follow streamed events; the injected CDP call
+    // supplies its existing 15-second command deadline. No retry or fallback read is issued.
+    const handler = Promise.resolve(result).then(reply => {
+      record.stream.ackOrdinal = tick();
+      record.stream.commandMs = performance.now() - started;
+      if (!record.stream.problem) retainSpan(record, reply?.bufferedData, true);
+    }, error => {
+      record.stream.ackOrdinal = tick();
+      record.stream.commandMs = performance.now() - started;
+      streamProblem(record, 'stream-command-error', error);
+    }).finally(() => pendingStreams.delete(handler));
+    pendingStreams.add(handler);
+    peakPendingStreams = Math.max(peakPendingStreams, pendingStreams.size);
+  }
 
   function frameNavigated(event) {
     tick();
@@ -850,9 +932,13 @@ export function createInventoryConsumptionProof({ browserOrigin, fixture, bodyLi
       requestOrdinal: ordinal, frameId: event.frameId ?? null, loaderId: event.loaderId ?? null, type: event.type ?? null,
       initiator: typeof event.initiator?.type === 'string' ? event.initiator.type.slice(0, 32) : null,
       mainFrameAtRequest: mainFrameId, mainLoaderAtRequest: mainLoaderId, response: null, dataLength: 0, dataEvents: 0,
-      finished: null, failure: null, servedFromCache: false, body: { state: 'pending' } };
+      finished: null, failure: null, servedFromCache: false, body: { state: 'pending' }, bodyCross: { state: 'pending' },
+      stream: { issueOrdinal: null, ackOrdinal: null, bufferedBytes: 0, streamedBytes: 0, prefixEventBytes: 0,
+        firstSpanOrdinal: null, terminalBeforeAck: false, problem: null },
+      capture: { prefix: null, chunks: [], bytes: 0 } };
     if (requests.has(record.requestId)) { counters.invalid++; return; }
     requests.set(record.requestId, record); current.requests.push(record);
+    startStream(record);
   }
   function responseReceived(event) {
     tick();
@@ -872,8 +958,24 @@ export function createInventoryConsumptionProof({ browserOrigin, fixture, bodyLi
   function dataReceived(event) {
     tick();
     const record = requests.get(String(event?.requestId)); if (!record) return;
-    if (!Number.isSafeInteger(event.dataLength) || event.dataLength < 0) { counters.invalid++; return; }
+    if (record.finished || record.failure) { streamProblem(record, 'stream-after-terminal'); return; }
+    if (!Number.isSafeInteger(event.dataLength) || event.dataLength < 0
+      || !Number.isSafeInteger(record.dataLength + event.dataLength)) {
+      counters.invalid++; streamProblem(record, 'stream-invalid-count'); return;
+    }
     record.dataLength += event.dataLength; record.dataEvents++;
+    if (record.dataEvents > dataEventLimit) { streamProblem(record, 'stream-event-overflow'); return; }
+    if (record.dataLength > bodyLimitBytes) { streamProblem(record, 'stream-oversize'); return; }
+    if (record.stream.problem) return;
+    if (event.data !== undefined) {
+      if (event.dataLength > 0) record.stream.firstSpanOrdinal ??= ordinal;
+      retainSpan(record, event.data, false, event.dataLength);
+    } else if (event.dataLength > 0) {
+      // Before the first streamed span, only the exact buffered prefix can cover a missing data field.
+      // A zero-dataLength finish flush carries encoded length only, never invented body bytes.
+      if (record.stream.firstSpanOrdinal !== null) streamProblem(record, 'stream-gap');
+      else record.stream.prefixEventBytes += event.dataLength;
+    }
   }
   function requestServedFromCache(event) {
     tick();
@@ -883,6 +985,7 @@ export function createInventoryConsumptionProof({ browserOrigin, fixture, bodyLi
   function terminal(event, failed) {
     tick();
     const record = requests.get(String(event?.requestId)); if (!record) return;
+    const hadTerminal = record.finished || record.failure;
     if (failed) {
       if (record.failure) { counters.invalid++; return; }
       record.failure = { ordinal, errorText: String(event.errorText ?? '').slice(0, 128), canceled: event.canceled === true };
@@ -890,8 +993,17 @@ export function createInventoryConsumptionProof({ browserOrigin, fixture, bodyLi
       if (record.finished) { counters.invalid++; return; }
       record.finished = { ordinal, encodedDataLength: finite(event.encodedDataLength) ? event.encodedDataLength : null };
     }
-    if (record.body.state !== 'pending' || record.queued) return;
-    if (bodyQueue.length >= ledgerLimit) { counters.bodyQueueOverflow++; record.body = { state: 'queue-overflow' }; return; }
+    if (hadTerminal) { counters.invalid++; streamProblem(record, 'stream-terminal-conflict'); return; }
+    if (record.stream.ackOrdinal === null) {
+      record.stream.terminalBeforeAck = true;
+      streamProblem(record, 'stream-ambiguous-terminal-before-ack');
+    }
+    if (!record.stream.problem) {
+      if (record.stream.bufferedBytes !== record.stream.prefixEventBytes) streamProblem(record, 'stream-prefix-coverage');
+      else if (record.capture.bytes !== record.dataLength || record.capture.bytes !== record.response?.contentLength) streamProblem(record, 'stream-byte-count-mismatch');
+    }
+    if (record.queued) return;
+    if (bodyQueue.length >= ledgerLimit) { counters.bodyQueueOverflow++; streamProblem(record, 'queue-overflow'); return; }
     record.queued = true; bodyQueue.push(record);
   }
   function validateBody(record, text) {
@@ -920,21 +1032,56 @@ export function createInventoryConsumptionProof({ browserOrigin, fixture, bodyLi
       structureVersion: String(data?.structureVersion ?? '').slice(0, 64),
       snapshotVersion: String(data?.page?.snapshotVersion ?? '').slice(0, 128) };
   }
-  /** Reads queued bodies through Network.getResponseBody only; never issues page network traffic. */
-  async function drain(call) {
-    while (bodyQueue.length) {
-      const record = bodyQueue.shift();
-      let result;
-      try { result = await call('Network.getResponseBody', { requestId: record.requestId }); }
-      catch (error) { record.body = { state: 'unavailable', error: String(error?.message ?? error).slice(0, 128) }; continue; }
-      if (typeof result?.body !== 'string' || result.body.length > Math.ceil(bodyLimitBytes * 4 / 3) + 4) { record.body = { state: 'oversize-or-invalid' }; continue; }
-      let bytes = result.base64Encoded ? Buffer.from(result.body, 'base64') : Buffer.from(result.body, 'utf8');
-      if (bytes.length > bodyLimitBytes) { record.body = { state: 'oversize-or-invalid', bytes: bytes.length }; continue; }
+  function attestStream(record) {
+    if (record.stream.problem) return;
+    const size = record.capture.bytes;
+    let reserved = false;
+    try {
+      // Charge the assembly scratch buffer as well as retained spans to the global raw-byte cap.
+      reserveRaw(size); reserved = true;
+      const bytes = Buffer.concat([record.capture.prefix, ...record.capture.chunks], size);
+      releaseRaw(record);
       const text = bytes.toString('utf8');
-      const body = { state: 'parsed', bytes: Buffer.byteLength(text, 'utf8'), sha256: sha(bytes), validUtf8: Buffer.from(text, 'utf8').equals(bytes) };
-      bytes = null;
-      record.body = { ...body, ...validateBody(record, text) }; // raw body discarded after parse/hash
-    }
+      record.body = { state: 'parsed', bytes: bytes.length, sha256: sha(bytes),
+        validUtf8: isUtf8(bytes), ...validateBody(record, text) };
+    } catch (error) { streamProblem(record, 'stream-' + error.message); }
+    finally { if (reserved) retainedRawBytes -= size; releaseRaw(record); }
+  }
+  async function crossCheck(record, read) {
+    if (!record.finished) { record.bodyCross = { state: 'not-required-failed-terminal' }; return; }
+    let size = 0, reserved = false;
+    try {
+      const result = await read('Network.getResponseBody', { requestId: record.requestId });
+      if (typeof result?.body !== 'string' || typeof result.base64Encoded !== 'boolean') throw new Error('invalid');
+      if (result.body.length > Math.ceil(bodyLimitBytes / 3) * 4) throw new Error('oversize');
+      size = result.base64Encoded ? binarySize(result.body) : Buffer.byteLength(result.body, 'utf8');
+      if (size > bodyLimitBytes) throw new Error('oversize');
+      reserveRaw(size); reserved = true;
+      const bytes = Buffer.from(result.body, result.base64Encoded ? 'base64' : 'utf8');
+      if (result.base64Encoded && bytes.toString('base64') !== result.body) throw new Error('invalid-base64');
+      const digest = sha(bytes);
+      record.bodyCross = { state: record.body.state !== 'parsed' ? 'uncompared'
+        : size === record.body.bytes && digest === record.body.sha256 ? 'matched' : 'mismatch', bytes: size, sha256: digest };
+    } catch (error) { record.bodyCross = { state: 'unavailable', error: String(error?.message ?? error).slice(0, 128) }; }
+    finally { if (reserved) retainedRawBytes -= size; }
+  }
+  /** Drain commands/attestation outside ready windows; getResponseBody is a required finished-response cross-check. */
+  function drain(read = call) {
+    if (draining) return draining;
+    draining = (async () => {
+      const started = performance.now();
+      try {
+        do {
+          await Promise.all([...pendingStreams]);
+          while (bodyQueue.length) {
+            const record = bodyQueue.shift();
+            attestStream(record);
+            await crossCheck(record, read);
+          }
+        } while (pendingStreams.size || bodyQueue.length);
+      } finally { drainMs += performance.now() - started; }
+    })().finally(() => { draining = null; });
+    return draining;
   }
   function beginAction({ label, kind, start }) {
     tick();
@@ -997,6 +1144,9 @@ export function createInventoryConsumptionProof({ browserOrigin, fixture, bodyLi
         if (ready && !(ready.ordinal > response.ordinal)) reasons.push('ready-before-response');
       }
       if (!request.finished && !request.failure) reasons.push('terminal-pending');
+      if (request.failure) reasons.push('loading-failed');
+      if (request.finished && request.bodyCross.state !== 'matched') reasons.push(request.bodyCross.state === 'mismatch'
+        ? 'body-capture-mismatch' : 'body-cross-' + request.bodyCross.state);
       if (request.body.state !== 'parsed') reasons.push(`body-${request.body.state}`);
       else {
         reasons.push(...request.body.reasons);
@@ -1009,7 +1159,7 @@ export function createInventoryConsumptionProof({ browserOrigin, fixture, bodyLi
         timing = matches[0];
         if (doc && timing.timeOrigin !== doc.timeOrigin) reasons.push('timing-time-origin');
         if (!response || timing.encodedBodySize !== response.contentLength) reasons.push('timing-encoded-length');
-        if (request.body.state !== 'parsed' || timing.decodedBodySize !== request.body.bytes) reasons.push('timing-decoded-length');
+        if (request.body.state === 'parsed' && timing.decodedBodySize !== request.body.bytes) reasons.push('timing-decoded-length');
         if (timing.responseStatus !== null && timing.responseStatus !== 200) reasons.push('timing-status');
         if (timing.deliveryType) reasons.push('timing-delivery-cache');
         if (!(timing.responseEnd <= ready.readyAt)) reasons.push('ready-before-response-end');
@@ -1026,7 +1176,7 @@ export function createInventoryConsumptionProof({ browserOrigin, fixture, bodyLi
         status: request.response?.status ?? null, protocol: request.response?.protocol ?? null, sameOrigin: request.response?.sameOrigin ?? null,
         fromDiskCache: request.response?.fromDiskCache ?? null, fromServiceWorker: request.response?.fromServiceWorker ?? null,
         fromPrefetchCache: request.response?.fromPrefetchCache ?? null, contentLength: request.response?.contentLength ?? null,
-        servedFromCache: request.servedFromCache,
+        servedFromCache: request.servedFromCache, stream: { ...request.stream, dataEvents: request.dataEvents }, bodyCross: { ...request.bodyCross },
         contentEncoding: request.response?.contentEncoding ?? null, dataLength: request.dataLength, failure: request.failure,
         body: request.body.state === 'parsed' ? { bytes: request.body.bytes, sha256: request.body.sha256, digest: request.body.digest,
           first: request.body.first, last: request.body.last, structureVersion: request.body.structureVersion,
@@ -1054,6 +1204,8 @@ export function createInventoryConsumptionProof({ browserOrigin, fixture, bodyLi
       expectedActions: PROOF_ACTION_LIMIT, recordedActions: actions.length, provenActions: proven,
       consumptionProven: actions.length === PROOF_ACTION_LIMIT && proven === PROOF_ACTION_LIMIT,
       counters: { ...counters }, documents: documents.size,
+      captureBounds: { bodyLimitBytes, rawLimitBytes, ledgerLimit, pendingLimit, dataEventLimit },
+      captureStats: { streamCommands, pendingStreams: pendingStreams.size, peakPendingStreams, retainedRawBytes, peakRawBytes, drainMs },
       documentBindings: [...documents.values()].map(document => ({ nonceHash: sha(document.nonce), timeOrigin: document.timeOrigin,
         announcedOrdinal: document.ordinal, executionContextId: document.contextId,
         frameIdHash: document.frameId === null ? null : sha(document.frameId),
@@ -1062,7 +1214,10 @@ export function createInventoryConsumptionProof({ browserOrigin, fixture, bodyLi
   }
   return { frameNavigated, executionContextCreated, bindingCalled, requestWillBeSent, responseReceived, dataReceived, requestServedFromCache,
     loadingFinished: event => terminal(event, false), loadingFailed: event => terminal(event, true),
-    beginAction, armResult, drain, freshReady, close() { closed = true; current = null; }, summary };
+    beginAction, armResult, drain, freshReady, close() {
+      closed = true; current = null;
+      for (const record of requests.values()) if (!record.finished && !record.failure) streamProblem(record, 'stream-incomplete');
+    }, summary };
 }
 
 /** Reports archived before this proof existed (no bodies or nonces) can never be proven. */
@@ -1111,7 +1266,8 @@ async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evalua
     }).observe({type:'resource', buffered:true});
   })();` });
   cdp.on('Network.dataReceived', coldEvidence.dataReceived, tab.sessionId);
-  const proof = createInventoryConsumptionProof({ browserOrigin, fixture });
+  const proofCall = (method, params) => cdp.call(method, params, tab.sessionId);
+  const proof = createInventoryConsumptionProof({ browserOrigin, fixture, call: proofCall });
   for (const name of INVENTORY_PROOF_BINDINGS) await tab.initialize('Runtime.addBinding', { name });
   cdp.on('Runtime.bindingCalled', proof.bindingCalled, tab.sessionId);
   cdp.on('Runtime.executionContextCreated', proof.executionContextCreated, tab.sessionId);
@@ -1123,7 +1279,6 @@ async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evalua
   cdp.on('Network.loadingFinished', proof.loadingFinished, tab.sessionId);
   cdp.on('Network.loadingFailed', proof.loadingFailed, tab.sessionId);
   await tab.initialize('Page.addScriptToEvaluateOnNewDocument', { source: inventoryDocumentInstrumentation() });
-  const proofCall = (method, params) => cdp.call(method, params, tab.sessionId);
   const armProof = async (expectation) => {
     if (!expectation) return;
     try { proof.armResult(await evaluate(tab, `window.__decompArmInventory?.(${JSON.stringify(expectation.token)}, ${JSON.stringify(expectation.addresses)}, ${JSON.stringify(expectation.summary)}) ?? null`)); }

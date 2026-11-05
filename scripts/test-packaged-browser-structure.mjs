@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { createHash } from 'node:crypto';
 import { runInNewContext } from 'node:vm';
 import { appendStructureFeedbackSample, assertStructureSourceLink, createJvmRssSummary, createModuleResponseInterceptor,
   createStructureResponseRecorder, createStructureTimingRecorder, evaluateStructureBudgets, isModuleDetailUrl, moduleDetailFetchPattern, nearestRankP95, recordJvmRssSample, structureFeedbackInstrumentation, summarizeJvmRss } from './packaged-browser-structure.mjs';
@@ -456,9 +457,21 @@ const inventoryBody = (start, overrides = {}) => {
   return JSON.stringify({ apiVersion: 1, kind: 'functionInventory', requestId: 'req', data });
 };
 
-function runProofScenario(o = {}) {
+async function runProofScenario(o = {}) {
   const start = o.start ?? 100, kind = o.kind ?? 'page';
-  const proof = createInventoryConsumptionProof({ browserOrigin, fixture: proofFixture, ...(o.limits ?? {}) });
+  const body = o.body ?? inventoryBody(start, o.bodyOverrides);
+  const calls = [], commands = new Map();
+  const call = (method, params) => {
+    calls.push([method, params.requestId]);
+    if (method === 'Network.streamResourceContent') return new Promise((resolve, reject) => {
+      commands.set(params.requestId, { resolve, reject });
+      if (params.requestId.startsWith('x')) resolve({ bufferedData: '' });
+    });
+    assert.equal(method, 'Network.getResponseBody');
+    if (o.bodyUnavailable) return Promise.reject(new Error('No resource with given identifier found'));
+    return Promise.resolve(o.crossResult ?? { body: o.crossBody ?? body, base64Encoded: false });
+  };
+  const proof = createInventoryConsumptionProof({ browserOrigin, fixture: proofFixture, call, ...(o.limits ?? {}) });
   const bind = (name, value, contextId = 1) => proof.bindingCalled({ name, executionContextId: contextId, payload: typeof value === 'string' ? value : JSON.stringify(value) });
   proof.frameNavigated({ frame: { id: 'F', loaderId: 'L1' } });
   proof.executionContextCreated({ context: { id: 1, auxData: { frameId: 'F', isDefault: true } } });
@@ -472,7 +485,6 @@ function runProofScenario(o = {}) {
     if (docNonce !== NONCE_A) bind(INVENTORY_PROOF_BINDINGS[0], { nonce: docNonce, timeOrigin }, 2);
   } else if (!o.noArm) proof.armResult({ nonce: NONCE_A, baselineMatches: o.staleBaseline === true });
   const activeContext = kind === 'reload' ? 2 : 1;
-  const body = o.body ?? inventoryBody(start, o.bodyOverrides);
   const bytes = Buffer.byteLength(body);
   const url = inventoryUrl(start);
   const requestIds = o.duplicateRequest ? ['r1', 'r2'] : ['r1'];
@@ -482,11 +494,22 @@ function runProofScenario(o = {}) {
     proof.requestWillBeSent({ requestId, frameId: 'F', loaderId: o.requestLoader ?? loader, type: 'Fetch', initiator: { type: 'script' }, request: { method: 'GET', url } });
     if (o.memoryCache) proof.requestServedFromCache({ requestId });
     if (o.readyBeforeResponse && requestId === 'r1') bind(INVENTORY_PROOF_BINDINGS[2], readyPayload(), o.readyContext ?? activeContext);
-    if (o.failBeforeResponse) { proof.loadingFailed({ requestId, errorText: 'net::ERR_ABORTED', canceled: true }); continue; }
+    if (o.failBeforeResponse) {
+      commands.get(requestId)?.reject(new Error('stream refused'));
+      await Promise.resolve();
+      proof.loadingFailed({ requestId, errorText: 'net::ERR_ABORTED', canceled: true }); continue;
+    }
     proof.responseReceived({ requestId, type: 'Fetch', response: { url, status: o.status ?? 200, protocol: 'http/1.1',
       fromDiskCache: o.diskCache === true, fromServiceWorker: o.serviceWorker === true, headers: { 'Content-Length': String(o.contentLength ?? bytes) } } });
-    proof.dataReceived({ requestId, dataLength: o.dataLength ?? bytes, encodedDataLength: bytes });
-    if (o.failBeforeBody) proof.loadingFailed({ requestId, errorText: 'net::ERR_ABORTED', canceled: true });
+    if (o.capture) await o.capture({ proof, requestId, body, bytes, command: commands.get(requestId) });
+    else {
+      if (o.failBeforeBody) commands.get(requestId)?.reject(new Error('stream refused'));
+      else commands.get(requestId)?.resolve({ bufferedData: '' });
+      await Promise.resolve();
+      proof.dataReceived({ requestId, dataLength: o.dataLength ?? bytes, encodedDataLength: bytes,
+        data: Buffer.from(o.truncate ? body.slice(0, -10) : body).toString('base64') });
+    }
+    if (o.failBeforeBody || o.canceled) proof.loadingFailed({ requestId, errorText: 'net::ERR_ABORTED', canceled: true });
     else if (!o.pending) proof.loadingFinished({ requestId, encodedDataLength: bytes });
   }
   function readyPayload() {
@@ -497,22 +520,16 @@ function runProofScenario(o = {}) {
   const timingNonce = o.timingNonce ?? docNonce;
   const timings = o.missingTiming ? 0 : o.duplicateTiming ? 2 : 1;
   for (let i = 0; i < timings; i++) bind(INVENTORY_PROOF_BINDINGS[1], { nonce: timingNonce, timeOrigin, name: url, initiatorType: 'fetch', nextHopProtocol: 'http/1.1',
-    responseStatus: 200, deliveryType: o.timingDelivery ?? '', encodedBodySize: bytes, decodedBodySize: bytes, transferSize: bytes + 300, startTime: 10, responseStart: 40, responseEnd: o.responseEnd ?? 50 }, o.timingContext ?? activeContext);
+    responseStatus: 200, deliveryType: o.timingDelivery ?? '', encodedBodySize: bytes, decodedBodySize: o.timingDecoded ?? bytes, transferSize: bytes + 300, startTime: 10, responseStart: 40, responseEnd: o.responseEnd ?? 50 }, o.timingContext ?? activeContext);
   if (!o.readyBeforeResponse && !o.noReady) bind(INVENTORY_PROOF_BINDINGS[2], readyPayload(), o.readyContext ?? activeContext);
   if (o.invalidPayload) bind(INVENTORY_PROOF_BINDINGS[2], '{');
-  const calls = [];
-  const call = async (method, params) => {
-    calls.push([method, params.requestId]);
-    if (o.bodyUnavailable || o.failBeforeBody || o.failBeforeResponse) throw new Error('No resource with given identifier found');
-    return { body: o.truncate ? body.slice(0, -10) : body, base64Encoded: false };
-  };
   return { proof, call, calls, expectation };
 }
 const proofVerdict = async (o = {}) => {
-  const { proof, call, calls } = runProofScenario(o);
+  const { proof, call, calls } = await runProofScenario(o);
   if (!o.pending) await proof.drain(call);
   const summary = proof.summary({ exceptions: o.exceptions ?? 0 });
-  assert.ok(calls.every(([method]) => method === 'Network.getResponseBody'), 'only buffered body reads');
+  assert.ok(calls.every(([method]) => ['Network.streamResourceContent', 'Network.getResponseBody'].includes(method)), 'only passive body evidence commands');
   return summary.actions[0];
 };
 
@@ -535,8 +552,8 @@ test('consumption proof positive control validates exactly one consumed response
 });
 
 for (const [name, options, reason] of [
-  ['truncated body', { truncate: true }, /body-invalid-json|byte-count-mismatch/],
-  ['failure before body', { failBeforeBody: true }, /body-unavailable/],
+  ['truncated body', { truncate: true }, /body-stream-chunk-length/],
+  ['failure before body', { failBeforeBody: true }, /body-stream-command-error/],
   ['failure before response', { failBeforeResponse: true }, /response-missing/],
   ['duplicate action request', { duplicateRequest: true }, /request-count:2/],
   ['old loader request', { requestLoader: 'L0' }, /request-not-current-loader/],
@@ -549,7 +566,7 @@ for (const [name, options, reason] of [
   ['wrong total', { bodyOverrides: { data: { totalFunctions: 99999 } } }, /body-total/],
   ['wrong revision', { bodyOverrides: { data: { binding: { jobId: proofFixture.jobId, runId: proofFixture.runId, revisionId: 'other' } } } }, /body-revision/],
   ['body hash/length mismatch', { contentLength: 5 }, /byte-count-mismatch/],
-  ['body unavailable', { bodyUnavailable: true }, /body-unavailable/],
+  ['body unavailable', { bodyUnavailable: true }, /body-cross-unavailable/],
   ['service worker', { serviceWorker: true }, /response-service-worker/],
   ['disk cache', { diskCache: true }, /response-cache/],
   ['memory cache without disk-cache flag', { memoryCache: true }, /response-cache/],
@@ -576,7 +593,7 @@ for (const [name, options, reason] of [
 }
 
 test('a proof cannot be complete with fewer than 52 actions and adds no budget changes', async () => {
-  const { proof, call } = runProofScenario();
+  const { proof, call } = await runProofScenario();
   await proof.drain(call);
   const summary = proof.summary();
   assert.equal(summary.consumptionProven, false);
@@ -674,4 +691,385 @@ test('injected readiness has a bounded document ledger and explicitly reports it
   assert.equal(readies.length, 129);
   assert.equal(readies.filter(([, value]) => value.overflow === true).length, 1);
   assert.equal(readies[128][1].overflow, true);
+});
+
+// #1911: Chrome 149 pinned streamResourceContent semantics. No browser or fallback fetch.
+const streamSpan = (proof, requestId, bytes, overrides = {}) => proof.dataReceived({
+  requestId, dataLength: bytes.length, encodedDataLength: bytes.length, data: bytes.toString('base64'), ...overrides,
+});
+const acknowledgeStream = async (command, bufferedData = '') => {
+  command.resolve({ bufferedData });
+  await Promise.resolve();
+};
+const prefixAndSpans = (interleave = false) => async ({ proof, requestId, body, command }) => {
+  const bytes = Buffer.from(body), split = 137;
+  proof.dataReceived({ requestId, dataLength: split, encodedDataLength: split });
+  if (!interleave) await acknowledgeStream(command, bytes.subarray(0, split).toString('base64'));
+  streamSpan(proof, requestId, bytes.subarray(split, 819));
+  streamSpan(proof, requestId, bytes.subarray(819));
+  if (interleave) await acknowledgeStream(command, bytes.subarray(0, split).toString('base64'));
+};
+
+for (const interleave of [false, true]) {
+  test(`passive capture joins prefix and ordered future spans, reply ${interleave ? 'after' : 'before'} spans`, async () => {
+    const { proof, calls, call } = await runProofScenario({ capture: prefixAndSpans(interleave) });
+    assert.equal(calls.length, 1, 'cross-check/attestation wait until explicit drain');
+    assert.equal(proof.summary().actions[0].request.body.state, 'pending');
+    assert.equal(proof.summary().captureStats.retainedRawBytes, Buffer.byteLength(inventoryBody(100)));
+    await proof.drain(call);
+    const summary = proof.summary(), action = summary.actions[0];
+    assert.deepEqual(action.reasons, []);
+    assert.equal(action.request.body.sha256, createHash('sha256').update(inventoryBody(100)).digest('hex'));
+    assert.equal(action.request.bodyCross.state, 'matched');
+    assert.equal(action.request.stream.bufferedBytes, 137);
+    assert.equal(action.request.stream.prefixEventBytes, 137);
+    assert.equal(action.request.stream.streamedBytes, action.request.body.bytes - 137);
+    assert.equal(action.request.stream.ackOrdinal > action.request.stream.firstSpanOrdinal, interleave);
+    assert.deepEqual(calls, [['Network.streamResourceContent', 'r1'], ['Network.getResponseBody', 'r1']]);
+    assert.equal(summary.captureStats.retainedRawBytes, 0);
+    assert.equal(summary.captureStats.pendingStreams, 0);
+    assert.ok(summary.captureStats.peakRawBytes <= summary.captureBounds.rawLimitBytes);
+    assert.ok(summary.captureStats.drainMs >= 0);
+    assert.ok(action.request.stream.commandMs >= 0);
+    assert.ok(!JSON.stringify(summary).includes('bufferedData'));
+  });
+}
+
+test('buffered prefix can cover the entire body and leading events delivered after its reply', async () => {
+  const action = await proofVerdict({ capture: async ({ proof, requestId, body, bytes, command }) => {
+    await acknowledgeStream(command, Buffer.from(body).toString('base64'));
+    proof.dataReceived({ requestId, dataLength: bytes, encodedDataLength: bytes });
+  } });
+  assert.deepEqual(action.reasons, []);
+  assert.equal(action.request.stream.streamedBytes, 0);
+});
+
+test('zero dataLength terminal encoded-byte flush adds no body span or byte', async () => {
+  const action = await proofVerdict({ capture: async (context) => {
+    await prefixAndSpans(true)(context);
+    context.proof.dataReceived({ requestId: context.requestId, dataLength: 0, encodedDataLength: 300 });
+    context.proof.dataReceived({ requestId: context.requestId, dataLength: 0, encodedDataLength: 0, data: '' });
+  } });
+  assert.deepEqual(action.reasons, []);
+  assert.equal(action.request.dataLength, Buffer.byteLength(inventoryBody(100)));
+});
+
+const streamFailures = [
+  ['stream command rejection', { capture: async ({ command }) => { command.reject(new Error('refused')); await Promise.resolve(); } }, /stream-command-error/],
+  ['missing bufferedData field', { capture: async ({ command }) => { command.resolve({}); await Promise.resolve(); } }, /stream-invalid-base64/],
+  ['missing leading bytes with empty prefix', { capture: async ({ proof, requestId, bytes, command }) => {
+    proof.dataReceived({ requestId, dataLength: bytes }); await acknowledgeStream(command);
+  } }, /stream-prefix-coverage/],
+  ['missing span after activation', { capture: async ({ proof, requestId, bytes, command }) => {
+    await acknowledgeStream(command); proof.dataReceived({ requestId, dataLength: bytes });
+  } }, /stream-prefix-coverage/],
+  ['missing middle span', { capture: async ({ proof, requestId, body, command }) => {
+    const bytes = Buffer.from(body); await acknowledgeStream(command);
+    streamSpan(proof, requestId, bytes.subarray(0, 10));
+    proof.dataReceived({ requestId, dataLength: 10 });
+    streamSpan(proof, requestId, bytes.subarray(20));
+  } }, /stream-gap/],
+  ['overlapping buffered prefix and streamed span', { capture: async ({ proof, requestId, body, command }) => {
+    const bytes = Buffer.from(body); await acknowledgeStream(command, bytes.subarray(0, 10).toString('base64'));
+    streamSpan(proof, requestId, bytes);
+  } }, /stream-prefix-coverage/],
+  ['duplicated span with full delivery count', { capture: async ({ proof, requestId, body, command }) => {
+    const bytes = Buffer.from(body); await acknowledgeStream(command);
+    streamSpan(proof, requestId, bytes); streamSpan(proof, requestId, bytes.subarray(0, 10));
+  } }, /stream-byte-count-mismatch/],
+  ['per-span decoded count differs', { capture: async ({ proof, requestId, body, command }) => {
+    await acknowledgeStream(command); streamSpan(proof, requestId, Buffer.from(body), { dataLength: 1 });
+  } }, /stream-chunk-length/],
+  ['terminal count differs from Content-Length', { contentLength: 10 }, /stream-byte-count-mismatch/],
+  ['canonical JSON with wrong oracle digest', { body: inventoryBody(200) }, /body-oracle-mismatch/],
+  ['oracle item count differs', { bodyOverrides: { data: { items: [] } } }, /body-count/],
+  ['finished cross-check different hash at same byte length', { crossBody: inventoryBody(100).replace('"requestId":"req"', '"requestId":"bad"') }, /body-capture-mismatch/],
+  ['finished cross-check unavailable', { bodyUnavailable: true }, /body-cross-unavailable/],
+  ['finished cross-check malformed base64', { crossResult: { body: 'Zh==', base64Encoded: true } }, /body-cross-unavailable/],
+  ['finished cross-check oversized', { crossBody: 'x'.repeat(1024 * 1024 + 1) }, /body-cross-unavailable/],
+  ['per-body accumulated overflow', { limits: { bodyLimitBytes: 64 } }, /stream-oversize/],
+  ['global raw-byte overflow', { limits: { rawLimitBytes: 64 } }, /stream-global-overflow/],
+  ['assembly scratch exceeds global raw-byte cap', { limits: { rawLimitBytes: Buffer.byteLength(inventoryBody(100)) } }, /stream-global-overflow/],
+  ['event ledger overflow including zero-byte events', { limits: { dataEventLimit: 2 }, capture: async ({ proof, requestId, body, command }) => {
+    await acknowledgeStream(command); streamSpan(proof, requestId, Buffer.from(body));
+    for (let i = 0; i < 2; i++) proof.dataReceived({ requestId, dataLength: 0 });
+  } }, /stream-event-overflow/],
+  ['unsafe dataLength', { dataLength: Number.MAX_SAFE_INTEGER + 1 }, /stream-invalid-count/],
+  ['negative dataLength', { dataLength: -1 }, /stream-invalid-count/],
+  ['data after terminal', { capture: async ({ proof, requestId, body, command }) => {
+    await acknowledgeStream(command); streamSpan(proof, requestId, Buffer.from(body));
+    proof.loadingFinished({ requestId }); streamSpan(proof, requestId, Buffer.from('x'));
+  } }, /stream-after-terminal/],
+  ['nonempty data on zero-length flush', { capture: async ({ proof, requestId, body, command }) => {
+    await acknowledgeStream(command); streamSpan(proof, requestId, Buffer.from(body));
+    streamSpan(proof, requestId, Buffer.from('x'), { dataLength: 0 });
+  } }, /stream-chunk-length/],
+  ['same-length duplicated span in valid JSON', { capture: async ({ proof, requestId, body, command }) => {
+    // Replace the second address with the first: byte counts still agree, oracle hash must refuse.
+    const bad = body.replace('0x400650', '0x400640');
+    assert.notEqual(bad, body); assert.equal(bad.length, body.length);
+    await acknowledgeStream(command); streamSpan(proof, requestId, Buffer.from(bad));
+  } }, /body-oracle-mismatch/],
+  ['reordered spans', { capture: async ({ proof, requestId, body, command }) => {
+    const bytes = Buffer.from(body); await acknowledgeStream(command);
+    streamSpan(proof, requestId, bytes.subarray(100)); streamSpan(proof, requestId, bytes.subarray(0, 100));
+  } }, /body-invalid-json/],
+];
+for (const [name, options, reason] of streamFailures) {
+  test(`passive capture refuses ${name}`, async () => {
+    const { proof, call } = await runProofScenario(options);
+    await proof.drain(call);
+    const summary = proof.summary(), action = summary.actions[0];
+    assert.equal(action.validatedConsumption, false);
+    assert.match(action.reasons.join(','), reason);
+    assert.equal(summary.captureStats.retainedRawBytes, 0, 'raw bytes dropped even on refusal');
+    assert.equal(summary.captureStats.pendingStreams, 0);
+    assert.ok(summary.captureStats.peakRawBytes <= summary.captureBounds.rawLimitBytes);
+  });
+}
+
+for (const malformed of ['Zg', 'Zg==\n', 'Zg--', 'Zh==', 'Zm9=', '=AAA', '!!!!']) {
+  for (const prefix of [false, true]) {
+    test(`passive capture rejects noncanonical base64 ${JSON.stringify(malformed)} in ${prefix ? 'prefix' : 'span'}`, async () => {
+      const action = await proofVerdict({ capture: async ({ proof, requestId, command }) => {
+        await acknowledgeStream(command, prefix ? malformed : '');
+        if (!prefix) proof.dataReceived({ requestId, dataLength: 1, data: malformed });
+      } });
+      assert.equal(action.validatedConsumption, false);
+      assert.match(action.reasons.join(','), /stream-invalid-base64|stream-chunk-length/);
+    });
+  }
+}
+
+for (const failed of [false, true]) {
+  test(`terminal ${failed ? 'failure' : 'finish'} before stream acknowledgement stays ambiguous`, async () => {
+    const { proof, call } = await runProofScenario({ pending: true, capture: async ({ proof, requestId, body, command }) => {
+      streamSpan(proof, requestId, Buffer.from(body));
+      if (failed) proof.loadingFailed({ requestId, canceled: true, errorText: 'net::ERR_ABORTED' });
+      else proof.loadingFinished({ requestId });
+      assert.equal(proof.summary().captureStats.retainedRawBytes, 0, 'terminal ambiguity drops pending spans immediately');
+      await acknowledgeStream(command);
+    } });
+    await proof.drain(call);
+    const action = proof.summary().actions[0];
+    assert.equal(action.validatedConsumption, false);
+    assert.equal(action.request.stream.terminalBeforeAck, true);
+    assert.match(action.reasons.join(','), /stream-ambiguous-terminal-before-ack/);
+    assert.equal(proof.summary().captureStats.retainedRawBytes, 0);
+  });
+}
+
+test('perfect canceled body remains FAIL with raw loadingFailed preserved', async () => {
+  const { proof, call, calls } = await runProofScenario({ canceled: true, capture: prefixAndSpans(true) });
+  await proof.drain(call);
+  const action = proof.summary().actions[0];
+  assert.deepEqual(action.reasons, ['loading-failed']);
+  assert.equal(action.validatedConsumption, false);
+  assert.equal(action.request.failure.errorText, 'net::ERR_ABORTED');
+  assert.equal(action.request.failure.canceled, true);
+  assert.equal(action.request.body.digest, inventoryPageOracle(proofFixture, 100).digest);
+  assert.equal(action.request.bodyCross.state, 'not-required-failed-terminal');
+  assert.deepEqual(calls, [['Network.streamResourceContent', 'r1']]);
+});
+
+test('absent body does not manufacture an independent decoded-length mismatch', async () => {
+  const action = await proofVerdict({ failBeforeBody: true });
+  assert.equal(action.validatedConsumption, false);
+  assert.ok(!action.reasons.includes('timing-decoded-length'));
+  assert.match(action.reasons.join(','), /body-stream-command-error/);
+});
+
+const bareRequest = (proof, requestId, request = {}) => proof.requestWillBeSent({ requestId,
+  frameId: 'F', loaderId: 'L1', type: 'Fetch', request: { method: 'GET', url: inventoryUrl(requestId), ...request } });
+const bareAction = (proof, label = 'action') => proof.beginAction({ label, kind: 'page', start: 100 });
+
+test('only attributed same-origin GET inventory candidates issue a stream command, once per ID', async () => {
+  const calls = [];
+  const proof = createInventoryConsumptionProof({ browserOrigin, fixture: proofFixture,
+    call: async (method, params) => { calls.push([method, params.requestId]); return { bufferedData: '' }; } });
+  bareRequest(proof, 'unattributed');
+  bareAction(proof);
+  for (const [id, request] of [
+    ['module', { url: inventoryUrl(100).replace('/functions?', '/modules?') }],
+    ['cross-origin', { url: inventoryUrl(100).replace(browserOrigin, 'https://other.example') }],
+    ['post', { method: 'POST' }], ['bad-url', { url: 'not a URL' }],
+  ]) bareRequest(proof, id, request);
+  assert.deepEqual(calls, []);
+  assert.equal(bareRequest(proof, 'inventory'), undefined, 'CDP dispatcher receives no awaitable');
+  bareRequest(proof, 'inventory');
+  await proof.drain();
+  proof.close();
+  bareRequest(proof, 'closed');
+  assert.deepEqual(calls, [['Network.streamResourceContent', 'inventory']]);
+  assert.equal(proof.summary().counters.invalid, 1, 'duplicate ID is explicit invalid evidence');
+  assert.equal(proof.summary().captureStats.retainedRawBytes, 0);
+});
+
+test('request ledger admits 128 commands and refuses the 129th without allocating a handler', async () => {
+  let count = 0;
+  const proof = createInventoryConsumptionProof({ browserOrigin, fixture: proofFixture,
+    call: async () => { count++; return { bufferedData: '' }; } });
+  bareAction(proof);
+  for (let i = 0; i < 129; i++) { bareRequest(proof, String(i)); await proof.drain(); }
+  assert.equal(count, 128);
+  assert.equal(proof.summary().counters.requestOverflow, 1);
+  assert.match(proof.summary().actions[0].reasons.join(','), /overflow:requestOverflow/);
+  proof.close();
+});
+
+test('pending stream handlers stop at 16 and command errors retain only 128 characters', async () => {
+  const rejects = [];
+  const proof = createInventoryConsumptionProof({ browserOrigin, fixture: proofFixture,
+    call: () => new Promise((resolve, reject) => rejects.push(reject)) });
+  for (let i = 0; i < 17; i++) { bareAction(proof, String(i)); bareRequest(proof, String(i)); }
+  assert.equal(rejects.length, 16);
+  assert.equal(proof.summary().captureStats.peakPendingStreams, 16);
+  assert.match(proof.summary().actions[16].reasons.join(','), /stream-pending-overflow/);
+  for (const reject of rejects) reject(new Error('x'.repeat(10000)));
+  await proof.drain();
+  const summary = proof.summary();
+  assert.equal(summary.captureStats.pendingStreams, 0);
+  assert.equal(summary.actions[0].request.stream.error.length, 128);
+  assert.ok(summary.actions.every(action => !action.validatedConsumption));
+  proof.close();
+});
+
+test('synchronous stream command throw is contained without retry', async () => {
+  let count = 0;
+  const proof = createInventoryConsumptionProof({ browserOrigin, fixture: proofFixture,
+    call: () => { count++; throw new Error('sync refusal'); } });
+  bareAction(proof); assert.doesNotThrow(() => bareRequest(proof, 'r1'));
+  await proof.drain();
+  assert.equal(count, 1);
+  assert.match(proof.summary().actions[0].reasons.join(','), /stream-command-error/);
+  assert.equal(proof.summary().captureStats.pendingStreams, 0);
+});
+
+test('global retained raw-byte cap is 4 MiB across requests, independently of the 128-request ledger', async () => {
+  const proof = createInventoryConsumptionProof({ browserOrigin, fixture: proofFixture,
+    call: async () => ({ bufferedData: '' }) });
+  const fullBody = Buffer.alloc(1024 * 1024, 65);
+  for (let i = 0; i < 5; i++) {
+    bareAction(proof, String(i)); bareRequest(proof, String(i));
+    await proof.drain();
+    streamSpan(proof, String(i), fullBody);
+  }
+  const summary = proof.summary();
+  assert.deepEqual(summary.captureBounds, { bodyLimitBytes: 1048576, rawLimitBytes: 4194304, ledgerLimit: 128,
+    pendingLimit: 16, dataEventLimit: 4096 });
+  assert.equal(summary.captureStats.retainedRawBytes, 4194304);
+  assert.equal(summary.captureStats.peakRawBytes, 4194304);
+  assert.match(summary.actions[4].reasons.join(','), /stream-global-overflow/);
+  proof.close();
+  assert.equal(proof.summary().captureStats.retainedRawBytes, 0);
+});
+
+test('1 MiB per-body bound applies to cumulative prefix plus future spans before allocation', async () => {
+  const proof = createInventoryConsumptionProof({ browserOrigin, fixture: proofFixture,
+    call: async () => ({ bufferedData: Buffer.alloc(1024 * 1024, 65).toString('base64') }) });
+  bareAction(proof); bareRequest(proof, 'r1'); await proof.drain();
+  assert.equal(proof.summary().captureStats.retainedRawBytes, 1048576);
+  streamSpan(proof, 'r1', Buffer.from('x'));
+  const summary = proof.summary();
+  assert.match(summary.actions[0].reasons.join(','), /stream-oversize/);
+  assert.equal(summary.captureStats.retainedRawBytes, 0);
+  assert.equal(summary.captureStats.peakRawBytes, 1048576);
+});
+
+test('oversized encoded prefix is rejected before retention', async () => {
+  const action = await proofVerdict({ capture: async ({ command }) => {
+    await acknowledgeStream(command, Buffer.alloc(1024 * 1024 + 1).toString('base64'));
+  } });
+  assert.match(action.reasons.join(','), /stream-oversize/);
+});
+
+test('drain waits for acknowledgements outside dispatch, serializes cross-checks and consumes each once', async () => {
+  let resolveCommand, settled = false;
+  const calls = [];
+  const proof = createInventoryConsumptionProof({ browserOrigin, fixture: proofFixture,
+    call: (method) => {
+      calls.push(method);
+      return new Promise(resolve => { resolveCommand = resolve; });
+    } });
+  bareAction(proof); bareRequest(proof, 'r1');
+  const firstDrain = proof.drain();
+  assert.equal(proof.drain(), firstDrain);
+  firstDrain.then(() => { settled = true; });
+  await Promise.resolve();
+  assert.equal(settled, false);
+  resolveCommand({ bufferedData: '' }); await firstDrain;
+  assert.equal(settled, true);
+  assert.deepEqual(calls, ['Network.streamResourceContent']);
+  proof.close();
+
+  const completed = await runProofScenario();
+  const drains = [completed.proof.drain(completed.call), completed.proof.drain(completed.call)];
+  assert.equal(drains[0], drains[1]);
+  await Promise.all(drains); await completed.proof.drain(completed.call);
+  assert.deepEqual(completed.calls, [['Network.streamResourceContent', 'r1'], ['Network.getResponseBody', 'r1']]);
+});
+
+test('late command reply after close cannot resurrect retained bytes', async () => {
+  let resolveCommand;
+  const proof = createInventoryConsumptionProof({ browserOrigin, fixture: proofFixture,
+    call: () => new Promise(resolve => { resolveCommand = resolve; }) });
+  bareAction(proof); bareRequest(proof, 'r1');
+  streamSpan(proof, 'r1', Buffer.from('pending'));
+  proof.close();
+  resolveCommand({ bufferedData: Buffer.from('prefix').toString('base64') });
+  await proof.drain();
+  assert.equal(proof.summary().captureStats.retainedRawBytes, 0);
+  assert.match(proof.summary().actions[0].reasons.join(','), /stream-incomplete/);
+});
+
+test('finished cross-check accepts canonical base64 without altering stream digest', async () => {
+  const action = await proofVerdict({ crossResult: { body: Buffer.from(inventoryBody(100)).toString('base64'), base64Encoded: true } });
+  assert.deepEqual(action.reasons, []);
+  assert.equal(action.request.bodyCross.sha256, action.request.body.sha256);
+});
+
+test('proof limits can be tightened but never raised above the hard production caps', () => {
+  for (const limits of [{ bodyLimitBytes: 1048577 }, { rawLimitBytes: 4194305 }, { ledgerLimit: 129 },
+    { pendingLimit: 17 }, { dataEventLimit: 4097 }, { rawLimitBytes: 0 }, { bodyLimitBytes: NaN }]) {
+    assert.throws(() => createInventoryConsumptionProof({ browserOrigin, fixture: proofFixture, ...limits }), /Invalid inventory proof bound/);
+  }
+});
+
+test('actual decoded-length mismatch still fails when a parsed body exists', async () => {
+  const action = await proofVerdict({ timingDecoded: 1 });
+  assert.equal(action.validatedConsumption, false);
+  assert.deepEqual(action.reasons, ['timing-decoded-length']);
+});
+
+test('cross-check without a captured body is uncompared rather than an invented hash mismatch', async () => {
+  const action = await proofVerdict({ capture: async ({ command }) => {
+    command.reject(new Error('refused')); await Promise.resolve();
+  } });
+  assert.equal(action.request.bodyCross.state, 'uncompared');
+  assert.ok(!action.reasons.includes('body-capture-mismatch'));
+  assert.ok(!action.reasons.includes('timing-decoded-length'));
+  assert.equal(action.validatedConsumption, false);
+});
+
+test('reply interleaved between byte spans preserves split UTF-8 bytes and exact hash', async () => {
+  const body = inventoryBody(100).replace('"requestId":"req"', '"requestId":"한글"');
+  const action = await proofVerdict({ body, capture: async ({ proof, requestId, body, command }) => {
+    const bytes = Buffer.from(body), offset = bytes.indexOf(Buffer.from('한')) + 1;
+    proof.dataReceived({ requestId, dataLength: offset, encodedDataLength: offset });
+    streamSpan(proof, requestId, bytes.subarray(offset, offset + 1));
+    await acknowledgeStream(command, bytes.subarray(0, offset).toString('base64'));
+    streamSpan(proof, requestId, bytes.subarray(offset + 1));
+  } });
+  assert.deepEqual(action.reasons, []);
+  assert.equal(action.request.body.sha256, createHash('sha256').update(body).digest('hex'));
+});
+
+test('invalid UTF-8 cannot become a valid oracle body through replacement decoding', async () => {
+  const action = await proofVerdict({ capture: async ({ proof, requestId, body, command }) => {
+    const bytes = Buffer.from(body), offset = bytes.indexOf('req"');
+    bytes[offset] = 0xff;
+    await acknowledgeStream(command); streamSpan(proof, requestId, bytes);
+  } });
+  assert.equal(action.validatedConsumption, false);
+  assert.ok(action.reasons.includes('body-utf8'));
 });
