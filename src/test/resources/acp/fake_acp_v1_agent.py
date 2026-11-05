@@ -1135,7 +1135,7 @@ if MODE in RECONSTRUCTION_MODES:
             f"#ifndef DECOMP_MODULE_{module_id.upper()}_H",
             f"#define DECOMP_MODULE_{module_id.upper()}_H",
             '#include "decomp_types.h"',
-            "int decomp_engine_main(void); /* fn_0000000000001000 @ 0x1000 */",
+            "int decomp_engine_main(void); /* fn_0000000000001000 @ 0x1000; extraction-status=recovered; recovery-assessment=unassessed */",
         ),
         f"src/modules/{module_id}_internal.h": (
             f"#ifndef DECOMP_MODULE_{module_id.upper()}_INTERNAL_H",
