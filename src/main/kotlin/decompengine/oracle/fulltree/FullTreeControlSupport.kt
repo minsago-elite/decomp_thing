@@ -216,6 +216,96 @@ internal fun unsupportedForeignOwnerLeaseMessage(label: String, effectiveUid: In
     "$label has an unsupported foreign non-root owner and cannot be leased " +
         "(effectiveUid=$effectiveUid fileUid=$fileUid)"
 
+private enum class MutationInvalidationScope { TARGETED, WATCH, GLOBAL }
+
+private enum class MutationInvalidationReason {
+    FILE_EVENT, PARENT_NAME_MATCH, PARENT_NAMELESS, BOUND_IGNORED, QUEUE_SENTINEL,
+    QUEUE_OVERFLOW, UNKNOWN_WATCH, INCOMPATIBLE_BINDING, REMOVE_WATCH_ERROR,
+    READ_EOF, READ_ERROR, TRUNCATED_HEADER, INVALID_NAME_LENGTH, UNTERMINATED_NAME,
+}
+
+private data class MutationInvalidation(
+    val registrationId: Long,
+    val componentOrdinal: Int,
+    val componentCount: Int,
+    val componentRole: String,
+    val parentDevice: Long,
+    val parentInode: Long,
+    val parentMountId: Long,
+    val selectedDevice: Long,
+    val selectedInode: Long,
+    val selectedMountId: Long,
+    val parentWatch: Int,
+    val parentGeneration: Long,
+    val fileWatch: Int,
+    val fileGeneration: Long,
+    val triggeringBindingKind: String,
+    val triggeringGeneration: Long,
+    val reason: MutationInvalidationReason,
+    val scope: MutationInvalidationScope,
+    val rawMask: Int,
+    val watchDescriptor: Int,
+    val nameLength: Int,
+    val nameMatch: String,
+    val sequence: Long,
+    val elapsedNanos: Long,
+    val operation: String = "EVENT",
+    val errno: Int = 0,
+    val readCount: Long = 0,
+    val readOffset: Int = 0,
+    val counterSaturated: Boolean = false,
+)
+
+private class MutationDiagnostic(message: String) : RuntimeException(message, null, false, false)
+
+private const val MUTATION_DIAGNOSTIC_MAX_BYTES = 2 * 1024
+
+private fun attachMutationDiagnostic(failure: FullTreeControlException, event: MutationInvalidation) {
+    attachMutationDiagnostic(failure, event, null)
+}
+
+private fun attachMutationDiagnostic(
+    failure: FullTreeControlException,
+    event: MutationInvalidation,
+    rejectingRegistrationId: Long?,
+) {
+    if (failure.suppressed.any { it is MutationDiagnostic }) return
+    val message = buildString {
+        append("stable-control mutation diagnostic: ")
+        append("registration=").append(event.registrationId)
+        append(", component=").append(event.componentOrdinal).append('/').append(event.componentCount)
+        append(", role=").append(event.componentRole)
+        append(", parent=").append(event.parentDevice).append(':').append(event.parentInode)
+            .append(':').append(event.parentMountId)
+        append(", selected=").append(event.selectedDevice).append(':').append(event.selectedInode)
+            .append(':').append(event.selectedMountId)
+        append(", parentWatch=").append(event.parentWatch).append('@').append(event.parentGeneration)
+        append(", fileWatch=").append(event.fileWatch).append('@').append(event.fileGeneration)
+        append(", trigger=").append(event.triggeringBindingKind).append('@').append(event.triggeringGeneration)
+        append(", reason=").append(event.reason.name)
+        append(", scope=").append(event.scope.name)
+        append(", mask=").append(event.rawMask.toUInt().toString(16))
+        append(", watch=").append(event.watchDescriptor)
+        append(", nameLength=").append(event.nameLength)
+        append(", nameMatch=").append(event.nameMatch)
+        append(", sequence=").append(event.sequence)
+        if (rejectingRegistrationId != null && rejectingRegistrationId != event.registrationId) {
+            append(", rejectingRegistration=").append(rejectingRegistrationId)
+        }
+        append(", observedElapsedNanos=").append(event.elapsedNanos)
+        append(", operation=").append(event.operation)
+        append(", errno=").append(event.errno)
+        append(", readCount=").append(event.readCount)
+        append(", readOffset=").append(event.readOffset)
+        append(", counterSaturated=").append(event.counterSaturated)
+    }
+    var bounded = message
+    while (bounded.toByteArray(Charsets.UTF_8).size > MUTATION_DIAGNOSTIC_MAX_BYTES) {
+        bounded = bounded.dropLast(1)
+    }
+    runCatching { failure.addSuppressed(MutationDiagnostic(bounded)) }
+}
+
 /** Stable bounded access to a descriptor-selected authenticated input. */
 internal class StableControlFile private constructor(
     private val authenticatedSize: Long,
@@ -863,49 +953,122 @@ internal class StableControlFile private constructor(
     private interface MutationRegistration {
         fun requireQuiet(label: String)
         fun release()
+        fun firstInvalidation(): MutationInvalidation?
+        fun registrationId(): Long?
     }
 
     private class CompositeMutationRegistration(
         private val registrations: List<MutationRegistration>,
     ) : MutationRegistration {
-        override fun requireQuiet(label: String) {
-            registrations.forEach { registration -> registration.requireQuiet(label) }
-        }
-
         override fun release() {
             registrations.asReversed().forEach { registration -> runCatching { registration.release() } }
+        }
+
+        override fun firstInvalidation(): MutationInvalidation? = registrations
+            .mapNotNull(MutationRegistration::firstInvalidation)
+            .minByOrNull(MutationInvalidation::sequence)
+
+        override fun registrationId(): Long? = null
+
+        override fun requireQuiet(label: String) {
+            for (registration in registrations) {
+                try {
+                    registration.requireQuiet(label)
+                } catch (failure: FullTreeControlException) {
+                    val event = firstInvalidation()
+                    if (event != null) attachMutationDiagnostic(failure, event, registration.registrationId())
+                    throw failure
+                }
+            }
         }
     }
 
     /** One process-wide inotify descriptor multiplexes every stable-file parent and inode watch. */
-    private object MutationMonitor {
-        private val libc: InotifyLibC by lazy { Native.load(Platform.C_LIBRARY_NAME, InotifyLibC::class.java) }
+    private class MutationMonitor(private val libc: InotifyLibC, private val clock: () -> Long = System::nanoTime) {
+        companion object {
+            val instance: MutationMonitor by lazy {
+                MutationMonitor(Native.load(Platform.C_LIBRARY_NAME, InotifyLibC::class.java))
+            }
+
+            private const val INOTIFY_READ_BYTES = 64 * 1024
+            private const val INOTIFY_EVENT_HEADER_BYTES = 4 * Int.SIZE_BYTES
+            private const val INOTIFY_QUEUE_WATCH = -1
+            private const val O_NONBLOCK = 0x800
+            private const val O_CLOEXEC = 0x80000
+            private const val EAGAIN = 11
+            private const val EINTR = 4
+            private const val EINVAL = 22
+            private const val IN_MODIFY = 0x00000002
+            private const val IN_ATTRIB = 0x00000004
+            private const val IN_CLOSE_WRITE = 0x00000008
+            private const val IN_MOVED_FROM = 0x00000040
+            private const val IN_MOVED_TO = 0x00000080
+            private const val IN_CREATE = 0x00000100
+            private const val IN_DELETE = 0x00000200
+            private const val IN_DELETE_SELF = 0x00000400
+            private const val IN_MOVE_SELF = 0x00000800
+            private const val IN_Q_OVERFLOW = 0x00004000
+            private const val IN_IGNORED = 0x00008000
+            private const val IN_ONLYDIR = 0x01000000
+            private const val FILE_MUTATION_MASK =
+                IN_MODIFY or IN_ATTRIB or IN_CLOSE_WRITE or IN_DELETE_SELF or IN_MOVE_SELF
+            private const val PARENT_MUTATION_MASK =
+                IN_ONLYDIR or FILE_MUTATION_MASK or IN_MOVED_FROM or IN_MOVED_TO or IN_CREATE or IN_DELETE
+        }
+
         private var descriptor = -1
         private var buffer: Memory? = null
         private var nextRegistrationId = 1L
+        private var nextBindingGeneration = 1L
+        private var bindingGenerationSaturated = false
+        private var eventSequence = 0L
+        private var sequenceSaturated = false
+        private val startedNanos = clock()
         private val registrations = HashMap<Long, Registration>()
         private val watches = HashMap<Int, WatchBinding>()
         private val retiredWatches = HashSet<Int>()
 
         private class Registration(
+            private val owner: MutationMonitor,
             val id: Long,
             val selectedNameBytes: ByteArray,
+            val parentIdentity: LinuxFileIdentity,
+            val selectedIdentity: LinuxFileIdentity,
+            val componentOrdinal: Int,
+            val componentCount: Int,
             var parentWatch: Int = -1,
+            var parentGeneration: Long = 0L,
             var fileWatch: Int = -1,
+            var fileGeneration: Long = 0L,
             var changed: Boolean = false,
+            var firstEvent: MutationInvalidation? = null,
         ) : MutationRegistration {
             override fun requireQuiet(label: String) {
-                MutationMonitor.requireQuiet(this, label)
+                owner.requireQuiet(this, label)
             }
 
             override fun release() {
-                MutationMonitor.release(this)
+                owner.release(this)
             }
+            override fun firstInvalidation(): MutationInvalidation? = firstEvent
+            override fun registrationId(): Long = id
         }
 
         private class WatchBinding(
             val kind: WatchKind,
+            val generation: Long,
             val registrations: MutableSet<Long> = LinkedHashSet(),
+        )
+
+        private data class EventObservation(
+            val sequence: Long,
+            val elapsedNanos: Long,
+            val rawMask: Int,
+            val watchDescriptor: Int,
+            val nameLength: Int,
+            val triggeringBindingKind: String,
+            val triggeringGeneration: Long,
+            val counterSaturated: Boolean,
         )
 
         private enum class WatchKind { PARENT, FILE }
@@ -916,12 +1079,28 @@ internal class StableControlFile private constructor(
             selected: LinuxDescriptor,
             name: String,
             label: String,
+            componentOrdinal: Int,
+            componentCount: Int,
+            earlierRegistrations: List<MutationRegistration> = emptyList(),
         ): MutationRegistration {
-            ensureOpen(label)
-            drain(label)
-            val registration = Registration(nextRegistrationId++, name.toByteArray(Charsets.UTF_8))
-            registrations[registration.id] = registration
+            var registration: Registration? = null
             try {
+                ensureOpen(label)
+                // Keep this drain inside the catch boundary: while a later component is being
+                // installed, it may observe and retain an invalidation for an earlier component
+                // before the same read fails on a later record.
+                drain(label)
+                val opened = Registration(
+                    this,
+                    nextRegistrationId++,
+                    name.toByteArray(Charsets.UTF_8),
+                    parent.identity,
+                    selected.identity,
+                    componentOrdinal,
+                    componentCount,
+                )
+                registration = opened
+                registrations[opened.id] = opened
                 val parentWatch = parent.whileOpen { fd ->
                     libc.inotify_add_watch(
                         descriptor,
@@ -934,8 +1113,9 @@ internal class StableControlFile private constructor(
                         "cannot register $label parent mutation watch (errno=${Native.getLastError()})",
                     )
                 }
-                bind(parentWatch, WatchKind.PARENT, registration.id, label)
-                registration.parentWatch = parentWatch
+                val parentBinding = bind(parentWatch, WatchKind.PARENT, opened.id, label)
+                opened.parentWatch = parentWatch
+                opened.parentGeneration = parentBinding.generation
 
                 val fileWatch = selected.whileOpen { fd ->
                     libc.inotify_add_watch(
@@ -949,17 +1129,28 @@ internal class StableControlFile private constructor(
                         "cannot register $label file mutation watch (errno=${Native.getLastError()})",
                     )
                 }
-                bind(fileWatch, WatchKind.FILE, registration.id, label)
-                registration.fileWatch = fileWatch
+                val fileBinding = bind(fileWatch, WatchKind.FILE, opened.id, label)
+                opened.fileWatch = fileWatch
+                opened.fileGeneration = fileBinding.generation
                 drain(label)
-                if (registration.changed) {
+                if (opened.changed) {
                     throw FullTreeControlException("$label mutated while its watches were registered")
                 }
-                return registration
+                return opened
             } catch (failure: Throwable) {
-                registrations.remove(registration.id)
-                unbind(registration.parentWatch, registration.id)
-                unbind(registration.fileWatch, registration.id)
+                if (failure is FullTreeControlException) {
+                    val earliest = (earlierRegistrations.asSequence().mapNotNull(MutationRegistration::firstInvalidation) +
+                        listOfNotNull(registration?.firstEvent).asSequence())
+                        .minByOrNull(MutationInvalidation::sequence)
+                    if (earliest != null) {
+                        attachMutationDiagnostic(failure, earliest, registration?.id)
+                    }
+                }
+                registration?.let { opened ->
+                    registrations.remove(opened.id)
+                    unbind(opened.parentWatch, opened.id)
+                    unbind(opened.fileWatch, opened.id)
+                }
                 throw failure
             }
         }
@@ -999,13 +1190,26 @@ internal class StableControlFile private constructor(
             }
         }
 
-        private fun bind(watch: Int, kind: WatchKind, registrationId: Long, label: String) {
+        private fun bind(watch: Int, kind: WatchKind, registrationId: Long, label: String): WatchBinding {
             val binding = watches[watch]
             if (binding != null && binding.kind != kind) {
-                markAllChanged()
+                val event = observeEvent(watch, 0, 0, binding.kind.name, binding.generation)
+                markAllChanged(
+                    event,
+                    MutationInvalidationReason.INCOMPATIBLE_BINDING,
+                    MutationInvalidationScope.GLOBAL,
+                )
                 throw FullTreeControlException("$label mutation monitor reused an incompatible watch")
             }
-            watches.getOrPut(watch) { WatchBinding(kind) }.registrations.add(registrationId)
+            return watches.getOrPut(watch) {
+                WatchBinding(kind, allocateBindingGeneration())
+            }.also { it.registrations.add(registrationId) }
+        }
+
+        private fun allocateBindingGeneration(): Long {
+            val generation = nextBindingGeneration
+            if (generation == Long.MAX_VALUE) bindingGenerationSaturated = true else nextBindingGeneration++
+            return generation
         }
 
         private fun unbind(watch: Int, registrationId: Long) {
@@ -1016,7 +1220,18 @@ internal class StableControlFile private constructor(
             watches.remove(watch)
             retiredWatches.add(watch)
             val result = libc.inotify_rm_watch(descriptor, watch)
-            if (result != 0 && Native.getLastError() != EINVAL) markAllChanged()
+            if (result != 0) {
+                val error = Native.getLastError()
+                if (error != EINVAL) {
+                    val observation = observeEvent(watch, 0, 0, "${binding.kind.name}_REMOVE", binding.generation)
+                    markAllChanged(
+                        observation,
+                        MutationInvalidationReason.REMOVE_WATCH_ERROR,
+                        MutationInvalidationScope.GLOBAL,
+                        error,
+                    )
+                }
+            }
             runCatching { drain("stable control file") }
         }
 
@@ -1028,13 +1243,26 @@ internal class StableControlFile private constructor(
                 when {
                     count > 0L -> inspectEvents(ownedBuffer, count.toInt(), label)
                     count == 0L -> {
-                        markAllChanged()
+                        val observation = observeEvent(-1, 0, 0, "READ", 0)
+                        markAllChanged(
+                            observation,
+                            MutationInvalidationReason.READ_EOF,
+                            MutationInvalidationScope.GLOBAL,
+                            readCount = count,
+                        )
                         throw FullTreeControlException("$label mutation monitor ended unexpectedly")
                     }
                     error == EINTR -> continue
                     error == EAGAIN -> return
                     else -> {
-                        markAllChanged()
+                        val observation = observeEvent(-1, 0, 0, "READ", 0)
+                        markAllChanged(
+                            observation,
+                            MutationInvalidationReason.READ_ERROR,
+                            MutationInvalidationScope.GLOBAL,
+                            error,
+                            readCount = count,
+                        )
                         throw FullTreeControlException("$label mutation monitor failed with errno $error")
                     }
                 }
@@ -1044,17 +1272,43 @@ internal class StableControlFile private constructor(
         private fun inspectEvents(buffer: Memory, count: Int, label: String) {
             var offset = 0
             while (offset < count) {
-                if (count - offset < INOTIFY_EVENT_HEADER_BYTES) malformedEvent(label, "truncated")
+                if (count - offset < INOTIFY_EVENT_HEADER_BYTES) {
+                    malformedEvent(label, "truncated", MutationInvalidationReason.TRUNCATED_HEADER, offset)
+                }
                 val watch = buffer.getInt(offset.toLong())
                 val mask = buffer.getInt((offset + Int.SIZE_BYTES).toLong())
                 val nameLength = buffer.getInt((offset + 3 * Int.SIZE_BYTES).toLong())
                 if (nameLength < 0 || nameLength > count - offset - INOTIFY_EVENT_HEADER_BYTES) {
-                    malformedEvent(label, "invalid-length")
+                    malformedEvent(
+                        label,
+                        "invalid-length",
+                        MutationInvalidationReason.INVALID_NAME_LENGTH,
+                        offset,
+                        observeEvent(watch, mask, nameLength, watches[watch]?.kind?.name ?: "UNKNOWN", watches[watch]?.generation ?: 0L),
+                    )
                 }
-                if (watch == INOTIFY_QUEUE_WATCH || mask and IN_Q_OVERFLOW != 0) {
-                    markAllChanged()
+                val binding = watches[watch]
+                val observation = observeEvent(
+                    watch,
+                    mask,
+                    nameLength,
+                    binding?.kind?.name ?: if (watch == INOTIFY_QUEUE_WATCH) "QUEUE" else "UNKNOWN",
+                    binding?.generation ?: 0L,
+                )
+                if (watch == INOTIFY_QUEUE_WATCH) {
+                    markAllChanged(
+                        observation,
+                        MutationInvalidationReason.QUEUE_SENTINEL,
+                        MutationInvalidationScope.GLOBAL,
+                    )
+                } else if (mask and IN_Q_OVERFLOW != 0) {
+                    markAllChanged(
+                        observation,
+                        MutationInvalidationReason.QUEUE_OVERFLOW,
+                        MutationInvalidationScope.GLOBAL,
+                    )
                 } else {
-                    dispatchEvent(buffer, offset, watch, mask, nameLength, label)
+                    dispatchEvent(buffer, offset, watch, mask, nameLength, label, observation)
                 }
                 offset = Math.addExact(offset, Math.addExact(INOTIFY_EVENT_HEADER_BYTES, nameLength))
             }
@@ -1067,6 +1321,7 @@ internal class StableControlFile private constructor(
             mask: Int,
             nameLength: Int,
             label: String,
+            observation: EventObservation,
         ) {
             val binding = watches[watch]
             if (binding == null) {
@@ -1074,19 +1329,38 @@ internal class StableControlFile private constructor(
                     retiredWatches.remove(watch)
                     return
                 }
-                markAllChanged()
+                markAllChanged(
+                    observation,
+                    MutationInvalidationReason.UNKNOWN_WATCH,
+                    MutationInvalidationScope.GLOBAL,
+                )
                 return
             }
             if (mask and IN_IGNORED != 0) {
-                binding.registrations.forEach { registrations[it]?.changed = true }
+                binding.registrations.forEach {
+                    markChanged(
+                        registrations[it], observation, MutationInvalidationReason.BOUND_IGNORED,
+                        MutationInvalidationScope.WATCH, "MATCH",
+                    )
+                }
                 watches.remove(watch)
                 return
             }
             if (binding.kind == WatchKind.FILE) {
-                binding.registrations.forEach { registrations[it]?.changed = true }
+                binding.registrations.forEach {
+                    markChanged(
+                        registrations[it], observation, MutationInvalidationReason.FILE_EVENT,
+                        MutationInvalidationScope.TARGETED, "LEAF",
+                    )
+                }
             } else {
                 if (nameLength == 0) {
-                    binding.registrations.forEach { registrations[it]?.changed = true }
+                    binding.registrations.forEach {
+                        markChanged(
+                            registrations[it], observation, MutationInvalidationReason.PARENT_NAMELESS,
+                            MutationInvalidationScope.WATCH, "NAMELESS",
+                        )
+                    }
                     return
                 }
                 val paddedName = buffer.getByteArray(
@@ -1094,24 +1368,133 @@ internal class StableControlFile private constructor(
                     nameLength,
                 )
                 val terminator = paddedName.indexOf(0)
-                if (terminator < 0) malformedEvent(label, "unterminated-name")
+                if (terminator < 0) {
+                    malformedEvent(
+                        label,
+                        "unterminated-name",
+                        MutationInvalidationReason.UNTERMINATED_NAME,
+                        offset,
+                        observation,
+                    )
+                }
                 val eventName = paddedName.copyOf(terminator)
                 binding.registrations.forEach { id ->
                     val registration = registrations[id]
                     if (registration != null && eventName.contentEquals(registration.selectedNameBytes)) {
-                        registration.changed = true
+                        markChanged(
+                            registration, observation, MutationInvalidationReason.PARENT_NAME_MATCH,
+                            MutationInvalidationScope.TARGETED, "MATCH",
+                        )
                     }
                 }
             }
         }
 
-        private fun malformedEvent(label: String, detail: String): Nothing {
-            markAllChanged()
+        private fun malformedEvent(
+            label: String,
+            detail: String,
+            reason: MutationInvalidationReason,
+            offset: Int,
+            existing: EventObservation? = null,
+            rawWatch: Int = -1,
+            rawMask: Int = 0,
+            rawNameLength: Int = 0,
+        ): Nothing {
+            val observation = existing ?: observeEvent(rawWatch, rawMask, rawNameLength, "MALFORMED", 0)
+            markAllChanged(
+                observation,
+                reason,
+                MutationInvalidationScope.GLOBAL,
+                readOffset = offset,
+            )
             throw FullTreeControlException("$label mutation monitor returned a $detail event")
         }
 
-        private fun markAllChanged() {
-            registrations.values.forEach { it.changed = true }
+        private fun markAllChanged(
+            observation: EventObservation,
+            reason: MutationInvalidationReason,
+            scope: MutationInvalidationScope,
+            errno: Int = 0,
+            readCount: Long = 0,
+            readOffset: Int = 0,
+        ) {
+            registrations.values.forEach {
+                markChanged(it, observation, reason, scope, "UNKNOWN", errno, readCount, readOffset)
+            }
+        }
+
+        private fun markChanged(
+            registration: Registration?,
+            observation: EventObservation,
+            reason: MutationInvalidationReason,
+            scope: MutationInvalidationScope,
+            nameMatch: String,
+            errno: Int = 0,
+            readCount: Long = 0,
+            readOffset: Int = 0,
+        ) {
+            if (registration == null) return
+            registration.changed = true
+            if (registration.firstEvent != null) return
+            registration.firstEvent = MutationInvalidation(
+                registration.id,
+                registration.componentOrdinal,
+                registration.componentCount,
+                if (registration.componentOrdinal + 1 == registration.componentCount) "SELECTED_LEAF" else "ANCESTOR_EDGE",
+                registration.parentIdentity.key.device,
+                registration.parentIdentity.key.inode,
+                registration.parentIdentity.mountId,
+                registration.selectedIdentity.key.device,
+                registration.selectedIdentity.key.inode,
+                registration.selectedIdentity.mountId,
+                registration.parentWatch,
+                registration.parentGeneration,
+                registration.fileWatch,
+                registration.fileGeneration,
+                observation.triggeringBindingKind,
+                observation.triggeringGeneration,
+                reason,
+                scope,
+                observation.rawMask,
+                observation.watchDescriptor,
+                observation.nameLength,
+                nameMatch,
+                observation.sequence,
+                observation.elapsedNanos,
+                if (reason in setOf(
+                        MutationInvalidationReason.READ_EOF,
+                        MutationInvalidationReason.READ_ERROR,
+                        MutationInvalidationReason.TRUNCATED_HEADER,
+                        MutationInvalidationReason.INVALID_NAME_LENGTH,
+                        MutationInvalidationReason.UNTERMINATED_NAME,
+                    )
+                ) "READ_OR_PARSE" else "EVENT",
+                errno,
+                readCount,
+                readOffset,
+                observation.counterSaturated,
+            )
+        }
+
+        private fun observeEvent(
+            watch: Int,
+            mask: Int,
+            nameLength: Int,
+            bindingKind: String,
+            bindingGeneration: Long,
+        ): EventObservation {
+            val saturated = eventSequence == Long.MAX_VALUE
+            if (!saturated) eventSequence++
+            return EventObservation(
+                eventSequence,
+                (clock() - startedNanos).coerceAtLeast(0L),
+                mask,
+                watch,
+                nameLength,
+                bindingKind,
+                bindingGeneration,
+                sequenceSaturated || saturated || bindingGenerationSaturated,
+            ).also { if (saturated) sequenceSaturated = true }
         }
 
         private interface InotifyLibC : Library {
@@ -1122,30 +1505,6 @@ internal class StableControlFile private constructor(
             fun close(descriptor: Int): Int
         }
 
-        private const val INOTIFY_READ_BYTES = 64 * 1024
-        private const val INOTIFY_EVENT_HEADER_BYTES = 4 * Int.SIZE_BYTES
-        private const val INOTIFY_QUEUE_WATCH = -1
-        private const val O_NONBLOCK = 0x800
-        private const val O_CLOEXEC = 0x80000
-        private const val EAGAIN = 11
-        private const val EINTR = 4
-        private const val EINVAL = 22
-        private const val IN_MODIFY = 0x00000002
-        private const val IN_ATTRIB = 0x00000004
-        private const val IN_CLOSE_WRITE = 0x00000008
-        private const val IN_MOVED_FROM = 0x00000040
-        private const val IN_MOVED_TO = 0x00000080
-        private const val IN_CREATE = 0x00000100
-        private const val IN_DELETE = 0x00000200
-        private const val IN_DELETE_SELF = 0x00000400
-        private const val IN_MOVE_SELF = 0x00000800
-        private const val IN_Q_OVERFLOW = 0x00004000
-        private const val IN_IGNORED = 0x00008000
-        private const val IN_ONLYDIR = 0x01000000
-        private const val FILE_MUTATION_MASK =
-            IN_MODIFY or IN_ATTRIB or IN_CLOSE_WRITE or IN_DELETE_SELF or IN_MOVE_SELF
-        private const val PARENT_MUTATION_MASK =
-            IN_ONLYDIR or FILE_MUTATION_MASK or IN_MOVED_FROM or IN_MOVED_TO or IN_CREATE or IN_DELETE
     }
 
     private enum class OpenFaultPoint {
@@ -1314,14 +1673,38 @@ internal class StableControlFile private constructor(
                 readLease = null
                 return result
             } catch (failure: Throwable) {
+                val ownedMutationWatch = mutationWatch
+                var mutationEvent = ownedMutationWatch?.firstInvalidation()
+                var capturedDiagnostic: MutationDiagnostic? = failure.suppressed
+                    .firstOrNull { it is MutationDiagnostic } as? MutationDiagnostic
+                if (mutationEvent == null && ownedMutationWatch != null) {
+                    val diagnosticFailure = runCatching {
+                        ownedMutationWatch.requireQuiet("stable control file rollback diagnostic")
+                    }.exceptionOrNull()
+                    capturedDiagnostic = diagnosticFailure?.suppressed?.firstOrNull {
+                        it is MutationDiagnostic
+                    } as? MutationDiagnostic
+                    mutationEvent = ownedMutationWatch.firstInvalidation()
+                }
+                val reportedFailure = if (failure is FullTreeControlException) {
+                    failure
+                } else {
+                    FullTreeControlException("cannot open $label through its pinned descriptor", failure)
+                }
+                if (reportedFailure.suppressed.none { it is MutationDiagnostic }) {
+                    if (capturedDiagnostic != null) {
+                        runCatching { reportedFailure.addSuppressed(capturedDiagnostic) }
+                    } else if (mutationEvent != null) {
+                        attachMutationDiagnostic(reportedFailure, mutationEvent)
+                    }
+                }
                 val ownedLease = readLease
                 if (ownedLease != null) ownedLease.release()
                 readable?.close()
                 selected?.close()
                 closeDirectories(directoryDescriptors)
                 mutationWatch?.release()
-                if (failure is FullTreeControlException) throw failure
-                throw FullTreeControlException("cannot open $label through its pinned descriptor", failure)
+                throw reportedFailure
             }
         }
 
@@ -1337,20 +1720,26 @@ internal class StableControlFile private constructor(
             try {
                 parentComponentNames.forEachIndexed { index, componentName ->
                     registrations.addLast(
-                        MutationMonitor.register(
+                        MutationMonitor.instance.register(
                             directoryDescriptors[index],
                             selected,
                             componentName,
                             label,
+                            index,
+                            parentComponentNames.size + 1,
+                            registrations.toList(),
                         ),
                     )
                 }
                 registrations.addLast(
-                    MutationMonitor.register(
+                    MutationMonitor.instance.register(
                         directoryDescriptors.last(),
                         selected,
                         selectedName,
                         label,
+                        parentComponentNames.size,
+                        parentComponentNames.size + 1,
+                        registrations.toList(),
                     ),
                 )
                 return CompositeMutationRegistration(registrations.toList())
