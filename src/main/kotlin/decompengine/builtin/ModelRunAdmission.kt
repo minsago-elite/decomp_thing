@@ -3,6 +3,9 @@ package decompengine.builtin
 import decompengine.agent.AgentCancellation
 import decompengine.agent.AgentExecutionLimits
 import decompengine.builtin.provider.*
+import decompengine.chatgpt.ChatGptDeadline
+import decompengine.chatgpt.ChatGptDeadlineClock
+import decompengine.chatgpt.ChatGptOperationFence
 import decompengine.project.GeneratedCValidationBudgetPolicy
 import decompengine.project.GeneratedCValidationHostSafetyLimits
 import decompengine.repair.RepairResourceBudget
@@ -12,6 +15,7 @@ import java.time.Duration
 import java.util.Collections
 import java.util.IdentityHashMap
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicReference
 
 internal fun v2Fail(kind: ModelFailureKind = ModelFailureKind.INVALID_REQUEST): Nothing = throw ModelProviderException(kind)
 internal fun v2Require(value: Boolean) { if (!value) v2Fail() }
@@ -124,19 +128,100 @@ internal class AccountBindingV2(
 }
 internal fun interface NanoClockV2 { fun now(): Long }
 internal data class CallTimeoutsV2(val overallNanos: Long, val connectNanos: Long, val requestNanos: Long, val idleNanos: Long)
-internal class RunDeadlineV2 internal constructor(private val end: Long, private val clock: NanoClockV2, private val cancellation: AgentCancellation) {
-    fun remainingNanos(): Long {
-        if (cancellation.isCancellationRequested()) v2Fail(ModelFailureKind.CANCELLED)
-        val left = v2Subtract(end, clock.now())
+/** Captured by the future host ingress before queue/helper work. No credentials or callbacks. */
+internal class OriginalModelRunOperationV2 private constructor(
+    private val root: ChatGptDeadline,
+    private val fence: ChatGptOperationFence,
+    private val system: Boolean,
+) {
+    private val owner = AtomicReference<ModelRunAdmissionV2?>()
+    fun cancel() = fence.cancel()
+    fun tightenFrom(entryNanos: Long, remainingNanos: Long) = root.tightenFrom(entryNanos, remainingNanos)
+    internal fun claim(admission: ModelRunAdmissionV2) {
+        requireLive(root)
+        v2Require(owner.compareAndSet(null, admission))
+    }
+    internal fun child(admission: ModelRunAdmissionV2, span: Long): ChatGptDeadline {
+        v2Require(owner.get() === admission)
+        return root.capFromOrigin(span)
+    }
+    internal fun validate(child: ChatGptDeadline, expectedFence: ChatGptOperationFence, requireSystem: Boolean) {
+        v2Require(system == requireSystem && (root.clock === ChatGptDeadlineClock.SYSTEM) == requireSystem)
+        v2Require(child.isWithin(root) && expectedFence === fence)
+        requireLive(child)
+    }
+    internal fun requireLive(child: ChatGptDeadline): Long {
+        v2Require(child.isWithin(root))
+        if (fence.isCancelled()) v2Fail(ModelFailureKind.CANCELLED)
+        val left = child.remainingNanos()
         if (left <= 0) v2Fail(ModelFailureKind.TIMEOUT)
         return left
     }
+    internal fun sharedFence() = fence
+    override fun toString() = "OriginalModelRunOperationV2(redacted)"
+    companion object {
+        fun captureSystem(originalAllowance: Duration): OriginalModelRunOperationV2 =
+            capture(ChatGptDeadlineClock.SYSTEM, originalAllowance, true)
+        fun captureControlledForTest(clock: ChatGptDeadlineClock, originalAllowance: Duration): OriginalModelRunOperationV2 {
+            v2Require(clock !== ChatGptDeadlineClock.SYSTEM)
+            return capture(clock, originalAllowance, false)
+        }
+        private fun capture(clock: ChatGptDeadlineClock, allowance: Duration, system: Boolean): OriginalModelRunOperationV2 =
+            OriginalModelRunOperationV2(ChatGptDeadline.start(clock, minOf(v2Nanos(allowance), 1_200_000_000_000L)),
+                ChatGptOperationFence(), system)
+    }
+}
+
+/** Time/cancellation only. This record never grants credentials, dispatch or settlement. */
+internal class ModelRunDeadlineAuthorityV2 private constructor(
+    private val original: OriginalModelRunOperationV2,
+    val deadline: ChatGptDeadline,
+    val fence: ChatGptOperationFence,
+) {
+    internal fun remainingNanos(): Long = original.requireLive(deadline)
+    internal fun requireAuthority(expected: OriginalModelRunOperationV2, system: Boolean): ModelRunDeadlineAuthorityV2 {
+        v2Require(expected === original)
+        original.validate(deadline, fence, system)
+        return this
+    }
+    override fun toString() = "ModelRunDeadlineAuthorityV2(redacted)"
+    companion object {
+        internal fun fromOriginal(original: OriginalModelRunOperationV2, owner: ModelRunAdmissionV2, span: Long) =
+            ModelRunDeadlineAuthorityV2(original, original.child(owner, span), original.sharedFence())
+    }
+}
+
+internal class RunDeadlineV2 private constructor(
+    private val authority: ModelRunDeadlineAuthorityV2?,
+    private val end: Long,
+    private val clock: NanoClockV2?,
+    private val cancellation: AgentCancellation?,
+) {
+    /** OFFLINE_COMPATIBILITY: callback clocks never acquire SYSTEM or TEST authority. */
+    internal constructor(end: Long, clock: NanoClockV2, cancellation: AgentCancellation) : this(null, end, clock, cancellation)
+    fun remainingNanos(): Long {
+        authority?.let { return it.remainingNanos() }
+        if (cancellation!!.isCancellationRequested()) v2Fail(ModelFailureKind.CANCELLED)
+        val left = v2Subtract(end, clock!!.now())
+        if (left <= 0) v2Fail(ModelFailureKind.TIMEOUT)
+        return left
+    }
+    fun requireSystemAuthority(expectedOriginal: OriginalModelRunOperationV2): ModelRunDeadlineAuthorityV2 =
+        (authority ?: v2Fail()).requireAuthority(expectedOriginal, true)
+    fun requireTestAuthority(expectedOriginal: OriginalModelRunOperationV2): ModelRunDeadlineAuthorityV2 =
+        (authority ?: v2Fail()).requireAuthority(expectedOriginal, false)
+    /** Final admission check: deliberately cannot invoke an offline callback. */
+    internal fun requireTrustedLive() { authority?.remainingNanos() }
     fun callTimeouts(budget: LocalBudgetV1): CallTimeoutsV2 {
         val overall = minOf(remainingNanos(), v2Nanos(budget.overallTimeout))
         return CallTimeoutsV2(overall, minOf(overall, v2Nanos(budget.connectTimeout)),
             minOf(overall, v2Nanos(budget.requestTimeout)), minOf(overall, v2Nanos(budget.idleTimeout)))
     }
     override fun toString() = "RunDeadlineV2(redacted)"
+    companion object {
+        internal fun fromOriginal(original: OriginalModelRunOperationV2, owner: ModelRunAdmissionV2, span: Long) =
+            RunDeadlineV2(ModelRunDeadlineAuthorityV2.fromOriginal(original, owner, span), 0L, null, null)
+    }
 }
 internal class CheckedAdmissionV2 private constructor(
     internal val owner: Any, internal val selection: PlanRunSelectionV1?, val requirement: GenerationRequirementV2,
@@ -168,17 +253,54 @@ internal class AdmittedModelRunV2 private constructor(val runId: UUID, internal 
 }
 
 /** No credentials/catalog/HTTP/tool-open callbacks exist in phase one. Registry is pure metadata. */
-internal class ModelRunAdmissionV2(
+internal class ModelRunAdmissionV2 private constructor(
     private val registry: () -> List<ToolDefinitionV2>,
     private val commitments: RunCommitmentsV2,
-    private val clock: NanoClockV2,
+    private val clock: NanoClockV2?,
     private val originalDeadlineNanos: Long,
-    private val cancellation: AgentCancellation = AgentCancellation.NONE,
+    private val cancellation: AgentCancellation?,
+    private val original: OriginalModelRunOperationV2?,
 ) {
+    /** Preserved offline constructor; production callers must retain an original operation. */
+    internal constructor(registry: () -> List<ToolDefinitionV2>, commitments: RunCommitmentsV2,
+        clock: NanoClockV2, originalDeadlineNanos: Long, cancellation: AgentCancellation = AgentCancellation.NONE) :
+        this(registry, commitments, clock, originalDeadlineNanos, cancellation, null)
+
+    private val admissionLock = Any()
+    private class Reservation { var poisoned = false }
+    private var active: Reservation? = null
+    private var currentCheck: CheckedAdmissionV2? = null
+    private var finalRun: AdmittedModelRunV2? = null
+    // Every access to these collections and reservation state holds admissionLock.
+
     private val bound = Collections.newSetFromMap(IdentityHashMap<CheckedAdmissionV2, Boolean>())
     private val issuedChecks = Collections.newSetFromMap(IdentityHashMap<CheckedAdmissionV2, Boolean>())
     private val issuedRuns = IdentityHashMap<AdmittedModelRunV2, Boolean>()
-    @Synchronized fun checkCapabilities(selection: PlanRunSelectionV1?, requirement: GenerationRequirementV2,
+    private fun rejectOverlap() {
+        active?.let { it.poisoned = true; v2Fail() }
+    }
+    private fun reserve(validate: () -> Unit): Reservation = synchronized(admissionLock) {
+        rejectOverlap()
+        validate() // private callback-free state predicates only
+        Reservation().also { active = it }
+    }
+    private fun compare(token: Reservation) { v2Require(active === token && !token.poisoned) }
+    private fun release(token: Reservation) = synchronized(admissionLock) {
+        if (active === token) active = null
+    }
+    private fun requireBindable(checked: CheckedAdmissionV2) {
+        v2Require(checked.owner === this && checked in issuedChecks && checked !in bound)
+        if (original != null) v2Require(finalRun == null && currentCheck === checked)
+    }
+    fun checkCapabilities(selection: PlanRunSelectionV1?, requirement: GenerationRequirementV2,
+        compiledCapabilities: ProviderCapabilitiesV2, caller: CallerRequirementsV2,
+        host: HostAdmissionLimitsV2, profile: ProfileAdmissionLimitsV2): CheckedAdmissionV2 {
+        val token = reserve { if (original != null) v2Require(finalRun == null) }
+        try {
+            return checkCandidate(token, selection, requirement, compiledCapabilities, caller, host, profile)
+        } finally { release(token) }
+    }
+    private fun checkCandidate(token: Reservation, selection: PlanRunSelectionV1?, requirement: GenerationRequirementV2,
         compiledCapabilities: ProviderCapabilitiesV2, caller: CallerRequirementsV2,
         host: HostAdmissionLimitsV2, profile: ProfileAdmissionLimitsV2): CheckedAdmissionV2 {
         val expected = when (compiledCapabilities.providerId) {
@@ -222,20 +344,46 @@ internal class ModelRunAdmissionV2(
             wallClock = minOf(d { it.wallClock }, legacy.wallClockTimeout), overallTimeout = d { it.overallTimeout },
             connectTimeout = d { it.connectTimeout }, requestTimeout = d { it.requestTimeout },
             idleTimeout = minOf(d { it.idleTimeout }, legacy.idleTimeout), maxRetries = i { it.maxRetries })
-        val deadline = RunDeadlineV2(minOf(originalDeadlineNanos, v2Add(clock.now(), v2Nanos(effective.wallClock))), clock, cancellation)
+        val deadline = if (original != null) RunDeadlineV2.fromOriginal(original, this, v2Nanos(effective.wallClock))
+            else RunDeadlineV2(minOf(originalDeadlineNanos, v2Add(clock!!.now(), v2Nanos(effective.wallClock))), clock, cancellation!!)
         deadline.remainingNanos()
         val tools = FrozenToolRegistryV2.freeze(registry(), minOf(effective.requestBytes, effective.contextBytes))
-        return CheckedAdmissionV2.mint(this, selection, requirement, effective, compiledCapabilities, tools, commitments, deadline, validationCommitment)
-            .also { issuedChecks.add(it) }
+        val candidate = CheckedAdmissionV2.mint(this, selection, requirement, effective, compiledCapabilities, tools, commitments, deadline, validationCommitment)
+        return synchronized(admissionLock) {
+            compare(token)
+            if (original != null) v2Require(finalRun == null)
+            deadline.requireTrustedLive()
+            issuedChecks.add(candidate)
+            if (original != null) currentCheck = candidate
+            candidate
+        }
     }
-    @Synchronized internal fun claimLedger(run: AdmittedModelRunV2) {
-        v2Require(issuedRuns[run] == false); issuedRuns[run] = true
+    internal fun claimLedger(run: AdmittedModelRunV2) = synchronized(admissionLock) {
+        rejectOverlap()
+        if (original != null) v2Require(finalRun === run)
+        v2Require(issuedRuns[run] == false)
+        issuedRuns[run] = true
     }
-    @Synchronized fun bind(checked: CheckedAdmissionV2, immutableAccountBinding: AccountBindingV2): AdmittedModelRunV2 {
-        v2Require(checked.owner === this && checked in issuedChecks && checked !in bound)
-        checked.deadline.remainingNanos()
-        checked.selection?.let { v2Require(it.accountId == immutableAccountBinding.accountId && it.modelSlug == immutableAccountBinding.modelSlug) }
-        bound.add(checked)
-        return AdmittedModelRunV2.mint(checked, immutableAccountBinding).also { issuedRuns[it] = false }
+    fun bind(checked: CheckedAdmissionV2, immutableAccountBinding: AccountBindingV2): AdmittedModelRunV2 {
+        val token = reserve { requireBindable(checked) }
+        try {
+            checked.selection?.let { v2Require(it.accountId == immutableAccountBinding.accountId && it.modelSlug == immutableAccountBinding.modelSlug) }
+            checked.deadline.remainingNanos()
+            val candidate = AdmittedModelRunV2.mint(checked, immutableAccountBinding)
+            return synchronized(admissionLock) {
+                compare(token)
+                requireBindable(checked)
+                checked.deadline.requireTrustedLive()
+                bound.add(checked)
+                issuedRuns[candidate] = false
+                if (original != null) finalRun = candidate
+                candidate
+            }
+        } finally { release(token) }
+    }
+    companion object {
+        fun fromOriginal(registry: () -> List<ToolDefinitionV2>, commitments: RunCommitmentsV2,
+            original: OriginalModelRunOperationV2): ModelRunAdmissionV2 =
+            ModelRunAdmissionV2(registry, commitments, null, 0L, null, original).also { original.claim(it) }
     }
 }

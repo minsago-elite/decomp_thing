@@ -3,7 +3,7 @@ package decompengine.chatgpt
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
-private const val MAX_SPAN = 600_000_000_000L
+private const val MAX_SPAN = 1_200_000_000_000L
 
 internal class ChatGptDeadlineClock private constructor(private val ticks: AtomicLong?) {
     private val failed = AtomicBoolean()
@@ -38,6 +38,12 @@ internal class ChatGptDeadline private constructor(private val root: Root, priva
     internal fun remainingNanos(): Long {
         val elapsed = root.sample()
         return (minOf(root.cutoff.get(), localCutoff) - elapsed).coerceAtLeast(0L)
+    }
+    /** Run limits are offsets from the original capture, never from this observation. */
+    internal fun capFromOrigin(maxNanos: Long): ChatGptDeadline {
+        require(maxNanos in 0..MAX_SPAN)
+        root.sample()
+        return ChatGptDeadline(root, minOf(localCutoff, root.cutoff.get(), maxNanos))
     }
     internal fun cap(maxNanos: Long): ChatGptDeadline = capAt(clock.readNanos(), maxNanos)
     internal fun capAt(entryNanos: Long, maxNanos: Long): ChatGptDeadline {

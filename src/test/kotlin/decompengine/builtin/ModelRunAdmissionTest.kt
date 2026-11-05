@@ -32,8 +32,8 @@ internal class V2Fixture(
     val inventory = ToolInventoryV2(mapOf(path to "a".repeat(64)))
     val binding = AccountBindingV2(account, "https://auth.openai.com", UUID(3, 4), "oaiapp_fixture", "b".repeat(64), 1, "fixture-model")
     val selection = PlanRunSelectionV1(account, "fixture-model", PlanBudgetPolicyV1.LOCAL_ACCEPTANCE_V1)
-    val factory = ModelRunAdmissionV2({ registryReads++; definitions }, RunCommitmentsV2("c".repeat(64), "d".repeat(64),
-        "e".repeat(64), inventory.commitment, policy.commitment), NanoClockV2 { now }, Duration.ofMinutes(20).toNanos(), cancellation)
+    val commitments = RunCommitmentsV2("c".repeat(64), "d".repeat(64), "e".repeat(64), inventory.commitment, policy.commitment)
+    val factory = ModelRunAdmissionV2({ registryReads++; definitions }, commitments, NanoClockV2 { now }, Duration.ofMinutes(20).toNanos(), cancellation)
     fun check(selection: PlanRunSelectionV1? = this.selection,
         requirement: GenerationRequirementV2 = GenerationRequirementV2.ElectLocalAcceptance(),
         capabilities: ProviderCapabilitiesV2 = ProviderCapabilitiesV2.siwc()) =

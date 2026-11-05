@@ -33,7 +33,7 @@ class ChatGptDeadlineTest {
         c.advanceNanos(25); assertEquals(0, d.remainingNanos())
     }
     @Test fun backwardAndFaultAreSticky() {
-        for (delta in listOf(-1L, 600_000_000_001L)) {
+        for (delta in listOf(-1L, 1_200_000_000_001L)) {
             val c = ChatGptDeadlineClock.controlled(); val d = ChatGptDeadline.start(c, 100)
             c.advanceNanos(delta); assertEquals(0, d.remainingNanos())
             c.advanceNanos(0); assertEquals(0, d.remainingNanos())
@@ -80,5 +80,43 @@ class ChatGptDeadlineTest {
     @Test fun cancellationLatchDoesNotInventCleanupTimeOrUncancel() {
         val f = ChatGptOperationFence(); assertFalse(f.isCancelled())
         f.cancel(); f.cancel(); assertTrue(f.isCancelled())
+    }
+    @Test fun fullDomainAndOriginCapsDoNotRestartOrDetach() {
+        val max = 1_200_000_000_000L
+        val c = ChatGptDeadlineClock.controlled(Long.MAX_VALUE - 10)
+        val root = ChatGptDeadline.start(c, max)
+        assertFailsWith<IllegalArgumentException> { ChatGptDeadline.start(c, max + 1) }
+        assertFailsWith<IllegalArgumentException> { root.capFromOrigin(max + 1) }
+        assertFailsWith<IllegalArgumentException> { root.capFromOrigin(-1) }
+        assertEquals(0, root.capFromOrigin(0).remainingNanos())
+        val full = root.capFromOrigin(max)
+        c.advanceNanos(600_000_000_000L); assertEquals(600_000_000_000L, full.remainingNanos())
+        c.advanceNanos(200_000_000_000L); assertEquals(400_000_000_000L, full.remainingNanos())
+        val smaller = full.capFromOrigin(900_000_000_000L)
+        assertTrue(smaller.isWithin(root)); assertEquals(100_000_000_000L, smaller.remainingNanos())
+        assertEquals(100_000_000_000L, smaller.capFromOrigin(max).remainingNanos())
+        root.tightenFrom(c.readNanos(), 10)
+        assertEquals(10, smaller.remainingNanos())
+        assertEquals(10, full.capFromOrigin(max).remainingNanos())
+        c.advanceNanos(400_000_000_000L); assertEquals(0, full.remainingNanos())
+        c.advanceNanos(1); assertEquals(0, root.capFromOrigin(max).remainingNanos())
+    }
+    @Test fun backwardsObservationAndCumulativeOverflowCannotReviveRoot() {
+        for (elapsed in listOf(-1L, 1_200_000_000_001L)) {
+            val c = ChatGptDeadlineClock.controlled(); val root = ChatGptDeadline.start(c, 1_200_000_000_000L)
+            // Reflection injects a hostile observation, without weakening the controlled API.
+            val ticks = ChatGptDeadlineClock::class.java.getDeclaredField("ticks").apply { isAccessible = true }
+                .get(c) as java.util.concurrent.atomic.AtomicLong
+            ticks.set(elapsed); assertEquals(0, root.remainingNanos())
+            ticks.set(0); root.tightenFrom(0, Long.MAX_VALUE)
+            assertEquals(0, root.capFromOrigin(1_200_000_000_000L).remainingNanos())
+        }
+        val c = ChatGptDeadlineClock.controlled(); val root = ChatGptDeadline.start(c, 1_200_000_000_000L)
+        val ticks = ChatGptDeadlineClock::class.java.getDeclaredField("ticks").apply { isAccessible = true }
+            .get(c) as java.util.concurrent.atomic.AtomicLong
+        c.advanceNanos(800_000_000_000L); assertEquals(400_000_000_000L, root.remainingNanos())
+        ticks.set(700_000_000_000L); assertEquals(400_000_000_000L, root.remainingNanos())
+        ticks.set(800_000_000_000L); c.advanceNanos(400_000_000_001L)
+        assertEquals(0, root.remainingNanos()); ticks.set(0); assertEquals(0, root.remainingNanos())
     }
 }
