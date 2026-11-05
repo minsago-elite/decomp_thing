@@ -92,6 +92,65 @@ internal object GitSourceCopy {
         return digests
     }
 
+    /**
+     * Read-only initialization comparison with the same ceilings and omitted roots as [copy].
+     * Lower limits and the stream boundary support authored controls; neither can raise a ceiling.
+     * Unreadable inputs propagate to the caller's unreadable retention hold.
+     */
+    fun matchesManifest(source: Path, expected: String, limits: GitCheckoutLimits = GitCheckoutLimits(),
+        openFile: (Path) -> java.io.InputStream = { Files.newInputStream(it, NOFOLLOW_LINKS) }): Boolean {
+        val fileLimit = minOf(limits.maxFiles, MAX_FILES)
+        val byteLimit = minOf(limits.maxBytes, MAX_BYTES)
+        val directoryLimit = minOf(limits.maxDirectories, MAX_DIRECTORIES)
+        val digests = sortedMapOf<String, String>()
+        var directories = 0
+        var bytes = 0L
+        var supported = true
+        fun refuse(): FileVisitResult { supported = false; return FileVisitResult.TERMINATE }
+        Files.walkFileTree(source, emptySet(), MAX_DEPTH + 1, object : SimpleFileVisitor<Path>() {
+            override fun preVisitDirectory(directory: Path, attributes: BasicFileAttributes): FileVisitResult {
+                GitStorage.checkInterrupted()
+                if (directory == source) return FileVisitResult.CONTINUE
+                val relative = source.relativize(directory)
+                if (relative.nameCount == 1 && relative.toString() in GitTrackingPolicy.UNCOPIED_ROOTS) {
+                    return FileVisitResult.SKIP_SUBTREE
+                }
+                if (relative.nameCount > MAX_DEPTH || ++directories > directoryLimit) return refuse()
+                return FileVisitResult.CONTINUE
+            }
+
+            override fun visitFile(file: Path, attributes: BasicFileAttributes): FileVisitResult {
+                GitStorage.checkInterrupted()
+                val relative = source.relativize(file)
+                if (relative.nameCount == 1 && relative.toString() in GitTrackingPolicy.UNCOPIED_ROOTS) {
+                    return FileVisitResult.CONTINUE
+                }
+                if (relative.nameCount > MAX_DEPTH || !attributes.isRegularFile || attributes.isSymbolicLink ||
+                    digests.size >= fileLimit || attributes.size() > byteLimit - bytes) return refuse()
+                val digest = MessageDigest.getInstance("SHA-256")
+                var observed = 0L
+                openFile(file).use { input ->
+                    val buffer = ByteArray(64 * 1024)
+                    while (true) {
+                        GitStorage.checkInterrupted()
+                        val remaining = minOf(byteLimit - bytes, attributes.size() - observed)
+                        val count = input.read(buffer, 0, minOf(buffer.size.toLong(), remaining + 1).toInt())
+                        if (count < 0) break
+                        if (count.toLong() > remaining) return refuse()
+                        bytes += count; observed += count
+                        digest.update(buffer, 0, count)
+                    }
+                }
+                if (observed != attributes.size()) return refuse()
+                digests[relative.toString()] = digest.digest().hex()
+                return FileVisitResult.CONTINUE
+            }
+
+            override fun visitFileFailed(file: Path, failure: IOException): FileVisitResult = throw failure
+        })
+        return supported && manifestDigest(digests) == expected
+    }
+
     fun manifestDigest(digests: Map<String, String>): String =
         GitStorage.sha256(digests.entries.joinToString("") { (path, digest) -> "$path\u0000$digest\n" })
 

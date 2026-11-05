@@ -168,6 +168,26 @@ it('uses polling when the server explicitly reports exhausted stream capacity', 
   expect(fetcher).toHaveBeenCalledOnce();
 });
 
+it('falls back to polling after two general 503 stream refusals without losing rows', async () => {
+  const error = fixture<{ error: { code: string } }>('error-validation');
+  error.error.code = 'STREAMS_DRAINING';
+  fetcher.mockImplementation(() => Promise.resolve(new Response(JSON.stringify(error), { status: 503,
+    headers: { 'Content-Type': 'application/json', 'X-Request-ID': 'request_example_1' } })));
+  transport.get.mockImplementation(kind => Promise.resolve(kind === 'snapshot' ? snapshot
+    : { data: { items: [], nextCursor: page.data.nextCursor, hasMore: false } }));
+  await start();
+  expect(fetcher).toHaveBeenCalledOnce();
+  expect(screen.getByRole('status').textContent).toContain('Reconnecting');
+  await advance(1000);
+  expect(fetcher).toHaveBeenCalledTimes(2);
+  await advance(2000);
+  expect(transport.get.mock.calls.at(-1)![1]).toContain(`transport=poll&limit=199&after=${page.data.nextCursor}`);
+  expect(screen.getByRole('status').textContent).toContain('Using periodic refresh');
+  expect(screen.getAllByRole('listitem')).toHaveLength(1);
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(fetcher).toHaveBeenCalledTimes(2);
+});
+
 // Injected-503 recovery control for a possible journal-publication read failure (#514).
 // This does not establish the cause of the historical packaged appended-SSE timeout.
 it('retries a stream refused during journal republication over a fresh stream without polling', async () => {

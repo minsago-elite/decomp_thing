@@ -105,6 +105,38 @@ import kotlin.test.assertTrue
 
 class ModuleRevisionGraphTest {
     @Test
+    fun `exploration snapshot copies corpus and rejects changed graph before repair preparation`() {
+        val project = generatedProject()
+        val binarySha256 = "a".repeat(64)
+        val originalInput = ProcessInput("retained", listOf("one"), byteArrayOf(0, 1))
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
+            graph.retainRegressionInputs(listOf(originalInput))
+        }
+        val snapshot = ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
+            graph.captureExplorationSnapshot(binarySha256)
+        }
+        assertEquals(binarySha256, snapshot.originalBinarySha256)
+        val exposed = snapshot.inputs.single()
+        exposed.stdin[0] = 99
+        assertEquals(0, snapshot.inputs.single().stdin[0].toInt())
+
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
+            graph.requireCurrentExplorationSnapshot(snapshot)
+        }
+
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
+            graph.retainRegressionInputs(listOf(originalInput, ProcessInput("later", emptyList(), byteArrayOf(2))))
+        }
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
+            val stale = assertFailsWith<IllegalArgumentException> {
+                graph.requireCurrentExplorationSnapshot(snapshot)
+            }
+            assertTrue(stale.message.orEmpty().contains("stale"))
+        }
+        assertEquals(listOf(originalInput), snapshot.inputs, "snapshot inputs must be detached from later graph writes")
+    }
+
+    @Test
     fun `legacy generated C fingerprint is rejected before pending recovery writes`() {
         val current = decompengine.project.GeneratedCMakeReconstructionProfile.descriptor
         val priorFingerprints = listOf(

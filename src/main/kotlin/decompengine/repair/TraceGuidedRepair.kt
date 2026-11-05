@@ -47,8 +47,10 @@ import java.nio.file.Path
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.ByteBuffer
+import java.nio.file.attribute.BasicFileAttributes
 import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
+import java.security.MessageDigest
 import java.time.Duration
 import java.util.ArrayList
 import java.util.Collections
@@ -66,6 +68,33 @@ import kotlin.io.path.readText
 import kotlin.io.path.readBytes
 import kotlin.io.path.isRegularFile
 import kotlin.io.path.relativeTo
+
+private fun captureExplorationBinarySha256(path: Path, maximumBytes: Long): String {
+    val normalized = path.toAbsolutePath().normalize()
+    require(Files.isRegularFile(normalized, LinkOption.NOFOLLOW_LINKS) && !Files.isSymbolicLink(normalized)) {
+        "exploration binary must be a regular non-symbolic-link file"
+    }
+    val before = Files.readAttributes(normalized, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+    require(before.size() in 1..maximumBytes) { "exploration binary exceeds the authenticated input bound" }
+    val digest = MessageDigest.getInstance("SHA-256")
+    var bytes = 0L
+    Files.newInputStream(normalized).use { input ->
+        val buffer = ByteArray(64 * 1024)
+        while (true) {
+            val count = input.read(buffer)
+            if (count < 0) break
+            bytes = Math.addExact(bytes, count.toLong())
+            require(bytes <= maximumBytes && bytes <= before.size()) { "exploration binary changed while its identity was captured" }
+            digest.update(buffer, 0, count)
+        }
+    }
+    val after = Files.readAttributes(normalized, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+    require(bytes == before.size() && after.size() == before.size() && after.fileKey() == before.fileKey() &&
+        after.lastModifiedTime() == before.lastModifiedTime()) {
+        "exploration binary changed while its identity was captured"
+    }
+    return digest.digest().joinToString("") { "%02x".format(it) }
+}
 
 data class StreamDiff(
     val expectedHex: String,
@@ -1282,19 +1311,71 @@ class TraceGuidedRepairLoop private constructor(
         inputs: List<ProcessInput>,
         reportsDir: Path = projectDir.resolve("reports"),
         maxIterations: Int = 5,
+    ): RepairRunOutcome = runRepairInternal(projectDir, originalBinary, inputs, reportsDir, maxIterations, null)
+
+    fun prepareExplorationSnapshot(projectDir: Path, originalBinary: Path): RepairExplorationSnapshotData {
+        checkOpen()
+        validationStrategy.requireAvailable()
+        val binarySha256 = captureExplorationBinarySha256(originalBinary, resourceBudget.maximumSourceBytes)
+        return openGraph(projectDir).use { graph ->
+            graph.enableRunContract()
+            val corpus = graph.retainRegressionInputs(history.retainedInputs())
+            graph.synchronizeRepairHistory()
+            history.adoptCanonicalProjection(graph.derivedRepairIterations(), corpus.inputs, graph.snapshot.runs)
+            graph.captureExplorationSnapshot(binarySha256)
+        }
+    }
+
+    fun runRepairWithExplorationSnapshot(
+        projectDir: Path,
+        originalBinary: Path,
+        inputs: List<ProcessInput>,
+        reportsDir: Path,
+        maxIterations: Int,
+        snapshot: RepairExplorationSnapshotData,
+    ): RepairRunOutcome = runRepairInternal(projectDir, originalBinary, inputs, reportsDir, maxIterations, snapshot)
+
+    private fun runRepairInternal(
+        projectDir: Path,
+        originalBinary: Path,
+        inputs: List<ProcessInput>,
+        reportsDir: Path,
+        maxIterations: Int,
+        explorationSnapshot: RepairExplorationSnapshotData?,
     ): RepairRunOutcome {
         checkOpen()
         require(maxIterations > 0)
         lastRunFailure = null
         validationStrategy.requireAvailable()
+        if (explorationSnapshot != null) {
+            require(explorationSnapshot.formatVersion == 1 &&
+                explorationSnapshot.projectPath == projectDir.toAbsolutePath().normalize().pathString) {
+                "retained exploration snapshot is bound to a different project or format"
+            }
+        }
         return withProgress(reportsDir) { openGraph(projectDir).use { graph ->
+            val expectedOriginalBinarySha256 = explorationSnapshot?.let { snapshot ->
+                graph.requireCurrentExplorationSnapshot(snapshot)
+                val beforeMutation = captureExplorationBinarySha256(originalBinary, resourceBudget.maximumSourceBytes)
+                require(beforeMutation == snapshot.originalBinarySha256) {
+                    "retained exploration snapshot is stale for the selected original binary"
+                }
+                beforeMutation
+            }
             val corpus = prepareProjectState(graph, inputs)
+            if (expectedOriginalBinarySha256 != null) {
+                val beforeRunAdmission = captureExplorationBinarySha256(originalBinary, resourceBudget.maximumSourceBytes)
+                require(beforeRunAdmission == expectedOriginalBinarySha256) {
+                    "original binary changed before the snapshot-bound repair run was admitted"
+                }
+            }
             val run = graph.beginRun(maxIterations, limits.wallClockTimeout.toMillis())
             activeDeadlineNanos = System.nanoTime() + limits.wallClockTimeout.toNanos()
             var finalReport: BehaviorComparisonReport? = null
             try {
                 checkRunBudget()
-                var assessment = assess(graph, projectDir, originalBinary, reportsDir, "${run.id}_initial", corpus.inputs)
+                var assessment = assess(graph, projectDir, originalBinary, reportsDir, "${run.id}_initial", corpus.inputs,
+                    expectedOriginalBinarySha256 = expectedOriginalBinarySha256)
                 checkRunBudget()
                 if (assessment is RepairAssessment.Valid) {
                     graph.acceptAssessedBaseline(assessment.proof, assessment.evidence, ::checkRunBudget)
@@ -1311,7 +1392,8 @@ class TraceGuidedRepairLoop private constructor(
                         execution.use {
                             try {
                                 val after = assess(graph, projectDir, originalBinary, reportsDir,
-                                    "iteration_${request.iterationIndex}", corpus.inputs, execution.attempt)
+                                    "iteration_${request.iterationIndex}", corpus.inputs, execution.attempt,
+                                    expectedOriginalBinarySha256)
                                 checkRunBudget()
                                 when {
                                     introducesRetainedRegression(assessment, after) -> execution.reject(RepairEvidence(
@@ -1716,6 +1798,7 @@ class TraceGuidedRepairLoop private constructor(
         label: String,
         regressionInputs: List<ProcessInput>,
         attempt: ModuleRevisionAttempt? = null,
+        expectedOriginalBinarySha256: String? = null,
     ): RepairAssessment {
         checkRunBudget()
         val corpus = graph.retainedRegressionCorpus()
@@ -1725,7 +1808,8 @@ class TraceGuidedRepairLoop private constructor(
         val invocation = graph.validationInvocation(attempt)
         val request = RepairCandidateValidationRequest(projectDir, sources, repairCandidateSourceSha256(sources),
             snapshot.profileId, snapshot.profileSha256, snapshot.indexSha256, originalBinary, corpus.inputs, corpus.sha256,
-            reportsDir, label, resourceBudget, activeDeadlineNanos, cancellation, invocation)
+            reportsDir, label, resourceBudget, activeDeadlineNanos, cancellation, invocation,
+            expectedOriginalBinarySha256)
         progress?.state(graph, decompengine.agent.AgentWorkflowPhase.BUILD_VALIDATING, attempt?.id)
         val outcome = try {
             validationStrategy.validateCandidate(request)
@@ -1738,10 +1822,22 @@ class TraceGuidedRepairLoop private constructor(
             throw failure
         }
         checkRunBudget()
+        if (expectedOriginalBinarySha256 != null) {
+            require(captureExplorationBinarySha256(
+                originalBinary ?: error("snapshot validation requires an original binary"),
+                resourceBudget.maximumSourceBytes,
+            ) == expectedOriginalBinarySha256) {
+                "original binary changed during snapshot-bound candidate validation"
+            }
+        }
         val proof = outcome.proof
         require(proof.sourceRevisionSha256 == request.sourceRevisionSha256 && proof.profileSha256 == request.profileSha256 &&
             proof.indexSha256 == request.indexSha256 && proof.regressionCorpusSha256 == request.regressionCorpusSha256 &&
             proof.cleanupVerified) { "validation proof is incomplete or bound to a different source/profile/corpus" }
+        require(request.expectedOriginalBinarySha256 == null ||
+            proof.originalBinarySha256 == request.expectedOriginalBinarySha256) {
+            "validation proof is bound to a different original binary than the exploration snapshot"
+        }
         require(allowTestOnlyValidation || proof.assurance == RepairValidationAssurance.STRICT_CONTAINED)
         if (originalBinary != null) graph.bindOriginalBinary(requireNotNull(proof.originalBinarySha256) {
             "validation proof lacks original binary identity"

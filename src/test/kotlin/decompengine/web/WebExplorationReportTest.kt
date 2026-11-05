@@ -16,6 +16,40 @@ class WebExplorationReportTest {
         assertEquals(result, report(valid))
         assertNotEquals(result.getValue("reportId"), report(valid.replace("0.5", "0.4")).getValue("reportId"))
     }
+
+    @Test fun `versioned retained input report is available without granting acceptance authority`() {
+        val fields = Json.parseToJsonElement(valid).jsonObject.toMutableMap()
+        fields["schema"] = JsonPrimitive("decomp-exploration")
+        fields["schemaVersion"] = JsonPrimitive(2)
+        fields["state"] = JsonPrimitive("complete")
+        fields["candidates"] = buildJsonArray {
+            add(buildJsonObject {
+                put("id", "candidate_case")
+                put("source", "SEED")
+                put("args", buildJsonArray { })
+                put("stdinHex", "")
+            })
+        }
+        fields["retainedInputs"] = buildJsonArray {
+            add(buildJsonObject {
+                put("id", "retained_case")
+                put("args", buildJsonArray { add(JsonPrimitive("argument")) })
+                put("stdinHex", "00ff")
+            })
+        }
+        fields["retainedInputsOmitted"] = JsonPrimitive(0)
+        val value = JsonObject(fields).toString()
+        val result = report(value)
+        assertEquals("available", result.getValue("state").jsonPrimitive.content)
+        assertEquals(2, result.getValue("producerSchemaVersion").jsonPrimitive.int)
+        assertEquals("not-evaluated", result.getValue("acceptance").jsonPrimitive.content)
+        assertEquals(JsonNull, result.getValue("acceptanceArtifactId"))
+
+        for (bad in listOf(value.replace("retained_case", ""), value.replace("00ff", "not-hex"),
+            value.replace("\"retainedInputsOmitted\":0", "\"retainedInputsOmitted\":-1"))) {
+            assertEquals("invalid", report(bad).getValue("state").jsonPrimitive.content)
+        }
+    }
     @Test fun `missing partial malformed future and invalid numeric values do not invent summaries`() {
         for ((bytes, state) in listOf(null to "unknown", "{}" to "partial", "{" to "invalid", "{\"schemaVersion\":2}" to "unsupported",
             valid.replace("0.5", "2.0") to "invalid", valid.replace("\"candidateCount\":1", "\"candidateCount\":2") to "invalid",

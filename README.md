@@ -143,6 +143,14 @@ For web reconstruction, set `WEB_RECONSTRUCTION_MODE=evidence-only` to select th
 
 The output includes `source-tree/` for normal editing, `source-tree.zip` for archival, and `reconstruction.json` for automation. The tree contains shared types, module headers and implementations, a parallel incremental Makefile, the whole-program recovery model, module ownership plan, unresolved entities, per-module prompt budget, prompt hash, acceptance decision, source hash, confidence limitations, tool versions, and build logs. Checkpoints are reused only when their recorded source hash still matches, so an interrupted run preserves accepted module bytes. `ARCHIVE_MANIFEST.sha256` verifies the archive payload.
 
+When the same output directory is used with another input binary, its analysis, source tree, archive, progress snapshot, run history, and compiler feedback are preserved under `input-cache/<input-sha256>/` and restored when that input is selected again. Existing output is migrated without replacing its input-bound checkpoints. Full run histories are bounded, redacted observations tied to the analyzed input and profile; they do not grant acceptance authority. Inspect them without rerunning a workflow:
+
+```bash
+llm_bin_patch runs list ./output/program-source
+llm_bin_patch runs replay ./output/program-source [run-id]
+llm_bin_patch runs follow ./output/program-source [run-id]
+```
+
 ## Development
 
 The required LLVM lanes validate the checked source/build/artifact manifest and
