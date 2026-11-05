@@ -542,6 +542,132 @@ class WebProgramStructureTest {
         if (state != "available") assertTrue(page.items().isEmpty())
     }
 
+    @Test fun `decoded scalar buffers accept escaped wire values and preserve unsigned addresses`() {
+        for (version in 1..2) {
+            val raw = Json.parseToJsonElement(model(functions, globals, types +
+                RecoveredType("no_address", "struct NoAddress {};", null), schema = version).decodeToString()).jsonObject.toString()
+            var escaped = raw
+            for (value in listOf("recovered", "partial", "failed", "synthetic", "unassessed",
+                "0x401000", "0x401100", "0xffffffffffffffff", "0x402000", "0x403000", "0x404000", "0x405000")) {
+                val encoded = value.map { "\\u%04x".format(it.code) }.joinToString("")
+                escaped = escaped.replace("\"$value\"", "\"$encoded\"")
+            }
+            assertNotEquals(raw, escaped)
+            fun index(value: String): WebProgramStructureIndex {
+                val revision = Revision(value.toByteArray(), null, emptyList())
+                return revision.evidence.readStructure(revision.reference, revision.cache) { index, _ -> index }
+            }
+            val plain = index(raw); val decoded = index(escaped)
+            for (kind in WebStructureKind.entries) {
+                val expected = plain.table(kind); val actual = decoded.table(kind)
+                assertContentEquals(expected.ids, actual.ids)
+                assertContentEquals(expected.addresses, actual.addresses)
+                assertContentEquals(expected.hasAddress, actual.hasAddress)
+                assertContentEquals(expected.status, actual.status)
+                assertContentEquals(expected.byAddress, actual.byAddress)
+            }
+            val decodedFunctions = decoded.table(WebStructureKind.FUNCTION)
+            val decodedTypes = decoded.table(WebStructureKind.TYPE)
+            assertEquals(-1L, decodedFunctions.addresses[decodedFunctions.index.getValue("fn_ffffffffffffffff")])
+            assertFalse(decodedTypes.hasAddress[decodedTypes.index.getValue("no_address")])
+            assertEquals(plain.retainedBytes, decoded.retainedBytes)
+        }
+        for (value in listOf("0x0", "0x1", "0x7fffffffffffffff", "0x8000000000000000", "0xffffffffffffffff")) {
+            val raw = Json.parseToJsonElement(model(functions.take(1)).decodeToString()).jsonObject.toString()
+                .replace("\"0x401000\"", "\"$value\"")
+            val row = rawModelOutcome(raw).items().single()
+            assertEquals(value, row.text("address"))
+        }
+    }
+
+    @Test fun `scalar semantic validation remains exact for every entity family and schema fieldset`() {
+        for (version in 1..2) {
+            val root = Json.parseToJsonElement(model(functions.take(1), globals, types, schema = version).decodeToString()).jsonObject
+            val statusKey = if (version == 1) "status" else "extractionStatus"
+            for (family in listOf("functions", "globals", "types")) {
+                val entity = root.getValue(family).jsonArray.single().jsonObject
+                val addressKey = if (family == "types") "sourceAddress" else "address"
+                fun changed(key: String, value: JsonElement) = root.toString().replace(entity.toString(),
+                    JsonObject(entity + (key to value)).toString())
+                for (value in listOf("", "0x", "0X1", "0x00", "0x0401000", "0xA", "0xabcdefABC", "0x10000000000000000", "0x-1", "0x1 ")) {
+                    assertRawModelOutcome(changed(addressKey, JsonPrimitive(value)))
+                }
+                for (value in listOf("recovered ", "Recovered", "", "unknown")) {
+                    assertRawModelOutcome(changed(statusKey, JsonPrimitive(value)))
+                }
+                if (version == 2) for (value in listOf("exact", "unassessed ", "Unassessed", "")) {
+                    assertRawModelOutcome(changed("recoveryAssessment", JsonPrimitive(value)))
+                }
+                for (value in listOf(JsonNull, JsonPrimitive(1), JsonPrimitive(true), JsonArray(emptyList()), JsonObject(emptyMap()))) {
+                    assertRawModelOutcome(changed(statusKey, value))
+                    if (version == 2) assertRawModelOutcome(changed("recoveryAssessment", value))
+                    if (family == "types" && value == JsonNull) assertRawModelOutcome(changed(addressKey, value), "available", null)
+                    else assertRawModelOutcome(changed(addressKey, value))
+                }
+                val otherStatus = if (version == 1) "extractionStatus" else "status"
+                assertRawModelOutcome(root.toString().replace(entity.toString(),
+                    JsonObject(entity - statusKey + (otherStatus to entity.getValue(statusKey))).toString()))
+                if (version == 1) assertRawModelOutcome(changed("recoveryAssessment", JsonPrimitive("unassessed")))
+            }
+        }
+    }
+
+    @Test fun `invalid scalar semantics defer to oversized identifiers but token errors remain immediate`() {
+        for (version in 1..2) {
+            val root = Json.parseToJsonElement(model(functions.take(1), globals, types, schema = version).decodeToString()).jsonObject
+            for (family in listOf("functions", "globals", "types")) {
+                val entity = root.getValue(family).jsonArray.single().jsonObject
+                val keys = listOf(if (version == 1) "status" else "extractionStatus",
+                    if (family == "types") "sourceAddress" else "address") +
+                    if (version == 2) listOf("recoveryAssessment") else emptyList()
+                for (key in keys) {
+                    fun reordered(value: JsonElement, oversized: Boolean): String {
+                        val fields = linkedMapOf(key to value, "id" to if (oversized) JsonPrimitive("x".repeat(4097)) else entity.getValue("id"))
+                        fields.putAll(entity - key - "id")
+                        return root.toString().replace(entity.toString(), JsonObject(fields).toString())
+                    }
+                    assertRawModelOutcome(reordered(JsonPrimitive("invalid"), false))
+                    assertRawModelOutcome(reordered(JsonPrimitive("invalid"), true), "limit-exceeded", "MODEL_IDENTIFIER_EXCEEDED")
+                    for (token in listOf(JsonNull, JsonPrimitive(1), JsonPrimitive(true), JsonArray(emptyList()), JsonObject(emptyMap()))) {
+                        if (key == "sourceAddress" && token == JsonNull) {
+                            assertRawModelOutcome(reordered(token, true), "limit-exceeded", "MODEL_IDENTIFIER_EXCEEDED")
+                        } else assertRawModelOutcome(reordered(token, true))
+                    }
+                }
+            }
+        }
+    }
+
+    @Test fun `identifier scratch arrays stay detached between rows families and reader invocations`() {
+        val rows = listOf(
+            RecoveredFunction("first", "First", 1u, "void first(void)", null,
+                calls = linkedSetOf("a", "b"), referencedGlobals = linkedSetOf("g", "h")),
+            RecoveredFunction("second", "Second", 2u, "void second(void)", null,
+                calls = setOf("c"), referencedGlobals = setOf("i")),
+            RecoveredFunction("third", "Third", 3u, "void third(void)", null),
+        )
+        val revision = Revision(model(rows, listOf(RecoveredGlobal("g", "G", 4u, "int", null))), null, emptyList())
+        fun read(): WebProgramStructureIndex = revision.evidence.readStructure(revision.reference, WebProgramStructureCache()) { index, _ -> index }
+        val first = read(); val second = read()
+        val table = first.table(WebStructureKind.FUNCTION)
+        assertContentEquals(arrayOf("a", "b"), table.calls[0])
+        assertContentEquals(arrayOf("c"), table.calls[1])
+        assertContentEquals(arrayOf("g", "h"), table.referencedGlobals[0])
+        assertContentEquals(arrayOf("i"), table.referencedGlobals[1])
+        assertSame(table.calls[2], table.referencedGlobals[2])
+        assertSame(table.calls[2], first.table(WebStructureKind.GLOBAL).calls[0])
+        assertNotSame(table.calls[0], table.calls[1])
+        assertNotSame(table.calls[0], table.referencedGlobals[0])
+        assertNotSame(table.calls[0], second.table(WebStructureKind.FUNCTION).calls[0])
+        table.calls[0][0] = "changed"
+        table.referencedGlobals[0][0] = "changed global"
+        assertContentEquals(arrayOf("c"), table.calls[1])
+        assertContentEquals(arrayOf("i"), table.referencedGlobals[1])
+        assertContentEquals(arrayOf("a", "b"), second.table(WebStructureKind.FUNCTION).calls[0])
+        assertContentEquals(arrayOf("g", "h"), second.table(WebStructureKind.FUNCTION).referencedGlobals[0])
+        assertContentEquals(arrayOf("g"), first.table(WebStructureKind.GLOBAL).ids)
+    }
+
     @Test fun `fixed entity duplicate names and escaped aliases fail before consuming their values`() {
         val root = Json.parseToJsonElement(model(functions.take(1)).decodeToString()).jsonObject
         val entity = root.getValue("functions").jsonArray.single().jsonObject

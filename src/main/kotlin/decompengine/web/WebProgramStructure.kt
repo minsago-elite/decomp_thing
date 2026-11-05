@@ -457,24 +457,6 @@ internal object WebProgramStructureBuilder {
     private fun declaredTemplate(profile: ReconstructionProfile, id: String) =
         profile.layout.declarations.singleOrNull { it.id == id }
 
-    /** Parse the canonical unsigned address spelling without allocating a regex matcher per row. */
-    private fun parseAddress(value: String): Long? {
-        if (!value.startsWith("0x")) return null
-        val firstDigit = 2
-        val digits = value.length - firstDigit
-        if (digits !in 1..16 || (digits > 1 && value[firstDigit] == '0')) return null
-        var parsed = 0L
-        for (index in firstDigit until value.length) {
-            val digit = when (val character = value[index]) {
-                in '0'..'9' -> character.code - '0'.code
-                in 'a'..'f' -> character.code - 'a'.code + 10
-                else -> return null
-            }
-            parsed = (parsed shl 4) or digit.toLong()
-        }
-        return parsed
-    }
-
     private fun planSchema(bytes: ByteArray): Long? = try {
         JSON.createParser(bytes).use { parser ->
             if (parser.nextToken() != JsonToken.START_OBJECT || parser.nextToken() != JsonToken.FIELD_NAME ||
@@ -497,6 +479,10 @@ internal object WebProgramStructureBuilder {
         private var schema = 1
         private var references = 0
         private val byteEvidenceBudget = ReferencedDataByteEvidenceJson.Budget()
+        private val identifierScratch = ArrayList<String>()
+        private enum class ScalarState { ABSENT, NULL, INVALID, VALUE }
+        private var decodedAddress = 0L
+        private var decodedStatus: WebExtractionStatus? = null
 
         fun read(): ParsedModel = MODEL_JSON.createParser(bytes).use { parser ->
             expect(parser.nextToken(), JsonToken.START_OBJECT)
@@ -565,8 +551,10 @@ internal object WebProgramStructureBuilder {
                 budget.charge(512, WebStructureCharge.MODEL_ENTITIES)
                 offsets.add(parser.currentTokenLocation().byteOffset)
                 var seenFields = 0
-                var id: String? = null; var name: String? = null; var address: String? = null
-                var label: String? = null; var assessment: String? = null
+                var id: String? = null; var name: String? = null
+                var addressState = ScalarState.ABSENT; var parsedAddress = 0L
+                var labelState = ScalarState.ABSENT; var label: WebExtractionStatus? = null
+                var assessmentState = ScalarState.ABSENT
                 var called: Array<String> = noIdentifiers; var referenced: Array<String> = noIdentifiers; var stringCount = 0
                 while (true) {
                     val next = parser.nextToken()
@@ -580,10 +568,18 @@ internal object WebProgramStructureBuilder {
                     when (key) {
                         "id" -> id = identifier(parser)
                         "name" -> name = identifier(parser)
-                        "address" -> address = text(parser)
-                        "sourceAddress" -> address = nullableText(parser)
-                        "status", "extractionStatus" -> label = text(parser)
-                        "recoveryAssessment" -> assessment = text(parser)
+                        "address", "sourceAddress" -> {
+                            addressState = address(parser, nullable = key == "sourceAddress")
+                            parsedAddress = decodedAddress
+                        }
+                        "status", "extractionStatus" -> {
+                            labelState = extractionStatus(parser)
+                            label = decodedStatus
+                        }
+                        "recoveryAssessment" -> {
+                            expect(parser.nextToken(), JsonToken.VALUE_STRING)
+                            assessmentState = if (decodedTextEquals(parser, "unassessed")) ScalarState.VALUE else ScalarState.INVALID
+                        }
                         "calls" -> called = identifiers(parser)
                         "referencedGlobals" -> referenced = identifiers(parser)
                         "strings" -> stringCount = count(parser)
@@ -593,13 +589,14 @@ internal object WebProgramStructureBuilder {
                     }
                 }
                 if (seenFields != expectedFields || id == null) malformed()
-                if (schema >= 2 && assessment != "unassessed") malformed()
-                if (kind != WebStructureKind.TYPE && address == null) malformed()
-                val parsedAddress = address?.let(::parseAddress)
-                if (address != null && parsedAddress == null) malformed()
+                // Token errors are immediate; semantic errors retain their end-of-object precedence.
+                if (schema >= 2 && assessmentState != ScalarState.VALUE) malformed()
+                if (kind != WebStructureKind.TYPE && addressState != ScalarState.VALUE) malformed()
+                if (addressState != ScalarState.VALUE && addressState != ScalarState.NULL) malformed()
                 ids += id; names += name
-                addresses.add(parsedAddress ?: 0L); hasAddress.add(address != null)
-                status += WebExtractionStatus.of(label ?: malformed()) ?: malformed()
+                addresses.add(parsedAddress); hasAddress.add(addressState == ScalarState.VALUE)
+                if (labelState != ScalarState.VALUE) malformed()
+                status += label ?: malformed()
                 calls += called; globals += referenced; strings.add(stringCount)
             }
             val size = ids.size
@@ -680,10 +677,50 @@ internal object WebProgramStructureBuilder {
             if (token != JsonToken.VALUE_STRING && !(nullable && token == JsonToken.VALUE_NULL)) malformed()
         }
         private fun text(parser: JsonParser): String { expect(parser.nextToken(), JsonToken.VALUE_STRING); return parser.text }
-        private fun nullableText(parser: JsonParser): String? = when (parser.nextToken()) {
-            JsonToken.VALUE_NULL -> null
-            JsonToken.VALUE_STRING -> parser.text
-            else -> malformed()
+        /** Jackson has already decoded escapes; consume its buffer before advancing the token. */
+        private fun decodedTextEquals(parser: JsonParser, expected: String): Boolean {
+            val chars = parser.textCharacters
+            val offset = parser.textOffset
+            if (parser.textLength != expected.length) return false
+            for (index in expected.indices) if (chars[offset + index] != expected[index]) return false
+            return true
+        }
+
+        private fun extractionStatus(parser: JsonParser): ScalarState {
+            expect(parser.nextToken(), JsonToken.VALUE_STRING)
+            decodedStatus = null
+            for (candidate in WebExtractionStatus.entries) {
+                if (decodedTextEquals(parser, candidate.wire)) {
+                    decodedStatus = candidate
+                    return ScalarState.VALUE
+                }
+            }
+            return ScalarState.INVALID
+        }
+
+        /** Canonical unsigned hex, accumulated as raw Long bits without boxing a per-row value. */
+        private fun address(parser: JsonParser, nullable: Boolean): ScalarState {
+            decodedAddress = 0L
+            val token = parser.nextToken()
+            if (nullable && token == JsonToken.VALUE_NULL) return ScalarState.NULL
+            expect(token, JsonToken.VALUE_STRING)
+            val chars = parser.textCharacters
+            val offset = parser.textOffset
+            val length = parser.textLength
+            val digits = length - 2
+            if (digits !in 1..16 || chars[offset] != '0' || chars[offset + 1] != 'x' ||
+                (digits > 1 && chars[offset + 2] == '0')) return ScalarState.INVALID
+            var parsed = 0L
+            for (index in offset + 2 until offset + length) {
+                val digit = when (val character = chars[index]) {
+                    in '0'..'9' -> character.code - '0'.code
+                    in 'a'..'f' -> character.code - 'a'.code + 10
+                    else -> return ScalarState.INVALID
+                }
+                parsed = (parsed shl 4) or digit.toLong()
+            }
+            decodedAddress = parsed
+            return ScalarState.VALUE
         }
         private fun identifier(parser: JsonParser): String = text(parser).also {
             if (it.isEmpty()) malformed()
@@ -693,10 +730,11 @@ internal object WebProgramStructureBuilder {
         private val noIdentifiers = emptyArray<String>()
 
         private fun identifiers(parser: JsonParser): Array<String> {
+            val values = identifierScratch
+            values.clear()
             expect(parser.nextToken(), JsonToken.START_ARRAY)
             if (parser.nextToken() == JsonToken.END_ARRAY) return noIdentifiers
             budget.charge(24, WebStructureCharge.MODEL_REFERENCE_ARRAYS)
-            val values = ArrayList<String>()
             do {
                 if (parser.currentToken() != JsonToken.VALUE_STRING) malformed()
                 if (values.size >= MAXIMUM_REFERENCES) throw WebStructureFailure("limit-exceeded", "MODEL_REFERENCES_EXCEEDED")
