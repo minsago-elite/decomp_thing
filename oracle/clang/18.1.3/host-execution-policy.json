@@ -1,0 +1,14 @@
+{
+  "formatVersion": 1,
+  "status": "unqualified-no-approved-environment",
+  "authority": "independently-installed-root-owned-approval-anchor",
+  "approvalStore": "/etc/decomp-thing/approved-actions/v1",
+  "launcher": "/usr/libexec/decomp-thing/clang1813-worker",
+  "runtimeSocket": "/run/decomp-thing/clang1813-docker.sock",
+  "approvedIndexSha256": null,
+  "authorityKeyFingerprint": null,
+  "environmentManifestDigest": null,
+  "actions": ["loader-smoke-v1", "provision-rootfs-v1", "verify-rootfs-v1"],
+  "productionArtifactTransport": "unfinished",
+  "qualificationEnabled": false
+}

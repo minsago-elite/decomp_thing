@@ -1,0 +1,21 @@
+{
+  "formatVersion": 1,
+  "status": "construction-inputs-unavailable",
+  "platform": {"os": "linux", "architecture": "amd64"},
+  "approvedPackageManifestSha256": null,
+  "constructionRecipeSha256": null,
+  "requiredClosures": [
+    "python-interpreter-stdlib-and-imports",
+    "debootstrap-shell-functions-and-noble-scripts",
+    "dpkg-dpkg-deb-dpkg-source-and-compression",
+    "gpgv-gnupg-and-selected-keyrings",
+    "tar-and-normalization-utilities",
+    "dynamic-loaders-and-shared-libraries",
+    "jdk-java-javac",
+    "gradle-distribution-launcher-and-plugins",
+    "kotlin-compiler-build-runtime-dependencies-and-resources"
+  ],
+  "construction": "Only independently authenticated pinned package inputs may produce an approved environment; no mutable runner apt installation qualifies.",
+  "networkDuringExecution": false,
+  "qualificationEnabled": false
+}
