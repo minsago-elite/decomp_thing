@@ -314,3 +314,75 @@ for (const [name, href] of [
 ]) {
   test(`packaged structure rejects ${name}`, () => assert.throws(() => check(href)));
 }
+
+test('cold evidence records failures, strips identities and caps the click window; actual gate rejects failures', async () => {
+  const { createColdEvidenceRecorder, assertStructureQualification } = await import('./packaged-browser-structure.mjs');
+  let clock = 0;
+  const recorder = createColdEvidenceRecorder(browserOrigin, () => clock++);
+  recorder.begin();
+  for (let i = 0; i < 80; i++) {
+    recorder.requestWillBeSent({ requestId: String(i), request: { method: 'GET', url: `${browserOrigin}/api/v1/jobs/privateJob/runs/privateRun/revisions/privateRev/functions?secret=privateQuery` } });
+    recorder.finish({ requestId: String(i), errorText: 'x'.repeat(200), canceled: true }, true);
+  }
+  recorder.end();
+  const evidence = recorder.summary();
+  assert.equal(evidence.firstPageRequests.length, 64);
+  assert.equal(evidence.firstPageRequestOverflow, 16);
+  assert.equal(evidence.failedInventoryRequests.length, 16);
+  assert.equal(evidence.failedInventoryRequestCount, 80);
+  assert.equal(evidence.failedInventoryRequestOverflow, 64);
+  assert.equal(evidence.failedInventoryRequests[0].errorText.length, 128);
+  assert.equal(evidence.firstFunctionRequests.length, 16);
+  assert.ok(!JSON.stringify(evidence).includes('private'));
+  const measurements = { ...evidence, firstPageMs: 100, pageDataP95Ms: 100, searchMs: 100, requestP95Ms: 100,
+    localFeedbackSamples: 51, invalidFeedbackSamples: 0, localFeedbackP95Ms: 10, pendingInventoryRequests: 0,
+    inventoryReads: Array(52).fill('100'), exceptions: [], requestMethods: ['GET'], peakBrowserHeapBytes: 1,
+    jvmMemory: summarizeJvmRss(Object.assign(createJvmRssSummary(100), { sampleCount: 1 })), moduleResponse: { terminal: 'finished', candidates: 1 } };
+  assert.equal(evidence.pendingEvidenceRequests, 0);
+  assert.deepEqual(evaluateStructureBudgets(measurements), ['Function inventory requests failed explicitly', 'Cold request evidence exceeded its bounded capture']);
+  assert.throws(() => assertStructureQualification(measurements), error => {
+    const payload = JSON.parse(error.message.slice('Structure qualification failed: '.length));
+    assert.deepEqual(payload.measurements.jvmMemory, measurements.jvmMemory);
+    assert.deepEqual(payload.measurements.moduleResponse, measurements.moduleResponse);
+    return true;
+  });
+  assertStructureQualification({ ...measurements, failedInventoryRequestCount: 0, firstPageRequestOverflow: 0 });
+});
+
+test('RSS evidence bounds retain all-sample peak and coverage and phase boundaries', () => {
+  const summary = createJvmRssSummary(100);
+  for (let i = 0; i < 1000; i++) recordJvmRssSample(summary, i === 400 ? 9999 : 200, i, i < 500 ? 'first-page' : 'page2');
+  const result = summarizeJvmRss(summary);
+  assert.equal(result.timeline.length, 256);
+  assert.equal(result.timelineDropped, 744);
+  assert.equal(result.sampleCount, 1000);
+  assert.equal(result.sampledPeakBytes, 9999);
+  assert.equal(result.incrementalPeakBytes, 9899);
+  assert.equal(result.coverageComplete, true);
+  for (const t of [0, 400, 499, 500]) assert.ok(result.timeline.some(row => row.tMs === t));
+  recordJvmRssSample(summary, 0);
+  assert.equal(summarizeJvmRss(summary).coverageComplete, false);
+  const flat = createJvmRssSummary(100);
+  for (let i = 0; i < 1000; i++) recordJvmRssSample(flat, 200, i, 'first-page');
+  const flatResult = summarizeJvmRss(flat);
+  assert.equal(flatResult.timeline.length, 256);
+  assert.equal(flatResult.timeline[0].tMs, 0);
+  assert.equal(flatResult.timeline.at(-1).tMs, 999);
+  assert.equal(flatResult.timelineBoundaryOverflow, 0);
+});
+
+test('cold evidence bounds simultaneous requests and records the first click-window function read', async () => {
+  const { createColdEvidenceRecorder } = await import('./packaged-browser-structure.mjs');
+  let clock = 0;
+  const recorder = createColdEvidenceRecorder(browserOrigin, () => clock++);
+  const request = requestId => ({ requestId, request: { method: 'GET', url: `${browserOrigin}/api/v1/jobs/a/runs/b/revisions/c/functions` } });
+  recorder.requestWillBeSent(request('before-click'));
+  recorder.finish({ requestId: 'before-click' });
+  recorder.begin();
+  for (let i = 0; i < 200; i++) recorder.requestWillBeSent(request(String(i)));
+  const evidence = recorder.summary();
+  assert.equal(evidence.pendingEvidenceRequests, 128);
+  assert.equal(evidence.pendingEvidenceRequestOverflow, 72);
+  assert.equal(evidence.firstFunctionRequests[0].seq, 2);
+  assert.ok(evidence.firstFunctionRequestStartOffsetMs >= 0);
+});

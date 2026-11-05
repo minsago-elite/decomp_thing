@@ -154,6 +154,54 @@ export function nearestRankP95(values) {
   return sorted[Math.ceil(sorted.length * 0.95) - 1];
 }
 
+/** Node-side evidence only; timestamps use the click clock, never URL values. */
+export function createColdEvidenceRecorder(browserOrigin, now = () => performance.now()) {
+  const origin = new URL(browserOrigin).origin;
+  const pending = new Map(), requests = [], functions = [], failedInventoryRequests = [];
+  let start = now(), active = false, phaseLabel = 'setup', seq = 0, windowCount = 0, failedCount = 0, pendingOverflow = 0;
+  return {
+    begin() { start = now(); active = true; phaseLabel = 'first-page'; },
+    end() { active = false; },
+    phase(value) { phaseLabel = value; },
+    requestWillBeSent(event) {
+      const url = new URL(event.request.url);
+      if (url.origin !== origin || !['GET', 'HEAD'].includes(event.request.method)) return;
+      const inventory = /\/functions$/.test(url.pathname);
+      const row = { seq: ++seq, startOffsetMs: now() - start, phaseLabel,
+        pathTemplate: url.pathname.replace(/\/(jobs|runs|revisions|functions|modules|globals|types|source-files)\/[^/]+/g, '/$1/{id}'),
+        method: event.request.method, headersOffsetMs: null, endOffsetMs: null, status: null, failure: null };
+      if (inventory && active && functions.length < 16) functions.push({ seq: row.seq, startOffsetMs: row.startOffsetMs });
+      if (active) { windowCount++; if (requests.length < 64) requests.push(row); }
+      if (inventory || requests.includes(row)) {
+        if (pending.size >= 128) pendingOverflow++;
+        else pending.set(event.requestId, { row, inventory });
+      }
+    },
+    responseReceived(event) { const item = pending.get(event.requestId); if (item) { item.row.status = event.response.status; item.row.headersOffsetMs = now() - start; } },
+    finish(event, failed = false) {
+      const item = pending.get(event.requestId); if (!item) return;
+      pending.delete(event.requestId); item.row.endOffsetMs = now() - start;
+      if (failed) {
+        const failure = { errorText: String(event.errorText ?? '').slice(0, 128), canceled: event.canceled === true,
+          blockedReason: String(event.blockedReason ?? '').slice(0, 128) };
+        item.row.failure = failure;
+        if (item.inventory) { failedCount++; if (failedInventoryRequests.length < 16) failedInventoryRequests.push({
+          seq: item.row.seq, startOffsetMs: item.row.startOffsetMs, phaseLabel: item.row.phaseLabel, ...failure }); }
+      }
+    },
+    summary() { return { firstPageRequests: requests, firstPageRequestCount: windowCount, firstPageRequestLimit: 64,
+      firstPageRequestOverflow: Math.max(0, windowCount - 64), pendingEvidenceRequests: pending.size,
+      pendingEvidenceRequestOverflow: pendingOverflow, firstFunctionRequestStartOffsetMs: functions[0]?.startOffsetMs ?? null,
+      firstFunctionRequests: functions, failedInventoryRequests, failedInventoryRequestCount: failedCount,
+      failedInventoryRequestLimit: 16, failedInventoryRequestOverflow: Math.max(0, failedCount - 16) }; },
+  };
+}
+
+export function assertStructureQualification(measurements, evidenceFailures = []) {
+  const budgetFailures = evaluateStructureBudgets(measurements);
+  if (budgetFailures.length || evidenceFailures.length) throw new Error(`Structure qualification failed: ${JSON.stringify({ evidenceFailures, budgetFailures, measurements })}`);
+}
+
 /** Retain bounded, same-origin phase timings without storing request URLs or response bodies. */
 export function createStructureTimingRecorder(browserOrigin) {
   const origin = new URL(browserOrigin).origin;
@@ -215,10 +263,21 @@ export function createJvmRssSummary(baselineBytes) {
     sampleCount: 0, failedSamples: 0 };
 }
 
-export function recordJvmRssSample(summary, valueBytes) {
+export function recordJvmRssSample(summary, valueBytes, tMs = 0, phase = 'setup') {
   if (!Number.isSafeInteger(valueBytes) || valueBytes <= 0) {
     summary.failedSamples++;
     return false;
+  }
+  summary.timeline ??= [];
+  summary.timeline.push({ tMs, bytes: valueBytes, phase });
+  if (summary.timeline.length > 256) {
+    const peak = Math.max(...summary.timeline.map(row => row.bytes));
+    const peakIndex = summary.timeline.findIndex(row => row.bytes === peak);
+    const index = summary.timeline.findIndex((row, i, rows) => i > 0 && i < rows.length - 1 && i !== peakIndex && row.phase === rows[i - 1].phase && row.phase === rows[i + 1].phase);
+    // Qualification has fewer than 256 phase boundaries. Explicitly report fallback truncation.
+    if (index < 0) summary.timelineBoundaryOverflow = (summary.timelineBoundaryOverflow ?? 0) + 1;
+    summary.timeline.splice(index >= 0 ? index : summary.timeline.findIndex((row, i, rows) => i > 0 && i < rows.length - 1 && i !== peakIndex), 1);
+    summary.timelineDropped = (summary.timelineDropped ?? 0) + 1;
   }
   summary.sampleCount++;
   summary.peakBytes = Math.max(summary.peakBytes, valueBytes);
@@ -226,8 +285,8 @@ export function recordJvmRssSample(summary, valueBytes) {
 }
 
 export function summarizeJvmRss(summary) {
-  return { measurement: 'linux-proc-vm-rss', baselineBytes: summary.baselineBytes,
-    baselineSamples: summary.baselineSampleCount, baselineSpreadBytes: summary.baselineSpreadBytes,
+  return { timeline: summary.timeline ?? [], timelineLimit: 256, timelineBoundaryOverflow: summary.timelineBoundaryOverflow ?? 0, timelineDropped: summary.timelineDropped ?? 0, timelinePolicy: 'retain first, peak and phase boundaries; discard interior samples', processIdentity: summary.processIdentity ?? null, measurement: 'linux-proc-vm-rss', baselineBytes: summary.baselineBytes,
+    baselineSamples: summary.baselineSampleCount, baselineMeasurementsBytes: summary.baselineMeasurementsBytes ?? [], baselineSpreadBytes: summary.baselineSpreadBytes,
     sampledPeakBytes: summary.peakBytes, incrementalPeakBytes: Math.max(0, summary.peakBytes - summary.baselineBytes),
     budgetBytes: JVM_RSS_BUDGET_BYTES, sampleIntervalMs: JVM_RSS_SAMPLE_INTERVAL_MS,
     sampleCount: summary.sampleCount, failedSamples: summary.failedSamples,
@@ -256,11 +315,15 @@ async function startJvmRssSampler(pid) {
   const sortedBaseline = [...baselineSamples].sort((left, right) => left - right);
   const summary = createJvmRssSummary(sortedBaseline[Math.floor(sortedBaseline.length / 2)]);
   summary.baselineSampleCount = baselineSamples.length;
+  summary.baselineMeasurementsBytes = [...baselineSamples];
   summary.baselineSpreadBytes = sortedBaseline.at(-1) - sortedBaseline[0];
+  summary.processIdentity = { pid, entryPoint: 'decompengine.MainKt' };
+  const sampleStart = performance.now();
+  let phase = 'setup';
   let inFlight = null;
   const sample = async () => {
     if (inFlight) return inFlight;
-    inFlight = readJvmRssBytes(pid).then((bytes) => { recordJvmRssSample(summary, bytes); }, () => {
+    inFlight = readJvmRssBytes(pid).then((bytes) => { recordJvmRssSample(summary, bytes, performance.now() - sampleStart, phase); }, () => {
       summary.failedSamples++;
     }).finally(() => { inFlight = null; });
     return inFlight;
@@ -269,6 +332,7 @@ async function startJvmRssSampler(pid) {
   await sample();
   let stoppedSummary = null;
   return {
+    phase(value) { phase = value; },
     async stop() {
       if (stoppedSummary) return stoppedSummary;
       clearInterval(timer);
@@ -546,6 +610,9 @@ export function evaluateStructureBudgets(m) {
   check(m.invalidFeedbackSamples === 0, 'Browser feedback telemetry must be valid, bounded, and complete');
   check(m.localFeedbackP95Ms <= LOCAL_FEEDBACK_BUDGET_MS,
     `Local function-inventory feedback p95 ${m.localFeedbackP95Ms}ms exceeds the D0 ${LOCAL_FEEDBACK_BUDGET_MS}ms budget`);
+  check((m.failedInventoryRequestCount ?? 0) === 0, 'Function inventory requests failed explicitly');
+  check((m.firstPageRequestOverflow ?? 0) === 0 && (m.pendingEvidenceRequestOverflow ?? 0) === 0,
+    'Cold request evidence exceeded its bounded capture');
   check(m.pendingInventoryRequests === 0, 'Every function inventory request must finish before evidence is retained');
   check(Array.isArray(m.inventoryReads) && m.inventoryReads.length >= 52 && m.inventoryReads.every((limit) => limit === '100'),
     'Every inventory read must request one bounded page');
@@ -577,6 +644,12 @@ async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evalua
   await cdp.call('Performance.enable', {}, tab.sessionId);
   const inventoryReads = [];
   const inventoryRequests = new Map();
+  const coldEvidence = createColdEvidenceRecorder(browserOrigin);
+  const phase = value => { coldEvidence.phase(value); jvmRssSampler.phase(value); };
+  cdp.on('Network.requestWillBeSent', coldEvidence.requestWillBeSent, tab.sessionId);
+  cdp.on('Network.responseReceived', coldEvidence.responseReceived, tab.sessionId);
+  cdp.on('Network.loadingFinished', event => coldEvidence.finish(event), tab.sessionId);
+  cdp.on('Network.loadingFailed', event => { coldEvidence.finish(event, true); inventoryRequests.delete(event.requestId); }, tab.sessionId);
   const inventoryRequestDurationsMs = [];
   const structureTiming = createStructureTimingRecorder(browserOrigin);
   cdp.on('Network.requestWillBeSent', structureTiming.requestWillBeSent, tab.sessionId);
@@ -636,15 +709,22 @@ async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evalua
   const address = (index) => `0x${fixture.functionAddress(index).toString(16)}`;
   await cdp.call('Page.navigate', { url: browserOrigin + run }, tab.sessionId);
   await ready(tab, `[...document.querySelectorAll('a')].some(a => a.textContent === 'Browse recovered functions')`, 'structure links on the result revision');
+  const beforeMetrics = (await cdp.call('Performance.getMetrics', {}, tab.sessionId)).metrics;
+  phase('first-page');
+  coldEvidence.begin();
   let started = performance.now();
   await evaluate(tab, `[...document.querySelectorAll('a')].find(a => a.textContent === 'Browse recovered functions').click()`);
   await ready(tab, `(${ROWS}).length === 100 && document.body.innerText.includes('of 100000 matching functions (100000 recorded)')`, 'first page of 100000 recorded functions');
   const firstPageMs = performance.now() - started;
+  coldEvidence.end();
+  const afterMetrics = (await cdp.call('Performance.getMetrics', {}, tab.sessionId)).metrics;
+  const firstPagePerformance = Object.fromEntries(['ScriptDuration', 'LayoutDuration', 'TaskDuration'].map(name => [name, { before: beforeMetrics.find(m => m.name === name)?.value, after: afterMetrics.find(m => m.name === name)?.value, delta: afterMetrics.find(m => m.name === name)?.value - beforeMetrics.find(m => m.name === name)?.value }]));
   assert.equal(await evaluate(tab, 'location.pathname'), `${revision}/functions`);
   assert.deepEqual(await evaluate(tab, ROWS), Array.from({ length: 100 }, (_, index) => address(index)));
   await heap();
   const pageMs = [];
   for (let page = 1; page <= 50; page++) {
+    phase(`page${page + 1}`);
     await evaluate(tab, `[...document.querySelectorAll('button')].find(b => b.textContent === 'Next page').focus()`);
     started = performance.now();
     await enter();
@@ -655,9 +735,11 @@ async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evalua
     await heap();
   }
   assert.ok(await evaluate(tab, `document.body.innerText.includes('Showing 5001–5100 of 100000 matching functions')`));
+  phase('reload');
   await cdp.call('Page.reload', {}, tab.sessionId);
   await ready(tab, `(${ROWS})[0] === ${JSON.stringify(address(5000))}`, 'function cursor restored after reload');
 
+  phase('search');
   started = performance.now();
   await evaluate(tab, `(() => {
     const field = document.querySelector('input[name="search"]');
@@ -674,6 +756,7 @@ async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evalua
   assert.ok(await evaluate(tab, `document.body.innerText.includes('Recovery assessment: unassessed')`));
   await evaluate(tab, `[...document.querySelectorAll('a')].find(a => a.textContent === 'synthetic_function_99998').click()`);
   await ready(tab, `document.querySelector('main h2')?.textContent === 'synthetic_function_99998'`, 'caller cross-link within the pinned structure version');
+  phase('module');
   const module = fixture.moduleId(Math.floor(99998 / 24));
   await evaluate(tab, `[...document.querySelectorAll('a')].find(a => a.textContent === ${JSON.stringify(module)}).click()`);
   await ready(tab, `document.querySelector('main h2')?.textContent === ${JSON.stringify(module)} && document.querySelector('table caption')?.textContent === 'Functions'`, 'owning module detail');
@@ -717,19 +800,14 @@ async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evalua
   const localFeedbackP95Ms = nearestRankP95(localFeedbackMs);
   const jvmMemory = await jvmRssSampler.stop();
   const structureTimingSummary = structureTiming.summary();
-  const budgetFailures = evaluateStructureBudgets({ firstPageMs, pageDataP95Ms, searchMs, requestP95Ms,
+  const measurements = { firstPageMs, pageDataP95Ms, searchMs, requestP95Ms,
     localFeedbackSamples: localFeedbackMs.length, invalidFeedbackSamples, localFeedbackP95Ms,
     pendingInventoryRequests: inventoryRequests.size, inventoryReads, exceptions: tab.exceptions,
-    requestMethods: tab.requests.map((request) => request.method), peakBrowserHeapBytes, jvmMemory,
-    structureTiming: structureTimingSummary });
-  if (budgetFailures.length || evidenceFailures.length) {
-    throw new Error(`Structure qualification failed: ${JSON.stringify({ evidenceFailures, budgetFailures,
-      measurements: { firstPageMs: Math.round(firstPageMs), pageDataP95Ms: Math.round(pageDataP95Ms), searchMs: Math.round(searchMs),
-        requestP95Ms: Math.round(requestP95Ms), localFeedbackP95Ms: Math.round(localFeedbackP95Ms), peakBrowserHeapBytes,
-        jvmIncrementalPeakBytes: jvmMemory.incrementalPeakBytes, structureTiming: structureTimingSummary } })}`);
-  }
+    requestMethods: tab.requests.map(request => request.method), peakBrowserHeapBytes, jvmMemory,
+    moduleResponse: moduleResponseEvidence, structureTiming: structureTimingSummary, firstPagePerformance, ...coldEvidence.summary() };
+  assertStructureQualification(measurements, evidenceFailures);
   pageMs.sort((a, b) => a - b);
-  return { recordedFunctions: fixture.functions, modules: fixture.modules, modelBytes: fixture.modelBytes, rowsPerPage: 100,
+  return { ...measurements, recordedFunctions: fixture.functions, modules: fixture.modules, modelBytes: fixture.modelBytes, rowsPerPage: 100,
     pagesVisited: 51, measuredInteractions: localFeedbackMs.length, maximumMountedRows: 100,
     firstPageMs: Math.round(firstPageMs), structureTiming: structureTimingSummary,
     pageMsP50: Math.round(pageMs[Math.ceil(pageMs.length * 0.5) - 1]), pageMsP95: Math.round(pageDataP95Ms),
