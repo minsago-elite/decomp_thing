@@ -28,6 +28,7 @@ ACTIVE = set()
 RECORD = {"status": "not-started", "phase": "setup", "commands": [], "transitions": [], "authorities": []}
 MODEL = json.dumps({"schemaVersion":4,"inputSha256":"a"*64,"functions":[],"globals":[],"types":[]}, separators=(",",":"))
 OWNED_SOURCES = ("build.gradle.kts", "scripts/test-atomic-install.py", "scripts/test-atomic-install-controls.py",
+                 "scripts/atomic-install-acp-publication.groovy",
                  "src/test/java/decompengine/install/AtomicInstallProbeAgent.java")
 
 
@@ -282,6 +283,13 @@ gradle.taskGraph.afterTask {{ task, state ->
     receipt.tasks.add([path: task.path, enabled: task.enabled, skipped: state.skipped, upToDate: state.upToDate,
         noSource: state.noSource, executed: state.executed, failure: state.failure != null,
         atUnixNs: nowNs()])
+    if (task.path == ':buildAcpGateHelper' && task.extensions.extraProperties.has('atomicAcpPublicationReceipt')) {{
+        receipt.acp = new LinkedHashMap(task.extensions.extraProperties.get('atomicAcpPublicationReceipt'))
+        receipt.acp.commandId = {command_id}
+        receipt.acp.runRoot = {groovy_path(WORK)}
+        receipt.acp.initSha256 = java.security.MessageDigest.getInstance('SHA-256').digest(
+            new File({groovy_path(WORK / f"command-{command_id:02d}.init.gradle")}).bytes).encodeHex().toString()
+    }}
     saveReceipt()
 }}
 '''
@@ -352,7 +360,13 @@ p.tasks.matching {{ it.name == "installDist" }}.configureEach {{ install ->
             if (outputs.size() != 1) throw new GradleException('unexpected mapping output roots: ' + name)
             roots[name] = outputs[0]
         }}
-        def plan = [runRoot: {groovy_path(WORK)}, repoRoot: {groovy_path(ROOT)}, installInputs: files(install.inputs.files), producers: producers,
+        def acpTask = p.tasks.getByName('buildAcpGateHelper')
+        def acp = [publicationScope: 'cooperative-build-producer-v1', bindingEvidence: 'stable-namespace-path-observations-v1', compiler: p.file(acpTask.inputs.properties.compiler.toString()).toPath().toAbsolutePath().normalize().toRealPath().toString(),
+            source: new File(p.projectDir, 'src/main/c/decomp_acp_gate_helper.c').absolutePath,
+            recipe: new File(p.projectDir, 'build.gradle.kts').absolutePath,
+            publication: new File(p.projectDir, 'scripts/atomic-install-acp-publication.groovy').absolutePath,
+            output: new File(p.buildDir, 'native/acp/decomp-acp-gate-helper').absolutePath]
+        def plan = [acp: acp, runRoot: {groovy_path(WORK)}, repoRoot: {groovy_path(ROOT)}, installInputs: files(install.inputs.files), producers: producers,
             frontendNodeHome: p.tasks.getByName('frontendBuild').inputs.properties.frontendNodeHome.toString(),
             mappingRoots: roots, originalJar: p.tasks.getByName('jar').archiveFile.get().asFile.absolutePath]
         def planText = JsonOutput.toJson(plan)
@@ -498,7 +512,7 @@ def set_phase(phase):
 def seal_preparation():
     command = RECORD["commands"][1]
     tasks = prepared.read_json(WORK / "command-01-events.json")["tasks"]
-    for name in prepared.PRODUCERS:
+    for name in (*prepared.PRODUCERS, "buildAcpGateHelper"):
         events = [t for t in tasks if t["path"] == ":" + name]
         prepared.require(len(events) == 1 and events[0]["executed"] and events[0]["enabled"] and
                          not any(events[0][key] for key in ("skipped", "upToDate", "noSource", "failure")),
@@ -508,7 +522,7 @@ def seal_preparation():
     node = pathlib.Path(shutil.which("node")).resolve()
     tools = {"java": {"path": str((java / "bin/java").resolve()), "home": str(java)},
              "javaRelease": {"path": str(java / "release")}, "node": {"path": str(node), "home": str(node.parent.parent)}}
-    # Original JDK release and pinned Node version; no compiler re-execution on replay.
+    # Original JDK release and pinned Node version; ACP still compiles freshly on replay.
     node_version = subprocess.check_output([node, "--version"], env=safe_env(), timeout=10).decode().strip()
     prepared.require(node_version.lstrip("v") == (ROOT / ".node-version").read_text().strip().lstrip("v"), "Node version differs")
     manifest = {"schemaVersion": 1, "runRoot": str(WORK), "preparationCommandId": 1,
@@ -574,6 +588,7 @@ def live_no_update():
 
 def validate_replay_receipt(manifest):
     receipt = prepared.read_json(WORK / "command-02-events.json")
+    prepared.validate_acp(receipt, manifest["plan"], manifest["inventory"]["entries"], RECORD["commands"][2])
     prepared.validate_publisher(receipt, manifest)
 
 

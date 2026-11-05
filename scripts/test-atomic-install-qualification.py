@@ -15,6 +15,9 @@ from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CONTROL_TMP = ROOT / "build/orchestration/atomic-install-prepared-replay-remediation/tmp"
+if "ATOMIC_CONTROL_EVIDENCE_ROOT" in os.environ:
+    CONTROL_TMP = pathlib.Path(os.environ["ATOMIC_CONTROL_EVIDENCE_ROOT"]).resolve(strict=True)
+    if not CONTROL_TMP.is_relative_to(ROOT): raise RuntimeError('control evidence must stay inside repository')
 CONTROL_TMP.mkdir(parents=True, exist_ok=True)
 SPEC = importlib.util.spec_from_file_location("atomic_install_verifier", ROOT / "scripts/verify-atomic-install-qualification.py")
 verifier = importlib.util.module_from_spec(SPEC)
@@ -138,6 +141,28 @@ def prepared_fixture(repo, run, record, output_fault=None):
     for name, directory in zip(prep.PRODUCERS, ("analysis", "behavior")):
         plan["producers"][name] = {"inputs": [str(repo / "src/main/c" / ("decomp_analysis_io_helper.c" if directory == "analysis" else "decomp_llvm_behavior_helper.c"))], "outputs": [str(run / "root-build/native" / directory)],
                                    "classpath": [str(bootstrap.parent)], "mainClass": name, "properties": {"compiler": str(compiler)}}
+    acp_helper = put('native/acp/decomp-acp-gate-helper', b'inert ACP fixture ' * 8); acp_helper.chmod(0o755)
+    put('native/acp/decomp-acp-gate-helper.sha256', (sha(acp_helper) + '  decomp-acp-gate-helper\n').encode())
+    plan['acp'] = {'publicationScope': 'cooperative-build-producer-v1', 'bindingEvidence': 'stable-namespace-path-observations-v1', 'compiler': str(compiler), 'source': str(repo / prep.ACP_SOURCE),
+        'recipe': str(repo / 'build.gradle.kts'), 'publication': str(repo / prep.ACP_PUBLICATION), 'output': str(acp_helper)}
+    def acp_event(index, events):
+        pin = prep.file_receipt(acp_helper)
+        candidate = {**pin, 'key': [pin['key'][0], pin['key'][1] + 1]} if index == 2 else dict(pin)
+        base = index * 100
+        events['tasks'].append({'path': ':buildAcpGateHelper', 'enabled': True, 'executed': True,
+            'skipped': False, 'upToDate': False, 'noSource': False, 'failure': False, 'atUnixNs': base + 8})
+        events['actionsStartedAtUnixNs'] = base + 10
+        candidate_path = str(run / 'root-build/acp-publication-private' / f'invocation-fixture-{index}' / acp_helper.name)
+        events['acp'] = {'schemaVersion': 2, 'publicationScope': 'cooperative-build-producer-v1', 'bindingEvidence': 'stable-namespace-path-observations-v1', 'commandId': index, 'runRoot': str(run),
+            'candidateValidationExitCode': 120, 'finalValidationExitCode': 120,
+            'initSha256': record['commands'][index]['initSha256'], 'flags': prep.ACP_FLAGS, 'exitCode': 0, 'cleanup': True,
+            'startedAtUnixNs': base + 2, 'compileStartedAtUnixNs': base + 3, 'compileFinishedAtUnixNs': base + 4,
+            'finishedAtUnixNs': base + 5, 'cleanupFinishedAtUnixNs': base + 6,
+            'output': str(acp_helper), 'candidatePath': candidate_path, 'candidate': candidate, 'final': pin,
+            'previous': pin if index == 2 else None, 'outcome': 'retained' if index == 2 else 'replaced',
+            'arguments': [str(compiler), *prep.ACP_FLAGS, plan['acp']['source'], '-o', candidate_path],
+            **{name: {'path': plan['acp'][name], 'file': prep.file_receipt(pathlib.Path(plan['acp'][name]))}
+               for name in ('compiler', 'source', 'recipe', 'publication')}}
     java = put("tools/jdk/bin/java", b"inert java"); java.chmod(0o755)
     release = put("tools/jdk/release", b'JAVA_VERSION="21.0.1"\n')
     node = put("tools/node/bin/node", b"inert node"); node.chmod(0o755)
@@ -147,6 +172,7 @@ def prepared_fixture(repo, run, record, output_fault=None):
     events = json.loads((run / "command-01-events.json").read_text())
     for name in prep.PRODUCERS:
         events["tasks"].insert(0, {**events["tasks"][0], "path": ":" + name})
+    acp_event(1, events)
     write_json(run / "command-01-events.json", events)
     record["commands"][1]["taskReceiptSha256"] = sha(run / "command-01-events.json")
     manifest = {"schemaVersion": 1, "runRoot": str(run), "preparationCommandId": 1, "preparationCommand": dict(record["commands"][1]),
@@ -163,6 +189,7 @@ def prepared_fixture(repo, run, record, output_fault=None):
                "manifestSha256": sha(run / "prepared-A.json"), "planEqual": True, "sourceError": None,
                "inventory": manifest["inventory"], "diff": prep.EMPTY_DIFF})
     events = json.loads((run / "command-02-events.json").read_text())
+    acp_event(2, events)
     events.update(actionsStarted=True, publisherCompleted=True, stalePruneCandidates=[], actionsStartedAtUnixNs=210,
                   guardPassedAtUnixNs=220, publisherCompletedAtUnixNs=270)
     for item in manifest["mapping"].values():
@@ -176,6 +203,8 @@ def prepared_fixture(repo, run, record, output_fault=None):
         if key.startswith("bin/"):
             events["events"].append({"phase": "published", "path": item["destination"], "atUnixNs": 260})
     write_json(run / "command-02-events.json", events)
+    guard = json.loads((run / 'prepared-guard.json').read_text()); guard['acp'] = events['acp']; guard['acpError'] = None
+    write_json(run / 'prepared-guard.json', guard)
     record["commands"][2]["taskReceiptSha256"] = sha(run / "command-02-events.json")
     probe = record["probes"][0]
     probe.update(role="prepared-no-update", preparationCommandId=1, replayCommandId=2,
@@ -203,7 +232,7 @@ def fixture(base):
     installed_app = install_lib / "llm_bin_patch.jar"
     installed_app.write_bytes(b"fixture installed app jar")
     sources = {}
-    for name in sorted({*verifier.OWNED, *driver.prepared.BUILD_CONTROLS, "src/main/c/fixture.c", "src/main/c/decomp_analysis_io_helper.c", "src/main/c/decomp_llvm_behavior_helper.c", "frontend/fixture.ts", "contracts/web/v1/contract.schema.json", "oracle/kotlin-schema-inventory-v1.json", "oracle/review.schema.json", "oracle/llvm/22.1.6/native-runtime-measurement-v2.Dockerfile"}):
+    for name in sorted({*verifier.OWNED, *driver.prepared.BUILD_CONTROLS, "src/main/c/fixture.c", driver.prepared.ACP_SOURCE, driver.prepared.ACP_PUBLICATION, "src/main/c/decomp_analysis_io_helper.c", "src/main/c/decomp_llvm_behavior_helper.c", "frontend/fixture.ts", "contracts/web/v1/contract.schema.json", "oracle/kotlin-schema-inventory-v1.json", "oracle/review.schema.json", "oracle/llvm/22.1.6/native-runtime-measurement-v2.Dockerfile"}):
         path = repo / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("fixture source " + name + "\n", encoding="utf-8")
@@ -338,7 +367,7 @@ def fixture(base):
 
     controls_dir = evidence / "driver-controls-current"
     controls_dir.mkdir()
-    expected_controls = ["distinct-buildDir-production-service-contention/release/task-failure/process-cancel/reacquire",
+    expected_controls = ["ACP-actual-publication-engine-inert-adversarial-controls", "distinct-buildDir-production-service-contention/release/task-failure/process-cancel/reacquire",
                          "agent-clock-121-second-update/full-expiry/signed-wrap/backward-rejection",
                          "synthetic-agent-A-B-A-late-loader-origin-resource-descriptor-JSON/no-product-main"]
     write_json(controls_dir / "controls.json", {"status": "passed", "passed": expected_controls,
@@ -793,6 +822,11 @@ def rehash_altered_init(run, record):
     command["initSha256"] = sha(path)
 
 
+# Each mutation starts from the same independently validated inert fixture.
+def acp_mutation(field, value, index=2):
+    return lambda repo, run, record: alter_prepared(run, record, f'command-{index:02d}-events.json',
+        lambda event: event['acp'].__setitem__(field, value))
+
 for _token in ("build-v1.json", "/tools/compiler", "/src/main/c/fixture.c", "/bootstrap/classes/",
                "/native/analysis/decomp-analysis-io-helper", "/native/behavior/decomp-llvm-behavior-helper",
                "/libs/llm_bin_patch.jar", "/generated/kotlin-boot", "/scripts/llm_bin_patch", "/tools/node"):
@@ -802,6 +836,30 @@ for _kind in ("mode", "key", "missing", "symlink", "fifo"):
 NEGATIVE_CASES.update({
     "prepared_manifest_missing": lambda repo, run, r: (run / "prepared-A.json").unlink(),
     "prepared_extra_input": lambda repo, run, r: (run / "prepared-products/extra").write_bytes(b"unexpected"),
+    "acp_missing_receipt": lambda repo, run, r: alter_prepared(run, r, 'command-02-events.json', lambda d: d.pop('acp')),
+    "acp_missing_task": lambda repo, run, r: alter_prepared(run, r, 'command-02-events.json', lambda d: d.update(tasks=[t for t in d['tasks'] if t['path'] != ':buildAcpGateHelper'])),
+    "acp_skipped_task": lambda repo, run, r: alter_prepared(run, r, 'command-02-events.json', lambda d: next(t for t in d['tasks'] if t['path'] == ':buildAcpGateHelper').update(skipped=True)),
+    "acp_up_to_date_task": lambda repo, run, r: alter_prepared(run, r, 'command-01-events.json', lambda d: next(t for t in d['tasks'] if t['path'] == ':buildAcpGateHelper').update(upToDate=True)),
+    "acp_old_version": acp_mutation('schemaVersion', 1),
+    "acp_boolean_version": acp_mutation('schemaVersion', True),
+    "acp_wrong_scope": acp_mutation('publicationScope', 'hostile-namespace-v1'),
+    "acp_wrong_binding": acp_mutation('bindingEvidence', 'executed-inode-authentication'),
+    "acp_extra_assurance": acp_mutation('descriptorAuthenticated', True),
+    "acp_missing_scope": lambda repo, run, r: alter_prepared(run, r, 'command-02-events.json', lambda d: d['acp'].pop('publicationScope')),
+    "acp_missing_binding": lambda repo, run, r: alter_prepared(run, r, 'command-02-events.json', lambda d: d['acp'].pop('bindingEvidence')),
+    "acp_missing_version": lambda repo, run, r: alter_prepared(run, r, 'command-02-events.json', lambda d: d['acp'].pop('schemaVersion')),
+    "acp_failed_compiler": acp_mutation('exitCode', 1),
+    "acp_cleanup_failure": acp_mutation('cleanup', False),
+    "acp_faked_retained": acp_mutation('previous', None),
+    "acp_candidate_probe": acp_mutation("candidateValidationExitCode", 0),
+    "acp_final_probe": acp_mutation("finalValidationExitCode", 0),
+    "acp_wrong_init": acp_mutation('initSha256', '0' * 64),
+    "acp_wrong_command": acp_mutation('commandId', 1),
+    "acp_skipped_prep": acp_mutation('exitCode', None, 1),
+    "acp_flags_changed": acp_mutation('flags', ['-O0']),
+    "acp_late_compile": acp_mutation('compileFinishedAtUnixNs', 999),
+    "acp_candidate_escape": acp_mutation('candidatePath', '/tmp/candidate'),
+    "acp_false_replace": acp_mutation('outcome', 'replaced'),
     "prepared_omitted_producer": lambda repo, run, r: alter_prepared(run, r, "command-01-events.json", lambda d: d.update(tasks=[t for t in d["tasks"] if t["path"] != ":buildAnalysisIoHelper"])),
     "prepared_previous_run": lambda repo, run, r: alter_prepared(run, r, "prepared-A.json", lambda d: d.update(runRoot=str(run.parent / "installed-prior"))),
     "prepared_stale_seal": lambda repo, run, r: alter_prepared(run, r, "prepared-A.json", lambda d: d.update(sealedAtUnixNs=1)),

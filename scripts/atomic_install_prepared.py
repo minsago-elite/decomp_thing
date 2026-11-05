@@ -61,22 +61,22 @@ def safe_path(path, base=None):
 
 
 @contextmanager
-def regular(path, limit=MAX_FILE):
+def regular(path, limit=MAX_FILE, *, dir_fd=None):
     path = safe_path(path)
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    fd = os.open(path if dir_fd is None else path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
     with os.fdopen(fd, "rb") as stream:
         before = os.fstat(stream.fileno())
         require(stat.S_ISREG(before.st_mode), f"nonregular file: {path}")
         require(before.st_size <= limit, f"file exceeds bound: {path}")
         yield stream, before
         identity = lambda s: (s.st_dev, s.st_ino, s.st_mode, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
-        require(identity(before) == identity(os.fstat(stream.fileno())) == identity(path.lstat()),
+        require(identity(before) == identity(os.fstat(stream.fileno())) == identity(path.lstat()) == identity(os.stat(path.name, dir_fd=dir_fd, follow_symlinks=False) if dir_fd is not None else path.lstat()),
                 f"file changed during read: {path}")
 
 
-def file_receipt(path, budget=None, copy_to=None):
+def file_receipt(path, budget=None, copy_to=None, *, dir_fd=None):
     h = hashlib.sha256()
-    with regular(path) as (stream, info):
+    with regular(path, dir_fd=dir_fd) as (stream, info):
         require(budget is None or info.st_size <= budget[0], "input byte bound exceeded")
         sink = None
         try:
@@ -460,12 +460,84 @@ def validate_output_sets(plan, entries):
                         for p in outputs) for name in actual), "producer output is undeclared")
 
 
+ACP_SCOPE = 'cooperative-build-producer-v1'
+ACP_BINDING = 'stable-namespace-path-observations-v1'
+ACP_FLAGS = ['-std=c11', '-O2', '-static', '-Wall', '-Wextra', '-Werror', '-Wl,--build-id=none']
+ACP_SOURCE = 'src/main/c/decomp_acp_gate_helper.c'
+ACP_PUBLICATION = 'scripts/atomic-install-acp-publication.groovy'
+
+
+def validate_acp(event, plan, entries, command=None):
+    """Fresh compiler execution is mandatory, independent of claimed retain outcome."""
+    config = plan['acp']
+    repo, run = pathlib.Path(plan['repoRoot']), pathlib.Path(plan['runRoot'])
+    require(set(config) == {'compiler', 'source', 'recipe', 'publication', 'output', 'publicationScope', 'bindingEvidence'}, 'ACP plan schema differs')
+    require(config['publicationScope'] == ACP_SCOPE and config['bindingEvidence'] == ACP_BINDING, 'ACP plan scope/binding differs')
+    for key, relative in (('source', ACP_SOURCE), ('recipe', 'build.gradle.kts'), ('publication', ACP_PUBLICATION)):
+        require(config[key] == str(repo / relative), 'ACP source/recipe path differs')
+    require(config['output'] == str(run / 'root-build/native/acp/decomp-acp-gate-helper'), 'ACP final path differs')
+    tasks = [t for t in event['tasks'] if t['path'] == ':buildAcpGateHelper']
+    require(len(tasks) == 1 and tasks[0]['enabled'] is True and tasks[0]['executed'] is True and
+            all(tasks[0][k] is False for k in ('skipped', 'upToDate', 'noSource', 'failure')), 'ACP fresh task missing/skipped')
+    value = event['acp']
+    require(set(value) == {'schemaVersion', 'publicationScope', 'bindingEvidence', 'commandId', 'runRoot', 'initSha256', 'startedAtUnixNs',
+        'compileStartedAtUnixNs', 'compileFinishedAtUnixNs', 'finishedAtUnixNs', 'cleanupFinishedAtUnixNs',
+        'compiler', 'source', 'recipe', 'publication', 'output', 'flags', 'arguments', 'exitCode', 'cleanup',
+        'candidatePath', 'candidate', 'previous', 'final', 'outcome', 'candidateValidationExitCode', 'finalValidationExitCode'}, 'ACP receipt fields differ')
+    require(type(value['schemaVersion']) is int and value['schemaVersion'] == 2 and type(value['commandId']) is int and value['commandId'] == event['commandId'] in (1, 2) and
+            value['runRoot'] == event['runRoot'] == str(run), 'ACP receipt command role differs')
+    require(value['publicationScope'] == ACP_SCOPE and value['bindingEvidence'] == ACP_BINDING, 'ACP receipt scope/binding differs')
+    require(type(value['exitCode']) is int and value['exitCode'] == 0 and value['cleanup'] is True,
+            'ACP fresh compiler/cleanup failed')
+    require(value['candidateValidationExitCode'] == value['finalValidationExitCode'] == 120, 'ACP static/protocol validation differs')
+    require(value['flags'] == ACP_FLAGS and value['output'] == config['output'], 'ACP recipe differs')
+    for name in ('compiler', 'source', 'recipe', 'publication'):
+        require(value[name] == {'path': config[name], 'file': entries[config[name]]}, 'ACP compiler/source/recipe inventory differs')
+    require(entries[config['compiler']]['mode'] & 0o111, 'ACP compiler not executable')
+    candidate = pathlib.Path(value['candidatePath'])
+    require(str(candidate) == value['candidatePath'] and '..' not in candidate.parts and
+            candidate.parent.parent == run / 'root-build/acp-publication-private' and
+            candidate.parent.name.startswith('invocation-') and len(candidate.parent.name) <= 128 and
+            candidate.name == pathlib.Path(config['output']).name, 'ACP private candidate path differs')
+    require(not any(candidate.is_relative_to(pathlib.Path(root)) for root in plan_roots(plan)),
+            'ACP candidate overlaps sealed input roots')
+    require(value['arguments'] == [config['compiler'], *ACP_FLAGS, config['source'], '-o', str(candidate)], 'ACP compilation arguments differ')
+    require(value['final'] == entries[config['output']], 'ACP final differs from independent inventory')
+    for item in (value['candidate'], value['final']):
+        require(set(item) == {'type', 'bytes', 'sha256', 'mode', 'key'} and item['type'] == 'file' and
+                type(item['bytes']) is int and 64 <= item['bytes'] <= 4 * 1024**2 and item['mode'] == 0o755 and
+                re.fullmatch('[0-9a-f]{64}', item['sha256']) and isinstance(item['key'], list) and len(item['key']) == 2 and
+                all(type(i) is int and i >= 0 for i in item['key']), 'ACP bounded output receipt differs')
+    require(all(value['candidate'][k] == value['final'][k] for k in ('type', 'bytes', 'sha256', 'mode')),
+            'ACP candidate/final content differs')
+    require(value['candidate']['key'][0] == value['final']['key'][0], 'ACP candidate crosses filesystem')
+    if value['outcome'] == 'retained':
+        require(value['previous'] == value['final'] and value['candidate']['key'] != value['final']['key'],
+                'ACP retained identity claim differs')
+    else:
+        require(value['outcome'] == 'replaced' and value['candidate'] == value['final'], 'ACP replacement identity differs')
+    if value['commandId'] == 2:
+        require(value['outcome'] == 'retained', 'ACP strict replay did not retain prepared final')
+    times = [value[k] for k in ('startedAtUnixNs', 'compileStartedAtUnixNs', 'compileFinishedAtUnixNs',
+                               'finishedAtUnixNs', 'cleanupFinishedAtUnixNs')] + [tasks[0]['atUnixNs']]
+    require(all(type(t) is int and t > 0 for t in times) and times == sorted(times), 'ACP execution ordering differs')
+    require(tasks[0]['atUnixNs'] <= event['actionsStartedAtUnixNs'], 'ACP execution did not precede Sync guard')
+    if command is not None:
+        require(command['commandId'] == value['commandId'] and command['initSha256'] == value['initSha256'] and
+                command['startedAtUnixNs'] <= times[0] <= times[-1] <= command['finishedAtUnixNs'], 'ACP command/init binding differs')
+    else:
+        require(value['initSha256'] == file_receipt(run / f"command-{value['commandId']:02d}.init.gradle")['sha256'],
+                'ACP immutable init differs')
+    return value
+
+
 def capture(plan, repo, source_hashes, tools):
     roots = plan_roots(plan)
     for path in roots:
         safe_path(path, repo)
     roots += [str(repo / p) for p in source_hashes]
     roots += [entry["path"] for entry in tools.values()]
+    roots += [plan["acp"]["compiler"]]
     # Compiler paths come from actual retained original provenance, never an override.
     initial = inventory(sorted(set(roots)))
     if initial["status"] != "passed":
@@ -477,6 +549,7 @@ def capture(plan, repo, source_hashes, tools):
     if current["status"] != "passed":
         write_json(pathlib.Path(plan["runRoot"]) / "prepared-seal-failure.json", current, immutable=True)
     require(current["status"] == "passed", "prepared compiler inventory failed")
+    validate_acp(read_json(pathlib.Path(plan["runRoot"]) / "command-01-events.json"), plan, current["entries"])
     validate_tools(tools, current["entries"], small_bytes)
     require(plan["frontendNodeHome"] in ("PATH", tools["node"]["home"]), "frontend Node home differs")
     return {"roots": sorted(set(roots)), "inventory": current, "provenance": prov,
@@ -580,10 +653,16 @@ def main():
         check_sources(manifest)
     except Exception as failure:
         source_error = repr(failure)
+    acp = None
+    acp_error = None
+    try:
+        acp = validate_acp(read_json(run / "command-02-events.json"), plan, current['entries'])
+    except Exception as failure:
+        acp_error = repr(failure)[:2048]
     write_json(run / "prepared-guard.json", {"commandId": 2, "runRoot": str(run), "atUnixNs": time.time_ns(),
                "manifestSha256": file_receipt(run / "prepared-A.json")["sha256"],
-               "inventory": current, "diff": diff, "planEqual": plan == manifest["plan"], "sourceError": source_error}, immutable=True)
-    require(plan == manifest["plan"] and diff == EMPTY_DIFF and source_error is None, "pre-Sync sealed-input guard failed")
+               "acp": acp, "acpError": acp_error, "inventory": current, "diff": diff, "planEqual": plan == manifest["plan"], "sourceError": source_error}, immutable=True)
+    require(plan == manifest["plan"] and diff == EMPTY_DIFF and source_error is None and acp_error is None, "pre-Sync sealed-input guard failed")
 
 
 if __name__ == "__main__":

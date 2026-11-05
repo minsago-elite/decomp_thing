@@ -1119,48 +1119,138 @@ val generateLlvmHostedWorkerClasspathReference = tasks.register("generateLlvmHos
     }
 }
 
-val buildAcpGateHelper = tasks.register<Exec>("buildAcpGateHelper") {
+fun validateAcpGateHelper(helper: Path, engine: groovy.lang.GroovyObject): Int {
+    fun identity() = Files.readAttributes(helper, "unix:dev,ino,mode,size,lastModifiedTime,ctime", LinkOption.NOFOLLOW_LINKS)
+    val before = identity()
+    require(Files.isRegularFile(helper, LinkOption.NOFOLLOW_LINKS) &&
+        ((before["mode"] as Int) and 0xfff) == 0x1ed &&
+        Files.getPosixFilePermissions(helper, LinkOption.NOFOLLOW_LINKS) == PosixFilePermissions.fromString("rwxr-xr-x")) {
+        "ACP gate helper must be a regular executable with mode0755"
+    }
+    val helperSize = before["size"] as Long
+    require(helperSize in 64L..(4L * 1024 * 1024)) {
+        "ACP gate helper must be a bounded ELF64 executable"
+    }
+    val bytes = Files.newByteChannel(helper, setOf(StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)).use { channel ->
+        val buffer = ByteBuffer.allocate(helperSize.toInt() + 1)
+        while (buffer.hasRemaining() && channel.read(buffer) != -1) { /* bounded read */ }
+        require(buffer.position().toLong() == helperSize && channel.size() == helperSize && before == identity()) {
+            "ACP gate-helper changed during bounded validation read"
+        }
+        buffer.array().copyOf(helperSize.toInt())
+    }
+    require(
+        bytes[0] == 0x7f.toByte() && bytes[1] == 'E'.code.toByte() &&
+            bytes[2] == 'L'.code.toByte() && bytes[3] == 'F'.code.toByte() &&
+            bytes[4] == 2.toByte() && bytes[5] == 1.toByte(),
+    ) { "ACP gate helper must be a little-endian ELF64 executable" }
+    val elf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+    val expectedMachine = when (System.getProperty("os.arch", "")) {
+        "amd64", "x86_64" -> 62
+        "aarch64" -> 183
+        else -> error("unsupported ACP gate-helper architecture")
+    }
+    require(elf.getShort(18).toInt() and 0xffff == expectedMachine) {
+        "ACP gate-helper architecture does not match the build host"
+    }
+    val programOffset = elf.getLong(32)
+    val programEntrySize = elf.getShort(54).toInt() and 0xffff
+    val programCount = elf.getShort(56).toInt() and 0xffff
+    require(programOffset >= 0 && programEntrySize >= 56 && programCount > 0) {
+        "ACP gate helper has an invalid ELF program-header table"
+    }
+    repeat(programCount) { index ->
+        val offset = Math.addExact(
+            programOffset,
+            Math.multiplyExact(index.toLong(), programEntrySize.toLong()),
+        )
+        require(offset <= bytes.size.toLong() - programEntrySize) {
+            "ACP gate-helper program headers exceed the artifact"
+        }
+        when (elf.getInt(offset.toInt())) {
+            3 -> error("ACP gate helper must not contain PT_INTERP")
+            2 -> {
+                val dynamicOffset = elf.getLong(offset.toInt() + 8)
+                val dynamicSize = elf.getLong(offset.toInt() + 32)
+                require(
+                    dynamicOffset >= 0 && dynamicSize >= 0 && dynamicSize % 16L == 0L &&
+                        dynamicOffset <= bytes.size.toLong() - dynamicSize,
+                ) { "ACP gate-helper dynamic table is malformed" }
+                var cursor = dynamicOffset
+                var terminated = false
+                while (cursor < dynamicOffset + dynamicSize) {
+                    when (elf.getLong(cursor.toInt())) {
+                        0L -> {
+                            terminated = true
+                            break
+                        }
+                        1L -> error("ACP gate helper must not contain DT_NEEDED")
+                    }
+                    cursor += 16L
+                }
+                require(terminated) { "ACP gate-helper dynamic table is unterminated" }
+            }
+        }
+    }
+    // The build-only engine owns launch, bounded reap, every stream close and
+    // interruption restoration. This is a stable-namespace pathname observation.
+    engine.invokeMethod("validateProcess", arrayOf(helper, object : groovy.lang.Closure<Unit>(helper) {
+        @Suppress("unused")
+        fun doCall() {
+            require(before == identity()) { "ACP gate helper changed during protocol validation" }
+        }
+    }))
+
+    return 120
+}
+
+abstract class AcpCompilerExecution {
+    @get:javax.inject.Inject
+    abstract val operations: org.gradle.process.ExecOperations
+}
+val acpCompilerExecution = objects.newInstance(AcpCompilerExecution::class.java)
+
+val acpPublicationSource = layout.projectDirectory.file("scripts/atomic-install-acp-publication.groovy")
+val acpGateHelperFlags = listOf("-std=c11", "-O2", "-static", "-Wall", "-Wextra", "-Werror", "-Wl,--build-id=none")
+val buildAcpGateHelper = tasks.register("buildAcpGateHelper") {
     group = "build"
-    description = "Builds the production static ACP sandbox gate helper"
-    inputs.file(acpGateHelperSource)
+    description = "Freshly compiles and atomically publishes the production static ACP gate helper"
+    inputs.files(acpGateHelperSource, acpPublicationSource)
     inputs.property("compiler", acpGateHelperCompiler)
     inputs.property("hostArchitecture", providers.systemProperty("os.arch"))
     outputs.file(acpGateHelperBinary)
-    // A compiler upgrade is security-relevant but is not visible to Gradle's path-based inputs.
+    // Compiler changes remain security-relevant: ALWAYS execute the resolved compiler.
     outputs.upToDateWhen { false }
-
-    doFirst {
-        val osName = System.getProperty("os.name", "").lowercase()
-        val architecture = System.getProperty("os.arch", "")
-        require("linux" in osName && architecture in setOf("amd64", "x86_64", "aarch64")) {
+    doLast {
+        require("linux" in System.getProperty("os.name", "").lowercase() &&
+            System.getProperty("os.arch", "") in setOf("amd64", "x86_64", "aarch64")) {
             "the production ACP gate helper supports only Linux x86-64 or aarch64"
         }
-        val configuredCompiler = file(acpGateHelperCompiler.get()).toPath().toAbsolutePath().normalize()
-        val compiler = configuredCompiler.toRealPath()
+        val compiler = file(acpGateHelperCompiler.get()).toPath().toAbsolutePath().normalize().toRealPath()
         require(Files.isRegularFile(compiler, LinkOption.NOFOLLOW_LINKS) && Files.isExecutable(compiler)) {
             "ACP gate-helper compiler is not an executable regular file: $compiler"
         }
-        val output = acpGateHelperBinary.get().asFile.toPath()
-        Files.createDirectories(output.parent)
-        commandLine(
-            compiler.toString(),
-            "-std=c11",
-            "-O2",
-            "-static",
-            "-Wall",
-            "-Wextra",
-            "-Werror",
-            "-Wl,--build-id=none",
-            acpGateHelperSource.asFile.absolutePath,
-            "-o",
-            output.toString(),
+        val engine = groovy.lang.GroovyShell().evaluate(acpPublicationSource.asFile) as groovy.lang.GroovyObject
+        val config = mapOf(
+            "output" to acpGateHelperBinary.get().asFile.toPath(),
+            "scratch" to layout.buildDirectory.dir("acp-publication-private").get().asFile.toPath(),
+            "compiler" to compiler, "source" to acpGateHelperSource.asFile.toPath(),
+            "recipe" to rootProject.file("build.gradle.kts").toPath(),
+            "publication" to acpPublicationSource.asFile.toPath(), "flags" to acpGateHelperFlags,
+            "compile" to object : groovy.lang.Closure<Int>(this) {
+                @Suppress("unused")
+                fun doCall(arguments: List<String>): Int = acpCompilerExecution.operations.exec {
+                    commandLine(arguments)
+                    isIgnoreExitValue = true
+                }.exitValue
+            },
+            "validate" to object : groovy.lang.Closure<Int>(this) {
+                @Suppress("unused")
+                fun doCall(path: Path): Int = validateAcpGateHelper(path, engine)
+            },
         )
-    }
-    doLast {
-        Files.setPosixFilePermissions(
-            acpGateHelperBinary.get().asFile.toPath(),
-            PosixFilePermissions.fromString("rwxr-xr-x"),
-        )
+        val receipt = engine.invokeMethod("publish", arrayOf(config))
+        extensions.extraProperties.set("atomicAcpPublicationReceipt", receipt)
     }
 }
 
@@ -1253,79 +1343,14 @@ val verifyAcpGateHelper = tasks.register("verifyAcpGateHelper") {
     description = "Verifies the packaged ACP gate helper's static ELF and fail-closed contract"
     dependsOn(buildAcpGateHelper)
     inputs.file(acpGateHelperBinary)
-
     doLast {
+        val engine = groovy.lang.GroovyShell().evaluate(acpPublicationSource.asFile) as groovy.lang.GroovyObject
         val helper = acpGateHelperBinary.get().asFile.toPath()
-        val helperSize = Files.size(helper)
-        require(helperSize in 64L..(4L * 1024 * 1024)) {
-            "ACP gate helper must be a bounded ELF64 executable"
-        }
-        val bytes = Files.readAllBytes(helper)
-        require(
-            bytes[0] == 0x7f.toByte() && bytes[1] == 'E'.code.toByte() &&
-                bytes[2] == 'L'.code.toByte() && bytes[3] == 'F'.code.toByte() &&
-                bytes[4] == 2.toByte() && bytes[5] == 1.toByte(),
-        ) { "ACP gate helper must be a little-endian ELF64 executable" }
-        val elf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
-        val expectedMachine = when (System.getProperty("os.arch", "")) {
-            "amd64", "x86_64" -> 62
-            "aarch64" -> 183
-            else -> error("unsupported ACP gate-helper architecture")
-        }
-        require(elf.getShort(18).toInt() and 0xffff == expectedMachine) {
-            "ACP gate-helper architecture does not match the build host"
-        }
-        val programOffset = elf.getLong(32)
-        val programEntrySize = elf.getShort(54).toInt() and 0xffff
-        val programCount = elf.getShort(56).toInt() and 0xffff
-        require(programOffset >= 0 && programEntrySize >= 56 && programCount > 0) {
-            "ACP gate helper has an invalid ELF program-header table"
-        }
-        repeat(programCount) { index ->
-            val offset = Math.addExact(
-                programOffset,
-                Math.multiplyExact(index.toLong(), programEntrySize.toLong()),
-            )
-            require(offset <= bytes.size.toLong() - programEntrySize) {
-                "ACP gate-helper program headers exceed the artifact"
-            }
-            when (elf.getInt(offset.toInt())) {
-                3 -> error("ACP gate helper must not contain PT_INTERP")
-                2 -> {
-                    val dynamicOffset = elf.getLong(offset.toInt() + 8)
-                    val dynamicSize = elf.getLong(offset.toInt() + 32)
-                    require(
-                        dynamicOffset >= 0 && dynamicSize >= 0 && dynamicSize % 16L == 0L &&
-                            dynamicOffset <= bytes.size.toLong() - dynamicSize,
-                    ) { "ACP gate-helper dynamic table is malformed" }
-                    var cursor = dynamicOffset
-                    var terminated = false
-                    while (cursor < dynamicOffset + dynamicSize) {
-                        when (elf.getLong(cursor.toInt())) {
-                            0L -> {
-                                terminated = true
-                                break
-                            }
-                            1L -> error("ACP gate helper must not contain DT_NEEDED")
-                        }
-                        cursor += 16L
-                    }
-                    require(terminated) { "ACP gate-helper dynamic table is unterminated" }
-                }
-            }
-        }
-        val probe = ProcessBuilder(helper.toString()).also { builder ->
-            builder.environment().clear()
-        }.start()
-        probe.outputStream.close()
-        val exited = probe.waitFor(5, TimeUnit.SECONDS)
-        if (!exited) {
-            probe.destroyForcibly()
-            probe.waitFor(2, TimeUnit.SECONDS)
-        }
-        require(exited && probe.exitValue() == 120) {
-            "ACP gate helper did not fail closed on a missing protocol invocation"
-        }
+        val receipt = buildAcpGateHelper.get().extensions.extraProperties.get("atomicAcpPublicationReceipt") as Map<*, *>
+        engine.invokeMethod("consume", arrayOf(helper, receipt["final"], object : groovy.lang.Closure<Int>(this) {
+            @Suppress("unused")
+            fun doCall(observed: Map<*, *>): Int = validateAcpGateHelper(helper, engine)
+        }))
     }
 }
 
@@ -1439,13 +1464,29 @@ val generateAcpGateHelperChecksum = tasks.register("generateAcpGateHelperChecksu
 
     doLast {
         val helper = acpGateHelperBinary.get().asFile.toPath()
-        val digest = MessageDigest.getInstance("SHA-256")
-            .digest(Files.readAllBytes(helper))
-            .joinToString("") { byte -> "%02x".format(byte) }
-        Files.writeString(
-            acpGateHelperChecksum.get().asFile.toPath(),
-            "$digest  decomp-acp-gate-helper\n",
-        )
+        val engine = groovy.lang.GroovyShell().evaluate(acpPublicationSource.asFile) as groovy.lang.GroovyObject
+        val receipt = buildAcpGateHelper.get().extensions.extraProperties.get("atomicAcpPublicationReceipt") as Map<*, *>
+        // Match the producer generation before AND after the bounded nofollow read,
+        // holding its canonical destination lock through checksum publication.
+        engine.invokeMethod("consume", arrayOf(helper, receipt["final"], object : groovy.lang.Closure<Unit>(this) {
+            @Suppress("unused")
+            fun doCall(observed: Map<*, *>) {
+                val digest = (observed["receipt"] as Map<*, *>)["sha256"] as String
+                val checksum = acpGateHelperChecksum.get().asFile.toPath()
+                if (Files.exists(checksum, LinkOption.NOFOLLOW_LINKS)) {
+                    require(Files.isRegularFile(checksum, LinkOption.NOFOLLOW_LINKS)) { "ACP checksum is not regular" }
+                }
+                Files.newByteChannel(checksum, setOf(StandardOpenOption.CREATE, StandardOpenOption.WRITE,
+                    StandardOpenOption.TRUNCATE_EXISTING, LinkOption.NOFOLLOW_LINKS)).use { channel ->
+                    val bytes = ByteBuffer.wrap("$digest  decomp-acp-gate-helper\n".toByteArray(Charsets.UTF_8))
+                    while (bytes.hasRemaining()) channel.write(bytes)
+                }
+            }
+        }))
+        // Gradle's project/output ownership continues through distribution reads.
+        // Independent simultaneous builds require disjoint build outputs; clean or
+        // external output replacement during this build is unsupported.
+
     }
 }
 

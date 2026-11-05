@@ -208,8 +208,8 @@ jobs:
           export GRADLE_USER_HOME="$GITHUB_WORKSPACE/build/.gradle-user-home"
           export JAVA_OPTS="-Djava.io.tmpdir=$GITHUB_WORKSPACE/build/atomic-install-ci/tmp -Duser.home=$GITHUB_WORKSPACE/build/atomic-install-ci/home -XX:-UsePerfData -XX:-CreateCoredumpOnCrash -XX:-DumpReplayDataOnError"
           ./gradlew --no-daemon "-Dorg.gradle.jvmargs=$JAVA_OPTS" verifyAtomicApplicationPublication atomicInstallProbeAgentJar
-      - name: Run Gradle writer and Java-agent controls
-        run: python3 -B scripts/test-atomic-install-controls.py --gradle-writers --java-agent
+      - name: Run Gradle writer, Java-agent, and ACP publication controls
+        run: python3 -B scripts/test-atomic-install-controls.py --gradle-writers --java-agent --acp-publication
       - name: Mark this run's installed qualification start
         run: |
           mkdir -p build/orchestration/atomic-install-ci

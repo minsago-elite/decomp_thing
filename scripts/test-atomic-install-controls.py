@@ -7,6 +7,9 @@ spec = importlib.util.spec_from_file_location("atomic_driver", ROOT / "scripts/t
 driver = importlib.util.module_from_spec(spec); spec.loader.exec_module(driver)
 PYTHON = os.environ.get("ATOMIC_CONTROL_PYTHON", "/usr/bin/python3.14" if pathlib.Path("/usr/bin/python3.14").exists() else sys.executable)
 BASE = ROOT / "build/orchestration/atomic-install-remediation"
+if "ATOMIC_CONTROL_EVIDENCE_ROOT" in os.environ:
+    BASE = pathlib.Path(os.environ["ATOMIC_CONTROL_EVIDENCE_ROOT"]).resolve(strict=True)
+    if not BASE.is_relative_to(ROOT): raise RuntimeError('control evidence must stay inside repository')
 BASE.mkdir(parents=True, exist_ok=True)
 WORK = pathlib.Path(tempfile.mkdtemp(prefix="driver-controls-", dir=BASE))
 driver.WORK = WORK
@@ -39,6 +42,575 @@ def wait_file(path, child, timeout=90):
     assert path.exists(), str(path)
 
 
+
+def acp_publication_controls():
+    """Run the actual build-only publisher with inert compiler/validator callbacks."""
+    java = pathlib.Path(os.environ['ACP_CONTROL_JAVA']) if 'ACP_CONTROL_JAVA' in os.environ else driver.qualified_java_home() / 'bin/java'
+    jars = os.environ.get('ACP_CONTROL_GROOVY_CLASSPATH')
+    if not jars:
+        import re
+        wrapper = (ROOT / 'gradle/wrapper/gradle-wrapper.properties').read_text()
+        version = re.search(r'gradle-([0-9.]+)-bin\.zip', wrapper).group(1)
+        caches = [pathlib.Path(os.environ.get('GRADLE_USER_HOME', ROOT / 'build/.gradle-user-home')), pathlib.Path.home() / '.gradle']
+        found = sorted({p for cache in caches for p in cache.glob(f'wrapper/dists/gradle-{version}-bin/*/gradle-{version}/lib/groovy-[0-9]*.jar')})
+        if not found: raise RuntimeError('set ACP_CONTROL_GROOVY_CLASSPATH to the pinned Gradle Groovy JAR')
+        jars = str(found[-1])
+    script = WORK / 'acp-publication-controls.groovy'
+    script.write_text(ACP_PUBLICATION_CONTROLS)
+    code, result = driver.run([java, '-XX:-UsePerfData', '-Djava.io.tmpdir=' + str(WORK / 'tmp'),
+        '-cp', jars, 'groovy.ui.GroovyMain', script, ROOT / 'scripts/atomic-install-acp-publication.groovy',
+        WORK / 'root-build/acp-inert', PYTHON], log=WORK / 'acp-publication-controls.log', timeout=120)
+    assert code == 0, result
+    resources = WORK / 'acp-resource-controls.groovy'
+    resources.write_text(ACP_RESOURCE_CONTROLS)
+    code, result = driver.run([java, '-XX:-UsePerfData', '-Djava.io.tmpdir=' + str(WORK / 'tmp'),
+        '-cp', jars, 'groovy.ui.GroovyMain', resources, ROOT / 'scripts/atomic-install-acp-publication.groovy',
+        WORK / 'root-build/acp-resources'], log=WORK / 'acp-resource-controls.log', timeout=120)
+    assert code == 0, result
+    passed.append('ACP-actual-publication-engine-inert-adversarial-controls')
+
+
+ACP_PUBLICATION_CONTROLS = r'''import java.nio.file.*
+import java.nio.file.attribute.*
+import java.nio.channels.*
+import java.util.concurrent.*
+
+def engine = new GroovyShell().evaluate(new File(args[0]))
+def root = Path.of(args[1]); Files.createDirectories(root)
+def results = []
+def bytes = ('inert candidate data; never executable\n' * 8).bytes
+def config = { String name ->
+    def base = Files.createDirectory(root.resolve(name))
+    def pin = { String leaf -> def p = base.resolve(leaf); Files.write(p, ('inert ' + leaf).bytes); p }
+    def cc = pin('compiler'); Files.setPosixFilePermissions(cc, PosixFilePermissions.fromString('rwxr-xr-x'))
+    [output: base.resolve('native/acp/helper'), scratch: base.resolve('private'), compiler: cc,
+     source: pin('source'), recipe: pin('recipe'), publication: Path.of(args[0]), flags: ['-std=c11', '-O2', '-static', '-Wall', '-Wextra', '-Werror', '-Wl,--build-id=none'],
+     compile: { arguments -> Files.write(Path.of(arguments[-1]), bytes, StandardOpenOption.CREATE_NEW); 0 },
+     validate: { Path p -> assert Files.size(p) >= 64; 120 }]
+}
+def failed = { String label, Closure action ->
+    try { action(); throw new AssertionError('unexpected success: ' + label) }
+    catch (IOException | IllegalStateException | InterruptedException expected) { results << label; Thread.interrupted() }
+}
+def empty = { cfg ->
+    Files.newDirectoryStream(cfg.scratch).withCloseable { stream ->
+        assert stream.every { it.fileName.toString().endsWith('.lock') }
+    }
+}
+// Red: direct-final compile simulation unlinks/replaces identical bytes, as the
+// original compiler path did. Hold the old descriptor so inode reuse cannot hide it.
+def red = config('red'); Files.createDirectories(red.output.parent)
+Files.write(red.output, bytes); Files.setPosixFilePermissions(red.output, engine.MODE)
+def initial = engine.read(red.output)
+FileChannel.open(red.output, StandardOpenOption.READ).withCloseable { held ->
+    Files.delete(red.output); Files.write(red.output, bytes); Files.setPosixFilePermissions(red.output, engine.MODE)
+    def after = engine.read(red.output)
+    assert after.receipt.sha256 == initial.receipt.sha256 && after.receipt.mode == initial.receipt.mode
+    assert after.receipt.key != initial.receipt.key
+    println('RED direct-final identical bytes/mode change key; strict equality rejects')
+}
+def green = config('green'); int calls = 0
+green.compile = { arguments ->
+    calls++
+    assert Files.getPosixFilePermissions(Path.of(arguments[-1]).parent) == PosixFilePermissions.fromString('rwx------')
+    Files.write(Path.of(arguments[-1]), bytes, StandardOpenOption.CREATE_NEW); 0
+}
+def first = engine.publish(green); def before = engine.read(green.output)
+def second = engine.publish(green)
+assert first.schemaVersion == 2 && first.publicationScope == 'cooperative-build-producer-v1' && first.bindingEvidence == 'stable-namespace-path-observations-v1'
+assert calls == 2 && first.outcome == 'replaced' && second.outcome == 'retained'
+assert engine.read(green.output).identity == before.identity && second.final == first.final && second.cleanup
+empty(green); results << 'two-fresh-compiles-retain-identical-byte-mode-inode-and-metadata'
+// Full bytes matter, not only length. Compiler/source changes are reflected in
+// receipts; changed output is published and the strict replay inventory differs.
+['compiler', 'source', 'output'].each { name ->
+    def cfg = config('changed-' + name); engine.publish(cfg); def old = engine.read(cfg.output)
+    if (name != 'output') Files.write(cfg[name], ('changed ' + name).bytes)
+    cfg.compile = { arguments -> Files.write(Path.of(arguments[-1]), ('X' * bytes.length).bytes); 0 }
+    def changed = engine.publish(cfg)
+    assert changed.outcome == 'replaced' && changed.final != old.receipt
+    empty(cfg); results << 'changed-' + name
+}
+def mode = config('mode'); engine.publish(mode); Files.setPosixFilePermissions(mode.output, PosixFilePermissions.fromString('rw-------'))
+def oldMode = engine.read(mode.output); def fixed = engine.publish(mode)
+assert fixed.outcome == 'replaced' && fixed.final.mode == 0755 && fixed.final.key != oldMode.receipt.key
+results << 'wrong-mode-never-retained'
+['failed', 'partial', 'missing', 'oversize', 'symlink', 'validate', 'force', 'move', 'cancel', 'cleanup',
+ 'identity', 'source-exchange', 'compiler-exchange', 'staging-exchange', 'extra-directory'].each { fault ->
+    def cfg = config('failure-' + fault); engine.publish(cfg); def old = engine.read(cfg.output)
+    def normal = cfg.compile
+    if (fault in ['failed', 'partial', 'missing', 'oversize', 'symlink', 'cancel', 'extra-directory']) {
+        cfg.compile = { arguments ->
+            Path candidate = Path.of(arguments[-1])
+            switch (fault) {
+                case 'failed': return 1
+                case 'partial': Files.write(candidate, 'partial'.bytes); return 1
+                case 'missing': return 0
+                case 'oversize':
+                    FileChannel.open(candidate, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE).withCloseable {
+                        it.position(engine.MAX); it.write(java.nio.ByteBuffer.wrap([1] as byte[]))
+                    }; return 0
+                case 'symlink': Files.createSymbolicLink(candidate, cfg.output); return 0
+                case 'cancel': Files.write(candidate, bytes); throw new InterruptedException('cancelled compiler')
+                case 'extra-directory': Files.createDirectory(candidate.parent.resolve('unexpected')); return 1
+            }
+        }
+    } else if (fault == 'validate') cfg.validate = { Path p -> throw new IOException('validation failure') }
+    else if (fault == 'force') cfg.force = { Path p, boolean dir -> throw new IOException('force failure') }
+    else if (fault == 'move') {
+        cfg.compile = { arguments -> Files.write(Path.of(arguments[-1]), ('M' * bytes.length).bytes); 0 }
+        cfg.move = { Path a, Path b -> throw new AtomicMoveNotSupportedException(a.toString(), b.toString(), 'injected') }
+    } else if (fault == 'cleanup') cfg.cleanup = { throw new IOException('cleanup failure') }
+    else if (fault in ['source-exchange', 'compiler-exchange']) cfg.validate = { Path p ->
+        if (p != cfg.output) { Path pin = cfg[fault.split('-')[0]]; Files.write(pin, 'exchanged'.bytes) }; 120
+    }
+    else if (fault == 'identity') cfg.validate = { Path p ->
+        if (p != cfg.output) { def temp = p.resolveSibling('replacement'); Files.write(temp, bytes); Files.move(temp, p, StandardCopyOption.REPLACE_EXISTING) }; 120
+    }
+    else if (fault == 'staging-exchange') cfg.validate = { Path p ->
+        if (p != cfg.output) { Files.move(p.parent, p.parent.resolveSibling('foreign')); Files.createDirectory(p.parent) }; 120
+    }
+    failed(fault) { engine.publish(cfg) }
+    assert engine.read(cfg.output).identity == old.identity
+    if (!(fault in ['cleanup', 'staging-exchange', 'extra-directory', 'identity'])) empty(cfg)
+    if (fault == 'identity') assert Files.list(cfg.scratch).withCloseable { it.count() } == 1 // uncertain replacement retained
+    if (fault == 'cleanup') { cfg.remove('cleanup'); assert engine.publish(cfg).outcome == 'retained' }
+}
+['final', 'ancestor', 'lock'].each { kind ->
+    def cfg = config('symlink-' + kind); engine.publish(cfg)
+    Path target
+    if (kind == 'final') { target = cfg.output; Files.delete(target) }
+    else if (kind == 'ancestor') { target = cfg.output.parent; Files.move(target, target.resolveSibling('saved')) }
+    else { target = engine.lockPath(cfg.output); Files.delete(target) }
+    Files.createSymbolicLink(target, Path.of('missing'))
+    failed('symlink-' + kind) { engine.publish(cfg) }
+}
+// Failures after rename are reported; never restore the old executable.
+['parent-force', 'final-validation'].each { fault ->
+    def cfg = config(fault); engine.publish(cfg); def old = engine.read(cfg.output)
+    cfg.compile = { a -> Files.write(Path.of(a[-1]), ('N' * bytes.length).bytes); 0 }
+    if (fault == 'parent-force') cfg.force = { Path p, boolean dir ->
+        if (dir) throw new IOException('directory force failure')
+        engine.force(p, false)
+    }
+    else cfg.validate = { Path p -> if (p == cfg.output) throw new IOException('final validation failure'); 120 }
+    failed(fault) { engine.publish(cfg) }
+    assert engine.read(cfg.output).receipt.sha256 != old.receipt.sha256
+    empty(cfg)
+}
+def overflow = config('cleanup-overflow')
+overflow.compile = { a ->
+    (0..16).each { Files.write(Path.of(a[-1]).parent.resolve('owned-' + it), bytes) }; 1
+}
+try { engine.publish(overflow); throw new AssertionError('unexpected success') }
+catch (IOException ex) { assert ex.message == 'ACP fresh compilation failed'; assert ex.suppressed[0].message == 'ACP cleanup entry bound'; results << 'cleanup-overflow-primary' }
+['lock', 'candidate', 'final'].each { kind ->
+    def cfg = config('fifo-' + kind); engine.publish(cfg)
+    def makeFifo = { Path p ->
+        def child = new ProcessBuilder(args[2], '-B', '-c', 'import os,sys; os.mkfifo(sys.argv[1])', p.toString()).start()
+        try { assert child.waitFor(5, TimeUnit.SECONDS) && child.exitValue() == 0 }
+        finally { if (child.isAlive()) child.destroyForcibly(); assert child.waitFor(2, TimeUnit.SECONDS) }
+    }
+    if (kind == 'candidate') cfg.compile = { a -> makeFifo(Path.of(a[-1])); 0 }
+    else {
+        Path path = cfg.output
+        if (kind == 'lock') path = engine.lockPath(cfg.output)
+        Files.delete(path); makeFifo(path)
+    }
+    failed('fifo-' + kind) { engine.publish(cfg) }
+}
+// Stable lock refuses another cooperative producer, then releases on completion.
+def concurrent = config('concurrent'); engine.publish(concurrent)
+def entered = new CountDownLatch(1); def release = new CountDownLatch(1)
+def normal = concurrent.compile
+concurrent.compile = { arguments -> entered.countDown(); assert release.await(10, TimeUnit.SECONDS); normal(arguments) }
+def pool = Executors.newSingleThreadExecutor()
+try {
+    def future = pool.submit({ engine.publish(concurrent) } as Callable)
+    assert entered.await(10, TimeUnit.SECONDS)
+    failed('concurrent-writer-refused') { engine.publish(concurrent) }
+    failed('different-scratch-same-output-refused') { engine.publish(concurrent + [scratch: concurrent.scratch.resolveSibling('other-private')]) }
+    failed('consumer-during-producer-refused') { engine.consume(concurrent.output, first.final) { throw new AssertionError('consumer entered') } }
+    release.countDown(); assert future.get(10, TimeUnit.SECONDS).outcome == 'retained'
+    assert engine.publish(concurrent).outcome == 'retained'; empty(concurrent)
+    results << 'concurrent-lock-release'
+} finally { release.countDown(); pool.shutdownNow(); assert pool.awaitTermination(10, TimeUnit.SECONDS) }
+// An independent OS process holds the same POSIX byte-range lock used by
+// FileChannel, proving contention is not only the JVM overlapping-lock registry.
+def cross = config('cross-process'); engine.publish(cross)
+Path crossLock = engine.lockPath(cross.output)
+def ready = root.resolve('cross-ready'); def releaseFile = root.resolve('cross-release')
+def python = """import fcntl, pathlib, sys, time
+with open(sys.argv[1], 'r+b') as lock:
+ fcntl.lockf(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+ pathlib.Path(sys.argv[2]).write_text('ready')
+ deadline = time.monotonic() + 10
+ while not pathlib.Path(sys.argv[3]).exists():
+  if time.monotonic() >= deadline: raise RuntimeError('release timeout')
+  time.sleep(.01)
+"""
+def holder = new ProcessBuilder(args[2], '-B', '-c', python, crossLock.toString(), ready.toString(), releaseFile.toString()).start()
+try {
+    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
+    while (!Files.exists(ready) && holder.isAlive() && System.nanoTime() < deadline) Thread.sleep(10)
+    assert Files.exists(ready)
+    failed('cross-process-lock-refusal') { engine.publish(cross) }
+    Files.writeString(releaseFile, 'release'); assert holder.waitFor(10, TimeUnit.SECONDS) && holder.exitValue() == 0
+    assert engine.publish(cross).outcome == 'retained'; empty(cross)
+    results << 'cross-process-lock-release'
+} finally { if (holder.isAlive()) holder.destroyForcibly(); assert holder.waitFor(2, TimeUnit.SECONDS) }
+def both = config('primary-cleanup'); both.compile = { a -> Files.write(Path.of(a[-1]), bytes); throw new IllegalStateException('primary compile') }
+both.cleanup = { throw new IOException('secondary cleanup') }
+try { engine.publish(both); throw new AssertionError('missing primary') }
+catch (IllegalStateException ex) { assert ex.message == 'primary compile'; assert ex.suppressed*.message == ['secondary cleanup']; results << 'primary-preserved' }
+// A consumer uses the same lock and exact producer generation; a later producer
+// cannot enter verification/checksum callbacks, and stale observations fail.
+engine.consume(green.output, second.final) { observed ->
+    assert observed.receipt == second.final
+    failed('producer-during-consumer-refused') { engine.publish(green + [scratch: green.scratch.resolveSibling('consumer-other')]) }
+}
+failed('consumer-stale-generation-refused') { engine.consume(green.output, second.final + [sha256: '0' * 64]) { throw new AssertionError('stale consumer entered') } }
+results << 'consumer-generation-and-lock'
+// First creation also shares the canonical lock before any candidate exists.
+def initialRace = config('first-creation'); def enteredFirst = new CountDownLatch(1); def finishFirst = new CountDownLatch(1)
+def initialCompile = initialRace.compile
+initialRace.compile = { a -> enteredFirst.countDown(); assert finishFirst.await(10, TimeUnit.SECONDS); initialCompile(a) }
+def firstPool = Executors.newSingleThreadExecutor()
+try {
+    def future = firstPool.submit({ engine.publish(initialRace) } as Callable)
+    assert enteredFirst.await(10, TimeUnit.SECONDS)
+    assert !Files.exists(initialRace.output)
+    failed('first-create-distinct-scratch-refused') { engine.publish(initialRace + [scratch: initialRace.scratch.resolveSibling('second-private')]) }
+    finishFirst.countDown(); assert future.get(10, TimeUnit.SECONDS).outcome == 'replaced'
+} finally { finishFirst.countDown(); firstPool.shutdownNow(); assert firstPool.awaitTermination(10, TimeUnit.SECONDS) }
+// Receipt cleanup remains inside the lock, even after successful publication.
+def duringCleanup = config('cleanup-lock')
+duringCleanup.cleanup = {
+    failed('producer-during-cleanup-refused') { engine.publish(duringCleanup + [scratch: duringCleanup.scratch.resolveSibling('other')]) }
+}
+assert engine.publish(duringCleanup).cleanup
+results << 'cleanup-completion-ownership'
+// Two real independent JVM producers contend on first creation and an existing
+// final, with different scratch configurations and no native subject execution.
+def childScript = root.resolve('cooperative-child.groovy')
+Files.writeString(childScript, """import java.nio.file.*
+import java.util.concurrent.TimeUnit
+ def engine = new GroovyShell().evaluate(new File(args[0]))
+ def base = Path.of(args[1]); def ready = base.resolve('child-ready'); def release = base.resolve('child-release')
+ def cfg = [output: base.resolve('native/acp/helper'), scratch: base.resolve('child-scratch'),
+    compiler: base.resolve('compiler'), source: base.resolve('source'), recipe: base.resolve('recipe'),
+    publication: Path.of(args[0]), flags: ['-std=c11','-O2','-static','-Wall','-Wextra','-Werror','-Wl,--build-id=none'],
+    compile: { a ->
+        Files.writeString(ready, 'ready')
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20)
+        while (!Files.exists(release)) { assert System.nanoTime() < deadline; Thread.sleep(10) }
+        Files.write(Path.of(a[-1]), ('inert candidate data; never executable\\n' * 8).bytes); 0
+    }, validate: { p -> 120 }]
+ assert engine.publish(cfg).cleanup
+""")
+['first','existing'].each { scenario ->
+    def cfg = config('process-' + scenario)
+    if (scenario == 'existing') engine.publish(cfg)
+    def base = cfg.source.parent
+    def readyFile = base.resolve('child-ready'); def releaseChild = base.resolve('child-release')
+    def child = new ProcessBuilder(Path.of(System.getProperty('java.home'),'bin/java').toString(),
+        '-XX:-UsePerfData', '-Djava.io.tmpdir=' + root.toString(), '-cp', System.getProperty('java.class.path'),
+        'groovy.ui.GroovyMain', childScript.toString(), args[0], base.toString())
+        .redirectErrorStream(true).redirectOutput(base.resolve('child.log').toFile()).start()
+    try {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20)
+        while (!Files.exists(readyFile) && child.isAlive() && System.nanoTime() < deadline) Thread.sleep(10)
+        assert Files.exists(readyFile): Files.readString(base.resolve('child.log'))
+        failed('two-jvm-' + scenario + '-refused') { engine.publish(cfg) }
+        Files.writeString(releaseChild, 'release')
+        assert child.waitFor(20, TimeUnit.SECONDS) && child.exitValue() == 0: Files.readString(base.resolve('child.log'))
+        assert engine.publish(cfg).outcome == 'retained'
+        results << 'two-jvm-' + scenario + '-release'
+    } finally {
+        if (child.isAlive()) child.destroyForcibly()
+        assert child.waitFor(2, TimeUnit.SECONDS)
+        child.errorStream.close(); child.inputStream.close(); child.outputStream.close()
+    }
+}
+// Tiny Python children prove the real process/reap path, not native helper ABI.
+['success','timeout','interrupt','identity'].each { scenario ->
+    Process child = null
+    Throwable problem = null
+    try {
+        engine.validateProcess(root.resolve('inert-probe'), {
+            if (scenario == 'identity') throw new IOException('identity-check')
+        }, { p ->
+            child = new ProcessBuilder(args[2], '-B', '-c', scenario in ['success','identity'] ?
+                'import sys; sys.exit(120)' : 'import time; time.sleep(30)').start()
+            if (scenario == 'interrupt') Thread.currentThread().interrupt()
+            child
+        })
+    } catch (Throwable failure) { problem = failure }
+    assert (problem == null) == (scenario == 'success')
+    assert child != null && !child.isAlive()
+    assert child.waitFor(1, TimeUnit.SECONDS)
+    if (scenario == 'interrupt') assert Thread.interrupted()
+    else assert !Thread.interrupted()
+    results << 'real-inert-probe-' + scenario + '-reaped'
+}
+def flagFault = config('flags')
+failed('exact-seven-flags-required') { engine.publish(flagFault + [flags: ['-O0']]) }
+// Compiler-created unknown regular files, like directories, are not owned
+// cleanup targets and must remain intact when the whole bounded set is rejected.
+def unknown = config('unknown-regular')
+unknown.compile = { a -> Files.write(Path.of(a[-1]), bytes); Files.writeString(Path.of(a[-1]).parent.resolve('foreign'), 'retain-me'); 0 }
+failed('unknown-cleanup-entry-refused') { engine.publish(unknown) }
+Files.newDirectoryStream(unknown.scratch).withCloseable { ds ->
+    assert ds.any { Files.readString(it.resolve('foreign')) == 'retain-me' }
+}
+// All cleanup attempts run despite earlier deletion/callback failures. The
+// compiler cause survives, and each later failure is directly suppressed.
+def multiCleanup = config('cleanup-multiple')
+Path ownedCandidate
+multiCleanup.compile = { a -> ownedCandidate = Path.of(a[-1]); Files.write(ownedCandidate, bytes); throw new IOException('compile-primary') }
+multiCleanup.cleanup = { throw new IOException('callback-cleanup') }
+def deleteMethod = Files.getMethod('delete',Path)
+def deleteAttempts = []
+Files.metaClass.static.delete = { Path p ->
+    deleteAttempts << p
+    if (p == ownedCandidate) throw new IOException('candidate-delete')
+    if (p == ownedCandidate?.parent) throw new IOException('directory-delete')
+    deleteMethod.invoke(null,p)
+}
+try {
+    try { engine.publish(multiCleanup); throw new AssertionError('cleanup success') }
+    catch (IOException problem) {
+        assert problem.message == 'compile-primary'
+        assert problem.suppressed*.message == ['candidate-delete','callback-cleanup','directory-delete']
+        assert deleteAttempts == [ownedCandidate, ownedCandidate.parent]
+        assert Files.exists(ownedCandidate)
+    }
+} finally { GroovySystem.metaClassRegistry.removeMetaClass(Files) }
+assert engine.withOutputLock(multiCleanup.output) { true }
+results << 'all-owned-cleanup-attempts-directly-suppressed'
+println('GREEN ACP inert controls: ' + results.size() + ' ' + results)
+'''
+
+ACP_RESOURCE_CONTROLS = r'''import java.nio.file.*
+import java.nio.channels.*
+import java.nio.ByteBuffer
+import java.lang.reflect.*
+import java.util.concurrent.TimeUnit
+
+@groovy.transform.CompileStatic
+class FaultLock extends FileLock {
+    FileLock real; List events; Set faults
+    FaultLock(FileChannel channel, FileLock real, List events, Set faults) {
+        super(channel, real.position(), real.size(), real.isShared())
+        this.real = real; this.events = events; this.faults = faults
+    }
+    boolean isValid() { real.isValid() }
+    void release() { real.release(); events << 'release'; if ('release' in faults) throw new IOException('release') }
+}
+class FaultChannel extends FileChannel {
+    FileChannel real
+    List events
+    Set faults
+    FileLock acquired
+    protected void implCloseChannel() { real.close(); events << 'channel'; if ('channel' in faults) throw new IOException('channel') }
+    FileLock tryLock(long p, long n, boolean shared) {
+        if ('acquire' in faults) throw new IOException('acquire')
+        def held = real.tryLock(p, n, shared)
+        if (held == null) return null
+        acquired = held
+        new FaultLock(this, held, events, faults)
+    }
+    FileLock lock(long p,long n,boolean shared) { throw new AssertionError('blocking lock') }
+    int read(ByteBuffer b) { if ('read' in faults) throw new IOException('read'); real.read(b) }
+    int read(ByteBuffer b,long p) { real.read(b,p) }
+    long read(ByteBuffer[] b,int o,int n) { real.read(b,o,n) }
+    int write(ByteBuffer b) { real.write(b) }
+    int write(ByteBuffer b,long p) { real.write(b,p) }
+    long write(ByteBuffer[] b,int o,int n) { real.write(b,o,n) }
+    long position() { real.position() }
+    FileChannel position(long p) { real.position(p); this }
+    long size() { real.size() }
+    FileChannel truncate(long n) { real.truncate(n); this }
+    void force(boolean metadata) { if ('force' in faults) throw new IOException('force'); real.force(metadata) }
+    long transferTo(long p,long n,WritableByteChannel c) { real.transferTo(p,n,c) }
+    long transferFrom(ReadableByteChannel c,long p,long n) { real.transferFrom(c,p,n) }
+    java.nio.MappedByteBuffer map(FileChannel.MapMode m,long p,long n) { real.map(m,p,n) }
+}
+class FaultInput extends InputStream {
+    String name; List events; Set faults
+    int read() { -1 }
+    void close() { events << name; if (name in faults) throw new IOException(name) }
+}
+class FaultOutput extends OutputStream {
+    List events; Set faults
+    void write(int b) { }
+    void close() { events << 'stdin'; if ('stdin' in faults) throw new IOException('stdin') }
+}
+class FakeProbe extends Process {
+    List events = []; Set faults = [] as Set; boolean alive = true; int waits = 0
+    OutputStream getOutputStream() { new FaultOutput(events:events, faults:faults) }
+    InputStream getInputStream() { if ('get-stdout' in faults) throw new IOException('get-stdout'); new FaultInput(name:'stdout',events:events,faults:faults) }
+    InputStream getErrorStream() { if ('get-stderr' in faults) throw new IOException('get-stderr'); new FaultInput(name:'stderr',events:events,faults:faults) }
+    int waitFor() { throw new AssertionError('unbounded reap') }
+    boolean waitFor(long amount,TimeUnit unit) {
+        waits++; events << 'wait-' + waits
+        if (waits == 1 && 'interrupt' in faults) throw new InterruptedException('interrupt')
+        if (waits == 2 && 'reap-interrupt' in faults) throw new InterruptedException('reap-interrupt')
+        if (waits == 1 && 'wait' in faults) throw new IOException('wait')
+        if (waits > 1 && 'reap' in faults) throw new IOException('reap')
+        if (waits == 1 && 'timeout' in faults) return false
+        alive = false; true
+    }
+    boolean isAlive() { alive }
+    int exitValue() { 'exit' in faults ? 7 : 120 }
+    void destroy() { destroyForcibly() }
+    Process destroyForcibly() { events << 'destroy'; if ('destroy' in faults) throw new IOException('destroy'); this }
+}
+def engine = new GroovyShell().evaluate(new File(args[0]))
+def root = Path.of(args[1]); Files.createDirectories(root)
+def output = root.resolve('helper')
+def directoryOpen = Files.getMethod('newDirectoryStream',Path)
+def successes = []
+// Every traversal close is faulted individually, and all simultaneously, with and
+// without an action failure. All actual underlying streams must still close.
+int depth = output.nameCount
+(0..depth).each { selected ->
+  [false,true].each { operationFailure ->
+    def opened = []; def closed = []; def faults = selected == depth ? (0..<depth).toSet() : [selected] as Set
+    Closure wrap
+    wrap = { SecureDirectoryStream real ->
+        int id = opened.size(); opened << id
+        Proxy.newProxyInstance(SecureDirectoryStream.class.classLoader,[SecureDirectoryStream] as Class[],
+          { Object proxy, Method method, Object[] a ->
+            if (method.name == 'newDirectoryStream') return wrap(method.invoke(real,a))
+            try {
+                def result = method.invoke(real,a)
+                if (method.name == 'close') { closed << id; if (id in faults) throw new IOException('stream-' + id) }
+                result
+            } catch (InvocationTargetException failure) { throw failure.cause }
+          } as InvocationHandler)
+    }
+    Files.metaClass.static.newDirectoryStream = { Path p -> wrap(directoryOpen.invoke(null,p)) }
+    try {
+        try { engine.withParent(output) { if (operationFailure) throw new IOException('primary'); 7 }; throw new AssertionError('accepted stream fault') }
+        catch (IOException failure) {
+            def messages = faults.toList().sort().reverse().collect { 'stream-' + it }
+            assert failure.message == (operationFailure ? 'primary' : messages.remove(0))
+            assert failure.suppressed*.message == messages
+            assert closed == opened.reverse()
+        }
+    } finally { GroovySystem.metaClassRegistry.removeMetaClass(Files) }
+    successes << "stream-${selected}-${operationFailure}"
+  }
+}
+// Acquisition-before-registration, type failure, release, channel close and
+// simultaneous primary+cleanup faults all use actual directory/channel objects.
+['handoff','type','identity','acquire','release','channel','both','primary-both'].each { scenario ->
+    def events = []; def channels = []; def opened = []; def closed = []
+    def faults = scenario in ['both','primary-both'] ? ['release','channel'] as Set : [scenario] as Set
+    if (scenario == 'identity') Files.write(engine.lockPath(output), [1] as byte[])
+    boolean openedChannel = false; boolean handoffFaulted = false
+    Closure wrap
+    wrap = { SecureDirectoryStream real ->
+        int id = opened.size(); opened << id
+        Proxy.newProxyInstance(SecureDirectoryStream.class.classLoader,[SecureDirectoryStream] as Class[],
+          { Object proxy,Method method,Object[] a ->
+            try {
+                if (method.name == 'newDirectoryStream') return wrap(method.invoke(real,a))
+                def result = method.invoke(real,a)
+                if (method.name == 'newByteChannel') {
+                    openedChannel = true
+                    def channel = new FaultChannel(real:result,events:events,faults:faults); channels << channel
+                    if (scenario == 'type') return Proxy.newProxyInstance(SeekableByteChannel.class.classLoader,[SeekableByteChannel] as Class[],
+                        { Object x,Method m,Object[] v -> m.invoke(channel,v) } as InvocationHandler)
+                    return channel
+                }
+                if (method.name == 'close') {
+                    closed << id
+                    if (scenario == 'handoff' && openedChannel && !handoffFaulted) { handoffFaulted = true; throw new IOException('handoff') }
+                }
+                result
+            } catch (InvocationTargetException failure) { throw failure.cause }
+          } as InvocationHandler)
+    }
+    Files.metaClass.static.newDirectoryStream = { Path p -> wrap(directoryOpen.invoke(null,p)) }
+    try {
+        try { engine.withOutputLock(output) { if (scenario == 'primary-both') throw new IOException('primary'); 7 }; throw new AssertionError('accepted ' + scenario) }
+        catch (IOException failure) {
+            assert failure.message == [handoff:'handoff',type:'ACP lock channel unavailable',identity:'ACP unsafe producer lock',acquire:'acquire',release:'release',channel:'channel',both:'release','primary-both':'primary'][scenario]
+            assert failure.suppressed*.message == (scenario == 'both' ? ['channel'] : scenario == 'primary-both' ? ['release','channel'] : [])
+            assert events == (scenario in ['handoff','type','identity','acquire'] ? ['channel'] : ['release','channel'])
+            assert channels.every { !it.isOpen() && !it.real.isOpen() && (it.acquired == null || !it.acquired.isValid()) }
+            assert closed == opened.reverse()
+        }
+    } finally { GroovySystem.metaClassRegistry.removeMetaClass(Files) }
+    if (scenario == 'identity') Files.write(engine.lockPath(output), new byte[0])
+    assert engine.withOutputLock(output) { 9 } == 9
+    successes << 'lock-' + scenario
+}
+// Bounded process cleanup exercised with an inert Process, never an ELF/compiler.
+[[],['stdin'],['stdout'],['stderr'],['get-stdout'],['get-stderr'],['wait'],['timeout'],['exit'],
+ ['interrupt'],['timeout','reap-interrupt'],['wait','destroy'],['wait','reap'],
+ ['wait','destroy','reap','stderr','stdout','stdin']].each { selected ->
+    def probe = new FakeProbe(faults:selected as Set)
+    Throwable caught = null
+    try { assert engine.validateProcess(output, { }, { p -> probe }) == 120 }
+    catch (Throwable failure) { caught = failure }
+    assert (caught == null) == selected.isEmpty()
+    def closes = probe.events.findAll { it in ['stdin','stdout','stderr'] }
+    if ('get-stdout' in selected) assert closes == ['stderr','stdin']
+    else if ('get-stderr' in selected) assert closes == ['stdout','stdin']
+    else assert closes[-3..-1] == ['stderr','stdout','stdin']
+    assert probe.waits >= 1
+    if ('interrupt' in selected || 'reap-interrupt' in selected) assert Thread.interrupted()
+    else assert !Thread.interrupted()
+    if ('wait' in selected && selected.size() > 3) {
+        assert caught.message == 'stdin' // stdin fails before wait, all later cleanups still run
+        assert caught.suppressed*.message == ['destroy','wait','stderr','stdout','stdin']
+    }
+    if (!('reap' in selected) && !('wait' in selected && 'stdin' in selected)) assert !probe.alive
+    successes << 'probe-' + selected
+}
+// Read/force channel cleanup nests inside traversal; preserve the operation,
+// directly suppress channel AND every stream failure, and close real handles.
+['read','force'].each { operation ->
+  [false,true].each { allCloses ->
+    def file = root.resolve(operation + '-' + allCloses)
+    Files.write(file, ('inert' * 32).bytes)
+    def events = []; def channels = []; def opened = []; def closed = []
+    Closure wrap
+    wrap = { SecureDirectoryStream real ->
+      int id = opened.size(); opened << id
+      Proxy.newProxyInstance(SecureDirectoryStream.class.classLoader,[SecureDirectoryStream] as Class[],
+        { Object proxy,Method method,Object[] a ->
+          try {
+            if (method.name == 'newDirectoryStream') return wrap(method.invoke(real,a))
+            def result = method.invoke(real,a)
+            if (method.name == 'newByteChannel') {
+                def channel = new FaultChannel(real:result,events:events,faults:([operation] + (allCloses ? ['channel'] : [])) as Set)
+                channels << channel; return channel
+            }
+            if (method.name == 'close') { closed << id; if (allCloses) throw new IOException('stream-' + id) }
+            result
+          } catch (InvocationTargetException problem) { throw problem.cause }
+        } as InvocationHandler)
+    }
+    Files.metaClass.static.newDirectoryStream = { Path p -> wrap(directoryOpen.invoke(null,p)) }
+    try {
+      try { if (operation == 'read') engine.read(file) else engine.force(file); throw new AssertionError('accepted ' + operation) }
+      catch (IOException failure) {
+        assert failure.message == operation
+        assert failure.suppressed*.message == (allCloses ? ['channel'] + opened.reverse().collect { 'stream-' + it } : [])
+        assert closed == opened.reverse()
+        assert channels.every { !it.real.isOpen() && !it.isOpen() }
+      }
+    } finally { GroovySystem.metaClassRegistry.removeMetaClass(Files) }
+    successes << operation + '-nested-cleanup-' + allCloses
+  }
+}
+println('GREEN ACP resource controls: ' + successes.size() + ' ' + successes)
+'''
+
 try:
     # Explicit and PATH-derived real executable homes; launcher option JSON/path roundtrip.
     jdk = WORK / "jdk with spaces"; (jdk / "bin").mkdir(parents=True)
@@ -63,8 +635,8 @@ try:
     assert '"dist", "bundle-report.json", "bundle-composition.json"' in init_text
     passed.append("one-install-root-and-fresh-frontend-output-wiring")
     with unittest.mock.patch.object(driver, "qualified_java_home", return_value=jdk):
-        with unittest.mock.patch.dict(os.environ, {"HOME": "/unchanged-home"}):
-            assert driver.safe_env()["HOME"] == "/unchanged-home"
+        original_home = os.environ.get("HOME")
+        assert driver.safe_env().get("HOME") == original_home
         with unittest.mock.patch.object(driver, "run", return_value=(0, "")) as run:
             driver.gradle("help")
             assert run.call_args.kwargs["timeout"] == driver.BUILD_TIMEOUT
@@ -281,6 +853,7 @@ public class ProgramModelJson {
             assert all(name.startswith(("META-INF/", "decompengine/install/")) for name in archive.namelist() if not name.endswith('/'))
         (fixture / "synthetic-agent-results.json").write_text(json.dumps(observations, indent=2))
         passed.append("synthetic-agent-A-B-A-late-loader-origin-resource-descriptor-JSON/no-product-main")
+    if "--acp-publication" in sys.argv: acp_publication_controls()
     record = {"status": "passed", "passed": passed, "sourceHashes": {p: driver.digest(ROOT/p) for p in driver.OWNED_SOURCES}}
 except BaseException as failure:
     record = {"status": "failed", "passed": passed, "failure": repr(failure)}

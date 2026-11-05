@@ -14,6 +14,9 @@ driver = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(driver)
 prep = driver.prepared
 BASE = ROOT / 'build/orchestration/atomic-install-prepared-replay-remediation/tmp'
+if 'ATOMIC_CONTROL_EVIDENCE_ROOT' in os.environ:
+    BASE = pathlib.Path(os.environ['ATOMIC_CONTROL_EVIDENCE_ROOT']).resolve(strict=True)
+    if not BASE.is_relative_to(ROOT): raise RuntimeError('control evidence must stay inside repository')
 BASE.mkdir(parents=True, exist_ok=True)
 
 
@@ -293,6 +296,259 @@ class ArtifactControls(unittest.TestCase):
             for kind in ('extra-directory', 'payload-directory', 'parent-payload', 'duplicate-parent', 'duplicate-file',
                          'file-directory-type', 'directory-file-type', 'noncanonical', 'traversal', 'backslash', 'symlink', 'compressed-parent', 'nul-file', 'nul-directory'):
                 with self.subTest(kind=kind), self.assertRaises(RuntimeError): module.verify(make(kind=kind), seal['sha256'])
+
+
+class SelectionControls(unittest.TestCase):
+    def setUp(self):
+        spec = importlib.util.spec_from_file_location('selection_artifacts', ROOT / 'scripts/atomic_install_artifacts.py')
+        self.mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(self.mod)
+        self.temp = tempfile.TemporaryDirectory(dir=BASE); self.addCleanup(self.temp.cleanup)
+        self.root = pathlib.Path(self.temp.name)
+        self.patterns = self.mod.rules(ROOT)
+        self.rules = mock.patch.object(self.mod, 'rules', side_effect=lambda repo: self.patterns)
+        self.rules.start(); self.addCleanup(self.rules.stop)
+        self.run = self.root / 'build/atomic-install/publisher-controls/run-one'
+        self.run.mkdir(parents=True)
+        (self.run / 'passed.txt').write_text('passed')
+        self.manifest = self.root / 'build' / self.mod.MANIFEST
+
+    def seal(self):
+        result = self.mod.seal(self.root)
+        return self.mod.io.read_json(self.manifest)['members']
+
+    def test_hosted_unselected_symlink_and_fifo(self):
+        bad = self.run / 'bad-target/lib'; bad.mkdir(parents=True)
+        (bad / 'dep.jar').symlink_to('missing')
+        (self.run / 'unselected-dangling').symlink_to('missing')
+        os.mkfifo(self.run / 'unselected-fifo')
+        with mock.patch.object(self.mod.io, 'safe_path', wraps=self.mod.io.safe_path) as safe:
+            self.assertEqual(set(self.seal()), {'atomic-install/publisher-controls/run-one/passed.txt'})
+            self.assertFalse(any('bad-target' in str(c) or 'unselected' in str(c) for c in safe.call_args_list))
+
+    def test_selected_unsafe_leaves_invalidate_stale_manifest(self):
+        for kind in ('symlink', 'dangling', 'fifo', 'directory'):
+            with self.subTest(kind=kind):
+                self.seal(); path = self.run / 'passed.txt'; path.unlink()
+                if kind in ('symlink', 'dangling'): path.symlink_to('absent')
+                elif kind == 'fifo': os.mkfifo(path)
+                else: path.mkdir()
+                with self.assertRaises((RuntimeError, OSError)): self.seal()
+                self.assertFalse(self.manifest.exists())
+                if kind == 'directory': path.rmdir()
+                else: path.unlink()
+                path.write_text('passed')
+
+    def test_selected_ancestors_and_exact_root_dangling(self):
+        for ancestor in ('run-two', 'run-two/sub'):
+            link = self.run.parent / ancestor
+            link.parent.mkdir(parents=True, exist_ok=True)
+            link.symlink_to('missing')
+            if '/' in ancestor: self.patterns.append('build/atomic-install/publisher-controls/run-two/sub/**')
+            with self.assertRaises((RuntimeError, OSError)): self.seal()
+            link.unlink()
+        exact = self.root / 'build/atomic-install/atomic-install-probe-agent.jar'
+        exact.symlink_to('missing')
+        with self.assertRaises((RuntimeError, OSError)): self.seal()
+
+    def test_overlap_hidden_and_exclusions(self):
+        self.patterns += ['build/atomic-install/publisher-controls/run-*/passed.txt',
+                          'build/atomic-install/publisher-controls/**',
+                          '!build/atomic-install/publisher-controls/run-one/excluded/**']
+        (self.run / '.hidden').symlink_to('absent')
+        (self.run / 'excluded').symlink_to('absent')
+        self.assertEqual(len(self.seal()), 1)
+
+    def test_every_pruned_entry_counts(self):
+        for i in range(12): (self.run / f'unselected-{i}').symlink_to('absent')
+        with mock.patch.object(self.mod.io, 'MAX_INPUT_ENTRIES', 10), self.assertRaisesRegex(RuntimeError, 'traversal'):
+            self.seal()
+
+    def test_bounds_and_missing_membership(self):
+        self.seal()
+        with mock.patch.object(self.mod.io, 'MAX_INPUT_BYTES', 1), self.assertRaises(RuntimeError): self.seal()
+        self.assertFalse(self.manifest.exists())
+        with mock.patch.object(self.mod.io, 'MAX_JSON', 32), self.assertRaises(RuntimeError): self.seal()
+        with mock.patch.object(self.mod, 'MAX_DEPTH', 3), self.assertRaises(RuntimeError): self.seal()
+        self.patterns.remove('build/atomic-install/publisher-controls/run-*/passed.txt')
+        self.patterns.remove('build/orchestration/atomic-install-ci/*.json')
+        with self.assertRaises(RuntimeError): self.seal()
+
+    def test_state_file_member_and_json_bounds(self):
+        with mock.patch.object(self.mod, 'MAX_STATE_WORK', 1), self.assertRaises(RuntimeError): self.seal()
+        with mock.patch.object(self.mod.io, 'MAX_FILE', 1), self.assertRaises(RuntimeError): self.seal()
+        with mock.patch.object(self.mod, 'MAX_PATTERNS', 1), self.assertRaises(RuntimeError): self.seal()
+        self.assertFalse(self.manifest.exists())
+
+    def test_original_direct_final_shape_strict_guard_rejects(self):
+        helper = self.run / 'helper'; helper.write_bytes(b'inert compiler output' * 8); helper.chmod(0o755)
+        manifest = {'plan': {}, 'roots': [str(helper)], 'inventory': prep.inventory([str(helper)])}
+        with helper.open('rb'):
+            replacement = self.run / 'fresh'; replacement.write_bytes(helper.read_bytes()); replacement.chmod(0o755)
+            replacement.replace(helper)
+            diff = prep.difference(manifest['inventory'], prep.inventory([str(helper)]))
+            self.assertEqual(set(diff['changed'][str(helper)]), {'key'})
+            with mock.patch.object(prep, 'check_sources'), self.assertRaisesRegex(RuntimeError, 'prepared input changed'):
+                prep.check_prepared(manifest, {})
+
+    def test_unsupported_pattern(self):
+        for pattern in ('build/[ab]/**', 'build/foo**bar', 'build/**/../secret', 'build/\\evil', 'build/\0evil'):
+            with self.subTest(pattern=pattern), self.assertRaises(RuntimeError): self.mod.components(pattern)
+
+    def test_relevant_directory_exchange(self):
+        original = self.mod.io.file_receipt
+        def exchange(path, *args, **kwargs):
+            if path.name == 'passed.txt':
+                self.run.rename(self.run.with_name('unselected-saved'))
+                self.run.symlink_to('unselected-saved', target_is_directory=True)
+            return original(path, *args, **kwargs)
+        with mock.patch.object(self.mod.io, 'file_receipt', side_effect=exchange), self.assertRaises((RuntimeError, OSError)):
+            self.seal()
+        self.assertFalse(self.manifest.exists())
+
+    def test_backtracking_counterexample_in_selection(self):
+        self.patterns.append('build/atomic-install/publisher-controls/run-one/' + 'a*' * 24 + 'b')
+        (self.run / ('a' * 80)).write_text('not selected')
+        self.assertEqual(set(self.seal()), {'atomic-install/publisher-controls/run-one/passed.txt'})
+
+    def test_state_budget_covers_membership_and_traversal_together(self):
+        self.seal()
+        work = self.mod.PatternWork()
+        self.mod.membership_controls(self.patterns, work)
+        with mock.patch.object(self.mod, 'MAX_STATE_WORK', work.used + 1):
+            with self.assertRaisesRegex(RuntimeError, 'pattern-state work'): self.seal()
+        self.assertFalse(self.manifest.exists())
+
+
+class PatternControls(unittest.TestCase):
+    def setUp(self):
+        spec = importlib.util.spec_from_file_location('bounded_patterns', ROOT / 'scripts/atomic_install_artifacts.py')
+        self.mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(self.mod)
+
+    def test_reviewer_exponential_pattern(self):
+        work = self.mod.PatternWork()
+        self.assertFalse(self.mod.matches('a*' * 24 + 'b', 'a' * 80, work))
+        self.assertLess(work.used, 4200)
+        self.assertFalse(self.mod.matches('build/' + 'a*' * 24 + 'b', 'build/' + 'a' * 80))
+        self.assertTrue(self.mod.matches('a*' * 24 + 'b', 'a' * 80 + 'b'))
+
+    def test_component_work_exact_boundary(self):
+        # Four initialized cells and three rows of four evaluated cells.
+        work = self.mod.PatternWork()
+        with mock.patch.object(self.mod, 'MAX_STATE_WORK', 16):
+            self.assertTrue(self.mod.component_matches('a*b', 'aab', work))
+            self.assertEqual(work.used, 16)
+            with self.assertRaisesRegex(RuntimeError, 'pattern-state work'): work.charge()
+        with mock.patch.object(self.mod, 'MAX_STATE_WORK', 15):
+            with self.assertRaisesRegex(RuntimeError, 'pattern-state work'):
+                self.mod.component_matches('a*b', 'aab', self.mod.PatternWork())
+
+    def test_matching_work_is_shared_across_calls(self):
+        one = self.mod.PatternWork()
+        self.assertTrue(self.mod.matches('a*', 'abc', one))
+        work = self.mod.PatternWork()
+        with mock.patch.object(self.mod, 'MAX_STATE_WORK', one.used):
+            self.assertTrue(self.mod.matches('a*', 'abc', work))
+            with self.assertRaisesRegex(RuntimeError, 'pattern-state work'):
+                self.mod.matches('a*', 'abc', work)
+
+    def test_component_dp_agrees_with_exhaustive_small_reference(self):
+        import functools
+        import itertools
+        @functools.cache
+        def reference(pattern, name):
+            if not pattern: return not name
+            if pattern[0] == '*':
+                return reference(pattern[1:], name) or bool(name) and reference(pattern, name[1:])
+            return bool(name) and pattern[0] in ('?', name[0]) and reference(pattern[1:], name[1:])
+        names = [''.join(p) for size in range(4) for p in itertools.product('ab', repeat=size)]
+        for size in range(1, 5):
+            for tokens in itertools.product('ab*?', repeat=size):
+                pattern = ''.join(tokens)
+                if '**' in pattern: continue
+                for name in names:
+                    self.assertEqual(self.mod.matches(pattern, name), reference(pattern, name), (pattern, name))
+
+    def test_supported_literals_globstar_and_component_boundaries(self):
+        for pattern, path, expected in (
+                ('build/**/a?.txt', 'build/a1.txt', True),
+                ('build/**/**/a?.txt', 'build/x/y/a1.txt', True),
+                ('build/*/a?.txt', 'build/a1.txt', False),
+                ('build/*/a?.txt', 'build/x/y/a1.txt', False),
+                ('build/**', 'build', True), ('build/**', 'build/x/y', True),
+                ('x.$^|é', 'x.$^|é', True), ('a?b', 'a\nb', True),
+                ('a*b', 'a/b', False)):
+            with self.subTest(pattern=pattern, path=path):
+                self.assertEqual(self.mod.matches(pattern, path), expected)
+
+    def test_full_patterns_and_names_are_not_truncated(self):
+        self.assertFalse(self.mod.matches('a' * 4096, 'a' * 255))
+        self.assertFalse(self.mod.matches('a' * 254 + 'b', 'a' * 255))
+        self.assertTrue(self.mod.matches('a' * 254 + '?', 'a' * 255))
+        with self.assertRaisesRegex(RuntimeError, 'depth/name'): self.mod.matches('*', 'a' * 256)
+        with self.assertRaisesRegex(RuntimeError, 'depth/name'): self.mod.matches('*', 'é' * 128)
+        with self.assertRaises(RuntimeError): self.mod.components('a' * 4097)
+
+
+class AcpScopeControls(unittest.TestCase):
+    @staticmethod
+    def fixture():
+        repo = ROOT
+        run = BASE / 'assurance-only'
+        config = {'compiler': str(repo / 'inert-compiler'), 'source': str(repo / prep.ACP_SOURCE),
+                  'recipe': str(repo / 'build.gradle.kts'), 'publication': str(repo / prep.ACP_PUBLICATION),
+                  'output': str(run / 'root-build/native/acp/decomp-acp-gate-helper'),
+                  'publicationScope': 'cooperative-build-producer-v1',
+                  'bindingEvidence': 'stable-namespace-path-observations-v1'}
+        pin = {'type': 'file', 'bytes': 128, 'sha256': 'a' * 64, 'mode': 0o755, 'key': [1, 2]}
+        entries = {config[k]: dict(pin) for k in ('compiler', 'source', 'recipe', 'publication', 'output')}
+        candidate = str(run / 'root-build/acp-publication-private/invocation-inert/decomp-acp-gate-helper')
+        receipt = {'schemaVersion': 2, 'publicationScope': config['publicationScope'], 'bindingEvidence': config['bindingEvidence'],
+                   'commandId': 2, 'runRoot': str(run), 'initSha256': 'f' * 64,
+                   'startedAtUnixNs': 2, 'compileStartedAtUnixNs': 3, 'compileFinishedAtUnixNs': 4,
+                   'finishedAtUnixNs': 5, 'cleanupFinishedAtUnixNs': 6, 'output': config['output'],
+                   'flags': prep.ACP_FLAGS, 'arguments': [config['compiler'], *prep.ACP_FLAGS, config['source'], '-o', candidate],
+                   'exitCode': 0, 'cleanup': True, 'candidatePath': candidate, 'candidate': {**pin, 'key': [1, 3]},
+                   'previous': dict(pin), 'final': dict(pin), 'outcome': 'retained',
+                   'candidateValidationExitCode': 120, 'finalValidationExitCode': 120,
+                   **{k: {'path': config[k], 'file': dict(pin)} for k in ('compiler', 'source', 'recipe', 'publication')}}
+        task = {'path': ':buildAcpGateHelper', 'enabled': True, 'executed': True, 'skipped': False,
+                'upToDate': False, 'noSource': False, 'failure': False, 'atUnixNs': 7}
+        event = {'tasks': [task], 'acp': receipt, 'commandId': 2, 'runRoot': str(run), 'actionsStartedAtUnixNs': 8}
+        plan = {'acp': config, 'repoRoot': str(repo), 'runRoot': str(run), 'installInputs': [], 'mappingRoots': {},
+                'originalJar': str(repo / 'inert.jar'), 'producers': {k: {g: [config['source']] for g in ('inputs', 'outputs', 'classpath')} for k in prep.PRODUCERS}}
+        command = {'commandId': 2, 'initSha256': 'f' * 64, 'startedAtUnixNs': 1, 'finishedAtUnixNs': 9}
+        return event, plan, entries, command
+
+    def test_current_scope_both_validators(self):
+        spec = importlib.util.spec_from_file_location('scope_verifier', ROOT / 'scripts/verify-atomic-install-qualification.py')
+        verifier = importlib.util.module_from_spec(spec); spec.loader.exec_module(verifier)
+        event, plan, entries, command = self.fixture()
+        self.assertIs(event['acp'], prep.validate_acp(event, plan, entries, command))
+        verifier.validate_acp_assurance(plan['acp'], event['acp'])
+
+    def test_exact_key_scope_mutations_independent(self):
+        spec = importlib.util.spec_from_file_location('scope_verifier', ROOT / 'scripts/verify-atomic-install-qualification.py')
+        verifier = importlib.util.module_from_spec(spec); spec.loader.exec_module(verifier)
+        for target in ('receipt', 'plan'):
+            for key in ('publicationScope', 'bindingEvidence'):
+                for operation in ('missing', 'wrong', 'null', 'extra'):
+                    with self.subTest(target=target, key=key, operation=operation):
+                        event, plan, entries, command = self.fixture()
+                        value = event['acp'] if target == 'receipt' else plan['acp']
+                        if operation == 'missing': value.pop(key)
+                        elif operation == 'extra': value['executedInodeAuthenticated'] = True
+                        else: value[key] = None if operation == 'null' else 'hostile-descriptor-assurance'
+                        with self.assertRaises(RuntimeError): prep.validate_acp(event, plan, entries, command)
+                        # This verifier path runs independently of validate_acp.
+                        with mock.patch.object(verifier.prepared, 'validate_acp', return_value={}):
+                            with self.assertRaises(verifier.QualificationError): verifier.validate_acp_assurance(plan['acp'], event['acp'])
+        for version in (None, 1, True, 2.0, '2', 3):
+            event, plan, entries, command = self.fixture()
+            if version is None: event['acp'].pop('schemaVersion')
+            else: event['acp']['schemaVersion'] = version
+            with self.subTest(version=version):
+                with self.assertRaises(RuntimeError): prep.validate_acp(event, plan, entries, command)
+                with self.assertRaises(verifier.QualificationError): verifier.validate_acp_assurance(plan['acp'], event['acp'])
 
 
 if __name__ == '__main__':

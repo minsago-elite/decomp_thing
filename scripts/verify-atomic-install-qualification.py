@@ -29,6 +29,7 @@ OWNED = (
     "build.gradle.kts",
     "scripts/test-atomic-install.py",
     "scripts/test-atomic-install-controls.py",
+    "scripts/atomic-install-acp-publication.groovy",
     "src/test/java/decompengine/install/AtomicInstallProbeAgent.java",
 )
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -58,6 +59,25 @@ EXPECTED_RELEASE_SECONDS = 1200 + 120 + 120 + 60
 
 class QualificationError(RuntimeError):
     pass
+
+
+def validate_acp_assurance(config, acp):
+    # Independently reject historical/overstated producer assurance, even if
+    # the producer-side validator is accidentally relaxed. No receipt upgrade.
+    require(set(config) == {'compiler', 'source', 'recipe', 'publication', 'output',
+                            'publicationScope', 'bindingEvidence'}, 'ACP independent plan keys differ')
+    require(set(acp) == {'schemaVersion', 'publicationScope', 'bindingEvidence',
+        'commandId', 'runRoot', 'initSha256', 'startedAtUnixNs', 'compileStartedAtUnixNs',
+        'compileFinishedAtUnixNs', 'finishedAtUnixNs', 'cleanupFinishedAtUnixNs',
+        'compiler', 'source', 'recipe', 'publication', 'output', 'flags', 'arguments',
+        'exitCode', 'cleanup', 'candidatePath', 'candidate', 'previous', 'final', 'outcome',
+        'candidateValidationExitCode', 'finalValidationExitCode'}, 'ACP independent receipt keys differ')
+    require(type(acp['schemaVersion']) is int and acp['schemaVersion'] == 2,
+            'ACP independent receipt version differs')
+    for assurance in (config, acp):
+        require(assurance['publicationScope'] == 'cooperative-build-producer-v1' and
+                assurance['bindingEvidence'] == 'stable-namespace-path-observations-v1',
+                'ACP independent scope/binding differs')
 
 
 def require(condition: bool, message: str) -> None:
@@ -557,7 +577,7 @@ def _validate_prepared(record, run, repo):
     require(set(tools) == {"java", "javaRelease", "node"} and manifest["nodeVersion"].lstrip("v") ==
             read_bytes(repo / ".node-version", MAX_POINTER).decode().strip().lstrip("v"), "qualified build tools differ")
     roots = sorted(set(prepared.plan_roots(plan) + [str(repo / p) for p in record["sourceHashes"]] +
-                       [t["path"] for t in tools.values()] +
+                       [t["path"] for t in tools.values()] + [plan["acp"]["compiler"]] +
                        [p["record"]["compiler"]["path"] for p in manifest["provenance"]["producers"].values()]))
     require(manifest["roots"] == roots, "prepared root set differs")
     for root in prepared.plan_roots(plan):
@@ -637,6 +657,11 @@ def _validate_prepared(record, run, repo):
             "pre-Sync guard receipt differs")
     replay = read_json(run / "command-02-events.json", MAX_LOG)
     require(replay["actionsStartedAtUnixNs"] <= guard["atUnixNs"] <= replay["guardPassedAtUnixNs"], "guard ordering differs")
+    for index in (1, 2):
+        event = read_json(run / f"command-{index:02d}-events.json", MAX_LOG)
+        validate_acp_assurance(plan['acp'], event['acp'])
+        prepared.validate_acp(event, plan, entries, record['commands'][index])
+    require(guard['acpError'] is None and guard['acp'] == replay['acp'], 'ACP guard/task receipt differs')
     prepared.validate_publisher(replay, manifest)
     probe = record["probes"][0]
     require(probe.get("role") == "prepared-no-update" and probe.get("preparationCommandId") == 1 and
@@ -658,7 +683,7 @@ def validate_controls(repo: pathlib.Path):
     controls_path = child_path(repo, str(control_runs[0]), "combined controls")
     control_record = read_json(controls_path)
     require(isinstance(control_record, dict), "combined controls record is not an object")
-    expected_controls = {"distinct-buildDir-production-service-contention/release/task-failure/process-cancel/reacquire",
+    expected_controls = {"ACP-actual-publication-engine-inert-adversarial-controls", "distinct-buildDir-production-service-contention/release/task-failure/process-cancel/reacquire",
                          "agent-clock-121-second-update/full-expiry/signed-wrap/backward-rejection",
                          "synthetic-agent-A-B-A-late-loader-origin-resource-descriptor-JSON/no-product-main"}
     require(control_record.get("status") == "passed" and expected_controls <= set(control_record.get("passed", [])),

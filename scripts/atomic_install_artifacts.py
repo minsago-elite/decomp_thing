@@ -13,6 +13,7 @@ import pathlib
 import re
 import stat
 import sys
+import secrets
 import zipfile
 
 SPEC = importlib.util.spec_from_file_location('atomic_artifact_io', pathlib.Path(__file__).with_name('atomic_install_prepared.py'))
@@ -23,7 +24,10 @@ MANIFEST = 'orchestration/atomic-install-ci/artifact-manifest.json'
 
 
 def rules(repo):
-    text = (repo / '.github/workflows/ci.yml').read_text()
+    with io.regular(repo / '.github/workflows/ci.yml', io.MAX_JSON) as (stream, _):
+        raw = stream.read(io.MAX_JSON + 1)
+        io.require(len(raw) <= io.MAX_JSON, 'workflow selection exceeds bound')
+        text = raw.decode()
     job = re.search(r'^  atomic-install:\n(.*?)(?=^  [a-zA-Z0-9_-]+:|\Z)', text, re.M | re.S)
     io.require(job is not None, 'atomic-install job missing')
     block = re.search(r'^          path: \|\n((?:            [^\n]+\n)+)', job[1], re.M)
@@ -33,19 +37,89 @@ def rules(repo):
     return paths
 
 
-def matches(pattern, path):
-    expression = re.escape(pattern).replace(r'\*\*', '.*').replace(r'\*', '[^/]*').replace(r'\?', '[^/]')
-    return re.fullmatch(expression, path) is not None
+MAX_DEPTH = 128
+MAX_PATTERNS = 256
+MAX_STATE_WORK = 32 * 1024**2
 
 
-def selected(paths, name):
-    if any(part.startswith('.') for part in pathlib.PurePosixPath(name).parts):
+def components(pattern):
+    io.require(len(pattern) <= 4096 and not any(c in pattern for c in "\\\0[]{}!()+@#"),
+               'unsupported artifact pattern')
+    io.require(all(ord(c) >= 32 and ord(c) != 127 for c in pattern), 'unsupported artifact pattern character')
+    parts = pattern.split('/')
+    io.require(0 < len(parts) <= MAX_DEPTH and all(p and p not in ('.', '..') and
+               ('**' not in p or p == '**') for p in parts), 'unsupported artifact pattern components')
+    return tuple(parts)
+
+
+class PatternWork:
+    """Shared, fail-closed budget for actual DP cells and NFA state visits."""
+    def __init__(self):
+        self.used = 0
+
+    def charge(self, count=1):
+        io.require(count <= MAX_STATE_WORK - self.used, 'artifact pattern-state work exceeds bound')
+        self.used += count
+
+
+def component_matches(pattern, name, work):
+    # Each row is a prefix of the pattern, each column a prefix of the name.
+    # Charge the row before allocation/evaluation, including its empty prefix.
+    # No regex recursion/backtracking; O(pattern * name) time, O(name) space.
+    work.charge(len(name) + 1)
+    previous = bytearray(len(name) + 1)
+    previous[0] = 1
+    for token in pattern:
+        work.charge(len(name) + 1)
+        current = bytearray(len(name) + 1)
+        current[0] = previous[0] if token == '*' else 0
+        for j, char in enumerate(name, 1):
+            if token == '*': current[j] = previous[j] or current[j - 1]
+            else: current[j] = previous[j - 1] and (token == '?' or token == char)
+        previous = current
+    return bool(previous[-1])
+
+
+def states(pattern, parts, work=None):
+    # Bounded component NFA. ** consumes zero or more whole components.
+    if work is None: work = PatternWork()
+    io.require(len(parts) <= MAX_DEPTH and all(len(p.encode()) <= 255 for p in parts),
+               'artifact depth/name bound')
+    def closure(current):
+        work.charge(len(current))
+        result = set(current)
+        for i in range(len(pattern)):
+            work.charge()
+            if i in result and pattern[i] == '**': result.add(i + 1)
+        return result
+    active = closure({0})
+    for part in parts:
+        following = set()
+        for i in active:
+            work.charge()
+            if i < len(pattern):
+                if pattern[i] == '**': following.add(i)
+                elif component_matches(pattern[i], part, work): following.add(i + 1)
+        active = closure(following)
+    return active
+
+
+def matches(pattern, path, work=None):
+    pattern = components(pattern)
+    return len(pattern) in states(pattern, path.split('/'), work)
+
+
+def selected(paths, name, work=None):
+    if work is None: work = PatternWork()
+    io.require(len(paths) <= MAX_PATTERNS, 'artifact pattern count exceeds bound')
+    if any(part.startswith('.') for part in name.split('/')):
         return False  # upload-artifact default include-hidden-files=false
-    return any(matches(p, name) for p in paths if not p.startswith('!')) and not any(
-        matches(p[1:], name) for p in paths if p.startswith('!'))
+    return any(matches(p, name, work) for p in paths if not p.startswith('!')) and not any(
+        matches(p[1:], name, work) for p in paths if p.startswith('!'))
 
 
-def membership_controls(paths):
+def membership_controls(paths, work=None):
+    if work is None: work = PatternWork()
     base = 'build/orchestration/atomic-install-remediation/installed-current/'
     kept = ['qualification.json', 'prepared-A.json', 'prepared-retained.json', 'prepared-closure.json', 'prepared-guard.json',
             *[p + s + '.json' for p in ('protected', 'prepared-input') for s in ('-before', '-after', '-diff')],
@@ -54,49 +128,127 @@ def membership_controls(paths):
             'barriers/A-none-current/READY.loaded', 'barriers/A-none-current/RELEASE', 'barriers/A-none-current/launcher.log']
     omitted = ['root-build/install/llm_bin_patch/lib/app.jar', 'prepared-products/000001', 'home/cache', 'tmp/output']
     for name in kept:
-        io.require(selected(paths, base + name), 'artifact omits ' + name)
+        io.require(selected(paths, base + name, work), 'artifact omits ' + name)
     for name in omitted:
-        io.require(not selected(paths, base + name), 'artifact includes products/cache: ' + name)
-    io.require(selected(paths, 'build/' + MANIFEST), 'artifact omits manifest')
+        io.require(not selected(paths, base + name, work), 'artifact includes products/cache: ' + name)
+    io.require(selected(paths, 'build/' + MANIFEST, work), 'artifact omits manifest')
     return {'retained': len(kept) + 1, 'excluded': len(omitted)}
 
 
 def seal(repo):
+    repo = io.safe_path(repo)
+    target = repo / 'build' / MANIFEST
+    # Invalidate the previous run before parsing rules or traversing anything.
+    # A failed seal cannot leave a previously valid manifest at the current path.
+    io.safe_path(target, repo)
+    if os.path.lexists(target):
+        io.require(stat.S_ISREG(target.lstat().st_mode), 'unsafe artifact manifest')
+        target.unlink()
     paths = rules(repo)
-    controls = membership_controls(paths)
+    io.require(len(paths) <= MAX_PATTERNS, 'artifact pattern count exceeds bound')
+    positives = [components(p) for p in paths if not p.startswith('!')]
+    negatives = [components(p[1:]) for p in paths if p.startswith('!')]
+    work = PatternWork()
+    controls = membership_controls(paths, work)
     budget = [io.MAX_INPUT_BYTES]
     files = {}
-    visited = [0]
-    roots = set()
-    for pattern in paths:
-        if pattern.startswith('!'): continue
-        parts = pathlib.PurePosixPath(pattern).parts
-        plain = []
-        for part in parts:
-            if '*' in part or '?' in part: break
-            plain.append(part)
-        roots.add(repo.joinpath(*plain))
-    def walk(path):
-        visited[0] += 1
-        io.require(visited[0] <= io.MAX_INPUT_ENTRIES, 'artifact traversal exceeds entry bound')
-        name = path.relative_to(repo).as_posix()
-        if any(part.startswith('.') for part in path.relative_to(repo).parts): return
-        if any(p.startswith('!') and p.endswith('/**') and matches(p[1:-3], name) for p in paths): return
-        io.safe_path(path, repo)
-        info = path.lstat()
-        if stat.S_ISDIR(info.st_mode):
-            with os.scandir(path) as children:
-                for child in children: walk(pathlib.Path(child.path))
-        elif selected(paths, name) and name != 'build/' + MANIFEST:
-            io.require(len(files) < io.MAX_INPUT_ENTRIES, 'artifact entry count exceeds bound')
-            receipt = io.file_receipt(path, budget)
-            files[name.removeprefix('build/')] = {k: receipt[k] for k in ('sha256', 'bytes')}
-    for root in sorted(roots):
-        if root.exists(): walk(root)
-    target = repo / 'build' / MANIFEST
-    target.parent.mkdir(parents=True, exist_ok=True)
-    io.write_json(target, {'schemaVersion': 1, 'members': files, 'patterns': paths, 'staticMembership': controls})
-    return {'manifest': str(target), 'sha256': io.file_receipt(target)['sha256'], 'members': len(files), **controls}
+    enumerated = 0
+    json_work = 0
+    def relevance(parts):
+        io.require(len(parts) <= MAX_DEPTH and all(len(p.encode()) <= 255 for p in parts),
+                   'artifact depth/name bound')
+        if any(p.startswith('.') for p in parts): return False, False
+        negative = [(p, states(p, parts, work)) for p in negatives]
+        # Only a terminal ** proves exclusion of an entire subtree.
+        if any(p[-1] == '**' and len(p) - 1 in active for p, active in negative): return False, False
+        positive = [(p, states(p, parts, work)) for p in positives]
+        member = any(len(p) in active for p, active in positive) and not any(len(p) in a for p, a in negative)
+        descend = any(any(i < len(p) for i in active) for p, active in positive)
+        return member, descend
+    def identity(info):
+        return info.st_dev, info.st_ino, info.st_mode
+    def walk(fd, path, parts):
+        nonlocal enumerated, json_work
+        before = os.fstat(fd)
+        io.require(stat.S_ISDIR(before.st_mode), 'artifact ancestor is not directory')
+        def stable():
+            io.require(identity(before) == identity(path.lstat()) == identity(os.fstat(fd)),
+                       'artifact directory exchanged')
+            io.safe_path(path, repo)
+        stable()
+        with os.scandir(fd) as children:
+            for child in children:
+                enumerated += 1
+                io.require(enumerated <= io.MAX_INPUT_ENTRIES, 'artifact traversal exceeds entry bound')
+                child_parts = (*parts, child.name)
+                member, descend = relevance(child_parts)
+                if not member and not descend: continue
+                stable()
+                info = os.stat(child.name, dir_fd=fd, follow_symlinks=False)
+                child_path = path / child.name
+                io.require(not stat.S_ISLNK(info.st_mode), 'selected artifact symlink/ancestor')
+                if stat.S_ISDIR(info.st_mode):
+                    io.require(descend, 'selected artifact leaf is directory')
+                    nested = os.open(child.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                    try:
+                        io.require(identity(info) == identity(os.fstat(nested)), 'artifact directory exchanged')
+                        walk(nested, child_path, child_parts)
+                    finally: os.close(nested)
+                elif member:
+                    io.require(stat.S_ISREG(info.st_mode), 'selected artifact leaf is not regular')
+                    name = '/'.join(child_parts)
+                    if name != 'build/' + MANIFEST:
+                        io.require(len(files) < io.MAX_INPUT_ENTRIES, 'artifact member count exceeds bound')
+                        receipt = io.file_receipt(child_path, budget, dir_fd=fd)
+                        json_work += len(json.dumps(name).encode()) + 160
+                        io.require(json_work <= io.MAX_JSON, 'artifact manifest member JSON bound')
+                        files[name.removeprefix('build/')] = {k: receipt[k] for k in ('sha256', 'bytes')}
+                else:
+                    # A relevant ancestor must really be a directory (including FIFO/dangling links).
+                    raise RuntimeError('artifact possible ancestor is not directory')
+                stable()
+        stable()
+    root_fd = os.open(repo, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try: walk(root_fd, repo, ())
+    finally: os.close(root_fd)
+    data = (json.dumps({'schemaVersion': 1, 'members': files, 'patterns': paths,
+                       'staticMembership': controls}, sort_keys=True, indent=2) + '\n').encode()
+    io.require(len(data) <= io.MAX_JSON, 'artifact manifest exceeds JSON bound')
+    # Descriptor-relative creation/publication cannot follow exchanged ancestors.
+    # No traversal touches a lexically unselected fixture just to create the manifest.
+    fds = [os.open(repo, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)]
+    stage_name = '.artifact-manifest-' + secrets.token_hex(16)
+    stage_created = False
+    published = False
+    try:
+        for part in target.parent.relative_to(repo).parts:
+            try: os.mkdir(part, dir_fd=fds[-1])
+            except FileExistsError: pass
+            fds.append(os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fds[-1]))
+        io.safe_path(target, repo)
+        directory_identity = identity(os.fstat(fds[-1]))
+        io.require(directory_identity == identity(target.parent.lstat()), 'artifact publication parent exchanged')
+        fd = os.open(stage_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=fds[-1])
+        stage_created = True
+        with os.fdopen(fd, 'wb') as sink:
+            sink.write(data); sink.flush(); os.fsync(sink.fileno())
+        io.safe_path(target, repo)
+        io.require(directory_identity == identity(target.parent.lstat()), 'artifact publication parent exchanged')
+        os.replace(stage_name, target.name, src_dir_fd=fds[-1], dst_dir_fd=fds[-1])
+        stage_created = False
+        published = True
+        os.fsync(fds[-1])
+        io.safe_path(target, repo)
+        io.require(directory_identity == identity(target.parent.lstat()), 'artifact publication parent exchanged')
+        return {'manifest': str(target), 'sha256': io.file_receipt(target, dir_fd=fds[-1])['sha256'], 'members': len(files), **controls}
+    except BaseException:
+        if published: os.unlink(target.name, dir_fd=fds[-1])
+        raise
+    finally:
+        try:
+            if stage_created: os.unlink(stage_name, dir_fd=fds[-1])
+        finally:
+            for fd in reversed(fds): os.close(fd)
 
 
 def verify(archive_path, expected_manifest_sha256):
