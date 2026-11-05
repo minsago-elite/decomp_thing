@@ -286,9 +286,7 @@ internal object WebProgramStructureBuilder {
         }
         val ref = snapshot.reference
         val fileIds = measured("index-source-files") {
-            snapshot.files.withIndex().associate { (index, file) ->
-                file.evidence.path to revisionSourceFileId(ref, index, file.evidence.path)
-            }
+            revisionSourceFileIds(ref, snapshot.files.map { it.evidence.path })
         }
         val shared = declaredPath(profile, "shared-interface")?.takeIf { it in fileIds }
         val sourceBytes = fileIds.entries.sumOf { 128L + 2L * (it.key.length + it.value.length) }
