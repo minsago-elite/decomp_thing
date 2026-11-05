@@ -302,7 +302,7 @@ class WebJobService(
     private val uploads = mutableMapOf<Thread, CountDownLatch>()
     private val uploadStorage = WebUploadStorage(store.storageRoot, maximumRetainedStorageBytes)
     private val sourceCatalogEvidence = WebSourceCatalogEvidence(sourceProfiles, ::readSourceCatalogInput, ::readArtifact,
-        ::verifySourceCatalogInput, ::verifySourceCatalogArtifact)
+        ::verifySourceCatalogInput, ::verifySourceCatalogArtifact, ::compareSourceCatalogArtifact)
     private val programStructureCache = WebProgramStructureCache()
 
     /** Internal seam for deterministic publication-failure fixtures; production code never reassigns this. */
@@ -818,6 +818,19 @@ class WebJobService(
         sourceCatalogVerification { store.verifyArtifact(jobId, path, maximumBytes, expected) }
     }
 
+    @Synchronized
+    private fun compareSourceCatalogArtifact(jobId: String, path: String, maximumBytes: Long,
+        expected: decompengine.repair.StableRegularFile): decompengine.repair.StableComparison {
+        requireInitializedRead()
+        val segments = canonicalReportSegments(path)
+        if (segments[1] == "runs") getAttempt(jobId, segments[2]) else presentation(jobId)
+        return try { store.compareArtifact(jobId, path, maximumBytes, expected) }
+        catch (failure: decompengine.jobs.ArtifactChangedException) {
+            if (Thread.currentThread().isInterrupted) throw failure
+            throw WebAccessDenied(409, "SOURCE_CATALOG_CHANGED", "Source catalog changed during capture. Refresh its first page.")
+        }
+    }
+
     private inline fun sourceCatalogVerification(verify: () -> Unit) {
         try { verify() } catch (failure: Exception) {
             if (failure is InterruptedException || Thread.currentThread().isInterrupted) throw failure
@@ -865,7 +878,7 @@ class WebJobService(
         val result = try { sourceCatalogEvidence.readStructure(reference, programStructureCache, project) }
             catch (changed: WebAccessDenied) { throw changed }
             catch (failure: Exception) {
-                if (failure is java.util.concurrent.CancellationException || failure is InterruptedException) throw failure
+                if (failure is java.util.concurrent.CancellationException || failure is InterruptedException || Thread.currentThread().isInterrupted) throw failure
                 throw WebAccessDenied(503, "PROGRAM_STRUCTURE_UNAVAILABLE", "The revision structure records are unavailable or exceed their limits.")
             }
         if (revisionSourceReference(jobId, runId, revisionId) != reference) revisionSourceChanged()

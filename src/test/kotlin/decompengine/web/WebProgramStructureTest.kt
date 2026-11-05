@@ -5,6 +5,7 @@ import decompengine.acp.LinuxFileKey
 import decompengine.project.*
 import decompengine.repair.RepairBudgetExceededException
 import decompengine.repair.StableRegularFile
+import decompengine.repair.StableComparison
 import io.github.optimumcode.json.schema.JsonSchema
 import io.github.optimumcode.json.schema.ValidationError
 import java.nio.file.Files
@@ -646,6 +647,144 @@ class WebProgramStructureTest {
             }
         }
         assertTrue(revision.cache.candidates(prefix).isEmpty())
+    }
+
+    private inner class StreamingCapture(val revision: Revision = standard()) {
+        val events = mutableListOf<String>()
+        val phases = mutableListOf<String>()
+        var compareFailure: Exception? = null
+        var fenceFailure: String? = null
+        private val input = captured(inputBytes).copy(identity = INPUT_IDENTITY)
+        private fun same(expected: StableRegularFile, current: StableRegularFile) =
+            expected.identity == current.identity && expected.sha256 == current.sha256 && expected.bytes.contentEquals(current.bytes)
+        val evidence = WebSourceCatalogEvidence(listOf(profile), { events += "read-input"; input },
+            { _, path, _ -> events += "read:$path"; revision.files.getValue(path) },
+            { _, expected ->
+                events += "verify-input"
+                if (fenceFailure == "input") error("input fence")
+                assertTrue(same(expected, input))
+            },
+            { _, path, _, expected ->
+                events += "verify:$path"
+                if (fenceFailure == path) error("artifact fence")
+                assertTrue(same(expected, revision.files.getValue(path)))
+            },
+            { _, path, _, expected ->
+                events += "compare:$path"
+                compareFailure?.let { throw it }
+                if (same(expected, revision.files.getValue(path))) StableComparison.SAME else StableComparison.DIFFERENT
+            })
+        fun read(project: (WebProgramStructureIndex, () -> ByteArray) -> WebProgramStructureIndex = { index, _ -> index }) =
+            evidence.readStructureMeasured(revision.reference, revision.cache, { phase, _ -> phases += phase }, project)
+        fun clear() { events.clear(); phases.clear() }
+        val prefix get() = WebProgramStructureCache.Prefix(jobId, runId, revisionId, revision.sourceSha, inputSha)
+        val manifestPath = "reports/runs/$runId/source-tree/source_tree_manifest.json"
+        val descriptorPath = "reports/runs/$runId/source-tree/reports/build_contract.json"
+    }
+
+    @Test fun `streaming warm hit compares twice without full metadata reads or parsing`() {
+        val capture = StreamingCapture()
+        val first = capture.read()
+        capture.clear()
+        assertSame(first, capture.read())
+        assertEquals(listOf("read-input", "compare:${capture.manifestPath}", "compare:${capture.descriptorPath}",
+            "verify:${capture.descriptorPath}", "verify:${capture.manifestPath}", "verify-input"), capture.events)
+        assertEquals(listOf("read-input", "compare-manifest", "compare-descriptor", "project-page", "verify-descriptor",
+            "verify-manifest", "verify-input"), capture.phases)
+    }
+
+    @Test fun `stable metadata changes rebuild and byte identical replacement rebinds before hitting`() {
+        for (descriptor in listOf(false, true)) {
+            val capture = StreamingCapture()
+            val path = if (descriptor) capture.descriptorPath else capture.manifestPath
+            val first = capture.read()
+            val original = capture.revision.files.getValue(path)
+            capture.revision.files[path] = captured(original.bytes + byteArrayOf(10))
+            val changed = capture.read()
+            assertNotSame(first, changed)
+            assertNotEquals(first.structureVersion, changed.structureVersion)
+            capture.clear()
+            capture.revision.files[path] = captured(capture.revision.files.getValue(path).bytes)
+            val replaced = capture.read()
+            assertNotSame(changed, replaced)
+            assertEquals(changed.structureVersion, replaced.structureVersion)
+            assertEquals(1, capture.phases.count { it == "build-projection" })
+            assertEquals(1, capture.events.count { it == "read:${capture.manifestPath}" })
+            assertEquals(1, capture.events.count { it == "read:${capture.descriptorPath}" })
+            capture.clear()
+            assertSame(replaced, capture.read())
+            assertEquals(2, capture.events.count { it.startsWith("compare:") })
+            assertFalse(capture.phases.contains("build-projection"))
+        }
+    }
+
+    @Test fun `candidate search checks MRU first and can select the second without reparsing`() {
+        val capture = StreamingCapture()
+        val original = capture.revision.files.getValue(capture.manifestPath)
+        val first = capture.read()
+        capture.revision.files[capture.manifestPath] = captured(original.bytes + byteArrayOf(10))
+        capture.read()
+        capture.revision.files[capture.manifestPath] = original
+        val before = capture.revision.cache.candidates(capture.prefix)
+        capture.clear()
+        assertSame(first, capture.read { index, _ ->
+            assertEquals(before, capture.revision.cache.candidates(capture.prefix))
+            index
+        })
+        assertEquals(3, capture.events.count { it.startsWith("compare:") })
+        assertFalse(capture.phases.contains("build-projection"))
+        assertSame(first, capture.revision.cache.candidates(capture.prefix).first().index)
+    }
+
+    @Test fun `comparison failures never fallback retry or touch and all fences precede publication`() {
+        val capture = StreamingCapture()
+        capture.read()
+        val original = capture.revision.files.getValue(capture.manifestPath)
+        capture.revision.files[capture.manifestPath] = captured(original.bytes + byteArrayOf(10))
+        capture.read()
+        capture.revision.files[capture.manifestPath] = original
+        val before = capture.revision.cache.candidates(capture.prefix)
+        for (failure in listOf(WebAccessDenied(409, "SOURCE_CATALOG_CHANGED", "changed"),
+            RepairBudgetExceededException("budget"), IllegalStateException("unavailable"), InterruptedException("interrupt"))) {
+            capture.clear(); capture.compareFailure = failure
+            assertSame(failure, assertFails { capture.read() })
+            assertEquals(listOf("read-input", "compare:${capture.manifestPath}"), capture.events)
+            assertEquals(before, capture.revision.cache.candidates(capture.prefix))
+        }
+        capture.compareFailure = null
+        assertFails { capture.read { _, _ -> error("project failed") } }
+        assertEquals(before, capture.revision.cache.candidates(capture.prefix))
+        for (fence in listOf(capture.descriptorPath, capture.manifestPath, "input")) {
+            capture.fenceFailure = fence
+            assertFails { capture.read() }
+            assertEquals(before, capture.revision.cache.candidates(capture.prefix))
+            val cold = StreamingCapture()
+            cold.fenceFailure = if (fence == "input") "input" else fence
+            assertFails { cold.read() }
+            assertTrue(cold.revision.cache.candidates(cold.prefix).isEmpty())
+        }
+    }
+
+    @Test fun `three and five argument adapters really read metadata for comparison`() {
+        for (fiveArguments in listOf(false, true)) {
+            val revision = standard()
+            val evidence = if (!fiveArguments) revision.evidence else WebSourceCatalogEvidence(listOf(profile),
+                { captured(inputBytes).copy(identity = INPUT_IDENTITY) },
+                { _, path, _ -> revision.reads += path; revision.files.getValue(path) }, { _, _ -> }, { _, _, _, _ -> })
+            val phases = mutableListOf<String>()
+            fun read() = evidence.readStructureMeasured(revision.reference, revision.cache, { phase, _ -> phases += phase }) { index, _ -> index }
+            val first = read()
+            revision.reads.clear(); phases.clear()
+            assertSame(first, read())
+            val manifestPath = "reports/runs/$runId/source-tree/source_tree_manifest.json"
+            val descriptorPath = "reports/runs/$runId/source-tree/reports/build_contract.json"
+            assertEquals(if (fiveArguments) 1 else 2, revision.reads.count { it == manifestPath })
+            assertEquals(if (fiveArguments) 1 else 2, revision.reads.count { it == descriptorPath })
+            assertFalse(phases.contains("build-projection"))
+            revision.files[manifestPath] = captured(revision.manifest)
+            assertNotSame(first, read())
+            assertTrue(phases.contains("build-projection"))
+        }
     }
 
     @Test fun `cursor filters cannot collide through map display delimiters`() {

@@ -9,6 +9,7 @@ import decompengine.project.ReconstructionProfile
 import decompengine.project.SourceTreeManifestReader
 import decompengine.repair.RepairBudgetExceededException
 import decompengine.repair.StableRegularFile
+import decompengine.repair.StableComparison
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.Collections
@@ -38,6 +39,7 @@ internal class WebSourceCatalogEvidence(
     private val readArtifact: (String, String, Long) -> StableRegularFile,
     private val verifyInput: ((String, StableRegularFile) -> Unit)?,
     private val verifyArtifact: ((String, String, Long, StableRegularFile) -> Unit)?,
+    private val compareArtifact: ((String, String, Long, StableRegularFile) -> StableComparison)? = null,
 ) {
     constructor(profiles: List<ReconstructionProfile>, readInput: (String) -> StableRegularFile,
         readArtifact: (String, String, Long) -> StableRegularFile) :
@@ -103,7 +105,7 @@ internal class WebSourceCatalogEvidence(
 
     /**
      * Program-structure projection of the selected candidate. A retained projection is reused only for the
-     * same input, manifest and descriptor digests; every read still recaptures those three commitments.
+     * same input digest and stable manifest/descriptor captures; every read rechecks all three commitments.
      */
     fun <T> readStructure(reference: WebRevisionSourceReference, cache: WebProgramStructureCache,
         project: (WebProgramStructureIndex, () -> ByteArray) -> T): T =
@@ -126,8 +128,16 @@ internal class WebSourceCatalogEvidence(
             val descriptorPath = "$root/reports/build_contract.json"
             canonicalReportSegments(manifestPath)
             val input = measured("read-input") { readInput(reference.jobId) }
-            val captured = measured("read-manifest") { readArtifact(reference.jobId, manifestPath, MAXIMUM_MANIFEST_BYTES) }
-            val descriptor = measured("read-descriptor") { readArtifact(reference.jobId, descriptorPath, MAXIMUM_MANIFEST_BYTES) }
+            val prefix = WebProgramStructureCache.Prefix(reference.jobId, reference.runId, reference.revisionId,
+                reference.sourceSha256, input.sha256)
+            // Census is MRU-first but does not touch candidates until projection and every after-fence succeed.
+            // A stable identity/content difference is a miss; an unavailable or changing capture must propagate.
+            val entry = cache.candidates(prefix).firstOrNull { candidate ->
+                measured("compare-manifest") { compareCapturedArtifact(reference.jobId, manifestPath, candidate.manifest) } == StableComparison.SAME &&
+                    measured("compare-descriptor") { compareCapturedArtifact(reference.jobId, descriptorPath, candidate.descriptor) } == StableComparison.SAME
+            }
+            val captured = entry?.manifest ?: measured("read-manifest") { readArtifact(reference.jobId, manifestPath, MAXIMUM_MANIFEST_BYTES) }
+            val descriptor = entry?.descriptor ?: measured("read-descriptor") { readArtifact(reference.jobId, descriptorPath, MAXIMUM_MANIFEST_BYTES) }
             require(captured.bytes.size.toLong() <= MAXIMUM_MANIFEST_BYTES && descriptor.bytes.size.toLong() <= MAXIMUM_MANIFEST_BYTES)
             fun evidence(entry: GeneratedFileEvidence, maximum: Int): ByteArray? {
                 val record = try { readArtifact(reference.jobId, "$root/${entry.path}", maximum.toLong()) }
@@ -138,7 +148,7 @@ internal class WebSourceCatalogEvidence(
             }
             val key = WebProgramStructureCache.Key(reference.jobId, reference.runId, reference.revisionId,
                 reference.sourceSha256, captured.sha256, descriptor.sha256, input.sha256)
-            val entry = cache.peek(key)
+            // Rebuild every miss, including byte-identical replacement with a new inode and the same digest key.
             val index = entry?.index ?: measured("build-projection") { run {
                 val document = measured("parse-manifest-json") { OracleJson.parse(captured.bytes, JSON_LIMITS) } as? JsonObject
                     ?: throw IllegalArgumentException("Source catalog manifest is invalid.")
@@ -156,7 +166,7 @@ internal class WebSourceCatalogEvidence(
             } }
             // Retention pins change the attempt version without changing the candidate; the projection depends
             // only on the keyed commitments, so it stays valid for the current reference.
-            check(index.reference.copy(attemptVersion = reference.attemptVersion) == reference && index.manifestSha256 == captured.sha256 && index.descriptorSha256 == descriptor.sha256)
+            check(index.reference.copy(attemptVersion = reference.attemptVersion) == reference && index.manifestSha256 == captured.sha256 && index.descriptorSha256 == descriptor.sha256 && index.inputSha256 == input.sha256)
             val result = measured("project-page") { project(index) {
                 val model = checkNotNull(index.model)
                 val record = readArtifact(reference.jobId, "$root/${model.path}", WebProgramStructureBuilder.MAXIMUM_MODEL_BYTES.toLong())
@@ -247,6 +257,16 @@ internal class WebSourceCatalogEvidence(
         verifyCapturedArtifact(jobId, path, captured)
         verifyCapturedInput(jobId, input)
         return result
+    }
+
+    private fun compareCapturedArtifact(jobId: String, path: String, expected: StableRegularFile): StableComparison {
+        compareArtifact?.let { return it(jobId, path, MAXIMUM_MANIFEST_BYTES, expected) }
+        // Legacy adapters must capture the current file too; absence of a streaming callback is never a hit.
+        val current = readArtifact(jobId, path, MAXIMUM_MANIFEST_BYTES)
+        require(current.bytes.size.toLong() <= MAXIMUM_MANIFEST_BYTES)
+        return if (expected.bytes.size == current.bytes.size && expected.identity == current.identity &&
+            expected.sha256 == current.sha256 && expected.bytes.contentEquals(current.bytes)) StableComparison.SAME
+        else StableComparison.DIFFERENT
     }
 
     private fun verifyCapturedInput(jobId: String, expected: StableRegularFile) {
