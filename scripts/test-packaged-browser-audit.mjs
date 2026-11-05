@@ -28,28 +28,32 @@ function pngBytes(width, height) {
   buffer.writeUInt32BE(width, 16); buffer.writeUInt32BE(height, 20);
   return buffer;
 }
-function tileState({ offset, height = 383, viewHeight = 200, viewWidth = 305, scroll }) {
-  const figureTop = -scroll;
+function tileState({ offset, height = 383, viewHeight = 200, viewWidth = 305, scroll, docTop = 0, left = 2, width = 300 }) {
+  const figureTop = docTop - scroll;
   const top = Math.max(0, figureTop + offset), bottom = Math.min(viewHeight, figureTop + height);
+  const x0 = Math.max(0, Math.floor(left)), x1 = Math.min(viewWidth, Math.ceil(left + width));
+  const y0 = Math.max(0, Math.floor(top)), y1 = Math.min(viewHeight, Math.ceil(bottom));
   const hit = { inFigure: true, hit: 'figure.output-signature-chart' };
-  return { figure: { x: 2, y: figureTop, width: 300, height }, rootClientWidth: viewWidth, rootClientHeight: viewHeight,
+  return { figure: { x: left, y: figureTop, width, height }, rootClientWidth: viewWidth, rootClientHeight: viewHeight,
     seriesHeights: [40, 40], activeElement: 'body', skipFocused: false, skipVisible: false,
     segment: { start: top - figureTop, end: bottom - figureTop },
-    viewportClip: { x: 2, y: top, width: 300, height: bottom - top },
-    pageClip: { x: 2, y: top + scroll + 1000, width: 300, height: bottom - top }, hits: [hit, hit, hit, hit].map(value => ({ ...value })) };
+    viewportClip: { x: x0, y: y0, width: x1 - x0, height: y1 - y0 },
+    pageClip: { x: x0, y: y0 + scroll, width: x1 - x0, height: y1 - y0 }, hits: [hit, hit, hit, hit].map(value => ({ ...value })) };
 }
-async function modeledCapture(set, { height = 383, viewHeight = 200, mutate = () => {}, png } = {}) {
+// Scrolling to a fractional document position lands on the floor, as browsers do at integer scroll offsets.
+async function modeledCapture(set, { height = 383, viewHeight = 200, docTop = 0, left, width, mutate = () => {}, png, shots } = {}) {
   let scroll = 0;
+  const documentHeight = docTop + height + 50;
   return captureOutputSignatureChart({ set,
     evaluate: async expression => {
-      const offset = Number([...expression.matchAll(/\}\)\((\d+(?:\.\d+)?)\)/g)].at(-1)?.[1]);
-      if (expression.startsWith('/*chart-capture-tile*/')) scroll = Math.min(offset, Math.max(0, height - viewHeight));
-      const state = tileState({ offset, height, viewHeight, scroll });
+      const offset = Number([...expression.matchAll(/\}\)\((\d+(?:\.\d+)?(?:e-?\d+)?)\)/g)].at(-1)?.[1]);
+      if (expression.startsWith('/*chart-capture-tile*/')) scroll = Math.min(Math.floor(docTop + offset), Math.max(0, docTop ? documentHeight - viewHeight : height - viewHeight));
+      const state = tileState({ offset, height, viewHeight, scroll, docTop, left, width });
       mutate(state, expression.startsWith('/*chart-capture-tile*/') ? 'before' : 'after', offset);
       return state;
     },
-    shoot: async ({ viewportClip }) => png ? png(viewportClip) : pngBytes(Math.round(viewportClip.width * set.deviceScaleFactor),
-      Math.round(viewportClip.height * set.deviceScaleFactor)) });
+    shoot: async ({ viewportClip, pageClip }) => { shots?.push({ viewportClip, pageClip });
+      return png ? png(viewportClip) : pngBytes(viewportClip.width * set.deviceScaleFactor, viewportClip.height * set.deviceScaleFactor); } });
 }
 async function intactCaptures() {
   return [await modeledCapture(chartCaptureSets[0], { viewHeight: 900 }), await modeledCapture(chartCaptureSets[1])];
@@ -186,7 +190,7 @@ test('chart capture controls reject reflow, overlays, wrong PNG sizes and bad co
   await fails({ png: () => Buffer.from('not a png') }, /PNG null/);
   await fails({ mutate: state => { state.viewportClip.width = 273; state.pageClip.width = 273; } }, /does not span the figure width/);
   // Clip escaping the viewport (beyond-viewport capture).
-  await fails({ mutate: state => { state.viewportClip.height = 383; state.pageClip.height = 383; } }, /not inside the rendered viewport/);
+  await fails({ mutate: state => { state.viewportClip.height = 383; state.pageClip.height = 383; } }, /not an integer rectangle inside the rendered viewport/);
   // Missing tiles, gaps and overlaps.
   const missing = await modeledCapture(set); missing.tiles.pop();
   assert.match(chartCaptureFailures(missing, set).join('\n'), /tiles cover 200 of 383/);
@@ -202,6 +206,82 @@ test('chart capture controls reject reflow, overlays, wrong PNG sizes and bad co
   assert.match(verdict(noZoom).join('\n'), /missing desktop or 400%/);
   const listed = clean(); listed.chartScreenshots.pop();
   assert.match(verdict(listed).join('\n'), /screenshot list does not match/);
+});
+
+test('fractional figure geometry is covered by outward integer clips with exact contiguous segments', async () => {
+  const set = chartCaptureSets[1];
+  const shots = [];
+  const capture = await modeledCapture(set, { docTop: 100.25, viewHeight: 200, height: 383.156, left: 2.4, width: 299.3, shots });
+  assert.deepEqual(chartCaptureFailures(capture, set), []);
+  assert.equal(capture.tiles.length, 2);
+  const [first, second] = capture.tiles;
+  // Tile 1: scroll floor(100.25) = 100, figure top at 0.25; clip pads 0.25 CSS px above the figure.
+  assert.equal(first.before.figure.y, 0.25);
+  assert.deepEqual(first.before.segment, { start: 0, end: 199.75 });
+  assert.deepEqual(first.before.viewportClip, { x: 2, y: 0, width: 300, height: 200 });
+  assert.deepEqual(first.png, { width: 1200, height: 800 });
+  // Tile 2 starts at the actual end of tile 1 and ends at the fractional figure bottom.
+  assert.equal(second.offset, 199.75);
+  assert.equal(second.before.segment.start, 199.75);
+  assert.ok(Math.abs(second.before.segment.end - 383.156) < 1e-9);
+  const segBottom = second.before.figure.y + second.before.segment.end;
+  assert.ok(second.before.viewportClip.y + second.before.viewportClip.height > segBottom, 'outward padded bottom');
+  assert.deepEqual(second.before.viewportClip, { x: 2, y: 0, width: 300, height: Math.ceil(segBottom) });
+  assert.deepEqual(second.png, { width: 300 * 4, height: Math.ceil(segBottom) * 4 });
+  for (const { viewportClip, pageClip } of shots)
+    for (const key of ['x', 'y', 'width', 'height']) { assert.ok(Number.isInteger(viewportClip[key])); assert.ok(Number.isInteger(pageClip[key])); }
+  // The former hosted failure: browser-snapped PNGs 3 or 2 device px short are rejected, not tolerated.
+  const short = await modeledCapture(set, { docTop: 100.25, height: 383.156, png: clip => pngBytes(clip.width * 4, clip.height * 4 - 2) });
+  assert.match(chartCaptureFailures(short, set).join('\n'), /does not match clip\*DPR/);
+  // A fractional (snappable) clip, a sub-pixel gap and an inward clip all fail strict coverage.
+  const fractional = await modeledCapture(set, { docTop: 100.25, height: 383.156,
+    mutate: state => { state.viewportClip.height -= 0.25; state.pageClip.height -= 0.25; } });
+  assert.match(chartCaptureFailures(fractional, set).join('\n'), /not an integer rectangle/);
+  const gap = await modeledCapture(set, { docTop: 100.25, height: 383.156 }); gap.tiles[1].before.segment.start += 0.1;
+  assert.match(chartCaptureFailures(gap, set).join('\n'), /gap or overlap/);
+  const inward = await modeledCapture(set, { docTop: 100.25, height: 383.156 });
+  inward.tiles[1].before.viewportClip.height -= 1; inward.tiles[1].before.pageClip.height -= 1;
+  assert.match(chartCaptureFailures(inward, set).join('\n'), /clip does not match its figure segment/);
+  const short2 = await modeledCapture(set, { docTop: 100.25, height: 383.156 }); short2.tiles[1].before.segment.end -= 0.2;
+  assert.match(chartCaptureFailures(short2, set).join('\n'), /not the figure\/viewport intersection/);
+});
+
+test('in-page capture expressions emit outward integer clips for fractional figure geometry (VM)', async () => {
+  const docTop = 100.25, height = 383.156, left = 2.4, width = 299.3;
+  let scrollY = 0; const probes = [];
+  const series = { getBoundingClientRect: () => ({ height: 40 }) };
+  const figure = { tagName: 'FIGURE', id: '', classList: ['output-signature-chart'],
+    getBoundingClientRect: () => ({ left, right: left + width, top: docTop - scrollY, bottom: docTop - scrollY + height, width, height }),
+    querySelectorAll: () => [series, series], contains: () => true };
+  const document = { body: {}, activeElement: null, scrollingElement: { clientWidth: 305, clientHeight: 200 },
+    querySelector: selector => selector === '.output-signature-chart' ? figure : null,
+    elementFromPoint: (x, y) => { probes.push([x, y]); return figure; } };
+  // Browsers land fractional scroll requests on an integer offset; model floor.
+  const context = { document, innerHeight: 200, scrollX: 0, get scrollY() { return scrollY; }, visualViewport: undefined,
+    scrollTo: ({ top }) => { scrollY = Math.min(Math.floor(top), 1000); }, getComputedStyle: () => ({ visibility: 'visible' }) };
+  const set = chartCaptureSets[1];
+  const shots = [];
+  const capture = await captureOutputSignatureChart({ set, evaluate: async expression => JSON.parse(JSON.stringify(runInNewContext(expression, context))),
+    shoot: async ({ viewportClip, pageClip }) => { shots.push({ viewportClip, pageClip });
+      return pngBytes(viewportClip.width * set.deviceScaleFactor, viewportClip.height * set.deviceScaleFactor); } });
+  assert.deepEqual(chartCaptureFailures(capture, set), []);
+  const [first, second, extra] = capture.tiles;
+  assert.equal(extra, undefined);
+  assert.deepEqual(first.before.segment, { start: 0, end: 199.75 });
+  assert.deepEqual(first.before.viewportClip, { x: 2, y: 0, width: 300, height: 200 });
+  assert.deepEqual(first.before.pageClip, { x: 2, y: 100, width: 300, height: 200 });
+  assert.deepEqual(first.png, { width: 1200, height: 800 });
+  assert.equal(second.offset, 199.75);
+  assert.equal(second.before.segment.start, 199.75);
+  assert.ok(Math.abs(second.before.segment.end - height) < 1e-9);
+  // scroll floor(300) = 300, figure bottom at 183.406 viewport px; clip ceil = 184 (0.594 px outward padding).
+  assert.deepEqual(second.before.viewportClip, { x: 2, y: 0, width: 300, height: 184 });
+  assert.deepEqual(second.before.pageClip, { x: 2, y: 300, width: 300, height: 184 });
+  assert.deepEqual(second.png, { width: 1200, height: 736 });
+  // Probes stay inside figure/clip intersection: x within [2.4, 301.7], y within the segment.
+  for (const [x, y] of probes) { assert.ok(x > left && x < left + width); assert.ok(y >= 0 && y < 200); }
+  assert.ok(probes.some(([, y]) => Math.abs(y - (1.25)) < 1e-9), 'tile 1 top probe starts inside the figure, not the padding');
+  assert.equal(shots.length, 2);
 });
 
 test('chart capture expressions blur focus, scroll within the viewport and probe inside the clip', () => {

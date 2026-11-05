@@ -214,6 +214,9 @@ export const measureOutputSignatureChart = `(() => {
 // wrong size is rejected by assertAudit instead of being retained as proof.
 export const chartCaptureMaxTiles = 8;
 export const chartCaptureTolerancePx = 0.5;
+// Coverage is checked strictly: segments must abut exactly and every clip must contain its segment,
+// so a sub-pixel gap or overlap cannot hide inside the 0.5 px layout-stability tolerance.
+export const chartCoverageEpsilonPx = 1e-3;
 export const chartCaptureSets = [
   { viewport: 'desktop 1440x900', prefix: 'attempt-evidence-output-signature-chart-desktop', deviceScaleFactor: 1 },
   { viewport: 'zoom 400% of 1280x800', prefix: 'attempt-evidence-output-signature-chart-zoom-400', deviceScaleFactor: 4 },
@@ -225,11 +228,16 @@ const chartCaptureState = `(offset => {
   const box = figure.getBoundingClientRect();
   const viewWidth = root.clientWidth, viewHeight = root.clientHeight || innerHeight;
   const pageLeft = visualViewport?.pageLeft ?? scrollX, pageTop = visualViewport?.pageTop ?? scrollY;
+  // Exact figure/viewport intersection for the segment starting at offset, in viewport CSS px.
   const top = Math.max(0, box.top + offset), bottom = Math.min(viewHeight, box.bottom);
-  const left = box.left, right = box.right;
+  const left = Math.max(0, box.left), right = Math.min(viewWidth, box.right);
+  // Browsers snap fractional clips, so the capture clip is the smallest integer CSS rectangle that
+  // contains the intersection (floor left/top, ceil right/bottom), bounded to the viewport.
+  const clipLeft = Math.max(0, Math.floor(left)), clipTop = Math.max(0, Math.floor(top));
+  const clipRight = Math.min(viewWidth, Math.ceil(right)), clipBottom = Math.min(viewHeight, Math.ceil(bottom));
   const describe = element => element ? element.tagName.toLowerCase() + (element.id ? '#' + element.id : '')
     + (element.classList?.length ? '.' + [...element.classList].join('.') : '') : null;
-  // Probe one CSS pixel inside each clip corner, so every probe is inside both figure and viewport.
+  // Probe one CSS pixel inside each corner of the figure/clip intersection, never in clip padding.
   const hits = [[left + 1, top + 1], [right - 1, top + 1], [left + 1, bottom - 1], [right - 1, bottom - 1]].map(([x, y]) => {
     const hit = document.elementFromPoint(x, y);
     return { x, y, inFigure: !!hit && (hit === figure || figure.contains(hit)), hit: describe(hit) };
@@ -245,8 +253,8 @@ const chartCaptureState = `(offset => {
     seriesHeights: [...figure.querySelectorAll('.output-signature-series')].map(series => series.getBoundingClientRect().height),
     activeElement: describe(document.activeElement), skipFocused: !!skip && document.activeElement === skip, skipVisible,
     segment: { start: top - box.top, end: bottom - box.top },
-    viewportClip: { x: left, y: top, width: right - left, height: bottom - top },
-    pageClip: { x: left + pageLeft, y: top + pageTop, width: right - left, height: bottom - top },
+    viewportClip: { x: clipLeft, y: clipTop, width: clipRight - clipLeft, height: clipBottom - clipTop },
+    pageClip: { x: clipLeft + pageLeft, y: clipTop + pageTop, width: clipRight - clipLeft, height: clipBottom - clipTop },
     hits,
   };
 })`;
@@ -279,7 +287,7 @@ export function pngDimensions(bytes) {
 export async function captureOutputSignatureChart({ set, evaluate, shoot }) {
   const tiles = [];
   let offset = 0, height = Infinity;
-  while (offset < height - chartCaptureTolerancePx && tiles.length < chartCaptureMaxTiles) {
+  while (offset < height - chartCoverageEpsilonPx && tiles.length < chartCaptureMaxTiles) {
     const before = await evaluate(prepareChartCaptureTile(offset));
     if (!before) break;
     height = before.figure.height;
@@ -287,7 +295,8 @@ export async function captureOutputSignatureChart({ set, evaluate, shoot }) {
     const bytes = await shoot({ file, pageClip: before.pageClip, viewportClip: before.viewportClip });
     const after = await evaluate(measureChartCaptureTile(offset));
     tiles.push({ file, offset, before, after, png: pngDimensions(bytes) });
-    if (!(before.segment.end > offset + chartCaptureTolerancePx)) break;
+    // The next tile starts exactly where this tile's actual figure intersection ended.
+    if (!(before.segment.end > offset + chartCoverageEpsilonPx)) break;
     offset = before.segment.end;
   }
   return { viewport: set.viewport, prefix: set.prefix, deviceScaleFactor: set.deviceScaleFactor,
@@ -299,6 +308,8 @@ export function chartCaptureFailures(capture, set) {
   const failures = [];
   const where = `chart capture ${set.viewport}`;
   const near = (a, b) => Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) <= chartCaptureTolerancePx;
+  const exact = (a, b) => Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) <= chartCoverageEpsilonPx;
+  const eps = chartCoverageEpsilonPx;
   if (!capture || capture.viewport !== set.viewport || capture.prefix !== set.prefix || capture.deviceScaleFactor !== set.deviceScaleFactor)
     return [`${where}: missing or mislabelled capture manifest`];
   const tiles = Array.isArray(capture.tiles) ? capture.tiles : [];
@@ -321,19 +332,29 @@ export function chartCaptureFailures(capture, set) {
       || before.seriesHeights.some((value, series) => !near(value, after.seriesHeights[series])))
       failures.push(`${at}: chart series rows reflowed during capture`);
     const clip = before.viewportClip;
-    if (!clip || !(clip.width > 0) || !(clip.height > 0) || clip.x < -chartCaptureTolerancePx || clip.y < -chartCaptureTolerancePx
-      || clip.x + clip.width > before.rootClientWidth + chartCaptureTolerancePx
-      || clip.y + clip.height > before.rootClientHeight + chartCaptureTolerancePx)
-      failures.push(`${at}: clip is not inside the rendered viewport`);
+    const integral = clip && ['x', 'y', 'width', 'height'].every(key => Number.isInteger(clip[key]));
+    if (!integral || !(clip.width > 0) || !(clip.height > 0) || clip.x < 0 || clip.y < 0
+      || clip.x + clip.width > before.rootClientWidth || clip.y + clip.height > before.rootClientHeight)
+      failures.push(`${at}: clip is not an integer rectangle inside the rendered viewport`);
     else {
-      if (!near(clip.x, before.figure.x) || !near(clip.width, before.figure.width)) failures.push(`${at}: clip does not span the figure width`);
-      if (!near(before.segment?.start, covered)) failures.push(`${at}: segment starts at ${before.segment?.start}, expected ${covered} (gap or overlap)`);
-      if (!near(clip.y, before.figure.y + before.segment.start) || !near(clip.height, before.segment.end - before.segment.start))
+      const { figure, segment } = before;
+      const figureRight = figure.x + figure.width, clipRight = clip.x + clip.width, clipBottom = clip.y + clip.height;
+      // Outward cover with less than one CSS px of padding: floor(left), ceil(right).
+      if (!(clip.x <= figure.x + eps && clip.x > figure.x - 1 - eps && clipRight >= figureRight - eps && clipRight < figureRight + 1 + eps))
+        failures.push(`${at}: clip does not span the figure width`);
+      if (!exact(segment?.start, covered)) failures.push(`${at}: segment starts at ${segment?.start}, expected ${covered} (gap or overlap)`);
+      const segTop = figure.y + segment?.start, segBottom = figure.y + segment?.end;
+      // The segment must be the actual figure/viewport intersection from its start.
+      if (!(segment?.end > segment?.start) || segTop < -eps || !exact(segment.end, Math.min(figure.height, before.rootClientHeight - figure.y)))
+        failures.push(`${at}: segment is not the figure/viewport intersection`);
+      if (!(clip.y <= segTop + eps && clip.y > segTop - 1 - eps && clipBottom >= segBottom - eps
+        && (clipBottom < segBottom + 1 + eps)))
         failures.push(`${at}: clip does not match its figure segment`);
-      if (!near(before.pageClip?.width, clip.width) || !near(before.pageClip?.height, clip.height)) failures.push(`${at}: page and viewport clips differ`);
-      const expected = { width: Math.round(clip.width * set.deviceScaleFactor), height: Math.round(clip.height * set.deviceScaleFactor) };
-      // Explicit rounding: Math.round(css * DPR), with one device pixel for browser edge snapping.
-      if (!png || Math.abs(png.width - expected.width) > 1 || Math.abs(png.height - expected.height) > 1)
+      if (!before.pageClip || !exact(before.pageClip.width, clip.width) || !exact(before.pageClip.height, clip.height))
+        failures.push(`${at}: page and viewport clips differ`);
+      // Integer CSS clip at an integer DPR: the PNG must be exactly clip*DPR device pixels.
+      const expected = { width: clip.width * set.deviceScaleFactor, height: clip.height * set.deviceScaleFactor };
+      if (!png || png.width !== expected.width || png.height !== expected.height)
         failures.push(`${at}: PNG ${JSON.stringify(png)} does not match clip*DPR ${JSON.stringify(expected)}`);
     }
     covered = before.segment?.end;
@@ -343,7 +364,7 @@ export function chartCaptureFailures(capture, set) {
         failures.push(`${at}: figure is occluded at a clip corner ${JSON.stringify(state.hits?.filter(hit => !hit.inFigure))}`);
     }
   });
-  if (first && !near(covered, first.height)) failures.push(`${where}: tiles cover ${covered} of ${first.height} CSS px`);
+  if (first && !exact(covered, first.height)) failures.push(`${where}: tiles cover ${covered} of ${first.height} CSS px`);
   return failures;
 }
 
