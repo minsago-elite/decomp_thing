@@ -10,15 +10,20 @@ import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 import { crc32, inflateSync } from 'node:zlib';
 
-export const GEOMETRY_PROBE_SCHEMA = 'packaged-real-zoom-geometry-probe/v1';
+// v2 (f109 correction): the wheel is planned in physical (DIP) units from the measured initial geometry, one trusted wheel
+// only, the landed physical scroll must equal the plan, and a match also needs full-crop RGB equality with the unclipped edge PNG.
+export const GEOMETRY_PROBE_SCHEMA = 'packaged-real-zoom-geometry-probe/v2';
 export const GEOMETRY_PROBE_LABEL = 'diagnostic-only: cannot qualify #619 or auditRealZoom; does not relabel existing zoom PNGs';
 export const MARKER = Object.freeze({ left: 37, top: 411, size: 100,
   quadrants: Object.freeze([['tl', 0, 0, [255, 0, 0]], ['tr', 1, 0, [0, 255, 0]], ['bl', 0, 1, [0, 0, 255]], ['br', 1, 1, [255, 255, 0]]]) });
 /** Own caps, shorter than and clipped to the remaining original section deadline; one attempt, no retries. */
 export const PROBE_CAPS = Object.freeze({ calibrationMs: 6000, zoomMs: 20000, reserveMs: Object.freeze({ calibration: 8000, zoom: 120000 }),
   settleMs: 1500, readyMs: 4000, observeMs: 2000 });
-/** Wheel deltas (CDP CSS px at the dispatch point): aim the marker into the zoomed viewport; the landed scroll is observed. */
-export const WHEEL_DELTA = Object.freeze({ 2: 311.5, 4: 381.25 });
+/** Historical f109 deltas (written as page CSS px). Never sent again; kept so controls can prove the planner refuses them. */
+export const F109_WHEEL_DELTA = Object.freeze({ 2: 311.5, 4: 381.25 });
+/** Minimum physical (DIP) clearance between the marker and every viewport edge / the scrollbar gutter, required before input. */
+export const EDGE_MARGIN_DIP = 8;
+export const PLAN_FORMULA = 'S = markerTop*f - floor((vv.height*f - markerSize*f)/2) - 1 (DIP, from the initial measurement)';
 export const MAX_PROBE_PNG_BYTES = 512 * 1024;
 export const MAX_DECODED_PIXELS = 4096 * 4096;
 const TEXT_CAP = 200;
@@ -120,11 +125,159 @@ export function decideConvention(candidates) {
   return hits.length === 1 ? { convention: hits[0], failure: null } : { convention: null, failure: hits.length ? 'both candidates matched: convention undecidable' : 'neither candidate matched' };
 }
 
+// ---------------------------------------------------------------- measured wheel plan (pure; refuses before any input)
+
+/**
+ * Checks a candidate physical scroll S against the measured initial geometry: integral DIP, fractional CSS (S/f), inside the
+ * document, and the marker fully visible with EDGE_MARGIN_DIP clearance from every viewport edge and the scrollbar gutter.
+ */
+export function assessPlan(factor, initial, S) {
+  const reasons = [];
+  const f = initial?.devicePixelRatio; const vv = initial?.visualViewport; const md = initial?.markerDocument;
+  if (f !== factor) reasons.push(`devicePixelRatio ${f} is not ${factor}`);
+  const vh = integral((vv?.height ?? NaN) * factor); const vw = integral((vv?.width ?? NaN) * factor);
+  const content = integral((initial?.clientWidth ?? NaN) * factor);
+  const mt = integral((md?.top ?? NaN) * factor); const ml = integral((md?.left ?? NaN) * factor); const ms = MARKER.size * factor;
+  if (vh === null || vw === null) reasons.push('visual viewport is not integral in physical (DIP) px');
+  if (content === null) reasons.push('clientWidth is not integral in physical (DIP) px');
+  if (mt === null || ml === null || md?.top !== MARKER.top || md?.left !== MARKER.left || md?.width !== MARKER.size || md?.height !== MARKER.size) reasons.push('marker document geometry is not the measured (37,411) 100x100 CSS px');
+  if (!Number.isInteger(S)) reasons.push(`planned S ${S} is not an integral DIP delta`);
+  else {
+    if (Number.isInteger(S / factor)) reasons.push(`planned S/f ${S / factor} is not a fractional CSS scroll`);
+    if (S <= 0) reasons.push('planned S is not positive');
+    const sh = initial?.scrollHeight;
+    if (vh !== null && !(Number.isFinite(sh) && S + vh <= sh * factor)) reasons.push('planned S exceeds the scrollable document');
+  }
+  const plan = { S, scrollYCss: Number.isFinite(S) ? S / factor : null, viewportDip: { width: vw, height: vh, content }, marker: null, margins: null };
+  if (Number.isInteger(S) && vh !== null && mt !== null && ml !== null && content !== null) {
+    const top = mt - S; const left = ml;
+    plan.marker = { left, top, right: left + ms - 1, bottom: top + ms - 1 };
+    plan.margins = { top, bottom: vh - (top + ms), left, gutter: content - (left + ms) };
+    if (Object.values(plan.margins).some((m) => m < EDGE_MARGIN_DIP)) reasons.push(`marker not fully visible at planned S (margins ${JSON.stringify(plan.margins)} < ${EDGE_MARGIN_DIP} DIP)`);
+  }
+  return { ok: reasons.length === 0, ...plan, reasons: reasons.map(cap) };
+}
+/** The single measured plan: S = mt − floor((vh − ms)/2) − 1, from the initial measurement only. */
+export function planWheel(factor, initial) {
+  const vh = (initial?.visualViewport?.height ?? NaN) * factor; const mt = (initial?.markerDocument?.top ?? NaN) * factor;
+  const S = mt - Math.floor((vh - MARKER.size * factor) / 2) - 1;
+  return assessPlan(factor, initial, Number.isFinite(S) ? S : null);
+}
+/** Exactly one wheel event, trusted, pixel mode, and its DOM delta times f equals S exactly (no unit assumed). */
+export function checkWheelEvents(factor, S, events) {
+  const failures = [];
+  if (!Array.isArray(events) || events.length !== 1) failures.push(`expected exactly one wheel event, observed ${Array.isArray(events) ? events.length : 'none'}`);
+  const e = Array.isArray(events) ? events[0] : null;
+  if (e) {
+    if (e.isTrusted !== true) failures.push('wheel event is not trusted');
+    if (e.deltaMode !== 0 || e.deltaX !== 0) failures.push('wheel event is not a pixel-mode vertical delta');
+    if (!(e.deltaY * factor === S)) failures.push(`wheel unit differs: DOM deltaY ${e.deltaY} x ${factor} is not planned ${S}`);
+  }
+  return failures;
+}
+/** Observed landing: L = scrollY*f must be integral (physical grid), scrollY fractional, and L must equal the plan. */
+export function landing(factor, S, scrollX, scrollY) {
+  const L = integral(scrollY * factor); const failures = [];
+  if (scrollX !== 0) failures.push(`scrollX ${scrollX} is not 0`);
+  if (L === null) failures.push(`landed scroll ${scrollY}x${factor} is not on the integral physical grid`);
+  if (!(scrollY > 0) || Number.isInteger(scrollY)) failures.push(`observed scrollY ${scrollY} is not a nonzero fractional CSS offset`);
+  if (L !== null && L !== S) failures.push(`trusted wheel landed off-plan: planned ${S}, observed ${L}`);
+  return { plannedDip: S, observedDip: L, scrollYCss: scrollY, onPlan: L !== null && L === S, failures: failures.map(cap) };
+}
+
+// ---------------------------------------------------------------- edge PNG geometry and full-crop equality
+
+const isWhite = (p) => p[0] === 255 && p[1] === 255 && p[2] === 255;
+/** Edge PNG facts: height must be vv.height*f; the marker bbox (content columns only) must be (37f, 411f−L, 100f, 100f). */
+export function edgeGeometry(edge, factor, geometry, L) {
+  const failures = [];
+  const vh = integral((geometry?.visualViewport?.height ?? NaN) * factor); const vw = integral((geometry?.visualViewport?.width ?? NaN) * factor);
+  const content = integral((geometry?.clientWidth ?? NaN) * factor);
+  if (vh === null || edge.height !== vh) failures.push(`edge PNG height ${edge.height} is not vv.height*f ${vh}`);
+  if (vw === null || vw > edge.width) failures.push(`edge PNG width ${edge.width} does not hold vv.width*f ${vw}`);
+  let bbox = null;
+  const scanW = Math.min(vw ?? 0, edge.width);
+  for (let y = 0; y < edge.height; y++) for (let x = 0; x < scanW; x++) {
+    if (isWhite(edge.pixel(x, y))) continue;
+    if (!bbox) bbox = { left: x, top: y, right: x, bottom: y };
+    else { if (x < bbox.left) bbox.left = x; if (x > bbox.right) bbox.right = x; if (y < bbox.top) bbox.top = y; if (y > bbox.bottom) bbox.bottom = y; }
+  }
+  const markerBbox = bbox && { x: bbox.left, y: bbox.top, width: bbox.right - bbox.left + 1, height: bbox.bottom - bbox.top + 1 };
+  const expected = L === null ? null : { x: MARKER.left * factor, y: MARKER.top * factor - L, width: MARKER.size * factor, height: MARKER.size * factor };
+  if (!expected || JSON.stringify(markerBbox) !== JSON.stringify(expected)) failures.push(`edge marker bbox ${JSON.stringify(markerBbox)} is not ${JSON.stringify(expected)}`);
+  return { width: edge.width, height: edge.height, vvHeightDip: vh, vvWidthDip: vw, contentDip: content,
+    gutterColumns: vw === null ? null : edge.width - vw, markerBbox, expectedBbox: expected, failures: failures.map(cap) };
+}
+/** Full RGB equality of a crop with the same-size region of the unclipped edge PNG at (x, y); every pixel is compared. */
+export function regionEqual(crop, edge, x, y) {
+  if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || y < 0 || x + crop.width > edge.width || y + crop.height > edge.height) return { equal: false, compared: 0, reason: 'region outside the edge PNG' };
+  for (let j = 0; j < crop.height; j++) for (let i = 0; i < crop.width; i++) {
+    const a = crop.pixel(i, j); const b = edge.pixel(x + i, y + j);
+    if (a[0] !== b[0] || a[1] !== b[1] || a[2] !== b[2]) return { equal: false, compared: j * crop.width + i + 1, firstMismatch: { x: i, y: j, crop: a.slice(0, 3), edge: b.slice(0, 3) } };
+  }
+  return { equal: true, compared: crop.width * crop.height };
+}
+/** A convention needs exactly one candidate with the 20 samples AND full edge equality, and distinct candidate bytes. */
+export function decideFactorConvention(candidates) {
+  if (candidates.length !== 2 || ['document-dip', 'viewport-dip'].some((name) => {
+    const matches = candidates.filter((c) => c.convention === name);
+    return matches.length !== 1 || typeof matches[0].sha256 !== 'string' || !matches[0].sha256
+      || typeof matches[0].match?.matches !== 'boolean' || typeof matches[0].edgeEquality?.equal !== 'boolean';
+  })) return { convention: null, failure: 'both candidates must be captured and evaluated' };
+  const shas = candidates.filter((c) => c.sha256).map((c) => c.sha256);
+  if (shas.length === 2 && shas[0] === shas[1]) return { convention: null, failure: 'uninformative: identical candidate bytes' };
+  const hits = candidates.filter((c) => c.match?.matches === true && c.edgeEquality?.equal === true).map((c) => c.convention);
+  if (hits.length === 1) return { convention: hits[0], failure: null };
+  if (hits.length > 1) return { convention: null, failure: 'both candidates matched: convention undecidable' };
+  const sampleOnly = candidates.filter((c) => c.match?.matches === true).map((c) => c.convention);
+  return { convention: null, failure: sampleOnly.length ? `samples matched ${sampleOnly.join(',')} but the full crop differs from the edge region` : 'neither candidate matched' };
+}
+/** Geometry that must not move between the post-wheel and post-capture measurements. */
+export const stableGeometry = (m) => JSON.stringify([m?.devicePixelRatio, m?.scrollX, m?.scrollY, m?.innerWidth, m?.innerHeight, m?.clientWidth,
+  m?.visualViewport?.scale, m?.visualViewport?.width, m?.visualViewport?.height, m?.visualViewport?.pageTop]);
+
+/**
+ * Pure per-factor verdict shared by the live probe and the offline assessment. crops: [{ convention, png (decoded), sha256 }].
+ * Off-plan landings retain crops and geometry as evidence but can never yield a convention.
+ */
+export function evaluateFactor({ factor, initial, after, final, sent, events, crops, edge }) {
+  const failures = [];
+  const plan = planWheel(factor, initial);
+  if (!plan.ok) failures.push(...plan.reasons.map((r) => `plan refused: ${r}`));
+  if (sent?.type !== 'mouseWheel' || sent.deltaY !== plan.S || sent.deltaX !== 0) failures.push(`sent wheel ${cap(JSON.stringify(sent ?? null))} is not the measured plan S=${plan.S}`);
+  failures.push(...checkWheelEvents(factor, plan.S, events));
+  const land = landing(factor, plan.S, after?.scrollX, after?.scrollY);
+  failures.push(...land.failures);
+  if ([after, final].some((m) => m?.devicePixelRatio !== factor || m?.visualViewport?.scale !== 1)) failures.push(`observed zoom/pinch state is not ${factor}x unpinched`);
+  const stable = !!final && stableGeometry(after) === stableGeometry(final);
+  if (!stable) failures.push('geometry moved between the post-wheel and post-capture measurements');
+  const expected = land.observedDip === null ? null : candidateClips(factor, after.scrollX, after.scrollY);
+  const edgeFacts = edge ? edgeGeometry(edge, factor, after, land.observedDip) : null;
+  if (!edgeFacts) failures.push('viewport edge PNG missing');
+  else failures.push(...edgeFacts.failures);
+  const per = [];
+  for (const c of crops ?? []) {
+    const exp = expected?.find((e) => e.convention === c.convention);
+    const entry = { convention: c.convention, sha256: c.sha256 ?? null, match: null, edgeEquality: null };
+    if (exp?.sent && c.png) {
+      entry.match = matchMarker(c.png, exp.clip, factor);
+      entry.edgeEquality = edge ? regionEqual(c.png, edge, MARKER.left * factor, MARKER.top * factor - land.observedDip) : null;
+    }
+    per.push(entry);
+  }
+  const decision = decideFactorConvention(per);
+  if (decision.failure) failures.push(decision.failure);
+  const fractionalViewport = { vvHeightCss: after?.visualViewport?.height ?? null, vvHeightDip: edgeFacts?.vvHeightDip ?? null, scrollYCss: after?.scrollY ?? null, landedDip: land.observedDip };
+  return { plan, landing: land, stable, edge: edgeFacts, candidates: per, fractionalViewport,
+    convention: failures.length ? null : decision.convention, failures: [...new Set(failures.map(cap))] };
+}
+
 // ---------------------------------------------------------------- section and hook
 
 export function createGeometryProbeSection() {
   return { schema: GEOMETRY_PROBE_SCHEMA, diagnostic: true, acceptance: false, label: GEOMETRY_PROBE_LABEL, marker: { left: MARKER.left, top: MARKER.top, size: MARKER.size },
-    pageSha256: sha256(PROBE_PAGE), caps: { ...PROBE_CAPS, reserveMs: { ...PROBE_CAPS.reserveMs }, pngBytes: MAX_PROBE_PNG_BYTES }, wheelDelta: { ...WHEEL_DELTA },
+    pageSha256: sha256(PROBE_PAGE), caps: { ...PROBE_CAPS, reserveMs: { ...PROBE_CAPS.reserveMs }, pngBytes: MAX_PROBE_PNG_BYTES },
+    wheelPlan: { formula: PLAN_FORMULA, marginDip: EDGE_MARGIN_DIP, wheels: 1, programmaticArm: false },
     processes: [], conclusion: { convention: null, status: 'pending' },
     limits: ['Diagnostic only; never an acceptance gate for #619.', 'Headless Chrome on a runner; profile default page zoom, not UI zoom, pinch or screen scale.',
       'No physical-device or screen-reader claim.', 'Cleanup observations are parent-side facts for the owned PID and paths only; unknown stays unknown.'] };
@@ -155,8 +308,8 @@ export function createGeometryProbe({ section, root, caps = PROBE_CAPS, now = ()
   };
   return {
     attach(spec) {
-      const entry = { key: cap(spec.key), factor: spec.factor, state: 'attached', capMs: null, elapsedMs: null, startIdentity: null, measurements: [], wheel: null,
-        candidates: [], viewportCapture: null, convention: null, failures: [], rejectedLateWrites: 0, targetCleanup: null, parentObservation: null };
+      const entry = { key: cap(spec.key), factor: spec.factor, state: 'attached', capMs: null, elapsedMs: null, startIdentity: null, measurements: [], plan: null, wheel: null, landing: null,
+        candidates: [], edge: null, captureGeometryStable: null, fractionalViewport: null, viewportCapture: null, convention: null, failures: [], rejectedLateWrites: 0, targetCleanup: null, parentObservation: null };
       Object.defineProperty(entry, 'open', { value: { run: true, observe: true }, enumerable: false });
       section.processes.push(entry); entries.set(spec.key, entry); conclude();
     },
@@ -283,7 +436,11 @@ async function probeWork({ entry, put, factor, key, cdp, checkActive, delay, roo
     put(() => { entry.gutterCss = initial.innerWidth - initial.clientWidth; });
     return;
   }
-  const sent = { type: 'mouseWheel', x: 20, y: 20, deltaX: 0, deltaY: WHEEL_DELTA[factor] };
+  // Measured plan, refused BEFORE any input when the marker would not be fully visible with the margin (no tuning, no retry).
+  const plan = planWheel(factor, initial);
+  put(() => { entry.plan = plan; });
+  if (!plan.ok) throw new Error(`plan refused before input: ${plan.reasons.join('; ')}`);
+  const sent = { type: 'mouseWheel', x: 20, y: 20, deltaX: 0, deltaY: plan.S };
   await cdp.call('Input.dispatchMouseEvent', sent, sessionId);
   const samples = []; let previous = null; let stable = 0; const settleEnd = Date.now() + caps.settleMs;
   while (Date.now() < settleEnd && stable < 3) {
@@ -293,10 +450,7 @@ async function probeWork({ entry, put, factor, key, cdp, checkActive, delay, roo
     stable = previous && previous[0] === s[0] && previous[1] === s[1] ? stable + 1 : 0; previous = s;
   }
   const after = await measure('after-wheel');
-  const trusted = after.wheel?.filter((w) => w.isTrusted === true) ?? [];
   put(() => { entry.wheel = { sent, settled: stable >= 3, samples, events: after.wheel ?? [] }; });
-  if (trusted.length !== 1) fail(`expected one trusted wheel event, observed ${trusted.length}`);
-  if (!(after.scrollY > 0) || Number.isInteger(after.scrollY)) fail(`observed scrollY ${after.scrollY} is not a nonzero fractional offset`);
   if (stable < 3) fail('scroll did not settle within the probe settle cap');
   const capture = async (name, params) => {
     const { data } = await cdp.call('Page.captureScreenshot', params, sessionId);
@@ -310,24 +464,34 @@ async function probeWork({ entry, put, factor, key, cdp, checkActive, delay, roo
     checkActive();
     return { png: decoded, record: { name, bytes: png.length, sha256: sha256(png), ihdr: { width: decoded.width, height: decoded.height, channels: decoded.channels } } };
   };
+  // Candidates come from the OBSERVED landing, never from the plan; an off-plan landing is still captured as bounded evidence.
+  const crops = [];
   for (const candidate of candidateClips(factor, after.scrollX, after.scrollY)) {
     const c = { ...candidate, match: null };
     if (c.sent) {
       const params = { format: 'png', captureBeyondViewport: false, clip: { ...c.clip } };
       c.params = params;
-      try { const shot = await capture(probePngName(key, c.convention), params); c.png = shot.record; c.match = matchMarker(shot.png, c.clip, factor); }
-      catch (error) { c.error = cap(error.message); }
+      try { const shot = await capture(probePngName(key, c.convention), params); c.png = shot.record; c.match = matchMarker(shot.png, c.clip, factor); crops.push({ convention: c.convention, png: shot.png, sha256: shot.record.sha256 }); }
+      catch (error) { c.error = cap(error.message); fail(`${c.convention} capture: ${c.error}`); }
     }
     put(() => entry.candidates.push(c));
   }
-  // Bounded edge calibration: the unclipped viewport PNG's IHDR is the observed physical viewport (scrollbar included or not).
+  // Unclipped edge calibration: its IHDR is the observed physical viewport (scrollbar included or not).
+  let edge = null;
   try {
     const shot = await capture(probePngName(key, 'viewport-edge'), { format: 'png', captureBeyondViewport: false });
+    edge = shot.png;
     put(() => { entry.viewportCapture = { ...shot.record, params: { format: 'png', captureBeyondViewport: false },
       cssTimesFactor: { width: after.innerWidth * factor, height: after.visualViewport ? after.visualViewport.height * factor : null, clientWidth: after.clientWidth * factor } }; });
   } catch (error) { fail(`viewport edge capture: ${error.message}`); }
-  const decision = decideConvention(entry.candidates);
-  put(() => { entry.convention = entry.failures.length ? null : decision.convention; if (decision.failure) entry.failures.push(decision.failure); });
+  const final = await measure('after-capture');
+  const verdict = evaluateFactor({ factor, initial, after, final, sent, events: after.wheel, crops, edge });
+  put(() => {
+    for (const c of entry.candidates) { const v = verdict.candidates.find((x) => x.convention === c.convention); if (v) c.edgeEquality = v.edgeEquality; }
+    entry.landing = verdict.landing; entry.edge = verdict.edge; entry.captureGeometryStable = verdict.stable; entry.fractionalViewport = verdict.fractionalViewport;
+    for (const f of verdict.failures) if (!entry.failures.includes(f)) entry.failures.push(f);
+    entry.convention = entry.failures.length ? null : verdict.convention;
+  });
 }
 
 // ---------------------------------------------------------------- offline assessment (diagnostic verdict, never acceptance)
@@ -336,6 +500,9 @@ async function probeWork({ entry, put, factor, key, cdp, checkActive, delay, roo
 export async function assessGeometryProbe(section, { directory, realZoom } = {}) {
   const failures = [];
   if (section?.schema !== GEOMETRY_PROBE_SCHEMA || section.diagnostic !== true || section.acceptance !== false) return ['geometry probe section missing or relabelled'];
+  // Only the trusted-wheel arm exists: any programmatic/second-arm record or flag is rejected, never assessed.
+  if (section.wheelPlan?.programmaticArm !== false || section.wheelPlan?.wheels !== 1) failures.push('geometry probe declares a programmatic arm or more than one wheel');
+  for (const e of section.processes ?? []) if (e && ('arm' in e || 'trustedInput' in e || 'programmatic' in e)) failures.push(`${cap(e.key)}: programmatic arm record present`);
   const recordFor = (key) => realZoom?.processes?.find((p) => p?.key === key);
   for (const e of section.processes ?? []) {
     const k = e.key; const r = recordFor(k);
@@ -350,26 +517,39 @@ export async function assessGeometryProbe(section, { directory, realZoom } = {})
     if (e.targetCleanup?.attempted !== true || e.targetCleanup?.succeeded !== true) failures.push(`${k}: probe target cleanup was not confirmed`);
     if (e.rejectedLateWrites) failures.push(`${k}: ${e.rejectedLateWrites} late probe write(s) rejected`);
     if (e.factor === 1) { if (e.state !== 'completed' || e.failures.length) failures.push(`${k}: calibration probe ${cap(e.state)}`); continue; }
-    const last = e.measurements?.at(-1);
-    if (last?.devicePixelRatio !== e.factor || last?.visualViewport?.scale !== 1) failures.push(`${k}: observed zoom/pinch state is not ${e.factor}x unpinched`);
+    const byLabel = (l) => (e.measurements ?? []).find((m) => m?.label === l);
+    const readPng = async (rec, expectName, label) => {
+      if (!rec) return null;
+      if (rec.name !== expectName) { failures.push(`${k}/${label}: PNG name differs`); return null; }
+      let bytes; try { bytes = await fs.readFile(join(directory, rec.name)); } catch { failures.push(`${k}/${label}: PNG missing`); return null; }
+      if (bytes.length !== rec.bytes || sha256(bytes) !== rec.sha256) { failures.push(`${k}/${label}: PNG sha256/size differs (wrong source)`); return null; }
+      let png; try { png = decodePng(bytes); } catch (error) { failures.push(`${k}/${label}: ${cap(error.message)}`); return null; }
+      if (png.width !== rec.ihdr?.width || png.height !== rec.ihdr?.height) failures.push(`${k}/${label}: IHDR differs`);
+      return png;
+    };
+    const after = byLabel('after-wheel');
     if (!(e.wheel?.events ?? []).some((w) => w.isTrusted === true) || e.wheel?.sent?.type !== 'mouseWheel') failures.push(`${k}: trusted wheel evidence missing`);
-    const rederived = [];
+    const expected = after ? candidateClips(e.factor, after.scrollX, after.scrollY) : [];
+    const crops = [];
     for (const c of e.candidates ?? []) {
-      if (!c.sent) { rederived.push({ convention: c.convention, match: { matches: false } }); continue; }
+      if (!c.sent) { failures.push(`${k}/${c.convention}: candidate was not sent`); continue; }
       if (![c.clip.x, c.clip.y, c.clip.width, c.clip.height].every(Number.isInteger) || c.params?.clip?.x !== c.clip.x || c.params?.clip?.y !== c.clip.y) { failures.push(`${k}/${c.convention}: sent clip not integral DIP`); continue; }
-      if (!c.png) { rederived.push({ convention: c.convention, match: { matches: false } }); continue; }
-      if (c.png.name !== probePngName(k, c.convention)) { failures.push(`${k}/${c.convention}: PNG name differs`); continue; }
-      let bytes; try { bytes = await fs.readFile(join(directory, c.png.name)); } catch { failures.push(`${k}/${c.convention}: PNG missing`); continue; }
-      if (bytes.length !== c.png.bytes || sha256(bytes) !== c.png.sha256) { failures.push(`${k}/${c.convention}: PNG sha256/size differs (wrong source)`); continue; }
-      let png; try { png = decodePng(bytes); } catch (error) { failures.push(`${k}/${c.convention}: ${cap(error.message)}`); continue; }
-      if (png.width !== c.png.ihdr.width || png.height !== c.png.ihdr.height) failures.push(`${k}/${c.convention}: IHDR differs`);
+      const exp = expected.find((x) => x.convention === c.convention);
+      if (!exp?.sent || JSON.stringify(exp.clip) !== JSON.stringify(c.clip)) { failures.push(`${k}/${c.convention}: clip is not derived from the observed landing`); continue; }
+      const png = await readPng(c.png, probePngName(k, c.convention), c.convention);
+      if (!png) continue;
       const match = matchMarker(png, c.clip, e.factor);
       if (match.matches !== (c.match?.matches === true)) failures.push(`${k}/${c.convention}: recorded match differs from re-derived colours`);
-      rederived.push({ convention: c.convention, match });
+      crops.push({ convention: c.convention, png, sha256: c.png.sha256 });
     }
-    const decision = decideConvention(rederived);
-    if (decision.failure) failures.push(`${k}: ${decision.failure}`);
-    else if (e.convention !== decision.convention) failures.push(`${k}: recorded convention differs from re-derived`);
+    const edge = await readPng(e.viewportCapture, probePngName(k, 'viewport-edge'), 'viewport-edge');
+    const verdict = evaluateFactor({ factor: e.factor, initial: byLabel('initial'), after, final: byLabel('after-capture'), sent: e.wheel?.sent, events: e.wheel?.events, crops, edge });
+    for (const f of verdict.failures) failures.push(`${k}: ${f}`);
+    for (const c of e.candidates ?? []) {
+      const v = verdict.candidates.find((x) => x.convention === c.convention);
+      if (v?.edgeEquality && c.edgeEquality?.equal !== v.edgeEquality.equal) failures.push(`${k}/${c.convention}: recorded edge equality differs from re-derived`);
+    }
+    if (!verdict.failures.length && e.convention !== verdict.convention) failures.push(`${k}: recorded convention differs from re-derived`);
     for (const f of e.failures ?? []) if (!failures.includes(`${k}: ${f}`)) failures.push(`${k}: ${cap(f)}`);
   }
   const zooms = (section.processes ?? []).filter((e) => e.factor !== 1);
