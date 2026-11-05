@@ -932,7 +932,7 @@ object SourceTreeGenerator {
                     inputBinarySha256 = model.inputSha256,
                     modelSchemaVersion = model.schemaVersion,
                     profileSha256 = profile.sha256,
-                    fingerprint = fingerprint,
+                    fingerprint = reusedAccepted?.fingerprint ?: fingerprint,
                     sourceSha256 = normalizedSourceSha256,
                     generator = attempted.generator,
                     workflowOrigin = workflowOrigin,

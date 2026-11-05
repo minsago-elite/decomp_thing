@@ -32,6 +32,11 @@ import decompengine.agent.execute
 import decompengine.agent.executeReceipt
 import decompengine.repair.CapturedRepairStagingAuthority
 import decompengine.repair.RepairResourceBudget
+import decompengine.project.SourceTreeGenerator
+import decompengine.project.ModuleCompilerFeedbackStore
+import decompengine.project.ReconstructionHostSafetyLimits
+import decompengine.agent.AgentWorkflowProgress
+import kotlinx.serialization.json.*
 import decompengine.project.ArchivalBundleVerifier
 import decompengine.project.ArchivalProjectAuditor
 import decompengine.project.ArchivalReconstructionService
@@ -1035,6 +1040,81 @@ class AcpAgentHarnessTest {
             process, null, AcpProcessContainment.LINUX_BUBBLEWRAP_CGROUP_V2, 64, 4096L, ProtocolActivity(),
         )
         return type to running
+    }
+
+    @Test
+    @Tag("ci-live")
+    @Tag("ci-contained-module")
+    @Execution(ExecutionMode.SAME_THREAD)
+    @ResourceLock("contained-module-compilation-runtime")
+    @Timeout(value = 5, unit = TimeUnit.MINUTES)
+    fun `compiler feedback retry preserves accepted checkpoint and session identity on reuse`() {
+        val temp = Files.createTempDirectory(
+            Path.of("build", "test-tmp").toAbsolutePath().normalize().createDirectories(), "acp-feedback-retry-",
+        )
+        val profile = ReconstructionProfiles.builtIn.first()
+        val model = RecoveredProgramModel(
+            inputSha256 = sha256(byteArrayOf(9, 8, 7)),
+            functions = listOf(RecoveredFunction(
+                "fn_0000000000001000", "decomp_engine_main", 0x1000UL,
+                "int decomp_engine_main(void)", "int decomp_engine_main(void) { return 0; }",
+            )),
+        )
+        val harness = harness("reconstruction-compiler-feedback-retry",
+            sentinel = profile.layout.declaration("module-implementation").materialize(mapOf("module" to "decomp")))
+        val provenance = AcpHarnessProvenance(
+            harness = "acp", implementationId = "scripted-acp-v1",
+            agentExecutionContractVersion = AGENT_EXECUTION_CONTRACT_VERSION,
+            acpProtocolVersion = ACP_STABLE_PROTOCOL_VERSION, acpSdkVersion = ACP_KOTLIN_SDK_VERSION,
+            configurationSha256 = "0".repeat(64), deprecated = false,
+        )
+        val reconstructor = BoundedLlmModuleReconstructor(harness,
+            harnessProvenanceDescriptor = provenance.stableDescriptor)
+        val project = temp.resolve("project")
+        val store = ModuleCompilerFeedbackStore(temp.resolve("feedback").createDirectories(), model.inputSha256, profile.sha256)
+        val reused = mutableListOf<String>()
+        fun generate() = SourceTreeGenerator.generateWithCompilerFeedback(
+            model, project, ReconstructionHostSafetyLimits.DEFAULT,
+            reconstructor = reconstructor, profile = profile,
+            compilerFeedback = store::read, onCompilerFeedback = store::write,
+            progress = object : AgentWorkflowProgress by AgentWorkflowProgress.NONE {
+                override fun checkpointReused(moduleId: String, sourceSha256: String) { reused += moduleId }
+            },
+        )
+        fun checkpoint() = Json.parseToJsonElement(project.resolve(
+            profile.layout.declaration("module-evidence").materialize(mapOf("module" to "decomp"))
+        ).readText()).jsonObject
+        fun journals(): Map<Path, String> = Files.walk(temp.resolve(".decomp-agent-sessions")).use { paths ->
+            paths.filter { it.fileName.toString() == "session.json" }.toList().associateWith { it.readText() }
+        }
+        generate()
+        val rejected = checkpoint()
+        assertEquals(false, rejected.getValue("accepted").jsonPrimitive.boolean)
+        assertNotNull(store.read("decomp"), "the first candidate must reach the contained compiler")
+        val rejectedJournals = journals().keys
+        generate()
+        val accepted = checkpoint()
+        assertEquals(true, accepted.getValue("accepted").jsonPrimitive.boolean)
+        assertTrue(rejected.getValue("fingerprint") != accepted.getValue("fingerprint"))
+        val before = journals()
+        val acceptedEntry = before.entries.single {
+            Json.parseToJsonElement(it.value).jsonObject.getValue("phase").jsonPrimitive.content == "ACCEPTED"
+        }
+        assertTrue(acceptedEntry.key !in rejectedJournals)
+        val acceptedJournal = Json.parseToJsonElement(acceptedEntry.value).jsonObject
+        assertEquals(accepted.getValue("executionRequestSha256"), acceptedJournal.getValue("acceptedRequestSha256"))
+        assertEquals(accepted.getValue("executionEvidenceSha256"), acceptedJournal.getValue("acceptedReceiptSha256"))
+        assertEquals(1, acceptedJournal.getValue("turns").jsonArray.size)
+        repeat(2) {
+            generate()
+            val cached = checkpoint()
+            assertEquals(true, cached.getValue("accepted").jsonPrimitive.boolean)
+            listOf("fingerprint", "promptSha256", "executionRequestSha256", "executionEvidenceSha256").forEach {
+                assertEquals(accepted.getValue(it), cached.getValue(it), it)
+            }
+            assertEquals(before, journals(), "reuse must leave every session journal byte-identical")
+        }
+        assertEquals(listOf("decomp", "decomp"), reused)
     }
 
     @Test
