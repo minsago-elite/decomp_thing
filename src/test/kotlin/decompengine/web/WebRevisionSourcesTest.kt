@@ -122,6 +122,64 @@ class WebRevisionSourcesTest {
         for (document in invalid) assertFails { capture(document = document) }
     }
 
+    @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+    @Test fun `source input size and key refusals retain exact errors and validation order`() {
+        val original = descriptor()
+        val rows = original.getValue("sourceInputs").jsonArray
+        val row = rows[0].jsonObject
+        val manifest = SourceTreeManifest(profileId = profile.id, profileSha256 = profile.sha256,
+            inputSha256 = input.sha256, files = small.map { evidence(it) }, unresolvedEntityIds = emptyList())
+        fun parse(item: JsonObject) = parseWebRevisionSourceInputs(reference(), manifest, "a".repeat(64),
+            JsonObject(original + ("sourceInputs" to JsonArray(listOf(item, rows[1])))), "b".repeat(64))
+        val invalidSizes = listOf("01", "-1", "10000000000000000000", "1.0").map { JsonUnquotedLiteral(it) } + JsonPrimitive("0")
+        for (size in invalidSizes) {
+            val failure = assertFailsWith<IllegalArgumentException> { parse(JsonObject(row + ("bytes" to size))) }
+            assertEquals(IllegalArgumentException::class, failure::class)
+            assertEquals("Failed requirement.", failure.message)
+        }
+        val wrongKeys = row.keys.map { JsonObject(row - it) } + listOf(
+            JsonObject(row + ("extra" to JsonPrimitive(0))),
+            JsonObject((row - "bytes") + ("size" to JsonPrimitive(0))),
+            JsonObject(emptyMap()),
+        )
+        for (item in wrongKeys) {
+            val failure = assertFailsWith<IllegalArgumentException> { parse(item) }
+            assertEquals(IllegalArgumentException::class, failure::class)
+            assertEquals("Failed requirement.", failure.message)
+        }
+        // Key validation precedes field reads, while path and hash identity precede size validation.
+        assertEquals("Failed requirement.", assertFailsWith<IllegalArgumentException> {
+            parse(JsonObject(row + ("path" to JsonNull) + ("extra" to JsonNull)))
+        }.message)
+        assertEquals("Source input descriptor is invalid.", assertFailsWith<IllegalStateException> {
+            parse(JsonObject(row + ("path" to JsonNull)))
+        }.message)
+        for (change in listOf("path" to JsonPrimitive("unknown"), "sha256" to JsonPrimitive("f".repeat(64)))) {
+            val failure = assertFailsWith<WebAccessDenied> {
+                parse(JsonObject(row + change + ("bytes" to JsonPrimitive("0"))))
+            }
+            assertEquals(409, failure.status)
+            assertEquals("SOURCE_REVISION_CHANGED", failure.code)
+            assertEquals("The selected revision could not be captured consistently. Refresh its source listing.", failure.message)
+        }
+    }
+
+    @Test fun `batch source file identities preserve single ids encoding order and duplicate replacement`() {
+        val paths = listOf("", "src/é.c", "src/한글.c", "src/\uD83D\uDE80.c", "src/e\u0301.c",
+            "src/\uD800.c", "src/\uDC00.c", "with\u0000separator", "src/é.c", "", "last")
+        val ref = reference()
+        for (selected in listOf(ref, ref.copy(jobId = "job-é", runId = "run-\uD83D\uDE80", revisionId = "rev-\uD800"),
+            ref.copy(sourceSha256 = "b".repeat(64)), ref.copy(attemptVersion = "new-version"))) {
+            val expected = paths.withIndex().associate { (index, path) -> path to revisionSourceFileId(selected, index, path) }
+            val actual = revisionSourceFileIds(selected, paths)
+            assertEquals(expected.entries.toList(), actual.entries.toList())
+            assertEquals(emptyMap(), revisionSourceFileIds(selected, emptyList()))
+            assertEquals(mapOf("" to revisionSourceFileId(selected, 0, "")), revisionSourceFileIds(selected, listOf("")))
+        }
+        assertEquals(revisionSourceFileIds(ref, paths), revisionSourceFileIds(ref.copy(attemptVersion = "new-version"), paths))
+        assertNotEquals(revisionSourceFileId(ref, 0, ""), revisionSourceFileId(ref, 1, ""))
+    }
+
     @Test fun `changed descriptor identity or uploaded input never publishes a partial source listing`() {
         val manifest = manifest(); val descriptor = captured(descriptor().toString().toByteArray(), 3)
         var captures = 0

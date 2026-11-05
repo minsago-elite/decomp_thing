@@ -33,6 +33,9 @@ test('bounds reports by replacing request lists with counts', () => {
   assert.equal(boundReport(small, 1000), small);
   const big = { status: 'passed', requests: { a: Array.from({ length: 1000 }, () => ({ method: 'GET', url: 'x'.repeat(50) })) } };
   assert.deepEqual(boundReport(big, 2000).requests, { a: { count: 1000, truncated: true } });
+  const formatted = boundReport({ requests: { a: Array(40).fill({ x: 'é'.repeat(10) }) } }, 300);
+  assert.ok(Buffer.byteLength(JSON.stringify(formatted, null, 2), 'utf8') <= 300,
+    'the emitted pretty-printed report must remain under its byte limit');
   assert.throws(() => boundReport({ blob: 'x'.repeat(5000), requests: {} }, 1000));
   assert.throws(() => boundReport({ blob: 'é'.repeat(600), requests: {} }, 1000),
     'UTF-8 encoded report bytes must be bounded, not JavaScript code units');

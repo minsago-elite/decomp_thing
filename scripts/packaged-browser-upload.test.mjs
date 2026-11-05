@@ -34,7 +34,9 @@ function fixture({ mountAt = 3, disabled = false, renderSelection = true, enable
       if (selector === 'section[aria-labelledby="upload-title"] input#binary-file[type="file"]:not(:disabled)') {
         return samples >= mountAt && !disabled ? picker : null;
       }
-      if (selector === 'button[type="submit"]') return samples >= mountAt ? submit : null;
+      if (selector === 'button[type="submit"]' || selector === '.upload-panel button[type="submit"]') {
+        return samples >= mountAt ? submit : null;
+      }
       throw new Error('Unexpected selector: ' + selector);
     },
   };
@@ -83,7 +85,7 @@ test('session readiness cannot select a missing lazy-route picker', async () => 
   await selectUploadFixture(f.args);
   assert.equal(f.document.activeElement, f.picker);
   assert.deepEqual(f.counts(), { changes: 1, evaluations: 1 });
-  assert.deepEqual(f.labels, ['workspace upload control', 'upload selection rendered']);
+  assert.deepEqual(f.labels, ['workspace upload control', 'upload selection rendered', 'selected fixture and enabled upload']);
   const [file] = f.picker.files;
   assert.equal(file.name, 'inert-browser-fixture.elf');
   assert.equal(file.size, 64);
@@ -144,7 +146,7 @@ for (const [name, qualify, filename, size] of [
     assert.equal(f.document.querySelector('#binary-file'), null);
     await assert.rejects(f.run(), error => error === f.submitted);
     assert.equal(f.counts().changes, 1);
-    assert.equal(f.labels.at(-1), 'upload selection rendered');
+    assert.equal(f.labels.at(-1), qualify === qualifyMeasuredUpload ? 'upload selection rendered' : 'selected fixture and enabled upload');
     const [file] = f.picker.files;
     assert.equal(file.name, filename);
     assert.equal(file.size, size);

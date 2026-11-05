@@ -285,23 +285,62 @@ data class ModulePlan(
 ) {
     fun toJson(): String = buildString {
         append("{\n  \"schemaVersion\": ").append(schemaVersion).append(",\n  \"modules\": [")
-        append(modules.sortedBy { it.id }.joinToString(",") { module ->
-            """
-            {
-              "id": "${module.id.json()}",
-              "sourcePath": "${module.sourcePath.json()}",
-              "headerPath": "${module.headerPath.json()}",
-              "functionIds": [${module.functionIds.joinToString(", ") { "\"${it.json()}\"" }}],
-              "globalIds": [${module.globalIds.joinToString(", ") { "\"${it.json()}\"" }}],
-              "typeIds": [${module.typeIds.joinToString(", ") { "\"${it.json()}\"" }}],
-              "boundaryEvidence": [${module.boundaryEvidence.joinToString(", ") { "\"${it.json()}\"" }}]
-            }""".trimIndent().prependIndent("    ")
-        })
+        modules.sortedBy { it.id }.forEachIndexed { index, module ->
+            if (index > 0) append(',')
+            append("    {\n      \"id\": ").appendJsonString(module.id)
+            append(",\n      \"sourcePath\": ").appendJsonString(module.sourcePath)
+            append(",\n      \"headerPath\": ").appendJsonString(module.headerPath)
+            append(",\n      \"functionIds\": ").appendJsonStringArray(module.functionIds)
+            append(",\n      \"globalIds\": ").appendJsonStringArray(module.globalIds)
+            append(",\n      \"typeIds\": ").appendJsonStringArray(module.typeIds)
+            append(",\n      \"boundaryEvidence\": ").appendJsonStringArray(module.boundaryEvidence)
+            append("\n    }")
+        }
         append("\n  ],\n  \"dependencyCycles\": [")
-        append(dependencyCycles.joinToString(",") { cycle -> "[${cycle.joinToString(",") { "\"${it.json()}\"" }}]" })
+        dependencyCycles.forEachIndexed { cycleIndex, cycle ->
+            if (cycleIndex > 0) append(',')
+            append('[')
+            cycle.forEachIndexed { moduleIndex, moduleId ->
+                if (moduleIndex > 0) append(',')
+                appendJsonString(moduleId)
+            }
+            append(']')
+        }
         append("]\n}\n")
     }
 }
+
+private fun StringBuilder.appendJsonStringArray(values: List<String>) {
+    append('[')
+    values.forEachIndexed { index, value ->
+        if (index > 0) append(", ")
+        appendJsonString(value)
+    }
+    append(']')
+}
+
+private fun StringBuilder.appendJsonString(value: String) {
+    append('"')
+    value.forEach { char ->
+        when (char) {
+            '\\' -> append("\\\\")
+            '"' -> append("\\\"")
+            '\n' -> append("\\n")
+            '\r' -> append("\\r")
+            '\t' -> append("\\t")
+            else -> if (char.code < 0x20) {
+                append("\\u")
+                append(HEX_DIGITS[(char.code shr 12) and 0xf])
+                append(HEX_DIGITS[(char.code shr 8) and 0xf])
+                append(HEX_DIGITS[(char.code shr 4) and 0xf])
+                append(HEX_DIGITS[char.code and 0xf])
+            } else append(char)
+        }
+    }
+    append('"')
+}
+
+private const val HEX_DIGITS = "0123456789abcdef"
 
 fun stableFunctionId(address: ULong): String = "fn_${address.toString(16).padStart(16, '0')}"
 fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }

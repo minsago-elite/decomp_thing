@@ -8,52 +8,67 @@ import kotlinx.serialization.json.jsonPrimitive
 
 /** Byte-format and ownership validation only; this does not attest execution or planner semantics. */
 internal object ModulePlanJson {
-    fun readCanonical(bytes: ByteArray, maximumBytes: Int): ModulePlan = readCanonical(bytes, maximumBytes) {}
+    fun readCanonical(bytes: ByteArray, maximumBytes: Int): ModulePlan = readCanonical(bytes, maximumBytes, {})
+
+    internal fun readCanonical(bytes: ByteArray, maximumBytes: Int, checkpoint: (String) -> Unit): ModulePlan =
+        readCanonical(bytes, maximumBytes, checkpoint, null)
 
     /** Cooperative traversal; individual library parsing, rendering and allocation remain nonpreemptible. */
-    internal fun readCanonical(bytes: ByteArray, maximumBytes: Int, checkpoint: (String) -> Unit): ModulePlan {
+    internal fun readCanonical(bytes: ByteArray, maximumBytes: Int, checkpoint: (String) -> Unit,
+        timing: ((String, Long) -> Unit)?): ModulePlan {
+        fun <T> measured(phase: String, action: () -> T): T {
+            if (timing == null) return action()
+            val started = System.nanoTime()
+            return try { action() } finally { timing(phase, System.nanoTime() - started) }
+        }
         checkpoint("before reading module plan")
         require(maximumBytes in 1..512 * 1024 * 1024 && bytes.size in 1..maximumBytes) {
             "module plan exceeds its byte bound"
         }
-        val text = bytes.toString(Charsets.UTF_8)
-        require(bytes.contentEquals(text.toByteArray(Charsets.UTF_8))) { "module plan is not canonical UTF-8" }
+        val text = measured("decode-utf8") { bytes.toString(Charsets.UTF_8) }
+        measured("verify-utf8-roundtrip") {
+            require(bytes.contentEquals(text.toByteArray(Charsets.UTF_8))) { "module plan is not canonical UTF-8" }
+        }
         checkpoint("after decoding module plan")
         // Bound nesting before the general JSON parser sees untrusted output. Strings may contain braces.
-        var depth = 0
-        var quoted = false
-        var escaped = false
-        text.forEachIndexed { index, char ->
-            if (index > 0 && index % 1024 == 0) checkpoint("scanning module plan after $index characters")
-            if (quoted) {
-                if (escaped) escaped = false
-                else if (char == '\\') escaped = true
-                else if (char == '"') quoted = false
-            } else when (char) {
-                '"' -> quoted = true
-                '{', '[' -> { depth++; require(depth <= 4) { "module plan exceeds its nesting bound" } }
-                '}', ']' -> { depth--; require(depth >= 0) }
+        measured("scan-nesting") {
+            var depth = 0
+            var quoted = false
+            var escaped = false
+            text.forEachIndexed { index, char ->
+                if (index > 0 && index % 1024 == 0) checkpoint("scanning module plan after $index characters")
+                if (quoted) {
+                    if (escaped) escaped = false
+                    else if (char == '\\') escaped = true
+                    else if (char == '"') quoted = false
+                } else when (char) {
+                    '"' -> quoted = true
+                    '{', '[' -> { depth++; require(depth <= 4) { "module plan exceeds its nesting bound" } }
+                    '}', ']' -> { depth--; require(depth >= 0) }
+                }
             }
+            require(depth == 0 && !quoted)
         }
-        require(depth == 0 && !quoted)
         checkpoint("before parsing module plan JSON")
-        val root = Json.parseToJsonElement(text).jsonObject
-        checkpoint("after parsing module plan JSON")
-        val version = root.getValue("schemaVersion").jsonPrimitive
-        require(!version.isString && version.content == "2") { "unsupported module plan schema" }
-        val plan = ModulePlan(modules = root.getValue("modules").jsonArray.map { element ->
-            checkpoint("reading module plan module")
-            val entry = element.jsonObject
-            PlannedModule(entry.getValue("id").string(), entry.getValue("sourcePath").string(),
-                entry.getValue("headerPath").string(), entry.getValue("functionIds").strings(checkpoint),
-                entry.getValue("globalIds").strings(checkpoint), entry.getValue("typeIds").strings(checkpoint),
-                entry.getValue("boundaryEvidence").strings(checkpoint))
-        }, dependencyCycles = root.getValue("dependencyCycles").jsonArray.map {
-            checkpoint("reading module plan cycle")
-            it.strings(checkpoint)
-        })
+        val plan = measured("parse-plan-json") {
+            val root = Json.parseToJsonElement(text).jsonObject
+            checkpoint("after parsing module plan JSON")
+            val version = root.getValue("schemaVersion").jsonPrimitive
+            require(!version.isString && version.content == "2") { "unsupported module plan schema" }
+            ModulePlan(modules = root.getValue("modules").jsonArray.map { element ->
+                checkpoint("reading module plan module")
+                val entry = element.jsonObject
+                PlannedModule(entry.getValue("id").string(), entry.getValue("sourcePath").string(),
+                    entry.getValue("headerPath").string(), entry.getValue("functionIds").strings(checkpoint),
+                    entry.getValue("globalIds").strings(checkpoint), entry.getValue("typeIds").strings(checkpoint),
+                    entry.getValue("boundaryEvidence").strings(checkpoint))
+            }, dependencyCycles = root.getValue("dependencyCycles").jsonArray.map {
+                checkpoint("reading module plan cycle")
+                it.strings(checkpoint)
+            })
+        }
         checkpoint("before rendering canonical module plan")
-        val canonical = plan.toJson().toByteArray(Charsets.UTF_8)
+        val canonical = measured("render-canonical-plan") { plan.toJson().toByteArray(Charsets.UTF_8) }
         checkpoint("after rendering canonical module plan")
         require(bytes.contentEquals(canonical)) {
             "module plan must use exact canonical fields, ordering, and bytes"

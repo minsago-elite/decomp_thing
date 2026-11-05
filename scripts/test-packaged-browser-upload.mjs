@@ -4,7 +4,8 @@ import { createRequire } from 'node:module';
 import { resolve, join } from 'node:path';
 import test, { after } from 'node:test';
 import vm from 'node:vm';
-import { qualifyUpload, qualifyUploadFailures, qualifyMeasuredUpload } from './packaged-browser-upload.mjs';
+import { runInNewContext } from 'node:vm';
+import { uploadFormReady, uploadSubmitReady, selectUploadFixture, qualifyUpload, qualifyUploadFailures, qualifyMeasuredUpload } from './packaged-browser-upload.mjs';
 
 // Use the already locked frontend DOM dependency; these controls launch no browser or JVM.
 const { JSDOM } = createRequire(new URL('../frontend/package.json', import.meta.url))('jsdom');
@@ -25,7 +26,7 @@ after(() => fs.rm(data, { recursive: true, force: true }));
 
 const entries = { qualifyUpload, qualifyUploadFailures, qualifyMeasuredUpload };
 const picker = '<input id="binary-file" type="file">';
-const panel = content => `<section aria-labelledby="upload-title"><h2 id="upload-title">Upload a binary</h2>${content}</section>`;
+const panel = content => `<section aria-labelledby="upload-title"><h2 id="upload-title">Upload a binary</h2><p id="upload-guidance">The complete request limit is 33554432 bytes, including multipart overhead.</p>${content}</section>`;
 const bannerOnly = `document.body.innerText.includes('Local session connected.')`;
 
 function fixture(t, { markup = '', route = '/nested/', connected = true, onTick = () => {}, evaluateFailure } = {}) {
@@ -153,4 +154,63 @@ test('existing ready preserves unrelated expression failure before file assignme
   await assert.rejects(qualifyUpload(f.args), error => error === failure);
   assert.equal(f.state.elapsed, 0);
   assert.equal(f.state.fixtureEvaluations, 0);
+});
+
+function page({ connected = true, limits = true, picker = true, selected = true,
+  disabled = false, label = 'Upload binary', button = true } = {}) {
+  const input = picker ? { files: selected ? [{ name: 'inert-browser-fixture.elf' }] : [] } : null;
+  const submit = button ? { disabled, textContent: label } : null;
+  return { location: { pathname: '/nested/' }, body: { innerText: connected ? 'Local session connected.' : 'Connecting…' },
+    querySelector: (selector) => ({
+      '#upload-guidance': limits ? { textContent: 'The complete request limit is 33554432 bytes, including multipart overhead.' } : null,
+      '#binary-file:not(:disabled)': input,
+      '#binary-file': input,
+      '.upload-panel button[type="submit"]': submit,
+      'button[type="submit"]': submit,
+      'section[aria-labelledby="upload-title"] input#binary-file[type="file"]:not(:disabled)': input,
+    })[selector] ?? null };
+}
+const ready = (expression, options) => Boolean(runInNewContext(expression, { document: page(options), location: { pathname: options?.route ?? '/nested/' } }));
+
+test('packaged upload waits for authenticated form limits, not just the shell session notice', () => {
+  for (const options of [{ connected: false }, { limits: false }, { picker: false }, { route: '/nested/upload' }]) {
+    assert.equal(ready(uploadFormReady, options), false);
+  }
+  assert.equal(ready(uploadFormReady), true);
+});
+
+test('upload submission waits through missing, uncommitted, disabled and replaced form states', () => {
+  const expression = uploadSubmitReady('Upload binary');
+  for (const options of [{ picker: false }, { selected: false }, { button: false },
+    { disabled: true }, { label: 'Retry this upload' }]) {
+    assert.equal(ready(expression, options), false);
+  }
+  assert.equal(ready(expression), true);
+});
+
+test('retry readiness requires the restored fixture and enabled retry button without submitting', () => {
+  const expression = uploadSubmitReady('Retry this upload');
+  for (const options of [{ selected: false }, { disabled: true }, { button: false }]) {
+    assert.equal(ready(expression, { label: 'Retry this upload', ...options }), false);
+  }
+  assert.equal(ready(expression), false);
+  assert.equal(ready(expression, { label: 'Retry this upload' }), true);
+});
+
+test('fixture reselection accepts the retained upload retry label', async () => {
+  const document = page({ label: 'Retry this upload' });
+  document.body.innerText += ' Selected: inert-browser-fixture.elf';
+  const observed = [];
+  await selectUploadFixture({
+    tab: { sessionId: 'fixture' },
+    evaluate: async () => {},
+    ready: async (_tab, expression) => {
+      observed.push(expression);
+      assert.equal(Boolean(runInNewContext(expression, { document })), true);
+    },
+    waitForControl: false,
+    submitLabel: 'Retry this upload',
+  });
+  assert.equal(observed.length, 2);
+  assert.match(observed[1], /Retry this upload/);
 });

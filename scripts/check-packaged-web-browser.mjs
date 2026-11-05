@@ -8,12 +8,13 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { qualifyUpload, qualifyUploadFailures, qualifyMeasuredUpload } from './packaged-browser-upload.mjs';
 import { seedScale, qualifyScale, dashboardFiltersWithSnapshot } from './packaged-browser-scale.mjs';
+import { seedStructure, qualifyStructure } from './packaged-browser-structure.mjs';
 import { seedLive, qualifyLive } from './packaged-browser-live.mjs';
 import { seedHistory, qualifyHistory } from './packaged-browser-history.mjs';
 import { seedLegacy, qualifyLegacy } from './packaged-browser-legacy.mjs';
 import { qualifyRestart, assertGracefulShutdown, scrubTokens, boundReport } from './packaged-browser-restart.mjs';
 import { qualifyUpgrade, qualifyUpgradeCache } from './packaged-browser-upgrade.mjs';
-import { qualifyAudit, assertAudit } from './packaged-browser-audit.mjs';
+import { qualifyAudit, assertAudit, encodeAuditEvidence, summarizeAuditEvidence } from './packaged-browser-audit.mjs';
 import { PackagedBrowserCdpDiagnostics } from './packaged-browser-cdp-diagnostics.mjs';
 
 // Test driver only: the application is launched with a separate Node-free PATH.
@@ -23,6 +24,7 @@ const { values } = parseArgs({ options: {
   'previous-archive': { type: 'string' },
   mode: { type: 'string', default: 'public' },
   'work-parent': { type: 'string', default: join(repo, 'build') },
+  'browser-temp-parent': { type: 'string', default: repo },
   'keep-workdir': { type: 'boolean', default: false },
   chrome: { type: 'string' },
   'java-home': { type: 'string' },
@@ -31,9 +33,9 @@ const { values } = parseArgs({ options: {
   help: { type: 'boolean', default: false },
 } });
 if (values.help) {
-  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|metadata|history|restart|scale|live|proxy|upgrade|legacy|audit] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
+  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|metadata|history|restart|scale|structure|live|proxy|upgrade|legacy|audit] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--browser-temp-parent /absolute/short-owned-directory] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
   console.log('restart: seeded history on one JVM, graceful SIGTERM-only restart on the same installation/data/port, fresh bootstrap and serverInstanceId, then two tabs with a progress-pin stale If-Match 412. No live worker, no restart-while-running, one Chromium only.');
-  console.log('public: packaged home/Runtime/recovery; session: public plus local session journey; upload: session plus inert upload and lost-response retry; history: session plus preseeded inert multi-page attempts; scale: session plus 10,000 persisted jobs and keyboard pagination; proxy: real Vite HMR and session journey against packaged JVM; upgrade: previous JVM to current JVM on one origin with an old tab.');
+  console.log('public: packaged home/Runtime/recovery; session: public plus local session journey; upload: session plus inert upload and lost-response retry; history: session plus preseeded inert multi-page attempts; scale: session plus 10,000 persisted jobs and keyboard pagination; structure: session plus a 100,000-function recorded revision; proxy: real Vite HMR and session journey against packaged JVM; upgrade: previous JVM to current JVM on one origin with an old tab.');
   console.log('legacy: inert legacy HTML/polling with explicit test-owned state edits; no workflow execution.');
   console.log('audit: every route at 1440x900, 390x844, 320px and 200%/400% zoom in light/dark themes with contract-fixture API reads fulfilled in DevTools; measures reflow, text/focus contrast, target size, reduced motion, every packaged asset under CSP and navigation timing budgets.');
   console.log('metadata: session plus one inert header upload/retry, real packaged job metadata, maximum uint64 address, and simulated malformed-response recovery; no workflow execution or upload quota/scale measurement.');
@@ -49,17 +51,19 @@ for (const option of ['archive', 'chrome', 'java-home', 'python']) {
   assert.ok(values[option] && isAbsolute(values[option]), `--${option} must name an absolute existing path; see --help`);
   await fs.access(values[option]);
 }
-assert.ok(['public', 'session', 'upload', 'metadata', 'history', 'restart', 'scale', 'live', 'proxy', 'upgrade', 'legacy', 'audit'].includes(values.mode), '--mode must be public, session, upload, metadata, history, restart, scale, live, proxy, upgrade, legacy or audit');
+assert.ok(['public', 'session', 'upload', 'metadata', 'history', 'restart', 'scale', 'structure', 'live', 'proxy', 'upgrade', 'legacy', 'audit'].includes(values.mode), '--mode must be public, session, upload, metadata, history, restart, scale, structure, live, proxy, upgrade, legacy or audit');
 if (values.mode === 'upgrade') {
   assert.ok(values['previous-archive'] && isAbsolute(values['previous-archive']), 'upgrade requires --previous-archive as an absolute existing ZIP path');
   await fs.access(values['previous-archive']);
 } else assert.equal(values['previous-archive'], undefined, '--previous-archive is only supported with --mode upgrade');
 assert.ok(isAbsolute(values['work-parent']), '--work-parent must be an absolute directory');
+assert.ok(isAbsolute(values['browser-temp-parent']), '--browser-temp-parent must be an absolute directory');
 const archive = values.archive;
 const javaHome = values['java-home'];
 const chromeBinary = values.chrome;
 await fs.mkdir(join(repo, 'build'), { recursive: true });
 assert.ok((await fs.stat(values['work-parent'])).isDirectory(), '--work-parent must already exist');
+assert.ok((await fs.stat(values['browser-temp-parent'])).isDirectory(), '--browser-temp-parent must already exist');
 if (values.mode === 'proxy') await fs.access(join(repo, 'frontend/node_modules/vite/bin/vite.js'));
 const sensitiveValues = [];
 const safeDiagnostic = (value) => {
@@ -141,7 +145,7 @@ class Protocol {
         if (!pending) return;
         clearTimeout(pending.timer);
         this.pending.delete(message.id);
-        if (message.error) pending.reject(new Error(message.error.message));
+        if (message.error) pending.reject(new Error(`DevTools ${pending.method} failed: ${message.error.message}`));
         else pending.resolve(message.result);
       } else {
         for (const listener of this.listeners.get(`${message.sessionId ?? ''}:${message.method}`) ?? []) listener(message.params);
@@ -159,7 +163,7 @@ class Protocol {
     const id = ++this.sequence;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => { this.pending.delete(id); reject(new Error(`DevTools deadline: ${method}`)); }, 15000);
-      this.pending.set(id, { resolve, reject, timer });
+      this.pending.set(id, { method, resolve, reject, timer });
       this.socket.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
     });
   }
@@ -335,6 +339,7 @@ async function makeTarget({ cspProbe = false, cacheEnabled = false, newWindow = 
       sourceFile: event.sourceFile, statusCode: event.statusCode, violatedDirective: event.violatedDirective,
     }));
   });` });
+  state.initialize = initialize;
   await initialize('Network.setCacheDisabled', { cacheDisabled: !cacheEnabled });
   await initialize('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
   state.initializationComplete = true;
@@ -455,7 +460,16 @@ async function prepareArchive(archivePath) {
   }
   // Gradle uses xargs with its default external echo command while parsing JVM options.
   await fs.symlink('/usr/bin/echo', join(bins, 'echo'));
-  const environment = { PATH: bins, JAVA_HOME: javaHome, LANG: 'C.UTF-8' };
+  const runtimeHome = join(working, 'jvm-home');
+  const runtimeTmp = join(working, 'jvm-tmp');
+  await fs.mkdir(runtimeHome);
+  await fs.mkdir(runtimeTmp);
+  // HOME/TMPDIR alone do not set HotSpot's directory properties. These controlled
+  // options keep the test JVM and its native extraction inside the owned workspace.
+  assert.ok(!/["\r\n]/.test(runtimeHome + runtimeTmp), 'JVM test directory cannot be represented in launcher options');
+  const environment = { PATH: bins, JAVA_HOME: javaHome, LANG: 'C.UTF-8', HOME: runtimeHome,
+    TMPDIR: runtimeTmp, TMP: runtimeTmp, TEMP: runtimeTmp,
+    JAVA_TOOL_OPTIONS: `-XX:-UsePerfData -Duser.home="${runtimeHome}" -Djava.io.tmpdir="${runtimeTmp}" -Djna.tmpdir="${runtimeTmp}"` };
   for (const name of ['node', 'npm']) assert.notEqual(spawnSync('/bin/sh', ['-c', `command -v ${name}`], { env: environment }).status, 0);
   const data = join(working, 'untouched jobs');
   return { ...setup, archivePath, archiveSha256, work, before, working, environment, data };
@@ -509,10 +523,11 @@ try {
   const historyFixture = values.mode === 'history' ? await seedHistory(data) : null;
   const restartFixture = values.mode === 'restart' ? await seedHistory(data) : null;
   const scaleFixture = values.mode === 'scale' ? await seedScale(data) : null;
+  const structureFixture = values.mode === 'structure' ? await seedStructure(data) : null;
   const liveFixture = values.mode === 'live' ? await seedLive(data) : null;
-  const populated = !!(historyFixture || restartFixture || scaleFixture || liveFixture);
+  const populated = !!(historyFixture || restartFixture || scaleFixture || structureFixture || liveFixture);
   const libraryText = historyFixture || restartFixture ? 'synthetic-history.elf' : scaleFixture ? 'synthetic-project-09999.elf'
-    : liveFixture ? 'live-dashboard-2.elf' : 'No uploaded jobs yet.';
+    : structureFixture ? 'synthetic-structure.elf' : liveFixture ? 'live-dashboard-2.elf' : 'No uploaded jobs yet.';
   let developmentPort;
   let browserOrigin;
   if (values.mode === 'proxy') {
@@ -536,7 +551,7 @@ try {
 
   // Chrome places SingletonSocket under TMPDIR. Keep it short enough even on hosted
   // runners whose checkout path is /home/runner/work/<repo>/<repo>.
-  browserTmp = await fs.mkdtemp(join(repo, '.ct-'));
+  browserTmp = await fs.mkdtemp(join(values['browser-temp-parent'], '.ct-'));
   report.browserTempDirectory = browserTmp;
   await fs.mkdir(profile);
   browser = startOwned(chromeBinary, [...(observeNativeVisibility ? [] : ['--headless=new']), '--disable-gpu', ...(values['no-sandbox'] ? ['--no-sandbox'] : []), '--no-first-run', '--no-default-browser-check', '--disable-background-networking', '--disable-extensions', '--disable-default-apps', '--disable-sync', '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1', `--user-data-dir=${profile}`, 'about:blank'], {
@@ -727,7 +742,7 @@ try {
     assert.equal(await fs.stat(data).then(() => true, () => false), false, 'Fixture-backed audit created job data');
     report.jobDataCreated = false;
   }
-  if (values.mode === 'public' || values.mode === 'session' || values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'history' || values.mode === 'scale' || values.mode === 'live') {
+  if (values.mode === 'public' || values.mode === 'session' || values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'history' || values.mode === 'scale' || values.mode === 'structure' || values.mode === 'live') {
     const identityExpression = `(() => ({ buildId: document.querySelector('meta[name="decomp-ui-build"]')?.content, applicationVersion: document.querySelector('meta[name="decomp-application-version"]')?.content, page: location.pathname, text: document.body.innerText }))()`;
     const home = await makeTarget();
     await cdp.call('Page.navigate', { url: `${origin}/nested/` }, home.sessionId);
@@ -884,7 +899,7 @@ try {
     report.requests = {};
   }
 
-  if (values.mode === 'session' || values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'history' || values.mode === 'scale' || values.mode === 'live' || values.mode === 'proxy') {
+  if (values.mode === 'session' || values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'history' || values.mode === 'scale' || values.mode === 'structure' || values.mode === 'live' || values.mode === 'proxy') {
     const bootstrapUrl = await waitFor(() => applicationOutput.split(/\s+/).find((part) => part.startsWith(browserOrigin + '/nested/#bootstrap=')), 'local bootstrap handoff');
     const token = new URL(bootstrapUrl).hash.slice('#bootstrap='.length);
     sensitiveValues.push(token);
@@ -1014,6 +1029,8 @@ try {
     report.attemptHistory = { navigation: true, directReload: true, missingExplained: true, mutationRequests: 0 };
 
     if (scaleFixture) report.scale = await qualifyScale({ fixture: scaleFixture, makeTarget, cdp, evaluate, ready, browserOrigin });
+    if (structureFixture) report.structure = await qualifyStructure({ fixture: structureFixture, makeTarget, cdp, evaluate, ready, browserOrigin,
+      applicationPid: application.pid });
     if (liveFixture) {
       report.liveDashboard = await qualifyLive({ fixture: liveFixture, makeTarget, cdp, evaluate, ready, waitFor, browserOrigin });
       report.jobDataCreated = true;
@@ -1193,6 +1210,19 @@ try {
       report.workCleanupConfirmed = false;
       report.workCleanupError = safeDiagnostic(error.stack);
       process.exitCode = 1;
+    }
+  }
+  if (report.audit) {
+    try {
+      const { bytes, metadata } = encodeAuditEvidence(scrubTokens(report.audit, sensitiveValues));
+      const file = 'audit-evidence.json.gz';
+      await fs.writeFile(join(root, file), bytes, { flag: 'wx', mode: 0o600 });
+      report.audit = summarizeAuditEvidence(report.audit, { file, ...metadata });
+    } catch (error) {
+      report.status = 'failed';
+      report.auditEvidenceError = safeDiagnostic(error.stack);
+      process.exitCode = 1;
+      report.audit = summarizeAuditEvidence(report.audit, { status: 'unavailable' });
     }
   }
   const retained = scrubTokens(boundReport(report), sensitiveValues);

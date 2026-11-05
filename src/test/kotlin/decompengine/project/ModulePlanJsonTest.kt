@@ -17,6 +17,52 @@ class ModulePlanJsonTest {
     private val plan = DeterministicModulePlanner(1, layout).plan(model)
 
     @Test
+    fun `module plan renderer preserves canonical bytes while escaping directly`() {
+        val input = ModulePlan(
+            modules = listOf(
+                PlannedModule(
+                    id = "z\"ed",
+                    sourcePath = "src\\\n\t\u0001é.c",
+                    headerPath = "include/core.h",
+                    functionIds = listOf("fn\"1", "fn\\2"),
+                    globalIds = emptyList(),
+                    typeIds = listOf("τ"),
+                    boundaryEvidence = listOf("line\nnext", "tab\tcarriage\r"),
+                ),
+                PlannedModule("a", "a.c", "a.h", emptyList(), listOf("g0"), emptyList(), emptyList()),
+            ),
+            dependencyCycles = listOf(listOf("a", "z\"ed")),
+        )
+
+        val expected = """
+{
+  "schemaVersion": 2,
+  "modules": [    {
+      "id": "a",
+      "sourcePath": "a.c",
+      "headerPath": "a.h",
+      "functionIds": [],
+      "globalIds": ["g0"],
+      "typeIds": [],
+      "boundaryEvidence": []
+    },    {
+      "id": "z\"ed",
+      "sourcePath": "src\\\n\t\u0001é.c",
+      "headerPath": "include/core.h",
+      "functionIds": ["fn\"1", "fn\\2"],
+      "globalIds": [],
+      "typeIds": ["τ"],
+      "boundaryEvidence": ["line\nnext", "tab\tcarriage\r"]
+    }
+  ],
+  "dependencyCycles": [["a","z\"ed"]]
+}
+""".trimIndent() + "\n"
+
+        assertEquals(expected, input.toJson())
+    }
+
+    @Test
     fun `canonical planner output preserves ownership cycles and escaped evidence`() {
         val withEvidence = plan.copy(modules = plan.modules.map {
             it.copy(boundaryEvidence = it.boundaryEvidence + "braces {[ and quote \" and slash \\")

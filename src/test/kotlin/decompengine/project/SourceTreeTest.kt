@@ -931,6 +931,7 @@ class SourceTreeTest {
         val expected = GeneratedCMakeReconstructionProfile.descriptor
 
         val parsed = SourceTreeManifestReader.parse(text, expected)
+        assertEquals(parsed.toJson(), SourceTreeManifestReader.parse(Json.parseToJsonElement(text).jsonObject, expected).toJson())
         assertEquals(parsed.editablePaths, SourceTreeManifestReader.editablePaths(project))
         assertFailsWith<IllegalArgumentException> {
             SourceTreeManifestReader.parse(text.replaceFirst("{\n", "{\n  \"unexpected\": true,\n"), expected)

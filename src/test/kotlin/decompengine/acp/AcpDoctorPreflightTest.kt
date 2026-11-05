@@ -246,7 +246,7 @@ class AcpDoctorPreflightTest {
         )
 
         val defaults = doctor.inspect(DoctorOptions(temporary.resolve("default-output")))
-        assertTrue(defaults.passed)
+        assertTrue(defaults.passed, defaults.checks.toString())
         assertFalse(defaults.checks.any { it.name.startsWith("ACP authentication method") })
         val report = doctor.inspect(DoctorOptions(temporary.resolve("output"), showAuthMethods = true))
 
