@@ -127,6 +127,89 @@ class WebProgramStructureTest {
     private fun JsonObject.text(name: String) = getValue(name).jsonPrimitive.contentOrNull
     private fun next(page: JsonObject) = page.getValue("page").jsonObject.text("nextCursor")
 
+    private fun columnTable(kind: WebStructureKind, names: List<String?>,
+        ids: Array<String> = Array(names.size) { "${kind.wire}_$it" },
+        addresses: LongArray = LongArray(names.size), hasAddress: BooleanArray = BooleanArray(names.size) { true },
+    ) = WebStructureTable(kind, ids, names.toTypedArray(), addresses, hasAddress,
+        Array(names.size) { WebExtractionStatus.RECOVERED }, LongArray(names.size), IntArray(names.size),
+        BooleanArray(names.size), BooleanArray(names.size), Array(names.size) { emptyArray<String>() },
+        Array(names.size) { emptyArray<String>() }, IntArray(names.size))
+
+    private fun collisionIndex(functionNames: List<String?>, globalNames: List<String?>, typeNames: List<String?>) =
+        WebProgramStructureIndex(WebRevisionSourceReference(jobId, runId, revisionId, inputSha, "version_1"),
+            inputSha, inputSha, inputSha, "metadata", WebStructureOutcome.AVAILABLE, null, null,
+            WebStructureOutcome.AVAILABLE, null,
+            listOf(columnTable(WebStructureKind.FUNCTION, functionNames), columnTable(WebStructureKind.GLOBAL, globalNames),
+                columnTable(WebStructureKind.TYPE, typeNames)), emptyList(), emptyMap(), null, 0, 0L)
+
+    /** Original allocation-heavy implementation, retained here as an independent result oracle. */
+    private fun oldCollisionGroups(index: WebProgramStructureIndex) =
+        HashMap<String, MutableList<Pair<WebStructureKind, Int>>>().also { groups ->
+            for (table in index.tables) if (table.kind != WebStructureKind.TYPE) {
+                for (row in 0 until table.size) table.names[row]?.let {
+                    groups.getOrPut(it) { ArrayList(1) } += table.kind to row
+                }
+            }
+        }.filterValues { it.size > 1 }
+
+    @Test fun `collision prepass matches original exact groups and function then global row order`() {
+        val index = collisionIndex(
+            listOf(null, "unique", "same", "intra", "same", "intra", "", "Case", "type-peer", "é"),
+            listOf("same", null, "global-only", "global-only", "", "unique-global", "case", "e\u0301",
+                String(charArrayOf('s', 'a', 'm', 'e'))),
+            listOf("unique", "type-peer", "type-peer", "same", "unique-global"))
+        assertEquals(oldCollisionGroups(index), index.collisions)
+        assertEquals(setOf("same", "intra", "global-only", ""), index.collisions.keys)
+        assertEquals(listOf(WebStructureKind.FUNCTION to 2, WebStructureKind.FUNCTION to 4,
+            WebStructureKind.GLOBAL to 0, WebStructureKind.GLOBAL to 8), index.collisions.getValue("same"))
+        assertSame(index.collisions, index.collisions)
+    }
+
+    @Test fun `collision prepass resolves long equal hash probe chains by string equality`() {
+        // Every concatenation of eight Aa/BB pairs has the same String hash, but a distinct name.
+        val names = (0 until 256).map { bits -> (0 until 8).joinToString("") { if (bits and (1 shl it) == 0) "Aa" else "BB" } }
+        assertEquals(1, names.map { it.hashCode() }.toSet().size)
+        assertEquals(256, names.toSet().size)
+        val index = collisionIndex(names + names.take(12).reversed(), names.filterIndexed { i, _ -> i % 3 == 0 }, names)
+        assertEquals(oldCollisionGroups(index), index.collisions)
+        assertFalse(names[13] in index.collisions)
+        assertEquals(listOf(WebStructureKind.FUNCTION to 0, WebStructureKind.FUNCTION to 267,
+            WebStructureKind.GLOBAL to 0), index.collisions.getValue(names[0]))
+    }
+
+    @Test fun `collision prepass keeps empty singleton null and unique inventories empty`() {
+        val unavailable = Revision(null, null, emptyList())
+        unavailable.evidence.readStructure(unavailable.reference, unavailable.cache) { index, _ ->
+            assertTrue(index.tables.isEmpty())
+            assertEquals(oldCollisionGroups(index), index.collisions)
+        }
+        for ((functions, globals) in listOf(emptyList<String?>() to emptyList(), listOf("one") to emptyList(),
+            emptyList<String?>() to listOf("one"), listOf(null, null) to listOf(null),
+            listOf("Aa", "unique") to listOf("BB", "other"))) {
+            val index = collisionIndex(functions, globals, listOf("one", "one", "Aa", "BB"))
+            assertEquals(oldCollisionGroups(index), index.collisions)
+            assertTrue(index.collisions.isEmpty())
+        }
+    }
+
+    @Test fun `primitive address order preserves unsigned ties and absent addresses on both paths`() {
+        val ids = arrayOf("zero", "tie-a", "tie-b", "signed-max", "unsigned-high", "unsigned-max",
+            "absent-a", "absent-b", "absent-high")
+        val addresses = longArrayOf(0, 7, 7, Long.MAX_VALUE, Long.MIN_VALUE, -1, 0, 0, -1)
+        val present = BooleanArray(ids.size) { it < 6 }
+        for (permutation in listOf(ids.indices.toList(), ids.indices.reversed().toList(), listOf(6, 2, 4, 0, 8, 1, 5, 7, 3))) {
+            val table = columnTable(WebStructureKind.TYPE, List(ids.size) { null },
+                permutation.map { ids[it] }.toTypedArray(), permutation.map { addresses[it] }.toLongArray(),
+                permutation.map { present[it] }.toBooleanArray())
+            assertEquals(ids.toList(), table.byAddress.map { table.ids[it] })
+            assertSame(table.byAddress, table.byAddress)
+        }
+        for (count in 0..1) {
+            val table = columnTable(WebStructureKind.FUNCTION, List(count) { null })
+            assertContentEquals(IntArray(count) { it }, table.byAddress)
+        }
+    }
+
     @Test fun `functions keep recorded identity exact addresses ownership and evidence references`() {
         val revision = standard()
         val page = revision.pages.functions("owner", jobId, runId, revisionId, null)

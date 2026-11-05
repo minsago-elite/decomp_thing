@@ -64,16 +64,17 @@ internal class WebStructureTable(
         ids.forEachIndexed { i, id -> check(map.put(id, i) == null) { "Recorded entity ID is duplicated." } }
     }
     // Unsigned 64-bit order; entities without a recorded address (types only) follow all addresses.
-    private val addressOrder = Comparator<Int> { a, b ->
+    private fun compareAddress(a: Int, b: Int): Int {
         val recorded = hasAddress[b].compareTo(hasAddress[a])
-        if (recorded != 0) recorded else {
+        return if (recorded != 0) recorded else {
             val address = java.lang.Long.compareUnsigned(addresses[a], addresses[b])
             if (address != 0) address else ids[a].compareTo(ids[b])
         }
     }
+    private val addressOrder = Comparator<Int> { a, b -> compareAddress(a, b) }
     // Total orders with an identity tie-break, built on first use; canonical models are already address-ordered.
     val byAddress: IntArray by lazy {
-        if ((1 until ids.size).all { addressOrder.compare(it - 1, it) < 0 }) IntArray(ids.size) { it } else order(addressOrder)
+        if ((1 until ids.size).all { compareAddress(it - 1, it) < 0 }) IntArray(ids.size) { it } else order(addressOrder)
     }
     val byName: IntArray by lazy {
         order(Comparator { a, b ->
@@ -153,11 +154,63 @@ internal class WebProgramStructureIndex(
     /** Exact name collisions among recorded functions and globals; types are keyed by declaration identity. */
     val collisions: Map<String, List<Pair<WebStructureKind, Int>>> by lazy { collisionGroups() }
 
-    private fun collisionGroups(): Map<String, List<Pair<WebStructureKind, Int>>> = HashMap<String, MutableList<Pair<WebStructureKind, Int>>>().also { groups ->
-        for (table in tables) if (table.kind != WebStructureKind.TYPE) {
-            for (row in 0 until table.size) table.names[row]?.let { groups.getOrPut(it) { ArrayList(1) } += table.kind to row }
+    private fun collisionGroups(): Map<String, List<Pair<WebStructureKind, Int>>> {
+        if (tables.isEmpty()) return emptyMap()
+        val functions = table(WebStructureKind.FUNCTION)
+        val globals = table(WebStructureKind.GLOBAL)
+        check(functions.size <= WebProgramStructureBuilder.MAXIMUM_FUNCTIONS)
+        check(globals.size <= WebProgramStructureBuilder.MAXIMUM_GLOBALS_OR_TYPES)
+        val rows = functions.size + globals.size
+        if (rows < 2) return emptyMap()
+        // At most half full, bounded by the admitted row counts (at most 4 MiB).
+        // Zero is empty; bit 0 selects the kind, bits 1..30 hold row + 1, and the sign marks duplicates.
+        var capacity = 1
+        while (capacity < rows * 2) capacity = capacity shl 1
+        val slots = IntArray(capacity)
+        val mask = capacity - 1
+        fun slot(name: String): Int {
+            val hash = name.hashCode()
+            var slot = (hash xor (hash ushr 16)) and mask
+            // Bound hostile equal-hash chains; the fallback uses HashMap's String-key tree bins.
+            repeat(64) {
+                val entry = slots[slot]
+                if (entry == 0) return slot
+                val names = if (entry and 1 == 0) functions.names else globals.names
+                if (names[((entry and Int.MAX_VALUE) ushr 1) - 1] == name) return slot
+                slot = (slot + 1) and mask
+            }
+            return -1
         }
-    }.filterValues { it.size > 1 }
+        for (kind in 0..1) {
+            val table = if (kind == 0) functions else globals
+            for (row in 0 until table.size) {
+                val name = table.names[row] ?: continue
+                val slot = slot(name)
+                if (slot < 0) return collisionGroupsFallback()
+                slots[slot] = if (slots[slot] == 0) ((row + 1) shl 1) or kind else slots[slot] or Int.MIN_VALUE
+            }
+        }
+        val groups = HashMap<String, MutableList<Pair<WebStructureKind, Int>>>()
+        for (kind in 0..1) {
+            val table = if (kind == 0) functions else globals
+            for (row in 0 until table.size) {
+                val name = table.names[row] ?: continue
+                val slot = slot(name)
+                check(slot >= 0)
+                if (slots[slot] < 0) groups.getOrPut(name) { ArrayList(2) } += table.kind to row
+            }
+        }
+        return groups
+    }
+
+    private fun collisionGroupsFallback(): Map<String, List<Pair<WebStructureKind, Int>>> =
+        HashMap<String, MutableList<Pair<WebStructureKind, Int>>>().also { groups ->
+            for (table in tables) if (table.kind != WebStructureKind.TYPE) {
+                for (row in 0 until table.size) table.names[row]?.let { name ->
+                    groups.getOrPut(name) { ArrayList(1) } += table.kind to row
+                }
+            }
+        }.filterValues { it.size > 1 }
 
     fun table(kind: WebStructureKind): WebStructureTable = tables[kind.ordinal]
     val available: Boolean get() = outcome.state == "available"
