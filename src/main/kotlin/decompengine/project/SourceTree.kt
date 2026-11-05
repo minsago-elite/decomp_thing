@@ -25,6 +25,7 @@ import decompengine.agent.receiptCommitmentBytes
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
@@ -32,6 +33,7 @@ import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 import java.nio.file.AtomicMoveNotSupportedException
 import java.io.IOException
 import java.io.InterruptedIOException
@@ -64,6 +66,8 @@ data class ModuleReconstructionRequest(
     val profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
     val sessionEvidenceFingerprint: String? = null,
     val acceptedSourceSha256: String? = null,
+    /** Bounded compiler feedback is prompt context only; acceptance uses fresh compilation below. */
+    val compilerDiagnostics: String? = null,
     /** Recovered ownership used to select only required cross-module interfaces. */
     val modulePlan: ModulePlan? = null,
     /** Archive replay freezes the workflow compiler command at the recorded checkpoint version. */
@@ -86,6 +90,16 @@ data class ModuleReconstructionIssue(
     val message: String,
     val entityIds: List<String>,
 )
+
+/** Cached execution belongs to the checkpoint's historical prompt identity. */
+internal fun requestForCheckpointReconciliation(
+    request: ModuleReconstructionRequest,
+    checkpointFingerprint: String,
+    checkpointReused: Boolean,
+): ModuleReconstructionRequest = if (checkpointReused &&
+    request.sessionEvidenceFingerprint != checkpointFingerprint) {
+    request.copy(sessionEvidenceFingerprint = checkpointFingerprint)
+} else request
 
 fun interface ModuleReconstructor {
     fun reconstruct(request: ModuleReconstructionRequest): ReconstructedModule
@@ -540,17 +554,9 @@ object SourceTreeGenerator {
         profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
         progress: AgentWorkflowProgress = AgentWorkflowProgress.NONE,
         onModuleProgress: (completed: Int, total: Int, moduleId: String) -> Unit = { _, _, _ -> },
-    ): SourceTreeManifest = generate(
-        model = model,
-        projectDir = projectDir,
-        hostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
-        planner = planner,
-        reconstructor = reconstructor,
-        overrides = overrides,
-        observedBehavior = observedBehavior,
-        profile = profile,
-        progress = progress,
-        onModuleProgress = onModuleProgress,
+    ): SourceTreeManifest = generateWithCompilerFeedback(
+        model, projectDir, ReconstructionHostSafetyLimits.DEFAULT, planner, reconstructor, overrides,
+        observedBehavior, profile, progress, { null }, {}, onModuleProgress,
     )
 
     /** Explicit host policy can authorize a profile without changing its recorded budgets or identity. */
@@ -564,6 +570,24 @@ object SourceTreeGenerator {
         observedBehavior: String? = null,
         profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
         progress: AgentWorkflowProgress = AgentWorkflowProgress.NONE,
+        onModuleProgress: (completed: Int, total: Int, moduleId: String) -> Unit = { _, _, _ -> },
+    ): SourceTreeManifest = generateWithCompilerFeedback(
+        model, projectDir, hostSafetyLimits, planner, reconstructor, overrides,
+        observedBehavior, profile, progress, { null }, {}, onModuleProgress,
+    )
+
+    internal fun generateWithCompilerFeedback(
+        model: RecoveredProgramModel,
+        projectDir: Path,
+        hostSafetyLimits: ReconstructionHostSafetyLimits,
+        planner: DeterministicModulePlanner? = null,
+        reconstructor: ModuleReconstructor? = null,
+        overrides: Map<String, String> = emptyMap(),
+        observedBehavior: String? = null,
+        profile: ReconstructionProfile,
+        progress: AgentWorkflowProgress = AgentWorkflowProgress.NONE,
+        compilerFeedback: (moduleId: String) -> ModuleCompilerFeedback? = { null },
+        onCompilerFeedback: (ModuleCompilerFeedback) -> Unit = {},
         onModuleProgress: (completed: Int, total: Int, moduleId: String) -> Unit = { _, _, _ -> },
     ): SourceTreeManifest {
         hostSafetyLimits.requireAllows(profile.budgets)
@@ -644,10 +668,30 @@ object SourceTreeGenerator {
         moduleDependencyOrder(dependenciesByModule).map(moduleById::getValue).forEachIndexed { index, module ->
             val dependencies = dependenciesByModule.getValue(module.id)
             val dependencyHeaders = dependencies.associate { dependency -> moduleById.getValue(dependency).headerPath to headers.getValue(dependency) }
-            val promptRequest = ModuleReconstructionRequest(
+            val basePromptRequest = ModuleReconstructionRequest(
                 module, model, typesHeader, headers.getValue(module.id), privateHeaders.getValue(module.id),
                 dependencyHeaders, projectDir, observedBehavior, profile = profile, modulePlan = plan,
             )
+            val contextFingerprint = if (selectedReconstructor is BoundedLlmModuleReconstructor &&
+                compilationPolicy.providesCompilerFeedback) {
+                selectedModuleInputFingerprint(basePromptRequest, compilationPolicy.fingerprintIdentity(7))
+            } else null
+            val feedbackSource = projectDir.resolve(module.sourcePath)
+            val recordedCompilerFeedback = contextFingerprint?.let { expectedContext ->
+                runCatching { compilerFeedback(module.id) }.getOrNull()?.takeIf { it.contextSha256 == expectedContext }
+            }
+            val currentSourceSha256 = feedbackSource.takeIf { it.exists() }?.let { sha256(it.readBytes()) }
+            val priorCompilerDiagnostics = recordedCompilerFeedback?.takeIf {
+                it.sourceSha256 == currentSourceSha256
+            }?.diagnostics
+            // Retain the old dispatched prompt identity for cache comparison only. Diagnostics
+            // tied to a failed source are never passed to a new attempt after source correction.
+            val retainedFeedbackFingerprint = recordedCompilerFeedback?.takeIf {
+                currentSourceSha256 != null && it.sourceSha256 != currentSourceSha256
+            }?.let { feedback ->
+                selectedModuleInputFingerprint(basePromptRequest.copy(compilerDiagnostics = feedback.diagnostics), compilationPolicy.fingerprintIdentity(7))
+            }
+            val promptRequest = basePromptRequest.copy(compilerDiagnostics = priorCompilerDiagnostics)
             val localFingerprint = moduleFingerprint(
                 module,
                 model,
@@ -660,7 +704,7 @@ object SourceTreeGenerator {
                 compilationPolicy.id,
             )
             val fingerprint = if (selectedReconstructor is BoundedLlmModuleReconstructor)
-                selectedModuleInputFingerprint(promptRequest)
+                selectedModuleInputFingerprint(promptRequest, compilationPolicy.fingerprintIdentity(7))
             else sha256(("transitive-interfaces-v2\n" + localFingerprint + "\n" +
                 interfaceFingerprints.getValue(module.id)).toByteArray())
             val sourcePath = projectDir.resolve(module.sourcePath)
@@ -727,13 +771,15 @@ object SourceTreeGenerator {
                 profile = profile,
                 sessionEvidenceFingerprint = fingerprint,
                 acceptedSourceSha256 = verifiedPreviousAcceptance?.sourceSha256,
+                compilerDiagnostics = priorCompilerDiagnostics,
                 modulePlan = plan,
             )
             val cacheIdentity = selectedReconstructor.cacheIdentity(profile)
             val cached = recordedCheckpoint?.takeIf { checkpoint ->
                 checkpoint.schemaVersion == 7 && checkpoint.inputBinarySha256 == model.inputSha256 &&
                     checkpoint.modelSchemaVersion == model.schemaVersion && checkpoint.profileSha256 == profile.sha256 &&
-                    checkpoint.fingerprint == fingerprint &&
+                    (checkpoint.fingerprint == fingerprint ||
+                        checkpoint.accepted && checkpoint.fingerprint == retainedFeedbackFingerprint) &&
                     sourcePath.exists() &&
                     sha256(sourcePath.readBytes()) == checkpoint.sourceSha256 &&
                     checkpoint.reconstructorIdentity == cacheIdentity &&
@@ -833,6 +879,14 @@ object SourceTreeGenerator {
                                     module.functionIds + module.globalIds,
                                 )
                             }
+                            if (!validation.passed && contextFingerprint != null && reusedAccepted == null) {
+                                try { onCompilerFeedback(retainedModuleCompilerFeedback(moduleId = module.id,
+                                    sourceSha256 = validation.sourceSha256, contextSha256 = requireNotNull(contextFingerprint),
+                                    diagnostics = validation.diagnosticsPrefix)) }
+                                catch (feedbackFailure: Exception) {
+                                    if (feedbackFailure is InterruptedException || Thread.currentThread().isInterrupted) throw feedbackFailure
+                                }
+                            }
                         }
                     } catch (failure: Exception) {
                         if (failure !is InterruptedException && !Thread.currentThread().isInterrupted) {
@@ -884,6 +938,8 @@ object SourceTreeGenerator {
                     workflowOrigin = workflowOrigin,
                     preDispatchObservedBehavior = if (workflowOrigin == "pre-dispatch-context-budget-fallback")
                         ModuleObservationRetention.retain(request) else null,
+                    preDispatchCompilerFeedback = if (workflowOrigin == "pre-dispatch-context-budget-fallback" &&
+                        priorCompilerDiagnostics != null) recordedCompilerFeedback else null,
                     reconstructorIdentity = cacheIdentity,
                     promptSha256 = attempted.promptSha256,
                     promptCharacters = attempted.promptCharacters,
@@ -919,6 +975,7 @@ object SourceTreeGenerator {
                 if (executionEvidence == null) configuredExecutionEvidenceFile?.deleteIfExists()
                 candidateCheckpoint.also { writeAtomically(checkpointPath, it.toJson()) }
             }
+            if (cached != null) progress.checkpointReused(module.id, checkpoint.sourceSha256)
             require(
                 checkpoint.executionEvidencePath == null ||
                     checkpoint.executionEvidencePath == configuredExecutionEvidencePath
@@ -926,13 +983,9 @@ object SourceTreeGenerator {
             if (checkpoint.executionEvidencePath == null) configuredExecutionEvidenceFile?.deleteIfExists()
             attemptPath.deleteIfExists()
             projectDir.resolve("reports/modules/${module.id}.attempt.execution.json").deleteIfExists()
-            val reconciliationRequest = if (cached != null &&
-                request.sessionEvidenceFingerprint != checkpoint.fingerprint) {
-                request.copy(sessionEvidenceFingerprint = checkpoint.fingerprint)
-            } else request
+            val reconciliationRequest = requestForCheckpointReconciliation(request, checkpoint.fingerprint, cached != null)
             selectedReconstructor.reconcileSessionCheckpoint(
-                reconciliationRequest,
-                checkpoint.accepted, checkpoint.sourceSha256,
+                reconciliationRequest, checkpoint.accepted, checkpoint.sourceSha256,
                 checkpoint.executionRequestSha256, checkpoint.executionEvidenceSha256,
             )
             val normalizedSource = sourcePath.readText()
@@ -1200,6 +1253,7 @@ object SourceTreeGenerator {
         val generator: String,
         val workflowOrigin: String = "reconstructor-return",
         val preDispatchObservedBehavior: String? = null,
+        val preDispatchCompilerFeedback: ModuleCompilerFeedback? = null,
         val reconstructorIdentity: String,
         val promptSha256: String,
         val promptCharacters: Int?,
@@ -1228,6 +1282,19 @@ object SourceTreeGenerator {
             require(preDispatchObservedBehavior == null ||
                 workflowOrigin == "pre-dispatch-context-budget-fallback") {
                 "retained pre-dispatch prompt input requires an undispatched fallback"
+            }
+            require(preDispatchCompilerFeedback == null ||
+                workflowOrigin == "pre-dispatch-context-budget-fallback") {
+                "retained pre-dispatch compiler feedback requires an undispatched fallback"
+            }
+            preDispatchCompilerFeedback?.let { feedback ->
+                require(feedback.moduleId.matches(Regex("[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}")) &&
+                    listOf(feedback.sourceSha256, feedback.contextSha256, feedback.diagnosticsSha256)
+                        .all { it.matches(Regex("[0-9a-f]{64}")) } &&
+                    feedback.diagnostics.toByteArray(Charsets.UTF_8).size <= 32_768 &&
+                    sha256(feedback.diagnostics.toByteArray(Charsets.UTF_8)) == feedback.diagnosticsSha256) {
+                    "retained pre-dispatch compiler feedback is invalid"
+                }
             }
             requireRetainableModuleObservation(preDispatchObservedBehavior)
             require(schemaVersion < 5 || !accepted ||
@@ -1305,6 +1372,14 @@ object SourceTreeGenerator {
             if (schemaVersion >= 6 && workflowOrigin == "pre-dispatch-context-budget-fallback") {
                 append("\n  \"preDispatchObservedBehavior\": ")
                 append(preDispatchObservedBehavior?.let { kotlinx.serialization.json.JsonPrimitive(it) } ?: JsonNull).append(',')
+                append("\n  \"preDispatchCompilerFeedback\": ")
+                append(preDispatchCompilerFeedback?.let { feedback -> buildJsonObject {
+                    put("moduleId", feedback.moduleId)
+                    put("sourceSha256", feedback.sourceSha256)
+                    put("contextSha256", feedback.contextSha256)
+                    put("diagnosticsSha256", feedback.diagnosticsSha256)
+                    put("diagnostics", feedback.diagnostics)
+                } } ?: JsonNull).append(',')
             }
             append("\n  \"reconstructorIdentity\": \"").append(reconstructorIdentity.jsonEscape()).append("\",")
             append("\n  \"promptSha256\": \"").append(promptSha256).append("\",")
@@ -1387,6 +1462,15 @@ object SourceTreeGenerator {
                 generator = root.getValue("generator").jsonPrimitive.content,
                 workflowOrigin = optionalString("workflowOrigin") ?: "reconstructor-return",
                 preDispatchObservedBehavior = optionalString("preDispatchObservedBehavior"),
+                preDispatchCompilerFeedback = root["preDispatchCompilerFeedback"]?.takeUnless { it is JsonNull }?.jsonObject?.let {
+                    ModuleCompilerFeedback(
+                        it.getValue("moduleId").jsonPrimitive.content,
+                        it.getValue("sourceSha256").jsonPrimitive.content,
+                        it.getValue("contextSha256").jsonPrimitive.content,
+                        it.getValue("diagnosticsSha256").jsonPrimitive.content,
+                        it.getValue("diagnostics").jsonPrimitive.content,
+                    )
+                },
                 reconstructorIdentity = root.getValue("reconstructorIdentity").jsonPrimitive.content,
                 promptSha256 = root.getValue("promptSha256").jsonPrimitive.content,
                 promptCharacters = root["promptCharacters"]?.jsonPrimitive?.intOrNull,

@@ -54,24 +54,42 @@ class ArchivalProjectScaleIntegrationTest {
         val manifest = Json.parseToJsonElement(corpus.resolve("manifest.json").readText()).jsonObject
         assertEquals("CC0-1.0", manifest["redistribution"]!!.jsonPrimitive.content)
         val fixtures = manifest["fixtures"]!!.jsonArray.map { it.jsonObject }
-        assertEquals(setOf("small_cli", "large_project"), fixtures.map { it["id"]!!.jsonPrimitive.content }.toSet())
+        assertEquals(setOf("small_cli", "large_project", "large_project_mtu"), fixtures.map { it["id"]!!.jsonPrimitive.content }.toSet())
         val temp = createTempDirectory("archival-corpus-")
         fixtures.forEach { fixture ->
             val id = fixture["id"]!!.jsonPrimitive.content
             val source = corpus.resolve(fixture["source"]!!.jsonPrimitive.content)
             assertEquals(fixture["sourceSha256"]!!.jsonPrimitive.content, sha256(source.readBytes()))
+            val sourceFiles = fixture["sourceFiles"]?.jsonArray?.map { entry ->
+                val file = corpus.resolve(entry.jsonObject["path"]!!.jsonPrimitive.content)
+                assertEquals(entry.jsonObject["sha256"]!!.jsonPrimitive.content, sha256(file.readBytes()))
+                file
+            } ?: listOf(source)
+            val translationUnits = fixture["translationUnits"]?.jsonArray?.map { corpus.resolve(it.jsonPrimitive.content) }
+                ?: listOf(source)
+            if (id == "large_project_mtu") {
+                assertEquals(fixture["expectedTranslationUnitCount"]!!.jsonPrimitive.content.toInt(), translationUnits.size)
+                assertEquals(6, fixture["expectedModuleCountMinimum"]!!.jsonPrimitive.content.toInt())
+                assertEquals(
+                    fixture["linkOrder"]!!.jsonArray.map { it.jsonPrimitive.content },
+                    translationUnits.map { it.fileName.toString() },
+                )
+                assertTrue(fixture["inputSurfaces"]!!.jsonArray.map { it.jsonPrimitive.content }.contains("multiple-translation-units"))
+                assertTrue(sourceFiles.any { it.fileName.toString() == "shared.h" })
+            }
             fixture["binaries"]!!.jsonArray.map { it.jsonObject }.forEach { binaryEntry ->
                 val binary = corpus.resolve(binaryEntry["path"]!!.jsonPrimitive.content)
                 assertEquals(binaryEntry["sha256"]!!.jsonPrimitive.content, sha256(binary.readBytes()))
                 val metadata = ElfMetadataReader.read(binary.readBytes())
                 assertEquals("ELF64", metadata.format)
                 assertEquals("x86-64", metadata.machine)
+                assertEquals(if (binaryEntry["pie"]!!.jsonPrimitive.content.toBoolean()) "shared" else "executable", metadata.objectType)
                 val symbols = command(listOf("nm", binary.toString())).second
                 if (binaryEntry["symbols"]!!.jsonPrimitive.content == "present") assertTrue(symbols.contains(" main"))
                 else assertFalse(symbols.contains(" main"))
             }
-            val nonPie = compile(source, temp.resolve("$id-nonpie"), listOf("-O0", "-no-pie"))
-            val pie = compile(source, temp.resolve("$id-pie"), listOf("-O2", "-fPIE", "-pie"))
+            val nonPie = compile(translationUnits, temp.resolve("$id-nonpie"), listOf("-O0", "-no-pie"))
+            val pie = compile(translationUnits, temp.resolve("$id-pie"), listOf("-O2", "-fPIE", "-pie"))
             assertTrue(nonPie.isExecutable() && pie.isExecutable())
             if (id == "large_project") {
                 val symbolsBefore = command(listOf("nm", pie.toString())).second
@@ -80,6 +98,15 @@ class ArchivalProjectScaleIntegrationTest {
                 val symbolsAfter = command(listOf("nm", pie.toString())).second
                 assertFalse(symbolsAfter.contains("parse_0"))
                 assertTrue(fixture["inputSurfaces"]!!.jsonArray.map { it.jsonPrimitive.content }.containsAll(listOf("argv", "stdin", "file", "libc", "shared-global-state")))
+            }
+            if (id == "large_project_mtu") {
+                val symbols = command(listOf("nm", pie.toString())).second
+                assertTrue(symbols.contains("parse_0"))
+                assertTrue(symbols.contains("render_0"))
+                assertTrue(symbols.contains("shared_archive_state"))
+                assertEquals("check:27\n", command(listOf(pie.toString(), "check")).second)
+                val fileInput = temp.resolve("$id-input.txt").also { it.writeText("fixture\n") }
+                assertEquals("fixture:27\n", command(listOf(pie.toString(), "--file", fileInput.toString())).second)
             }
         }
     }
@@ -308,8 +335,12 @@ class ArchivalProjectScaleIntegrationTest {
     }
 
     private fun compile(source: Path, output: Path, flags: List<String>): Path {
+        return compile(listOf(source), output, flags)
+    }
+
+    private fun compile(sources: List<Path>, output: Path, flags: List<String>): Path {
         output.parent.createDirectories()
-        val (exit, text) = command(listOf("gcc") + flags + listOf(source.toString(), "-o", output.toString()))
+        val (exit, text) = command(listOf("gcc") + flags + sources.map(Path::toString) + listOf("-o", output.toString()))
         check(exit == 0) { "gcc failed: $text" }
         check(output.exists() && output.isExecutable())
         return output

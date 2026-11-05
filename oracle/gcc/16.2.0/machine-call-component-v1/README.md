@@ -24,7 +24,10 @@ python3 scripts/verify-machine-call-component-evidence.py \
 
 To recover the exact report into an existing repository-local directory, add
 `--extract-report build/driver-machine-calls.json`. Extraction creates a new file
-only after verification and refuses to replace an existing file. The verifier
+only after verification and refuses to replace an existing file. Reads, extraction,
+and failure cleanup use retained directory descriptors rooted at the trusted
+repository directory; each child directory is opened without following symlinks.
+Replacing a checked parent pathname cannot redirect these operations. The verifier
 checks single-member gzip bounds, byte commitments, canonical JSON, request and
 runtime consistency, inventory totals, authority flags, and source/input Git
 blobs. It performs no network access or analysis.

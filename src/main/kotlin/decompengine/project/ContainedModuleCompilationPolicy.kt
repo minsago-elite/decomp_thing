@@ -18,6 +18,7 @@ internal object ContainedModuleCompilationPolicy : ModuleCompilationPolicy {
     private val qualificationDiagnosticsObserver = ThreadLocal<((ByteArray, ByteArray) -> Unit)?>()
 
     override val id = POLICY_ID
+    override val providesCompilerFeedback = true
     override val legacyFingerprintIdentity = GeneratedCModuleValidation.POLICY_ID
     override fun requireAvailable(profile: ReconstructionProfile) {
         requireContainedModuleCompilerProfile(profile)
@@ -266,7 +267,12 @@ internal class VerifiedContainedModuleCompilation private constructor(private va
                 val evidence = ModuleCompilationEvidence(request.sourceSha256, ContainedModuleCompilationPolicy.command(profile, sourcePath),
                     if (worker.outcome == "compiled-object") "passed" else "failed", worker.exitCode,
                     ContainedModuleCompilationProof.diagnosticsSha256(worker), worker.stdoutBytes + worker.stderrBytes, proof,
-                    if (worker.outcome == "compiled-object") VerifiedContainedModuleCompilation(sha256(OracleJson.canonicalBytes(proof)), snapshot) else null)
+                    if (worker.outcome == "compiled-object") VerifiedContainedModuleCompilation(sha256(OracleJson.canonicalBytes(proof)), snapshot) else null,
+                    capturedDiagnostics?.let { (stdout, stderr) ->
+                        val combined = stdout + stderr
+                        GeneratedCModuleValidation.diagnosticFeedback(combined, canonicalProject,
+                            listOf(configuration.scratchMount))
+                    } ?: "")
                 ContainedModuleCompilationProof.verify(evidence)
                 snapshot.requireCurrent { deadline.requireCurrent() }
                 deadline.requireCurrent()

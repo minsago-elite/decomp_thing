@@ -234,12 +234,22 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
                         (request.module.functionIds + request.module.globalIds).sorted() == source.entityIds) {
                         "pre-dispatch fallback differs from the retained module plan: $moduleId"
                     }
-                    val prompt = modulePromptEvidence(request, legacy = legacy).text
+                    val compilerPolicyId = ReconstructionCompilationPolicies.resolve(profile)
+                        .fingerprintIdentity(checkpoint.schemaVersion.toInt())
+                    val feedback = checkpoint.preDispatchCompilerFeedback
+                    if (feedback != null) {
+                        require(!legacy && feedback.moduleId == moduleId &&
+                            feedback.contextSha256 == promptInputs.fingerprint(request, legacy = false, compilerPolicyId = compilerPolicyId) &&
+                            sha256(feedback.diagnostics.toByteArray(StandardCharsets.UTF_8)) == feedback.diagnosticsSha256) {
+                            "pre-dispatch compiler feedback differs from its module source context: $moduleId"
+                        }
+                    }
+                    val promptRequest = if (feedback == null) request else request.copy(compilerDiagnostics = feedback.diagnostics)
+                    val prompt = modulePromptEvidence(promptRequest, legacy = legacy).text
                     require(prompt.length.toLong() == checkpoint.promptCharacters &&
                         sha256(prompt.toByteArray(StandardCharsets.UTF_8)) == checkpoint.promptSha256 &&
-                        promptInputs.fingerprint(request, legacy = legacy,
-                            compilerPolicyId = ReconstructionCompilationPolicies.resolve(profile)
-                                .fingerprintIdentity(checkpoint.schemaVersion.toInt())) == checkpoint.fingerprint) {
+                        promptInputs.fingerprint(promptRequest, legacy = legacy,
+                            compilerPolicyId = compilerPolicyId) == checkpoint.fingerprint) {
                         "pre-dispatch fallback prompt differs from independently rendered inputs: $moduleId"
                     }
                     // Retained observation text is caller input, not proof of historical dispatch.
@@ -418,10 +428,14 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
             5L -> CHECKPOINT_V5_FIELDS
             else -> CHECKPOINT_V4_FIELDS
         }
-        require(root.keys == expectedFields || schemaVersion == 6L &&
-            (root.keys == expectedFields + "workflowOrigin" ||
-                root.keys == expectedFields + setOf("workflowOrigin", "preDispatchObservedBehavior")) ||
-            schemaVersion == 7L && root.keys == expectedFields + "preDispatchObservedBehavior") {
+        val optionalV6Fields = listOf("workflowOrigin", "preDispatchObservedBehavior", "preDispatchCompilerFeedback")
+        val allowedV6Keys = (0 until (1 shl optionalV6Fields.size)).map { mask ->
+            optionalV6Fields.filterIndexed { index, _ -> mask and (1 shl index) != 0 }.toSet()
+        }.filter { fields -> fields.isEmpty() || "workflowOrigin" in fields }.map { expectedFields + it }.toSet()
+        val allowedV7Keys = setOf(expectedFields + "preDispatchObservedBehavior",
+            expectedFields + setOf("preDispatchObservedBehavior", "preDispatchCompilerFeedback"))
+        require(root.keys == expectedFields || schemaVersion == 6L && root.keys in allowedV6Keys ||
+            schemaVersion == 7L && root.keys in allowedV7Keys) {
             "module checkpoint has unsupported fields: $moduleId"
         }
         if (schemaVersion >= 6L) {
@@ -447,6 +461,30 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
             root.optionalString("preDispatchObservedBehavior", "module checkpoint")
                 .also(::requireRetainableModuleObservation)
         } else null // Older null-observation fallbacks can still pass exact prompt replay.
+        val preDispatchCompilerFeedback = if ("preDispatchCompilerFeedback" in root) {
+            require(workflowOrigin == "pre-dispatch-context-budget-fallback") {
+                "retained pre-dispatch compiler feedback requires an undispatched fallback: $moduleId"
+            }
+            val value = root.getValue("preDispatchCompilerFeedback")
+            if (value == JsonNull) null else {
+                val feedback = value.requiredObject("pre-dispatch compiler feedback")
+                feedback.requireExactKeys(setOf("moduleId", "sourceSha256", "contextSha256", "diagnosticsSha256", "diagnostics"),
+                    "pre-dispatch compiler feedback")
+                val diagnostics = feedback.requiredString("diagnostics", "pre-dispatch compiler feedback")
+                require(diagnostics.toByteArray(StandardCharsets.UTF_8).size <= 32_768) {
+                    "pre-dispatch compiler feedback exceeds its byte bound: $moduleId"
+                }
+                ModuleCompilerFeedback(
+                    feedback.requiredString("moduleId", "pre-dispatch compiler feedback"),
+                    feedback.requiredSha256("sourceSha256", "pre-dispatch compiler feedback"),
+                    feedback.requiredSha256("contextSha256", "pre-dispatch compiler feedback"),
+                    feedback.requiredSha256("diagnosticsSha256", "pre-dispatch compiler feedback"),
+                    diagnostics,
+                ).also { require(sha256(diagnostics.toByteArray(StandardCharsets.UTF_8)) == it.diagnosticsSha256) {
+                    "pre-dispatch compiler feedback digest differs: $moduleId"
+                } }
+            }
+        } else null
         val reconstructorIdentity = root.requiredString("reconstructorIdentity", "module checkpoint")
         require(schemaVersion < 7L || !moduleClaimsAgentExecution(generator, reconstructorIdentity) ||
             reconstructorIdentity.endsWith(":v4")) {
@@ -559,6 +597,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         return ReconstructionCheckpoint(
             fingerprint,
             preDispatchObservedBehavior,
+            preDispatchCompilerFeedback,
             schemaVersion,
             generator,
             workflowOrigin,
@@ -1584,6 +1623,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
     private data class ReconstructionCheckpoint(
         val fingerprint: String,
         val preDispatchObservedBehavior: String?,
+        val preDispatchCompilerFeedback: ModuleCompilerFeedback?,
         val schemaVersion: Long,
         val generator: String,
         val workflowOrigin: String,
