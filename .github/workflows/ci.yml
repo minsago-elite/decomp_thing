@@ -574,9 +574,13 @@ jobs:
     needs: frontend
     env:
       NPM_CONFIG_CACHE: ${{ github.workspace }}/build/npm-download-cache
+      GRADLE_USER_HOME: ${{ github.workspace }}/build/gradle-user-home
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-java@v6
         with:
           distribution: temurin
@@ -611,6 +615,7 @@ jobs:
           mkdir -p build/exporter-rendering-v16
           ./gradlew --no-daemon test \
             --tests decompengine.analysis.BundledGhidraTest \
+            --tests decompengine.analysis.BundledGhidraManifestRejectionTest \
             --tests decompengine.project.GhidraProgramModelExporterTest \
             --tests decompengine.project.ReferencedDataBytesRealGhidraTest \
             --tests decompengine.project.GhidraReferencedBytesExporterTest \
@@ -623,6 +628,23 @@ jobs:
             --tests decompengine.web.SourceTreeJobReconstructorTest
       - name: Verify ZIP and TAR bundle contents and native executable modes
         run: ./gradlew --no-daemon --offline verifyGhidraDistributionArchives
+      - name: Verify atomic bundle publication and refusal controls
+        run: ./gradlew --no-daemon --offline verifyAtomicGhidraBundlePublication
+      - name: Verify installed Ghidra publication overlap coordinator controls
+        run: python3 scripts/qualify-ghidra-install-overlap.py --self-test
+      - name: Qualify real installed reconstruction during same-bundle publication
+        timeout-minutes: 30
+        env:
+          QUALIFICATION_PR_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+          QUALIFICATION_PR_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: python3 -B scripts/qualify-ghidra-install-overlap.py --offline --deadline-seconds 1500 --cleanup-reserve-seconds 240
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: bundled-ghidra-install-overlap
+          include-hidden-files: true
+          retention-days: 14
+          path: build/ghidra-install-overlap
       - uses: actions/upload-artifact@v7
         if: always()
         with:

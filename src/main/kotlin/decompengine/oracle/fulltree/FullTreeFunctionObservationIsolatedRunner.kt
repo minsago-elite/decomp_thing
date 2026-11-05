@@ -51,6 +51,75 @@ internal class KotlinSystemdCgroupBootLaunchException(
     val preAttachmentRollbackSafe: Boolean,
 ) : IllegalArgumentException(message, cause)
 
+private class KotlinBootRollbackDiagnostic(message: String) : RuntimeException(message, null, false, false)
+
+internal enum class KotlinBootCloseOutcome { NOT_OWNED, SUCCEEDED, FAILED, SKIPPED_BOUNDARY_FAILURE }
+
+internal data class KotlinBootRollbackAccounting(
+    val rollbackSafe: Boolean,
+    val boundaryFailure: Throwable?,
+    val privateCleanupFailure: Throwable?,
+    val boundaryClose: KotlinBootCloseOutcome,
+    val runTreeClose: KotlinBootCloseOutcome,
+    val runtimeClose: KotlinBootCloseOutcome,
+)
+
+/** Keeps the historical terminal close order and suppression behavior in one auditable helper. */
+private fun accountKotlinBootRollback(
+    failure: Throwable,
+    launchAttempted: Boolean,
+    boundary: AutoCloseable?,
+    runTree: AutoCloseable?,
+    runtime: AutoCloseable?,
+): KotlinBootRollbackAccounting {
+    fun close(resource: AutoCloseable?): Pair<KotlinBootCloseOutcome, Throwable?> {
+        if (resource == null) return KotlinBootCloseOutcome.NOT_OWNED to null
+        val closeFailure = runCatching { resource.close() }.exceptionOrNull()
+        if (closeFailure != null && closeFailure !== failure) {
+            runCatching { failure.addSuppressed(closeFailure) }
+        }
+        return (if (closeFailure == null) KotlinBootCloseOutcome.SUCCEEDED else KotlinBootCloseOutcome.FAILED) to closeFailure
+    }
+
+    val (boundaryClose, boundaryFailure) = close(boundary)
+    var privateCleanupFailure: Throwable? = null
+    val runTreeClose: KotlinBootCloseOutcome
+    val runtimeClose: KotlinBootCloseOutcome
+    if (boundaryClose == KotlinBootCloseOutcome.FAILED) {
+        runTreeClose = if (runTree == null) KotlinBootCloseOutcome.NOT_OWNED else KotlinBootCloseOutcome.SKIPPED_BOUNDARY_FAILURE
+        runtimeClose = if (runtime == null) KotlinBootCloseOutcome.NOT_OWNED else KotlinBootCloseOutcome.SKIPPED_BOUNDARY_FAILURE
+    } else {
+        val (treeOutcome, treeFailure) = close(runTree)
+        runTreeClose = treeOutcome
+        privateCleanupFailure = treeFailure
+        val (runtimeOutcome, runtimeFailure) = close(runtime)
+        runtimeClose = runtimeOutcome
+        if (privateCleanupFailure == null) privateCleanupFailure = runtimeFailure
+    }
+    val rollbackSafe = boundaryClose != KotlinBootCloseOutcome.FAILED && privateCleanupFailure == null &&
+        (!launchAttempted || boundary != null)
+    return KotlinBootRollbackAccounting(
+        rollbackSafe, boundaryFailure, privateCleanupFailure, boundaryClose, runTreeClose, runtimeClose,
+    )
+}
+
+private enum class KotlinBootLaunchPhase {
+    VALIDATION, RUNTIME_OPEN, PRIVATE_TREE_OPEN, PROCESS_START, BOOT_WAIT, BOOT_PROOF, ATTACHMENT_PROOF, CONSTRUCT_OWNER,
+}
+
+private fun formatKotlinBootRollbackDiagnostic(
+    phase: KotlinBootLaunchPhase,
+    launchAttempted: Boolean,
+    failureKind: String,
+    accounting: KotlinBootRollbackAccounting,
+): String = boundedUtf8(
+    "Kotlin BOOT rollback diagnostic: phase=$phase, ownershipTransferred=false, " +
+        "launchAttempted=$launchAttempted, failureKind=$failureKind, " +
+        "boundaryClose=${accounting.boundaryClose}, runTreeClose=${accounting.runTreeClose}, " +
+        "runtimeClose=${accounting.runtimeClose}, preAttachmentRollbackSafe=${accounting.rollbackSafe}",
+    1024,
+)
+
 internal enum class FullTreeFunctionObservationLaunchFaultPoint {
     BEFORE_INITIAL_UNIT_ABSENCE,
     BEFORE_FINAL_UNIT_ABSENCE,
@@ -1565,6 +1634,7 @@ internal object KotlinSystemdCgroupBootLauncher {
         var runTree: PrivateObservationRunTree? = null
         var boundary: TrustedObservationBoundary? = null
         var launchAttempted = false
+        var failurePoint = KotlinBootLaunchPhase.VALIDATION
         try {
             if (!unitName.matches(PRODUCTION_KOTLIN_BOOT_UNIT_NAME)) {
                 isolationFail("Kotlin BOOT unit name is not a safe bounded scope name")
@@ -1579,6 +1649,7 @@ internal object KotlinSystemdCgroupBootLauncher {
                 isolationFail("Kotlin BOOT deployment-closure digest is invalid")
             }
             val resources = IsolatedObservationResources.forKotlinBoot(requestedResources)
+            failurePoint = KotlinBootLaunchPhase.RUNTIME_OPEN
             val openedRuntime = AuthenticatedObservationRuntime.open(configuration)
             runtime = openedRuntime
             val requiredCleanupBytes = addExact(
@@ -1589,6 +1660,7 @@ internal object KotlinSystemdCgroupBootLauncher {
             if (requiredCleanupBytes > KOTLIN_BOOT_MAXIMUM_PRIVATE_BYTES) {
                 isolationFail("Kotlin BOOT class path exceeds its bounded cleanup closure")
             }
+            failurePoint = KotlinBootLaunchPhase.PRIVATE_TREE_OPEN
             val openedTree = PrivateObservationRunTree.create(scratchParent, resources)
             runTree = openedTree
             val classPath = openedRuntime.materializeClassPath(openedTree)
@@ -1596,19 +1668,23 @@ internal object KotlinSystemdCgroupBootLauncher {
             val openedBoundary = TrustedObservationBoundary(configuration, openedRuntime, classPath)
             boundary = openedBoundary
             launchAttempted = true
+            failurePoint = KotlinBootLaunchPhase.PROCESS_START
             val unit = openedBoundary.launchKotlinBootKeeper(
                 unitName = unitName,
                 nonce = nonce,
                 runTree = openedTree,
                 resources = resources,
             )
+            failurePoint = KotlinBootLaunchPhase.BOOT_WAIT
             unit.awaitBoot(nonce, openedTree)
+            failurePoint = KotlinBootLaunchPhase.BOOT_PROOF
             val receipt = unit.captureKotlinBootAttachment(
                 resources,
                 kotlinSystemdCgroupBootRuntimeClosureSha256(configuration, deploymentClosureSha256),
                 requestedResources,
                 deploymentClosureSha256,
             )
+            failurePoint = KotlinBootLaunchPhase.ATTACHMENT_PROOF
             if (receipt.controlGroup != expectedControlGroup) {
                 isolationFail("Kotlin BOOT scope is outside the exact derived cgroup")
             }
@@ -1623,6 +1699,7 @@ internal object KotlinSystemdCgroupBootLauncher {
                 openedBoundary,
                 unit,
             )
+            failurePoint = KotlinBootLaunchPhase.CONSTRUCT_OWNER
             val result = KotlinSystemdCgroupBootOwner(
                 ownership,
                 KOTLIN_SYSTEMD_CGROUP_BOOT_OWNER_PERMIT,
@@ -1632,31 +1709,48 @@ internal object KotlinSystemdCgroupBootLauncher {
             runtime = null
             result
         } catch (failure: Throwable) {
-            fun suppress(next: Throwable) {
-                if (next !== failure) failure.addSuppressed(next)
-            }
-            val boundaryFailure = runCatching { boundary?.close() }.exceptionOrNull()
-            boundaryFailure?.let(::suppress)
-            var privateCleanupFailed = false
-            if (boundaryFailure == null) {
-                runCatching { runTree?.close() }.exceptionOrNull()?.let {
-                    privateCleanupFailed = true
-                    suppress(it)
-                }
-                runCatching { runtime?.close() }.exceptionOrNull()?.let {
-                    privateCleanupFailed = true
-                    suppress(it)
-                }
-            }
-            val rollbackSafe = boundaryFailure == null && !privateCleanupFailed &&
-                (!launchAttempted || boundary != null)
-            throw KotlinSystemdCgroupBootLaunchException(
+            val accounting = accountKotlinBootRollback(
+                failure,
+                launchAttempted,
+                boundary,
+                runTree,
+                runtime,
+            )
+            val wrapped = KotlinSystemdCgroupBootLaunchException(
                 "generic Kotlin BOOT launch failed before ownership transfer",
                 failure,
-                rollbackSafe,
+                accounting.rollbackSafe,
             )
+            runCatching {
+                wrapped.addSuppressed(
+                    KotlinBootRollbackDiagnostic(
+                        formatKotlinBootRollbackDiagnostic(
+                            failurePoint,
+                            launchAttempted,
+                            bootFailureKind(failure),
+                            accounting,
+                        ),
+                    ),
+                )
+            }
+            throw wrapped
         }
     }
+}
+
+private fun bootFailureKind(failure: Throwable): String = when (failure) {
+    is FullTreeControlException -> "CONTROL"
+    is IllegalArgumentException -> "ARGUMENT"
+    is IllegalStateException -> "STATE"
+    is java.io.IOException -> "IO"
+    is Error -> "ERROR"
+    else -> "OTHER"
+}
+
+private fun boundedUtf8(value: String, maximumBytes: Int): String {
+    var bounded = value
+    while (bounded.toByteArray(Charsets.UTF_8).size > maximumBytes) bounded = bounded.dropLast(1)
+    return bounded
 }
 
 private fun kotlinSystemdCgroupBootRuntimeClosureSha256(
