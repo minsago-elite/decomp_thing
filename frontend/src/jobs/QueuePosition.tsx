@@ -3,8 +3,21 @@ import { queuePositionCopy as copy } from '../copy/attemptOutcome';
 import { message as displayMessage } from '../shared/messages';
 import { formatExactTimestamp } from './metadataFormat';
 import { usePrivateTransport } from '../session/PrivateTransport';
-import { withApiFailureReference } from '../api/client';
+import { ApiClientError, withApiFailureReference } from '../api/client';
+import { canRetainMetadata, metadataFailureKind } from '../shared/retainMetadata';
 import type { QueuePosition as QueueSample } from '../api/generated';
+
+type Failure = keyof typeof copy.failures;
+
+/** Fixed panel-local categories: storage refusals stay unverified, local binding refusals are invalid responses, never outages. */
+function failureKind(failure: unknown): Failure {
+  if (!(failure instanceof ApiClientError)) return 'unverified';
+  const kind = metadataFailureKind(failure);
+  if (kind !== 'unverified' && kind !== 'failed') return kind;
+  if (kind === 'unverified') return failure.code === 'response_too_large' && failure.serverCode === undefined ? 'sizeLimit' : kind;
+  if (failure.status === 413) return 'sizeLimit';
+  return canRetainMetadata(failure) ? 'transient' : 'failed';
+}
 
 /** A sampled, approximate observation of one queued attempt; never scheduling authority. */
 export function QueuePosition({ jobId, runId, basePath }: { jobId: string; runId: string; basePath: string }) {
@@ -15,14 +28,15 @@ export function QueuePosition({ jobId, runId, basePath }: { jobId: string; runId
     // Read only on request: the sample is a point-in-time observation, never polled.
     if (read === 0) return;
     const controller = new AbortController();
-    setState(previous => ({ ...previous, loading: true, error: '' }));
+    // A pending check never presents the earlier sample as current.
+    setState({ sample: null, loading: true, error: '' });
     void client.get('queuePosition', `/jobs/${jobId}/runs/${runId}/queue-position`, { signal: controller.signal }).then(({ data }) => {
       if (controller.signal.aborted) return;
-      if (data.jobId !== jobId || data.runId !== runId) throw new Error('binding');
+      if (data.jobId !== jobId || data.runId !== runId) throw new ApiClientError('invalid_response');
       setState({ sample: data, loading: false, error: '' });
     }).catch((failure: unknown) => {
       // An older sample would misstate the queue, so a failed read discards it.
-      if (!controller.signal.aborted) setState({ sample: null, loading: false, error: withApiFailureReference(copy.failed, failure) });
+      if (!controller.signal.aborted) setState({ sample: null, loading: false, error: withApiFailureReference(copy.failures[failureKind(failure)], failure) });
     });
     return () => { controller.abort(); };
   }, [client, jobId, runId, read]);

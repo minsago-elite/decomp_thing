@@ -79,7 +79,16 @@ export const recordedValidationCopy = {
   producerReportsComplete: 'Reported complete; not independently verified here', unverifiedCleanup: 'Unverified',
   sourceTitle: 'Source at this validation', findSource: 'Find matching source snapshot', readingSource: 'Reading retained source commitments…',
   sourceBoundary: 'A link is available only when retained workflow source metadata has this validation’s exact source commitment. Reading metadata does not verify file bytes or repair acceptance.',
-  sourceUnavailable: 'No retained source snapshot matching this validation could be verified. No source link is available.',
+  sourceFailures: {
+    session: 'Source commitments were not read because the local session is no longer valid. Sign in again, then find the matching source snapshot. No source link is available.',
+    denied: 'This session is not permitted to read the retained source commitments of this attempt. Use a session with access to this job. No source link is available.',
+    missing: 'The retained attempt or its source commitments are not recorded; they may never have been retained or were removed. No source link is available.',
+    unsupported: 'The retained source commitments use a format this interface does not support. No source link is available.',
+    unverified: 'No retained source snapshot matching this validation could be verified. No source link is available.',
+    sizeLimit: 'The retained source commitments exceed the size this interface reads, so they are not shown. No source link is available.',
+    transient: 'Retained source commitments are temporarily unavailable. Wait a moment, then find the matching source snapshot again. No source link is available.',
+    failed: 'Retained source commitments could not be read. Check the session, then find the matching source snapshot again. No source link is available.',
+  },
   retainedRevision: 'Retained workflow revision', openSource: 'Open source with this validated digest',
 } as const;
 
