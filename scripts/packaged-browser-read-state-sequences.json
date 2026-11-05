@@ -3,14 +3,14 @@
   "probe": {
     "test": "frontend/tests/packaged-read-states-probe.test.tsx",
     "module": "scripts/packaged-browser-read-states.mjs",
-    "moduleSha256": "260ae9b235a9668323cdca50f170155b67648e8f2656c646870e5f39b61c023f",
-    "generatorSha256": "39b7bbc64ab636d119174713dbfbaf5a47c92261dea4b38eb220012303185f03",
-    "outputSha256": "a9de870491a53fd347a5a1dac95e71097602e859ae5729df139e31566c1af293",
+    "moduleSha256": "cee198a71796836f527c1aaaa4b00720b08fd351206476537f5a177919d762ea",
+    "generatorSha256": "28b996018b20735d4f36e6939ceb4cd6e36403c2dee64be8aca8f09a78835480",
+    "outputSha256": "dc82cd6f89555aaf296f324a1fbd55282d4536e8c0c01404f6a9986843c8d1ad",
     "regenerate": "cd frontend && READ_STATES_WRITE_SEQUENCES=1 npx vitest run tests/packaged-read-states-probe.test.tsx"
   },
   "nonApi": "HTML, assets and /version are outside /nested/api/v1 and are not ledger entries; the JSDOM probe observed none through fetch.",
   "sse": "No EventSource or text/event-stream read occurs in the covered cases (none observed).",
-  "s10": "Frontend-fixture: generator bootstrapVariants[\"628-git-supported\"] (stale supported git capability) then the exact 503 CAPABILITY_UNAVAILABLE refusal; not backend-outage evidence. #1898 tracks the stale git_local baseline.",
+  "s10": "Frontend-fixture: opt-in generator bootstrapVariants[\"628-git-supported\"] replaces the canonical unavailable git and git-import entries with supported git and unconfigured import, then receives the exact 503 CAPABILITY_UNAVAILABLE refusal; not backend-outage evidence.",
   "axPinning": "unpinned-until-hosted",
   "keyboard": {
     "S1": {

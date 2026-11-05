@@ -16,6 +16,30 @@ import { SessionStatus } from '../src/session/SessionStatus';
 vi.setConfig({ testTimeout: 30_000 });
 const fixture = <T,>(name: string) => JSON.parse(readFileSync(resolve(process.cwd(), `../contracts/web/v1/fixtures/${name}.json`), 'utf8')) as T;
 const bootstrap = fixture<{ data: Bootstrap }>('bootstrap').data;
+const unavailableGitCapabilities = [
+  { id: 'git', state: 'unavailable', reasonCode: 'GIT_NOT_FOUND', message: 'Git is not installed or not executable on the server.',
+    workflows: [], agentContractVersion: null, limits: null },
+  { id: 'git-import', state: 'unavailable', reasonCode: 'GIT_NOT_FOUND', message: 'Git is not installed or not executable on the server.',
+    workflows: [], agentContractVersion: null, limits: null },
+] as const;
+const canonicalBootstrapFixtures = [
+  'bootstrap', 'bootstrap-retention', 'bootstrap-scheduler-saturated', 'bootstrap-scheduler-unavailable', 'bootstrap-without-launch',
+  'invalid-retention-accounting', 'invalid-retention-error', 'invalid-scheduler-bound', 'invalid-scheduler-capacity', 'invalid-scheduler-exact',
+] as const;
+const workflowOnlyBootstrapFixtures = [
+  'bootstrap-workflow-launch', 'invalid-launch-agent-contact', 'invalid-launch-contract-version',
+  'invalid-launch-multiple-workflows', 'invalid-launch-unknown-tool', 'invalid-launch-without-limits',
+] as const;
+it.each(canonicalBootstrapFixtures)('%s reports the backend Git and import capability identities', name => {
+  const capabilities = fixture<{ data: Bootstrap }>(name).data.capabilities;
+  expect(capabilities.map(capability => capability.id).slice(-2)).toEqual(['git', 'git-import']);
+  expect(capabilities.slice(-2)).toEqual(unavailableGitCapabilities);
+  expect(new Set(capabilities.map(capability => capability.id)).size).toBe(capabilities.length);
+});
+it.each(workflowOnlyBootstrapFixtures)('%s retains its workflow-only capability fixture scope', name => {
+  const capabilities = fixture<{ data: Bootstrap }>(name).data.capabilities;
+  expect(capabilities.some(capability => capability.id === 'git' || capability.id === 'git-import')).toBe(false);
+});
 const baseJob = (): Job => ({ ...fixture<ResponseOf<'job'>>('job-lossless').data, latestRunId: 'run_example_1' });
 const jobId = baseJob().jobId;
 const repositoryId = 'repository_example_2', operationId = 'operation_example_2';
@@ -79,20 +103,22 @@ function CommitProbe({ job }: { job: Job }) {
   useLayoutEffect(() => { commits.push(`${job.version}:${document.querySelector('.git-repository')?.textContent ?? ''}`); }, [job]);
   return null;
 }
-function Harness({ initial, initialSession, pollIntervalMs }: { initial: Job; initialSession: BrowserSession; pollIntervalMs: number | null }) {
+function Harness({ initial, initialSession, pollIntervalMs, capabilities = [supported] }: {
+  initial: Job; initialSession: BrowserSession; pollIntervalMs: number | null; capabilities?: readonly Capability[];
+}) {
   const [job, changeJob] = useState(initial); const [session, changeSession] = useState(initialSession);
   setJob = changeJob; setSession = changeSession;
   return <PrivateSessionContext.Provider value={session}><SessionStatus session={session} /><main>
-    <GitRepositoryPanel job={job} capabilities={[supported]} basePath="/" session={session}
+    <GitRepositoryPanel job={job} capabilities={capabilities} basePath="/" session={session}
       {...(pollIntervalMs === null ? {} : { pollIntervalMs })} />
     <CommitProbe job={job} />
     <section aria-label="Sibling"><p>Independent sibling</p></section>
   </main></PrivateSessionContext.Provider>;
 }
-async function mount(fetcher: Fetcher, job = baseJob(), pollIntervalMs: number | null = 1) {
+async function mount(fetcher: Fetcher, job = baseJob(), pollIntervalMs: number | null = 1, capabilities: readonly Capability[] = [supported]) {
   vi.stubGlobal('fetch', fetcher);
   const session = await realSession();
-  render(<Harness initial={job} initialSession={session} pollIntervalMs={pollIntervalMs} />);
+  render(<Harness initial={job} initialSession={session} pollIntervalMs={pollIntervalMs} capabilities={capabilities} />);
   return session;
 }
 const region = () => within(screen.getByRole('region', { name: copy.title }));
@@ -119,6 +145,16 @@ function expectFailure(kind: keyof typeof copy.failures, referenced: boolean) {
   expectSafe();
 }
 const details = () => region().queryByText('Branch trunk (no commits yet)');
+
+it('renders the canonical unavailable Git capability without requesting repository state', async () => {
+  const fetcher = sequence();
+  await mount(fetcher, baseJob(), 1, bootstrap.capabilities);
+  expect(region().getByText('Git is unavailable on this server.')).toBeTruthy();
+  expect(region().getByText('Git is not installed or not executable on the server.')).toBeTruthy();
+  expect(region().getByText('GIT_NOT_FOUND')).toBeTruthy();
+  expect(region().queryByRole('button', { name: copy.refresh })).toBeNull();
+  expect(calls(fetcher)).toEqual([]);
+});
 
 const families = [
   ['denied', failure(403, 'ACCESS_DENIED'), true],

@@ -248,9 +248,17 @@ test('binding: exact sources, stable hashes, derived headers, withheld opaque an
   assert.notEqual(variant.postSha256, a.identity.bootstrap.postSha256);
   const servedVariant = JSON.parse(find('S10', `${M.API}/bootstrap`).body.toString('utf8'));
   const servedBase = JSON.parse(find('S1', `${M.API}/bootstrap`).body.toString('utf8'));
-  assert.deepEqual(servedVariant.data.capabilities.at(-1).id, 'git');
-  assert.equal(servedVariant.data.capabilities.at(-1).state, 'supported');
-  assert.ok(!servedBase.data.capabilities.some((c) => c.id === 'git'));
+  assert.deepEqual(servedBase.data.capabilities.map((c) => c.id), ['harness_acp', 'git', 'git-import']);
+  assert.deepEqual(servedBase.data.capabilities.slice(-2), [
+    { id: 'git', state: 'unavailable', reasonCode: 'GIT_NOT_FOUND', message: 'Git is not installed or not executable on the server.', workflows: [], agentContractVersion: null, limits: null },
+    { id: 'git-import', state: 'unavailable', reasonCode: 'GIT_NOT_FOUND', message: 'Git is not installed or not executable on the server.', workflows: [], agentContractVersion: null, limits: null },
+  ]);
+  assert.deepEqual(servedVariant.data.capabilities.slice(-2), [
+    { id: 'git', state: 'supported', reasonCode: null, message: 'Git 2.43.0 is available for managed source repositories.', workflows: [], agentContractVersion: null, limits: null },
+    { id: 'git-import', state: 'unavailable', reasonCode: 'GIT_IMPORT_UNCONFIGURED', message: 'Repository import needs an operator-configured import root on the server.', workflows: [], agentContractVersion: null, limits: null },
+  ]);
+  assert.equal(servedVariant.data.capabilities.filter((c) => c.id === 'git').length, 1);
+  assert.equal(servedVariant.data.capabilities.filter((c) => c.id === 'git-import').length, 1);
   delete servedVariant.data.capabilities; delete servedBase.data.capabilities; delete servedVariant.data.runtime.gitVersion; delete servedBase.data.runtime.gitVersion;
   assert.deepEqual(servedVariant, servedBase);
   assert.deepEqual([find('S5', `${M.API}/jobs/${M.JOBS.S5}`), find('S7', `${M.API}/jobs/${M.JOBS.S7}`), find('S13', `${M.API}/jobs/${M.JOB}/runs/${M.RUN}`)].map((e) => [e.source, e.sourceName, e.status]),
@@ -287,8 +295,10 @@ test('binding refuses substituted bytes, missing errors and non-buffer contract 
   assert.throws(() => M.bindReadStateFixtures(noVariant, options), /lack bootstrapVariants\.628-git-supported/);
   const drift = structuredClone(generated); drift.bootstrapVariants['628-git-supported'].data.readiness = 'ready';
   assert.throws(() => M.bindReadStateFixtures(drift, options), /differs from the base bootstrap/);
-  const twoCaps = structuredClone(generated); twoCaps.bootstrapVariants['628-git-supported'].data.capabilities.push({ ...twoCaps.bootstrapVariants['628-git-supported'].data.capabilities.at(-1) });
-  assert.throws(() => M.bindReadStateFixtures(twoCaps, options), /exactly one supported git/);
+  const duplicateGit = structuredClone(generated); duplicateGit.bootstrapVariants['628-git-supported'].data.capabilities.push({ ...duplicateGit.bootstrapVariants['628-git-supported'].data.capabilities.find((entry) => entry.id === 'git') });
+  assert.throws(() => M.bindReadStateFixtures(duplicateGit, options), /unique backend capability order/);
+  const changedOtherCapability = structuredClone(generated); changedOtherCapability.bootstrapVariants['628-git-supported'].data.capabilities[0].message = 'changed unrelated capability';
+  assert.throws(() => M.bindReadStateFixtures(changedOtherCapability, options), /replace only the canonical git and git-import/);
 });
 
 test('pinned state projections are the manually assessed product copy', () => {

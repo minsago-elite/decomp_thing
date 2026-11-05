@@ -32,16 +32,32 @@ it('the opt-in Git bootstrap decodes through the real client without changing th
     basePath: '/nested/', applicationBuildId: 'SIMULATED_DEVELOPMENT_DATA', uiBuildId: 'SIMULATED_DEVELOPMENT_DATA',
     serverInstanceId: 'SIMULATED_DEVELOPMENT_INSTANCE', sessionExpiresAt: '2099-12-31T23:59:59Z',
   } });
-  expect(baseBootstrap.data.capabilities.some(capability => capability.id === 'git' && capability.state === 'supported')).toBe(false);
-  expect(gitBootstrap.data.capabilities).toEqual([...baseBootstrap.data.capabilities, {
-    id: 'git', state: 'supported', reasonCode: null,
-    message: 'Git is available for managed source repositories.',
-    workflows: [], agentContractVersion: null, limits: null, launch: null,
-  }]);
+  expect(baseBootstrap.data.capabilities.map(capability => capability.id)).toEqual(['harness_acp', 'git', 'git-import']);
+  expect(baseBootstrap.data.capabilities.slice(-2)).toEqual([
+    { id: 'git', state: 'unavailable', reasonCode: 'GIT_NOT_FOUND',
+      message: 'Git is not installed or not executable on the server.', workflows: [], agentContractVersion: null, limits: null },
+    { id: 'git-import', state: 'unavailable', reasonCode: 'GIT_NOT_FOUND',
+      message: 'Git is not installed or not executable on the server.', workflows: [], agentContractVersion: null, limits: null },
+  ]);
+  expect(gitBootstrap.data.capabilities).toEqual(baseBootstrap.data.capabilities.map(capability => {
+    if (capability.id === 'git') return { id: 'git', state: 'supported', reasonCode: null,
+      message: 'Git 2.43.0 is available for managed source repositories.', workflows: [], agentContractVersion: null, limits: null };
+    if (capability.id === 'git-import') return { id: 'git-import', state: 'unavailable', reasonCode: 'GIT_IMPORT_UNCONFIGURED',
+      message: 'Repository import needs an operator-configured import root on the server.', workflows: [], agentContractVersion: null, limits: null };
+    return capability;
+  }));
+  expect(gitBootstrap.data.capabilities.filter(capability => capability.id === 'git')).toHaveLength(1);
+  expect(gitBootstrap.data.capabilities.filter(capability => capability.id === 'git-import')).toHaveLength(1);
   expect(gitBootstrap).toEqual({ ...baseBootstrap, data: {
     ...baseBootstrap.data, capabilities: gitBootstrap.data.capabilities,
     runtime: { ...baseBootstrap.data.runtime, gitVersion: '2.43.0' },
   } });
+  const baseFetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify(baseBootstrap), {
+    status: 200, headers: { 'Content-Type': 'application/json', 'X-Request-ID': baseBootstrap.requestId },
+  }));
+  expect(await createApiClient({ basePath: '/nested/', fetch: baseFetcher }).get('bootstrap', '/bootstrap')).toEqual(baseBootstrap);
+  expect(baseFetcher).toHaveBeenCalledOnce();
+  expect(baseFetcher.mock.calls[0]?.[1]?.method).toBe('GET');
   const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify(gitBootstrap), {
     status: 200, headers: { 'Content-Type': 'application/json', 'X-Request-ID': gitBootstrap.requestId },
   }));

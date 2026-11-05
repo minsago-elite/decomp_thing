@@ -8,6 +8,7 @@ import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { constants as fsConstants, promises as fs, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 
 export const READ_STATES_SCHEMA = 'packaged-read-states/v1';
 export const SEQUENCES_SCHEMA = 'packaged-read-state-sequences/v1';
@@ -57,9 +58,8 @@ export const PRODUCT_COPY = Object.freeze({
  * Frozen case matrix of THIS slice. `responses` override the base read map: `contract` = exact retained file bytes,
  * `error` = generator `errors[code]`. `state` is the manually assessed positive projection: the role node and its
  * exact product text (canonical references masked as `<ref>`). `variant` = generator `bootstrapVariants[name]` bound
- * through the SAME reviewed 3-field bootstrap patch. S10 is a FRONTEND-FIXTURE state: an earlier (stale) supported `git`
- * capability report followed by the exact 503 CAPABILITY_UNAVAILABLE repository refusal; never backend-outage evidence
- * (the stale `git_local` contract baseline is tracked separately in #1898).
+ * through the SAME reviewed 3-field bootstrap patch. S10 is a FRONTEND-FIXTURE state: the opt-in supported `git`
+ * capability observation is followed by the exact 503 CAPABILITY_UNAVAILABLE repository refusal; never backend-outage evidence.
  */
 export const READ_STATE_CASES = Object.freeze([
   { id: 'S1', name: 'job-normal', route: `${BASE}/jobs/${JOB}`, responses: {},
@@ -167,9 +167,36 @@ export function bindReadStateFixtures(generated, { buildId, generatorSha256, out
     // Only the reviewed differences are allowed: capabilities and runtime.gitVersion.
     const strip = (doc) => { const copy = structuredClone(doc); delete copy.data.capabilities; delete copy.data.runtime?.gitVersion; return JSON.stringify(copy); };
     if (strip(variant) !== strip(bootstrap)) throw new Error(`bootstrapVariants.${name} differs from the base bootstrap outside ${BOOTSTRAP_VARIANT_DIFF.join('/')}`);
-    const baseCaps = JSON.stringify(bootstrap.data.capabilities);
-    if (JSON.stringify(variant.data.capabilities.slice(0, bootstrap.data.capabilities.length)) !== baseCaps || variant.data.capabilities.length !== bootstrap.data.capabilities.length + 1
-      || variant.data.capabilities.at(-1)?.id !== 'git' || variant.data.capabilities.at(-1)?.state !== 'supported') throw new Error(`bootstrapVariants.${name} must append exactly one supported git capability`);
+    const baseCaps = bootstrap.data.capabilities;
+    const variantCaps = variant.data.capabilities;
+    const ids = baseCaps.map((entry) => entry.id);
+    const gitIndex = ids.indexOf('git'); const importIndex = ids.indexOf('git-import');
+    if (new Set(ids).size !== ids.length || ids.lastIndexOf('git') !== gitIndex || ids.lastIndexOf('git-import') !== importIndex
+      || gitIndex !== ids.length - 2 || importIndex !== ids.length - 1 || variantCaps.length !== baseCaps.length
+      || variantCaps.some((entry, index) => entry.id !== ids[index])) throw new Error(`bootstrapVariants.${name} must preserve the unique backend capability order`);
+    const unavailableGit = {
+      id: 'git', state: 'unavailable', reasonCode: 'GIT_NOT_FOUND',
+      message: 'Git is not installed or not executable on the server.', workflows: [], agentContractVersion: null, limits: null,
+    };
+    const unavailableImport = {
+      id: 'git-import', state: 'unavailable', reasonCode: 'GIT_NOT_FOUND',
+      message: 'Git is not installed or not executable on the server.', workflows: [], agentContractVersion: null, limits: null,
+    };
+    const supportedGit = {
+      id: 'git', state: 'supported', reasonCode: null,
+      message: 'Git 2.43.0 is available for managed source repositories.', workflows: [], agentContractVersion: null, limits: null,
+    };
+    const unavailableImportRoot = {
+      id: 'git-import', state: 'unavailable', reasonCode: 'GIT_IMPORT_UNCONFIGURED',
+      message: 'Repository import needs an operator-configured import root on the server.', workflows: [], agentContractVersion: null, limits: null,
+    };
+    if (!isDeepStrictEqual(baseCaps[gitIndex], unavailableGit)
+      || !isDeepStrictEqual(baseCaps[importIndex], unavailableImport)
+      || !isDeepStrictEqual(variantCaps[gitIndex], supportedGit)
+      || !isDeepStrictEqual(variantCaps[importIndex], unavailableImportRoot)
+      || baseCaps.some((entry, index) => index !== gitIndex && index !== importIndex && !isDeepStrictEqual(entry, variantCaps[index]))) {
+      throw new Error(`bootstrapVariants.${name} must replace only the canonical git and git-import capability entries`);
+    }
     const pre = Buffer.from(JSON.stringify(variant));
     const copy = structuredClone(variant); Object.assign(copy.data, { basePath: `${BASE}/`, uiBuildId: buildId, sessionExpiresAt });
     const entry = makeEntry(`${API}/bootstrap`, 200, Buffer.from(JSON.stringify(copy)), 'generator-variant', `bootstrapVariants.${name}`, sha256(pre));
@@ -382,7 +409,7 @@ export function createReadStatesSection() {
     fixtures: null, sources: null, precondition: null, cases: [], late: [], orphans: [], unknown: [], writes: [], fulfillFailures: [], afterStop: [], dropped: 0,
     targets: [], cleanup: [], failure: null, failures: [], elapsedMs: null,
     limits: ['Scripted CDP + generated/contract fixture bytes: frontend-fixture evidence only; no backend failure, session timing, screen reader (#617), touch or #629 command evidence.',
-      'S10 is a frontend-fixture stale supported git capability followed by the exact 503 CAPABILITY_UNAVAILABLE refusal; it is not backend-outage evidence (#1898 tracks the stale git_local baseline).',
+      'S10 is a frontend-fixture opt-in supported git capability observation followed by the exact 503 CAPABILITY_UNAVAILABLE refusal; it is not backend-outage evidence.',
       'Zero non-GET is claimed only for the covered cases, not general command-replay protection.',
       'Start focus is programmatic #main focus (verified as document.activeElement); only trusted CDP Tab input counts, and the expected first reachable element is the JSDOM DOM-order expectation until the hosted run.',
       'AX text digests are bound to the DOM node by role and text but are unpinned until real hosted evidence.',

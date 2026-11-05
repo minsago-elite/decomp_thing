@@ -253,7 +253,7 @@ it('writes or verifies the frozen sequence file, including module, generator and
       regenerate: 'cd frontend && READ_STATES_WRITE_SEQUENCES=1 npx vitest run tests/packaged-read-states-probe.test.tsx' },
     nonApi: 'HTML, assets and /version are outside /nested/api/v1 and are not ledger entries; the JSDOM probe observed none through fetch.',
     sse: 'No EventSource or text/event-stream read occurs in the covered cases (none observed).',
-    s10: 'Frontend-fixture: generator bootstrapVariants["628-git-supported"] (stale supported git capability) then the exact 503 CAPABILITY_UNAVAILABLE refusal; not backend-outage evidence. #1898 tracks the stale git_local baseline.',
+    s10: 'Frontend-fixture: opt-in generator bootstrapVariants["628-git-supported"] replaces the canonical unavailable git and git-import entries with supported git and unconfigured import, then receives the exact 503 CAPABILITY_UNAVAILABLE refusal; not backend-outage evidence.',
     axPinning: 'unpinned-until-hosted',
     keyboard: Object.fromEntries(CASES.map(id => [id, observed[id]!.keyboard])),
     cases: Object.fromEntries(CASES.map(id => [id, { route: driver.READ_STATE_CASES.find(value => value.id === id)!.route, waves: observed[id]!.waves }])),

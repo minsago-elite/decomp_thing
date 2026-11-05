@@ -344,11 +344,21 @@ def generate(base_path: str, schema_path: Path) -> dict:
     # #628 S10: an earlier capability report can precede a refused repository read.
     # This opt-in fixture must never change the general or responsive bootstrap.
     git_bootstrap = deepcopy(bootstrap)
-    git_bootstrap["data"]["capabilities"].append({
-        "id": "git", "state": "supported", "reasonCode": None,
-        "message": "Git is available for managed source repositories.",
-        "workflows": [], "agentContractVersion": None, "limits": None, "launch": None,
-    })
+    git_capabilities = git_bootstrap["data"]["capabilities"]
+    if [entry.get("id") for entry in git_capabilities].count("git") != 1 or [entry.get("id") for entry in git_capabilities].count("git-import") != 1:
+        raise ValueError("bootstrap fixture must contain exactly one git and git-import capability")
+    git_bootstrap["data"]["capabilities"] = [
+        ({
+            "id": "git", "state": "supported", "reasonCode": None,
+            "message": "Git 2.43.0 is available for managed source repositories.",
+            "workflows": [], "agentContractVersion": None, "limits": None,
+        } if entry["id"] == "git" else {
+            "id": "git-import", "state": "unavailable", "reasonCode": "GIT_IMPORT_UNCONFIGURED",
+            "message": "Repository import needs an operator-configured import root on the server.",
+            "workflows": [], "agentContractVersion": None, "limits": None,
+        } if entry["id"] == "git-import" else entry)
+        for entry in git_capabilities
+    ]
     git_bootstrap["data"]["runtime"]["gitVersion"] = "2.43.0"
     validate(git_bootstrap)
     check_semantics(git_bootstrap)
