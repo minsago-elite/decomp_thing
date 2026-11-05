@@ -62,7 +62,7 @@ internal class ContainedModuleCompilationHostedObservation private constructor(
             val verified = ContainedModuleCompilationProof.verify(evidence)
             require(evidence.passed && verified.result.outcome == "compiled-object") { "observation requires successful real module compilation" }
             val proof = requireNotNull(evidence.containedProof)
-            require(proof.getValue("schemaVersion") == JsonPrimitive(2)) { "observation requires the descriptor-policy proof" }
+            require(proof.getValue("schemaVersion") == JsonPrimitive(4)) { "observation requires the composed descriptor-policy and interpreter proof" }
             require(verified.request.canonicalBytes.contentEquals(observed.request.canonicalBytes)) {
                 "successful compiler proof differs from the privately observed request"
             }
