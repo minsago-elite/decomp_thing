@@ -4,18 +4,21 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { promises as fs } from 'node:fs';
+import { promises as fs, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import test from 'node:test';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { crc32, deflateSync } from 'node:zlib';
 import {
-  ALLOWED_METHODS, FORBIDDEN_METHODS, MAX_METHOD_KEYS, REAL_ZOOM_DEADLINES, REAL_ZOOM_NAMES, REAL_ZOOM_PROCESSES, REAL_ZOOM_SCHEMA, REAL_ZOOM_SIZING,
-  applyRealZoomGate, assessRealZoomReport, boundedArgv, countingCdp, createRealZoomSection, expectedZoomObservations, qualifyRealZoom, readZoomPreferences,
-  verifyRealZoomScreenshots, zoomLevel, zoomPreferences, zoomProbe, zoomProfile,
+  ALLOWED_METHODS, FORBIDDEN_METHODS, GUTTER_PAGE, GUTTER_PAGE_SHA256, GUTTER_URL, HISTORICAL_FAILED_SHA256, MAX_METHOD_KEYS, REAL_ZOOM_DEADLINES, REAL_ZOOM_NAMES,
+  REAL_ZOOM_PROCESSES, REAL_ZOOM_SCHEMA, REAL_ZOOM_SIZING, ZOOM_PAGE,
+  applyRealZoomGate, assessRealZoomReport, boundedArgv, countingCdp, createRealZoomSection, dipClipFailure, expectedZoomObservations, gutterCalibrationFailures,
+  qualifyRealZoom, readZoomPreferences, snapDipClip, verifyRealZoomScreenshots, zoomLevel, zoomPreferences, zoomProbe, zoomProfile, zoomScreenshotFailure, zoomViewport,
 } from './packaged-browser-real-zoom.mjs';
+import * as RealZoom from './packaged-browser-real-zoom.mjs';
 import {
   NAVIGATION_PAGE, PRODUCT_COPY, RESPONSIVE_REGIONS, RESPONSIVE_SIZING, assessResponsiveReport, createResponsiveSection, pngDimensions, qualifyResponsive,
-  responsiveFixtures, screenshotName,
+  responsiveFixtures, screenshotName, snapClip,
 } from './packaged-browser-responsive.mjs';
 import { loadReport, publishReport, verifyRetainedReports } from './packaged-browser-report.mjs';
 
@@ -47,7 +50,46 @@ const BOOT = '/nested/api/v1/bootstrap';
 const resolutionQuery = (f) => `(min-resolution: ${(f - 0.01).toFixed(2)}dppx) and (max-resolution: ${(f + 0.01).toFixed(2)}dppx)`;
 const geometry = (f, extra = {}) => ({ innerWidth: 1280 / f, innerHeight: Math.round(CAL.innerHeight / f), outerWidth: CAL.outerWidth, outerHeight: CAL.outerHeight,
   devicePixelRatio: f, scrollX: 0, scrollY: 0, visualViewport: { scale: 1, width: 1280 / f, height: Math.round(CAL.innerHeight / f) },
+  // 54f measured fields: a non-overflowing reading (no gutter), clientWidth = floor(vv.width).
+  clientWidth: 1280 / f, clientHeight: Math.round(CAL.innerHeight / f), scrollHeight: Math.round(CAL.innerHeight / f),
   resolutionQuery: resolutionQuery(f), resolutionMatches: true, path: '/', bounds: { ...CAL.bounds }, ...extra });
+/** Measured 2x/4x scroll offsets (f109/54f diagnostic runs): half- and quarter-CSS-px, integral in DIP. */
+const SCROLL = { 2: 296.5, 4: 274.25 };
+const GUTTER = 15;
+/** An overflowing zoomed page as Chrome 149 measured it: gutter in device px, vv.height*f = calibration innerHeight, innerHeight = floor(vv.height). */
+function realGeometry(f, { scrollY = SCROLL[f] ?? 0, gutter = GUTTER } = {}) {
+  if (f === 1) return geometry(1);
+  const vvW = (1280 - gutter) / f; const vvH = CAL.innerHeight / f;
+  return { ...geometry(f), innerHeight: Math.floor(vvH), scrollY, clientWidth: Math.floor(vvW), clientHeight: Math.floor(vvH), scrollHeight: 3000,
+    visualViewport: { scale: 1, width: vvW, height: vvH, offsetLeft: 0, offsetTop: 0, pageLeft: 0, pageTop: scrollY } };
+}
+const GUTTER_CAL = Object.freeze({ pageSha256: GUTTER_PAGE_SHA256, innerWidth: 1280, clientWidth: 1280 - GUTTER, clientHeight: CAL.innerHeight, scrollHeight: 3000, gutterCss: GUTTER });
+const RECT = Object.freeze({ left: 0.5, top: 0.25, width: 99.5, height: 49.5 });
+/** A gate-passing document-DIP screenshot record for one cell (synthetic; it is not Chrome evidence). */
+function dipShot(name, f, { dpr = f, geometry: g = realGeometry(f), rect = RECT, bytes } = {}) {
+  const zv = zoomViewport({ ...g, devicePixelRatio: dpr });
+  const snapped = snapDipClip(rect, zv, f);
+  const data = bytes ?? png(snapped.clip.width, snapped.clip.height, name);
+  return { data, record: { name, bytes: data.length, sha256: sha(data), ...pngDimensions(data), clip: snapped.clip,
+    elementRect: Object.fromEntries(Object.entries(rect).map(([k, v]) => [k, Math.round(v * 1000) / 1000])),
+    viewport: { scrollX: zv.scrollX, scrollY: zv.scrollY, innerWidth: zv.innerWidth, innerHeight: zv.innerHeight, devicePixelRatio: zv.devicePixelRatio },
+    clipUnit: snapped.clipUnit, factor: snapped.factor, rectRaw: snapped.rectRaw, dipViewport: snapped.dipViewport, zoomViewport: zv,
+    viewportEquality: { sha256: sha(`viewport ${name}`), bytes: 4096, width: 1280, height: snapped.dipViewport.height, compared: snapped.clip.width * snapped.clip.height, equal: true },
+    afterGeometry: structuredClone(zv) } };
+}
+
+/** Minimal RGB8 PNG encoder for synthetic surfaces (decoded by the probe's bounded decodePng). */
+function encodePng(width, height, pixel) {
+  const stride = width * 3 + 1; const raw = Buffer.alloc(stride * height);
+  for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) { const [r, g, b] = pixel(x, y); const o = y * stride + 1 + x * 3; raw[o] = r; raw[o + 1] = g; raw[o + 2] = b; }
+  const chunk = (type, data) => { const head = Buffer.alloc(8); head.writeUInt32BE(data.length, 0); head.write(type, 4, 'latin1');
+    const tail = Buffer.alloc(4); tail.writeUInt32BE(crc32(Buffer.concat([head.subarray(4), data]))); return Buffer.concat([head, data, tail]); };
+  const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(width, 0); ihdr.writeUInt32BE(height, 4); ihdr[8] = 8; ihdr[9] = 2;
+  return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk('IHDR', ihdr), chunk('IDAT', deflateSync(raw)), chunk('IEND', Buffer.alloc(0))]);
+}
+/** One synthetic document surface in document DIP; 16-px blocks so any origin shift by sY*f (593, 1097) is visible. */
+const SURFACE = (x, y) => [(x >> 4) & 255, (y >> 4) & 255, ((x >> 4) * 7 + (y >> 4) * 13) & 255];
+const SCROLLBAR = [241, 241, 241];
 
 /** A real-zoom-shaped responsive section for one process (synthetic, gate-passing). */
 function zoomResponsive(spec, identity, dpr = spec.factor) {
@@ -62,16 +104,14 @@ function zoomResponsive(spec, identity, dpr = spec.factor) {
   const pngs = new Map();
   for (const e of expectedZoomObservations(spec.key)) {
     const page = { scrollX: 0, scrollY: 0, overflow: 0, innerWidth: width, innerHeight: height, devicePixelRatio: dpr, path: '/', h1: 'x' };
-    const clip = { x: 0, y: 0, width: Math.min(150, width), height: Math.min(90, height), scale: 1 };
-    const bytes = png(Math.round(clip.width * dpr), Math.round(clip.height * dpr), screenshotName(e));
+    const { data: bytes, record: screenshot } = dipShot(screenshotName(e), spec.factor, { dpr });
     pngs.set(screenshotName(e), bytes);
     const region = RESPONSIVE_REGIONS.find((value) => value.key === e.subject && e.kind === 'region');
     const reads = [{ method: 'GET', path: BOOT, status: 200, count: 1 }];
     if (region?.artifact) reads.push({ method: 'GET', path: identity.artifactPaths[region.artifact], status: 200, count: 1 });
     if (region?.hexRows) reads.push({ method: 'GET', path: identity.hex.chunkPath, status: 200, count: 1 });
     const base = { profile: e.profile, profileName: profile.name, sizing: REAL_ZOOM_SIZING, kind: e.kind, subject: e.subject, requests: ledger(reads),
-      screenshot: { name: screenshotName(e), bytes: bytes.length, sha256: sha(bytes), ...pngDimensions(bytes), clip,
-        viewport: { scrollX: 0, scrollY: 0, innerWidth: width, innerHeight: height, devicePixelRatio: dpr } } };
+      screenshot };
     if (e.kind === 'preferences') s.observations.push({ ...base, page, longNameRendered: true, reach: { tabs: 3, direction: 'backward' },
       opened: { expanded: 'true', panelShown: true, panelWithinWidth: true }, inside: { inPreferences: true, focusVisible: true },
       closed: { expanded: 'false', focus: { trigger: true, focusVisible: true } }, input: trustedKeys('Tab', 'Enter', 'Tab', 'Escape') });
@@ -117,8 +157,11 @@ function cleanZoom() {
       pid: 1, version: { product: PRODUCT }, launch: { outcome: 'ready', elapsedMs: 900 }, probes: [], probesDropped: 0, responsive: null,
       methods: { counts, overflow: 0 }, preferencesReadback: spec.seed ? { read: true, survived: true, value: zoomLevel(spec.factor) } : { read: false, reason: 'missing' },
       cleanup: { launched: true, browserClose: 'sent', stopped: true, exitCode: 0, signal: null, bodySettled: true, profileRemoved: true, tempRemoved: true, portFileGone: true, directoryRemoved: true } };
-    if (!spec.seed) record.probes.push({ label: 'calibration about:blank', ...CAL, devicePixelRatio: 1, scrollX: 0, scrollY: 0, visualViewport: { scale: 1, width: 1280, height: 713 },
-      resolutionQuery: resolutionQuery(1), resolutionMatches: true, path: '/' });
+    if (!spec.seed) {
+      record.probes.push({ label: 'calibration about:blank', ...CAL, devicePixelRatio: 1, scrollX: 0, scrollY: 0, visualViewport: { scale: 1, width: 1280, height: 713 },
+        resolutionQuery: resolutionQuery(1), resolutionMatches: true, path: '/' });
+      record.gutterCalibration = { ...GUTTER_CAL };
+    }
     else {
       const profile = zoomProfile(spec, CAL.innerHeight);
       record.expected = { innerWidth: profile.width, innerHeight: profile.height };
@@ -187,13 +230,14 @@ test('calibrated height: inner != outer at 1x; obsolete 800/f and outerHeight/f 
   const expect = structuredClone(section); proc(expect, 'zoom200').expected.innerHeight = 400; zoomFails(expect, main, /recorded expectation differs/);
 });
 
-test('float DPR: within 1e-6 passes with exact rounded PNG; 2.01, 2.000002 and a 1x no-op fail', () => {
+test('probe DPR within 1e-6 passes, screenshots require exact DPR; 2.01, 2.000002 and a 1x no-op fail', () => {
   const { main } = cleanZoom();
   for (const dpr of [1.9999999, 2.0000005]) {
     const { section } = cleanZoom(); const r = proc(section, 'zoom200');
     r.probes.forEach((p) => { p.devicePixelRatio = dpr; });
+    assert.deepEqual(assessRealZoomReport(section, main), [], `probe dpr ${dpr}`);
     r.responsive = zoomResponsive(REAL_ZOOM_PROCESSES[1], fixtures().identity, dpr).s;
-    assert.deepEqual(assessRealZoomReport(section, main), [], `dpr ${dpr}`);
+    zoomFails(section, main, /screenshot viewport: devicePixelRatio .* is not exactly 2/);
   }
   for (const dpr of [2.01, 2.000002]) {
     const { section } = cleanZoom(); proc(section, 'zoom200').probes[0].devicePixelRatio = dpr;
@@ -244,14 +288,16 @@ test('method log: each forbidden method, an unlisted method and truncation fail'
   assert.ok(FORBIDDEN_METHODS.every((f) => !ALLOWED_METHODS.includes(f)));
 });
 
-test('exact PNG = round(integral clip x observed DPR): clip x1, off-by-one and fractional clips fail', () => {
+// 54f §3.5: this test pinned the old integral-CSS gate messages ('is not its clip 150x90 at observed 4x', 'clip is not integral CSS
+// pixels', 'not a bounded element clip'); each mutation is kept and now meets the document-DIP gate. Name/page assertions are unchanged.
+test('exact PNG = document-DIP clip size: CSS-sized, off-by-one, non-snapped and out-of-viewport clips fail', () => {
   const { main } = cleanZoom();
   const mutate = (fn) => { const s = cleanZoom().section; fn(proc(s, 'zoom400').responsive.observations[0].screenshot); return s; };
-  zoomFails(mutate((sh) => { sh.width = sh.clip.width; sh.height = sh.clip.height; }), main, /is not its clip 150x90 at observed 4x \(600x360\)/);
-  zoomFails(mutate((sh) => { sh.width += 1; }), main, /is not its clip/);
-  zoomFails(mutate((sh) => { sh.clip.x = 0.5; }), main, /clip is not integral CSS pixels/);
-  zoomFails(mutate((sh) => { sh.clip.width = 400; }), main, /not a bounded element clip within the viewport/);
-  zoomFails(mutate((sh) => { sh.viewport.devicePixelRatio = 4.01; }), main, /screenshot viewport: devicePixelRatio 4.01/);
+  zoomFails(mutate((sh) => { sh.width = sh.clip.width / 4; sh.height = sh.clip.height / 4; }), main, /PNG 99.5x49.5 ≠ clip 398x198/);
+  zoomFails(mutate((sh) => { sh.width += 1; }), main, /PNG 399x198 ≠ clip 398x198/);
+  zoomFails(mutate((sh) => { sh.clip.x = 0.5; }), main, /is not snapDipClip\(rectRaw\)/);
+  zoomFails(mutate((sh) => { sh.clip.width = 4000; }), main, /is not snapDipClip\(rectRaw\)/);
+  zoomFails(mutate((sh) => { sh.viewport.devicePixelRatio = 4.01; sh.zoomViewport.devicePixelRatio = 4.01; }), main, /screenshot viewport: devicePixelRatio 4.01/);
   const name = cleanZoom().section; proc(name, 'zoom200').responsive.observations[0].screenshot.name = 'responsive-scale200-preferences-disclosure.png';
   zoomFails(name, main, /bounded screenshot evidence missing|screenshot names are not the distinct fixed zoom names/);
   const page = cleanZoom().section; proc(page, 'zoom200').responsive.observations[2].afterDrag.innerWidth = 1280; zoomFails(page, main, /afterDrag: innerWidth 1280 is not 640/);
@@ -304,8 +350,8 @@ async function stop(child) {
 }
 
 /** Scripted CDP that derives zoom from the seeded profile, as a stand-in for HostZoomMap. */
-function harness({ modes = {}, geometryFor = (f) => geometry(f), hang = null, product = PRODUCT, stopImpl = stop } = {}) {
-  const launches = []; const children = [];
+function harness({ modes = {}, geometryFor = (f) => realGeometry(f), hang = null, product = PRODUCT, stopImpl = stop, shot = 'dip', gutterCal = GUTTER_CAL } = {}) {
+  const launches = []; const children = []; const clips = []; const viewportPngs = new Map();
   const spawnChrome = (binary, argv, options) => {
     const key = REAL_ZOOM_PROCESSES[launches.length].key;
     const profile = argv.find((a) => a.startsWith('--user-data-dir=')).slice(16);
@@ -328,13 +374,31 @@ function harness({ modes = {}, geometryFor = (f) => geometry(f), hang = null, pr
       if (method === 'Target.attachToTarget') return { sessionId: 's' };
       if (method === 'Browser.getWindowForTarget') return { bounds: { ...g.bounds } };
       if (method === 'Fetch.enable') setTimeout(() => listeners.get('s:Fetch.requestPaused')?.({ requestId: 'r', request: { url: 'http://127.0.0.1:1/nested/api/v1/bootstrap', method: 'GET', headers: {} } }), 0);
-      if (method === 'Page.captureScreenshot') return { data: png(Math.round(params.clip.width * g.devicePixelRatio), Math.round(params.clip.height * g.devicePixelRatio)).toString('base64') };
+      if (method === 'Page.captureScreenshot') {
+        // One synthetic document surface: a clip is document-DIP ('dip'), CSS-sized ('css') or viewport-relative ('origin');
+        // the unclipped capture is the 1280 x vv.height*f viewport at sY*f with the scrollbar beyond vv.width*f.
+        const sY = (g.scrollY ?? 0) * factor; const vvW = (g.visualViewport?.width ?? g.innerWidth) * factor; const vvH = (g.visualViewport?.height ?? g.innerHeight) * factor;
+        const c = params.clip;
+        if (!c) {
+          if (shot === 'oversized-viewport') return { data: 'A'.repeat(4 * Math.ceil(512 * 1024 / 3) + 4) };
+          const key = `${factor}:${sY}:${vvW}:${vvH}`;
+          if (!viewportPngs.has(key)) viewportPngs.set(key, encodePng(1280, vvH, (i, j) => (i < vvW ? SURFACE(i, sY + j) : SCROLLBAR)));
+          return { data: viewportPngs.get(key).toString('base64') };
+        }
+        clips.push({ key: launch.key, clip: { ...c } });
+        if (shot === 'css') return { data: encodePng(Math.round(c.width / factor), Math.round(c.height / factor), (i, j) => SURFACE(c.x + i, c.y + j)).toString('base64') };
+        if (shot === 'origin') return { data: encodePng(c.width, c.height, (i, j) => SURFACE(c.x + i, sY + c.y + j)).toString('base64') };
+        return { data: encodePng(c.width, c.height, (i, j) => SURFACE(c.x + i, c.y + j)).toString('base64') };
+      }
       if (method !== 'Runtime.evaluate') return {};
       const expr = params.expression;
       let value = true;
-      if (expr.includes('resolutionMatches')) value = { ...g, resolutionQuery: /matchMedia\("([^"]+)"\)/.exec(expr)[1], bounds: undefined };
+      if (expr.includes('__gutterCalibration')) value = gutterCal ? { __gutterCalibration: true, ready: 'complete', innerWidth: gutterCal.innerWidth, clientWidth: gutterCal.clientWidth,
+        clientHeight: gutterCal.clientHeight, scrollHeight: gutterCal.scrollHeight } : null;
+      else if (expr.includes('resolutionMatches')) value = { ...g, resolutionQuery: /matchMedia\("([^"]+)"\)/.exec(expr)[1], bounds: undefined };
       else if (expr.includes('const r = e.getBoundingClientRect();\n    return { x:')) value = { x: 50, y: 25, left: 0.5, top: 0.25, width: 99.5, height: 49.5, docLeft: 0, docTop: 0 };
-      else if (expr.startsWith('({ scrollX')) value = { scrollX: 0, scrollY: 0, overflow: 0, innerWidth: g.innerWidth, innerHeight: g.innerHeight, devicePixelRatio: g.devicePixelRatio, path: '/x', h1: 'h' };
+      else if (expr.startsWith('({ scrollX')) value = { scrollX: 0, scrollY: g.scrollY ?? 0, overflow: 0, innerWidth: g.innerWidth, innerHeight: g.innerHeight, devicePixelRatio: g.devicePixelRatio, path: '/x', h1: 'h',
+        clientWidth: g.clientWidth, clientHeight: g.clientHeight, scrollHeight: g.scrollHeight, visualViewport: g.visualViewport ? { ...g.visualViewport } : null };
       else if (expr === 'innerHeight') value = g.innerHeight;
       else if (expr.includes('return { scrollWidth: e.scrollWidth, clientWidth: e.clientWidth,\n')) value = { scrollWidth: 900, clientWidth: 300, rtl: true };
       else if (expr.includes("querySelectorAll('pre.byte-preview')")) value = { summary: PRODUCT_COPY.previewTitles[0], open: true, total: 8, visible: 2, minWidth: 256, rem: 16 };
@@ -349,7 +413,7 @@ function harness({ modes = {}, geometryFor = (f) => geometry(f), hang = null, pr
         return Promise.resolve(reply(method, params, sessionId));
       } };
   };
-  return { launches, children, args: { repo, chromeBinary: '/fake/chrome', chromeSha256: CHROME_SHA, baseArgs: BASE_ARGS, spawnChrome, stop: stopImpl, connect,
+  return { launches, children, clips, args: { repo, chromeBinary: '/fake/chrome', chromeSha256: CHROME_SHA, baseArgs: BASE_ARGS, spawnChrome, stop: stopImpl, connect,
     origin: 'http://127.0.0.1:1', fixtures: () => fixtures(), delay: (ms) => new Promise((r) => setTimeout(r, ms)) } };
 }
 const owned = async () => (await fs.readdir(repo)).filter((n) => n.startsWith('.cz-'));
@@ -517,6 +581,21 @@ test('golden: the default 25-cell emulation drive is byte-identical to the pre-z
     assert.equal(section.observations.length, 25);
     assert.deepEqual(section.restored, { touch: false, metricsCleared: true, focus: true });
     assert.equal(assessResponsiveReport(section).length, 184, 'same verdict on the same scripted evidence');
+    // P3: optional hook metadata cannot overwrite the actual screenshot identity or measured bounds.
+    const collision = { name: 'forged.png', bytes: 0, sha256: 'f'.repeat(64), width: 1, height: 1, clip: null, viewport: null, elementRect: null };
+    const hooked = createResponsiveSection();
+    await qualifyResponsive({ cdp, makeTarget: async () => ({ sessionId: 's', targetId: 't' }), evaluate, ready: async () => true, delay: async () => undefined,
+      root, origin: 'http://127.0.0.1:1', fixtures: fixtures(), section: hooked,
+      clipFor: (r, v) => ({ ...collision, clip: snapClip(r, v) }), afterCapture: async () => collision });
+    assert.equal(hooked.observations.length, 25);
+    for (const observation of hooked.observations) {
+      const shot = observation.screenshot;
+      assert.equal(shot.name, screenshotName(observation));
+      const bytes = await fs.readFile(join(root, shot.name));
+      assert.equal(shot.sha256, sha(bytes)); assert.equal(shot.bytes, bytes.length);
+      assert.deepEqual({ width: shot.width, height: shot.height }, pngDimensions(bytes));
+      assert.ok(shot.clip && shot.viewport && shot.elementRect);
+    }
   } finally { await fs.rm(root, { recursive: true, force: true }); }
 });
 
@@ -731,4 +810,292 @@ test('D1: startup that completes after return is closed and never mutates the re
   assert.deepEqual([c.cleanup.stopped, c.cleanup.profileRemoved, c.cleanup.directoryRemoved], [true, true, true]);
   assert.deepEqual([log.connects, log.closes, log.calls], [1, 1, []], 'the late connection is closed after return without any call');
   zoomFails({ ...createRealZoomSection(), executable: { sha256: CHROME_SHA }, processes: [c] }, cleanZoom().main, /expected processes/);
+});
+
+// ---------------------------------------------------------------- 54f acceptance correction (document-DIP clip, measured gutter)
+// Controls only (pure, scripted CDP, stand-in processes). They prove the gate rejects defective evidence and that the driver
+// sends the DIP clip; they are not Chrome qualification, and #619 stays unqualified until a reviewed hosted run.
+
+const REPLAY = JSON.parse(readFileSync(join(repo, 'scripts/packaged-browser-real-zoom-54f-replay.json'), 'utf8'));
+const REPLAY_CAL = { innerHeight: REPLAY.calibration.innerHeight };
+/** A 54f record re-derived as a document-DIP record from its own raw rect; PNG identity is the recorded one unless replaced. */
+function replayRecord(entry, { png: data = null } = {}) {
+  const zv = structuredClone(REPLAY.zoomViewport.value);
+  const snapped = snapDipClip(entry.rectRaw, zv, 2);
+  const identity = data ? { bytes: data.length, sha256: sha(data), ...pngDimensions(data) } : {};
+  return { ...structuredClone(entry.recorded), ...identity, clip: snapped.clip, clipUnit: snapped.clipUnit, factor: 2, rectRaw: snapped.rectRaw, dipViewport: snapped.dipViewport,
+    zoomViewport: zv, viewportEquality: { sha256: 'e'.repeat(64), bytes: 9000, width: 1280, height: 657, compared: snapped.clip.width * snapped.clip.height, equal: true },
+    afterGeometry: structuredClone(zv) };
+}
+const shotFails = (record, pattern, f = 2, cal = { innerHeight: CAL.innerHeight }, gutter = GUTTER) => assert.match(String(zoomScreenshotFailure(f, cal, gutter)(record)), pattern);
+/** Applies a change to the measured viewport and its post-capture re-read alike, so only the targeted rule can fail. */
+const withViewport = (record, fn) => { const r = structuredClone(record); fn(r.zoomViewport); fn(r.afterGeometry); return r; };
+
+test('C1 54f replay: committed fixture, recorded half-size PNGs fail, same rects with DIP-sized synthetic PNGs pass', () => {
+  assert.equal(REPLAY.source.zipSha256, '1d88cb1898a0c5b1a74609adb9df22cdf9eeedfeafea98b52554ba8c8e89da60');
+  assert.deepEqual(REPLAY.historicalFailedSha256.map((h) => h.sha256), [...HISTORICAL_FAILED_SHA256]);
+  const [prefs, nav] = REPLAY.records;
+  for (const entry of REPLAY.records) {
+    for (const k of ['left', 'top', 'width', 'height']) {
+      assert.ok(Math.abs(entry.rectRaw[k] - entry.recorded.elementRect[k]) <= 5e-4, `${entry.recorded.name} ${k}`);
+      assert.ok(Number.isInteger(entry.rectRaw[k] * 128), 'a single 1/128-px value, so floor/ceil cannot flip');
+    }
+    assert.deepEqual(snapDipClip(entry.rectRaw, REPLAY.zoomViewport.value, 2).clip, entry.expectedDipClip);
+    // Recorded as-is (CSS clip, no DIP fields): never accepted.
+    shotFails(structuredClone(entry.recorded), /screenshot clip unit null@null is not document-dip@2/, 2, REPLAY_CAL);
+  }
+  assert.deepEqual(prefs.expectedDipClip, { x: 32, y: 203, width: 1152, height: 451, scale: 1 });
+  assert.deepEqual(nav.expectedDipClip, { x: 32, y: 355, width: 1201, height: 265, scale: 1 });
+  shotFails(replayRecord(prefs), /screenshot: PNG 576x226 ≠ clip 1152x451/, 2, REPLAY_CAL);
+  shotFails(replayRecord(nav), /screenshot: PNG 601x133 ≠ clip 1201x265/, 2, REPLAY_CAL);
+  // The recorded CSS clip under the DIP gate (the old path) is not the snapped clip.
+  shotFails({ ...replayRecord(prefs), clip: structuredClone(prefs.recorded.clip) }, /is not snapDipClip\(rectRaw\)/, 2, REPLAY_CAL);
+  // Even correctly sized, a historical PNG digest never passes.
+  shotFails({ ...replayRecord(prefs), width: 1152, height: 451 }, /a9c36b25.* historical failed PNG/, 2, REPLAY_CAL);
+  for (const entry of REPLAY.records) {
+    const c = entry.expectedDipClip;
+    assert.equal(zoomScreenshotFailure(2, REPLAY_CAL, REPLAY.diagnosticProbeGutterCss.value)(replayRecord(entry, { png: png(c.width, c.height, entry.recorded.name) })), null, entry.recorded.name);
+  }
+  assert.deepEqual([REPLAY.processFailures.zoom200.offendingValueRetained, REPLAY.processFailures.zoom400.observations], [false, 0]);
+});
+
+test('C2 exact dyadic scroll: 296.5@2 and 274.25@4 snap outward in document DIP; 274.3, near-integral, scrollX, f=3 and CSS clips fail', () => {
+  const v2 = zoomViewport(realGeometry(2)); const v4 = zoomViewport(realGeometry(4));
+  assert.deepEqual(snapDipClip(RECT, v2, 2).clip, { x: 1, y: 593, width: 199, height: 100, scale: 1 });
+  assert.deepEqual(snapDipClip(RECT, v2, 2).dipViewport, { x: 0, y: 593, width: 1265, height: 713 });
+  assert.deepEqual(snapDipClip(RECT, v4, 4).clip, { x: 2, y: 1098, width: 398, height: 198, scale: 1 });
+  // Right edge is vv.width*f (1265), not clientWidth*f (1264) nor 1280.
+  assert.deepEqual(snapDipClip({ left: 600, top: 0, width: 40, height: 10 }, { ...v2, scrollY: 0 }, 2).clip, { x: 1200, y: 0, width: 65, height: 20, scale: 1 });
+  for (const [v, f, pattern] of [[{ ...v4, scrollY: 274.3 }, 4, /scrollY 274.3 x 4 is not an integral physical/], [{ ...v4, scrollY: 274.2500001 }, 4, /scrollY 274.2500001 x 4/],
+    [{ ...v2, scrollX: 1 }, 2, /scrollX 1 is not 0/], [v2, 3, /factor 3 is not 2 or 4/], [{ ...v2, scrollY: -0.5 }, 2, /scrollY -0.5/]]) {
+    assert.equal(snapDipClip(RECT, v, f), null); assert.match(dipClipFailure(RECT, v, f), pattern);
+  }
+  const { record } = dipShot('responsive-zoom200-preferences-disclosure.png', 2);
+  assert.equal(zoomScreenshotFailure(2, { innerHeight: CAL.innerHeight }, GUTTER)(record), null);
+  shotFails({ ...record, clip: { x: 0, y: 296, width: 100, height: 50, scale: 1 } }, /is not snapDipClip/);
+  shotFails(withViewport(record, (v) => { v.scrollY = 274.3; }), /recorded viewport differs|document-DIP clip refused/);
+});
+
+test('C3 authoritative flag-off 1x gutter: 15 with overflow passes; 14/16, no overflow, missing (even with probe 15), wrong page or no overflow fail', () => {
+  const { main } = cleanZoom();
+  assert.deepEqual(gutterCalibrationFailures({ gutterCalibration: { ...GUTTER_CAL } }), { gutterDip: 15, failures: [] });
+  assert.equal(sha(GUTTER_PAGE), GUTTER_PAGE_SHA256);
+  assert.equal(Buffer.from(GUTTER_URL.split(',')[1], 'base64').toString(), GUTTER_PAGE);
+  assert.match(GUTTER_PAGE, /height:3000px/);
+  const probe = (gutterCss) => ({ processes: [{ key: 'calibration', gutterCss }] });
+  assert.deepEqual(assessRealZoomReport(cleanZoom().section, { ...main, geometryProbe: probe(15) }), [], 'an agreeing probe adds nothing');
+  for (const g of [14, 16]) {
+    const s = cleanZoom().section; Object.assign(proc(s, 'calibration').gutterCalibration, { gutterCss: g, clientWidth: 1280 - g });
+    zoomFails(s, main, new RegExp(`screenshot viewport: visualViewport.width 632.5 differs from the gutter rule \\(1280 - 632.5x2 is not ${g}\\)`));
+  }
+  const noOverflow = cleanZoom().section;
+  const shot = proc(noOverflow, 'zoom200').responsive.observations[0];
+  shot.screenshot = withViewport(shot.screenshot, (v) => { v.scrollHeight = v.clientHeight; });
+  zoomFails(noOverflow, main, /visualViewport.width 632.5 differs from the gutter rule \(1280 - 632.5x2 is not 0\)/);
+  const missing = cleanZoom().section; delete proc(missing, 'calibration').gutterCalibration;
+  const failures = assessRealZoomReport(missing, { ...main, geometryProbe: probe(15) });
+  assert.ok(failures.includes('calibration: 1x scrollbar gutter not measured'), failures.join('\n'));
+  assert.ok(failures.some((f) => /^zoom200\/[^:]+: screenshot viewport: 1x scrollbar gutter not measured/.test(f)), 'the flag-on probe gutter is never substituted');
+  const page = cleanZoom().section; proc(page, 'calibration').gutterCalibration.pageSha256 = 'f'.repeat(64); zoomFails(page, main, /gutter page sha256 f+ is not the pinned/);
+  const flat = cleanZoom().section; proc(flat, 'calibration').gutterCalibration.scrollHeight = CAL.innerHeight; zoomFails(flat, main, /gutter page does not overflow/);
+  const wide = cleanZoom().section; proc(wide, 'calibration').gutterCalibration.innerWidth = 1265; zoomFails(wide, main, /gutter page innerWidth 1265 is not 1280/);
+  const big = cleanZoom().section; Object.assign(proc(big, 'calibration').gutterCalibration, { gutterCss: 33, clientWidth: 1247 }); zoomFails(big, main, /1x gutter 33 is not an integer 0..32/);
+  zoomFails(cleanZoom().section, { ...main, geometryProbe: probe(16) }, /diagnostic probe gutterCss 16 differs from the authoritative 1x gutter 15/);
+  // Probe geometry obeys the same rule: an overflowing probe with vv.width = innerWidth fails.
+  const pr = cleanZoom().section; Object.assign(proc(pr, 'zoom200').probes[0], { scrollHeight: 3000 }); zoomFails(pr, main, /zoom200\/before: visualViewport.width 640 differs from the gutter rule/);
+});
+
+test('C4 viewport height/width identities: vv.height*f, clientWidth floor, vv.scale and a truncated height fail', () => {
+  const { record } = dipShot('responsive-zoom200-preferences-disclosure.png', 2);
+  shotFails(withViewport(record, (v) => { v.visualViewport.height = 356; }), /visualViewport.height 356 x 2 is not the calibration innerHeight 713/);
+  shotFails(withViewport(record, (v) => { v.clientWidth = 633; }), /clientWidth 633 is not floor\(visualViewport.width 632.5\)/);
+  shotFails(withViewport(record, (v) => { v.visualViewport.scale = 0.5; }), /visualViewport.scale 0.5 is not 1/);
+  const replay = replayRecord(REPLAY.records[0], { png: png(1152, 451) });
+  assert.equal(zoomScreenshotFailure(2, REPLAY_CAL, GUTTER)(replay), null);
+  shotFails(withViewport(replay, (v) => { v.visualViewport.height = 328; }), /visualViewport.height 328 x 2 is not the calibration innerHeight 657/, 2, REPLAY_CAL);
+  const tall = structuredClone(record); tall.viewport.innerHeight = 357; tall.zoomViewport.innerHeight = 357; tall.afterGeometry.innerHeight = 357;
+  shotFails(tall, /innerHeight 357 is not floor\(713\/2\)/);
+});
+
+test('C5 clip identity: non-snapped clip, raw-rect drift, recorded DIP viewport and a clip reaching column >= vvW fail', () => {
+  const { record } = dipShot('responsive-zoom200-preferences-disclosure.png', 2);
+  shotFails({ ...record, clip: { ...record.clip, x: record.clip.x + 1 } }, /is not snapDipClip/);
+  shotFails({ ...record, rectRaw: { ...record.rectRaw, top: record.rectRaw.top + 0.001 } }, /raw rect drifted from the recorded elementRect beyond 0.0005/);
+  shotFails({ ...record, dipViewport: { ...record.dipViewport, width: 1280 } }, /recorded DIP viewport differs/);
+  const edge = dipShot('responsive-zoom200-region-exploration-partial.png', 2, { rect: { left: 600, top: 0, width: 40, height: 10 } }).record;
+  assert.equal(edge.clip.x + edge.clip.width, 1265);
+  assert.equal(zoomScreenshotFailure(2, { innerHeight: CAL.innerHeight }, GUTTER)(edge), null);
+  shotFails({ ...edge, clip: { ...edge.clip, width: 80 }, width: 80 }, /is not snapDipClip/);
+});
+
+test('C6 viewport equality: a 1-px mismatch, partial comparison, missing record, viewport-dip crops and geometry drift fail', () => {
+  const { record } = dipShot('responsive-zoom200-preferences-disclosure.png', 2);
+  const eq = (patch) => ({ ...record, viewportEquality: { ...record.viewportEquality, ...patch } });
+  shotFails(eq({ equal: false, compared: 7 }), /crop differs from the viewport capture \(7\/19900 compared, equal false\)/);
+  shotFails(eq({ compared: 19899 }), /crop differs from the viewport capture/);
+  shotFails({ ...record, viewportEquality: undefined }, /viewport equality record missing/);
+  shotFails(eq({ height: 712 }), /viewport PNG 1280x712 is not 1280x713/);
+  shotFails({ ...record, afterGeometry: { ...record.afterGeometry, scrollY: 297 } }, /afterGeometry differs/);
+  shotFails({ ...record, sha256: '1abc2aec377504d7cda1402f27f5f23664603c1b7117a2e9684fa9e73119ccbc' }, /historical failed PNG/);
+  shotFails({ ...dipShot('responsive-zoom400-preferences-disclosure.png', 4).record, sha256: '0b0d9d8b2ea2be381e1eb3003b2bff4140580807efc297e37575a00fda09188c' }, /historical failed PNG/, 4);
+  // A real pixel comparison: the same synthetic surface agrees; one changed pixel is found.
+  const c = record.clip; const sY = 593;
+  const view = encodePng(1280, 713, (i, j) => (i < 1265 ? SURFACE(i, sY + j) : SCROLLBAR));
+  const good = encodePng(c.width, c.height, (i, j) => SURFACE(c.x + i, c.y + j));
+  const bad = encodePng(c.width, c.height, (i, j) => (i === 5 && j === 9 ? [0, 0, 0] : SURFACE(c.x + i, c.y + j)));
+  return import('./packaged-browser-zoom-geometry-probe.mjs').then(({ decodePng, regionEqual }) => {
+    assert.deepEqual(regionEqual(decodePng(good), decodePng(view), c.x, c.y - sY), { equal: true, compared: 19900 });
+    assert.equal(regionEqual(decodePng(bad), decodePng(view), c.x, c.y - sY).equal, false);
+  });
+});
+
+test('C7 preserved gates on the DIP section: digest, observations, emulation PNG under a zoom name, sha swap, sizing method and label', async () => {
+  const { main } = cleanZoom();
+  const d = cleanZoom().section; proc(d, 'zoom200').responsive.digestControl = null; zoomFails(d, main, /zoom200: real-client digest control missing/);
+  const o = cleanZoom().section; proc(o, 'zoom400').responsive.observations.splice(3, 1); zoomFails(o, main, /zoom400: expected 6 observations, found 5/);
+  const emu = cleanZoom().section; const ob = proc(emu, 'zoom200').responsive.observations[0];
+  const bytes = png(150 * 2, 90 * 2); ob.screenshot = { name: ob.screenshot.name, bytes: bytes.length, sha256: sha(bytes), width: 300, height: 180,
+    clip: { x: 0, y: 0, width: 150, height: 90, scale: 1 }, viewport: { scrollX: 0, scrollY: 0, innerWidth: 640, innerHeight: 356, devicePixelRatio: 2 } };
+  zoomFails(emu, main, /zoom200\/preferences\/disclosure: screenshot clip unit null@null is not document-dip@2/);
+  const m = cleanZoom().section; proc(m, 'zoom200').methods.counts['Emulation.setDeviceMetricsOverride'] = 2; zoomFails(m, main, /forbidden sizing\/pinch method Emulation.setDeviceMetricsOverride sent 2/);
+  const l = cleanZoom().section; proc(l, 'zoom400').responsive.sizing = RESPONSIVE_SIZING; zoomFails(l, main, /zoom400: responsive labels differ/);
+  const dir = await fs.mkdtemp(join(repo, 'build/test-real-zoom-c7-'));
+  try {
+    const { section, pngs } = cleanZoom();
+    for (const [name, data] of pngs) await fs.writeFile(join(dir, name), data);
+    const [a, b] = proc(section, 'zoom200').responsive.observations.map((x) => x.screenshot);
+    [a.sha256, b.sha256] = [b.sha256, a.sha256];
+    assert.match((await verifyRealZoomScreenshots(dir, section)).join('\n'), /retained PNG differs/);
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+/** C8: the actual helpers (qualifyRealZoom -> drive -> qualifyResponsive) against one synthetic surface. */
+async function driveStandIn(module, options = {}) {
+  const root = await fs.mkdtemp(join(repo, 'build/test-real-zoom-c8-'));
+  try {
+    const h = harness(options);
+    const section = module.createRealZoomSection();
+    await module.qualifyRealZoom({ ...h.args, section, root });
+    return { h, section };
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+}
+const screenshotsOf = (section, key) => (proc(section, key).responsive?.observations ?? []).map((o) => o.screenshot);
+
+test('C8 real-helper stand-in: drive sends the document-DIP clip at 296.5@2/274.25@4 with gutter 15 and the gate passes it', async () => {
+  const { h, section } = await driveStandIn(RealZoom);
+  assert.deepEqual(proc(section, 'calibration').gutterCalibration, { ...GUTTER_CAL });
+  assert.equal(proc(section, 'calibration').probes.length, 1, 'the calibration keeps exactly one probe');
+  assert.equal(proc(section, 'calibration').methods.counts['Page.navigate'], 1);
+  assert.deepEqual(h.clips.find((c) => c.key === 'zoom200').clip, { x: 1, y: 593, width: 199, height: 100, scale: 1 }, 'captureScreenshot received the DIP clip');
+  assert.deepEqual(h.clips.find((c) => c.key === 'zoom400').clip, { x: 2, y: 1098, width: 398, height: 198, scale: 1 });
+  const cal = proc(section, 'calibration').probes[0];
+  for (const [key, f] of [['zoom200', 2], ['zoom400', 4]]) {
+    const shots = screenshotsOf(section, key);
+    assert.equal(shots.length, 6, key);
+    for (const s of shots) {
+      assert.equal(zoomScreenshotFailure(f, cal, GUTTER)(s), null, `${key} ${s.name}`);
+      assert.deepEqual([s.viewportEquality.equal, s.viewportEquality.width, s.viewportEquality.height], [true, 1280, 713]);
+    }
+    assert.ok(!proc(section, key).probes.some((p) => p.label === 'failure'));
+  }
+  assert.deepEqual(assessRealZoomReport(section, MAIN()).filter((f) => /screenshot|gutter|clip/.test(f)), []);
+});
+
+test('C8 paired stand-ins: CSS-sized PNGs and a viewport-relative origin fail; a refused scroll retains the failing probe', async () => {
+  const cal = { innerHeight: CAL.innerHeight };
+  const css = (await driveStandIn(RealZoom, { shot: 'css' })).section;
+  const cssShots = screenshotsOf(css, 'zoom200');
+  assert.equal(cssShots.length, 6);
+  for (const s of cssShots) assert.match(zoomScreenshotFailure(2, cal, GUTTER)(s), /screenshot: PNG 100x50 ≠ clip 199x100/);
+  const origin = (await driveStandIn(RealZoom, { shot: 'origin' })).section;
+  for (const s of screenshotsOf(origin, 'zoom200')) {
+    assert.equal(s.viewportEquality.equal, false);
+    assert.match(zoomScreenshotFailure(2, cal, GUTTER)(s), /crop differs from the viewport capture/);
+  }
+  const refused = (await driveStandIn(RealZoom, { geometryFor: (f) => realGeometry(f, f === 4 ? { scrollY: 274.3 } : {}) })).section;
+  const z4 = proc(refused, 'zoom400');
+  assert.match(z4.failure, /zoom400: document-DIP clip refused: scrollY 274.3 x 4 is not an integral physical \(DIP\) offset/);
+  assert.deepEqual([z4.probes.at(-1).label, z4.probes.at(-1).scrollY, z4.probes.at(-1).visualViewport.width], ['failure', 274.3, 316.25], 'the triggering value is retained');
+  zoomFails(refused, MAIN(), /zoom400: failed: real-zoom zoom400: document-DIP clip refused/);
+  assert.match(ZOOM_PAGE, /^\(\{ scrollX, scrollY, overflow: .*innerWidth, innerHeight, devicePixelRatio, path: location.pathname, h1: /s);
+  assert.match(zoomProbe(2), /clientWidth: document.documentElement.clientWidth.*pageTop: visualViewport.pageTop/s);
+});
+
+// C9: each named mutant of the real module is killed by a control that the unmutated module passes.
+const MUTANTS = [
+  ['Math.round for floor/ceil', (s) => { const a = s.indexOf('  const x0 = Math.max('); const b = s.indexOf('  if (x1 - x0 < 1'); assert.ok(a > 0 && b > a);
+    return s.slice(0, a) + s.slice(a, b).replaceAll('Math.floor(', 'Math.round(').replaceAll('Math.ceil(', 'Math.round(') + s.slice(b); }, 'snap'],
+  ['clientWidth*f edge', (s) => once(s, 'const vvW = v.visualViewport.width * f;', 'const vvW = v.clientWidth * f;'), 'edge'],
+  ['no gutter check', (s) => once(s, 'if (REAL_ZOOM_WINDOW.width - vv.width * f !== expected) return', 'if (false) return'), 'gutter'],
+  ['1e-6 scroll tolerance', (s) => once(s, '!Number.isInteger(v.scrollY * f)', 'Math.abs(v.scrollY * f - Math.round(v.scrollY * f)) > 1e-6'), 'tolerance'],
+  ['viewport origin', (s) => once(s, 'const sX = v.scrollX; const sY = v.scrollY;', 'const sX = 0; const sY = 0;'), 'origin'],
+  ['no afterCapture', (s) => once(s, 'clipFor, pageExpression: ZOOM_PAGE, afterCapture,', 'clipFor, pageExpression: ZOOM_PAGE,'), 'drive'],
+  ['accepting the flag-on probe gutter', (s) => once(s, 'const gutter = gutterCalibrationFailures(processes[0]);',
+    "const gutter = processes[0].gutterCalibration ? gutterCalibrationFailures(processes[0]) : { gutterDip: probeGutter ?? null, failures: probeGutter == null ? ['calibration: 1x scrollbar gutter not measured'] : [] };"), 'probe-gutter'],
+];
+function once(source, from, to) { assert.equal(source.split(from).length, 2, `mutation site must be unique: ${from}`); return source.replace(from, to); }
+const KILLERS = {
+  snap: (M) => REPLAY.records.every((e) => isDeep(M.snapDipClip(e.rectRaw, REPLAY.zoomViewport.value, 2)?.clip, e.expectedDipClip)),
+  edge: (M) => isDeep(M.snapDipClip({ left: 600, top: 0, width: 40, height: 10 }, { ...zoomViewport(realGeometry(2)), scrollY: 0 }, 2)?.clip, { x: 1200, y: 0, width: 65, height: 20, scale: 1 }),
+  gutter: (M) => { const { section, main } = cleanZoom(); Object.assign(proc(section, 'calibration').gutterCalibration, { gutterCss: 14, clientWidth: 1266 });
+    return M.assessRealZoomReport(section, main).some((f) => /differs from the gutter rule/.test(f)); },
+  tolerance: (M) => M.snapDipClip(RECT, { ...zoomViewport(realGeometry(4)), scrollY: 274.2500001 }, 4) === null,
+  origin: (M) => isDeep(M.snapDipClip(RECT, zoomViewport(realGeometry(2)), 2)?.clip, { x: 1, y: 593, width: 199, height: 100, scale: 1 }),
+  drive: async (M) => { const { section } = await driveStandIn(M); const cal = proc(section, 'calibration').probes[0];
+    const shots = screenshotsOf(section, 'zoom200'); return shots.length === 6 && shots.every((s) => M.zoomScreenshotFailure(2, cal, GUTTER)(s) === null); },
+  'probe-gutter': (M) => { const { section, main } = cleanZoom(); delete proc(section, 'calibration').gutterCalibration;
+    return M.assessRealZoomReport(section, { ...main, geometryProbe: { processes: [{ key: 'calibration', gutterCss: 15 }] } }).includes('calibration: 1x scrollbar gutter not measured'); },
+};
+function isDeep(a, b) { try { assert.deepStrictEqual(a, b); return true; } catch { return false; } }
+
+test('C9 mutants: all seven named mutants of the real module are killed; the unmutated module passes every killer', async () => {
+  const source = await fs.readFile(join(repo, 'scripts/packaged-browser-real-zoom.mjs'), 'utf8');
+  const base = pathToFileURL(join(repo, 'scripts')).href;
+  const rewrite = (s) => s.replaceAll("from './", `from '${base}/`);
+  for (const killer of Object.values(KILLERS)) assert.equal(await killer(RealZoom), true, 'the unmutated module passes');
+  const dir = await fs.mkdtemp(join(repo, 'build/test-real-zoom-mutants-'));
+  try {
+    for (const [index, [name, mutate, killer]] of MUTANTS.entries()) {
+      const mutated = rewrite(mutate(source));
+      assert.notEqual(mutated, rewrite(source), name);
+      const file = join(dir, `m${index}.mjs`); await fs.writeFile(file, mutated);
+      const M = await import(pathToFileURL(file).href);
+      assert.equal(await KILLERS[killer](M), false, `mutant survived: ${name}`);
+    }
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+
+test('P1 whole disclosures: viewport intersection cannot certify a complete preferences or navigation panel', () => {
+  for (const f of [2, 4]) for (const kind of ['preferences', 'navigation']) {
+    const name = `responsive-zoom${f * 100}-${kind}-disclosure.png`;
+    const full = dipShot(name, f).record;
+    assert.equal(zoomScreenshotFailure(f, CAL, GUTTER)(full), null);
+    const rect = { left: 16, top: 101.59375, width: 280, height: f === 4 ? 225.3671875 : 300 };
+    const partial = dipShot(name, f, { rect }).record;
+    assert.ok(partial.clip.height < Math.ceil((rect.top + rect.height) * f) - Math.floor(rect.top * f));
+    assert.match(zoomScreenshotFailure(f, CAL, GUTTER)(partial), /disclosure is not fully inside the viewport/);
+  }
+});
+
+test('P2 viewport capture refuses oversized encoded data before decoding', async () => {
+  const { section } = await driveStandIn(RealZoom, { shot: 'oversized-viewport' });
+  for (const key of ['zoom200', 'zoom400']) assert.match(proc(section, key).responsive.failure, /viewport PNG encoded size exceeds/);
+});
+
+test('P4 screenshot DPR is exact even when calibration probes allow tolerance', () => {
+  for (const dpr of [1.9999999, 2.0000005]) {
+    const sh = dipShot('responsive-zoom200-preferences-disclosure.png', 2, { dpr }).record;
+    assert.match(zoomScreenshotFailure(2, CAL, GUTTER)(sh), /devicePixelRatio .* is not exactly 2/);
+  }
+});
+
+test('P5 verifier carries diagnostic gutter mismatches into the mandatory zoom gate', async () => {
+  const { section, main } = cleanZoom();
+  const report = { auditRealZoom: section, tools: { chromeSha256: CHROME_SHA }, browser: main.browser,
+    browserArgv: main.browserArgv, auditResponsive: { fixtures: main.fixtures },
+    auditRealZoomGeometryProbe: { processes: [{ key: 'calibration', gutterCss: 14 }] } };
+  const results = await applyRealZoomGate([{ directory: 'no-png-read-on-semantic-failure', ok: true, mode: 'audit', status: 'passed' }], async () => report);
+  assert.equal(results[0].realZoomGate, 'failed');
+  assert.match(results[0].error, /diagnostic.*gutter|gutter.*diagnostic/);
 });

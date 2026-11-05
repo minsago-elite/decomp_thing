@@ -756,7 +756,7 @@ try {
       try { geometryProbeSection.assessment = (await assessGeometryProbe(geometryProbeSection, { directory: root, realZoom })).slice(0, 24).map((f) => String(f).slice(0, 240)); }
       catch (error) { geometryProbeSection.assessment = [`assessment failed: ${String(error?.message ?? error).slice(0, 200)}`]; }
     }
-    const realZoomFailures = assessRealZoomReport(realZoom, { chromeSha256: report.tools.chromeSha256, browser: report.browser, browserArgv: report.browserArgv, fixtures: responsive.fixtures });
+    const realZoomFailures = assessRealZoomReport(realZoom, { chromeSha256: report.tools.chromeSha256, browser: report.browser, browserArgv: report.browserArgv, fixtures: responsive.fixtures, geometryProbe: geometryProbeSection });
     assert.deepEqual(realZoomFailures, [], `Packaged #619 real browser zoom failures:\n${realZoomFailures.join('\n')}`);
     assert.ok(targets.filter((target) => !target.cspProbe).every((target) => target.requests.every((entry) => entry.url.startsWith(origin + '/') || entry.url.startsWith('data:'))), 'Audit fetched an external dependency');
     assert.equal(await fs.stat(data).then(() => true, () => false), false, 'Fixture-backed audit created job data');

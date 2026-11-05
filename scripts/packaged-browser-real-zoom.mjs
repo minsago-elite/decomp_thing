@@ -6,9 +6,12 @@
 // No Emulation sizing, pinch or window-bounds method may reach a zoom process (bounded counted method log).
 // Touch is still CDP-emulated and labelled. Headless Chrome on a runner; not UI/keyboard-initiated zoom,
 // physical devices or screen readers. Chrome 149 behaviour is unknown until a hosted run; these controls are not it.
+import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
+// The diagnostic probe file is unchanged and only imported for its bounded PNG decoder and full-region comparison.
+import { decodePng, regionEqual, MAX_PROBE_PNG_BYTES } from './packaged-browser-zoom-geometry-probe.mjs';
 import {
   RESPONSIVE_REGIONS, RESPONSIVE_SCHEMA, RESPONSIVE_TOUCH, createResponsiveSection, qualifyResponsive, screenshotName, assessResponsiveObservation,
   digestFailures, fixtureFailures, runLedgerFailures, verifyResponsiveScreenshots,
@@ -52,11 +55,76 @@ export const zoomLevel = (factor) => Math.log(factor) / Math.log(1.2);
 /** The exact nested Default/Preferences seed of the prior retained harness (cdp-619.mjs). */
 export const zoomPreferences = (factor) => ({ partition: { default_zoom_level: { x: zoomLevel(factor) } } });
 const resolutionQuery = (factor) => `(min-resolution: ${(factor - 0.01).toFixed(2)}dppx) and (max-resolution: ${(factor + 0.01).toFixed(2)}dppx)`;
+const VV_FIELDS = 'visualViewport: visualViewport ? { scale: visualViewport.scale, width: visualViewport.width, height: visualViewport.height, offsetLeft: visualViewport.offsetLeft, '
+  + 'offsetTop: visualViewport.offsetTop, pageLeft: visualViewport.pageLeft, pageTop: visualViewport.pageTop } : null';
+const DOC_FIELDS = 'clientWidth: document.documentElement.clientWidth, clientHeight: document.documentElement.clientHeight, scrollHeight: document.scrollingElement.scrollHeight';
 /** Geometry probe: every value is observed, nothing is set. */
-export const zoomProbe = (factor) => `(() => ({ innerWidth, innerHeight, outerWidth, outerHeight, devicePixelRatio, scrollX, scrollY,
-  visualViewport: visualViewport ? { scale: visualViewport.scale, width: visualViewport.width, height: visualViewport.height } : null,
+export const zoomProbe = (factor) => `(() => ({ innerWidth, innerHeight, outerWidth, outerHeight, devicePixelRatio, scrollX, scrollY, ${DOC_FIELDS},
+  ${VV_FIELDS},
   resolutionQuery: ${JSON.stringify(resolutionQuery(factor))}, resolutionMatches: matchMedia(${JSON.stringify(resolutionQuery(factor))}).matches,
   path: location.pathname.slice(0, 160) }))()`;
+
+/** Real-zoom page reading (qualifyResponsive pageExpression): the v2 PAGE keys plus the measured DIP-viewport fields. */
+export const ZOOM_PAGE = `({ scrollX, scrollY, overflow: document.scrollingElement.scrollWidth - document.scrollingElement.clientWidth,
+  innerWidth, innerHeight, devicePixelRatio, path: location.pathname, h1: (document.querySelector('main h1')?.textContent ?? '').trim().slice(0, 80),
+  ${DOC_FIELDS}, ${VV_FIELDS} })`;
+
+/** Authoritative 1x scrollbar gutter: a pinned overflowing data: page on the calibration target (no flag, no server). */
+export const GUTTER_PAGE = '<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;padding:0;background:#fff}#gutter-tall{width:1px;height:3000px}</style></head>'
+  + '<body><div id="gutter-tall"></div></body></html>';
+export const GUTTER_PAGE_SHA256 = '688f87bcbce7edb633f04772a889878da7d8bbd2756b00d6f4e54164a18019c7';
+export const GUTTER_URL = `data:text/html;base64,${Buffer.from(GUTTER_PAGE).toString('base64')}`;
+export const GUTTER_MEASURE = `(() => { const d = document.documentElement; return { __gutterCalibration: true, ready: document.readyState, innerWidth,
+  clientWidth: d.clientWidth, clientHeight: d.clientHeight, scrollHeight: document.scrollingElement.scrollHeight }; })()`;
+export const MAX_GUTTER_CSS = 32;
+export const RECT_DRIFT = 5e-4;
+/** Historical wrong or uninformative PNGs (6a/f109/54f). They are never reassessed as passing, whatever record carries them. */
+export const HISTORICAL_FAILED_SHA256 = Object.freeze([
+  'a9c36b25745a807b7d9f3b29788413ddf499ff74695330878141cc1f02e08185', // 54f/6a responsive-zoom200-preferences-disclosure.png (CSS clip on a DIP surface)
+  '01b42b0bc12b261a4f28ba29799aa860ff54c2447f32b739b2bb69aee5ce1630', // 54f/6a responsive-zoom200-navigation-disclosure.png (CSS clip on a DIP surface)
+  '1abc2aec377504d7cda1402f27f5f23664603c1b7117a2e9684fa9e73119ccbc', // f109/54f zoom200 viewport-dip crop (white)
+  '0b0d9d8b2ea2be381e1eb3003b2bff4140580807efc297e37575a00fda09188c', // f109/54f zoom400 viewport-dip crop
+]);
+const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
+const HEX64 = /^[0-9a-f]{64}$/;
+const finite = (...values) => values.every((v) => typeof v === 'number' && Number.isFinite(v));
+
+/** Why a document-DIP clip cannot be derived exactly; null when snapDipClip may proceed. Measured cases only (f in {2,4}, scrollX 0, vv.scale 1). */
+export function dipClipFailure(rect, v, f) {
+  if (f !== 2 && f !== 4) return `factor ${cap(f)} is not 2 or 4`;
+  if (!rect || !finite(rect.left, rect.top, rect.width, rect.height) || rect.width < 0 || rect.height < 0) return 'invalid element rect';
+  if (!v || !finite(v.scrollX, v.scrollY)) return 'scroll offset not measured';
+  if (v.scrollX !== 0) return `scrollX ${cap(v.scrollX)} is not 0`;
+  if (v.scrollY < 0 || !Number.isInteger(v.scrollY * f)) return `scrollY ${cap(v.scrollY)} x ${f} is not an integral physical (DIP) offset`;
+  const vv = v.visualViewport;
+  if (!vv || vv.scale !== 1) return `visualViewport.scale ${cap(vv?.scale)} is not 1`;
+  if (!finite(vv.width, vv.height) || !Number.isInteger(vv.width * f) || !Number.isInteger(vv.height * f) || vv.width * f < 1 || vv.height * f < 1)
+    return `visual viewport ${cap(vv.width)}x${cap(vv.height)} x ${f} is not integral DIP`;
+  return null;
+}
+
+/**
+ * Pure: element rect (viewport CSS px) -> outward-snapped document-DIP clip intersected with the DIP viewport
+ * [sX*f, sY*f, vv.width*f, vv.height*f], or null (refused or empty). f is dyadic, so every product here is exact.
+ */
+export function snapDipClip(rect, v, f) {
+  if (dipClipFailure(rect, v, f)) return null;
+  const sX = v.scrollX; const sY = v.scrollY;
+  const vvW = v.visualViewport.width * f; const vvH = v.visualViewport.height * f;
+  const x0 = Math.max(Math.floor((rect.left + sX) * f), sX * f);
+  const y0 = Math.max(Math.floor((rect.top + sY) * f), sY * f);
+  const x1 = Math.min(Math.ceil((rect.left + rect.width + sX) * f), sX * f + vvW);
+  const y1 = Math.min(Math.ceil((rect.top + rect.height + sY) * f), sY * f + vvH);
+  if (x1 - x0 < 1 || y1 - y0 < 1) return null;
+  return { clip: { x: x0, y: y0, width: x1 - x0, height: y1 - y0, scale: 1 }, clipUnit: 'document-dip', factor: f,
+    rectRaw: { left: rect.left, top: rect.top, width: rect.width, height: rect.height }, dipViewport: { x: sX * f, y: sY * f, width: vvW, height: vvH } };
+}
+
+/** The measured viewport fields a zoom screenshot is bound to (from ZOOM_PAGE). */
+export const zoomViewport = (v) => ({ scrollX: v?.scrollX, scrollY: v?.scrollY, innerWidth: v?.innerWidth, innerHeight: v?.innerHeight, devicePixelRatio: v?.devicePixelRatio,
+  clientWidth: v?.clientWidth, clientHeight: v?.clientHeight, scrollHeight: v?.scrollHeight,
+  visualViewport: v?.visualViewport ? { scale: v.visualViewport.scale, width: v.visualViewport.width, height: v.visualViewport.height, offsetLeft: v.visualViewport.offsetLeft,
+    offsetTop: v.visualViewport.offsetTop, pageLeft: v.visualViewport.pageLeft, pageTop: v.visualViewport.pageTop } : null });
 
 /** The responsive profile a zoom process is driven with; height derives from the measured 1x calibration. */
 export function zoomProfile(spec, calibrationInnerHeight) {
@@ -277,6 +345,13 @@ async function drive({ spec, record, cdp, fixtures, root, origin, delay, deadlin
   if (!spec.seed) {
     const target = await makeZoomTarget(cdp);
     await probe(target, 'calibration about:blank');
+    // Authoritative 1x gutter, flag off: same owned target, pinned overflowing data: page, inside the calibration cap.
+    await cdp.call('Page.navigate', { url: GUTTER_URL }, target.sessionId);
+    await ready(target, `document.readyState === 'complete' && document.getElementById('gutter-tall') !== null`, 'calibration gutter page');
+    const g = await evaluate(target, GUTTER_MEASURE);
+    const sent = Buffer.from(GUTTER_URL.slice(GUTTER_URL.indexOf(',') + 1), 'base64');
+    record.gutterCalibration = { pageSha256: sha256(sent), innerWidth: g?.innerWidth ?? null, clientWidth: g?.clientWidth ?? null, clientHeight: g?.clientHeight ?? null,
+      scrollHeight: g?.scrollHeight ?? null, gutterCss: finite(g?.innerWidth, g?.clientWidth) ? g.innerWidth - g.clientWidth : null };
     await cdp.call('Target.closeTarget', { targetId: target.targetId });
     return;
   }
@@ -284,7 +359,35 @@ async function drive({ spec, record, cdp, fixtures, root, origin, delay, deadlin
   record.expected = { innerWidth: profile.width, innerHeight: profile.height, heightToleranceCss: HEIGHT_TOLERANCE_CSS, devicePixelRatio: spec.factor,
     outerWidth: calibration.outerWidth, outerHeight: calibration.outerHeight, bounds: calibration.bounds };
   const responsive = record.responsive = { ...createResponsiveSection(), sizing: REAL_ZOOM_SIZING };
-  await qualifyResponsive({ cdp, makeTarget: () => makeZoomTarget(cdp), evaluate, ready, delay, root, origin, fixtures, section: responsive,
+  const f = spec.factor; let current = null;
+  // Document-DIP clip per cell; a refusal retains the triggering geometry as a probe labelled `failure`, then fails (no rescroll, no tolerance).
+  const clipFor = async (r, v) => {
+    const rect = { left: r.left, top: r.top, width: r.width, height: r.height }; const measured = zoomViewport(v);
+    const snapped = snapDipClip(rect, measured, f);
+    if (snapped) return { ...snapped, zoomViewport: measured };
+    try { await probe(current, 'failure'); } catch { /* the failure below is the recorded fact */ }
+    throw new Error(`real-zoom ${spec.key}: document-DIP clip refused: ${dipClipFailure(rect, measured, f) ?? 'element is not in the DIP viewport'}`);
+  };
+  // One unclipped in-memory viewport capture per cell (never written), decoded within the probe's caps and compared pixel-for-pixel.
+  const afterCapture = async ({ png, clip, extra }) => {
+    const { data } = await cdp.call('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false }, current.sessionId);
+    const afterGeometry = zoomViewport(await evaluate(current, ZOOM_PAGE));
+    if (typeof data !== 'string' || data.length > 4 * Math.ceil(MAX_PROBE_PNG_BYTES / 3))
+      throw new Error(`viewport PNG encoded size exceeds ${MAX_PROBE_PNG_BYTES} bytes`);
+    const bytes = Buffer.from(data, 'base64');
+    const viewportEquality = { sha256: sha256(bytes), bytes: bytes.length, width: null, height: null, compared: 0, equal: false };
+    try {
+      const crop = decodePng(png); const view = decodePng(bytes);
+      viewportEquality.width = view.width; viewportEquality.height = view.height;
+      const m = extra.zoomViewport;
+      const result = regionEqual(crop, view, clip.x - m.scrollX * f, clip.y - m.scrollY * f);
+      viewportEquality.compared = result.compared; viewportEquality.equal = result.equal === true;
+      if (!viewportEquality.equal) viewportEquality.reason = cap(result.reason ?? JSON.stringify(result.firstMismatch ?? null));
+    } catch (error) { viewportEquality.reason = message(error); }
+    return { viewportEquality, afterGeometry };
+  };
+  await qualifyResponsive({ cdp, makeTarget: async () => (current = await makeZoomTarget(cdp)), evaluate, ready, delay, root, origin, fixtures, section: responsive,
+    clipFor, pageExpression: ZOOM_PAGE, afterCapture,
     profiles: [profile], sizing: REAL_ZOOM_SIZING, restoreMetrics: false,
     // Touch emulation is labelled and allowed; size is observed, never set.
     sizeProfile: async (p, call, target) => { await call('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 }); await probe(target, `${p.key} before`); },
@@ -325,28 +428,88 @@ export function zoomGeometryFailure(p, factor, calibration) {
   return null;
 }
 
-function probeFailure(p, factor, calibration) {
+/** Authoritative 1x gutter record (flag off). Its absence is a failure; the diagnostic probe never substitutes for it. */
+export function gutterCalibrationFailures(record) {
+  const g = record?.gutterCalibration;
+  if (!g || typeof g !== 'object') return { gutterDip: null, failures: ['calibration: 1x scrollbar gutter not measured'] };
+  const out = [];
+  if (g.pageSha256 !== GUTTER_PAGE_SHA256) out.push(`calibration: gutter page sha256 ${cap(g.pageSha256)} is not the pinned overflowing page`);
+  if (g.innerWidth !== REAL_ZOOM_WINDOW.width) out.push(`calibration: gutter page innerWidth ${cap(g.innerWidth)} is not ${REAL_ZOOM_WINDOW.width}`);
+  if (!(Number.isInteger(g.scrollHeight) && Number.isInteger(g.clientHeight) && g.scrollHeight > g.clientHeight)) out.push('calibration: gutter page does not overflow');
+  if (!(Number.isInteger(g.gutterCss) && g.gutterCss >= 0 && g.gutterCss <= MAX_GUTTER_CSS && g.gutterCss === g.innerWidth - g.clientWidth))
+    out.push(`calibration: 1x gutter ${cap(g.gutterCss)} is not an integer 0..${MAX_GUTTER_CSS} equal to innerWidth - clientWidth`);
+  return { gutterDip: out.length ? null : g.gutterCss, failures: out };
+}
+
+/** Measured edge rule: 1280 - vv.width*f is the 1x gutter (in device px) when the document overflows, else 0; clientWidth = floor(vv.width). */
+function gutterFailure(v, f, gutterDip) {
+  const vv = v?.visualViewport;
+  if (!finite(v?.clientWidth, v?.clientHeight, v?.scrollHeight, vv?.width)) return 'clientWidth/clientHeight/scrollHeight/visualViewport.width not measured';
+  const overflow = v.scrollHeight > v.clientHeight;
+  if (overflow && gutterDip === null) return '1x scrollbar gutter not measured';
+  const expected = overflow ? gutterDip : 0;
+  if (REAL_ZOOM_WINDOW.width - vv.width * f !== expected) return `visualViewport.width ${vv.width} differs from the gutter rule (${REAL_ZOOM_WINDOW.width} - ${vv.width}x${f} is not ${expected})`;
+  if (v.clientWidth !== Math.floor(vv.width)) return `clientWidth ${v.clientWidth} is not floor(visualViewport.width ${vv.width})`;
+  return null;
+}
+
+function probeFailure(p, factor, calibration, gutterDip) {
   const geometry = zoomGeometryFailure(p, factor, calibration);
   if (geometry) return geometry;
   if (p.visualViewport?.scale !== 1) return `visualViewport.scale ${p.visualViewport?.scale} is not 1 (pinch)`;
-  if (p.visualViewport?.width !== p.innerWidth) return `visualViewport.width ${p.visualViewport?.width} differs from innerWidth ${p.innerWidth}`;
+  const gutter = gutterFailure(p, factor, gutterDip);
+  if (gutter) return gutter;
   if (p.outerWidth !== calibration.outerWidth || p.outerHeight !== calibration.outerHeight) return `outer ${p.outerWidth}x${p.outerHeight} differs from calibration ${calibration.outerWidth}x${calibration.outerHeight} (emulation)`;
   if (p.bounds?.width !== calibration.bounds?.width || p.bounds?.height !== calibration.bounds?.height) return 'window bounds differ from calibration';
   if (p.resolutionMatches !== true || p.resolutionQuery !== resolutionQuery(factor)) return `resolution media query ${cap(p.resolutionQuery)} did not match`;
   return null;
 }
 
-/** PNG = round(integral clip x observed DPR) exactly, inside the observed zoomed viewport. Zero pixel tolerance. */
-function zoomScreenshotFailure(factor, calibration) {
+/**
+ * Document-DIP screenshot gate: the recorded clip is exactly snapDipClip(rectRaw, measured viewport, f), the PNG is the clip size
+ * (no rounding), and the crop equals the same region of an unclipped viewport capture pixel-for-pixel with unmoved geometry.
+ */
+export function zoomScreenshotFailure(factor, calibration, gutterDip) {
+  const check = dipScreenshotFailure(factor, calibration, gutterDip);
+  return (s) => { const problem = check(s); return problem === null || problem.startsWith('screenshot') ? problem : `screenshot: ${problem}`; };
+}
+function dipScreenshotFailure(factor, calibration, gutterDip) {
   return (s) => {
-    const c = s.clip; const v = s.viewport;
-    if (!c || !v || c.scale !== 1 || ![c.x, c.y, c.width, c.height, v.scrollX, v.scrollY].every(Number.isInteger)) return 'screenshot clip is not integral CSS pixels';
-    const geometry = zoomGeometryFailure(v, factor, calibration);
+    if (s.clipUnit !== 'document-dip' || s.factor !== factor) return `screenshot clip unit ${cap(s.clipUnit ?? null)}@${cap(s.factor ?? null)} is not document-dip@${factor}`;
+    const c = s.clip; const v = s.viewport; const m = s.zoomViewport;
+    if (!c || !v || !m || typeof m !== 'object') return 'screenshot clip or measured viewport missing';
+    if (['scrollX', 'scrollY', 'innerWidth', 'innerHeight', 'devicePixelRatio'].some((k) => v[k] !== m[k])) return 'recorded viewport differs from the measured zoom viewport';
+    if (m.devicePixelRatio !== factor) return `screenshot viewport: devicePixelRatio ${cap(m.devicePixelRatio)} is not exactly ${factor}`;
+    const geometry = zoomGeometryFailure(m, factor, calibration);
     if (geometry) return `screenshot viewport: ${geometry}`;
-    if (c.width < 1 || c.height < 1 || c.x < v.scrollX || c.y < v.scrollY || c.x + c.width > v.scrollX + v.innerWidth || c.y + c.height > v.scrollY + v.innerHeight)
-      return 'screenshot is not a bounded element clip within the viewport';
-    const w = Math.round(c.width * v.devicePixelRatio); const h = Math.round(c.height * v.devicePixelRatio);
-    if (s.width !== w || s.height !== h) return `screenshot ${s.width}x${s.height} is not its clip ${c.width}x${c.height} at observed ${v.devicePixelRatio}x (${w}x${h})`;
+    if (m.innerHeight !== Math.floor(calibration.innerHeight / factor)) return `screenshot viewport: innerHeight ${m.innerHeight} is not floor(${calibration.innerHeight}/${factor})`;
+    const vv = m.visualViewport;
+    if (vv?.scale !== 1) return `screenshot viewport: visualViewport.scale ${cap(vv?.scale)} is not 1`;
+    if (!finite(vv.height) || vv.height * factor !== calibration.innerHeight) return `screenshot viewport: visualViewport.height ${cap(vv.height)} x ${factor} is not the calibration innerHeight ${calibration.innerHeight}`;
+    const gutter = gutterFailure(m, factor, gutterDip);
+    if (gutter) return `screenshot viewport: ${gutter}`;
+    const r = s.rectRaw; const e = s.elementRect;
+    if (!r || !e || ['left', 'top', 'width', 'height'].some((k) => !finite(r[k], e[k]) || Math.abs(r[k] - e[k]) > RECT_DRIFT)) return `raw rect drifted from the recorded elementRect beyond ${RECT_DRIFT}`;
+    const snapped = snapDipClip(r, m, factor);
+    if (!snapped) return `document-DIP clip refused: ${dipClipFailure(r, m, factor) ?? 'element is not in the DIP viewport'}`;
+    if (!isDeepStrictEqual(c, snapped.clip)) return `clip ${cap(JSON.stringify(c))} is not snapDipClip(rectRaw) ${JSON.stringify(snapped.clip)}`;
+    // Disclosure evidence must include the whole panel. Region cells may intentionally show a viewport slice.
+    if (['preferences', 'navigation'].some((kind) => s.name === `responsive-zoom${factor * 100}-${kind}-disclosure.png`)) {
+      const x = Math.floor((r.left + m.scrollX) * factor); const y = Math.floor((r.top + m.scrollY) * factor);
+      const whole = { x, y, width: Math.ceil((r.left + r.width + m.scrollX) * factor) - x,
+        height: Math.ceil((r.top + r.height + m.scrollY) * factor) - y, scale: 1 };
+      if (!isDeepStrictEqual(c, whole)) return 'disclosure is not fully inside the viewport';
+    }
+    const d = snapped.dipViewport;
+    if (!isDeepStrictEqual(s.dipViewport, d)) return 'recorded DIP viewport differs from the measured one';
+    if (c.x < d.x || c.y < d.y || c.x + c.width > d.x + d.width || c.y + c.height > d.y + d.height) return 'clip is outside the DIP viewport';
+    if (s.width !== c.width || s.height !== c.height) return `PNG ${s.width}x${s.height} ≠ clip ${c.width}x${c.height}`;
+    const q = s.viewportEquality;
+    if (!q || typeof q !== 'object') return 'viewport equality record missing';
+    if (!HEX64.test(q.sha256 ?? '') || q.width !== REAL_ZOOM_WINDOW.width || q.height !== d.height) return `viewport PNG ${cap(q.width)}x${cap(q.height)} is not ${REAL_ZOOM_WINDOW.width}x${d.height}`;
+    if (q.equal !== true || q.compared !== c.width * c.height) return `crop differs from the viewport capture (${cap(q.compared)}/${c.width * c.height} compared, equal ${cap(q.equal)})`;
+    if (!isDeepStrictEqual(s.afterGeometry, m)) return 'geometry moved between clip and capture (afterGeometry differs)';
+    if (HISTORICAL_FAILED_SHA256.includes(s.sha256)) return `${cap(s.sha256)} is a historical failed PNG and never passes`;
     return null;
   };
 }
@@ -374,7 +537,7 @@ function cleanupFailures(r) {
 }
 
 /** Semantic gate over report.auditRealZoom; `main` is the report's own Chrome identity and v2 fixture identity. */
-export function assessRealZoomReport(section, { chromeSha256, browser, browserArgv, fixtures: mainFixtures } = {}) {
+export function assessRealZoomReport(section, { chromeSha256, browser, browserArgv, fixtures: mainFixtures, geometryProbe = null } = {}) {
   if (!section || typeof section !== 'object') return ['auditRealZoom evidence missing (report predates #619 real browser zoom)'];
   const failures = [];
   if (section.schema !== REAL_ZOOM_SCHEMA) failures.push(`auditRealZoom schema ${JSON.stringify(section.schema ?? null)}`);
@@ -411,6 +574,13 @@ export function assessRealZoomReport(section, { chromeSha256, browser, browserAr
   }
   const calibrationProblems = calibrationFailures(processes[0]);
   failures.push(...calibrationProblems);
+  // The flag-on diagnostic probe may only add a mismatch failure; it never stands in for the flag-off 1x measurement.
+  const probeGutter = Array.isArray(geometryProbe?.processes) ? geometryProbe.processes.find((p) => p?.key === 'calibration')?.gutterCss : undefined;
+  const gutter = gutterCalibrationFailures(processes[0]);
+  failures.push(...gutter.failures);
+  const gutterDip = gutter.gutterDip;
+  if (probeGutter !== undefined && probeGutter !== null && gutterDip !== null && probeGutter !== gutterDip)
+    failures.push(`calibration: diagnostic probe gutterCss ${cap(probeGutter)} differs from the authoritative 1x gutter ${gutterDip}`);
   if (calibrationProblems.length) return failures;
   const calibration = processes[0].probes[0];
   for (const [index, spec] of REAL_ZOOM_PROCESSES.entries()) {
@@ -418,7 +588,7 @@ export function assessRealZoomReport(section, { chromeSha256, browser, browserAr
     const r = processes[index]; const k = spec.key;
     const profile = zoomProfile(spec, calibration.innerHeight);
     if (!Array.isArray(r.probes) || r.probes.length < 2) failures.push(`${k}: geometry probes missing`);
-    for (const p of r.probes ?? []) { const problem = probeFailure(p, spec.factor, calibration); if (problem) failures.push(`${k}/${cap(p?.label)}: ${problem}`); }
+    for (const p of r.probes ?? []) { const problem = probeFailure(p, spec.factor, calibration, gutterDip); if (problem) failures.push(`${k}/${cap(p?.label)}: ${problem}`); }
     if (r.expected?.innerWidth !== profile.width || r.expected?.innerHeight !== profile.height) failures.push(`${k}: recorded expectation differs from calibration-derived geometry`);
     const s = r.responsive;
     if (!s || typeof s !== 'object') { failures.push(`${k}: responsive evidence missing`); continue; }
@@ -430,7 +600,7 @@ export function assessRealZoomReport(section, { chromeSha256, browser, browserAr
     const observations = Array.isArray(s.observations) ? s.observations : [];
     const matrix = expectedZoomObservations(k);
     if (observations.length !== matrix.length) failures.push(`${k}: expected ${matrix.length} observations, found ${observations.length}`);
-    const options = { profile, sizing: REAL_ZOOM_SIZING, screenshotFailure: zoomScreenshotFailure(spec.factor, calibration), pageFailure: (page) => zoomGeometryFailure(page, spec.factor, calibration) };
+    const options = { profile, sizing: REAL_ZOOM_SIZING, screenshotFailure: zoomScreenshotFailure(spec.factor, calibration, gutterDip), pageFailure: (page) => zoomGeometryFailure(page, spec.factor, calibration) };
     for (const expected of matrix) {
       const matches = observations.filter((o) => o?.profile === expected.profile && o?.kind === expected.kind && o?.subject === expected.subject);
       if (matches.length !== 1) failures.push(`${k}/${expected.kind}/${expected.subject}: expected one observation, found ${matches.length}`);
@@ -463,7 +633,7 @@ export async function applyRealZoomGate(results, load) {
     let failures;
     try {
       const report = await load(result.directory);
-      failures = assessRealZoomReport(report.auditRealZoom, { chromeSha256: report.tools?.chromeSha256, browser: report.browser, browserArgv: report.browserArgv, fixtures: report.auditResponsive?.fixtures });
+      failures = assessRealZoomReport(report.auditRealZoom, { chromeSha256: report.tools?.chromeSha256, browser: report.browser, browserArgv: report.browserArgv, fixtures: report.auditResponsive?.fixtures, geometryProbe: report.auditRealZoomGeometryProbe });
       if (failures.length === 0) failures = await verifyRealZoomScreenshots(result.directory, report.auditRealZoom);
     } catch (error) { failures = [`report reload failed: ${message(error)}`]; }
     result.realZoomGate = failures.length ? 'failed' : 'passed';

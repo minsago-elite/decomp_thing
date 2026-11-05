@@ -265,7 +265,10 @@ const emulateControl = (call) => call('Emulation.setDeviceMetricsOverride', { wi
  * restoreMetrics:false so no device-metrics method is ever sent on a zoomed target.
  */
 export async function qualifyResponsive({ cdp, makeTarget, evaluate, ready, delay, root, origin, fixtures, section = createResponsiveSection(),
-  profiles = RESPONSIVE_PROFILES, sizing = RESPONSIVE_SIZING, sizeProfile = emulateProfile, sizeControl = emulateControl, afterNavigate = null, restoreMetrics = true }) {
+  profiles = RESPONSIVE_PROFILES, sizing = RESPONSIVE_SIZING, sizeProfile = emulateProfile, sizeControl = emulateControl, afterNavigate = null, restoreMetrics = true,
+  // Default-identity hooks (real zoom only overrides them): the clip and its recorded extra fields, the page reading, and a
+  // post-capture check whose fields are merged into the screenshot record. The defaults send exactly the v2 emulation calls.
+  clipFor = (r, v) => ({ clip: snapClip(r, v) }), pageExpression = PAGE, afterCapture = null }) {
   let target = null; let failed = false; let fetchHandler = null;
   const call = (method, params = {}) => cdp.call(method, params, target.sessionId);
   const served = [];
@@ -322,11 +325,15 @@ export async function qualifyResponsive({ cdp, makeTarget, evaluate, ready, dela
   };
   const shot = async (o, clipExpr, viewport) => {
     const round = (v) => Math.round(v * 1000) / 1000;
-    let clip = null; let elementRect = null;
+    let clip = null; let elementRect = null; let extra = {};
     if (clipExpr) {
       const r = await rect(clipExpr);
       // The exact integral clip is both sent and recorded; the raw rect is reference data only, never a pixel prediction.
-      if (r) { elementRect = { left: round(r.left), top: round(r.top), width: round(r.width), height: round(r.height) }; clip = snapClip(r, viewport); }
+      if (r) {
+        elementRect = { left: round(r.left), top: round(r.top), width: round(r.width), height: round(r.height) };
+        let chosen = clipFor(r, viewport); if (chosen && typeof chosen.then === 'function') chosen = await chosen;
+        ({ clip = null, ...extra } = chosen ?? {});
+      }
       if (!clip) throw new Error(`${screenshotName(o)}: element is not in the viewport`);
     }
     const { data } = await call('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false, ...(clip ? { clip } : {}) });
@@ -334,7 +341,8 @@ export async function qualifyResponsive({ cdp, makeTarget, evaluate, ready, dela
     if (png.length > MAX_RESPONSIVE_PNG_BYTES) throw new Error(`${screenshotName(o)} exceeds ${MAX_RESPONSIVE_PNG_BYTES} bytes`);
     const dims = pngDimensions(png);
     await fs.writeFile(join(root, screenshotName(o)), png);
-    return { name: screenshotName(o), bytes: png.length, sha256: sha256(png), ...dims, clip: clip ? { ...clip } : null, elementRect,
+    const after = afterCapture ? await afterCapture({ name: screenshotName(o), png, clip, viewport, extra }) : null;
+    return { ...extra, ...(after ?? {}), name: screenshotName(o), bytes: png.length, sha256: sha256(png), ...dims, clip: clip ? { ...clip } : null, elementRect,
       viewport: { scrollX: viewport.scrollX, scrollY: viewport.scrollY, innerWidth: viewport.innerWidth, innerHeight: viewport.innerHeight, devicePixelRatio: viewport.devicePixelRatio } };
   };
   let phase = 'setup';
@@ -386,7 +394,7 @@ export async function qualifyResponsive({ cdp, makeTarget, evaluate, ready, dela
       const opened = await evaluate(target, `(() => { const t = document.querySelector('${PREFERENCES.trigger}'); const p = document.getElementById('${PREFERENCES.panel}');
         const r = p?.getBoundingClientRect(); return { expanded: t?.getAttribute('aria-expanded'), panelShown: !!p && p.checkVisibility(),
         panelWithinWidth: !!r && r.left >= -1 && r.right <= document.scrollingElement.clientWidth + 1 }; })()`);
-      const page = await evaluate(target, PAGE);
+      const page = await evaluate(target, pageExpression);
       const prefsShot = await shot({ ...base, kind: 'preferences', subject: 'disclosure' }, `document.getElementById('${PREFERENCES.panel}')`, page);
       await press('Tab'); const inside = await evaluate(target, FOCUS);
       await press('Escape'); await delay(100);
@@ -404,7 +412,7 @@ export async function qualifyResponsive({ cdp, makeTarget, evaluate, ready, dela
       const navState = `({ expanded: document.querySelector('.navigation-toggle')?.getAttribute('aria-expanded'), linksShown: !!document.querySelector('#main-navigation-links')?.checkVisibility(),
         overflow: document.scrollingElement.scrollWidth - document.scrollingElement.clientWidth })`;
       const keyboardOpen = await evaluate(target, navState);
-      const navPage = await evaluate(target, PAGE);
+      const navPage = await evaluate(target, pageExpression);
       const navShot = await shot({ ...base, kind: 'navigation', subject: 'disclosure' }, `document.querySelector('#main-navigation-links')`, navPage);
       await press('Tab'); const linkFocus = await evaluate(target, FOCUS);
       await press('Escape'); await delay(100);
@@ -417,7 +425,7 @@ export async function qualifyResponsive({ cdp, makeTarget, evaluate, ready, dela
       await evaluate(target, visible(link)); await delay(100);
       await tap(await rect(link));
       await ready(target, `location.pathname === ${JSON.stringify(NAVIGATION_PAGE.routeLink)} && document.activeElement?.matches('main h1')`, `touch route at ${profile.name}`).catch(() => false);
-      const routed = { ...await evaluate(target, PAGE), ...await evaluate(target, navState), focus: await evaluate(target, FOCUS) };
+      const routed = { ...await evaluate(target, pageExpression), ...await evaluate(target, navState), focus: await evaluate(target, FOCUS) };
       section.observations.push({ ...base, kind: 'navigation', subject: 'disclosure', reach: navReach, keyboardOpen, linkFocus, escaped, touchOpen, routed,
         input: { keyboard: keyboardInput, touch: await input() }, screenshot: navShot, requests: phaseLedger(ledgerStart) });
 
@@ -452,21 +460,21 @@ export async function qualifyResponsive({ cdp, makeTarget, evaluate, ready, dela
           geometry.hex = { rows: rows.rows, inside: rows.inside, textLength: rows.text.length, textSha256: sha256(Buffer.from(rows.text, 'utf8')) };
         }
         await evaluate(target, `${sel}.scrollLeft = 0`);
-        const before = { ...await evaluate(target, PAGE), regionScrollLeft: 0 };
+        const before = { ...await evaluate(target, pageExpression), regionScrollLeft: 0 };
         for (let i = 0; i < 8; i++) await press('ArrowRight');
-        const afterKeys = { ...await evaluate(target, PAGE), regionScrollLeft: await settle(`${sel}.scrollLeft`, 200) };
+        const afterKeys = { ...await evaluate(target, pageExpression), regionScrollLeft: await settle(`${sel}.scrollLeft`, 200) };
         const keyboardInput = await input();
         const regionShot = await shot({ ...base, kind: 'region', subject: region.key }, sel, afterKeys);
         await evaluate(target, `(${sel}.scrollLeft = 0, ${sel}.scrollIntoView({ block: 'start', inline: 'nearest' }), true)`); await delay(100);
         const r = await rect(sel);
         const y = Math.min(r.top + 24, (await evaluate(target, 'innerHeight')) - 8);
         const startX = Math.min(r.left + r.width - 16, before.innerWidth - 16);
-        const beforeDrag = await evaluate(target, PAGE);
+        const beforeDrag = await evaluate(target, pageExpression);
         await call('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: startX, y }] });
         for (let i = 1; i <= 10; i++) { await call('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: Math.max(startX - i * 20, 2), y }] }); await delay(16); }
         await call('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
         const dragScroll = await settle(`${sel}.scrollLeft`, 1200);
-        const afterDrag = { ...await evaluate(target, PAGE), regionScrollLeft: dragScroll };
+        const afterDrag = { ...await evaluate(target, pageExpression), regionScrollLeft: dragScroll };
         let tapped = null;
         if (region.tap) {
           const button = `[...${sel}.querySelectorAll('button')].find(b => b.textContent.startsWith(${JSON.stringify(region.tap)}))`;
