@@ -121,25 +121,31 @@ const deadline = (ms, label) => {
  * so the production launch path and the controls share this code. The section is the caller's (already attached).
  */
 export async function qualifyRealZoom({ section, repo, chromeBinary, chromeSha256, baseArgs, env = process.env, spawnChrome, stop, connect, fixtures, root, origin,
-  delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), deadlines = REAL_ZOOM_DEADLINES }) {
+  delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), deadlines = REAL_ZOOM_DEADLINES, geometryProbe = null }) {
   section.executable = { path: cap(chromeBinary), sha256: chromeSha256 ?? null };
   let calibration = null;
   for (const spec of REAL_ZOOM_PROCESSES) {
     const record = { key: spec.key, factor: spec.factor, seed: spec.seed ? zoomPreferences(spec.factor) : null, argv: null, pid: null, version: null,
       launch: { outcome: 'pending' }, window: null, probes: [], probesDropped: 0, responsive: null, methods: null, preferencesReadback: null, cleanup: null };
     section.processes.push(record); // Attached before any fallible preparation.
-    if (spec.seed && !calibration) { record.failure = 'skipped: no valid 1x calibration'; record.cleanup = { launched: false }; continue; }
-    await runProcess({ spec, record, repo, chromeBinary, baseArgs, env, spawnChrome, stop, connect, fixtures, root, origin, delay, deadlines, calibration });
+    // Optional diagnostic hook (packaged-browser-zoom-geometry-probe.mjs); absent by default. Its record is attached before launch.
+    if (geometryProbe) hookSafe(() => geometryProbe.attach(spec));
+    if (spec.seed && !calibration) { record.failure = 'skipped: no valid 1x calibration'; record.cleanup = { launched: false }; if (geometryProbe) hookSafe(() => geometryProbe.cleanupStarted(spec.key)); continue; }
+    await runProcess({ spec, record, repo, chromeBinary, baseArgs, env, spawnChrome, stop, connect, fixtures, root, origin, delay, deadlines, calibration, geometryProbe });
     if (spec.key === 'calibration') calibration = record.failure === undefined && calibrationFailures(record).length === 0 ? record.probes[0] : null;
   }
   return section;
 }
 
-async function runProcess({ spec, record, repo, chromeBinary, baseArgs, env, spawnChrome, stop, connect, fixtures, root, origin, delay, deadlines, calibration }) {
+/** A diagnostic hook failure is never a qualification fact: it is swallowed here and recorded by the hook itself. */
+const hookSafe = (fn) => { try { const r = fn(); return r && typeof r.then === 'function' ? r.then(() => {}, () => {}) : undefined; } catch { return undefined; } };
+
+async function runProcess({ spec, record, repo, chromeBinary, baseArgs, env, spawnChrome, stop, connect, fixtures, root, origin, delay, deadlines, calibration, geometryProbe = null }) {
   let directory = null; let child = null; let protocol = null; let body = null; let finishing = false;
   const methods = record.methods = { counts: {}, overflow: 0 };
   const started = Date.now();
-  const cancel = deadline(spec.seed ? deadlines.zoomProcessMs : deadlines.calibrationMs, `real-zoom ${spec.key}: section wall-clock deadline exceeded`);
+  const sectionMs = spec.seed ? deadlines.zoomProcessMs : deadlines.calibrationMs;
+  const cancel = deadline(sectionMs, `real-zoom ${spec.key}: section wall-clock deadline exceeded`);
   try {
     directory = await fs.mkdtemp(join(repo, '.cz-'));
     record.directory = cap(directory);
@@ -180,6 +186,12 @@ async function runProcess({ spec, record, repo, chromeBinary, baseArgs, env, spa
       const version = await cdp.call('Browser.getVersion');
       if (finishing) throw cancel.error();
       record.version = { product: cap(version?.product ?? ''), revision: cap(version?.revision ?? ''), protocolVersion: cap(version?.protocolVersion ?? ''), userAgent: cap(version?.userAgent ?? '') };
+      if (geometryProbe) {
+        // Same process/argv/seed, own target, own shorter cap inside the original deadline; rejected once cleanup starts.
+        const hookCdp = { call: (method, params, sessionId) => (finishing ? Promise.reject(new Error('geometry probe rejected: cleanup started')) : cdp.call(method, params, sessionId)) };
+        await hookSafe(() => geometryProbe.run({ key: spec.key, factor: spec.factor, cdp: hookCdp, delay, pid: record.pid, remainingMs: () => sectionMs - (Date.now() - started) }));
+        if (finishing) throw cancel.error();
+      }
       await drive({ spec, record, cdp, fixtures, root, origin, delay, deadlines, calibration });
     })();
     await Promise.race([body, cancel.promise]);
@@ -187,6 +199,7 @@ async function runProcess({ spec, record, repo, chromeBinary, baseArgs, env, spa
     record.failure = message(error);
   } finally {
     finishing = true;
+    if (geometryProbe) hookSafe(() => geometryProbe.cleanupStarted(spec.key));
     cancel.clear();
     const cleanup = record.cleanup = { launched: !!child?.pid, browserClose: null, stopped: false, exitCode: null, signal: null, bodySettled: body ? null : true,
       profileRemoved: false, tempRemoved: false, portFileGone: false, directoryRemoved: false };
@@ -226,6 +239,8 @@ async function runProcess({ spec, record, repo, chromeBinary, baseArgs, env, spa
     cleanup.elapsedMs = Date.now() - started;
     // Never overwrite the original failure; cleanup failures are their own record.
     if (failures.length) record.cleanupFailure = cap(failures.join('; '));
+    // Parent-side observation after launcher cleanup: owned PID identity and owned paths only; never alters the record above.
+    if (geometryProbe) await hookSafe(() => geometryProbe.observeAfterCleanup({ key: spec.key, child, pid: child?.pid ?? null, directory }));
   }
 }
 

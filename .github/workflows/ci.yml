@@ -81,6 +81,11 @@ jobs:
           node --check scripts/packaged-browser-report.mjs
           node --test scripts/packaged-browser-report.test.mjs
           node --check scripts/verify-packaged-browser-reports.mjs
+      - name: Verify bounded real zoom geometry diagnostics
+        timeout-minutes: 2
+        run: |
+          node --check scripts/packaged-browser-zoom-geometry-probe.mjs
+          node --test --test-timeout=90000 scripts/test-packaged-browser-zoom-geometry-probe.mjs
       - name: Verify packaged availability-notice accessibility controls
         timeout-minutes: 2
         run: |
@@ -390,7 +395,7 @@ jobs:
           node scripts/check-packaged-web-browser.mjs \
             --archive "$WEB_TEST_ARCHIVE" \
             --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
-            --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode audit --no-sandbox
+            --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode audit --no-sandbox --real-zoom-geometry-probe
       - name: Exercise explicit Vite proxy against the same packaged JVM
         run: |
           node scripts/check-packaged-web-browser.mjs \

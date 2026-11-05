@@ -17,6 +17,7 @@ import { qualifyUpgrade, qualifyUpgradeCache } from './packaged-browser-upgrade.
 import { qualifyAudit, assertAudit } from './packaged-browser-audit.mjs';
 import { createResponsiveSection, responsiveFixtures, qualifyResponsive, assessResponsiveReport } from './packaged-browser-responsive.mjs';
 import { boundedArgv, createRealZoomSection, qualifyRealZoom, assessRealZoomReport } from './packaged-browser-real-zoom.mjs';
+import { createGeometryProbeSection, createGeometryProbe, assessGeometryProbe } from './packaged-browser-zoom-geometry-probe.mjs';
 import { PackagedBrowserCdpDiagnostics } from './packaged-browser-cdp-diagnostics.mjs';
 import { AXE_VERSION, createNoticeSection, qualifyAvailabilityNotices, assessNoticeReport } from './packaged-browser-a11y-notices.mjs';
 
@@ -32,10 +33,11 @@ const { values } = parseArgs({ options: {
   'java-home': { type: 'string' },
   python: { type: 'string', default: '/usr/bin/python3' },
   'no-sandbox': { type: 'boolean', default: false },
+  'real-zoom-geometry-probe': { type: 'boolean', default: false },
   help: { type: 'boolean', default: false },
 } });
 if (values.help) {
-  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|metadata|history|restart|scale|live|proxy|upgrade|legacy|audit] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
+  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|metadata|history|restart|scale|live|proxy|upgrade|legacy|audit] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox] [--real-zoom-geometry-probe]');
   console.log('restart: seeded history on one JVM, graceful SIGTERM-only restart on the same installation/data/port, fresh bootstrap and serverInstanceId, then two tabs with a progress-pin stale If-Match 412. No live worker, no restart-while-running, one Chromium only.');
   console.log('public: packaged home/Runtime/recovery; session: public plus local session journey; upload: session plus inert upload and lost-response retry; history: session plus preseeded inert multi-page attempts; scale: session plus 10,000 persisted jobs and keyboard pagination; proxy: real Vite HMR and session journey against packaged JVM; upgrade: previous JVM to current JVM on one origin with an old tab.');
   console.log('legacy: inert legacy HTML/polling with explicit test-owned state edits; no workflow execution.');
@@ -743,9 +745,16 @@ try {
     // #619 genuine 200%/400% page zoom: three fresh owned Chrome processes (1x calibration, 2x, 4x) with the same
     // executable and flags. Attached before any launch so partial evidence and cleanup records are published.
     const realZoom = report.auditRealZoom = createRealZoomSection();
+    // Opt-in (--real-zoom-geometry-probe) diagnostic section, separate from the gate and attached before any launch.
+    const geometryProbeSection = values['real-zoom-geometry-probe'] ? (report.auditRealZoomGeometryProbe = createGeometryProbeSection()) : null;
     await qualifyRealZoom({ section: realZoom, repo, chromeBinary, chromeSha256: report.tools.chromeSha256, baseArgs: chromeFlags(true), env: process.env,
       spawnChrome: startOwned, stop, connect: async (url) => new Protocol(await connectDevTools(url)), root, origin, delay,
-      fixtures: () => responsiveFixtures({ repo, python: values.python, buildId: manifest.buildId }) });
+      fixtures: () => responsiveFixtures({ repo, python: values.python, buildId: manifest.buildId }),
+      ...(geometryProbeSection ? { geometryProbe: createGeometryProbe({ section: geometryProbeSection, root }) } : {}) });
+    if (geometryProbeSection) {
+      try { geometryProbeSection.assessment = (await assessGeometryProbe(geometryProbeSection, { directory: root, realZoom })).slice(0, 24).map((f) => String(f).slice(0, 240)); }
+      catch (error) { geometryProbeSection.assessment = [`assessment failed: ${String(error?.message ?? error).slice(0, 200)}`]; }
+    }
     const realZoomFailures = assessRealZoomReport(realZoom, { chromeSha256: report.tools.chromeSha256, browser: report.browser, browserArgv: report.browserArgv, fixtures: responsive.fixtures });
     assert.deepEqual(realZoomFailures, [], `Packaged #619 real browser zoom failures:\n${realZoomFailures.join('\n')}`);
     assert.ok(targets.filter((target) => !target.cspProbe).every((target) => target.requests.every((entry) => entry.url.startsWith(origin + '/') || entry.url.startsWith('data:'))), 'Audit fetched an external dependency');
