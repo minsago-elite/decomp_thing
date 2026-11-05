@@ -13,6 +13,10 @@ internal class ChatGptPlanSecretsV1 {
     private var totalBytes = 0
     private var snapshot = Snapshot(0, emptyList())
 
+    /** Callback-free revision read for bounded validation/publication fences on this monitor. */
+    @Synchronized
+    internal fun registryRevision(): Int = snapshot.version
+
     /**
      * Validation failures do not accept an addition. Once published, acceptance is permanent even
      * if a sink then fails with TRANSPORT; duplicates are no-ops, not publication retries. Every

@@ -11,6 +11,52 @@ import java.time.Instant
 import java.util.UUID
 
 class ChatGptPlanOfflinePortsV1Test {
+    @Test fun registryRevisionReadsAreStableAndCallbackFree() {
+        val secrets = registry("abcdef")
+        var deliveries = 0
+        val guard = secrets.displayGuard { deliveries++ }
+        guard.append("abc")
+        val revision = secrets.registryRevision()
+        repeat(8) { assertEquals(revision, secrets.registryRevision()) }
+        synchronized(secrets) { assertEquals(revision, secrets.registryRevision()) }
+        assertEquals(0, deliveries)
+        guard.finishValidatedCompletion()
+        assertEquals(1, deliveries)
+        assertEquals(revision, secrets.registryRevision())
+    }
+
+    @Test fun registryRevisionChangesOnlyForAcceptedDistinctAdditions() {
+        val secrets = registry()
+        val initial = secrets.registryRevision()
+        secrets.registerSynthetic("first")
+        assertEquals(initial + 1, secrets.registryRevision())
+        secrets.registerSynthetic("first")
+        assertEquals(initial + 1, secrets.registryRevision())
+        fixed(ModelFailureKind.MALFORMED_RESPONSE) { secrets.registerSynthetic("") }
+        fixed(ModelFailureKind.RESOURCE_EXHAUSTED) { secrets.registerSynthetic("x".repeat(ChatGptPlanSecretsV1.MAX_SECRET_BYTES + 1)) }
+        assertEquals(initial + 1, secrets.registryRevision())
+        secrets.registerSynthetic("second")
+        assertEquals(initial + 2, secrets.registryRevision())
+    }
+
+    @Test fun registryRevisionIsAcceptedBeforeReentrantSinkAndSurvivesItsFailure() {
+        val secrets = registry("abcdef")
+        val before = secrets.registryRevision()
+        var callbacks = 0
+        val guard = secrets.displayGuard {
+            callbacks++
+            assertEquals(before + 1, secrets.registryRevision())
+            assertTrue(Thread.holdsLock(secrets))
+            throw IllegalStateException("synthetic-cause")
+        }
+        guard.append("abc")
+        fixed(ModelFailureKind.TRANSPORT) { secrets.registerSynthetic("abc") }
+        assertEquals(before + 1, secrets.registryRevision())
+        secrets.registerSynthetic("abc")
+        assertEquals(before + 1, secrets.registryRevision())
+        assertEquals(1, callbacks)
+    }
+
     @Test fun credentialAndCatalogBindingsAreExplicitAndRedacted() {
         val binding = binding()
         val credential = OfflinePlanCredentialV1(binding, 7, Instant.parse("2030-01-01T00:00:00Z"), setOf("resource.invoke", "chatgpt.tokens.use.direct"), FakeBearer())
