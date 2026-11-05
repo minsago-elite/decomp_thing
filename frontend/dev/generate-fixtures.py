@@ -341,7 +341,19 @@ def generate(base_path: str, schema_path: Path) -> dict:
         validate(error)
         check_semantics(error)
         errors[code] = error
+    # #628 S10: an earlier capability report can precede a refused repository read.
+    # This opt-in fixture must never change the general or responsive bootstrap.
+    git_bootstrap = deepcopy(bootstrap)
+    git_bootstrap["data"]["capabilities"].append({
+        "id": "git", "state": "supported", "reasonCode": None,
+        "message": "Git is available for managed source repositories.",
+        "workflows": [], "agentContractVersion": None, "limits": None, "launch": None,
+    })
+    git_bootstrap["data"]["runtime"]["gitVersion"] = "2.43.0"
+    validate(git_bootstrap)
+    check_semantics(git_bootstrap)
     return {"label": "SIMULATED_DEVELOPMENT_DATA", "schemaSha256": hashlib.sha256(schema_bytes).hexdigest(),
+            "bootstrapVariants": {"628-git-supported": git_bootstrap},
             "routes": routes, "scenarios": scenarios, "errors": errors, "artifactContents": artifact_contents,
             "download": {"path": artifact_path + "/content", "body": download,
                          "sha256": artifact["data"]["sha256"]}}
