@@ -42,6 +42,13 @@ version = "0.1.0"
 // Reuse compilation only. Qualification results must be produced by this build.
 allprojects {
     tasks.configureEach {
+        if (path == ":ghidra-bridge:fetchGhidra" &&
+            providers.gradleProperty("ghidraInstallOverlapPrivateCache").isPresent) {
+            // This task already always executes and verifies the pinned archive. With a
+            // private Gradle home beneath build/, stale-output cleanup would otherwise
+            // delete its seeded cache before that verification can run (including offline).
+            doNotTrackState("Qualification uses a preseeded private archive cache beneath build")
+        }
         if (this !is org.gradle.api.tasks.compile.JavaCompile &&
             this !is org.jetbrains.kotlin.gradle.tasks.KotlinCompile
         ) {
@@ -2071,19 +2078,63 @@ tasks.named<JavaExec>("run") {
     systemProperty("decompengine.ghidra.bundle", project(":ghidra-bridge").layout.buildDirectory.dir("bundle").get().asFile.absolutePath)
 }
 
+// Explicit qualification only. No analysis/runtime behavior or ordinary task outcome changes.
+val ghidraOverlapEvidence = providers.gradleProperty("ghidraInstallOverlapEvidence").map { value ->
+    val directory = file(value).toPath().toAbsolutePath().normalize()
+    require(directory.startsWith(layout.buildDirectory.get().asFile.toPath().toAbsolutePath().normalize()))
+    require(Files.isDirectory(directory) && !Files.isSymbolicLink(directory))
+    directory
+}
+fun ghidraOverlapEvent(directory: Path, event: String, detail: String = "") {
+    Files.writeString(directory.resolve("publisher.jsonl"), groovy.json.JsonOutput.toJson(mapOf(
+        "event" to event, "monotonicNs" to System.nanoTime(),
+        "pid" to ProcessHandle.current().pid(), "detail" to detail,
+    )) + "\n", StandardOpenOption.CREATE, StandardOpenOption.APPEND)
+}
+if (ghidraOverlapEvidence.isPresent) {
+    gradle.taskGraph.afterTask(org.gradle.api.Action<Task> {
+        val task = this
+        if (task.path == ":installDist") {
+            Files.writeString(ghidraOverlapEvidence.get().resolve("task-outcomes.jsonl"),
+                groovy.json.JsonOutput.toJson(mapOf("task" to task.path, "didWork" to task.state.didWork,
+                    "skipped" to task.state.skipped, "skipMessage" to task.state.skipMessage,
+                    "failure" to task.state.failure?.toString())) + "\n",
+                StandardOpenOption.CREATE, StandardOpenOption.APPEND)
+        }
+    })
+}
 tasks.named<Sync>("installDist") {
     inputs.property("atomicGhidraBundlePublicationVersion", 1)
     preserve { include("libexec/ghidra", "libexec/ghidra/**") }
     eachFile { if (path.startsWith("libexec/ghidra/")) exclude() }
+    if (ghidraOverlapEvidence.isPresent) {
+        outputs.upToDateWhen { false }
+        doFirst { ghidraOverlapEvent(ghidraOverlapEvidence.get(), "installDist-executing") }
+    }
     doLast {
+        val evidence = ghidraOverlapEvidence.orNull
+        if (evidence != null) {
+            ghidraOverlapEvent(evidence, "publisher-entry")
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(180)
+            while (!Files.exists(evidence.resolve("publisher-release"))) {
+                check(System.nanoTime() < deadline) { "Ghidra overlap publisher barrier timed out" }
+                Thread.sleep(20)
+            }
+            ghidraOverlapEvent(evidence, "publication-start")
+        }
         publishGhidraBundle(project(":ghidra-bridge").layout.buildDirectory.dir("bundle").get().asFile.toPath(),
-            destinationDir.resolve("libexec/ghidra").toPath())
+            destinationDir.resolve("libexec/ghidra").toPath(), if (evidence == null) GhidraPublicationHooks() else
+                GhidraPublicationHooks(
+                    onPublished = { ghidraOverlapEvent(evidence, "replaced", it) },
+                    onDeleted = { ghidraOverlapEvent(evidence, "deleted", it) },
+                ))
+        if (evidence != null) ghidraOverlapEvent(evidence, "publication-end")
     }
 }
 
 tasks.register("verifyGhidraDistributionArchives") {
     group = "verification"
-    description = "Verifies complete bundled Ghidra bytes and executable modes in ZIP and TAR distributions"
+    description = "Verifies complete bundled Ghidra file/directory inventory and modes in ZIP and TAR distributions"
     dependsOn("installDist", "distZip", "distTar")
     doLast {
         fun digest(input: java.io.InputStream): String {
@@ -2099,6 +2150,26 @@ tasks.register("verifyGhidraDistributionArchives") {
             return hash.digest().joinToString("") { byte -> "%02x".format(byte) }
         }
         val staged = project(":ghidra-bridge").layout.buildDirectory.dir("bundle").get().asFile
+        fun posixMode(path: Path): Int {
+            val permissions = Files.getPosixFilePermissions(path, LinkOption.NOFOLLOW_LINKS)
+            var mode = 0
+            if (PosixFilePermission.OWNER_READ in permissions) mode = mode or 0x100
+            if (PosixFilePermission.OWNER_WRITE in permissions) mode = mode or 0x080
+            if (PosixFilePermission.OWNER_EXECUTE in permissions) mode = mode or 0x040
+            if (PosixFilePermission.GROUP_READ in permissions) mode = mode or 0x020
+            if (PosixFilePermission.GROUP_WRITE in permissions) mode = mode or 0x010
+            if (PosixFilePermission.GROUP_EXECUTE in permissions) mode = mode or 0x008
+            if (PosixFilePermission.OTHERS_READ in permissions) mode = mode or 0x004
+            if (PosixFilePermission.OTHERS_WRITE in permissions) mode = mode or 0x002
+            if (PosixFilePermission.OTHERS_EXECUTE in permissions) mode = mode or 0x001
+            return mode
+        }
+        val expectedDirectories = Files.walk(staged.toPath()).use { paths ->
+            paths.filter { Files.isDirectory(it, LinkOption.NOFOLLOW_LINKS) }
+                .map { staged.toPath().relativize(it).toString().replace(File.separatorChar, '/')
+                    .ifEmpty { "." } }
+                .toList().toSet()
+        }
         val manifest = staged.resolve("bundle.sha256")
         val expected = manifest.readLines().associate { it.substring(66) to it.substring(0, 64) } +
             ("bundle.sha256" to digest(manifest.inputStream()))
@@ -2115,8 +2186,10 @@ tasks.register("verifyGhidraDistributionArchives") {
             zipTree(tasks.named<Zip>("distZip").get().archiveFile),
             tarTree(tasks.named<Tar>("distTar").get().archiveFile),
         )
-        archiveTrees.forEach { tree ->
+        val verification = mutableListOf<Map<String, Any>>()
+        archiveTrees.forEachIndexed { archiveIndex, tree ->
             val observed = mutableSetOf<String>()
+            val observedDirectories = mutableSetOf<String>()
             var referenceObserved = false
             tree.visit {
                 if (!isDirectory && path == referencePath) {
@@ -2125,17 +2198,89 @@ tasks.register("verifyGhidraDistributionArchives") {
                     }
                     referenceObserved = true
                 }
+                if (isDirectory && (path == prefix.trimEnd('/') || path.startsWith(prefix))) {
+                    val relative = if (path == prefix.trimEnd('/')) "."
+                        else path.removePrefix(prefix).trimEnd('/').ifEmpty { "." }
+                    require(observedDirectories.add(relative) && relative in expectedDirectories) {
+                        "Unexpected or duplicate Ghidra archive directory: $relative"
+                    }
+                    val stagedDirectory = if (relative == ".") staged else staged.resolve(relative)
+                    val actualMode = permissions.toUnixNumeric()
+                    require(actualMode == posixMode(stagedDirectory.toPath())) {
+                        "Lost Ghidra archive directory mode: $relative"
+                    }
+                    verification += mapOf("archive" to if (archiveIndex == 0) "zip" else "tar",
+                        "type" to "directory", "path" to relative, "size" to size,
+                        "mode" to actualMode, "lastModifiedMillis" to lastModified)
+                }
                 if (!isDirectory && path.startsWith(prefix)) {
                     val relative = path.removePrefix(prefix)
                     require(observed.add(relative) && relative in expected) { "Unexpected Ghidra archive member: $relative" }
-                    require(digest(open()) == expected.getValue(relative)) { "Changed Ghidra archive member: $relative" }
+                    val actualDigest = digest(open())
+                    require(actualDigest == expected.getValue(relative)) { "Changed Ghidra archive member: $relative" }
                     val expectedMode = if (staged.resolve(relative).canExecute()) 0x1ed else 0x1a4
                     require(permissions.toUnixNumeric() == expectedMode) { "Lost Ghidra archive permissions: $relative" }
+                    verification += mapOf("archive" to if (archiveIndex == 0) "zip" else "tar",
+                        "type" to "file", "path" to relative, "size" to size,
+                        "sha256" to actualDigest, "mode" to permissions.toUnixNumeric(),
+                        "lastModifiedMillis" to lastModified)
                 }
             }
             require(observed == expected.keys) { "Distribution omits bundled Ghidra files" }
+            val implicitDirectories = expectedDirectories - observedDirectories
+            require(implicitDirectories.isEmpty() || implicitDirectories == setOf(".")) {
+                "Distribution omits bundled Ghidra directory entries: ${implicitDirectories.sorted().take(5)}"
+            }
+            if (implicitDirectories.isNotEmpty()) {
+                val rootMode = posixMode(staged.toPath())
+                require(rootMode == 0x1ed) { "Implicit TAR root directory mode is not normalized 0755" }
+                verification += mapOf("archive" to if (archiveIndex == 0) "zip" else "tar",
+                    "type" to "directory", "path" to ".", "size" to 0L,
+                    "mode" to rootMode, "implicit" to true, "lastModifiedMillis" to 0L)
+            }
+            require(observedDirectories + implicitDirectories == expectedDirectories) {
+                "Distribution directory inventory differs from staged bundle"
+            }
             require(referenceObserved) { "Distribution omits the bundled Ghidra deployment reference" }
         }
+        val report = layout.buildDirectory.file("reports/ghidra-distribution-archives.json").get().asFile
+        report.parentFile.mkdirs()
+        report.writeText(groovy.json.JsonOutput.toJson(mapOf("verified" to true, "entries" to verification,
+            "files" to verification.filter { it["type"] == "file" },
+            "directories" to verification.filter { it["type"] == "directory" },
+            "directoryCounts" to verification.filter { it["type"] == "directory" }
+                .groupingBy { it["archive"] }.eachCount())))
+    }
+}
+
+// Compile only this probe against the installed runtime; unrelated test implementations
+// and development main classes must not enter its compile or launch classpath.
+val ghidraOverlapProbeSources = sourceSets.create("ghidraOverlapProbe")
+kotlin.sourceSets.getByName("ghidraOverlapProbe").kotlin.apply {
+    setSrcDirs(listOf("src/test/kotlin"))
+    include("decompengine/project/InstalledGhidraOverlapProbe.kt")
+}
+dependencies {
+    add(ghidraOverlapProbeSources.implementationConfigurationName,
+        files(provider {
+            fileTree(layout.buildDirectory.dir("install/llm_bin_patch/lib")) { include("*.jar") }
+        }).builtBy("installDist"))
+}
+tasks.register("prepareGhidraInstallOverlapProbe") {
+    group = "verification"
+    description = "Builds the test-only probe and records the installed runtime launch inputs"
+    dependsOn("installDist", ghidraOverlapProbeSources.classesTaskName)
+    doLast {
+        val report = layout.buildDirectory.file("ghidra-install-overlap-probe.json").get().asFile
+        report.writeText(groovy.json.JsonOutput.toJson(mapOf(
+            "java" to javaToolchains.launcherFor { languageVersion.set(JavaLanguageVersion.of(21)) }
+                .get().executablePath.asFile.absolutePath,
+            "gradleVersion" to gradle.gradleVersion,
+            "kotlinVersion" to "2.4.0",
+            "archive" to File(gradle.gradleUserHomeDir,
+                "caches/decomp-ghidra/ghidra_12.1.3_PUBLIC_20260817.zip").absolutePath,
+            "testClasses" to ghidraOverlapProbeSources.output.classesDirs.files.map { it.absolutePath },
+        )))
     }
 }
 
