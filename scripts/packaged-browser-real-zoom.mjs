@@ -225,7 +225,10 @@ async function runProcess({ spec, record, repo, chromeBinary, baseArgs, env, spa
     }
     const argv = [...baseArgs, `--window-size=${REAL_ZOOM_WINDOW.width},${REAL_ZOOM_WINDOW.height}`, '--force-device-scale-factor=1', `--user-data-dir=${profile}`, 'about:blank'];
     record.argv = boundedArgv(argv);
-    if (cancel.state.fired) throw cancel.error();
+    // Check the wall clock as well as the timer flag: a zero/very short original section cap may
+    // expire while filesystem preparation is completing in microtasks, before its timer callback runs.
+    // Nothing may spawn after that cap merely because the event loop has not delivered the timer yet.
+    if (cancel.state.fired || Date.now() - started >= sectionMs) throw cancel.error();
     // Launch, connect, getVersion and the drive are one body raced against the original section deadline, so the cap
     // holds from the first fallible step. Once cleanup starts (`finishing`), a late startup result is closed and never recorded.
     body = (async () => {
