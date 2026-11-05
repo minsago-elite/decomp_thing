@@ -40,6 +40,7 @@ internal class ContainedModuleCompilationRuntimeConfiguration private constructo
     val compilerExecHelperSource: Path? get() = declaration.compilerExecHelperSource
     val compilerExecHelperPath: Path? get() = declaration.compilerExecHelperPath
     val compilerExecHelperSha256: String? get() = declaration.compilerExecHelperSha256
+    val compilerInternalIncludePath: Path? get() = declaration.compilerInternalIncludePath
     val compilerRuntimeMounts: List<FullTreeFunctionObservationRuntimeMount> get() = declaration.compilerRuntimeMounts
     val compilerRuntimeExecuteRoot: Path get() = declaration.compilerRuntimeExecuteRoot
     val compilerRuntimeExecuteFiles: List<Path> get() = declaration.compilerRuntimeExecuteFiles
@@ -50,6 +51,7 @@ internal class ContainedModuleCompilationRuntimeConfiguration private constructo
     /** Required immediately before every launch; the directory manifest is not a content hash. */
     fun verifyCompilerInput(): KotlinSystemdCgroupCommandInput {
         verifyInterpreter(declaration)
+        verifyInternalInclude(declaration)
         return verifyPinnedFile(compilerExecutable, compilerSha256, executable = true)
     }
 
@@ -67,6 +69,7 @@ internal class ContainedModuleCompilationRuntimeConfiguration private constructo
         val compilerExecHelperSource: Path?,
         val compilerExecHelperPath: Path?,
         val compilerExecHelperSha256: String?,
+        val compilerInternalIncludePath: Path?,
         val compilerInterpreter: Interpreter?,
         compilerRuntimeMounts: List<FullTreeFunctionObservationRuntimeMount>,
         val scratchMount: Path,
@@ -83,7 +86,8 @@ internal class ContainedModuleCompilationRuntimeConfiguration private constructo
         val configurationSha256: String = sha256(OracleJson.canonicalBytes(JsonObject(mapOf(
             "provider" to JsonPrimitive(if (configurationRecord["schemaVersion"] == JsonPrimitive(1))
                 "contained-generated-c-module-runtime-v1" else if (configurationRecord["schemaVersion"] == JsonPrimitive(2))
-                "contained-generated-c-module-runtime-v2" else "contained-generated-c-module-runtime-v3"),
+                "contained-generated-c-module-runtime-v2" else if (configurationRecord["schemaVersion"] == JsonPrimitive(3))
+                "contained-generated-c-module-runtime-v3" else "contained-generated-c-module-runtime-v4"),
             "configuration" to configurationRecord,
             "isolationConfigurationSha256" to JsonPrimitive(isolation.canonicalSha256),
         )), CONFIG_LIMITS))
@@ -92,6 +96,15 @@ internal class ContainedModuleCompilationRuntimeConfiguration private constructo
     internal data class Interpreter(val machine: String, val source: Path, val path: Path, val sha256: String)
 
     companion object {
+        private fun verifyInternalInclude(declaration: Declaration) {
+            requireNotNull(declaration.compilerInternalIncludePath).let { destination ->
+                val mount = declaration.compilerRuntimeMounts.single { destination.startsWith(it.destination) }
+                val source = mount.source.resolve(mount.destination.relativize(destination))
+                requireRootOwned(source, directory = true)
+                requireRootOwned(source.resolve("stddef.h"), directory = false)
+            }
+        }
+
         private fun verifyInterpreter(declaration: Declaration) {
             val interpreter = requireNotNull(declaration.compilerInterpreter) {
                 "live module compilation requires runtime schema 3 retained interpreter authority"
@@ -150,6 +163,9 @@ internal class ContainedModuleCompilationRuntimeConfiguration private constructo
             requireRootOwned(path, directory = false)
             val bytes = readStableRegularFile(requireNotNull(path.parent), path.fileName.toString(), MAXIMUM_CONFIG_BYTES.toLong()).bytes
             val declaration = parse(bytes)
+            require(declaration.configurationRecord["schemaVersion"] == JsonPrimitive(4)) {
+                "live module compilation requires runtime schema 4"
+            }
             verifyInterpreter(declaration)
             require(declaration.compilerExecHelperSource != null && declaration.compilerExecHelperPath != null &&
                 declaration.compilerExecHelperSha256 != null) {
@@ -171,6 +187,7 @@ internal class ContainedModuleCompilationRuntimeConfiguration private constructo
             ).forEach { (executable, digest) -> verifyPinnedFile(executable, digest, executable = true) }
             verifyPinnedFile(requireNotNull(declaration.compilerExecHelperSource),
                 requireNotNull(declaration.compilerExecHelperSha256), executable = true)
+            verifyInternalInclude(declaration)
             isolation.workerClassPath.forEach { verifyPinnedFile(it.path, it.expectedSha256, executable = false) }
             // The scratch root belongs to the service UID, unlike its root-owned ancestors.
             // Its live owner, mount flags, ext4 capacity and exclusive use are checked at acquire.
@@ -181,8 +198,11 @@ internal class ContainedModuleCompilationRuntimeConfiguration private constructo
             val document = OracleJson.parse(bytes, CONFIG_LIMITS) as? JsonObject
                 ?: throw IllegalArgumentException("contained module compiler configuration must be an object")
             val schemaVersion = document.integer("schemaVersion").toInt()
-            require(schemaVersion in 1..3) { "unsupported contained module compiler runtime schema" }
-            document.exact(if (schemaVersion == 1) ROOT_FIELDS_V1 else if (schemaVersion == 2) ROOT_FIELDS_V2 else ROOT_FIELDS_V2 + "compilerInterpreter", "runtime")
+            require(schemaVersion in 1..4) { "unsupported contained module compiler runtime schema" }
+            require(!(schemaVersion == 3 && document.keys == ROOT_FIELDS_V2 + "compilerInternalIncludePath")) {
+                "legacy unlanded runtime schema 3 is missing retained interpreter authority"
+            }
+            document.exact(when (schemaVersion) { 1 -> ROOT_FIELDS_V1; 2 -> ROOT_FIELDS_V2; 3 -> ROOT_FIELDS_V3; else -> ROOT_FIELDS_V4 }, "runtime")
             val profileId = document.text("profileId")
             requireRegisteredProfile(profileId)
             val isolation = parseIsolation(document.objectField("isolation"))
@@ -194,7 +214,8 @@ internal class ContainedModuleCompilationRuntimeConfiguration private constructo
             val helperSource = helper?.path("source")
             val helperPath = helper?.path("path")
             val helperSha256 = helper?.digest("sha256")
-            val interpreter = if (schemaVersion == 3) document.objectField("compilerInterpreter").let { record ->
+            val compilerInternalIncludePath = if (schemaVersion == 4) document.path("compilerInternalIncludePath") else null
+            val interpreter = if (schemaVersion >= 3) document.objectField("compilerInterpreter").let { record ->
                 record.exact(setOf("machine", "source", "path", "sha256"), "compiler interpreter")
                 val machine = record.text("machine")
                 require(machine in setOf("x86_64", "aarch64")) { "unsupported compiler interpreter machine" }
@@ -265,10 +286,20 @@ internal class ContainedModuleCompilationRuntimeConfiguration private constructo
                     "compiler trampoline and compiler executable must be distinct"
                 }
             }
+            if (schemaVersion == 4) {
+                val internalInclude = requireNotNull(compilerInternalIncludePath)
+                val mount = mounts.singleOrNull { internalInclude.startsWith(it.destination) }
+                    ?: throw IllegalArgumentException("compiler internal include path is outside authenticated runtime mounts")
+                val source = mount.source.resolve(mount.destination.relativize(internalInclude))
+                require(source.startsWith(mount.source) && source != mount.source && source.fileName == Path.of("include") &&
+                    mount.source.resolve(mount.destination.relativize(internalInclude)) == source) {
+                    "compiler internal include path is not a declared include directory"
+                }
+            }
             // Curated headers and compiler internals may retain their toolchain's compiled-in
             // lookup paths through explicit aliases. The executable's own path stays canonical.
             return Declaration(document, profileId, isolation, compilerPath, compilerSha256, helperSource, helperPath,
-                helperSha256, interpreter, mounts, scratch,
+                helperSha256, compilerInternalIncludePath, interpreter, mounts, scratch,
                 scratchPolicy, managerControlGroup)
         }
 
@@ -406,6 +437,8 @@ internal class ContainedModuleCompilationRuntimeConfiguration private constructo
         private val ROOT_FIELDS_V1 = setOf("schemaVersion", "profileId", "isolation", "compiler", "compilerRuntimeMounts",
             "scratchMount", "scratchPolicy", "managerControlGroup")
         private val ROOT_FIELDS_V2 = ROOT_FIELDS_V1 + "compilerExecHelper"
+        private val ROOT_FIELDS_V3 = ROOT_FIELDS_V2 + "compilerInterpreter"
+        private val ROOT_FIELDS_V4 = ROOT_FIELDS_V3 + "compilerInternalIncludePath"
         private val SCRATCH_FIELDS = setOf("requiredAvailableBytes", "maximumFilesystemBytes", "requiredAvailableInodes", "maximumFilesystemInodes")
         private val ISOLATION_FIELDS = setOf("javaExecutable", "javaRuntime", "systemLibraryMounts", "bubblewrapExecutable",
             "resourceLimiterExecutable", "scopeSupervisorExecutable", "scopeInspectorExecutable", "systemdBusControllerExecutable",

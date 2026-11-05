@@ -485,10 +485,10 @@ class ContainedModuleCompilerWorkerTest {
         val request = ContainedModuleCompilerRequest("a".repeat(64), profile.id, profile.sha256, snapshot,
             "src/modules/alpha.c", inputs, compiler, sha256(Files.readAllBytes(compiler)), output,
             maximumWallMillis, maximumOutputBytes, OracleJson.parse(profile.canonicalJson().toByteArray()) as JsonObject,
-            schemaVersion = 2, trampolinePath = helper, trampolineSha256 = sha256(Files.readAllBytes(helper)),
+            schemaVersion = 4, trampolinePath = helper, trampolineSha256 = sha256(Files.readAllBytes(helper)),
             runtimeReadRoots = compilerRoots,
             runtimeExecuteRoots = listOf(compiler.parent, Path.of("/usr/bin").toRealPath()).distinct(),
-            runtimeExecuteFiles = listOf(loaderPath))
+            runtimeExecuteFiles = listOf(loaderPath), compilerInternalIncludePath = Path.of("/usr/include").toRealPath())
         return Fixture(root, request)
     }
 

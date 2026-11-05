@@ -100,6 +100,14 @@ object ContainedModuleCompilationQualificationCli {
             headers.path("destination") == Path.of("/usr/include")) {
             "installed compiler internals or header aliases differ from the reviewed closure"
         }
+        val compilerInternalIncludeSource = gcc.path("source").resolve("include")
+        val compilerInternalIncludeDestination = gcc.path("destination").resolve("include")
+        requireTrusted(compilerInternalIncludeSource, directory = true)
+        val internalStddef = compilerInternalIncludeSource.resolve("stddef.h")
+        requireTrusted(internalStddef, directory = false)
+        require(Files.isRegularFile(internalStddef, LinkOption.NOFOLLOW_LINKS)) {
+            "provisioned GCC runtime lacks its authenticated stddef.h"
+        }
         val manifestCache = mutableMapOf<Path, String>()
         fun mount(source: Path, destination: Path = source): JsonObject = JsonObject(mapOf(
             "source" to JsonPrimitive(source.toString()), "destination" to JsonPrimitive(destination.toString()),
@@ -163,9 +171,11 @@ object ContainedModuleCompilationQualificationCli {
         require(libraries.isNotEmpty())
         val interpreterSource = Path.of(if (abi == "x86_64-linux-gnu") "/lib64/ld-linux-x86-64.so.2" else "/lib/ld-linux-aarch64.so.1").toRealPath()
         val candidates = libraries.filter { interpreterSource.startsWith(Path.of((it["source"] as JsonPrimitive).content)) }
-        val interpreterMount = candidates.firstOrNull { it["source"] == it["destination"] } ?: candidates.single()
+        val interpreterMount = candidates.singleOrNull { it["source"] == it["destination"] } ?: candidates.single()
         val interpreterPath = Path.of((interpreterMount["destination"] as JsonPrimitive).content).resolve(
             Path.of((interpreterMount["source"] as JsonPrimitive).content).relativize(interpreterSource))
+        requireTrusted(interpreterSource, directory = false)
+        require(Files.isExecutable(interpreterSource))
         val interpreter = JsonObject(mapOf("machine" to JsonPrimitive(abi.removeSuffix("-linux-gnu")),
             "source" to JsonPrimitive(interpreterSource.toString()), "path" to JsonPrimitive(interpreterPath.toString()),
             "sha256" to JsonPrimitive(digest(interpreterSource))))
@@ -189,10 +199,11 @@ object ContainedModuleCompilationQualificationCli {
             "maximumFilesystemInodes" to JsonPrimitive(capacity.totalInodes)))
         require(capacity.availableBytes >= workerBytes + 128L * 1024 * 1024 && capacity.availableInodes >= 8192)
         return listOf(GeneratedCMakeReconstructionProfile.PROFILE_ID, GeneratedCNinjaReconstructionProfile.PROFILE_ID).associateWith { profile ->
-            JsonObject(mapOf("schemaVersion" to JsonPrimitive(3), "compilerInterpreter" to interpreter, "profileId" to JsonPrimitive(profile), "isolation" to isolation,
+            JsonObject(mapOf("schemaVersion" to JsonPrimitive(4), "compilerInterpreter" to interpreter, "profileId" to JsonPrimitive(profile), "isolation" to isolation,
                 "compiler" to JsonObject(mapOf("path" to JsonPrimitive(compiler.toString()), "sha256" to JsonPrimitive(digest(compiler)))),
                 "compilerExecHelper" to JsonObject(mapOf("source" to JsonPrimitive(compilerExecHelper.toString()),
                     "path" to JsonPrimitive(compilerExecHelperDestination.toString()), "sha256" to JsonPrimitive(digest(compilerExecHelper)))),
+                "compilerInternalIncludePath" to JsonPrimitive(compilerInternalIncludeDestination.toString()),
                 "compilerRuntimeMounts" to compilerMounts, "scratchMount" to JsonPrimitive(scratch.toString()), "scratchPolicy" to policy,
                 "managerControlGroup" to JsonPrimitive(managerGroup))).also {
                 ContainedModuleCompilationRuntimeConfiguration.parse(OracleJson.canonicalBytes(it, limits))

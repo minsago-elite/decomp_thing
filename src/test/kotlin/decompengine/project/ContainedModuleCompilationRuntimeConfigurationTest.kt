@@ -85,6 +85,45 @@ class ContainedModuleCompilationRuntimeConfigurationTest {
     }
 
     @Test
+    fun `runtime v4 binds an internal include directory beneath the declared GCC mount`() {
+        val current = JsonObject(valid() + mapOf(
+            "compilerInterpreter" to interpreterRecord(),
+            "schemaVersion" to JsonPrimitive(4),
+            "compilerExecHelper" to JsonObject(mapOf(
+                "source" to JsonPrimitive("/opt/module-compiler/bin/decomp-module-compiler-exec"),
+                "path" to JsonPrimitive("/opt/module-compiler/bin/decomp-module-compiler-exec"),
+                "sha256" to JsonPrimitive(DIGEST),
+            )),
+            "compilerInternalIncludePath" to JsonPrimitive("/opt/module-compiler/lib/gcc/x86_64-linux-gnu/13/include"),
+        ))
+        val parsed = parse(current)
+        reject(current - "compilerInternalIncludePath")
+        reject(current - "compilerInterpreter")
+        reject(current + ("extra" to JsonPrimitive(true)))
+        reject(current + ("compilerInternalIncludePath" to JsonPrimitive(4)))
+        reject(current + ("compilerInternalIncludePath" to JsonPrimitive("/opt/module-compiler/../include")))
+        val historical = parse(current - "compilerInternalIncludePath" + ("schemaVersion" to JsonPrimitive(3)))
+        assertEquals(null, historical.compilerInternalIncludePath)
+        assertEquals(parsed.compilerRuntimeExecuteFiles, historical.compilerRuntimeExecuteFiles)
+        assertNotEquals(parsed.configurationSha256, historical.configurationSha256)
+        val refused = assertFailsWith<IllegalArgumentException> {
+            parse(current - "compilerInterpreter" + ("schemaVersion" to JsonPrimitive(3)))
+        }
+        assertEquals("legacy unlanded runtime schema 3 is missing retained interpreter authority", refused.message)
+        // Parsing absent paths succeeds; the live prelaunch check must reject them.
+        val companion = ContainedModuleCompilationRuntimeConfiguration.Companion
+        val method = companion.javaClass.getDeclaredMethod(
+            "verifyInternalInclude", ContainedModuleCompilationRuntimeConfiguration.Declaration::class.java)
+        method.isAccessible = true
+        assertFailsWith<InvocationTargetException> { method.invoke(companion, parsed) }
+        assertEquals(Path.of("/opt/module-compiler/lib/gcc/x86_64-linux-gnu/13/include"), parsed.compilerInternalIncludePath)
+        assertNotEquals(parse(JsonObject(valid() + ("schemaVersion" to JsonPrimitive(2)) +
+            ("compilerExecHelper" to current.getValue("compilerExecHelper")))).configurationSha256, parsed.configurationSha256)
+        reject(current + ("compilerInternalIncludePath" to JsonPrimitive("/outside/gcc/include")))
+        reject(current + ("compilerInternalIncludePath" to JsonPrimitive("/opt/module-compiler/not-an-include")))
+    }
+
+    @Test
     fun `retained interpreters parse without host architecture or filesystem authority`() {
         val previous = System.getProperty("os.arch")
         try {
@@ -309,6 +348,10 @@ class ContainedModuleCompilationRuntimeConfigurationTest {
     ))
 
     private fun classPath(path: String) = JsonObject(mapOf("path" to JsonPrimitive(path), "sha256" to JsonPrimitive(DIGEST)))
+
+    private fun interpreterRecord() = JsonObject(mapOf(
+        "machine" to JsonPrimitive("x86_64"), "source" to JsonPrimitive("/opt/keeper-libraries/loader.so"),
+        "path" to JsonPrimitive("/lib64/loader.so"), "sha256" to JsonPrimitive(DIGEST)))
 
     private fun valid(): JsonObject = JsonObject(mapOf(
         "schemaVersion" to JsonPrimitive(1),

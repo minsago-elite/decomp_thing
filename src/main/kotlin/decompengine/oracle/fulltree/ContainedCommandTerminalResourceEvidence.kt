@@ -119,10 +119,11 @@ internal object ContainedCommandTerminalResourceEvidence {
     fun verifyExecution(executionBytes: ByteArray, attachmentBytes: ByteArray): JsonObject {
         val attachment = checkedRecord(attachmentBytes, "attachmentSha256")
         val execution = checkedRecord(executionBytes, "executionSha256")
-        require(attachment["schemaVersion"] == JsonPrimitive(3) &&
-            attachment["provider"] == JsonPrimitive("kotlin-lease-contained-command-attachment-v3") &&
-            execution["schemaVersion"] == JsonPrimitive(3) &&
-            execution["provider"] == JsonPrimitive("kotlin-lease-contained-command-execution-v3")) {
+        val version = attachment.number("schemaVersion")
+        require(version in setOf(3L, 5L) &&
+            attachment["provider"] == JsonPrimitive("kotlin-lease-contained-command-attachment-v$version") &&
+            execution["schemaVersion"] == JsonPrimitive(version) &&
+            execution["provider"] == JsonPrimitive("kotlin-lease-contained-command-execution-v$version")) {
             "contained command execution lacks strict terminal resource evidence"
         }
         require(execution["attachmentSha256"] == JsonPrimitive(OracleArtifacts.sha256(attachmentBytes)) &&
@@ -137,6 +138,18 @@ internal object ContainedCommandTerminalResourceEvidence {
         require(outcome["requestSha256"] == attachment["requestSha256"] &&
             outcome["nonce"] == attachment["nonce"]) { "contained command strict outcome belongs to another request" }
         val keeperNamespacePid = requireScopeAndKeeper(attachment)
+        if (version == 5L) {
+            val policy = ContainedCommandFileDescriptorPolicy.MODULE_COMPILATION
+            val observation = ContainedCommandFileDescriptorObservation.parse(attachment.objectField("fileDescriptorLimits"))
+            observation.requireSelected(policy)
+            val keeper = (attachment["processes"] as JsonArray).map { it as JsonObject }
+                .single { it["role"] == JsonPrimitive("supervisor-jvm") }
+            observation.requireIdentity(keeper.number("hostPid"), keeper.number("startTimeTicks"))
+            val resources = attachment.objectField("resources")
+            require(resources["fileDescriptorPolicySha256"] == JsonPrimitive(policy.sha256) &&
+                resources["maximumOpenFiles"] == JsonPrimitive(policy.maximumOpenFiles) &&
+                resources["processorCount"] == JsonPrimitive(1)) { "contained command FD resources differ from the actual observation" }
+        }
         require(outcome.number("keeperPid") == keeperNamespacePid && outcome.number("childPid") != keeperNamespacePid &&
             outcome.number("childPid") in 1L..Int.MAX_VALUE.toLong()) { "contained command strict outcome belongs to another keeper" }
         require(execution["outcomeSha256"] == JsonPrimitive(OracleArtifacts.sha256(OracleJson.canonicalBytes(outcome)))) {

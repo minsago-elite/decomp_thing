@@ -1,0 +1,20 @@
+{
+  "command": [
+    "/usr/bin/java",
+    "-version"
+  ],
+  "environment": {
+    "LANG": "C.UTF-8",
+    "LC_ALL": "C.UTF-8",
+    "TZ": "UTC"
+  },
+  "maximumStartWaitSeconds": 30,
+  "maximumStderrBytes": 1024,
+  "maximumStdoutBytes": 1024,
+  "maximumWallSeconds": 30,
+  "nonce": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "provider": "kotlin-contained-command-request-v2",
+  "runDirectory": "/srv/contained-run",
+  "schemaVersion": 3,
+  "terminalResourcePolicySha256": "0ec1e4b96307285671feb32a2af352c8e410635b0a7255328ba0f745f7450ddd"
+}

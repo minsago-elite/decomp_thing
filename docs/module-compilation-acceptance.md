@@ -52,15 +52,19 @@ The worker acquires the ordinary `StableControlFile` kernel lease on the exact o
 inode at the original compiler path through result capture. Scratch remains noexec,
 no writable executable mount is added, and no arbitrary foreign owner is trusted.
 
-Live compiler requests use schema v2 and pin a root-owned native Landlock trampoline,
-its digest, and the exact mounted runtime read roots. Historical v1 request bytes remain
+Live compiler requests use schema v4 and pin a root-owned native Landlock trampoline,
+its digest, the exact mounted runtime read roots, and the selected GCC internal include
+directory. The backend adds that authenticated sandbox destination as a fixed `-isystem`
+argument, so relocated GCC can find its own `stddef.h` without widening filesystem access.
+Runtime configuration and proof v4 bind that mapping; schemas v1 and v2 retain their
+historical command and bytes. Historical request bytes remain
 decodable, but the worker cannot execute them and historical proofs cannot gain live
 authority from them. The trampoline checks every rule target's type and device/inode,
 requires Landlock ABI 3 or newer, applies `no_new_privs`, enforces the policy, installs
 the process restrictions, and then `execve`s the compiler in the same bounded session.
 Any setup failure stops before compiler execution.
 
-Live runtime declarations use schema 3. They retain the interpreter's reviewed machine,
+Live runtime declarations use schema 4. They retain the interpreter's reviewed machine,
 canonical host source path, exact mapped sandbox path, and SHA-256 digest. The runtime
 configuration commitment includes that record; the request's execute-file list must
 match its retained mapping. Archive parsing derives the mapping only from recorded
@@ -73,8 +77,14 @@ Historical schema-1 declarations and requests keep their original interpretation
 Earlier schema-2 declarations do not retain interpreter authority, so request-2 proofs
 using them fail closed rather than borrowing the auditing host's loader. Adding fields
 from the current host is not an archive migration or a substitute for authentication.
-Schema-3 changes require fresh configured qualification; earlier schema-2 qualification
-results do not qualify the new runtime contract.
+The composed schema-4 contract requires fresh configured qualification; earlier
+schema-2 or schema-3 qualification results do not qualify this contract.
+
+Runtime schema 3 retains the parent interpreter-record meaning for historical replay.
+The unlanded include-only runtime schema 3 and compiler request/proof schema 3 refuse
+explicitly. Current proof 4 requires request 4 and runtime 4; historical parsing cannot
+issue live authority. The abstract checkpoint command remains profile-only; the internal
+include destination is bound only through concrete request argv and runtime/proof data.
 
 The compiler can read each authenticated snapshot file individually; snapshot
 directories grant enumeration only. Pinned runtime directories grant read access, while
@@ -92,7 +102,9 @@ resource limits and cleanup remain in force.
 
 Host staging must itself support execution or the attempt fails closed; the bounded
 staging file is removed only before launch or after proven process/scope absence.
-Resource limits are not raised. No old proof recreates a live permit. The worker retains the raw
+The module-only authenticated FD policy admits soft=hard NOFILE 7678; generic
+contained commands retain 512. Both START observations, descriptor count and numeric
+range must agree with the admitted finite policy. No old proof recreates a live permit. The worker retains the raw
 exit or signal, bounded diagnostic hashes, and a regular ELF `ET_REL` object's bytes
 and hash. Timeout/output failures have no claimed raw exit status; empty retained logs
 in those cases mean no captured bytes were available, not that nothing was emitted.
@@ -180,7 +192,7 @@ snapshot regression positives as resolution of that broader P1 acceptance-integr
 The current shared NOFILE 512 policy also cannot retain every nonempty input in an
 otherwise admitted large snapshot. Issue #1786 and PR #1800 own the separately versioned,
 authenticated module-only finite descriptor correction and configured Make/Ninja scale
-qualification; they are not incorporated by this PR. The advertised 4096-input ceiling
+qualification; their implementation is incorporated here, but fresh configured qualification remains outstanding. The advertised 4096-input ceiling
 is not evidence that the current launcher can execute that population. Do not drop
 inputs, raise generic worker limits or infer acceptance from diagnostic worker success.
 

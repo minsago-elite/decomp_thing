@@ -56,6 +56,19 @@ class AnalysisIoHelperBuildV1Test {
             assertEquals(JsonPrimitive(0), result["exitCode"])
             assertEquals(kotlinx.serialization.json.JsonNull, result["signal"])
         }
+        // Shipped records name the private build directory by a fixed token, never by host path.
+        val recordText = recordBytes.decodeToString()
+        assertTrue(root.toString() !in recordText && "analysis-io-build" !in recordText, recordText)
+        assertEquals(analysisRecordedArguments(analysisTestCompiler()).map(::JsonPrimitive),
+            (compilation.getValue("arguments") as kotlinx.serialization.json.JsonArray).toList())
+        val environment = compilation.getValue("environment") as JsonObject
+        assertEquals(JsonPrimitive("$ANALYSIS_IO_RECORDED_BUILD_ROOT/home"), environment["HOME"])
+        assertEquals(JsonPrimitive("$ANALYSIS_IO_RECORDED_BUILD_ROOT/tmp"), environment["TMPDIR"])
+        // A second build from the same source and compiler publishes byte-identical metadata.
+        val rebuilt = AnalysisIoHelperBuildV1.build(analysisTestCompiler(), analysisTestSource(), Files.createDirectory(root.resolve("rebuilt")))
+        for (name in listOf("source.c", "build-policy.txt", "build-v1.json", tuple.fileName.toString())) {
+            assertTrue(Files.readAllBytes(metadata.resolve(name)).contentEquals(Files.readAllBytes(rebuilt.resolveSibling(name))), name)
+        }
     }
 
     @Test fun `substituted source failed compiler and writable compiler cannot publish a tuple`() = withAnalysisBuildDirectory { root ->

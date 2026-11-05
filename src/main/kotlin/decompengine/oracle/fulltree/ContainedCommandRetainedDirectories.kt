@@ -11,10 +11,11 @@ import kotlinx.serialization.json.JsonPrimitive
 
 /** Read-only restrictions within an already-authorized run root; never grants a new writable path. */
 internal class ContainedCommandRetainedDirectories(
-    activeName: String?,
+    private val activeName: String?,
     previous: Map<String, LinuxFileIdentity>,
     private val stateIdentity: LinuxFileIdentity? = null,
     private val reportsIdentity: LinuxFileIdentity? = null,
+    visibleInputs: List<KotlinContainedCommandRetainedInput>? = null,
 ) {
     private val entries = previous.toSortedMap().toMap()
     init {
@@ -31,7 +32,16 @@ internal class ContainedCommandRetainedDirectories(
     }
     private val protectedEntries = entries + (stateIdentity?.let { mapOf("state" to it) } ?: emptyMap()) +
         (reportsIdentity?.let { mapOf("reports" to it) } ?: emptyMap())
+    private val visibility = visibleInputs?.let { ContainedCommandRetainedInputVisibility(checkNotNull(activeName), protectedEntries.keys, it) }
     val controlsAreEmpty: Boolean get() = entries.isEmpty()
+    fun visibilityToJson(): JsonObject? = visibility?.canonicalIdentity()
+    fun selectedInputs(root: Path): List<KotlinSystemdCgroupCommandInput> = visibility?.inputs.orEmpty().map {
+        KotlinSystemdCgroupCommandInput(root.resolve(it.relativePath), it.bytes, it.sha256)
+    }
+
+    /** Strict mode preserves the host tree and substitutes only the child's view of that tree. */
+    fun runRootMountArguments(root: Path): List<String> = visibility?.mountArguments(root)
+        ?: (listOf("--bind", root.toString(), root.toString()) + mountArguments(root))
 
     fun verify(parent: LinuxDescriptor) {
         val current = parent.whileOpen(LinuxFilesystemSyscalls::identity)
@@ -45,6 +55,7 @@ internal class ContainedCommandRetainedDirectories(
                 }
             }
         }
+        visibility?.verifySources(parent)
     }
 
     fun stateToJson(): JsonObject? = stateIdentity?.let { containedControlIdentityJson("state", it) }

@@ -51,7 +51,7 @@ object ContainedModuleCompilerWorker {
         requireContainedModuleCompilerProfile(request.profile)
         // Nondumpable processes can have root-owned /proc entries; ask libc for the effective UID.
         val currentUid = CompilerWorkerProtection.currentUid()
-        require(request.schemaVersion == 2 && request.trampolinePath != null && request.trampolineSha256 != null) {
+        require(request.schemaVersion == 4 && request.trampolinePath != null && request.trampolineSha256 != null) {
             "module compiler execution requires the current Landlock trampoline request"
         }
         requireOwnedDirectory(request.snapshotRoot, currentUid)

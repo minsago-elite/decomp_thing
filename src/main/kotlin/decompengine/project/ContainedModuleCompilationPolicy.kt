@@ -127,17 +127,20 @@ internal class VerifiedContainedModuleCompilation private constructor(private va
                         }
                         LinuxFilesystemSyscalls.synchronize(directory)
                     }
-                    ContainedModuleCompilerRequest(nonce, profile.id, profile.sha256, borrowed.path.resolve("state/snapshot"),
+                    val created = ContainedModuleCompilerRequest(nonce, profile.id, profile.sha256, borrowed.path.resolve("state/snapshot"),
                         sourcePath, snapshot.inputs, configuration.compilerExecutable, configuration.compilerSha256,
                         borrowed.path.resolve("reports"), minOf(profile.budgets.buildWallClockMillis, ContainedModuleCompilerRequest.MAXIMUM_WALL_MILLIS),
                         minOf(profile.budgets.buildMaximumOutputBytes, ContainedModuleCompilerRequest.MAXIMUM_OUTPUT_BYTES),
                         profileRecord = OracleJson.parse(profile.canonicalJson().toByteArray()) as JsonObject,
-                        schemaVersion = 2, trampolinePath = configuration.compilerExecHelperPath,
+                        schemaVersion = 4, trampolinePath = configuration.compilerExecHelperPath,
                         trampolineSha256 = configuration.compilerExecHelperSha256,
                         runtimeReadRoots = (configuration.isolation.systemLibraryMounts + configuration.compilerRuntimeMounts)
                             .map { it.destination },
                         runtimeExecuteRoots = listOf(configuration.compilerRuntimeExecuteRoot),
-                        runtimeExecuteFiles = configuration.compilerRuntimeExecuteFiles)
+                        runtimeExecuteFiles = configuration.compilerRuntimeExecuteFiles,
+                        compilerInternalIncludePath = configuration.compilerInternalIncludePath)
+                    require(created.compilerInternalIncludePath != null) { "current module compiler runtime lacks its authenticated GCC internal include path" }
+                    created
                 }
                 require(request.snapshotSha256 == snapshotSha)
                 LinuxFilesystemSyscalls.openRoot(temporary).use { directory ->
@@ -179,7 +182,8 @@ internal class VerifiedContainedModuleCompilation private constructor(private va
                                 compilerInput, executableSnapshot, trampolineInput, trampolineSnapshot),
                             configuration.compilerRuntimeMounts,
                             KotlinSystemdCgroupCommandResources(deadline.remainingWholeSecondsMillis(60_000), 512L * 1024 * 1024,
-                                128, ContainedModuleCompilerRequest.MAXIMUM_OBJECT_BYTES), configuration.configurationSha256,
+                                128, ContainedModuleCompilerRequest.MAXIMUM_OBJECT_BYTES,
+                                fileDescriptorPolicy = ContainedCommandFileDescriptorPolicy.MODULE_COMPILATION), configuration.configurationSha256,
                             beforeStart = { receipt ->
                                 acquired.requireCurrentOperationRunRootAfterScopeAttachment(rootToken)
                                 snapshot.requireCurrent { deadline.requireCurrent() }
@@ -253,12 +257,13 @@ internal class VerifiedContainedModuleCompilation private constructor(private va
                 removeOwnedModuleCompilerRequestDirectory(temporary)
                 val worker = checkNotNull(workerResult)
                 val proof = JsonObject(mapOf(
-                    "schemaVersion" to JsonPrimitive(1), "provider" to JsonPrimitive("contained-module-compilation-v1"),
+                    "schemaVersion" to JsonPrimitive(4), "provider" to JsonPrimitive("contained-module-compilation-v4"),
                     "scope" to JsonPrimitive("module-object"), "policyId" to JsonPrimitive(ContainedModuleCompilationPolicy.POLICY_ID),
                     "profileId" to JsonPrimitive(profile.id), "profileSha256" to JsonPrimitive(profile.sha256),
                     "sourceSha256" to JsonPrimitive(request.sourceSha256), "snapshotSha256" to JsonPrimitive(request.snapshotSha256),
                     "runtimeConfigurationSha256" to JsonPrimitive(configuration.configurationSha256),
                     "runtimeConfiguration" to configuration.configurationRecord, "intent" to intent,
+                    "runtimeClosure" to OracleJson.parseCanonical(checkNotNull(execution.runtimeClosureCanonicalBytes)),
                     "request" to OracleJson.parseCanonical(request.canonicalBytes), "result" to OracleJson.parseCanonical(worker.canonicalBytes),
                     "commandRequest" to OracleJson.parseCanonical(checkNotNull(commandRequest)),
                     "attachment" to OracleJson.parseCanonical(checkNotNull(attachment)), "execution" to OracleJson.parseCanonical(execution.canonicalBytes),

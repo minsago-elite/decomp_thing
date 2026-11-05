@@ -211,17 +211,11 @@ internal fun parseNativeHelperReference(bytes: ByteArray, source: ByteArray, bui
     require(helperString(compilation, "workingDirectory") == "/")
     val arguments = (compilation["arguments"] as? JsonArray)?.map { helperScalarString(it) } ?: error("missing compilation argv")
     require(arguments.size == NATIVE_HELPER_ARGUMENT_TEMPLATE.size + 1 && arguments.first() == compilerPath.toString())
-    val sourcePath = helperHistoricalPath(arguments[9])
-    val outputPath = helperHistoricalPath(arguments[11])
-    require(sourcePath.fileName.toString() == NATIVE_HELPER_SOURCE_NAME && outputPath.fileName.toString() == NATIVE_HELPER_NAME &&
-        sourcePath.parent == outputPath.parent)
-    val expectedArguments = listOf(compilerPath.toString()) + NATIVE_HELPER_ARGUMENT_TEMPLATE.map {
-        when (it) { "\${SOURCE}" -> sourcePath.toString(); "\${OUTPUT}" -> outputPath.toString(); else -> it }
-    }
-    require(arguments == expectedArguments) { "native helper compilation argv drifted" }
+    // Build-tree paths are recorded relative to the fixed build-root token, never as host paths.
+    require(arguments == nativeHelperRecordedArguments(compilerPath.toString())) { "native helper compilation argv drifted" }
     val environment = helperObject(compilation["environment"], "compilation environment")
-    val expectedEnvironment = mapOf("HOME" to sourcePath.parent.resolve("home").toString(), "LANG" to "C", "LC_ALL" to "C",
-        "PATH" to "/usr/bin:/bin", "SOURCE_DATE_EPOCH" to "1779182222", "TMPDIR" to sourcePath.parent.resolve("tmp").toString(), "TZ" to "UTC")
+    val expectedEnvironment = mapOf("HOME" to "$NATIVE_HELPER_RECORDED_BUILD_ROOT/home", "LANG" to "C", "LC_ALL" to "C",
+        "PATH" to "/usr/bin:/bin", "SOURCE_DATE_EPOCH" to "1779182222", "TMPDIR" to "$NATIVE_HELPER_RECORDED_BUILD_ROOT/tmp", "TZ" to "UTC")
     require(environment == JsonObject(expectedEnvironment.mapValues { JsonPrimitive(it.value) })) { "native helper compilation environment drifted" }
     verifyHelperProcessRecord(helperObject(compilation["result"], "compilation result"))
     return NativeHelperReference(files.toMap())

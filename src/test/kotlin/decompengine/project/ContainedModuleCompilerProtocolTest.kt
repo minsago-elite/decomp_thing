@@ -15,6 +15,101 @@ import kotlinx.serialization.json.JsonPrimitive
 
 class ContainedModuleCompilerProtocolTest {
     @Test
+    fun `fixed historical canonical requests retain their original bytes and meaning`() {
+        // V1 is authored; V2 is a fixed canonical encoding of the retained parent request record.
+        val provenance = requireNotNull(javaClass.getResourceAsStream(
+            "/module-compilation/retained-compatibility/compiler-request-fixture-provenance.json"
+        )).use { OracleJson.parse(it.readBytes()) } as JsonArray
+        for ((version, bytes) in listOf(1 to historicalV1, 2 to historicalV2, 3 to retainedV3)) {
+            val record = provenance.map { it as JsonObject }.single {
+                it["schemaVersion"] == JsonPrimitive(version)
+            }
+            assertEquals((record.getValue("sha256") as JsonPrimitive).content, sha256(bytes))
+        }
+        for ((version, fixture) in listOf(1 to historicalV1, 2 to historicalV2)) {
+            val bytes = fixture
+            val parsed = ContainedModuleCompilerRequest.parse(bytes)
+            assertEquals(version, parsed.schemaVersion)
+            assertContentEquals(bytes, parsed.canonicalBytes)
+            assertFalse("-isystem" in parsed.command)
+            assertEquals(version == 2, "-pipe" in parsed.command)
+            assertEquals(null, parsed.compilerInternalIncludePath)
+        }
+        assertTrue(assertFailsWith<IllegalArgumentException> {
+            ContainedModuleCompilerRequest.parse(retainedV3)
+        }.message!!.contains("v3"))
+    }
+
+
+    @Test
+    fun `request v4 binds the authenticated GCC internal include directory into compiler arguments`() {
+        val profile = ReconstructionProfiles.default
+        val include = Path.of("/opt/compiler/lib/gcc/x86_64-linux-gnu/13/include")
+        val current = ContainedModuleCompilerRequest("3".repeat(64), profile.id, profile.sha256, root.resolve("snapshot"),
+            source.path, listOf(source, header), Path.of("/opt/compiler/bin/cc"), "4".repeat(64), root.resolve("output"),
+            1000, 65536, profileRecord = profileRecord(profile), schemaVersion = 4,
+            trampolinePath = Path.of("/opt/compiler/bin/decomp-module-compiler-exec"), trampolineSha256 = "5".repeat(64),
+            runtimeReadRoots = listOf(Path.of("/opt/compiler"), Path.of("/lib64")),
+            runtimeExecuteRoots = listOf(Path.of("/opt/compiler")),
+            runtimeExecuteFiles = listOf(Path.of("/lib64/ld-linux-x86-64.so.2")), compilerInternalIncludePath = include)
+        val parsed = ContainedModuleCompilerRequest.parse(current.canonicalBytes)
+        assertEquals(include, parsed.compilerInternalIncludePath)
+        assertContentEquals(current.canonicalBytes, parsed.canonicalBytes)
+        assertEquals(listOf("-isystem", include.toString()), current.command.windowed(2).first { it.first() == "-isystem" })
+        assertEquals(listOf("/opt/compiler/bin/cc", "-B/opt/compiler/bin/") +
+            profile.adapterConfiguration.getValue("compiler-flags").map {
+                if (it == "-Iinclude") "-I${root.resolve("snapshot/include")}" else it
+            } + listOf("-isystem", include.toString(), "-pipe", "-c",
+                root.resolve("snapshot").resolve(source.path).toString(), "-o", "/proc/self/fd/3"), current.command)
+        val record = OracleJson.parse(current.canonicalBytes) as JsonObject
+        assertEquals(JsonPrimitive("contained-module-compiler-request-v4"), record["provider"])
+        val malformed = listOf(
+            JsonObject(record - "compilerInternalIncludePath"),
+            JsonObject(record + ("extra" to JsonPrimitive(true))),
+            JsonObject(record + ("compilerInternalIncludePath" to JsonPrimitive(4))),
+            JsonObject(record + ("schemaVersion" to JsonPrimitive("4"))),
+            JsonObject(record + ("provider" to JsonPrimitive("contained-module-compiler-request-v2"))),
+        ) + listOf(0L, 3L, 5L, 4294967300L).map { version ->
+            JsonObject(record + mapOf("schemaVersion" to JsonPrimitive(version),
+                "provider" to JsonPrimitive("contained-module-compiler-request-v$version")))
+        } + listOf("relative/include", "/outside/include", "/opt/compiler/../include",
+            "/opt/compiler/not-include", "${root.resolve("snapshot/include")}",
+            "${root.resolve("output/include")}").map { path ->
+            JsonObject(record + ("compilerInternalIncludePath" to JsonPrimitive(path)))
+        }
+        malformed.forEach { changed ->
+            assertFailsWith<IllegalArgumentException> {
+                ContainedModuleCompilerRequest.parse(OracleJson.canonicalBytes(changed))
+            }
+        }
+        val v3 = JsonObject(record + mapOf("schemaVersion" to JsonPrimitive(3),
+            "provider" to JsonPrimitive("contained-module-compiler-request-v3")))
+        assertTrue(assertFailsWith<IllegalArgumentException> {
+            ContainedModuleCompilerRequest.parse(OracleJson.canonicalBytes(v3))
+        }.message!!.contains("v3"))
+        // Historical V2 retains the FD command without the new internal include option.
+        val v2 = JsonObject((record - "compilerInternalIncludePath") + mapOf(
+            "schemaVersion" to JsonPrimitive(2), "provider" to JsonPrimitive("contained-module-compiler-request-v2")))
+        val historicalBytes = OracleJson.canonicalBytes(v2)
+        val historical = ContainedModuleCompilerRequest.parse(historicalBytes)
+        assertContentEquals(historicalBytes, historical.canonicalBytes)
+        assertEquals(null, historical.compilerInternalIncludePath)
+        assertFalse("-isystem" in historical.command)
+        assertFailsWith<IllegalArgumentException> {
+            ContainedModuleLandlockPolicy.forRequest(historical, root.resolve("scratch"))
+        }
+        assertFailsWith<IllegalArgumentException> {
+            ContainedModuleCompilerRequest("3".repeat(64), profile.id, profile.sha256, root.resolve("snapshot"),
+                source.path, listOf(source, header), Path.of("/opt/compiler/bin/cc"), "4".repeat(64), root.resolve("output"),
+                1000, 65536, profileRecord = profileRecord(profile), schemaVersion = 4,
+                trampolinePath = Path.of("/opt/compiler/bin/decomp-module-compiler-exec"), trampolineSha256 = "5".repeat(64),
+                runtimeReadRoots = listOf(Path.of("/opt/compiler"), Path.of("/lib64")),
+                runtimeExecuteRoots = listOf(Path.of("/opt/compiler")),
+                runtimeExecuteFiles = listOf(Path.of("/lib64/ld-linux-x86-64.so.2")), compilerInternalIncludePath = Path.of("/outside/include"))
+        }
+    }
+
+    @Test
     fun `request binds exact registered profiles immutable sorted snapshots and absolute derived arguments`() {
         for (profile in ReconstructionProfiles.builtIn) {
             val inputs = mutableListOf(header, source)
@@ -212,4 +307,13 @@ class ContainedModuleCompilerProtocolTest {
         ContainedModuleCompilerResult(request.sha256, request.nonce, request.profileId, request.profileSha256,
             request.snapshotSha256, request.sourceSha256, request.compilerSha256, outcome, exitCode, signal,
             sha256(byteArrayOf()), 0, sha256(byteArrayOf()), 0, objectSha256, objectBytes)
+    private val historicalV1 = requireNotNull(javaClass.getResourceAsStream(
+        "/module-compilation/retained-compatibility/compiler-request-v1-authored.json"
+    )).use { it.readBytes() }
+    private val historicalV2 = requireNotNull(javaClass.getResourceAsStream(
+        "/module-compilation/retained-compatibility/compiler-request-v2-retained-parent-record-derived.json"
+    )).use { it.readBytes() }
+    private val retainedV3 = requireNotNull(javaClass.getResourceAsStream(
+        "/module-compilation/retained-compatibility/compiler-request-v3-retained-FD-record-derived.json"
+    )).use { it.readBytes() }
 }

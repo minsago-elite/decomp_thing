@@ -28,7 +28,7 @@ internal object ContainedModuleLandlockPolicy {
     internal data class Entry(val kind: Kind, val path: Path, val identity: Identity)
 
     fun forRequest(request: ContainedModuleCompilerRequest, scratchDirectory: Path): ByteArray {
-        require(request.schemaVersion == 2) { "historical module compiler request has no read-boundary authority" }
+        require(request.schemaVersion == 4) { "historical module compiler request has no read-boundary authority" }
         val entries = linkedMapOf<Pair<Kind, Path>, Entry>()
         fun add(kind: Kind, path: Path, directory: Boolean) {
             canonicalPath(path)

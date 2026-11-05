@@ -41,6 +41,7 @@ internal class ContainedModuleCompilerRequest(
     runtimeReadRoots: List<Path> = emptyList(),
     runtimeExecuteRoots: List<Path> = emptyList(),
     runtimeExecuteFiles: List<Path> = emptyList(),
+    val compilerInternalIncludePath: Path? = null,
 ) {
     val profile: ReconstructionProfile
     val inputs: List<ContainedModuleCompilerInput>
@@ -57,10 +58,14 @@ internal class ContainedModuleCompilerRequest(
     init {
         listOf(nonce, profileSha256, compilerSha256).forEach(::requireCompilerDigest)
         listOf(snapshotRoot, compilerPath, outputDirectory).forEach(::requireCompilerAbsolutePath)
-        require(schemaVersion in 1..2) { "unsupported module compiler request version" }
+        require(schemaVersion != 3) { "unlanded module compiler request v3 is unsupported" }
+        require(schemaVersion in setOf(1, 2, 4)) { "unsupported module compiler request version" }
         this.runtimeReadRoots = java.util.List.copyOf(runtimeReadRoots.sortedBy { it.toString() })
         this.runtimeExecuteRoots = java.util.List.copyOf(runtimeExecuteRoots.sortedBy { it.toString() })
         this.runtimeExecuteFiles = java.util.List.copyOf(runtimeExecuteFiles.sortedBy { it.toString() })
+        if (schemaVersion != 4) require(compilerInternalIncludePath == null) {
+            "historical module compiler requests cannot declare a GCC internal include directory"
+        }
         if (schemaVersion == 1) {
             require(trampolinePath == null && trampolineSha256 == null && this.runtimeReadRoots.isEmpty() &&
                 this.runtimeExecuteRoots.isEmpty() && this.runtimeExecuteFiles.isEmpty()) {
@@ -92,6 +97,15 @@ internal class ContainedModuleCompilerRequest(
                 this.runtimeReadRoots.any { compilerPath.startsWith(it) } &&
                 this.runtimeExecuteRoots.any { compilerPath.startsWith(it) }) {
                 "module compiler or its trampoline is outside authenticated runtime read roots"
+            }
+            if (schemaVersion == 4) {
+                requireCompilerAbsolutePath(requireNotNull(compilerInternalIncludePath))
+                require(this.runtimeReadRoots.any { compilerInternalIncludePath.startsWith(it) } &&
+                    compilerInternalIncludePath.fileName == Path.of("include")) {
+                    "compiler internal include directory is outside authenticated runtime roots"
+                }
+            } else require(compilerInternalIncludePath == null) {
+                "historical module compiler requests cannot declare a GCC internal include directory"
             }
         }
         require(!snapshotRoot.startsWith(outputDirectory) && !outputDirectory.startsWith(snapshotRoot) &&
@@ -135,10 +149,11 @@ internal class ContainedModuleCompilerRequest(
                 listOf("-c", snapshotRoot.resolve(sourcePath).toString(), "-o", outputDirectory.resolve(OBJECT_FILE).toString()))
         } else {
             java.util.List.copyOf(listOf(compilerPath.toString(), "-B${compilerPath.parent}/") + flags +
+                (if (schemaVersion == 4) listOf("-isystem", requireNotNull(compilerInternalIncludePath).toString()) else emptyList()) +
                 listOf("-pipe", "-c", snapshotRoot.resolve(sourcePath).toString(), "-o", COMPILER_OUTPUT_FD_PATH))
         }
         val record = mutableMapOf(
-            "provider" to JsonPrimitive(if (schemaVersion == 1) "contained-module-compiler-request-v1" else "contained-module-compiler-request-v2"),
+            "provider" to JsonPrimitive("contained-module-compiler-request-v$schemaVersion"),
             "schemaVersion" to JsonPrimitive(schemaVersion),
             "nonce" to JsonPrimitive(nonce), "profileId" to JsonPrimitive(profileId), "profileSha256" to JsonPrimitive(profileSha256),
             "profile" to OracleJson.parse(profile.canonicalJson().toByteArray()),
@@ -154,6 +169,14 @@ internal class ContainedModuleCompilerRequest(
             record["runtimeReadRoots"] = JsonArray(this.runtimeReadRoots.map { JsonPrimitive(it.toString()) })
             record["runtimeExecuteRoots"] = JsonArray(this.runtimeExecuteRoots.map { JsonPrimitive(it.toString()) })
             record["runtimeExecuteFiles"] = JsonArray(this.runtimeExecuteFiles.map { JsonPrimitive(it.toString()) })
+        }
+        if (schemaVersion == 4) {
+            record["trampolinePath"] = JsonPrimitive(requireNotNull(trampolinePath).toString())
+            record["trampolineSha256"] = JsonPrimitive(requireNotNull(trampolineSha256))
+            record["runtimeReadRoots"] = JsonArray(this.runtimeReadRoots.map { JsonPrimitive(it.toString()) })
+            record["runtimeExecuteRoots"] = JsonArray(this.runtimeExecuteRoots.map { JsonPrimitive(it.toString()) })
+            record["runtimeExecuteFiles"] = JsonArray(this.runtimeExecuteFiles.map { JsonPrimitive(it.toString()) })
+            record["compilerInternalIncludePath"] = JsonPrimitive(requireNotNull(compilerInternalIncludePath).toString())
         }
         encoded = OracleJson.canonicalBytes(JsonObject(record), COMPILER_REQUEST_LIMITS)
         sha256 = decompengine.project.sha256(encoded)
@@ -174,13 +197,17 @@ internal class ContainedModuleCompilerRequest(
 
         fun parse(bytes: ByteArray): ContainedModuleCompilerRequest {
             val root = OracleJson.parseCanonical(bytes, COMPILER_REQUEST_LIMITS).compilerObject()
-            val version = root.compilerLong("schemaVersion").toInt()
+            val wireVersion = root.compilerLong("schemaVersion")
+            require(wireVersion != 3L) { "unlanded module compiler request v3 is unsupported" }
+            require(wireVersion in setOf(1L, 2L, 4L)) { "unsupported module compiler request version" }
+            val version = wireVersion.toInt()
             val legacyFields = setOf("provider", "schemaVersion", "nonce", "profileId", "profileSha256", "profile", "snapshotRoot", "sourcePath",
                 "inputs", "snapshotSha256", "compilerPath", "compilerSha256", "outputDirectory", "maximumWallMillis", "maximumOutputBytes")
             val currentFields = legacyFields + setOf("trampolinePath", "trampolineSha256", "runtimeReadRoots", "runtimeExecuteRoots", "runtimeExecuteFiles")
-            root.compilerKeys(*(if (version == 1) legacyFields else currentFields).toTypedArray())
+            root.compilerKeys(*(when (version) { 1 -> legacyFields; 2 -> currentFields; else -> currentFields + "compilerInternalIncludePath" }).toTypedArray())
             require((root.compilerText("provider") == "contained-module-compiler-request-v1" && version == 1) ||
-                (root.compilerText("provider") == "contained-module-compiler-request-v2" && version == 2)) {
+                (root.compilerText("provider") == "contained-module-compiler-request-v2" && version == 2) ||
+                (root.compilerText("provider") == "contained-module-compiler-request-v4" && version == 4)) {
                 "unsupported module compiler request"
             }
             val inputs = root["inputs"] as? JsonArray ?: throw IllegalArgumentException("module compiler inputs must be an array")
@@ -193,26 +220,27 @@ internal class ContainedModuleCompilerRequest(
                 }, Path.of(root.compilerText("compilerPath")), root.compilerText("compilerSha256"), Path.of(root.compilerText("outputDirectory")),
                 root.compilerLong("maximumWallMillis"), root.compilerLong("maximumOutputBytes"), root.getValue("profile").compilerObject(),
                 schemaVersion = version,
-                trampolinePath = if (version == 2) Path.of(root.compilerText("trampolinePath")) else null,
-                trampolineSha256 = if (version == 2) root.compilerText("trampolineSha256") else null,
-                runtimeReadRoots = if (version == 2) (root["runtimeReadRoots"] as? JsonArray
+                trampolinePath = if (version >= 2) Path.of(root.compilerText("trampolinePath")) else null,
+                trampolineSha256 = if (version >= 2) root.compilerText("trampolineSha256") else null,
+                runtimeReadRoots = if (version >= 2) (root["runtimeReadRoots"] as? JsonArray
                     ?: error("module compiler runtime roots must be an array")).map { value ->
                     val primitive = value as? JsonPrimitive ?: error("module compiler runtime root must be a string")
                     require(primitive.isString) { "module compiler runtime root must be a string" }
                     Path.of(primitive.content)
                 } else emptyList(),
-                runtimeExecuteRoots = if (version == 2) (root["runtimeExecuteRoots"] as? JsonArray
+                runtimeExecuteRoots = if (version >= 2) (root["runtimeExecuteRoots"] as? JsonArray
                     ?: error("module compiler runtime execute roots must be an array")).map { value ->
                     val primitive = value as? JsonPrimitive ?: error("module compiler runtime execute root must be a string")
                     require(primitive.isString) { "module compiler runtime execute root must be a string" }
                     Path.of(primitive.content)
                 } else emptyList(),
-                runtimeExecuteFiles = if (version == 2) (root["runtimeExecuteFiles"] as? JsonArray
+                runtimeExecuteFiles = if (version >= 2) (root["runtimeExecuteFiles"] as? JsonArray
                     ?: error("module compiler runtime executable files must be an array")).map { value ->
                     val primitive = value as? JsonPrimitive ?: error("module compiler runtime executable file must be a string")
                     require(primitive.isString) { "module compiler runtime executable file must be a string" }
                     Path.of(primitive.content)
                 } else emptyList(),
+                compilerInternalIncludePath = if (version == 4) Path.of(root.compilerText("compilerInternalIncludePath")) else null,
             ).also {
                 require(it.snapshotSha256 == root.compilerText("snapshotSha256") && it.canonicalBytes.contentEquals(bytes)) {
                     "module compiler request changed during decoding"
