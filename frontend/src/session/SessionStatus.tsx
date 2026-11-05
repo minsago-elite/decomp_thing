@@ -43,11 +43,11 @@ export function SessionStatus({ session, placement = 'any' }: { session: Browser
     </aside>;
   }
   if (state.status === 'authenticated') {
-    return <aside class="session-notice is-connected" aria-label={copy.localSession}>
+    return <div role="group" class="session-notice is-connected" aria-label={copy.localSession}>
       <p>{copy.localSessionConnected}</p>
       {state.serverChanged && <p role="status">{copy.applicationInstanceChanged}</p>}
       <button type="button" onClick={() => { void session.logout(); }}>{copy.signOut}</button>
-    </aside>;
+    </div>;
   }
   const canCheck = state.status !== 'unavailable' || !['removal-failed', 'incompatible'].includes(state.reason);
   return <aside class="session-notice notice" aria-label={copy.localSession}>

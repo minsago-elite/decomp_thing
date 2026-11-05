@@ -176,16 +176,35 @@ it('keeps the connected session in header chrome and every other state in the pa
   await act(async () => { await session.initialize({ kind: 'absent' }); });
   expect(screen.getByTestId('header').textContent).toContain('Local session connected');
   expect(screen.getByTestId('page').textContent).toBe('');
+  const connectedGroup = screen.getByRole('group', { name: 'Local session' });
+  expect(connectedGroup.tagName).toBe('DIV');
+  expect(screen.queryByRole('complementary', { name: 'Local session' })).toBeNull();
+  expect(connectedGroup.closest('header')).toBe(screen.getByTestId('header'));
+  expect(connectedGroup.querySelector('[role="status"]')).toBeNull();
+  expect(connectedGroup.querySelector('button')?.textContent).toBe('Sign out');
+  const connectedAxe = await axeSummary(connectedGroup);
+  expect(connectedAxe.violations).toEqual([]);
+  expect(connectedAxe.incomplete).toEqual([]);
+  expect(connectedAxe.passes).toEqual(expect.arrayContaining(['aria-allowed-role', 'aria-roles', 'aria-valid-attr', 'aria-valid-attr-value']));
+  expect(connectedAxe.inapplicable).toContain('landmark-complementary-is-top-level');
   await act(async () => { await session.logout(); });
   expect(screen.getByTestId('header').textContent).toBe('');
   expect(screen.getByTestId('page').textContent).toContain('signed out');
   expect(screen.getAllByRole('button').map(button => button.textContent)).not.toContain('Sign out');
 });
 
-async function axeViolations(root: Element) {
+const SESSION_AXE_RULES = ['aria-allowed-role', 'aria-required-children', 'aria-valid-attr', 'aria-valid-attr-value',
+  'aria-roles', 'nested-interactive', 'landmark-unique', 'landmark-complementary-is-top-level'];
+
+async function axeSummary(root: Element) {
   const { default: axe } = await import('axe-core');
-  const result = await axe.run(root, { runOnly: { type: 'rule', values: ['aria-allowed-role', 'aria-required-children', 'nested-interactive', 'landmark-unique'] } });
-  return result.violations.map(violation => violation.id);
+  const result = await axe.run(root, { runOnly: { type: 'rule', values: SESSION_AXE_RULES }, resultTypes: ['violations', 'passes', 'incomplete'] });
+  return { violations: result.violations.map(item => item.id), passes: result.passes.map(item => item.id),
+    incomplete: result.incomplete.map(item => item.id), inapplicable: result.inapplicable.map(item => item.id) };
+}
+
+async function axeViolations(root: Element) {
+  return (await axeSummary(root)).violations;
 }
 
 function expectStatusOnlyText() {
@@ -212,7 +231,13 @@ it('keeps live status semantics on text-only regions through every session trans
   expect(session.snapshot().status).toBe('checking');
   expect(expectStatusOnlyText().map(status => status.textContent)).toEqual(['Checking local session…']);
   expect(screen.queryByRole('button')).toBeNull();
-  expect(screen.getByRole('complementary', { name: 'Local session' })).toBeTruthy();
+  const pageNotice = screen.getByRole('complementary', { name: 'Local session' });
+  expect(pageNotice).toBeTruthy();
+  const pageAxe = await axeSummary(pageNotice);
+  expect(pageAxe.violations).toEqual([]);
+  expect(pageAxe.incomplete).toEqual([]);
+  expect(pageAxe.passes).toEqual(expect.arrayContaining(['aria-allowed-role', 'aria-roles', 'aria-valid-attr',
+    'aria-valid-attr-value', 'landmark-complementary-is-top-level']));
   expect(await axeViolations(document.body)).toEqual([]);
   await act(async () => { release(); await pending; });
 
@@ -249,6 +274,12 @@ it('announces an application instance change as text only beside the Sign out ac
   expect(session.snapshot()).toMatchObject({ status: 'authenticated', serverChanged: true });
   const [status] = expectStatusOnlyText();
   expect(status?.textContent).toMatch(/^Application instance changed\./);
+  const connectedGroup = screen.getByRole('group', { name: 'Local session' });
+  expect(connectedGroup.querySelector('[role="status"]')).toBe(status);
+  expect(connectedGroup.querySelector('button')?.closest('[role="status"]')).toBeNull();
+  const changedAxe = await axeSummary(connectedGroup);
+  expect(changedAxe.violations).toEqual([]);
+  expect(changedAxe.passes).toContain('aria-allowed-role');
   expect(screen.getByText('Local session connected.').getAttribute('role')).toBeNull();
   expect(screen.getByRole('button', { name: 'Sign out' }).closest('[role="status"]')).toBeNull();
   expect(gateway.logout).not.toHaveBeenCalled();
@@ -291,5 +322,14 @@ it('negative control: axe rejects the former aside[role=status] native-role over
   document.body.append(host);
   try {
     expect(await axeViolations(host)).toContain('aria-allowed-role');
+  } finally { host.remove(); }
+});
+
+it('negative control: rejects a complementary session landmark nested inside the app banner', async () => {
+  const host = document.createElement('div');
+  host.innerHTML = '<header><aside class="session-notice is-connected" aria-label="Local session"><p>Local session connected.</p><button type="button">Sign out</button></aside></header>';
+  document.body.append(host);
+  try {
+    expect(await axeViolations(host)).toContain('landmark-complementary-is-top-level');
   } finally { host.remove(); }
 });

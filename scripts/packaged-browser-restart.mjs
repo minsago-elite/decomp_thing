@@ -231,7 +231,8 @@ export async function qualifyRestart({ fixture, origin, makeTarget, cdp, evaluat
   evidence.serverRestartNoticeShown = true;
   // #1895: the real restart is the only packaged path to the application-instance-changed status.
   if (sessionSemantics) {
-    await sessionSemantics.checkpoint(old, 'connected-instance-changed', { statusText: 'Application instance changed.', buttons: ['Sign out'] });
+    await sessionSemantics.checkpoint(old, 'connected-instance-changed', { container: 'connected',
+      statusText: 'Application instance changed.', buttons: ['Sign out'] });
     evidence.sessionSemantics = sessionSemantics.results;
   }
 

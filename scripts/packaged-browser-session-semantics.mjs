@@ -15,12 +15,12 @@ const CONTROL_SELECTOR = 'button, a[href], input, select, textarea, [tabindex], 
 export const statusRecorderSource = `(() => {
   const seen = []; Object.defineProperty(window, '__sessionStatusObservations', { value: seen });
   const trusted = []; Object.defineProperty(window, '__sessionActivationEvents', { value: trusted });
-  const record = () => { for (const node of document.querySelectorAll('aside.session-notice [role="status"]')) {
+  const record = () => { for (const node of document.querySelectorAll('.session-notice [role="status"]')) {
     const text = node.textContent.trim(); if (text && seen.at(-1)?.text !== text) seen.push({ text, tag: node.tagName.toLowerCase(),
       controls: node.querySelectorAll(${JSON.stringify(CONTROL_SELECTOR)}).length, ownTabIndex: node.hasAttribute('tabindex') }); } };
   new MutationObserver(record).observe(document, { subtree: true, childList: true, characterData: true });
   for (const type of ['keydown', 'click']) document.addEventListener(type, (event) => {
-    const button = event.target?.closest?.('aside.session-notice button');
+    const button = event.target?.closest?.('.session-notice button');
     if (button) trusted.push({ type, isTrusted: event.isTrusted, key: event.key ?? null, label: button.textContent });
   }, true);
 })();`;
@@ -28,19 +28,21 @@ export const statusRecorderSource = `(() => {
 /** Collects the session semantics visible in the current document. */
 export const sessionFactsExpression = `(() => {
   const asides = [...document.querySelectorAll('aside')];
-  const session = asides.filter(aside => aside.classList.contains('session-notice'));
+  const session = [...document.querySelectorAll('.session-notice')];
   const statuses = [...document.querySelectorAll('[role="status"]')].filter(node => node.textContent.trim());
   return {
     asides: asides.map(aside => ({ role: aside.getAttribute('role'), label: aside.getAttribute('aria-label'), session: aside.classList.contains('session-notice') })),
     sessionCount: session.length,
+    sessionContainers: session.map(container => ({ tag: container.tagName.toLowerCase(), role: container.getAttribute('role'),
+      label: container.getAttribute('aria-label'), inBanner: Boolean(container.closest('header')) })),
     statuses: statuses.map(node => { const connection = node.closest('aside.connection-notice'); return {
-      tag: node.tagName.toLowerCase(), text: node.textContent.trim(), inSession: Boolean(node.closest('aside.session-notice')),
+      tag: node.tagName.toLowerCase(), text: node.textContent.trim(), inSession: Boolean(node.closest('.session-notice')),
       controls: node.querySelectorAll(${JSON.stringify(CONTROL_SELECTOR)}).length, ownTabIndex: node.hasAttribute('tabindex'),
       connectionNotice: Boolean(connection), role: node.getAttribute('role'), label: connection?.getAttribute('aria-label') ?? null,
     }; }),
     activeElement: { tag: document.activeElement?.tagName?.toLowerCase() ?? null,
       label: document.activeElement?.textContent?.trim() ?? null },
-    buttons: session.flatMap(aside => [...aside.querySelectorAll('button')].map(button => ({ label: button.textContent,
+    buttons: session.flatMap(container => [...container.querySelectorAll('button')].map(button => ({ label: button.textContent,
       insideStatus: Boolean(button.closest('[role="status"]')), type: button.getAttribute('type') }))),
   };
 })()`;
@@ -48,10 +50,20 @@ export const sessionFactsExpression = `(() => {
 /** Pure verdict over collected facts; `expected` names the state the harness drove the real app into. */
 export function assertSessionFacts(facts, expected) {
   assert.ok(facts && Array.isArray(facts.asides) && Array.isArray(facts.statuses), 'Session facts are missing');
-  assert.equal(facts.sessionCount, 1, `Expected exactly one session aside, saw ${facts.sessionCount}`);
-  const landmark = facts.asides.find((aside) => aside.session);
-  assert.equal(landmark.role, null, `Session aside overrides its native role with "${landmark.role}"`);
-  assert.equal(landmark.label, SESSION_LANDMARK_NAME, 'Session aside must be the complementary landmark named "Local session"');
+  assert.equal(facts.sessionCount, 1, `Expected exactly one session container, saw ${facts.sessionCount}`);
+  assert.ok(Array.isArray(facts.sessionContainers) && facts.sessionContainers.length === 1, 'Session container facts are missing');
+  const connected = expected.container === 'connected' || (expected.container === undefined && expected.statusText === null);
+  const container = facts.sessionContainers[0];
+  if (connected) {
+    assert.equal(container.tag, 'div', `Connected session group must use <div>, saw <${container.tag}>`);
+    assert.equal(container.role, 'group', `Connected session group must use role=group, saw "${container.role}"`);
+    assert.equal(container.inBanner, true, 'Connected session group must stay in the app header');
+  } else {
+    assert.equal(container.tag, 'aside', `Page session notice must use <aside>, saw <${container.tag}>`);
+    assert.equal(container.role, null, `Session aside overrides its native role with "${container.role}"`);
+    assert.equal(container.inBanner, false, 'Page session landmark must remain outside the header banner');
+  }
+  assert.equal(container.label, SESSION_LANDMARK_NAME, 'Session container must be named "Local session"');
   for (const status of facts.statuses.filter((item) => item.inSession)) {
     assert.equal(status.tag, 'p', `role=status must be a text-only <p>, saw <${status.tag}>`);
     assert.equal(status.controls, 0, 'role=status contains a button, link, input or tabindex descendant');
@@ -82,13 +94,15 @@ export function assertSessionFacts(facts, expected) {
 }
 
 /** Axe must have actually evaluated the required rules against the session region. */
-export function assertAxeResult(result, requiredRules = REQUIRED_AXE_PASSES) {
+export function assertAxeResult(result, requiredRules = REQUIRED_AXE_PASSES, expectedInapplicable = []) {
   assert.ok(result && Array.isArray(result.violations) && Array.isArray(result.passes), 'Axe result is missing');
   assert.deepEqual(result.violations.filter((rule) => rule.nodes > 0).map((rule) => rule.id), [], `Axe violations in session region: ${JSON.stringify(result.violations)}`);
   const passed = new Set(result.passes.filter((rule) => rule.nodes > 0).map((rule) => rule.id));
   const missing = requiredRules.filter((rule) => !passed.has(rule));
   assert.deepEqual(missing, [], `Required axe rules did not pass (inapplicable or incomplete): ${missing.join(', ')}`);
   assert.deepEqual(result.incomplete.filter((rule) => rule.nodes > 0).map((rule) => rule.id).filter((id) => requiredRules.includes(id)), [], 'Required axe rule incomplete in session region');
+  const inapplicable = new Set((result.inapplicable ?? []).map((rule) => rule.id));
+  for (const rule of expectedInapplicable) assert.ok(inapplicable.has(rule), `Expected axe rule ${rule} to be inapplicable to this session container`);
   return { passes: [...passed].sort(), violations: 0, inapplicable: result.inapplicable.map((rule) => rule.id).sort() };
 }
 
@@ -127,13 +141,19 @@ export function sessionSemanticsGate({ cdp, evaluate, ready, capture, axeSource,
     const facts = await evaluate(target, sessionFactsExpression);
     const verdict = assertSessionFacts(facts, expected);
     if (!(await evaluate(target, 'typeof window.axe === "object"'))) await evaluate(target, `${axeSource};void 0`);
-    const requiredRules = expected.statusText === null
-      ? ['aria-valid-attr', 'aria-valid-attr-value', 'landmark-complementary-is-top-level'] : REQUIRED_AXE_PASSES;
-    const axe = assertAxeResult(await evaluate(target, `axe.run(document, { runOnly: { type: 'rule', values: ${JSON.stringify(AXE_RULES)} }, resultTypes: ['violations', 'passes', 'incomplete'] })
-      .then(r => ({ violations: r.violations.map(v => ({ id: v.id, nodes: v.nodes.filter(n => n.element?.closest('aside.session-notice')).length })),
-        passes: r.passes.map(p => ({ id: p.id, nodes: p.nodes.filter(n => n.element?.closest('aside.session-notice')).length })),
-        incomplete: r.incomplete.map(p => ({ id: p.id, nodes: p.nodes.filter(n => n.element?.closest('aside.session-notice')).length })),
-        inapplicable: r.inapplicable.map(p => ({ id: p.id })) }))`), requiredRules);
+    const connected = expected.container === 'connected' || (expected.container === undefined && expected.statusText === null);
+    const requiredRules = connected
+      ? ['aria-allowed-role', 'aria-roles', 'aria-valid-attr', 'aria-valid-attr-value'] : REQUIRED_AXE_PASSES;
+    const expectedInapplicable = connected ? ['landmark-complementary-is-top-level'] : [];
+    const axe = assertAxeResult(await evaluate(target, `(() => {
+      const session = document.querySelector('.session-notice');
+      if (!session) throw new Error('Session container is missing before axe check');
+      return axe.run(session, { runOnly: { type: 'rule', values: ${JSON.stringify(AXE_RULES)} }, resultTypes: ['violations', 'passes', 'incomplete'] })
+        .then(r => ({ violations: r.violations.map(v => ({ id: v.id, nodes: v.nodes.length })),
+          passes: r.passes.map(p => ({ id: p.id, nodes: p.nodes.length })),
+          incomplete: r.incomplete.map(p => ({ id: p.id, nodes: p.nodes.length })),
+          inapplicable: r.inapplicable.map(p => ({ id: p.id })) }));
+    })()`), requiredRules, expectedInapplicable);
     await capture(target, `session-${name}.png`);
     const result = { name, ...verdict, activeElement: facts.activeElement, axe, screenshot: `session-${name}.png` };
     results.checkpoints.push(result);

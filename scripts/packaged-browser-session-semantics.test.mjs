@@ -3,27 +3,35 @@ import test from 'node:test';
 import { REQUIRED_AXE_PASSES, assertActivation, assertAxeResult, assertSessionFacts, assertStatusObservations, sessionSemanticsGate, statusRecorderSource, sessionFactsExpression } from './packaged-browser-session-semantics.mjs';
 
 const aside = (overrides = {}) => ({ role: null, label: 'Local session', session: true, ...overrides });
+const pageContainer = (overrides = {}) => ({ tag: 'aside', role: null, label: 'Local session', inBanner: false, ...overrides });
+const connectedContainer = (overrides = {}) => ({ tag: 'div', role: 'group', label: 'Local session', inBanner: true, ...overrides });
 const status = (overrides = {}) => ({ tag: 'p', text: 'You signed out of this browser. Public pages remain available.', inSession: true, controls: 0, ownTabIndex: false, ...overrides });
 const button = (label, overrides = {}) => ({ label, insideStatus: false, type: 'button', ...overrides });
 const required = { statusText: 'You signed out of this browser.', buttons: ['Check session'] };
-const validRequired = () => ({ asides: [aside()], sessionCount: 1, statuses: [status()], buttons: [button('Check session')] });
+const validRequired = () => ({ asides: [aside()], sessionCount: 1, sessionContainers: [pageContainer()], statuses: [status()], buttons: [button('Check session')] });
 
-test('accepts the current required and quiet connected semantics', () => {
+test('accepts page landmarks and the named connected header group', () => {
   assert.deepEqual(assertSessionFacts(validRequired(), required).controls, ['Check session']);
-  assert.equal(assertSessionFacts({ asides: [aside()], sessionCount: 1, statuses: [], buttons: [button('Sign out')] },
-    { statusText: null, buttons: ['Sign out'] }).sessionStatuses, 0);
+  const connected = { asides: [], sessionCount: 1, sessionContainers: [connectedContainer()], statuses: [], buttons: [button('Sign out')] };
+  assert.equal(assertSessionFacts(connected, { container: 'connected', statusText: null, buttons: ['Sign out'] }).sessionStatuses, 0);
+  assert.throws(() => assertSessionFacts({ ...connected, sessionContainers: [pageContainer({ inBanner: true })] },
+    { container: 'connected', statusText: null, buttons: ['Sign out'] }), /Connected session group must use <div>/);
+  assert.throws(() => assertSessionFacts({ ...validRequired(), sessionContainers: [connectedContainer()] }, required),
+    /Page session notice must use <aside>/);
 });
 
 test('scopes session semantics while recording the independent browser connection notice', () => {
-  const facts = { asides: [aside(), aside({ role: 'status', label: 'Connection status', session: false })], sessionCount: 1,
+  const facts = { asides: [aside({ session: false, role: 'status', label: 'Connection status' })], sessionCount: 1,
+    sessionContainers: [connectedContainer()],
     statuses: [{ tag: 'aside', text: 'Browser reports offline', inSession: false, controls: 1, ownTabIndex: false,
       connectionNotice: true, role: 'status', label: 'Connection status' }], buttons: [button('Sign out')] };
-  assert.doesNotThrow(() => assertSessionFacts(facts, { statusText: null, externalStatusText: 'Browser reports offline', buttons: ['Sign out'] }));
-  assert.throws(() => assertSessionFacts(facts, { statusText: null, buttons: ['Sign out'] }), /Unexpected status outside/);
+  assert.doesNotThrow(() => assertSessionFacts(facts, { container: 'connected', statusText: null, externalStatusText: 'Browser reports offline', buttons: ['Sign out'] }));
+  assert.throws(() => assertSessionFacts(facts, { container: 'connected', statusText: null, buttons: ['Sign out'] }), /Unexpected status outside/);
 });
 
 test('negative control: rejects the former aside[role=status] wrapping Check session', () => {
-  const former = { asides: [aside({ role: 'status' })], sessionCount: 1, statuses: [status({ tag: 'aside', controls: 1 })], buttons: [button('Check session', { insideStatus: true })] };
+  const former = { asides: [aside({ role: 'status' })], sessionCount: 1, sessionContainers: [pageContainer({ role: 'status' })],
+    statuses: [status({ tag: 'aside', controls: 1 })], buttons: [button('Check session', { insideStatus: true })] };
   assert.throws(() => assertSessionFacts(former, required), /overrides its native role/);
 });
 
@@ -33,8 +41,8 @@ test('rejects each invalid fragment independently', () => {
     [(f) => { f.statuses[0].controls = 1; }, /button, link, input or tabindex/],
     [(f) => { f.statuses[0].ownTabIndex = true; }, /not be focusable/],
     [(f) => { f.buttons[0].insideStatus = true; }, /inside the status/],
-    [(f) => { f.asides[0].label = 'Session'; }, /named "Local session"/],
-    [(f) => { f.sessionCount = 0; }, /exactly one session aside/],
+    [(f) => { f.sessionContainers[0].label = 'Session'; }, /named "Local session"/],
+    [(f) => { f.sessionCount = 0; }, /exactly one session container/],
     [(f) => { f.statuses[0].text = 'Something else'; }, /lacks/],
     [(f) => { f.buttons = [button('Sign out')]; }, /Unexpected session controls/],
     [(f) => { f.statuses.push(status()); }, /exactly one session status/],
@@ -58,6 +66,37 @@ test('axe must pass every required rule on the session region', () => {
   assert.throws(() => assertAxeResult(axe({ incomplete: [{ id: 'aria-roles', nodes: 1 }] })), /incomplete in session region/);
   assert.equal(assertAxeResult(axe({ incomplete: [{ id: 'aria-roles', nodes: 0 }] })).violations, 0);
   assert.throws(() => assertAxeResult(null), /missing/);
+  const connectedRules = ['aria-allowed-role', 'aria-roles', 'aria-valid-attr', 'aria-valid-attr-value'];
+  const connectedAxe = { violations: [], incomplete: [], inapplicable: [{ id: 'landmark-complementary-is-top-level' }],
+    passes: connectedRules.map((id) => ({ id, nodes: 1 })) };
+  assert.deepEqual(assertAxeResult(connectedAxe, connectedRules, ['landmark-complementary-is-top-level']).violations, 0);
+  assert.throws(() => assertAxeResult({ ...connectedAxe, violations: [{ id: 'aria-allowed-role', nodes: 1 }] },
+    connectedRules, ['landmark-complementary-is-top-level']), /Axe violations/);
+  assert.throws(() => assertAxeResult(connectedAxe, connectedRules, ['landmark-complementary-is-top-level', 'landmark-unique']),
+    /Expected axe rule landmark-unique to be inapplicable/);
+});
+
+test('connected checkpoint scopes axe to the named group and counts serialized result nodes', async () => {
+  const facts = { asides: [], sessionCount: 1, sessionContainers: [connectedContainer()], statuses: [], buttons: [button('Sign out')] };
+  const target = { sessionId: 'sid', requests: [] };
+  let axeExpression = '';
+  const evaluate = async (_target, expression) => {
+    if (expression === sessionFactsExpression) return facts;
+    if (expression === 'typeof window.axe === "object"') return true;
+    if (expression.includes('axe.run(')) {
+      axeExpression = expression;
+      return { violations: [], incomplete: [], inapplicable: [{ id: 'landmark-complementary-is-top-level' }],
+        passes: ['aria-allowed-role', 'aria-roles', 'aria-valid-attr', 'aria-valid-attr-value'].map(id => ({ id, nodes: 1 })) };
+    }
+    throw new Error(`Unexpected evaluate expression: ${expression}`);
+  };
+  const captures = [];
+  const gate = sessionSemanticsGate({ evaluate, capture: async (_target, name) => captures.push(name), axeSource: 'axe' });
+  const result = await gate.checkpoint(target, 'connected', { container: 'connected', statusText: null, buttons: ['Sign out'] });
+  assert.match(axeExpression, /document\.querySelector\('\.session-notice'\)/);
+  assert.doesNotMatch(axeExpression, /n\.element/);
+  assert.deepEqual(result.axe.inapplicable, ['landmark-complementary-is-top-level']);
+  assert.deepEqual(captures, ['session-connected.png']);
 });
 
 test('every recorded transient rendering must be a text-only, non-focusable paragraph', () => {
@@ -82,7 +121,7 @@ test('held trusted DELETE checkpoints signing-out and always resumes the real re
       }
     },
   };
-  const facts = { asides: [aside()], sessionCount: 1, statuses: [status({ text: 'Signing out…' })], buttons: [] };
+  const facts = { asides: [aside()], sessionCount: 1, sessionContainers: [pageContainer()], statuses: [status({ text: 'Signing out…' })], buttons: [] };
   const evaluate = async (_target, expression) => {
     if (expression === 'window.__sessionActivationEvents.length') return 0;
     if (expression === 'window.__sessionActivationEvents') return trusted('Sign out');
@@ -91,7 +130,7 @@ test('held trusted DELETE checkpoints signing-out and always resumes the real re
     if (expression.includes(":focus-visible")) return true;
     if (expression === sessionFactsExpression) return facts;
     if (expression === 'typeof window.axe === "object"') return true;
-    if (expression.startsWith('axe.run(')) return { violations: [], incomplete: [], inapplicable: [],
+    if (expression.includes('axe.run(')) return { violations: [], incomplete: [], inapplicable: [],
       passes: REQUIRED_AXE_PASSES.map((id) => ({ id, nodes: 1 })) };
     throw new Error(`Unexpected evaluate expression: ${expression}`);
   };
