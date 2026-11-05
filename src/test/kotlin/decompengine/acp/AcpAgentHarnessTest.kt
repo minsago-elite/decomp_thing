@@ -1292,7 +1292,7 @@ class AcpAgentHarnessTest {
                 }
             }
         }
-        assertEquals(103, acpTestMethods.size, acpTestMethods.joinToString { it.name })
+        assertEquals(104, acpTestMethods.size, acpTestMethods.joinToString { it.name })
         assertTrue(
             acpTestMethods.all { it.returnType == Void.TYPE },
             acpTestMethods.filter { it.returnType != Void.TYPE }.joinToString {
@@ -3614,22 +3614,30 @@ class AcpAgentHarnessTest {
     private fun javap(type: Class<*>): String {
         val executable = Path.of(System.getProperty("java.home"), "bin", "javap")
         val classPath = Path.of(requireNotNull(type.protectionDomain.codeSource).location.toURI()).toString()
-        val process = ProcessBuilder(
-            executable.toString(),
-            "-p",
-            "-classpath",
-            classPath,
-            type.name,
-        ).redirectErrorStream(true).start()
-        val exited = process.waitFor(10, TimeUnit.SECONDS)
-        if (!exited) {
-            process.destroyForcibly()
-            process.waitFor(3, TimeUnit.SECONDS)
+        val outputPath = Files.createTempFile(
+            Path.of("build", "test-tmp", "javap").toAbsolutePath().normalize().createDirectories(), "bytecode-", ".txt")
+        try {
+            // Waiting before draining a pipe can block on valid hosts with small pipe buffers.
+            val process = ProcessBuilder(executable.toString(), "-p", "-classpath", classPath, type.name)
+                .redirectErrorStream(true).redirectOutput(outputPath.toFile()).start()
+            try {
+                val exited = process.waitFor(10, TimeUnit.SECONDS)
+                if (!exited) {
+                    process.destroyForcibly()
+                    assertTrue(process.waitFor(3, TimeUnit.SECONDS), "javap did not terminate after its timeout")
+                }
+                val outputBytes = Files.newInputStream(outputPath).use { it.readNBytes(1024 * 1024 + 1) }
+                assertTrue(outputBytes.size <= 1024 * 1024, "javap output exceeded its bound")
+                val output = outputBytes.toString(Charsets.UTF_8)
+                assertTrue(exited, "javap timed out")
+                assertEquals(0, process.exitValue(), output)
+                return output
+            } finally {
+                if (process.isAlive) process.destroyForcibly()
+            }
+        } finally {
+            Files.deleteIfExists(outputPath)
         }
-        val output = process.inputStream.readAllBytes().toString(Charsets.UTF_8)
-        assertTrue(exited, "javap timed out")
-        assertEquals(0, process.exitValue(), output)
-        return output
     }
 
     private fun isForbiddenExecutionSeamType(type: Class<*>): Boolean =
