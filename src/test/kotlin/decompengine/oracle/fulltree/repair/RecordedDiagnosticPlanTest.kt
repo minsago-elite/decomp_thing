@@ -89,7 +89,7 @@ internal class RecordedDiagnosticPlanTest {
             "1fafe1ad797e874447d318b76571e8e458b3dc75bc6bc9c14670a89088c80c4f",
             "46b339cc2b3a1642d4ea33f50262fd9f8de7d79b9fc6854f7fbf8571facbf8c1")
         for(variant in 1..4)assertEquals(expected[variant-1],RecordedDiagnosticFixtures.create(variant,includeBatch=false).plan.dependencyPlanSha256)
-        val vectors=OracleJson.parse(Files.readAllBytes(Path.of("build/orchestration/scheduler-886-algorithm-integration-evidence/literal-vectors.json"))).jsonObject
+        val vectors=OracleJson.parse(requireNotNull(javaClass.getResourceAsStream("/diagnostics/scheduler-886-literal-vectors.json")) { "scheduler diagnostic literal vectors missing" }.use { it.readBytes() }).jsonObject
         val g=DiagnosticGraphCodec(DiagnosticComputationContext())
         assertEquals("diagnostic-occurrence-facc6ba3b866a334e82b31ebf6153f9685193835b46f89db07e5464c03ae8cf4",
             g.id("diagnostic-occurrence",vectors.getValue("occurrenceBinding"),true))
