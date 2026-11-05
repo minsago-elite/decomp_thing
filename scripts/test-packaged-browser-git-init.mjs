@@ -9,7 +9,8 @@ import { readStateFixtures } from './packaged-browser-read-states.mjs';
 const repo = resolve(new URL('..', import.meta.url).pathname);
 const readContract = (name) => readFileSync(join(repo, 'contracts/web/v1/fixtures', name));
 const fixtureBundle = () => {
-  const readStates = readStateFixtures({ repo, python: '/usr/bin/python3', buildId: 'git-init-test-build' });
+  // Use the interpreter selected by the CI toolchain (setup-python), not Ubuntu's system Python.
+  const readStates = readStateFixtures({ repo, python: process.env.PYTHON ?? 'python3', buildId: 'git-init-test-build' });
   return { readStates, gitInit: bindGitInitFixtures(readStates, { readContract }) };
 };
 
