@@ -7284,6 +7284,7 @@ internal fun hashStableRegularFile(
     readBytes: (Int, Long) -> Unit,
     cancellationCheck: () -> Unit,
     validateMetadata: (LinuxDescriptor) -> Unit = {},
+    verifyChunk: (ByteArray, Int, Long) -> Unit = { _, _, _ -> },
 ): StableFileDigest {
     cancellationCheck()
     // Snapshot paths use Linux filename semantics, independently of repair manifest grammar.
@@ -7328,6 +7329,7 @@ internal fun hashStableRegularFile(
                 if (count < 0) break
                 size = Math.addExact(size, count.toLong())
                 readBytes(count, size)
+                verifyChunk(buffer, count, size - count)
                 digest.update(buffer, 0, count)
             }
         }
@@ -7348,6 +7350,37 @@ internal fun hashStableRegularFile(
         authorized?.close()
         directories.asReversed().forEach { it.close() }
     }
+}
+
+/** Verify captured bytes without allocating another whole-file array. */
+internal fun verifyStableRegularFile(
+    root: Path, relative: String, maximumBytes: Long, expected: StableRegularFile,
+    cancellationCheck: () -> Unit = {},
+) {
+    require(maximumBytes in 1 until Int.MAX_VALUE.toLong())
+    val result = hashStableRegularFile(root, relative,
+        declaredSize = { size ->
+            if (size > maximumBytes) throw RepairBudgetExceededException("verification exceeds read limit")
+            requireUnchanged(size == expected.bytes.size.toLong()) { "verification length changed" }
+        },
+        readBytes = { _, total ->
+            if (total > maximumBytes) throw RepairBudgetExceededException("verification exceeds read limit")
+            requireUnchanged(total <= expected.bytes.size) { "verification grew" }
+        },
+        cancellationCheck = cancellationCheck,
+        validateMetadata = { descriptor ->
+            val identity = LinuxFilesystemSyscalls.identity(descriptor.fd)
+            requireUnchanged(identity == expected.identity && identity.isRegularFile &&
+                !identity.isSymbolicLink && identity.linkCount == 1) { "verification identity changed" }
+        },
+        verifyChunk = { bytes, count, offset ->
+            requireUnchanged(java.util.Arrays.equals(bytes, 0, count,
+                expected.bytes, offset.toInt(), offset.toInt() + count)) {
+                "verification content changed"
+            }
+        })
+    requireUnchanged(result.identity == expected.identity && result.size == expected.bytes.size.toLong() &&
+        result.sha256 == expected.sha256) { "verification commitment changed" }
 }
 
 internal fun readStableRegularFile(

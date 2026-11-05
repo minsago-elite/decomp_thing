@@ -36,7 +36,13 @@ internal class WebSourceCatalogEvidence(
     profiles: List<ReconstructionProfile>,
     private val readInput: (String) -> StableRegularFile,
     private val readArtifact: (String, String, Long) -> StableRegularFile,
+    private val verifyInput: ((String, StableRegularFile) -> Unit)?,
+    private val verifyArtifact: ((String, String, Long, StableRegularFile) -> Unit)?,
 ) {
+    constructor(profiles: List<ReconstructionProfile>, readInput: (String) -> StableRegularFile,
+        readArtifact: (String, String, Long) -> StableRegularFile) :
+        this(profiles, readInput, readArtifact, null, null)
+
     private val profiles = profiles.associateBy { it.id to it.sha256 }
     private val capturing = AtomicBoolean(false)
     private val searching = AtomicBoolean(false)
@@ -156,9 +162,9 @@ internal class WebSourceCatalogEvidence(
                 if (record.sha256 != model.sha256) revisionSourceChanged()
                 record.bytes
             } }
-            measured("verify-descriptor") { requireSame(descriptor, readArtifact(reference.jobId, descriptorPath, MAXIMUM_MANIFEST_BYTES)) }
-            measured("verify-manifest") { requireSame(captured, readArtifact(reference.jobId, manifestPath, MAXIMUM_MANIFEST_BYTES)) }
-            measured("verify-input") { requireSame(input, readInput(reference.jobId)) }
+            measured("verify-descriptor") { verifyCapturedArtifact(reference.jobId, descriptorPath, descriptor) }
+            measured("verify-manifest") { verifyCapturedArtifact(reference.jobId, manifestPath, captured) }
+            measured("verify-input") { verifyCapturedInput(reference.jobId, input) }
             return result
         } finally { capturing.set(false) }
     }
@@ -203,7 +209,7 @@ internal class WebSourceCatalogEvidence(
             ?: throw IllegalArgumentException("Source input descriptor is invalid.")
         val snapshot = parseWebRevisionSourceInputs(reference, manifest, captured.sha256, document, descriptor.sha256)
         val result = project(snapshot)
-        requireSame(descriptor, readArtifact(reference.jobId, path, MAXIMUM_MANIFEST_BYTES))
+        verifyCapturedArtifact(reference.jobId, path, descriptor)
         return result
     }
 
@@ -235,9 +241,19 @@ internal class WebSourceCatalogEvidence(
         val manifest = SourceTreeManifestReader.parse(document.toString(), profile)
         require(manifest.inputSha256 == input.sha256)
         val result = project(manifest, captured)
-        requireSame(captured, readArtifact(jobId, path, MAXIMUM_MANIFEST_BYTES))
-        requireSame(input, readInput(jobId))
+        verifyCapturedArtifact(jobId, path, captured)
+        verifyCapturedInput(jobId, input)
         return result
+    }
+
+    private fun verifyCapturedInput(jobId: String, expected: StableRegularFile) {
+        if (verifyInput == null) requireSame(expected, readInput(jobId))
+        else verifyInput.invoke(jobId, expected)
+    }
+
+    private fun verifyCapturedArtifact(jobId: String, path: String, expected: StableRegularFile) {
+        if (verifyArtifact == null) requireSame(expected, readArtifact(jobId, path, MAXIMUM_MANIFEST_BYTES))
+        else verifyArtifact.invoke(jobId, path, MAXIMUM_MANIFEST_BYTES, expected)
     }
 
     private fun requireSame(expected: StableRegularFile, current: StableRegularFile) {

@@ -301,7 +301,8 @@ class WebJobService(
     private var legacyListingEpoch = Any()
     private val uploads = mutableMapOf<Thread, CountDownLatch>()
     private val uploadStorage = WebUploadStorage(store.storageRoot, maximumRetainedStorageBytes)
-    private val sourceCatalogEvidence = WebSourceCatalogEvidence(sourceProfiles, ::readSourceCatalogInput, ::readArtifact)
+    private val sourceCatalogEvidence = WebSourceCatalogEvidence(sourceProfiles, ::readSourceCatalogInput, ::readArtifact,
+        ::verifySourceCatalogInput, ::verifySourceCatalogArtifact)
     private val programStructureCache = WebProgramStructureCache()
 
     /** Internal seam for deterministic publication-failure fixtures; production code never reassigns this. */
@@ -800,6 +801,28 @@ class WebJobService(
     private fun readSourceCatalogInput(jobId: String): decompengine.repair.StableRegularFile {
         requireInitializedRead()
         return store.readInput(jobId)
+    }
+
+    @Synchronized
+    private fun verifySourceCatalogInput(jobId: String, expected: decompengine.repair.StableRegularFile) {
+        requireInitializedRead()
+        sourceCatalogVerification { store.verifyInput(jobId, expected) }
+    }
+
+    @Synchronized
+    private fun verifySourceCatalogArtifact(jobId: String, path: String, maximumBytes: Long,
+        expected: decompengine.repair.StableRegularFile) {
+        requireInitializedRead()
+        val segments = canonicalReportSegments(path)
+        if (segments[1] == "runs") getAttempt(jobId, segments[2]) else presentation(jobId)
+        sourceCatalogVerification { store.verifyArtifact(jobId, path, maximumBytes, expected) }
+    }
+
+    private inline fun sourceCatalogVerification(verify: () -> Unit) {
+        try { verify() } catch (failure: Exception) {
+            if (failure is InterruptedException || Thread.currentThread().isInterrupted) throw failure
+            throw WebAccessDenied(409, "SOURCE_CATALOG_CHANGED", "Source catalog changed during capture. Refresh its first page.")
+        }
     }
 
     /** Authorize before capture and again before returning, without locking jobs during JSON parsing. */
