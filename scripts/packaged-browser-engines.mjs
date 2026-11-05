@@ -5,7 +5,7 @@ import { promises as fs, readFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
-import { assertAudit, auditFixtures, auditViewports, measureContrast, measureFocus, measureOutputSignatureChart, measurePage } from './packaged-browser-audit.mjs';
+import { assertAudit, auditFixtures, captureOutputSignatureChart, chartCaptureSets, auditViewports, measureContrast, measureFocus, measureOutputSignatureChart, measurePage } from './packaged-browser-audit.mjs';
 import { isPlaywrightScreenshotCspViolation, openEngineAuditPage, serveEngineAuditFixtures } from './packaged-browser-engine-adapter.mjs';
 
 // Cross-engine packaged smoke and audit (#631). The DevTools-based check-packaged-web-browser.mjs
@@ -538,7 +538,7 @@ async function auditWithFixtures(origin, fixtures, fulfilled, unmapped) {
       throw failure;
     }
   };
-  const layout = []; const contrast = []; const focus = []; const chart = []; const chartScreenshots = [];
+  const layout = []; const contrast = []; const focus = []; const chart = []; const chartScreenshots = []; const chartCaptures = [];
   for (const viewport of auditViewports) {
     const { context: created, record } = await context({ viewport: { width: viewport.width, height: viewport.height },
       deviceScaleFactor: viewport.deviceScaleFactor, ...(values.engine === 'firefox' ? {} : { isMobile: viewport.mobile }) });
@@ -587,16 +587,15 @@ async function auditWithFixtures(origin, fixtures, fulfilled, unmapped) {
         await target.emulateMedia({ colorScheme: 'light', reducedMotion: 'reduce' });
         const phase = `screenshot:${viewport.name}:attempt evidence`;
         await target.evaluate((value) => { globalThis.__decompAuditPhase = value; }, phase);
-        const name = viewport.name === 'desktop 1440x900'
-          ? 'attempt-evidence-output-signature-chart-desktop.png'
-          : 'attempt-evidence-output-signature-chart-zoom-400.png';
         try {
-          const figure = target.locator('.output-signature-chart');
-          await figure.scrollIntoViewIfNeeded();
-          await figure.screenshot({ path: join(root, name) });
+          // Viewport-only tiles (no full-element capture), with geometry and occlusion re-measured around each.
+          const set = chartCaptureSets.find((candidate) => candidate.viewport === viewport.name);
+          const captured = await captureOutputSignatureChart({ set, evaluate: (expression) => target.evaluate(expression),
+            shoot: ({ file, viewportClip }) => target.screenshot({ path: join(root, file), clip: viewportClip }) });
+          chartCaptures.push(captured);
+          chartScreenshots.push(...captured.tiles.map((tile) => tile.file));
         }
         finally { await target.evaluate(() => { globalThis.__decompAuditPhase = null; }).catch(() => undefined); }
-        chartScreenshots.push(name);
       }
       if (viewport.deviceScaleFactor === 4 || ['job detail', 'source file'].includes(page.name)) {
         const phase = `screenshot:${viewport.name}:${page.name}`;
@@ -703,7 +702,7 @@ async function auditWithFixtures(origin, fixtures, fulfilled, unmapped) {
   const workerTargets = records.flatMap((record) => record.workers ?? []);
   const responses = records.flatMap((record) => record.responses);
   const result = { fixtures: fixtures.pages.map(({ name, path }) => ({ name, path })), chartExpected: fixtures.chartExpected,
-    layout, contrast, focus, chart, chartScreenshots, fulfilled, unmapped, interactions,
+    layout, contrast, focus, chart, chartScreenshots, chartCaptures, fulfilled, unmapped, interactions,
     workers: { highlightedTokens,
       targets: workerTargets.map((worker) => ({ ...worker, responses: responses.filter((response) => response.url === worker.url) })) },
     keyboard, timing: { coldLoad: summary(cold), routeFeedback: summary(feedback), routeData: summary(data), raw: { cold, feedback, data } } };

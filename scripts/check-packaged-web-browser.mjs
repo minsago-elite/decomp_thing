@@ -412,8 +412,12 @@ async function ready(target, expression, label) {
 }
 
 async function capture(target, name, clip) {
-  const { data } = await cdp.call('Page.captureScreenshot', { format: 'png', ...(clip ? { clip, captureBeyondViewport: true } : {}) }, target.sessionId);
-  await fs.writeFile(join(root, name), Buffer.from(data, 'base64'));
+  // Clipped (chart) captures stay inside the rendered viewport: beyond-viewport capture can resize
+  // the layout viewport (dropping the scrollbar) and reflow the figure after it was measured.
+  const { data } = await cdp.call('Page.captureScreenshot', { format: 'png', ...(clip ? { clip, captureBeyondViewport: false } : {}) }, target.sessionId);
+  const bytes = Buffer.from(data, 'base64');
+  await fs.writeFile(join(root, name), bytes);
+  return bytes;
 }
 
 async function prepareArchive(archivePath) {

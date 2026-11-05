@@ -207,17 +207,145 @@ export const measureOutputSignatureChart = `(() => {
   };
 })()`;
 
-export const prepareOutputSignatureChartCapture = `(() => {
+// Chart evidence is captured from the actual rendered viewport only: no beyond-viewport capture,
+// no viewport widening and no stitching. A figure taller than the viewport is recorded as numbered,
+// contiguous viewport tiles. Each tile records geometry before and after the capture so a capture
+// that reflowed the page, was occluded (for example by a focused skip link) or produced a PNG of the
+// wrong size is rejected by assertAudit instead of being retained as proof.
+export const chartCaptureMaxTiles = 8;
+export const chartCaptureTolerancePx = 0.5;
+export const chartCaptureSets = [
+  { viewport: 'desktop 1440x900', prefix: 'attempt-evidence-output-signature-chart-desktop', deviceScaleFactor: 1 },
+  { viewport: 'zoom 400% of 1280x800', prefix: 'attempt-evidence-output-signature-chart-zoom-400', deviceScaleFactor: 4 },
+];
+const chartCaptureState = `(offset => {
   const figure = document.querySelector('.output-signature-chart');
-  figure?.scrollIntoView({ block: 'start', inline: 'nearest' });
-  const box = figure?.getBoundingClientRect();
-  if (!box) return null;
-  const pageLeft = visualViewport?.pageLeft ?? scrollX;
-  const pageTop = visualViewport?.pageTop ?? scrollY;
-  return { viewport: { x: box.x, y: box.y, width: box.width, height: box.height,
-    right: box.right, bottom: box.bottom, widthLimit: innerWidth, heightLimit: innerHeight },
-    clip: { x: box.x + pageLeft, y: box.y + pageTop, width: box.width, height: box.height } };
+  if (!figure) return null;
+  const root = document.scrollingElement;
+  const box = figure.getBoundingClientRect();
+  const viewWidth = root.clientWidth, viewHeight = root.clientHeight || innerHeight;
+  const pageLeft = visualViewport?.pageLeft ?? scrollX, pageTop = visualViewport?.pageTop ?? scrollY;
+  const top = Math.max(0, box.top + offset), bottom = Math.min(viewHeight, box.bottom);
+  const left = box.left, right = box.right;
+  const describe = element => element ? element.tagName.toLowerCase() + (element.id ? '#' + element.id : '')
+    + (element.classList?.length ? '.' + [...element.classList].join('.') : '') : null;
+  // Probe one CSS pixel inside each clip corner, so every probe is inside both figure and viewport.
+  const hits = [[left + 1, top + 1], [right - 1, top + 1], [left + 1, bottom - 1], [right - 1, bottom - 1]].map(([x, y]) => {
+    const hit = document.elementFromPoint(x, y);
+    return { x, y, inFigure: !!hit && (hit === figure || figure.contains(hit)), hit: describe(hit) };
+  });
+  const skip = document.querySelector('.skip-link');
+  const skipBox = skip?.getBoundingClientRect();
+  const skipVisible = !!skip && skip.checkVisibility() && getComputedStyle(skip).visibility === 'visible'
+    && skipBox.width > 1 && skipBox.height > 1 && skipBox.right > 0 && skipBox.bottom > 0
+    && skipBox.left < viewWidth && skipBox.top < viewHeight;
+  return {
+    figure: { x: box.left, y: box.top, width: box.width, height: box.height },
+    rootClientWidth: viewWidth, rootClientHeight: viewHeight,
+    seriesHeights: [...figure.querySelectorAll('.output-signature-series')].map(series => series.getBoundingClientRect().height),
+    activeElement: describe(document.activeElement), skipFocused: !!skip && document.activeElement === skip, skipVisible,
+    segment: { start: top - box.top, end: bottom - box.top },
+    viewportClip: { x: left, y: top, width: right - left, height: bottom - top },
+    pageClip: { x: left + pageLeft, y: top + pageTop, width: right - left, height: bottom - top },
+    hits,
+  };
+})`;
+/** Blur focus, scroll so the figure segment starting at `offset` CSS px is at the viewport top, then measure. */
+export const prepareChartCaptureTile = offset => `/*chart-capture-tile*/(() => {
+  const figure = document.querySelector('.output-signature-chart');
+  if (!figure) return null;
+  const active = document.activeElement;
+  if (active && active !== document.body && typeof active.blur === 'function') active.blur();
+  const start = figure.getBoundingClientRect();
+  scrollTo({ left: scrollX, top: start.top + (visualViewport?.pageTop ?? scrollY) + ${Number(offset)}, behavior: 'instant' });
+  return ${chartCaptureState}(${Number(offset)});
 })()`;
+/** Re-measure without scrolling, immediately after the capture. */
+export const measureChartCaptureTile = offset => `/*chart-capture-after*/${chartCaptureState}(${Number(offset)})`;
+
+/** Width and height from a PNG IHDR chunk; pixel data is never inspected or changed. */
+export function pngDimensions(bytes) {
+  const buffer = Buffer.from(bytes ?? []);
+  const signature = '89504e470d0a1a0a';
+  if (buffer.length < 24 || buffer.subarray(0, 8).toString('hex') !== signature || buffer.subarray(12, 16).toString('latin1') !== 'IHDR')
+    return null;
+  return { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) };
+}
+
+/**
+ * Captures one chart evidence set. `evaluate(expression)` runs in the page; `shoot({ file, pageClip,
+ * viewportClip })` must take a viewport-only clipped PNG and return its bytes.
+ */
+export async function captureOutputSignatureChart({ set, evaluate, shoot }) {
+  const tiles = [];
+  let offset = 0, height = Infinity;
+  while (offset < height - chartCaptureTolerancePx && tiles.length < chartCaptureMaxTiles) {
+    const before = await evaluate(prepareChartCaptureTile(offset));
+    if (!before) break;
+    height = before.figure.height;
+    const file = `${set.prefix}-tile-${tiles.length + 1}.png`;
+    const bytes = await shoot({ file, pageClip: before.pageClip, viewportClip: before.viewportClip });
+    const after = await evaluate(measureChartCaptureTile(offset));
+    tiles.push({ file, offset, before, after, png: pngDimensions(bytes) });
+    if (!(before.segment.end > offset + chartCaptureTolerancePx)) break;
+    offset = before.segment.end;
+  }
+  return { viewport: set.viewport, prefix: set.prefix, deviceScaleFactor: set.deviceScaleFactor,
+    figure: tiles[0]?.before?.figure ?? null, tiles };
+}
+
+/** Every reason a chart capture set does not prove the intact, unobscured rendered figure. */
+export function chartCaptureFailures(capture, set) {
+  const failures = [];
+  const where = `chart capture ${set.viewport}`;
+  const near = (a, b) => Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) <= chartCaptureTolerancePx;
+  if (!capture || capture.viewport !== set.viewport || capture.prefix !== set.prefix || capture.deviceScaleFactor !== set.deviceScaleFactor)
+    return [`${where}: missing or mislabelled capture manifest`];
+  const tiles = Array.isArray(capture.tiles) ? capture.tiles : [];
+  if (tiles.length < 1 || tiles.length > chartCaptureMaxTiles) failures.push(`${where}: ${tiles.length} tiles outside 1..${chartCaptureMaxTiles}`);
+  const first = tiles[0]?.before?.figure;
+  let covered = 0;
+  tiles.forEach((tile, index) => {
+    const at = `${where} tile ${index + 1}`;
+    const { before, after, png } = tile ?? {};
+    if (tile?.file !== `${set.prefix}-tile-${index + 1}.png`) failures.push(`${at}: unexpected file ${tile?.file}`);
+    if (!before || !after || !first) { failures.push(`${at}: missing before/after geometry`); return; }
+    for (const key of ['x', 'y', 'width', 'height'])
+      if (!near(before.figure?.[key], after.figure?.[key])) failures.push(`${at}: figure ${key} changed during capture`);
+    if (!near(before.figure.width, first.width) || !near(before.figure.height, first.height))
+      failures.push(`${at}: figure size differs from the first tile`);
+    if (!near(before.rootClientWidth, after.rootClientWidth) || !near(before.rootClientHeight, after.rootClientHeight))
+      failures.push(`${at}: viewport client size changed during capture`);
+    if (!Array.isArray(before.seriesHeights) || before.seriesHeights.length !== 2 || !Array.isArray(after.seriesHeights)
+      || after.seriesHeights.length !== before.seriesHeights.length
+      || before.seriesHeights.some((value, series) => !near(value, after.seriesHeights[series])))
+      failures.push(`${at}: chart series rows reflowed during capture`);
+    const clip = before.viewportClip;
+    if (!clip || !(clip.width > 0) || !(clip.height > 0) || clip.x < -chartCaptureTolerancePx || clip.y < -chartCaptureTolerancePx
+      || clip.x + clip.width > before.rootClientWidth + chartCaptureTolerancePx
+      || clip.y + clip.height > before.rootClientHeight + chartCaptureTolerancePx)
+      failures.push(`${at}: clip is not inside the rendered viewport`);
+    else {
+      if (!near(clip.x, before.figure.x) || !near(clip.width, before.figure.width)) failures.push(`${at}: clip does not span the figure width`);
+      if (!near(before.segment?.start, covered)) failures.push(`${at}: segment starts at ${before.segment?.start}, expected ${covered} (gap or overlap)`);
+      if (!near(clip.y, before.figure.y + before.segment.start) || !near(clip.height, before.segment.end - before.segment.start))
+        failures.push(`${at}: clip does not match its figure segment`);
+      if (!near(before.pageClip?.width, clip.width) || !near(before.pageClip?.height, clip.height)) failures.push(`${at}: page and viewport clips differ`);
+      const expected = { width: Math.round(clip.width * set.deviceScaleFactor), height: Math.round(clip.height * set.deviceScaleFactor) };
+      // Explicit rounding: Math.round(css * DPR), with one device pixel for browser edge snapping.
+      if (!png || Math.abs(png.width - expected.width) > 1 || Math.abs(png.height - expected.height) > 1)
+        failures.push(`${at}: PNG ${JSON.stringify(png)} does not match clip*DPR ${JSON.stringify(expected)}`);
+    }
+    covered = before.segment?.end;
+    for (const state of [before, after]) {
+      if (state.skipFocused || state.skipVisible) failures.push(`${at}: skip link is focused or visible over the capture`);
+      if (!Array.isArray(state.hits) || state.hits.length !== 4 || state.hits.some(hit => !hit.inFigure))
+        failures.push(`${at}: figure is occluded at a clip corner ${JSON.stringify(state.hits?.filter(hit => !hit.inFigure))}`);
+    }
+  });
+  if (first && !near(covered, first.height)) failures.push(`${where}: tiles cover ${covered} of ${first.height} CSS px`);
+  return failures;
+}
 
 // Runs in the page. Regions that require two-dimensional reading may scroll; nothing else may
 // push the page wider than its viewport or hide an action off-screen.
@@ -464,7 +592,7 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
     { name: 'prefers-color-scheme', value: scheme }, { name: 'prefers-reduced-motion', value: 'reduce' }] }, tab.sessionId);
   const tab = await makeTarget();
   await intercept(tab);
-  const layout = []; const contrast = []; const focus = []; const chart = []; const chartScreenshots = [];
+  const layout = []; const contrast = []; const focus = []; const chart = []; const chartScreenshots = []; const chartCaptures = [];
   for (const viewport of auditViewports) {
     await cdp.call('Emulation.setDeviceMetricsOverride', { width: viewport.width, height: viewport.height,
       deviceScaleFactor: viewport.deviceScaleFactor, mobile: viewport.mobile }, tab.sessionId);
@@ -489,17 +617,11 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
       if (page.name === 'attempt evidence' && (viewport.name === 'desktop 1440x900' || viewport.name === 'zoom 400% of 1280x800')) {
         await theme(tab, 'light');
         await delay(50);
-        const name = viewport.name === 'desktop 1440x900'
-          ? 'attempt-evidence-output-signature-chart-desktop.png'
-          : 'attempt-evidence-output-signature-chart-zoom-400.png';
-        const chartBounds = await evaluate(tab, prepareOutputSignatureChartCapture);
-        const viewportBounds = chartBounds?.viewport;
-        assert.ok(viewportBounds && chartBounds.clip && viewportBounds.width > 0 && viewportBounds.height > 0
-          && viewportBounds.x >= -1 && viewportBounds.right <= viewportBounds.widthLimit + 1
-          && viewportBounds.y >= -1 && viewportBounds.y < viewportBounds.heightLimit,
-        `Chart must be brought into the rendered viewport before capture: ${JSON.stringify(chartBounds)}`);
-        await capture(tab, name, { ...chartBounds.clip, scale: 1 });
-        chartScreenshots.push(name);
+        const set = chartCaptureSets.find(candidate => candidate.viewport === viewport.name);
+        const captured = await captureOutputSignatureChart({ set, evaluate: expression => evaluate(tab, expression),
+          shoot: ({ file, pageClip }) => capture(tab, file, { ...pageClip, scale: 1 }) });
+        chartCaptures.push(captured);
+        chartScreenshots.push(...captured.tiles.map(tile => tile.file));
       }
       // Visual evidence: every route at 400% zoom, and the #619 views at every supported size.
       if ((viewport.width === 320 && viewport.deviceScaleFactor === 4) || ['workspace', 'job detail', 'source directory', 'source file'].includes(page.name)) {
@@ -647,7 +769,7 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
     feedback.push(timing.focused); data.push(timing.populated);
   }
   return { fixtures: fixtures.pages.map(({ name, path }) => ({ name, path })), chartExpected: fixtures.chartExpected,
-    layout, contrast, focus, chart, chartScreenshots, fulfilled, unmapped, interactions,
+    layout, contrast, focus, chart, chartScreenshots, chartCaptures, fulfilled, unmapped, interactions,
     workers: { highlightedTokens: highlighted, targets: workers }, keyboard,
     timing: { coldLoad: summary(cold), routeFeedback: summary(feedback), routeData: summary(data), raw: { cold, feedback, data } } };
 }
@@ -686,8 +808,11 @@ export function assertAudit(audit, manifest, responses, origin, budgets = { cold
   const focus = coverage('focus', expected([null]));
   const chartExpected = audit.chartExpected;
   const same = (actual, expected) => JSON.stringify(actual) === JSON.stringify(expected);
-  const requiredChartScreenshots = ['attempt-evidence-output-signature-chart-desktop.png', 'attempt-evidence-output-signature-chart-zoom-400.png'];
-  if (!same(audit.chartScreenshots, requiredChartScreenshots)) failures.push('chart: missing desktop or 400% packaged screenshot evidence');
+  const captures = Array.isArray(audit.chartCaptures) ? audit.chartCaptures : [];
+  if (captures.length !== chartCaptureSets.length) failures.push('chart: missing desktop or 400% packaged screenshot evidence');
+  chartCaptureSets.forEach((set, index) => failures.push(...chartCaptureFailures(captures[index], set)));
+  if (!same(audit.chartScreenshots, captures.flatMap(capture => (capture?.tiles ?? []).map(tile => tile?.file))) || !audit.chartScreenshots?.length)
+    failures.push('chart: screenshot list does not match the capture manifests');
   for (const entry of chart) {
     const where = `${entry.page} @ ${entry.viewport} (${entry.scheme})`;
     const validRect = box => box && [box.x, box.y, box.width, box.height, box.right, box.bottom].every(Number.isFinite)

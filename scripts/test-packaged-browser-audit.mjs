@@ -4,7 +4,8 @@ import { dirname, resolve } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { runInNewContext } from 'node:vm';
-import { assertAudit, auditContentReady, auditFixtures, auditPageNames, auditPageReady, auditTokenKinds, auditViewports, measureContrast, measureFocus, measureOutputSignatureChart, measurePage, prepareAuditPage, prepareOutputSignatureChartCapture, qualifyAudit } from './packaged-browser-audit.mjs';
+import { assertAudit, auditContentReady, auditFixtures, auditPageNames, auditPageReady, auditTokenKinds, auditViewports, measureContrast, measureFocus, measureOutputSignatureChart, measurePage, prepareAuditPage, qualifyAudit,
+  captureOutputSignatureChart, chartCaptureFailures, chartCaptureSets, measureChartCaptureTile, pngDimensions, prepareChartCaptureTile } from './packaged-browser-audit.mjs';
 
 // Controls for the packaged audit's own verdict: each injected defect must be reported, so a
 // passing CI audit cannot be a vacuous one.
@@ -19,7 +20,41 @@ function timingEvidence(cold = 400, feedback = 40, data = 90) {
   return { coldLoad: { samples: 20, median: cold, p95: cold }, routeFeedback: { samples: 50, median: feedback, p95: feedback },
     routeData: { samples: 50, median: data, p95: data }, raw: { cold: Array(20).fill(cold), feedback: Array(50).fill(feedback), data: Array(50).fill(data) } };
 }
-function clean() {
+
+// A modeled page whose figure (300 x height CSS px) scrolls under a viewport of viewHeight CSS px.
+function pngBytes(width, height) {
+  const buffer = Buffer.alloc(33);
+  Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex').copy(buffer);
+  buffer.writeUInt32BE(width, 16); buffer.writeUInt32BE(height, 20);
+  return buffer;
+}
+function tileState({ offset, height = 383, viewHeight = 200, viewWidth = 305, scroll }) {
+  const figureTop = -scroll;
+  const top = Math.max(0, figureTop + offset), bottom = Math.min(viewHeight, figureTop + height);
+  const hit = { inFigure: true, hit: 'figure.output-signature-chart' };
+  return { figure: { x: 2, y: figureTop, width: 300, height }, rootClientWidth: viewWidth, rootClientHeight: viewHeight,
+    seriesHeights: [40, 40], activeElement: 'body', skipFocused: false, skipVisible: false,
+    segment: { start: top - figureTop, end: bottom - figureTop },
+    viewportClip: { x: 2, y: top, width: 300, height: bottom - top },
+    pageClip: { x: 2, y: top + scroll + 1000, width: 300, height: bottom - top }, hits: [hit, hit, hit, hit].map(value => ({ ...value })) };
+}
+async function modeledCapture(set, { height = 383, viewHeight = 200, mutate = () => {}, png } = {}) {
+  let scroll = 0;
+  return captureOutputSignatureChart({ set,
+    evaluate: async expression => {
+      const offset = Number([...expression.matchAll(/\}\)\((\d+(?:\.\d+)?)\)/g)].at(-1)?.[1]);
+      if (expression.startsWith('/*chart-capture-tile*/')) scroll = Math.min(offset, Math.max(0, height - viewHeight));
+      const state = tileState({ offset, height, viewHeight, scroll });
+      mutate(state, expression.startsWith('/*chart-capture-tile*/') ? 'before' : 'after', offset);
+      return state;
+    },
+    shoot: async ({ viewportClip }) => png ? png(viewportClip) : pngBytes(Math.round(viewportClip.width * set.deviceScaleFactor),
+      Math.round(viewportClip.height * set.deviceScaleFactor)) });
+}
+async function intactCaptures() {
+  return [await modeledCapture(chartCaptureSets[0], { viewHeight: 900 }), await modeledCapture(chartCaptureSets[1])];
+}
+function clean(captures = cleanCaptures) {
   const fixtures = auditFixtures(repo, manifest.buildId);
   const matrix = fixtures.pages.flatMap(({ name: page }) => auditViewports.flatMap(viewport =>
     ['light', 'dark'].map(scheme => ({ page, viewport: viewport.name, scheme }))));
@@ -40,7 +75,7 @@ function clean() {
   })));
   return {
     chartExpected: fixtures.chartExpected, chart,
-    chartScreenshots: ['attempt-evidence-output-signature-chart-desktop.png', 'attempt-evidence-output-signature-chart-zoom-400.png'],
+    chartCaptures: captures, chartScreenshots: captures.flatMap(capture => capture.tiles.map(tile => tile.file)),
     layout: matrix.map(identity => ({ ...identity, pageOverflowPx: 0, overflow: [], overflowCount: 0, clippedActions: [], smallTargets: [],
       headingWithinWidth: true, navigation: { narrow: true, toggleShown: true, linksShown: false }, animations: 0,
       scrollRegions: [{ fits: true, scrolls: true, focusable: true, named: true }] })),
@@ -53,6 +88,7 @@ function clean() {
     timing: timingEvidence(),
   };
 }
+const cleanCaptures = await intactCaptures();
 const verdict = (audit, served = responses) => assertAudit(audit, manifest, served, origin).failures;
 
 test('a clean audit with every packaged asset and the worker has no failures', () => {
@@ -110,7 +146,7 @@ test('requires the rendered chart identity, exact table and geometry at every vi
   }
   const missing = clean(); missing.chart.pop();
   assert.match(verdict(missing).join('\n'), /chart: missing 1 coverage/);
-  const screenshots = clean(); screenshots.chartScreenshots = [];
+  const screenshots = clean([]);
   assert.match(verdict(screenshots).join('\n'), /missing desktop or 400% packaged screenshot evidence/);
   const emptyBars = clean();
   for (const series of emptyBars.chart[0].chartSeries) series.barWidth = '0';
@@ -120,22 +156,78 @@ test('requires the rendered chart identity, exact table and geometry at every vi
   assert.match(verdict(misleadingBars).join('\n'), /visual bar widths do not represent the reported counts/);
 });
 
-test('chart screenshot preparation scrolls the rendered figure into the measured viewport', () => {
-  let scrollOptions = null;
-  const expected = { x: 0, y: 0, width: 300, height: 383, right: 300, bottom: 383 };
-  const figure = { scrollIntoView: options => { scrollOptions = options; }, getBoundingClientRect: () => expected };
-  const measured = runInNewContext(prepareOutputSignatureChartCapture, {
-    document: { querySelector: selector => selector === '.output-signature-chart' ? figure : null },
-    innerWidth: 320, innerHeight: 200, visualViewport: { pageLeft: 17, pageTop: 1400 }, scrollX: 17, scrollY: 1400,
-  });
-  assert.deepEqual(JSON.parse(JSON.stringify(scrollOptions)), { block: 'start', inline: 'nearest' });
-  assert.deepEqual(JSON.parse(JSON.stringify(measured)), {
-    viewport: { ...expected, widthLimit: 320, heightLimit: 200 },
-    clip: { x: 17, y: 1400, width: 300, height: 383 },
-  });
-  assert.ok(measured.viewport.y < measured.viewport.heightLimit);
-  assert.ok(measured.viewport.height > measured.viewport.heightLimit,
-    'An oversized chart is valid when its top is visible and capture includes beyond-viewport content');
+test('chart capture keeps an intact, unobscured figure in contiguous viewport-only tiles', async () => {
+  const [desktop, zoom] = cleanCaptures;
+  assert.deepEqual(desktop.tiles.map(tile => tile.file), ['attempt-evidence-output-signature-chart-desktop-tile-1.png']);
+  assert.deepEqual(zoom.tiles.map(tile => [tile.file, tile.before.segment, tile.png]), [
+    ['attempt-evidence-output-signature-chart-zoom-400-tile-1.png', { start: 0, end: 200 }, { width: 1200, height: 800 }],
+    ['attempt-evidence-output-signature-chart-zoom-400-tile-2.png', { start: 200, end: 383 }, { width: 1200, height: 732 }],
+  ]);
+  for (const [index, capture] of cleanCaptures.entries()) assert.deepEqual(chartCaptureFailures(capture, chartCaptureSets[index]), []);
+  assert.deepEqual(verdict(clean()), []);
+});
+
+test('chart capture controls reject reflow, overlays, wrong PNG sizes and bad coverage', async () => {
+  const set = chartCaptureSets[1];
+  const fails = async (options, pattern) => {
+    const failures = chartCaptureFailures(await modeledCapture(set, options), set);
+    assert.match(failures.join('\n'), pattern, JSON.stringify(failures));
+  };
+  // Reflow: the second label wraps differently after capture, or the scrollbar disappears.
+  await fails({ mutate: (state, phase) => { if (phase === 'after') state.seriesHeights[1] = 62; } }, /series rows reflowed/);
+  await fails({ mutate: (state, phase) => { if (phase === 'after') { state.rootClientWidth = 320; state.figure.width = 315; } } },
+    /figure width changed|viewport client size changed/);
+  await fails({ mutate: (state, phase) => { if (phase === 'after') state.figure.height = 340; } }, /figure height changed/);
+  // A focused skip link painted over the heading/top of the figure.
+  await fails({ mutate: state => { state.skipFocused = true; state.skipVisible = true; } }, /skip link is focused or visible/);
+  await fails({ mutate: state => { state.hits[0] = { inFigure: false, hit: 'a.skip-link' }; } }, /occluded at a clip corner/);
+  // Wrong PNG dimensions, including a tight clip that cut off the right edge.
+  await fails({ png: clip => pngBytes(Math.round(clip.width * 4) - 60, Math.round(clip.height * 4)) }, /does not match clip\*DPR/);
+  await fails({ png: () => Buffer.from('not a png') }, /PNG null/);
+  await fails({ mutate: state => { state.viewportClip.width = 273; state.pageClip.width = 273; } }, /does not span the figure width/);
+  // Clip escaping the viewport (beyond-viewport capture).
+  await fails({ mutate: state => { state.viewportClip.height = 383; state.pageClip.height = 383; } }, /not inside the rendered viewport/);
+  // Missing tiles, gaps and overlaps.
+  const missing = await modeledCapture(set); missing.tiles.pop();
+  assert.match(chartCaptureFailures(missing, set).join('\n'), /tiles cover 200 of 383/);
+  const gap = await modeledCapture(set); gap.tiles[1].before.segment.start = 210;
+  assert.match(chartCaptureFailures(gap, set).join('\n'), /gap or overlap/);
+  const overlap = await modeledCapture(set); overlap.tiles[1].before.segment.start = 190;
+  assert.match(chartCaptureFailures(overlap, set).join('\n'), /gap or overlap/);
+  const renamed = await modeledCapture(set); renamed.tiles[0].file = 'chart.png';
+  assert.match(chartCaptureFailures(renamed, set).join('\n'), /unexpected file/);
+  assert.match(chartCaptureFailures(await modeledCapture(chartCaptureSets[0]), set).join('\n'), /mislabelled capture manifest/);
+  // The audit verdict requires both manifests and a matching screenshot list.
+  const noZoom = clean([cleanCaptures[0]]);
+  assert.match(verdict(noZoom).join('\n'), /missing desktop or 400%/);
+  const listed = clean(); listed.chartScreenshots.pop();
+  assert.match(verdict(listed).join('\n'), /screenshot list does not match/);
+});
+
+test('chart capture expressions blur focus, scroll within the viewport and probe inside the clip', () => {
+  const probes = []; let scrolled = null; let blurred = false;
+  const skip = { checkVisibility: () => false, getBoundingClientRect: () => ({ left: 0, top: -40, right: 100, bottom: -10, width: 100, height: 30 }) };
+  const active = { blur: () => { blurred = true; }, tagName: 'A', id: '', classList: ['skip-link'] };
+  const series = { getBoundingClientRect: () => ({ height: 40 }) };
+  const top = () => (scrolled ? 1400 - scrolled.top : 1400) + 0;
+  const figure = { tagName: 'FIGURE', id: '', classList: ['output-signature-chart'],
+    getBoundingClientRect: () => ({ left: 2, right: 302, top: top(), bottom: top() + 383, width: 300, height: 383 }),
+    querySelectorAll: () => [series, series], contains: () => true };
+  const document = { body: {}, activeElement: active, scrollingElement: { clientWidth: 305, clientHeight: 200 },
+    querySelector: selector => selector === '.output-signature-chart' ? figure : selector === '.skip-link' ? skip : null,
+    elementFromPoint: (x, y) => { probes.push([x, y]); return figure; } };
+  const context = { document, innerHeight: 200, scrollX: 0, get scrollY() { return scrolled?.top ?? 0; }, visualViewport: undefined,
+    scrollTo: options => { scrolled = options; }, getComputedStyle: () => ({ visibility: 'visible' }) };
+  const state = runInNewContext(prepareChartCaptureTile(200), context);
+  assert.ok(blurred);
+  assert.equal(scrolled.top, 1600);
+  assert.deepEqual(JSON.parse(JSON.stringify(state.segment)), { start: 200, end: 383 });
+  assert.deepEqual(JSON.parse(JSON.stringify(state.viewportClip)), { x: 2, y: 0, width: 300, height: 183 });
+  assert.equal(state.skipVisible, false);
+  assert.deepEqual(probes, [[3, 1], [301, 1], [3, 182], [301, 182]]);
+  const after = runInNewContext(measureChartCaptureTile(200), context);
+  assert.deepEqual(JSON.parse(JSON.stringify(after.viewportClip)), JSON.parse(JSON.stringify(state.viewportClip)));
+  assert.deepEqual(pngDimensions(pngBytes(7, 9)), { width: 7, height: 9 });
 });
 
 test('requires finite, complete timing samples and consistent summaries before budget checks', () => {
@@ -322,7 +414,7 @@ test('preparation refuses missing rendered content or unused read fixtures', asy
 test('qualifyAudit prepares every fresh layout/contrast/focus navigation before measuring', async () => {
   const fixtures = auditFixtures(repo, manifest.buildId);
   let current, page, onRequest;
-  const counts = { layout: 0, contrast: 0, focus: 0, chart: 0, navigations: 0 };
+  const counts = { layout: 0, contrast: 0, focus: 0, chart: 0, navigations: 0, chartCaptureEvaluations: 0 };
   const completed = new Error('stop before worker/browser qualification');
   const cdp = {
     on(event, callback) { if (event === 'Fetch.requestPaused') onRequest = callback; },
@@ -340,7 +432,7 @@ test('qualifyAudit prepares every fresh layout/contrast/focus navigation before 
     },
   };
   await assert.rejects(qualifyAudit({ origin, repo, manifest, evidenceDirectory: repo, cdp,
-    makeTarget: async () => ({ sessionId: 'modeled' }), delay: async () => {}, capture: async () => {},
+    makeTarget: async () => ({ sessionId: 'modeled' }), delay: async () => {}, capture: async () => pngBytes(300, 150),
     ready: async (tab, expression, label) => current.ready(tab, expression, label),
     evaluate: async (tab, expression) => {
       let kind = null;
@@ -348,10 +440,10 @@ test('qualifyAudit prepares every fresh layout/contrast/focus navigation before 
       else if (expression === measureContrast) kind = 'contrast';
       else if (expression === measureFocus) kind = 'focus';
       else if (expression === measureOutputSignatureChart) kind = 'chart';
-      else if (expression === prepareOutputSignatureChartCapture) return {
-        viewport: { x: 0, y: 0, width: 300, height: 383, right: 300, bottom: 383, widthLimit: 320, heightLimit: 200 },
-        clip: { x: 0, y: 1200, width: 300, height: 383 },
-      };
+      else if (expression.startsWith('/*chart-capture-')) {
+        counts.chartCaptureEvaluations++;
+        return tileState({ offset: 0, height: 150, viewHeight: 200, scroll: 0 });
+      }
       if (kind) {
         assert.equal(await current.evaluate(tab, auditPageReady(page, true)), true, `${kind} measured an empty ${page.name}`);
         assert.deepEqual(current.actions, (page.preparation ?? []).map(step => step.action));
@@ -361,7 +453,7 @@ test('qualifyAudit prepares every fresh layout/contrast/focus navigation before 
       return current.evaluate(tab, expression);
     },
   }), error => error === completed);
-  assert.deepEqual(counts, { layout: 120, contrast: 48, focus: 48, chart: 10, navigations: 84 });
+  assert.deepEqual(counts, { layout: 120, contrast: 48, focus: 48, chart: 10, navigations: 84, chartCaptureEvaluations: 4 });
 });
 
 test('content checks require visible, distinctive rows rather than an empty or hidden table', () => {
