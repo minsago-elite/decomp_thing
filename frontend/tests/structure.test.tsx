@@ -258,10 +258,31 @@ it('summarizes recorded totals and diagnostics in the module inventory', async (
     render(<App basePath="/nested" session={auth} />);
     const summary = await screen.findByRole('table', { name: copy.summaryTitle });
     expect(within(summary).getByRole('rowheader', { name: copy.summaryKinds.functions })).toBeTruthy();
-    expect(screen.getByText(copy.unresolvedCalls).nextElementSibling?.textContent).toBe('1');
+    expect(within(summary).getByRole('columnheader', { name: `${copy.evidence.recovered} / recorded population` })).toBeTruthy();
+    expect(screen.getByText(copy.unresolvedCalls).nextElementSibling?.textContent).toBe('1 / 2');
+    expect(screen.getByText(copy.modulesAccepted).nextElementSibling?.textContent).toBe('1 / 2');
+    expect(screen.getByText(copy.cycles).nextElementSibling?.textContent).toBe('0 / 2');
+    expect(screen.getByText(copy.unknownReferences).nextElementSibling?.textContent).toBe('1 / 8');
+    expect(screen.getByText(copy.summaryProvenance.replace('{version}', 'program-structure-summary-v1'))).toBeTruthy();
+    expect(screen.getByText(copy.manifestDigest).nextElementSibling?.textContent).toBe(modules.manifestSha256);
     const list = screen.getByRole('table', { name: copy.modulesTitle });
     expect(within(list).getByRole('link', { name: 'core' }).getAttribute('href')).toBe(`${revision}/modules/core?structureVersion=${modules.structureVersion}`);
     expect(screen.getByText('Showing 1–2 of 2 modules.')).toBeTruthy();
+  } finally { auth.dispose(); }
+});
+
+it('keeps unavailable plan measurements distinct from measured zero', async () => {
+  const auth = await session();
+  const modules = fixture<ModuleInventory>('module-inventory-plan-not-recorded');
+  transport.get.mockResolvedValue({ data: modules });
+  history.replaceState(null, '', `${revision}/modules`);
+  try {
+    render(<App basePath="/nested" session={auth} />);
+    await screen.findByRole('table', { name: copy.summaryTitle });
+    expect(screen.getByText(copy.modulesCount).nextElementSibling?.textContent).toBe(copy.notMeasured);
+    expect(screen.getByText(copy.modulesAccepted).nextElementSibling?.textContent).toBe(copy.notMeasured);
+    expect(screen.getByText(copy.unknownReferences).nextElementSibling?.textContent).toBe(copy.notMeasured);
+    expect(screen.queryByText('0 / 0')).toBeNull();
   } finally { auth.dispose(); }
 });
 

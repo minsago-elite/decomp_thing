@@ -144,6 +144,7 @@ internal class WebProgramStructureIndex(
     val sourceFileIds: Map<String, String>,
     val sharedInterfacePath: String?,
     val unknownPlanReferences: Int,
+    val totalPlanReferences: Int,
     val retainedBytes: Long,
 ) {
     val structureVersion: String = revisionSourceDigest(listOf("program-structure-v1", metadataVersion,
@@ -299,9 +300,11 @@ internal object WebProgramStructureBuilder {
         var retainedBytes = budget.bytes
         fun result(outcome: WebStructureOutcome, model: WebStructureRecord? = null, schema: Int? = null,
             planOutcome: WebStructureOutcome = WebStructureOutcome("not-recorded", "MODEL_UNAVAILABLE"), plan: WebStructureRecord? = null,
-            tables: List<WebStructureTable> = emptyList(), modules: List<WebStructureModule> = emptyList(), unknown: Int = 0) =
+            tables: List<WebStructureTable> = emptyList(), modules: List<WebStructureModule> = emptyList(), unknown: Int = 0,
+            totalPlanReferences: Int = 0) =
             WebProgramStructureIndex(ref, snapshot.manifestSha256, snapshot.descriptorSha256, manifest.inputSha256,
-                snapshot.metadataVersion, outcome, model, schema, planOutcome, plan, tables, modules, fileIds, shared, unknown, retainedBytes).also {
+                snapshot.metadataVersion, outcome, model, schema, planOutcome, plan, tables, modules, fileIds, shared, unknown,
+                totalPlanReferences, retainedBytes).also {
                     retention?.invoke(WebStructureRetention(retainedCharges).also { check(it.bytes == retainedBytes) })
                 }
         val modelFile = evidenceFile(profile, manifest, "program-model-evidence")
@@ -364,6 +367,7 @@ internal object WebProgramStructureBuilder {
             }
         }
         var unknown = 0
+        var totalPlanReferences = 0
         val modules = ArrayList<WebStructureModule>()
         if (plan != null) {
             val cycles = HashMap<String, List<String>>()
@@ -397,6 +401,7 @@ internal object WebProgramStructureBuilder {
                             WebStructureKind.GLOBAL to module.globalIds, WebStructureKind.TYPE to module.typeIds)) {
                             val table = parsed.tables[kind.ordinal]
                             for (id in owned) {
+                                totalPlanReferences++
                                 val row = table.index[id]
                                 if (row == null) { unknown++; continue }
                                 table.owners[row] = if (table.owners[row] == OWNER_UNOWNED) moduleIndex else OWNER_AMBIGUOUS
@@ -407,10 +412,11 @@ internal object WebProgramStructureBuilder {
             }
         }
         if (planOutcome.state != "available") {
-            modules.clear(); unknown = 0
+            modules.clear(); unknown = 0; totalPlanReferences = 0
             parsed.tables.forEach { it.owners.fill(OWNER_NOT_RECORDED) }
         }
-        return result(WebStructureOutcome.AVAILABLE, model, parsed.schemaVersion, planOutcome, planRecord, parsed.tables, modules, unknown)
+        return result(WebStructureOutcome.AVAILABLE, model, parsed.schemaVersion, planOutcome, planRecord, parsed.tables, modules,
+            unknown, totalPlanReferences)
     }
 
     /** Conservative retained allocation charge, including maps, lazy orders/collisions and array growth.

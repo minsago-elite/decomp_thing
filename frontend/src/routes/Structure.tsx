@@ -43,6 +43,7 @@ function Context({ selected, data }: { selected: SourceSelection; data: Header |
     <dt>{copy.revision}</dt><dd><code>{selected.revisionId}</code></dd>
     {data && <>
       <dt>{copy.sourceDigest}</dt><dd><code>{data.sourceSha256}</code></dd>
+      <dt>{copy.manifestDigest}</dt><dd><code>{data.manifestSha256}</code></dd>
       <dt>{copy.structureVersion}</dt><dd><code>{data.structureVersion}</code></dd>
       <dt>{copy.modelRecord}</dt><dd>{record(data.model)}</dd>
       <dt>{copy.planRecord}</dt><dd>{record(data.plan)}</dd>
@@ -216,6 +217,8 @@ function Modules({ selected, basePath, search }: { selected: SourceSelection; ba
   const data = read.state === 'ready' ? read.value : null;
   const offset = cursor ? Number(cursor.split('_')[1]) : 0;
   const summary = data?.summary;
+  const countOf = (count: number | null, total: number | null) => count === null || total === null
+    ? copy.notMeasured : message(copy.countOf, { count, total });
   return <Frame selected={selected} data={data} read={read} pinned={version !== undefined} onRefresh={() => {
     if (cursor || version) { moveFocus.current = true; location.route(structureListPath(basePath, selected, 'modules')); } else refresh();
   }} navigation={<p><a href={structureListPath(basePath, selected, 'functions')}>{copy.browseFunctions}</a></p>}>
@@ -223,23 +226,31 @@ function Modules({ selected, basePath, search }: { selected: SourceSelection; ba
       <div class="structure-table"><table>
         <caption>{copy.summaryTitle}</caption>
         <thead><tr><th scope="col">{copy.summaryColumns.kind}</th><th scope="col">{copy.summaryColumns.total}</th>
-          {EVIDENCE_CLASSES.map(value => <th scope="col" key={value}>{copy.evidence[value]}</th>)}
-          <th scope="col">{copy.summaryColumns.owned}</th><th scope="col">{copy.summaryColumns.unowned}</th><th scope="col">{copy.summaryColumns.ambiguous}</th></tr></thead>
+          {EVIDENCE_CLASSES.map(value => <th scope="col" key={value}>{message(copy.evidenceOfPopulation, { label: copy.evidence[value] })}</th>)}
+          <th scope="col">{copy.summaryColumns.extraction}</th>
+          <th scope="col">{copy.summaryColumns.owned}</th><th scope="col">{copy.summaryColumns.unowned}</th><th scope="col">{copy.summaryColumns.ambiguous}</th>
+          <th scope="col">{copy.summaryColumns.notRecorded}</th></tr></thead>
         <tbody>{(['functions', 'globals', 'types'] as const).map(kind => <tr key={kind}>
           <th scope="row">{copy.summaryKinds[kind]}</th><td>{summary[kind].total}</td>
-          {EVIDENCE_CLASSES.map(value => <td key={value}>{summary[kind].evidence[value]}</td>)}
-          <td>{summary[kind].ownership.owned}</td><td>{summary[kind].ownership.unowned}</td><td>{summary[kind].ownership.ambiguous}</td>
+          {EVIDENCE_CLASSES.map(value => <td key={value}>{countOf(summary[kind].evidence[value], summary[kind].total)}</td>)}
+          <td>{message(copy.extractionCounts, { ...summary[kind].extraction, total: summary[kind].total })}</td>
+          <td>{countOf(summary[kind].ownership.owned, summary[kind].total)}</td>
+          <td>{countOf(summary[kind].ownership.unowned, summary[kind].total)}</td>
+          <td>{countOf(summary[kind].ownership.ambiguous, summary[kind].total)}</td>
+          <td>{countOf(summary[kind].ownership['not-recorded'], summary[kind].total)}</td>
         </tr>)}</tbody>
       </table></div>
+      <p>{message(copy.summaryProvenance, { version: summary.measurementVersion })}</p>
       <h2>{copy.diagnostics}</h2>
       <dl class="job-facts">
-        <dt>{copy.modulesCount}</dt><dd>{summary.modules}</dd>
-        <dt>{copy.modulesAccepted}</dt><dd>{summary.modulesDeclaredAccepted}</dd>
-        <dt>{copy.cycles}</dt><dd>{summary.dependencyCycles}</dd>
-        <dt>{copy.unknownReferences}</dt><dd>{summary.unknownPlanReferences}</dd>
-        <dt>{copy.collisions}</dt><dd>{summary.nameCollisions}</dd>
-        <dt>{copy.unresolvedCalls}</dt><dd>{summary.unresolvedCallTargets}</dd>
-        <dt>{copy.unresolvedGlobals}</dt><dd>{summary.unresolvedGlobalReferences}</dd>
+        <dt>{copy.modulesCount}</dt><dd>{summary.modules ?? copy.notMeasured}</dd>
+        <dt>{copy.modulesAccepted}</dt><dd>{countOf(summary.modulesDeclaredAccepted, summary.modules)}</dd>
+        <dt>{copy.cycles}</dt><dd>{countOf(summary.dependencyCycles, summary.modules)}</dd>
+        <dt>{copy.modulesInCycles}</dt><dd>{countOf(summary.modulesInDependencyCycles, summary.modules)}</dd>
+        <dt>{copy.unknownReferences}</dt><dd>{countOf(summary.unknownPlanReferences, summary.totalPlanReferences)}</dd>
+        <dt>{copy.collisions}</dt><dd>{countOf(summary.nameCollisions, summary.namedFunctionGlobalRecords)}</dd>
+        <dt>{copy.unresolvedCalls}</dt><dd>{countOf(summary.unresolvedCallTargets, summary.totalCallTargets)}</dd>
+        <dt>{copy.unresolvedGlobals}</dt><dd>{countOf(summary.unresolvedGlobalReferences, summary.totalReferencedGlobalTargets)}</dd>
       </dl>
       <EvidenceMeanings />
     </>}

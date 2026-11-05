@@ -148,13 +148,19 @@
           "not-recorded": 1
         }
       },
-      "modules": 0,
-      "modulesDeclaredAccepted": 0,
-      "dependencyCycles": 0,
-      "unknownPlanReferences": 0,
+      "modules": null,
+      "modulesDeclaredAccepted": null,
+      "dependencyCycles": null,
+      "unknownPlanReferences": null,
       "nameCollisions": 1,
       "unresolvedCallTargets": 1,
-      "unresolvedGlobalReferences": 1
+      "unresolvedGlobalReferences": 1,
+      "measurementVersion": "program-structure-summary-v1",
+      "modulesInDependencyCycles": null,
+      "totalPlanReferences": null,
+      "namedFunctionGlobalRecords": 6,
+      "totalCallTargets": 2,
+      "totalReferencedGlobalTargets": 2
     },
     "totalModules": null,
     "items": [],
