@@ -108,6 +108,7 @@ test('every recorded transient rendering must be a text-only, non-focusable para
 
 test('held trusted DELETE checkpoints signing-out and always resumes the real request', async () => {
   let fetchPaused;
+  let focusExpression = '';
   const calls = [];
   const target = { sessionId: 'sid', requests: [] };
   const cdp = {
@@ -126,7 +127,10 @@ test('held trusted DELETE checkpoints signing-out and always resumes the real re
     if (expression === 'window.__sessionActivationEvents.length') return 0;
     if (expression === 'window.__sessionActivationEvents') return trusted('Sign out');
     if (expression.includes('document.activeElement?.blur()')) return true;
-    if (expression.includes('document.activeElement?.closest')) return 'Sign out';
+    if (expression.includes('document.activeElement?.closest')) {
+      focusExpression = expression;
+      return expression.includes("closest('.session-notice')") ? 'Sign out' : null;
+    }
     if (expression.includes(":focus-visible")) return true;
     if (expression === sessionFactsExpression) return facts;
     if (expression === 'typeof window.axe === "object"') return true;
@@ -140,6 +144,7 @@ test('held trusted DELETE checkpoints signing-out and always resumes the real re
   const activation = await gate.activate(target, 'Sign out', { allowed: { mutations: ['DELETE /nested/api/v1/session'], reads: [] },
     holdRequest: { method: 'DELETE', pathSuffix: '/nested/api/v1/session', checkpointName: 'signing-out',
       expected: { statusText: 'Signing out…', buttons: [] } }, settled: 'signed out' });
+  assert.match(focusExpression, /closest\('\.session-notice'\)/);
   assert.equal(activation.during.name, 'signing-out');
   assert.equal(activation.during.sessionStatuses, 1);
   assert.equal(activation.during.controls.length, 0);

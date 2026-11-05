@@ -199,7 +199,7 @@ export function sessionSemanticsGate({ cdp, evaluate, ready, capture, axeSource,
     for (let presses = 0; presses < 120 && focused !== label; presses += 1) {
       await cdp.call('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 }, target.sessionId);
       await cdp.call('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 }, target.sessionId);
-      focused = await evaluate(target, `document.activeElement?.closest('aside.session-notice') && document.activeElement.tagName === 'BUTTON' ? document.activeElement.textContent : null`);
+      focused = await evaluate(target, `document.activeElement?.closest('.session-notice') && document.activeElement.tagName === 'BUTTON' ? document.activeElement.textContent : null`);
     }
     focusVisible = await evaluate(target, `document.activeElement.matches(':focus-visible')`);
     assert.equal(focusVisible, true, `"${label}" keyboard focus is not :focus-visible`);
