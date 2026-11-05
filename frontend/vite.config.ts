@@ -1,4 +1,5 @@
-import { mkdir, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import preact from '@preact/preset-vite';
 import { defineConfig } from 'vite';
@@ -71,12 +72,12 @@ function displayPreferenceBootstrap(): Plugin {
   };
 }
 
-/** Build metadata stays outside the served output and contains no host paths. */
-function bundleComposition(workerModules: ModuleOwner[]): Plugin {
+/** Owner/lock evidence is bound into the shipped UI closure; neither record contains host paths. */
+export function bundleComposition(workerModules: ModuleOwner[]): Plugin {
   return {
     name: 'decomp-bundle-composition',
     apply: 'build',
-    async writeBundle(_options, bundle) {
+    async generateBundle(_options, bundle) {
       const modules = Object.values(bundle)
         .filter((entry) => entry.type === 'chunk')
         .flatMap((entry) => Object.entries(entry.modules).map(([id, module]) => {
@@ -91,6 +92,14 @@ function bundleComposition(workerModules: ModuleOwner[]): Plugin {
         .map(({ chunk, owner, feature }): ModuleOwner => ({ chunk, owner, ...(feature ? { feature } : {}) }))
         .concat(workerModules)
         .sort((left, right) => `${left.chunk}/${left.owner}`.localeCompare(`${right.chunk}/${right.owner}`));
+      const chunkOwners = Object.fromEntries([...new Set(modules.map(module => module.chunk))].sort().map(chunk =>
+        [chunk, [...new Set(modules.filter(module => module.chunk === chunk).map(module => module.owner))].sort()]));
+      const lockfile = await readFile(new URL('./package-lock.json', import.meta.url));
+      const source = JSON.stringify({ schemaVersion: 1, chunkOwners,
+        lockfileSha256: createHash('sha256').update(lockfile).digest('hex') }) + '\n';
+      // An ordinary content-addressed JSON asset: the embedded UI manifest hashes it, and the
+      // release verifier reads it back from the JAR, not the assembler's mutable build directory.
+      this.emitFile({ type: 'asset', fileName: `assets/bundle-ownership-${createHash('sha256').update(source).digest('hex')}.json`, source });
       await mkdir(outputRoot, { recursive: true });
       await writeFile(`${outputRoot}bundle-composition.json`, JSON.stringify(modules, null, 2) + '\n');
     },
