@@ -159,6 +159,25 @@ class WebProgramStructureTest {
         assertFalse(page.toString().contains("return helper")); assertFalse(page.containsKey("acceptance"))
     }
 
+    @Test fun `case insensitive search preserves displayed Unicode names and identifiers`() {
+        val dotted = "fn_dotted_İ"
+        val revision = Revision(model(listOf(
+            RecoveredFunction(dotted, "İşlev", 0x401000u, "int dotted(void)"),
+            RecoveredFunction("fn_other", "Other", 0x401100u, "int other(void)"),
+        )), null, emptyList())
+        for ((search, expected) in listOf(
+            "İşlev" to dotted, "işlev" to dotted, "İŞLEV" to dotted,
+            dotted to dotted, "FN_DOTTED_i" to dotted,
+            "0X4010" to dotted, "0X4011" to "fn_other",
+        )) {
+            val encoded = java.net.URLEncoder.encode(search, Charsets.UTF_8)
+            val page = revision.pages.functions("owner", jobId, runId, revisionId, "search=$encoded")
+            assertEquals(listOf(expected), page.items().map { it.text("entityId") }, search)
+            assertEquals(1, page.getValue("matchedFunctions").jsonPrimitive.int, search)
+            assertEquals(search, page.getValue("query").jsonObject.getValue("search").jsonPrimitive.content)
+        }
+    }
+
     @Test fun `sorting and filtering stay stable across page boundaries and report exact scope`() {
         val revision = standard()
         for ((query, expected) in listOf(
