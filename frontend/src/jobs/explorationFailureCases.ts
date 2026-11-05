@@ -6,6 +6,7 @@ import type { RetainedCase, RetainedCases, RetainedObservation } from './explora
 const reasons = {
   'behavior-deadline-exceeded': 'timeout',
   'sandbox-unavailable': 'tooling-unavailable',
+  'sandbox-wrapper-start-failed': 'execution-failure',
   'output-limit-exceeded': 'execution-failure',
   'completion-unverified': 'execution-failure',
   'producer-interrupted': 'interrupted',
