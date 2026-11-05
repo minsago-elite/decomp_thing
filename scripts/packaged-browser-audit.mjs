@@ -265,7 +265,7 @@ export const prepareChartCaptureTile = offset => `/*chart-capture-tile*/(() => {
   const active = document.activeElement;
   if (active && active !== document.body && typeof active.blur === 'function') active.blur();
   const start = figure.getBoundingClientRect();
-  scrollTo({ left: scrollX, top: start.top + (visualViewport?.pageTop ?? scrollY) + ${Number(offset)}, behavior: 'instant' });
+  scrollTo({ left: scrollX, top: Math.floor(start.top + (visualViewport?.pageTop ?? scrollY) + ${Number(offset)}), behavior: 'instant' });
   return ${chartCaptureState}(${Number(offset)});
 })()`;
 /** Re-measure without scrolling, immediately after the capture. */

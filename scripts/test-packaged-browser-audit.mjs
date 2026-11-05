@@ -40,7 +40,7 @@ function tileState({ offset, height = 383, viewHeight = 200, viewWidth = 305, sc
     viewportClip: { x: x0, y: y0, width: x1 - x0, height: y1 - y0 },
     pageClip: { x: x0, y: y0 + scroll, width: x1 - x0, height: y1 - y0 }, hits: [hit, hit, hit, hit].map(value => ({ ...value })) };
 }
-// Scrolling to a fractional document position lands on the floor, as browsers do at integer scroll offsets.
+// This model floors scroll requests; a separate VM control also covers nearest-integer rounding.
 async function modeledCapture(set, { height = 383, viewHeight = 200, docTop = 0, left, width, mutate = () => {}, png, shots } = {}) {
   let scroll = 0;
   const documentHeight = docTop + height + 50;
@@ -711,4 +711,32 @@ test('measures visible input values and placeholders and rejects low contrast fo
 test('covers the documented desktop, narrow, 320px and 200%/400% zoom profiles', () => {
   assert.deepEqual(auditViewports.map(({ width, height, deviceScaleFactor }) => [width, height, deviceScaleFactor]),
     [[1440, 900, 1], [390, 844, 1], [320, 640, 1], [640, 400, 2], [320, 200, 4]]);
+});
+
+test('capture keeps the first figure pixel when the browser rounds fractional scrolls upward (VM)', async () => {
+  for (const set of chartCaptureSets) {
+    const docTop = 100.6875, height = 383.156, left = 2.4, width = 299.3;
+    let scrollY = 0;
+    const requested = [];
+    const series = { getBoundingClientRect: () => ({ height: 40 }) };
+    const figure = { tagName: 'FIGURE', id: '', classList: ['output-signature-chart'],
+      getBoundingClientRect: () => ({ left, right: left + width, top: docTop - scrollY,
+        bottom: docTop - scrollY + height, width, height }),
+      querySelectorAll: () => [series, series], contains: () => true };
+    const document = { body: {}, activeElement: null, scrollingElement: { clientWidth: 305, clientHeight: 200 },
+      querySelector: selector => selector === '.output-signature-chart' ? figure : null,
+      elementFromPoint: () => figure };
+    const context = { document, innerHeight: 200, scrollX: 0, get scrollY() { return scrollY; }, visualViewport: undefined,
+      scrollTo: ({ top }) => { requested.push(top); scrollY = Math.min(Math.round(top), 1000); },
+      getComputedStyle: () => ({ visibility: 'visible' }) };
+    const capture = await captureOutputSignatureChart({ set,
+      evaluate: async expression => JSON.parse(JSON.stringify(runInNewContext(expression, context))),
+      shoot: async ({ viewportClip }) => pngBytes(viewportClip.width * set.deviceScaleFactor, viewportClip.height * set.deviceScaleFactor) });
+    assert.deepEqual(chartCaptureFailures(capture, set), []);
+    assert.ok(requested.every(Number.isInteger), 'capture chooses integer scroll targets before browser rounding');
+    assert.equal(capture.tiles[0].before.figure.y, 0.6875);
+    assert.equal(capture.tiles[0].before.segment.start, 0);
+    assert.equal(capture.tiles[1].before.segment.start, capture.tiles[0].before.segment.end);
+    assert.ok(Math.abs(capture.tiles.at(-1).before.segment.end - height) < 1e-9);
+  }
 });
