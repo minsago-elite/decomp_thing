@@ -2,7 +2,7 @@ import { gitRepositoryCopy as copy } from '../copy/job';
 import { message as displayMessage, textMessage } from '../shared/messages';
 import { usePrivateTransport } from '../session/PrivateTransport';
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
-import { ApiClientError, withApiFailureReference } from '../api/client';
+import { ApiClientError, withApiFailureReference, withValidatedRequestReference } from '../api/client';
 import { canRetainMetadata, metadataFailureKind } from '../shared/retainMetadata';
 import type { Capability, GitRepositories, GitWorkspace, Job, Operation } from '../api/generated';
 import type { BrowserSession } from '../session/session';
@@ -21,7 +21,9 @@ interface Binding { client: unknown; jobId: string; version: string; session: un
 interface View { binding: Binding; observed: Observed | null; status: string; busy: boolean; stale: boolean }
 
 /** A response that names another job, action, repository or operation than the one requested. */
-class IdentityMismatch extends Error {}
+class IdentityMismatch extends Error {
+  constructor(readonly requestId: string) { super(); }
+}
 
 /** Fixed panel-local categories: storage refusals stay unverified before any 413 size check; local identity refusals are unverified. */
 function failureKind(failure: unknown): Failure {
@@ -110,12 +112,13 @@ export function GitRepositoryPanel({ job, capabilities, basePath, session, pollI
 
   /** One explicit initialization: one POST, then polls bound to the acknowledged operation's identity. */
   async function initialize(signal: AbortSignal, runId: string, revisionId: string, csrfToken: string, acceptance: { acknowledged: boolean }): Promise<Operation> {
-    const ack = (await client.post('operation', repositoriesPath, 'gitRepositoryInitRequest',
+    const ackResponse = await client.post('operation', repositoriesPath, 'gitRepositoryInitRequest',
       { action: 'git.init', runId, revisionId, initialBranch: null },
-      { csrfToken, ifMatch: `"${binding.version}"`, idempotencyKey: crypto.randomUUID(), signal })).data;
+      { csrfToken, ifMatch: `"${binding.version}"`, idempotencyKey: crypto.randomUUID(), signal });
+    const ack = ackResponse.data;
     const { operationId, repositoryId } = ack;
     if (ack.jobId !== binding.jobId || ack.action !== 'git.init' || repositoryId === null
-      || !idPattern.test(repositoryId) || !idPattern.test(operationId)) throw new IdentityMismatch();
+      || !idPattern.test(repositoryId) || !idPattern.test(operationId)) throw new IdentityMismatch(ackResponse.requestId);
     acceptance.acknowledged = true;
     const operationPath = `${repositoriesPath}/${repositoryId}/operations/${operationId}`;
     let operation = ack;
@@ -123,9 +126,10 @@ export function GitRepositoryPanel({ job, capabilities, basePath, session, pollI
       if (poll >= maximumPolls) { update(() => ({ status: copy.stillRunning })); break; }
       update(() => ({ status: copy.initializationRunning }));
       await sleep(pollIntervalMs, signal);
-      operation = (await client.get('operation', operationPath, { signal })).data;
+      const pollResponse = await client.get('operation', operationPath, { signal });
+      operation = pollResponse.data;
       if (operation.jobId !== binding.jobId || operation.action !== 'git.init'
-        || operation.repositoryId !== repositoryId || operation.operationId !== operationId) throw new IdentityMismatch();
+        || operation.repositoryId !== repositoryId || operation.operationId !== operationId) throw new IdentityMismatch(pollResponse.requestId);
     }
     return operation;
   }
@@ -154,7 +158,8 @@ export function GitRepositoryPanel({ job, capabilities, basePath, session, pollI
           ? copy.operationStates[outcome.state] : outcome && !terminal.has(outcome.state) ? copy.stillRunning : listingStatus(next) }));
     } catch (failure: unknown) {
       if (controller.signal.aborted) return;
-      if (failure instanceof IdentityMismatch) { update(() => ({ observed: null, stale: false, status: copy.initializationUnverified })); return; }
+      if (failure instanceof IdentityMismatch) { update(() => ({ observed: null, stale: false,
+        status: withValidatedRequestReference(copy.initializationUnverified, failure.requestId) })); return; }
       if (phase === 'command') {
         const status = failure instanceof ApiClientError ? failure.status ?? 0 : 0;
         const kind = failureKind(failure);

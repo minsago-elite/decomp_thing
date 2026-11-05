@@ -22,6 +22,7 @@ import { PackagedBrowserCdpDiagnostics } from './packaged-browser-cdp-diagnostic
 import { AXE_VERSION, createNoticeSection, qualifyAvailabilityNotices, assessNoticeReport } from './packaged-browser-a11y-notices.mjs';
 import { createConnectionSection, qualifyConnectionNotice, assessConnectionReport } from './packaged-browser-connection-notice.mjs';
 import { createReadStatesSection, readStateFixtures, qualifyReadStates, assessReadStatesReport, verifyRetainedPng as verifyReadStatePng, withDeadline as readStateDeadline, FIXED_PNG_NAMES as READ_STATE_PNG_NAMES } from './packaged-browser-read-states.mjs';
+import { bindGitInitFixtures, createGitInitSection, qualifyGitInitialization, assessGitInitReport, verifyGitInitPng, GIT_INIT_CASES } from './packaged-browser-git-init.mjs';
 
 // Test driver only: the application is launched with a separate Node-free PATH.
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -748,10 +749,11 @@ try {
     const axeSource = readFileSync(join(repo, 'frontend/node_modules/axe-core/axe.min.js'), 'utf8');
     const readStatesLateSink = [];
     const readStatesStartedAt = Date.now();
+    const boundAuditFixtures = readStateFixtures({ repo, python: values.python, buildId: manifest.buildId });
     await qualifyReadStates({ cdp, makeTarget, evaluate, ready, delay, root, origin, section: readStates,
       sequences: readStatesSequences, axeSource, axeSha256: createHash('sha256').update(axeSource).digest('hex'), lateSink: readStatesLateSink,
       cookie: { name: 'decomp_read_state_fixture', value: randomUUID() },
-      fixtures: () => readStateFixtures({ repo, python: values.python, buildId: manifest.buildId }) });
+      fixtures: () => boundAuditFixtures });
     let readStatesFailures = [];
     const finalizeReadStatesParentEvidence = async () => {
       const parent = report.auditReadStatesParent = { schema: 'packaged-read-states-parent/v1', lateSink: [], lateTargetCleanup: [], elapsedMs: Date.now() - readStatesStartedAt };
@@ -789,10 +791,45 @@ try {
       parent.elapsedMs = Date.now() - readStatesStartedAt;
       report.auditReadStatesGate = { failures: readStatesFailures, passed: readStatesFailures.length === 0 };
     };
+    const gitInit = report.auditGitInit = createGitInitSection();
+    const gitInitFixtures = bindGitInitFixtures(boundAuditFixtures, { readContract: (name) => readFileSync(join(repo, 'contracts/web/v1/fixtures', name)) });
+    const gitInitLateSink = [];
+    const gitInitStartedAt = Date.now();
+    let gitInitFailures = [];
+    const finalizeGitInitEvidence = async () => {
+      const parent = report.auditGitInitParent = { schema: 'packaged-git-init-parent/v1', lateSink: [], lateTargetCleanup: [], assessment: [], elapsedMs: Date.now() - gitInitStartedAt };
+      for (const item of gitInitLateSink) {
+        if (item?.kind === 'target-acquired-after-cutoff' && typeof item.targetId === 'string' && item.targetId) {
+          const cleanup = { targetId: item.targetId, outcome: 'unresolved' };
+          try { await readStateDeadline(cdp.call('Target.closeTarget', { targetId: item.targetId }), 1000, 'late Git-init target close'); cleanup.outcome = 'closed'; }
+          catch (error) { cleanup.reason = String(error?.message ?? error).slice(0, 160); }
+          parent.lateTargetCleanup.push(cleanup);
+        } else parent.lateSink.push({ kind: item?.kind ?? 'unknown-late-event', id: item?.id ?? null });
+      }
+      const expected = [...GIT_INIT_CASES.map(({ id }) => `git-init-${id}.png`)].sort();
+      const shots = gitInit.cases.map((item) => item?.screenshot).filter(Boolean);
+      const actual = shots.map((item) => item.name).sort();
+      if (JSON.stringify(actual) !== JSON.stringify(expected)) parent.lateSink.push({ kind: 'fixed-png-record-set-mismatch' });
+      else for (const shot of shots) {
+        try { await verifyGitInitPng(root, shot); }
+        catch (error) { parent.lateSink.push({ kind: 'retained-png-invalid', id: shot.name }); }
+      }
+      const owned = assessGitInitReport(gitInit);
+      const cleanupFailures = parent.lateTargetCleanup.filter((x) => x.outcome !== 'closed').map((x) => `late target cleanup: ${x.reason ?? x.outcome}`);
+      const lateFailures = parent.lateSink.map((x) => x.kind);
+      gitInitFailures = [...owned, ...cleanupFailures, ...lateFailures].slice(0, 64);
+      parent.assessment = [...cleanupFailures, ...lateFailures].slice(0, 32);
+      parent.elapsedMs = Date.now() - gitInitStartedAt;
+      report.auditGitInitGate = { failures: gitInitFailures, passed: gitInitFailures.length === 0 };
+    };
     // #619: rich long-content fixtures and trusted keyboard/emulated-touch operability on a separate target.
     // The section is attached before driving so partial evidence is published if the driver throws.
     let auditRunError = null;
     try {
+      // #1897: each command case runs in an owned packaged target. Request-stage interception is closed over
+      // exact generator/contract bytes; the POST is fulfilled locally and never reaches the backend.
+      await qualifyGitInitialization({ cdp, makeTarget, evaluate, delay, root, origin, section: gitInit,
+        fixtures: gitInitFixtures, cookie: { name: 'decomp_git_init_fixture', value: randomUUID() }, lateSink: gitInitLateSink });
       const responsive = report.auditResponsive = createResponsiveSection();
       await qualifyResponsive({ cdp, makeTarget, evaluate, ready, delay, root, origin, section: responsive,
         fixtures: () => responsiveFixtures({ repo, python: values.python, buildId: manifest.buildId }) });
@@ -831,8 +868,17 @@ try {
         // surface the evidence-finalization failure directly instead of silently publishing it.
         if (!auditRunError) throw error;
       }
+      try { await finalizeGitInitEvidence(); }
+      catch (error) {
+        const message = `Git-init evidence finalization failed: ${String(error?.message ?? error).slice(0, 160)}`;
+        report.auditGitInitParent ??= { schema: 'packaged-git-init-parent/v1', lateSink: [], lateTargetCleanup: [], assessment: [] };
+        report.auditGitInitParent.assessment.push(message);
+        gitInitFailures = [message]; report.auditGitInitGate = { failures: gitInitFailures, passed: false };
+        if (!auditRunError) throw error;
+      }
     }
     assert.deepEqual(readStatesFailures, [], `Packaged #628 read-state failures:\n${readStatesFailures.join('\n')}`);
+    assert.deepEqual(gitInitFailures, [], `Packaged #1897 Git-init failures:\n${gitInitFailures.join('\n')}`);
   }
   if (values.mode === 'public' || values.mode === 'session' || values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'history' || values.mode === 'scale' || values.mode === 'live') {
     const identityExpression = `(() => ({ buildId: document.querySelector('meta[name="decomp-ui-build"]')?.content, applicationVersion: document.querySelector('meta[name="decomp-application-version"]')?.content, page: location.pathname, text: document.body.innerText }))()`;

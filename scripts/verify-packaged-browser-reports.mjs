@@ -13,6 +13,8 @@
 // genuine 200%/400% page zoom, counted methods, cleanup records, Chrome identity) and its retained PNGs must match.
 // With --require-read-states, every passed audit report must also carry the bounded #628 read-state slice, closed late
 // target cleanup and its complete fixed-name PNG set; the verifier recomputes the slice and PNG hashes on readback.
+// With --require-git-init, every passed audit report must also prove the exact-source fixture-only Git-init
+// command path, one guarded POST per trusted click, identity-bound polling and no escaped API request.
 import { readFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -23,19 +25,21 @@ import { applyConnectionNoticeGate } from './packaged-browser-connection-notice.
 import { applyAuditResponsiveGate } from './packaged-browser-responsive.mjs';
 import { applyRealZoomGate } from './packaged-browser-real-zoom.mjs';
 import { applyAuditReadStatesGate } from './packaged-browser-read-states-gate.mjs';
+import { applyAuditGitInitGate } from './packaged-browser-git-init-gate.mjs';
 
-let parent, requiredModes, requireResponsive, requireRealZoom, requireReadStates;
+let parent, requiredModes, requireResponsive, requireRealZoom, requireReadStates, requireGitInit;
 try {
-  const { values, positionals } = parseArgs({ options: { 'require-modes': { type: 'string' }, 'require-responsive-audit': { type: 'boolean' }, 'require-real-zoom': { type: 'boolean' }, 'require-read-states': { type: 'boolean' } }, allowPositionals: true });
+  const { values, positionals } = parseArgs({ options: { 'require-modes': { type: 'string' }, 'require-responsive-audit': { type: 'boolean' }, 'require-real-zoom': { type: 'boolean' }, 'require-read-states': { type: 'boolean' }, 'require-git-init': { type: 'boolean' } }, allowPositionals: true });
   parent = positionals[0] ?? join(fileURLToPath(new URL('..', import.meta.url)), 'build');
   requireResponsive = values['require-responsive-audit'] === true;
   requireRealZoom = values['require-real-zoom'] === true;
   requireReadStates = values['require-read-states'] === true;
+  requireGitInit = values['require-git-init'] === true;
   requiredModes = values['require-modes'] === undefined ? [] : values['require-modes'].split(',');
   if (positionals.length > 1 || !isAbsolute(parent) || requiredModes.some(mode => !/^[a-z][a-z0-9-]*$/.test(mode)) || new Set(requiredModes).size !== requiredModes.length)
     throw new Error('Invalid parent or required modes');
 } catch {
-  console.error('Usage: node scripts/verify-packaged-browser-reports.mjs [/absolute/parent] [--require-modes mode1,mode2,...] [--require-responsive-audit] [--require-real-zoom] [--require-read-states]');
+  console.error('Usage: node scripts/verify-packaged-browser-reports.mjs [/absolute/parent] [--require-modes mode1,mode2,...] [--require-responsive-audit] [--require-real-zoom] [--require-read-states] [--require-git-init]');
   process.exit(2);
 }
 const noticed = await applyConnectionNoticeGate(await applySessionNoticeGate(await verifyRetainedReports(parent, { requiredModes }), directory => loadReport(directory)), directory => loadReport(directory));
@@ -43,6 +47,7 @@ const responsive = requireResponsive ? await applyAuditResponsiveGate(noticed, d
 const zoomed = requireRealZoom ? await applyRealZoomGate(responsive, directory => loadReport(directory)) : responsive;
 const sequences = requireReadStates ? JSON.parse(readFileSync(join(fileURLToPath(new URL('..', import.meta.url)), 'scripts/packaged-browser-read-state-sequences.json'), 'utf8')) : undefined;
 const results = requireReadStates ? await applyAuditReadStatesGate(zoomed, directory => loadReport(directory), { sequences }) : zoomed;
-for (const r of results) console.log(`${r.ok ? 'verified' : 'INVALID '} ${r.directory}${r.ok ? ` status=${r.status}${r.gate ? ` notice-gate=${r.gate}` : ''}${r.connectionGate ? ` connection-gate=${r.connectionGate}` : ''}${r.responsiveGate ? ` responsive-gate=${r.responsiveGate}` : ''}${r.realZoomGate ? ` real-zoom-gate=${r.realZoomGate}` : ''}${r.readStatesGate ? ` read-states-gate=${r.readStatesGate}` : ''}` : `: ${r.error}`}`);
+const gitInited = requireGitInit ? await applyAuditGitInitGate(results, directory => loadReport(directory)) : results;
+for (const r of gitInited) console.log(`${r.ok ? 'verified' : 'INVALID '} ${r.directory}${r.ok ? ` status=${r.status}${r.gate ? ` notice-gate=${r.gate}` : ''}${r.connectionGate ? ` connection-gate=${r.connectionGate}` : ''}${r.responsiveGate ? ` responsive-gate=${r.responsiveGate}` : ''}${r.realZoomGate ? ` real-zoom-gate=${r.realZoomGate}` : ''}${r.readStatesGate ? ` read-states-gate=${r.readStatesGate}` : ''}${r.gitInitGate ? ` git-init-gate=${r.gitInitGate}` : ''}` : `: ${r.error}`}`);
 if (results.length === 0) console.log(`No retained packaged-browser report directories under ${parent}`);
-if (results.some(r => !r.ok)) process.exitCode = 1;
+if (gitInited.some(r => !r.ok)) process.exitCode = 1;

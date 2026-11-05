@@ -50,6 +50,7 @@ const runDoc = () => { const d = fixture<ResponseOf<'run'>>('run-completed-unacc
 const secretMessage = 'PRIVATE operation message /srv/secret';
 const operationDoc = (state: string, change: Partial<ResponseOf<'operation'>['data']> = {}) => {
   const d = fixture<ResponseOf<'operation'>>('git-operation-init-completed');
+  d.requestId = reference;
   Object.assign(d.data, { state, message: secretMessage, endedAt: ['queued', 'running'].includes(state) ? null : d.data.endedAt }, change);
   return d;
 };
@@ -428,7 +429,7 @@ it.each([
   const fetcher = sequence(ok(emptyDoc()), ok(runDoc()), ok(operationDoc('queued', change), 202));
   const { button } = await readyToInitialize(fetcher);
   fireEvent.click(button);
-  await waitFor(() => expect(status()).toBe(copy.initializationUnverified));
+  await waitFor(() => expect(status()).toBe(`${copy.initializationUnverified} Reference ID: ${reference}.`));
   await waitFor(() => expect(refresh().hasAttribute('disabled')).toBe(false));
   expect(initButton()).toBeNull();
   expect(calls(fetcher)).toEqual([LIST, RUN, POST]);
@@ -446,7 +447,7 @@ it.each([
   const fetcher = sequence(ok(emptyDoc()), ok(runDoc()), ok(operationDoc('queued'), 202), ok(operationDoc('completed', change)));
   const { button } = await readyToInitialize(fetcher);
   fireEvent.click(button);
-  await waitFor(() => expect(status()).toBe(copy.initializationUnverified));
+  await waitFor(() => expect(status()).toBe(`${copy.initializationUnverified} Reference ID: ${reference}.`));
   expect(calls(fetcher)).toEqual([LIST, RUN, POST, POLL]);
   expect(details()).toBeNull(); expect(initButton()).toBeNull();
 });
@@ -456,8 +457,32 @@ it('every poll targets the acknowledged operation even after a mismatched later 
     ok(operationDoc('running', { operationId: 'operation_other' })));
   const { button } = await readyToInitialize(fetcher);
   fireEvent.click(button);
-  await waitFor(() => expect(status()).toBe(copy.initializationUnverified));
+  await waitFor(() => expect(status()).toBe(`${copy.initializationUnverified} Reference ID: ${reference}.`));
   expect(calls(fetcher)).toEqual([LIST, RUN, POST, POLL, POLL]);
+});
+
+it('identity mismatch uses only a canonical response reference', async () => {
+  const acknowledgement = operationDoc('queued', { jobId: 'f'.repeat(32) });
+  acknowledgement.requestId = 'request_example_1';
+  const fetcher = sequence(ok(emptyDoc()), ok(runDoc()), ok(acknowledgement, 202));
+  const { button } = await readyToInitialize(fetcher);
+  fireEvent.click(button);
+  await waitFor(() => expect(status()).toBe(copy.initializationUnverified));
+  expect(status()).not.toContain('request_example_1');
+  expect(calls(fetcher)).toEqual([LIST, RUN, POST]);
+  expectSafe();
+});
+
+it('poll identity mismatch with an opaque request ID shows no reference', async () => {
+  const poll = operationDoc('completed', { operationId: 'operation_other' });
+  poll.requestId = 'request_example_1';
+  const fetcher = sequence(ok(emptyDoc()), ok(runDoc()), ok(operationDoc('queued'), 202), ok(poll));
+  const { button } = await readyToInitialize(fetcher);
+  fireEvent.click(button);
+  await waitFor(() => expect(status()).toBe(copy.initializationUnverified));
+  expect(status()).not.toContain('request_example_1');
+  expect(calls(fetcher)).toEqual([LIST, RUN, POST, POLL]);
+  expectSafe();
 });
 
 it('an obsolete poll answering after a job change cannot replace or unblock the new binding (characterization)', async () => {

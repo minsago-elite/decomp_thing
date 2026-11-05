@@ -7,7 +7,7 @@ import { MAX_JSON_BYTES } from './json';
 import { readSourceDigestHead, sourceDigestExpectation, sourceDigestHeadFailure } from './sourceDigest';
 import type { SourceDigestExpectation, SourceDigestObservation } from './sourceDigest';
 
-export { ApiClientError, withApiFailureReference } from './errors';
+export { ApiClientError, withApiFailureReference, withValidatedRequestReference } from './errors';
 export interface RequestOptions { signal?: AbortSignal }
 export interface MutationOptions extends RequestOptions {
   csrfToken?: string;
