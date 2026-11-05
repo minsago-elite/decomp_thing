@@ -7352,6 +7352,62 @@ internal fun hashStableRegularFile(
     }
 }
 
+internal enum class StableComparison { SAME, DIFFERENT }
+
+/** Compare only after the current capture has passed every stability fence. */
+internal fun compareStableRegularFile(
+    root: Path, relative: String, maximumBytes: Long, expected: StableRegularFile,
+    cancellationCheck: () -> Unit = {},
+): StableComparison {
+    require(maximumBytes in 1 until Int.MAX_VALUE.toLong())
+    var sizeMatches = false
+    var contentMatches = true
+    var opened: LinuxFileIdentity? = null
+    var changeTime: java.nio.file.attribute.FileTime? = null
+    val result = try { hashStableRegularFile(root, relative,
+        declaredSize = { size ->
+            if (size > maximumBytes) throw RepairBudgetExceededException("comparison exceeds read limit")
+            sizeMatches = size == expected.bytes.size.toLong()
+        },
+        readBytes = { _, total ->
+            if (total > maximumBytes) throw RepairBudgetExceededException("comparison exceeds read limit")
+        },
+        cancellationCheck = cancellationCheck,
+        validateMetadata = { descriptor ->
+            val identity = LinuxFilesystemSyscalls.identity(descriptor.fd)
+            // The proc entry is kernel-owned and the descriptor remains owned throughout capture.
+            val ctime = Files.getAttribute(Path.of("/proc/self/fd/${descriptor.fd}"), "unix:ctime")
+                as? java.nio.file.attribute.FileTime
+                ?: throw StableFileUnavailableException("comparison change time unavailable")
+            if (opened == null) {
+                if (!identity.isRegularFile || identity.isSymbolicLink || identity.linkCount != 1)
+                    throw StableFileUnavailableException("comparison target is unavailable")
+                opened = identity
+                changeTime = ctime
+            } else {
+                requireUnchanged(identity == opened && ctime == changeTime) {
+                    "comparison metadata changed during reading"
+                }
+            }
+        },
+        verifyChunk = { bytes, count, offset ->
+            val available = (expected.bytes.size.toLong() - offset).coerceAtLeast(0).coerceAtMost(count.toLong()).toInt()
+            if (available != count) contentMatches = false
+            if (available > 0 && !java.util.Arrays.equals(bytes, 0, available,
+                    expected.bytes, offset.toInt(), offset.toInt() + available)) contentMatches = false
+        })
+    } catch (failure: java.io.IOException) {
+        if (failure is java.io.InterruptedIOException || failure is java.nio.channels.ClosedByInterruptException ||
+            Thread.currentThread().isInterrupted) throw failure
+        throw StableFileUnavailableException("comparison target or required metadata unavailable: ${failure.message}")
+    } catch (failure: UnsupportedOperationException) {
+        throw StableFileUnavailableException("comparison required metadata unsupported: ${failure.message}")
+    }
+    return if (sizeMatches && contentMatches && result.size == expected.bytes.size.toLong() &&
+        result.sha256 == expected.sha256 && opened == expected.identity && result.identity == expected.identity)
+        StableComparison.SAME else StableComparison.DIFFERENT
+}
+
 /** Verify captured bytes without allocating another whole-file array. */
 internal fun verifyStableRegularFile(
     root: Path, relative: String, maximumBytes: Long, expected: StableRegularFile,

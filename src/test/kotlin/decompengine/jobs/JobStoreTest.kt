@@ -18,6 +18,33 @@ import org.junit.jupiter.api.Assumptions.assumeTrue
 
 @ExtendWith(RecoveryMatrixEvidence::class)
 class JobStoreTest {
+    @Test fun artifactComparisonMappings() {
+        val root = createTempDirectory("jobs-comparison-")
+        val store = JobStore(root)
+        val job = store.createFromUpload("snapshot.elf", elfFixture())
+        val reports = java.nio.file.Files.createDirectory(root.resolve(job.id).resolve("reports"))
+        val path = reports.resolve("sample.json")
+        java.nio.file.Files.write(path, ByteArray(180000))
+        val expected = store.readArtifact(job.id, "reports/sample.json", 200000)
+        fun compare(cancel: () -> Unit = {}) = store.compareArtifact(job.id, "reports/sample.json", 200000, expected, cancel)
+        assertEquals(decompengine.repair.StableComparison.SAME, compare())
+        java.nio.file.Files.write(path, ByteArray(180001))
+        assertEquals(decompengine.repair.StableComparison.DIFFERENT, compare())
+        assertFailsWith<decompengine.repair.RepairBudgetExceededException> {
+            store.compareArtifact(job.id, "reports/sample.json", 10, expected)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            store.compareArtifact(job.id, "reports/../sample.json", 200000, expected)
+        }
+        var checks = 0
+        assertFailsWith<ArtifactChangedException> {
+            compare { if (++checks == 5) java.nio.file.Files.write(path, byteArrayOf(1), java.nio.file.StandardOpenOption.APPEND) }
+        }
+        java.nio.file.Files.delete(path)
+        val unavailable = assertFailsWith<JobStoreException> { compare() }
+        assertTrue(unavailable !is ArtifactChangedException)
+    }
+
     @Test
     fun `strict metadata read detects only owned sibling directory link count change`() {
         val root = createTempDirectory("jobs-metadata-sibling-diagnostic-")

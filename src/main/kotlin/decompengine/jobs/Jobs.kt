@@ -427,6 +427,17 @@ class JobStore internal constructor(
         }
     }
 
+    internal fun compareArtifact(
+        jobId: String, relativePath: String, maximumBytes: Long, expected: StableRegularFile,
+        cancellationCheck: () -> Unit = {},
+    ): decompengine.repair.StableComparison {
+        jobDirectory(jobId)
+        requireCanonicalReportPath(relativePath)
+        return contained("artifact") {
+            decompengine.repair.compareStableRegularFile(root, "$jobId/$relativePath", maximumBytes, expected, cancellationCheck)
+        }
+    }
+
     internal fun verifyArtifact(jobId: String, relativePath: String, maximumBytes: Long, expected: StableRegularFile) {
         jobDirectory(jobId)
         requireCanonicalReportPath(relativePath)
