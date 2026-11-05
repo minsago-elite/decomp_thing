@@ -1,3 +1,17 @@
+import java.nio.charset.CodingErrorAction
+import java.nio.charset.StandardCharsets
+import java.nio.charset.MalformedInputException
+import java.util.concurrent.Executors
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.nio.file.AtomicMoveNotSupportedException
+import java.nio.file.StandardOpenOption
+import java.nio.channels.FileChannel
+import java.nio.file.attribute.FileTime
+import java.nio.file.attribute.PosixFilePermission
+import java.nio.file.attribute.PosixFileAttributes
+import java.nio.file.StandardCopyOption
+import java.nio.file.attribute.UserPrincipal
 import java.io.File
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
@@ -9,7 +23,6 @@ import java.nio.file.attribute.BasicFileAttributes
 import java.nio.file.attribute.PosixFilePermissions
 import java.security.MessageDigest
 import java.time.Duration
-import java.util.concurrent.TimeUnit
 import java.util.Properties
 import java.util.zip.ZipFile
 import java.util.jar.Attributes
@@ -493,6 +506,130 @@ val llvmHostedWorkerClasspathReference =
     layout.buildDirectory.file(
         "generated/oracle/behavior/llvm-behavior-hosted-worker-classpath-reference-v1.json",
     )
+
+class GhidraPublicationHooks(
+    val onPublished: (String) -> Unit = {},
+    val onDeleted: (String) -> Unit = {},
+    val atomicMove: (Path, Path) -> Unit = { source, target ->
+        Files.move(source, target, StandardCopyOption.ATOMIC_MOVE,
+            StandardCopyOption.REPLACE_EXISTING)
+    },
+    val expectedOwner: UserPrincipal? = null,
+)
+
+// Per-file atomic publication; runtime inventory authentication rejects mixed generations.
+fun publishGhidraBundle(staged: Path, installed: Path, hooks: GhidraPublicationHooks = GhidraPublicationHooks()) {
+    val nofollow = LinkOption.NOFOLLOW_LINKS
+    val timestamp = FileTime.fromMillis(315532800000L)
+    val root = installed.toAbsolutePath().normalize()
+    fun attributes(path: Path) = Files.readAttributes(path, PosixFileAttributes::class.java, nofollow)
+    fun inventory(path: Path): Map<String, Path> {
+        val result = sortedMapOf<String, Path>()
+        Files.walk(path).use { paths -> paths.forEach { entry ->
+            val attr = attributes(entry)
+            require(attr.isDirectory || attr.isRegularFile) { "Unsafe bundle entry: $entry" }
+            if (attr.isRegularFile) result[path.relativize(entry).toString()] = entry
+        } }
+        return result
+    }
+    require(attributes(staged).isDirectory)
+    val stagedFiles = inventory(staged)
+    val manifestPath = staged.resolve("bundle.sha256")
+    require(Files.size(manifestPath) <= 4 * 1024 * 1024)
+    val manifest = Files.newInputStream(manifestPath, nofollow).use { it.readNBytes(4 * 1024 * 1024 + 1) }
+    require(manifest.size <= 4 * 1024 * 1024)
+    val records = sortedMapOf<String, String>()
+    val manifestText = StandardCharsets.UTF_8.newDecoder()
+        .onMalformedInput(CodingErrorAction.REPORT)
+        .onUnmappableCharacter(CodingErrorAction.REPORT)
+        .decode(ByteBuffer.wrap(manifest)).toString()
+    manifestText.reader().buffered().readLines().forEach { line ->
+        require(Regex("[0-9a-f]{64}  .+").matches(line)) { "Invalid manifest record" }
+        val name = line.substring(66)
+        require(name != "bundle.sha256" && !name.contains('\u0000') &&
+            !Path.of(name).isAbsolute && name.split('/').all { it.isNotEmpty() && it != "." && it != ".." })
+        require(records.put(name, line.substring(0, 64)) == null) { "Duplicate record" }
+    }
+    require(records.isNotEmpty() && stagedFiles.keys == records.keys + "bundle.sha256") { "Staged inventory mismatch" }
+    val modes = records.mapValues { (_, _) -> emptySet<PosixFilePermission>() }.toMutableMap()
+    records.forEach { (name, hash) ->
+        require(sha256(staged.resolve(name)) == hash) { "Unauthenticated staged entry: $name" }
+        // Match the distribution CopySpec's executable-access decision exactly.
+        modes[name] = PosixFilePermissions.fromString(if (staged.resolve(name).toFile().canExecute())
+            "rwxr-xr-x" else "rw-r--r--")
+    }
+    var ancestor: Path? = root
+    while (ancestor != null) {
+        if (Files.exists(ancestor, nofollow)) require(attributes(ancestor).isDirectory) { "Unsafe ancestor: $ancestor" }
+        ancestor = ancestor.parent
+    }
+    val owner = hooks.expectedOwner ?: root.fileSystem.userPrincipalLookupService.lookupPrincipalByName(System.getProperty("user.name"))
+    val old = if (Files.exists(root, nofollow)) inventory(root) else emptyMap()
+    if (Files.exists(root, nofollow)) Files.walk(root).use { paths -> paths.forEach {
+        require(attributes(it).owner() == owner) { "Unexpected bundle owner: $it" }
+    } }
+    (records.keys + "bundle.sha256").forEach { name ->
+        val target = root.resolve(name)
+        if (Files.exists(target, nofollow)) require(attributes(target).isRegularFile) { "File/directory conflict: $target" }
+        var parent = target.parent
+        while (parent != root) {
+            if (Files.exists(parent, nofollow)) require(attributes(parent).isDirectory) { "File/directory conflict: $parent" }
+            parent = parent.parent
+        }
+    }
+    fun syncDirectory(path: Path) { FileChannel.open(path, StandardOpenOption.READ).use { it.force(true) } }
+    fun normalize(path: Path, mode: Set<PosixFilePermission>) {
+        val attr = attributes(path)
+        if (attr.permissions() != mode) Files.setPosixFilePermissions(path, mode)
+        if (attr.lastModifiedTime() != timestamp) Files.setLastModifiedTime(path, timestamp)
+    }
+    Files.createDirectories(root)
+    fun publish(name: String, hash: String, bytes: ByteArray? = null) {
+        val target = root.resolve(name)
+        val mode = modes[name] ?: PosixFilePermissions.fromString("rw-r--r--")
+        if (Files.exists(target, nofollow) && sha256(target) == hash) {
+            normalize(target, mode)
+            return
+        }
+        Files.createDirectories(target.parent)
+        val temp = Files.createTempFile(target.parent, ".ghidra-publication-", ".tmp")
+        try {
+            if (bytes != null) Files.write(temp, bytes) else {
+                require(attributes(staged.resolve(name)).isRegularFile)
+                Files.newInputStream(staged.resolve(name), nofollow).use { input ->
+                    Files.newOutputStream(temp).use { output -> input.copyTo(output) }
+                }
+                require(sha256(staged.resolve(name)) == hash) { "Staged entry changed: $name" }
+            }
+            require(sha256(temp) == hash) { "Copied entry changed: $name" }
+            normalize(temp, mode)
+            FileChannel.open(temp, StandardOpenOption.WRITE).use { it.force(true) }
+            hooks.atomicMove(temp, target)
+            syncDirectory(target.parent)
+            hooks.onPublished(name)
+        } finally { Files.deleteIfExists(temp) }
+    }
+    records.forEach { (name, hash) -> publish(name, hash) }
+    val manifestHash = MessageDigest.getInstance("SHA-256").digest(manifest).joinToString("") { "%02x".format(it) }
+    publish("bundle.sha256", manifestHash, manifest)
+    old.filterKeys { it !in records && it != "bundle.sha256" }.forEach { (name, path) ->
+        require(attributes(path).isRegularFile && attributes(path).owner() == owner)
+        Files.delete(path); syncDirectory(path.parent); hooks.onDeleted(name)
+    }
+    Files.walk(root).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach { path ->
+        if (path != root && attributes(path).isDirectory) {
+            val empty = Files.newDirectoryStream(path).use { !it.iterator().hasNext() }
+            if (empty) { Files.delete(path); syncDirectory(path.parent) }
+        }
+    } }
+    val expected = records + ("bundle.sha256" to manifestHash)
+    require(inventory(root).keys == expected.keys)
+    expected.forEach { (name, hash) ->
+        val path = root.resolve(name)
+        require(sha256(path) == hash && attributes(path).permissions() ==
+            (modes[name] ?: PosixFilePermissions.fromString("rw-r--r--")) && attributes(path).lastModifiedTime() == timestamp)
+    }
+}
 
 fun sha256(path: java.nio.file.Path): String {
     val digest = MessageDigest.getInstance("SHA-256")
@@ -1917,10 +2054,12 @@ tasks.named<JavaExec>("run") {
 }
 
 tasks.named<Sync>("installDist") {
+    inputs.property("atomicGhidraBundlePublicationVersion", 1)
+    preserve { include("libexec/ghidra", "libexec/ghidra/**") }
+    eachFile { if (path.startsWith("libexec/ghidra/")) exclude() }
     doLast {
-        destinationDir.resolve("libexec/ghidra").walkTopDown().filter { it.isFile }.forEach { file ->
-            check(file.setLastModified(315532800000L)) { "Could not normalize installed Ghidra timestamp: $file" }
-        }
+        publishGhidraBundle(project(":ghidra-bridge").layout.buildDirectory.dir("bundle").get().asFile.toPath(),
+            destinationDir.resolve("libexec/ghidra").toPath())
     }
 }
 
@@ -2129,3 +2268,184 @@ tasks.named("check") {
     dependsOn(verifyLlvmBehaviorHelperDistribution)
     dependsOn(verifyKotlinBootClasspathDistribution)
 }
+
+val verifyAtomicGhidraBundlePublication = tasks.register("verifyAtomicGhidraBundlePublication") {
+    group = "verification"
+    doLast {
+        val base = layout.buildDirectory.dir("1903-publication/fixture").get().asFile.toPath()
+        if (Files.exists(base)) Files.walk(base).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach { Files.delete(it) } }
+        val staged = base.resolve("staged")
+        val installed = base.resolve("installed")
+        Files.createDirectories(staged.resolve("a")); Files.createDirectories(staged.resolve("bin"))
+        Files.writeString(staged.resolve("a/x"), "fixture")
+        Files.writeString(staged.resolve("bin/tool"), "tool")
+        Files.setPosixFilePermissions(staged.resolve("bin/tool"), PosixFilePermissions.fromString("rwxr-xr-x"))
+        fun manifest() { Files.writeString(staged.resolve("bundle.sha256"), listOf("a/x", "bin/tool").joinToString("") {
+            "${sha256(staged.resolve(it))}  $it\n"
+        }) }
+        manifest()
+        var assertions = 0
+        fun verify(value: Boolean) { check(value); assertions++ }
+        val published = mutableListOf<String>()
+        publishGhidraBundle(staged, installed, GhidraPublicationHooks(onPublished = { published.add(it) }))
+        verify(published == listOf("a/x", "bin/tool", "bundle.sha256"))
+        fun snapshot() = Files.walk(installed).use { paths -> paths.filter { Files.isRegularFile(it) }.toList().associate {
+            installed.relativize(it).toString() to Triple(sha256(it), Files.readAttributes(it, BasicFileAttributes::class.java).fileKey(), Files.getLastModifiedTime(it))
+        } }
+        val first = snapshot(); published.clear()
+        publishGhidraBundle(staged, installed, GhidraPublicationHooks(onPublished = { published.add(it) }))
+        verify(published.isEmpty()); verify(snapshot() == first)
+        Files.writeString(installed.resolve("obsolete"), "obsolete")
+        publishGhidraBundle(staged, installed)
+        verify(snapshot() == first)
+        Files.writeString(staged.resolve("a/x"), "changed")
+        val before = snapshot()
+        verify(runCatching { publishGhidraBundle(staged, installed) }.isFailure)
+        verify(snapshot() == before)
+        manifest()
+        verify(runCatching { publishGhidraBundle(staged, installed, GhidraPublicationHooks(atomicMove = { a, b ->
+            throw AtomicMoveNotSupportedException(a.toString(), b.toString(), "fixture")
+        })) }.isFailure)
+        verify(snapshot() == before)
+        publishGhidraBundle(staged, installed)
+        verify(sha256(installed.resolve("a/x")) == sha256(staged.resolve("a/x")))
+        fun fullSnapshot(root: Path): Map<String, List<Any?>> = Files.walk(root).use { paths ->
+            paths.toList().associate { path ->
+                val a = Files.readAttributes(path, PosixFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+                root.relativize(path).toString() to listOf(a.fileKey(), a.permissions(), a.owner(),
+                    a.isDirectory, a.isRegularFile, a.isSymbolicLink, a.isOther,
+                    if (a.isRegularFile) sha256(path) else if (a.isSymbolicLink) Files.readSymbolicLink(path).toString() else null)
+            }
+        }
+        fun noTemps() = Files.walk(installed).use { paths ->
+            paths.noneMatch { it.fileName.toString().startsWith(".ghidra-publication-") }
+        }
+        fun refusal(label: String, reason: String?, type: Class<out Throwable> = IllegalArgumentException::class.java,
+                    hooks: GhidraPublicationHooks = GhidraPublicationHooks(), target: Path = installed) {
+            val snapshot = fullSnapshot(installed)
+            val error = runCatching { publishGhidraBundle(staged, target, hooks) }.exceptionOrNull()
+            verify(error != null && type.isInstance(error) && (reason == null || error.message.orEmpty().contains(reason)))
+            verify(fullSnapshot(installed) == snapshot)
+            verify(noTemps())
+            logger.lifecycle("control: $label")
+        }
+        val validManifest = Files.readAllBytes(staged.resolve("bundle.sha256"))
+        val record = String(validManifest).lineSequence().first()
+        listOf("missing entry" to "$record\n", "blank record" to (String(validManifest) + "\n"),
+            "duplicate" to (String(validManifest) + "$record\n"),
+            "traversal" to (record.take(66) + "../escape\n"),
+            "absolute" to (record.take(66) + "/escape\n")).forEach { (label, text) ->
+            Files.writeString(staged.resolve("bundle.sha256"), text)
+            refusal(label, when(label) { "missing entry" -> "Staged inventory mismatch"; "blank record" -> "Invalid manifest record"; "duplicate" -> "Duplicate record"; else -> "Failed requirement" })
+        }
+        Files.write(staged.resolve("bundle.sha256"), byteArrayOf(0xc3.toByte(), 0x28))
+        refusal("malformed UTF8", null, MalformedInputException::class.java)
+        Files.write(staged.resolve("bundle.sha256"), validManifest)
+        val outside = base.resolve("outside")
+        Files.writeString(outside, "independent target")
+        Files.createSymbolicLink(installed.resolve("link"), outside.toAbsolutePath())
+        refusal("symlink target", "Unsafe bundle entry")
+        verify(Files.readString(outside) == "independent target")
+        Files.delete(installed.resolve("link"))
+        val linked = base.resolve("linked")
+        Files.createSymbolicLink(linked, installed.toAbsolutePath())
+        refusal("linked ancestor", "Unsafe ancestor", target = linked.resolve("nested"))
+        Files.delete(linked)
+        val fifo = installed.resolve("fifo")
+        val process = ProcessBuilder("mkfifo", fifo.toString()).start()
+        check(process.waitFor(10, TimeUnit.SECONDS) && process.exitValue() == 0)
+        refusal("FIFO", "Unsafe bundle entry")
+        Files.delete(fifo)
+        Files.createSymbolicLink(staged.resolve("link"), outside.toAbsolutePath())
+        refusal("staged symlink", "Unsafe bundle entry")
+        Files.delete(staged.resolve("link"))
+        refusal("wrong owner", "Unexpected bundle owner", hooks = GhidraPublicationHooks(
+            expectedOwner = object : UserPrincipal { override fun getName() = "synthetic-wrong-owner" }))
+        Files.delete(installed.resolve("a/x")); Files.createDirectory(installed.resolve("a/x"))
+        refusal("file directory conflict", "File/directory conflict")
+        Files.delete(installed.resolve("a/x")); publishGhidraBundle(staged, installed)
+        Files.writeString(staged.resolve("a/x"), "atomic unsupported")
+        manifest()
+        refusal("unsupported atomic move", "synthetic unsupported", AtomicMoveNotSupportedException::class.java,
+            GhidraPublicationHooks(atomicMove = { a, b -> throw AtomicMoveNotSupportedException(a.toString(), b.toString(), "synthetic unsupported") }))
+        publishGhidraBundle(staged, installed)
+        Files.createDirectories(installed.resolve("empty/nested"))
+        Files.writeString(installed.resolve("obsolete"), "old")
+        Files.writeString(installed.resolve(".ghidra-publication-stale.tmp"), "stale")
+        Files.writeString(staged.resolve("a/x"), "ordered x")
+        Files.writeString(staged.resolve("bin/tool"), "ordered tool")
+        manifest()
+        val events = mutableListOf<String>()
+        publishGhidraBundle(staged, installed, GhidraPublicationHooks(
+            onPublished = { events.add("publish:$it") }, onDeleted = { events.add("delete:$it") }))
+        verify(events.take(3) == listOf("publish:a/x", "publish:bin/tool", "publish:bundle.sha256"))
+        verify(events.drop(3).toSet() == setOf("delete:obsolete", "delete:.ghidra-publication-stale.tmp"))
+        verify(!Files.exists(installed.resolve("empty")))
+        verify(fullSnapshot(installed).keys == setOf("", "a", "a/x", "bin", "bin/tool", "bundle.sha256"))
+        verify(Files.getPosixFilePermissions(installed.resolve("bin/tool")) == PosixFilePermissions.fromString("rwxr-xr-x"))
+        verify(Files.getPosixFilePermissions(installed.resolve("a/x")) == PosixFilePermissions.fromString("rw-r--r--"))
+        logger.lifecycle("control: changed manifest publication and cleanup ordering, inventory and modes")
+        Files.writeString(staged.resolve("a/x"), "authenticated first")
+        Files.writeString(staged.resolve("bin/tool"), "authenticated second")
+        manifest()
+        val oldTool = sha256(installed.resolve("bin/tool"))
+        val oldManifest = sha256(installed.resolve("bundle.sha256"))
+        val mutation = runCatching { publishGhidraBundle(staged, installed, GhidraPublicationHooks(onPublished = {
+            if (it == "a/x") Files.writeString(staged.resolve("bin/tool"), "unauthenticated mutation")
+        })) }.exceptionOrNull()
+        verify(mutation is IllegalArgumentException && mutation.message.orEmpty().contains("Staged entry changed"))
+        verify(sha256(installed.resolve("a/x")) == sha256(staged.resolve("a/x")))
+        verify(sha256(installed.resolve("bin/tool")) == oldTool && sha256(installed.resolve("bundle.sha256")) == oldManifest)
+        verify(noTemps())
+        logger.lifecycle("control: staged mutation refuses changed bytes after earlier atomic publication")
+        val oldBytes = ByteArray(8 * 1024 * 1024) { (it * 31).toByte() }
+        val newBytes = ByteArray(oldBytes.size) { (it * 17 + 7).toByte() }
+        Files.write(staged.resolve("a/x"), oldBytes); manifest(); publishGhidraBundle(staged, installed)
+        val oldHash = sha256(installed.resolve("a/x"))
+        val oldKey = Files.readAttributes(installed.resolve("a/x"), BasicFileAttributes::class.java).fileKey()
+        Files.write(staged.resolve("a/x"), newBytes); manifest()
+        val newHash = sha256(staged.resolve("a/x"))
+        val ready = CountDownLatch(1)
+        val start = CountDownLatch(1)
+        val moved = CountDownLatch(1)
+        val executor = Executors.newSingleThreadExecutor()
+        Files.newInputStream(installed.resolve("a/x")).use { held ->
+            val reader = executor.submit<List<String>> {
+                val hashes = mutableListOf(sha256(installed.resolve("a/x")))
+                ready.countDown()
+                check(start.await(30, TimeUnit.SECONDS))
+                repeat(16) { hashes.add(sha256(installed.resolve("a/x"))) }
+                check(moved.await(30, TimeUnit.SECONDS))
+                hashes.add(sha256(installed.resolve("a/x")))
+                hashes
+            }
+            try {
+                check(ready.await(30, TimeUnit.SECONDS))
+                publishGhidraBundle(staged, installed, GhidraPublicationHooks(atomicMove = { a, b ->
+                    if (b == installed.toAbsolutePath().resolve("a/x")) start.countDown()
+                    Files.move(a, b, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+                    if (b == installed.toAbsolutePath().resolve("a/x")) moved.countDown()
+                }))
+                verify(held.readAllBytes().contentEquals(oldBytes))
+                val hashes = reader.get(30, TimeUnit.SECONDS)
+                verify(hashes.first() == oldHash && hashes.last() == newHash && hashes.all { it == oldHash || it == newHash })
+                verify(sha256(installed.resolve("a/x")) == newHash)
+                verify(Files.readAttributes(installed.resolve("a/x"), BasicFileAttributes::class.java).fileKey() != oldKey)
+            } finally {
+                start.countDown(); moved.countDown(); reader.cancel(true); executor.shutdownNow()
+                check(executor.awaitTermination(30, TimeUnit.SECONDS))
+            }
+        }
+        verify(noTemps())
+        logger.lifecycle("control: 8MiB held stream and concurrent fresh opens, post-publication hash and inode")
+        Files.setPosixFilePermissions(staged.resolve("a/x"), PosixFilePermissions.fromString("rw-r----x"))
+        val distributionMode = PosixFilePermissions.fromString(
+            if (staged.resolve("a/x").toFile().canExecute()) "rwxr-xr-x" else "rw-r--r--")
+        publishGhidraBundle(staged, installed)
+        verify(Files.getPosixFilePermissions(installed.resolve("a/x")) == distributionMode)
+        logger.lifecycle("control: executable mode matches distribution access semantics")
+        logger.lifecycle("source SHA-256: ${sha256(project.file("build.gradle.kts").toPath())}")
+        logger.lifecycle("verifyAtomicGhidraBundlePublication: $assertions assertions passed")
+    }
+}
+tasks.named("check") { dependsOn(verifyAtomicGhidraBundlePublication) }
