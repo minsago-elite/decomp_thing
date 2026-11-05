@@ -109,13 +109,14 @@ export function GitRepositoryPanel({ job, capabilities, basePath, session, pollI
   }
 
   /** One explicit initialization: one POST, then polls bound to the acknowledged operation's identity. */
-  async function initialize(signal: AbortSignal, runId: string, revisionId: string, csrfToken: string): Promise<Operation> {
+  async function initialize(signal: AbortSignal, runId: string, revisionId: string, csrfToken: string, acceptance: { acknowledged: boolean }): Promise<Operation> {
     const ack = (await client.post('operation', repositoriesPath, 'gitRepositoryInitRequest',
       { action: 'git.init', runId, revisionId, initialBranch: null },
       { csrfToken, ifMatch: `"${binding.version}"`, idempotencyKey: crypto.randomUUID(), signal })).data;
     const { operationId, repositoryId } = ack;
     if (ack.jobId !== binding.jobId || ack.action !== 'git.init' || repositoryId === null
       || !idPattern.test(repositoryId) || !idPattern.test(operationId)) throw new IdentityMismatch();
+    acceptance.acknowledged = true;
     const operationPath = `${repositoriesPath}/${repositoryId}/operations/${operationId}`;
     let operation = ack;
     for (let poll = 0; !terminal.has(operation.state); poll++) {
@@ -135,6 +136,7 @@ export function GitRepositoryPanel({ job, capabilities, basePath, session, pollI
     update(current => ({ busy: true, stale: !command && current.observed !== null,
       status: command ? copy.requestingInitialization : copy.readingRepository }));
     let phase: 'command' | 'read' = command ? 'command' : 'read';
+    const acceptance = { acknowledged: false };
     try {
       let outcome: Operation | null = null;
       if (command) {
@@ -142,7 +144,7 @@ export function GitRepositoryPanel({ job, capabilities, basePath, session, pollI
         const csrfToken = session.csrf();
         if (!latestRunId || !revisionId) throw new ApiClientError('invalid_request');
         if (!csrfToken) { update(() => ({ status: copy.reconnectBeforeInitializing })); return; }
-        outcome = await initialize(controller.signal, latestRunId, revisionId, csrfToken);
+        outcome = await initialize(controller.signal, latestRunId, revisionId, csrfToken, acceptance);
         phase = 'read';
       }
       const next = await read(controller.signal);
@@ -158,6 +160,7 @@ export function GitRepositoryPanel({ job, capabilities, basePath, session, pollI
         const kind = failureKind(failure);
         update(() => ({ observed: null, stale: false, status: withApiFailureReference(
           kind === 'session' || kind === 'denied' ? copy.failures[kind]
+          : acceptance.acknowledged ? copy.initializationUnconfirmed
           : status === 412 ? copy.jobChanged
           : status === 409 ? copy.conflict
           : status === 503 ? copy.unavailableNow

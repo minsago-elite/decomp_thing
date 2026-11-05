@@ -313,6 +313,24 @@ async function readyToInitialize(fetcher: Fetcher, pollIntervalMs: number | null
   return { session, button };
 }
 
+it.each([
+  [409, 'GIT_REPOSITORY_EXISTS', copy.initializationUnconfirmed],
+  [412, 'PRECONDITION_FAILED', copy.initializationUnconfirmed],
+  [503, 'PRIVATE_DIAGNOSTIC', copy.initializationUnconfirmed],
+  [401, 'SESSION_EXPIRED', copy.failures.session],
+  [403, 'ACCESS_DENIED', copy.failures.denied],
+] as const)('a poll failure %s after acceptance preserves uncertainty without repeating the command', async (code, reason, expected) => {
+  const fetcher = sequence(ok(emptyDoc()), ok(runDoc()), ok(operationDoc('queued'), 202), failure(code, reason));
+  const { button } = await readyToInitialize(fetcher);
+  fireEvent.click(button);
+  await waitFor(() => expect(status().startsWith(expected)).toBe(true));
+  await waitFor(() => expect(refresh().hasAttribute('disabled')).toBe(false));
+  expect(status()).toContain(reference);
+  expect(calls(fetcher)).toEqual([LIST, RUN, POST, POLL]);
+  expect(initButton()).toBeNull();
+  expectSafe();
+});
+
 it('normal queued-to-completed initialization: one POST with CSRF/If-Match/key, default polling, identity-bound path (characterization)', async () => {
   const fetcher = sequence(ok(emptyDoc()), ok(runDoc()), ok(operationDoc('queued'), 202), ok(operationDoc('running')),
     ok(operationDoc('completed')), ok(listingDoc()), ok(workspaceDoc()));
