@@ -1,8 +1,12 @@
 package decompengine.oracle.machinecalls
 
+import decompengine.acp.LinuxDescriptor
+import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.analysis.BundledGhidra
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.StrictJsonLimits
+import decompengine.oracle.externalcalls.StaticMemoryTransferDecoderV1
+import decompengine.oracle.externalcalls.staticMemoryTransferFromBridgeV1
 import decompengine.oracle.fulltree.StableControlFile
 import decompengine.oracle.fulltree.FullTreeFunctionObservationIsolationConfiguration
 import decompengine.oracle.fulltree.FullTreeFunctionObservationRuntimeArtifactRole
@@ -14,12 +18,7 @@ import java.io.ByteArrayInputStream
 import java.net.URI
 import java.net.URL
 import java.lang.reflect.InvocationTargetException
-import java.nio.ByteBuffer
-import java.nio.channels.FileChannel
-import java.nio.file.Files
-import java.nio.file.LinkOption
 import java.nio.file.Path
-import java.nio.file.StandardOpenOption
 import java.security.CodeSource
 import java.security.SecureClassLoader
 import java.security.cert.Certificate
@@ -384,6 +383,50 @@ internal class AuthenticatedMachineCallRuntimeV2 private constructor(
     private val loader: MachineCallJarClassLoaderV1,
     private val decoderClass: Class<*>,
 ) : AutoCloseable {
+    /** Uses the same authenticated isolated runtime; no new discovery or classpath is admitted. */
+    fun <T> withStaticMemoryTransferDecoder(consume: (StaticMemoryTransferDecoderV1) -> T): T {
+        val thread = Thread.currentThread()
+        val previous = thread.contextClassLoader
+        thread.contextClassLoader = loader
+        try {
+            val name = "decompengine.ghidra.ByteStaticMemoryTransferDecoderV1"
+            val type = Class.forName(name, false, loader)
+            val recordType = Class.forName("$name\$StaticMemoryTransfer", false, loader)
+            val wrapperType = Class.forName("$name\$DecodeException", false, loader)
+            val refusalType = Class.forName("decompengine.ghidra.ByteInstructionDecoderV1\$DecodeException", false, loader)
+            for (loaded in listOf(type, recordType, wrapperType, refusalType)) {
+                require(loaded.classLoader === loader) { "static memory decoder escaped its isolated loader" }
+                requireLoadedMachineCallBridgeV1(loaded, request.bridgeSnapshot.path, request.bridgeSha256)
+            }
+            require(recordType.isRecord)
+            val decode = type.getMethod("decode", java.lang.Long.TYPE, ByteArray::class.java)
+            require(decode.returnType === recordType) { "static memory decoder return type differs" }
+            type.getMethod("initialize", String::class.java).invoke(null,
+                request.bundleRoot.resolve("ghidra_${BundledGhidra.VERSION}_PUBLIC").toString())
+            val decoder = type.getConstructor(String::class.java).newInstance(request.languageId)
+            return consume(StaticMemoryTransferDecoderV1 { address, bytes ->
+                val owned = bytes.copyOf()
+                val record = try { decode.invoke(decoder, address.toLong(), owned.copyOf()) }
+                catch (failure: InvocationTargetException) {
+                    val direct = failure.cause
+                    // Only the base decoder's authenticated refusal is a recoverable byte refusal.
+                    // The new bridge wraps it once; its own API/second-pass failures stay fatal.
+                    val refusal = if (direct?.javaClass === wrapperType) direct.cause else direct
+                    if (refusal?.javaClass === refusalType && refusal.javaClass.classLoader === loader) {
+                        throw MachineInstructionRefusalV1(requireNotNull(refusal.message))
+                    }
+                    throw failure
+                } ?: throw IllegalArgumentException("static memory decoder returned null")
+                require(record.javaClass === recordType && record.javaClass.classLoader === loader)
+                staticMemoryTransferFromBridgeV1(record).also { result ->
+                    require(result.address == address && result.length <= owned.size && result.bytes.contentEquals(owned.copyOf(result.length))) {
+                        "static memory decoder changed requested address or bytes"
+                    }
+                }
+            })
+        } finally { thread.contextClassLoader = previous }
+    }
+
     fun <T> withDecoder(consume: (MachineInstructionDecoderV1) -> T): T {
         val thread = Thread.currentThread()
         val previous = thread.contextClassLoader
@@ -604,22 +647,46 @@ internal fun machineInstructionFromBridgeV1(record: Any): MachineInstructionV1 {
         address(value("fallthrough")), targets.map { requireNotNull(address(it)) }, address(value("directCallTarget")), string("contextStatus"))
 }
 
-/** A hard-link publication is atomic and, unlike ATOMIC_MOVE, cannot replace an existing target. */
-internal fun publishMachineCallResultV1(output: Path, bytes: ByteArray) {
+/**
+ * Pin every directory lookup without following symlinks, then publish an unnamed inode through
+ * that retained parent. Neither link source/destination nor failure cleanup re-resolves a mutable
+ * absolute pathname. A renamed parent receives the authentic bytes, never its replacement.
+ * Linux/O_TMPFILE support is required: there is deliberately no pathname-based fallback.
+ */
+internal fun publishMachineCallResultV1(output: Path, bytes: ByteArray, checkpoint: (String) -> Unit = {}) {
     requireMachineCallPath(output)
-    val parent = requireStableDirectory(requireNotNull(output.parent), "machine-call output parent")
-    require(!Files.exists(output, LinkOption.NOFOLLOW_LINKS)) { "machine-call output already exists" }
-    val staged = Files.createTempFile(parent.first, ".machine-call-", ".pending")
+    LinuxFilesystemSyscalls.requireSupported(output)
+    val directories = mutableListOf<LinuxDescriptor>()
     try {
-        FileChannel.open(staged, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS).use { channel ->
-            val buffer = ByteBuffer.wrap(bytes)
-            while (buffer.hasRemaining()) channel.write(buffer)
-            channel.force(true)
+        var parent = LinuxFilesystemSyscalls.openRoot(output.root).also(directories::add)
+        for (component in requireNotNull(output.parent)) {
+            parent = LinuxFilesystemSyscalls.openDirectoryAt(parent.fd, component.toString()).also(directories::add)
         }
-        require(requireStableDirectory(parent.first, "machine-call output parent") == parent) { "machine-call output parent changed" }
-        Files.createLink(output, staged)
+        val identity = LinuxFilesystemSyscalls.identity(parent.fd)
+        require(identity.isDirectory && !identity.isSymbolicLink && identity.mode and 0x12 == 0) {
+            "machine-call output parent must not be group/world writable"
+        }
+        val name = output.fileName.toString()
+        LinuxFilesystemSyscalls.openPathAtOrNull(parent.fd, name)?.use {
+            throw IllegalArgumentException("machine-call output already exists")
+        }
+        LinuxFilesystemSyscalls.createTemporaryAt(parent.fd).use { staged ->
+            try {
+                LinuxFilesystemSyscalls.write(staged, bytes) {}
+                checkpoint("before publication link")
+                val current = LinuxFilesystemSyscalls.identity(staged.fd)
+                require(current.key == staged.identity.key && current.isRegularFile && current.linkCount == 0) {
+                    "machine-call staged inode changed"
+                }
+                // linkat(AT_EMPTY_PATH) names the retained inode, and fails if the target exists.
+                LinuxFilesystemSyscalls.linkTemporaryAt(staged, parent.fd, name)
+            } finally {
+                // Closing an unpublished O_TMPFILE releases the inode; no unlink pathname exists.
+                checkpoint("before staging close")
+            }
+        }
     } finally {
-        Files.deleteIfExists(staged)
+        directories.asReversed().forEach { it.close() }
     }
 }
 

@@ -22,6 +22,17 @@ class IndependentMachineCallReportV1Test {
         try { assertFails { IndependentMachineCallReportV1.validateComponent(report) } } finally { Thread.interrupted() }
     }
 
+    @Test fun `ownership validation includes absolute extents starting below image base`() = withMachineCallCrossBaseFixtureV1 { report ->
+        IndependentMachineCallReportV1.validateComponent(report)
+        assertEquals(report, IndependentMachineCallReportV1.parseComponent(OracleJson.canonicalBytes(report)))
+        val roots = report.getValue("roots") as JsonArray
+        val index = roots.indexOfFirst { (it as JsonObject).getValue("rva") == JsonNull }
+        val problems = report.at(listOf("roots", index, "ownershipProblems")) as JsonArray
+        // All counts and local extent checks still agree; only the absolute overlap relation rejects this.
+        reject(report.edit(listOf("roots", index, "ownershipProblems"),
+            JsonArray(problems.filter { it != JsonPrimitive("overlapping-symbol-extents") })))
+    }
+
     @Test fun `report fields are closed at every nesting level and authority is never admitted`() = withMachineCallComponentFixtureV1 { report ->
         val objects = listOf(emptyList<Any>(), listOf("limits"), listOf("counts"), listOf("roots", 0),
             listOf("roots", 0, "origins", 0), listOf("canonicalPopulation", 0), listOf("calls", 0))

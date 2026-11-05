@@ -63,6 +63,10 @@ class ContainedModuleCompilerWorkerTest {
     fun `direct worker refuses transient source or transitive header includes before compiler launch`() = withRoot { root ->
         val cases = listOf(
             "#include \"/tmp/transient-reports.h\"\nint alpha(void) { return 1; }" to "int alpha(void);\n",
+            // This is the concrete writable-tree escape spelling from the compiler-read
+            // finding. Keep the path literal here so a future policy change cannot silently
+            // admit it before the native boundary is exercised.
+            "#include \"../../../../reports/tmp/input.h\"\nint alpha(void) { return 1; }" to "int alpha(void);\n",
             "#include \"modules/alpha.h\"\nint alpha(void) { return 1; }" to
                 "#ifndef ALPHA_H\n#define ALPHA_H\n#include \"/tmp/transient-tmp.h\"\n#endif\n",
         )
@@ -481,10 +485,10 @@ class ContainedModuleCompilerWorkerTest {
         val request = ContainedModuleCompilerRequest("a".repeat(64), profile.id, profile.sha256, snapshot,
             "src/modules/alpha.c", inputs, compiler, sha256(Files.readAllBytes(compiler)), output,
             maximumWallMillis, maximumOutputBytes, OracleJson.parse(profile.canonicalJson().toByteArray()) as JsonObject,
-            schemaVersion = 2, trampolinePath = helper, trampolineSha256 = sha256(Files.readAllBytes(helper)),
+            schemaVersion = 4, trampolinePath = helper, trampolineSha256 = sha256(Files.readAllBytes(helper)),
             runtimeReadRoots = compilerRoots,
             runtimeExecuteRoots = listOf(compiler.parent, Path.of("/usr/bin").toRealPath()).distinct(),
-            runtimeExecuteFiles = listOf(loaderPath))
+            runtimeExecuteFiles = listOf(loaderPath), compilerInternalIncludePath = Path.of("/usr/include").toRealPath())
         return Fixture(root, request)
     }
 

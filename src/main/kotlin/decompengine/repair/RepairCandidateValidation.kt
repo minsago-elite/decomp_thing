@@ -30,6 +30,7 @@ class RepairCandidateValidationRequest(
     val deadlineNanos: Long,
     val cancellation: AgentCancellation,
     val invocation: RepairValidationInvocation? = null,
+    val expectedOriginalBinarySha256: String? = null,
 ) {
     private val sourceContent = checkedCandidateSources(candidateSources, budget)
     private val inputContent = checkedCandidateInputs(inputs, budget)
@@ -61,6 +62,10 @@ class RepairCandidateValidationRequest(
         require(inputContent.map { it.id } == inputContent.map { it.id }.distinct().sorted())
         require(repairRegressionCorpusSha256(inputContent) == regressionCorpusSha256)
         require(listOf(profileSha256, indexSha256).all { it.matches(Regex("[0-9a-f]{64}")) })
+        require(expectedOriginalBinarySha256 == null ||
+            (originalBinary != null && expectedOriginalBinarySha256.matches(Regex("[0-9a-f]{64}")))) {
+            "expected original binary digest is invalid or has no binary"
+        }
         invocation?.let {
             require(it.sourceRevisionSha256 == sourceRevisionSha256 && it.profileSha256 == profileSha256 &&
                 it.indexSha256 == indexSha256 && it.regressionCorpusSha256 == regressionCorpusSha256)
@@ -164,10 +169,17 @@ internal fun validateTestOnlyRepairCandidate(
             Files.write(target, bytes)
         }
         Files.createDirectories(request.reportsDir)
+        val originalSha256 = request.originalBinary?.let { sha256(Files.readAllBytes(it)) }
+        require(request.expectedOriginalBinarySha256 == null || originalSha256 == request.expectedOriginalBinarySha256) {
+            "original binary changed after exploration snapshot validation"
+        }
         val compile = strategy.compile(workspace, request.reportsDir.resolve("${request.label}.compile.log"), request.budget)
         val rebuilt = if (compile == null && request.originalBinary != null) strategy.rebuiltProgram(workspace, request.budget) else null
+        require(request.originalBinary?.let { sha256(Files.readAllBytes(it)) } == originalSha256) {
+            "original binary changed during test-only repair validation"
+        }
         val proof = RepairValidationProof(request.sourceRevisionSha256, request.profileSha256, request.indexSha256,
-            request.regressionCorpusSha256, request.originalBinary?.let { sha256(Files.readAllBytes(it)) },
+            request.regressionCorpusSha256, originalSha256,
             rebuilt?.takeIf { Files.isRegularFile(it) }?.let { sha256(Files.readAllBytes(it)) },
             sha256("TEST_ONLY_HOST_PROCESS".toByteArray()), sha256("${request.label}:${request.sourceRevisionSha256}".toByteArray()),
             true, RepairValidationAssurance.TEST_ONLY_HOST_PROCESS)

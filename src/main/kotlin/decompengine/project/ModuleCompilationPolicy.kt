@@ -11,6 +11,8 @@ internal interface ModuleCompilationPolicy {
     fun fingerprintIdentity(checkpointVersion: Int): String = if (checkpointVersion <= 6) legacyFingerprintIdentity else id
     fun commandForCheckpoint(profile: ReconstructionProfile, sourcePath: String, checkpointVersion: Int): List<String> =
         if (checkpointVersion <= 6) historicalCommand(profile, sourcePath) else command(profile, sourcePath)
+    /** Whether exact-source, bounded diagnostics may be offered as informational next-attempt context. */
+    val providesCompilerFeedback: Boolean get() = false
     fun command(profile: ReconstructionProfile, sourcePath: String): List<String>
     fun validate(projectDir: Path, sourcePath: String, profile: ReconstructionProfile): ModuleCompilationEvidence
 }

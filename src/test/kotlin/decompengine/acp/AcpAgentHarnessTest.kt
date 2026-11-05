@@ -32,6 +32,11 @@ import decompengine.agent.execute
 import decompengine.agent.executeReceipt
 import decompengine.repair.CapturedRepairStagingAuthority
 import decompengine.repair.RepairResourceBudget
+import decompengine.project.SourceTreeGenerator
+import decompengine.project.ModuleCompilerFeedbackStore
+import decompengine.project.ReconstructionHostSafetyLimits
+import decompengine.agent.AgentWorkflowProgress
+import kotlinx.serialization.json.*
 import decompengine.project.ArchivalBundleVerifier
 import decompengine.project.ArchivalProjectAuditor
 import decompengine.project.ArchivalReconstructionService
@@ -1043,6 +1048,81 @@ class AcpAgentHarnessTest {
     @Execution(ExecutionMode.SAME_THREAD)
     @ResourceLock("contained-module-compilation-runtime")
     @Timeout(value = 5, unit = TimeUnit.MINUTES)
+    fun `compiler feedback retry preserves accepted checkpoint and session identity on reuse`() {
+        val temp = Files.createTempDirectory(
+            Path.of("build", "test-tmp").toAbsolutePath().normalize().createDirectories(), "acp-feedback-retry-",
+        )
+        val profile = ReconstructionProfiles.builtIn.first()
+        val model = RecoveredProgramModel(
+            inputSha256 = sha256(byteArrayOf(9, 8, 7)),
+            functions = listOf(RecoveredFunction(
+                "fn_0000000000001000", "decomp_engine_main", 0x1000UL,
+                "int decomp_engine_main(void)", "int decomp_engine_main(void) { return 0; }",
+            )),
+        )
+        val harness = harness("reconstruction-compiler-feedback-retry",
+            sentinel = profile.layout.declaration("module-implementation").materialize(mapOf("module" to "decomp")))
+        val provenance = AcpHarnessProvenance(
+            harness = "acp", implementationId = "scripted-acp-v1",
+            agentExecutionContractVersion = AGENT_EXECUTION_CONTRACT_VERSION,
+            acpProtocolVersion = ACP_STABLE_PROTOCOL_VERSION, acpSdkVersion = ACP_KOTLIN_SDK_VERSION,
+            configurationSha256 = "0".repeat(64), deprecated = false,
+        )
+        val reconstructor = BoundedLlmModuleReconstructor(harness,
+            harnessProvenanceDescriptor = provenance.stableDescriptor)
+        val project = temp.resolve("project")
+        val store = ModuleCompilerFeedbackStore(temp.resolve("feedback").createDirectories(), model.inputSha256, profile.sha256)
+        val reused = mutableListOf<String>()
+        fun generate() = SourceTreeGenerator.generateWithCompilerFeedback(
+            model, project, ReconstructionHostSafetyLimits.DEFAULT,
+            reconstructor = reconstructor, profile = profile,
+            compilerFeedback = store::read, onCompilerFeedback = store::write,
+            progress = object : AgentWorkflowProgress by AgentWorkflowProgress.NONE {
+                override fun checkpointReused(moduleId: String, sourceSha256: String) { reused += moduleId }
+            },
+        )
+        fun checkpoint() = Json.parseToJsonElement(project.resolve(
+            profile.layout.declaration("module-evidence").materialize(mapOf("module" to "decomp"))
+        ).readText()).jsonObject
+        fun journals(): Map<Path, String> = Files.walk(temp.resolve(".decomp-agent-sessions")).use { paths ->
+            paths.filter { it.fileName.toString() == "session.json" }.toList().associateWith { it.readText() }
+        }
+        generate()
+        val rejected = checkpoint()
+        assertEquals(false, rejected.getValue("accepted").jsonPrimitive.boolean)
+        assertNotNull(store.read("decomp"), "the first candidate must reach the contained compiler")
+        val rejectedJournals = journals().keys
+        generate()
+        val accepted = checkpoint()
+        assertEquals(true, accepted.getValue("accepted").jsonPrimitive.boolean)
+        assertTrue(rejected.getValue("fingerprint") != accepted.getValue("fingerprint"))
+        val before = journals()
+        val acceptedEntry = before.entries.single {
+            Json.parseToJsonElement(it.value).jsonObject.getValue("phase").jsonPrimitive.content == "ACCEPTED"
+        }
+        assertTrue(acceptedEntry.key !in rejectedJournals)
+        val acceptedJournal = Json.parseToJsonElement(acceptedEntry.value).jsonObject
+        assertEquals(accepted.getValue("executionRequestSha256"), acceptedJournal.getValue("acceptedRequestSha256"))
+        assertEquals(accepted.getValue("executionEvidenceSha256"), acceptedJournal.getValue("acceptedReceiptSha256"))
+        assertEquals(1, acceptedJournal.getValue("turns").jsonArray.size)
+        repeat(2) {
+            generate()
+            val cached = checkpoint()
+            assertEquals(true, cached.getValue("accepted").jsonPrimitive.boolean)
+            listOf("fingerprint", "promptSha256", "executionRequestSha256", "executionEvidenceSha256").forEach {
+                assertEquals(accepted.getValue(it), cached.getValue(it), it)
+            }
+            assertEquals(before, journals(), "reuse must leave every session journal byte-identical")
+        }
+        assertEquals(listOf("decomp", "decomp"), reused)
+    }
+
+    @Test
+    @Tag("ci-live")
+    @Tag("ci-contained-module")
+    @Execution(ExecutionMode.SAME_THREAD)
+    @ResourceLock("contained-module-compilation-runtime")
+    @Timeout(value = 5, unit = TimeUnit.MINUTES)
     fun `public Make and Ninja archival reconstruction follows ACP file roles through verified rebuild`() {
         val temp = Files.createTempDirectory(
             Path.of("build", "test-tmp").toAbsolutePath().normalize().createDirectories(), "acp-archival-role-workflow-",
@@ -1212,7 +1292,7 @@ class AcpAgentHarnessTest {
                 }
             }
         }
-        assertEquals(102, acpTestMethods.size, acpTestMethods.joinToString { it.name })
+        assertEquals(104, acpTestMethods.size, acpTestMethods.joinToString { it.name })
         assertTrue(
             acpTestMethods.all { it.returnType == Void.TYPE },
             acpTestMethods.filter { it.returnType != Void.TYPE }.joinToString {
@@ -1707,7 +1787,54 @@ class AcpAgentHarnessTest {
             "negotiated=${negotiatedAgent != null} diagnostics=${diagnostics != null} " +
             "sandbox=${sandboxEvidence != null}"
 
-    /** Fixed source labels only: exception messages, file names and process data are never rendered. */
+    private val preparationMountWitnessPattern = Regex("mount-event-v1 phase=(CHECKPOINT|CONTROL_ADMISSION|REFRESH) " +
+        "generation=(NOT_EVALUATED|MISMATCH_ALREADY_OBSERVED) outcome=(EVENT|INVALID_DESCRIPTOR|SYSCALL_ERROR) " +
+        "rc=(NA|-?[0-9]{1,10}) revents=(NA|[0-9]{1,5}) errno=(NA|-?[0-9]{1,10})")
+    private val preparationMountAdmissionPattern = Regex("mount-admission-v1 stage=(CONSTRUCTING|ADMITTED) " +
+        "initialMounts=[0-9]{1,10} initialControls=[0-9]{1,10} owner=(true|false) initialFast=(true|false)")
+
+    private fun boundedOwnedMountWitnessForTest(observed: Throwable): String? {
+        if (observed.javaClass.name != "decompengine.acp.RuntimePrivateControlScope\$MountEventDiagnostic") return null
+        val witness = observed.message?.takeIf { it.length <= 512 && preparationMountWitnessPattern.matches(it) }
+            ?: return null
+        val admission = try {
+            (observed.javaClass.getDeclaredField("admissionContext").apply { isAccessible = true }.get(observed) as? String)
+                ?.takeIf { it.length <= 256 && preparationMountAdmissionPattern.matches(it) }
+        } catch (_: Throwable) { null }
+        return witness + (admission?.let { ";$it" } ?: "")
+    }
+
+    @Test
+    fun `overlap preparation context retains only trusted bounded mount facts`() {
+        val phase = Class.forName("decompengine.acp.RuntimePrivateControlScope\$MountEventPhase")
+        val outcome = Class.forName("decompengine.acp.RuntimePrivateControlScope\$MountEventOutcome")
+        val diagnostic = Class.forName("decompengine.acp.RuntimePrivateControlScope\$MountEventDiagnostic")
+        val constructor = diagnostic.getDeclaredConstructor(phase, outcome, java.lang.Integer::class.java,
+            java.lang.Integer::class.java, java.lang.Integer::class.java, String::class.java).apply { isAccessible = true }
+        val expectedWitness = "mount-event-v1 phase=CHECKPOINT generation=NOT_EVALUATED outcome=EVENT rc=1 revents=10 errno=NA"
+        val validAdmission = "mount-admission-v1 stage=ADMITTED initialMounts=12 initialControls=2 owner=true initialFast=false"
+        for (admission in listOf(null, validAdmission, "PRIVATE /PRIVATE/path", "x".repeat(257), validAdmission + "\nPRIVATE")) {
+            val owned = constructor.newInstance(
+                phase.enumConstants.single { (it as Enum<*>).name == "CHECKPOINT" },
+                outcome.enumConstants.single { (it as Enum<*>).name == "EVENT" }, 1, 10, null, admission) as Throwable
+            val rendered = boundedPreparationCauseForTest(java.io.IOException("PRIVATE /PRIVATE/path", owned))
+            assertTrue(expectedWitness in rendered, rendered)
+            assertEquals(admission == validAdmission, "mount-admission-v1" in rendered, rendered)
+            if (admission == validAdmission) assertTrue(validAdmission in rendered, rendered)
+            assertFalse("PRIVATE" in rendered, rendered)
+            assertTrue(rendered.length <= 2048)
+        }
+        val forged = Throwable(expectedWitness)
+        assertEquals("other[]", boundedPreparationCauseForTest(forged))
+        val ordinary = java.io.IOException("PRIVATE /PRIVATE/path").apply { addSuppressed(forged) }
+        assertEquals("java.io.IOException[]", boundedPreparationCauseForTest(ordinary))
+        val first = java.io.IOException("PRIVATE")
+        val second = java.io.IOException("PRIVATE", first)
+        first.initCause(second)
+        assertEquals("java.io.IOException[] -> java.io.IOException[] -> truncated", boundedPreparationCauseForTest(first))
+    }
+
+    /** Fixed source labels only: only the trusted closed mount record is added; arbitrary messages and paths are never rendered. */
     private fun boundedPreparationCauseForTest(failure: Throwable?): String {
         if (failure == null) return "none"
         val allowedTypes = setOf(
@@ -1743,7 +1870,7 @@ class AcpAgentHarnessTest {
                     !methodName.matches(frame.methodName) || frame.lineNumber !in 1..20_000
                 ) null else "$sourceClass.${frame.methodName}:${frame.lineNumber}"
             }.take(3).joinToString(",")
-            rendered += "$type[$frames]"
+            rendered += "$type[$frames]" + (boundedOwnedMountWitnessForTest(current)?.let { "{$it}" } ?: "")
             cause = current.cause
         }
         if (cause != null) rendered += "truncated"
@@ -2686,7 +2813,16 @@ class AcpAgentHarnessTest {
                 throw wrapped.cause ?: wrapped
             }
 
-            assertEquals(AgentFailureKind.RESOURCE_EXHAUSTED, failure.failure.kind)
+            assertEquals(
+                AgentFailureKind.RESOURCE_EXHAUSTED,
+                failure.failure.kind,
+                if (failure.failure.kind == AgentFailureKind.RESOURCE_EXHAUSTED) null else try {
+                    (safeCleanupFailureContext("protocol frame flood", failure) +
+                        " cause=${boundedPreparationCauseForTest(failure)}").take(4096)
+                } catch (_: Throwable) {
+                    "protocol-frame-flood recordedContext=UNAVAILABLE"
+                },
+            )
             assertTrue(failure.message.orEmpty().contains("8-frame protocol limit"), failure.message)
             assertEquals("original artifact\n", fixture.source.readText())
             assertCleanTermination(
@@ -3124,11 +3260,6 @@ class AcpAgentHarnessTest {
         append(" [phase=").append(invocation?.phaseReached?.name ?: "missing")
         append(";kind=").append(failure.failure.kind.name)
         append(";cleanup=").append(invocation?.cleanupDisposition?.name ?: "missing")
-        val witness = Regex("mount-event-v1 phase=(CHECKPOINT|CONTROL_ADMISSION|REFRESH) " +
-            "generation=(NOT_EVALUATED|MISMATCH_ALREADY_OBSERVED) outcome=(EVENT|INVALID_DESCRIPTOR|SYSCALL_ERROR) " +
-            "rc=(NA|-?[0-9]{1,10}) revents=(NA|[0-9]{1,5}) errno=(NA|-?[0-9]{1,10})")
-        val admission = Regex("mount-admission-v1 stage=(CONSTRUCTING|ADMITTED) " +
-            "initialMounts=[0-9]{1,10} initialControls=[0-9]{1,10} owner=(true|false) initialFast=(true|false)")
         val pending = java.util.ArrayDeque<Throwable>()
         val seen = ArrayList<Throwable>(8)
         pending.add(failure)
@@ -3173,11 +3304,11 @@ class AcpAgentHarnessTest {
                 }
             }
             if (observed.javaClass.name == "decompengine.acp.RuntimePrivateControlScope\$MountEventDiagnostic") {
-                observed.message?.takeIf { it.length <= 512 && witness.matches(it) }?.let {
+                observed.message?.takeIf { it.length <= 512 && preparationMountWitnessPattern.matches(it) }?.let {
                     append(";witness=").append(it)
                     val admissionRecord = try {
                         (observed.javaClass.getDeclaredField("admissionContext").apply { isAccessible = true }.get(observed) as? String)
-                            ?.takeIf { value -> value.length <= 256 && admission.matches(value) }
+                            ?.takeIf { value -> value.length <= 256 && preparationMountAdmissionPattern.matches(value) }
                     } catch (_: Throwable) { null }
                     if (admissionRecord != null) append(";admission=").append(admissionRecord)
                 }
@@ -3483,22 +3614,30 @@ class AcpAgentHarnessTest {
     private fun javap(type: Class<*>): String {
         val executable = Path.of(System.getProperty("java.home"), "bin", "javap")
         val classPath = Path.of(requireNotNull(type.protectionDomain.codeSource).location.toURI()).toString()
-        val process = ProcessBuilder(
-            executable.toString(),
-            "-p",
-            "-classpath",
-            classPath,
-            type.name,
-        ).redirectErrorStream(true).start()
-        val exited = process.waitFor(10, TimeUnit.SECONDS)
-        if (!exited) {
-            process.destroyForcibly()
-            process.waitFor(3, TimeUnit.SECONDS)
+        val outputPath = Files.createTempFile(
+            Path.of("build", "test-tmp", "javap").toAbsolutePath().normalize().createDirectories(), "bytecode-", ".txt")
+        try {
+            // Waiting before draining a pipe can block on valid hosts with small pipe buffers.
+            val process = ProcessBuilder(executable.toString(), "-p", "-classpath", classPath, type.name)
+                .redirectErrorStream(true).redirectOutput(outputPath.toFile()).start()
+            try {
+                val exited = process.waitFor(10, TimeUnit.SECONDS)
+                if (!exited) {
+                    process.destroyForcibly()
+                    assertTrue(process.waitFor(3, TimeUnit.SECONDS), "javap did not terminate after its timeout")
+                }
+                val outputBytes = Files.newInputStream(outputPath).use { it.readNBytes(1024 * 1024 + 1) }
+                assertTrue(outputBytes.size <= 1024 * 1024, "javap output exceeded its bound")
+                val output = outputBytes.toString(Charsets.UTF_8)
+                assertTrue(exited, "javap timed out")
+                assertEquals(0, process.exitValue(), output)
+                return output
+            } finally {
+                if (process.isAlive) process.destroyForcibly()
+            }
+        } finally {
+            Files.deleteIfExists(outputPath)
         }
-        val output = process.inputStream.readAllBytes().toString(Charsets.UTF_8)
-        assertTrue(exited, "javap timed out")
-        assertEquals(0, process.exitValue(), output)
-        return output
     }
 
     private fun isForbiddenExecutionSeamType(type: Class<*>): Boolean =

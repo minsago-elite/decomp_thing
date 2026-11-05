@@ -18,6 +18,7 @@ internal object ContainedModuleCompilationPolicy : ModuleCompilationPolicy {
     private val qualificationDiagnosticsObserver = ThreadLocal<((ByteArray, ByteArray) -> Unit)?>()
 
     override val id = POLICY_ID
+    override val providesCompilerFeedback = true
     override val legacyFingerprintIdentity = GeneratedCModuleValidation.POLICY_ID
     override fun requireAvailable(profile: ReconstructionProfile) {
         requireContainedModuleCompilerProfile(profile)
@@ -27,11 +28,9 @@ internal object ContainedModuleCompilationPolicy : ModuleCompilationPolicy {
         }
     }
     override fun historicalCommand(profile: ReconstructionProfile, sourcePath: String) = GeneratedCModuleValidation.command(profile, sourcePath)
-    override fun command(profile: ReconstructionProfile, sourcePath: String): List<String> = command(profile, sourcePath, null)
-    internal fun command(profile: ReconstructionProfile, sourcePath: String, compilerInternalIncludePath: Path?): List<String> {
+    override fun command(profile: ReconstructionProfile, sourcePath: String): List<String> {
         profile.layout.declaration("module-implementation").moduleIdForPath(sourcePath)
         return listOf("authenticated-profile-compiler") + profile.adapterConfiguration.getValue("compiler-flags") +
-            (compilerInternalIncludePath?.let { listOf("-isystem", it.toString()) } ?: emptyList()) +
             listOf("-c", sourcePath, "-o", "<owned-module-object>")
     }
     override fun validate(projectDir: Path, sourcePath: String, profile: ReconstructionProfile): ModuleCompilationEvidence =
@@ -133,7 +132,7 @@ internal class VerifiedContainedModuleCompilation private constructor(private va
                         borrowed.path.resolve("reports"), minOf(profile.budgets.buildWallClockMillis, ContainedModuleCompilerRequest.MAXIMUM_WALL_MILLIS),
                         minOf(profile.budgets.buildMaximumOutputBytes, ContainedModuleCompilerRequest.MAXIMUM_OUTPUT_BYTES),
                         profileRecord = OracleJson.parse(profile.canonicalJson().toByteArray()) as JsonObject,
-                        schemaVersion = 3, trampolinePath = configuration.compilerExecHelperPath,
+                        schemaVersion = 4, trampolinePath = configuration.compilerExecHelperPath,
                         trampolineSha256 = configuration.compilerExecHelperSha256,
                         runtimeReadRoots = (configuration.isolation.systemLibraryMounts + configuration.compilerRuntimeMounts)
                             .map { it.destination },
@@ -258,7 +257,7 @@ internal class VerifiedContainedModuleCompilation private constructor(private va
                 removeOwnedModuleCompilerRequestDirectory(temporary)
                 val worker = checkNotNull(workerResult)
                 val proof = JsonObject(mapOf(
-                    "schemaVersion" to JsonPrimitive(3), "provider" to JsonPrimitive("contained-module-compilation-v3"),
+                    "schemaVersion" to JsonPrimitive(4), "provider" to JsonPrimitive("contained-module-compilation-v4"),
                     "scope" to JsonPrimitive("module-object"), "policyId" to JsonPrimitive(ContainedModuleCompilationPolicy.POLICY_ID),
                     "profileId" to JsonPrimitive(profile.id), "profileSha256" to JsonPrimitive(profile.sha256),
                     "sourceSha256" to JsonPrimitive(request.sourceSha256), "snapshotSha256" to JsonPrimitive(request.snapshotSha256),
@@ -270,11 +269,15 @@ internal class VerifiedContainedModuleCompilation private constructor(private va
                     "attachment" to OracleJson.parseCanonical(checkNotNull(attachment)), "execution" to OracleJson.parseCanonical(execution.canonicalBytes),
                     "diskLease" to OracleJson.parseCanonical(diskBytes), "cleanup" to JsonObject(listOf("processesAbsent", "unitAbsent", "cgroupAbsent",
                         "scratchRemoved", "leaseReleased").associateWith { JsonPrimitive(true) })))
-                val evidence = ModuleCompilationEvidence(request.sourceSha256, ContainedModuleCompilationPolicy.command(profile, sourcePath,
-                    request.compilerInternalIncludePath),
+                val evidence = ModuleCompilationEvidence(request.sourceSha256, ContainedModuleCompilationPolicy.command(profile, sourcePath),
                     if (worker.outcome == "compiled-object") "passed" else "failed", worker.exitCode,
                     ContainedModuleCompilationProof.diagnosticsSha256(worker), worker.stdoutBytes + worker.stderrBytes, proof,
-                    if (worker.outcome == "compiled-object") VerifiedContainedModuleCompilation(sha256(OracleJson.canonicalBytes(proof)), snapshot) else null)
+                    if (worker.outcome == "compiled-object") VerifiedContainedModuleCompilation(sha256(OracleJson.canonicalBytes(proof)), snapshot) else null,
+                    capturedDiagnostics?.let { (stdout, stderr) ->
+                        val combined = stdout + stderr
+                        GeneratedCModuleValidation.diagnosticFeedback(combined, canonicalProject,
+                            listOf(configuration.scratchMount))
+                    } ?: "")
                 ContainedModuleCompilationProof.verify(evidence)
                 snapshot.requireCurrent { deadline.requireCurrent() }
                 deadline.requireCurrent()

@@ -430,6 +430,91 @@ class ContainedModuleCompilationProofTest {
             "execution", "operationWallTime", executionDeadline)), "operation deadline")
     }
 
+    @Test
+    fun `full portable proofs and checkpoint decoding ignore auditor architecture`() {
+        val previous = System.getProperty("os.arch")
+        try {
+            System.setProperty("os.arch", "unsupported-archive-auditor")
+            for (machine in listOf("x86_64", "aarch64")) {
+                val fixture = fixture(machine = machine)
+                ContainedModuleCompilationProof.verify(fixture.proof)
+                val decoded = ModuleCompilationEvidence.decode(document(fixture.evidence().toJson().toByteArray(), false),
+                    7, fixture.request.profile, fixture.request.sourcePath, fixture.request.sourceSha256, true)
+                assertTrue(decoded.passed)
+                assertFalse(decoded.authorizesAcceptance(fixture.request.sourceSha256, fixture.request.profileSha256,
+                    ContainedModuleCompilationPolicy.POLICY_ID))
+                for (paths in listOf(emptyList(), listOf("/lib64/substituted.so"),
+                    listOf("/lib64/ld-2.99.so", "/lib64/extra.so"), listOf("/lib64/extra.so", "/lib64/ld-2.99.so"))) {
+                    reject(changeNested(fixture.proof, "request", "runtimeExecuteFiles", JsonArray(paths.map(::JsonPrimitive))))
+                }
+                // Rebuild every request/result/keeper commitment, so the retained runtime mapping,
+                // rather than a stale request hash, must reject these otherwise valid requests.
+                for (files in listOf(listOf(Path.of("/lib64/substituted.so")),
+                    listOf(Path.of("/lib64/ld-2.99.so"), Path.of("/lib64/extra.so")))) {
+                    val substituted = fixture(machine = machine, executeFiles = files)
+                    val mismatch = assertFailsWith<IllegalArgumentException> {
+                        ContainedModuleCompilationProof.verify(substituted.proof)
+                    }
+                    assertTrue(mismatch.message.orEmpty().contains("read-boundary request differs"))
+                }
+                val alteredRuntime = changeNested(fixture.proof.objectField("runtimeConfiguration"),
+                    "compilerInterpreter", "sha256", JsonPrimitive(SOURCE))
+                val digest = ContainedModuleCompilationRuntimeConfiguration.parse(bytes(alteredRuntime)).configurationSha256
+                var altered = change(change(fixture.proof, "runtimeConfiguration", alteredRuntime),
+                    "runtimeConfigurationSha256", JsonPrimitive(digest))
+                reject(altered)
+                altered = changeNested(altered, "intent", "runtimeConfigurationSha256", JsonPrimitive(digest))
+                reject(altered)
+                altered = change(altered, "diskLease", seal(change(change(altered.objectField("diskLease"),
+                    "scopeSha256", JsonPrimitive(digest)), "requestSha256", JsonPrimitive(sha256(bytes(altered.objectField("intent"))))), "evidenceSha256"))
+                reject(altered)
+                val legacy = fixture(machine = machine, legacyRuntime = true)
+                val error = assertFailsWith<IllegalArgumentException> { ContainedModuleCompilationProof.verify(legacy.proof) }
+                assertTrue(error.message.orEmpty().contains("runtime schema 3 retained interpreter authority"))
+            }
+        } finally {
+            if (previous == null) System.clearProperty("os.arch") else System.setProperty("os.arch", previous)
+        }
+    }
+
+    @Test
+    fun `retained parent checkpoint verifies without live authority and unlanded FD proof refuses`() {
+        val root = "/module-compilation/retained-compatibility/"
+        val manifest = kotlinx.serialization.json.Json.parseToJsonElement(
+            requireNotNull(javaClass.getResourceAsStream(root + "retained-compatibility-records.json")).bufferedReader().readText()) as JsonArray
+        for ((index, name) in listOf("parent", "fd").withIndex()) {
+            val raw = requireNotNull(javaClass.getResourceAsStream(root + name + "-retained-accepted-checkpoint.json")).readBytes()
+            val provenance = manifest[index] as JsonObject
+            assertEquals(provenance.text("memberSha256"), sha256(raw))
+            assertEquals(JsonPrimitive(if (index == 0) 41988490372L else 41621403245L), provenance["run"])
+            val checkpoint = document(raw, false)
+            val evidence = checkpoint.objectField("compilation")
+            val proof = evidence.objectField("containedProof")
+            if (index == 0) {
+                val verified = ContainedModuleCompilationProof.verify(proof)
+                val decoded = ModuleCompilationEvidence.decode(evidence, 7, verified.request.profile,
+                    verified.request.sourcePath, verified.request.sourceSha256, true)
+                assertEquals(null, decoded.liveAuthority)
+                assertTrue(decoded.passed)
+            } else {
+                val failure = assertFailsWith<IllegalArgumentException> { ContainedModuleCompilationProof.verify(proof) }
+                assertTrue(failure.message.orEmpty().contains("schema 3"))
+                assertFailsWith<IllegalArgumentException> { ContainedModuleCompilerRequest.parse(bytes(proof.objectField("request"))) }
+                assertFailsWith<IllegalArgumentException> { ContainedModuleCompilationRuntimeConfiguration.parse(bytes(proof.objectField("runtimeConfiguration"))) }
+            }
+        }
+    }
+
+    @Test
+    fun `historical proofs cannot be relabeled into new live authority`() {
+        for (original in listOf(fixture().proof, fixture(machine = "x86_64").proof, fixture2().proof)) {
+            for (version in listOf(3, 4)) {
+                reject(JsonObject(original + mapOf("schemaVersion" to JsonPrimitive(version),
+                    "provider" to JsonPrimitive("contained-module-compilation-v$version"))))
+            }
+        }
+    }
+
     private data class Fixture(val proof: JsonObject, val request: ContainedModuleCompilerRequest,
         val result: ContainedModuleCompilerResult, val command: KotlinContainedCommandRequest) {
         fun evidence() = ModuleCompilationEvidence(request.sourceSha256,
@@ -438,14 +523,77 @@ class ContainedModuleCompilationProofTest {
             ContainedModuleCompilationProof.diagnosticsSha256(result), result.stdoutBytes + result.stderrBytes, containedProof = proof)
     }
 
-    private fun fixture2(success: Boolean = true, profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor): Fixture {
-        val legacy = fixture(success, profile)
+    @Test
+    fun `authored V4 proofs decode both profiles and outcomes without live authority`() {
+        for (profile in ReconstructionProfiles.builtIn) for (success in listOf(true, false)) {
+            val fixture = fixture2(success, profile, v4 = true)
+            assertProof2HashJoins(fixture.proof)
+            ContainedModuleCompilationProof.verify(fixture.proof)
+            val decoded = ModuleCompilationEvidence.decode(document(fixture.evidence().toJson().toByteArray(), false),
+                7, profile, fixture.request.sourcePath, fixture.request.sourceSha256, success)
+            assertEquals(null, decoded.liveAuthority)
+            assertEquals(success, decoded.passed)
+            ContainedModuleCompilationProof.verify(decoded)
+        }
+    }
+
+    @Test
+    fun `V4 coordinated closure mutations refuse incomplete owned inputs and widened resources`() {
+        val proof = fixture2(v4 = true).proof
+        val closure = proof.objectField("runtimeClosure")
+        closure.keys.forEach {
+            reject2(rehash2(change(proof, "runtimeClosure", JsonObject(closure - it))))
+        }
+        reject2(rehash2(changeNested(proof, "runtimeClosure", "unexpected", JsonPrimitive(true))), "fields differ")
+        reject2(rehash2(changeNested(proof, "runtimeClosure", "resources", JsonPrimitive(false))))
+        val resources = closure.objectField("resources")
+        reject2(rehash2(changeNested(proof, "runtimeClosure", "resources",
+            change(resources, "maximumOpenFiles", JsonPrimitive(512)))), "resources")
+        val inputs = closure.getValue("readOnlyInputs") as JsonArray
+        reject2(rehash2(changeNested(proof, "runtimeClosure", "readOnlyInputs", JsonArray(inputs.reversed()))), "retained worker request")
+        val limits = proof.objectField("attachment").objectField("fileDescriptorLimits")
+        reject2(rehash2(changeNested(proof, "attachment", "fileDescriptorLimits",
+            change(limits, "softLimit", JsonPrimitive(512)))))
+    }
+
+    @Test
+    fun `V4 closed pairing and authenticated mapping controls reject after public joins`() {
+        val proof = fixture2(v4 = true).proof
+        val runtime = proof.objectField("runtimeConfiguration")
+        val parent = change(JsonObject(runtime - "compilerInternalIncludePath"), "schemaVersion", JsonPrimitive(3))
+        reject2(rehash2(change(proof, "runtimeConfiguration", parent)), "pairing")
+        val historical = JsonObject(proof - "runtimeClosure" + mapOf("schemaVersion" to JsonPrimitive(1),
+            "provider" to JsonPrimitive("contained-module-compilation-v1")))
+        val failure = assertFailsWith<IllegalArgumentException> { ContainedModuleCompilationProof.verify(historical) }
+        assertTrue(failure.message.orEmpty().contains("proof and request versions differ"))
+        reject2(rehash2(changeNested(proof, "runtimeConfiguration", "compilerInternalIncludePath",
+            JsonPrimitive("/lib64/include"))), "outside authenticated runtime mounts")
+        reject2(rehash2(change(proof, "runtimeConfiguration", JsonObject(runtime - "compilerInterpreter"))))
+        reject2(rehash2(changeNested(proof, "runtimeConfiguration", "compilerInterpreter", JsonPrimitive(false))))
+        val interpreter = runtime.objectField("compilerInterpreter")
+        for ((field, value) in listOf("machine" to "unsupported", "path" to "/unmapped/ld.so")) {
+            reject2(rehash2(changeNested(proof, "runtimeConfiguration", "compilerInterpreter",
+                change(interpreter, field, JsonPrimitive(value)))))
+        }
+        // Bind the altered request into the result before reaching request/runtime semantics.
+        for ((field, value) in listOf(
+            "compilerInternalIncludePath" to JsonPrimitive("/opt/module-compiler/other/include"),
+            "runtimeExecuteFiles" to JsonArray(listOf(JsonPrimitive("/lib64/other-loader.so"))))) {
+            val request = change(proof.objectField("request"), field, value)
+            val result = change(proof.objectField("result"), "requestSha256", JsonPrimitive(sha256(bytes(request))))
+            reject2(rehash2(JsonObject(proof + mapOf("request" to request, "result" to result))),
+                if (field == "compilerInternalIncludePath") "internal include path differs" else "read-boundary")
+        }
+    }
+
+    private fun fixture2(success: Boolean = true, profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor, v4: Boolean = false): Fixture {
+        val legacy = fixture(success, profile, machine = if (v4) "x86_64" else null, v4 = v4)
         val request = legacy.request
         val additionalMount = JsonObject(mapOf("source" to JsonPrimitive("/opt/module-compiler-support"),
             "destination" to JsonPrimitive("/opt/module-compiler-support"), "sha256" to JsonPrimitive(OTHER)))
         val originalRuntime = legacy.proof.objectField("runtimeConfiguration")
         val runtimeRecord = change(originalRuntime, "compilerRuntimeMounts",
-            JsonArray((originalRuntime.getValue("compilerRuntimeMounts") as JsonArray) + additionalMount))
+            JsonArray((originalRuntime.getValue("compilerRuntimeMounts") as JsonArray) + if (v4) emptyList() else listOf(additionalMount)))
         val runtime = ContainedModuleCompilationRuntimeConfiguration.parse(bytes(runtimeRecord))
         val command = KotlinContainedCommandRequest(legacy.command.runDirectory, NONCE, legacy.command.command,
             legacy.command.environment, legacy.command.maximumStartWaitSeconds, legacy.command.maximumWallSeconds,
@@ -499,7 +647,21 @@ class ContainedModuleCompilationProofTest {
             "runtimeConfiguration" to runtimeRecord, "runtimeConfigurationSha256" to JsonPrimitive(runtime.configurationSha256),
             "runtimeClosure" to closure, "commandRequest" to document(command.canonicalBytes), "intent" to intent, "diskLease" to disk,
             "attachment" to attachment, "execution" to execution))
-        return Fixture(rehash2(proof), request, legacy.result, command)
+        if (!v4) return Fixture(rehash2(proof), request, legacy.result, command)
+        val owned = ownedExecutableProof(Fixture(proof, request, legacy.result, command))
+        val ownedClosure = owned.objectField("runtimeClosure")
+        val inputs = ownedClosure.getValue("readOnlyInputs") as JsonArray
+        val helper = JsonObject(mapOf("path" to JsonPrimitive(runtime.compilerExecHelperPath.toString()),
+            "bytes" to JsonPrimitive(4096), "sha256" to JsonPrimitive(runtime.compilerExecHelperSha256)))
+        val snapshot = change(helper, "path", JsonPrimitive(Path.of(requestPath).parent.resolve("trampoline").toString()))
+        val aliases = ownedClosure.getValue("executableAliases") as JsonArray
+        val full = JsonObject(ownedClosure + mapOf(
+            "provider" to JsonPrimitive("kotlin-lease-contained-command-runtime-owned-executable-v2"),
+            "readOnlyInputs" to JsonArray(inputs + helper + snapshot),
+            "executableAliases" to JsonArray(aliases + JsonObject(mapOf("source" to snapshot.getValue("path"),
+                "destination" to helper.getValue("path"))))))
+        return Fixture(rehash2(JsonObject(owned + mapOf("schemaVersion" to JsonPrimitive(4),
+            "provider" to JsonPrimitive("contained-module-compilation-v4"), "runtimeClosure" to full))), request, legacy.result, command)
     }
 
     /** Rebind every public digest after a semantic mutation. This never authenticates archived HMACs. */
@@ -542,9 +704,17 @@ class ContainedModuleCompilationProofTest {
     }
 
     private fun fixture(success: Boolean = true, profile: ReconstructionProfile = GeneratedCMakeReconstructionProfile.descriptor,
-        serviceSeconds: Long = minOf(60L, moduleCompilerOperationWallMillis(profile) / 1000L)): Fixture {
-        val runtimeRecord = runtimeRecord(profile.id)
-        val runtime = ContainedModuleCompilationRuntimeConfiguration.parse(bytes(runtimeRecord))
+        serviceSeconds: Long = minOf(60L, moduleCompilerOperationWallMillis(profile) / 1000L),
+        machine: String? = null, legacyRuntime: Boolean = false, executeFiles: List<Path>? = null, v4: Boolean = false): Fixture {
+        val runtimeRecord = if (machine == null) runtimeRecord(profile.id) else JsonObject(runtimeRecord(profile.id) +
+            mapOf("schemaVersion" to JsonPrimitive(if (v4) 4 else if (legacyRuntime) 2 else 3),
+                "compilerExecHelper" to JsonObject(mapOf("source" to JsonPrimitive("/opt/module-compiler/helper"),
+                    "path" to JsonPrimitive("/opt/module-compiler/helper"), "sha256" to JsonPrimitive(OTHER)))) +
+            if (legacyRuntime) emptyMap() else mapOf("compilerInterpreter" to JsonObject(mapOf(
+                "machine" to JsonPrimitive(machine), "source" to JsonPrimitive("/opt/keeper-libraries/ld-2.99.so"),
+                "path" to JsonPrimitive("/lib64/ld-2.99.so"), "sha256" to JsonPrimitive(OTHER)))))
+        val actualRuntimeRecord = if (v4) change(runtimeRecord, "compilerInternalIncludePath", JsonPrimitive("/opt/module-compiler/lib/gcc/include")) else runtimeRecord
+        val runtime = ContainedModuleCompilationRuntimeConfiguration.parse(bytes(actualRuntimeRecord))
         val operationMillis = moduleCompilerOperationWallMillis(profile)
         val run = runtime.scratchMount.resolve(".decomp-oracle-lease-$NONCE").resolve(runDirectoryName(NONCE))
         val control = run.resolve("control-$NONCE")
@@ -552,7 +722,14 @@ class ContainedModuleCompilationProofTest {
             "src/modules/sample.c", listOf(ContainedModuleCompilerInput("src/modules/sample.c", SOURCE, 16)),
             runtime.compilerExecutable, runtime.compilerSha256, run.resolve("reports"),
             minOf(30_000L, profile.budgets.buildWallClockMillis), minOf(2L * 1024 * 1024, profile.budgets.buildMaximumOutputBytes),
-            document(profile.canonicalJson().toByteArray(), canonical = false))
+            document(profile.canonicalJson().toByteArray(), canonical = false),
+            schemaVersion = if (v4) 4 else if (machine == null) 1 else 2,
+            compilerInternalIncludePath = runtime.compilerInternalIncludePath,
+            trampolinePath = runtime.compilerExecHelperPath, trampolineSha256 = runtime.compilerExecHelperSha256,
+            runtimeReadRoots = if (machine == null) emptyList() else
+                (runtime.isolation.systemLibraryMounts + runtime.compilerRuntimeMounts).map { it.destination }.distinct().sortedBy { it.toString() },
+            runtimeExecuteRoots = if (machine == null) emptyList() else listOf(runtime.compilerRuntimeExecuteRoot),
+            runtimeExecuteFiles = executeFiles ?: if (legacyRuntime) listOf(Path.of("/lib64/ld-2.99.so")) else runtime.compilerRuntimeExecuteFiles)
         val result = ContainedModuleCompilerResult(request.sha256, NONCE, profile.id, profile.sha256, request.snapshotSha256,
             request.sourceSha256, runtime.compilerSha256, if (success) "compiled-object" else "compiler-failed", if (success) 0 else 2,
             null, sha256(byteArrayOf()), 0, sha256(byteArrayOf()), 0, if (success) OTHER else null, if (success) 64 else null)
@@ -624,7 +801,7 @@ class ContainedModuleCompilationProofTest {
         )), "executionSha256")
         val proof = JsonObject(common + mapOf("schemaVersion" to JsonPrimitive(1), "provider" to JsonPrimitive("contained-module-compilation-v1"),
             "scope" to JsonPrimitive("module-object"), "policyId" to JsonPrimitive(ContainedModuleCompilationPolicy.POLICY_ID),
-            "runtimeConfiguration" to runtimeRecord, "intent" to intent, "request" to document(request.canonicalBytes),
+            "runtimeConfiguration" to actualRuntimeRecord, "intent" to intent, "request" to document(request.canonicalBytes),
             "result" to document(result.canonicalBytes), "commandRequest" to document(command.canonicalBytes),
             "attachment" to attachment, "execution" to execution, "diskLease" to disk,
             "cleanup" to JsonObject(listOf("processesAbsent", "unitAbsent", "cgroupAbsent", "scratchRemoved", "leaseReleased")

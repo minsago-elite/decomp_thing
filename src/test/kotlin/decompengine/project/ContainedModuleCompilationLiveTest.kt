@@ -478,7 +478,7 @@ class ContainedModuleCompilationLiveTest {
         fun verifyCapturedInputs(label: String, evidence: ModuleCompilationEvidence) {
             val proof = ContainedModuleCompilationProof.verify(evidence)
             verifyCapturedRequest(label, proof.request)
-            assertEquals(JsonPrimitive(2), assertNotNull(evidence.containedProof)["schemaVersion"])
+            assertEquals(JsonPrimitive(4), assertNotNull(evidence.containedProof)["schemaVersion"])
         }
         fun verifyCapturedRequest(label: String, request: ContainedModuleCompilerRequest) {
             assertEquals(514, request.inputs.size)

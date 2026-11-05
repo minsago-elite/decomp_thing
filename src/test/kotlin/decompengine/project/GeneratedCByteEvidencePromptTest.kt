@@ -8,6 +8,18 @@ import kotlin.test.assertFailsWith
 
 class GeneratedCByteEvidencePromptTest {
     @Test
+    fun `compiler feedback is prompt-only and leaves the recovered model unchanged`() {
+        val model = RecoveredProgramModel(schemaVersion = 3, inputSha256 = "fixture", functions = emptyList(), globals = emptyList())
+        val before = model.toJson()
+        val prompt = GeneratedCModulePrompt.render(request(model).copy(
+            compilerDiagnostics = "unused variable 'context'",
+        ))
+        assertContains(prompt.objective, "informational; the workflow will compile this exact candidate again")
+        assertContains(prompt.objective, "unused variable 'context'")
+        assertEquals(before, model.toJson())
+    }
+
+    @Test
     fun `raw bytes and unavailable ranges remain distinct from listing initializer`() {
         val bytes = ReferencedDataByteEvidence(windows = listOf(
             ReferencedDataByteWindow(0x2008UL, 8,

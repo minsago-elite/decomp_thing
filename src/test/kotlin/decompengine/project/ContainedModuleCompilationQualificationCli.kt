@@ -169,6 +169,16 @@ object ContainedModuleCompilationQualificationCli {
                 mount(directory.toRealPath(), destination)
             }
         require(libraries.isNotEmpty())
+        val interpreterSource = Path.of(if (abi == "x86_64-linux-gnu") "/lib64/ld-linux-x86-64.so.2" else "/lib/ld-linux-aarch64.so.1").toRealPath()
+        val candidates = libraries.filter { interpreterSource.startsWith(Path.of((it["source"] as JsonPrimitive).content)) }
+        val interpreterMount = candidates.singleOrNull { it["source"] == it["destination"] } ?: candidates.single()
+        val interpreterPath = Path.of((interpreterMount["destination"] as JsonPrimitive).content).resolve(
+            Path.of((interpreterMount["source"] as JsonPrimitive).content).relativize(interpreterSource))
+        requireTrusted(interpreterSource, directory = false)
+        require(Files.isExecutable(interpreterSource))
+        val interpreter = JsonObject(mapOf("machine" to JsonPrimitive(abi.removeSuffix("-linux-gnu")),
+            "source" to JsonPrimitive(interpreterSource.toString()), "path" to JsonPrimitive(interpreterPath.toString()),
+            "sha256" to JsonPrimitive(digest(interpreterSource))))
         val isolation = JsonObject(mapOf(
             "javaExecutable" to JsonPrimitive(java.toString()), "javaRuntime" to mount(javaRoot, Path.of("/decomp-runtime/java")),
             "systemLibraryMounts" to JsonArray(libraries), "systemdUserRuntimeDirectory" to JsonPrimitive(session.toString()),
@@ -189,7 +199,7 @@ object ContainedModuleCompilationQualificationCli {
             "maximumFilesystemInodes" to JsonPrimitive(capacity.totalInodes)))
         require(capacity.availableBytes >= workerBytes + 128L * 1024 * 1024 && capacity.availableInodes >= 8192)
         return listOf(GeneratedCMakeReconstructionProfile.PROFILE_ID, GeneratedCNinjaReconstructionProfile.PROFILE_ID).associateWith { profile ->
-            JsonObject(mapOf("schemaVersion" to JsonPrimitive(3), "profileId" to JsonPrimitive(profile), "isolation" to isolation,
+            JsonObject(mapOf("schemaVersion" to JsonPrimitive(4), "compilerInterpreter" to interpreter, "profileId" to JsonPrimitive(profile), "isolation" to isolation,
                 "compiler" to JsonObject(mapOf("path" to JsonPrimitive(compiler.toString()), "sha256" to JsonPrimitive(digest(compiler)))),
                 "compilerExecHelper" to JsonObject(mapOf("source" to JsonPrimitive(compilerExecHelper.toString()),
                     "path" to JsonPrimitive(compilerExecHelperDestination.toString()), "sha256" to JsonPrimitive(digest(compilerExecHelper)))),

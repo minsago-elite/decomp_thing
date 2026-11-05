@@ -34,7 +34,7 @@ int main(int argc, char **argv) {
     return argc > 2 ? 3 : 0;
 }
 '''
-HEADER_CLOSURE_SOURCE = FIXTURE_SOURCE + '#include <stdlib.h>\n'
+HEADER_CLOSURE_SOURCE = FIXTURE_SOURCE + '#include <stdlib.h>\n#include <string.h>\n'
 
 
 def no_duplicate_keys(pairs):
@@ -226,36 +226,107 @@ def parse_gcc_include_search_paths(stderr):
     return paths
 
 
-def staged_compiler_include_search(staged_compiler, subprogram_prefix, mounted_roots):
+def staged_compiler_include_search(staged_compiler, subprogram_prefix, mounted_roots, staged_headers_root):
     """Capture bounded search-path evidence from the exact staged compiler bytes."""
     staged_compiler = trusted(staged_compiler)
     subprogram_prefix = trusted(subprogram_prefix)
+    staged_headers_root = trusted(Path(staged_headers_root))
     mounts = tuple((trusted(Path(source)), trusted(Path(destination))) for source, destination in mounted_roots)
     if not mounts or len({source for source, _ in mounts}) != len(mounts) or len({dest for _, dest in mounts}) != len(mounts):
         raise ValueError('compiler include evidence lacks a unique mounted-root inventory')
-    result = subprocess.run([str(staged_compiler), f'-B{subprogram_prefix}/', '-v', '-E', '-x', 'c', '-'],
-                            input='#include <stddef.h>\n', text=True, stdout=subprocess.PIPE,
+    result = subprocess.run([str(staged_compiler), f'-B{subprogram_prefix}/', f'-I{staged_headers_root}',
+                            '-v', '-E', '-x', 'c', '-'],
+                            input='#include <stddef.h>\n#include <stdarg.h>\n', text=True, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, timeout=30, check=False,
                             env={'LANG': 'C', 'LC_ALL': 'C', 'TZ': 'UTC', 'PATH': str(subprogram_prefix)})
     stderr = result.stderr.encode('utf-8')
     if len(result.stdout.encode('utf-8')) > 1024 * 1024:
         raise ValueError('compiler include-search output exceeds its byte bound')
     paths = parse_gcc_include_search_paths(stderr)
-    candidates = []
+    candidates = {'stddef.h': [], 'stdarg.h': []}
+    candidate_roots = (*mounts, (staged_headers_root, staged_headers_root))
     for directory in paths:
         search_root = Path(directory)
-        for source_root, mounted_root in mounts:
+        for source_root, mounted_root in candidate_roots:
             if not search_root.is_relative_to(source_root):
                 continue
             relative = search_root.relative_to(source_root)
-            mounted_path = mounted_root / relative / 'stddef.h'
-            if mounted_path.is_file() and not mounted_path.is_symlink():
-                data = mounted_path.read_bytes()
-                candidates.append({'searchPath': str(search_root), 'mountedPath': str(mounted_path),
-                                   'bytes': len(data), 'sha256': hashlib.sha256(data).hexdigest()})
+            for name in candidates:
+                mounted_path = mounted_root / relative / name
+                if mounted_path.is_file() and not mounted_path.is_symlink():
+                    data = mounted_path.read_bytes()
+                    candidates[name].append({'searchPath': str(search_root), 'mountedPath': str(mounted_path),
+                                             'bytes': len(data), 'sha256': hashlib.sha256(data).hexdigest()})
             break
-    return {'exitCode': result.returncode, 'searchPaths': paths, 'stddefCandidates': candidates,
+    return {'exitCode': result.returncode, 'searchPaths': paths, 'stddefCandidates': candidates['stddef.h'],
+            'stdargCandidates': candidates['stdarg.h'], 'builtinHeaderCandidates': candidates,
             'diagnosticsBytes': len(stderr), 'diagnosticsSha256': hashlib.sha256(stderr).hexdigest()}
+
+
+def require_compiler_stddef_candidate(evidence):
+    if evidence['exitCode'] == 0 and evidence['stddefCandidates']:
+        return
+    # This stdout is retained as operator-provisioning.json by the hosted lane. Keep
+    # enough bounded, non-secret evidence to distinguish compiler failure from path
+    # projection failure without retaining arbitrary compiler diagnostics.
+    print(json.dumps({'schemaVersion': 1, 'compilerIncludeSearch': evidence}, sort_keys=True))
+    raise ValueError('registered compiler has no authenticated readable stddef include candidate')
+
+
+def require_compiler_builtin_header_candidate(evidence, include_directory, header_name, mounted_directory=None):
+    expected_search_path = str(Path(include_directory))
+    expected_mount_path = str(Path(mounted_directory)) if mounted_directory is not None else None
+    if header_name not in ('stddef.h', 'stdarg.h'):
+        raise ValueError('unsupported compiler builtin header admission')
+    candidates = evidence.get('builtinHeaderCandidates', {}).get(header_name, [])
+    if evidence['exitCode'] == 0 and any(candidate.get('searchPath') == expected_search_path and
+            (expected_mount_path is None or candidate.get('mountedPath') == str(Path(expected_mount_path) / header_name))
+            for candidate in candidates):
+        return
+    print(json.dumps({'schemaVersion': 1, 'compilerIncludeSearch': evidence,
+                      'requiredBuiltinHeader': header_name, 'requiredSearchPath': expected_search_path}, sort_keys=True))
+    raise ValueError(f'registered compiler has no authenticated readable GCC builtin {header_name} candidate')
+
+
+def copy_compiler_builtin_include_directory(source, gcc_runtime, tools_root, copier):
+    """Stage the pinned GCC builtin include tree at the authenticated -B prefix."""
+    gcc_runtime = trusted(Path(gcc_runtime))
+    source = trusted(Path(source))
+    tools_root = Path(tools_root)
+    destination = tools_root / 'include'
+    if not source.is_dir() or source.name != 'include' or not source.is_relative_to(gcc_runtime) or source == gcc_runtime:
+        raise ValueError('compiler builtin include directory must be a pinned include subtree of GCC runtime')
+    if destination.exists() or destination.is_symlink():
+        raise ValueError('compiler builtin include destination already exists')
+    copier.copy(source, destination)
+    required = destination / 'stdarg.h'
+    if required.is_symlink() or not required.is_file():
+        raise ValueError('pinned GCC builtin include tree lacks a regular stdarg.h')
+    return destination
+
+
+def preserve_compiler_builtin_headers(dependencies, gcc_runtime, headers_root, copier):
+    """Expose GCC's required builtin stddef header through the declared /usr/include alias."""
+    gcc_runtime = trusted(Path(gcc_runtime))
+    headers_root = Path(headers_root)
+    target = headers_root / 'stddef.h'
+    if target.exists():
+        if target.is_symlink() or not target.is_file():
+            raise ValueError('authenticated stddef header destination is not a regular file')
+        return
+    candidates = []
+    for value in dependencies:
+        source = Path(value)
+        if source.name != 'stddef.h':
+            continue
+        resolved = trusted(source)
+        if resolved.is_relative_to(gcc_runtime):
+            candidates.append(resolved)
+    if len(set(candidates)) != 1:
+        raise ValueError('compiler dependency closure lacks one pinned GCC builtin stddef header')
+    copier.copy(candidates[0], target)
+    if target.is_symlink() or not target.is_file():
+        raise ValueError('authenticated stddef header copy is not a regular file')
 
 
 def trusted(path):
@@ -415,9 +486,12 @@ def prepare(args):
         subprograms, subprogram_mounts = copy_compiler_subprograms(gcc, copier)
         gcc_runtime = trusted(Path(command([str(gcc), '-print-libgcc-file-name'])).parent)
         copier.copy(gcc_runtime, RUNTIME / 'gcc')
-        build = [{'source': str(RUNTIME / 'gcc'), 'destination': str(gcc_runtime)}] + subprogram_mounts
-        # The qualification image retains the fixed fixture headers and the additional stdlib
-        # header used by module compilation controls. A deployment supplies its own reviewed closure.
+        gcc_builtin_include = trusted(Path(command([str(gcc), '-print-file-name=include'])))
+        copy_compiler_builtin_include_directory(gcc_builtin_include, gcc_runtime, RUNTIME / 'tools', copier)
+        build = [{'source': str(RUNTIME / 'gcc'), 'destination': str(gcc_runtime)}] + subprogram_mounts + [
+            {'source': str(RUNTIME / 'tools' / 'include'), 'destination': '/decomp-generated-c-tools/include'}]
+        # The qualification image retains the fixed fixture headers and additional standard
+        # headers used by module compilation controls. A deployment supplies its own reviewed closure.
         dependency_text = command([str(gcc), '-M', '-x', 'c', '-'], input_text=HEADER_CLOSURE_SOURCE)
         headers = dependency_text.replace('\\\n', ' ').partition(':')[2].split()
         for header in headers:
@@ -428,10 +502,16 @@ def prepare(args):
                 copier.copy(path, RUNTIME / 'headers' / path.relative_to('/usr/include'))
             elif not path.resolve().is_relative_to(gcc_runtime):
                 raise ValueError(f'unsupported compiler header authority: {path}')
+        preserve_compiler_builtin_headers(headers, gcc_runtime, RUNTIME / 'headers', copier)
         build.append({'source': str(RUNTIME / 'headers'), 'destination': '/usr/include'})
         compiler_include_search = staged_compiler_include_search(
             RUNTIME / 'tools' / 'cc', RUNTIME / 'tools',
-            ((gcc_runtime, RUNTIME / 'gcc'), (Path('/usr/include'), RUNTIME / 'headers')))
+            ((gcc_runtime, RUNTIME / 'gcc'), (RUNTIME / 'tools', RUNTIME / 'tools'),
+             (Path('/usr/include'), RUNTIME / 'headers')), RUNTIME / 'headers')
+        require_compiler_stddef_candidate(compiler_include_search)
+        require_compiler_builtin_header_candidate(
+            compiler_include_search, RUNTIME / 'tools' / 'include', 'stdarg.h',
+            RUNTIME / 'tools' / 'include')
         link_parent = None
         for name in ('crt1.o', 'Scrt1.o', 'crti.o', 'crtn.o', 'libc.so', 'libc_nonshared.a'):
             path = Path(command([str(gcc), f'-print-file-name={name}'])).absolute().resolve()

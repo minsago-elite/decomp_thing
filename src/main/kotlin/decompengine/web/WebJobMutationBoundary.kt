@@ -62,8 +62,18 @@ internal class WebJobMutationBoundary(
 
     fun authorizeGitRepository(exchange: HttpExchange): AuthorizedWebGitRepository {
         checkNotNull(access.authorize(exchange, WebEndpointPolicy.jsonMutation("POST")))
-        return AuthorizedWebGitRepository()
+        return AuthorizedWebGitRepository(jobs)
     }
+}
+
+/**
+ * Repository-creation capability; the body selects only typed intent, never a path or command.
+ * Admission is serialized with job deletion, so deletion never purges storage a Git operation owns.
+ */
+internal class AuthorizedWebGitRepository internal constructor(private val jobs: WebJobService) {
+    fun request(repositories: decompengine.git.ManagedGitRepositories, jobId: String,
+        request: decompengine.git.GitRepositoryRequest, requestKey: String, precondition: () -> Unit,
+    ): decompengine.git.GitOperationAdmission = jobs.withGitAdmission(jobId) { repositories.request(jobId, request, requestKey, precondition) }
 }
 
 /** Display-metadata capability; the body selects only allowlisted label/archive values. */
@@ -82,13 +92,6 @@ internal class AuthorizedWebJobDeletion internal constructor(
 ) {
     fun request(jobId: String, expectedVersion: String, requestKey: String): WebJobDeletionAdmission =
         jobs.requestJobDeletion(jobId, expectedVersion, session.sessionId, requestKey)
-}
-
-/** Repository-creation capability; the body selects only typed intent, never a path or command. */
-internal class AuthorizedWebGitRepository internal constructor() {
-    fun request(repositories: decompengine.git.ManagedGitRepositories, jobId: String,
-        request: decompengine.git.GitRepositoryRequest, requestKey: String, precondition: () -> Unit,
-    ): decompengine.git.GitOperationAdmission = repositories.request(jobId, request, requestKey, precondition)
 }
 
 /** Upload-only capability shared by the legacy and versioned HTTP adapters. */
@@ -116,15 +119,16 @@ internal class AuthorizedLegacyWebJobStart internal constructor(
 /** Versioned start capability; caller input cannot select paths, adapters or commands. */
 internal class AuthorizedWebWorkflowStart internal constructor(private val jobs: WebJobService) {
     fun request(jobId: String, expectedJobVersion: String, request: NewWorkflowAttempt,
-        requestKey: String): DurableWebWorkflowStartResult =
-        jobs.requestDurableStart(jobId, expectedJobVersion, request, requestKey)
+        requestKey: String, prerequisites: WebWorkflowPrerequisites?): DurableWebWorkflowStartResult =
+        jobs.requestDurableStart(jobId, expectedJobVersion, request, requestKey, prerequisites)
 }
 
 /** Recovery capability for one identified predecessor; callers cannot select a workflow, harness, path or session. */
 internal class AuthorizedWebRecovery internal constructor(private val jobs: WebJobService) {
     fun request(jobId: String, runId: String, expectedRunVersion: String, mode: WorkflowRecoveryMode,
-        expectedInputRevisionId: String?, requestKey: String): DurableWebWorkflowStartResult =
-        jobs.requestDurableRecovery(jobId, runId, expectedRunVersion, mode, expectedInputRevisionId, requestKey)
+        expectedInputRevisionId: String?, requestKey: String,
+        prerequisites: WebWorkflowPrerequisites? = WebWorkflowPrerequisites.UNCHECKED): DurableWebWorkflowStartResult =
+        jobs.requestDurableRecovery(jobId, runId, expectedRunVersion, mode, expectedInputRevisionId, requestKey, prerequisites)
 }
 
 /** Cancellation-only capability; the body cannot select the authenticated actor. */

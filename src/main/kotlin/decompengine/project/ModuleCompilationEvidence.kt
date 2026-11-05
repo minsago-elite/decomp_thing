@@ -20,6 +20,7 @@ internal class ModuleCompilationEvidence(
     val diagnosticsBytes: Long,
     containedProof: JsonObject? = null,
     internal val liveAuthority: VerifiedContainedModuleCompilation? = null,
+    val diagnosticsPrefix: String = "",
 ) {
     val command: List<String> = Collections.unmodifiableList(ArrayList(command))
     val containedProof: JsonObject? = containedProof?.let { Json.parseToJsonElement(it.toString()).jsonObject }
