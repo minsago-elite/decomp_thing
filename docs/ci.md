@@ -606,6 +606,13 @@ ABA and coalescing **UNKNOWN**. Snapshot differences cannot recover intermediate
 changes or identify an actor. A notification can coalesce several changes;
 absence of a visible difference does not establish benignness.
 
+An owned stop drains pending notifications with nonblocking polls on the same
+descriptor. Only a quiet final poll permits a complete `SIGNAL` stop; its
+`coverageEnd` anchor conservatively ends coverage at that poll's start, before
+descriptor close and STOP-record publication. The original duration, a stop-time
+bound, output capacity and a finite poll count bound draining. Exhausting any
+bound or encountering an error leaves the interval incomplete.
+
 Records retain the mount namespace inode, hashes of full canonical rows/tables,
 private roots, targets and sources, a closed filesystem vocabulary (other names
 hash), propagation labels plus a hash of all optional fields, and a closed target
@@ -636,9 +643,14 @@ that observation interval and cannot prove the job's remaining interval clean.
 Every record stream remains diagnostic-only with no qualification authority.
 
 The control directory is workspace/build-owned, exclusive and mode 0700; a
-second start never adopts it. Control/ready files bind the CI run/attempt/lane,
+second start never adopts it. Control/ownership files bind the CI run/attempt/lane,
 workspace and directory identity, command hash, token, PID and process start
-ticks. Stop validates these identities, opens a pidfd, checks the pinned process
+ticks. The worker registers `owned.json` before observation starts so a failed
+startup remains available to authenticated stop. It publishes `ready.json` only
+after opening the mount descriptor, registering its poll and recording the
+baseline successfully, while still within the deadline and not stopping.
+Ownership registration alone does not permit the start command to report READY.
+Stop validates the ownership identities, opens a pidfd, checks the pinned process
 identity again and uses only `pidfd_send_signal(SIGTERM)`. It never falls back
 to signaling a numerical PID or process group, escalates signals or adopts an
 unrelated process. A missing/mismatched owner, absent start/stop or unavailable

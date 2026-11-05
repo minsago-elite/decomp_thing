@@ -202,10 +202,11 @@ class Recorder:
 
 def observe(recorder, roots, workspace, duration, stopped, *, open_fd=os.open,
             close_fd=os.close, read=read_table, poll_factory=select.poll,
-            namespace=lambda: os.stat('/proc/self/ns/mnt').st_ino):
+            namespace=lambda: os.stat('/proc/self/ns/mnt').st_ino, on_ready=None):
     fd = None
     reason = 'DEADLINE'
     incomplete = True
+    coverage_end = None
     start = time.monotonic()
     recorder.write('START', schema=1, diagnosticOnly=True, qualified=False,
                    clocks={'monotonic': 'Python time.monotonic_ns', 'realtime': 'Unix time.time_ns',
@@ -219,12 +220,41 @@ def observe(recorder, roots, workspace, duration, stopped, *, open_fd=os.open,
         poller.register(fd, select.POLLPRI | select.POLLERR)
         before = anchor()
         previous = read(fd)
-        recorder.write('BASELINE', namespaceInode=ns, rows=len(previous), tableHash=digest(previous),
-                       readStart=before, readEnd=anchor())
-        incomplete = False
-        while not stopped() and time.monotonic() - start < duration:
-            remaining = duration - (time.monotonic() - start)
-            events = poller.poll(max(0, min(POLL_MS, int(remaining * 1000))))
+        if not recorder.write('BASELINE', namespaceInode=ns, rows=len(previous), tableHash=digest(previous),
+                              readStart=before, readEnd=anchor()):
+            reason = 'OUTPUT_LIMIT'
+            return
+        if on_ready is not None and not stopped() and time.monotonic() - start < duration:
+            on_ready()
+        drain_deadline = None
+        drain_polls = 0
+        while True:
+            now = time.monotonic()
+            if now - start >= duration:
+                break
+            draining = stopped()
+            if draining:
+                if drain_deadline is None:
+                    drain_deadline = now + STOP_SECONDS
+                # Time and iteration caps also bound a stream of spurious notifications.
+                if now >= drain_deadline or drain_polls >= MAX_RECORDS:
+                    reason = 'STOP_DRAIN_LIMIT'
+                    break
+                drain_polls += 1
+            remaining = duration - (now - start)
+            poll_start = anchor()
+            events = poller.poll(0 if draining else max(0, min(POLL_MS, int(remaining * 1000))))
+            if draining and not events:
+                if time.monotonic() - start >= duration:
+                    break
+                if time.monotonic() >= drain_deadline:
+                    reason = 'STOP_DRAIN_LIMIT'
+                    break
+                # Conservatively end coverage at the start of the final quiet poll,
+                # not at the later STOP write or descriptor close.
+                coverage_end = poll_start
+                reason, incomplete = 'SIGNAL', False
+                break
             # Drain a reported event even if the stop signal arrived during poll.
             masks = [mask for event_fd, mask in events if event_fd == fd]
             mask = 0
@@ -255,11 +285,6 @@ def observe(recorder, roots, workspace, duration, stopped, *, open_fd=os.open,
             if recorder.overflow:
                 reason, incomplete = 'OUTPUT_LIMIT', True
                 break
-        if reason == 'DEADLINE':
-            if stopped():
-                reason = 'SIGNAL'
-            else:
-                incomplete = True  # Coverage ended before the CI stop step.
     except Unavailable as exc:
         reason = str(exc)  # exclusively closed internal codes
         recorder.write('UNAVAILABLE', reason=reason, incomplete=True, coalescing='UNKNOWN')
@@ -276,7 +301,7 @@ def observe(recorder, roots, workspace, duration, stopped, *, open_fd=os.open,
             except OSError:
                 reason, incomplete = 'CLOSE_UNAVAILABLE', True
         recorder.write('STOP', reason=reason, anchor=anchor(), stopObserved=True,
-                       incomplete=incomplete, intervalEnded=True, coalescing='UNKNOWN',
+                       incomplete=incomplete, intervalEnded=True, coverageEnd=coverage_end, coalescing='UNKNOWN',
                        qualification='NONE', productCleanup='UNKNOWN')
 
 
@@ -390,27 +415,30 @@ def run(root, directory, token, duration, roots, session):
         stopping[0] = True
     signal.signal(signal.SIGTERM, on_signal)
     signal.signal(signal.SIGINT, on_signal)
+    ownership = dict(**own, controlIdentity=control_id, token=token)
+    write_json(directory / 'owned.json', ownership)
+    def on_ready():
+        write_json(directory / 'ready.json', dict(**ownership, baselineRecorded=True))
     with (directory / 'observations.jsonl').open('xb') as stream:
-        write_json(directory / 'ready.json', dict(**own, controlIdentity=control_id, token=token))
-        observe(Recorder(stream), roots, str(root), duration, lambda: stopping[0])
+        observe(Recorder(stream), roots, str(root), duration, lambda: stopping[0], on_ready=on_ready)
 
 
 def stop_owned(root, directory, session):
     """A pidfd pins the process across validation/signaling; no PID kill fallback."""
     control, control_id = load_owned(root, directory, session)
-    ready = json.loads(bounded_file(directory / 'ready.json'))
-    if (ready['controlIdentity'] != control_id or ready['token'] != control['token']
-            or ready['workspaceIdentity'] != control['workspaceIdentity']
-            or ready['commandHash'] != control['commandHash'] or ready['uid'] != control['uid']
-            or type(ready['pid']) is not int or ready['pid'] <= 1):
+    owned = json.loads(bounded_file(directory / 'owned.json'))
+    if (owned['controlIdentity'] != control_id or owned['token'] != control['token']
+            or owned['workspaceIdentity'] != control['workspaceIdentity']
+            or owned['commandHash'] != control['commandHash'] or owned['uid'] != control['uid']
+            or type(owned['pid']) is not int or owned['pid'] <= 1):
         bad('OWNERSHIP_MISMATCH')
     try:
-        handle = os.pidfd_open(ready['pid'], 0)
+        handle = os.pidfd_open(owned['pid'], 0)
     except ProcessLookupError:
         return 'ALREADY_EXITED'
     try:
-        current = process_identity(ready['pid'])
-        if any(current[k] != ready[k] for k in current):
+        current = process_identity(owned['pid'])
+        if any(current[k] != owned[k] for k in current):
             bad('OWNERSHIP_MISMATCH')
         # Recheck the control file immediately before signaling the pinned process.
         again, again_id = load_owned(root, directory, session)

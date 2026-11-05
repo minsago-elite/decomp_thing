@@ -145,9 +145,65 @@ class ObserverControls(unittest.TestCase):
         self.assertNotIn(b'private-option', raw)
 
     def test_signal_stop(self):
-        records, reader, _ = self.drive([m.parse(row())], [[], [(37, select.POLLPRI)]], stop_after=1)
-        self.assertEqual(1, reader.call_count)
+        records, reader, _ = self.drive([m.parse(row()), m.parse(row(options='ro'))],
+                                       [[], [(37, select.POLLPRI)]], stop_after=1)
+        self.assertEqual(2, reader.call_count)
+        self.assertTrue(any(r['kind'] == 'CHANGED' for r in records))
         self.assertEqual('SIGNAL', records[-1]['reason'])
+
+    def test_stop_during_snapshot_or_recording_drains_second_event(self):
+        for stop_at in ('read', 'EVENT', 'CHANGED'):
+            with self.subTest(stop_at=stop_at):
+                out = io.BytesIO()
+                recorder = m.Recorder(out)
+                stopping = [False]
+                table = m.parse(row())
+                tables = [table, m.parse(row(options='ro')), table]
+                def read(_fd):
+                    value = tables.pop(0)
+                    if stop_at == 'read' and len(tables) == 1:
+                        stopping[0] = True
+                    return value
+                write = recorder.write
+                def record(kind, **values):
+                    result = write(kind, **values)
+                    if kind == stop_at:
+                        stopping[0] = True
+                    return result
+                recorder.write = record
+                poller = Mock()
+                poller.poll.side_effect = [[(37, select.POLLPRI)], [(37, select.POLLERR)], []]
+                m.observe(recorder, [], '/repo', 10, lambda: stopping[0],
+                          open_fd=lambda *_: 37, close_fd=lambda _: None, read=read,
+                          poll_factory=lambda: poller, namespace=lambda: 123)
+                records = [json.loads(line) for line in out.getvalue().splitlines()]
+                self.assertEqual(2, sum(r['kind'] == 'EVENT' for r in records))
+                self.assertEqual(2, sum(r['kind'] == 'CHANGED' for r in records))
+                self.assertEqual([0, 0], [c.args[0] for c in poller.poll.call_args_list[1:]])
+                self.assertFalse(records[-1]['incomplete'])
+                self.assertEqual('SIGNAL', records[-1]['reason'])
+                self.assertLessEqual(records[-1]['coverageEnd']['monotonicAfterNs'],
+                                     records[-1]['anchor']['monotonicBeforeNs'])
+
+    def test_stop_drain_deadline_output_and_error_are_incomplete(self):
+        table = m.parse(row())
+        for name, tables, events, duration, count in [
+                ('DEADLINE', [table, table], [[(37, select.POLLPRI)]], .25, m.MAX_RECORDS),
+                ('OUTPUT_LIMIT', [table, table, table], [[(37, select.POLLPRI)]] * 2, 10, 7),
+                ('POLL_UNAVAILABLE', [table, table], [[(37, select.POLLPRI)], [(37, select.POLLHUP)]], 10, m.MAX_RECORDS),
+                ('PARSE', [table, table, m.Unavailable('PARSE')], [[(37, select.POLLPRI)]] * 2, 10, m.MAX_RECORDS),
+                ('STOP_DRAIN_LIMIT', [table], [[(38, select.POLLPRI)]] * 20, 10, 8)]:
+            with self.subTest(reason=name), patch.object(m, 'MAX_RECORDS', count):
+                records, _, _ = self.drive(tables, events, duration=duration, stop_after=1)
+                self.assertEqual(name, records[-1]['reason'])
+                self.assertTrue(records[-1]['incomplete'])
+                self.assertIsNone(records[-1]['coverageEnd'])
+
+    def test_stop_drain_time_budget_is_incomplete(self):
+        with patch.object(m, 'STOP_SECONDS', .001):
+            records, _, _ = self.drive([m.parse(row())], [[]], duration=10, stop_after=1)
+        self.assertEqual('STOP_DRAIN_LIMIT', records[-1]['reason'])
+        self.assertTrue(records[-1]['incomplete'])
 
     def test_same_fd_seek_and_bounded_read_to_eof(self):
         data = row()
@@ -277,11 +333,11 @@ class LifecycleControls(unittest.TestCase):
         self.control = dict(token='test', sessionHash=m.digest('session'), workspaceIdentity=m.identity(self.root), uid=os.getuid(),
                             directoryIdentity=m.identity(self.directory), commandHash='expected')
         m.write_json(self.directory / 'control.json', self.control)
-        self.ready = dict(pid=444, ticks=123, commandHash='expected', uid=os.getuid(),
+        self.owned = dict(pid=444, ticks=123, commandHash='expected', uid=os.getuid(),
                           workspaceIdentity=m.identity(self.root), token='test',
                           controlIdentity=m.identity(self.directory / 'control.json'))
-        m.write_json(self.directory / 'ready.json', self.ready)
-        self.current = {k: self.ready[k] for k in ('pid', 'ticks', 'commandHash', 'workspaceIdentity', 'uid')}
+        m.write_json(self.directory / 'owned.json', self.owned)
+        self.current = {k: self.owned[k] for k in ('pid', 'ticks', 'commandHash', 'workspaceIdentity', 'uid')}
 
     def stop(self, current=None, events=None, pid_error=None):
         clock = Clock()
@@ -319,9 +375,9 @@ class LifecycleControls(unittest.TestCase):
             self.assertEqual(1, sum(c.args == (77,) for c in close.call_args_list))
 
     def test_control_replaced_or_token_forged_never_signal(self):
-        self.ready['controlIdentity'] = [0, 0]
-        (self.directory / 'ready.json').unlink()
-        m.write_json(self.directory / 'ready.json', self.ready)
+        self.owned['controlIdentity'] = [0, 0]
+        (self.directory / 'owned.json').unlink()
+        m.write_json(self.directory / 'owned.json', self.owned)
         result, send, opened, _, _ = self.stop()
         self.assertEqual('OWNERSHIP_MISMATCH', result)
         send.assert_not_called()
@@ -332,9 +388,9 @@ class LifecycleControls(unittest.TestCase):
              self.assertRaisesRegex(m.Unavailable, 'OWNERSHIP_MISMATCH'):
             m.stop_owned(self.root, self.directory, 'another-session')
         opened.assert_not_called()
-        self.ready['token'] = 'forged'
-        (self.directory / 'ready.json').unlink()
-        m.write_json(self.directory / 'ready.json', self.ready)
+        self.owned['token'] = 'forged'
+        (self.directory / 'owned.json').unlink()
+        m.write_json(self.directory / 'owned.json', self.owned)
         result, send, opened, _, _ = self.stop()
         self.assertEqual('OWNERSHIP_MISMATCH', result)
         send.assert_not_called()
@@ -367,8 +423,8 @@ class LifecycleControls(unittest.TestCase):
 
     def test_control_replacement_between_validation_and_signal(self):
         changed = dict(self.control, token='replaced')
-        with patch.object(m, 'load_owned', side_effect=[(self.control, self.ready['controlIdentity']),
-                                                       (changed, self.ready['controlIdentity'])]), \
+        with patch.object(m, 'load_owned', side_effect=[(self.control, self.owned['controlIdentity']),
+                                                       (changed, self.owned['controlIdentity'])]), \
              patch.object(m.os, 'pidfd_open', return_value=77, create=True), \
              patch.object(m, 'process_identity', return_value=self.current), \
              patch.object(m.signal, 'pidfd_send_signal', create=True) as send, \
@@ -429,13 +485,112 @@ class LifecycleControls(unittest.TestCase):
     def test_worker_installs_signal_handlers_and_does_not_launch_real_observer(self):
         with patch.object(m, 'process_identity', return_value=self.current), \
              patch.object(m.signal, 'signal') as handlers, patch.object(m, 'observe') as observe:
-            (self.directory / 'ready.json').unlink()
+            (self.directory / 'owned.json').unlink()
             m.run(self.root, self.directory, 'test', 10, [], 'session')
         self.assertEqual([signal.SIGTERM, signal.SIGINT], [x.args[0] for x in handlers.call_args_list])
+        self.assertTrue((self.directory / 'owned.json').exists())
+        self.assertFalse((self.directory / 'ready.json').exists())
+        observe.call_args.kwargs['on_ready']()
+        self.assertTrue(json.loads((self.directory / 'ready.json').read_text())['baselineRecorded'])
         stopped = observe.call_args.args[4]
         self.assertFalse(stopped())
         handlers.call_args_list[0].args[1](signal.SIGTERM, None)
         self.assertTrue(stopped())
+
+    def run_baseline(self, outcome):
+        (self.directory / 'owned.json').unlink()
+        poller = Mock()
+        handlers = {}
+        def handler(number, callback):
+            handlers[number] = callback
+        def read(_fd):
+            self.assertTrue((self.directory / 'owned.json').exists())
+            self.assertFalse((self.directory / 'ready.json').exists())
+            poller.register.assert_called_once_with(37, select.POLLPRI | select.POLLERR)
+            if outcome == 'failure':
+                raise m.Unavailable('PARSE')
+            if outcome == 'stopped':
+                handlers[signal.SIGTERM](signal.SIGTERM, None)
+            return m.parse(row())
+        def poll(_ms):
+            if outcome == 'success':
+                ready = json.loads((self.directory / 'ready.json').read_text())
+                self.assertTrue(ready['baselineRecorded'])
+                records = (self.directory / 'observations.jsonl').read_text().splitlines()
+                self.assertEqual('BASELINE', json.loads(records[-1])['kind'])
+            handlers[signal.SIGTERM](signal.SIGTERM, None)
+            return []
+        poller.poll.side_effect = poll
+        observe = m.observe
+        def fake_observe(*args, **kwargs):
+            return observe(*args, **kwargs, open_fd=lambda *_: 37, close_fd=lambda _: None,
+                           read=read, poll_factory=lambda: poller, namespace=lambda: 123)
+        with patch.object(m, 'process_identity', return_value=self.current), \
+             patch.object(m.signal, 'signal', side_effect=handler), \
+             patch.object(m, 'observe', side_effect=fake_observe):
+            m.run(self.root, self.directory, 'test', 10, [], 'session')
+
+    def test_worker_ready_only_after_recorded_baseline(self):
+        self.run_baseline('success')
+        self.assertTrue((self.directory / 'ready.json').exists())
+
+    def test_baseline_failure_is_not_ready_but_owned_stop_remains_authenticated(self):
+        self.run_baseline('failure')
+        self.assertFalse((self.directory / 'ready.json').exists())
+        result, send, opened, _, _ = self.stop(events=True)
+        self.assertEqual('EXITED_AFTER_SIGNAL', result)
+        opened.assert_called_once_with(444, 0)
+        send.assert_called_once_with(77, signal.SIGTERM)
+
+    def test_stop_during_baseline_does_not_publish_ready(self):
+        self.run_baseline('stopped')
+        self.assertFalse((self.directory / 'ready.json').exists())
+
+    def test_start_waits_for_readiness_not_ownership(self):
+        for ready in (False, True):
+            fresh = self.root / 'build' / str(ready)
+            clock = Clock()
+            def launch(*_args, **_kwargs):
+                m.write_json(fresh / 'owned.json', self.owned)
+            def sleep(seconds):
+                clock.sleep(seconds)
+                self.assertFalse((fresh / 'start.json').exists())
+                if ready and clock.now >= .1 and not (fresh / 'ready.json').exists():
+                    m.write_json(fresh / 'ready.json', dict(self.owned, baselineRecorded=True))
+            with patch.object(m.subprocess, 'Popen', side_effect=launch), \
+                 patch.object(m.time, 'monotonic', clock.monotonic), \
+                 patch.object(m.time, 'sleep', sleep):
+                m.start(self.root, fresh, 10, [], 'session')
+            self.assertEqual('READY' if ready else 'START_UNCONFIRMED',
+                             json.loads((fresh / 'start.json').read_text())['status'])
+
+    def test_baseline_reaching_deadline_never_calls_ready(self):
+        out = io.BytesIO()
+        ready = Mock()
+        clock = Clock()
+        def read(_fd):
+            clock.now = 10
+            return m.parse(row())
+        with patch.object(m.time, 'monotonic', clock.monotonic):
+            m.observe(m.Recorder(out), [], '/repo', 10, lambda: False, on_ready=ready,
+                      open_fd=lambda *_: 37, close_fd=lambda _: None,
+                      read=read, poll_factory=Mock, namespace=lambda: 123)
+        ready.assert_not_called()
+        stop = json.loads(out.getvalue().splitlines()[-1])
+        self.assertEqual('DEADLINE', stop['reason'])
+        self.assertTrue(stop['incomplete'])
+
+    def test_baseline_output_failure_never_calls_ready(self):
+        out = io.BytesIO()
+        ready = Mock()
+        with patch.object(m, 'MAX_RECORDS', 4):
+            m.observe(m.Recorder(out), [], '/repo', 10, lambda: False, on_ready=ready,
+                      open_fd=lambda *_: 37, close_fd=lambda _: None,
+                      read=lambda _: m.parse(row()), poll_factory=Mock, namespace=lambda: 123)
+        ready.assert_not_called()
+        stop = json.loads(out.getvalue().splitlines()[-1])
+        self.assertEqual('OUTPUT_LIMIT', stop['reason'])
+        self.assertTrue(stop['incomplete'])
 
     def test_symlinks_and_oversized_controls_rejected(self):
         link = self.root / 'link'
