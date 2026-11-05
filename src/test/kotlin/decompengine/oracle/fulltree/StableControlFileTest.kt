@@ -72,6 +72,7 @@ class StableControlFileTest {
             }
 
             assertTrue(failure.message.orEmpty().contains("mutated"), failure.message)
+            assertTargetedMutationDiagnostic(failure)
             assertContentEquals(original, Files.readAllBytes(displaced))
             assertContentEquals(replacement, Files.readAllBytes(input))
         }
@@ -94,6 +95,7 @@ class StableControlFileTest {
                     file.verifyUnchanged("same-inode control fixture")
                 }
                 assertTrue(failure.message.orEmpty().contains("mutated"), failure.message)
+                assertTargetedMutationDiagnostic(failure)
             }
         }
 
@@ -128,6 +130,7 @@ class StableControlFileTest {
                 }
 
                 assertTrue(failure.message.orEmpty().contains("mutated"), failure.message)
+                assertTargetedMutationDiagnostic(failure)
                 assertContentEquals(expectedDestination, destination)
             }
         }
@@ -622,5 +625,20 @@ class StableControlFileTest {
         } catch (failure: InvocationTargetException) {
             throw failure.targetException
         }
+    }
+
+    private fun assertTargetedMutationDiagnostic(failure: FullTreeControlException) {
+        val diagnosticThrowable = failure.suppressed.singleOrNull { it.javaClass.simpleName == "MutationDiagnostic" }
+            ?: error("missing mutation diagnostic; message=${failure.message}; suppressed=${failure.suppressed.toList()}")
+        val diagnostic = diagnosticThrowable.message.orEmpty()
+        assertTrue(diagnostic.contains("scope=TARGETED"), "unexpected diagnostic: $diagnostic")
+        assertTrue(
+            diagnostic.contains("reason=FILE_EVENT") || diagnostic.contains("reason=PARENT_NAME_MATCH"),
+            diagnostic,
+        )
+        assertTrue(diagnostic.contains("parentWatch="), diagnostic)
+        assertTrue(diagnostic.contains("fileWatch="), diagnostic)
+        assertTrue(diagnostic.contains("observedElapsedNanos="), diagnostic)
+        assertTrue(diagnostic.toByteArray(Charsets.UTF_8).size <= 2 * 1024)
     }
 }
