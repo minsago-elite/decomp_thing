@@ -578,3 +578,95 @@ mandatory.
 
 This is prepared source. Its own normal Actions must establish hit/miss behavior
 and any download or whole-CI savings; no measured speedup is claimed.
+
+## Passive host mount diagnostics (#1799, #1530, #1551)
+
+Ordinary Kotlin partitions and required ACP CI start an owned passive observer
+before host preparation and stop it after the existing ACP quota release. All
+existing preparation, qualification, assertions and release steps retain their
+order and behavior. The observer does not correct, tolerate or retry events,
+admit work, or establish cleanup. Start/stop failures do not waive any product
+failure. The separate `*-host-mount-observation` artifact is uploaded with
+`always()`, including on job failure. Abrupt runner loss can prevent both stop
+and upload; absence is incomplete evidence, never successful qualification.
+
+`scripts/ci-observe-host-mount-events.py` opens one `/proc/self/mountinfo`
+descriptor. It seeks to zero and reads that descriptor to EOF for the initial
+bounded snapshot, then polls it for `POLLPRI|POLLERR`. Each positive notification
+acknowledges the event counter on that descriptor and causes one bounded read/diff
+on the same descriptor, preserving its observation identity. Timeouts produce neither an event nor `NO_NET_DELTA`. `POLLHUP`,
+`POLLNVAL`, read errors, malformed/duplicate rows and input limits produce
+`UNAVAILABLE` and an incomplete stop. The full canonical comparison includes
+mount ID, parent, device, root, target, mount options, all optional fields,
+filesystem, source and superblock options. Kernel root labels (including namespace
+handles and deleted/noncanonical paths) remain opaque hashed values. Only target
+paths participate in path-shape classification. Option ordering is canonicalized.
+A positive event with the same complete table produces `NO_NET_DELTA`, with
+ABA and coalescing **UNKNOWN**. Snapshot differences cannot recover intermediate
+changes or identify an actor. A notification can coalesce several changes;
+absence of a visible difference does not establish benignness.
+
+Records retain the mount namespace inode, hashes of full canonical rows/tables,
+private roots, targets and sources, a closed filesystem vocabulary (other names
+hash), propagation labels plus a hash of all optional fields, and a closed target
+class: credentials, user-runtime, snap, docker, binfmt, decomp, workspace, system
+or other. These are path-shape descriptions, not actor or security judgments.
+Only exact members of the script's fixed system-target allowlist appear raw.
+No substring/name-based secret detection permits publication. Options and
+superblock options also hash; no environment, raw mount table, journal or
+arbitrary exception message is emitted. Hashes allow equality comparisons and
+are not a guarantee against guessing known paths.
+
+Each row relates to explicitly configured observation roots as `AT`, `UNDER`,
+`ANCESTOR` or `DISJOINT`, using component boundaries. Current workflows configure
+the workspace and its build directory. **These roots are not the complete
+product covered-authority projection.** A disjoint event is not proof that it is
+irrelevant or safe, and cannot override the product's sticky refusal witness.
+
+The output is complete JSON lines in `observations.jsonl` plus one
+`lifecycle.json` document. Observation output is capped at 508 records / 252 KiB;
+lifecycle output is at most one record / 4 KiB, jointly below 512 records /
+256 KiB. Capacity is reserved for start, error, overflow and stop markers; JSON
+is never byte-sliced. On output pressure the observer records `OVERFLOW`, marks
+incomplete, and stops. Input is capped at 1 MiB, 4096 rows, 64 fields per row,
+4096 bytes per field and eight configured roots. Oversized/incomplete tables
+are rejected instead of diffing a partial snapshot. The poll interval is at most
+250 ms and observer lifetime at most six hours. Deadline termination ends only
+that observation interval and cannot prove the job's remaining interval clean.
+Every record stream remains diagnostic-only with no qualification authority.
+
+The control directory is workspace/build-owned, exclusive and mode 0700; a
+second start never adopts it. Control/ready files bind the CI run/attempt/lane,
+workspace and directory identity, command hash, token, PID and process start
+ticks. Stop validates these identities, opens a pidfd, checks the pinned process
+identity again and uses only `pidfd_send_signal(SIGTERM)`. It never falls back
+to signaling a numerical PID or process group, escalates signals or adopts an
+unrelated process. A missing/mismatched owner, absent start/stop or unavailable
+pidfd is explicitly incomplete. Stop waits at most three seconds and records a
+survivor if necessary; that record grants no cleanup authority. The independent
+observer deadline still applies. Background stdin/stdout/stderr are disconnected
+from CI step pipes; control files are not uploaded. No namespace, capability,
+privileged command, native product query or auth/provider operation is added.
+
+Start, reads and stop include bounded anchors: Python `time.monotonic_ns()`
+before and after a `time.time_ns()` realtime sample. Read start/end anchors
+bound the snapshot interval, not the instant of the causing operation. Wall
+clock adjustments and scheduling uncertainty must be retained. Java
+`System.nanoTime()` has an arbitrary origin that its API does not guarantee
+across processes. An exact Python/JVM monotonic join requires retained evidence
+for the pinned runtime/platform; sharing a host is insufficient. Without that
+evidence, clock joins are conditional or unknown, using anchor uncertainty
+rather than inventing an exact causal timeline. Observations do not resolve any
+of the original issues' acceptance criteria by themselves.
+
+Local controls use authored mount tables and mocked poll/read/clock/process/
+signal operations only. They never start a daemon or observe the local host:
+
+```bash
+/usr/bin/python3.14 -B scripts/test-ci-observe-host-mount-events.py --verbose
+```
+
+Ubuntu CI uses `python3`. Test temporary files stay under
+`build/1799-passive-diagnostics/o1-controls`; local AST, YAML, diff and control
+logs/source hashes are retained there. Parent integration and Opus review precede
+any push; these local controls are not full #1799 qualification.

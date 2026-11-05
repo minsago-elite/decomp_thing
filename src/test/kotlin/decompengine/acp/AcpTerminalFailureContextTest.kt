@@ -132,6 +132,30 @@ class AcpTerminalFailureContextTest {
         assertEquals(AcpTerminalAuditReason.CAPABILITY_DISABLED, unrelated.snapshot().single().reason)
     }
 
+    @Test
+    fun `timing display accepts signed clocks and rejects malformed overflow and forged records`() {
+        val timing = "mount-timing-v1 clock=System.nanoTime origin=unspecified createdNs=${Long.MIN_VALUE} " +
+            "admittedNs=NA lastCleanNs=-1 firstObservedNs=0 cleanPolls=${Long.MAX_VALUE}"
+        for (value in listOf(null, timing, "PRIVATE", "x".repeat(513), timing + " PRIVATE",
+            timing.replace("System.nanoTime", "SystemXnanoTime"),
+            timing.replace("unspecified", "shared"), timing.replace("cleanPolls=${Long.MAX_VALUE}", "cleanPolls=-1"),
+            timing.replace("firstObservedNs=0", "firstObservedNs=9223372036854775808"),
+            timing.replace("firstObservedNs=0", "firstObservedNs=-0"))) {
+            val witness = mountWitness(null)
+            witness.javaClass.getDeclaredField("timingContext").apply { isAccessible = true }.set(witness, value)
+            val failure = IOException("PRIVATE", witness)
+            val context = assertNotNull(captureTerminalLaunchFailure(AcpTerminalFailureSite.SANDBOX_LAUNCH, failure)).text
+            assertEquals(value == timing, "mount-timing-v1" in context)
+            assertTrue("mount-event-v1" in context)
+            assertFalse("PRIVATE" in context)
+            assertSame(witness, failure.cause)
+            assertTrue(failure.suppressed.isEmpty())
+        }
+        assertNull((mountWitness(null) as AcpMountEventWitness).timingRecord) // Legacy six-argument constructor.
+        val forged = IOException(timing).apply { addSuppressed(mountWitness(null)) }
+        assertFalse("mount-timing-v1" in assertNotNull(captureTerminalLaunchFailure(AcpTerminalFailureSite.CREATE_CHECK, forged)).text)
+    }
+
     private fun mountWitness(admission: String?): Throwable {
         val phase = Class.forName("decompengine.acp.RuntimePrivateControlScope\$MountEventPhase")
         val outcome = Class.forName("decompengine.acp.RuntimePrivateControlScope\$MountEventOutcome")

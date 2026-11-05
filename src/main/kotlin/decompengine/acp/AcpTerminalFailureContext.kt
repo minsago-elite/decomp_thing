@@ -6,6 +6,21 @@ import java.nio.file.AccessDeniedException
 import java.nio.file.FileSystemLoopException
 import java.nio.file.NoSuchFileException
 
+/** Closed signed-Long clock grammar; no origin, elapsed-time or cross-process inference. */
+internal fun validatedAcpMountTiming(record: String?): String? {
+    if (record == null || record.length > 512) return null
+    val match = ACP_MOUNT_TIMING.matchEntire(record) ?: return null
+    if (match.groupValues.drop(1).any { it != "NA" && it.toLongOrNull() == null }) return null
+    return record
+}
+
+private val ACP_MOUNT_TIMING = Regex(
+    "mount-timing-v1 clock=System\\.nanoTime origin=unspecified " +
+        "createdNs=(0|-?[1-9][0-9]{0,18}) admittedNs=(NA|0|-?[1-9][0-9]{0,18}) " +
+        "lastCleanNs=(NA|0|-?[1-9][0-9]{0,18}) firstObservedNs=(NA|0|-?[1-9][0-9]{0,18}) " +
+        "cleanPolls=(0|[1-9][0-9]{0,18})",
+)
+
 internal const val TERMINAL_FAILURE_CONTEXT_UNAVAILABLE = "terminal launch failure context=unavailable"
 internal enum class AcpTerminalFailureSite { SANDBOX_LAUNCH, CREATE_CHECK }
 
@@ -56,7 +71,8 @@ internal class AcpTerminalLaunchFailureContext private constructor(val text: Str
                 val admitted = if (record != null) failure.admissionRecord
                     ?.takeIf { it.length <= 256 && admission.matches(it) } else null
                 if (record == null) "mount-witness-invalid"
-                else if (admitted == null) record else "$record;$admitted"
+                else record + (admitted?.let { ";$it" } ?: "") +
+                    (validatedAcpMountTiming(failure.timingRecord)?.let { ";$it" } ?: "")
             }
             is LinuxSyscallException -> "syscall(errno=${failure.errno})"
             is LinuxResourceLimitException -> "read-limit"

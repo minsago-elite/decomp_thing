@@ -377,6 +377,21 @@ jobs:
         env:
           ANGR_DIFF_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
         run: bash scripts/select-angr-qualification.sh
+      - name: Verify passive mount observation controls
+        id: mount-observation-controls
+        continue-on-error: true
+        timeout-minutes: 1
+        run: python3 -B scripts/test-ci-observe-host-mount-events.py --verbose
+      - name: Start passive host mount observation
+        if: steps.mount-observation-controls.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 1
+        run: >-
+          python3 -B scripts/ci-observe-host-mount-events.py start
+          --workspace "$GITHUB_WORKSPACE"
+          --session "${{ github.run_id }}-${{ github.run_attempt }}-kotlin-${{ matrix.shard }}"
+          --root "$GITHUB_WORKSPACE"
+          --root "$GITHUB_WORKSPACE/build"
       - name: Prepare root-owned oracle JVM and system libraries
         run: bash scripts/ci-prepare-oracle-runtime.sh
       - name: Prepare required live ACP sandbox host
@@ -502,6 +517,25 @@ jobs:
       - name: Release finite ACP quota fixture
         if: always()
         run: bash scripts/ci-release-acp-quota.sh
+      - name: Stop owned passive host mount observation
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 1
+        run: >-
+          python3 -B scripts/ci-observe-host-mount-events.py stop
+          --workspace "$GITHUB_WORKSPACE"
+          --session "${{ github.run_id }}-${{ github.run_attempt }}-kotlin-${{ matrix.shard }}"
+      - name: Retain passive host mount diagnostics
+        uses: actions/upload-artifact@v7
+        if: always()
+        continue-on-error: true
+        with:
+          name: kotlin-${{ matrix.shard }}-host-mount-observation
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            build/ci-host-mount-observation/observations.jsonl
+            build/ci-host-mount-observation/lifecycle.json
       - uses: actions/upload-artifact@v7
         if: always()
         with:

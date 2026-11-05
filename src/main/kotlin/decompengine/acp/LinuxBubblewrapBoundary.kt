@@ -29,6 +29,8 @@ internal sealed interface AcpMountEventWitness {
     val diagnosticRecord: String
     /** Already captured optional display data; no refreshed identity or native query. */
     val admissionRecord: String? get() = null
+    /** Captured clock scalars only; origin is unspecified by the Java API. */
+    val timingRecord: String? get() = null
 }
 
 /** A fatal failure to prove that a sandbox scope/tree or one of its pinned resources is gone. */
@@ -2178,6 +2180,13 @@ private class RuntimePrivateControlScope private constructor(
 
     /** One scope's original event latch, with failure-only diagnostics and no query injection. */
     private class MountEventCheck(private val poll: LinuxFilesystemSyscalls.MountMetadataPollScratch) {
+        private val createdNs = System.nanoTime()
+        private var admissionCompleteNs = 0L
+        private var lastCleanNs = 0L
+        private var firstObservedNs = 0L
+        private var observedFailure = false
+        private var cleanPollCount = 0L
+        private var firstEventTimingContext: String? = null
         private var mountChanged = false
         private var firstEventPhase: MountEventPhase? = null
         private var firstEventObservation = 0L
@@ -2197,7 +2206,23 @@ private class RuntimePrivateControlScope private constructor(
         }
 
         fun markAdmissionComplete() {
+            if (!admissionComplete) admissionCompleteNs = System.nanoTime()
             admissionComplete = true
+        }
+
+        // No subtraction or nonnegative-origin assumption; absent observations remain NA.
+        private fun timingContext(): String? = try {
+            "mount-timing-v1 clock=System.nanoTime origin=unspecified createdNs=$createdNs " +
+                "admittedNs=${if (admissionComplete) admissionCompleteNs else "NA"} " +
+                "lastCleanNs=${if (cleanPollCount > 0) lastCleanNs else "NA"} " +
+                "firstObservedNs=${if (observedFailure) firstObservedNs else "NA"} cleanPolls=$cleanPollCount"
+        } catch (_: Throwable) { null }
+
+        private fun recordFailureTime() {
+            if (!observedFailure) {
+                firstObservedNs = System.nanoTime()
+                observedFailure = true
+            }
         }
 
         // Already-owned initial scalars only: no refreshed rows, identities, or native queries.
@@ -2226,8 +2251,12 @@ private class RuntimePrivateControlScope private constructor(
                 firstEventPhase = phase
                 firstEventObservation = observation
                 mountChanged = true
+                recordFailureTime()
+                firstEventTimingContext = timingContext()
                 throw eventFailure()
             }
+            lastCleanNs = System.nanoTime()
+            if (cleanPollCount < Long.MAX_VALUE) cleanPollCount++
         }
 
         private fun eventFailure(): IOException {
@@ -2236,7 +2265,7 @@ private class RuntimePrivateControlScope private constructor(
                 val diagnostic = firstEventDiagnostic ?: MountEventDiagnostic(
                     checkNotNull(firstEventPhase), MountEventOutcome.EVENT,
                     (firstEventObservation ushr 32).toInt(), firstEventObservation.toInt() and 0xffff, null,
-                    admissionContext(),
+                    admissionContext(), firstEventTimingContext,
                 ).also { firstEventDiagnostic = it }
                 // This exact local IOException is fresh: no graph lookup or existing-list growth.
                 failure.addSuppressed(diagnostic)
@@ -2250,11 +2279,12 @@ private class RuntimePrivateControlScope private constructor(
             try {
                 // Claim before construction/attachment; no retries even if diagnostics fail.
                 val observation = poll.claimFailureObservation(failure) ?: return
+                recordFailureTime()
                 val outcome = if (observation.events != null) MountEventOutcome.INVALID_DESCRIPTOR
                     else MountEventOutcome.SYSCALL_ERROR
                 // Only the exact scratch-created, not-yet-annotated exception can reach this line.
                 val diagnostic = MountEventDiagnostic(phase, outcome,
-                    observation.result, observation.events, observation.error, admissionContext())
+                    observation.result, observation.events, observation.error, admissionContext(), timingContext())
                 failure.addSuppressed(diagnostic)
                 // The claimed scratch token proves this exact native primary was freshly constructed.
                 failure.initCause(diagnostic)
@@ -2270,6 +2300,7 @@ private class RuntimePrivateControlScope private constructor(
         events: Int?,
         error: Int?,
         private val admissionContext: String?,
+        private val timingContext: String?,
     ) : Throwable(
         "mount-event-v1 phase=${phase.name} generation=" +
             (if (phase == MountEventPhase.REFRESH) "MISMATCH_ALREADY_OBSERVED" else "NOT_EVALUATED") +
@@ -2278,6 +2309,10 @@ private class RuntimePrivateControlScope private constructor(
     ), AcpMountEventWitness {
         override val diagnosticRecord: String get() = message.orEmpty()
         override val admissionRecord: String? get() = admissionContext
+        override val timingRecord: String? get() = timingContext
+
+        constructor(phase: MountEventPhase, outcome: MountEventOutcome, result: Int?, events: Int?, error: Int?,
+            admissionContext: String?) : this(phase, outcome, result, events, error, admissionContext, null)
 
         // Preserve the legacy scalar witness constructor and its exact message.
         constructor(phase: MountEventPhase, outcome: MountEventOutcome, result: Int?, events: Int?, error: Int?) :

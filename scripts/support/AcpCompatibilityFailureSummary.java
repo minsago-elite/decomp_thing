@@ -20,6 +20,25 @@ final class AcpCompatibilityFailureSummary {
         "initialMounts=[0-9]{1,10} initialControls=[0-9]{1,10} owner=(true|false) initialFast=(true|false)"
     );
 
+    private static final Pattern MOUNT_TIMING = Pattern.compile(
+        "mount-timing-v1 clock=System\\.nanoTime origin=unspecified " +
+        "createdNs=(0|-?[1-9][0-9]{0,18}) admittedNs=(NA|0|-?[1-9][0-9]{0,18}) " +
+        "lastCleanNs=(NA|0|-?[1-9][0-9]{0,18}) firstObservedNs=(NA|0|-?[1-9][0-9]{0,18}) " +
+        "cleanPolls=(0|[1-9][0-9]{0,18})"
+    );
+
+    private static boolean validTiming(String record) {
+        if (record.length() > 512) return false;
+        var match = MOUNT_TIMING.matcher(record);
+        if (!match.matches()) return false;
+        try {
+            for (var index = 1; index <= match.groupCount(); index++) {
+                if (!match.group(index).equals("NA")) Long.parseLong(match.group(index));
+            }
+            return true;
+        } catch (NumberFormatException invalid) { return false; }
+    }
+
     private AcpCompatibilityFailureSummary() {}
 
     static void report(AgentExecutionReceipt receipt, Throwable failure) {
@@ -78,6 +97,11 @@ final class AcpCompatibilityFailureSummary {
                         if (field.get(current) instanceof String admission && admission.length() <= 256 &&
                             MOUNT_ADMISSION.matcher(admission).matches()) witness += "; " + admission;
                     } catch (Throwable unavailable) { /* Preserve the original scalar witness. */ }
+                    try {
+                        var field = current.getClass().getDeclaredField("timingContext");
+                        field.setAccessible(true);
+                        if (field.get(current) instanceof String timing && validTiming(timing)) witness += "; " + timing;
+                    } catch (Throwable unavailable) { /* Preserve the original scalar witness and admission. */ }
                 }
             }
             var sites = new ArrayList<String>(6);
