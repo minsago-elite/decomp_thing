@@ -7425,13 +7425,17 @@ private fun readStableRegularFileInternal(
                 "stable file-read target $relative has ${before.size()} bytes; limit=$maximumBytes",
             )
         }
-        val bytes = try {
-            LinuxFilesystemSyscalls.read(readable, maximumBytes.toInt(), cancellationCheck)
+        val observed = try {
+            LinuxFilesystemSyscalls.readKnownSize(readable, before.size().toInt(), maximumBytes.toInt(), cancellationCheck)
         } catch (_: LinuxResourceLimitException) {
             throw RepairBudgetExceededException("stable file-read target $relative grew beyond $maximumBytes bytes")
         }
         afterRead?.invoke()
         cancellationCheck()
+        requireUnchanged(observed.observedCount == before.size()) {
+            "stable file-read descriptor changed while it was read: $relative"
+        }
+        val bytes = requireNotNull(observed.bytes)
         val after = Files.readAttributes(descriptorPath, BasicFileAttributes::class.java)
         requireUnchanged(
             after.isRegularFile && before.fileKey() == after.fileKey() &&
