@@ -11,6 +11,9 @@ import hashlib, json, os, pathlib, re, shlex, shutil, signal, subprocess, sys, t
 _SPEC = importlib.util.spec_from_file_location("atomic_install_prepared", pathlib.Path(__file__).with_name("atomic_install_prepared.py"))
 prepared = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(prepared)
+_CHILD_SPEC = importlib.util.spec_from_file_location("atomic_install_child", pathlib.Path(__file__).with_name("atomic_install_child.py"))
+child_runtime = importlib.util.module_from_spec(_CHILD_SPEC)
+_CHILD_SPEC.loader.exec_module(child_runtime)
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 EVIDENCE = ROOT / "build/orchestration/atomic-install-remediation"
@@ -27,8 +30,8 @@ RELEASE_TIMEOUT = BUILD_TIMEOUT + READY_TIMEOUT + PROBE_FINISH_TIMEOUT + 60
 ACTIVE = set()
 RECORD = {"status": "not-started", "phase": "setup", "commands": [], "transitions": [], "authorities": []}
 MODEL = json.dumps({"schemaVersion":4,"inputSha256":"a"*64,"functions":[],"globals":[],"types":[]}, separators=(",",":"))
-OWNED_SOURCES = ("build.gradle.kts", "scripts/test-atomic-install.py", "scripts/test-atomic-install-controls.py",
-                 "scripts/atomic-install-acp-publication.groovy",
+OWNED_SOURCES = ("build.gradle.kts", "scripts/test-atomic-install.py", "scripts/test-atomic-install-controls.py", "scripts/atomic_install_child.py",
+                 "scripts/atomic-install-acp-publication.groovy", "scripts/atomic-install-declared-inputs.groovy",
                  "src/test/java/decompengine/install/AtomicInstallProbeAgent.java")
 
 
@@ -97,79 +100,29 @@ def close_preserving_failure(child, record=None):
             raise
 
 
-class Child:
-    """Bounded disk + memory output; every local failure kills the group and reaps."""
-    def __init__(self, args, *, env=None, cwd=ROOT, log=None):
-        self.log = pathlib.Path(log or WORK / ("process-" + str(time.monotonic_ns()) + ".log"))
-        self.error = None
-        self.tail = bytearray()
-        self.total = 0
-        self.process = None
-        self.reader = None
-        self.log.parent.mkdir(parents=True, exist_ok=True)
-        self.sink = self.log.open("xb")
-        try:
-            self.process = subprocess.Popen(list(map(str, args)), cwd=cwd, env=env,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
-            ACTIVE.add(self)
-            self.reader = threading.Thread(target=self._drain, daemon=True)
-            self.reader.start()
-        except BaseException:
-            close_preserving_failure(self)
-            raise
-
-    def _drain(self):
-        try:
-            while chunk := self.process.stdout.read(65536):
-                remaining = MAX_LOG - self.total
-                self.sink.write(chunk[:max(0, remaining)])
-                self.total += len(chunk)
-                self.tail.extend(chunk)
-                del self.tail[:-12000]
-                if self.total > MAX_LOG:
-                    raise RuntimeError(f"output exceeded {MAX_LOG} bytes: {self.log}")
-        except BaseException as failure:
-            self.error = failure
-            self.kill_group()
-        finally:
-            self.sink.close()
-
-    def kill_group(self):
-        if self.process is not None:
-            try: os.killpg(self.process.pid, signal.SIGKILL)
-            except ProcessLookupError: pass
-
-    def close(self):
-        # Defer a second terminal signal until this child has been killed and reaped.
-        previous = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
-        try:
-            self.kill_group()  # Also kill descendants after the group leader has exited.
-            if self.process is not None:
-                self.process.wait(timeout=10)
-                if self.reader is not None and self.reader.ident is not None:
-                    self.reader.join(timeout=10)
-                    if self.reader.is_alive(): raise RuntimeError("output collector failed to reap")
-                self.process.stdout.close()
-            self.sink.close()
-            ACTIVE.discard(self)
-        finally:
-            signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+class Child(child_runtime.Child):
+    """Driver policy around the independently owned actual-command runtime."""
+    def __init__(self, args, *, env=None, cwd=ROOT, log=None, phase_deadline=None):
+        super().__init__(args, env=env, cwd=cwd,
+            log=log or WORK / ("process-" + str(time.monotonic_ns()) + ".log"),
+            active=ACTIVE, phase_deadline=phase_deadline, max_log=MAX_LOG)
 
     def wait(self, timeout):
         try:
             code = self.process.wait(timeout=timeout)
-            self.kill_group()  # No orphan may retain the pipe after a successful leader exit.
-            self.reader.join(timeout=10)
-            if self.reader.is_alive(): raise RuntimeError("output collector did not finish")
             if self.error: raise self.error
             return code
         finally:
             close_preserving_failure(self)
 
-    def text(self): return self.tail.decode("utf-8", errors="replace")
+
+def process_alive(process):
+    # poll() is nonblocking and its cached status can lag the actual pidfd.
+    return process.poll() is None and process.is_running()
 
 
 def run(args, *, env=None, timeout=900, log=None, allow_failure=False):
+    phase_deadline = time.monotonic() + timeout
     command = {"args": list(map(str, args)), "phase": RECORD["phase"], "status": "running",
                "commandId": len(RECORD["commands"]), "startedAtUnixNs": time.time_ns()}
     if "-I" in command["args"]:
@@ -180,9 +133,9 @@ def run(args, *, env=None, timeout=900, log=None, allow_failure=False):
     save_record()
     child = None
     try:
-        child = Child(args, env=env, log=log)
+        child = Child(args, env=env, log=log, phase_deadline=phase_deadline)
         command["log"] = str(child.log)
-        code = child.wait(timeout)
+        code = child.wait(max(0, phase_deadline - time.monotonic()))
         command.update(status="passed" if code == 0 else "failed", exitCode=code, logSha256=digest(child.log))
         if code and not allow_failure: raise RuntimeError(f"exit {code}: {args[0]} (log {child.log})")
         return code, child.text()
@@ -265,6 +218,7 @@ def init_text(config, *, root=None, work=None):
     plan_file = WORK / f"command-{command_id:02d}-plan.json"
     helper = ROOT / "scripts/atomic_install_prepared.py"
     text = f'''import groovy.json.JsonOutput
+import groovy.json.JsonSlurper
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 // Immutable command configuration: {json.dumps(config, sort_keys=True)}
@@ -298,12 +252,49 @@ gradle.taskGraph.afterTask {{ task, state ->
     text += f'''allprojects {{ p -> if (p == p.rootProject) {{
 p.buildDir = new File({groovy_path(WORK / "root-build")})
 p.afterEvaluate {{
+def encoderClass = new GroovyShell(getClass().classLoader).evaluate(new File({groovy_path(ROOT / "scripts/atomic-install-declared-inputs.groovy")}))
+def encoder = encoderClass.newInstance(gradle.gradleHomeDir)
 def declaredProperties = [:]
+def orderedClasspaths = [:]
+def configuredCompiler, configuredNodeHome, selectedJavaHome
+def snapshotNanos = 0L
 gradle.taskGraph.whenReady {{ graph ->
     if (!graph.hasTask(":installDist")) return
+    def snapshotStart = System.nanoTime()
+    encoder.deadline = snapshotStart + 120000000000L
     ['buildAnalysisIoHelper', 'buildLlvmBehaviorHelper'].each {{ name ->
-        declaredProperties[name] = p.tasks.getByName(name).inputs.properties.collectEntries {{ key, value -> [(key): value.toString()] }}
+        def producer = p.tasks.getByName(name)
+        def completeProperties
+        try {{ completeProperties = producer.inputs.properties }} catch (Throwable failure) {{
+            if (failure instanceof ThreadDeath || failure instanceof VirtualMachineError) throw failure
+            throw new GradleException('declared-inputs task=' + name + ' property=<getProperties> type=' + failure.getClass().name.take(160) + ' phase=getProperties rejected')
+        }}
+        declaredProperties[name] = encoder.snapshot(name, completeProperties)
+        def ordered = []
+        for (def file: producer.classpath.files) ordered.add(encoder.filePath(file))
+        orderedClasspaths[name] = encoderClass.freeze(ordered)
+        def launcher = declaredProperties[name].javaLauncher[3]
+        def executableOverride = producer.executable
+        if (executableOverride != null) {{
+            if (!(executableOverride instanceof String)) throw new GradleException('configured executable must be String')
+            def overridePath = new File(executableOverride).toPath()
+            if (encoder.lexical(overridePath) != launcher.executablePath || overridePath.toRealPath().toString() != launcher.executableRealPath) throw new GradleException('configured executable differs from selected launcher')
+        }}
+        def home = launcher.metadata.installationRealPath
+        if (launcher.metadata.languageVersion != ['java-language',21] || launcher.executableRealPath != home + '/bin/java') throw new GradleException('unqualified selected launcher')
+        if (selectedJavaHome != null && selectedJavaHome != home) throw new GradleException('selected launchers disagree')
+        selectedJavaHome = home
     }}
+    def qualifiedHome = System.getProperty('org.gradle.java.installations.paths')
+    if (!(qualifiedHome instanceof String) || new File(qualifiedHome).toPath().toRealPath().toString() != selectedJavaHome) throw new GradleException('selected launcher differs from qualified Java21 tools')
+    configuredCompiler = p.tasks.getByName('buildAcpGateHelper').inputs.properties.compiler
+    configuredNodeHome = p.tasks.getByName('frontendBuild').inputs.properties.frontendNodeHome
+    if (!(configuredCompiler instanceof String) || !(configuredNodeHome instanceof String)) throw new GradleException('compiler/frontendNodeHome must be String')
+    declaredProperties = encoderClass.freeze(declaredProperties)
+    orderedClasspaths = encoderClass.freeze(orderedClasspaths)
+    encoder.providers.clear()
+    snapshotNanos = System.nanoTime() - snapshotStart
+    if (snapshotNanos > 120000000000L) throw new GradleException('configured snapshot deadline')
 }}
 p.tasks.matching {{ it.name == "frontendBuild" }}.configureEach {{
     outputs.upToDateWhen {{ false }}
@@ -344,12 +335,17 @@ p.tasks.matching {{ it.name == "installDist" }}.configureEach {{ install ->
         receipt.actionsStarted = true
         receipt.actionsStartedAtUnixNs = nowNs()
         saveReceipt()
-        def files = {{ collection -> collection.files.collect {{ it.absolutePath }}.sort() }}
+        encoder.deadline = System.nanoTime() + 120000000000L - snapshotNanos
+        def files = {{ collection ->
+            def result = []
+            for (def file: collection.files) result.add(encoder.filePath(file))
+            result.sort {{ a,b -> encoder.compareKeys(a,b) }}
+        }}
         def producers = [:]
         ['buildAnalysisIoHelper', 'buildLlvmBehaviorHelper'].each {{ name ->
             def producer = p.tasks.getByName(name)
             producers[name] = [inputs: files(producer.inputs.files), outputs: files(producer.outputs.files),
-                classpath: files(producer.classpath), mainClass: producer.mainClass.get(),
+                classpath: files(producer.classpath), orderedClasspath: orderedClasspaths[name], mainClass: declaredProperties[name].mainClass[1],
                 properties: declaredProperties[name]]
         }}
         def roots = [:]
@@ -361,17 +357,25 @@ p.tasks.matching {{ it.name == "installDist" }}.configureEach {{ install ->
             roots[name] = outputs[0]
         }}
         def acpTask = p.tasks.getByName('buildAcpGateHelper')
-        def acp = [publicationScope: 'cooperative-build-producer-v1', bindingEvidence: 'stable-namespace-path-observations-v1', compiler: p.file(acpTask.inputs.properties.compiler.toString()).toPath().toAbsolutePath().normalize().toRealPath().toString(),
+        def acp = [publicationScope: 'cooperative-build-producer-v1', bindingEvidence: 'stable-namespace-path-observations-v1', compiler: p.file(configuredCompiler).toPath().toAbsolutePath().normalize().toRealPath().toString(),
             source: new File(p.projectDir, 'src/main/c/decomp_acp_gate_helper.c').absolutePath,
             recipe: new File(p.projectDir, 'build.gradle.kts').absolutePath,
             publication: new File(p.projectDir, 'scripts/atomic-install-acp-publication.groovy').absolutePath,
             output: new File(p.buildDir, 'native/acp/decomp-acp-gate-helper').absolutePath]
-        def plan = [acp: acp, runRoot: {groovy_path(WORK)}, repoRoot: {groovy_path(ROOT)}, installInputs: files(install.inputs.files), producers: producers,
-            frontendNodeHome: p.tasks.getByName('frontendBuild').inputs.properties.frontendNodeHome.toString(),
+        def bindingPath = new File({groovy_path(WORK / f"command-{command_id:02d}-bindings.json")})
+        def remainingBindingSeconds = (encoder.deadline - System.nanoTime()) / 1000000000.0d
+        if (remainingBindingSeconds <= 0) throw new GradleException('snapshot/binding deadline')
+        p.providers.exec {{ commandLine({groovy_path(pathlib.Path(sys.executable).resolve())}, '-B', {groovy_path(helper)},
+            'bindings', selectedJavaHome, gradle.gradleHomeDir.absolutePath, bindingPath.absolutePath, Double.toString(remainingBindingSeconds)) }}.result.get().assertNormalExitValue()
+        if (bindingPath.length() > 33554432) throw new GradleException('binding JSON exceeds bound')
+        def bindings = new JsonSlurper().parse(bindingPath, 'UTF-8')
+        def plan = [declaredInputsFormat: 'declared-inputs-v1', jdkBinding: bindings.jdkBinding, gradleBinding: bindings.gradleBinding,
+            acp: acp, runRoot: {groovy_path(WORK)}, repoRoot: {groovy_path(ROOT)}, installInputs: files(install.inputs.files), producers: producers,
+            frontendNodeHome: configuredNodeHome,
             mappingRoots: roots, originalJar: p.tasks.getByName('jar').archiveFile.get().asFile.absolutePath]
-        def planText = JsonOutput.toJson(plan)
-        if (planText.getBytes('UTF-8').length > 33554432) throw new GradleException('atomic plan exceeds bound')
-        Files.writeString(new File({groovy_path(plan_file)}).toPath(), planText, java.nio.file.StandardOpenOption.CREATE_NEW)
+        def planBytes = encoder.canonical(plan)
+        if (planBytes.length > 33554432) throw new GradleException('atomic plan exceeds bound')
+        Files.write(new File({groovy_path(plan_file)}).toPath(), planBytes, java.nio.file.StandardOpenOption.CREATE_NEW)
 '''
     if replay:
         text += f'''        p.providers.exec {{ commandLine({groovy_path(pathlib.Path(sys.executable).resolve())}, '-B', {groovy_path(helper)},
@@ -442,6 +446,7 @@ def read_evidence(path):
 
 
 def launch_blocked(generation, authority="none"):
+    deadline = time.monotonic() + READY_TIMEOUT
     root = pathlib.Path(tempfile.mkdtemp(prefix=f"{generation}-{authority}-", dir=WORK / "barriers"))
     ready = root / "READY"; release = root / "RELEASE"; jar = app_jar()
     props = {"atomic.probe.app": str(jar), "atomic.probe.ready": str(ready), "atomic.probe.release": str(release),
@@ -454,11 +459,10 @@ def launch_blocked(generation, authority="none"):
     save_record()
     child = None
     try:
-        child = Child([install_root() / "bin" / APP], cwd=WORK, env=env, log=root / "launcher.log")
+        child = Child([install_root() / "bin" / APP], cwd=WORK, env=env, log=root / "launcher.log", phase_deadline=deadline)
         child.probe = probe
         probe.update(pid=child.process.pid, log=str(child.log))
-        deadline = time.monotonic() + READY_TIMEOUT
-        while time.monotonic() < deadline and child.process.poll() is None and not ready.exists():
+        while time.monotonic() < deadline and process_alive(child.process) and not ready.exists():
             if child.error: raise child.error
             time.sleep(.05)
         if not ready.exists(): raise RuntimeError(f"agent did not reach READY: {child.log}")
@@ -550,9 +554,9 @@ def live_no_update():
         child, release, ready, jar = launch_blocked("A")
         RECORD["probes"][0].update(role="prepared-no-update", preparationCommandId=1, replayCommandId=2,
                                     preparedManifestSha256=digest(WORK / "prepared-A.json"))
-        prepared.require(child.process.poll() is None, "installed probe died before replay")
+        prepared.require(process_alive(child.process), "installed probe died before replay")
         install("A", replay=True)
-        prepared.require(child.process.poll() is None, "installed probe died during replay")
+        prepared.require(process_alive(child.process), "installed probe died during replay")
     except BaseException as failure:
         primary = failure
         raise
@@ -605,6 +609,14 @@ def main():
     try:
         set_phase("source capture")
         RECORD.update(sourceHead=subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(), sourceHashes=source_hashes())
+        retained = WORK / "owned-sources/atomic_install_child.py"
+        retained.parent.mkdir()
+        with prepared.regular(ROOT / "scripts/atomic_install_child.py", 256 * 1024) as (stream, _):
+            data = stream.read(256 * 1024 + 1)
+        if len(data) > 256 * 1024: raise RuntimeError("child helper source exceeds retention bound")
+        retained.write_bytes(data)
+        if digest(retained) != RECORD["sourceHashes"]["scripts/atomic_install_child.py"]:
+            raise RuntimeError("retained child helper differs from source capture")
         set_phase("agent build")
         write_init(None)
         gradle("-I", INIT, "atomicInstallProbeAgentJar", log=WORK / "agent-build.log")

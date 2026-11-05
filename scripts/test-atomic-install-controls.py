@@ -20,18 +20,31 @@ passed = []
 
 
 def check_failure(name, action, expected):
-    try: action()
-    except expected: pass
-    else: raise AssertionError(name + " did not fail")
+    original = driver.Child.close
+    observed = []
+    def checked_close(child):
+        try: return original(child)
+        finally:
+            if child._complete:
+                check_dead(child)
+                observed.append(child)
+    with unittest.mock.patch.object(driver.Child, 'close', checked_close):
+        try: action()
+        except expected: pass
+        else: raise AssertionError(name + " did not fail")
+    assert observed, name + " lacked an exact settlement observation"
     assert not driver.ACTIVE, name + " leaked an owned child"
     passed.append(name)
 
 
-def check_dead(pid):
-    # A child process started with this launcher must have been reaped, not merely signaled.
-    try: os.waitpid(pid, os.WNOHANG)
-    except ChildProcessError: return
-    raise AssertionError("child is still waitable")
+def check_dead(child):
+    assert child.actual_exited(), "actual retained pidfd never reported exit"
+    ack = child.settlement
+    assert ack and ack['pid'] == child.process.pid and ack['code'] == child.process.returncode
+    assert ack['actualReaped'] and ack['allRegisteredReaped'] and ack['echild'] and ack['error'] is None
+    assert child._helper.pid != child.process.pid and child._helper.returncode == 0
+    assert not child.reader.is_alive() and not child.pump.is_alive()
+    assert child._complete and child not in driver.ACTIVE
 
 
 def wait_file(path, child, timeout=90):
@@ -611,6 +624,537 @@ int depth = output.nameCount
 println('GREEN ACP resource controls: ' + successes.size() + ' ' + successes)
 '''
 
+def ownership_controls():
+    """Inert exact-source controls; never a compensating descendant kill."""
+    import array, concurrent.futures, errno, threading, socket, types
+    from unittest import mock
+    rt = driver.child_runtime
+    receipts = []
+    def run_case(label, action):
+        action()
+        assert not driver.ACTIVE, (label, driver.ACTIVE)
+        passed.append(label)
+    def spawn(code, name, extra=()):
+        return driver.Child([PYTHON, '-B', '-c', code, *map(str, extra)], log=WORK / (name+'.log'))
+    def save(child):
+        check_dead(child)
+        receipts.append({'actualPid': child.process.pid, 'helperPid': child._helper.pid,
+                         'nonce': child._nonce, 'ack': child.settlement,
+                         'startupDeadline': child.startup_deadline, 'cleanupDeadline': child.cleanup_deadline,
+                         'outputJoined': not child.reader.is_alive(), 'pumpJoined': not child.pump.is_alive()})
+    def foreign():
+        # Actual production enrollment/signal hooks with safe modeled generation
+        # reuse. Numeric targets never go to a kernel signal operation.
+        owner = rt.Supervisor(None, 'model', time.monotonic()+10, float('inf'), ['inert'])
+        owner.cap = 8
+        sent, opened, closed = [], [], []
+        def acquire(pid):
+            opened.append(pid)
+            return {43000: 900}[pid]
+        terminal = types.SimpleNamespace(si_pid=43000, si_code=os.CLD_EXITED, si_status=23)
+        with mock.patch.object(rt.os, 'pidfd_open', side_effect=acquire), \
+             mock.patch.object(rt.os, 'waitid', return_value=None), \
+             mock.patch.object(rt.os, 'kill', side_effect=AssertionError('numeric kill')), \
+             mock.patch.object(rt.os, 'killpg', side_effect=AssertionError('numeric group signal')), \
+             mock.patch.object(rt.signal, 'pidfd_send_signal', side_effect=lambda fd, sig: sent.append(fd)), \
+             mock.patch.object(rt.os, 'close', side_effect=lambda fd: closed.append(fd)):
+            # The sole waiter's direct-child list excludes foreign43002/group43000.
+            with mock.patch('builtins.open', mock.mock_open(read_data=b'43000')):
+                owner.census()
+            owner.signal_owned(owner.handles[43000])
+            # Diagnostic numeric generation could now change; it is never read.
+            owner.signal_owned(owner.handles[43000])
+            with mock.patch.object(rt.os, 'waitid', return_value=terminal):
+                owner.harvest()
+        assert opened == [43000] and sent == [900, 900] and closed == [900]
+        assert 43002 not in owner.handles and not owner.handles
+        (WORK/'foreign-green.json').write_text(json.dumps({'foreignEnrolled':False,'exactHandlesSignaled':sent,'numericSignals':0}))
+    run_case('ownership-foreign-generation-production-hooks', foreign)
+
+    def detached():
+        marker = WORK/'detached-worker.json'
+        code = '''import os,sys,time,pathlib,json
+r,w=os.pipe()
+p=os.fork()
+if p:
+ os.close(w);os.read(r,1);os._exit(23)
+os.close(r);os.setsid()
+pathlib.Path(sys.argv[1]).write_text(json.dumps({'pid':os.getpid()}))
+for fd in (0,1,2):os.close(fd)
+os.write(w,b'X');os.close(w);time.sleep(60)
+'''
+        child = spawn(code, 'detached', (marker,))
+        assert child.wait(10) == 23
+        worker = json.loads(marker.read_text())['pid']
+        assert worker in {row['pid'] for row in child.settlement['sample']}
+        assert child.settlement['reaped'] == 2
+        assert not pathlib.Path('/proc', str(worker)).exists()
+        save(child)
+    run_case('ownership-detached-worker-before-first-census', detached)
+
+    def topology():
+        for mode in ('doublefork', 'intermediate-subreaper'):
+            code = '''import ctypes,os,time,sys
+r,w=os.pipe()
+p=os.fork()
+if p:
+ os.close(w);os.read(r,1);os._exit(19)
+os.close(r);os.setsid()
+if sys.argv[1]=='intermediate-subreaper':
+ assert ctypes.CDLL(None).prctl(36,1,0,0,0)==0
+p=os.fork()
+if not p:
+ p=os.fork()
+ if p:os._exit(0)
+ os.write(w,b'X');os.close(w);time.sleep(60)
+else:
+ os.close(w);time.sleep(60)
+'''
+            child = spawn(code, mode, (mode,))
+            assert child.wait(10) == 19
+            assert child.settlement['reaped'] >= 3
+            save(child)
+    run_case('ownership-doublefork-intermediate-subreaper', topology)
+
+    import concurrent.futures as futures
+    def concurrent_fixed():
+        def launch(i):
+            child = spawn('import os,time; print(os.getpid(),flush=True); time.sleep(.1)', 'concurrent-'+str(i))
+            assert child.wait(10) == 0 and int(child.text()) == child.process.pid
+            save(child)
+            return {r['pid'] for r in child.settlement['sample']}
+        with futures.ThreadPoolExecutor(max_workers=4) as executor:
+            sets = list(executor.map(launch, range(4)))
+        assert sum(map(len,sets)) == len(set().union(*sets))
+    run_case('ownership-concurrent-owner-isolation-self-pid', concurrent_fixed)
+
+    def status_paths():
+        for code in (0, 127, 23):
+            child = spawn('import os,sys; os._exit(int(sys.argv[1]))', 'fast-'+str(code), (code,))
+            assert child.wait(10) == code
+            save(child)
+        try:
+            driver.Child([str(WORK/'missing-executable')], log=WORK/'missing.log')
+        except FileNotFoundError as failure:
+            assert failure.errno == errno.ENOENT and failure.filename == str(WORK/'missing-executable')
+        else:
+            raise AssertionError('exec error confused with exit127')
+        child = spawn('import time; time.sleep(60)', 'nonblocking')
+        before=time.monotonic()
+        for _ in range(100): assert child.process.poll() is None
+        assert time.monotonic()-before < .5 and child.process.is_running()
+        child.close();save(child)
+        assert child.process.returncode == -signal.SIGKILL
+    run_case('ownership-fast127-execerror-nonblocking-status', status_paths)
+
+    def frame_faults():
+        def fdset(): return set(os.listdir('/proc/self/fd'))
+        left,right = socket.socketpair(socket.AF_UNIX,socket.SOCK_SEQPACKET)
+        source=rt.FD(os.pidfd_open(os.getpid()))
+        try:
+            for payload, count in ((b'{',1),(b'{}',2),(b'[]',1),(b'x'*20000,1),
+                                   (b'{"kind":"BOUND","kind":"BOUND"}',1)):
+                before=fdset()
+                left.sendmsg([payload],[(socket.SOL_SOCKET,socket.SCM_RIGHTS,array.array('i',[source.number]*count))])
+                rights=[]
+                try:
+                    frame,rights=rt.receive(right)
+                    assert len(rights)==count
+                    # Application state validation owns rights even after decoding.
+                    rt.validate(frame,'nonce','helper',0,'BOUND',{'pid'})
+                    raise AssertionError('bad frame accepted')
+                except (rt.OwnershipError, json.JSONDecodeError): pass
+                finally: rt.retire_all(rights)
+                assert fdset()==before
+            # Valid BOUND FD type/PID checks cannot use waitid(nonchild).
+            rt.validate_pidfd(source,os.getpid())
+            with mock.patch.object(rt.os,'waitid',side_effect=AssertionError('nonchild wait')):
+                rt.validate_pidfd(source,os.getpid())
+            r,w=os.pipe()
+            try:
+                with unittest.TestCase().assertRaises(rt.OwnershipError): rt.validate_pidfd(rt.FD(r),os.getpid())
+                with unittest.TestCase().assertRaises(rt.OwnershipError): rt.validate_pidfd(source,os.getpid()+1)
+            finally: os.close(r);os.close(w)
+        finally:source.close();left.close();right.close()
+    run_case('ownership-malformed-extra-truncated-wrong-fd', frame_faults)
+
+    def close_faults():
+        for error in (OSError(errno.EIO,'late close'),InterruptedError(errno.EINTR,'ambiguous close')):
+            read,write=os.pipe(); handle=rt.FD(read); replacement=[]; real_close=os.close
+            def late(fd):
+                real_close(fd)
+                replacement.extend(os.pipe())
+                raise error
+            with mock.patch.object(rt.os,'close',side_effect=late):
+                with unittest.TestCase().assertRaises(OSError):handle.close()
+            assert handle.number is None and handle.close_error is error
+            handle.close()
+            assert replacement[0]==read
+            os.fstat(replacement[0])
+            for fd in (*replacement,write):os.close(fd)
+        transport=mock.Mock()
+        transport.recvmsg.return_value=(b'{',[(socket.SOL_SOCKET,socket.SCM_RIGHTS,array.array('i',[900]).tobytes())],0,None)
+        with mock.patch.object(rt.os,'close',side_effect=InterruptedError(errno.EINTR,'close uncertainty')):
+            with unittest.TestCase().assertRaises(json.JSONDecodeError) as caught:rt.receive(transport)
+        assert any('close uncertainty' in note for note in caught.exception.__notes__)
+    run_case('ownership-detached-close-eio-eintr-reused-integer', close_faults)
+
+    def acquisition_close_priority():
+        for secondary in (OSError(errno.EIO, 'acquisition close uncertain'),
+                          InterruptedError(errno.EINTR, 'acquisition close interrupted')):
+            owner = rt.Supervisor(None, 'model', time.monotonic()+10, float('inf'), ['inert'])
+            owner.cap = 8
+            primary = ChildProcessError(errno.ECHILD, 'original child relation rejected')
+            handles = []
+            original_fd = rt.FD
+            def retain(number):
+                handle = original_fd(number); handles.append(handle); return handle
+            with mock.patch.object(rt, 'FD', side_effect=retain), \
+                 mock.patch.object(rt.os, 'pidfd_open', return_value=900), \
+                 mock.patch.object(rt.os, 'waitid', side_effect=primary), \
+                 mock.patch.object(rt.os, 'close', side_effect=secondary) as close:
+                try: owner.acquire(43002)
+                except ChildProcessError as caught:
+                    assert caught is primary
+                    owner.fail(caught)
+                else: raise AssertionError('child relation rejection was lost')
+                assert len(handles) == 1 and handles[0].number is None
+                handles[0].close()
+                assert close.call_count == 1 and close.call_args.args == (900,)
+            assert not owner.handles and owner.deadline is not None
+            assert repr(primary) in owner.failure and repr(secondary) in owner.failure
+            assert len(owner.failure) <= 4096
+            first = owner.failure; owner.fail(RuntimeError('later failure'))
+            assert owner.failure == first
+    run_case('ownership-acquisition-close-primary-and-receipt', acquisition_close_priority)
+
+    def writer_call_contract():
+        # Execute the optional writer branch's actual assertion call against a
+        # settled owned child without running Gradle or replacing the assertion.
+        import ast
+        tree = ast.parse(pathlib.Path(__file__).read_text())
+        calls = [node for node in ast.walk(tree) if isinstance(node, ast.Expr)
+                 and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name)
+                 and node.value.func.id == 'check_dead'
+                 and any(isinstance(part, ast.Name) and part.id == 'cancelled'
+                         for part in ast.walk(node.value))]
+        assert len(calls) == 1
+        child = spawn('pass', 'writer-call-contract'); assert child.wait(3) == 0
+        exec(compile(ast.Module(body=calls, type_ignores=[]), __file__, 'exec'),
+             {'check_dead': check_dead, 'cancelled': child})
+        save(child)
+    run_case('ownership-optional-writer-check-dead-contract', writer_call_contract)
+
+    def prego():
+        marker=WORK/'must-not-exec'
+        original=rt.Child._send
+        primary=KeyboardInterrupt('pre-GO injected interrupt')
+        owners=[]
+        def intercept(owner, kind, **kwargs):
+            if kind=='GO':
+                owners.append(owner)
+                raise primary
+            return original(owner,kind,**kwargs)
+        with mock.patch.object(rt.Child,'_send',intercept):
+            try:spawn('import pathlib,sys; pathlib.Path(sys.argv[1]).write_text("BAD")','prego',(marker,))
+            except KeyboardInterrupt as failure: assert failure is primary
+            else:raise AssertionError('preGO accepted')
+        assert not marker.exists()
+        assert owners[0].settlement['code'] in (125, -signal.SIGKILL)
+        save(owners[0])
+        # A failed output reader start still pumps/reaps a never-released command.
+        original_start=threading.Thread.start; once=[False]; owners=[]
+        def failed_start(thread):
+            if thread.name=='atomic-output' and not once[0]:
+                once[0]=True;owners.extend(driver.ACTIVE);raise RuntimeError('reader start injected')
+            return original_start(thread)
+        with mock.patch.object(threading.Thread,'start',failed_start):
+            with unittest.TestCase().assertRaisesRegex(RuntimeError,'reader start injected'):
+                spawn('raise RuntimeError("must not execute")','reader-start')
+        assert len(owners)==1 and owners[0]._complete and owners[0].settlement['code'] in (125, -signal.SIGKILL)
+    run_case('ownership-preGO-interrupt-reader-start-no-exec', prego)
+
+    def deadlines():
+        owner=object.__new__(rt.Child)
+        owner._condition=threading.Condition();owner.cleanup_deadline=None;owner.startup_deadline=90
+        with mock.patch.object(rt.time,'monotonic',return_value=100): first=owner._trigger_cleanup()
+        with mock.patch.object(rt.time,'monotonic',return_value=999):
+            assert owner._trigger_cleanup()==first==110
+            assert owner.startup_deadline==90
+        child=spawn('import time; time.sleep(60)','deadlines')
+        child.close();deadline=child.cleanup_deadline;child.close()
+        assert child.cleanup_deadline==deadline
+        save(child)
+        # No live process: expired close must use zero waits and retain custody.
+        owner=object.__new__(rt.Child)
+        owner.__dict__.update(_complete=False,_peer=None,_close_lock=threading.RLock(),_condition=threading.Condition(),
+            cleanup_deadline=50,_helper=mock.Mock(),_helper_fd=rt.FD(999),_actual_fd=None,_socket=mock.Mock(),
+            pump=mock.Mock(),reader=None,process=mock.Mock(),settlement=None,_protocol_error=None,
+            error=None,_reader_stop=threading.Event(),_pump_stop=threading.Event(),_protocol_complete=False)
+        owner.process.returncode=7;owner.pump.ident=1;owner.pump.is_alive.return_value=True
+        owner._helper.wait.side_effect=subprocess.TimeoutExpired(['helper'],0)
+        with mock.patch.object(rt.time,'monotonic',return_value=100):
+            for _ in range(3):
+                with unittest.TestCase().assertRaises(rt.OwnershipError):owner.close()
+        assert owner.cleanup_deadline==50 and all(c.kwargs['timeout']==0 for c in owner._helper.wait.call_args_list)
+        assert all(c.args==(0,) for c in owner.pump.join.call_args_list)
+    run_case('ownership-immutable-start-first-cleanup-deadlines', deadlines)
+
+    def exhaustion():
+        with mock.patch.object(rt.resource,'getrlimit',return_value=(20,20)):
+            with unittest.TestCase().assertRaises(rt.OwnershipError):spawn('raise AssertionError','admission-refused')
+        owner=rt.Supervisor(None,'fault',10,20,['inert']);owner.cap=4
+        with mock.patch.object(rt.os,'pidfd_open',side_effect=OSError(errno.EMFILE,'injected exhaustion')):
+            with unittest.TestCase().assertRaises(OSError):owner.acquire(43000)
+        assert not owner.handles
+        owner.handles={43000:rt.FD(800)};owner.pid=43000;owner.deadline=10
+        with mock.patch.object(rt.os,'waitid',side_effect=InterruptedError(errno.EINTR,'wait interrupted')):
+            with unittest.TestCase().assertRaises(InterruptedError):owner.harvest()
+        assert owner.handles[43000].number==800 and owner.reaped==0
+        result=types.SimpleNamespace(si_pid=43000,si_code=os.CLD_EXITED,si_status=23)
+        with mock.patch.object(rt.os,'waitid',return_value=result),mock.patch.object(rt.os,'close') as close:
+            owner.harvest();owner.harvest()
+        assert owner.reaped==1 and owner.actual_reaped and close.call_count==1
+    run_case('ownership-exhaustion-interrupted-exact-wait', exhaustion)
+
+    def output_fault():
+        child=spawn('import time,os; time.sleep(.15); os.write(1,b"x"*4194304); time.sleep(60)','output-fault')
+        original=child.sink
+        class Sink:
+            def write(self,data):raise OSError('injected output sink failure')
+            def close(self):original.close()
+        child.sink=Sink()
+        with unittest.TestCase().assertRaisesRegex(OSError,'injected output sink failure'):child.wait(10)
+        assert child.settlement and child._complete and not child.reader.is_alive() and not child.pump.is_alive()
+    run_case('ownership-output-sink-failure-settles', output_fault)
+
+    def lowfd():
+        code='''import importlib.util,pathlib,resource,sys,concurrent.futures
+root=pathlib.Path(sys.argv[1]);out=pathlib.Path(sys.argv[2])
+spec=importlib.util.spec_from_file_location('child',root/'scripts/atomic_install_child.py');m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+soft,hard=resource.getrlimit(resource.RLIMIT_NOFILE);resource.setrlimit(resource.RLIMIT_NOFILE,(64,hard))
+active=set()
+def launch(i):
+ c=m.Child([sys.executable,'-B','-c','print("lowfd")'],log=out/('low-'+str(i)+'.log'),active=active)
+ assert c.wait(5)==0 and c.text()=='lowfd\\n' and c._complete
+with concurrent.futures.ThreadPoolExecutor(max_workers=3) as e:list(e.map(launch,range(3)))
+assert not active
+'''
+        child=spawn(code,'lowfd-runner',(ROOT,WORK))
+        assert child.wait(15)==0,child.text();save(child)
+    run_case('ownership-low-fd-concurrent-admission',lowfd)
+    def late_and_protocol():
+        child=spawn('import time; time.sleep(60)','late-fds')
+        before=set(os.listdir('/proc/self/fd'))
+        duplicate=rt.FD(os.dup(child._actual_fd.number))
+        with unittest.TestCase().assertRaisesRegex(rt.OwnershipError,'late descriptors'):
+            child._accept({},[duplicate])
+        assert duplicate.number is None and set(os.listdir('/proc/self/fd'))==before
+        for frame in (rt.packet('wrong','helper',child._in_seq,'EXIT',pid=child.process.pid,code=0,deadline=time.monotonic()+10),
+                      rt.packet(child._nonce,'helper',child._in_seq+1,'EXIT',pid=child.process.pid,code=0,deadline=time.monotonic()+10)):
+            with unittest.TestCase().assertRaises(rt.OwnershipError):child._accept(frame,[])
+        assert child.process.is_running()
+        with mock.patch.object(child,'actual_exited',return_value=True):
+            assert child.process.poll() is None and not child.process.is_running()
+        child.close();save(child)
+        # Late pump delivery cannot fabricate a positive ACK from booleans.
+        owner=object.__new__(rt.Child);owner.process=types.SimpleNamespace(pid=43000,returncode=0)
+        owner._nonce='model';owner._in_seq=3;owner.settlement=None;owner.actual_exited=lambda:False
+        frame=rt.packet('model','helper',3,'SETTLED',pid=43000,code=0,deadline=100,
+                        actualReaped=True,allRegisteredReaped=True,echild=True,error=None,reaped=1,sample=[],reapDigest='0'*64)
+        with unittest.TestCase().assertRaisesRegex(rt.OwnershipError,'incomplete actual settlement'):owner._accept(frame,[])
+    run_case('ownership-late-fd-wrong-nonce-sequence-pending-status',late_and_protocol)
+
+    def create_binding_failure():
+        primary=OSError(errno.EMFILE,'helper pidfd injection');original=rt.os.pidfd_open;once=[False];owners=[]
+        def fail_once(pid,*args):
+            if not once[0]:
+                once[0]=True;owners.extend(driver.ACTIVE);raise primary
+            return original(pid,*args)
+        with mock.patch.object(rt.os,'pidfd_open',side_effect=fail_once):
+            try:spawn('raise AssertionError("not released")','helper-bind-failure')
+            except OSError as failure:assert failure is primary
+            else:raise AssertionError('binding failure lost')
+        assert len(owners)==1 and owners[0]._complete and owners[0]._helper.returncode==0
+        marker=WORK/'preexec-must-not-run'
+        original_send=rt.Child._send
+        def kill_preexec(owner,kind,**kwargs):
+            if kind=='GO':rt.signal.pidfd_send_signal(owner._actual_fd.number,signal.SIGKILL)
+            return original_send(owner,kind,**kwargs)
+        with mock.patch.object(rt.Child,'_send',kill_preexec):
+            child=spawn('import pathlib,sys;pathlib.Path(sys.argv[1]).write_text("BAD")','preexec-death',(marker,))
+        assert child.wait(10)==-signal.SIGKILL and not marker.exists()
+        save(child)
+    run_case('ownership-provisional-helper-binding-preexec-death',create_binding_failure)
+
+    def catastrophic_model():
+        owner=object.__new__(rt.Child);active={owner}
+        error=rt.OwnershipError('modeled catastrophic supervisor death')
+        owner.__dict__.update(_complete=False,_peer=None,_close_lock=threading.RLock(),_condition=threading.Condition(),
+            cleanup_deadline=50,_helper=mock.Mock(),_helper_fd=rt.FD(999),_actual_fd=rt.FD(998),_socket=mock.Mock(),
+            pump=mock.Mock(),reader=None,process=mock.Mock(),settlement=None,_protocol_error=error,
+            error=error,_reader_stop=threading.Event(),_pump_stop=threading.Event(),_protocol_complete=False,_active=active)
+        owner.process.returncode=None;owner.pump.ident=1;owner.pump.is_alive.return_value=False
+        owner._helper.wait.return_value=0
+        with mock.patch.object(rt.time,'monotonic',return_value=100), \
+             mock.patch.object(rt.signal,'pidfd_send_signal') as signal_fd, \
+             mock.patch.object(rt.os,'kill',side_effect=AssertionError('numeric signal')), \
+             mock.patch.object(rt.os,'killpg',side_effect=AssertionError('group signal')):
+            with unittest.TestCase().assertRaises(rt.OwnershipError) as caught:owner.close()
+        assert caught.exception is error and owner in active and owner.settlement is None and not owner._complete
+        signal_fd.assert_called_once_with(998,signal.SIGKILL)
+        assert owner.cleanup_deadline==50
+    run_case('ownership-catastrophic-death-explicitly-unresolved-model',catastrophic_model)
+
+    def stale_handle():
+        # Isolated sole waiter: delayed zombie binding is valid; the retained
+        # handle after exact reap reports ESRCH rather than another generation.
+        code='''import os,signal,time
+p=os.fork()
+if p==0:os._exit(23)
+time.sleep(.03)
+f=os.pidfd_open(p)
+r=os.waitid(os.P_PIDFD,f,os.WEXITED|os.WNOWAIT);assert r.si_pid==p and r.si_status==23
+r=os.waitid(os.P_PIDFD,f,os.WEXITED);assert r.si_pid==p
+try:signal.pidfd_send_signal(f,signal.SIGKILL)
+except ProcessLookupError:pass
+else:raise AssertionError('stale handle signaled a process')
+os.close(f)
+'''
+        child=spawn(code,'stale-handle');assert child.wait(10)==0;save(child)
+    run_case('ownership-delayed-zombie-stale-retained-pidfd',stale_handle)
+
+    def mutants():
+        source=pathlib.Path(rt.__file__).read_text()
+        results=[]
+        def reject(label,old,new,check):
+            assert old in source,label
+            namespace={'__name__':'inert_mutant','__file__':rt.__file__}
+            changed=source.replace(old,new,1)
+            exec(compile(changed,'<'+label+'>','exec'),namespace)
+            check(rt.__dict__)  # The exact production implementation must pass.
+            try:check(namespace)
+            except AssertionError:results.append({'mutant':label,'status':'REJECTED','sha256':driver.hashlib.sha256(changed.encode()).hexdigest()})
+            else:raise AssertionError('mutant survived: '+label)
+        def bad_rights(ns):
+            transport=mock.Mock();transport.recvmsg.return_value=(b'{',[(socket.SOL_SOCKET,socket.SCM_RIGHTS,array.array('i',[900,901]).tobytes())],0,None)
+            with mock.patch.object(os,'close') as close:
+                try:ns['receive'](transport)
+                except json.JSONDecodeError:pass
+            assert [call.args[0] for call in close.call_args_list]==[900,901]
+        reject('malformed-rights-leak','                retire_all(rights)\n','                pass  # mutant drops all received rights\n',bad_rights)
+        def close_detach(ns):
+            handle=ns['FD'](900)
+            with mock.patch.object(os,'close',side_effect=OSError('post-close fault')) as close:
+                try:handle.close()
+                except OSError:pass
+                try:handle.close()
+                except OSError:pass
+            assert handle.number is None and close.call_count==1
+        reject('retry-recycled-descriptor','number, self.number = self.number, None','number = self.number',close_detach)
+        def deadline(ns):
+            owner=object.__new__(ns['Child']);owner._condition=threading.Condition();owner.cleanup_deadline=None
+            with mock.patch.object(time,'monotonic',return_value=100):owner._trigger_cleanup()
+            with mock.patch.object(time,'monotonic',return_value=200):owner._trigger_cleanup()
+            assert owner.cleanup_deadline==110
+        reject('renewed-cleanup-budget','value if self.cleanup_deadline is None else min(self.cleanup_deadline, value)','value',deadline)
+        def acquisition(ns):
+            owner=ns['Supervisor'](None,'model',10,20,['inert']);owner.cap=3
+            with mock.patch.object(os,'pidfd_open',return_value=900),mock.patch.object(os,'waitid',side_effect=ChildProcessError()),mock.patch.object(os,'close'):
+                try:owner.acquire(43002)
+                except ChildProcessError:pass
+            assert not owner.handles
+        reject('unchecked-child-enrollment','            os.waitid(os.P_PIDFD, handle.number, os.WEXITED | os.WNOHANG | os.WNOWAIT)\n','            pass  # mutant omits child relation\n',acquisition)
+        def empty(ns):
+            owner=ns['Supervisor'](None,'model',10,20,['inert'])
+            with mock.patch.object(os,'waitid',return_value=None):assert not owner.empty()
+        reject('quiet-census-settlement','return False  # no event is NOT ECHILD','return True  # mutant claims quiet means empty',empty)
+        def pending(ns):
+            facade=ns['ActualProcess'](types.SimpleNamespace(actual_exited=lambda:True),43000,['inert'],None)
+            assert facade.poll() is None and not facade.is_running()
+        reject('pending-exit-counted-alive','return self.returncode is None and not self.owner.actual_exited()','return self.returncode is None',pending)
+        def numeric(ns):
+            owner=ns['Supervisor'](None,'model',10,20,['inert'])
+            with mock.patch.object(os,'kill',side_effect=AssertionError('numeric signaling')),mock.patch.object(signal,'pidfd_send_signal') as send:
+                owner.signal_owned(ns['FD'](900))
+                assert send.call_args.args==(900,signal.SIGKILL)
+        reject('numeric-signal-authority','signal.pidfd_send_signal(handle.number, signal.SIGKILL)','os.kill(handle.number, signal.SIGKILL)',numeric)
+        (WORK/'ownership-mutants.json').write_text(json.dumps(results,indent=2)+'\n')
+    run_case('ownership-seven-meaningful-mutants-rejected',mutants)
+
+    def actual_helper_faults():
+        # Fresh executed Python wrappers inject faults into the exact helper;
+        # they create only inert, gated fixtures and retain every abort receipt.
+        original_path=pathlib.Path(rt.__file__).resolve()
+        for mode in ('preflight', 'root-acquire', 'census'):
+            wrapper=WORK/('helper-fault-'+mode+'.py')
+            common='''import importlib.util,sys,os,errno
+spec=importlib.util.spec_from_file_location('exact_child',%r)
+m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+''' % str(original_path)
+            injection={
+                'preflight':'''def refused(self):raise OSError(errno.EMFILE,'injected preflight capacity')
+m.Supervisor.preflight=refused
+''',
+                'root-acquire':'''original=m.os.pidfd_open
+calls=0
+def failed(pid,*args):
+ global calls
+ calls+=1
+ if calls==2:raise OSError(errno.EMFILE,'injected gated root acquisition')
+ return original(pid,*args)
+m.os.pidfd_open=failed
+''',
+                'census':'''original=m.Supervisor.census
+calls=0
+def failed(self):
+ global calls
+ calls+=1
+ if calls==2:raise OSError(errno.EMFILE,'injected cleanup census')
+ return original(self)
+m.Supervisor.census=failed
+'''}[mode]
+            wrapper.write_text(common+injection+'sys.exit(m.main())\n')
+            seen=[];original_close=rt.Child.close
+            def observe(owner):
+                if owner not in seen:seen.append(owner)
+                return original_close(owner)
+            with mock.patch.object(rt,'__file__',str(wrapper)),mock.patch.object(rt.Child,'close',observe):
+                if mode=='census':
+                    child=spawn('import os,time; p=os.fork(); time.sleep(60) if p==0 else None','census-fault')
+                    with unittest.TestCase().assertRaisesRegex(rt.OwnershipError,'injected cleanup census'):child.wait(10)
+                    assert child._complete and child.settlement['reaped']==2 and child.settlement['error']
+                    assert child.actual_exited() and not child.reader.is_alive() and not child.pump.is_alive()
+                else:
+                    marker=WORK/('refused-'+mode)
+                    with unittest.TestCase().assertRaises(OSError):
+                        spawn('import pathlib,sys;pathlib.Path(sys.argv[1]).write_text("BAD")',mode,(marker,))
+                    assert not marker.exists() and len(seen)==1 and seen[0]._complete
+                    receipt=seen[0]._pre_go_receipt
+                    assert receipt['kind']==('REFUSED' if mode=='preflight' else 'ABORTED')
+                    if mode=='root-acquire':assert receipt['actualReaped'] and receipt['echild']
+                    (WORK/(mode+'-abort.json')).write_text(json.dumps(receipt,indent=2))
+    run_case('ownership-actual-preflight-gated-acquire-census-faults',actual_helper_faults)
+
+    def startup_and_highfd():
+        import fcntl
+        phase=time.monotonic()+3
+        child=driver.Child([PYTHON,'-B','-c','import time;time.sleep(60)'],log=WORK/'absolute-start.log',phase_deadline=phase)
+        assert child.startup_deadline==phase
+        child.close();save(child)
+        fd=rt.FD(os.pidfd_open(os.getpid()))
+        high=rt.FD(fcntl.fcntl(fd.number,fcntl.F_DUPFD_CLOEXEC,1100))
+        try:assert not rt.readable(high.number)
+        finally:high.close();fd.close()
+        transport=mock.Mock()
+        transport.recvmsg.return_value=(b'{}',[(socket.SOL_SOCKET,socket.SCM_RIGHTS,array.array('i',[900,901]).tobytes())],socket.MSG_CTRUNC,None)
+        with mock.patch.object(rt.os,'close') as close:
+            with unittest.TestCase().assertRaisesRegex(rt.OwnershipError,'truncated'):rt.receive(transport)
+        assert [c.args[0] for c in close.call_args_list]==[900,901]
+    run_case('ownership-absolute-startup-high-fd-ctrunc-retention',startup_and_highfd)
+
+    (WORK/'ownership-receipts.json').write_text(json.dumps(receipts,indent=2)+'\n')
+
 try:
     # Explicit and PATH-derived real executable homes; launcher option JSON/path roundtrip.
     jdk = WORK / "jdk with spaces"; (jdk / "bin").mkdir(parents=True)
@@ -651,11 +1195,11 @@ try:
 
     child = driver.Child([PYTHON, "-c", "print('complete')"], log=WORK / "success.log")
     assert child.wait(10) == 0 and child.text() == "complete\n"
-    check_dead(child.process.pid)
+    check_dead(child)
     passed.append("bounded-process-success-reaped")
     child = driver.Child([PYTHON, "-c", "import time; time.sleep(60)"], log=WORK / "timeout.log")
     check_failure("timeout-group-kill-reap", lambda: child.wait(.05), subprocess.TimeoutExpired)
-    check_dead(child.process.pid)
+    check_dead(child)
     child = driver.Child([PYTHON, "-c", "import time; time.sleep(60)"], log=WORK / "interrupt.log")
     original_wait = child.process.wait
     calls = [0]
@@ -665,7 +1209,7 @@ try:
         return original_wait(*args, **kwargs)
     with unittest.mock.patch.object(child.process, "wait", side_effect=interrupt_once):
         check_failure("interrupt-group-kill-reap", lambda: child.wait(10), KeyboardInterrupt)
-    check_dead(child.process.pid)
+    check_dead(child)
     old_limit = driver.MAX_LOG; driver.MAX_LOG = 4096
     child = driver.Child([PYTHON, "-c", "import os; os.write(1,b'x'*1000000)"], log=WORK / "overflow.log")
     check_failure("output-bound-group-kill-reap", lambda: child.wait(10), RuntimeError)
@@ -674,7 +1218,7 @@ try:
     # A descendant retains the output pipe after its parent exits. Cleanup kills the whole group.
     child = driver.Child([PYTHON, "-c", "import os,time; p=os.fork(); time.sleep(60) if p==0 else None"], log=WORK / "descendant.log")
     assert child.wait(10) == 0
-    check_dead(child.process.pid)
+    check_dead(child)
     passed.append("descendant-pipe-group-cleanup")
 
     with zipfile.ZipFile(driver.install_root() / "lib/app.jar", "w") as archive: archive.writestr("decompengine/MainKt.class", b"fixture")
@@ -699,6 +1243,8 @@ try:
             check_failure("READY-interrupt-local-cleanup", lambda: driver.launch_blocked("A"), KeyboardInterrupt)
     assert len(list((WORK / "barriers").iterdir())) == 3
     passed.append("unique-barriers-per-attempt")
+
+    ownership_controls()
 
     if "--gradle-init" in sys.argv:
         project = WORK / "init-project"; project.mkdir()
@@ -774,7 +1320,7 @@ tasks.register('verifyDriverInit') {
         assert failed.wait(120) != 0 and "injected writer task failure" in failed.text()
         after_failure, _, _ = writer("writer-after-failure", released=True); assert after_failure.wait(120) == 0
         cancelled, ready, _ = writer("writer-cancelled"); wait_file(ready, cancelled)
-        cancelled.close(); check_dead(cancelled.process.pid)
+        cancelled.close(); check_dead(cancelled)
         after_cancel, _, _ = writer("writer-after-cancel", released=True); assert after_cancel.wait(120) == 0
         assert len(list(destination.parent.glob(".install-*.lock"))) == 1
         passed.append("distinct-buildDir-production-service-contention/release/task-failure/process-cancel/reacquire")

@@ -21,6 +21,7 @@ BASE.mkdir(parents=True, exist_ok=True)
 
 
 class PreparedControls(unittest.TestCase):
+    @mock.patch.object(prep, 'validate_semantic_plan', new=lambda *args: None)
     def exercise(self, fault=None):
         with tempfile.TemporaryDirectory(dir=BASE) as directory:
             work = pathlib.Path(directory)
@@ -183,6 +184,7 @@ class PreparedControls(unittest.TestCase):
             with mock.patch.object(prep, 'MAX_FILE', 4):
                 self.assertEqual('failed', prep.inventory([str(data)])['status'])
 
+    @mock.patch.object(prep, 'validate_semantic_plan', new=lambda *args: None)
     def test_current_input_membership_and_identity(self):
         with tempfile.TemporaryDirectory(dir=BASE) as directory:
             root = pathlib.Path(directory); source = root / 'source'; source.mkdir()
@@ -379,6 +381,7 @@ class SelectionControls(unittest.TestCase):
         with mock.patch.object(self.mod, 'MAX_PATTERNS', 1), self.assertRaises(RuntimeError): self.seal()
         self.assertFalse(self.manifest.exists())
 
+    @mock.patch.object(prep, 'validate_semantic_plan', new=lambda *args: None)
     def test_original_direct_final_shape_strict_guard_rejects(self):
         helper = self.run / 'helper'; helper.write_bytes(b'inert compiler output' * 8); helper.chmod(0o755)
         manifest = {'plan': {}, 'roots': [str(helper)], 'inventory': prep.inventory([str(helper)])}

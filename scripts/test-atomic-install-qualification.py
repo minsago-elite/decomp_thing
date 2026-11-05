@@ -43,6 +43,109 @@ def write_json(path, value):
     path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
 
 
+SEMANTIC_FIXTURE = {'args': ['list', []],
+ 'compiler': ['string', '/usr/bin/cc'],
+ 'debug': ['boolean', False],
+ 'debugOptions': ['implementation',
+                  'org.gradle.process.internal.DefaultJavaDebugOptions_Decorated',
+                  {'baseClass': 'org.gradle.process.internal.DefaultJavaDebugOptions',
+                   'classSha256': 'ae5c4a7daf98189ae2e133838bc2c5b906b7ec45601410a38a5c7c4235c22d2b',
+                   'jarPath': '/home/june/.gradle/wrapper/dists/gradle-9.6.1-bin/4ticwg1pgcbps2hj28r8so764/gradle-9.6.1/lib/gradle-process-services-9.6.1.jar',
+                   'jarSha256': 'b7c04a9f1dacdd9230dbf58177d8195a3e9d61ed5b59d0c8eb64fb3aa0db226d'},
+                  {'enabled': ['boolean', False],
+                   'host': ['null'],
+                   'port': ['integer', 'java.lang.Integer', '5005'],
+                   'server': ['boolean', True],
+                   'suspend': ['boolean', True]}],
+ 'debugOptions.enabled': ['boolean', False],
+ 'debugOptions.host': ['null'],
+ 'debugOptions.port': ['integer', 'java.lang.Integer', '5005'],
+ 'debugOptions.server': ['boolean', True],
+ 'debugOptions.suspend': ['boolean', True],
+ 'defaultCharacterEncoding': ['string', 'UTF-8'],
+ 'enableAssertions': ['boolean', False],
+ 'ignoreExitValue': ['boolean', False],
+ 'javaLauncher': ['implementation',
+                  'org.gradle.jvm.toolchain.internal.DefaultToolchainJavaLauncher',
+                  {'baseClass': 'org.gradle.jvm.toolchain.internal.DefaultToolchainJavaLauncher',
+                   'classSha256': '7673c65551445a806c89e2ac6dac36b337a684ff89865c3e8ec830819f5baf7b',
+                   'jarPath': '/home/june/.gradle/wrapper/dists/gradle-9.6.1-bin/4ticwg1pgcbps2hj28r8so764/gradle-9.6.1/lib/plugins/gradle-toolchains-jvm-9.6.1.jar',
+                   'jarSha256': '255cb2dabf5b6df503aff83ac88baefa0e0680cab056f550eb545f93f5e79605'},
+                  {'executablePath': '/opt/openjdk-bin-21.0.12.1_p1/bin/java',
+                   'executableRealPath': '/opt/openjdk-bin-21.0.12.1_p1/bin/java',
+                   'metadata': {'currentJvm': ['boolean', True],
+                                'fallback': ['boolean', False],
+                                'installationPath': '/opt/openjdk-bin-21.0.12.1_p1',
+                                'installationRealPath': '/opt/openjdk-bin-21.0.12.1_p1',
+                                'javaRuntimeVersion': ['string', '21.0.12.1+1-LTS'],
+                                'jvmVersion': ['string', '21.0.12.1+1-LTS'],
+                                'languageVersion': ['java-language', 21],
+                                'vendor': ['string', 'Eclipse Temurin']}}],
+ 'javaLauncher.metadata': ['implementation',
+                           'org.gradle.jvm.toolchain.internal.JavaToolchain',
+                           {'baseClass': 'org.gradle.jvm.toolchain.internal.JavaToolchain',
+                            'classSha256': 'f76c8a9033b64d172c89461bf6baeb791e87d17672a7b1b61ba0ff9ec70ffc39',
+                            'jarPath': '/home/june/.gradle/wrapper/dists/gradle-9.6.1-bin/4ticwg1pgcbps2hj28r8so764/gradle-9.6.1/lib/gradle-toolchains-jvm-shared-9.6.1.jar',
+                            'jarSha256': '1a94c0a887759e4de0439b6733603660a923821eec8aa5b9d824dc74588771fd'},
+                           {'currentJvm': ['boolean', True],
+                            'fallback': ['boolean', False],
+                            'installationPath': '/opt/openjdk-bin-21.0.12.1_p1',
+                            'installationRealPath': '/opt/openjdk-bin-21.0.12.1_p1',
+                            'javaRuntimeVersion': ['string', '21.0.12.1+1-LTS'],
+                            'jvmVersion': ['string', '21.0.12.1+1-LTS'],
+                            'languageVersion': ['java-language', 21],
+                            'vendor': ['string', 'Eclipse Temurin']}],
+ 'javaLauncher.metadata.languageVersion': ['java-language', 21],
+ 'javaLauncher.metadata.taskInputs': ['implementation',
+                                      'org.gradle.jvm.toolchain.internal.JavaToolchainInput',
+                                      {'baseClass': 'org.gradle.jvm.toolchain.internal.JavaToolchainInput',
+                                       'classSha256': '890498733ffc37e9f7b0c7da59c80da0f900ab4affa1432af3b032fc11cb4049',
+                                       'jarPath': '/home/june/.gradle/wrapper/dists/gradle-9.6.1-bin/4ticwg1pgcbps2hj28r8so764/gradle-9.6.1/lib/gradle-toolchains-jvm-shared-9.6.1.jar',
+                                       'jarSha256': '1a94c0a887759e4de0439b6733603660a923821eec8aa5b9d824dc74588771fd'},
+                                      {'implementation': ['string', 'vendor-specific'],
+                                       'languageVersion': ['java-language', 21],
+                                       'vendor': ['string', 'any vendor']}],
+ 'javaLauncher.metadata.taskInputs.implementation': ['string', 'vendor-specific'],
+ 'javaLauncher.metadata.taskInputs.languageVersion': ['java-language', 21],
+ 'javaLauncher.metadata.taskInputs.vendor': ['string', 'any vendor'],
+ 'jvmArgs': ['list', []],
+ 'mainClass': ['string', 'inert.Main'],
+ 'mainModule': ['null'],
+ 'maxHeapSize': ['null'],
+ 'minHeapSize': ['null'],
+ 'modularity': ['implementation',
+                'org.gradle.internal.jvm.DefaultModularitySpec_Decorated',
+                {'baseClass': 'org.gradle.internal.jvm.DefaultModularitySpec',
+                 'classSha256': 'baad8b87d5baa266d400abb67d52a10ab1c4afe8f9ef1eb721e9538128756348',
+                 'jarPath': '/home/june/.gradle/wrapper/dists/gradle-9.6.1-bin/4ticwg1pgcbps2hj28r8so764/gradle-9.6.1/lib/gradle-process-services-9.6.1.jar',
+                 'jarSha256': 'b7c04a9f1dacdd9230dbf58177d8195a3e9d61ed5b59d0c8eb64fb3aa0db226d'},
+                {'inferModulePath': ['boolean', True]}],
+ 'modularity.inferModulePath': ['boolean', True],
+ 'systemProperties': ['map', []]}
+
+def add_semantic_fixture(plan, tools):
+    prep = driver.prepared
+    home = tools['java']['home']; gradle_root = str(pathlib.Path(plan['repoRoot']) / 'fixture-gradle')
+    plan['declaredInputsFormat'] = 'declared-inputs-v1'
+    plan['jdkBinding'] = prep.jdk_binding(pathlib.Path(home))
+    plan['gradleBinding'] = {'root':gradle_root, 'version':prep.GRADLE_VERSION, 'commit':prep.GRADLE_COMMIT,
+        'distributionSha256':prep.GRADLE_ZIP_SHA256, 'buildReceiptSha256':'f1ced844391f571370fe8d1606f665a6cd568b9a6e5793f954aabab7173f299a',
+        'entries':{name:{'type':'file','sha256':digest,'bytes':1,'mode':0o644,'key':[1,index+1]}
+                   for index,(name,digest) in enumerate(prep.GRADLE_JARS.items())}}
+    for name,producer in plan['producers'].items():
+        props=copy.deepcopy(SEMANTIC_FIXTURE)
+        props['compiler']=['string',plan['acp']['compiler']]
+        props['hostArchitecture']=['string','amd64']
+        props['mainClass']=['string',producer['mainClass']]
+        for key in prep.DECLARED_REGISTRY:
+            pin=prep.DECLARED_CLASSES[prep.DECLARED_REGISTRY[key]]
+            props[key][2]['jarPath']=gradle_root+'/'+pin['jar']
+        for metadata in (props['javaLauncher'][3]['metadata'],props['javaLauncher.metadata'][3]):
+            metadata['installationPath']=home;metadata['installationRealPath']=home
+        props['javaLauncher'][3]['executablePath']=tools['java']['path']
+        props['javaLauncher'][3]['executableRealPath']=tools['java']['path']
+        producer['properties']=props;producer['orderedClasspath']=list(producer['classpath'])
+
 def prepared_fixture(repo, run, record, output_fault=None):
     """Real bounded inventories/copies of inert fixture bytes; no build execution."""
     prep = driver.prepared
@@ -168,6 +271,7 @@ def prepared_fixture(repo, run, record, output_fault=None):
     node = put("tools/node/bin/node", b"inert node"); node.chmod(0o755)
     tools = {"java": {"path": str(java), "home": str(java.parent.parent)},
              "javaRelease": {"path": str(release)}, "node": {"path": str(node), "home": str(node.parent.parent)}}
+    add_semantic_fixture(plan, tools)
     for index in (1, 2): write_json(run / f"command-{index:02d}-plan.json", plan)
     events = json.loads((run / "command-01-events.json").read_text())
     for name in prep.PRODUCERS:
@@ -237,6 +341,9 @@ def fixture(base):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("fixture source " + name + "\n", encoding="utf-8")
         sources[name] = sha(path)
+    retained = run_dir / "owned-sources/atomic_install_child.py"
+    retained.parent.mkdir()
+    retained.write_bytes((repo / "scripts/atomic_install_child.py").read_bytes())
     owned = {name: sources[name] for name in verifier.OWNED}
     agent = repo / "build/atomic-install/atomic-install-probe-agent.jar"
     agent.parent.mkdir(parents=True)
@@ -399,6 +506,33 @@ class QualificationVerifierControls(unittest.TestCase):
             repo, _ = fixture(pathlib.Path(temp))
             result = verifier.select_and_verify(repo, "0123456789abcdef")
             self.assertEqual("passed", result["status"])
+
+    def test_retained_child_helper_relation_beyond_resealed_membership(self):
+        spec = importlib.util.spec_from_file_location('child_artifact_controls', ROOT / 'scripts/atomic_install_artifacts.py')
+        artifacts = importlib.util.module_from_spec(spec); spec.loader.exec_module(artifacts)
+        for mutation in ('positive', 'absent', 'tampered', 'swapped'):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory(dir=CONTROL_TMP) as temp:
+                repo, run = fixture(pathlib.Path(temp))
+                helper = run / 'owned-sources/atomic_install_child.py'
+                if mutation == 'absent': helper.unlink()
+                elif mutation == 'tampered': helper.write_bytes(b'wrong helper bytes')
+                elif mutation == 'swapped': helper.write_bytes((repo / 'scripts/test-atomic-install.py').read_bytes())
+                # Reseal the actual selected bytes, including malicious omission.
+                with mock.patch.object(artifacts, 'rules', return_value=artifacts.rules(ROOT)):
+                    sealed = artifacts.seal(repo)
+                members = json.loads((repo / 'build' / artifacts.MANIFEST).read_text())['members']
+                member = str(helper.relative_to(repo / 'build'))
+                self.assertEqual(member in members, mutation != 'absent')
+                archive = repo / 'selected.zip'
+                with zipfile.ZipFile(archive, 'w') as output:
+                    for name in [*members, artifacts.MANIFEST]:
+                        output.write(repo / 'build' / name, name)
+                self.assertEqual(artifacts.verify(archive, sealed['sha256'])['status'], 'passed')
+                if mutation == 'positive':
+                    self.assertEqual(verifier.select_and_verify(repo, '0123456789abcdef')['status'], 'passed')
+                else:
+                    with self.assertRaises(verifier.QualificationError):
+                        verifier.select_and_verify(repo, '0123456789abcdef')
 
     def test_fully_resealed_compiler_output_contradictions(self):
         original_fixture = prepared_fixture
@@ -704,6 +838,9 @@ def symlink_parent(repo, run, record):
 # The first thirteen entries plus test_real_checkout_only_four_owned_sources are
 # the review's fourteen counterexamples, reproduced without its omitted receipts.
 NEGATIVE_CASES = {
+    "retained_child_helper_absent": lambda repo, run, r: (run / "owned-sources/atomic_install_child.py").unlink(),
+    "retained_child_helper_tampered": lambda repo, run, r: (run / "owned-sources/atomic_install_child.py").write_bytes(b"tampered helper"),
+    "retained_child_helper_swapped": lambda repo, run, r: (run / "owned-sources/atomic_install_child.py").write_bytes((repo / "scripts/test-atomic-install.py").read_bytes()),
     "retained_agent_changed": lambda repo, run, r: (repo / "build/atomic-install/atomic-install-probe-agent.jar").write_bytes(b"changed"),
     "retained_agent_missing": lambda repo, run, r: (repo / "build/atomic-install/atomic-install-probe-agent.jar").unlink(),
     "retained_agent_digest_missing": lambda repo, run, r: r.pop("agentSha256"),
@@ -1016,6 +1153,34 @@ def negative_control(mutation):
 
 for _name, _mutation in NEGATIVE_CASES.items():
     setattr(QualificationVerifierControls, "test_reject_" + _name, negative_control(_mutation))
+
+
+class DeclaredInputContractControls(unittest.TestCase):
+    def setUp(self):
+        QualificationVerifierControls.setUp(self)
+
+    def test_independent_exact_schema_and_missing_inputs(self):
+        with tempfile.TemporaryDirectory(dir=CONTROL_TMP) as temp:
+            repo,run = fixture(pathlib.Path(temp))
+            plan = json.loads((run/'command-01-plan.json').read_text())
+            consumers = (driver.prepared, verifier)
+            for consumer in consumers: consumer.validate_semantic_plan(plan)
+            mutants=[]
+            for field in plan:
+                value=copy.deepcopy(plan);del value[field];mutants.append(('plan.'+field,value))
+            for field in plan['producers']['buildAnalysisIoHelper']['properties']:
+                value=copy.deepcopy(plan);del value['producers']['buildAnalysisIoHelper']['properties'][field]
+                mutants.append(('input.'+field,value))
+            for wire in (['string',None],['null',None],['boolean',1],['integer','java.lang.Byte','128'],
+                         ['decimal','1',True],['ieee','java.lang.Double','0'],['provider',['present']],
+                         ['array','unreviewed.Component',[]],['provider',['present',['null']]],['map',[['a',['null']],['a',['null']]]],
+                         ['set',[['string','a'],['string','a']]],['ordered-set',[['null']],[]]):
+                value=copy.deepcopy(plan);value['producers']['buildAnalysisIoHelper']['properties']['extra']=wire
+                mutants.append(('wire.'+wire[0],value))
+            for name,value in mutants:
+                for consumer in consumers:
+                    with self.subTest(name=name,consumer=consumer.__name__), self.assertRaises((RuntimeError,TypeError,KeyError)):
+                        consumer.validate_semantic_plan(value)
 
 
 if __name__ == "__main__":
