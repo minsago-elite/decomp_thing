@@ -246,6 +246,18 @@ export const explorationEvidenceCopy = {
   "explorationEvidenceCouldNotBeReadCheckTheSessionAnd": "Exploration evidence could not be read. Check the session and refresh this attempt.",
   "refreshExplorationEvidence": "Refresh exploration evidence",
   "readExplorationEvidence": "Read exploration evidence",
+  "refreshingExplorationEvidence": "Refreshing exploration evidence…",
+  "previousExplorationEvidenceMayBeOutdated": "The exploration evidence shown below was read earlier for this attempt and may be outdated until this refresh completes.",
+  "failures": {
+    "session": "Exploration evidence was not read because the local session is no longer valid. Sign in again, then read this evidence.",
+    "denied": "This session is not permitted to read exploration evidence for this attempt. Use a session with access to this job.",
+    "missing": "No exploration report is recorded for this attempt. Exploration may not have run or its report was removed; no result is inferred.",
+    "unsupported": "This exploration report uses a format this interface does not support. Update the interface, then read this evidence again.",
+    "unverified": "The exploration report could not be verified and is not shown. Its recorded data may be corrupt; refresh only after checking the job storage.",
+    "sizeLimit": "The exploration report exceeds the size this interface reads and is not shown. Download the report artifact from the job's artifacts instead.",
+    "transient": "Exploration evidence is temporarily unavailable. Wait a moment, then refresh exploration evidence.",
+    "failed": "Exploration evidence could not be read. Check the session and refresh this attempt."
+  },
   "yes": "Yes",
   "no": "No",
   "evidenceLimitations": "Evidence limitations"
