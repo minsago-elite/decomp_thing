@@ -457,7 +457,16 @@ async function prepareArchive(archivePath) {
   }
   // Gradle uses xargs with its default external echo command while parsing JVM options.
   await fs.symlink('/usr/bin/echo', join(bins, 'echo'));
-  const environment = { PATH: bins, JAVA_HOME: javaHome, LANG: 'C.UTF-8' };
+  const runtimeHome = join(working, 'jvm-home');
+  const runtimeTmp = join(working, 'jvm-tmp');
+  await fs.mkdir(runtimeHome);
+  await fs.mkdir(runtimeTmp);
+  // HOME/TMPDIR alone do not set HotSpot's directory properties. These controlled
+  // options keep the test JVM and its native extraction inside the owned workspace.
+  assert.ok(!/["\r\n]/.test(runtimeHome + runtimeTmp), 'JVM test directory cannot be represented in launcher options');
+  const environment = { PATH: bins, JAVA_HOME: javaHome, LANG: 'C.UTF-8', HOME: runtimeHome,
+    TMPDIR: runtimeTmp, TMP: runtimeTmp, TEMP: runtimeTmp,
+    JAVA_TOOL_OPTIONS: `-XX:-UsePerfData -Duser.home="${runtimeHome}" -Djava.io.tmpdir="${runtimeTmp}" -Djna.tmpdir="${runtimeTmp}"` };
   for (const name of ['node', 'npm']) assert.notEqual(spawnSync('/bin/sh', ['-c', `command -v ${name}`], { env: environment }).status, 0);
   const data = join(working, 'untouched jobs');
   return { ...setup, archivePath, archiveSha256, work, before, working, environment, data };
