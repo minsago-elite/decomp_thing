@@ -279,68 +279,213 @@ async function startJvmRssSampler(pid) {
   };
 }
 
-/** Retain a selected response body as soon as Chrome reports the request complete. */
-export function createStructureResponseRecorder(readBody) {
-  if (typeof readBody !== 'function') throw new TypeError('Structure response reader is required');
-  const byPath = new Map();
-  const byRequest = new Map();
+const MODULE_DETAIL_PATH = /^\/nested\/api\/v1\/jobs\/[^/]+\/runs\/[^/]+\/revisions\/[^/]+\/modules\/[^/?#]+$/;
+const MODULE_CANDIDATE_LIMIT = 16;
+const MODULE_BODY_LIMIT_BYTES = 1024 * 1024;
+const MODULE_RETAINED_LIMIT_BYTES = 4 * 1024 * 1024;
+const safeId = (value) => typeof value === 'string' && /^[A-Za-z0-9_.:-]{1,64}$/.test(value) ? value : null;
+
+/** Exact Fetch pattern (CDP wildcard syntax, not regex); the handler re-verifies the path. */
+export function moduleDetailFetchPattern(browserOrigin) {
+  return { urlPattern: `${new URL(browserOrigin).origin}/nested/api/v1/jobs/*/runs/*/revisions/*/modules/*`,
+    resourceType: 'Fetch', requestStage: 'Response' };
+}
+
+export function isModuleDetailUrl(url, browserOrigin) {
+  let parsed;
+  try { parsed = new URL(url); } catch { return false; }
+  if (parsed.origin !== new URL(browserOrigin).origin || parsed.hash !== '' || parsed.username !== ''
+    || parsed.password !== '' || !MODULE_DETAIL_PATH.test(parsed.pathname) || parsed.search.length > 8192) return false;
+  const seen = new Set();
+  for (const [key, value] of parsed.searchParams) {
+    if (seen.has(key)) return false;
+    seen.add(key);
+    if (key === 'kind' && ['functions', 'globals', 'types'].includes(value)) continue;
+    if (key === 'limit' && /^(?:[1-9]|[1-9][0-9]|1[0-9]{2}|200)$/.test(value)) continue;
+    if (key === 'structureVersion' && /^[a-f0-9]{64}$/.test(value)) continue;
+    if (key === 'cursor' && /^[a-f0-9]{64}_(?:0|[1-9][0-9]{0,6})_[a-f0-9]{32}$/.test(value)) continue;
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Bounded lifetime ledger of every same-origin module-detail request. Bodies are captured at the Fetch
+ * response stage (before the page can consume them), so later cancellation or navigation cannot erase them.
+ */
+export function createStructureResponseRecorder({ candidateLimit = MODULE_CANDIDATE_LIMIT,
+  bodyLimitBytes = MODULE_BODY_LIMIT_BYTES, retainedLimitBytes = MODULE_RETAINED_LIMIT_BYTES } = {}) {
+  const byNetworkId = new Map();
+  const order = [];
+  let retainedBytes = 0;
+  let overflow = 0;
+  const candidate = (networkId, path) => {
+    const id = safeId(networkId);
+    if (id === null) { overflow++; return null; }
+    let value = byNetworkId.get(id);
+    if (value) return value;
+    if (byNetworkId.size >= candidateLimit) { overflow++; return null; }
+    value = { networkId: id, path, resourceType: 'other', initiator: 'other', mainFrame: false, currentMainLoader: false,
+      pausedStatus: null, networkStatus: null, fromDiskCache: false, fromServiceWorker: false, responseRequestId: null,
+      body: null, bodyBytes: 0, capture: 'pending', continuation: 'pending', terminal: 'pending', failure: null };
+    byNetworkId.set(id, value);
+    order.push(value);
+    return value;
+  };
+  const evict = (keep) => {
+    for (const value of order) {
+      if (retainedBytes <= retainedLimitBytes) return;
+      if (value === keep || value.body === null) continue;
+      retainedBytes -= value.bodyBytes;
+      value.body = null;
+      value.capture = 'evicted';
+    }
+  };
   return {
-    responseReceived(path, requestId, response = {}, request = {}) {
-      let resolve;
-      let reject;
-      const promise = new Promise((accept, refuse) => { resolve = accept; reject = refuse; });
-      promise.catch(() => undefined);
-      const capture = { promise, resolve, reject, requestId, status: Number.isInteger(response.status) ? response.status : null,
-        fromDiskCache: response.fromDiskCache === true, fromServiceWorker: response.fromServiceWorker === true,
-        resourceType: typeof request.resourceType === 'string' && /^[A-Za-z]{1,32}$/.test(request.resourceType) ? request.resourceType : 'other',
-        initiator: ['parser', 'script', 'preload', 'other', 'preflight', 'signedExchange', 'preload', 'earlyHints']
-          .includes(request.initiator) ? request.initiator : 'other',
-        mainFrame: request.mainFrame === true, currentMainLoader: request.currentMainLoader === true,
-        terminal: 'pending', failure: null };
-      const captures = byPath.get(path) ?? [];
-      if (captures.length >= 8) throw new Error('Too many module response candidates for one path');
-      captures.push(capture);
-      byPath.set(path, captures);
-      byRequest.set(requestId, capture);
+    requestWillBeSent(networkId, path, context = {}) {
+      const value = candidate(networkId, path);
+      if (!value) return;
+      value.resourceType = typeof context.resourceType === 'string' && /^[A-Za-z]{1,32}$/.test(context.resourceType) ? context.resourceType : 'other';
+      value.initiator = ['parser', 'script', 'preload', 'other', 'preflight', 'signedExchange', 'earlyHints']
+        .includes(context.initiator) ? context.initiator : 'other';
+      value.mainFrame = context.mainFrame === true;
+      value.currentMainLoader = context.currentMainLoader === true;
     },
-    async loadingFinished(requestId) {
-      const capture = byRequest.get(requestId);
-      if (!capture) return;
-      byRequest.delete(requestId);
-      capture.terminal = 'loading-finished';
-      try { capture.resolve(await readBody(requestId)); }
-      catch {
-        capture.terminal = 'body-unavailable';
-        capture.failure = 'body-unavailable';
-        capture.reject(new Error('Structure response body unavailable after loadingFinished'));
-      }
+    bodyCaptured(networkId, path, { status, responseRequestId, body, base64Encoded }) {
+      const value = candidate(networkId, path);
+      if (!value) return;
+      value.pausedStatus = Number.isInteger(status) ? status : null;
+      value.responseRequestId = safeId(responseRequestId);
+      const text = typeof body === 'string' ? (base64Encoded === true ? Buffer.from(body, 'base64').toString('utf8') : body) : null;
+      const bytes = text === null ? 0 : Buffer.byteLength(text, 'utf8');
+      if (text === null) { value.capture = 'unavailable'; return; }
+      if (bytes > bodyLimitBytes) { value.capture = 'oversize'; value.bodyBytes = bytes; return; }
+      value.body = text;
+      value.bodyBytes = bytes;
+      value.capture = 'captured';
+      retainedBytes += bytes;
+      evict(value);
     },
-    loadingFailed(requestId, { errorText, canceled, blockedReason } = {}) {
-      const capture = byRequest.get(requestId);
-      if (!capture) return;
-      byRequest.delete(requestId);
-      capture.terminal = 'loading-failed';
-      capture.failure = {
+    bodyUnavailable(networkId, path, { status, responseRequestId, reason } = {}) {
+      const value = candidate(networkId, path);
+      if (!value) return;
+      value.pausedStatus = Number.isInteger(status) ? status : null;
+      value.responseRequestId = safeId(responseRequestId);
+      value.capture = ['not-ok', 'response-error', 'read-failed', 'foreign'].includes(reason) ? reason : 'unavailable';
+    },
+    continued(networkId, ok) {
+      const value = byNetworkId.get(safeId(networkId));
+      if (value) value.continuation = ok ? 'continued' : 'continue-failed';
+    },
+    responseReceived(networkId, response = {}) {
+      const value = byNetworkId.get(safeId(networkId));
+      if (!value) return;
+      value.networkStatus = Number.isInteger(response.status) ? response.status : null;
+      value.fromDiskCache = response.fromDiskCache === true;
+      value.fromServiceWorker = response.fromServiceWorker === true;
+    },
+    loadingFinished(networkId) {
+      const value = byNetworkId.get(safeId(networkId));
+      if (value && value.terminal === 'pending') value.terminal = 'finished';
+    },
+    loadingFailed(networkId, { errorText, canceled, blockedReason } = {}) {
+      const value = byNetworkId.get(safeId(networkId));
+      if (!value || value.terminal !== 'pending') return;
+      value.terminal = canceled === true ? 'canceled' : 'failed';
+      value.failure = {
         error: typeof errorText === 'string' && /^net::ERR_[A-Z0-9_]{1,64}$/.test(errorText) ? errorText : 'other',
-        canceled: canceled === true,
-        blocked: typeof blockedReason === 'string' && /^[A-Z_]{1,32}$/.test(blockedReason) ? blockedReason : null,
+        blocked: typeof blockedReason === 'string' && /^[A-Za-z_]{1,32}$/.test(blockedReason) ? blockedReason : null,
       };
-      capture.reject(new Error('Structure response failed'));
     },
-    async bodyForPath(path) {
-      const captures = byPath.get(path);
-      if (!captures?.length) throw new Error('Missing completed module response');
-      const outcomes = await Promise.allSettled(captures.map((capture) => capture.promise));
-      const completed = outcomes.find((outcome) => outcome.status === 'fulfilled');
-      if (completed) return completed.value;
-      const failures = captures.map((capture) => {
-        const id = typeof capture.requestId === 'string' && /^[A-Za-z0-9_.:-]{1,64}$/.test(capture.requestId) ? capture.requestId : 'unknown';
-        const error = capture.failure?.error ?? 'none';
-        const blocked = capture.failure?.blocked ?? 'none';
-        return `id=${id},status=${capture.status ?? 'unknown'},type=${capture.resourceType},initiator=${capture.initiator},mainFrame=${capture.mainFrame},currentMainLoader=${capture.currentMainLoader},diskCache=${capture.fromDiskCache},serviceWorker=${capture.fromServiceWorker},terminal=${capture.terminal},error=${error},canceled=${capture.failure?.canceled ?? false},blocked=${blocked}`;
-      });
-      throw new Error(`No module response completed for ${path}: ${failures.join('; ')}`);
+    /**
+     * Identify the single captured response whose recorded identity the rendered page shows. Superseded requests
+     * cancelled before any body was captured are accounted for; every other candidate must be the consumed one.
+     */
+    consumedResponse(path, matchesRendered) {
+      const captures = order.filter((value) => value.path === path);
+      const describe = () => captures.map((value) => `id=${value.networkId},xRequestId=${value.responseRequestId ?? 'none'},`
+        + `paused=${value.pausedStatus ?? 'unknown'},status=${value.networkStatus ?? 'unknown'},type=${value.resourceType},`
+        + `initiator=${value.initiator},mainFrame=${value.mainFrame},currentMainLoader=${value.currentMainLoader},`
+        + `diskCache=${value.fromDiskCache},serviceWorker=${value.fromServiceWorker},capture=${value.capture},`
+        + `continuation=${value.continuation},terminal=${value.terminal},error=${value.failure?.error ?? 'none'},`
+        + `blocked=${value.failure?.blocked ?? 'none'},role=${value.role ?? 'unaccounted'}`).join('; ');
+      const fail = (reason) => { throw new Error(`${reason} for ${path} (overflow=${overflow}): ${describe() || 'no candidates'}`); };
+      if (overflow > 0) fail('Module response ledger overflowed');
+      if (!captures.length) fail('Missing module response');
+      const matches = [];
+      for (const value of captures) {
+        value.role = undefined;
+        if (value.capture !== 'captured') continue;
+        let snapshot;
+        try { snapshot = JSON.parse(value.body).data; } catch { continue; }
+        let matched = false;
+        try { matched = matchesRendered(snapshot) === true; } catch { matched = false; }
+        if (matched) matches.push({ value, snapshot });
+      }
+      if (matches.length > 1) {
+        for (const { value } of matches) value.role = 'duplicate-match';
+        fail('Unaccounted duplicate module responses');
+      }
+      if (matches.length === 0) fail('No captured module response matches the rendered identity');
+      const [{ value: consumed, snapshot }] = matches;
+      consumed.role = 'consumed';
+      const valid = consumed.pausedStatus === 200 && consumed.networkStatus === 200 && !consumed.fromDiskCache
+        && !consumed.fromServiceWorker && consumed.continuation === 'continued' && consumed.terminal !== 'failed';
+      for (const value of captures) {
+        if (value === consumed) continue;
+        if (value.terminal === 'canceled' && value.capture === 'pending') value.role = 'superseded-canceled';
+      }
+      if (!valid) fail('Consumed module response violates delivery constraints');
+      if (captures.some((value) => value.role === undefined)) fail('Unaccounted module response');
+      return { snapshot, evidence: { networkId: consumed.networkId, xRequestId: consumed.responseRequestId,
+        terminal: consumed.terminal, candidates: captures.length,
+        supersededCanceled: captures.filter((value) => value.role === 'superseded-canceled').length } };
     },
+  };
+}
+
+/**
+ * Fetch.requestPaused handler: reads the body before continuation and always continues the response unchanged.
+ * It never fulfils, fails, retries, or refetches a request.
+ */
+export function createModuleResponseInterceptor({ call, recorder, browserOrigin }) {
+  return async (event) => {
+    const interceptionId = event?.requestId;
+    let ok = false;
+    try {
+      const url = event?.request?.url;
+      if (!isModuleDetailUrl(url, browserOrigin)) return;
+      const path = new URL(url).pathname;
+      const networkId = event.networkId;
+      const headerList = Array.isArray(event.responseHeaders) ? event.responseHeaders : [];
+      const ids = headerList.filter((header) => typeof header?.name === 'string' && header.name.toLowerCase() === 'x-request-id');
+      const responseRequestId = ids.length === 1 ? ids[0].value : null;
+      const status = event.responseStatusCode;
+      if (event.request.method !== 'GET' || !['Fetch', 'XHR'].includes(event.resourceType)) {
+        recorder.bodyUnavailable(networkId, path, { status, responseRequestId, reason: 'foreign' });
+        return;
+      }
+      if (event.responseErrorReason !== undefined) {
+        recorder.bodyUnavailable(networkId, path, { status, responseRequestId, reason: 'response-error' });
+        return;
+      }
+      if (status !== 200) {
+        recorder.bodyUnavailable(networkId, path, { status, responseRequestId, reason: 'not-ok' });
+        return;
+      }
+      let body;
+      try { body = await call('Fetch.getResponseBody', { requestId: interceptionId }); }
+      catch {
+        recorder.bodyUnavailable(networkId, path, { status, responseRequestId, reason: 'read-failed' });
+        return;
+      }
+      recorder.bodyCaptured(networkId, path, { status, responseRequestId, body: body?.body, base64Encoded: body?.base64Encoded });
+    } catch { /* Recorder bounds are reported by consumedResponse; continuation below still runs. */ }
+    finally {
+      try { await call('Fetch.continueResponse', { requestId: interceptionId }); ok = true; }
+      catch { ok = false; }
+      try { recorder.continued(event?.networkId, ok); } catch { /* bounded ledger */ }
+    }
   };
 }
 
@@ -386,6 +531,33 @@ export function structureFeedbackInstrumentation() {
   })();`;
 }
 
+const boundedFailure = (message) => String(message).slice(0, 4096);
+
+/** Evaluate every D0 budget and control; returns all failures instead of stopping at the first. */
+export function evaluateStructureBudgets(m) {
+  const failures = [];
+  const check = (condition, message) => { if (!condition) failures.push(boundedFailure(message)); };
+  check(m.firstPageMs <= FIRST_DATA_BUDGET_MS,
+    `First function data page ${m.firstPageMs}ms exceeds the D0 ${FIRST_DATA_BUDGET_MS}ms budget; phase timings: ${JSON.stringify(m.structureTiming)}`);
+  check(m.pageDataP95Ms <= FIRST_DATA_BUDGET_MS, `Paged function data p95 ${m.pageDataP95Ms}ms exceeds the D0 ${FIRST_DATA_BUDGET_MS}ms budget`);
+  check(m.searchMs <= FIRST_DATA_BUDGET_MS, `Function search first data ${m.searchMs}ms exceeds the D0 ${FIRST_DATA_BUDGET_MS}ms budget`);
+  check(m.requestP95Ms <= FIRST_DATA_BUDGET_MS, `Function inventory request p95 ${m.requestP95Ms}ms exceeds the D0 ${FIRST_DATA_BUDGET_MS}ms budget`);
+  check(m.localFeedbackSamples === 51, 'Every page/filter interaction must expose immediate loading feedback');
+  check(m.invalidFeedbackSamples === 0, 'Browser feedback telemetry must be valid, bounded, and complete');
+  check(m.localFeedbackP95Ms <= LOCAL_FEEDBACK_BUDGET_MS,
+    `Local function-inventory feedback p95 ${m.localFeedbackP95Ms}ms exceeds the D0 ${LOCAL_FEEDBACK_BUDGET_MS}ms budget`);
+  check(m.pendingInventoryRequests === 0, 'Every function inventory request must finish before evidence is retained');
+  check(Array.isArray(m.inventoryReads) && m.inventoryReads.length >= 52 && m.inventoryReads.every((limit) => limit === '100'),
+    'Every inventory read must request one bounded page');
+  check(Array.isArray(m.exceptions) && m.exceptions.length === 0, `Browser exceptions: ${m.exceptions?.length ?? 'unknown'}`);
+  check(Array.isArray(m.requestMethods) && m.requestMethods.every((method) => ['GET', 'HEAD'].includes(method)), 'Structure browsing issued a mutation request');
+  check(Number.isFinite(m.peakBrowserHeapBytes) && m.peakBrowserHeapBytes <= 128 * 1024 * 1024, `Browser heap ${m.peakBrowserHeapBytes} exceeds the D0 budget`);
+  check(m.jvmMemory?.coverageComplete === true, `JVM RSS sampling was incomplete: ${JSON.stringify(m.jvmMemory)}`);
+  check(Number.isFinite(m.jvmMemory?.incrementalPeakBytes) && m.jvmMemory.incrementalPeakBytes <= JVM_RSS_BUDGET_BYTES,
+    `JVM incremental RSS ${m.jvmMemory?.incrementalPeakBytes} exceeds the D0 ${JVM_RSS_BUDGET_BYTES}-byte budget`);
+  return failures;
+}
+
 export async function qualifyStructure(options) {
   const jvmRssSampler = await startJvmRssSampler(options.applicationPid);
   try { return await qualifyStructureWithRssSampler(options, jvmRssSampler); }
@@ -411,10 +583,7 @@ async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evalua
   cdp.on('Network.responseReceived', structureTiming.responseReceived, tab.sessionId);
   cdp.on('Network.loadingFinished', structureTiming.loadingFinished, tab.sessionId);
   cdp.on('Network.loadingFailed', structureTiming.loadingFailed, tab.sessionId);
-  const moduleResponseBodies = createStructureResponseRecorder((requestId) =>
-    cdp.call('Network.getResponseBody', { requestId }, tab.sessionId));
-  const moduleResponsePaths = new Map();
-  const moduleRequestContexts = new Map();
+  const moduleResponses = createStructureResponseRecorder();
   let mainFrameId = null;
   let mainLoaderId = null;
   cdp.on('Page.frameNavigated', (event) => {
@@ -424,9 +593,8 @@ async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evalua
     }
   }, tab.sessionId);
   cdp.on('Network.requestWillBeSent', (event) => {
-    if (moduleRequestContexts.size < 64
-      && /\/api\/v1\/jobs\/[^/]+\/runs\/[^/]+\/revisions\/[^/]+\/modules\/[^/]+$/.test(new URL(event.request.url).pathname)) {
-      moduleRequestContexts.set(event.requestId, {
+    if (event.request.method === 'GET' && isModuleDetailUrl(event.request.url, browserOrigin)) {
+      moduleResponses.requestWillBeSent(event.requestId, new URL(event.request.url).pathname, {
         resourceType: event.type,
         initiator: event.initiator?.type,
         mainFrame: event.frameId === mainFrameId,
@@ -434,29 +602,13 @@ async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evalua
       });
     }
   }, tab.sessionId);
-  cdp.on('Network.responseReceived', (event) => {
-    const url = new URL(event.response.url);
-    if (url.origin === new URL(browserOrigin).origin && event.response.status === 200
-      && /\/api\/v1\/jobs\/[^/]+\/runs\/[^/]+\/revisions\/[^/]+\/modules\/[^/]+$/.test(url.pathname)) {
-      moduleResponsePaths.set(event.requestId, url.pathname);
-      moduleResponseBodies.responseReceived(url.pathname, event.requestId, event.response,
-        moduleRequestContexts.get(event.requestId) ?? {});
-    }
-  }, tab.sessionId);
-  cdp.on('Network.loadingFinished', (event) => {
-    if (moduleResponsePaths.delete(event.requestId)) {
-      moduleRequestContexts.delete(event.requestId);
-      void moduleResponseBodies.loadingFinished(event.requestId);
-    }
-  }, tab.sessionId);
-  cdp.on('Network.loadingFailed', (event) => {
-    const path = moduleResponsePaths.get(event.requestId);
-    if (path) {
-      moduleResponsePaths.delete(event.requestId);
-      moduleRequestContexts.delete(event.requestId);
-      moduleResponseBodies.loadingFailed(event.requestId, event);
-    } else moduleRequestContexts.delete(event.requestId);
-  }, tab.sessionId);
+  cdp.on('Network.responseReceived', (event) => moduleResponses.responseReceived(event.requestId, event.response), tab.sessionId);
+  cdp.on('Network.loadingFinished', (event) => moduleResponses.loadingFinished(event.requestId), tab.sessionId);
+  cdp.on('Network.loadingFailed', (event) => moduleResponses.loadingFailed(event.requestId, event), tab.sessionId);
+  cdp.on('Fetch.requestPaused', createModuleResponseInterceptor({
+    call: (method, params) => cdp.call(method, params, tab.sessionId), recorder: moduleResponses, browserOrigin,
+  }), tab.sessionId);
+  await cdp.call('Fetch.enable', { patterns: [moduleDetailFetchPattern(browserOrigin)] }, tab.sessionId);
   cdp.on('Network.requestWillBeSent', (event) => {
     const url = new URL(event.request.url);
     if (/\/api\/v1\/jobs\/[^/]+\/runs\/[^/]+\/revisions\/[^/]+\/functions$/.test(url.pathname)) {
@@ -528,10 +680,17 @@ async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evalua
   const owned = Math.min(24, OWNED - Math.floor(99998 / 24) * 24);
   assert.equal(await evaluate(tab, `document.querySelectorAll('table tbody tr').length`), owned);
   const implementation = await evaluate(tab, `[...document.querySelectorAll('a')].find(a => a.textContent === 'src/modules/${module}.c')?.getAttribute('href')`);
-  let response;
+  const evidenceFailures = [];
+  let moduleResponseEvidence = null;
   try {
-    response = await moduleResponseBodies.bodyForPath(
-      `/nested/api/v1/jobs/${fixture.jobId}/runs/${fixture.runId}/revisions/${fixture.revisionId}/modules/${module}`);
+    const consumed = moduleResponses.consumedResponse(
+      `/nested/api/v1/jobs/${fixture.jobId}/runs/${fixture.runId}/revisions/${fixture.revisionId}/modules/${module}`,
+      (snapshot) => {
+        assert.equal(snapshot?.module?.moduleId, module);
+        assertStructureSourceLink(implementation, { revision, browserOrigin, snapshot });
+        return true;
+      });
+    moduleResponseEvidence = consumed.evidence;
   } catch (failure) {
     let rendered = { path: false, moduleHeading: false, ownedTable: false };
     try {
@@ -541,11 +700,9 @@ async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evalua
         ownedTable: [...document.querySelectorAll('table caption')].some(node => node.textContent === 'Functions'),
       })`);
     } catch { /* Preserve the original response failure if the document is already detached. */ }
-    throw new Error(`${failure instanceof Error ? failure.message : 'Module response failed'}; renderedModule=${JSON.stringify(rendered)}`);
+    evidenceFailures.push(boundedFailure(`${failure instanceof Error ? failure.message : 'Module response failed'}; renderedModule=${JSON.stringify(rendered)}`));
   }
-  const snapshot = JSON.parse(response.base64Encoded ? Buffer.from(response.body, 'base64').toString('utf8') : response.body).data;
-  assert.equal(snapshot.module.moduleId, module);
-  assertStructureSourceLink(implementation, { revision, browserOrigin, snapshot });
+  await cdp.call('Fetch.disable', {}, tab.sessionId);
   await cdp.call('Page.navigate', { url: browserOrigin + `${revision}/modules` }, tab.sessionId);
   await ready(tab, `document.body.innerText.includes('Showing 1–100 of ${fixture.modules} modules.') && document.querySelector('table caption')?.textContent === 'Recorded totals'`, 'module inventory with recorded totals');
   assert.ok(await evaluate(tab, `[...document.querySelectorAll('dt')].find(dt => dt.textContent === 'Names shared by several functions or globals')?.nextElementSibling.textContent === '1'`));
@@ -560,23 +717,17 @@ async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evalua
   const localFeedbackP95Ms = nearestRankP95(localFeedbackMs);
   const jvmMemory = await jvmRssSampler.stop();
   const structureTimingSummary = structureTiming.summary();
-  assert.ok(firstPageMs <= FIRST_DATA_BUDGET_MS,
-    `First function data page ${firstPageMs}ms exceeds the D0 ${FIRST_DATA_BUDGET_MS}ms budget; phase timings: ${JSON.stringify(structureTimingSummary)}`);
-  assert.ok(pageDataP95Ms <= FIRST_DATA_BUDGET_MS, `Paged function data p95 ${pageDataP95Ms}ms exceeds the D0 ${FIRST_DATA_BUDGET_MS}ms budget`);
-  assert.ok(searchMs <= FIRST_DATA_BUDGET_MS, `Function search first data ${searchMs}ms exceeds the D0 ${FIRST_DATA_BUDGET_MS}ms budget`);
-  assert.ok(requestP95Ms <= FIRST_DATA_BUDGET_MS, `Function inventory request p95 ${requestP95Ms}ms exceeds the D0 ${FIRST_DATA_BUDGET_MS}ms budget`);
-  assert.equal(localFeedbackMs.length, 51, 'Every page/filter interaction must expose immediate loading feedback');
-  assert.equal(invalidFeedbackSamples, 0, 'Browser feedback telemetry must be valid, bounded, and complete');
-  assert.ok(localFeedbackP95Ms <= LOCAL_FEEDBACK_BUDGET_MS,
-    `Local function-inventory feedback p95 ${localFeedbackP95Ms}ms exceeds the D0 ${LOCAL_FEEDBACK_BUDGET_MS}ms budget`);
-  assert.equal(inventoryRequests.size, 0, 'Every function inventory request must finish before evidence is retained');
-  assert.ok(inventoryReads.length >= 52 && inventoryReads.every((limit) => limit === '100'), 'Every inventory read must request one bounded page');
-  assert.deepEqual(tab.exceptions, []);
-  assert.ok(tab.requests.every((request) => ['GET', 'HEAD'].includes(request.method)));
-  assert.ok(peakBrowserHeapBytes <= 128 * 1024 * 1024, `Browser heap ${peakBrowserHeapBytes} exceeds the D0 budget`);
-  assert.ok(jvmMemory.coverageComplete, `JVM RSS sampling was incomplete: ${JSON.stringify(jvmMemory)}`);
-  assert.ok(jvmMemory.incrementalPeakBytes <= JVM_RSS_BUDGET_BYTES,
-    `JVM incremental RSS ${jvmMemory.incrementalPeakBytes} exceeds the D0 ${JVM_RSS_BUDGET_BYTES}-byte budget`);
+  const budgetFailures = evaluateStructureBudgets({ firstPageMs, pageDataP95Ms, searchMs, requestP95Ms,
+    localFeedbackSamples: localFeedbackMs.length, invalidFeedbackSamples, localFeedbackP95Ms,
+    pendingInventoryRequests: inventoryRequests.size, inventoryReads, exceptions: tab.exceptions,
+    requestMethods: tab.requests.map((request) => request.method), peakBrowserHeapBytes, jvmMemory,
+    structureTiming: structureTimingSummary });
+  if (budgetFailures.length || evidenceFailures.length) {
+    throw new Error(`Structure qualification failed: ${JSON.stringify({ evidenceFailures, budgetFailures,
+      measurements: { firstPageMs: Math.round(firstPageMs), pageDataP95Ms: Math.round(pageDataP95Ms), searchMs: Math.round(searchMs),
+        requestP95Ms: Math.round(requestP95Ms), localFeedbackP95Ms: Math.round(localFeedbackP95Ms), peakBrowserHeapBytes,
+        jvmIncrementalPeakBytes: jvmMemory.incrementalPeakBytes, structureTiming: structureTimingSummary } })}`);
+  }
   pageMs.sort((a, b) => a - b);
   return { recordedFunctions: fixture.functions, modules: fixture.modules, modelBytes: fixture.modelBytes, rowsPerPage: 100,
     pagesVisited: 51, measuredInteractions: localFeedbackMs.length, maximumMountedRows: 100,
@@ -585,5 +736,5 @@ async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evalua
     functionRequestP95Ms: Math.round(requestP95Ms), localFeedbackP95Ms: Math.round(localFeedbackP95Ms),
     firstPageBudgetMs: FIRST_DATA_BUDGET_MS, localFeedbackBudgetMs: LOCAL_FEEDBACK_BUDGET_MS, jvmMemory,
     searchMs: Math.round(searchMs), peakBrowserHeapBytes, cursorReload: true,
-    pinnedCrossLinks: true, moduleSourceLink: true, narrowReflow: true, boundedInventoryReads: inventoryReads.length, mutationRequests: 0 };
+    pinnedCrossLinks: true, moduleSourceLink: true, moduleResponse: moduleResponseEvidence, narrowReflow: true, boundedInventoryReads: inventoryReads.length, mutationRequests: 0 };
 }

@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { runInNewContext } from 'node:vm';
-import { appendStructureFeedbackSample, assertStructureSourceLink, createJvmRssSummary, createStructureResponseRecorder,
-  createStructureTimingRecorder, nearestRankP95, recordJvmRssSample, structureFeedbackInstrumentation, summarizeJvmRss } from './packaged-browser-structure.mjs';
+import { appendStructureFeedbackSample, assertStructureSourceLink, createJvmRssSummary, createModuleResponseInterceptor,
+  createStructureResponseRecorder, createStructureTimingRecorder, evaluateStructureBudgets, isModuleDetailUrl, moduleDetailFetchPattern, nearestRankP95, recordJvmRssSample, structureFeedbackInstrumentation, summarizeJvmRss } from './packaged-browser-structure.mjs';
 
 const revision = `/nested/jobs/${'f'.repeat(32)}/runs/run_structure_scale/revisions/revision_structure_scale`;
 const browserOrigin = 'http://127.0.0.1:12345';
@@ -60,48 +60,190 @@ test('JVM RSS budget is measured above warmed baseline and incomplete sampling s
   assert.throws(() => createJvmRssSummary(Number.NaN), TypeError);
 });
 
-test('module response bodies are captured at loadingFinished, before later navigation can evict them', async () => {
-  const expected = { body: '{"data":{"module":"recorded"}}', base64Encoded: false };
-  const reads = [];
-  const recorder = createStructureResponseRecorder(async (requestId) => {
-    reads.push(requestId);
-    return expected;
-  });
-  recorder.responseReceived('/modules/module_0041', 'request-41', { status: 200 });
-  assert.deepEqual(reads, [], 'Response arrival alone must not attempt body retrieval');
-  const body = recorder.bodyForPath('/modules/module_0041');
-  await recorder.loadingFinished('request-41');
-  assert.deepEqual(reads, ['request-41']);
-  assert.equal(await body, expected);
+const modulePath = `/nested/api/v1/jobs/${'a'.repeat(32)}/runs/run/revisions/rev/modules/module_0041`;
+const moduleUrl = `${browserOrigin}${modulePath}`;
+const moduleBody = (moduleId, sha = 'a') => JSON.stringify({ data: { module: { moduleId }, sourceSha256: sha.repeat(64) } });
+const rendered = (moduleId, sha = 'a') => (value) => value.module.moduleId === moduleId && value.sourceSha256 === sha.repeat(64);
+const paused = (overrides = {}) => ({ requestId: 'interception-1', networkId: 'net-1', resourceType: 'Fetch',
+  responseStatusCode: 200, responseHeaders: [{ name: 'X-Request-ID', value: 'req-1' }],
+  request: { method: 'GET', url: moduleUrl }, ...overrides });
+const fakeCdp = (bodies = {}, { failRead = false, failContinue = false } = {}) => {
+  const calls = [];
+  return { calls, call: async (method, params) => {
+    calls.push([method, params.requestId]);
+    if (method === 'Fetch.getResponseBody') {
+      if (failRead) throw new Error('read failed');
+      return { body: bodies[params.requestId], base64Encoded: false };
+    }
+    if (failContinue) throw new Error('Invalid InterceptionId');
+    return {};
+  } };
+};
+const deliver = (recorder, id, { status = 200, terminal = 'finished', canceled = true } = {}) => {
+  recorder.responseReceived(id, { status });
+  if (terminal === 'finished') recorder.loadingFinished(id);
+  else recorder.loadingFailed(id, { errorText: 'net::ERR_ABORTED', canceled });
+};
+
+test('module detail Fetch pattern is exact CDP wildcard syntax scoped to same-origin response stage', () => {
+  assert.deepEqual(moduleDetailFetchPattern(`${browserOrigin}/ignored`), { requestStage: 'Response', resourceType: 'Fetch',
+    urlPattern: `${browserOrigin}/nested/api/v1/jobs/*/runs/*/revisions/*/modules/*` });
+  assert.equal(isModuleDetailUrl(moduleUrl, browserOrigin), true);
+  assert.equal(isModuleDetailUrl(`${moduleUrl}?kind=functions&limit=50&structureVersion=${'a'.repeat(64)}`, browserOrigin), true);
+  assert.equal(isModuleDetailUrl(`${moduleUrl}?kind=globals&limit=200&cursor=${'a'.repeat(64)}_200_${'b'.repeat(32)}`, browserOrigin), true);
+  for (const query of ['kind=other', 'limit=201', 'limit=050', 'structureVersion=bad', 'version=bad', 'kind=functions&kind=types', 'cursor=', 'x=1']) {
+    assert.equal(isModuleDetailUrl(`${moduleUrl}?${query}`, browserOrigin), false, query);
+  }
+  for (const url of [`${moduleUrl}/extra`, `${moduleUrl}?x=1`, `http://127.0.0.1:1${modulePath}`, moduleUrl.replace('/modules/module_0041', '/modules'), 'not a url']) {
+    assert.equal(isModuleDetailUrl(url, browserOrigin), false, url);
+  }
 });
 
-test('module response body capture ignores an aborted duplicate when a same-path response completes', async () => {
-  const expected = { body: '{"data":{"module":"recorded"}}', base64Encoded: false };
-  const reads = [];
-  const recorder = createStructureResponseRecorder(async (requestId) => {
-    reads.push(requestId);
-    return expected;
-  });
-  recorder.responseReceived('/modules/module_0002', 'request-aborted', { status: 200, fromDiskCache: true });
-  recorder.responseReceived('/modules/module_0002', 'request-complete', { status: 200 });
-  const body = recorder.bodyForPath('/modules/module_0002');
-  recorder.loadingFailed('request-aborted', { errorText: 'net::ERR_ABORTED', canceled: true });
-  await recorder.loadingFinished('request-complete');
-  assert.equal(await body, expected);
-  assert.deepEqual(reads, ['request-complete']);
+test('interceptor reads the body before continuing and continues unchanged on every path', async () => {
+  for (const [name, event, options, expected] of [
+    ['captured', paused(), {}, ['Fetch.getResponseBody', 'Fetch.continueResponse']],
+    ['frontend module query', paused({ request: { method: 'GET', url: `${moduleUrl}?kind=functions&limit=50&structureVersion=${'a'.repeat(64)}` } }), {},
+      ['Fetch.getResponseBody', 'Fetch.continueResponse']],
+    ['pattern overmatch', paused({ request: { method: 'GET', url: `${moduleUrl}/extra` } }), {}, ['Fetch.continueResponse']],
+    ['non-200', paused({ responseStatusCode: 404 }), {}, ['Fetch.continueResponse']],
+    ['response error', paused({ responseErrorReason: 'Aborted' }), {}, ['Fetch.continueResponse']],
+    ['non-fetch type', paused({ resourceType: 'Document' }), {}, ['Fetch.continueResponse']],
+    ['read failure', paused(), { failRead: true }, ['Fetch.getResponseBody', 'Fetch.continueResponse']],
+    ['malformed event', { requestId: 'interception-1' }, {}, ['Fetch.continueResponse']],
+  ]) {
+    const cdp = fakeCdp({ 'interception-1': moduleBody('module_0041') }, options);
+    const recorder = createStructureResponseRecorder();
+    await createModuleResponseInterceptor({ call: cdp.call, recorder, browserOrigin })(event);
+    assert.deepEqual(cdp.calls.map(([method]) => method), expected, name);
+    assert.ok(cdp.calls.every(([method]) => !/fulfill|failRequest|continueRequest|Network\./.test(method)), name);
+  }
 });
 
-test('module response body capture refuses when every same-path response fails', async () => {
-  const reads = [];
-  const recorder = createStructureResponseRecorder(async (requestId) => { reads.push(requestId); return {}; });
-  recorder.responseReceived('/modules/module_0002', 'request-2', { status: 200 },
-    { resourceType: 'Fetch', initiator: 'script', mainFrame: true, currentMainLoader: true });
-  recorder.responseReceived('/modules/module_0002', 'request-3', { status: 200, fromServiceWorker: true });
-  const body = recorder.bodyForPath('/modules/module_0002');
-  recorder.loadingFailed('request-2', { errorText: 'net::ERR_ABORTED', canceled: true });
-  recorder.loadingFailed('request-3', { errorText: 'private text with possible URL', blockedReason: 'private reason' });
-  await assert.rejects(body, /No module response completed for \/modules\/module_0002: .*status=200,type=Fetch,initiator=script,mainFrame=true,currentMainLoader=true,diskCache=false.*error=net::ERR_ABORTED,canceled=true.*serviceWorker=true.*error=other/);
-  assert.deepEqual(reads, []);
+test('consumed module response is matched by rendered identity and carries X-Request-ID', async () => {
+  const cdp = fakeCdp({ 'interception-1': moduleBody('module_0041') });
+  const recorder = createStructureResponseRecorder();
+  recorder.requestWillBeSent('net-1', modulePath, { resourceType: 'Fetch', initiator: 'script', mainFrame: true, currentMainLoader: true });
+  await createModuleResponseInterceptor({ call: cdp.call, recorder, browserOrigin })(paused());
+  deliver(recorder, 'net-1');
+  const { snapshot, evidence } = recorder.consumedResponse(modulePath, rendered('module_0041'));
+  assert.equal(snapshot.module.moduleId, 'module_0041');
+  assert.deepEqual(evidence, { networkId: 'net-1', xRequestId: 'req-1', terminal: 'finished', candidates: 1, supersededCanceled: 0 });
+});
+
+test('cancellation after body capture keeps the captured evidence', async () => {
+  const cdp = fakeCdp({ 'interception-1': moduleBody('module_0041') });
+  const recorder = createStructureResponseRecorder();
+  await createModuleResponseInterceptor({ call: cdp.call, recorder, browserOrigin })(paused());
+  deliver(recorder, 'net-1', { terminal: 'failed' });
+  assert.equal(recorder.consumedResponse(modulePath, rendered('module_0041')).evidence.terminal, 'canceled');
+});
+
+test('superseded request cancelled before its body is accounted for, not ignored silently', async () => {
+  const cdp = fakeCdp({ 'interception-2': moduleBody('module_0041') });
+  const recorder = createStructureResponseRecorder();
+  recorder.requestWillBeSent('net-1', modulePath);
+  recorder.loadingFailed('net-1', { errorText: 'net::ERR_ABORTED', canceled: true });
+  await createModuleResponseInterceptor({ call: cdp.call, recorder, browserOrigin })(paused({ requestId: 'interception-2', networkId: 'net-2' }));
+  deliver(recorder, 'net-2');
+  assert.equal(recorder.consumedResponse(modulePath, rendered('module_0041')).evidence.supersededCanceled, 1);
+});
+
+test('post-body eviction fails instead of passing on lost evidence', async () => {
+  const recorder = createStructureResponseRecorder({ retainedLimitBytes: 120 });
+  const cdp = fakeCdp({ 'interception-1': moduleBody('module_0041'), 'interception-2': moduleBody('module_0041', 'b') });
+  const intercept = createModuleResponseInterceptor({ call: cdp.call, recorder, browserOrigin });
+  await intercept(paused());
+  await intercept(paused({ requestId: 'interception-2', networkId: 'net-2' }));
+  deliver(recorder, 'net-1');
+  deliver(recorder, 'net-2', { terminal: 'failed' });
+  assert.throws(() => recorder.consumedResponse(modulePath, rendered('module_0041')),
+    /No captured module response matches the rendered identity.*id=net-1.*capture=evicted/);
+});
+
+test('unmatched or foreign identity fails', async () => {
+  const cdp = fakeCdp({ 'interception-1': moduleBody('module_0042') });
+  const recorder = createStructureResponseRecorder();
+  await createModuleResponseInterceptor({ call: cdp.call, recorder, browserOrigin })(paused());
+  deliver(recorder, 'net-1');
+  assert.throws(() => recorder.consumedResponse(modulePath, rendered('module_0041')), /No captured module response matches/);
+  assert.throws(() => createStructureResponseRecorder().consumedResponse(modulePath, () => true), /Missing module response/);
+});
+
+test('unexplained duplicates fail: two matching bodies or an extra completed response', async () => {
+  const both = createStructureResponseRecorder();
+  const cdp = fakeCdp({ 'interception-1': moduleBody('module_0041'), 'interception-2': moduleBody('module_0041') });
+  const intercept = createModuleResponseInterceptor({ call: cdp.call, recorder: both, browserOrigin });
+  await intercept(paused());
+  await intercept(paused({ requestId: 'interception-2', networkId: 'net-2' }));
+  deliver(both, 'net-1');
+  deliver(both, 'net-2');
+  assert.throws(() => both.consumedResponse(modulePath, rendered('module_0041')), /Unaccounted duplicate module responses/);
+
+  const extra = createStructureResponseRecorder();
+  const cdp2 = fakeCdp({ 'interception-1': moduleBody('module_0041'), 'interception-2': moduleBody('module_0041', 'b') });
+  const intercept2 = createModuleResponseInterceptor({ call: cdp2.call, recorder: extra, browserOrigin });
+  await intercept2(paused());
+  await intercept2(paused({ requestId: 'interception-2', networkId: 'net-2' }));
+  deliver(extra, 'net-1');
+  deliver(extra, 'net-2');
+  assert.throws(() => extra.consumedResponse(modulePath, rendered('module_0041')), /Unaccounted module response.*id=net-2.*role=unaccounted/);
+});
+
+test('cancellation cannot excuse a conflicting captured body or failed capture', async () => {
+  for (const capture of ['captured', 'oversize', 'read-failed']) {
+    const recorder = createStructureResponseRecorder({ bodyLimitBytes: 200 });
+    const cdp = fakeCdp({ 'interception-1': moduleBody('module_0041'),
+      'interception-2': capture === 'oversize' ? 'x'.repeat(201) : moduleBody('module_0041', 'b') });
+    const intercept = createModuleResponseInterceptor({ call: cdp.call, recorder, browserOrigin });
+    await intercept(paused());
+    if (capture === 'read-failed') {
+      recorder.bodyUnavailable('net-2', modulePath, { status: 200, reason: 'read-failed' });
+    } else {
+      await intercept(paused({ requestId: 'interception-2', networkId: 'net-2' }));
+    }
+    deliver(recorder, 'net-1');
+    deliver(recorder, 'net-2', { terminal: 'failed' });
+    assert.throws(() => recorder.consumedResponse(modulePath, rendered('module_0041')),
+      /Unaccounted module response.*id=net-2.*role=unaccounted/, capture);
+  }
+});
+
+test('consumed response must satisfy status, cache, service-worker and continuation constraints', async () => {
+  for (const [name, mutate, options] of [
+    ['disk cache', (r) => r.responseReceived('net-1', { status: 200, fromDiskCache: true })],
+    ['service worker', (r) => r.responseReceived('net-1', { status: 200, fromServiceWorker: true })],
+    ['network status', (r) => r.responseReceived('net-1', { status: 500 })],
+    ['missing network response', () => {}],
+    ['continuation failed', (r) => r.responseReceived('net-1', { status: 200 }), { failContinue: true }],
+  ]) {
+    const recorder = createStructureResponseRecorder();
+    const cdp = fakeCdp({ 'interception-1': moduleBody('module_0041') }, options);
+    await createModuleResponseInterceptor({ call: cdp.call, recorder, browserOrigin })(paused());
+    mutate(recorder);
+    assert.throws(() => recorder.consumedResponse(modulePath, rendered('module_0041')), /violates delivery constraints/, name);
+  }
+});
+
+test('module ledger bounds candidates and oversize bodies, failing closed', async () => {
+  const recorder = createStructureResponseRecorder({ candidateLimit: 2, bodyLimitBytes: 10 });
+  const cdp = fakeCdp({ 'interception-1': moduleBody('module_0041') });
+  await createModuleResponseInterceptor({ call: cdp.call, recorder, browserOrigin })(paused());
+  assert.throws(() => recorder.consumedResponse(modulePath, () => true), /capture=oversize/);
+  recorder.requestWillBeSent('net-2', modulePath);
+  recorder.requestWillBeSent('net-3', modulePath);
+  assert.throws(() => recorder.consumedResponse(modulePath, () => true), /overflowed.*overflow=1/);
+});
+
+test('every D0 budget is evaluated even when several fail', () => {
+  const passing = { firstPageMs: 100, pageDataP95Ms: 100, searchMs: 100, requestP95Ms: 100, localFeedbackSamples: 51,
+    invalidFeedbackSamples: 0, localFeedbackP95Ms: 10, pendingInventoryRequests: 0, inventoryReads: Array(52).fill('100'),
+    exceptions: [], requestMethods: ['GET'], peakBrowserHeapBytes: 1, jvmMemory: { coverageComplete: true, incrementalPeakBytes: 1 },
+    structureTiming: {} };
+  assert.deepEqual(evaluateStructureBudgets(passing), []);
+  const failures = evaluateStructureBudgets({ ...passing, firstPageMs: 501, localFeedbackP95Ms: 101,
+    peakBrowserHeapBytes: 128 * 1024 * 1024 + 1, jvmMemory: { coverageComplete: true, incrementalPeakBytes: 256 * 1024 * 1024 + 1 } });
+  assert.equal(failures.length, 4);
+  assert.equal(evaluateStructureBudgets({ ...passing, firstPageMs: Number.NaN, peakBrowserHeapBytes: undefined, jvmMemory: undefined }).length, 4);
 });
 
 test('structure feedback samples survive document replacement through the parent binding', () => {
