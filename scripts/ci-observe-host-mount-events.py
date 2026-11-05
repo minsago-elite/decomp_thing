@@ -268,6 +268,8 @@ def observe(recorder, roots, workspace, duration, stopped, *, open_fd=os.open,
         reason, incomplete = 'IO_UNAVAILABLE', True
         recorder.write('UNAVAILABLE', reason=reason, incomplete=True, coalescing='UNKNOWN')
     finally:
+        if reason == 'DEADLINE':
+            incomplete = True  # Also covers unexpected exceptions after the baseline.
         if fd is not None:
             try:
                 close_fd(fd)

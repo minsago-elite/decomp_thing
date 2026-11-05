@@ -122,6 +122,19 @@ class ObserverControls(unittest.TestCase):
                       namespace=Mock(side_effect=OSError('private')))
         self.assertEqual('UNAVAILABLE', json.loads(out.getvalue().splitlines()[1])['kind'])
 
+    def test_unexpected_failure_preserves_exception_and_incomplete_stop(self):
+        out = io.BytesIO()
+        poller = Mock()
+        poller.poll.return_value = [(42, select.POLLPRI)]
+        with self.assertRaisesRegex(RuntimeError, 'authored failure'):
+            m.observe(m.Recorder(out), [], '/repo', 1, lambda: False,
+                      open_fd=Mock(return_value=42), close_fd=Mock(),
+                      read=Mock(side_effect=[m.parse(row()), RuntimeError('authored failure')]),
+                      poll_factory=lambda: poller, namespace=lambda: 123)
+        stop = json.loads(out.getvalue().splitlines()[-1])
+        self.assertEqual('STOP', stop['kind'])
+        self.assertTrue(stop['incomplete'])
+
     def test_full_table_changes_not_hidden_by_equal_target(self):
         table = m.parse(row())
         changed = m.parse(row(superopts='rw,private-option'))
