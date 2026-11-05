@@ -1,0 +1,169 @@
+--- a/ghidra/program/model/data/PointerDataType.java
++++ b/ghidra/program/model/data/PointerDataType.java
+@@ -53,6 +53,7 @@
+ 	protected int length;
+ 
+ 	private boolean deleted = false;
++    private final boolean ownedFactoryAuthority;
+ 	private String displayName;
+ 
+ 	/**
+@@ -135,14 +136,20 @@
+ 	 *                           organization will be used
+ 	 */
+ 	public PointerDataType(DataType referencedDataType, int length, DataTypeManager dtm) {
+-		super(referencedDataType != null ? referencedDataType.getCategoryPath() : null,
++        this(referencedDataType, length, dtm, true);
++    }
++
++    private PointerDataType(DataType referencedDataType, int length, DataTypeManager dtm,
++            boolean authority) {
++        super(referencedDataType != null ? referencedDataType.getCategoryPath() : null,
+ 			constructUniqueName(referencedDataType, length), dtm);
+ 		if (referencedDataType instanceof BitFieldDataType) {
+ 			throw new IllegalArgumentException(
+ 				"Pointer reference data-type may not be a bitfield: " +
+ 					referencedDataType.getName());
+ 		}
+-		this.length = length <= 0 ? -1 : length;
++        this.ownedFactoryAuthority = authority && finiteOwnedFactory(getClass());
++        this.length = length <= 0 ? -1 : length;
+ 		this.referencedDataType = referencedDataType;
+ 		if (referencedDataType != null) {
+ 			referencedDataType.addParent(this);
+@@ -151,11 +158,9 @@
+ 
+ 	@Override
+ 	public final Pointer clone(DataTypeManager dtm) {
+-		if (dtm == getDataTypeManager()) {
+-			return this;
+-		}
+-		// don't clone referenced data-type to avoid potential circular reference
+-		return new PointerDataType(referencedDataType, length, dtm);
++        ghidra.program.database.data.DataTypeManagerDB.checkOwnedPointerCopy(this, dtm);
++        if (dtm == getDataTypeManager()) return this;
++        return copyForManager(this, dtm);
+ 	}
+ 
+ 	@Override
+@@ -743,11 +748,19 @@
+ 
+ 	@Override
+ 	public void dataTypeDeleted(DataType dt) {
++        try {
++
+ 		if (referencedDataType == dt) {
+ 			notifyDeleted();
+ 			deleted = true;
+ 		}
+-	}
++	
++        }
++        catch (RuntimeException | Error failure) {
++            ghidra.program.database.data.DataTypeManagerDB.recordOwnedPointerFailure(getDataTypeManager(), failure);
++            throw failure;
++        }
++    }
+ 
+ 	@Override
+ 	public boolean isDeleted() {
+@@ -756,6 +769,10 @@
+ 
+ 	@Override
+ 	public void dataTypeReplaced(DataType oldDt, DataType newDt) {
++        try {
++
++        if (newDt instanceof Pointer pointer && newDt != this) ghidra.program.database.data.DataTypeManagerDB.checkOwnedPointerCopy(pointer, getDataTypeManager());
++
+ 		DataTypeUtilities.checkValidReplacement(oldDt, newDt);
+ 		if (referencedDataType == oldDt) {
+ 			if (newDt == this) {
+@@ -775,7 +792,13 @@
+ 			name = constructUniqueName(referencedDataType, length);
+ 			notifyNameChanged(oldName);
+ 		}
+-	}
++	
++        }
++        catch (RuntimeException | Error failure) {
++            ghidra.program.database.data.DataTypeManagerDB.recordOwnedPointerFailure(getDataTypeManager(), failure);
++            throw failure;
++        }
++    }
+ 
+ 	@Override
+ 	public void dataTypeNameChanged(DataType dt, String oldName) {
+@@ -837,11 +860,25 @@
+ 
+ 	@Override
+ 	public Pointer newPointer(DataType dt) {
+-		if (dt != null) {
+-			dt = dt.clone(getDataTypeManager());
+-		}
+-		return new PointerDataType(dt, length, getDataTypeManager());
+-	}
++        try {
++
++        DataTypeManager destination = getDataTypeManager();
++        ghidra.program.database.data.DataTypeManagerDB.checkOwnedPointerCopy(this, destination);
++        if (dt instanceof Pointer pointer)
++            ghidra.program.database.data.DataTypeManagerDB.checkOwnedPointerCopy(pointer, destination);
++        DataType original = dt;
++        if (dt != null) dt = dt.clone(destination);
++        PointerDataType result = new PointerDataType(dt, length, destination,
++            ownedFactoryAuthority && !deleted && (original == null || dt != null));
++        ghidra.program.database.data.DataTypeManagerDB.checkOwnedPointerCopy(result, destination);
++        return result;
++	
++        }
++        catch (RuntimeException | Error failure) {
++            ghidra.program.database.data.DataTypeManagerDB.recordOwnedPointerFailure(getDataTypeManager(), failure);
++            throw failure;
++        }
++    }
+ 
+ 	@Override
+ 	public String getName() {
+@@ -857,4 +894,42 @@
+ 		return getName(); // always include pointer length
+ 	}
+ 
++
++
++    private static boolean finiteOwnedFactory(Class<?> type) {
++        return type == PointerDataType.class || type == Pointer8DataType.class ||
++            type == Pointer16DataType.class || type == Pointer24DataType.class ||
++            type == Pointer32DataType.class || type == Pointer40DataType.class ||
++            type == Pointer48DataType.class || type == Pointer56DataType.class || type == Pointer64DataType.class;
++    }
++    public final DataType strictReferencedDataType(DataTypeManager destination) {
++        if (!ownedFactoryAuthority || !finiteOwnedFactory(getClass()) || deleted ||
++            (getDataTypeManager() != null && getDataTypeManager() != destination))
++            {
++            IllegalStateException failure = new IllegalStateException("Unauthoritative in-memory pointer");
++            // The checker rejects this same input and publishes to its pre-registration owner.
++            ghidra.program.database.data.DataTypeManagerDB.recordOwnedPointerFailure(destination, failure);
++            throw failure;
++        }
++        return referencedDataType;
++    }
++    public static PointerDataType copyForManager(Pointer source, DataTypeManager destination) {
++        try {
++
++        ghidra.program.database.data.DataTypeManagerDB.checkOwnedPointerCopy(source, destination);
++        if (source instanceof PointerDataType memory) {
++            return new PointerDataType(memory.referencedDataType, memory.length, destination,
++                memory.ownedFactoryAuthority && !memory.deleted &&
++                (memory.getDataTypeManager() == null || memory.getDataTypeManager() == destination));
++        }
++        return new PointerDataType(source.getDataType(),
++            source.hasLanguageDependantLength() ? -1 : source.getLength(), destination, false);
++    
++        }
++        catch (RuntimeException | Error failure) {
++            ghidra.program.database.data.DataTypeManagerDB.recordOwnedPointerFailure(destination, failure);
++            throw failure;
++        }
++    }
++
+ }

@@ -1,0 +1,103 @@
+{
+  "preserve_compiler_sibling": "ghidra/program/database/data/CategoryCache.class",
+  "replace": [
+    {
+      "entry": "ghidra/framework/data/DomainObjectAdapterDB$DomainObjectTransaction.class",
+      "module": "Project"
+    },
+    {
+      "entry": "ghidra/framework/data/DomainObjectAdapterDB.class",
+      "module": "Project"
+    },
+    {
+      "entry": "ghidra/program/database/DBObjectCache$KeyedSoftReference.class",
+      "module": "SoftwareModeling"
+    },
+    {
+      "entry": "ghidra/program/database/DBObjectCache.class",
+      "module": "SoftwareModeling"
+    },
+    {
+      "entry": "ghidra/program/database/data/ProgramDataTypeManager.class",
+      "module": "SoftwareModeling"
+    },
+    {
+      "entry": "ghidra/program/database/data/DataTypeManagerDB$1.class",
+      "module": "SoftwareModeling"
+    },
+    {
+      "entry": "ghidra/program/database/data/DataTypeManagerDB$DataTypeIterator.class",
+      "module": "SoftwareModeling"
+    },
+    {
+      "entry": "ghidra/program/database/data/DataTypeManagerDB$DbErrorHandler.class",
+      "module": "SoftwareModeling"
+    },
+    {
+      "entry": "ghidra/program/database/data/DataTypeManagerDB$DedupedConflicts.class",
+      "module": "SoftwareModeling"
+    },
+    {
+      "entry": "ghidra/program/database/data/DataTypeManagerDB$EquivalenceCache.class",
+      "module": "SoftwareModeling"
+    },
+    {
+      "entry": "ghidra/program/database/data/DataTypeManagerDB$IdsToDataTypeMap.class",
+      "module": "SoftwareModeling"
+    },
+    {
+      "entry": "ghidra/program/database/data/DataTypeManagerDB$ResolvePair.class",
+      "module": "SoftwareModeling"
+    },
+    {
+      "entry": "ghidra/program/database/data/DataTypeManagerDB.class",
+      "module": "SoftwareModeling"
+    },
+    {
+      "entry": "ghidra/program/database/data/PointerDB.class",
+      "module": "SoftwareModeling"
+    },
+    {
+      "entry": "ghidra/program/database/data/ProgramBasedDataTypeManagerDB.class",
+      "module": "SoftwareModeling"
+    },
+    {
+      "entry": "ghidra/program/database/data/SettingsDBAdapter.class",
+      "module": "SoftwareModeling"
+    },
+    {
+      "entry": "ghidra/program/database/data/SettingsDBAdapterV1.class",
+      "module": "SoftwareModeling"
+    },
+    {
+      "entry": "ghidra/program/database/code/CodeManager$1.class",
+      "module": "SoftwareModeling"
+    },
+    {
+      "entry": "ghidra/program/database/code/CodeManager.class",
+      "module": "SoftwareModeling"
+    },
+    {
+      "entry": "ghidra/program/database/code/DataDB.class",
+      "module": "SoftwareModeling"
+    },
+    {
+      "entry": "ghidra/program/model/data/PointerDataType$PointerReferenceClassification.class",
+      "module": "SoftwareModeling"
+    },
+    {
+      "entry": "ghidra/program/model/data/PointerDataType.class",
+      "module": "SoftwareModeling"
+    },
+    {
+      "entry": "ghidra/framework/data/OwnedProgramIntegrityException.class",
+      "module": "Project"
+    },
+    {
+      "entry": "ghidra/program/database/data/PointerReferenceObservation.class",
+      "module": "SoftwareModeling"
+    }
+  ],
+  "rule": "Any additional generated/nested class requires revised inventory/review; compiler sibling is discarded and pristine payload retained.",
+  "status": "DISABLED dependency-only; isolated modules built; no installation or activation"
+}

@@ -1,0 +1,14 @@
+--- a/ghidra/program/database/data/SettingsDBAdapter.java
++++ b/ghidra/program/database/data/SettingsDBAdapter.java
+@@ -310,4 +310,11 @@
+ 	 */
+ 	abstract void invalidateNameCache();
+ 
++
++
++    // Null denotes an oversized name; missing/malformed rows still throw IOException.
++    String readSettingNameDirect(short index) throws IOException {
++        throw new IOException("Unsupported direct settings format");
++    }
++
+ }

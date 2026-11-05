@@ -1,0 +1,33 @@
+--- a/ghidra/program/database/data/SettingsDBAdapterV1.java
++++ b/ghidra/program/database/data/SettingsDBAdapterV1.java
+@@ -316,4 +316,30 @@
+ 		}
+ 	}
+ 
++
++
++    @Override String readSettingNameDirect(short index) throws IOException {
++        if (index < 1 || index > 32766) throw new IOException("Invalid settings name index");
++        DBRecord row = settingsNameTable.getRecord(index);
++        if (row == null || row.getKey() != index || !row.hasSameSchema(V1_NAME_TABLE_SCHEMA))
++            throw new IOException("Missing/malformed settings name row");
++        String name = row.getString(V1_NAME_COL);
++        if (name == null) throw new IOException("Null settings name");
++        // getRecord may have allocated the entire stored string. This caps retention only.
++        if (name.length() > 64) return null; // negative retention-limit result, not a failed read
++        int bytes = 0;
++        for (int i = 0; i < name.length(); i++) {
++            char c = name.charAt(i);
++            if (Character.isHighSurrogate(c)) {
++                if (++i >= name.length() || !Character.isLowSurrogate(name.charAt(i)))
++                    throw new IOException("Malformed settings name encoding");
++                bytes += 4;
++            }
++            else if (Character.isLowSurrogate(c)) throw new IOException("Malformed settings name encoding");
++            else bytes += c < 128 ? 1 : c < 2048 ? 2 : 3;
++            if (bytes > 64) return null; // negative retention-limit result, not a failed read
++        }
++        return name;
++    }
++
+ }

@@ -1,0 +1,97 @@
+{
+  "status": "DISABLED; dependency controls only",
+  "architecture_sha256": "aab21b0bba33a63d7c07b9034ed35348cd1d3804cba48cd1575a48298ff97747",
+  "sources": [
+    {
+      "path": "ghidra/framework/data/DomainObjectAdapterDB.java",
+      "base_sha256": "d315b7455a3fdcfc2c0d22d992d3d32908bd58990cbb162d406ad8193c527cad",
+      "source_sha256": "ddc90f63e8a92f7e8f773c514a765d3b4845da9e717ec8e44ef8c6ffb487be5d",
+      "diff_sha256": "31ed2cd792580fcd510270d4c0f22e8521b276e9777baa74d622cd5128acdf17",
+      "exact_patch_roundtrip": true
+    },
+    {
+      "path": "ghidra/framework/data/OwnedProgramIntegrityException.java",
+      "base_sha256": null,
+      "source_sha256": "6731e4377b441387f553a657c5ec9c1aaf75dd0d8b22f37e0a103635de27cadc",
+      "diff_sha256": "7bd07ad565f7f43462618a30a40ce6bbba547008ba65abea38b60e3356f1a768",
+      "exact_patch_roundtrip": true
+    },
+    {
+      "path": "ghidra/program/database/DBObjectCache.java",
+      "base_sha256": "b169f71667c7a6111f66f0d86dcef89db6db1d78df29dfa84e339b7950c11267",
+      "source_sha256": "0c75c666d3b03cea706ae16ddfb7bc6af657dcf97a8c7d781fbbab44501f508a",
+      "diff_sha256": "b6c96e35d3a5c4c95f04647c2cb423d8293a9902a60abc9c1009eb028ae5af5b",
+      "exact_patch_roundtrip": true
+    },
+    {
+      "path": "ghidra/program/database/code/CodeManager.java",
+      "base_sha256": "3266589c4b41377fd4aeab5470fc80a040cb562fe8b752dc557c84e046ed5e9d",
+      "source_sha256": "76d5d793a98583308e733f52e15a4a7af56a38c53a81be02f70ec39d80029f1e",
+      "diff_sha256": "fef7025633ccc18fac14cb3afc28c4865e25895c26010883ad32acf832963718",
+      "exact_patch_roundtrip": true
+    },
+    {
+      "path": "ghidra/program/database/code/DataDB.java",
+      "base_sha256": "5b9abe956a78089a4f69bec0a7921faa694c7e255db4df77dc7dd615c210161b",
+      "source_sha256": "4c82734975dd3101e7395394649d2621ff9252cdd0103da0171b7f762f8f900c",
+      "diff_sha256": "ad80af971481a2f628c2b1e61aac2dc55ed77925344c368fa424059d1a0d3b90",
+      "exact_patch_roundtrip": true
+    },
+    {
+      "path": "ghidra/program/database/data/DataTypeManagerDB.java",
+      "base_sha256": "f10aa0a556dcc2d9cac58d4cbcb2eb4673692c91ca65d81bba710d08e2837cd0",
+      "source_sha256": "64065737b959678a3ecce827387811ef620008b0894c889bc57fa5f34a55c497",
+      "diff_sha256": "3d147b0f5f9a7ff0d2e4b5787d352b0970f611dd7c550731d50afb246380d0e9",
+      "exact_patch_roundtrip": true
+    },
+    {
+      "path": "ghidra/program/database/data/PointerDB.java",
+      "base_sha256": "d8451260ccd918146cc69bc360cf11a1110aca3942e3a9396793afa4f4b41c67",
+      "source_sha256": "aa043182f47e3dc79d9ef7ebaa6b7b51aabc7065149e17484ac38486b7569a65",
+      "diff_sha256": "9551987ec372b8b9942b80c6e6927ea9ac2066838ba0f6355a5d1cbf192f3814",
+      "exact_patch_roundtrip": true
+    },
+    {
+      "path": "ghidra/program/database/data/PointerReferenceObservation.java",
+      "base_sha256": null,
+      "source_sha256": "880313448fcf1fbe5e8e42d017323c2679bdc572e0c9c8054ba7763452bbdc0b",
+      "diff_sha256": "beac9083f90e08806de702619beaacebe3931348c781eca1026e4429f54f0992",
+      "exact_patch_roundtrip": true
+    },
+    {
+      "path": "ghidra/program/database/data/ProgramBasedDataTypeManagerDB.java",
+      "base_sha256": "0fac2c7ea78fbc43caac328c54aec3bca8a6e7c100172b005ed31a3c4322e782",
+      "source_sha256": "4db89873264ca1d9c88692a6a5d860d5d1b6e6358d5d81a8ecf24a5395cd0a68",
+      "diff_sha256": "ca5088500321c66de95a32d6d2978a19d3b7e7d38c64f64ec692438c1f4973f2",
+      "exact_patch_roundtrip": true
+    },
+    {
+      "path": "ghidra/program/database/data/ProgramDataTypeManager.java",
+      "base_sha256": "9ac6b003d3b96e3081b056091bb031a3fac3be3ea1c66e07d070679b702850b6",
+      "source_sha256": "69c51c8163c57e28e5e0d54e9b90f1e9d4ce4d0b167a09dc885c02caf5b47a2d",
+      "diff_sha256": "61e7f15a02833a248367e505dcb2b8913b216c11857bc84e0f6c7e3b234fbd8f",
+      "exact_patch_roundtrip": true
+    },
+    {
+      "path": "ghidra/program/database/data/SettingsDBAdapter.java",
+      "base_sha256": "dc8db67b8766d9ab7f29bea9d44e41760de7e8929f66d6e2c1e5e15bafaea540",
+      "source_sha256": "61f16f75116adad28693524e9db21a8e51e7eac96f1e25ca58e6d78556cdf89a",
+      "diff_sha256": "36294458534ec4d53243157686bdbf24e8b1695538623505faca1947c4c2d61f",
+      "exact_patch_roundtrip": true
+    },
+    {
+      "path": "ghidra/program/database/data/SettingsDBAdapterV1.java",
+      "base_sha256": "c1f81aead3f0ae6aa247bc74b2f60af5ad86877b22a1af8472182e2fc228840d",
+      "source_sha256": "f6f4f90c652c261c213e00ef13605d4ef857f7cc36c3a4ebe52103ecf5452633",
+      "diff_sha256": "6a822bcf0df55ce7c0912f7df9bc60b08fbe2a582b2c2d909aae7c707caf1aee",
+      "exact_patch_roundtrip": true
+    },
+    {
+      "path": "ghidra/program/model/data/PointerDataType.java",
+      "base_sha256": "56e6d7f4897bb4083237964323cf6d3750da353a12df8e66a3bbddb133383b1c",
+      "source_sha256": "2be974886399553de146113892afb589c52c6a57784219e99c45ac8869208be0",
+      "diff_sha256": "824e47e0d2cf36e5f409f2dee7fd0b389d460395cfb530c9e457af3035ba68a2",
+      "exact_patch_roundtrip": true
+    }
+  ]
+}

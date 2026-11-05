@@ -1,0 +1,34 @@
+--- a/ghidra/framework/data/DomainObjectAdapterDB.java
++++ b/ghidra/framework/data/DomainObjectAdapterDB.java
+@@ -207,6 +207,7 @@
+ 
+ 	@Override
+ 	public void dbError(IOException e) {
++        recordOwnedIntegrityFailure(e);
+ 		fatalErrorOccurred = true;
+ 		fatalErrorOccurred(e);
+ 	}
+@@ -643,4 +644,23 @@
+ 	protected void saveMetadata() throws IOException {
+ 		MetadataManager.saveData(this, metadata);
+ 	}
++
++
++    private final java.util.concurrent.atomic.AtomicReference<OwnedProgramIntegrityException>
++        ownedIntegrityFailure = new java.util.concurrent.atomic.AtomicReference<>();
++
++    /** Error-only receipt; deliberately independent of DB and consumer lifetime. */
++    public final OwnedProgramIntegrityException recordOwnedIntegrityFailure(Throwable cause) {
++        if (cause == null) cause = new IllegalArgumentException("Missing owned failure cause");
++        OwnedProgramIntegrityException failure = cause instanceof OwnedProgramIntegrityException
++            ? (OwnedProgramIntegrityException) cause : new OwnedProgramIntegrityException(cause);
++        ownedIntegrityFailure.compareAndSet(null, failure);
++        return ownedIntegrityFailure.get();
++    }
++
++    public final void checkOwnedIntegrity() {
++        OwnedProgramIntegrityException failure = ownedIntegrityFailure.get();
++        if (failure != null) throw failure;
++    }
++
+ }
