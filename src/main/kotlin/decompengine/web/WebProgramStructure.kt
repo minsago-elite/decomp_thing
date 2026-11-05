@@ -165,6 +165,19 @@ internal class WebProgramStructureIndex(
 
 internal class WebStructureRecord(val path: String, val sha256: String, val sizeBytes: Long)
 
+/** Fixed-size accounting only; emitted on demand and never retained by an index or sent on the wire. */
+internal enum class WebStructureCharge {
+    BASELINE, SOURCE_FILES, MODEL_ENTITIES, MODEL_STRINGS, MODEL_REFERENCE_STRINGS,
+    MODEL_REFERENCE_SLOTS, MODEL_REFERENCE_ARRAYS, PLAN_MODULES, PLAN_MODULE_STRINGS,
+    PLAN_REFERENCE_STRINGS, PLAN_REFERENCE_SLOTS, PLAN_REFERENCE_LISTS, PLAN_BOUNDARY_STRINGS, PLAN_CYCLE_STRINGS,
+}
+
+internal class WebStructureRetention(charges: LongArray) {
+    private val charges = charges.copyOf()
+    val bytes: Long get() = charges.sum()
+    operator fun get(category: WebStructureCharge): Long = charges[category.ordinal]
+}
+
 internal object WebProgramStructureBuilder {
     const val MAXIMUM_MODEL_BYTES = 64 * 1024 * 1024
     const val MAXIMUM_PLAN_BYTES = 16 * 1024 * 1024
@@ -198,6 +211,15 @@ internal object WebProgramStructureBuilder {
         manifest: SourceTreeManifest,
         readEvidence: (GeneratedFileEvidence, Int) -> ByteArray?,
         timing: ((String, Long) -> Unit)? = null,
+    ): WebProgramStructureIndex = buildDiagnosed(snapshot, profile, manifest, readEvidence, timing, null)
+
+    fun buildDiagnosed(
+        snapshot: WebRevisionSourceSnapshot,
+        profile: ReconstructionProfile,
+        manifest: SourceTreeManifest,
+        readEvidence: (GeneratedFileEvidence, Int) -> ByteArray?,
+        timing: ((String, Long) -> Unit)?,
+        retention: ((WebStructureRetention) -> Unit)?,
     ): WebProgramStructureIndex {
         fun <T> measured(phase: String, action: () -> T): T {
             if (timing == null) return action()
@@ -211,13 +233,21 @@ internal object WebProgramStructureBuilder {
             }
         }
         val shared = declaredPath(profile, "shared-interface")?.takeIf { it in fileIds }
-        val budget = RetainedBudget(64 * 1024L + fileIds.entries.sumOf { 128L + 2L * (it.key.length + it.value.length) })
+        val sourceBytes = fileIds.entries.sumOf { 128L + 2L * (it.key.length + it.value.length) }
+        val initialCharges = LongArray(WebStructureCharge.entries.size).also {
+            it[WebStructureCharge.BASELINE.ordinal] = 64 * 1024L
+            it[WebStructureCharge.SOURCE_FILES.ordinal] = sourceBytes
+        }
+        val budget = RetainedBudget(64 * 1024L + sourceBytes, initialCharges = initialCharges)
+        var retainedCharges = initialCharges
         var retainedBytes = budget.bytes
         fun result(outcome: WebStructureOutcome, model: WebStructureRecord? = null, schema: Int? = null,
             planOutcome: WebStructureOutcome = WebStructureOutcome("not-recorded", "MODEL_UNAVAILABLE"), plan: WebStructureRecord? = null,
             tables: List<WebStructureTable> = emptyList(), modules: List<WebStructureModule> = emptyList(), unknown: Int = 0) =
             WebProgramStructureIndex(ref, snapshot.manifestSha256, snapshot.descriptorSha256, manifest.inputSha256,
-                snapshot.metadataVersion, outcome, model, schema, planOutcome, plan, tables, modules, fileIds, shared, unknown, retainedBytes)
+                snapshot.metadataVersion, outcome, model, schema, planOutcome, plan, tables, modules, fileIds, shared, unknown, retainedBytes).also {
+                    retention?.invoke(WebStructureRetention(retainedCharges).also { check(it.bytes == retainedBytes) })
+                }
         val modelFile = evidenceFile(profile, manifest, "program-model-evidence")
             ?: return result(WebStructureOutcome("not-recorded",
                 if (declaredPath(profile, "program-model-evidence") == null) "PROFILE_DECLARES_NO_MODEL" else "MODEL_NOT_RECORDED"))
@@ -238,11 +268,21 @@ internal object WebProgramStructureBuilder {
         if (parsed.inputSha256 != manifest.inputSha256) {
             return result(WebStructureOutcome("invalid", "MODEL_INPUT_MISMATCH"), model, parsed.schemaVersion)
         }
+        measured("canonicalize-references") {
+            val functions = parsed.tables[WebStructureKind.FUNCTION.ordinal]
+            val globals = parsed.tables[WebStructureKind.GLOBAL.ordinal]
+            for (row in 0 until functions.size) {
+                canonicalizeReferences(functions.calls[row], functions, budget)
+                canonicalizeReferences(functions.referencedGlobals[row], globals, budget)
+            }
+        }
         retainedBytes = budget.bytes
+        retainedCharges = budget.charges()
         val planFile = evidenceFile(profile, manifest, "module-plan-evidence")
         var planOutcome = WebStructureOutcome("not-recorded", "PLAN_NOT_RECORDED")
         var planRecord: WebStructureRecord? = null
         var plan: ModulePlan? = null
+        var resolutions: List<List<IntArray>> = emptyList()
         if (planFile != null) {
             val bytes = measured("read-plan-evidence") { readEvidence(planFile, MAXIMUM_PLAN_BYTES) }
             if (bytes == null) planOutcome = WebStructureOutcome("limit-exceeded", "PLAN_BYTES_EXCEEDED")
@@ -252,10 +292,11 @@ internal object WebProgramStructureBuilder {
                     val candidate = measured("parse-canonical-plan") {
                         ModulePlanJson.readCanonical(bytes, MAXIMUM_PLAN_BYTES, {}, timing)
                     }
-                    val planBudget = RetainedBudget(retainedBytes, "PLAN_RETAINED_BYTES_EXCEEDED")
-                    measured("validate-plan") { validatePlan(candidate, planBudget) }
+                    val planBudget = RetainedBudget(retainedBytes, "PLAN_RETAINED_BYTES_EXCEEDED", retainedCharges)
+                    resolutions = measured("validate-plan") { validatePlan(candidate, parsed.tables, planBudget) }
                     plan = candidate
                     retainedBytes = planBudget.bytes
+                    retainedCharges = planBudget.charges()
                     WebStructureOutcome.AVAILABLE
                 } catch (failure: WebStructureFailure) {
                     WebStructureOutcome(failure.state, failure.reason)
@@ -277,10 +318,17 @@ internal object WebProgramStructureBuilder {
                 planOutcome = WebStructureOutcome("invalid", "PLAN_DUPLICATE_MODULE")
             } else {
                 measured("form-modules-and-owners") {
-                    plan.modules.sortedBy { it.id }.forEach { planned ->
+                    plan.modules.withIndex().sortedBy { it.value.id }.forEach { (plannedIndex, planned) ->
+                        fun owned(kind: WebStructureKind, raw: List<String>): List<String> {
+                            if (raw.isEmpty()) return emptyList()
+                            val rows = resolutions[plannedIndex][kind.ordinal]
+                            val ids = parsed.tables[kind.ordinal].ids
+                            return List(raw.size) { slot -> rows[slot].let { if (it < 0) raw[slot] else ids[it] } }
+                        }
                         val implementationFile = filesByPath[planned.sourcePath]
-                        modules += WebStructureModule(planned.id, planned.sourcePath, planned.headerPath, planned.functionIds,
-                            planned.globalIds, planned.typeIds, planned.boundaryEvidence,
+                        modules += WebStructureModule(planned.id, planned.sourcePath, planned.headerPath,
+                            owned(WebStructureKind.FUNCTION, planned.functionIds),
+                            owned(WebStructureKind.GLOBAL, planned.globalIds), owned(WebStructureKind.TYPE, planned.typeIds), planned.boundaryEvidence,
                             // The source-tree manifest was already checked against this profile by
                             // SourceTreeManifestReader; repeating the declaration's regex match for
                             // every planned module adds substantial cold-path cost at scale.
@@ -311,56 +359,94 @@ internal object WebProgramStructureBuilder {
 
     /** Conservative retained allocation charge, including maps, lazy orders/collisions and array growth.
      * Strings are charged as UTF-16 even on compact-string JVMs; no interning assumption is needed. */
-    internal class RetainedBudget(initialBytes: Long, private val reason: String = "MODEL_RETAINED_BYTES_EXCEEDED") {
+    internal class RetainedBudget(private val initialBytes: Long,
+        private val reason: String = "MODEL_RETAINED_BYTES_EXCEEDED",
+        initialCharges: LongArray = LongArray(WebStructureCharge.entries.size).also { it[WebStructureCharge.BASELINE.ordinal] = initialBytes },
+    ) {
+        private val categories = initialCharges.copyOf()
+        private val floors = initialCharges.copyOf()
+        init { require(initialBytes >= 0 && categories.size == WebStructureCharge.entries.size &&
+            categories.all { it >= 0 } && categories.sum() == initialBytes) }
         var bytes: Long = initialBytes; private set
-        fun charge(amount: Long) {
+        fun charges(): LongArray = categories.copyOf()
+        fun charge(amount: Long, category: WebStructureCharge = WebStructureCharge.MODEL_STRINGS) {
             require(amount >= 0)
             if (amount > MAXIMUM_RETAINED_BYTES - bytes) throw WebStructureFailure("limit-exceeded", reason)
             bytes += amount
+            categories[category.ordinal] += amount
         }
-        fun string(value: String) = charge(64L + 2L * value.length)
+        fun release(amount: Long, category: WebStructureCharge = WebStructureCharge.MODEL_STRINGS) {
+            require(amount >= 0 && amount <= bytes - initialBytes &&
+                amount <= categories[category.ordinal] - floors[category.ordinal])
+            bytes -= amount
+            categories[category.ordinal] -= amount
+        }
+        fun string(value: String, category: WebStructureCharge = WebStructureCharge.MODEL_STRINGS) =
+            charge(64L + 2L * value.length, category)
+    }
+
+    /** Release only the duplicate object actually displaced from this retained slot. */
+    internal fun canonicalizeReferences(values: Array<String>, table: WebStructureTable, budget: RetainedBudget) {
+        for (slot in values.indices) {
+            val original = values[slot]
+            val row = table.index[original] ?: continue
+            val canonical = table.ids[row]
+            if (original !== canonical) {
+                values[slot] = canonical
+                budget.release(64L + 2L * original.length, WebStructureCharge.MODEL_REFERENCE_STRINGS)
+            }
+        }
     }
 
     /** Projection admission, not exact producer ownership: ambiguous and missing entity references remain visible. */
-    private fun validatePlan(plan: ModulePlan, budget: RetainedBudget) {
+    private fun validatePlan(plan: ModulePlan, tables: List<WebStructureTable>, budget: RetainedBudget): List<List<IntArray>> {
         fun invalid(): Nothing = throw WebStructureFailure("invalid", "PLAN_MALFORMED")
         fun identifier(value: String) {
             if (value.isEmpty()) invalid()
             if (value.length > MAXIMUM_IDENTIFIER_CHARACTERS) throw WebStructureFailure("limit-exceeded", "PLAN_IDENTIFIER_EXCEEDED")
-            budget.string(value)
         }
-        fun moduleId(value: String) {
+        fun moduleId(value: String, category: WebStructureCharge = WebStructureCharge.PLAN_MODULE_STRINGS) {
             if (value.length > 128) throw WebStructureFailure("limit-exceeded", "PLAN_IDENTIFIER_EXCEEDED")
             if (!MODULE_ID.matches(value)) invalid()
-            budget.string(value)
+            budget.string(value, category)
         }
         fun path(value: String) {
             if (value.length > 4096) throw WebStructureFailure("limit-exceeded", "PLAN_PATH_EXCEEDED")
             if (value.isEmpty() || value.startsWith('/') || value.any { it == '\\' || it == ':' || it.code < 32 || it.code == 127 } ||
                 value.split('/').any { it.isEmpty() || it == "." || it == ".." }) invalid()
-            budget.string(value)
+            budget.string(value, WebStructureCharge.PLAN_MODULE_STRINGS)
         }
         if (plan.modules.size > WebSourceCatalogSnapshot.MAXIMUM_FILES) throw WebStructureFailure("limit-exceeded", "PLAN_MODULES_EXCEEDED")
         val ids = HashSet<String>()
+        val resolutions = ArrayList<List<IntArray>>(plan.modules.size)
         for (module in plan.modules) {
-            budget.charge(512)
+            budget.charge(512, WebStructureCharge.PLAN_MODULES)
             moduleId(module.id)
             if (!ids.add(module.id)) throw WebStructureFailure("invalid", "PLAN_DUPLICATE_MODULE")
             path(module.sourcePath); path(module.headerPath)
-            for (owned in listOf(module.functionIds, module.globalIds, module.typeIds)) {
+            resolutions += listOf(module.functionIds, module.globalIds, module.typeIds).mapIndexed { kind, owned ->
                 if (owned.size > MAXIMUM_REFERENCES) throw WebStructureFailure("limit-exceeded", "PLAN_REFERENCES_EXCEEDED")
-                owned.forEach(::identifier)
+                if (owned.isNotEmpty()) budget.charge(64, WebStructureCharge.PLAN_REFERENCE_LISTS)
+                IntArray(owned.size) { slot ->
+                    val id = owned[slot]
+                    identifier(id)
+                    val row = tables[kind].index[id] ?: -1
+                    budget.charge(8, WebStructureCharge.PLAN_REFERENCE_SLOTS)
+                    if (row < 0) budget.string(id, WebStructureCharge.PLAN_REFERENCE_STRINGS)
+                    row
+                }
             }
-            module.boundaryEvidence.forEach { budget.string(it) }
+            module.boundaryEvidence.forEach { budget.string(it, WebStructureCharge.PLAN_BOUNDARY_STRINGS) }
         }
         val cycleMembers = HashSet<String>()
         for (cycle in plan.dependencyCycles) {
             if (cycle.size < 2) invalid()
             for (id in cycle) {
-                moduleId(id)
+                moduleId(id, WebStructureCharge.PLAN_CYCLE_STRINGS)
                 if (id !in ids || !cycleMembers.add(id)) invalid()
             }
         }
+        return resolutions
     }
 
     private fun declaredTemplate(profile: ReconstructionProfile, id: String) =
@@ -446,7 +532,7 @@ internal object WebProgramStructureBuilder {
                 if (token == JsonToken.END_ARRAY) break
                 expect(token, JsonToken.START_OBJECT)
                 if (ids.size >= maximum) throw WebStructureFailure("limit-exceeded", "MODEL_ENTITIES_EXCEEDED")
-                budget.charge(512)
+                budget.charge(512, WebStructureCharge.MODEL_ENTITIES)
                 offsets.add(parser.currentTokenLocation().byteOffset)
                 var seenFieldCount = 0
                 var id: String? = null; var name: String? = null; var address: String? = null
@@ -573,6 +659,7 @@ internal object WebProgramStructureBuilder {
         private fun identifiers(parser: JsonParser): Array<String> {
             expect(parser.nextToken(), JsonToken.START_ARRAY)
             if (parser.nextToken() == JsonToken.END_ARRAY) return noIdentifiers
+            budget.charge(24, WebStructureCharge.MODEL_REFERENCE_ARRAYS)
             val values = ArrayList<String>()
             do {
                 if (parser.currentToken() != JsonToken.VALUE_STRING) malformed()
@@ -580,7 +667,8 @@ internal object WebProgramStructureBuilder {
                 if (references >= MAXIMUM_MODEL_REFERENCES) throw WebStructureFailure("limit-exceeded", "MODEL_REFERENCES_EXCEEDED")
                 val value = parser.text
                 if (value.isEmpty() || value.length > MAXIMUM_IDENTIFIER_CHARACTERS) malformed()
-                budget.string(value)
+                budget.string(value, WebStructureCharge.MODEL_REFERENCE_STRINGS)
+                budget.charge(8, WebStructureCharge.MODEL_REFERENCE_SLOTS)
                 references++
                 values += value
             } while (parser.nextToken() != JsonToken.END_ARRAY)

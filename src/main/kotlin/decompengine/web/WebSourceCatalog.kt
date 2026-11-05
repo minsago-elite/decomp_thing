@@ -113,7 +113,12 @@ internal class WebSourceCatalogEvidence(
 
     /** Optional in-process diagnostics for bounded qualification; timings never enter the wire response. */
     internal fun <T> readStructureMeasured(reference: WebRevisionSourceReference, cache: WebProgramStructureCache,
-        timing: ((String, Long) -> Unit)?, project: (WebProgramStructureIndex, () -> ByteArray) -> T): T {
+        timing: ((String, Long) -> Unit)?, project: (WebProgramStructureIndex, () -> ByteArray) -> T): T =
+        readStructureDiagnosed(reference, cache, timing, null, project)
+
+    internal fun <T> readStructureDiagnosed(reference: WebRevisionSourceReference, cache: WebProgramStructureCache,
+        timing: ((String, Long) -> Unit)?, retention: ((WebStructureRetention) -> Unit)?,
+        project: (WebProgramStructureIndex, () -> ByteArray) -> T): T {
         fun <V> measured(phase: String, action: () -> V): V {
             if (timing == null) return action()
             val started = System.nanoTime()
@@ -162,7 +167,7 @@ internal class WebSourceCatalogEvidence(
                 val descriptorDocument = measured("parse-descriptor-json") { OracleJson.parse(descriptor.bytes, JSON_LIMITS) } as? JsonObject
                     ?: throw IllegalArgumentException("Source input descriptor is invalid.")
                 val snapshot = measured("parse-source-inputs") { parseWebRevisionSourceInputs(reference, manifest, captured.sha256, descriptorDocument, descriptor.sha256) }
-                WebProgramStructureBuilder.build(snapshot, profile, manifest, ::evidence, timing)
+                WebProgramStructureBuilder.buildDiagnosed(snapshot, profile, manifest, ::evidence, timing, retention)
             } }
             // Retention pins change the attempt version without changing the candidate; the projection depends
             // only on the keyed commitments, so it stays valid for the current reference.

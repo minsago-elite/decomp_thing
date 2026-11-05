@@ -562,6 +562,148 @@ class WebProgramStructureTest {
             assertFailsWith<WebProgramStructureBuilder.WebStructureFailure> { planBudget.charge(1) }.reason)
     }
 
+    @Test fun `canonical identifiers reuse only the matching kind and retain exact mixed charges`() {
+        val f = RecoveredFunction("f", "F", 1u, "void F(void)", null)
+        val same = RecoveredFunction("same", "S", 2u, "void S(void)", null)
+        val gs = listOf(RecoveredGlobal("g", "G", 3u, "int", null), RecoveredGlobal("same", "S", 4u, "int", null))
+        val ts = listOf(RecoveredType("t", "struct T {};", null))
+        val raw = Json.parseToJsonElement(model(listOf(f, same), gs, ts).decodeToString()).jsonObject
+        val rows = raw.getValue("functions").jsonArray.toMutableList()
+        rows[0] = JsonObject(rows[0].jsonObject + mapOf(
+            "calls" to JsonArray(listOf("same", "g", "missing", "same", "f").map(::JsonPrimitive)),
+            "referencedGlobals" to JsonArray(listOf("same", "f", "missing", "same", "g").map(::JsonPrimitive))))
+        val modelBytes = JsonObject(raw + ("functions" to JsonArray(rows))).toString().toByteArray()
+        val modules = listOf(planned("b", emptyList()), planned("a", listOf("same", "g", "missing", "same", "f"),
+            listOf("same", "f", "missing", "g"), listOf("t", "f", "missing"), listOf("evidence")))
+        val revision = Revision(modelBytes, plan(*modules.toTypedArray(), cycles = listOf(listOf("b", "a"))), listOf("a", "b"))
+        var charge: WebStructureRetention? = null
+        val index = revision.evidence.readStructureDiagnosed(revision.reference, revision.cache, null, { charge = it }) { index, _ -> index }
+        val functions = index.table(WebStructureKind.FUNCTION)
+        val globals = index.table(WebStructureKind.GLOBAL)
+        val types = index.table(WebStructureKind.TYPE)
+        val called = functions.calls[0]
+        val referenced = functions.referencedGlobals[0]
+        assertEquals(listOf("same", "g", "missing", "same", "f"), called.toList())
+        assertEquals(listOf("same", "f", "missing", "same", "g"), referenced.toList())
+        for (slot in listOf(0, 3)) {
+            assertSame(functions.ids[1], called[slot])
+            assertSame(globals.ids[1], referenced[slot])
+        }
+        assertSame(functions.ids[0], called[4]); assertSame(globals.ids[0], referenced[4])
+        assertNotSame(globals.ids[0], called[1]); assertNotSame(functions.ids[0], referenced[1])
+        assertNotSame(functions.ids[1], globals.ids[1])
+        assertTrue(functions.calls[1].isEmpty()); assertTrue(functions.referencedGlobals[1].isEmpty())
+        assertEquals(listOf("a", "b"), index.modules.map { it.id })
+        val module = index.modules[0]
+        for ((table, owned, original) in listOf(Triple(functions, module.functionIds, modules[1].functionIds),
+            Triple(globals, module.globalIds, modules[1].globalIds), Triple(types, module.typeIds, modules[1].typeIds))) {
+            assertEquals(original, owned)
+            for (id in owned) table.index[id]?.let { assertSame(table.ids[it], id) }
+        }
+        assertEquals(6, index.unknownPlanReferences)
+        assertEquals(OWNER_AMBIGUOUS, functions.owners[1])
+        assertEquals(listOf("b", "a"), module.cycle)
+        assertSame(module.cycle, index.modules[1].cycle)
+        assertEquals(listOf("evidence"), module.boundaryEvidence)
+        assertTrue(index.modules[1].functionIds.isEmpty())
+        fun strings(vararg values: String) = values.sumOf { 64L + 2L * it.length }
+        val expected = mapOf(
+            WebStructureCharge.BASELINE to 65536L,
+            WebStructureCharge.SOURCE_FILES to index.sourceFileIds.entries.sumOf { 128L + 2L * (it.key.length + it.value.length) },
+            WebStructureCharge.MODEL_ENTITIES to 5 * 512L,
+            WebStructureCharge.MODEL_STRINGS to strings("f", "F", "same", "S", "g", "G", "same", "S", "t"),
+            WebStructureCharge.MODEL_REFERENCE_STRINGS to strings("g", "missing", "f", "missing"),
+            WebStructureCharge.MODEL_REFERENCE_SLOTS to 10 * 8L,
+            WebStructureCharge.MODEL_REFERENCE_ARRAYS to 2 * 24L,
+            WebStructureCharge.PLAN_MODULES to 2 * 512L,
+            WebStructureCharge.PLAN_MODULE_STRINGS to modules.sumOf { strings(it.id, it.sourcePath, it.headerPath) },
+            WebStructureCharge.PLAN_REFERENCE_STRINGS to strings("g", "missing", "f", "missing", "f", "missing"),
+            WebStructureCharge.PLAN_REFERENCE_SLOTS to 12 * 8L,
+            WebStructureCharge.PLAN_REFERENCE_LISTS to 3 * 64L,
+            WebStructureCharge.PLAN_BOUNDARY_STRINGS to strings("evidence"),
+            WebStructureCharge.PLAN_CYCLE_STRINGS to strings("b", "a"),
+        )
+        for (category in WebStructureCharge.entries) assertEquals(expected.getValue(category), charge!![category], category.name)
+        assertEquals(expected.values.sum(), index.retainedBytes)
+        assertEquals(index.retainedBytes, charge!!.bytes)
+    }
+
+    @Test fun `reference release requires actual replacement and cannot cross a budget floor`() {
+        val revision = standard()
+        val index = revision.evidence.readStructure(revision.reference, revision.cache) { index, _ -> index }
+        val table = index.table(WebStructureKind.FUNCTION)
+        val canonical = table.ids[0]
+        val duplicate = String(canonical.toCharArray())
+        val budget = WebProgramStructureBuilder.RetainedBudget(100)
+        budget.string(duplicate, WebStructureCharge.MODEL_REFERENCE_STRINGS)
+        val values = arrayOf(canonical, duplicate, "unknown")
+        WebProgramStructureBuilder.canonicalizeReferences(values, table, budget)
+        assertSame(canonical, values[0]); assertSame(canonical, values[1]); assertEquals("unknown", values[2])
+        assertEquals(100L, budget.bytes)
+        WebProgramStructureBuilder.canonicalizeReferences(values, table, budget)
+        assertEquals(100L, budget.bytes)
+        for (amount in listOf(-1L, 1L, Long.MAX_VALUE)) assertFailsWith<IllegalArgumentException> { budget.release(amount) }
+        budget.charge(10)
+        assertFailsWith<IllegalArgumentException> { budget.release(10, WebStructureCharge.MODEL_REFERENCE_STRINGS) }
+        budget.release(10)
+        assertFailsWith<IllegalArgumentException> { budget.release(1) }
+        assertFailsWith<IllegalArgumentException> { WebProgramStructureBuilder.RetainedBudget(-1) }
+        // A future canonical match cannot discount the parse's peak admission charge.
+        val peak = WebProgramStructureBuilder.RetainedBudget(WebProgramStructureBuilder.MAXIMUM_RETAINED_BYTES - 8)
+        peak.charge(8, WebStructureCharge.MODEL_REFERENCE_SLOTS)
+        assertEquals("MODEL_RETAINED_BYTES_EXCEEDED", assertFailsWith<WebProgramStructureBuilder.WebStructureFailure> {
+            peak.string(duplicate, WebStructureCharge.MODEL_REFERENCE_STRINGS)
+        }.reason)
+    }
+
+    @Test fun `known references must pass peak parse admission before canonical discounts`() {
+        val id = "f".repeat(512)
+        val original = model(listOf(RecoveredFunction(id, "F", 1u, "void F(void)", null))).decodeToString()
+        val raw = Json.parseToJsonElement(original).jsonObject
+        val row = raw.getValue("functions").jsonArray.single().jsonObject
+        val repeated = JsonArray(List(100_000) { JsonPrimitive(id) })
+        val bytes = JsonObject(raw + ("functions" to JsonArray(listOf(JsonObject(row + ("calls" to repeated)))))).toString().toByteArray()
+        assertTrue(bytes.size < WebProgramStructureBuilder.MAXIMUM_MODEL_BYTES)
+        val revision = Revision(bytes, null, emptyList())
+        val phases = mutableListOf<String>()
+        var charge: WebStructureRetention? = null
+        val index = revision.evidence.readStructureDiagnosed(revision.reference, revision.cache, { phase, _ -> phases += phase },
+            { charge = it }) { index, _ -> index }
+        assertEquals("limit-exceeded", index.outcome.state)
+        assertEquals("MODEL_RETAINED_BYTES_EXCEEDED", index.outcome.reason)
+        assertFalse("canonicalize-references" in phases)
+        assertTrue(index.tables.isEmpty())
+        assertEquals(index.retainedBytes, charge!!.bytes)
+        for (category in WebStructureCharge.entries.filter { it.name.startsWith("MODEL_") }) assertEquals(0L, charge!![category])
+    }
+
+    @Test fun `discarded malformed model and plan charges never appear as retained diagnostics`() {
+        val validModel = model(functions.take(1))
+        val cases = listOf(
+            validModel.copyOf(validModel.size - 2) to plan(planned("core", listOf(functions[0].id))),
+            model(functions.take(1), input = "d".repeat(64)) to plan(planned("core", listOf(functions[0].id))),
+            validModel to plan(planned("core", listOf(functions[0].id)), planned("core", emptyList())),
+            validModel to plan(planned("core", listOf(functions[0].id, "x".repeat(4097)))),
+            validModel to plan(planned("core", List(100001) { functions[0].id })),
+        )
+        for ((modelBytes, planBytes) in cases) {
+            val revision = Revision(modelBytes, planBytes, listOf("core"))
+            var charge: WebStructureRetention? = null
+            val index = revision.evidence.readStructureDiagnosed(revision.reference, revision.cache, null, { charge = it }) { index, _ -> index }
+            val retained = assertNotNull(charge)
+            assertEquals(index.retainedBytes, retained.bytes)
+            for (category in WebStructureCharge.entries.filter { it.name.startsWith("PLAN_") }) assertEquals(0L, retained[category])
+            if (!index.available) {
+                for (category in WebStructureCharge.entries.filter { it.name.startsWith("MODEL_") }) assertEquals(0L, retained[category])
+                assertTrue(index.tables.isEmpty())
+            } else {
+                assertTrue(index.tables.all { it.owners.all { owner -> owner == OWNER_NOT_RECORDED } })
+                assertTrue(retained[WebStructureCharge.MODEL_ENTITIES] > 0)
+            }
+            assertTrue(index.modules.isEmpty()); assertEquals(0, index.unknownPlanReferences)
+        }
+    }
+
     @Test fun `retained cache evicts by total charged bytes as well as entry count`() {
         val revision = standard()
         val index = revision.evidence.readStructure(revision.reference, revision.cache) { index, _ -> index }
@@ -845,9 +987,13 @@ class WebProgramStructureTest {
             return { phase, nanos -> phases[phase] = (phases[phase] ?: 0L) + nanos }
         }
         var started = System.nanoTime()
-        val measuredPages = revision.pagesWithFreshCache(timingCollector())
+        val measuredCache = WebProgramStructureCache()
+        val measuredPages = revision.pagesWithCache(measuredCache, timingCollector())
         val first = measuredPages.functions("owner", jobId, runId, revisionId, "limit=200")
         val coldMs = (System.nanoTime() - started) / 1_000_000
+        val retainedEntry = measuredCache.candidates(WebProgramStructureCache.Prefix(jobId, runId, revisionId, revision.sourceSha, inputSha)).single()
+        assertTrue(retainedEntry.retainedBytes <= 96L * 1024 * 1024)
+        assertSame(retainedEntry, measuredCache.getEntry(retainedEntry.key))
         val coldSamples = mutableListOf(coldMs)
         System.gc(); val retained = runtime.totalMemory() - runtime.freeMemory() - before
         assertEquals(count, first.getValue("totalFunctions").jsonPrimitive.int)
@@ -868,6 +1014,7 @@ class WebProgramStructureTest {
         val warm = mutableListOf<Long>()
         var cursor = next(first)
         var bytes = first.toString().length
+        val modelReadsBeforeWarm = revision.reads.count { it.endsWith("/program_model.json") }
         repeat(20) {
             started = System.nanoTime()
             val page = measuredPages.functions("owner", jobId, runId, revisionId, "limit=200&cursor=$cursor")
@@ -876,6 +1023,8 @@ class WebProgramStructureTest {
             bytes = maxOf(bytes, page.toString().length)
             cursor = next(page)
         }
+        assertEquals(modelReadsBeforeWarm, revision.reads.count { it.endsWith("/program_model.json") })
+        assertSame(retainedEntry, measuredCache.getEntry(retainedEntry.key))
         for (query in listOf("sort=name&order=desc&limit=200", "search=synthetic_function_99999", "status=partial&limit=200", "module=module_4166")) {
             started = System.nanoTime()
             val page = revision.pages.functions("owner", jobId, runId, revisionId, query)
@@ -908,6 +1057,8 @@ class WebProgramStructureTest {
             put("coldP50Ms", coldP50); put("coldP95Ms", coldP95); put("coldMaxMs", orderedCold.last())
             put("warmP50Ms", warm[warm.size / 2]); put("warmMaxMs", warm.last())
             put("detailMs", detailMs); put("retainedBytes", retained); put("maxPageChars", bytes)
+            put("chargedIndexBytes", retainedEntry.index.retainedBytes); put("chargedEntryBytes", retainedEntry.retainedBytes)
+            put("cacheRetained", true)
             put("thresholds", buildJsonObject {
                 put("coldP95MsExclusive", 500); put("warmP50MsExclusive", 500)
                 put("pageRowsInclusive", 200); put("pageCharsExclusive", 1_000_000)
@@ -925,7 +1076,7 @@ class WebProgramStructureTest {
                 put("searchMatched", searched.items().single().text("name"))
             })
         }
-        val evidencePath = Path.of("build/test-results/program-structure-scale.json")
+        val evidencePath = Path.of(System.getProperty("decompengine.structure.scaleEvidence", "build/test-results/program-structure-scale.json"))
         Files.createDirectories(evidencePath.parent)
         Files.writeString(evidencePath, evidence.toString() + "\n")
         assertTrue(coldP95 < 500, "cold first-page p95 exceeded 500 ms: $coldSamples; " +

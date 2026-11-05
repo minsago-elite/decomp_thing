@@ -6,12 +6,24 @@ import decompengine.repair.StableComparison
 import java.lang.management.ManagementFactory
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.StandardCopyOption
+import java.security.MessageDigest
 import kotlinx.serialization.json.*
 
 /** Explicit CLI only. Uses production service callbacks; never executes a workflow. */
 object StructureAllocationDiagnostic {
     @JvmStatic fun main(args: Array<String>) {
         val root = Path.of(args[0]); val mode = args[1]
+        require(mode == "catalog" || mode == "service")
+        fun sha(bytes: ByteArray) = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+        fun pins(): Map<String, String> = Files.walk(root).use { paths ->
+            paths.filter { Files.isRegularFile(it) }.sorted().toList().associate { root.relativize(it).toString() to sha(Files.readAllBytes(it)) }
+        }
+        val sourcePins = pins()
+        val sourceTree = "${"f".repeat(32)}/reports/runs/run_structure_scale/source-tree"
+        check(sourcePins.size == 8344)
+        check(Files.size(root.resolve("$sourceTree/reports/program_model.json")) == 29_349_734L)
+        check(sourcePins["$sourceTree/reports/program_model.json"] == "be44553df47a17b40aac623a27a957b32e923f8137edf743a172525d0182c832")
         val bean = ManagementFactory.getThreadMXBean() as com.sun.management.ThreadMXBean
         bean.isThreadAllocatedMemoryEnabled = true
         fun allocated() = bean.getThreadAllocatedBytes(Thread.currentThread().threadId())
@@ -23,15 +35,22 @@ object StructureAllocationDiagnostic {
         }
         fun <T> measure(kind: String, name: String, action: () -> T): T {
             val a = allocated(); val n = System.nanoTime()
-            val result = action()
-            val bytes = allocated() - a; val nanos = System.nanoTime() - n
-            events += buildJsonObject {
-                put("kind", kind); put("name", name); put("allocatedBytes", bytes); put("nanos", nanos)
-                if (result is StableRegularFile) { put("size", result.bytes.size); put("sha256", result.sha256) }
-                if (result is StableComparison) put("comparison", result.name)
-                if (kind == "request") put("memory", memory())
+            var result: T? = null
+            var failure: Throwable? = null
+            try { return action().also { result = it } }
+            catch (caught: Throwable) { failure = caught; throw caught }
+            finally {
+                val bytes = allocated() - a; val nanos = System.nanoTime() - n
+                events += buildJsonObject {
+                    put("kind", kind); put("name", name); put("allocatedBytes", bytes); put("nanos", nanos)
+                    when (val value = result) {
+                        is StableRegularFile -> { put("size", value.bytes.size); put("sha256", value.sha256) }
+                        is StableComparison -> put("comparison", value.name)
+                    }
+                    failure?.let { put("failure", "${it.javaClass.name}: ${it.message}") }
+                    if (kind == "request") put("memory", memory())
+                }
             }
-            return result
         }
         val baseline = memory()
         var failureMessage: String? = null
@@ -53,16 +72,30 @@ object StructureAllocationDiagnostic {
                     measure("compare", path) { compare(job, path, max, expected) }
                 })
                 val referenceMethod = service.javaClass.getDeclaredMethod("revisionSourceReference", String::class.java, String::class.java, String::class.java).also { it.isAccessible = true }
-                val cache = WebProgramStructureCache()
+                val cache = if (mode == "service") field(service, "programStructureCache").get(service) as WebProgramStructureCache
+                    else WebProgramStructureCache()
+                var projected: WebProgramStructureIndex? = null
+                val built = java.util.Collections.newSetFromMap(java.util.IdentityHashMap<WebProgramStructureIndex, Boolean>())
                 var phaseAllocated = allocated()
                 val pages = WebProgramStructurePages { job, run, revision, project ->
                     val measuredProject: (WebProgramStructureIndex, () -> ByteArray) -> JsonObject = { index, model ->
-                        if (events.none { it["kind"]?.jsonPrimitive?.content == "retention" }) {
+                        projected = index
+                        if (built.add(index)) {
                             val sourceRoot = root.resolve("$job/reports/runs/$run/source-tree")
                             val metadataBytes = Files.size(sourceRoot.resolve("source_tree_manifest.json")) +
                                 Files.size(sourceRoot.resolve("reports/build_contract.json"))
                             events += buildJsonObject {
-                                put("kind", "retention"); put("name", "first-projection")
+                                put("kind", "retention"); put("name", "projection-${built.size}")
+                                put("modelSha256", index.model!!.sha256); put("planSha256", index.plan!!.sha256)
+                                put("functions", index.table(WebStructureKind.FUNCTION).size)
+                                put("globals", index.table(WebStructureKind.GLOBAL).size)
+                                put("types", index.table(WebStructureKind.TYPE).size)
+                                put("modules", index.modules.size)
+                                put("sourceFiles", index.sourceFileIds.size)
+                                put("callSlots", index.tables.sumOf { table -> table.calls.sumOf { it.size } })
+                                put("globalSlots", index.tables.sumOf { table -> table.referencedGlobals.sumOf { it.size } })
+                                put("planSlots", index.modules.sumOf { it.functionIds.size + it.globalIds.size + it.typeIds.size })
+                                put("unknownPlanReferences", index.unknownPlanReferences)
                                 put("indexBytes", index.retainedBytes); put("metadataBytes", metadataBytes)
                                 put("entryBytes", index.retainedBytes + metadataBytes + 1024L)
                                 put("maximumEntryBytes", 96L * 1024 * 1024)
@@ -74,14 +107,28 @@ object StructureAllocationDiagnostic {
                     else {
                         val reference = referenceMethod.invoke(service, job, run, revision) as WebRevisionSourceReference
                         phaseAllocated = allocated()
-                        evidence.readStructureMeasured(reference, cache, { phase, nanos ->
+                        evidence.readStructureDiagnosed(reference, cache, { phase, nanos ->
                             val now = allocated()
                             events += buildJsonObject { put("kind", "phase"); put("name", phase); put("nanos", nanos); put("allocatedSincePreviousMarker", now - phaseAllocated) }
                             phaseAllocated = allocated()
+                        }, { charges ->
+                            events += buildJsonObject {
+                                put("kind", "charges"); put("name", "build-${built.size + 1}"); put("total", charges.bytes)
+                                put("categories", buildJsonObject { WebStructureCharge.entries.forEach { put(it.name, charges[it]) } })
+                            }
                         }, measuredProject)
                     }
                 }
                 val job = "f".repeat(32); val run = "run_structure_scale"; val revision = "revision_structure_scale"
+                fun retained(): WebProgramStructureCache.Entry {
+                    val index = checkNotNull(projected)
+                    val candidates = cache.candidates(WebProgramStructureCache.Prefix(job, run, revision, index.reference.sourceSha256, index.inputSha256))
+                    check(candidates.size == 1) { "Expected one retained entry under total cap, got ${candidates.size}" }
+                    val entry = candidates.single()
+                    check(entry.index === index)
+                    check(entry.retainedBytes <= 96L * 1024 * 1024)
+                    return entry
+                }
                 var firstVersion: JsonElement? = null
                 var cursor: String? = null
                 repeat(51) { page ->
@@ -93,6 +140,13 @@ object StructureAllocationDiagnostic {
                 measure("request", "reload") { pages.functions("owner", job, run, revision, "limit=100") }
                 measure("request", "search") { pages.functions("owner", job, run, revision, "search=synthetic_function_99999") }
                 measure("request", "modules") { pages.modules("owner", job, run, revision, "limit=100") }
+                val firstEntry = retained()
+                check(built.size == 1)
+                check(events.count { it["kind"]?.jsonPrimitive?.content == "read" && it["name"]?.jsonPrimitive?.content == "input.elf" } == 54)
+                for (suffix in listOf("/program_model.json", "/module_plan.json")) {
+                    check(events.count { it["kind"]?.jsonPrimitive?.content == "read" && it["name"]!!.jsonPrimitive.content.endsWith(suffix) } == 1)
+                }
+                events += buildJsonObject { put("kind", "checkpoint"); put("name", "54-requests"); put("builds", built.size); put("cacheRetained", true) }
                 val manifestSuffix = "/source_tree_manifest.json"
                 val descriptorSuffix = "/reports/build_contract.json"
                 for (suffix in listOf(manifestSuffix, descriptorSuffix)) {
@@ -111,15 +165,44 @@ object StructureAllocationDiagnostic {
                         check(changed.getValue("page").jsonObject["snapshotVersion"] != firstVersion)
                         check(events.count { it["name"]?.jsonPrimitive?.content == "build-projection" } == 2)
                         check(events.count { it["name"]?.jsonPrimitive?.content == "parse-model" } == 2)
+                        val changedEntry = retained()
+                        check(cache.getEntry(firstEntry.key) == null)
+                        check(firstEntry.retainedBytes + changedEntry.retainedBytes > 128L * 1024 * 1024)
+                        val current = Files.readAllBytes(manifest)
+                        val currentSha = sha(current)
+                        val replacement = Path.of(args[2]).toAbsolutePath().parent.resolve("identical-current-manifest.json")
+                        Files.write(replacement, current)
+                        Files.move(replacement, manifest, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+                        check(sha(Files.readAllBytes(manifest)) == currentSha)
+                        val rebound = measure("request", "identical-current-manifest-new-inode") { pages.functions("owner", job, run, revision, "limit=100") }
+                        check(rebound.getValue("page").jsonObject["snapshotVersion"] == changed.getValue("page").jsonObject["snapshotVersion"])
+                        check(events.count { it["name"]?.jsonPrimitive?.content == "build-projection" } == 3)
+                        check(events.count { it["name"]?.jsonPrimitive?.content == "parse-model" } == 3)
+                        val reboundEntry = retained()
+                        check(reboundEntry !== changedEntry && reboundEntry.index !== changedEntry.index)
+                        check(reboundEntry.key == changedEntry.key)
+                        check(reboundEntry.manifest.identity.key != changedEntry.manifest.identity.key)
+                        events += buildJsonObject {
+                            put("kind", "checkpoint"); put("name", "invalidation-and-rebind"); put("builds", built.size)
+                            put("oldEntryEvicted", true); put("sameSha256", currentSha); put("differentInode", true)
+                        }
                     } finally { Files.write(manifest, original) }
                 }
             }
-        } catch (failure: Exception) {
+        } catch (failure: Throwable) {
             failureMessage = "${failure.javaClass.name}: ${failure.message}"
             throw failure
         } finally {
+            val finalPins = pins()
+            val restored = finalPins == sourcePins
+            if (!restored && failureMessage == null) failureMessage = "Fixture source pins changed"
+            Files.writeString(Path.of(args[2] + ".pins.json"), buildJsonObject {
+                put("restored", restored); put("files", sourcePins.size)
+                put("before", buildJsonObject { sourcePins.forEach { (path, hash) -> put(path, hash) } })
+                put("after", buildJsonObject { finalPins.forEach { (path, hash) -> put(path, hash) } })
+            }.toString())
             Files.writeString(Path.of(args[2]), buildJsonObject {
-                put("mode", mode); put("baseline", baseline); put("events", JsonArray(events))
+                put("mode", mode); put("fixtureRestored", restored); put("fixtureFiles", sourcePins.size); put("baseline", baseline); put("events", JsonArray(events))
                 put("failure", failureMessage?.let(::JsonPrimitive) ?: JsonNull)
                 put("counters", buildJsonObject {
                     for (kind in listOf("read", "compare", "phase", "request")) {
@@ -131,6 +214,7 @@ object StructureAllocationDiagnostic {
                 })
                 put("allocationNote", "Request totals include nested reads; phase marker deltas overlap nested timing scopes and are not exclusive. Heap used is not retained charge; no forced GC.")
             }.toString())
+            check(restored) { "Fixture source pins changed" }
         }
     }
 }
