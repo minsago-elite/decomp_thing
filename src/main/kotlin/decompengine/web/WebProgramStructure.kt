@@ -451,7 +451,7 @@ internal object WebProgramStructureBuilder {
                 var seenFieldCount = 0
                 var id: String? = null; var name: String? = null; var address: String? = null
                 var label: String? = null; var assessment: String? = null
-                var called: Array<String> = emptyArray(); var referenced: Array<String> = emptyArray(); var stringCount = 0
+                var called: Array<String> = noIdentifiers; var referenced: Array<String> = noIdentifiers; var stringCount = 0
                 while (true) {
                     val next = parser.nextToken()
                     if (next == JsonToken.END_OBJECT) break
@@ -568,10 +568,13 @@ internal object WebProgramStructureBuilder {
             if (it.length > MAXIMUM_IDENTIFIER_CHARACTERS) throw WebStructureFailure("limit-exceeded", "MODEL_IDENTIFIER_EXCEEDED")
             budget.string(it)
         }
+        private val noIdentifiers = emptyArray<String>()
+
         private fun identifiers(parser: JsonParser): Array<String> {
             expect(parser.nextToken(), JsonToken.START_ARRAY)
+            if (parser.nextToken() == JsonToken.END_ARRAY) return noIdentifiers
             val values = ArrayList<String>()
-            while (parser.nextToken() != JsonToken.END_ARRAY) {
+            do {
                 if (parser.currentToken() != JsonToken.VALUE_STRING) malformed()
                 if (values.size >= MAXIMUM_REFERENCES) throw WebStructureFailure("limit-exceeded", "MODEL_REFERENCES_EXCEEDED")
                 if (references >= MAXIMUM_MODEL_REFERENCES) throw WebStructureFailure("limit-exceeded", "MODEL_REFERENCES_EXCEEDED")
@@ -580,7 +583,7 @@ internal object WebProgramStructureBuilder {
                 budget.string(value)
                 references++
                 values += value
-            }
+            } while (parser.nextToken() != JsonToken.END_ARRAY)
             return values.toTypedArray()
         }
         private fun count(parser: JsonParser): Int {

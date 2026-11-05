@@ -133,18 +133,18 @@ internal class WebSourceCatalogEvidence(
             val key = WebProgramStructureCache.Key(reference.jobId, reference.runId, reference.revisionId,
                 reference.sourceSha256, captured.sha256, descriptor.sha256, input.sha256)
             val index = cache.get(key) ?: measured("build-projection") { run {
-                val document = OracleJson.parse(captured.bytes, JSON_LIMITS) as? JsonObject
+                val document = measured("parse-manifest-json") { OracleJson.parse(captured.bytes, JSON_LIMITS) } as? JsonObject
                     ?: throw IllegalArgumentException("Source catalog manifest is invalid.")
                 val profileId = (document["profileId"] as? JsonPrimitive)?.takeIf { it.isString }?.content
                 val profileSha256 = (document["profileSha256"] as? JsonPrimitive)?.takeIf { it.isString }?.content
                 val profile = profiles[profileId to profileSha256]
                     ?: throw IllegalArgumentException("Source catalog profile is unavailable.")
                 require(((document["files"] as? JsonArray)?.size ?: Int.MAX_VALUE) <= WebSourceCatalogSnapshot.MAXIMUM_FILES)
-                val manifest = SourceTreeManifestReader.parse(document, profile)
+                val manifest = measured("validate-manifest") { SourceTreeManifestReader.parse(document, profile) }
                 require(manifest.inputSha256 == input.sha256)
-                val descriptorDocument = OracleJson.parse(descriptor.bytes, JSON_LIMITS) as? JsonObject
+                val descriptorDocument = measured("parse-descriptor-json") { OracleJson.parse(descriptor.bytes, JSON_LIMITS) } as? JsonObject
                     ?: throw IllegalArgumentException("Source input descriptor is invalid.")
-                val snapshot = parseWebRevisionSourceInputs(reference, manifest, captured.sha256, descriptorDocument, descriptor.sha256)
+                val snapshot = measured("parse-source-inputs") { parseWebRevisionSourceInputs(reference, manifest, captured.sha256, descriptorDocument, descriptor.sha256) }
                 WebProgramStructureBuilder.build(snapshot, profile, manifest, ::evidence, timing).also { cache.put(key, it) }
             } }
             // Retention pins change the attempt version without changing the candidate; the projection depends
