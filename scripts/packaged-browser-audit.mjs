@@ -426,7 +426,11 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
       }
       // Visual evidence: every route at 400% zoom, and the #619 views at every supported size.
       if ((viewport.width === 320 && viewport.deviceScaleFactor === 4) || ['workspace', 'job detail', 'source directory', 'source file'].includes(page.name)) {
-        await capture(tab, `audit-${viewport.name.split(' ')[0]}-${viewport.width}-${page.name.replaceAll(' ', '-')}.png`);
+        await capture(tab, `audit-${viewport.name.split(' ')[0]}-${viewport.width}-${page.name.replaceAll(' ', '-')}.png`,
+          `audit:${viewport.name}:${page.name}`, {
+            width: viewport.width * viewport.deviceScaleFactor,
+            height: viewport.height * viewport.deviceScaleFactor,
+          });
       }
     }
   }

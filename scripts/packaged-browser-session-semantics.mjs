@@ -154,7 +154,7 @@ export function sessionSemanticsGate({ cdp, evaluate, ready, capture, axeSource,
           incomplete: r.incomplete.map(p => ({ id: p.id, nodes: p.nodes.length })),
           inapplicable: r.inapplicable.map(p => ({ id: p.id })) }));
     })()`), requiredRules, expectedInapplicable);
-    await capture(target, `session-${name}.png`);
+    await capture(target, `session-${name}.png`, `session-checkpoint:${name}`);
     const result = { name, ...verdict, activeElement: facts.activeElement, axe, screenshot: `session-${name}.png` };
     results.checkpoints.push(result);
     return result;

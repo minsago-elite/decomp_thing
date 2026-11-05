@@ -91,12 +91,14 @@ test('connected checkpoint scopes axe to the named group and counts serialized r
     throw new Error(`Unexpected evaluate expression: ${expression}`);
   };
   const captures = [];
-  const gate = sessionSemanticsGate({ evaluate, capture: async (_target, name) => captures.push(name), axeSource: 'axe' });
+  const phases = [];
+  const gate = sessionSemanticsGate({ evaluate, capture: async (_target, name, phase) => { captures.push(name); phases.push(phase); }, axeSource: 'axe' });
   const result = await gate.checkpoint(target, 'connected', { container: 'connected', statusText: null, buttons: ['Sign out'] });
   assert.match(axeExpression, /document\.querySelector\('\.session-notice'\)/);
   assert.doesNotMatch(axeExpression, /n\.element/);
   assert.deepEqual(result.axe.inapplicable, ['landmark-complementary-is-top-level']);
   assert.deepEqual(captures, ['session-connected.png']);
+  assert.deepEqual(phases, ['session-checkpoint:connected']);
 });
 
 test('every recorded transient rendering must be a text-only, non-focusable paragraph', () => {
@@ -139,7 +141,8 @@ test('held trusted DELETE checkpoints signing-out and always resumes the real re
     throw new Error(`Unexpected evaluate expression: ${expression}`);
   };
   const captures = [];
-  const gate = sessionSemanticsGate({ cdp, evaluate, ready: async () => true, capture: async (_target, name) => captures.push(name),
+  const phases = [];
+  const gate = sessionSemanticsGate({ cdp, evaluate, ready: async () => true, capture: async (_target, name, phase) => { captures.push(name); phases.push(phase); },
     axeSource: 'axe', origin: 'https://example.test' });
   const activation = await gate.activate(target, 'Sign out', { allowed: { mutations: ['DELETE /nested/api/v1/session'], reads: [] },
     holdRequest: { method: 'DELETE', pathSuffix: '/nested/api/v1/session', checkpointName: 'signing-out',
@@ -149,6 +152,7 @@ test('held trusted DELETE checkpoints signing-out and always resumes the real re
   assert.equal(activation.during.sessionStatuses, 1);
   assert.equal(activation.during.controls.length, 0);
   assert.deepEqual(captures, ['session-signing-out.png']);
+  assert.deepEqual(phases, ['session-checkpoint:signing-out']);
   assert.deepEqual(calls.filter((method) => method.startsWith('Fetch.')), ['Fetch.enable', 'Fetch.continueRequest', 'Fetch.disable']);
 });
 
