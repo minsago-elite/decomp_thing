@@ -611,6 +611,7 @@ jobs:
           mkdir -p build/exporter-rendering-v16
           ./gradlew --no-daemon test \
             --tests decompengine.analysis.BundledGhidraTest \
+            --tests decompengine.analysis.BundledGhidraManifestRejectionTest \
             --tests decompengine.project.GhidraProgramModelExporterTest \
             --tests decompengine.project.ReferencedDataBytesRealGhidraTest \
             --tests decompengine.project.GhidraReferencedBytesExporterTest \
@@ -623,6 +624,8 @@ jobs:
             --tests decompengine.web.SourceTreeJobReconstructorTest
       - name: Verify ZIP and TAR bundle contents and native executable modes
         run: ./gradlew --no-daemon --offline verifyGhidraDistributionArchives
+      - name: Verify atomic bundle publication and refusal controls
+        run: ./gradlew --no-daemon --offline verifyAtomicGhidraBundlePublication
       - uses: actions/upload-artifact@v7
         if: always()
         with:
