@@ -642,8 +642,8 @@ class WebProgramStructureTest {
         assertEquals(200, first.items().size)
         repeat(19) {
             System.gc()
-            val freshPages = revision.pagesWithFreshCache(timingCollector())
             started = System.nanoTime()
+            val freshPages = revision.pagesWithFreshCache(timingCollector())
             val sample = freshPages.functions("owner", jobId, runId, revisionId, "limit=200")
             coldSamples += (System.nanoTime() - started) / 1_000_000
             assertEquals(count, sample.getValue("totalFunctions").jsonPrimitive.int)
@@ -653,8 +653,6 @@ class WebProgramStructureTest {
         val coldP50 = orderedCold[orderedCold.size / 2]
         val coldP95 = orderedCold[((orderedCold.size * 95 + 99) / 100 - 1).coerceAtMost(orderedCold.lastIndex)]
         val slowestIndex = coldSamples.indices.maxBy { coldSamples[it] }
-        assertTrue(coldP95 < 500, "cold first-page p95 exceeded 500 ms: $coldSamples; " +
-            "slowestPhases=${coldPhases[slowestIndex].mapValues { (_, nanos) -> nanos / 1_000_000 }}")
         val warm = mutableListOf<Long>()
         var cursor = next(first)
         var bytes = first.toString().length
@@ -662,6 +660,7 @@ class WebProgramStructureTest {
             started = System.nanoTime()
             val page = measuredPages.functions("owner", jobId, runId, revisionId, "limit=200&cursor=$cursor")
             warm += (System.nanoTime() - started) / 1_000_000
+            assertTrue(page.items().size <= 200)
             bytes = maxOf(bytes, page.toString().length)
             cursor = next(page)
         }
@@ -669,6 +668,7 @@ class WebProgramStructureTest {
             started = System.nanoTime()
             val page = revision.pages.functions("owner", jobId, runId, revisionId, query)
             warm += (System.nanoTime() - started) / 1_000_000
+            bytes = maxOf(bytes, page.toString().length)
             assertTrue(page.items().size <= 200)
         }
         val searched = revision.pages.functions("owner", jobId, runId, revisionId, "search=synthetic_function_99999")
@@ -684,6 +684,40 @@ class WebProgramStructureTest {
             "coldP50Ms=$coldP50 coldP95Ms=$coldP95 coldMaxMs=${orderedCold.last()} " +
             "slowestPhases=${coldPhases[slowestIndex].mapValues { (_, nanos) -> nanos / 1_000_000 }} " +
             "warmP50Ms=${warm[warm.size / 2]} warmMaxMs=${warm.last()} detailMs=$detailMs retainedBytes=$retained maxPageChars=$bytes")
+        val evidence = buildJsonObject {
+            put("schemaVersion", 1)
+            put("functions", count)
+            put("modelBytes", revision.model!!.size)
+            put("coldSamplesMs", JsonArray(coldSamples.map { JsonPrimitive(it) }))
+            put("coldPhaseSamplesNanos", JsonArray(coldPhases.map { phases ->
+                buildJsonObject { phases.forEach { (phase, nanos) -> put(phase, nanos) } }
+            }))
+            put("warmSamplesMs", JsonArray(warm.map { JsonPrimitive(it) }))
+            put("coldP50Ms", coldP50); put("coldP95Ms", coldP95); put("coldMaxMs", orderedCold.last())
+            put("warmP50Ms", warm[warm.size / 2]); put("warmMaxMs", warm.last())
+            put("detailMs", detailMs); put("retainedBytes", retained); put("maxPageChars", bytes)
+            put("thresholds", buildJsonObject {
+                put("coldP95MsExclusive", 500); put("warmP50MsExclusive", 500)
+                put("pageRowsInclusive", 200); put("pageCharsExclusive", 1_000_000)
+                put("retainedBytesExclusive", 256L * 1024 * 1024)
+            })
+            put("outcomes", buildJsonObject {
+                put("coldP95Passed", coldP95 < 500)
+                put("warmP50Passed", warm[warm.size / 2] < 500)
+                put("pageCharsPassed", bytes < 1_000_000)
+                put("pageRowsPassed", true) // All measured pages passed their structural assertions.
+                put("retainedBytesPassed", retained < 256L * 1024 * 1024)
+                put("totalFunctions", first.getValue("totalFunctions"))
+                put("totalModules", modulePage.getValue("totalModules"))
+                put("detailCalledByTotal", detail.getValue("entity").jsonObject.getValue("calledBy").jsonObject.getValue("total"))
+                put("searchMatched", searched.items().single().text("name"))
+            })
+        }
+        val evidencePath = Path.of("build/test-results/program-structure-scale.json")
+        Files.createDirectories(evidencePath.parent)
+        Files.writeString(evidencePath, evidence.toString() + "\n")
+        assertTrue(coldP95 < 500, "cold first-page p95 exceeded 500 ms: $coldSamples; " +
+            "slowestPhases=${coldPhases[slowestIndex].mapValues { (_, nanos) -> nanos / 1_000_000 }}")
         // D0 budgets: bounded responses (≤200 rows, <1 MiB), first-data-page latency and incremental JVM memory.
         assertTrue(bytes < 1_000_000, "page bytes $bytes")
         assertTrue(warm[warm.size / 2] < 500, "warm page latency $warm")

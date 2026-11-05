@@ -495,6 +495,7 @@ jobs:
           path: |
             build/reports/tests/full-suite
             build/test-results/full-suite
+            build/test-results/program-structure-scale.json
             build/reports/tests/test
             build/test-results/test
             build/reports/junit-signatures
