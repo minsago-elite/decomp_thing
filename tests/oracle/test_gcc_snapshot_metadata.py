@@ -479,36 +479,66 @@ class ProcessBoundsTest(unittest.TestCase):
         self.assertLess(time.monotonic() - start, 2)
 
     def test_owned_process_group_is_cleaned_after_leader_exits(self):
+        if not sys.platform.startswith("linux"):
+            self.skipTest("PR_SET_CHILD_SUBREAPER is a Linux process-control facility")
         scratch = Path(tempfile.mkdtemp(prefix="gcc-snapshot-descendant-", dir=ROOT / "build"))
         pid_file = scratch / "descendant.pid"
-        ready_file = scratch / "keeper.ready"
-        keeper_source = (
-            "import signal,subprocess,sys,time\n"
+        reaped_file = scratch / "reaped.json"
+        leader_source = (
+            "import subprocess,sys,time\n"
             "p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)'], "
             "stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
-            "signal.signal(signal.SIGTERM,lambda signum,frame:(p.wait(),sys.exit(0)))\n"
             "open(sys.argv[1],'w').write(str(p.pid))\n"
-            "open(sys.argv[2],'w').write('ready')\n"
-            "while True:\n"
-            "    time.sleep(1)\n"
+            "time.sleep(0.05)\n"
         )
-        source = (
-            "import os,subprocess,sys,time\n"
-            "p=subprocess.Popen([sys.executable,'-c',sys.argv[3],sys.argv[1],sys.argv[2]], "
-            "stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
-            "deadline=time.monotonic()+10\n"
-            "while not os.path.exists(sys.argv[2]):\n"
-            "    if p.poll() is not None or time.monotonic() >= deadline:\n"
-            "        raise SystemExit(92)\n"
-            "    time.sleep(0.01)\n"
+        # Run _run_docker in a separate Linux subreaper. The worker leader and
+        # sleeper share the driver's process group; when the leader exits, the
+        # subreaper adopts the sleeper and reaps it while the driver performs
+        # its SIGTERM/SIGKILL cleanup. This never delegates reaping to PID 1.
+        subreaper_source = (
+            "import ctypes,importlib.util,json,os,sys,threading,time\n"
+            "libc=ctypes.CDLL(None,use_errno=True)\n"
+            "if libc.prctl(36,1,0,0,0) != 0: raise OSError(ctypes.get_errno(),'prctl')\n"
+            "driver,pid_path,reaped_path,repo=sys.argv[1:]\n"
+            "spec=importlib.util.spec_from_file_location('diagnostic',driver)\n"
+            "d=importlib.util.module_from_spec(spec); spec.loader.exec_module(d)\n"
+            "wanted=[None]; reaped=[]; stop=threading.Event()\n"
+            "def reap():\n"
+            "  while not stop.is_set():\n"
+            "    if wanted[0] is None:\n"
+            "      try: wanted[0]=int(open(pid_path).read())\n"
+            "      except (FileNotFoundError,ValueError): pass\n"
+            "    if wanted[0] is not None:\n"
+            "      try: pid,status=os.waitpid(wanted[0],os.WNOHANG)\n"
+            "      except ChildProcessError: pid=0\n"
+            "      if pid: reaped.append(pid)\n"
+            "    time.sleep(0.002)\n"
+            "thread=threading.Thread(target=reap,daemon=True); thread.start()\n"
+            "d.CLEANUP_SECONDS=1; d.POSTPROCESS_SECONDS=1; d.SEAL_SECONDS=1; d.SEAL_CLEANUP_SECONDS=1\n"
+            f"result=d._run_docker([sys.executable,'-c',{leader_source!r},pid_path], "
+            "{'PATH':os.environ.get('PATH','/usr/bin:/bin')}, d.ROOT, time.monotonic()+20)\n"
+            "stop.set(); thread.join(timeout=2)\n"
+            "if thread.is_alive(): raise RuntimeError('subreaper thread did not stop')\n"
+            "if wanted[0] is None: raise RuntimeError('descendant PID was never observed')\n"
+            "if wanted[0] not in reaped: raise RuntimeError('subreaper did not reap descendant')\n"
+            "try: os.kill(wanted[0],0)\n"
+            "except ProcessLookupError: pass\n"
+            "else: raise RuntimeError('descendant still exists after reaping')\n"
+            "fields=('exitCode','groupCleanupConfirmed','complete','timedOut','cleanup')\n"
+            "summary={key:result[key] for key in fields}\n"
+            "open(reaped_path,'w').write(json.dumps({'result':summary,'reaped':reaped}))\n"
         )
         try:
-            result = diagnostic._run_docker(
-                [os.environ.get("PYTHON", "python3"), "-c", source,
-                 str(pid_file), str(ready_file), keeper_source],
-                {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}, ROOT,
-                time.monotonic() + 45,
+            completed = subprocess.run(
+                [sys.executable, "-c", subreaper_source, str(DRIVER_PATH),
+                 str(pid_file), str(reaped_file), str(ROOT)],
+                cwd=ROOT, env=os.environ.copy(), stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30, check=False,
             )
+            self.assertEqual(0, completed.returncode, completed.stderr.decode(errors="replace"))
+            evidence = json.loads(reaped_file.read_bytes())
+            result = evidence["result"]
+            self.assertEqual([int(pid_file.read_text())], evidence["reaped"])
             self.assertEqual(0, result["exitCode"])
             self.assertTrue(result["groupCleanupConfirmed"])
             self.assertTrue(result["complete"])
