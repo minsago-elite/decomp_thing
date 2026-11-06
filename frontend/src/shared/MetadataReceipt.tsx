@@ -20,3 +20,8 @@ export function MetadataReceipt({ kind, receipt }: { kind: keyof typeof copy.lab
   return <p class="metadata-receipt" aria-label={copy.labels[kind]}>{message(commonCopy.labeledValue, { label: copy.labels[kind], value: receipt
     ? <ReceiptText receipt={receipt} visible={visible} /> : copy.unknown })}</p>;
 }
+
+/** A consistent, non-live-region warning for a verified snapshot kept after a transient read failure. */
+export function StaleMetadataNotice() {
+  return <p class="notice metadata-stale">{copy.retainedMetadataMayBeOutdated}</p>;
+}

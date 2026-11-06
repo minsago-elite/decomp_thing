@@ -85,6 +85,66 @@ describe('bootstrap fragment removal', () => {
 });
 
 describe('page-local session state', () => {
+  it.each([
+    new ApiClientError('network_error'),
+    new ApiClientError('timeout'),
+    new ApiClientError('http_error', { status: 503, serverCode: 'SERVICE_UNAVAILABLE' }),
+  ])('retains the accepted receipt through repeated failed background revalidation: %s', async failure => {
+    const { session, gateway } = setup();
+    await session.initialize({ kind: 'absent' });
+    const accepted = session.snapshot();
+    if (accepted.status !== 'authenticated') throw new Error('expected authenticated');
+    gateway.bootstrap.mockRejectedValue(failure);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await session.revalidate();
+      const failed = session.snapshot();
+      if (failed.status !== 'unavailable') throw new Error('expected unavailable');
+      expect(failed.reason).toBe('connection');
+      expect(failed.runtime).toBe(accepted.runtime);
+      expect(failed.runtimeReceipt).toBe(accepted.runtimeReceipt);
+      expect(session.csrf()).toBeNull();
+      expect(JSON.stringify(failed)).not.toContain(csrf);
+    }
+    expect(gateway.bootstrap).toHaveBeenCalledTimes(3);
+    expect(gateway.exchange).not.toHaveBeenCalled();
+    expect(gateway.logout).not.toHaveBeenCalled();
+  });
+
+  it('clears a retained background receipt when revalidation reports session expiry', async () => {
+    const { session, gateway } = setup();
+    await session.initialize({ kind: 'absent' });
+    gateway.bootstrap.mockRejectedValueOnce(new ApiClientError('network_error'));
+    await session.revalidate();
+    gateway.bootstrap.mockRejectedValueOnce(denied('SESSION_EXPIRED'));
+    await session.revalidate();
+    expect(session.snapshot()).toEqual({ status: 'required', reason: 'expired' });
+    expect(session.csrf()).toBeNull();
+  });
+
+  it('keeps the view generation on same-server revalidation while replacing the receipt, and keeps the receipt on failure', async () => {
+    const { session, gateway, data } = setup();
+    data.serverInstanceId = 'synthetic-instance-a';
+    await session.initialize({ kind: 'absent' });
+    const first = session.snapshot();
+    if (first.status !== 'authenticated') throw new Error('expected authenticated');
+    gateway.bootstrap.mockResolvedValueOnce({ ...structuredClone(data) });
+    await session.revalidate();
+    const same = session.snapshot();
+    if (same.status !== 'authenticated') throw new Error('expected authenticated');
+    expect(same.generation).toBe(first.generation);
+    expect(same.runtimeReceipt).toBeDefined();
+    expect(same.runtimeReceipt).not.toBe(first.runtimeReceipt);
+    const accepted = same.runtimeReceipt;
+    gateway.bootstrap.mockRejectedValueOnce(new ApiClientError('network_error'));
+    await session.refresh();
+    const failed = session.snapshot();
+    if (failed.status !== 'unavailable') throw new Error('expected unavailable');
+    expect(failed.reason).toBe('connection');
+    expect(failed.runtime).toEqual(same.runtime);
+    expect(failed.runtimeReceipt).toBe(accepted);
+    expect(JSON.stringify(failed)).not.toContain(csrf);
+  });
+
   it('exposes an incompatible bootstrap while clearing private state and pending observations', async () => {
     const { session, gateway, data } = setup();
     await session.initialize({ kind: 'absent' });

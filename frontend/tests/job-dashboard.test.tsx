@@ -55,7 +55,7 @@ it('renders only a bounded page of a 10000-job library and navigates without bac
 it.each([
   [410, 'CURSOR_EXPIRED', 'This page snapshot expired.'],
   [503, 'LISTING_BUSY', 'Another job listing is in progress.'],
-])('keeps the displayed page truthful and restores keyboard focus after a failed %s continuation', async (status, code, message) => {
+])('keeps the displayed page truthful and avoids moving focus to a stale-data alert after a failed %s continuation', async (status, code, message) => {
   let rejectContinuation: (reason: unknown) => void = () => undefined;
   transport.get.mockResolvedValueOnce(page([job(1)], 'next_page'))
     .mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectContinuation = reject; }))
@@ -71,19 +71,21 @@ it.each([
   await act(async () => { rejectContinuation(new ApiClientError('http_error', { status, serverCode: code })); await Promise.resolve(); });
   const alert = await screen.findByRole('alert');
   expect(alert.textContent).toContain(message);
-  expect(alert.textContent).toContain('Previously loaded rows are shown below; their state may be outdated.');
+  expect(screen.getByText('Previously loaded metadata may be outdated. Refresh to read current details.')).toBeTruthy();
   expect(screen.getByText('Page 1')).toBeTruthy();
   expect(screen.queryByText('Page 2')).toBeNull();
   expect(screen.getByText('program-1.elf')).toBeTruthy();
   expect(screen.getByRole('button', { name: 'Previous page' })).toHaveProperty('disabled', true);
   expect(screen.getByRole('button', { name: 'Next page' })).toHaveProperty('disabled', true);
-  await waitFor(() => expect(document.activeElement).toBe(alert));
+  expect(document.activeElement).not.toBe(alert);
   expect(transport.get).toHaveBeenCalledTimes(2);
-  fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' }));
+  const refreshButton = screen.getByRole('button', { name: 'Refresh jobs' });
+  refreshButton.focus();
+  fireEvent.click(refreshButton);
   expect(await screen.findByText('program-3.elf')).toBeTruthy();
   expect(screen.queryByText('program-1.elf')).toBeNull();
   expect(screen.getByText('Page 1')).toBeTruthy();
-  await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Job results' })));
+  expect(document.activeElement).toBe(refreshButton);
   expect(transport.get).toHaveBeenCalledTimes(3);
 });
 
@@ -146,7 +148,7 @@ it('retains stale rows after failed refresh and clears private rows on denied ac
   expect(await screen.findByText('program-1.elf')).toBeTruthy();
   fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' }));
   expect(await screen.findByRole('alert')).toBeTruthy();
-  expect(screen.getByText(/Previously loaded rows/)).toBeTruthy();
+  expect(screen.getByText('Previously loaded metadata may be outdated. Refresh to read current details.')).toBeTruthy();
   expect(screen.getByText('program-1.elf')).toBeTruthy();
   fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' }));
   await waitFor(() => expect(screen.queryByText('program-1.elf')).toBeNull());
@@ -318,7 +320,7 @@ it.each(['unavailable', 'unsupported', 'unknown', 'missing', 'empty'] as const)(
           expect(selectedCapability?.textContent).toContain('The selected harness cannot start these workflows.');
         }
       }
-      expect(screen.getAllByRole('button').map(button => button.textContent)).toEqual(['Display preferences', 'Sign out', 'Read storage and maintenance preview']);
+      expect(screen.getAllByRole('button').map(button => button.textContent)).toEqual(['Display preferences', 'Sign out', 'Check session', 'Read storage and maintenance preview']);
       expect(gateway.bootstrap).toHaveBeenCalledOnce();
       expect(gateway.exchange).not.toHaveBeenCalled();
       expect(gateway.logout).not.toHaveBeenCalled();
@@ -403,7 +405,7 @@ it.each([
   fireEvent.click(screen.getByRole('button', { name: 'Refresh jobs' }));
   const alert = await screen.findByRole('alert');
   expect(alert.textContent).toContain(message);
-  expect(alert.textContent).toContain('Previously loaded rows are shown below; their state may be outdated.');
+  expect(screen.getByText('Previously loaded metadata may be outdated. Refresh to read current details.')).toBeTruthy();
   expect(screen.getByText('program-1.elf')).toBeTruthy();
   expect(screen.getByRole('button', { name: 'Next page' })).toHaveProperty('disabled', true);
   expect(transport.get).toHaveBeenCalledTimes(2);
@@ -531,14 +533,14 @@ it('retains job navigation through a transient metadata refresh and explicit rec
     expect(screen.getByRole('link', { name: 'Browse attempt history' })).toBe(historyLink);
     await act(async () => { rejectRefresh(new ApiClientError('timeout')); await Promise.resolve(); });
     expect(await screen.findByRole('alert')).toBeTruthy();
-    expect(screen.getByText('Previously loaded job metadata may be outdated. Refresh the job to read current details.')).toBeTruthy();
+    expect(screen.getByText('Previously loaded metadata may be outdated. Refresh to read current details.')).toBeTruthy();
     expect(screen.getByRole('heading', { name: selected.displayFilename })).toBeTruthy();
     expect(document.activeElement).toBe(historyLink);
     expect(transport.get).toHaveBeenCalledTimes(2);
     fireEvent.click(screen.getByRole('button', { name: 'Refresh job' }));
     await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
     await waitFor(() => expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Refresh job' }).disabled).toBe(false));
-    expect(screen.queryByText(/Previously loaded job metadata may be outdated/)).toBeNull();
+    expect(screen.queryByText('Previously loaded metadata may be outdated. Refresh to read current details.')).toBeNull();
     expect(screen.getByRole('link', { name: 'Browse attempt history' })).toBe(historyLink);
     expect(transport.get.mock.calls.map(call => call[0])).toEqual(['job', 'job', 'job']);
   } finally { auth.dispose(); }

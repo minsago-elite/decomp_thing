@@ -14,6 +14,7 @@ import { seedLegacy, qualifyLegacy } from './packaged-browser-legacy.mjs';
 import { qualifyRestart, assertGracefulShutdown, scrubTokens, boundReport } from './packaged-browser-restart.mjs';
 import { qualifyUpgrade, qualifyUpgradeCache } from './packaged-browser-upgrade.mjs';
 import { qualifyAudit, assertAudit } from './packaged-browser-audit.mjs';
+import { qualifyStaleContext } from './packaged-browser-stale-context.mjs';
 import { PackagedBrowserCdpDiagnostics } from './packaged-browser-cdp-diagnostics.mjs';
 
 // Test driver only: the application is launched with a separate Node-free PATH.
@@ -31,8 +32,9 @@ const { values } = parseArgs({ options: {
   help: { type: 'boolean', default: false },
 } });
 if (values.help) {
-  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|metadata|history|restart|scale|live|proxy|upgrade|legacy|audit] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
+  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|metadata|history|stale-context|restart|scale|live|proxy|upgrade|legacy|audit] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
   console.log('restart: seeded history on one JVM, graceful SIGTERM-only restart on the same installation/data/port, fresh bootstrap and serverInstanceId, then two tabs with a progress-pin stale If-Match 412. No live worker, no restart-while-running, one Chromium only.');
+  console.log('stale-context: one bounded failed GET and explicit recovery on the packaged Dashboard, Job, Run, RunHistory and Runtime views; records focus, selection, scroll, stale notice and local receipt age without changing production authority.');
   console.log('public: packaged home/Runtime/recovery; session: public plus local session journey; upload: session plus inert upload and lost-response retry; history: session plus preseeded inert multi-page attempts; scale: session plus 10,000 persisted jobs and keyboard pagination; proxy: real Vite HMR and session journey against packaged JVM; upgrade: previous JVM to current JVM on one origin with an old tab.');
   console.log('legacy: inert legacy HTML/polling with explicit test-owned state edits; no workflow execution.');
   console.log('audit: every route at 1440x900, 390x844, 320px and 200%/400% zoom in light/dark themes with contract-fixture API reads fulfilled in DevTools; measures reflow, text/focus contrast, target size, reduced motion, every packaged asset under CSP and navigation timing budgets.');
@@ -49,7 +51,7 @@ for (const option of ['archive', 'chrome', 'java-home', 'python']) {
   assert.ok(values[option] && isAbsolute(values[option]), `--${option} must name an absolute existing path; see --help`);
   await fs.access(values[option]);
 }
-assert.ok(['public', 'session', 'upload', 'metadata', 'history', 'restart', 'scale', 'live', 'proxy', 'upgrade', 'legacy', 'audit'].includes(values.mode), '--mode must be public, session, upload, metadata, history, restart, scale, live, proxy, upgrade, legacy or audit');
+assert.ok(['public', 'session', 'upload', 'metadata', 'history', 'stale-context', 'restart', 'scale', 'live', 'proxy', 'upgrade', 'legacy', 'audit'].includes(values.mode), '--mode must be public, session, upload, metadata, history, stale-context, restart, scale, live, proxy, upgrade, legacy or audit');
 if (values.mode === 'upgrade') {
   assert.ok(values['previous-archive'] && isAbsolute(values['previous-archive']), 'upgrade requires --previous-archive as an absolute existing ZIP path');
   await fs.access(values['previous-archive']);
@@ -507,11 +509,12 @@ try {
   const { manifest, data } = installation;
   const legacyFixture = values.mode === 'legacy' ? await seedLegacy(data) : null;
   const historyFixture = values.mode === 'history' ? await seedHistory(data) : null;
+  const staleContextFixture = values.mode === 'stale-context' ? await seedHistory(data) : null;
   const restartFixture = values.mode === 'restart' ? await seedHistory(data) : null;
   const scaleFixture = values.mode === 'scale' ? await seedScale(data) : null;
   const liveFixture = values.mode === 'live' ? await seedLive(data) : null;
-  const populated = !!(historyFixture || restartFixture || scaleFixture || liveFixture);
-  const libraryText = historyFixture || restartFixture ? 'synthetic-history.elf' : scaleFixture ? 'synthetic-project-09999.elf'
+  const populated = !!(historyFixture || staleContextFixture || restartFixture || scaleFixture || liveFixture);
+  const libraryText = historyFixture || staleContextFixture || restartFixture ? 'synthetic-history.elf' : scaleFixture ? 'synthetic-project-09999.elf'
     : liveFixture ? 'live-dashboard-2.elf' : 'No uploaded jobs yet.';
   let developmentPort;
   let browserOrigin;
@@ -727,7 +730,7 @@ try {
     assert.equal(await fs.stat(data).then(() => true, () => false), false, 'Fixture-backed audit created job data');
     report.jobDataCreated = false;
   }
-  if (values.mode === 'public' || values.mode === 'session' || values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'history' || values.mode === 'scale' || values.mode === 'live') {
+  if (values.mode === 'public' || values.mode === 'session' || values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'history' || values.mode === 'stale-context' || values.mode === 'scale' || values.mode === 'live') {
     const identityExpression = `(() => ({ buildId: document.querySelector('meta[name="decomp-ui-build"]')?.content, applicationVersion: document.querySelector('meta[name="decomp-application-version"]')?.content, page: location.pathname, text: document.body.innerText }))()`;
     const home = await makeTarget();
     await cdp.call('Page.navigate', { url: `${origin}/nested/` }, home.sessionId);
@@ -884,7 +887,7 @@ try {
     report.requests = {};
   }
 
-  if (values.mode === 'session' || values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'history' || values.mode === 'scale' || values.mode === 'live' || values.mode === 'proxy') {
+  if (values.mode === 'session' || values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'history' || values.mode === 'stale-context' || values.mode === 'scale' || values.mode === 'live' || values.mode === 'proxy') {
     const bootstrapUrl = await waitFor(() => applicationOutput.split(/\s+/).find((part) => part.startsWith(browserOrigin + '/nested/#bootstrap=')), 'local bootstrap handoff');
     const token = new URL(bootstrapUrl).hash.slice('#bootstrap='.length);
     sensitiveValues.push(token);
@@ -1020,6 +1023,10 @@ try {
     }
     if (historyFixture) {
       report.populatedHistory = await qualifyHistory({ fixture: historyFixture, makeTarget, cdp, evaluate, ready, browserOrigin });
+      report.jobDataCreated = true;
+    }
+    if (staleContextFixture) {
+      report.staleContext = await qualifyStaleContext({ fixture: staleContextFixture, tab: authenticated, cdp, evaluate, ready, waitFor, browserOrigin, capture });
       report.jobDataCreated = true;
     }
     if (values.mode === 'metadata') {

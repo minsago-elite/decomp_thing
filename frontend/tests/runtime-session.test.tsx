@@ -1,8 +1,10 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { act, render, screen } from '@testing-library/preact';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/preact';
 import { expect, it, vi } from 'vitest';
 import type { Bootstrap } from '../src/api/generated';
+import { ApiClientError } from '../src/api/errors';
+import { formatExactBytes } from '../src/copy/format';
 import Runtime from '../src/routes/Runtime';
 import { createBrowserSession } from '../src/session/session';
 
@@ -63,6 +65,200 @@ it('reports a new server instance with unchanged builds and does not fetch on re
     expect(gateway.exchange).not.toHaveBeenCalled();
     expect(gateway.logout).not.toHaveBeenCalled();
     expect(document.body.textContent).not.toContain(data.csrfToken);
+  } finally { session.dispose(); }
+});
+
+it('retains only the last runtime receipt across a transient reconnect read and ages it without another request', async () => {
+  vi.useFakeTimers(); vi.setSystemTime(0);
+  let monotonic = 0;
+  vi.spyOn(performance, 'now').mockImplementation(() => monotonic);
+  const fixture = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/bootstrap.json'), 'utf8')) as { data: Bootstrap };
+  const data = { ...fixture.data, sessionExpiresAt: new Date(Date.now() + 60_000).toISOString() };
+  const gateway = { bootstrap: vi.fn().mockResolvedValueOnce(data).mockRejectedValueOnce(new ApiClientError('network_error')).mockResolvedValueOnce(data), exchange: vi.fn(), logout: vi.fn() };
+  const session = createBrowserSession(gateway, '/');
+  try {
+    await session.initialize({ kind: 'absent' });
+    const view = render(<Runtime identity={{ applicationVersion: '0.1.0', uiBuildId: data.uiBuildId }} session={session} />);
+    const report = screen.getByLabelText('Runtime report');
+    const receipt = report.querySelector<HTMLElement>('[data-received-at]')?.getAttribute('data-received-at');
+    expect(receipt).toBeTruthy();
+    const instance = screen.getByText('server_fixture_1');
+    instance.tabIndex = -1; instance.focus();
+    const range = document.createRange(); range.selectNodeContents(instance);
+    window.getSelection()?.removeAllRanges(); window.getSelection()?.addRange(range);
+    document.documentElement.scrollTop = 543;
+    await act(async () => { await session.refresh(); });
+    expect(screen.getByText('Connected server')).toBeTruthy();
+    expect(screen.getByText('server_fixture_1')).toBeTruthy();
+    expect(screen.getByText('Previously loaded metadata may be outdated. Refresh to read current details.')).toBeTruthy();
+    expect(screen.getByLabelText('Runtime report').querySelector<HTMLElement>('[data-received-at]')?.getAttribute('data-received-at')).toBe(receipt);
+    expect(screen.getByText('server_fixture_1')).toBe(instance);
+    expect(document.activeElement).toBe(instance);
+    expect(window.getSelection()?.toString()).toBe('server_fixture_1');
+    expect(document.documentElement.scrollTop).toBe(543);
+    expect(gateway.bootstrap).toHaveBeenCalledTimes(2);
+    monotonic = 10_000;
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(screen.getByLabelText('Runtime report').textContent).toContain('about 10 seconds ago');
+    expect(gateway.bootstrap).toHaveBeenCalledTimes(2);
+    await act(async () => { await session.refresh(); });
+    expect(screen.queryByText('Previously loaded metadata may be outdated. Refresh to read current details.')).toBeNull();
+    expect(screen.getByText('server_fixture_1')).toBe(instance);
+    expect(document.activeElement).toBe(instance);
+    expect(window.getSelection()?.toString()).toBe('server_fixture_1');
+    expect(document.documentElement.scrollTop).toBe(543);
+    expect(gateway.bootstrap).toHaveBeenCalledTimes(3);
+    expect(document.body.textContent).not.toContain(data.csrfToken);
+    view.unmount();
+  } finally { session.dispose(); vi.restoreAllMocks(); vi.useRealTimers(); }
+});
+
+it('keeps the Runtime retry control focused after a transient session check failure', async () => {
+  const fixture = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/bootstrap.json'), 'utf8')) as { data: Bootstrap };
+  const data = { ...fixture.data, sessionExpiresAt: new Date(Date.now() + 60_000).toISOString() };
+  const gateway = { bootstrap: vi.fn().mockResolvedValueOnce(data).mockRejectedValueOnce(new ApiClientError('network_error')),
+    exchange: vi.fn(), logout: vi.fn() };
+  const session = createBrowserSession(gateway, '/');
+  try {
+    await session.initialize({ kind: 'absent' });
+    render(<Runtime identity={{ applicationVersion: '0.1.0', uiBuildId: data.uiBuildId }} session={session} />);
+    const check = screen.getByRole('button', { name: 'Check session' });
+    check.focus();
+    expect(document.activeElement).toBe(check);
+    fireEvent.click(check);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(screen.getByText('Previously loaded metadata may be outdated. Refresh to read current details.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Check session' })).toBe(check);
+    expect(document.activeElement).toBe(check);
+    expect(gateway.bootstrap).toHaveBeenCalledTimes(2);
+  } finally { session.dispose(); }
+});
+
+it('discards instance-bound storage and maintenance results when the Runtime server changes', async () => {
+  const fixture = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/bootstrap.json'), 'utf8')) as { data: Bootstrap };
+  const data = { ...fixture.data, sessionExpiresAt: new Date(Date.now() + 60_000).toISOString() };
+  const storage = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/storage-summary.json'), 'utf8')) as { requestId: string; data: { totalBytes: string } };
+  const maintenance = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/maintenance-preview.json'), 'utf8')) as { requestId: string };
+  const responses = new Map([
+    ['/api/v1/storage', storage], ['/api/v1/storage/maintenance-preview', maintenance],
+  ]);
+  const fetcher = vi.fn<typeof fetch>(input => {
+    const requestUrl = input instanceof Request ? input.url : input instanceof URL ? input.href : input;
+    const path = new URL(requestUrl, window.location.origin).pathname;
+    const suffix = path.endsWith('/storage/maintenance-preview') ? '/api/v1/storage/maintenance-preview' : '/api/v1/storage';
+    const document = responses.get(suffix);
+    expect(document).toBeTruthy();
+    return Promise.resolve(new Response(JSON.stringify(document), { status: 200, headers: {
+      'Content-Type': 'application/json; charset=utf-8', 'X-Request-ID': document!.requestId,
+    } }));
+  });
+  vi.stubGlobal('fetch', fetcher);
+  const gateway = { bootstrap: vi.fn().mockResolvedValueOnce(data).mockResolvedValueOnce({ ...data, serverInstanceId: 'server_fixture_2' }),
+    exchange: vi.fn(), logout: vi.fn() };
+  const session = createBrowserSession(gateway, '/');
+  try {
+    await session.initialize({ kind: 'absent' });
+    render(<Runtime identity={{ applicationVersion: '0.1.0', uiBuildId: data.uiBuildId }} session={session} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Read storage and maintenance preview' }));
+    await waitFor(() => expect(screen.getByText('Total').nextElementSibling?.textContent).toBe(formatExactBytes(storage.data.totalBytes)));
+    expect(screen.getByText('Maintenance preview (dry run)')).toBeTruthy();
+    await act(async () => { await session.refresh(); });
+    expect(screen.getByText('server_fixture_2')).toBeTruthy();
+    expect(screen.queryByText(formatExactBytes(storage.data.totalBytes))).toBeNull();
+    expect(screen.queryByText('Maintenance preview (dry run)')).toBeNull();
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  } finally { session.dispose(); }
+});
+
+it('clears retained Runtime facts after a non-transient session refusal', async () => {
+  const fixture = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/bootstrap.json'), 'utf8')) as { data: Bootstrap };
+  const data = { ...fixture.data, sessionExpiresAt: new Date(Date.now() + 60_000).toISOString() };
+  const gateway = { bootstrap: vi.fn().mockResolvedValueOnce(data).mockRejectedValueOnce(
+    new ApiClientError('http_error', { status: 401, serverCode: 'SESSION_EXPIRED' })).mockRejectedValueOnce(new ApiClientError('network_error')),
+    exchange: vi.fn(), logout: vi.fn() };
+  const session = createBrowserSession(gateway, '/');
+  try {
+    await session.initialize({ kind: 'absent' });
+    render(<Runtime identity={{ applicationVersion: '0.1.0', uiBuildId: data.uiBuildId }} session={session} />);
+    expect(screen.getByText('server_fixture_1')).toBeTruthy();
+    await act(async () => { await session.refresh(); });
+    expect(screen.queryByText('server_fixture_1')).toBeNull();
+    expect(screen.queryByLabelText('Runtime report')).toBeNull();
+    expect(screen.queryByText(/Previously loaded metadata may be outdated/)).toBeNull();
+    expect(screen.getByText('Runtime information is not connected')).toBeTruthy();
+    await act(async () => { await session.refresh(); });
+    expect(screen.queryByText('server_fixture_1')).toBeNull();
+    expect(screen.queryByLabelText('Runtime report')).toBeNull();
+  } finally { session.dispose(); }
+});
+
+it.each(['invalid_json', 'invalid_response', 'unexpected_response'] as const)(
+  'clears previously verified Runtime facts after an unverified bootstrap response (%s)', async code => {
+    const fixture = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/bootstrap.json'), 'utf8')) as { data: Bootstrap };
+    const data = { ...fixture.data, sessionExpiresAt: new Date(Date.now() + 60_000).toISOString() };
+    const gateway = { bootstrap: vi.fn().mockResolvedValueOnce(data).mockRejectedValueOnce(new ApiClientError(code)),
+      exchange: vi.fn(), logout: vi.fn() };
+    const session = createBrowserSession(gateway, '/');
+    try {
+      await session.initialize({ kind: 'absent' });
+      render(<Runtime identity={{ applicationVersion: '0.1.0', uiBuildId: data.uiBuildId }} session={session} />);
+      expect(screen.getByText('server_fixture_1')).toBeTruthy();
+      await act(async () => { await session.refresh(); });
+      expect(session.snapshot()).toMatchObject({ status: 'unavailable', reason: 'connection' });
+      expect(session.snapshot()).not.toHaveProperty('runtime');
+      expect(session.snapshot()).not.toHaveProperty('runtimeReceipt');
+      expect(screen.queryByText('server_fixture_1')).toBeNull();
+      expect(screen.queryByLabelText('Runtime report')).toBeNull();
+      expect(screen.queryByText(/Previously loaded metadata may be outdated/)).toBeNull();
+      expect(screen.getByText('Runtime information is not connected')).toBeTruthy();
+      expect(gateway.bootstrap).toHaveBeenCalledTimes(2);
+    } finally { session.dispose(); }
+  },
+);
+
+it('clears connection-retained Runtime facts when another tab invalidates the session', async () => {
+  const fixture = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/bootstrap.json'), 'utf8')) as { data: Bootstrap };
+  const data = { ...fixture.data, sessionExpiresAt: new Date(Date.now() + 60_000).toISOString() };
+  const listeners = new Set<EventListenerOrEventListenerObject>();
+  class TestBroadcastChannel {
+    static current: TestBroadcastChannel | null = null;
+    constructor() { TestBroadcastChannel.current = this; }
+    addEventListener(_type: string, listener: EventListenerOrEventListenerObject) {
+      listeners.add(listener);
+    }
+    removeEventListener(_type: string, listener: EventListenerOrEventListenerObject) {
+      listeners.delete(listener);
+    }
+    postMessage() {}
+    close() {}
+    emit(data: unknown) {
+      const event = { data } as MessageEvent;
+      for (const listener of listeners) {
+        if (typeof listener === 'function') listener(event);
+        else listener.handleEvent(event);
+      }
+    }
+  }
+  vi.stubGlobal('BroadcastChannel', TestBroadcastChannel);
+  const gateway = { bootstrap: vi.fn().mockResolvedValueOnce(data).mockRejectedValueOnce(new ApiClientError('network_error')),
+    exchange: vi.fn(), logout: vi.fn() };
+  const session = createBrowserSession(gateway, '/');
+  try {
+    await session.initialize({ kind: 'absent' });
+    render(<Runtime identity={{ applicationVersion: '0.1.0', uiBuildId: data.uiBuildId }} session={session} />);
+    await act(async () => { await session.refresh(); });
+    expect(screen.getByText('server_fixture_1')).toBeTruthy();
+    expect(screen.getByText('Previously loaded metadata may be outdated. Refresh to read current details.')).toBeTruthy();
+    await act(async () => {
+      TestBroadcastChannel.current?.emit({ version: 1, type: 'session-invalidated' });
+      await Promise.resolve();
+    });
+    expect(screen.queryByText('server_fixture_1')).toBeNull();
+    expect(screen.queryByLabelText('Runtime report')).toBeNull();
+    expect(screen.queryByText(/Previously loaded metadata may be outdated/)).toBeNull();
+    expect(session.snapshot()).toMatchObject({ status: 'unavailable', reason: 'connection' });
+    expect(session.snapshot()).not.toHaveProperty('runtime');
+    expect(gateway.bootstrap).toHaveBeenCalledTimes(2);
   } finally { session.dispose(); }
 });
 

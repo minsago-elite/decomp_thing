@@ -180,6 +180,8 @@ jobs:
           "$RUNNER_TEMP/web-test-browser/chrome" --version | tee build/packaged-web-ci/browser-version.txt
           python3 scripts/test-packaged-browser-install.py
           node --check scripts/check-packaged-web-browser.mjs
+          node --check scripts/packaged-browser-stale-context.mjs
+          node --test scripts/packaged-browser-stale-context.test.mjs
           node --test scripts/packaged-browser-upload.test.mjs
           node --check scripts/packaged-browser-restart.mjs
           node --test scripts/packaged-browser-restart.test.mjs
@@ -237,6 +239,12 @@ jobs:
             --archive "$WEB_TEST_ARCHIVE" \
             --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
             --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode metadata --no-sandbox
+      - name: Preserve context across transient metadata failures in packaged views
+        run: |
+          node scripts/check-packaged-web-browser.mjs \
+            --archive "$WEB_TEST_ARCHIVE" \
+            --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
+            --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode stale-context --no-sandbox
       - name: Preserve focused dashboard rows during actual background updates
         run: |
           node scripts/check-packaged-web-browser.mjs \

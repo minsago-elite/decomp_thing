@@ -4,6 +4,7 @@ import { normalizeBasePath } from '../app/paths';
 import { createInvalidationChannel } from './invalidationChannel';
 import { captureReceiptTime } from '../shared/receiptTime';
 import type { ReceiptTime } from '../shared/receiptTime';
+import { canRetainMetadata } from '../shared/retainMetadata';
 import type { BootstrapFragment } from './fragment';
 
 export type SessionGateway = {
@@ -15,10 +16,10 @@ export type SessionGateway = {
 export type RuntimeSnapshot = Pick<Bootstrap, 'applicationBuildId' | 'uiBuildId' | 'serverInstanceId' | 'readiness' | 'capabilities' | 'limits' | 'runtime'>;
 
 export type SessionState =
-  | { status: 'public' | 'checking' | 'signing-out' }
+  | { status: 'public' | 'checking' | 'signing-out'; runtime?: RuntimeSnapshot; runtimeReceipt?: ReceiptTime }
   | { status: 'authenticated'; expiresAt: string; generation: number; runtime: RuntimeSnapshot; runtimeReceipt?: ReceiptTime; serverChanged?: true }
   | { status: 'required'; reason: 'missing' | 'expired' | 'bootstrap-required' | 'bootstrap-expired' | 'invalid-link' | 'signed-out' | 'session-changed'; referenceId?: string }
-  | { status: 'unavailable'; reason: 'connection' | 'configuration' | 'incompatible' | 'logout-unconfirmed' | 'removal-failed'; referenceId?: string };
+  | { status: 'unavailable'; reason: 'connection' | 'configuration' | 'incompatible' | 'logout-unconfirmed' | 'removal-failed'; referenceId?: string; runtime?: RuntimeSnapshot; runtimeReceipt?: ReceiptTime };
 
 /** Session/CSRF material stays in this page's closure and never enters UI snapshots. */
 export function createBrowserSession(gateway: SessionGateway, basePath: string) {
@@ -51,6 +52,10 @@ export function createBrowserSession(gateway: SessionGateway, basePath: string) 
       // Expiry/connection loss can retain form context for an explicit reconnect. A peer
       // logout must still erase it, without changing authorization or starting any request.
       notifyInvalidated(true);
+      if (state.status === 'unavailable' && state.reason === 'connection' && state.runtime) {
+        publish({ status: 'unavailable', reason: 'connection',
+          ...('referenceId' in state && state.referenceId ? { referenceId: state.referenceId } : {}) });
+      }
       return;
     }
     invalidatePending(); forget();
@@ -81,7 +86,14 @@ export function createBrowserSession(gateway: SessionGateway, basePath: string) 
     else if (!logout && error instanceof ApiClientError && error.code === 'unsupported_contract') {
       notifyInvalidated(false);
       publish({ status: 'unavailable', reason: 'incompatible', ...reference });
-    } else publish({ status: 'unavailable', reason: logout ? 'logout-unconfirmed' : 'connection', ...reference });
+    } else if (!logout) {
+      const retained = state.status === 'checking' || state.status === 'authenticated'
+        || (state.status === 'unavailable' && state.reason === 'connection') ? state : null;
+      publish({ status: 'unavailable', reason: 'connection', ...reference,
+        ...(retained?.runtime && retained.runtimeReceipt && canRetainMetadata(error)
+          ? { runtime: retained.runtime, runtimeReceipt: retained.runtimeReceipt } : {}) });
+    }
+    else publish({ status: 'unavailable', reason: 'logout-unconfirmed', ...reference });
   }
   function authenticated(bootstrap: Bootstrap, preserveViewGeneration = false) {
     if (disposed) return;
@@ -112,8 +124,9 @@ export function createBrowserSession(gateway: SessionGateway, basePath: string) 
         readiness: bootstrap.readiness, capabilities: structuredClone(bootstrap.capabilities),
         limits: { ...bootstrap.limits }, runtime: { ...bootstrap.runtime },
       };
+      const runtimeReceipt = captureReceiptTime();
       // A new bootstrap generation replaces private views even when intermediate renders coalesce.
-      publish({ status: 'authenticated', expiresAt: bootstrap.sessionExpiresAt, generation: viewGeneration, runtime, runtimeReceipt: captureReceiptTime(),
+      publish({ status: 'authenticated', expiresAt: bootstrap.sessionExpiresAt, generation: viewGeneration, runtime, runtimeReceipt,
         ...(serverChanged ? { serverChanged: true as const } : {}) });
       expiry = setTimeout(() => {
         forget();
@@ -152,8 +165,11 @@ export function createBrowserSession(gateway: SessionGateway, basePath: string) 
   function refresh(): Promise<void> {
     if (fragmentBlocked) return Promise.resolve();
     if (pending || disposed) return pending ?? Promise.resolve();
+    const retained = state.status === 'authenticated' || (state.status === 'unavailable' && state.reason === 'connection')
+      ? state : null;
     forget();
-    publish({ status: 'checking' });
+    publish({ status: 'checking', ...(retained?.runtime && retained.runtimeReceipt
+      ? { runtime: retained.runtime, runtimeReceipt: retained.runtimeReceipt } : {}) });
     return run(async (signal) => {
       const bootstrap = await gateway.bootstrap(signal);
       if (!signal.aborted) authenticated(bootstrap);
