@@ -4,7 +4,8 @@ import { dirname, resolve } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { runInNewContext } from 'node:vm';
-import { assertAudit, auditContentReady, auditFixtures, auditPageNames, auditPageReady, auditTokenKinds, auditViewports, measureContrast, measureFocus, measurePage, prepareAuditPage, qualifyAudit } from './packaged-browser-audit.mjs';
+import { assertAudit, auditContentReady, auditFixtures, auditPageNames, auditPageReady, auditTokenKinds, auditViewports, measureContrast, measureFocus, measureOutputSignatureChart, measurePage, prepareAuditPage, qualifyAudit,
+  captureOutputSignatureChart, chartCaptureFailures, chartCaptureSets, measureChartCaptureTile, pngDimensions, prepareChartCaptureTile } from './packaged-browser-audit.mjs';
 
 // Controls for the packaged audit's own verdict: each injected defect must be reported, so a
 // passing CI audit cannot be a vacuous one.
@@ -19,11 +20,66 @@ function timingEvidence(cold = 400, feedback = 40, data = 90) {
   return { coldLoad: { samples: 20, median: cold, p95: cold }, routeFeedback: { samples: 50, median: feedback, p95: feedback },
     routeData: { samples: 50, median: data, p95: data }, raw: { cold: Array(20).fill(cold), feedback: Array(50).fill(feedback), data: Array(50).fill(data) } };
 }
-function clean() {
+
+// A modeled page whose figure (300 x height CSS px) scrolls under a viewport of viewHeight CSS px.
+function pngBytes(width, height) {
+  const buffer = Buffer.alloc(33);
+  Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex').copy(buffer);
+  buffer.writeUInt32BE(width, 16); buffer.writeUInt32BE(height, 20);
+  return buffer;
+}
+function tileState({ offset, height = 383, viewHeight = 200, viewWidth = 305, scroll, docTop = 0, left = 2, width = 300 }) {
+  const figureTop = docTop - scroll;
+  const top = Math.max(0, figureTop + offset), bottom = Math.min(viewHeight, figureTop + height);
+  const x0 = Math.max(0, Math.floor(left)), x1 = Math.min(viewWidth, Math.ceil(left + width));
+  const y0 = Math.max(0, Math.floor(top)), y1 = Math.min(viewHeight, Math.ceil(bottom));
+  const hit = { inFigure: true, hit: 'figure.output-signature-chart' };
+  return { figure: { x: left, y: figureTop, width, height }, rootClientWidth: viewWidth, rootClientHeight: viewHeight,
+    seriesHeights: [40, 40], activeElement: 'body', skipFocused: false, skipVisible: false,
+    segment: { start: top - figureTop, end: bottom - figureTop },
+    viewportClip: { x: x0, y: y0, width: x1 - x0, height: y1 - y0 },
+    pageClip: { x: x0, y: y0 + scroll, width: x1 - x0, height: y1 - y0 }, hits: [hit, hit, hit, hit].map(value => ({ ...value })) };
+}
+// This model floors scroll requests; a separate VM control also covers nearest-integer rounding.
+async function modeledCapture(set, { height = 383, viewHeight = 200, docTop = 0, left, width, mutate = () => {}, png, shots } = {}) {
+  let scroll = 0;
+  const documentHeight = docTop + height + 50;
+  return captureOutputSignatureChart({ set,
+    evaluate: async expression => {
+      const offset = Number([...expression.matchAll(/\}\)\((\d+(?:\.\d+)?(?:e-?\d+)?)\)/g)].at(-1)?.[1]);
+      if (expression.startsWith('/*chart-capture-tile*/')) scroll = Math.min(Math.floor(docTop + offset), Math.max(0, docTop ? documentHeight - viewHeight : height - viewHeight));
+      const state = tileState({ offset, height, viewHeight, scroll, docTop, left, width });
+      mutate(state, expression.startsWith('/*chart-capture-tile*/') ? 'before' : 'after', offset);
+      return state;
+    },
+    shoot: async ({ viewportClip, pageClip }) => { shots?.push({ viewportClip, pageClip });
+      return png ? png(viewportClip) : pngBytes(viewportClip.width * set.deviceScaleFactor, viewportClip.height * set.deviceScaleFactor); } });
+}
+async function intactCaptures() {
+  return [await modeledCapture(chartCaptureSets[0], { viewHeight: 900 }), await modeledCapture(chartCaptureSets[1])];
+}
+function clean(captures = cleanCaptures) {
   const fixtures = auditFixtures(repo, manifest.buildId);
   const matrix = fixtures.pages.flatMap(({ name: page }) => auditViewports.flatMap(viewport =>
     ['light', 'dark'].map(scheme => ({ page, viewport: viewport.name, scheme }))));
+  const chart = auditViewports.flatMap(viewport => ['light', 'dark'].map(scheme => ({
+    page: 'attempt evidence', viewport: viewport.name, scheme, viewportWidth: viewport.width,
+    chartPresent: true, chartRole: 'img', chartVisible: true, figurePresent: true, figureVisible: true, chartName: fixtures.chartExpected.chartName,
+    chartBounds: { x: 0, y: 0, width: 300, height: 100, right: 300, bottom: 100 },
+    chartSeries: fixtures.chartExpected.labels.map((label, index) => ({ label, bounds: { x: 0, y: 0, width: 300, height: 30, right: 300, bottom: 30 },
+      svgBounds: { x: 0, y: 0, width: 300, height: 14, right: 300, bottom: 14 }, barWidth: index === 0 ? '100' : '50' })),
+    binding: `${fixtures.chartExpected.reportId} ${fixtures.chartExpected.jobId} ${fixtures.chartExpected.runId} ${fixtures.chartExpected.revisionId}`,
+    chartDescription: [`${fixtures.chartExpected.reportId} ${fixtures.chartExpected.jobId} ${fixtures.chartExpected.runId} ${fixtures.chartExpected.revisionId}`,
+      `Expanded distinct exit/output signatures: ${fixtures.chartExpected.counts.expanded}. New distinct exit/output signatures: ${fixtures.chartExpected.counts.added}.`,
+      fixtures.chartExpected.tableName, fixtures.chartExpected.approximation],
+    region: { name: fixtures.chartExpected.tableName, focusable: true, visible: true, bounds: { x: 0, y: 0, width: 300, height: 100, right: 300, bottom: 100 }, clientWidth: 300, scrollWidth: 300 },
+    caption: fixtures.chartExpected.tableName, headers: fixtures.chartExpected.headers,
+    rows: [[fixtures.chartExpected.labels[0], fixtures.chartExpected.counts.expanded, fixtures.chartExpected.sample],
+      [fixtures.chartExpected.labels[1], fixtures.chartExpected.counts.added, fixtures.chartExpected.counts.denominator]],
+  })));
   return {
+    chartExpected: fixtures.chartExpected, chart,
+    chartCaptures: captures, chartScreenshots: captures.flatMap(capture => capture.tiles.map(tile => tile.file)),
     layout: matrix.map(identity => ({ ...identity, pageOverflowPx: 0, overflow: [], overflowCount: 0, clippedActions: [], smallTargets: [],
       headingWithinWidth: true, navigation: { narrow: true, toggleShown: true, linksShown: false }, animations: 0,
       scrollRegions: [{ fits: true, scrolls: true, focusable: true, named: true }] })),
@@ -36,17 +92,18 @@ function clean() {
     timing: timingEvidence(),
   };
 }
+const cleanCaptures = await intactCaptures();
 const verdict = (audit, served = responses) => assertAudit(audit, manifest, served, origin).failures;
 
 test('a clean audit with every packaged asset and the worker has no failures', () => {
   const audit = clean();
   assert.deepEqual(auditFixtures(repo, manifest.buildId).pages.map(page => page.name), auditPageNames);
-  assert.deepEqual([audit.layout.length, audit.contrast.length, audit.focus.length], [120, 48, 24]);
+  assert.deepEqual([audit.layout.length, audit.contrast.length, audit.focus.length, audit.chart.length], [120, 48, 24, 10]);
   assert.deepEqual(verdict(audit), []);
 });
 
 test('rejects absent, empty, partial, duplicate and unexpected measurement matrices', () => {
-  for (const kind of ['layout', 'contrast', 'focus']) {
+  for (const kind of ['layout', 'contrast', 'focus', 'chart']) {
     for (const missing of [undefined, null, []]) {
       const audit = clean(); audit[kind] = missing;
       assert.match(verdict(audit).join('\n'), new RegExp(`${kind}: missing`));
@@ -64,9 +121,193 @@ test('rejects absent, empty, partial, duplicate and unexpected measurement matri
       assert.match(verdict(unexpected).join('\n'), new RegExp(`${kind}: unexpected coverage`));
     }
   }
-  const empty = clean(); empty.layout = []; empty.contrast = []; empty.focus = [];
+  const empty = clean(); empty.layout = []; empty.contrast = []; empty.focus = []; empty.chart = [];
   empty.timing = { coldLoad: { p95: null }, routeFeedback: { p95: null }, routeData: { p95: null } };
-  assert.equal(verdict(empty).length, 6, 'the independently reproduced empty/null report must fail');
+  assert.equal(verdict(empty).length, 7, 'the independently reproduced empty/null report must fail');
+});
+
+test('requires the rendered chart identity, exact table and geometry at every viewport and theme', () => {
+  const audit = clean();
+  assert.equal(audit.chart.length, auditViewports.length * 2);
+  for (const [field, value, pattern] of [
+    ['chartName', 'Unlabeled', /misnamed accessible signature chart/],
+    ['binding', 'wrong report', /not bound to the expected report/],
+    ['caption', 'Wrong caption', /accessible table does not preserve/],
+    ['headers', [], /accessible table does not preserve/],
+    ['rows', [], /accessible table does not preserve/],
+  ]) {
+    const changed = clean(); changed.chart[0][field] = value;
+    assert.match(verdict(changed).join('\n'), pattern);
+  }
+  for (const change of [
+    { chartPresent: false }, { chartVisible: false }, { chartRole: 'presentation' },
+    { chartBounds: { x: -3, y: 0, width: 20, height: 10, right: 17, bottom: 10 } },
+    { chartDescription: [] }, { region: { name: 'Unnamed', focusable: false, bounds: null, clientWidth: 0, scrollWidth: 0 } },
+    { chartSeries: [] },
+  ]) {
+    const changed = clean(); Object.assign(changed.chart[0], change);
+    assert.ok(verdict(changed).length > 0, JSON.stringify(change));
+  }
+  const missing = clean(); missing.chart.pop();
+  assert.match(verdict(missing).join('\n'), /chart: missing 1 coverage/);
+  const screenshots = clean([]);
+  assert.match(verdict(screenshots).join('\n'), /missing desktop or 400% packaged screenshot evidence/);
+  const emptyBars = clean();
+  for (const series of emptyBars.chart[0].chartSeries) series.barWidth = '0';
+  assert.match(verdict(emptyBars).join('\n'), /visual bar widths do not represent the reported counts/);
+  const misleadingBars = clean();
+  misleadingBars.chart[0].chartSeries[1].barWidth = '100';
+  assert.match(verdict(misleadingBars).join('\n'), /visual bar widths do not represent the reported counts/);
+});
+
+test('chart capture keeps an intact, unobscured figure in contiguous viewport-only tiles', async () => {
+  const [desktop, zoom] = cleanCaptures;
+  assert.deepEqual(desktop.tiles.map(tile => tile.file), ['attempt-evidence-output-signature-chart-desktop-tile-1.png']);
+  assert.deepEqual(zoom.tiles.map(tile => [tile.file, tile.before.segment, tile.png]), [
+    ['attempt-evidence-output-signature-chart-zoom-400-tile-1.png', { start: 0, end: 200 }, { width: 1200, height: 800 }],
+    ['attempt-evidence-output-signature-chart-zoom-400-tile-2.png', { start: 200, end: 383 }, { width: 1200, height: 732 }],
+  ]);
+  for (const [index, capture] of cleanCaptures.entries()) assert.deepEqual(chartCaptureFailures(capture, chartCaptureSets[index]), []);
+  assert.deepEqual(verdict(clean()), []);
+});
+
+test('chart capture controls reject reflow, overlays, wrong PNG sizes and bad coverage', async () => {
+  const set = chartCaptureSets[1];
+  const fails = async (options, pattern) => {
+    const failures = chartCaptureFailures(await modeledCapture(set, options), set);
+    assert.match(failures.join('\n'), pattern, JSON.stringify(failures));
+  };
+  // Reflow: the second label wraps differently after capture, or the scrollbar disappears.
+  await fails({ mutate: (state, phase) => { if (phase === 'after') state.seriesHeights[1] = 62; } }, /series rows reflowed/);
+  await fails({ mutate: (state, phase) => { if (phase === 'after') { state.rootClientWidth = 320; state.figure.width = 315; } } },
+    /figure width changed|viewport client size changed/);
+  await fails({ mutate: (state, phase) => { if (phase === 'after') state.figure.height = 340; } }, /figure height changed/);
+  // A focused skip link painted over the heading/top of the figure.
+  await fails({ mutate: state => { state.skipFocused = true; state.skipVisible = true; } }, /skip link is focused or visible/);
+  await fails({ mutate: state => { state.hits[0] = { inFigure: false, hit: 'a.skip-link' }; } }, /occluded at a clip corner/);
+  // Wrong PNG dimensions, including a tight clip that cut off the right edge.
+  await fails({ png: clip => pngBytes(Math.round(clip.width * 4) - 60, Math.round(clip.height * 4)) }, /does not match clip\*DPR/);
+  await fails({ png: () => Buffer.from('not a png') }, /PNG null/);
+  await fails({ mutate: state => { state.viewportClip.width = 273; state.pageClip.width = 273; } }, /does not span the figure width/);
+  // Clip escaping the viewport (beyond-viewport capture).
+  await fails({ mutate: state => { state.viewportClip.height = 383; state.pageClip.height = 383; } }, /not an integer rectangle inside the rendered viewport/);
+  // Missing tiles, gaps and overlaps.
+  const missing = await modeledCapture(set); missing.tiles.pop();
+  assert.match(chartCaptureFailures(missing, set).join('\n'), /tiles cover 200 of 383/);
+  const gap = await modeledCapture(set); gap.tiles[1].before.segment.start = 210;
+  assert.match(chartCaptureFailures(gap, set).join('\n'), /gap or overlap/);
+  const overlap = await modeledCapture(set); overlap.tiles[1].before.segment.start = 190;
+  assert.match(chartCaptureFailures(overlap, set).join('\n'), /gap or overlap/);
+  const renamed = await modeledCapture(set); renamed.tiles[0].file = 'chart.png';
+  assert.match(chartCaptureFailures(renamed, set).join('\n'), /unexpected file/);
+  assert.match(chartCaptureFailures(await modeledCapture(chartCaptureSets[0]), set).join('\n'), /mislabelled capture manifest/);
+  // The audit verdict requires both manifests and a matching screenshot list.
+  const noZoom = clean([cleanCaptures[0]]);
+  assert.match(verdict(noZoom).join('\n'), /missing desktop or 400%/);
+  const listed = clean(); listed.chartScreenshots.pop();
+  assert.match(verdict(listed).join('\n'), /screenshot list does not match/);
+});
+
+test('fractional figure geometry is covered by outward integer clips with exact contiguous segments', async () => {
+  const set = chartCaptureSets[1];
+  const shots = [];
+  const capture = await modeledCapture(set, { docTop: 100.25, viewHeight: 200, height: 383.156, left: 2.4, width: 299.3, shots });
+  assert.deepEqual(chartCaptureFailures(capture, set), []);
+  assert.equal(capture.tiles.length, 2);
+  const [first, second] = capture.tiles;
+  // Tile 1: scroll floor(100.25) = 100, figure top at 0.25; clip pads 0.25 CSS px above the figure.
+  assert.equal(first.before.figure.y, 0.25);
+  assert.deepEqual(first.before.segment, { start: 0, end: 199.75 });
+  assert.deepEqual(first.before.viewportClip, { x: 2, y: 0, width: 300, height: 200 });
+  assert.deepEqual(first.png, { width: 1200, height: 800 });
+  // Tile 2 starts at the actual end of tile 1 and ends at the fractional figure bottom.
+  assert.equal(second.offset, 199.75);
+  assert.equal(second.before.segment.start, 199.75);
+  assert.ok(Math.abs(second.before.segment.end - 383.156) < 1e-9);
+  const segBottom = second.before.figure.y + second.before.segment.end;
+  assert.ok(second.before.viewportClip.y + second.before.viewportClip.height > segBottom, 'outward padded bottom');
+  assert.deepEqual(second.before.viewportClip, { x: 2, y: 0, width: 300, height: Math.ceil(segBottom) });
+  assert.deepEqual(second.png, { width: 300 * 4, height: Math.ceil(segBottom) * 4 });
+  for (const { viewportClip, pageClip } of shots)
+    for (const key of ['x', 'y', 'width', 'height']) { assert.ok(Number.isInteger(viewportClip[key])); assert.ok(Number.isInteger(pageClip[key])); }
+  // The former hosted failure: browser-snapped PNGs 3 or 2 device px short are rejected, not tolerated.
+  const short = await modeledCapture(set, { docTop: 100.25, height: 383.156, png: clip => pngBytes(clip.width * 4, clip.height * 4 - 2) });
+  assert.match(chartCaptureFailures(short, set).join('\n'), /does not match clip\*DPR/);
+  // A fractional (snappable) clip, a sub-pixel gap and an inward clip all fail strict coverage.
+  const fractional = await modeledCapture(set, { docTop: 100.25, height: 383.156,
+    mutate: state => { state.viewportClip.height -= 0.25; state.pageClip.height -= 0.25; } });
+  assert.match(chartCaptureFailures(fractional, set).join('\n'), /not an integer rectangle/);
+  const gap = await modeledCapture(set, { docTop: 100.25, height: 383.156 }); gap.tiles[1].before.segment.start += 0.1;
+  assert.match(chartCaptureFailures(gap, set).join('\n'), /gap or overlap/);
+  const inward = await modeledCapture(set, { docTop: 100.25, height: 383.156 });
+  inward.tiles[1].before.viewportClip.height -= 1; inward.tiles[1].before.pageClip.height -= 1;
+  assert.match(chartCaptureFailures(inward, set).join('\n'), /clip does not match its figure segment/);
+  const short2 = await modeledCapture(set, { docTop: 100.25, height: 383.156 }); short2.tiles[1].before.segment.end -= 0.2;
+  assert.match(chartCaptureFailures(short2, set).join('\n'), /not the figure\/viewport intersection/);
+});
+
+test('in-page capture expressions emit outward integer clips for fractional figure geometry (VM)', async () => {
+  const docTop = 100.25, height = 383.156, left = 2.4, width = 299.3;
+  let scrollY = 0; const probes = [];
+  const series = { getBoundingClientRect: () => ({ height: 40 }) };
+  const figure = { tagName: 'FIGURE', id: '', classList: ['output-signature-chart'],
+    getBoundingClientRect: () => ({ left, right: left + width, top: docTop - scrollY, bottom: docTop - scrollY + height, width, height }),
+    querySelectorAll: () => [series, series], contains: () => true };
+  const document = { body: {}, activeElement: null, scrollingElement: { clientWidth: 305, clientHeight: 200 },
+    querySelector: selector => selector === '.output-signature-chart' ? figure : null,
+    elementFromPoint: (x, y) => { probes.push([x, y]); return figure; } };
+  // Browsers land fractional scroll requests on an integer offset; model floor.
+  const context = { document, innerHeight: 200, scrollX: 0, get scrollY() { return scrollY; }, visualViewport: undefined,
+    scrollTo: ({ top }) => { scrollY = Math.min(Math.floor(top), 1000); }, getComputedStyle: () => ({ visibility: 'visible' }) };
+  const set = chartCaptureSets[1];
+  const shots = [];
+  const capture = await captureOutputSignatureChart({ set, evaluate: async expression => JSON.parse(JSON.stringify(runInNewContext(expression, context))),
+    shoot: async ({ viewportClip, pageClip }) => { shots.push({ viewportClip, pageClip });
+      return pngBytes(viewportClip.width * set.deviceScaleFactor, viewportClip.height * set.deviceScaleFactor); } });
+  assert.deepEqual(chartCaptureFailures(capture, set), []);
+  const [first, second, extra] = capture.tiles;
+  assert.equal(extra, undefined);
+  assert.deepEqual(first.before.segment, { start: 0, end: 199.75 });
+  assert.deepEqual(first.before.viewportClip, { x: 2, y: 0, width: 300, height: 200 });
+  assert.deepEqual(first.before.pageClip, { x: 2, y: 100, width: 300, height: 200 });
+  assert.deepEqual(first.png, { width: 1200, height: 800 });
+  assert.equal(second.offset, 199.75);
+  assert.equal(second.before.segment.start, 199.75);
+  assert.ok(Math.abs(second.before.segment.end - height) < 1e-9);
+  // scroll floor(300) = 300, figure bottom at 183.406 viewport px; clip ceil = 184 (0.594 px outward padding).
+  assert.deepEqual(second.before.viewportClip, { x: 2, y: 0, width: 300, height: 184 });
+  assert.deepEqual(second.before.pageClip, { x: 2, y: 300, width: 300, height: 184 });
+  assert.deepEqual(second.png, { width: 1200, height: 736 });
+  // Probes stay inside figure/clip intersection: x within [2.4, 301.7], y within the segment.
+  for (const [x, y] of probes) { assert.ok(x > left && x < left + width); assert.ok(y >= 0 && y < 200); }
+  assert.ok(probes.some(([, y]) => Math.abs(y - (1.25)) < 1e-9), 'tile 1 top probe starts inside the figure, not the padding');
+  assert.equal(shots.length, 2);
+});
+
+test('chart capture expressions blur focus, scroll within the viewport and probe inside the clip', () => {
+  const probes = []; let scrolled = null; let blurred = false;
+  const skip = { checkVisibility: () => false, getBoundingClientRect: () => ({ left: 0, top: -40, right: 100, bottom: -10, width: 100, height: 30 }) };
+  const active = { blur: () => { blurred = true; }, tagName: 'A', id: '', classList: ['skip-link'] };
+  const series = { getBoundingClientRect: () => ({ height: 40 }) };
+  const top = () => (scrolled ? 1400 - scrolled.top : 1400) + 0;
+  const figure = { tagName: 'FIGURE', id: '', classList: ['output-signature-chart'],
+    getBoundingClientRect: () => ({ left: 2, right: 302, top: top(), bottom: top() + 383, width: 300, height: 383 }),
+    querySelectorAll: () => [series, series], contains: () => true };
+  const document = { body: {}, activeElement: active, scrollingElement: { clientWidth: 305, clientHeight: 200 },
+    querySelector: selector => selector === '.output-signature-chart' ? figure : selector === '.skip-link' ? skip : null,
+    elementFromPoint: (x, y) => { probes.push([x, y]); return figure; } };
+  const context = { document, innerHeight: 200, scrollX: 0, get scrollY() { return scrolled?.top ?? 0; }, visualViewport: undefined,
+    scrollTo: options => { scrolled = options; }, getComputedStyle: () => ({ visibility: 'visible' }) };
+  const state = runInNewContext(prepareChartCaptureTile(200), context);
+  assert.ok(blurred);
+  assert.equal(scrolled.top, 1600);
+  assert.deepEqual(JSON.parse(JSON.stringify(state.segment)), { start: 200, end: 383 });
+  assert.deepEqual(JSON.parse(JSON.stringify(state.viewportClip)), { x: 2, y: 0, width: 300, height: 183 });
+  assert.equal(state.skipVisible, false);
+  assert.deepEqual(probes, [[3, 1], [301, 1], [3, 182], [301, 182]]);
+  const after = runInNewContext(measureChartCaptureTile(200), context);
+  assert.deepEqual(JSON.parse(JSON.stringify(after.viewportClip)), JSON.parse(JSON.stringify(state.viewportClip)));
+  assert.deepEqual(pngDimensions(pngBytes(7, 9)), { width: 7, height: 9 });
 });
 
 test('requires finite, complete timing samples and consistent summaries before budget checks', () => {
@@ -253,7 +494,7 @@ test('preparation refuses missing rendered content or unused read fixtures', asy
 test('qualifyAudit prepares every fresh layout/contrast/focus navigation before measuring', async () => {
   const fixtures = auditFixtures(repo, manifest.buildId);
   let current, page, onRequest;
-  const counts = { layout: 0, contrast: 0, focus: 0, navigations: 0 };
+  const counts = { layout: 0, contrast: 0, focus: 0, chart: 0, navigations: 0, chartCaptureEvaluations: 0 };
   const completed = new Error('stop before worker/browser qualification');
   const cdp = {
     on(event, callback) { if (event === 'Fetch.requestPaused') onRequest = callback; },
@@ -271,13 +512,18 @@ test('qualifyAudit prepares every fresh layout/contrast/focus navigation before 
     },
   };
   await assert.rejects(qualifyAudit({ origin, repo, manifest, evidenceDirectory: repo, cdp,
-    makeTarget: async () => ({ sessionId: 'modeled' }), delay: async () => {}, capture: async () => {},
+    makeTarget: async () => ({ sessionId: 'modeled' }), delay: async () => {}, capture: async () => pngBytes(300, 150),
     ready: async (tab, expression, label) => current.ready(tab, expression, label),
     evaluate: async (tab, expression) => {
       let kind = null;
       if (expression === measurePage) kind = 'layout';
       else if (expression === measureContrast) kind = 'contrast';
       else if (expression === measureFocus) kind = 'focus';
+      else if (expression === measureOutputSignatureChart) kind = 'chart';
+      else if (expression.startsWith('/*chart-capture-')) {
+        counts.chartCaptureEvaluations++;
+        return tileState({ offset: 0, height: 150, viewHeight: 200, scroll: 0 });
+      }
       if (kind) {
         assert.equal(await current.evaluate(tab, auditPageReady(page, true)), true, `${kind} measured an empty ${page.name}`);
         assert.deepEqual(current.actions, (page.preparation ?? []).map(step => step.action));
@@ -287,7 +533,7 @@ test('qualifyAudit prepares every fresh layout/contrast/focus navigation before 
       return current.evaluate(tab, expression);
     },
   }), error => error === completed);
-  assert.deepEqual(counts, { layout: 120, contrast: 48, focus: 48, navigations: 84 });
+  assert.deepEqual(counts, { layout: 120, contrast: 48, focus: 48, chart: 10, navigations: 84, chartCaptureEvaluations: 4 });
 });
 
 test('content checks require visible, distinctive rows rather than an empty or hidden table', () => {
@@ -465,4 +711,32 @@ test('measures visible input values and placeholders and rejects low contrast fo
 test('covers the documented desktop, narrow, 320px and 200%/400% zoom profiles', () => {
   assert.deepEqual(auditViewports.map(({ width, height, deviceScaleFactor }) => [width, height, deviceScaleFactor]),
     [[1440, 900, 1], [390, 844, 1], [320, 640, 1], [640, 400, 2], [320, 200, 4]]);
+});
+
+test('capture keeps the first figure pixel when the browser rounds fractional scrolls upward (VM)', async () => {
+  for (const set of chartCaptureSets) {
+    const docTop = 100.6875, height = 383.156, left = 2.4, width = 299.3;
+    let scrollY = 0;
+    const requested = [];
+    const series = { getBoundingClientRect: () => ({ height: 40 }) };
+    const figure = { tagName: 'FIGURE', id: '', classList: ['output-signature-chart'],
+      getBoundingClientRect: () => ({ left, right: left + width, top: docTop - scrollY,
+        bottom: docTop - scrollY + height, width, height }),
+      querySelectorAll: () => [series, series], contains: () => true };
+    const document = { body: {}, activeElement: null, scrollingElement: { clientWidth: 305, clientHeight: 200 },
+      querySelector: selector => selector === '.output-signature-chart' ? figure : null,
+      elementFromPoint: () => figure };
+    const context = { document, innerHeight: 200, scrollX: 0, get scrollY() { return scrollY; }, visualViewport: undefined,
+      scrollTo: ({ top }) => { requested.push(top); scrollY = Math.min(Math.round(top), 1000); },
+      getComputedStyle: () => ({ visibility: 'visible' }) };
+    const capture = await captureOutputSignatureChart({ set,
+      evaluate: async expression => JSON.parse(JSON.stringify(runInNewContext(expression, context))),
+      shoot: async ({ viewportClip }) => pngBytes(viewportClip.width * set.deviceScaleFactor, viewportClip.height * set.deviceScaleFactor) });
+    assert.deepEqual(chartCaptureFailures(capture, set), []);
+    assert.ok(requested.every(Number.isInteger), 'capture chooses integer scroll targets before browser rounding');
+    assert.equal(capture.tiles[0].before.figure.y, 0.6875);
+    assert.equal(capture.tiles[0].before.segment.start, 0);
+    assert.equal(capture.tiles[1].before.segment.start, capture.tiles[0].before.segment.end);
+    assert.ok(Math.abs(capture.tiles.at(-1).before.segment.end - height) < 1e-9);
+  }
 });

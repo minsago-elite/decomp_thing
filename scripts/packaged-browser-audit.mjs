@@ -69,6 +69,19 @@ export function auditFixtures(repo, buildId) {
   const exploration = bound('report-exploration', selected);
   exploration.data.sourceArtifact.binding = selected;
   exploration.data.sourceArtifact.contentHref = `/nested${exploration.data.sourceArtifact.contentHref}`;
+  const chartExpected = {
+    reportId: exploration.data.reportId, jobId, runId, revisionId,
+    chartName: 'Observed output signature counts', tableName: 'Output signature counts reported by the producer',
+    counts: {
+      expanded: exploration.data.summary.expandedOutputSignatures,
+      added: exploration.data.summary.confidence.newOutputSignatureCount,
+      denominator: `Expanded observed signatures: ${exploration.data.summary.confidence.outputSignatureCount}`,
+    },
+    headers: ['Measurement', 'Reported count', 'Denominator / sample'],
+    labels: ['Expanded distinct exit/output signatures', 'New distinct exit/output signatures'],
+    sample: 'The producer’s expanded observation sample',
+    approximation: 'Bar lengths are approximate; the table preserves exact reported counts.',
+  };
   const history = bound('validation-history', { jobId, runId, revisionId: null });
   const sourceSearch = bound('source-search-complete', selected);
   const owner = history.data.items[0];
@@ -141,7 +154,7 @@ export function auditFixtures(repo, buildId) {
       ] }] },
   ];
   return {
-    pages, controls, csrfToken: bootstrap.data.csrfToken, sourceBytes: bytes, sourceName: file.data.item.displayName, runId, runVersion: run.data.version, retriedRunId: retried.data.runId,
+    pages, controls, csrfToken: bootstrap.data.csrfToken, sourceBytes: bytes, sourceName: file.data.item.displayName, runId, runVersion: run.data.version, retriedRunId: retried.data.runId, chartExpected,
     respond(method, pathname, accept) {
       const route = routes.find(([pattern, , verb = 'GET']) => pattern.test(pathname) && (verb === method || (verb === 'GET' && method === 'HEAD')));
       return route ? route[1](accept) : error(404, 'NOT_FOUND');
@@ -158,6 +171,202 @@ export const auditViewports = [
   { name: 'zoom 200% of 1280x800', width: 640, height: 400, deviceScaleFactor: 2, mobile: false },
   { name: 'zoom 400% of 1280x800', width: 320, height: 200, deviceScaleFactor: 4, mobile: false },
 ];
+
+// Capture the approximate graphic and exact identity-bound table from the real packaged page.
+export const measureOutputSignatureChart = `(() => {
+  const text = element => (element?.innerText ?? element?.textContent ?? '').trim().replace(/\\s+/g, ' ');
+  const ids = value => (value ?? '').split(/\\s+/).filter(Boolean);
+  const chart = document.querySelector('.output-signature-chart [role="img"]');
+  const figure = document.querySelector('.output-signature-chart');
+  const region = document.querySelector('[aria-labelledby="output-signature-breadth-title"] .retained-case-table');
+  const table = region?.querySelector('table');
+  const rect = element => {
+    const box = element?.getBoundingClientRect();
+    return box ? { x: box.x, y: box.y, width: box.width, height: box.height, right: box.right, bottom: box.bottom } : null;
+  };
+  const visible = element => !!element && element.checkVisibility()
+    && getComputedStyle(element).visibility === 'visible' && getComputedStyle(element).display !== 'none';
+  const labelledBy = ids(chart?.getAttribute('aria-labelledby'));
+  const describedBy = ids(chart?.getAttribute('aria-describedby'));
+  return {
+    chartPresent: !!chart, chartRole: chart?.getAttribute('role') ?? null,
+    chartVisible: visible(chart), figurePresent: !!figure, figureVisible: visible(figure),
+    chartName: labelledBy.map(id => text(document.getElementById(id))).filter(Boolean).join(' '),
+    chartDescription: describedBy.map(id => text(document.getElementById(id))).filter(Boolean),
+    chartBounds: rect(figure),
+    chartSeries: [...(chart?.querySelectorAll('.output-signature-series') ?? [])].map(series => ({
+      label: text(series.querySelector('span')), bounds: rect(series), svgBounds: rect(series.querySelector('svg')),
+      barWidth: series.querySelector('rect')?.getAttribute('width') ?? null,
+    })),
+    binding: text(document.querySelector('#exploration-report-binding')),
+    region: region ? { name: region.getAttribute('aria-label'), focusable: region.tabIndex === 0, visible: visible(region),
+      bounds: rect(region), clientWidth: region.clientWidth, scrollWidth: region.scrollWidth } : null,
+    caption: text(table?.querySelector('caption')),
+    headers: [...(table?.querySelectorAll('thead th') ?? [])].map(text),
+    rows: [...(table?.querySelectorAll('tbody tr') ?? [])].map(row => [...row.querySelectorAll('th, td')].map(text)),
+  };
+})()`;
+
+// Chart evidence is captured from the actual rendered viewport only: no beyond-viewport capture,
+// no viewport widening and no stitching. A figure taller than the viewport is recorded as numbered,
+// contiguous viewport tiles. Each tile records geometry before and after the capture so a capture
+// that reflowed the page, was occluded (for example by a focused skip link) or produced a PNG of the
+// wrong size is rejected by assertAudit instead of being retained as proof.
+export const chartCaptureMaxTiles = 8;
+export const chartCaptureTolerancePx = 0.5;
+// Coverage is checked strictly: segments must abut exactly and every clip must contain its segment,
+// so a sub-pixel gap or overlap cannot hide inside the 0.5 px layout-stability tolerance.
+export const chartCoverageEpsilonPx = 1e-3;
+export const chartCaptureSets = [
+  { viewport: 'desktop 1440x900', prefix: 'attempt-evidence-output-signature-chart-desktop', deviceScaleFactor: 1 },
+  { viewport: 'zoom 400% of 1280x800', prefix: 'attempt-evidence-output-signature-chart-zoom-400', deviceScaleFactor: 4 },
+];
+const chartCaptureState = `(offset => {
+  const figure = document.querySelector('.output-signature-chart');
+  if (!figure) return null;
+  const root = document.scrollingElement;
+  const box = figure.getBoundingClientRect();
+  const viewWidth = root.clientWidth, viewHeight = root.clientHeight || innerHeight;
+  const pageLeft = visualViewport?.pageLeft ?? scrollX, pageTop = visualViewport?.pageTop ?? scrollY;
+  // Exact figure/viewport intersection for the segment starting at offset, in viewport CSS px.
+  const top = Math.max(0, box.top + offset), bottom = Math.min(viewHeight, box.bottom);
+  const left = Math.max(0, box.left), right = Math.min(viewWidth, box.right);
+  // Browsers snap fractional clips, so the capture clip is the smallest integer CSS rectangle that
+  // contains the intersection (floor left/top, ceil right/bottom), bounded to the viewport.
+  const clipLeft = Math.max(0, Math.floor(left)), clipTop = Math.max(0, Math.floor(top));
+  const clipRight = Math.min(viewWidth, Math.ceil(right)), clipBottom = Math.min(viewHeight, Math.ceil(bottom));
+  const describe = element => element ? element.tagName.toLowerCase() + (element.id ? '#' + element.id : '')
+    + (element.classList?.length ? '.' + [...element.classList].join('.') : '') : null;
+  // Probe one CSS pixel inside each corner of the figure/clip intersection, never in clip padding.
+  const hits = [[left + 1, top + 1], [right - 1, top + 1], [left + 1, bottom - 1], [right - 1, bottom - 1]].map(([x, y]) => {
+    const hit = document.elementFromPoint(x, y);
+    return { x, y, inFigure: !!hit && (hit === figure || figure.contains(hit)), hit: describe(hit) };
+  });
+  const skip = document.querySelector('.skip-link');
+  const skipBox = skip?.getBoundingClientRect();
+  const skipVisible = !!skip && skip.checkVisibility() && getComputedStyle(skip).visibility === 'visible'
+    && skipBox.width > 1 && skipBox.height > 1 && skipBox.right > 0 && skipBox.bottom > 0
+    && skipBox.left < viewWidth && skipBox.top < viewHeight;
+  return {
+    figure: { x: box.left, y: box.top, width: box.width, height: box.height },
+    rootClientWidth: viewWidth, rootClientHeight: viewHeight,
+    seriesHeights: [...figure.querySelectorAll('.output-signature-series')].map(series => series.getBoundingClientRect().height),
+    activeElement: describe(document.activeElement), skipFocused: !!skip && document.activeElement === skip, skipVisible,
+    segment: { start: top - box.top, end: bottom - box.top },
+    viewportClip: { x: clipLeft, y: clipTop, width: clipRight - clipLeft, height: clipBottom - clipTop },
+    pageClip: { x: clipLeft + pageLeft, y: clipTop + pageTop, width: clipRight - clipLeft, height: clipBottom - clipTop },
+    hits,
+  };
+})`;
+/** Blur focus, scroll so the figure segment starting at `offset` CSS px is at the viewport top, then measure. */
+export const prepareChartCaptureTile = offset => `/*chart-capture-tile*/(() => {
+  const figure = document.querySelector('.output-signature-chart');
+  if (!figure) return null;
+  const active = document.activeElement;
+  if (active && active !== document.body && typeof active.blur === 'function') active.blur();
+  const start = figure.getBoundingClientRect();
+  scrollTo({ left: scrollX, top: Math.floor(start.top + (visualViewport?.pageTop ?? scrollY) + ${Number(offset)}), behavior: 'instant' });
+  return ${chartCaptureState}(${Number(offset)});
+})()`;
+/** Re-measure without scrolling, immediately after the capture. */
+export const measureChartCaptureTile = offset => `/*chart-capture-after*/${chartCaptureState}(${Number(offset)})`;
+
+/** Width and height from a PNG IHDR chunk; pixel data is never inspected or changed. */
+export function pngDimensions(bytes) {
+  const buffer = Buffer.from(bytes ?? []);
+  const signature = '89504e470d0a1a0a';
+  if (buffer.length < 24 || buffer.subarray(0, 8).toString('hex') !== signature || buffer.subarray(12, 16).toString('latin1') !== 'IHDR')
+    return null;
+  return { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) };
+}
+
+/**
+ * Captures one chart evidence set. `evaluate(expression)` runs in the page; `shoot({ file, pageClip,
+ * viewportClip })` must take a viewport-only clipped PNG and return its bytes.
+ */
+export async function captureOutputSignatureChart({ set, evaluate, shoot }) {
+  const tiles = [];
+  let offset = 0, height = Infinity;
+  while (offset < height - chartCoverageEpsilonPx && tiles.length < chartCaptureMaxTiles) {
+    const before = await evaluate(prepareChartCaptureTile(offset));
+    if (!before) break;
+    height = before.figure.height;
+    const file = `${set.prefix}-tile-${tiles.length + 1}.png`;
+    const bytes = await shoot({ file, pageClip: before.pageClip, viewportClip: before.viewportClip });
+    const after = await evaluate(measureChartCaptureTile(offset));
+    tiles.push({ file, offset, before, after, png: pngDimensions(bytes) });
+    // The next tile starts exactly where this tile's actual figure intersection ended.
+    if (!(before.segment.end > offset + chartCoverageEpsilonPx)) break;
+    offset = before.segment.end;
+  }
+  return { viewport: set.viewport, prefix: set.prefix, deviceScaleFactor: set.deviceScaleFactor,
+    figure: tiles[0]?.before?.figure ?? null, tiles };
+}
+
+/** Every reason a chart capture set does not prove the intact, unobscured rendered figure. */
+export function chartCaptureFailures(capture, set) {
+  const failures = [];
+  const where = `chart capture ${set.viewport}`;
+  const near = (a, b) => Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) <= chartCaptureTolerancePx;
+  const exact = (a, b) => Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) <= chartCoverageEpsilonPx;
+  const eps = chartCoverageEpsilonPx;
+  if (!capture || capture.viewport !== set.viewport || capture.prefix !== set.prefix || capture.deviceScaleFactor !== set.deviceScaleFactor)
+    return [`${where}: missing or mislabelled capture manifest`];
+  const tiles = Array.isArray(capture.tiles) ? capture.tiles : [];
+  if (tiles.length < 1 || tiles.length > chartCaptureMaxTiles) failures.push(`${where}: ${tiles.length} tiles outside 1..${chartCaptureMaxTiles}`);
+  const first = tiles[0]?.before?.figure;
+  let covered = 0;
+  tiles.forEach((tile, index) => {
+    const at = `${where} tile ${index + 1}`;
+    const { before, after, png } = tile ?? {};
+    if (tile?.file !== `${set.prefix}-tile-${index + 1}.png`) failures.push(`${at}: unexpected file ${tile?.file}`);
+    if (!before || !after || !first) { failures.push(`${at}: missing before/after geometry`); return; }
+    for (const key of ['x', 'y', 'width', 'height'])
+      if (!near(before.figure?.[key], after.figure?.[key])) failures.push(`${at}: figure ${key} changed during capture`);
+    if (!near(before.figure.width, first.width) || !near(before.figure.height, first.height))
+      failures.push(`${at}: figure size differs from the first tile`);
+    if (!near(before.rootClientWidth, after.rootClientWidth) || !near(before.rootClientHeight, after.rootClientHeight))
+      failures.push(`${at}: viewport client size changed during capture`);
+    if (!Array.isArray(before.seriesHeights) || before.seriesHeights.length !== 2 || !Array.isArray(after.seriesHeights)
+      || after.seriesHeights.length !== before.seriesHeights.length
+      || before.seriesHeights.some((value, series) => !near(value, after.seriesHeights[series])))
+      failures.push(`${at}: chart series rows reflowed during capture`);
+    const clip = before.viewportClip;
+    const integral = clip && ['x', 'y', 'width', 'height'].every(key => Number.isInteger(clip[key]));
+    if (!integral || !(clip.width > 0) || !(clip.height > 0) || clip.x < 0 || clip.y < 0
+      || clip.x + clip.width > before.rootClientWidth || clip.y + clip.height > before.rootClientHeight)
+      failures.push(`${at}: clip is not an integer rectangle inside the rendered viewport`);
+    else {
+      const { figure, segment } = before;
+      const figureRight = figure.x + figure.width, clipRight = clip.x + clip.width, clipBottom = clip.y + clip.height;
+      // Outward cover with less than one CSS px of padding: floor(left), ceil(right).
+      if (!(clip.x <= figure.x + eps && clip.x > figure.x - 1 - eps && clipRight >= figureRight - eps && clipRight < figureRight + 1 + eps))
+        failures.push(`${at}: clip does not span the figure width`);
+      if (!exact(segment?.start, covered)) failures.push(`${at}: segment starts at ${segment?.start}, expected ${covered} (gap or overlap)`);
+      const segTop = figure.y + segment?.start, segBottom = figure.y + segment?.end;
+      // The segment must be the actual figure/viewport intersection from its start.
+      if (!(segment?.end > segment?.start) || segTop < -eps || !exact(segment.end, Math.min(figure.height, before.rootClientHeight - figure.y)))
+        failures.push(`${at}: segment is not the figure/viewport intersection`);
+      if (!(clip.y <= segTop + eps && clip.y > segTop - 1 - eps && clipBottom >= segBottom - eps
+        && (clipBottom < segBottom + 1 + eps)))
+        failures.push(`${at}: clip does not match its figure segment`);
+      if (!before.pageClip || !exact(before.pageClip.width, clip.width) || !exact(before.pageClip.height, clip.height))
+        failures.push(`${at}: page and viewport clips differ`);
+      // Integer CSS clip at an integer DPR: the PNG must be exactly clip*DPR device pixels.
+      const expected = { width: clip.width * set.deviceScaleFactor, height: clip.height * set.deviceScaleFactor };
+      if (!png || png.width !== expected.width || png.height !== expected.height)
+        failures.push(`${at}: PNG ${JSON.stringify(png)} does not match clip*DPR ${JSON.stringify(expected)}`);
+    }
+    covered = before.segment?.end;
+    for (const state of [before, after]) {
+      if (state.skipFocused || state.skipVisible) failures.push(`${at}: skip link is focused or visible over the capture`);
+      if (!Array.isArray(state.hits) || state.hits.length !== 4 || state.hits.some(hit => !hit.inFigure))
+        failures.push(`${at}: figure is occluded at a clip corner ${JSON.stringify(state.hits?.filter(hit => !hit.inFigure))}`);
+    }
+  });
+  if (first && !exact(covered, first.height)) failures.push(`${where}: tiles cover ${covered} of ${first.height} CSS px`);
+  return failures;
+}
 
 // Runs in the page. Regions that require two-dimensional reading may scroll; nothing else may
 // push the page wider than its viewport or hide an action off-screen.
@@ -404,7 +613,7 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
     { name: 'prefers-color-scheme', value: scheme }, { name: 'prefers-reduced-motion', value: 'reduce' }] }, tab.sessionId);
   const tab = await makeTarget();
   await intercept(tab);
-  const layout = []; const contrast = []; const focus = [];
+  const layout = []; const contrast = []; const focus = []; const chart = []; const chartScreenshots = []; const chartCaptures = [];
   for (const viewport of auditViewports) {
     await cdp.call('Emulation.setDeviceMetricsOverride', { width: viewport.width, height: viewport.height,
       deviceScaleFactor: viewport.deviceScaleFactor, mobile: viewport.mobile }, tab.sessionId);
@@ -419,10 +628,21 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
         await delay(50);
         const measured = await evaluate(tab, measurePage);
         layout.push({ page: page.name, viewport: viewport.name, scheme, ...measured });
+        if (page.name === 'attempt evidence') chart.push({ page: page.name, viewport: viewport.name, scheme,
+          viewportWidth: viewport.width, ...await evaluate(tab, measureOutputSignatureChart) });
         // Colour does not depend on width; measure it at the two layouts that restyle text.
         if (viewport.width === 1440 || viewport.width === 320 && viewport.deviceScaleFactor === 1) {
           contrast.push({ page: page.name, viewport: viewport.name, scheme, ...await evaluate(tab, measureContrast) });
         }
+      }
+      if (page.name === 'attempt evidence' && (viewport.name === 'desktop 1440x900' || viewport.name === 'zoom 400% of 1280x800')) {
+        await theme(tab, 'light');
+        await delay(50);
+        const set = chartCaptureSets.find(candidate => candidate.viewport === viewport.name);
+        const captured = await captureOutputSignatureChart({ set, evaluate: expression => evaluate(tab, expression),
+          shoot: ({ file, pageClip }) => capture(tab, file, { ...pageClip, scale: 1 }) });
+        chartCaptures.push(captured);
+        chartScreenshots.push(...captured.tiles.map(tile => tile.file));
       }
       // Visual evidence: every route at 400% zoom, and the #619 views at every supported size.
       if ((viewport.width === 320 && viewport.deviceScaleFactor === 4) || ['workspace', 'job detail', 'source directory', 'source file'].includes(page.name)) {
@@ -569,7 +789,8 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
     })`);
     feedback.push(timing.focused); data.push(timing.populated);
   }
-  return { fixtures: fixtures.pages.map(({ name, path }) => ({ name, path })), layout, contrast, focus, fulfilled, unmapped, interactions,
+  return { fixtures: fixtures.pages.map(({ name, path }) => ({ name, path })), chartExpected: fixtures.chartExpected,
+    layout, contrast, focus, chart, chartScreenshots, chartCaptures, fulfilled, unmapped, interactions,
     workers: { highlightedTokens: highlighted, targets: workers }, keyboard,
     timing: { coldLoad: summary(cold), routeFeedback: summary(feedback), routeData: summary(data), raw: { cold, feedback, data } } };
 }
@@ -602,9 +823,56 @@ export function assertAudit(audit, manifest, responses, origin, budgets = { cold
     return records.filter(entry => entry && typeof entry === 'object');
   };
   const layout = coverage('layout', expected(auditViewports));
+  const chart = coverage('chart', expected(auditViewports).filter(entry => entry.page === 'attempt evidence'));
   const contrast = coverage('contrast', expected(auditViewports.filter(viewport =>
     viewport.width === 1440 || viewport.width === 320 && viewport.deviceScaleFactor === 1)));
   const focus = coverage('focus', expected([null]));
+  const chartExpected = audit.chartExpected;
+  const same = (actual, expected) => JSON.stringify(actual) === JSON.stringify(expected);
+  const captures = Array.isArray(audit.chartCaptures) ? audit.chartCaptures : [];
+  if (captures.length !== chartCaptureSets.length) failures.push('chart: missing desktop or 400% packaged screenshot evidence');
+  chartCaptureSets.forEach((set, index) => failures.push(...chartCaptureFailures(captures[index], set)));
+  if (!same(audit.chartScreenshots, captures.flatMap(capture => (capture?.tiles ?? []).map(tile => tile?.file))) || !audit.chartScreenshots?.length)
+    failures.push('chart: screenshot list does not match the capture manifests');
+  for (const entry of chart) {
+    const where = `${entry.page} @ ${entry.viewport} (${entry.scheme})`;
+    const validRect = box => box && [box.x, box.y, box.width, box.height, box.right, box.bottom].every(Number.isFinite)
+      && box.width > 0 && box.height > 0;
+    if (!chartExpected || !entry.chartPresent || entry.chartRole !== 'img' || !entry.chartVisible || !entry.figurePresent
+      || !entry.figureVisible || entry.chartName !== chartExpected.chartName)
+      failures.push(`${where}: missing or misnamed accessible signature chart`);
+    if (!validRect(entry.chartBounds) || entry.chartBounds.x < -1 || entry.chartBounds.right > entry.viewportWidth + 1)
+      failures.push(`${where}: signature chart has invalid or off-viewport bounds`);
+    const expectedCounts = `Expanded distinct exit/output signatures: ${chartExpected?.counts.expanded}. New distinct exit/output signatures: ${chartExpected?.counts.added}.`;
+    if (!chartExpected || !entry.chartDescription?.includes(entry.binding)
+      || !entry.chartDescription.includes(expectedCounts)
+      || !entry.chartDescription.includes(chartExpected.tableName)
+      || !entry.chartDescription.includes(chartExpected.approximation))
+      failures.push(`${where}: chart description lost its report identity, exact counters, table or approximation note`);
+    if (!chartExpected || !entry.binding.includes(chartExpected.reportId) || !entry.binding.includes(chartExpected.jobId)
+      || !entry.binding.includes(chartExpected.runId) || !entry.binding.includes(chartExpected.revisionId))
+      failures.push(`${where}: chart is not bound to the expected report, job, attempt and revision`);
+    if (!chartExpected || entry.region?.name !== chartExpected.tableName || entry.region?.focusable !== true || entry.region?.visible !== true
+      || !validRect(entry.region?.bounds) || !Number.isFinite(entry.region?.clientWidth) || entry.region.clientWidth <= 0
+      || !Number.isFinite(entry.region?.scrollWidth) || entry.region.scrollWidth < entry.region.clientWidth)
+      failures.push(`${where}: exact table is not in a visible, named, keyboard-scrollable region`);
+    if (!chartExpected || entry.caption !== chartExpected.tableName || !same(entry.headers, chartExpected.headers)
+      || !same(entry.rows, [
+        [chartExpected.labels[0], chartExpected.counts.expanded, chartExpected.sample],
+        [chartExpected.labels[1], chartExpected.counts.added, chartExpected.counts.denominator],
+      ])) failures.push(`${where}: accessible table does not preserve exact producer counters and denominator`);
+    if (entry.chartSeries?.length !== 2 || entry.chartSeries.some(series => !series.label || !validRect(series.bounds)
+      || !validRect(series.svgBounds) || series.barWidth === null))
+      failures.push(`${where}: visual chart series are missing or not rendered`);
+    const expandedCount = Number(chartExpected?.counts.expanded);
+    const addedCount = Number(chartExpected?.counts.added);
+    const expectedBarWidths = [100, expandedCount > 0 ? addedCount / expandedCount * 100 : NaN];
+    const actualBarWidths = entry.chartSeries?.map(series => Number(series.barWidth)) ?? [];
+    if (!Number.isFinite(expandedCount) || !Number.isFinite(addedCount) || expandedCount <= 0
+      || actualBarWidths.length !== expectedBarWidths.length
+      || actualBarWidths.some((width, index) => !Number.isFinite(width) || Math.abs(width - expectedBarWidths[index]) > 0.1))
+      failures.push(`${where}: visual bar widths do not represent the reported counts`);
+  }
   for (const entry of layout) {
     const where = `${entry.page} @ ${entry.viewport} (${entry.scheme})`;
     if (entry.pageOverflowPx > 1) failures.push(`${where}: page scrolls horizontally by ${entry.pageOverflowPx}px: ${entry.overflow.join('; ')}`);
