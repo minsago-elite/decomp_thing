@@ -83,7 +83,7 @@ class AgentPathRule(
     }
 }
 
-class AgentAccessPolicy(
+class AgentAccessPolicy @JvmOverloads constructor(
     pathRules: Collection<AgentPathRule>,
     allowedOperations: Collection<AgentOperation> = pathRules.flatMap { it.operations }.toSet(),
     val mutationAuthority: AgentMutationAuthority? = null,
