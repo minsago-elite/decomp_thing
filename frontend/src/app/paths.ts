@@ -145,11 +145,11 @@ export function runPath(basePath: string, jobId: string, runId: string): string 
   return `${jobPath(basePath, jobId)}/runs/${runId}`;
 }
 
-export type RunView = 'overview' | 'activity' | 'evidence';
+export type RunView = 'overview' | 'activity' | 'evidence' | 'logs';
 
 /** Named, read-only views of the same immutable attempt identity. */
 export function runViewPath(basePath: string, jobId: string, runId: string, view: RunView): string {
-  if (view !== 'overview' && view !== 'activity' && view !== 'evidence') return invalidUrl();
+  if (view !== 'overview' && view !== 'activity' && view !== 'evidence' && view !== 'logs') return invalidUrl();
   const path = runPath(basePath, jobId, runId);
   return view === 'overview' ? path : `${path}/${view}`;
 }

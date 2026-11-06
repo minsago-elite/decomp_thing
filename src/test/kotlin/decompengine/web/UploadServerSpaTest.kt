@@ -33,7 +33,7 @@ class UploadServerSpaTest {
         )
         server.start()
         try {
-            for (path in listOf("/", "/jobs/" + "a".repeat(32) + "/runs", "/upload", "/jobs/" + "a".repeat(32) + "/runs/run_example_1", "/runtime", "/runtime?capability=fixture", "/jobs/" + "a".repeat(32))) {
+            for (path in listOf("/", "/jobs/" + "a".repeat(32) + "/runs", "/upload", "/jobs/" + "a".repeat(32) + "/runs/run_example_1", "/jobs/" + "a".repeat(32) + "/runs/run_example_1/logs", "/runtime", "/runtime?capability=fixture", "/jobs/" + "a".repeat(32))) {
                 val response = request(server, path)
                 assertEquals(200, response.statusCode())
                 assertTrue(response.body().contains("/assets/ui/assets/index-"))
@@ -79,6 +79,12 @@ class UploadServerSpaTest {
             val jobPath = "/workbench/jobs/" + "a".repeat(32)
             assertEquals(200, request(server, jobPath).statusCode())
             assertEquals(jobPath, request(server, "$jobPath/").headers().firstValue("Location").orElseThrow())
+            val logRoute = "$jobPath/runs/run_example_1/logs"
+            val logShell = request(server, logRoute)
+            assertEquals(200, logShell.statusCode())
+            assertTrue(logShell.body().contains("/workbench/assets/ui/assets/index-"))
+            assertSecurity(logShell, WEB_APPLICATION_CONTENT_SECURITY_POLICY)
+            assertEquals(logRoute, request(server, "$logRoute/").headers().firstValue("Location").orElseThrow())
             assertEquals(404, request(server, "/workbench/jobs/%61" + "a".repeat(31)).statusCode())
             assertEquals(404, request(server, "/runtime").statusCode())
             assertEquals(404, request(server, "/w%6Frkbench/runtime").statusCode())

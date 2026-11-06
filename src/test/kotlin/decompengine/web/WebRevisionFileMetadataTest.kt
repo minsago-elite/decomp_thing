@@ -121,12 +121,12 @@ class WebRevisionFileMetadataTest {
         // These are string-only classifier decisions; no server or browser is constructed.
         for (prefix in listOf("/", "/nested/")) {
             val selected = "${prefix}jobs/$jobId/runs/$runId"
-            for (view in listOf("activity", "evidence")) {
+            for (view in listOf("activity", "evidence", "logs")) {
                 val path = "$selected/$view"
                 assertEquals(path, canonicalSpaDocumentPath(prefix, path))
                 assertEquals(path, canonicalSpaDocumentPath(prefix, "$path/"))
             }
-            for (suffix in listOf("unknown", "Activity", "%61ctivity", "evidence/extra", "activity/../private", "evidence//")) {
+            for (suffix in listOf("unknown", "Activity", "%61ctivity", "evidence/extra", "activity/../private", "evidence//", "logs/build", "Logs")) {
                 assertNull(canonicalSpaDocumentPath(prefix, "$selected/$suffix"))
             }
         }
