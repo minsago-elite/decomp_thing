@@ -21,7 +21,10 @@ internal data class WorkspaceChangeSet(
 )
 
 internal object WorkspaceChangeSetClassifier {
-    fun classify(changes: Collection<WorkspaceSnapshotChange>): WorkspaceChangeSet {
+    fun classify(
+        changes: Collection<WorkspaceSnapshotChange>,
+        checkpoint: () -> Unit = {},
+    ): WorkspaceChangeSet {
         val ordered = changes.sortedWith(
             compareBy<WorkspaceSnapshotChange>({ it.source.rootId }, { it.source.relativePath }),
         )
@@ -29,38 +32,50 @@ internal object WorkspaceChangeSetClassifier {
             "workspace change set contains duplicate paths"
         }
 
-        val deletedByContent = ordered.asSequence()
-            .filter {
-                it.kind == AgentFileChangeKind.DELETED && it.beforeSha256 != null && it.beforeSizeBytes != null
+        val deletedByContent = mutableMapOf<ContentIdentity, MutableList<WorkspaceSnapshotChange>>()
+        val createdByContent = mutableMapOf<ContentIdentity, MutableList<WorkspaceSnapshotChange>>()
+        ordered.forEachIndexed { index, change ->
+            if (index % CHECKPOINT_INTERVAL == 0) checkpoint()
+            when (change.kind) {
+                AgentFileChangeKind.DELETED -> {
+                    val sha256 = change.beforeSha256
+                    val size = change.beforeSizeBytes
+                    if (sha256 != null && size != null) {
+                        deletedByContent.getOrPut(ContentIdentity(sha256, size), ::mutableListOf).add(change)
+                    }
+                }
+                AgentFileChangeKind.CREATED -> {
+                    val sha256 = change.afterSha256
+                    val size = change.afterSizeBytes
+                    if (sha256 != null && size != null) {
+                        createdByContent.getOrPut(ContentIdentity(sha256, size), ::mutableListOf).add(change)
+                    }
+                }
+                AgentFileChangeKind.MODIFIED -> Unit
             }
-            .groupBy { ContentIdentity(it.beforeSha256!!, it.beforeSizeBytes!!) }
-        val createdByContent = ordered.asSequence()
-            .filter {
-                it.kind == AgentFileChangeKind.CREATED && it.afterSha256 != null && it.afterSizeBytes != null
-            }
-            .groupBy { ContentIdentity(it.afterSha256!!, it.afterSizeBytes!!) }
+        }
 
-        val candidates = deletedByContent.keys.intersect(createdByContent.keys)
-            .asSequence()
-            .filter { it.sizeBytes > 0 }
-            .filter { identity ->
-                deletedByContent.getValue(identity).size == 1 && createdByContent.getValue(identity).size == 1
+        val candidates = mutableListOf<AgentFileMoveCandidate>()
+        deletedByContent.entries.sortedWith(compareBy({ it.key.sha256 }, { it.key.sizeBytes }))
+            .forEachIndexed { index, (identity, deleted) ->
+                if (index % CHECKPOINT_INTERVAL == 0) checkpoint()
+                val created = createdByContent[identity]
+                if (identity.sizeBytes > 0 && deleted.size == 1 && created?.size == 1) {
+                    candidates += AgentFileMoveCandidate(
+                        sourcePath = deleted.single().source,
+                        destinationPath = created.single().source,
+                        contentSha256 = identity.sha256,
+                        sizeBytes = identity.sizeBytes,
+                    )
+                }
             }
-            .map { identity ->
-                AgentFileMoveCandidate(
-                    sourcePath = deletedByContent.getValue(identity).single().source,
-                    destinationPath = createdByContent.getValue(identity).single().source,
-                    contentSha256 = identity.sha256,
-                    sizeBytes = identity.sizeBytes,
-                )
-            }
-            .sortedWith(compareBy(
-                { it.sourcePath.rootId }, { it.sourcePath.relativePath },
-                { it.destinationPath.rootId }, { it.destinationPath.relativePath },
-            ))
-            .toList()
+        candidates.sortWith(compareBy(
+            { it.sourcePath.rootId }, { it.sourcePath.relativePath },
+            { it.destinationPath.rootId }, { it.destinationPath.relativePath },
+        ))
 
-        val result = ordered.map { change ->
+        val result = ordered.mapIndexed { index, change ->
+            if (index % CHECKPOINT_INTERVAL == 0) checkpoint()
             AgentFileChange(
                 path = change.source,
                 kind = change.kind,
@@ -72,5 +87,6 @@ internal object WorkspaceChangeSetClassifier {
         return WorkspaceChangeSet(result, candidates)
     }
 
+    private const val CHECKPOINT_INTERVAL = 64
     private data class ContentIdentity(val sha256: String, val sizeBytes: Long)
 }

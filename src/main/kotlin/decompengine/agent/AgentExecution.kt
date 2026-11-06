@@ -448,7 +448,12 @@ class AgentExecutionResult(
     moveCandidates: Collection<AgentFileMoveCandidate> = emptyList(),
 ) {
     val changes: List<AgentFileChange> = immutableList(changes)
-    val moveCandidates: List<AgentFileMoveCandidate> = immutableList(moveCandidates)
+    val moveCandidates: List<AgentFileMoveCandidate> = immutableList(
+        moveCandidates.sortedWith(compareBy(
+            { it.sourcePath.rootId }, { it.sourcePath.relativePath },
+            { it.destinationPath.rootId }, { it.destinationPath.relativePath },
+        )),
+    )
 
     init {
         require(this.changes.map { it.path }.distinct().size == this.changes.size) {
@@ -457,19 +462,20 @@ class AgentExecutionResult(
         require(stopReason != AgentStopReason.NO_CHANGES || this.changes.isEmpty()) {
             "a no-change result cannot report file changes"
         }
-        require(this.moveCandidates.map { it.sourcePath }.distinct().size == this.moveCandidates.size &&
-            this.moveCandidates.map { it.destinationPath }.distinct().size == this.moveCandidates.size) {
+        val candidateEndpoints = this.moveCandidates.flatMap { listOf(it.sourcePath, it.destinationPath) }
+        require(candidateEndpoints.distinct().size == candidateEndpoints.size) {
             "move candidates must not reuse endpoints"
         }
+        val changesByPath = this.changes.associateBy { it.path }
         this.moveCandidates.forEach { move ->
-            require(this.changes.any {
-                it.path == move.sourcePath && it.kind == AgentFileChangeKind.DELETED &&
+            require(changesByPath[move.sourcePath]?.let {
+                it.kind == AgentFileChangeKind.DELETED &&
                     it.beforeSha256 == move.contentSha256 && it.afterSha256 == null
-            }) { "move candidate source must remain an explicit matching deletion" }
-            require(this.changes.any {
-                it.path == move.destinationPath && it.kind == AgentFileChangeKind.CREATED &&
+            } == true) { "move candidate source must remain an explicit matching deletion" }
+            require(changesByPath[move.destinationPath]?.let {
+                it.kind == AgentFileChangeKind.CREATED &&
                     it.beforeSha256 == null && it.afterSha256 == move.contentSha256 && it.sizeBytes == move.sizeBytes
-            }) { "move candidate destination must remain an explicit matching creation" }
+            } == true) { "move candidate destination must remain an explicit matching creation" }
         }
     }
 }
