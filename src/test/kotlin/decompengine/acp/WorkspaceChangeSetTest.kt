@@ -74,6 +74,24 @@ class WorkspaceChangeSetTest {
         }
     }
 
+    @Test
+    fun `large classifications periodically observe cancellation and deadline checkpoints`() {
+        val changes = (0 until 130).flatMap { index ->
+            val sha = index.toString(16).padStart(64, '0')
+            listOf(
+                deletion(path("src/old-$index"), sha, index + 1L),
+                creation(path("src/new-$index"), sha, index + 1L),
+            )
+        }
+        var checkpoints = 0
+
+        val changeSet = WorkspaceChangeSetClassifier.classify(changes) { checkpoints++ }
+
+        assertEquals(260, changeSet.changes.size)
+        assertEquals(130, changeSet.moveCandidates.size)
+        assertTrue(checkpoints >= 9, "expected checkpoints across indexing, pairing and result construction")
+    }
+
     private fun path(relative: String) = AgentWorkspacePath("project", relative)
 
     private fun deletion(path: AgentWorkspacePath, sha: String, size: Long) =

@@ -3318,7 +3318,7 @@ internal class WorkspaceSnapshot private constructor(
                     afterSizeBytes = afterState?.size,
                 )
             }
-            .let(WorkspaceChangeSetClassifier::classify)
+            .let { WorkspaceChangeSetClassifier.classify(it, budget::checkpoint) }
     }
 
     companion object {
