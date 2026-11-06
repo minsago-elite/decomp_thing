@@ -447,16 +447,21 @@ class ActualAptSignatureControlsTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        base = ROOT / "build/gcc-snapshot-metadata-test-tmp"
+        base = ROOT / "build"
         base.mkdir(parents=True, exist_ok=True)
-        cls.temp = tempfile.TemporaryDirectory(prefix="apt-signature-", dir=base)
+        cls.temp = tempfile.TemporaryDirectory(prefix="g", dir=base)
         cls.root = Path(cls.temp.name)
         cls.root.chmod(0o755)
         cls.homes = {}
         cls.keyrings = {}
-        for name in ("trusted", "unrelated"):
-            home = cls.root / ("gnupg-" + name)
+        for name, home_leaf in (("trusted", "t"), ("unrelated", "u")):
+            home = cls.root / home_leaf
             home.mkdir(mode=0o700)
+            # Linux sun_path is 108 bytes including its terminating NUL. Keep
+            # GnuPG's longest socket name strictly below that limit.
+            socket_path = os.fsencode(home / "S.gpg-agent.extra")
+            if len(socket_path) >= 108:
+                raise RuntimeError("GnuPG fixture socket path exceeds the Unix-domain limit")
             cls.homes[name] = home
             subprocess.run([
                 "gpg", "--batch", "--passphrase", "", "--homedir", str(home),
