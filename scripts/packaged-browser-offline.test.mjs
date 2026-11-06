@@ -18,6 +18,12 @@ test('offline history seed uses server-valid opaque workflow versions and a vali
   try {
     const fixture = await seedHistory(join(parent, 'fixture'));
     const state = JSON.parse(fixture.retained['workflow-state.json']);
+    const job = JSON.parse(fixture.retained['job.json']);
+    assert.deepEqual(job.metadata, {
+      format: 'ELF64', endianness: 'little', elf_version: 1, os_abi: 'System V', object_type: 'executable',
+      machine: 'x86-64', entry_point: 0, elf_header_size: 64, program_header_count: 0,
+      section_header_count: 0, section_name_table_index: 0,
+    });
     assert.match(state.version, /^version_[a-f0-9]{32}$/);
     for (const attempt of state.attempts) assert.match(attempt.version, /^version_[a-f0-9]{32}$/);
     const latest = state.attempts.at(-1);
@@ -29,6 +35,23 @@ test('offline history seed uses server-valid opaque workflow versions and a vali
     assert.equal(latest.terminalReason, 'FAILED');
   } finally {
     await fs.rm(parent, { recursive: true, force: true });
+  }
+});
+
+test('offline nullable DOM text reads are parenthesized before boolean composition', async () => {
+  const driver = await fs.readFile(new URL('./check-packaged-web-browser.mjs', import.meta.url), 'utf8');
+  for (const name of ['notice', 'attemptStatus']) {
+    const match = driver.match(new RegExp('const ' + name + ' = `([^\\n]+)`;'));
+    assert.ok(match, `missing ${name} expression`);
+    const expression = match[1];
+    assert.ok(expression.startsWith('(') && expression.endsWith(')'), `${name} nullish expression needs grouping`);
+    const compilableExpression = name === 'attemptStatus'
+      ? '(document.querySelector("section [role=status]")?.textContent ?? null)'
+      : expression;
+    for (const predicate of [
+      `navigator.onLine === false && ${compilableExpression} === "expected"`,
+      `navigator.onLine === true && ${compilableExpression} === "expected"`,
+    ]) assert.doesNotThrow(() => new Function(`return (${predicate});`));
   }
 });
 

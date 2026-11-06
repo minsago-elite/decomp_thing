@@ -542,10 +542,10 @@ async function qualifyOfflineMode({ origin, manifest, fixture }) {
     assert.ok(cookie, 'Expected the HttpOnly local session cookie');
     return { generation: createHash('sha256').update(cookie.value).digest('hex').slice(0, 16), httpOnly: cookie.httpOnly };
   };
-  const notice = `document.querySelector('.connection-notice h2')?.textContent ?? null`;
+  const notice = `(document.querySelector('.connection-notice h2')?.textContent ?? null)`;
   const retryButton = `[...document.querySelectorAll('button')].find((button) => button.textContent === 'Retry as a new attempt')`;
   const readActionsButton = `[...document.querySelectorAll('button')].find((button) => button.textContent === 'Read available actions')`;
-  const attemptStatus = `document.querySelector(${JSON.stringify(`section[aria-labelledby="attempt-controls-title-${runId}"] [role="status"]`)})?.textContent ?? null`;
+  const attemptStatus = `(document.querySelector(${JSON.stringify(`section[aria-labelledby="attempt-controls-title-${runId}"] [role="status"]`)})?.textContent ?? null)`;
   const stores = { cacheNames: new Set(), checkedPhases: [], registrations: 0, controlled: false, localEntries: 0, sessionEntries: 0, indexedDatabases: 0 };
   const recordStores = async () => {
     const observed = await browserStores();
