@@ -1,0 +1,20 @@
+{
+  "allowInterruption": false,
+  "command": [
+    "/usr/bin/java",
+    "-version"
+  ],
+  "environment": {
+    "LANG": "C.UTF-8",
+    "LC_ALL": "C.UTF-8",
+    "TZ": "UTC"
+  },
+  "maximumStartWaitSeconds": 10,
+  "maximumStderrBytes": 1024,
+  "maximumStdoutBytes": 1024,
+  "maximumWallSeconds": 10,
+  "nonce": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "provider": "kotlin-contained-command-request-v4",
+  "runDirectory": "/srv/contained/control-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "schemaVersion": 4
+}

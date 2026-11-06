@@ -1,0 +1,202 @@
+# Contained module compilation
+
+`ContainedModuleCompilationPolicy` compiles one exact module before current source
+acceptance. It is selected by the generated-C Make and Ninja adapters. The policy
+accepts the registered descriptors and their admitted budget variants. The complete
+selected descriptor is bound through the request and proof; only budgets may vary.
+Compiler flags, executable wrappers, layouts, and adapter configuration stay fixed.
+The caller-selected host policy admits the budgets before planning; the compiler
+applies its own fixed ceilings to the requested compilation limits.
+
+The compiler sees a private snapshot containing the candidate `.c` file and declared
+public/private `.h` interfaces. Other implementations and reports are absent. Snapshot
+members have bounded stable reads, single-link regular-file checks, a sorted manifest,
+and exact byte hashes. Undeclared files in the project compiler search roots are
+rejected, including shadow system headers and precompiled-header sidecars. The search
+inventory and bytes are checked again before START, after execution, and when the
+live permit is consumed. No header or prior-source read permission is added to ACP.
+
+The operator supplies `GENERATED_C_MODULE_COMPILE_CONFIG_FILE`, or a root-owned
+`GENERATED_C_MODULE_COMPILE_CONFIG_DIRECTORY` containing the fixed
+`generated-c-make-v1.json` and `generated-c-ninja-v1.json` names. The two selectors
+cannot be combined. Each closed configuration identifies one built-in profile, pins
+Java and boundary helpers, worker JARs, the compiler executable, finite compiler/header
+runtime directories, the user manager's expected cgroup, and a dedicated bounded ext4
+scratch policy. Runtime/configuration ancestors must be canonical and root-owned.
+The application does not install or acquire additional compiler authority implicitly.
+
+The current worker limits compilation to 30 seconds, 2 MiB total retained diagnostics,
+4096 snapshot files, 16 MiB per file, 128 MiB total input, and a 64 MiB object. The outer
+scope applies 512 MiB memory, 128 tasks, CPU/wall and file limits, denied network, and
+finite scratch. Requested profile limits can only narrow the worker limits. The
+operation deadline includes preparation, execution, capture, and cleanup. Its whole-second
+limit rounds down, never up; budgets below two seconds fail closed. Missing
+runtime, missing enforcement, or uncertain cleanup cannot produce accepted evidence.
+
+A nondumpable Java worker derives the command from the registered profile and invokes
+the pinned compiler through the native bounded process helper. Host root can appear as
+an unmapped foreign UID inside the user namespace; that UID is never treated as trusted
+root. The controller keeps its original runtime/input authentication and streams at
+most 64 MiB of pinned compiler bytes into its private host request directory, never
+into the **noexec** leased scratch. Both the original and its owner-read/execute-only,
+single-linked copy are authenticated and retained as stable inputs. An explicit
+read-only executable alias overlays the copy at the original runtime compiler path. The
+Landlock trampoline uses the same handoff as a second alias. Each alias must join two
+identical pinned input records, target an existing host-root executable inside a same-path
+runtime tree, and retain authenticated terminal-resource enforcement. One-alias calls retain
+the `kotlin-lease-contained-command-runtime-owned-executable-v1` provider; module compiler
+calls bind both ordered aliases under the separate
+`kotlin-lease-contained-command-runtime-owned-executable-v2` provider. Calls without aliases
+keep their original runtime bytes.
+The worker acquires the ordinary `StableControlFile` kernel lease on the exact owned
+inode at the original compiler path through result capture. Scratch remains noexec,
+no writable executable mount is added, and no arbitrary foreign owner is trusted.
+
+Live compiler requests use schema v4 and pin a root-owned native Landlock trampoline,
+its digest, the exact mounted runtime read roots, and the selected GCC internal include
+directory. The backend adds that authenticated sandbox destination as a fixed `-isystem`
+argument, so relocated GCC can find its own `stddef.h` without widening filesystem access.
+Runtime configuration and proof v4 bind that mapping; schemas v1 and v2 retain their
+historical command and bytes. Historical request bytes remain
+decodable, but the worker cannot execute them and historical proofs cannot gain live
+authority from them. The trampoline checks every rule target's type and device/inode,
+requires Landlock ABI 3 or newer, applies `no_new_privs`, enforces the policy, installs
+the process restrictions, and then `execve`s the compiler in the same bounded session.
+Any setup failure stops before compiler execution.
+
+Live runtime declarations use schema 4. They retain the interpreter's reviewed machine,
+canonical host source path, exact mapped sandbox path, and SHA-256 digest. The runtime
+configuration commitment includes that record; the request's execute-file list must
+match its retained mapping. Archive parsing derives the mapping only from recorded
+system-library mounts and never discovers the auditing host's architecture or loader.
+Live loading still resolves the reviewed host loader, checks its machine/path/digest,
+and revalidates the interpreter before launch. A recorded mapping alone grants no live
+execution authority.
+
+Historical schema-1 declarations and requests keep their original interpretation.
+Earlier schema-2 declarations do not retain interpreter authority, so request-2 proofs
+using them fail closed rather than borrowing the auditing host's loader. Adding fields
+from the current host is not an archive migration or a substitute for authentication.
+The composed schema-4 contract requires fresh configured qualification; earlier
+schema-2 or schema-3 qualification results do not qualify this contract.
+
+Runtime schema 3 retains the parent interpreter-record meaning for historical replay.
+The unlanded include-only runtime schema 3 and compiler request/proof schema 3 refuse
+explicitly. Current proof 4 requires request 4 and runtime 4; historical parsing cannot
+issue live authority. The abstract checkpoint command remains profile-only; the internal
+include destination is bound only through concrete request argv and runtime/proof data.
+
+The compiler can read each authenticated snapshot file individually; snapshot
+directories grant enumeration only. Pinned runtime directories grant read access, while
+execute permission is limited to the compiler tool directory containing the pinned
+compiler and its configured compiler subprograms, plus the exact pinned ELF interpreter
+file. Reports, request files, the worker
+runtime and procfs are not readable. The pre-created
+single-linked `module.o` inode is writable and truncatable; it receives a narrow read
+exception because GNU `as` opens this output read/write. The compiler receives that
+inode on descriptor 3. Scratch permits creation, writing and removal but no file reads
+or execution, including reopening a file the compiler created itself. The v2 command
+adds fixed `-pipe` and writes to `/proc/self/fd/3`; there is no readable-temporary
+fallback. Existing source-policy checks, leases, namespace monitoring, object checks,
+resource limits and cleanup remain in force.
+
+Host staging must itself support execution or the attempt fails closed; the bounded
+staging file is removed only before launch or after proven process/scope absence.
+The module-only authenticated FD policy admits soft=hard NOFILE 7678; generic
+contained commands retain 512. Both START observations, descriptor count and numeric
+range must agree with the admitted finite policy. No old proof recreates a live permit. The worker retains the raw
+exit or signal, bounded diagnostic hashes, and a regular ELF `ET_REL` object's bytes
+and hash. Timeout/output failures have no claimed raw exit status; empty retained logs
+in those cases mean no captured bytes were available, not that nothing was emitted.
+
+The outer keeper authenticates its request, exact child outcome, and hashes computed
+from actual stdout/stderr pipe bytes. Replacing a writable capture file with an
+equal-length result cannot satisfy those hashes. Strict request version 3 uses protocol
+version 2; older request versions preserve their original protocol bytes. A strict
+scope records all `pids.events` and `memory.events` keys before START and again while
+frozen with only the original authenticated keeper processes. Missing or changed keys,
+regressing counters, or any enforcing limit event fail closed, including a handled task
+refusal followed by exit zero. Unit, cgroup, and process absence are proven before
+bounded descriptor-owned scratch removal and lease release.
+
+Checkpoint schema 7 retains the exact worker request/result, runtime declaration,
+keeper request/attachment/execution, disk lease, and cleanup bindings. These are
+historical evidence when reopened. Only the live coordinator can issue an acceptance
+permit after cleanup. Application-owned instance admission rejects a constructor-created
+clone even with identical proof bytes; the permit rechecks the candidate/header snapshot
+before use. Cached source
+and ACP evidence are reused only after current identity checks and a fresh contained
+compilation. Compiler-only retries do not rewrite an already accepted ACP session as
+rejected. Failed compilation, unexpected runtime errors, and cancellation preserve a
+previous accepted source, checkpoint, receipt, and manifest.
+
+The intended proof is module-object compilation against the recorded closure, subject
+to the unresolved integrity and qualification blockers below. It does not prove
+whole-project linking, entrypoint correctness, recovered ABI truth, behavior, production
+ACP execution, or release readiness. The public generated-C repair validator remains
+behind its separate qualification guard.
+
+The reusable `Contained module compilation` Actions workflow is a prerequisite of
+the always-running ACP required gate on the same revision. The ACP gate explicitly fails
+when that prerequisite fails or is skipped. Its original Make/Ninja archive positive
+runs in the compiler lane; every other ACP control retains the no-skip contract.
+The workflow uses the existing installed Java,
+generated-C runtime, and ext4 scratch helpers. New project artifacts and reports remain
+under `build/module-compilation-qualification` and `build/reports`. Its required tests
+exercise valid compilation, native off-snapshot and scratch read refusal, source/header
+binding, rejection rollback, real compiler cancellation, historical replay separation,
+and a handled task-limit refusal. A fresh compiled-method inventory must exactly match the XML class/method results,
+with no omitted, skipped, duplicated, failed, or cached controls. Missing
+configured authority fails the lane. Local protocol and
+worker tests are useful implementation evidence; they do not replace that hosted run.
+The required inventory also includes a direct worker user-namespace regression for
+both built-ins: an actual host-root compiler inode is materialized before namespace
+entry, its owned snapshot overlays the staged toolchain's compiler, and the test records
+both namespace-visible UIDs and UID/GID maps. Compilation must succeed through the
+owned-copy handoff, without changing the compiler command. A second required regression
+bind-remounts output noexec inside an isolated mount namespace and uses a different UID
+map; both built-ins must still compile. Unaliased foreign compilers and digest-substituted
+executables refuse. The configured exact-snapshot positive separately asserts root
+ownership and the runtime compiler pin before its real contained invocation.
+These controls do not claim complete #1827 qualification until the hosted lane passes.
+
+## Outstanding acceptance blockers
+
+Issue #738 remains open. The worker now supplements its retained per-input kernel leases
+with a fail-closed namespace mutation history, installed before inventory/pinning and held
+through object/log capture. It watches every snapshot directory and the selected path in
+every ancestor, not only declared filenames. Transient headers, shadow headers, precompiled
+sidecars, ancestor replacement, lost/overflowed event history and depth-truncated trees
+refuse admission even when endpoint inventories match. The monitor uses one close-on-exec
+descriptor, synchronous bounded kernel-queue drains and directory identity revalidation;
+it never replaces byte authentication or existing file leases.
+
+Local filesystem controls exercise actual Linux events and refusal/descriptor ownership.
+Synchronized worker fixtures add, consume and remove an undeclared header, a shadow header
+and a valid precompiled sidecar around successful compiler execution. These diagnostics
+have no keeper receipt or acceptance authority. The namespace implementation and those
+worker fixtures still require qualification through the actual configured Make/Ninja
+routes; local success is not a hosted complete-closure guarantee. Empty headers still
+lack a retained kernel lease, and complete-set terminal-validation cutoff qualification
+remains separate. The read-only sandbox bind alone does not exclude host-side writes.
+
+This is snapshot-namespace protection, not mediation of every compiler read. In particular,
+source can name writable off-snapshot paths with relative includes. A local synchronized
+worker witness consumed a transient header in its output directory and still returned
+`compiled-object`; the snapshot monitor correctly does not reject ordinary sibling output
+writes. The production layout likewise has writable reports outside `state/snapshot`.
+Closing #738 requires a fail-closed complete compiler-input boundary, including these
+non-snapshot search locations, and actual configured qualification. Do not treat the
+snapshot regression positives as resolution of that broader P1 acceptance-integrity gap.
+
+The current shared NOFILE 512 policy also cannot retain every nonempty input in an
+otherwise admitted large snapshot. Issue #1786 and PR #1800 own the separately versioned,
+authenticated module-only finite descriptor correction and configured Make/Ninja scale
+qualification; their implementation is incorporated here, but fresh configured qualification remains outstanding. The advertised 4096-input ceiling
+is not evidence that the current launcher can execute that population. Do not drop
+inputs, raise generic worker limits or infer acceptance from diagnostic worker success.
+
+The lightweight preflight regression runs an isolated Java/JUnit fixture through the
+real Gradle init script: fresh execution must reach a test, and both existing XML and
+an empty preexisting report directory must refuse before Test output preparation.
+It checks task ordering only, not native compiler containment or live admission.

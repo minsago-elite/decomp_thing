@@ -5,23 +5,46 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
-import kotlin.test.assertTrue
+import kotlin.test.assertSame
 
 class ModuleCompilationPolicyTest {
     @Test
-    fun `registered profile selects one compiler policy and preserves configured driver`() {
-        val base = GeneratedCMakeReconstructionProfile.descriptor
-        val selected = ReconstructionProfile(base.schemaVersion, base.id, base.layout, base.budgets,
-            base.adapterConfiguration + ("compiler-driver" to listOf("/usr/bin/cc")))
-        val policy = ReconstructionCompilationPolicies.resolve(selected)
-        assertEquals("generated-c-module-validation-v2", policy.id)
-        assertEquals("/usr/bin/cc", policy.command(selected, "src/modules/sample.c").first())
-        val project = Files.createTempDirectory("selected-compiler-policy-")
-        val source = project.resolve("sample.c")
-        Files.writeString(source, "int sample(void) { return 7; }\n")
-        val result = policy.validate(project, "sample.c", selected)
-        assertTrue(result.passed)
-        assertEquals(sha256(Files.readAllBytes(source)), result.sourceSha256)
+    fun `registered profiles select contained compilation and retain explicit historical commands`() {
+        for (profile in listOf(GeneratedCMakeReconstructionProfile.descriptor, GeneratedCNinjaReconstructionProfile.descriptor)) {
+            val policy = ReconstructionCompilationPolicies.resolve(profile)
+            assertSame(ContainedModuleCompilationPolicy, policy)
+            assertEquals("generated-c-contained-module-compilation-v1", policy.id)
+            assertEquals(listOf("authenticated-profile-compiler") + profile.adapterConfiguration.getValue("compiler-flags") +
+                listOf("-c", "src/modules/sample.c", "-o", "<owned-module-object>"),
+                policy.command(profile, "src/modules/sample.c"))
+            assertEquals("generated-c-module-validation-v2", policy.fingerprintIdentity(6))
+            assertEquals(policy.id, policy.fingerprintIdentity(7))
+            assertEquals(GeneratedCModuleValidation.command(profile, "src/modules/sample.c"),
+                policy.commandForCheckpoint(profile, "src/modules/sample.c", 6))
+            assertFailsWith<IllegalArgumentException> { policy.command(profile, "sample.c") }
+        }
+    }
+
+    @Test
+    fun `contained policy refuses caller compiler overrides before runtime or filesystem access`() {
+        for (base in listOf(GeneratedCMakeReconstructionProfile.descriptor, GeneratedCNinjaReconstructionProfile.descriptor)) {
+            val selected = ReconstructionProfile(base.schemaVersion, base.id, base.layout, base.budgets,
+                base.adapterConfiguration + ("compiler-driver" to listOf("/usr/bin/cc")))
+            val policy = ReconstructionCompilationPolicies.resolve(selected)
+            val parent = Files.createTempDirectory("selected-compiler-policy-")
+            try {
+                val project = parent.resolve("must-not-be-created")
+                assertEquals("module compiler profile may vary only registered reconstruction budgets",
+                    assertFailsWith<IllegalArgumentException> { policy.requireAvailable(selected) }.message)
+                assertEquals("module compiler profile may vary only registered reconstruction budgets",
+                    assertFailsWith<IllegalArgumentException> {
+                        policy.validate(project, "src/modules/sample.c", selected)
+                    }.message)
+                assertFalse(Files.exists(project))
+            } finally {
+                parent.toFile().deleteRecursively()
+            }
+        }
     }
 
     @Test

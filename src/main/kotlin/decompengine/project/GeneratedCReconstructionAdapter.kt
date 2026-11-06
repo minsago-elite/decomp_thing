@@ -11,7 +11,7 @@ internal object GeneratedCReconstructionAdapter : ReconstructionAdapter {
     override fun repairIndexProfile(profile: ReconstructionProfile): RepairIndexProfile =
         GeneratedCRepairIndexProfile.forProfile(profile)
     override val diagnostics: ToolchainDiagnosticPolicy = GeneratedCToolchainDiagnostics("gnu-make", "Make")
-    override val compilation: ModuleCompilationPolicy = GeneratedCModuleValidation
+    override val compilation: ModuleCompilationPolicy = ContainedModuleCompilationPolicy
     override val archiveBuild: ArchiveBuildPolicy = GeneratedCArchiveBuildPolicy
     override val behaviorBuild: BehaviorBuildPolicy = GeneratedCBehaviorBuildPolicy
     override val mvpPatchCompiler: MvpPatchCompilerPolicy = GeneratedCMvpPatchCompilerPolicy

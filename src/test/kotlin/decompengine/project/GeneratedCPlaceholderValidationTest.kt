@@ -1,5 +1,6 @@
 package decompengine.project
 
+import kotlinx.serialization.json.JsonNull
 import decompengine.agent.AgentWorkflowPhase
 import decompengine.agent.AgentWorkflowProgress
 import java.nio.file.Files
@@ -19,7 +20,19 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
+import org.junit.jupiter.api.BeforeEach
+import org.junit.jupiter.api.Tag
+import org.junit.jupiter.api.TestInfo
+import org.junit.jupiter.api.parallel.Execution
+import org.junit.jupiter.api.parallel.ExecutionMode
+import org.junit.jupiter.api.parallel.ResourceLock
+
+@Execution(ExecutionMode.SAME_THREAD)
+@ResourceLock("contained-module-compilation-runtime")
 class GeneratedCPlaceholderValidationTest {
+    @BeforeEach
+    fun requireConfiguredCompiler(test: TestInfo) = requireHostedModuleCompiler(test)
+
     @Test
     fun `renamed typed zero results remain unresolved through the compiler-backed generation gate`() {
         for ((prototype, recovered) in listOf(
@@ -31,11 +44,15 @@ class GeneratedCPlaceholderValidationTest {
         )) {
             val project = project()
             val model = model(function(prototype, recovered), main()).copy(types = TYPES)
-            val manifest = SourceTreeGenerator.generate(model, project, reconstructor = ModuleReconstructor { request ->
-                val evidence = EvidenceModuleReconstructor().reconstruct(request)
-                evidence.copy(source = evidence.source.replace("decomp_placeholder_result", "renamed_result"),
-                    generator = "scripted-agent", issues = emptyList())
-            })
+            val manifest = SourceTreeGenerator.generate(model, project, overrides = mapOf("fn_convert" to "core", "fn_main" to "core"),
+                reconstructor = ModuleReconstructor { request ->
+                    val evidence = EvidenceModuleReconstructor().reconstruct(request)
+                    evidence.copy(source = evidence.source.replace("decomp_placeholder_result", "renamed_result"),
+                        generator = "scripted-agent", issues = emptyList())
+                })
+            assertTrue(manifest.files.none { it.acceptedImplementation == true })
+            assertEquals(JsonNull, Json.parseToJsonElement(project.resolve("reports/modules/core.json").readText())
+                .jsonObject.getValue("compilation"), "placeholder rejection precedes compiler admission")
             assertTrue("fn_convert" in manifest.unresolvedImplementationIds, prototype)
             val reports = Files.walk(project.resolve("reports/modules")).use { paths ->
                 paths.filter { it.toString().endsWith(".json") }.toList().map { it.readText() }
@@ -115,11 +132,15 @@ class GeneratedCPlaceholderValidationTest {
             val prototype = "$type convert(void)"
             val input = model(function(prototype, "$prototype { return 1.5; }"), main())
             val project = project()
-            val manifest = SourceTreeGenerator.generate(input, project, reconstructor = ModuleReconstructor { request ->
-                val evidence = EvidenceModuleReconstructor().reconstruct(request)
-                evidence.copy(source = evidence.source.replace("= {0};", "= 0.0f;"),
-                    generator = "scripted-agent", issues = emptyList())
-            })
+            val manifest = SourceTreeGenerator.generate(input, project, overrides = mapOf("fn_convert" to "core", "fn_main" to "core"),
+                reconstructor = ModuleReconstructor { request ->
+                    val evidence = EvidenceModuleReconstructor().reconstruct(request)
+                    evidence.copy(source = evidence.source.replace("= {0};", "= 0.0f;"),
+                        generator = "scripted-agent", issues = emptyList())
+                })
+            assertTrue(manifest.files.none { it.acceptedImplementation == true })
+            assertEquals(JsonNull, Json.parseToJsonElement(project.resolve("reports/modules/core.json").readText())
+                .jsonObject.getValue("compilation"), "placeholder rejection precedes compiler admission")
             assertTrue("fn_convert" in manifest.unresolvedImplementationIds, type)
             assertTrue(Files.walk(project.resolve("reports/modules")).use { paths ->
                 paths.filter { it.toString().endsWith(".json") }.toList().any { it.readText().contains("generic-return-placeholder") }
@@ -137,11 +158,15 @@ class GeneratedCPlaceholderValidationTest {
         )) {
             val project = project()
             val input = model(function(prototype, recovered), main()).copy(types = TYPES)
-            val manifest = SourceTreeGenerator.generate(input, project, reconstructor = ModuleReconstructor { request ->
-                val evidence = EvidenceModuleReconstructor().reconstruct(request)
-                evidence.copy(source = evidence.source.replace("= {0};", "= {0,};"),
-                    generator = "scripted-agent", issues = emptyList())
-            })
+            val manifest = SourceTreeGenerator.generate(input, project, overrides = mapOf("fn_convert" to "core", "fn_main" to "core"),
+                reconstructor = ModuleReconstructor { request ->
+                    val evidence = EvidenceModuleReconstructor().reconstruct(request)
+                    evidence.copy(source = evidence.source.replace("= {0};", "= {0,};"),
+                        generator = "scripted-agent", issues = emptyList())
+                })
+            assertTrue(manifest.files.none { it.acceptedImplementation == true })
+            assertEquals(JsonNull, Json.parseToJsonElement(project.resolve("reports/modules/core.json").readText())
+                .jsonObject.getValue("compilation"), "placeholder rejection precedes compiler admission")
             assertTrue("fn_convert" in manifest.unresolvedImplementationIds, prototype)
             assertTrue(project.resolve("UNRESOLVED.md").readText().contains("fn_convert"), prototype)
             assertTrue(Files.walk(project.resolve("reports/modules")).use { paths ->
@@ -220,6 +245,7 @@ class GeneratedCPlaceholderValidationTest {
         )) {
             val project = project()
             val manifest = SourceTreeGenerator.generate(model(function(prototype, recovered), main()), project,
+                overrides = mapOf("fn_convert" to "core", "fn_main" to "core"),
                 reconstructor = ModuleReconstructor { request ->
                     val evidence = EvidenceModuleReconstructor().reconstruct(request)
                     evidence.copy(source = evidence.source
@@ -231,6 +257,9 @@ class GeneratedCPlaceholderValidationTest {
                         .replace("decomp_placeholder_result", "candidate_result"),
                         generator = "scripted-agent", issues = emptyList())
                 })
+            assertTrue(manifest.files.none { it.acceptedImplementation == true })
+            assertEquals(JsonNull, Json.parseToJsonElement(project.resolve("reports/modules/core.json").readText())
+                .jsonObject.getValue("compilation"), "placeholder rejection precedes compiler admission")
             assertTrue("fn_convert" in manifest.unresolvedImplementationIds, prototype)
             val reports = Files.walk(project.resolve("reports/modules")).use { paths ->
                 paths.filter { it.toString().endsWith(".json") }.toList().map { Json.parseToJsonElement(it.readText()).jsonObject }
@@ -283,6 +312,7 @@ class GeneratedCPlaceholderValidationTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `retained trivial evidence still permits an equivalent renamed result`() {
         val project = project()
         val function = function("struct result convert(void)",
@@ -298,6 +328,7 @@ class GeneratedCPlaceholderValidationTest {
     }
 
     @Test
+    @Tag("ci-live")
     fun `formerly accepted empty-statement placeholders cannot be reused or restored as accepted revisions`() {
         for (changeFingerprint in listOf(false, true)) {
             val project = project()
@@ -329,16 +360,20 @@ class GeneratedCPlaceholderValidationTest {
             val compilation = checkpoint.getValue("compilation").jsonObject
             assertEquals("passed", compilation.getValue("outcome").jsonPrimitive.content)
 
-            // Simulate a checkpoint accepted by the older matcher: its metadata and exact source
-            // digest agree, but the source is now rejected by the current adapter policy.
+            // Compile the stale bytes through the real boundary, then present an untrusted
+            // accepted checkpoint. Authentic compilation must not bypass current adapter policy.
             val staleSource = EvidenceModuleReconstructor().reconstruct(requireNotNull(initialRequest)).source
                 .replace("decomp_placeholder_result", "formerly_accepted_result")
                 .replace("= {0};", "= {0,}; ; ;").trimEnd() + "\n"
             val staleSha256 = sha256(staleSource.toByteArray())
             sourcePath.writeText(staleSource)
+            val staleCompilation = ContainedModuleCompilationPolicy.validate(project, "src/modules/core.c",
+                GeneratedCMakeReconstructionProfile.descriptor)
+            assertTrue(staleCompilation.passed, "the stale placeholder must really compile for this policy discriminator")
+            assertEquals(staleSha256, staleCompilation.sourceSha256)
             checkpointPath.writeText(JsonObject(checkpoint + mapOf(
                 "sourceSha256" to JsonPrimitive(staleSha256),
-                "compilation" to JsonObject(compilation + ("sourceSha256" to JsonPrimitive(staleSha256))),
+                "compilation" to Json.parseToJsonElement(staleCompilation.toJson()),
             )).toString())
             initialGeneration = false
             val phases = mutableListOf<AgentWorkflowPhase>()

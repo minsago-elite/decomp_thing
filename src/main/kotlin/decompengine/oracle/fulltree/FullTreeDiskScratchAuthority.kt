@@ -934,6 +934,82 @@ internal class FullTreeDiskScratchLease internal constructor(
         requireSameDirectory(path, duplicate, "borrowed disk-scratch operation run root")
     }
 
+    /**
+     * Removes only this lease's pinned operation root. The coordinator must first prove the exact
+     * operation's processes and cgroup absent; historical receipts are not that live authority.
+     * Failed or over-budget traversal preserves the token and lease residue for recovery.
+     */
+    @Synchronized
+    fun removeOperationRunRootAfterCgroupAbsence(
+        expected: FullTreeDiskScratchRunRoot,
+        maximumEntries: Int,
+        maximumBytes: Long,
+    ) {
+        require(maximumEntries in 1..1_048_576 && maximumBytes > 0)
+        check(!operationRunBorrowActive) { "disk-scratch root cannot be removed while borrowed" }
+        requireCurrentOperationRunRootAfterCgroupAbsence(expected)
+        val root = checkNotNull(operationRunDescriptor)
+        val rootIdentity = LinuxFilesystemSyscalls.identity(root.fd)
+        var entries = 0
+        var bytes = 0L
+        fun removeContents(directory: LinuxDescriptor, depth: Int) {
+            require(depth <= 64) { "disk-scratch cleanup depth exceeds bound" }
+            val names = LinuxFilesystemSyscalls.directoryEntryNames(directory, maximumEntries - entries + 1)
+            for (name in names) {
+                entries = Math.addExact(entries, 1)
+                require(entries <= maximumEntries) { "disk-scratch cleanup entry bound exceeded" }
+                LinuxFilesystemSyscalls.openPathAtOrNull(directory.fd, name)?.use { child ->
+                    val identity = LinuxFilesystemSyscalls.identity(child.fd)
+                    require(identity.mountId == rootIdentity.mountId && identity.uid == rootIdentity.uid &&
+                        !identity.isSymbolicLink && (identity.isDirectory || identity.isRegularFile)) {
+                        "disk-scratch cleanup encountered an unowned or special entry"
+                    }
+                    if (identity.isDirectory) {
+                        LinuxFilesystemSyscalls.openDirectoryAt(directory.fd, name).use { nested ->
+                            require(sameDirectory(identity, nested.identity)) { "disk-scratch cleanup directory changed" }
+                            removeContents(nested, depth + 1)
+                            val after = LinuxFilesystemSyscalls.identity(nested.fd)
+                            require(sameDirectory(after, identity) && after.mode == identity.mode && after.gid == identity.gid) {
+                                "disk-scratch cleanup directory identity changed"
+                            }
+                        }
+                        LinuxFilesystemSyscalls.openDirectoryAt(directory.fd, name).use { selected ->
+                            require(sameDirectory(identity, selected.identity)) { "disk-scratch cleanup name changed" }
+                        }
+                        LinuxFilesystemSyscalls.removeDirectory(directory.fd, name)
+                    } else {
+                        require(identity.linkCount == 1) { "disk-scratch cleanup refuses a multiply linked file" }
+                        bytes = Math.addExact(bytes, Files.size(LinuxFilesystemSyscalls.stableDescriptorPath(child.fd)))
+                        require(bytes <= maximumBytes) { "disk-scratch cleanup byte bound exceeded" }
+                        LinuxFilesystemSyscalls.openRegularFileAtOrNull(directory.fd, name)?.use { selected ->
+                            require(selected.identity == identity) { "disk-scratch cleanup file changed" }
+                        } ?: error("disk-scratch cleanup file disappeared")
+                        LinuxFilesystemSyscalls.unlink(directory.fd, name)
+                    }
+                } ?: error("disk-scratch cleanup entry disappeared")
+            }
+            require(LinuxFilesystemSyscalls.directoryEntryNames(directory, 1).isEmpty()) {
+                "disk-scratch cleanup directory is not empty"
+            }
+            LinuxFilesystemSyscalls.synchronize(directory)
+        }
+        removeContents(root, 0)
+        requireCurrentOperationRunRootAfterCgroupAbsence(expected)
+        val name = runDirectoryName(evidence.operationId)
+        LinuxFilesystemSyscalls.openDirectoryAt(leaseDescriptor.fd, name).use { selected ->
+            require(sameDirectory(rootIdentity, selected.identity)) { "disk-scratch cleanup root name changed" }
+        }
+        LinuxFilesystemSyscalls.removeDirectory(leaseDescriptor.fd, name)
+        LinuxFilesystemSyscalls.synchronize(leaseDescriptor)
+        LinuxFilesystemSyscalls.openPathAtOrNull(leaseDescriptor.fd, name)?.use {
+            error("disk-scratch cleanup root remains present")
+        }
+        root.close()
+        operationRunDescriptor = null
+        operationRunRoot = null
+        requireCurrent(FullTreeDiskScratchStage.RELEASE)
+    }
+
     /** Destructive release; the coordinator must independently prove every release precondition. */
     @Synchronized
     fun requireCleanAndRelease(

@@ -62,7 +62,7 @@ class ClangGeneratedProjectTest {
     fun `clang diagnostics remain attributed to the generated source owner`() {
         val clang = requireClang()
         val project = createTempDirectory("clang-generated-warning-")
-        SourceTreeGenerator.generate(
+        val manifest = SourceTreeGenerator.generate(
             RecoveredProgramModel(
                 inputSha256 = "clang-warning",
                 functions = listOf(
@@ -76,8 +76,22 @@ class ClangGeneratedProjectTest {
                 ),
             ),
             project,
-            reconstructor = RecoveredCModuleReconstructor(),
+            reconstructor = ModuleReconstructor { request ->
+                val candidate = RecoveredCModuleReconstructor().reconstruct(request)
+                candidate.copy(
+                    generator = "authored-clang-build-fixture",
+                    issues = candidate.issues + ModuleReconstructionIssue(
+                        "authored-build-fixture-unaccepted",
+                        "authored source exercises Clang diagnostics without module acceptance",
+                        request.module.functionIds + request.module.globalIds,
+                    ),
+                    retryable = false,
+                )
+            },
         )
+        assertEquals(listOf("fn_warning"), manifest.unresolvedImplementationIds)
+        assertTrue(manifest.files.filter { ProjectFileRole.MODULE_IMPLEMENTATION in it.roles }
+            .all { it.acceptedImplementation == false })
 
         val failure = runCatching {
             MakeProjectBuilder.build(

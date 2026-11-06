@@ -32,6 +32,11 @@ import decompengine.agent.execute
 import decompengine.agent.executeReceipt
 import decompengine.repair.CapturedRepairStagingAuthority
 import decompengine.repair.RepairResourceBudget
+import decompengine.project.SourceTreeGenerator
+import decompengine.project.ModuleCompilerFeedbackStore
+import decompengine.project.ReconstructionHostSafetyLimits
+import decompengine.agent.AgentWorkflowProgress
+import kotlinx.serialization.json.*
 import decompengine.project.ArchivalBundleVerifier
 import decompengine.project.ArchivalProjectAuditor
 import decompengine.project.ArchivalReconstructionService
@@ -41,6 +46,7 @@ import decompengine.project.RecoveredFunction
 import decompengine.project.RecoveredProgramModel
 import decompengine.project.ReconstructionAdapters
 import decompengine.project.budgetedAnalyzer
+import decompengine.project.requireHostedModuleCompiler
 import java.nio.file.Path
 import java.nio.file.Files
 import java.security.MessageDigest
@@ -67,10 +73,19 @@ import kotlin.test.assertNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
 import kotlinx.coroutines.flow.collect
+import org.junit.jupiter.api.BeforeEach
+import org.junit.jupiter.api.Tag
+import org.junit.jupiter.api.TestInfo
 import org.junit.jupiter.api.Timeout
+import org.junit.jupiter.api.parallel.Execution
+import org.junit.jupiter.api.parallel.ExecutionMode
+import org.junit.jupiter.api.parallel.ResourceLock
 
 @Timeout(value = 60, unit = TimeUnit.SECONDS)
 class AcpAgentHarnessTest {
+    @BeforeEach
+    fun requireConfiguredCompilerForHostedAcceptance(test: TestInfo) = requireHostedModuleCompiler(test)
+
     private fun assertFixtureManifestAcquisitionBounds() {
         val events = List(3) { java.io.IOException("host mounts changed during runtime manifest") }
         var attempts = 0
@@ -1028,8 +1043,90 @@ class AcpAgentHarnessTest {
     }
 
     @Test
+    @Tag("ci-live")
+    @Tag("ci-contained-module")
+    @Execution(ExecutionMode.SAME_THREAD)
+    @ResourceLock("contained-module-compilation-runtime")
+    @Timeout(value = 5, unit = TimeUnit.MINUTES)
+    fun `compiler feedback retry preserves accepted checkpoint and session identity on reuse`() {
+        val temp = Files.createTempDirectory(
+            Path.of("build", "test-tmp").toAbsolutePath().normalize().createDirectories(), "acp-feedback-retry-",
+        )
+        val profile = ReconstructionProfiles.builtIn.first()
+        val model = RecoveredProgramModel(
+            inputSha256 = sha256(byteArrayOf(9, 8, 7)),
+            functions = listOf(RecoveredFunction(
+                "fn_0000000000001000", "decomp_engine_main", 0x1000UL,
+                "int decomp_engine_main(void)", "int decomp_engine_main(void) { return 0; }",
+            )),
+        )
+        val harness = harness("reconstruction-compiler-feedback-retry",
+            sentinel = profile.layout.declaration("module-implementation").materialize(mapOf("module" to "decomp")))
+        val provenance = AcpHarnessProvenance(
+            harness = "acp", implementationId = "scripted-acp-v1",
+            agentExecutionContractVersion = AGENT_EXECUTION_CONTRACT_VERSION,
+            acpProtocolVersion = ACP_STABLE_PROTOCOL_VERSION, acpSdkVersion = ACP_KOTLIN_SDK_VERSION,
+            configurationSha256 = "0".repeat(64), deprecated = false,
+        )
+        val reconstructor = BoundedLlmModuleReconstructor(harness,
+            harnessProvenanceDescriptor = provenance.stableDescriptor)
+        val project = temp.resolve("project")
+        val store = ModuleCompilerFeedbackStore(temp.resolve("feedback").createDirectories(), model.inputSha256, profile.sha256)
+        val reused = mutableListOf<String>()
+        fun generate() = SourceTreeGenerator.generateWithCompilerFeedback(
+            model, project, ReconstructionHostSafetyLimits.DEFAULT,
+            reconstructor = reconstructor, profile = profile,
+            compilerFeedback = store::read, onCompilerFeedback = store::write,
+            progress = object : AgentWorkflowProgress by AgentWorkflowProgress.NONE {
+                override fun checkpointReused(moduleId: String, sourceSha256: String) { reused += moduleId }
+            },
+        )
+        fun checkpoint() = Json.parseToJsonElement(project.resolve(
+            profile.layout.declaration("module-evidence").materialize(mapOf("module" to "decomp"))
+        ).readText()).jsonObject
+        fun journals(): Map<Path, String> = Files.walk(temp.resolve(".decomp-agent-sessions")).use { paths ->
+            paths.filter { it.fileName.toString() == "session.json" }.toList().associateWith { it.readText() }
+        }
+        generate()
+        val rejected = checkpoint()
+        assertEquals(false, rejected.getValue("accepted").jsonPrimitive.boolean)
+        assertNotNull(store.read("decomp"), "the first candidate must reach the contained compiler")
+        val rejectedJournals = journals().keys
+        generate()
+        val accepted = checkpoint()
+        assertEquals(true, accepted.getValue("accepted").jsonPrimitive.boolean)
+        assertTrue(rejected.getValue("fingerprint") != accepted.getValue("fingerprint"))
+        val before = journals()
+        val acceptedEntry = before.entries.single {
+            Json.parseToJsonElement(it.value).jsonObject.getValue("phase").jsonPrimitive.content == "ACCEPTED"
+        }
+        assertTrue(acceptedEntry.key !in rejectedJournals)
+        val acceptedJournal = Json.parseToJsonElement(acceptedEntry.value).jsonObject
+        assertEquals(accepted.getValue("executionRequestSha256"), acceptedJournal.getValue("acceptedRequestSha256"))
+        assertEquals(accepted.getValue("executionEvidenceSha256"), acceptedJournal.getValue("acceptedReceiptSha256"))
+        assertEquals(1, acceptedJournal.getValue("turns").jsonArray.size)
+        repeat(2) {
+            generate()
+            val cached = checkpoint()
+            assertEquals(true, cached.getValue("accepted").jsonPrimitive.boolean)
+            listOf("fingerprint", "promptSha256", "executionRequestSha256", "executionEvidenceSha256").forEach {
+                assertEquals(accepted.getValue(it), cached.getValue(it), it)
+            }
+            assertEquals(before, journals(), "reuse must leave every session journal byte-identical")
+        }
+        assertEquals(listOf("decomp", "decomp"), reused)
+    }
+
+    @Test
+    @Tag("ci-live")
+    @Tag("ci-contained-module")
+    @Execution(ExecutionMode.SAME_THREAD)
+    @ResourceLock("contained-module-compilation-runtime")
+    @Timeout(value = 5, unit = TimeUnit.MINUTES)
     fun `public Make and Ninja archival reconstruction follows ACP file roles through verified rebuild`() {
-        val temp = createTempDirectory("acp-archival-role-workflow-")
+        val temp = Files.createTempDirectory(
+            Path.of("build", "test-tmp").toAbsolutePath().normalize().createDirectories(), "acp-archival-role-workflow-",
+        )
         val binary = temp.resolve("authored.elf")
         val binaryBytes = byteArrayOf(9, 8, 7)
         Files.write(binary, binaryBytes)
@@ -1195,7 +1292,7 @@ class AcpAgentHarnessTest {
                 }
             }
         }
-        assertEquals(103, acpTestMethods.size, acpTestMethods.joinToString { it.name })
+        assertEquals(104, acpTestMethods.size, acpTestMethods.joinToString { it.name })
         assertTrue(
             acpTestMethods.all { it.returnType == Void.TYPE },
             acpTestMethods.filter { it.returnType != Void.TYPE }.joinToString {
@@ -3517,22 +3614,30 @@ class AcpAgentHarnessTest {
     private fun javap(type: Class<*>): String {
         val executable = Path.of(System.getProperty("java.home"), "bin", "javap")
         val classPath = Path.of(requireNotNull(type.protectionDomain.codeSource).location.toURI()).toString()
-        val process = ProcessBuilder(
-            executable.toString(),
-            "-p",
-            "-classpath",
-            classPath,
-            type.name,
-        ).redirectErrorStream(true).start()
-        val exited = process.waitFor(10, TimeUnit.SECONDS)
-        if (!exited) {
-            process.destroyForcibly()
-            process.waitFor(3, TimeUnit.SECONDS)
+        val outputPath = Files.createTempFile(
+            Path.of("build", "test-tmp", "javap").toAbsolutePath().normalize().createDirectories(), "bytecode-", ".txt")
+        try {
+            // Waiting before draining a pipe can block on valid hosts with small pipe buffers.
+            val process = ProcessBuilder(executable.toString(), "-p", "-classpath", classPath, type.name)
+                .redirectErrorStream(true).redirectOutput(outputPath.toFile()).start()
+            try {
+                val exited = process.waitFor(10, TimeUnit.SECONDS)
+                if (!exited) {
+                    process.destroyForcibly()
+                    assertTrue(process.waitFor(3, TimeUnit.SECONDS), "javap did not terminate after its timeout")
+                }
+                val outputBytes = Files.newInputStream(outputPath).use { it.readNBytes(1024 * 1024 + 1) }
+                assertTrue(outputBytes.size <= 1024 * 1024, "javap output exceeded its bound")
+                val output = outputBytes.toString(Charsets.UTF_8)
+                assertTrue(exited, "javap timed out")
+                assertEquals(0, process.exitValue(), output)
+                return output
+            } finally {
+                if (process.isAlive) process.destroyForcibly()
+            }
+        } finally {
+            Files.deleteIfExists(outputPath)
         }
-        val output = process.inputStream.readAllBytes().toString(Charsets.UTF_8)
-        assertTrue(exited, "javap timed out")
-        assertEquals(0, process.exitValue(), output)
-        return output
     }
 
     private fun isForbiddenExecutionSeamType(type: Class<*>): Boolean =

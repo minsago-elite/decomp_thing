@@ -60,7 +60,7 @@ GENERIC_CONTRACT_MODES = {
     "session-preferences-pipelined-update",
     "session-preferences-pipelined-work",
 }
-RECONSTRUCTION_MODES = {"reconstruction-role-policy"}
+RECONSTRUCTION_MODES = {"reconstruction-role-policy", "reconstruction-compiler-feedback-retry"}
 MVP_VULNERABLE_SOURCE = """#include <stdio.h>
 int main(void) {
     char badge[8];
@@ -228,6 +228,7 @@ expected_fs = {
     "fs-cap-write-only": {"readTextFile": False, "writeTextFile": True},
     "fs-cap-none": None,
     "reconstruction-role-policy": {"readTextFile": False, "writeTextFile": True},
+    "reconstruction-compiler-feedback-retry": {"readTextFile": False, "writeTextFile": True},
     "mvp-patch": {"readTextFile": True, "writeTextFile": True},
     "mvp-patch-bad-fix": {"readTextFile": True, "writeTextFile": True},
     "doctor-preflight": {"readTextFile": True, "writeTextFile": True},
@@ -1171,6 +1172,8 @@ if MODE in RECONSTRUCTION_MODES:
         "/* fn_0000000000001000 */\n"
         "int decomp_engine_main(void) { return 0; }\n"
     )
+    if MODE == "reconstruction-compiler-feedback-retry" and "Bounded compiler diagnostics from the prior attempt" not in prompt_text:
+        content = content.replace("return 0;", "return decomp_feedback_missing_symbol;")
     write_workspace_file(source, content, 816)
 elif MODE in ("mvp-patch", "mvp-patch-bad-fix"):
     reconstructing = "Convert the Ghidra decompiler output" in prompt_text

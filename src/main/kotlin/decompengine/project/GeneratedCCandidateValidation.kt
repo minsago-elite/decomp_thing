@@ -323,3 +323,317 @@ internal object GeneratedCCandidateValidation {
     }
 
 }
+
+/**
+ * Closed input-affecting source policy for the authenticated module compiler snapshot.
+ * This deliberately does not interpret the C program or ask the compiler what it read: it
+ * admits only literal includes whose target is in the supplied immutable inventory, plus the
+ * reviewed standard headers retained by the registered generated-C runtime.
+ */
+internal object GeneratedCSourceHeaderPolicy {
+    private val systemHeaders = setOf("stddef.h", "stdint.h", "stdio.h", "stdlib.h", "string.h")
+    private val directive = Regex("^\\s*(?:#|%:)\\s*([A-Za-z_][A-Za-z_0-9]*)(.*)$")
+    private val guardName = Regex("^\\s*([A-Za-z_][A-Za-z_0-9]*)\\s*$")
+    private val includeOperand = Regex("^\\s*(?:\"([^\"\\\\\\r\\n]+)\"|<([^<>\\r\\n]+)>)\\s*$")
+
+    fun requireAllowed(sourcePath: String, files: Map<String, ByteArray>, progress: () -> Unit = {}) {
+        requireAllowedStreaming(sourcePath, files.keys, { path -> files.getValue(path) }, progress)
+    }
+
+    /**
+     * Validate an authenticated inventory without retaining all of its bytes at once. The
+     * inventory is supplied separately from [read] so callers can keep membership bound to the
+     * request manifest while reading one pinned file at a time.
+     */
+    fun requireAllowedStreaming(
+        sourcePath: String,
+        authenticatedPaths: Collection<String>,
+        read: (String) -> ByteArray,
+        progress: () -> Unit = {},
+    ) {
+        require(sourcePath in authenticatedPaths) { "generated-C policy source is absent from authenticated snapshot" }
+        require(authenticatedPaths.size in 1..ContainedModuleCompilerRequest.MAXIMUM_INPUTS) {
+            "generated-C policy inventory exceeds its bound"
+        }
+        val normalizedFiles = authenticatedPaths.map(::normalizeInventoryPath).toSet()
+        require(normalizedFiles.size == authenticatedPaths.size) { "generated-C policy inventory has ambiguous paths" }
+        for (path in normalizedFiles.sorted()) {
+            checkScanProgress(progress, 0)
+            val bytes = read(path)
+            require(bytes.size <= ContainedModuleCompilerRequest.MAXIMUM_INPUT_FILE_BYTES) {
+                "generated-C policy input exceeds its bound: $path"
+            }
+            val text = try {
+                bytes.toString(Charsets.UTF_8).also { decoded ->
+                    require(decoded.toByteArray(Charsets.UTF_8).contentEquals(bytes)) { "generated-C policy input is not valid UTF-8: $path" }
+                }
+            } catch (failure: IllegalArgumentException) {
+                throw IllegalArgumentException("generated-C policy input is not valid UTF-8: $path", failure)
+            }
+            require('\u0000' !in text && !text.startsWith('\uFEFF')) {
+                "generated-C policy input contains unsupported encoding markers: $path"
+            }
+            validateTranslationUnit(path, text, normalizedFiles, progress)
+        }
+    }
+
+    private fun validateTranslationUnit(path: String, source: String, inventory: Set<String>, progress: () -> Unit) {
+        rejectMalformedOrContinuedDirectives(path, source, progress)
+        val logical = phaseOneAndTwo(source, progress)
+        val clean = removeComments(logical, progress)
+        val code = maskLiterals(clean, progress)
+        if (Regex("\\b(?:_Pragma|__has_include(?:_next)?|__has_include_next)\\b").containsMatchIn(code)) {
+            reject(path, "unsupported preprocessing operator")
+        }
+        checkInlineAssembler(path, code, progress)
+
+        var guard: String? = null
+        var guardDefined = false
+        var guardClosed = false
+        var directiveCount = 0
+        var seenAnyContent = false
+        clean.lineSequence().forEach { line ->
+            checkScanProgress(progress, line.length)
+            if (guardClosed && line.isNotBlank()) reject(path, "source follows include guard")
+            val match = directive.find(line)
+            if (match == null) {
+                if (line.trimStart().startsWith('#') || line.trimStart().startsWith("%:")) {
+                    reject(path, "malformed preprocessing directive")
+                }
+                if (line.isNotBlank()) seenAnyContent = true
+                return@forEach
+            }
+            directiveCount++
+            val name = match.groupValues[1]
+            val operand = match.groupValues[2].trim()
+            when (name) {
+                "" -> Unit
+                "include" -> {
+                    if (guardClosed || (guard != null && !guardDefined)) reject(path, "include is outside a closed conventional guard")
+                    val include = includeOperand.matchEntire(operand) ?: reject(path, "computed or malformed include operand")
+                    val quoted = include.groupValues[1].takeIf { it.isNotEmpty() }
+                    val angled = include.groupValues[2].takeIf { it.isNotEmpty() }
+                    val nameText = quoted ?: angled ?: reject(path, "empty include operand")
+                    if (nameText.startsWith('/') || nameText.contains('\\')) {
+                        reject(path, "absolute or platform-specific include path is unsupported")
+                    }
+                    val sourceCandidate = if (quoted != null) {
+                        val parent = path.substringBeforeLast('/', "")
+                        resolveInclude(parent, nameText)
+                            ?: reject(path, "quoted include escapes the authenticated project")
+                    } else null
+                    val admittedBySourceDirectory = sourceCandidate?.let { it in inventory } == true
+                    if (!admittedBySourceDirectory) {
+                        val includeCandidate = resolveInclude("include", nameText)
+                            ?: reject(path, "include escapes the authenticated project")
+                        if (includeCandidate !in inventory && nameText !in systemHeaders) {
+                            reject(path, "include is outside the authenticated snapshot: $nameText")
+                        }
+                    }
+                }
+                "ifndef" -> {
+                    if (!path.endsWith(".h") || guard != null || guardDefined || guardClosed || directiveCount != 1 || seenAnyContent) {
+                        reject(path, "unsupported conditional preprocessing directive")
+                    }
+                    guard = guardName.matchEntire(operand)?.groupValues?.get(1)
+                        ?: reject(path, "malformed conventional include guard")
+                }
+                "define" -> {
+                    val expected = guard
+                    if (expected != null && !guardDefined && !guardClosed && operand == expected) {
+                        guardDefined = true
+                    } else if (guard == null && path.endsWith(".h") && !guardClosed &&
+                        Regex("[A-Za-z_][A-Za-z_0-9]*(?:\\s+(?:[0-9]+[uUlL]*|0[xX][0-9A-Fa-f]+[uUlL]*))?").matches(operand)) {
+                        // Numeric object-like constants cannot manufacture preprocessing,
+                        // include names, or assembler source after macro expansion.
+                    } else reject(path, "unsupported macro definition")
+                }
+                "endif" -> {
+                    if (!guardDefined || guardClosed || operand.isNotEmpty()) reject(path, "unsupported conditional preprocessing directive")
+                    guardClosed = true
+                }
+                else -> reject(path, "unsupported preprocessing directive #$name")
+            }
+        }
+        if (guard != null && (!guardDefined || !guardClosed)) reject(path, "unterminated conventional include guard")
+    }
+
+    private fun rejectMalformedOrContinuedDirectives(path: String, source: String, progress: () -> Unit) {
+        var index = 0
+        var lineStart = true
+        var directive = false
+        while (index < source.length) {
+            checkScanProgress(progress, index)
+            val character = source[index]
+            val next = source.getOrNull(index + 1)
+            if (character == '\r' || character == '\n') {
+                directive = false
+                lineStart = true
+                index++
+                if (character == '\r' && source.getOrNull(index) == '\n') index++
+                continue
+            }
+            if (directive) {
+                if (character == '\\' && (next == '\r' || next == '\n')) {
+                    reject(path, "continued preprocessing directive is unsupported")
+                }
+                if (character == '/' && next == '*') {
+                    index += 2
+                    var closed = false
+                    while (index < source.length) {
+                        checkScanProgress(progress, index)
+                        if (source[index] == '\r' || source[index] == '\n') {
+                            reject(path, "preprocessing directive comment crosses a physical line")
+                        }
+                        if (source[index] == '*' && source.getOrNull(index + 1) == '/') {
+                            index += 2
+                            closed = true
+                            break
+                        }
+                        index++
+                    }
+                    if (!closed) reject(path, "unterminated preprocessing directive comment")
+                    continue
+                }
+                index++
+                continue
+            }
+            if (lineStart && character.isWhitespace()) {
+                index++
+                continue
+            }
+            if (lineStart && (character == '#' || source.startsWith("%:", index) || source.startsWith("??=", index))) {
+                directive = true
+                lineStart = false
+                index += when {
+                    character == '#' -> 1
+                    source.startsWith("%:", index) -> 2
+                    else -> 3
+                }
+                continue
+            }
+            lineStart = false
+            index++
+        }
+    }
+
+    /** Reject every GNU inline-assembler token in one bounded lexical pass. */
+    private fun checkInlineAssembler(path: String, code: String, progress: () -> Unit) {
+        var index = 0
+        while (index < code.length) {
+            checkScanProgress(progress, index)
+            val character = code[index]
+            if (character == '_' || character.isLetter()) {
+                val start = index++
+                while (index < code.length && (code[index] == '_' || code[index].isLetterOrDigit())) index++
+                val tokenLength = index - start
+                if ((tokenLength == 3 && code.regionMatches(start, "asm", 0, 3)) ||
+                    (tokenLength == 5 && code.regionMatches(start, "__asm", 0, 5)) ||
+                    (tokenLength == 7 && code.regionMatches(start, "__asm__", 0, 7))) {
+                    reject(path, "inline assembler is unsupported")
+                }
+            } else {
+                index++
+            }
+        }
+    }
+
+    private fun phaseOneAndTwo(source: String, progress: () -> Unit): String {
+        val trigraphs = mapOf("=" to '#', "/" to '\\', "'" to '^', "(" to '[', ")" to ']', "!" to '|', "<" to '{', ">" to '}', "-" to '~')
+        val phaseOne = buildString(source.length) {
+            var i = 0
+            while (i < source.length) {
+                checkScanProgress(progress, i)
+                if (source.startsWith("??", i) && i + 2 < source.length && source[i + 2].toString() in trigraphs) {
+                    append(trigraphs.getValue(source[i + 2].toString()))
+                    i += 3
+                } else append(source[i++])
+            }
+        }
+        return buildString(phaseOne.length) {
+            var i = 0
+            while (i < phaseOne.length) {
+                checkScanProgress(progress, i)
+                if (phaseOne[i] == '\\' && i + 1 < phaseOne.length && phaseOne[i + 1] == '\n') i += 2
+                else if (phaseOne[i] == '\\' && i + 2 < phaseOne.length && phaseOne[i + 1] == '\r' && phaseOne[i + 2] == '\n') i += 3
+                else if (phaseOne[i] == '\\' && i + 1 < phaseOne.length && phaseOne[i + 1] == '\r') i += 2
+                else append(phaseOne[i++])
+            }
+        }
+    }
+
+    private fun removeComments(source: String, progress: () -> Unit): String = buildString(source.length) {
+        var i = 0
+        var quote: Char? = null
+        var escaped = false
+        while (i < source.length) {
+            checkScanProgress(progress, i)
+            val c = source[i]
+            val next = source.getOrNull(i + 1)
+            when {
+                quote != null -> {
+                    append(c)
+                    when { escaped -> escaped = false; c == '\\' -> escaped = true; c == quote -> quote = null }
+                }
+                c == '"' || c == '\'' -> { quote = c; append(c) }
+                c == '/' && next == '/' -> {
+                    append("  "); i += 2
+                    while (i < source.length && source[i] != '\n' && source[i] != '\r') { append(' '); i++ }
+                    continue
+                }
+                c == '/' && next == '*' -> {
+                    append("  "); i += 2
+                    while (i < source.length && !(source[i] == '*' && source.getOrNull(i + 1) == '/')) { append(if (source[i] == '\n' || source[i] == '\r') source[i] else ' '); i++ }
+                    if (i < source.length) { append("  "); i++ }
+                }
+                else -> append(c)
+            }
+            i++
+        }
+    }
+
+    private fun maskLiterals(source: String, progress: () -> Unit): String = buildString(source.length) {
+        var quote: Char? = null
+        var escaped = false
+        source.forEachIndexed { index, c ->
+            checkScanProgress(progress, index)
+            if (quote == null) {
+                if (c == '"' || c == '\'') { quote = c; append(' ') } else append(c)
+            } else {
+                append(if (c == '\n' || c == '\r') c else ' ')
+                when { escaped -> escaped = false; c == '\\' -> escaped = true; c == quote -> quote = null }
+            }
+        }
+    }
+
+    private fun checkScanProgress(progress: () -> Unit, index: Int) {
+        if ((index and 0x3ff) == 0) {
+            if (Thread.currentThread().isInterrupted) throw InterruptedException("generated-C source policy cancelled")
+            progress()
+        }
+    }
+
+    /** Resolve a literal include against one registered project search root without escaping it. */
+    private fun resolveInclude(base: String, include: String): String? {
+        val components = base.split('/').filter { it.isNotEmpty() }.toMutableList()
+        for (component in include.split('/')) {
+            when (component) {
+                "", "." -> if (component.isEmpty()) return null
+                ".." -> if (components.isEmpty()) return null else components.removeAt(components.lastIndex)
+                else -> components += component
+            }
+        }
+        return components.takeIf { it.isNotEmpty() }?.joinToString("/")
+    }
+
+    private fun normalizeInventoryPath(path: String): String {
+        require(!path.startsWith('/') && '\\' !in path && path.split('/').none { it.isEmpty() || it == "." || it == ".." })
+        return path
+    }
+
+    private fun reject(path: String, reason: String): Nothing = throw GeneratedCSourcePolicyRefusal(path, reason)
+}
+
+/** A deterministic refusal that callers can distinguish from compiler observations. */
+internal class GeneratedCSourcePolicyRefusal(val sourcePath: String, val reason: String) :
+    IllegalArgumentException("generated-C source policy refused $sourcePath: $reason")
