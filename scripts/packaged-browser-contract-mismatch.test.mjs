@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { assertContractMismatch, CONTRACT_MISMATCH_SCREENSHOTS, incompatibleBootstrapEnvelope } from './packaged-browser-contract-mismatch.mjs';
+import { assertContractMismatch, CONTRACT_MISMATCH_SCREENSHOTS, incompatibleBootstrapEnvelope, manifestAssetRequestPaths } from './packaged-browser-contract-mismatch.mjs';
 
 const origin = 'http://127.0.0.1:43123';
 const buildId = 'b'.repeat(64);
@@ -51,6 +51,13 @@ test('constructs a source-bound unsupported bootstrap without changing its envel
   assert.equal(Date.parse(parsed.data.sessionExpiresAt), 1_800_000_300_000);
   assert.equal(envelope.sha256.length, 64);
   assert.equal(envelope.fixtureSha256.length, 64);
+});
+
+test('binds manifest paths through the packaged asset mount prefix', () => {
+  assert.deepEqual(manifestAssetRequestPaths([{ path: 'assets/index-A1.js' }, { path: 'assets/index-B2.css' }]), [
+    '/nested/assets/ui/assets/index-A1.js', '/nested/assets/ui/assets/index-B2.css',
+  ]);
+  assert.throws(() => manifestAssetRequestPaths([{ path: '../outside.js' }]), /unsafe path/);
 });
 
 test('accepts a complete same-origin reload-once ledger and returns bounded report data', () => {

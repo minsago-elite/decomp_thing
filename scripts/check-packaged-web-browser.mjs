@@ -15,7 +15,7 @@ import { qualifyRestart, assertGracefulShutdown, scrubTokens, boundReport } from
 import { qualifyUpgrade, qualifyUpgradeCache } from './packaged-browser-upgrade.mjs';
 import { qualifyAudit, assertAudit } from './packaged-browser-audit.mjs';
 import { PackagedBrowserCdpDiagnostics } from './packaged-browser-cdp-diagnostics.mjs';
-import { incompatibleBootstrapEnvelope, assertContractMismatch } from './packaged-browser-contract-mismatch.mjs';
+import { incompatibleBootstrapEnvelope, assertContractMismatch, manifestAssetRequestPaths } from './packaged-browser-contract-mismatch.mjs';
 
 // Test driver only: the application is launched with a separate Node-free PATH.
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -1021,7 +1021,7 @@ try {
       assert.equal(rejected.length, 0, 'The mismatch gate refused an unexpected request');
       assert.equal(fulfilled.length, 2, 'Expected initial and remount bootstrap fixture responses');
       evidence.verdict = assertContractMismatch(evidence, { origin, buildId: manifest.buildId,
-        allowedAssetPaths: manifest.files.map((entry) => `/nested/${entry.path}`) });
+        allowedAssetPaths: manifestAssetRequestPaths(manifest.files) });
     }
 
     report.requests = { normal: home.requests, boundary: boundary.requests, redirect: redirect.requests,

@@ -12,6 +12,16 @@ export const CONTRACT_MISMATCH_SCREENSHOTS = Object.freeze([
   'contract-mismatch-after-reload.png',
 ]);
 
+export function manifestAssetRequestPaths(manifestFiles) {
+  assert.ok(Array.isArray(manifestFiles), 'Packaged asset manifest is missing');
+  return manifestFiles.map((entry) => {
+    assert.ok(typeof entry?.path === 'string' && !entry.path.startsWith('/')
+      && !entry.path.split('/').some((part) => part === '' || part === '.' || part === '..'),
+    'Packaged asset manifest contains an unsafe path');
+    return `/nested/assets/ui/${entry.path}`;
+  });
+}
+
 /** Build a contract-decodable envelope whose advertised API set is intentionally unsupported. */
 export function incompatibleBootstrapEnvelope(now = Date.now()) {
   assert.ok(Number.isSafeInteger(now) && now >= 0, 'Bootstrap fixture clock must be a nonnegative safe integer');
