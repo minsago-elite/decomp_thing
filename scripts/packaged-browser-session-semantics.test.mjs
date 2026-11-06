@@ -26,7 +26,23 @@ test('scopes session semantics while recording the independent browser connectio
     statuses: [{ tag: 'aside', text: 'Browser reports offline', inSession: false, controls: 1, ownTabIndex: false,
       connectionNotice: true, role: 'status', label: 'Connection status' }], buttons: [button('Sign out')] };
   assert.doesNotThrow(() => assertSessionFacts(facts, { container: 'connected', statusText: null, externalStatusText: 'Browser reports offline', buttons: ['Sign out'] }));
-  assert.throws(() => assertSessionFacts(facts, { container: 'connected', statusText: null, buttons: ['Sign out'] }), /Unexpected status outside/);
+  assert.throws(() => assertSessionFacts(facts, { container: 'connected', statusText: null, buttons: ['Sign out'] }), /Unexpected browser-connection status/);
+});
+
+test('allows unrelated route statuses while strictly checking the connected session status', () => {
+  const routeStatus = { tag: 'div', text: 'Attempt running', inSession: false, controls: 1, ownTabIndex: false,
+    connectionNotice: false, role: 'status', label: null };
+  const facts = { asides: [], sessionCount: 1, sessionContainers: [connectedContainer()],
+    statuses: [status({ text: 'Application instance changed.' }), routeStatus], buttons: [button('Sign out')] };
+  const result = assertSessionFacts(facts, { container: 'connected', statusText: 'Application instance changed.', buttons: ['Sign out'] });
+  assert.equal(result.sessionStatuses, 1);
+  assert.equal(result.unrelatedStatuses, 1);
+  assert.throws(() => assertSessionFacts({ ...facts, statuses: [status({ text: 'Application instance changed.' }),
+    { ...routeStatus, inSession: true }] }, { container: 'connected', statusText: 'Application instance changed.', buttons: ['Sign out'] }), /text-only <p>/);
+  assert.throws(() => assertSessionFacts(facts, { container: 'connected', statusText: 'Application instance changed.',
+    externalStatusText: 'Browser reports offline', buttons: ['Sign out'] }), /Expected one separately scoped browser-connection status/);
+  assert.throws(() => assertSessionFacts({ ...facts, statuses: [status({ text: 'Application instance changed.' }),
+    status({ text: 'Attempt running' }), routeStatus] }, { container: 'connected', statusText: 'Application instance changed.', buttons: ['Sign out'] }), /exactly one session status/);
 });
 
 test('negative control: rejects the former aside[role=status] wrapping Check session', () => {

@@ -74,15 +74,16 @@ export function assertSessionFacts(facts, expected) {
     assert.equal(button.type, 'button');
   }
   const sessionStatuses = facts.statuses.filter((status) => status.inSession);
-  const externalStatuses = facts.statuses.filter((status) => !status.inSession);
+  // Session semantics do not own announcements from the page route. The only separately
+  // managed non-session status in this shell is the browser ConnectionNotice.
+  const connectionStatuses = facts.statuses.filter((status) => !status.inSession && status.connectionNotice);
   if (expected.externalStatusText) {
-    assert.equal(externalStatuses.length, 1, 'Expected one separately scoped browser-connection status');
-    assert.equal(externalStatuses[0].tag, 'aside');
-    assert.equal(externalStatuses[0].connectionNotice, true, 'External status did not come from the browser connection notice');
-    assert.equal(externalStatuses[0].role, 'status');
-    assert.equal(externalStatuses[0].label, 'Connection status');
-    assert.ok(externalStatuses[0].text.includes(expected.externalStatusText), 'Browser-connection status text did not match');
-  } else assert.equal(externalStatuses.length, 0, 'Unexpected status outside the session notice');
+    assert.equal(connectionStatuses.length, 1, 'Expected one separately scoped browser-connection status');
+    assert.equal(connectionStatuses[0].tag, 'aside');
+    assert.equal(connectionStatuses[0].role, 'status');
+    assert.equal(connectionStatuses[0].label, 'Connection status');
+    assert.ok(connectionStatuses[0].text.includes(expected.externalStatusText), 'Browser-connection status text did not match');
+  } else assert.equal(connectionStatuses.length, 0, 'Unexpected browser-connection status');
   const labels = facts.buttons.map((button) => button.label);
   if (expected.statusText === null) assert.equal(sessionStatuses.length, 0, 'Quiet connected state must expose no session status');
   else {
@@ -90,7 +91,8 @@ export function assertSessionFacts(facts, expected) {
     assert.ok(sessionStatuses[0].text.includes(expected.statusText), `Session status text "${sessionStatuses[0].text}" lacks "${expected.statusText}"`);
   }
   assert.deepEqual(labels, expected.buttons, 'Unexpected session controls');
-  return { asides: facts.asides.length, statuses: facts.statuses.length, sessionStatuses: sessionStatuses.length, controls: labels };
+  return { asides: facts.asides.length, statuses: facts.statuses.length, sessionStatuses: sessionStatuses.length,
+    unrelatedStatuses: facts.statuses.length - sessionStatuses.length - connectionStatuses.length, controls: labels };
 }
 
 /** Axe must have actually evaluated the required rules against the session region. */
