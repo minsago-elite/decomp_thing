@@ -8,6 +8,7 @@ import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import java.nio.ByteBuffer
 import java.nio.charset.CodingErrorAction
+import java.security.MessageDigest
 import java.time.Duration
 import java.time.Instant
 import java.time.ZonedDateTime
@@ -41,6 +42,8 @@ class OpenAiCompatibleConfiguration(
 
 /** Streaming Chat Completions is confined to this adapter; the harness sees ModelProvider v1. */
 class OpenAiCompatibleModelProvider(private val configuration: OpenAiCompatibleConfiguration) : ModelProvider {
+    override val identity = ModelProviderIdentity("openai-compatible/${sha256(configuration.endpoint.toASCIIString())}", configuration.model)
+
     override fun generate(request: ModelRequest, onEvent: (ModelEvent) -> Unit): ModelResponse {
         val limits = request.limits
         val deadline = System.nanoTime() + limits.overallTimeout.toNanos()
@@ -100,6 +103,9 @@ class OpenAiCompatibleModelProvider(private val configuration: OpenAiCompatibleC
             }
         error("Unreachable provider retry state")
     }
+
+    private fun sha256(value: String) = MessageDigest.getInstance("SHA-256").digest(value.toByteArray(Charsets.UTF_8))
+        .joinToString("") { byte -> "%02x".format(byte) }
 
     private fun encode(request: ModelRequest): ByteArray = boundedProviderJson(request.limits.maxRequestBytes) { json ->
         json.writeStartObject()

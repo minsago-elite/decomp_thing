@@ -8,9 +8,16 @@ content-hash manifests distinguish source contents, namespace and file identity 
 source text in the checkpoint store.
 
 The loop checkpoints immediately before its first model request and between fully completed tool
-batches. The record binds the conversation and tool schemas, source/context hashes, original journal
-identities, loop-limit fingerprint, usage, remaining wall-clock allowance and absolute expiry,
-event sequence, prior state trace, used call IDs and canonical-action repetition counts. A digest of
+batches. Checkpoint state schema 3 binds the configured provider and model to the identity exposed by
+the actual provider instance, the logical stage digest (the stage's content lineage, not a temporary
+directory or process identity), and the accepted-revision digest. Resume requires the caller to
+supply the expected accepted-revision digest independently; it must match
+both the checkpoint and the trusted journal identity. This is a continuation precondition, not proof
+that a workflow accepted or published a revision. Checkpoint-enabled execution rejects providers
+without an explicit stable identity. The record also binds the conversation and tool schemas,
+source/context hashes, original journal identities, loop-limit fingerprint, usage, remaining
+wall-clock allowance and absolute expiry, event sequence, prior state trace, used call IDs and
+canonical-action repetition counts. A digest of
 the original checkpoint state detects redaction: altered text remains evidence and cannot silently
 become restored model context. Remaining turns/tools/tokens/output bytes are derived from the bound
 request/loop limits and restored usage; they do not reset.
@@ -70,6 +77,7 @@ zero failures/errors. The hosted v5 result must be qualified separately.
 
 The subsequent [captured-repair integration](builtin-captured-recovery-v1.md) now rehydrates supplied
 candidate bytes through the shared bounded callbacks while preserving the original accepted base.
-Checkpoint state schema 2 binds the trusted tool session's additional authority digest, including
-captured repair quotas and effective sink paths. Schema-1 checkpoint states lack this binding and
-are rejected. Durable archived source retrieval and workflow acceptance remain separate requirements.
+Checkpoint state schema 3 binds the trusted tool session's additional authority digest, including
+captured repair quotas and effective sink paths. Schema-1 and schema-2 checkpoint states are rejected;
+they do not bind the provider instance identity and independent accepted-revision precondition.
+Durable archived source retrieval and workflow acceptance remain separate requirements.
