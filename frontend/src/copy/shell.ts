@@ -84,6 +84,11 @@ export const buildMismatchCopy = {
   explanation: 'This page is build {page}; the server reports build {server}. Reload to use the matching version. Copy any unsaved input first; unconfirmed attempt commands stay retained for explicit replay.',
 } as const;
 
+export const contractMismatchCopy = {
+  title: 'Reload to match the server version',
+  explanation: 'Reloading loads the page again without resending forms or commands. Copy any unsaved input first.',
+} as const;
+
 export const panelBoundaryCopy = {
   title: '{panel} could not be displayed',
   explanation: 'The rest of this page is still available. Your work remains on the server.',
