@@ -20,7 +20,7 @@ EXPECTED = {
     "decompengine.builtin.BuiltinCapturedResumeTest": 8,
     "decompengine.builtin.BuiltinSourceStoreTest": 9,
     "decompengine.builtin.BuiltinInvocationArchiveTest": 8,
-    "decompengine.builtin.BuiltinTerminalToolsTest": 7,
+    "decompengine.builtin.BuiltinTerminalToolsTest": 8,
     "decompengine.builtin.provider.OpenAiCompatibleModelProviderTest": 23,
 }
 
