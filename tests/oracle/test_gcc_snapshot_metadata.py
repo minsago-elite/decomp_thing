@@ -192,17 +192,90 @@ class RecipeAndSanitizerTest(unittest.TestCase):
         parsed = diagnostic.parse_apt_metadata(valid)
         self.assertEqual("2.6.1 (amd64)", parsed["aptVersion"])
         self.assertEqual("2.2.40", parsed["gpgvVersion"])
+        self.assertEqual("2.2.40", parsed["packageVersions"]["gpgv"])
         self.assertEqual([keyring_path], parsed["sourceSignedByPaths"])
         self.assertEqual(keyring_sha, parsed["keyrings"][0]["sha256"])
         self.assertEqual((0, 0), (parsed["keyrings"][0]["uid"], parsed["keyrings"][0]["gid"]))
 
+        # Trixie's apt 3 may use the sqv method while the base has no gpgv
+        # executable/package. Missing gpgv inventory stays explicit UNKNOWN;
+        # it cannot be inferred from the separately parsed APT method label.
+        trixie = (valid.replace(b"apt 2.6.1 (amd64)", b"apt 3.0.3 (amd64)", 1)
+                  .replace(b"apt=2.6.1\n", b"apt=3.0.3\n", 1)
+                  .replace(b"debian-archive-keyring=2023.3", b"debian-archive-keyring=2025.1", 1)
+                  .replace(b"gpgv 2.2.40", b"/bin/sh: 1: gpgv: not found", 1)
+                  .replace(b"gpgv=2.2.40\n", b"gpgv=\n", 1))
+        parsed_trixie = diagnostic.parse_apt_metadata(trixie)
+        self.assertEqual("3.0.3 (amd64)", parsed_trixie["aptVersion"])
+        self.assertEqual("3.0.3", parsed_trixie["packageVersions"]["apt"])
+        self.assertEqual("2025.1", parsed_trixie["packageVersions"]["debian-archive-keyring"])
+        self.assertEqual("UNKNOWN", parsed_trixie["gpgvVersion"])
+        self.assertEqual("UNKNOWN", parsed_trixie["packageVersions"]["gpgv"])
+        # Neither the error's digits nor a method URI may be treated as a
+        # gpgv version. URI observations are independently summarized below.
+        noisy_optional = trixie.replace(
+            b"/bin/sh: 1: gpgv: not found", b"/bin/sh: 1: gpgv: not found (exit 127, tried 2.2.40)", 1
+        ).replace(b"DIAG_GPGV_VERSION_END", b"gpgv:2.4.7\nDIAG_GPGV_VERSION_END", 1)
+        parsed_noisy = diagnostic.parse_apt_metadata(noisy_optional)
+        self.assertEqual("UNKNOWN", parsed_noisy["gpgvVersion"])
+        self.assertEqual("UNKNOWN", parsed_noisy["packageVersions"]["gpgv"])
+        duplicate_optional = trixie.replace(
+            b"gpgv=\n", b"gpgv=\ngpgv=2.2.40\n", 1
+        )
+        self.assertEqual("UNKNOWN", diagnostic.parse_apt_metadata(duplicate_optional)["packageVersions"]["gpgv"])
+        unrecognized_optional = trixie.replace(b"gpgv=\n", b"gpgv=not-found\n", 1)
+        self.assertEqual("UNKNOWN", diagnostic.parse_apt_metadata(unrecognized_optional)["packageVersions"]["gpgv"])
+
+        observed = (b"#8 1.001 201 URI Done: sqv:/var/lib/apt/lists/a\n"
+                    b"#8 1.002 Signature verification succeeded: /var/lib/apt/lists/a\n"
+                    b"#8 1.003 201 URI Done: sqv:/var/lib/apt/lists/b\n"
+                    b"#8 1.004 Signature verification succeeded: /var/lib/apt/lists/b\n"
+                    b"#8 1.005 201 URI Done: gpgv:/var/lib/apt/lists/c\n"
+                    b"#8 1.006 Signature verification succeeded: /var/lib/apt/lists/c\n")
+        self.assertEqual({
+            "verifierUriSchemesObserved": ["gpgv", "sqv"],
+            "verifierUriDoneCountObserved": 3,
+            "signatureVerificationSuccessCountObserved": 3,
+            "verifierObservationTruncated": False,
+        }, diagnostic.summarize_verifier_observations(observed))
+        self.assertEqual("2.2.40", parsed["gpgvVersion"])
+        self.assertEqual("2.2.40", parsed["packageVersions"]["gpgv"])
+        sqv_only = diagnostic.summarize_verifier_observations(
+            b"#8 1.007 201 URI Done: sqv:/var/lib/apt/lists/installed-gpgv\n"
+        )
+        self.assertEqual(["sqv"], sqv_only["verifierUriSchemesObserved"])
+        self.assertEqual("2.2.40", parsed["gpgvVersion"])
+        self.assertEqual("2.2.40", parsed["packageVersions"]["gpgv"])
+        gpgv_only = diagnostic.summarize_verifier_observations(
+            b"#8 1.008 201 URI Done: gpgv:/var/lib/apt/lists/legacy-method\n"
+        )
+        self.assertEqual(["gpgv"], gpgv_only["verifierUriSchemesObserved"])
+        self.assertEqual([], diagnostic.summarize_verifier_observations(
+            b"#8 1.0 mentions sqv: but is not a URI record\n#8 1.1 echo: 201 URI Done: gpgv:/x\n"
+        )["verifierUriSchemesObserved"])
+        empty_observation = diagnostic.summarize_verifier_observations(b"#8 1.0 no verifier observation\n")
+        self.assertEqual([], empty_observation["verifierUriSchemesObserved"])
+        self.assertEqual(0, empty_observation["verifierUriDoneCountObserved"])
+        self.assertEqual(0, empty_observation["signatureVerificationSuccessCountObserved"])
+
+        many_schemes = b"".join(
+            f"#8 1.{i:03d} 201 URI Done: method{i:02d}:/opaque\n".encode()
+            for i in range(diagnostic.MAX_VERIFIER_SCHEMES + 1)
+        )
+        many = diagnostic.summarize_verifier_observations(many_schemes)
+        self.assertEqual(diagnostic.MAX_VERIFIER_SCHEMES, len(many["verifierUriSchemesObserved"]))
+        self.assertEqual(diagnostic.MAX_VERIFIER_SCHEMES + 1, many["verifierUriDoneCountObserved"])
+        self.assertTrue(many["verifierObservationTruncated"])
+        self.assertEqual(sorted(many["verifierUriSchemesObserved"]), many["verifierUriSchemesObserved"])
+
         hostile = (
-            valid.replace(b"gpgv 2.2.40", b"gpgv unavailable", 1),
             valid.replace(b"debian-archive-keyring=2023.3\n", b"", 1),
             valid.replace(b"KEYRING_META mode=644 size=21", b"KEYRING_META mode=666 size=21", 1),
             valid.replace(keyring_sha.encode(), b"g" * 64, 1),
             valid.replace(b"KEYRING_FPR=0123456789ABCDEF0123456789ABCDEF01234567\n", b"", 1),
             valid.replace(keyring_path.encode(), b"/usr/share/keyrings/unrelated.gpg", 1),
+            valid.replace(b"DIAG_APT_VERSION_BEGIN", b"DIAG_GPGV_VERSION_BEGIN", 1),
+            valid + b"DIAG_APT_VERSION_BEGIN\napt 9.9\nDIAG_APT_VERSION_END\n",
         )
         for payload in hostile:
             with self.subTest(payload=payload[-120:]):
@@ -269,8 +342,8 @@ class RecipeAndSanitizerTest(unittest.TestCase):
             transcript = "\n".join([
                 "#1 DIAG_APT_EXIT=100",
                 "#1 DIAG_APT_VERSION_BEGIN", "#1 apt 2.6.1 (amd64)", "#1 DIAG_APT_VERSION_END",
-                "#1 DIAG_GPGV_VERSION_BEGIN", "#1 gpgv 2.2.40", "#1 DIAG_GPGV_VERSION_END",
-                "#1 DIAG_PACKAGE_VERSIONS_BEGIN", "#1 apt=2.6.1", "#1 gpgv=2.2.40",
+                "#1 DIAG_GPGV_VERSION_BEGIN", "#1 /bin/sh: 1: gpgv: not found", "#1 DIAG_GPGV_VERSION_END",
+                "#1 DIAG_PACKAGE_VERSIONS_BEGIN", "#1 apt=2.6.1", "#1 gpgv=",
                 "#1 debian-archive-keyring=2023.3", "#1 DIAG_PACKAGE_VERSIONS_END",
                 "#1 DIAG_GPG_TOOL=available",
                 "#1 DIAG_SOURCE_STANZAS_BEGIN", "#1 URIs: https://snapshot.example/debian",
@@ -282,6 +355,12 @@ class RecipeAndSanitizerTest(unittest.TestCase):
                 "#1 KEYRING_FPR=0123456789ABCDEF0123456789ABCDEF01234567",
                 "#1 KEYRING_END=/usr/share/keyrings/archive.gpg",
                 "#1 DIAG_KEYRINGS_END", "#1 HTTP/1.1 404 Not Found",
+                "#1 1.001 201 URI Done: sqv:/var/lib/apt/lists/a",
+                "#1 1.002 Signature verification succeeded: /var/lib/apt/lists/a",
+                "#1 1.003 201 URI Done: sqv:/var/lib/apt/lists/b",
+                "#1 1.004 Signature verification succeeded: /var/lib/apt/lists/b",
+                "#1 1.005 201 URI Done: sqv:/var/lib/apt/lists/c",
+                "#1 1.006 Signature verification succeeded: /var/lib/apt/lists/c",
                 "#1 Location: https://snapshot.example/final?token=do-not-retain",
                 "#1 Authorization: Bearer do-not-retain",
             ]) + "\n"
@@ -318,13 +397,19 @@ class RecipeAndSanitizerTest(unittest.TestCase):
             receipt_path = output / "receipt.json"
             receipt = json.loads(receipt_path.read_bytes())
             self.assertEqual("complete", receipt["status"])
+            self.assertEqual(2, receipt["schemaVersion"])
             self.assertTrue(receipt["provenance"]["worktreeClean"])
             self.assertEqual(100, receipt["aptObservation"]["updateExitCode"])
             self.assertEqual(1, receipt["aptObservation"]["statusLineCountObserved"])
             self.assertIn("404 Not Found", receipt["aptObservation"]["statusLinesFromAptDebug"][0])
             self.assertEqual("unavailable-from-apt-capture", receipt["aptObservation"]["aptConsumedBodyBytes"])
             self.assertEqual("2.6.1 (amd64)", receipt["aptMetadata"]["aptVersion"])
-            self.assertEqual("2.2.40", receipt["aptMetadata"]["gpgvVersion"])
+            self.assertEqual("UNKNOWN", receipt["aptMetadata"]["gpgvVersion"])
+            self.assertEqual("UNKNOWN", receipt["aptMetadata"]["packageVersions"]["gpgv"])
+            self.assertEqual(["sqv"], receipt["aptObservation"]["verifierUriSchemesObserved"])
+            self.assertEqual(3, receipt["aptObservation"]["verifierUriDoneCountObserved"])
+            self.assertEqual(3, receipt["aptObservation"]["signatureVerificationSuccessCountObserved"])
+            self.assertFalse(receipt["aptObservation"]["verifierObservationTruncated"])
             self.assertIn("apt-diagnostic.log", receipt["evidenceFiles"])
             self.assertIn("diagnostic.Dockerfile", receipt["evidenceFiles"])
             log = (output / "apt-diagnostic.log").read_bytes()

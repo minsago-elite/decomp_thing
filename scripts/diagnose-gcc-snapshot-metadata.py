@@ -37,6 +37,8 @@ RECIPE_PUBLISH_SECONDS = 5
 CALL_SECONDS = 30
 OUTPUT_CAP = 2 * 1024 * 1024
 EVIDENCE_CAP = 8 * 1024 * 1024
+MAX_VERIFIER_SCHEMES = 16
+UNKNOWN = "UNKNOWN"
 APT_UPDATE_MARKER = b"    && apt-get -o Acquire::Check-Valid-Until=false update \\\n"
 APT_DEBUG_OPTIONS = (
     "-o Acquire::Check-Valid-Until=false "
@@ -234,22 +236,82 @@ def _without_buildkit_prefix(line: str) -> str:
     return re.sub(r"^\s*#\d+\s+(?:[0-9]+(?:\.[0-9]+)?\s+)?", "", line)
 
 
+def summarize_verifier_observations(sanitized: bytes) -> dict:
+    """Retain bounded APT method labels, never infer an executable identity."""
+    schemes = set()
+    uri_done_count = 0
+    signature_success_count = 0
+    for raw_line in sanitized.splitlines():
+        line = _without_buildkit_prefix(raw_line.decode("utf-8", errors="replace")).strip()
+        match = re.match(r"^201 URI Done: ([A-Za-z][A-Za-z0-9+.-]{0,31}):", line)
+        if match:
+            uri_done_count += 1
+            schemes.add(match.group(1).lower())
+        if re.match(r"^Signature verification succeeded:\s+\S+\s*$", line):
+            signature_success_count += 1
+    ordered = sorted(schemes)
+    return {
+        "verifierUriSchemesObserved": ordered[:MAX_VERIFIER_SCHEMES],
+        "verifierUriDoneCountObserved": uri_done_count,
+        "signatureVerificationSuccessCountObserved": signature_success_count,
+        "verifierObservationTruncated": len(ordered) > MAX_VERIFIER_SCHEMES,
+    }
+
+
 def parse_apt_metadata(sanitized: bytes) -> dict:
-    apt_version = _block(sanitized, b"DIAG_APT_VERSION_BEGIN", b"DIAG_APT_VERSION_END")
-    gpgv_version = _block(sanitized, b"DIAG_GPGV_VERSION_BEGIN", b"DIAG_GPGV_VERSION_END")
-    package_versions = _block(sanitized, b"DIAG_PACKAGE_VERSIONS_BEGIN", b"DIAG_PACKAGE_VERSIONS_END")
-    source_block = _block(sanitized, b"DIAG_SOURCE_STANZAS_BEGIN", b"DIAG_SOURCE_STANZAS_END")
-    keyring_block = _block(sanitized, b"DIAG_KEYRINGS_BEGIN", b"DIAG_KEYRINGS_END")
+    markers = (
+        (b"DIAG_APT_VERSION_BEGIN", b"DIAG_APT_VERSION_END"),
+        (b"DIAG_GPGV_VERSION_BEGIN", b"DIAG_GPGV_VERSION_END"),
+        (b"DIAG_PACKAGE_VERSIONS_BEGIN", b"DIAG_PACKAGE_VERSIONS_END"),
+        (b"DIAG_SOURCE_STANZAS_BEGIN", b"DIAG_SOURCE_STANZAS_END"),
+        (b"DIAG_KEYRINGS_BEGIN", b"DIAG_KEYRINGS_END"),
+    )
+    blocks = [_block(sanitized, begin, end) for begin, end in markers]
+    marker_lines = [
+        _without_buildkit_prefix(line.decode("utf-8", errors="replace")).strip().encode("utf-8")
+        for line in sanitized.splitlines()
+    ]
+    marker_positions = []
+    for begin, end in markers:
+        begin_at = marker_lines.index(begin)
+        end_at = marker_lines.index(end)
+        marker_positions.extend((begin_at, end_at))
+    if marker_positions != sorted(marker_positions):
+        raise Refusal("required diagnostic blocks out of order")
+    apt_version, gpgv_version, package_versions, source_block, keyring_block = blocks
     if not re.search(rb"\bapt\s+[0-9][^\r\n]*", apt_version, re.I):
         raise Refusal("APT version evidence missing")
-    if not re.search(rb"\bgpgv\s+[^\r\n]*[0-9]", gpgv_version, re.I):
-        raise Refusal("GPGV version evidence missing")
+    # BuildKit prefixes every line in a RUN vertex. Normalize only after the
+    # unique, ordered marker block has been selected so records are matched as
+    # whole lines and cannot be supplied by unrelated output.
+    package_lines = [
+        _without_buildkit_prefix(line.decode("utf-8", errors="replace")).strip()
+        for line in package_versions.splitlines()
+    ]
+    package_versions = "\n".join(package_lines).encode("utf-8")
+    gpgv_lines = [
+        _without_buildkit_prefix(line.decode("utf-8", errors="replace")).strip()
+        for line in gpgv_version.splitlines()
+    ]
+    gpgv_version = "\n".join(gpgv_lines).encode("utf-8")
     versions = {}
-    for package in (b"apt", b"gpgv", b"debian-archive-keyring"):
-        match = re.search(rb"(?m)(?:^|\s)" + re.escape(package) + rb"=([^\s]+)\s*$", package_versions)
-        if not match:
-            raise Refusal(f"{package.decode()} package version evidence missing")
-        versions[package.decode()] = match.group(1).decode("ascii", errors="strict")
+    for package in (b"apt", b"debian-archive-keyring"):
+        matches = re.findall(rb"(?m)^" + re.escape(package) + rb"=([^\s]+)\s*$", package_versions)
+        if len(matches) != 1 or not matches[0]:
+            raise Refusal(f"{package.decode()} package version evidence missing or ambiguous")
+        versions[package.decode()] = matches[0].decode("ascii", errors="strict")
+    gpgv_package_versions = re.findall(rb"(?m)^gpgv=([^\s]*)\s*$", package_versions)
+    gpgv_package_value = gpgv_package_versions[0] if len(gpgv_package_versions) == 1 else b""
+    versions["gpgv"] = (
+        gpgv_package_value.decode("ascii", errors="strict")
+        if re.fullmatch(rb"[0-9][0-9A-Za-z.+:~_-]*", gpgv_package_value)
+        else UNKNOWN
+    )
+    gpgv_banners = re.findall(rb"(?mi)^\s*gpgv(?:\s+\(GnuPG\))?\s+([0-9][0-9A-Za-z.+:~_-]*)\s*$", gpgv_version)
+    gpgv_version_value = (
+        gpgv_banners[0].decode("ascii", errors="strict")
+        if len(gpgv_banners) == 1 else UNKNOWN
+    )
 
     source_lines = [_without_buildkit_prefix(line) for line in source_block.decode("utf-8", errors="replace").splitlines()]
     if not any(line.startswith(("URIs:", "deb ", "deb-src ")) for line in source_lines):
@@ -303,7 +365,7 @@ def parse_apt_metadata(sanitized: bytes) -> dict:
         raise Refusal("APT default trust keyring evidence missing")
     return {"packageVersions": versions, "sourceSignedByPaths": sorted(signed_by),
             "aptVersion": re.search(rb"\bapt\s+([^\r\n]+)", apt_version, re.I).group(1).decode("utf-8", errors="replace").strip(),
-            "gpgvVersion": re.search(rb"\bgpgv\s+([^\r\n]+)", gpgv_version, re.I).group(1).decode("utf-8", errors="replace").strip(),
+            "gpgvVersion": gpgv_version_value,
             "keyrings": keyrings}
 
 
@@ -732,7 +794,7 @@ def capture(output_relative: str, docker_host: str, environ: dict[str, str] | No
     status = ("complete" if error is None and process["complete"] and apt_exit is not None
               and provenance_complete else "incomplete")
     receipt = {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "kind": "gcc-debian-snapshot-metadata-diagnostic-only",
         "status": status,
         "limitations": [
@@ -762,6 +824,7 @@ def capture(output_relative: str, docker_host: str, environ: dict[str, str] | No
             "updateExitCode": apt_exit,
             "aptProgressLinesAreNotHttpStatus": True,
             **summarize_apt_transport(sanitized),
+            **summarize_verifier_observations(sanitized),
             "httpStatuses": "only-explicit-lines-reported-by-APT-debug",
             "redirectChain": "APT debug lines only; ordering retained in apt-diagnostic.log",
             "aptConsumedBodyBytes": "unavailable-from-apt-capture",
