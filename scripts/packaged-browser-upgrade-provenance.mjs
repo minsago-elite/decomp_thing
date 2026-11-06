@@ -50,13 +50,23 @@ export function validatePreviousBuildProvenance(pin, provenance, archive) {
 }
 
 export function validateCurrentBuildProvenance(provenance, repository, currentSource, archive) {
-  validateBuildRecord(provenance, 'packaged-current-build/v1', repository,
+  validateBuildRecord(provenance, 'packaged-current-build/v2', repository,
     { ...currentSource, archiveFile: 'current-package.zip' }, archive);
+  const expectedPullRequest = currentSource.pullRequest ?? null;
+  if (expectedPullRequest === null) {
+    assert.equal(provenance.pullRequest, null, 'Current package unexpectedly claims pull-request source identity');
+  } else {
+    assert.match(expectedPullRequest.headCommit ?? '', SHA1, 'Expected pull-request head commit is invalid');
+    assert.match(expectedPullRequest.baseCommit ?? '', SHA1, 'Expected pull-request base commit is invalid');
+    assert.deepEqual(provenance.pullRequest, expectedPullRequest,
+      'Current package pull-request head/base identity differs from the browser qualification checkout');
+  }
   return {
     schema: provenance.schema,
     repository: provenance.repository,
     commit: provenance.commit,
     tree: provenance.tree,
+    pullRequest: provenance.pullRequest,
     cleanSource: provenance.cleanSource,
     build: { workflow: provenance.build.workflow, runId: provenance.build.runId,
       runAttempt: provenance.build.runAttempt, gradleVersion: provenance.build.gradleVersion,
@@ -65,9 +75,14 @@ export function validateCurrentBuildProvenance(provenance, repository, currentSo
   };
 }
 
-export function assertSameUpgradeRun(previous, current) {
+export function assertSameUpgradeRun(previous, current, expectedRunId = null) {
   assert.equal(previous.build.workflow, current.build.workflow, 'Previous and current packages use different workflows');
   assert.equal(previous.build.runId, current.build.runId, 'Previous and current packages must come from the same workflow run');
   assert.equal(previous.build.runAttempt, current.build.runAttempt,
     'Previous and current packages must come from the same workflow attempt');
+  if (expectedRunId !== null) {
+    assert.match(expectedRunId, /^\d{1,20}$/, 'Browser qualification CI run identity is invalid');
+    assert.equal(current.build.runId, expectedRunId,
+      'Package artifacts were not produced by the workflow run performing this browser qualification');
+  }
 }

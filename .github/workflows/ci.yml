@@ -148,7 +148,8 @@ jobs:
           java-version: "21"
       - uses: ./.github/actions/setup-gradle-compiler-cache
         with:
-          cache-read-only: ${{ github.ref != 'refs/heads/master' }}
+          # Never publish outputs compiled from the older pinned source under this run's current-source key.
+          cache-read-only: true
       - name: Cache locked frontend package downloads
         uses: actions/cache@v6
         with:
@@ -242,11 +243,11 @@ jobs:
           if-no-files-found: error
           path: build/pinned-upgrade-previous
 
-  web-packaged:
+  web-packaged-build:
     needs: frontend
     env:
       NPM_CONFIG_CACHE: ${{ github.workspace }}/build/npm-download-cache
-    name: Packaged web contracts and browser
+    name: Packaged web build and primary browser journeys
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     permissions:
@@ -318,6 +319,8 @@ jobs:
       - name: Bind the current package to its exact clean source tree
         env:
           DECOMP_BROWSER_JS_RUNTIME: ${{ runner.temp }}/frontend-node/bin/node
+          DECOMP_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
+          DECOMP_PR_BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
         run: |
           mkdir -p build/packaged-current-package
           cp "$WEB_TEST_ARCHIVE" build/packaged-current-package/current-package.zip
@@ -339,11 +342,24 @@ jobs:
           tree = subprocess.check_output(['git', 'rev-parse', 'HEAD^{tree}'], text=True).strip()
           assert commit == os.environ['GITHUB_SHA']
           assert subprocess.check_output(['git', 'status', '--porcelain=v1'], text=True) == ''
+          event_name = os.environ['GITHUB_EVENT_NAME']
+          head = os.environ.get('DECOMP_PR_HEAD_SHA', '')
+          base = os.environ.get('DECOMP_PR_BASE_SHA', '')
+          if event_name == 'pull_request':
+              assert len(head) == 40 and all(ch in '0123456789abcdef' for ch in head)
+              assert len(base) == 40 and all(ch in '0123456789abcdef' for ch in base)
+              parents = set(subprocess.check_output(['git', 'rev-list', '--parents', '-n1', 'HEAD'], text=True).split()[1:])
+              assert head in parents and base in parents, 'Built merge commit does not bind the recorded PR head and base'
+              pull_request = {'headCommit': head, 'baseCommit': base}
+          else:
+              assert not head and not base
+              pull_request = None
           record = {
-              'schema': 'packaged-current-build/v1',
+              'schema': 'packaged-current-build/v2',
               'repository': 'minsago-elite/decomp_thing',
               'commit': commit,
               'tree': tree,
+              'pullRequest': pull_request,
               'cleanSource': True,
               'build': {
                   'workflow': 'CI',
@@ -459,7 +475,7 @@ jobs:
             build/reports/junit-signatures
 
   web-upgrade-browser:
-    needs: [web-packaged, web-upgrade-previous]
+    needs: [web-packaged-build, web-upgrade-previous]
     name: Packaged cache upgrade from pinned prior build
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -506,6 +522,9 @@ jobs:
           name: packaged-web-pinned-previous
           path: build/packaged-upgrade-inputs/previous
       - name: Run the cache-enabled two-build upgrade in pinned Chrome
+        env:
+          DECOMP_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
+          DECOMP_PR_BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
         run: |
           node scripts/check-packaged-web-browser.mjs \
             --archive "$GITHUB_WORKSPACE/build/packaged-upgrade-inputs/current/current-package.zip" \
@@ -520,13 +539,30 @@ jobs:
         with:
           name: packaged-web-upgrade-verification
           retention-days: 14
-          if-no-files-found: warn
+          compression-level: 0
+          if-no-files-found: error
           path: |
             build/packaged-upgrade-inputs/browser-version.txt
             build/packaged-upgrade-inputs/current/current-source.json
             build/packaged-upgrade-inputs/previous/previous-source.json
             build/packaged-browser-*/report.json
             build/packaged-browser-*/*.png
+
+  web-packaged:
+    name: Packaged web contracts and browser
+    needs: [web-packaged-build, web-upgrade-browser]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Require primary packaged journeys and pinned two-build upgrade
+        env:
+          PACKAGED_RESULT: ${{ needs.web-packaged-build.result }}
+          UPGRADE_RESULT: ${{ needs.web-upgrade-browser.result }}
+        run: |
+          test "$PACKAGED_RESULT" = success
+          test "$UPGRADE_RESULT" = success
 
   kotlin-suite:
     needs: frontend

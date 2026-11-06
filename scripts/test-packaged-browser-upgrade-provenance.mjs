@@ -25,7 +25,7 @@ const provenance = {
 test('accepts the exact pinned source tree and downloaded package digest', () => {
   assert.deepEqual(pin, {
     ...expectedPin,
-    reason: 'Last master source before the D11 Home and Runtime notice change; its Runtime lazy chunk is absent from current master.',
+    reason: 'Pinned pre-notice source for comparing the prior Runtime lazy-chunk asset with later package builds.',
   });
   assert.deepEqual(validatePreviousBuildProvenance(pin, provenance, archive), provenance);
 });
@@ -53,21 +53,31 @@ test('rejects source, cleanliness, artifact, and toolchain provenance drift', ()
 test('binds the current package to the exact driver checkout and ZIP bytes', () => {
   const current = {
     ...provenance,
-    schema: 'packaged-current-build/v1',
+    schema: 'packaged-current-build/v2',
     commit: 'c'.repeat(40),
     tree: 'd'.repeat(40),
+    pullRequest: { headCommit: 'e'.repeat(40), baseCommit: 'f'.repeat(40) },
     archive: { file: 'current-package.zip', ...archive },
   };
   assert.equal(validateCurrentBuildProvenance(current, pin.repository,
-    { commit: current.commit, tree: current.tree }, archive).commit, current.commit);
+    { commit: current.commit, tree: current.tree, pullRequest: current.pullRequest }, archive).commit, current.commit);
   assert.throws(() => validateCurrentBuildProvenance(current, pin.repository,
-    { commit: pin.commit, tree: current.tree }, archive), /expected commit/);
+    { commit: pin.commit, tree: current.tree, pullRequest: current.pullRequest }, archive), /expected commit/);
   assert.throws(() => validateCurrentBuildProvenance(current, pin.repository,
-    { commit: current.commit, tree: pin.tree }, archive), /expected tree/);
+    { commit: current.commit, tree: pin.tree, pullRequest: current.pullRequest }, archive), /expected tree/);
+  assert.throws(() => validateCurrentBuildProvenance(current, pin.repository,
+    { commit: current.commit, tree: current.tree, pullRequest: { ...current.pullRequest, headCommit: 'a'.repeat(40) } }, archive), /head\/base identity/);
+  const pushBuild = { ...current, pullRequest: null };
+  assert.equal(validateCurrentBuildProvenance(pushBuild, pin.repository,
+    { commit: current.commit, tree: current.tree, pullRequest: null }, archive).pullRequest, null);
+  assert.throws(() => validateCurrentBuildProvenance(current, pin.repository,
+    { commit: current.commit, tree: current.tree, pullRequest: null }, archive), /unexpectedly claims pull-request/);
   const previous = validatePreviousBuildProvenance(pin, provenance, archive);
   const verifiedCurrent = validateCurrentBuildProvenance(current, pin.repository,
-    { commit: current.commit, tree: current.tree }, archive);
+    { commit: current.commit, tree: current.tree, pullRequest: current.pullRequest }, archive);
   assert.doesNotThrow(() => assertSameUpgradeRun(previous, verifiedCurrent));
+  assert.doesNotThrow(() => assertSameUpgradeRun(previous, verifiedCurrent, previous.build.runId));
+  assert.throws(() => assertSameUpgradeRun(previous, verifiedCurrent, '42200000000'), /performing this browser qualification/);
   assert.throws(() => assertSameUpgradeRun(previous, {
     ...verifiedCurrent, build: { ...verifiedCurrent.build, runAttempt: '2' },
   }), /same workflow attempt/);

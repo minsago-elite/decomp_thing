@@ -101,6 +101,14 @@ const cdpDiagnostics = new PackagedBrowserCdpDiagnostics();
 const profile = join(root, 'browser profile');
 const ownerToken = randomUUID();
 const installHelper = join(repo, 'scripts/packaged-browser-install.py');
+const pullRequestHeadCommit = process.env.DECOMP_PR_HEAD_SHA || null;
+const pullRequestBaseCommit = process.env.DECOMP_PR_BASE_SHA || null;
+assert.equal(pullRequestHeadCommit === null, pullRequestBaseCommit === null,
+  'PR head and base source identities must be supplied together');
+if (pullRequestHeadCommit !== null) {
+  assert.match(pullRequestHeadCommit, /^[a-f0-9]{40}$/);
+  assert.match(pullRequestBaseCommit, /^[a-f0-9]{40}$/);
+}
 let cdp;
 let applicationError = '';
 let applicationOutput = '';
@@ -108,8 +116,9 @@ let browserError = '';
 let viteError = '';
 const report = { status: 'running', mode: values.mode, testDirectory: root, driverNode: nodeVersion,
   driverCommit: process.env.GITHUB_SHA ?? execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8', maxBuffer: 1024 }).trim(),
-  driverHeadCommit: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8', maxBuffer: 1024 }).trim(),
+  driverCheckoutCommit: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8', maxBuffer: 1024 }).trim(),
   driverTree: execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: repo, encoding: 'utf8', maxBuffer: 1024 }).trim(),
+  driverPullRequestHeadCommit: pullRequestHeadCommit, driverPullRequestBaseCommit: pullRequestBaseCommit,
   tools: { node: process.execPath, chrome: chromeBinary, javaHome, python: values.python }, requests: {} };
 const launchErrors = new WeakMap();
 console.log(`Evidence directory: ${root}`);
@@ -527,10 +536,16 @@ try {
     previousSourcePin = { schema: pin.schema, repository: pin.repository, commit: pin.commit, tree: pin.tree, reason: pin.reason };
     const currentProvenance = JSON.parse(readFileSync(values['current-provenance'], 'utf8'));
     report.currentSource = validateCurrentBuildProvenance(currentProvenance, pin.repository, {
-      commit: report.driverHeadCommit, tree: report.driverTree,
+      commit: report.driverCheckoutCommit, tree: report.driverTree,
+      pullRequest: pullRequestHeadCommit === null ? null : {
+        headCommit: pullRequestHeadCommit, baseCommit: pullRequestBaseCommit,
+      },
     }, { sha256: await fileHash(archive), bytes: (await fs.stat(archive)).size });
-    assertSameUpgradeRun(previousSource, report.currentSource);
-    report.upgrade = { previousSourcePin, previousSource, previousArchiveVerified: true, phase: 'verify-packages' };
+    const workflowRunId = process.env.GITHUB_RUN_ID ?? null;
+    assertSameUpgradeRun(previousSource, report.currentSource, workflowRunId);
+    report.upgrade = { previousSourcePin, previousSource, previousArchiveVerified: true,
+      qualification: { workflowRunId, workflowRunAttempt: process.env.GITHUB_RUN_ATTEMPT ?? null },
+      phase: 'verify-packages' };
   }
   let installation = await prepareArchive(values.mode === 'upgrade' ? values['previous-archive'] : archive);
   recordInstallation(installation);
