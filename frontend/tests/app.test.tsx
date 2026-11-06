@@ -1,5 +1,6 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/preact';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import axe from 'axe-core';
 import { App } from '../src/app/App';
 import { ViewBoundary } from '../src/shared/ViewBoundary';
 import { createAssetRecovery } from '../src/app/assetRecovery';
@@ -334,6 +335,75 @@ describe('browser offline notices', () => {
       expect(fetch).not.toHaveBeenCalled();
       second.unmount();
     } finally { added.mockRestore(); removed.mockRestore(); }
+  });
+});
+
+async function connectionViolations(root: Element = document.body) {
+  const result = await axe.run(root, {
+    runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa', 'best-practice'] },
+    rules: { 'color-contrast': { enabled: false } },
+    resultTypes: ['violations'],
+  });
+  return result.violations.map(violation => violation.id);
+}
+
+describe('connection notice semantics (#1896)', () => {
+  let online = true;
+  let originalOnline: PropertyDescriptor | undefined;
+  beforeEach(() => {
+    online = true;
+    originalOnline = Object.getOwnPropertyDescriptor(navigator, 'onLine');
+    Object.defineProperty(navigator, 'onLine', { configurable: true, get: () => online });
+  });
+  afterEach(() => {
+    if (originalOnline) Object.defineProperty(navigator, 'onLine', originalOnline);
+    else Reflect.deleteProperty(navigator, 'onLine');
+  });
+
+  function expectNoticeShape(heading: string) {
+    const region = screen.getByRole('region', { name: heading });
+    expect(region.tagName).toBe('SECTION');
+    const status = screen.getByRole('status', { name: 'Connection status' });
+    expect(status.tagName).toBe('DIV');
+    expect(region.contains(status)).toBe(true);
+    expect(status.querySelector('h2')?.textContent).toBe(heading);
+    expect(document.querySelector('aside[role="status"]')).toBeNull();
+    expect(document.querySelectorAll('.connection-notice')).toHaveLength(1);
+  }
+
+  it('names offline, reconnected and coalesced notices without axe violations or mutations', async () => {
+    const fetch = vi.fn(); const reload = vi.fn();
+    const store = vi.spyOn(Storage.prototype, 'setItem');
+    vi.stubGlobal('fetch', fetch);
+    try {
+      render(<App reload={reload} />);
+      online = false;
+      fireEvent(window, new Event('offline'));
+      expectNoticeShape('Browser reports offline');
+      expect(await connectionViolations(document.querySelector('.connection-notice')!)).toEqual([]);
+      online = true;
+      fireEvent(window, new Event('online'));
+      expectNoticeShape('Refresh loaded information');
+      expect(await connectionViolations(document.querySelector('.connection-notice')!)).toEqual([]);
+      await act(() => {
+        online = false; window.dispatchEvent(new Event('offline'));
+        online = true; window.dispatchEvent(new Event('online'));
+      });
+      expectNoticeShape('Refresh loaded information');
+      expect(await connectionViolations(document.querySelector('.connection-notice')!)).toEqual([]);
+      expect(fetch).not.toHaveBeenCalled();
+      expect(reload).not.toHaveBeenCalled();
+      expect(store).not.toHaveBeenCalled();
+    } finally { store.mockRestore(); }
+  });
+
+  it('rejects the previous aside[role=status] markup (negative control)', async () => {
+    const legacy = render(<aside class="connection-notice notice" role="status" aria-label="Connection status">
+      <h2>Browser reports offline</h2><p>Previously loaded information may be out of date.</p>
+    </aside>);
+    expect(await connectionViolations(legacy.container)).toContain('aria-allowed-role');
+    expect(screen.queryByRole('region', { name: 'Browser reports offline' })).toBeNull();
+    legacy.unmount();
   });
 });
 
