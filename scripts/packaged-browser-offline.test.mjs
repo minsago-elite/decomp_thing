@@ -1,0 +1,180 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import { OFFLINE_CLAIMS, OFFLINE_SCHEMA, OFFLINE_LABEL, RECONNECT_LABEL, COMMAND_PAUSED, COMMAND_VERIFIED, assertOffline, isExpectedRead, isNoStore, qualifyOffline } from './packaged-browser-offline.mjs';
+
+const origin = 'http://127.0.0.1:41234';
+const job = 'd'.repeat(32);
+const run = 'run_fixture_54';
+const api = path => `${origin}/nested/api/v1/${path}`;
+const token = (n) => `0000000${n}-0000-4000-8000-000000000000`;
+
+function clean() {
+  const requestIds = new Map();
+  let requestSequence = 0;
+  const r = (phase, method, url, type = 'Fetch') => {
+    const requestId = `request-${requestSequence++}`;
+    requestIds.set(`${phase}|${url}`, requestId);
+    return { requestId, phase, method, url, type };
+  };
+  const s = (phase, url, type, cacheControl, extra = {}) => ({ requestId: requestIds.get(`${phase}|${url}`) ?? 'missing-request', phase,
+    url, status: 200, type, cacheControl, fromDiskCache: false, fromServiceWorker: false, ...extra });
+  const asset = `${origin}/nested/assets/ui/assets/index-abc.js`;
+  return {
+    schema: OFFLINE_SCHEMA, origin, basePath: '/nested/',
+    identity: { buildId: 'build-1', applicationVersion: '1.0.0', archiveSha256: 'a'.repeat(64), chromeProduct: 'HeadlessChrome/140.0', chromeSha256: 'b'.repeat(64), driverCommit: 'c'.repeat(40) },
+    privateMarkers: [job, run],
+    serviceWorker: { registrations: 0, controlled: false, cdpRegistrations: 0, cdpVersions: 0, fromServiceWorkerResponses: 0 },
+    cacheStorage: { pageNames: [], checkedPhases: ['baseline', 'offline', 'offline-reload', 'recovery'] },
+    storage: { localEntries: 0, sessionEntries: 0, indexedDatabases: 0 },
+    session: { generationBefore: '0123456789abcdef', generationAfter: '0123456789abcdef', cookieHttpOnly: true },
+    requests: [
+      r('baseline', 'GET', `${origin}/nested/`, 'Document'),
+      r('baseline', 'POST', api('session')),
+      r('baseline', 'GET', api('jobs')),
+      r('baseline', 'GET', api(`jobs/${job}`)),
+      r('baseline', 'GET', api(`jobs/${job}/runs/${run}`)),
+      r('baseline', 'GET', api(`jobs/${job}/runs/${run}/controls`)),
+      r('baseline', 'GET', asset, 'Script'),
+      r('reconnect', 'GET', api('session')),
+      r('offline-reload', 'GET', `${origin}/nested/jobs/${job}`, 'Document'),
+      r('recovery', 'GET', `${origin}/nested/jobs/${job}`, 'Document'),
+      r('recovery', 'GET', asset, 'Script'),
+      r('recovery', 'GET', api(`jobs/${job}`)),
+      r('recovery', 'GET', api(`jobs/${job}/runs/${run}`)),
+      r('recovery', 'GET', api(`jobs/${job}/runs/${run}/controls`)),
+    ],
+    responses: [
+      s('baseline', `${origin}/nested/`, 'Document', 'no-store'),
+      s('baseline', api('jobs'), 'Fetch', 'no-store'),
+      s('baseline', api(`jobs/${job}`), 'Fetch', 'no-store'),
+      s('baseline', api(`jobs/${job}/runs/${run}`), 'Fetch', 'no-store'),
+      s('baseline', api(`jobs/${job}/runs/${run}/controls`), 'Fetch', 'no-store'),
+      s('baseline', asset, 'Script', 'public, max-age=31536000, immutable'),
+      s('reconnect', api('session'), 'Fetch', 'no-store'),
+      s('recovery', `${origin}/nested/jobs/${job}`, 'Document', 'no-store'),
+      s('recovery', asset, 'Script', 'public, max-age=31536000, immutable', { fromDiskCache: true }),
+      s('recovery', api(`jobs/${job}`), 'Fetch', 'no-store'),
+      s('recovery', api(`jobs/${job}/runs/${run}`), 'Fetch', 'no-store'),
+      s('recovery', api(`jobs/${job}/runs/${run}/controls`), 'Fetch', 'no-store'),
+    ],
+    failedRequests: [{ requestId: 'request-8', phase: 'offline-reload', type: 'Document', error: 'net::ERR_INTERNET_DISCONNECTED', blockedReason: null }],
+    events: [
+      { phase: 'offline', type: 'offline', isTrusted: true, onLine: false },
+      { phase: 'reconnect', type: 'online', isTrusted: true, onLine: true },
+      { phase: 'offline-reload', type: 'offline', isTrusted: true, onLine: false },
+      { phase: 'recovery', type: 'online', isTrusted: true, onLine: true },
+    ],
+    phases: {
+      baseline: { url: `${origin}/nested/jobs/${job}/runs/${run}`, historyLength: 3, pageToken: token(1), privateTextShown: true, controlStatus: COMMAND_VERIFIED },
+      offline: { url: `${origin}/nested/jobs/${job}/runs/${run}`, historyLength: 3, pageToken: token(1), noticeHeading: OFFLINE_LABEL,
+        privateTextShown: true, controlStatus: COMMAND_PAUSED, commandAction: 'retry', commandDisabled: true,
+        disabledClickProbeAttempts: 1, requestsAfterRefusal: 0, screenshot: 'offline-controls.png' },
+      reconnect: { url: `${origin}/nested/jobs/${job}/runs/${run}`, historyLength: 3, pageToken: token(1), noticeHeading: RECONNECT_LABEL, commandEnabled: true, recoveryMs: 900 },
+      offlineReload: { url: 'chrome-error://chromewebdata/', historyLength: 3, pageToken: token(2), renderedText: 'No internet', documentFailed: true, screenshot: 'offline-reload.png' },
+      recovery: { url: `${origin}/nested/jobs/${job}/runs/${run}`, historyLength: 3, pageToken: token(3), privateTextShown: true,
+        controlStatus: COMMAND_VERIFIED, recoveryMs: 1500, observationMs: 3000 },
+    },
+    screenshots: ['offline-baseline.png', 'offline-controls.png', 'offline-reload.png', 'offline-recovered.png'].map(name => ({ name, bytes: 512, sha256: 'e'.repeat(64) })),
+    emulation: { method: 'Network.emulateNetworkConditions', offlineCalls: 2, onlineCalls: 2, restored: true },
+    cleanup: { networkRestored: true, listenersDetached: true, targetClosed: true },
+    claims: structuredClone(OFFLINE_CLAIMS),
+  };
+}
+
+function fails(mutate, pattern) {
+  const evidence = clean();
+  mutate(evidence);
+  const verdict = qualifyOffline(evidence);
+  assert.equal(verdict.passed, false, `expected failure matching ${pattern}`);
+  assert.ok(verdict.failures.some(f => pattern.test(f)), `no failure matched ${pattern}: ${verdict.failures.join(' | ')}`);
+  assert.throws(() => assertOffline(evidence));
+}
+
+test('clean trace passes', () => {
+  const verdict = assertOffline(clean());
+  assert.deepEqual(verdict.failures, []);
+  assert.equal(verdict.summary.offlineEvents, 2);
+});
+test('retry eligibility needs the explicit server-verified status', () => {
+  fails(e => { e.phases.baseline.controlStatus = COMMAND_PAUSED; }, /not verified by the server read/);
+  fails(e => { e.phases.recovery.controlStatus = COMMAND_PAUSED; }, /not re-verified after reconnect/);
+});
+
+test('Cache-Control classification', () => {
+  assert.equal(isNoStore('no-store'), true);
+  assert.equal(isNoStore('no-store, max-age=0'), true);
+  assert.equal(isNoStore('private, max-age=60'), false);
+  assert.equal(isNoStore('no-store, max-age=60'), false);
+  assert.equal(isNoStore(null), false);
+  assert.equal(isExpectedRead({ method: 'GET', url: api(`jobs/${job}`), type: 'Fetch' }, '/nested/', origin), true);
+  assert.equal(isExpectedRead({ method: 'GET', url: api(`jobs/${job}/runs/${run}/controls`), type: 'Fetch' }, '/nested/', origin), true);
+  assert.equal(isExpectedRead({ method: 'GET', url: api('jobs/x/runs/y/cancel'), type: 'Fetch' }, '/nested/', origin), false);
+  assert.equal(isExpectedRead({ method: 'POST', url: api('session'), type: 'Fetch' }, '/nested/', origin), false);
+  assert.equal(isExpectedRead({ method: 'GET', url: api('telemetry'), type: 'Fetch' }, '/nested/', origin), false);
+});
+
+test('service-worker registration fails', () => fails(e => { e.serviceWorker.registrations = 1; }, /serviceWorker: page reported/));
+test('service-worker control fails', () => fails(e => { e.serviceWorker.controlled = true; }, /controlled/));
+test('Chrome-reported service-worker version fails', () => fails(e => { e.serviceWorker.cdpVersions = 1; }, /Chrome reported/));
+test('service-worker served response fails', () => fails(e => { e.responses[1].fromServiceWorker = true; }, /service worker/));
+test('non-empty CacheStorage fails', () => fails(e => { e.cacheStorage.pageNames = ['jobs']; }, /cacheStorage: not empty/));
+test('unchecked CacheStorage fails', () => fails(e => { e.cacheStorage.checkedPhases = []; }, /not checked/));
+test('CacheStorage must be checked during both offline phases', () => fails(e => {
+  e.cacheStorage.checkedPhases = ['baseline', 'recovery'];
+}, /not checked in offline/));
+test('API max-age fails', () => fails(e => { e.responses[1].cacheControl = 'private, max-age=600'; }, /api .* not no-store/));
+test('document without Cache-Control fails', () => fails(e => { e.responses[0].cacheControl = null; }, /document .* not no-store/));
+test('API served from disk cache fails', () => fails(e => { e.responses[6].fromDiskCache = true; }, /served from the HTTP cache/));
+test('sensitive response while offline fails', () => fails(e => { e.responses.push({ ...e.responses[3], phase: 'offline-reload' }); }, /received while offline/));
+test('private text after offline reload fails', () => fails(e => { e.phases.offlineReload.renderedText = `Attempt ${run}`; }, /private text rendered/));
+test('offline reload served by cache fails', () => fails(e => { e.phases.offlineReload.documentFailed = false; }, /did not fail offline/));
+test('offline document failure must be the one expected emulated network failure', () => {
+  fails(e => { e.failedRequests[0].error = 'other'; }, /expected one failed offline document/);
+  fails(e => { e.failedRequests[0].blockedReason = 'csp'; }, /expected one failed offline document/);
+});
+test('missing stale label fails', () => fails(e => { e.phases.offline.noticeHeading = null; }, /offline\/stale label missing/));
+test('offline view must retain only already-open attempt text', () => fails(e => { e.phases.offline.privateTextShown = false; }, /already-open attempt is not available/));
+test('enabled retry command offline fails', () => fails(e => { e.phases.offline.commandDisabled = false; }, /retry command was not disabled/));
+test('retry command must be disabled again after reconnect', () => fails(e => { e.phases.reconnect.commandEnabled = false; }, /retry command control did not recover/));
+test('disabled retry probe emitting a request fails', () => fails(e => { e.phases.offline.requestsAfterRefusal = 1; }, /disabled retry probe emitted a request/));
+test('mutation after reconnect fails', () => fails(e => { e.requests.push({ requestId: 'extra-1', phase: 'reconnect', method: 'PATCH', url: api(`jobs/${job}`), type: 'Fetch' }); }, /PATCH in reconnect/));
+test('command replay after recovery fails', () => fails(e => { e.requests.push({ requestId: 'extra-2', phase: 'recovery', method: 'POST', url: api(`jobs/${job}/runs/r/cancel`), type: 'Fetch' }); }, /command replay/));
+test('read while offline fails', () => fails(e => { e.requests.push({ requestId: 'extra-3', phase: 'offline', method: 'GET', url: api(`jobs/${job}`), type: 'Fetch' }); }, /reads must be suspended/));
+test('unexpected fetch fails', () => fails(e => { e.requests.push({ requestId: 'extra-4', phase: 'recovery', method: 'GET', url: api('telemetry'), type: 'Fetch' }); }, /unexpected fetch/));
+test('extra baseline mutation fails', () => fails(e => { e.requests.push({ requestId: 'extra-5', phase: 'baseline', method: 'POST', url: api('jobs'), type: 'Fetch' }); }, /unexpected baseline mutation/));
+test('missing offline event fails', () => fails(e => { e.events = e.events.filter(x => x.type !== 'offline'); }, /missing trusted offline/));
+test('missing online event fails', () => fails(e => { e.events = e.events.filter(x => x.type !== 'online'); }, /missing trusted online/));
+test('missing second offline or recovery event fails', () => {
+  fails(e => { e.events = e.events.filter(x => !(x.type === 'offline' && x.phase === 'offline-reload')); }, /offline event in offline-reload/);
+  fails(e => { e.events = e.events.filter(x => !(x.type === 'online' && x.phase === 'recovery')); }, /online event in recovery/);
+});
+test('untrusted event fails', () => fails(e => { e.events[0].isTrusted = false; }, /untrusted offline/));
+test('wrong origin request fails', () => fails(e => { e.requests.push({ requestId: 'extra-6', phase: 'recovery', method: 'GET', url: 'http://127.0.0.1:9/nested/', type: 'Document' }); }, /wrong origin/));
+test('response must join exactly one request by CDP id, URL and phase', () => {
+  fails(e => { e.responses[1].requestId = 'unrelated'; }, /response must join exactly one/);
+  fails(e => { e.responses[1].phase = 'recovery'; }, /response must join exactly one/);
+});
+test('non-loopback origin fails', () => fails(e => { e.origin = 'http://example.test'; }, /origin: must be/));
+test('cleanup false fails', () => fails(e => { e.cleanup.listenersDetached = false; }, /cleanup.listenersDetached/));
+test('unrestored emulation fails', () => fails(e => { e.emulation.restored = false; }, /not restored/));
+test('emulation phases must be exact', () => {
+  fails(e => { e.emulation.offlineCalls = 3; }, /expected exactly two offline/);
+  fails(e => { e.events.push({ phase: 'recovery', type: 'online', isTrusted: true, onLine: true }); }, /expected exactly the ordered/);
+});
+test('session generation change fails', () => fails(e => { e.session.generationAfter = 'f'.repeat(16); }, /generation changed/));
+test('unbounded recovery fails', () => fails(e => { e.phases.recovery.recoveryMs = 60000; }, /recovery not bounded/));
+test('URL, history and page identity stay fixed until offline reload', () => {
+  fails(e => { e.phases.offline.historyLength += 1; }, /URL or history changed/);
+  fails(e => { e.phases.reconnect.pageToken = token(9); }, /page identity or history changed/);
+});
+test('altered claims fail', () => fails(e => { e.claims.notClaimed = []; }, /claims/));
+test('missing, misordered or malformed screenshots fail', () => {
+  fails(e => { e.screenshots.pop(); }, /expected four retained/);
+  fails(e => { e.screenshots[0].name = 'other.png'; }, /misordered or invalid/);
+  fails(e => { e.screenshots[0].sha256 = 'bad'; }, /misordered or invalid/);
+});
+test('unknown evidence keys fail', () => fails(e => { e.extra = 1; }, /unknown keys/));
+test('oversized lists fail', () => fails(e => { e.requests = Array.from({ length: 2001 }, () => e.requests[0]); }, /exceeds/));
+test('malformed input never throws from qualifyOffline', () => {
+  for (const value of [null, 1, 'x', [], {}]) assert.equal(qualifyOffline(value).passed, false);
+});

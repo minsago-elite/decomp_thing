@@ -97,3 +97,33 @@ bounded live reads and the local session-expiry timer are separate from recovery
 `resilience.test.tsx` covers the reload-once-then-guidance sequence, convergence after a
 successful reload, the asset-recovery guard, and six concurrent expiry rejections producing a
 single transition and notice with no automatic bootstrap or exchange request.
+
+## Offline viewing and sensitive data (#632)
+
+Offline viewing is limited to what the open page already holds, labelled as possibly stale
+("Browser reports offline"). There is no service worker, no Cache Storage, no IndexedDB and no
+response cache for job data: API and document responses are `Cache-Control: no-store` and API
+reads use `cache: 'no-store'`; only content-hashed assets under `assets/ui/` are `immutable`.
+While offline, reads that need the network are suspended and mutation/start controls are
+disabled and refuse submission; nothing is queued, and reconnecting replays no command.
+
+Evidence, kept separate by strength:
+
+- **Unit (jsdom):** `frontend/tests/capability-fallbacks.test.tsx` inventories browser
+  persistence, checks `cache: 'no-store'`, and that an attempt command is not queued offline.
+  A static source scan supplements, but does not replace, the packaged evidence.
+- **Packaged Chrome (real):** `check-packaged-web-browser.mjs --mode offline` runs the packaged
+  JVM from the CI archive with the browser HTTP cache enabled and a seeded synthetic job whose
+  latest attempt is failed and has server-verified retry eligibility. It
+  records build/archive/Chrome identity, URL/history, page token, session generation (cookie
+  digest), storage and every request/response with `Cache-Control` and cache provenance. It
+  goes offline through CDP `Network.emulateNetworkConditions` and requires trusted
+  `offline`/`online` window events, the stale label, a paused and disabled retry command with no
+  request, continued in-memory attempt text while offline, a reload that renders no seeded
+  attempt text (screenshots retained), and a bounded reconnect with only expected reads and no
+  POST/PUT/PATCH/DELETE. The pure verdict
+  `scripts/packaged-browser-offline.mjs` fails closed (`packaged-browser-offline.test.mjs`).
+- **Simulated, not claimed:** loss is browser-level emulation, not a host or server outage;
+  data is synthetic; the packaged scenario exercises one server-verified failed-attempt retry
+  control. This scenario makes no old-build/new-server upgrade claim, no cross-engine claim
+  (#631), and is not full #222 acceptance.

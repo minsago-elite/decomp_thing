@@ -15,6 +15,7 @@ import { qualifyRestart, assertGracefulShutdown, scrubTokens, boundReport } from
 import { qualifyUpgrade, qualifyUpgradeCache } from './packaged-browser-upgrade.mjs';
 import { qualifyAudit, assertAudit } from './packaged-browser-audit.mjs';
 import { PackagedBrowserCdpDiagnostics } from './packaged-browser-cdp-diagnostics.mjs';
+import { COMMAND_PAUSED, COMMAND_VERIFIED, OFFLINE_CLAIMS, OFFLINE_SCHEMA, assertOffline } from './packaged-browser-offline.mjs';
 
 // Test driver only: the application is launched with a separate Node-free PATH.
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -31,9 +32,10 @@ const { values } = parseArgs({ options: {
   help: { type: 'boolean', default: false },
 } });
 if (values.help) {
-  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|metadata|history|restart|scale|live|proxy|upgrade|legacy|audit] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
+  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|metadata|history|restart|scale|live|proxy|upgrade|legacy|audit|offline] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
   console.log('restart: seeded history on one JVM, graceful SIGTERM-only restart on the same installation/data/port, fresh bootstrap and serverInstanceId, then two tabs with a progress-pin stale If-Match 412. No live worker, no restart-while-running, one Chromium only.');
   console.log('public: packaged home/Runtime/recovery; session: public plus local session journey; upload: session plus inert upload and lost-response retry; history: session plus preseeded inert multi-page attempts; scale: session plus 10,000 persisted jobs and keyboard pagination; proxy: real Vite HMR and session journey against packaged JVM; upgrade: previous JVM to current JVM on one origin with an old tab.');
+  console.log('offline: seeded job page with the HTTP cache enabled; real CDP Network.emulateNetworkConditions offline/online, trusted window events, no-store/service-worker/CacheStorage checks, refused offline edits, offline reload without private text, bounded reconnect without mutation replay. Browser-level emulation only; no upgrade or cross-engine claim.');
   console.log('legacy: inert legacy HTML/polling with explicit test-owned state edits; no workflow execution.');
   console.log('audit: every route at 1440x900, 390x844, 320px and 200%/400% zoom in light/dark themes with contract-fixture API reads fulfilled in DevTools; measures reflow, text/focus contrast, target size, reduced motion, every packaged asset under CSP and navigation timing budgets.');
   console.log('metadata: session plus one inert header upload/retry, real packaged job metadata, maximum uint64 address, and simulated malformed-response recovery; no workflow execution or upload quota/scale measurement.');
@@ -49,7 +51,7 @@ for (const option of ['archive', 'chrome', 'java-home', 'python']) {
   assert.ok(values[option] && isAbsolute(values[option]), `--${option} must name an absolute existing path; see --help`);
   await fs.access(values[option]);
 }
-assert.ok(['public', 'session', 'upload', 'metadata', 'history', 'restart', 'scale', 'live', 'proxy', 'upgrade', 'legacy', 'audit'].includes(values.mode), '--mode must be public, session, upload, metadata, history, restart, scale, live, proxy, upgrade, legacy or audit');
+assert.ok(['public', 'session', 'upload', 'metadata', 'history', 'restart', 'scale', 'live', 'proxy', 'upgrade', 'legacy', 'audit', 'offline'].includes(values.mode), '--mode must be public, session, upload, metadata, history, restart, scale, live, proxy, upgrade, legacy, audit or offline');
 if (values.mode === 'upgrade') {
   assert.ok(values['previous-archive'] && isAbsolute(values['previous-archive']), 'upgrade requires --previous-archive as an absolute existing ZIP path');
   await fs.access(values['previous-archive']);
@@ -167,6 +169,16 @@ class Protocol {
     const key = `${sessionId ?? ''}:${method}`;
     if (!this.listeners.has(key)) this.listeners.set(key, []);
     this.listeners.get(key).push(listener);
+  }
+  off(method, listener, sessionId) {
+    const key = `${sessionId ?? ''}:${method}`;
+    const listeners = this.listeners.get(key);
+    if (!listeners) return false;
+    const index = listeners.indexOf(listener);
+    if (index === -1) return false;
+    listeners.splice(index, 1);
+    if (listeners.length === 0) this.listeners.delete(key);
+    return true;
   }
 }
 
@@ -427,6 +439,251 @@ async function ready(target, expression, label) {
   }, label);
 }
 
+// #632 offline/sensitive-data scenario. Evidence collection only; the verdict lives in
+// packaged-browser-offline.mjs. Every listener, emulation and target owned here is
+// released in the finally block even when a step fails.
+async function qualifyOfflineMode({ origin, manifest, fixture }) {
+  const bootstrapUrl = await waitFor(() => applicationOutput.split(/\s+/).find((part) => part.startsWith(origin + '/nested/#bootstrap=')), 'offline local bootstrap handoff');
+  sensitiveValues.push(new URL(bootstrapUrl).hash.slice('#bootstrap='.length));
+  const workflowState = JSON.parse(fixture.retained['workflow-state.json']);
+  const latestAttempt = workflowState.attempts.at(-1);
+  assert.ok(latestAttempt && latestAttempt.state === 'failed', 'Offline scenario requires a seeded latest failed attempt');
+  const runId = latestAttempt.runId;
+  const runUrl = `${origin}/nested/jobs/${fixture.jobId}/runs/${runId}`;
+  const filename = JSON.parse(fixture.retained['job.json']).filename;
+  const markers = [fixture.jobId, runId];
+  const tab = await makeTarget({ cacheEnabled: true });
+  const sessionId = tab.sessionId;
+  let phase = 'baseline';
+  let recording = true;
+  let overflow = false;
+  const requests = [];
+  const responses = [];
+  const failedRequests = [];
+  const events = [];
+  const subscriptions = [];
+  const subscribe = (method, listener) => {
+    cdp.on(method, listener, sessionId);
+    subscriptions.push([method, listener]);
+  };
+  const failedRequestIds = new Map();
+  const documentRequestIds = new Map();
+  const swState = { registrations: new Set(), versions: new Set() };
+  const emulation = { method: 'Network.emulateNetworkConditions', offlineCalls: 0, onlineCalls: 0, restored: false };
+  const cleanup = { networkRestored: false, listenersDetached: false, targetClosed: false };
+  const screenshots = [];
+  const captureOfflineEvidence = async (name) => {
+    await capture(tab, name);
+    const bytes = await fs.readFile(join(root, name));
+    assert.ok(bytes.length > 24 && bytes.length <= 8 * 1024 * 1024, `Offline screenshot ${name} has an invalid size`);
+    assert.deepEqual([...bytes.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10], `Offline screenshot ${name} is not PNG`);
+    assert.equal(bytes.toString('ascii', 12, 16), 'IHDR', `Offline screenshot ${name} has no PNG IHDR`);
+    assert.equal(bytes.readUInt32BE(16), 1280, `Offline screenshot ${name} width changed`);
+    assert.equal(bytes.readUInt32BE(20), 900, `Offline screenshot ${name} height changed`);
+    const record = { name, bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') };
+    screenshots.push(record);
+    return record;
+  };
+  subscribe('Network.requestWillBeSent', (event) => {
+    if (!recording) return;
+    const url = event.request.url.split('#')[0].split('?')[0];
+    if (documentRequestIds.size >= 600 && !documentRequestIds.has(event.requestId)) { overflow = true; return; }
+    if (event.type === 'Document') documentRequestIds.set(event.requestId, phase);
+    if (failedRequestIds.size >= 600 && !failedRequestIds.has(event.requestId)) { overflow = true; return; }
+    if (requests.length >= 600) { overflow = true; return; }
+    requests.push({ requestId: event.requestId, phase, method: event.request.method, url, type: event.type ?? 'Other' });
+  });
+  subscribe('Network.responseReceived', (event) => {
+    if (!recording) return;
+    if (responses.length >= 600) { overflow = true; return; }
+    responses.push({ requestId: event.requestId, phase, url: event.response.url.split('#')[0].split('?')[0], status: event.response.status, type: event.type ?? 'Other',
+      cacheControl: responseHeader(event.response, 'cache-control'), fromDiskCache: event.response.fromDiskCache === true,
+      fromServiceWorker: event.response.fromServiceWorker === true });
+  });
+  subscribe('Network.loadingFailed', (event) => {
+    if (!recording) return;
+    if (failedRequests.length >= 600) { overflow = true; return; }
+    const error = /^net::ERR_[A-Z0-9_]+$/.test(event.errorText ?? '') ? event.errorText : 'other';
+    const failure = { requestId: event.requestId, phase, type: event.type ?? 'Other', error,
+      blockedReason: event.blockedReason ?? null };
+    failedRequests.push(failure);
+    failedRequestIds.set(event.requestId, failure);
+  });
+  subscribe('Runtime.bindingCalled', (event) => {
+    if (!recording || event.name !== '__decompOfflineEvent') return;
+    if (events.length >= 100) { overflow = true; return; }
+    try {
+      const payload = JSON.parse(event.payload);
+      events.push({ phase, type: String(payload.type), isTrusted: payload.isTrusted === true, onLine: payload.onLine === true });
+    } catch { events.push({ phase, type: 'malformed', isTrusted: false, onLine: false }); }
+  });
+  subscribe('ServiceWorker.workerRegistrationUpdated', ({ registrations }) => {
+    for (const registration of registrations ?? []) if (!registration.isDeleted) {
+      if (swState.registrations.size >= 100 && !swState.registrations.has(registration.registrationId)) overflow = true;
+      else swState.registrations.add(registration.registrationId);
+    }
+  });
+  subscribe('ServiceWorker.workerVersionUpdated', ({ versions }) => { for (const version of versions ?? []) {
+    if (swState.versions.size >= 100 && !swState.versions.has(version.versionId)) overflow = true;
+    else swState.versions.add(version.versionId);
+  } });
+  const setOffline = async (offline) => {
+    await cdp.call('Network.emulateNetworkConditions', { offline, latency: 0, downloadThroughput: -1, uploadThroughput: -1 }, sessionId);
+    if (offline) emulation.offlineCalls += 1; else emulation.onlineCalls += 1;
+  };
+  const pageState = () => evaluate(tab, `({ url: location.href, historyLength: history.length, pageToken: globalThis.__decompOfflinePageToken ?? null })`);
+  const browserStores = () => evaluate(tab, `(async () => ({
+    cacheNames: await caches.keys(), registrations: (await navigator.serviceWorker.getRegistrations()).length,
+    controlled: navigator.serviceWorker.controller !== null, localEntries: localStorage.length, sessionEntries: sessionStorage.length,
+    indexedDatabases: (await indexedDB.databases()).length }))()`);
+  const sessionGeneration = async () => {
+    const { cookies } = await cdp.call('Network.getCookies', { urls: [origin + '/nested/'] }, sessionId);
+    const cookie = cookies.find((entry) => entry.path === '/nested/' && entry.httpOnly);
+    assert.ok(cookie, 'Expected the HttpOnly local session cookie');
+    return { generation: createHash('sha256').update(cookie.value).digest('hex').slice(0, 16), httpOnly: cookie.httpOnly };
+  };
+  const notice = `document.querySelector('.connection-notice h2')?.textContent ?? null`;
+  const retryButton = `[...document.querySelectorAll('button')].find((button) => button.textContent === 'Retry as a new attempt')`;
+  const readActionsButton = `[...document.querySelectorAll('button')].find((button) => button.textContent === 'Read available actions')`;
+  const attemptStatus = `document.querySelector(${JSON.stringify(`section[aria-labelledby="attempt-controls-title-${runId}"] [role="status"]`)})?.textContent ?? null`;
+  const stores = { cacheNames: new Set(), checkedPhases: [], registrations: 0, controlled: false, localEntries: 0, sessionEntries: 0, indexedDatabases: 0 };
+  const recordStores = async () => {
+    const observed = await browserStores();
+    for (const name of observed.cacheNames) stores.cacheNames.add(name);
+    stores.checkedPhases.push(phase);
+    stores.registrations = Math.max(stores.registrations, observed.registrations);
+    stores.controlled ||= observed.controlled;
+    for (const key of ['localEntries', 'sessionEntries', 'indexedDatabases']) stores[key] = Math.max(stores[key], observed[key]);
+  };
+  let evidence;
+  try {
+    await cdp.call('ServiceWorker.enable', {}, sessionId);
+    await cdp.call('Runtime.addBinding', { name: '__decompOfflineEvent' }, sessionId);
+    await cdp.call('Page.addScriptToEvaluateOnNewDocument', { source: `(() => {
+      Object.defineProperty(globalThis, '__decompOfflinePageToken', { value: crypto.randomUUID() });
+      for (const type of ['offline', 'online']) addEventListener(type, (event) => globalThis.__decompOfflineEvent?.(JSON.stringify({ type, isTrusted: event.isTrusted, onLine: navigator.onLine })));
+    })();` }, sessionId);
+    await cdp.call('Page.navigate', { url: bootstrapUrl }, sessionId);
+    await ready(tab, `document.body.innerText.includes('Local session connected.') && document.body.innerText.includes(${JSON.stringify(filename)})`, 'offline-mode authenticated dashboard');
+    await cdp.call('Page.navigate', { url: runUrl }, sessionId);
+    await ready(tab, `document.querySelector('h1')?.textContent === 'Workflow attempt' && document.body.innerText.includes(${JSON.stringify(runId)}) && !!(${readActionsButton})`, 'seeded failed attempt online');
+    await evaluate(tab, `(${readActionsButton}).click()`);
+    await ready(tab, `!!(${retryButton}) && !(${retryButton}).disabled && ${attemptStatus} === ${JSON.stringify(COMMAND_VERIFIED)}`, 'server-verified retry action');
+    await delay(500);
+    const before = await sessionGeneration();
+    await recordStores();
+    const baseline = { ...(await pageState()), privateTextShown: await evaluate(tab, `document.body.innerText.includes(${JSON.stringify(runId)})`),
+      controlStatus: await evaluate(tab, attemptStatus) };
+    await captureOfflineEvidence('offline-baseline.png');
+
+    phase = 'offline';
+    await setOffline(true);
+    await ready(tab, `navigator.onLine === false && ${notice} === 'Browser reports offline' && (${retryButton})?.disabled === true && ${attemptStatus} === ${JSON.stringify(COMMAND_PAUSED)}`,
+      'offline label and paused attempt controls');
+    const commandState = await evaluate(tab, `(() => {
+      const button = (${retryButton});
+      if (!button) return { found: false, disabled: false };
+      button.click();
+      return { found: true, disabled: button.disabled };
+    })()`);
+    assert.equal(commandState.found, true, 'Offline retry attempt did not find the verified command');
+    assert.equal(commandState.disabled, true, 'Offline retry command became enabled');
+    await delay(1500);
+    await recordStores();
+    const offline = { ...(await pageState()), noticeHeading: await evaluate(tab, notice),
+      privateTextShown: await evaluate(tab, `document.body.innerText.includes(${JSON.stringify(runId)})`),
+      controlStatus: await evaluate(tab, attemptStatus), commandAction: 'retry', commandDisabled: await evaluate(tab, `(${retryButton}).disabled`), disabledClickProbeAttempts: 1,
+      requestsAfterRefusal: requests.filter((request) => request.phase === 'offline').length, screenshot: 'offline-controls.png' };
+    await captureOfflineEvidence(offline.screenshot);
+
+    phase = 'reconnect';
+    const reconnectStarted = performance.now();
+    await setOffline(false);
+    await ready(tab, `navigator.onLine === true && ${notice} === 'Refresh loaded information' && (${retryButton})?.disabled === false`, 'reconnect label and recovered controls');
+    const reconnectMs = Math.round(performance.now() - reconnectStarted);
+    await delay(2500); // Bounded window for the jittered session revalidation and any replay.
+    const reconnect = { ...(await pageState()), noticeHeading: await evaluate(tab, notice),
+      commandEnabled: await evaluate(tab, `(${retryButton}).disabled === false`), recoveryMs: reconnectMs };
+
+    phase = 'offline-reload';
+    await setOffline(true);
+    await ready(tab, `navigator.onLine === false`, 'second offline transition');
+    await recordStores();
+    await cdp.call('Page.reload', {}, sessionId);
+    await waitFor(() => [...documentRequestIds].some(([id, at]) => at === 'offline-reload' && failedRequestIds.has(id)), 'offline reload document failure');
+    await ready(tab, `document.readyState === 'complete' && !document.querySelector('meta[name="decomp-ui-build"]')`, 'offline reload error document');
+    await delay(500);
+    const reloadState = await pageState();
+    const offlineReload = { ...reloadState, renderedText: String(await evaluate(tab, `document.body?.innerText ?? ''`)).slice(0, 8192),
+      documentFailed: [...documentRequestIds].filter(([, at]) => at === 'offline-reload').every(([id]) => failedRequestIds.has(id)),
+      screenshot: 'offline-reload.png' };
+    await captureOfflineEvidence(offlineReload.screenshot);
+
+    phase = 'recovery';
+    const recoveryStarted = performance.now();
+    await setOffline(false);
+    await cdp.call('Page.navigate', { url: runUrl }, sessionId);
+    await ready(tab, `document.querySelector('h1')?.textContent === 'Workflow attempt' && document.body.innerText.includes(${JSON.stringify(runId)}) && !!(${readActionsButton})`, 'attempt re-read after recovery');
+    await evaluate(tab, `(${readActionsButton}).click()`);
+    await ready(tab, `!!(${retryButton}) && !(${retryButton}).disabled && ${attemptStatus} === ${JSON.stringify(COMMAND_VERIFIED)}`, 'retry action re-read after recovery');
+    const recoveryMs = Math.round(performance.now() - recoveryStarted);
+    const observationStarted = performance.now();
+    await delay(3000);
+    await recordStores();
+    const after = await sessionGeneration();
+    const recovery = { ...(await pageState()), privateTextShown: await evaluate(tab, `document.body.innerText.includes(${JSON.stringify(runId)})`),
+      controlStatus: await evaluate(tab, attemptStatus), recoveryMs,
+      observationMs: Math.round(performance.now() - observationStarted) };
+    await captureOfflineEvidence('offline-recovered.png');
+    evidence = { schema: OFFLINE_SCHEMA, origin, basePath: '/nested/',
+      identity: { buildId: manifest.buildId, applicationVersion: manifest.applicationVersion, archiveSha256: report.archiveSha256,
+        chromeProduct: report.browser.product, chromeSha256: report.tools.chromeSha256, driverCommit: report.driverCommit },
+      privateMarkers: markers,
+      serviceWorker: { registrations: stores.registrations, controlled: stores.controlled, cdpRegistrations: swState.registrations.size,
+        cdpVersions: swState.versions.size, fromServiceWorkerResponses: responses.filter((response) => response.fromServiceWorker).length },
+      cacheStorage: { pageNames: [...stores.cacheNames], checkedPhases: stores.checkedPhases },
+      storage: { localEntries: stores.localEntries, sessionEntries: stores.sessionEntries, indexedDatabases: stores.indexedDatabases },
+      session: { generationBefore: before.generation, generationAfter: after.generation, cookieHttpOnly: before.httpOnly && after.httpOnly },
+      requests, responses, failedRequests, events, phases: { baseline, offline, reconnect, offlineReload, recovery }, screenshots, emulation, cleanup,
+      claims: structuredClone(OFFLINE_CLAIMS) };
+  } finally {
+    recording = false;
+    let listenersDetached = true;
+    for (const [method, listener] of subscriptions) {
+      try { if (!cdp.off(method, listener, sessionId)) listenersDetached = false; }
+      catch { listenersDetached = false; }
+    }
+    cleanup.listenersDetached = listenersDetached;
+    try {
+      await cdp.call('Network.emulateNetworkConditions', { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 }, sessionId);
+      emulation.restored = true;
+      cleanup.networkRestored = await ready(tab, 'navigator.onLine === true', 'offline network emulation restored');
+    } catch { /* recorded as not restored */ }
+    await cdp.call('ServiceWorker.disable', {}, sessionId).catch(() => {});
+    // The offline reload's failed Document hop has no response by design; keep it out of the
+    // global CSP request/response correlation while still recording it in the offline evidence.
+    const offlineFailures = new Set([...documentRequestIds].filter(([id, at]) => at === 'offline-reload' && failedRequestIds.has(id)).map(([id]) => id));
+    tab.documentRequests = tab.documentRequests.filter((request) => !offlineFailures.has(request.requestId));
+    for (const id of offlineFailures) tab.pendingDocumentRequests.delete(id);
+    try { await cdp.call('Target.closeTarget', { targetId: tab.targetId }); cleanup.targetClosed = true; } catch { /* recorded */ }
+    if (lastTarget === tab) lastTarget = undefined;
+    report.offlineExcludedFailedDocumentHops = offlineFailures.size;
+  }
+  for (const screenshot of screenshots) {
+    const bytes = await fs.readFile(join(root, screenshot.name));
+    assert.equal(bytes.length, screenshot.bytes, `Offline screenshot ${screenshot.name} changed after capture`);
+    assert.equal(createHash('sha256').update(bytes).digest('hex'), screenshot.sha256,
+      `Offline screenshot ${screenshot.name} hash changed after capture`);
+  }
+  report.offline = safeEvidence(evidence);
+  report.offlineScreenshots = screenshots;
+  assert.equal(overflow, false, 'Offline network trace exceeded its 600-entry bound; refusing a partial verdict');
+  report.offlineVerdict = assertOffline(evidence);
+  report.requests.offline = requests.length;
+  report.jobDataCreated = true;
+  console.log('Packaged offline/sensitive-data scenario verified (#632).');
+}
+
 async function capture(target, name) {
   const { data } = await cdp.call('Page.captureScreenshot', { format: 'png' }, target.sessionId);
   await fs.writeFile(join(root, name), Buffer.from(data, 'base64'));
@@ -508,6 +765,19 @@ try {
   const legacyFixture = values.mode === 'legacy' ? await seedLegacy(data) : null;
   const historyFixture = values.mode === 'history' ? await seedHistory(data) : null;
   const restartFixture = values.mode === 'restart' ? await seedHistory(data) : null;
+  const offlineFixture = values.mode === 'offline' ? await seedHistory(data) : null;
+  if (offlineFixture) {
+    // The 55-row history seed ends in a completed attempt. For this separate offline scenario,
+    // make only its latest synthetic attempt failed so the real server exposes a retry command.
+    const workflowState = JSON.parse(offlineFixture.retained['workflow-state.json']);
+    const latest = workflowState.attempts.at(-1);
+    latest.state = 'failed';
+    latest.terminalReason = 'FAILED';
+    latest.candidate = null;
+    const bytes = JSON.stringify(workflowState);
+    offlineFixture.retained['workflow-state.json'] = bytes;
+    await fs.writeFile(join(offlineFixture.directory, 'workflow-state.json'), bytes, { flag: 'w', mode: 0o600 });
+  }
   const scaleFixture = values.mode === 'scale' ? await seedScale(data) : null;
   const liveFixture = values.mode === 'live' ? await seedLive(data) : null;
   const populated = !!(historyFixture || restartFixture || scaleFixture || liveFixture);
@@ -727,6 +997,7 @@ try {
     assert.equal(await fs.stat(data).then(() => true, () => false), false, 'Fixture-backed audit created job data');
     report.jobDataCreated = false;
   }
+  if (offlineFixture) await qualifyOfflineMode({ origin, manifest, fixture: offlineFixture });
   if (values.mode === 'public' || values.mode === 'session' || values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'history' || values.mode === 'scale' || values.mode === 'live') {
     const identityExpression = `(() => ({ buildId: document.querySelector('meta[name="decomp-ui-build"]')?.content, applicationVersion: document.querySelector('meta[name="decomp-application-version"]')?.content, page: location.pathname, text: document.body.innerText }))()`;
     const home = await makeTarget();
