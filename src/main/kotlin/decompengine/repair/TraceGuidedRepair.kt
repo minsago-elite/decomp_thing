@@ -27,7 +27,6 @@ import decompengine.project.sha256
 import decompengine.project.AcpExecutionReceiptDocument
 import decompengine.project.BoundedAgentExecutionEventRecorder
 import decompengine.project.DeclaredRoleMutationPolicy
-import decompengine.project.GeneratedCMakeReconstructionProfile
 import decompengine.project.ProjectFileRole
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -1647,7 +1646,7 @@ class TraceGuidedRepairLoop private constructor(
                             rules,
                             mutationAuthority = if (allowTestOnlyValidation) {
                                 DeclaredRoleMutationPolicy.forTestOnlyPaths(
-                                    profileSha256 = GeneratedCMakeReconstructionProfile.descriptor.sha256,
+                                    profileSha256 = graph.snapshot.profileSha256,
                                     rootId = root.id,
                                     ownerId = "repair-test:${attempt.id}",
                                     operationsByPath = writable.associateWith { setOf(AgentOperation.WRITE_FILE) },
@@ -1655,7 +1654,9 @@ class TraceGuidedRepairLoop private constructor(
                                 )
                             } else {
                                 DeclaredRoleMutationPolicy.forDeclaredPaths(
-                                    profile = GeneratedCMakeReconstructionProfile.descriptor,
+                                    profile = requireNotNull(graph.declaredRoleProfile) {
+                                        "generated-C repair mutation authority requires a declared reconstruction profile"
+                                    },
                                     rootId = root.id,
                                     ownerId = "repair:${attempt.id}",
                                     operationsByPath = writable.associateWith { setOf(AgentOperation.WRITE_FILE) },

@@ -2314,6 +2314,10 @@ internal class ModuleRevisionGraph private constructor(
             )
         }
 
+    /** The immutable source-tree contract admitted by this graph's repair index, when present. */
+    internal val declaredRoleProfile: ReconstructionProfile?
+        get() = index.profile.reconstructionProfile()
+
     /** Preserve the original bytes before assigning honest authority to legacy head records. */
     @Synchronized
     fun enableRunContract() = graphOperation {
