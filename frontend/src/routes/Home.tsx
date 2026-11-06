@@ -12,11 +12,11 @@ export default function Home({ basePath = '', session = null }: { basePath?: str
       <h1 id="workspace-title">{copy.yourWorkWithItsEvidence}</h1>
       <p class="lead">{copy.reviewReconstructedSourceInspectValidationEvidenceAndFollowEachRevision}</p>
       {session && <PanelBoundary name={panelBoundaryCopy.names.upload}><Upload basePath={basePath} session={session} /></PanelBoundary>}
-      {state?.status === 'authenticated' ? <PanelBoundary name={panelBoundaryCopy.names.dashboard}><Dashboard key={state.generation} basePath={basePath} draftOwner={session} /></PanelBoundary> : <div class="notice" aria-labelledby="availability-title">
+      {state?.status === 'authenticated' ? <PanelBoundary name={panelBoundaryCopy.names.dashboard}><Dashboard key={state.generation} basePath={basePath} draftOwner={session} /></PanelBoundary> : <section class="notice" aria-labelledby="availability-title">
         <h2 id="availability-title">{copy.theWorkbenchShellIsReady}</h2>
         <p>{copy.connectALocalSessionToBrowseUploadedJobsThePublic}</p>
         <p>{copy.existingCommandLineWorkflowsRemainAvailable}</p>
-      </div>}
+      </section>}
     </section>
   );
 }
