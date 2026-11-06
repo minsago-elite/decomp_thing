@@ -121,8 +121,16 @@ under #222. It does not close #632; GitHub owns status.
   over a recorded `fetch`. It checks request methods and counts across an incompatible response,
   a reload click, repeated clicks and a remount, and checks that an in-flight session POST is
   sent exactly once.
+- **Packaged contract-mismatch control**: the `session` packaged-browser run fulfills the real
+  browser's bootstrap read with a simulated, unsupported API-version advertisement while keeping
+  the envelope itself valid. It records the initial notice, trusted Enter activation, one
+  same-build reload, manual guidance, request counts and screenshots. This qualifies the packaged
+  frontend response to the simulated mismatch; it does not establish a real two-build deployment
+  or a response from a newer server.
 - **Offline**: there is no service worker, offline cache of private data, or offline command
   queue. The offline controls and their evidence come from #1793 and are described above.
 
-Limits: this is a local jsdom slice. It does not qualify packaged two-build deployment, behavior
-across browser engines, or screen readers. Those parts of #632 and #222 remain open.
+Limits: the component evidence is local jsdom, and the packaged mismatch stimulus is simulated.
+Neither establishes packaged two-build deployment or response behavior from a newer server. This
+also does not qualify behavior across browser engines or screen readers. Those parts of #632 and
+#222 remain open.
