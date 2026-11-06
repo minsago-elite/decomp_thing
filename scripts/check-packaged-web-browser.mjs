@@ -886,7 +886,7 @@ try {
       let fetchDisabled = false;
       const evidence = { simulatedContract: true, interceptedPath: '/nested/api/v1/bootstrap',
         advertisedApiVersions: envelope.advertisedApiVersions, fixtureSha256: envelope.fixtureSha256,
-        responseBodySha256: envelope.sha256, uiBuildId: manifest.buildId, metaBuildId: null, observationSeconds: 5,
+        simulatedEnvelopeSha256: envelope.sha256, uiBuildId: manifest.buildId, metaBuildId: null, observationSeconds: 5,
         documentsBeforeClick: null, documentsAfterClick: null, documentsAfterQuiet: null,
         bootstrapReadsBeforeClick: null, bootstrapReadsAfterClick: null, bootstrapReadsAfterQuiet: null,
         clicksSent: 0, mutationRequests: null, otherApiRequests: null, automaticReloads: null,

@@ -14,7 +14,7 @@ function ledger() {
     simulatedContract: true,
     interceptedPath: '/nested/api/v1/bootstrap',
     fixtureSha256: envelope.fixtureSha256,
-    responseBodySha256: envelope.sha256,
+    simulatedEnvelopeSha256: envelope.sha256,
     advertisedApiVersions: envelope.advertisedApiVersions,
     uiBuildId: buildId,
     metaBuildId: buildId,
@@ -140,11 +140,28 @@ test('rejects unsafe notice states, untrusted activation and a reload loop', () 
   }
 });
 
+test('rejects incomplete phase counts, hidden controls and interception cleanup', () => {
+  const cases = [
+    [e => { e.observationSeconds = 4; }, /observation window/],
+    [e => { e.bootstrapReadsBeforeClick = 0; }, /initial contract check was not exactly one bootstrap read/],
+    [e => { e.bootstrapReadsAfterClick = 1; }, /reload did not make exactly one fresh bootstrap read/],
+    [e => { e.bootstrapReadsAfterQuiet = 3; }, /automatic bootstrap retry/],
+    [e => { e.before.reloadButtonEnabled = false; }, /reload action is disabled/],
+    [e => { e.before.reloadButtonVisible = false; }, /reload action is not visible/],
+    [e => { e.interceptionErrors.push('failed response'); }, /could not be fulfilled cleanly/],
+    [e => { e.metaBuildId = 'a'.repeat(64); }, /Rendered meta build identity/],
+  ];
+  for (const [mutate, pattern] of cases) {
+    const evidence = ledger(); mutate(evidence);
+    assert.throws(() => assertContractMismatch(evidence, { origin, buildId, allowedAssetPaths }), pattern);
+  }
+});
+
 test('rejects stale source identity, missing screenshots and malformed captures', () => {
   const cases = [
     [e => { e.fixtureSha256 = '0'.repeat(64); }, /fixture source hash/],
     [e => { e.interceptedPath = '/nested/api/v1/jobs'; }, /bind to bootstrap only/],
-    [e => { e.responseBodySha256 = 'invalid'; }, /response hash/],
+    [e => { e.simulatedEnvelopeSha256 = 'invalid'; }, /envelope hash/],
     [e => { e.uiBuildId = 'a'.repeat(64); }, /UI build identity/],
     [e => { e.after.metaBuildId = 'a'.repeat(64); }, /same packaged build/],
     [e => { e.captures.pop(); }, /missing, duplicated, or out of order/],

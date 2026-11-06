@@ -51,7 +51,7 @@ export function assertContractMismatch(evidence, { origin, buildId, allowedAsset
   assert.equal(evidence?.simulatedContract, true, 'Contract mismatch stimulus must be explicitly labeled simulated');
   assert.equal(evidence.fixtureSha256, bootstrapFixtureSha256, 'Bootstrap fixture source hash changed');
   assert.equal(evidence.interceptedPath, '/nested/api/v1/bootstrap', 'The simulated response must bind to bootstrap only');
-  assert.match(evidence.responseBodySha256, /^[0-9a-f]{64}$/, 'Simulated bootstrap response hash is missing or invalid');
+  assert.match(evidence.simulatedEnvelopeSha256, /^[0-9a-f]{64}$/, 'Simulated bootstrap envelope hash is missing or invalid');
   assert.deepEqual(evidence.advertisedApiVersions, [2], 'Expected an unsupported API-version advertisement');
   assert.equal(evidence.uiBuildId, buildId, 'Packaged UI build identity changed');
   assert.equal(evidence.metaBuildId, buildId, 'Rendered meta build identity differs from the package manifest');
