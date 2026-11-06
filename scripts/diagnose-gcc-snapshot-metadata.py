@@ -241,20 +241,27 @@ def summarize_verifier_observations(sanitized: bytes) -> dict:
     schemes = set()
     uri_done_count = 0
     signature_success_count = 0
+    schemes_truncated = False
     for raw_line in sanitized.splitlines():
         line = _without_buildkit_prefix(raw_line.decode("utf-8", errors="replace")).strip()
-        match = re.match(r"^201 URI Done: ([A-Za-z][A-Za-z0-9+.-]{0,31}):", line)
+        match = re.match(r"^201 URI Done: ([A-Za-z][A-Za-z0-9+.-]*):", line)
         if match:
             uri_done_count += 1
-            schemes.add(match.group(1).lower())
+            scheme = match.group(1).lower()
+            if len(scheme) > 32:
+                schemes_truncated = True
+            else:
+                schemes.add(scheme)
+                if len(schemes) > MAX_VERIFIER_SCHEMES:
+                    schemes_truncated = True
+                    schemes.remove(max(schemes))
         if re.match(r"^Signature verification succeeded:\s+\S+\s*$", line):
             signature_success_count += 1
-    ordered = sorted(schemes)
     return {
-        "verifierUriSchemesObserved": ordered[:MAX_VERIFIER_SCHEMES],
+        "verifierUriSchemesObserved": sorted(schemes),
         "verifierUriDoneCountObserved": uri_done_count,
         "signatureVerificationSuccessCountObserved": signature_success_count,
-        "verifierObservationTruncated": len(ordered) > MAX_VERIFIER_SCHEMES,
+        "verifierObservationTruncated": schemes_truncated,
     }
 
 

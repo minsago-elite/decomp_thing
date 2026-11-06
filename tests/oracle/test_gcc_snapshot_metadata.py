@@ -267,6 +267,12 @@ class RecipeAndSanitizerTest(unittest.TestCase):
         self.assertEqual(diagnostic.MAX_VERIFIER_SCHEMES + 1, many["verifierUriDoneCountObserved"])
         self.assertTrue(many["verifierObservationTruncated"])
         self.assertEqual(sorted(many["verifierUriSchemesObserved"]), many["verifierUriSchemesObserved"])
+        overlong_scheme = diagnostic.summarize_verifier_observations(
+            b"#8 1.999 201 URI Done: " + b"a" * 33 + b":/opaque\n"
+        )
+        self.assertEqual([], overlong_scheme["verifierUriSchemesObserved"])
+        self.assertEqual(1, overlong_scheme["verifierUriDoneCountObserved"])
+        self.assertTrue(overlong_scheme["verifierObservationTruncated"])
 
         hostile = (
             valid.replace(b"debian-archive-keyring=2023.3\n", b"", 1),
