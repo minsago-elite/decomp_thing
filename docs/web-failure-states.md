@@ -97,3 +97,15 @@ bounded live reads and the local session-expiry timer are separate from recovery
 `resilience.test.tsx` covers the reload-once-then-guidance sequence, convergence after a
 successful reload, the asset-recovery guard, and six concurrent expiry rejections producing a
 single transition and notice with no automatic bootstrap or exchange request.
+
+## Two-build cached upgrade qualification (#632)
+
+The packaged upgrade job rebuilds a complete prior distribution from the immutable source
+commit recorded in `scripts/packaged-browser-upgrade-pin.json`, builds the current distribution
+from the workflow checkout, and runs both packages through the same-origin old-tab journey in
+pinned Chrome. The prior and current source commit/tree identities and ZIP digests are checked
+before the browser run and retained with its report. The upgrade checks production cache reuse,
+the real missing old Runtime asset after replacement, a visible safe-reload notice, and explicit
+recovery without mutation replay. This is asset-version evidence; it does not simulate or establish
+an API-version mismatch. The API mismatch half of #632 remains open until a real API version
+change provides the old-client/new-server pair.

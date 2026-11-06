@@ -60,7 +60,10 @@ jobs:
           npm --prefix frontend ci --ignore-scripts --no-audit --no-fund
           python3 -m pip install --requirement requirements/oracle-generation.txt
       - name: Verify packaged upgrade and cache evidence controls
-        run: node scripts/test-packaged-browser-upgrade.mjs
+        run: |
+          node scripts/test-packaged-browser-upgrade.mjs
+          node --check scripts/packaged-browser-upgrade-provenance.mjs
+          node --test scripts/test-packaged-browser-upgrade-provenance.mjs
       - name: Verify packaged accessibility and asset audit controls
         run: |
           node scripts/test-packaged-browser-audit.mjs
@@ -124,6 +127,120 @@ jobs:
             ${{ runner.temp }}/frontend-ci
             build/frontend/bundle-report.json
             build/frontend/bundle-composition.json
+
+  web-upgrade-previous:
+    needs: frontend
+    env:
+      NPM_CONFIG_CACHE: ${{ github.workspace }}/build/npm-download-cache
+    name: Build pinned previous web package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: ./.github/actions/setup-gradle-compiler-cache
+        with:
+          cache-read-only: ${{ github.ref != 'refs/heads/master' }}
+      - name: Cache locked frontend package downloads
+        uses: actions/cache@v6
+        with:
+          path: ${{ github.workspace }}/build/npm-download-cache/_cacache
+          key: frontend-npm-downloads-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('frontend/package-lock.json', 'frontend/package.json', 'frontend/.npmrc', '.node-version', 'scripts/install-frontend-node.sh', 'scripts/frontend-node-sha256.txt') }}
+      - name: Cache reviewed frontend Node downloads
+        uses: actions/cache@v6
+        with:
+          path: ${{ github.workspace }}/build/frontend-node-downloads
+          key: frontend-node-archives-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/install-frontend-node.sh', 'scripts/frontend-node-sha256.txt', '.node-version', 'frontend/package.json') }}
+      - name: Install pinned build Node and resolve the previous-source pin
+        env:
+          DECOMP_FRONTEND_NODE_DOWNLOAD_CACHE: '1'
+        run: |
+          bash scripts/install-frontend-node.sh "$RUNNER_TEMP/frontend-node"
+          echo "$RUNNER_TEMP/frontend-node/bin" >> "$GITHUB_PATH"
+          python3 - <<'PY' >> "$GITHUB_ENV"
+          import json
+          from pathlib import Path
+          pin = json.loads(Path('scripts/packaged-browser-upgrade-pin.json').read_text())
+          assert pin['schema'] == 'packaged-upgrade-source-pin/v1'
+          assert pin['repository'] == 'minsago-elite/decomp_thing'
+          print(f"PREVIOUS_SOURCE_COMMIT={pin['commit']}")
+          print(f"PREVIOUS_SOURCE_TREE={pin['tree']}")
+          PY
+      - name: Check out the immutable prior source tree
+        run: |
+          git fetch --no-tags --depth=1 origin "$PREVIOUS_SOURCE_COMMIT"
+          git checkout --detach "$PREVIOUS_SOURCE_COMMIT"
+          test "$(git rev-parse HEAD)" = "$PREVIOUS_SOURCE_COMMIT"
+          test "$(git rev-parse HEAD^{tree})" = "$PREVIOUS_SOURCE_TREE"
+          test -z "$(git status --porcelain=v1)"
+      - name: Build the complete prior distribution from its pinned source
+        env:
+          DECOMP_BROWSER_JS_RUNTIME: ${{ runner.temp }}/frontend-node/bin/node
+        run: |
+          ./gradlew --no-daemon installDist distZip verifyPackagedWeb
+          previous_archives=(build/distributions/*.zip)
+          test "${#previous_archives[@]}" -eq 1
+          mkdir -p build/pinned-upgrade-previous
+          cp "${previous_archives[0]}" build/pinned-upgrade-previous/previous-package.zip
+          test -s build/pinned-upgrade-previous/previous-package.zip
+          archive_sha256="$(sha256sum build/pinned-upgrade-previous/previous-package.zip | cut -d ' ' -f 1)"
+          archive_bytes="$(stat -c '%s' build/pinned-upgrade-previous/previous-package.zip)"
+          gradle_output="$(./gradlew --version --console=plain)"
+          gradle_version="$(sed -n 's/^Gradle //p' <<< "$gradle_output" | sed -n '1p')"
+          java_version="$(java -version 2>&1 | sed -n '1p')"
+          node_version="$(node --version | sed 's/^v//')"
+          python3 - "$PREVIOUS_SOURCE_COMMIT" "$PREVIOUS_SOURCE_TREE" "$archive_sha256" "$archive_bytes" "$gradle_version" "$java_version" "$node_version" <<'PY'
+          import json
+          import os
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          commit, tree, archive_sha256, archive_bytes, gradle, java, node = sys.argv[1:]
+          assert subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip() == commit
+          assert subprocess.check_output(['git', 'rev-parse', 'HEAD^{tree}'], text=True).strip() == tree
+          assert subprocess.check_output(['git', 'status', '--porcelain=v1'], text=True) == ''
+          record = {
+              'schema': 'packaged-previous-build/v1',
+              'repository': 'minsago-elite/decomp_thing',
+              'commit': commit,
+              'tree': tree,
+              'cleanSource': True,
+              'build': {
+                  'workflow': 'CI',
+                  'runId': os.environ['GITHUB_RUN_ID'],
+                  'runAttempt': os.environ['GITHUB_RUN_ATTEMPT'],
+                  'gradleVersion': gradle,
+                  'javaVersion': java,
+                  'nodeVersion': node,
+              },
+              'archive': {
+                  'file': 'previous-package.zip',
+                  'sha256': archive_sha256,
+                  'bytes': int(archive_bytes),
+              },
+          }
+          assert gradle and java and node
+          Path('build/pinned-upgrade-previous/previous-source.json').write_text(
+              json.dumps(record, indent=2, sort_keys=True) + '\n'
+          )
+          PY
+      - name: Retain pinned previous package and build provenance
+        uses: actions/upload-artifact@v7
+        with:
+          name: packaged-web-pinned-previous
+          retention-days: 14
+          compression-level: 0
+          if-no-files-found: error
+          path: build/pinned-upgrade-previous
 
   web-packaged:
     needs: frontend
@@ -198,6 +315,55 @@ jobs:
           test "${#web_distribution[@]}" -eq 1
           test -f "${web_distribution[0]}"
           echo "WEB_TEST_ARCHIVE=${web_distribution[0]}" >> "$GITHUB_ENV"
+      - name: Bind the current package to its exact clean source tree
+        env:
+          DECOMP_BROWSER_JS_RUNTIME: ${{ runner.temp }}/frontend-node/bin/node
+        run: |
+          mkdir -p build/packaged-current-package
+          cp "$WEB_TEST_ARCHIVE" build/packaged-current-package/current-package.zip
+          archive_sha256="$(sha256sum build/packaged-current-package/current-package.zip | cut -d ' ' -f 1)"
+          archive_bytes="$(stat -c '%s' build/packaged-current-package/current-package.zip)"
+          gradle_output="$(./gradlew --version --console=plain)"
+          gradle_version="$(sed -n 's/^Gradle //p' <<< "$gradle_output" | sed -n '1p')"
+          java_version="$(java -version 2>&1 | sed -n '1p')"
+          node_version="$(node --version | sed 's/^v//')"
+          python3 - "$archive_sha256" "$archive_bytes" "$gradle_version" "$java_version" "$node_version" <<'PY'
+          import json
+          import os
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          archive_sha256, archive_bytes, gradle, java, node = sys.argv[1:]
+          commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+          tree = subprocess.check_output(['git', 'rev-parse', 'HEAD^{tree}'], text=True).strip()
+          assert commit == os.environ['GITHUB_SHA']
+          assert subprocess.check_output(['git', 'status', '--porcelain=v1'], text=True) == ''
+          record = {
+              'schema': 'packaged-current-build/v1',
+              'repository': 'minsago-elite/decomp_thing',
+              'commit': commit,
+              'tree': tree,
+              'cleanSource': True,
+              'build': {
+                  'workflow': 'CI',
+                  'runId': os.environ['GITHUB_RUN_ID'],
+                  'runAttempt': os.environ['GITHUB_RUN_ATTEMPT'],
+                  'gradleVersion': gradle,
+                  'javaVersion': java,
+                  'nodeVersion': node,
+              },
+              'archive': {
+                  'file': 'current-package.zip',
+                  'sha256': archive_sha256,
+                  'bytes': int(archive_bytes),
+              },
+          }
+          assert gradle and java and node
+          Path('build/packaged-current-package/current-source.json').write_text(
+              json.dumps(record, indent=2, sort_keys=True) + '\n'
+          )
+          PY
       - name: Require positive real-browser expiry evidence
         run: >-
           python3 scripts/test-ci-partitions.py
@@ -209,6 +375,7 @@ jobs:
         with:
           name: packaged-browser-expiry-test-reports
           retention-days: 14
+          compression-level: 0
           if-no-files-found: error
           path: |
             build/test-results/test/TEST-decompengine.web.BrowserSessionExpiryTest.xml
@@ -268,6 +435,14 @@ jobs:
             --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
             --python "$(command -v python3)" --work-parent "$RUNNER_TEMP" --mode proxy --no-sandbox
           git diff --exit-code -- frontend/ contracts/web/v1/
+      - name: Retain exact current package for the two-build upgrade run
+        uses: actions/upload-artifact@v7
+        with:
+          name: packaged-web-current-source
+          retention-days: 14
+          compression-level: 0
+          if-no-files-found: error
+          path: build/packaged-current-package
       - name: Retain sanitized packaged web evidence
         uses: actions/upload-artifact@v7
         if: always()
@@ -282,6 +457,76 @@ jobs:
             build/reports/tests/test
             build/test-results/test
             build/reports/junit-signatures
+
+  web-upgrade-browser:
+    needs: [web-packaged, web-upgrade-previous]
+    name: Packaged cache upgrade from pinned prior build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements/oracle-generation.txt
+      - name: Cache reviewed frontend Node downloads
+        uses: actions/cache@v6
+        with:
+          path: ${{ github.workspace }}/build/frontend-node-downloads
+          key: frontend-node-archives-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/install-frontend-node.sh', 'scripts/frontend-node-sha256.txt', '.node-version', 'frontend/package.json') }}
+      - name: Install pinned browser and test-driver tools
+        env:
+          DECOMP_FRONTEND_NODE_DOWNLOAD_CACHE: '1'
+        run: |
+          bash scripts/install-frontend-node.sh "$RUNNER_TEMP/frontend-node"
+          echo "$RUNNER_TEMP/frontend-node/bin" >> "$GITHUB_PATH"
+          python3 scripts/install-web-test-browser.py "$RUNNER_TEMP/web-test-browser"
+          sudo apt-get update
+          mapfile -t web_browser_dependencies < "$RUNNER_TEMP/web-test-browser/deb.deps"
+          sudo apt-get satisfy -y --no-install-recommends "${web_browser_dependencies[@]}"
+          python3 -m pip install --requirement requirements/oracle-generation.txt
+          mkdir -p build/packaged-upgrade-inputs
+          "$RUNNER_TEMP/web-test-browser/chrome" --version > build/packaged-upgrade-inputs/browser-version.txt
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: packaged-web-current-source
+          path: build/packaged-upgrade-inputs/current
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: packaged-web-pinned-previous
+          path: build/packaged-upgrade-inputs/previous
+      - name: Run the cache-enabled two-build upgrade in pinned Chrome
+        run: |
+          node scripts/check-packaged-web-browser.mjs \
+            --archive "$GITHUB_WORKSPACE/build/packaged-upgrade-inputs/current/current-package.zip" \
+            --current-provenance "$GITHUB_WORKSPACE/build/packaged-upgrade-inputs/current/current-source.json" \
+            --previous-archive "$GITHUB_WORKSPACE/build/packaged-upgrade-inputs/previous/previous-package.zip" \
+            --previous-provenance "$GITHUB_WORKSPACE/build/packaged-upgrade-inputs/previous/previous-source.json" \
+            --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
+            --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode upgrade --no-sandbox
+      - name: Retain pinned upgrade report, source provenance, and screenshots
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: packaged-web-upgrade-verification
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            build/packaged-upgrade-inputs/browser-version.txt
+            build/packaged-upgrade-inputs/current/current-source.json
+            build/packaged-upgrade-inputs/previous/previous-source.json
+            build/packaged-browser-*/report.json
+            build/packaged-browser-*/*.png
 
   kotlin-suite:
     needs: frontend

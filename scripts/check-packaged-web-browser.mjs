@@ -13,6 +13,7 @@ import { seedHistory, qualifyHistory } from './packaged-browser-history.mjs';
 import { seedLegacy, qualifyLegacy } from './packaged-browser-legacy.mjs';
 import { qualifyRestart, assertGracefulShutdown, scrubTokens, boundReport } from './packaged-browser-restart.mjs';
 import { qualifyUpgrade, qualifyUpgradeCache } from './packaged-browser-upgrade.mjs';
+import { assertSameUpgradeRun, validateCurrentBuildProvenance, validatePreviousBuildProvenance } from './packaged-browser-upgrade-provenance.mjs';
 import { qualifyAudit, assertAudit } from './packaged-browser-audit.mjs';
 import { PackagedBrowserCdpDiagnostics } from './packaged-browser-cdp-diagnostics.mjs';
 
@@ -21,6 +22,8 @@ const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const { values } = parseArgs({ options: {
   archive: { type: 'string' },
   'previous-archive': { type: 'string' },
+  'previous-provenance': { type: 'string' },
+  'current-provenance': { type: 'string' },
   mode: { type: 'string', default: 'public' },
   'work-parent': { type: 'string', default: join(repo, 'build') },
   'keep-workdir': { type: 'boolean', default: false },
@@ -31,14 +34,14 @@ const { values } = parseArgs({ options: {
   help: { type: 'boolean', default: false },
 } });
 if (values.help) {
-  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|metadata|history|restart|scale|live|proxy|upgrade|legacy|audit] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
+  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|metadata|history|restart|scale|live|proxy|upgrade|legacy|audit] [--previous-archive /absolute/previous.zip --previous-provenance /absolute/previous-source.json --current-provenance /absolute/current-source.json] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
   console.log('restart: seeded history on one JVM, graceful SIGTERM-only restart on the same installation/data/port, fresh bootstrap and serverInstanceId, then two tabs with a progress-pin stale If-Match 412. No live worker, no restart-while-running, one Chromium only.');
   console.log('public: packaged home/Runtime/recovery; session: public plus local session journey; upload: session plus inert upload and lost-response retry; history: session plus preseeded inert multi-page attempts; scale: session plus 10,000 persisted jobs and keyboard pagination; proxy: real Vite HMR and session journey against packaged JVM; upgrade: previous JVM to current JVM on one origin with an old tab.');
   console.log('legacy: inert legacy HTML/polling with explicit test-owned state edits; no workflow execution.');
   console.log('audit: every route at 1440x900, 390x844, 320px and 200%/400% zoom in light/dark themes with contract-fixture API reads fulfilled in DevTools; measures reflow, text/focus contrast, target size, reduced motion, every packaged asset under CSP and navigation timing budgets.');
   console.log('metadata: session plus one inert header upload/retry, real packaged job metadata, maximum uint64 address, and simulated malformed-response recovery; no workflow execution or upload quota/scale measurement.');
   console.log('live: session plus authored inert job changes and real background listing reads; preserves focused row order and applies new jobs on explicit refresh.');
-  console.log('upgrade requires --previous-archive and distinct manifest builds with the old Runtime chunk absent from --archive. Its previous extraction is always removed before the current extraction, even with --keep-workdir.');
+  console.log('upgrade requires a pinned prior package and provenance record, plus distinct manifest builds with the old Runtime chunk absent from --archive. Its previous extraction is always removed before the current extraction, even with --keep-workdir.');
   console.log('Reports/screenshots stay in build/. Owned extraction/profile/socket directories are removed after confirmed shutdown unless --keep-workdir is set. Proxy requires npm ci --ignore-scripts under the pinned Node beforehand.');
   process.exit(0);
 }
@@ -53,7 +56,15 @@ assert.ok(['public', 'session', 'upload', 'metadata', 'history', 'restart', 'sca
 if (values.mode === 'upgrade') {
   assert.ok(values['previous-archive'] && isAbsolute(values['previous-archive']), 'upgrade requires --previous-archive as an absolute existing ZIP path');
   await fs.access(values['previous-archive']);
-} else assert.equal(values['previous-archive'], undefined, '--previous-archive is only supported with --mode upgrade');
+  assert.ok(values['previous-provenance'] && isAbsolute(values['previous-provenance']), 'upgrade requires --previous-provenance as an absolute JSON path');
+  await fs.access(values['previous-provenance']);
+  assert.ok(values['current-provenance'] && isAbsolute(values['current-provenance']), 'upgrade requires --current-provenance as an absolute JSON path');
+  await fs.access(values['current-provenance']);
+} else {
+  assert.equal(values['previous-archive'], undefined, '--previous-archive is only supported with --mode upgrade');
+  assert.equal(values['previous-provenance'], undefined, '--previous-provenance is only supported with --mode upgrade');
+  assert.equal(values['current-provenance'], undefined, '--current-provenance is only supported with --mode upgrade');
+}
 assert.ok(isAbsolute(values['work-parent']), '--work-parent must be an absolute directory');
 const archive = values.archive;
 const javaHome = values['java-home'];
@@ -97,6 +108,8 @@ let browserError = '';
 let viteError = '';
 const report = { status: 'running', mode: values.mode, testDirectory: root, driverNode: nodeVersion,
   driverCommit: process.env.GITHUB_SHA ?? execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8', maxBuffer: 1024 }).trim(),
+  driverHeadCommit: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8', maxBuffer: 1024 }).trim(),
+  driverTree: execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: repo, encoding: 'utf8', maxBuffer: 1024 }).trim(),
   tools: { node: process.execPath, chrome: chromeBinary, javaHome, python: values.python }, requests: {} };
 const launchErrors = new WeakMap();
 console.log(`Evidence directory: ${root}`);
@@ -502,6 +515,23 @@ async function removeOwnedWork() {
 
 try {
   report.tools.chromeSha256 = await fileHash(chromeBinary);
+  let previousSource;
+  let previousSourcePin;
+  if (values.mode === 'upgrade') {
+    const pin = JSON.parse(readFileSync(join(repo, 'scripts/packaged-browser-upgrade-pin.json'), 'utf8'));
+    const previousArchive = values['previous-archive'];
+    const previousProvenance = JSON.parse(readFileSync(values['previous-provenance'], 'utf8'));
+    previousSource = validatePreviousBuildProvenance(pin, previousProvenance, {
+      sha256: await fileHash(previousArchive), bytes: (await fs.stat(previousArchive)).size,
+    });
+    previousSourcePin = { schema: pin.schema, repository: pin.repository, commit: pin.commit, tree: pin.tree, reason: pin.reason };
+    const currentProvenance = JSON.parse(readFileSync(values['current-provenance'], 'utf8'));
+    report.currentSource = validateCurrentBuildProvenance(currentProvenance, pin.repository, {
+      commit: report.driverHeadCommit, tree: report.driverTree,
+    }, { sha256: await fileHash(archive), bytes: (await fs.stat(archive)).size });
+    assertSameUpgradeRun(previousSource, report.currentSource);
+    report.upgrade = { previousSourcePin, previousSource, previousArchiveVerified: true, phase: 'verify-packages' };
+  }
   let installation = await prepareArchive(values.mode === 'upgrade' ? values['previous-archive'] : archive);
   recordInstallation(installation);
   const { manifest, data } = installation;
@@ -579,7 +609,7 @@ try {
   }
   if (values.mode === 'upgrade') {
     const previous = installation;
-    report.upgrade = { previous: installationIdentity(previous), phase: 'previous-home', requestInterception: false };
+    Object.assign(report.upgrade, { previous: installationIdentity(previous), phase: 'previous-home', requestInterception: false });
     const previousRuntime = previous.manifest.files.find((entry) => /^assets\/Runtime-.+\.js$/.test(entry.path));
     assert.ok(previousRuntime, 'Previous package must contain a Runtime lazy chunk');
     const previousRuntimeUrl = `${origin}/nested/assets/ui/${previousRuntime.path}`;
