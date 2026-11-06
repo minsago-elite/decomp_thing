@@ -348,7 +348,8 @@ jobs:
           if event_name == 'pull_request':
               assert len(head) == 40 and all(ch in '0123456789abcdef' for ch in head)
               assert len(base) == 40 and all(ch in '0123456789abcdef' for ch in base)
-              parents = set(subprocess.check_output(['git', 'rev-list', '--parents', '-n1', 'HEAD'], text=True).split()[1:])
+              commit_object = subprocess.check_output(['git', 'cat-file', '-p', 'HEAD'], text=True)
+              parents = {line.split(' ', 1)[1] for line in commit_object.splitlines() if line.startswith('parent ')}
               assert head in parents and base in parents, 'Built merge commit does not bind the recorded PR head and base'
               pull_request = {'headCommit': head, 'baseCommit': base}
           else:
