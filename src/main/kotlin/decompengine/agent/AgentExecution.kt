@@ -376,6 +376,26 @@ data class AgentFileChange(
     }
 }
 
+/**
+ * A deterministic content-matched move candidate derived from two complete snapshots.
+ *
+ * This records a unique non-empty content match between a deletion and creation. Snapshot
+ * equality cannot prove that the filesystem performed a rename, so consumers must retain the
+ * underlying deletion and creation as the authoritative path changes.
+ */
+data class AgentFileMoveCandidate(
+    val sourcePath: AgentWorkspacePath,
+    val destinationPath: AgentWorkspacePath,
+    val contentSha256: String,
+    val sizeBytes: Long,
+) {
+    init {
+        require(sourcePath != destinationPath) { "move candidate endpoints must differ" }
+        require(contentSha256.isSha256()) { "move candidate digest must be SHA-256" }
+        require(sizeBytes > 0) { "empty files do not identify a unique move candidate" }
+    }
+}
+
 data class AgentFileChangeEvent(
     override val sequence: Long,
     val change: AgentFileChange,
@@ -425,8 +445,15 @@ class AgentExecutionResult(
     changes: Collection<AgentFileChange> = emptyList(),
     val session: AgentSessionReference? = null,
     val usage: AgentUsage? = null,
+    moveCandidates: Collection<AgentFileMoveCandidate> = emptyList(),
 ) {
     val changes: List<AgentFileChange> = immutableList(changes)
+    val moveCandidates: List<AgentFileMoveCandidate> = immutableList(
+        moveCandidates.sortedWith(compareBy(
+            { it.sourcePath.rootId }, { it.sourcePath.relativePath },
+            { it.destinationPath.rootId }, { it.destinationPath.relativePath },
+        )),
+    )
 
     init {
         require(this.changes.map { it.path }.distinct().size == this.changes.size) {
@@ -434,6 +461,21 @@ class AgentExecutionResult(
         }
         require(stopReason != AgentStopReason.NO_CHANGES || this.changes.isEmpty()) {
             "a no-change result cannot report file changes"
+        }
+        val candidateEndpoints = this.moveCandidates.flatMap { listOf(it.sourcePath, it.destinationPath) }
+        require(candidateEndpoints.distinct().size == candidateEndpoints.size) {
+            "move candidates must not reuse endpoints"
+        }
+        val changesByPath = this.changes.associateBy { it.path }
+        this.moveCandidates.forEach { move ->
+            require(changesByPath[move.sourcePath]?.let {
+                it.kind == AgentFileChangeKind.DELETED &&
+                    it.beforeSha256 == move.contentSha256 && it.afterSha256 == null
+            } == true) { "move candidate source must remain an explicit matching deletion" }
+            require(changesByPath[move.destinationPath]?.let {
+                it.kind == AgentFileChangeKind.CREATED &&
+                    it.beforeSha256 == null && it.afterSha256 == move.contentSha256 && it.sizeBytes == move.sizeBytes
+            } == true) { "move candidate destination must remain an explicit matching creation" }
         }
     }
 }
