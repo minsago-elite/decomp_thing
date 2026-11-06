@@ -22,6 +22,18 @@ export function manifestAssetRequestPaths(manifestFiles) {
   });
 }
 
+export async function captureScreenshotEvidence(target, name, capture, readPng) {
+  await capture(target, name);
+  const bytes = await readPng(name);
+  assert.ok(bytes.length >= 24 && bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])),
+    `${name} is not a PNG`);
+  const width = bytes.readUInt32BE(16), height = bytes.readUInt32BE(20);
+  assert.equal(width, 1280, `${name} width changed`);
+  assert.equal(height, 900, `${name} height changed`);
+  assert.ok(bytes.length > 0 && bytes.length <= 8 * 1024 * 1024, `${name} exceeds the screenshot evidence bound`);
+  return { name, width, height, bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') };
+}
+
 /** Build a contract-decodable envelope whose advertised API set is intentionally unsupported. */
 export function incompatibleBootstrapEnvelope(now = Date.now()) {
   assert.ok(Number.isSafeInteger(now) && now >= 0, 'Bootstrap fixture clock must be a nonnegative safe integer');

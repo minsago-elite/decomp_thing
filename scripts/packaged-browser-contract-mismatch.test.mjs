@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { assertContractMismatch, CONTRACT_MISMATCH_SCREENSHOTS, incompatibleBootstrapEnvelope, manifestAssetRequestPaths } from './packaged-browser-contract-mismatch.mjs';
+import { assertContractMismatch, captureScreenshotEvidence, CONTRACT_MISMATCH_SCREENSHOTS, incompatibleBootstrapEnvelope, manifestAssetRequestPaths } from './packaged-browser-contract-mismatch.mjs';
 
 const origin = 'http://127.0.0.1:43123';
 const buildId = 'b'.repeat(64);
@@ -58,6 +58,43 @@ test('binds manifest paths through the packaged asset mount prefix', () => {
     '/nested/assets/ui/assets/index-A1.js', '/nested/assets/ui/assets/index-B2.css',
   ]);
   assert.throws(() => manifestAssetRequestPaths([{ path: '../outside.js' }]), /unsafe path/);
+});
+
+test('captures before reading and validates the screenshot evidence bytes', async () => {
+  const bytes = Buffer.alloc(24);
+  Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(bytes);
+  bytes.writeUInt32BE(1280, 16);
+  bytes.writeUInt32BE(900, 20);
+  const order = [];
+  const target = { sessionId: 'target-session' };
+  const evidence = await captureScreenshotEvidence(target, 'contract-mismatch-notice.png', async (actualTarget, name) => {
+    order.push(['capture', actualTarget, name]);
+  }, async (name) => {
+    order.push(['read', name]);
+    return bytes;
+  });
+  assert.deepEqual(order, [
+    ['capture', target, 'contract-mismatch-notice.png'],
+    ['read', 'contract-mismatch-notice.png'],
+  ]);
+  assert.deepEqual(evidence, { name: 'contract-mismatch-notice.png', width: 1280, height: 900, bytes: 24,
+    sha256: 'e8d47cdc8b2316f50aa9d2da45c28161f7e0fe2f109904eb7b2a4c29fa99032b' });
+});
+
+test('rejects invalid PNG signature, dimensions and size', async () => {
+  const valid = Buffer.alloc(24);
+  Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(valid);
+  valid.writeUInt32BE(1280, 16);
+  valid.writeUInt32BE(900, 20);
+  const verify = (bytes) => captureScreenshotEvidence({}, 'capture.png', async () => {}, async () => bytes);
+  await assert.rejects(verify(Buffer.alloc(24)), /not a PNG/);
+  const wrongWidth = Buffer.from(valid); wrongWidth.writeUInt32BE(1279, 16);
+  await assert.rejects(verify(wrongWidth), /width changed/);
+  const wrongHeight = Buffer.from(valid); wrongHeight.writeUInt32BE(899, 20);
+  await assert.rejects(verify(wrongHeight), /height changed/);
+  const tooLarge = Buffer.alloc(8 * 1024 * 1024 + 1);
+  valid.copy(tooLarge);
+  await assert.rejects(verify(tooLarge), /evidence bound/);
 });
 
 test('accepts a complete same-origin reload-once ledger and returns bounded report data', () => {

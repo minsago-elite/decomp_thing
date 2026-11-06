@@ -15,7 +15,7 @@ import { qualifyRestart, assertGracefulShutdown, scrubTokens, boundReport } from
 import { qualifyUpgrade, qualifyUpgradeCache } from './packaged-browser-upgrade.mjs';
 import { qualifyAudit, assertAudit } from './packaged-browser-audit.mjs';
 import { PackagedBrowserCdpDiagnostics } from './packaged-browser-cdp-diagnostics.mjs';
-import { incompatibleBootstrapEnvelope, assertContractMismatch, manifestAssetRequestPaths } from './packaged-browser-contract-mismatch.mjs';
+import { incompatibleBootstrapEnvelope, assertContractMismatch, manifestAssetRequestPaths, captureScreenshotEvidence } from './packaged-browser-contract-mismatch.mjs';
 
 // Test driver only: the application is launched with a separate Node-free PATH.
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -434,14 +434,7 @@ async function capture(target, name) {
 }
 
 async function captureEvidence(target, name) {
-  await capture(target, name);
-  const bytes = await fs.readFile(join(root, name));
-  assert.ok(bytes.length >= 24 && bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])), `${name} is not a PNG`);
-  const width = bytes.readUInt32BE(16), height = bytes.readUInt32BE(20);
-  assert.equal(width, 1280, `${name} width changed`);
-  assert.equal(height, 900, `${name} height changed`);
-  assert.ok(bytes.length > 0 && bytes.length <= 8 * 1024 * 1024, `${name} exceeds the screenshot evidence bound`);
-  return { name, width, height, bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') };
+  return captureScreenshotEvidence(target, name, capture, (fileName) => fs.readFile(join(root, fileName)));
 }
 
 async function prepareArchive(archivePath) {
