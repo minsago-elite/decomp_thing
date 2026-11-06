@@ -100,6 +100,14 @@ internal fun invalidSourceSearchCursor(): Nothing = throw WebAccessDenied(400, "
 
 private fun invalidCursor(): Nothing = invalidSourceSearchCursor()
 
+/** The pinned reader requires a positive limit and may read one extra byte to detect growth. */
+internal fun sourceSearchReadReservation(file: WebRevisionSourceFile): Long {
+    require(file.committedInput) { "Source search requires a committed input size." }
+    val committedSize = requireNotNull(file.sizeBytes) { "Source search requires a committed input size." }
+    require(committedSize in 0..WebRevisionSourceContent.MAXIMUM_FILE_BYTES)
+    return maxOf(1L, committedSize) + 1
+}
+
 /**
  * Bounded literal search over the canonical input set of one persisted candidate. There is no retained index:
  * every scanned body is a fresh digest-checked capture, so offsets always describe the committed file bytes.
@@ -112,7 +120,7 @@ internal class WebRevisionSourceSearch(
 ) {
     private val secret = ByteArray(32).also(SecureRandom()::nextBytes)
 
-    init { require(deadlineNanos > 0 && maximumScannedBytes >= WebRevisionSourceContent.MAXIMUM_FILE_BYTES) }
+    init { require(deadlineNanos > 0 && maximumScannedBytes >= WebRevisionSourceContent.MAXIMUM_FILE_BYTES + 1) }
 
     fun search(owner: String, jobId: String, runId: String, revisionId: String, rawQuery: String?): JsonObject {
         val query = WebSourceSearchQuery.parse(rawQuery)
@@ -149,12 +157,14 @@ internal class WebRevisionSourceSearch(
             val file = snapshot.files[index]
             val path = file.evidence.path
             if (!path.startsWith(prefix)) break
+            // Search covers canonical source inputs only; manifest-only reports remain browsable but unsearched.
+            if (!file.committedInput) continue
             if (pathFilter != null && !(if (query.caseSensitive) path else fold(path)).contains(pathFilter)) continue
             inScope++
             when {
                 ProjectFileRole.VIEWABLE !in file.evidence.roles -> notViewable++
                 file.evidence.contentKind != ProjectContentKind.UTF8_TEXT -> declaredBinary++
-                file.sizeBytes > WebRevisionSourceContent.MAXIMUM_FILE_BYTES -> tooLarge++
+                file.sizeBytes!! > WebRevisionSourceContent.MAXIMUM_FILE_BYTES -> tooLarge++
                 else -> searchable += index
             }
         }
@@ -164,7 +174,7 @@ internal class WebRevisionSourceSearch(
             if (version != snapshot.metadataVersion) throw WebAccessDenied(410, "CURSOR_EXPIRED",
                 "Source metadata changed since this search page. Start the search again.")
             position = searchable.binarySearch(fileIndex).also { if (it < 0) invalidCursor() }
-            if (offset.toLong() > snapshot.files[fileIndex].sizeBytes) invalidCursor()
+            if (offset.toLong() > snapshot.files[fileIndex].sizeBytes!!) invalidCursor()
             resumeOffset = offset
         }
         val items = ArrayList<JsonObject>(query.limit)
@@ -177,13 +187,15 @@ internal class WebRevisionSourceSearch(
             val file = snapshot.files[fileIndex]
             val from = resumeOffset
             if (expired()) { stop = Stop("deadline", fileIndex, from); break }
-            if (scannedBytes > 0 && scannedBytes + file.sizeBytes > maximumScannedBytes) { stop = Stop("byte-limit", fileIndex, from); break }
+            val reservation = sourceSearchReadReservation(file)
+            if (scannedBytes + reservation > maximumScannedBytes) { stop = Stop("byte-limit", fileIndex, from); break }
+            // Reserve the full authorized work before IO; failed revalidation and the overflow probe count too.
+            scannedBytes += reservation
             val bytes = read(file)
             progressed = true; resumeOffset = 0; position++
-            // A read can fail its final revalidation after reading the whole body; charge its committed size either way.
-            if (bytes == null) { unavailable++; scannedBytes += file.sizeBytes; continue }
+            if (bytes == null) { unavailable++; continue }
             check(bytes.size.toLong() == file.sizeBytes)
-            scannedFiles++; scannedBytes += bytes.size
+            scannedFiles++
             if (WebRevisionSourceContent.textFallback(bytes) != null) { unsearchableText++; continue }
             if (from > 0 && from < bytes.size && (bytes[from].toInt() and 0xc0) == 0x80) invalidCursor()
             var lineStart = from
@@ -218,7 +230,7 @@ internal class WebRevisionSourceSearch(
                     bytePosition += utf8Length(content, charPosition, start); charPosition = start
                     searchFrom = end
                     if (bytePosition < from) continue
-                    val item = item(ref, fileIndex, file, content, start, end, line, lineStart, bytePosition)
+                    val item = item(snapshot.fileId(file), file, content, start, end, line, lineStart, bytePosition)
                     val size = item.toString().toByteArray(Charsets.UTF_8).size + 1
                     if (items.size >= query.limit || itemBytes + size > MAXIMUM_ITEM_BYTES) {
                         stop = Stop("result-limit", fileIndex, bytePosition); position--; break@files
@@ -274,14 +286,14 @@ internal class WebRevisionSourceSearch(
         }
     }
 
-    private fun item(ref: WebRevisionSourceReference, fileIndex: Int, file: WebRevisionSourceFile, line: String,
+    private fun item(fileId: String, file: WebRevisionSourceFile, line: String,
         start: Int, end: Int, lineNumber: Long, lineStart: Int, offset: Int): JsonObject {
         val before = line.codePointCount(0, start)
         val beforeStart = if (before > CONTEXT_CODE_POINTS) line.offsetByCodePoints(start, -CONTEXT_CODE_POINTS) else 0
         val after = line.codePointCount(end, line.length)
         val afterEnd = if (after > CONTEXT_CODE_POINTS) line.offsetByCodePoints(end, CONTEXT_CODE_POINTS) else line.length
         return buildJsonObject {
-            put("fileId", revisionSourceFileId(ref, fileIndex, file.evidence.path)); put("displayName", file.evidence.path)
+            put("fileId", fileId); put("displayName", file.evidence.path)
             put("sha256", file.evidence.sha256)
             put("line", lineNumber.toString()); put("column", (before + 1).toString())
             put("offsetBytes", offset.toString()); put("lineOffsetBytes", lineStart.toString())

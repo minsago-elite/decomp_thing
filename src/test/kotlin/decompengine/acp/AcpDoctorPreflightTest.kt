@@ -303,7 +303,7 @@ class AcpDoctorPreflightTest {
                 harness.preflight(AcpPreflightWorkflow.PATCH)
             }
 
-            assertEquals(case.failureKind, failure.failure.kind, case.mode)
+            assertEquals(case.failureKind, failure.failure.kind, "${case.mode}: ${doctorFailureContext(failure)}")
             assertTrue(case.expectedDetail in failure.failure.details, case.mode)
             val receipt = assertNotNull(failure.receipt, case.mode)
             assertIs<AgentExecutionOutcome.Failed>(receipt.outcome, case.mode)

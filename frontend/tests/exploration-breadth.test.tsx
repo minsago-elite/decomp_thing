@@ -28,6 +28,17 @@ function read(value: Report) {
 }
 const table = () => screen.findByRole('table', { name: 'Output signature counts reported by the producer' });
 
+it('retains the numeric summary without mounting an unavailable report case reader', async () => {
+  const value = (JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/report-exploration-unavailable.json'), 'utf8')) as ResponseOf<'report'>).data;
+  expect(value.sourceArtifact!.content?.projection).toBe('unavailable');
+  const { fetcher } = read(value);
+  await table();
+  expect(screen.getByText(/Download and retained case details withheld/)).toBeTruthy();
+  expect(screen.queryByRole('button', { name: 'Read retained case details' })).toBeNull();
+  expect(screen.queryByRole('link', { name: 'Download observed exploration JSON' })).toBeNull();
+  expect(fetcher).toHaveBeenCalledOnce();
+});
+
 it('presents frozen repeated-signature sample counts with their real denominator and report binding', async () => {
   const value = report(); const { fetcher } = read(value); const grid = await table();
   const expanded = within(grid).getByRole('row', { name: /Expanded distinct exit\/output signatures/ });

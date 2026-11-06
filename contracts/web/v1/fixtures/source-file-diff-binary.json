@@ -1,0 +1,59 @@
+{
+  "apiVersion": 1,
+  "kind": "sourceFileDiff",
+  "requestId": "request_diff_3",
+  "data": {
+    "binding": {
+      "jobId": "job_1",
+      "runId": "run_2",
+      "revisionId": "revision_2"
+    },
+    "base": {
+      "runId": "run_1",
+      "revisionId": "revision_1"
+    },
+    "authority": "recorded-digests",
+    "sourceSha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "metadataVersion": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "baseSourceSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "baseMetadataVersion": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "status": "modified",
+    "baseFile": {
+      "fileId": "file_4_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "displayName": "data.bin",
+      "sizeBytes": "12",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "declaredUtf8Text": false,
+      "declaredViewable": true,
+      "commitment": "source-input"
+    },
+    "headFile": {
+      "fileId": "file_4_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "displayName": "data.bin",
+      "sizeBytes": "12",
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "declaredUtf8Text": false,
+      "declaredViewable": true,
+      "commitment": "source-input"
+    },
+    "representation": "binary",
+    "fallbackReason": "declared-binary",
+    "baseLines": null,
+    "headLines": null,
+    "totalHunks": 0,
+    "hunkOffset": 0,
+    "nextHunk": null,
+    "unchangedAfter": null,
+    "hunks": [],
+    "patchAvailable": false,
+    "limits": {
+      "maximumFileBytes": "1048576",
+      "maximumLines": 50000,
+      "maximumEdits": 2000,
+      "contextLines": 3,
+      "hunksPerPage": 20,
+      "rowsPerPage": 2000,
+      "lineCharacters": 1000
+    }
+  }
+}

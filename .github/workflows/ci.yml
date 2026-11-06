@@ -59,8 +59,10 @@ jobs:
           } > "$RUNNER_TEMP/frontend-ci/toolchain.txt"
           npm --prefix frontend ci --ignore-scripts --no-audit --no-fund
           python3 -m pip install --requirement requirements/oracle-generation.txt
-      - name: Verify packaged upgrade and cache evidence controls
-        run: node scripts/test-packaged-browser-upgrade.mjs
+      - name: Verify packaged upgrade, cache and live storage evidence controls
+        run: |
+          node --test scripts/test-packaged-browser-upgrade.mjs scripts/test-packaged-browser-live.mjs
+          node --test scripts/packaged-browser-live.test.mjs
       - name: Verify packaged accessibility and asset audit controls
         run: |
           node scripts/test-packaged-browser-audit.mjs
@@ -69,6 +71,14 @@ jobs:
           node --check scripts/packaged-browser-engines.mjs
       - name: Verify packaged upload route readiness controls
         run: node scripts/test-packaged-browser-upload.mjs
+      - name: Verify packaged structure evidence controls
+        run: node --test scripts/test-packaged-browser-structure.mjs scripts/test-packaged-browser-structure-body-evidence.mjs
+      - name: Verify packaged DevTools target lifecycle controls
+        run: node --test scripts/test-packaged-browser-target-lifecycle.mjs
+      - name: Verify packaged browser target setup integration
+        run: node scripts/test-packaged-browser-target-setup-integration.mjs
+      - name: Verify packaged logs failure-phase evidence controls
+        run: node --test scripts/test-packaged-browser-logs-phase-evidence.mjs scripts/test-packaged-browser-log-projection-evidence.mjs scripts/packaged-browser-log-server-phases.test.mjs
       - name: Verify bounded archival cleanup controls
         timeout-minutes: 1
         run: python3 -B scripts/test-archival-diagnostics.py --verbose
@@ -89,6 +99,8 @@ jobs:
             | tee "$RUNNER_TEMP/frontend-ci/api-drift-tests.txt"
       - name: Verify generated large web fixtures
         run: node --test scripts/web-scale-fixtures.test.mjs | tee "$RUNNER_TEMP/frontend-ci/scale-fixtures-tests.txt"
+      - name: Verify live dashboard audit preservation controls
+        run: node --test scripts/packaged-browser-live.test.mjs | tee "$RUNNER_TEMP/frontend-ci/live-audit-tests.txt"
       - name: Check frontend freshness diagnostic controls
         timeout-minutes: 1
         run: python3 -B scripts/test-frontend-freshness.py --verbose
@@ -237,6 +249,12 @@ jobs:
             --archive "$WEB_TEST_ARCHIVE" \
             --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
             --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode metadata --no-sandbox
+      - name: Browse, preview, highlight and compare retained sources by keyboard
+        run: |
+          node scripts/check-packaged-web-browser.mjs \
+            --archive "$WEB_TEST_ARCHIVE" \
+            --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
+            --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode sources --no-sandbox
       - name: Preserve focused dashboard rows during actual background updates
         run: |
           node scripts/check-packaged-web-browser.mjs \
@@ -249,6 +267,19 @@ jobs:
             --archive "$WEB_TEST_ARCHIVE" \
             --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
             --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode scale --no-sandbox
+      - name: Verify bounded program-structure views with one hundred thousand recorded functions
+        run: |
+          node scripts/check-packaged-web-browser.mjs \
+            --archive "$WEB_TEST_ARCHIVE" \
+            --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
+            --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode structure --no-sandbox
+      - name: Qualify large replaced log recordings and browser teardown budgets
+        run: |
+          node --test scripts/test-packaged-browser-logs.mjs
+          node scripts/check-packaged-web-browser.mjs \
+            --archive "$WEB_TEST_ARCHIVE" \
+            --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
+            --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode logs --no-sandbox
       - name: Exercise same-origin JVM restart and two-tab stale progress pin
         run: |
           xvfb-run -a node scripts/check-packaged-web-browser.mjs \
@@ -278,6 +309,7 @@ jobs:
           path: |
             build/packaged-web-ci
             build/packaged-browser-*/report.json
+            build/packaged-browser-*/report.full.part-*
             build/packaged-browser-*/*.png
             build/reports/tests/test
             build/test-results/test

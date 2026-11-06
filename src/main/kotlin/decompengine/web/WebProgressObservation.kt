@@ -23,6 +23,11 @@ internal fun isProgressJournalArtifact(relativePath: String): Boolean {
 /** The caller must authorize and capture the selected artifact before projecting its display bytes. */
 internal fun progressArtifactProjection(relativePath: String, bytes: ByteArray): ByteArray {
     if (!isProgressJournalArtifact(relativePath)) return bytes
+    return progressJournalProjection(bytes)
+}
+
+/** Display snapshot of one retained progress journal; the caller has already selected a journal artifact. */
+internal fun progressJournalProjection(bytes: ByteArray): ByteArray {
     return try {
         val snapshot = replayProgressSnapshot(AgentProgressJournal.decode(bytes))
         OracleJson.canonicalBytes(snapshot, StrictJsonLimits(

@@ -19,6 +19,7 @@
         "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "declaredUtf8Text": true,
         "declaredViewable": true,
+        "commitment": "source-input",
         "kind": "file"
       }
     ],
@@ -29,7 +30,7 @@
     },
     "directoryId": "dir_1_1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "parentDirectoryId": "root",
-    "displayName": "\u00e9 space",
+    "displayName": "é space",
     "depth": 1,
     "breadcrumbs": [
       {
@@ -38,7 +39,7 @@
       },
       {
         "directoryId": "dir_1_1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "displayName": "\u00e9 space"
+        "displayName": "é space"
       }
     ],
     "omittedAncestors": 0,

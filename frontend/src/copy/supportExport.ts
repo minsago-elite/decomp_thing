@@ -1,0 +1,30 @@
+// Support export copy; a separate module so the lazily loaded panel keeps it out of the initial bundle.
+
+export const supportExportCopy = {
+  "supportExport": "Support export",
+  "intro": "Prepare a redacted diagnostic document to share when reporting a problem. Nothing is collected until you preview it, and the download is exactly the previewed document.",
+  "scope": "Export scope",
+  "serverScope": "Server runtime, limits, recovery files and recent audit entries",
+  "jobScope": "One job, its attempts and its audit entries",
+  "jobId": "Job ID (32 lowercase hexadecimal characters)",
+  "invalidJobId": "Enter a 32-character lowercase hexadecimal job ID.",
+  "preview": "Preview export",
+  "previewing": "Preparing preview…",
+  "previewFailed": "The support export could not be prepared.",
+  "previewReady": "Preview ready. Review it before downloading.",
+  "generatedAt": "Generated",
+  "redactionVersion": "Redaction policy",
+  "includedSections": "Included sections",
+  "omittedSections": "Omitted sections",
+  "omission": "{section}: {reason}",
+  "noSections": "No sections could be read.",
+  "document": "Previewed document",
+  "download": "Download previewed export ({bytes})",
+  "tooLarge": "This preview exceeds the download limit; narrow the scope.",
+  "reasonNotInScope": "outside the selected scope",
+  "reasonUnavailable": "could not be read; its state is unknown",
+  "reasonJobContent": "job content is never exported",
+  "reasonPrivateConfiguration": "private server configuration is never exported",
+  "reasonSecret": "credentials are never exported",
+  "reasonNotRecorded": "not recorded by this application"
+} as const;

@@ -100,6 +100,24 @@ class WebRevisionSourceSearchTest {
         assertEquals("Makefile", string(items(page).first(), "displayName"))
     }
 
+    @Test fun `search links retain canonical input identities when manifest entries precede the results`() {
+        val harness = harness(listOf(entry("Makefile", "needle\n"), entry("src/a.c", "needle\n")))
+        val legacy = harness.snapshot
+        val report = WebRevisionSourceFile(GeneratedFileEvidence("A/report.json", "e".repeat(64), "fixture",
+            roles = setOf(ProjectFileRole.VIEWABLE), contentKind = ProjectContentKind.UTF8_TEXT), null)
+        harness.snapshot = WebRevisionSourceSnapshot(legacy.reference, legacy.manifestSha256, legacy.descriptorSha256, legacy.files + report)
+        // Nullable manifest-only sizes must never acquire search admission or become a zero-byte charge.
+        assertFailsWith<IllegalArgumentException> { sourceSearchReadReservation(report) }
+        assertEquals(legacy.files[0].sizeBytes!! + 1, sourceSearchReadReservation(legacy.files[0]))
+        val matches = all(WebRevisionSourceSearch(harness::source), "q=needle&limit=1")
+        assertEquals(listOf("Makefile", "src/a.c"), matches.map { string(it, "displayName") })
+        for ((index, item) in matches.withIndex()) {
+            val id = string(item, "fileId")
+            assertEquals(revisionSourceFileId(legacy.reference, index, legacy.files[index].evidence.path), id)
+            assertSame(legacy.files[index], resolveRevisionSourceFile(harness.snapshot, id))
+        }
+    }
+
     @Test fun `case and symbol modes are explicit and symbol matches require identifier boundaries`() {
         val entries = listOf(entry("a.c", "int Count = count_total + COUNT;\ncount();\nÉcole école ÉCOLE\n"))
         val engine = WebRevisionSourceSearch(harness(entries)::source)
@@ -177,7 +195,7 @@ class WebRevisionSourceSearchTest {
         val large = ("x".repeat(1023) + "\n").repeat(5 * 1024) + "needle\n"
         val entries = listOf(entry("a.c", large), entry("b.c", large), entry("c.c", "needle\n"))
         val state = harness(entries)
-        val engine = WebRevisionSourceSearch(state::source, maximumScannedBytes = WebRevisionSourceContent.MAXIMUM_FILE_BYTES)
+        val engine = WebRevisionSourceSearch(state::source, maximumScannedBytes = WebRevisionSourceContent.MAXIMUM_FILE_BYTES + 1)
         val first = search(engine, "q=needle")
         assertEquals("partial", first.getValue("status").jsonPrimitive.content)
         assertEquals("byte-limit", first.getValue("stopReason").jsonPrimitive.content)
@@ -192,13 +210,32 @@ class WebRevisionSourceSearchTest {
         val large = ("x".repeat(1023) + "\n").repeat(5 * 1024) + "needle\n"
         val entries = listOf(entry("a.c", large), entry("b.c", large), entry("c.c", large))
         val state = harness(entries).also { it.bodies = it.bodies + ("a.c" to null) + ("b.c" to null) }
-        val engine = WebRevisionSourceSearch(state::source, maximumScannedBytes = WebRevisionSourceContent.MAXIMUM_FILE_BYTES)
+        val engine = WebRevisionSourceSearch(state::source, maximumScannedBytes = WebRevisionSourceContent.MAXIMUM_FILE_BYTES + 1)
         val first = search(engine, "q=needle")
         // The failed 5 MiB read leaves no room for another 5 MiB read on this page.
         assertEquals("byte-limit", first.getValue("stopReason").jsonPrimitive.content)
         assertEquals(1, state.reads)
-        assertEquals(entries[0].bytes.size.toString(), first.getValue("progress").jsonObject.getValue("scannedBytes").jsonPrimitive.content)
+        assertEquals((entries[0].bytes.size + 1).toString(), first.getValue("progress").jsonObject.getValue("scannedBytes").jsonPrimitive.content)
         assertEquals(listOf("c.c"), all(engine, "q=needle").map { string(it, "displayName") })
+    }
+
+    @Test fun `page admission includes overflow probes at the maximum file size`() {
+        val entries = (0 until 5).map { Entry("f$it.c", byteArrayOf(), text,
+            size = WebRevisionSourceContent.MAXIMUM_FILE_BYTES) }
+        val state = harness(entries).also { it.bodies = entries.associate { file -> file.path to null } }
+        val engine = WebRevisionSourceSearch(state::source)
+        val first = search(engine, "q=needle")
+        val progress = first.getValue("progress").jsonObject
+        // Four complete 8 MiB reservations plus their probes would exceed the unchanged 32 MiB ceiling.
+        assertEquals(3, state.reads)
+        assertEquals(3, progress.getValue("unavailableFiles").jsonPrimitive.int)
+        assertEquals(3 * (WebRevisionSourceContent.MAXIMUM_FILE_BYTES + 1), progress.getValue("scannedBytes").jsonPrimitive.long)
+        assertEquals("byte-limit", first.getValue("stopReason").jsonPrimitive.content)
+        assertNotNull(cursor(first))
+        val last = search(engine, "q=needle&cursor=${cursor(first)}")
+        assertEquals(5, state.reads)
+        assertEquals("complete", last.getValue("status").jsonPrimitive.content)
+        assertEquals(5, last.getValue("coverageGaps").jsonObject.getValue("unavailableFiles").jsonPrimitive.int)
     }
 
     @Test fun `elapsed deadline stops with explicit progress and every continuation advances`() {
@@ -259,6 +296,75 @@ class WebRevisionSourceSearchTest {
                 }
             }
             assertEquals(truth(bytes, needle).map(Int::toString), found.map { string(it, "offsetBytes") })
+        }
+    }
+
+    @Test fun `dense matches check the deadline and resume at the first unprocessed Unicode position`() {
+        val needle = "a".repeat(128)
+        // A valid 256 KiB line, with dense maximum-width matches and multibyte cursor positions.
+        val body = "😀" + needle.repeat(101) + "😀".repeat(62_303)
+        val bytes = body.toByteArray()
+        assertEquals(256 * 1024, bytes.size)
+        assertNull(WebRevisionSourceContent.textFallback(bytes))
+        for (case in listOf("sensitive", "insensitive")) {
+            var now = 0L; var ticking = true
+            val engine = WebRevisionSourceSearch(harness(listOf(entry("dense.c", body)))::source,
+                nanoTime = { now.also { if (ticking) now += 1_000_000 } }, deadlineNanos = 3_000_000)
+            val query = "q=$needle&case=$case&limit=100"
+            val first = search(engine, query)
+            // Dense hits return before find's candidate checkpoint; the between-match check must still stop the page.
+            assertEquals("deadline", string(first, "stopReason"))
+            val emitted = items(first).map { string(it, "offsetBytes").toInt() }
+            assertTrue(emitted.size in 1..3, "the deadline stopped a dense page within its clock budget: $emitted")
+            val next = assertNotNull(cursor(first))
+            val resume = next.split('_')[2].toInt()
+            assertEquals(emitted.last() + needle.length, resume, "resume immediately after the last emitted match")
+            assertTrue((bytes[resume].toInt() and 0xc0) != 0x80)
+            ticking = false
+            val continued = search(engine, "$query&cursor=$next")
+            assertEquals("complete", string(continued, "status"))
+            assertNull(cursor(continued))
+            assertEquals(truth(bytes, needle).map(Int::toString),
+                (items(first) + items(continued)).map { string(it, "offsetBytes") })
+        }
+    }
+
+    @Test fun `dense matches observe interruption without clearing the flag and can resume`() {
+        val body = "a".repeat(4096)
+        for (case in listOf("sensitive", "insensitive")) {
+            val engine = WebRevisionSourceSearch(harness(listOf(entry("dense.c", body)))::source)
+            val query = "q=a&case=$case&limit=100"
+            val first = try {
+                Thread.currentThread().interrupt()
+                search(engine, query).also { page ->
+                    assertEquals("deadline", string(page, "stopReason"))
+                    // A page makes bounded progress, then stops on the next check; it does not run to its limit.
+                    assertTrue(items(page).size in 1..3, "an interrupted page exceeded its bounded progress")
+                    assertTrue(Thread.currentThread().isInterrupted)
+                    assertNotNull(cursor(page))
+                }
+            } finally { Thread.interrupted() }
+            val continued = search(engine, "$query&cursor=${cursor(first)}")
+            assertEquals(truth(body.toByteArray(), "a").take(items(first).size + items(continued).size).map(Int::toString),
+                (items(first) + items(continued)).map { string(it, "offsetBytes") })
+        }
+    }
+
+    @Test fun `deadline before a dense first match still makes exact progress`() {
+        for (case in listOf("sensitive", "insensitive")) {
+            var now = 0L; var ticking = true
+            val engine = WebRevisionSourceSearch(harness(listOf(entry("dense.c", "aaaa")))::source,
+                nanoTime = { now.also { if (ticking) now += 1_000_000 } }, deadlineNanos = 1_000_000)
+            val query = "q=a&case=$case"
+            val first = search(engine, query)
+            assertEquals("deadline", string(first, "stopReason"))
+            val emitted = items(first).map { string(it, "offsetBytes") }
+            assertTrue(emitted.size in 1..3, "a page always makes progress but stops before completion: $emitted")
+            assertEquals((emitted.last().toInt() + 1).toString(), assertNotNull(cursor(first)).split('_')[2])
+            ticking = false
+            val continued = search(engine, "$query&cursor=${cursor(first)}")
+            assertEquals("complete", string(continued, "status"))
+            assertEquals(listOf("0", "1", "2", "3"), emitted + items(continued).map { string(it, "offsetBytes") })
         }
     }
 
@@ -385,7 +491,8 @@ class WebRevisionSourceSearchTest {
         for (mode in listOf("valid", "changed", "missing", "busy", "valid")) {
             val engine = WebRevisionSourceSearch({ _, _, _, scan ->
                 evidence.search(reference, { job, run, path, maximum ->
-                    assertEquals(jobId, job); assertEquals(runId, run); assertEquals(WebRevisionSourceContent.MAXIMUM_FILE_BYTES, maximum)
+                    assertEquals(jobId, job); assertEquals(runId, run)
+                    assertEquals(if (path == "Makefile") 1L else payload.size.toLong(), maximum)
                     if (mode == "busy") assertEquals("SOURCE_SEARCH_BUSY", assertFailsWith<WebAccessDenied> {
                         evidence.search(reference, { _, _, _, _ -> error("nested") }) { _, _ -> JsonObject(emptyMap()) }
                     }.code)
@@ -406,5 +513,23 @@ class WebRevisionSourceSearchTest {
             }
             evidence.readRevision(reference) // Admission is always released.
         }
+    }
+
+    @Test fun `source search preserves query and excerpts from committed content under redaction`() {
+        val secret = "hunter2secret"
+        val query = "password=$secret"
+        val body = "const char *path = \"/tmp/example\"; // $query\n"
+        val engine = WebRevisionSourceSearch(harness(listOf(entry("src/example.c", body)))::source)
+        val page = search(engine, "q=${encode(query)}")
+        val policy = WebRedactionPolicy.create(
+            mapOf("DB_PASSWORD" to secret), emptyList(), listOf(java.nio.file.Path.of("/tmp/example")),
+        )
+
+        assertEquals(query, page.getValue("query").jsonObject.getValue("text").jsonPrimitive.content)
+        val match = items(page).single()
+        assertTrue(match.getValue("before").jsonPrimitive.content.contains("/tmp/example"))
+        assertEquals(query, match.getValue("match").jsonPrimitive.content)
+        assertNotEquals(page, policy.json(page), "fixture must exercise credential and private-path redaction")
+        assertEquals(page, publicWebApiData("sourceSearch", page, policy))
     }
 }

@@ -7,17 +7,26 @@ requirements/oracle-generation.txt. This is not an HTTP or runtime conformance t
 
 from __future__ import annotations
 
+import codecs
+import copy
 import json
 import re
-import codecs
-import unicodedata
-from pathlib import Path
 import sys
+import unicodedata
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any, cast
 
 import fastjsonschema
 
-
 ROOT = Path(__file__).resolve().parent
+
+
+def load_json(path: Path) -> Any:
+    try:
+        return json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"could not load JSON fixture {path.relative_to(ROOT)}") from error
 
 
 def check_validation_preview(value: dict | None, byte_count: str | None) -> None:
@@ -99,7 +108,7 @@ def check_validation_cases(data: dict) -> None:
             continue
         if any(flag is None for flag in flags):
             raise ValueError("compared validation cases require every comparison flag")
-        for preview, count in zip(previews, counts):
+        for preview, count in zip(previews, counts, strict=True):
             check_validation_preview(preview, count)
         for flag, first, second in [(item["stdoutMatches"], previews[0], previews[1]),
                                     (item["stderrMatches"], previews[2], previews[3])]:
@@ -117,7 +126,7 @@ def check_validation_cases(data: dict) -> None:
     indexed_pages = None
     comparison = value.get("comparisonIndex")
     if comparison is not None:
-        if not behavior or total > 10000:
+        if not behavior or matched is None or total > 10000:
             raise ValueError("complete mismatch indexes require a supported behavior population")
         bitmap = bytes.fromhex(comparison["mismatchBitmapHex"])
         if len(bitmap) != (total + 7) // 8:
@@ -174,7 +183,7 @@ OUTCOME_EXPECTATIONS = {
 
 def check_outcomes(manifest: dict, validate) -> None:
     """Require one safe, schema-valid wire document for each named web outcome."""
-    index = json.loads((ROOT / "outcomes.json").read_text())
+    index = load_json(ROOT / "outcomes.json")
     if index.get("version") != 1 or not isinstance(index.get("cases"), list):
         raise ValueError("outcome index must use version 1 and a cases array")
     cases = index["cases"]
@@ -188,7 +197,7 @@ def check_outcomes(manifest: dict, validate) -> None:
             raise ValueError(f"{outcome}: invalid outcome fixture reference")
         if filename not in valid_files:
             raise ValueError(f"{outcome}: outcome fixture must be in the positive manifest")
-        document = json.loads((ROOT / filename).read_text())
+        document = load_json(ROOT / filename)
         validate(document)
         check_semantics(document)
         kind, expectations = OUTCOME_EXPECTATIONS[outcome]
@@ -203,7 +212,7 @@ def check_outcomes(manifest: dict, validate) -> None:
         # These fixtures are wire metadata, never host-specific test inputs or
         # bearer material. Runtime auth and actual binary payloads are out of scope.
         serialized = json.dumps(document, ensure_ascii=False)
-        if re.search(r'"(?:csrfToken|password|secret|privatePath|binaryBytes|authorization)"\s*:', serialized, re.I):
+        if re.search(r'"(?:csrfToken|password|secret|privatePath|binaryBytes|authorization)"\s*:', serialized, re.IGNORECASE):
             raise ValueError(f"{outcome}: outcome fixture contains credential or binary fields")
         if re.search(r"/home/|/Users/|[A-Za-z]:\\\\Users\\\\|-----BEGIN [A-Z ]*PRIVATE KEY-----|gh[pousr]_[A-Za-z0-9]{20,}", serialized):
             raise ValueError(f"{outcome}: outcome fixture contains a private path or credential")
@@ -318,6 +327,52 @@ def check_directory(data: dict) -> None:
         raise ValueError("directory parent identity is inconsistent")
 
 
+def check_source_diff(data: dict) -> None:
+    counts, items, page = data["counts"], data["items"], data["page"]
+    if counts["added"] + counts["removed"] + counts["modified"] + counts["renamed"] != data["totalChanged"]:
+        raise ValueError("source diff change counts disagree with the changed total")
+    if len(items) > page["limit"] or len(items) > data["totalChanged"]:
+        raise ValueError("source diff page exceeds its limit or changed total")
+    for item in items:
+        for side, revision in (("baseFile", "base"), ("headFile", "head")):
+            entry = item[side]
+            if entry is not None and entry["commitment"] == "source-input" and entry["sizeBytes"] is None:
+                raise ValueError("source diff input entry lacks its committed size")
+        if item["status"] == "renamed" and item["baseFile"]["sha256"] != item["headFile"]["sha256"]:
+            raise ValueError("source diff renames require identical recorded digests")
+        if item["status"] == "modified" and (item["baseFile"]["displayName"] != item["headFile"]["displayName"]
+                                             or (item["baseFile"]["sha256"] == item["headFile"]["sha256"]
+                                                 and item["baseFile"]["declaredUtf8Text"] == item["headFile"]["declaredUtf8Text"])):
+            raise ValueError("source diff modification must keep its path and change its digest or declared content kind")
+
+
+def check_source_file_diff(data: dict) -> None:
+    hunks = data["hunks"]
+    end = data["hunkOffset"] + len(hunks)
+    if data["nextHunk"] is not None and data["nextHunk"] != end:
+        raise ValueError("source diff continuation does not follow this page")
+    if (data["nextHunk"] is None) != (end == data["totalHunks"] or data["totalHunks"] == 0):
+        raise ValueError("source diff hunk pages disagree with the total")
+    if data["representation"] == "text" and data["totalHunks"] > 0 and not hunks:
+        raise ValueError("source diff text page has no hunks")
+    for hunk in hunks:
+        base, head = hunk["baseStart"], hunk["headStart"]
+        for line in hunk["lines"]:
+            if line["baseLine"] is not None:
+                if line["baseLine"] != base or base > data["baseLines"]:
+                    raise ValueError("source diff base line numbers are not sequential within the file")
+                base += 1
+            if line["headLine"] is not None:
+                if line["headLine"] != head or head > data["headLines"]:
+                    raise ValueError("source diff head line numbers are not sequential within the file")
+                head += 1
+            shown = len(line["text"].encode("utf-16-le", "surrogatepass")) // 2
+            if line["characters"] < shown or line["truncated"] != (line["characters"] > shown):
+                raise ValueError("source diff truncation marker disagrees with the line length")
+        if base - hunk["baseStart"] != hunk["baseCount"] or head - hunk["headStart"] != hunk["headCount"]:
+            raise ValueError("source diff hunk counts disagree with its lines")
+
+
 def check_source_chunk(data: dict) -> None:
     size, offset, length = int(data["sizeBytes"]), int(data["offsetBytes"]), int(data["lengthBytes"])
     end = offset + length
@@ -345,6 +400,8 @@ def check_source_chunk(data: dict) -> None:
 def check_job_label(label) -> None:
     if isinstance(label, str) and (label.strip() != label or any(ord(c) < 32 or ord(c) == 127 or ord(c) in (0x2028, 0x2029) for c in label)):
         raise ValueError("a job label must be printable and unpadded")
+
+
 def check_source_search(data: dict) -> None:
     page, limits, scope, progress, query = data["page"], data["limits"], data["scope"], data["progress"], data["query"]
     items = data["items"]
@@ -395,10 +452,115 @@ def check_source_search(data: dict) -> None:
         previous = item
 
 
+ARTIFACT_FAMILY_CODES = {"exploration-report": "exploration", "progress-journal": "progress", "source-manifest": "manifest",
+                         "build-contract": "contract", "source-archive": "archive"}
+# Server-produced reports are served only through the shared redacted report projection.
+REDACTED_ARTIFACT_FAMILIES = {"exploration-report", "progress-journal"}
+
+
+def check_artifact_href(item: dict) -> None:
+    suffix = "/api/v1/jobs/" + item["binding"]["jobId"] + "/artifacts/" + item["artifactId"] + "/content"
+    if not re.fullmatch(r"(?:/[A-Za-z0-9_-]+)*" + re.escape(suffix), item["contentHref"]):
+        raise ValueError("artifact content link belongs to another resource")
+
+
+def check_catalog_artifact(item: dict) -> None:
+    """Catalog entries carry both optional fields; a verified digest needs a revision-checked family."""
+    check_artifact_href(item)
+    if ("family" in item) != ("verification" in item):
+        raise ValueError("catalog artifact family and verification must appear together")
+    if "family" not in item:
+        return
+    if "content" not in item:
+        raise ValueError("catalog artifact does not name its served content projection")
+    report = item["family"] in REDACTED_ARTIFACT_FAMILIES
+    if (item["content"]["projection"] == "verbatim") == report:
+        raise ValueError("report artifact content must be redacted or unavailable; source content is verbatim")
+    code = ARTIFACT_FAMILY_CODES[item["family"]]
+    if not re.fullmatch(re.escape(code) + r"_[a-f0-9]{32}_" + re.escape(item["sha256"]), item["artifactId"]):
+        raise ValueError("catalog artifact identity does not bind its family and digest")
+    if item["binding"]["runId"] is None:
+        raise ValueError("catalog artifacts belong to one attempt")
+    if item["verification"] == "source-inventory-checked" and (item["family"] not in ("source-manifest", "build-contract")
+                                                          or item["binding"]["revisionId"] is None):
+        raise ValueError("only revision-bound source metadata can be verified against a revision commitment")
+
+
+def check_source_archive(data: dict) -> None:
+    archive, verification = data["archive"], data["verification"]
+    if archive["state"] == "present":
+        if not re.fullmatch(r"archive_[a-f0-9]{32}_" + re.escape(archive["sha256"]), archive["artifactId"]):
+            raise ValueError("source archive identity does not bind its digest")
+        check_artifact_href({"binding": data["binding"], "artifactId": archive["artifactId"], "contentHref": archive["contentHref"]})
+    if (archive["state"] == "present") != (verification["state"] not in ("missing", "too-large")) or \
+            (archive["state"] != "present" and verification["state"] != archive["state"]):
+        raise ValueError("source archive verification state disagrees with the retained archive")
+    if verification["state"] == "stale" and verification["previousVerifiedSha256"] == archive["sha256"]:
+        raise ValueError("a stale verification names a different archive")
+    if data["git"]["state"] == "mapped":
+        mapping = data["git"]["mapping"]
+        if mapping["revisionId"] != data["binding"]["revisionId"] or mapping["sourceSha256"] != data["sourceSha256"]:
+            raise ValueError("Git mapping belongs to another revision")
+
+
+def check_structure(kind: str, data: dict) -> None:
+    """Recorded program structure: explicit unavailable states, exact selectors and derived evidence classes."""
+    if data["model"]["state"] != data["state"] or data["model"]["stateReason"] != data["stateReason"]:
+        raise ValueError("structure state must restate the program model record state")
+    if len({item["id"] for item in data["capabilities"]}) != len(data["capabilities"]):
+        raise ValueError("structure capabilities repeat a fact family")
+    if kind == "functionInventory":
+        rows, pages = data["items"], [data["page"]]
+    elif kind == "moduleInventory":
+        rows, pages = [], [data["page"]]
+        if (data["totalModules"] is None and data["items"]) or (data["totalModules"] is not None and len(data["items"]) > data["totalModules"]):
+            raise ValueError("module rows exceed the recorded module plan")
+        if any(item["selector"] not in (None, item["moduleId"]) for item in data["items"]):
+            raise ValueError("module selectors must be the recorded module identity")
+    elif kind == "moduleDetail":
+        owned = data["owned"]
+        if (data["module"] is None) != (owned is None):
+            raise ValueError("module detail and owned entities must be recorded together")
+        rows, pages = (owned["items"], [owned["page"]]) if owned else ([], [])
+        if owned and (len(owned["items"]) > owned["total"] or any(item["kind"] != owned["kind"] for item in owned["items"])):
+            raise ValueError("owned entity page disagrees with its kind or total")
+    else:
+        rows, pages = ([data["entity"]] if data["entity"] else []), []
+    if data["state"] != "available" and (rows or data["recoveryAssessment"] != "not-recorded"):
+        raise ValueError("unavailable program records cannot present entities or an assessment")
+    for page in pages:
+        if page["snapshotVersion"] != data["structureVersion"]:
+            raise ValueError("structure pages must be bound to the structure version")
+    for row in rows:
+        if row["selector"] not in (None, row["entityId"]):
+            raise ValueError("entity selectors must be the recorded entity identity")
+        if not row["recorded"]:
+            continue
+        if (row["evidenceState"] == "excluded") != (row["ownership"] == "unowned"):
+            raise ValueError("excluded entities are exactly those the plan assigns to no module")
+        if (row["ownership"] == "owned") != (row["moduleId"] is not None):
+            raise ValueError("an owning module is recorded exactly for owned entities")
+    if kind == "functionInventory" and data["totalFunctions"] is not None and not len(rows) <= data["matchedFunctions"] <= data["totalFunctions"]:
+        raise ValueError("matched functions must lie within the recorded total")
+    if kind == "entityDetail" and data["entity"]:
+        entity = data["entity"]
+        if (entity["kind"] == "function") != (entity["calls"] is not None):
+            raise ValueError("call references belong only to functions")
+        for references in (entity["calls"], entity["calledBy"], entity["referencedGlobals"], entity["referencedBy"], entity["collisions"]):
+            if references and (len(references["items"]) > references["total"] or any(
+                    item["resolution"] != "recorded" and item["selector"] is not None for item in references["items"])):
+                raise ValueError("unrecorded references cannot carry a selector")
+        if any(text["recorded"] != (text["preview"] is not None) for text in entity["texts"]):
+            raise ValueError("text previews exist exactly for recorded fields")
+
+
 def check_semantics(document: dict) -> None:
     """Check relationships JSON Schema cannot express with portable draft-07."""
     kind = document["kind"]
     data = document.get("data", {})
+    if kind in ("functionInventory", "moduleInventory", "moduleDetail", "entityDetail"):
+        check_structure(kind, data)
+        return
     if kind == "validationHistory":
         if data["state"] != "recorded":
             if any(data[key] is not None for key in ("graphSha256", "corpusSha256", "page", "totalPages", "previousPage", "nextPage")) or data["items"]:
@@ -449,6 +611,30 @@ def check_semantics(document: dict) -> None:
         check_source_chunk(data)
     elif kind == "sourceSearch":
         check_source_search(data)
+    elif kind == "sourceDiff":
+        check_source_diff(data)
+    elif kind == "sourceFileDiff":
+        check_source_file_diff(data)
+    elif kind == "sourceArchive":
+        check_source_archive(data)
+    elif kind == "operation" and data["action"] == "archive.verify":
+        if data["repositoryId"] is not None or data["worktreeId"] is not None or data["resultObjectId"] is not None:
+            raise ValueError("archive verification has no repository, worktree or Git result object")
+    elif kind == "artifact":
+        check_catalog_artifact(data)
+    elif kind == "artifacts":
+        binding, items = data["binding"], data["items"]
+        if binding["revisionId"] is not None and binding["runId"] is None:
+            raise ValueError("artifact revision filter requires its attempt filter")
+        if len(items) > data["page"]["limit"] or len({item["artifactId"] for item in items}) != len(items):
+            raise ValueError("artifact page exceeds its limit or repeats an identity")
+        for item in items:
+            check_catalog_artifact(item)
+            if "family" not in item or item["family"] not in data["catalogedFamilies"]:
+                raise ValueError("artifact catalog entry is outside the cataloged families")
+            if item["binding"]["jobId"] != binding["jobId"] or any(
+                    binding[key] is not None and item["binding"][key] != binding[key] for key in ("runId", "revisionId")):
+                raise ValueError("artifact catalog entry is outside its filter")
     elif kind == "revisionFile":
         path = data["item"]["displayName"]
         for part in path.split("/"):
@@ -491,15 +677,33 @@ def check_semantics(document: dict) -> None:
         if data["state"] == "queued" and (int(data["ahead"]) != int(data["position"]) - 1
                 or int(data["position"]) > int(data["queuedTasks"]) or int(data["activeWorkers"]) > int(data["workerLimit"])):
             raise ValueError("queue position sample is inconsistent")
+    elif kind == "logRange":
+        if data["state"] == "available":
+            window, lines, total = data["range"], data["lines"], int(data["totalLines"])
+            first, count = int(window["firstLine"]), int(window["lineCount"])
+            if count != len(lines) or [int(line["number"]) for line in lines] != list(range(first, first + count)):
+                raise ValueError("log lines are not the declared contiguous range")
+            if first > total + 1 or window["truncatedBefore"] != (first > 1) or window["truncatedAfter"] != (first + count - 1 < total):
+                raise ValueError("log range markers disagree with its position")
+            if int(data["redactedLines"]) > total or sum(line["redacted"] for line in lines) > int(data["redactedLines"]):
+                raise ValueError("log redaction count is inconsistent")
+            search = data["search"]
+            if search is not None:
+                matches = [int(value) for value in search["matches"]]
+                if matches != sorted(set(matches)) or any(value > total for value in matches) or len(matches) > int(search["matchCount"]) \
+                        or search["matchesTruncated"] != (int(search["matchCount"]) > len(matches)):
+                    raise ValueError("log search matches are inconsistent")
     elif kind == "bootstrap":
         retention = data["runtime"].get("progressRetention")
-        if retention is not None:
-            if int(retention["expired"]) > int(retention["examined"]) or ((int(retention["failures"]) == 0) != (retention["lastFailureCode"] is None)):
-                raise ValueError("retention counters are inconsistent")
+        if retention is not None and (
+                int(retention["expired"]) > int(retention["examined"])
+                or ((int(retention["failures"]) == 0) != (retention["lastFailureCode"] is None))):
+            raise ValueError("retention counters are inconsistent")
         scheduler = data["runtime"].get("scheduler")
-        if scheduler is not None and scheduler["state"] == "available":
-            if int(scheduler["activeWorkers"]) > int(scheduler["workerLimit"]) or int(scheduler["queuedTasks"]) > int(scheduler["queueCapacity"]):
-                raise ValueError("scheduler sample exceeds configured capacity")
+        if scheduler is not None and scheduler["state"] == "available" and (
+                int(scheduler["activeWorkers"]) > int(scheduler["workerLimit"])
+                or int(scheduler["queuedTasks"]) > int(scheduler["queueCapacity"])):
+            raise ValueError("scheduler sample exceeds configured capacity")
         limits = data["limits"]
         if limits["defaultPageLimit"] > limits["maxPageLimit"]:
             raise ValueError("default page size exceeds configured maximum")
@@ -521,9 +725,8 @@ def check_semantics(document: dict) -> None:
                 raise ValueError("exploration adapter has a foreign summary schema")
             if data["reportType"] == "revision-validation" and "result" not in summary:
                 raise ValueError("validation adapter has a foreign summary schema")
-        if data["acceptance"] == "accepted":
-            if summary is None or summary.get("result") != "passed":
-                raise ValueError("accepted report requires a passed validation summary")
+        if data["acceptance"] == "accepted" and (summary is None or summary.get("result") != "passed"):
+            raise ValueError("accepted report requires a passed validation summary")
         check_validation_cases(data)
         failure = data.get("validationFailure")
         if failure is not None:
@@ -608,9 +811,9 @@ def check_semantics(document: dict) -> None:
 
 def check_run_lifecycle_controls(validate) -> int:
     """Exercise every state/reason pair and start alternative in each Run position."""
-    single = json.loads((ROOT / "fixtures/run-completed-unaccepted.json").read_text())
-    page = json.loads((ROOT / "fixtures/runs-page.json").read_text())
-    snapshot = json.loads((ROOT / "fixtures/snapshot.json").read_text())
+    single = load_json(ROOT / "fixtures/run-completed-unaccepted.json")
+    page = load_json(ROOT / "fixtures/runs-page.json")
+    snapshot = load_json(ROOT / "fixtures/snapshot.json")
     expected = {
         "queued": {None}, "running": {None}, "cancelling": {None},
         "completed": {"COMPLETED", "NO_CHANGES"},
@@ -632,9 +835,9 @@ def check_run_lifecycle_controls(validate) -> int:
             try:
                 validate(document)
                 check_semantics(document)
-            except (fastjsonschema.JsonSchemaException, ValueError):
+            except (fastjsonschema.JsonSchemaException, ValueError) as error:
                 if valid:
-                    raise ValueError("valid lifecycle metadata was rejected")
+                    raise ValueError("valid lifecycle metadata was rejected") from error
             else:
                 if not valid:
                     raise ValueError("contradictory lifecycle metadata was accepted")
@@ -654,7 +857,7 @@ def check_run_lifecycle_controls(validate) -> int:
 
 def check_validation_display_controls(validate) -> int:
     """Authored wire controls only: byte/text binding and absence of partial results."""
-    original = json.loads((ROOT / "fixtures/report-normal-cases.json").read_text())
+    original = load_json(ROOT / "fixtures/report-normal-cases.json")
     cases = [
         ([65], None, "A", 1), ([0xef, 0xbb, 0xbf, 65], None, "\\ufeffA", 4),
         ([92, 13, 10, 9, 0, 0xe2, 0x80, 0xae], None, '\\\\\\r\\n\n\\t\\u0000\\u202e', 8),
@@ -667,15 +870,15 @@ def check_validation_display_controls(validate) -> int:
         try:
             validate(document)
             check_semantics(document)
-        except (fastjsonschema.JsonSchemaException, ValueError):
+        except (fastjsonschema.JsonSchemaException, ValueError) as error:
             if valid:
-                raise ValueError("valid validation display metadata was rejected")
+                raise ValueError("valid validation display metadata was rejected") from error
         else:
             if not valid:
                 raise ValueError("fabricated validation display metadata was accepted")
         checked += 1
     for octets, total, text, consumed in cases:
-        document = json.loads(json.dumps(original))
+        document = copy.deepcopy(original)
         item = document["data"]["validationCases"]["items"][0]
         count = total or str(len(octets))
         hexadecimal = "".join(("" if i == 0 else "\n" if i % 16 == 0 else " ") + format(byte, "02x")
@@ -691,7 +894,7 @@ def check_validation_display_controls(validate) -> int:
         if text is not None:
             item["originalStdoutPreview"] = item["rebuiltStdoutPreview"] = {**preview, "text": None, "textBytes": None}
             check(document, False)
-    document = json.loads(json.dumps(original))
+    document = copy.deepcopy(original)
     document["data"].update(state="partial", validationCases=None, validationFailure=None)
     check(document, False)
     document["data"]["summary"] = None
@@ -701,28 +904,28 @@ def check_validation_display_controls(validate) -> int:
 
 def check_validation_mismatch_controls(validate) -> int:
     """Authored multi-page receipt metadata; no execution, HTTP or browser instance."""
-    original = json.loads((ROOT / "fixtures/report-normal-cases.json").read_text())
+    original = load_json(ROOT / "fixtures/report-normal-cases.json")
     checked = 0
     def check(document, valid):
         nonlocal checked
         try:
             validate(document)
             check_semantics(document)
-        except (fastjsonschema.JsonSchemaException, ValueError):
+        except (fastjsonschema.JsonSchemaException, ValueError) as error:
             if valid:
-                raise ValueError("valid mismatch page metadata was rejected")
+                raise ValueError("valid mismatch page metadata was rejected") from error
         else:
             if not valid:
                 raise ValueError("contradictory mismatch page metadata was accepted")
         checked += 1
     def page(number):
-        document = json.loads(json.dumps(original))
+        document = copy.deepcopy(original)
         detail = document["data"]["validationCases"]
         document["data"]["summary"].update(result="failed", casesCompared="61")
         template = detail["items"][0]
         items = []
         for ordinal in range((number - 1) * 20 + 1, min(number * 20, 61) + 1):
-            item = json.loads(json.dumps(template))
+            item = copy.deepcopy(template)
             item.update(caseId=f"case_{ordinal}", ordinal=str(ordinal))
             if ordinal in (22, 61):
                 item.update(outcome="mismatch", stdoutMatches=False)
@@ -766,7 +969,7 @@ def check_validation_mismatch_controls(validate) -> int:
     document["data"]["validationCases"].update(matchedInputs="60", firstMismatchPage=1,
                                                 previousMismatchPage=2, nextMismatchPage=4)
     check(document, False)
-    document = json.loads(json.dumps(original))
+    document = copy.deepcopy(original)
     document["data"]["validationCases"].update(firstMismatchPage=None, previousMismatchPage=None, nextMismatchPage=None)
     check(document, True)
     document["data"]["validationCases"]["firstMismatchPage"] = 1
@@ -801,9 +1004,13 @@ def check_route_matrix_documents(schema: dict) -> int:
 
 
 def main() -> int:
-    manifest = json.loads((ROOT / "fixtures.json").read_text())
-    schema = json.loads((ROOT / manifest["schema"]).read_text())
-    validate = fastjsonschema.compile(schema)
+    try:
+        manifest = load_json(ROOT / "fixtures.json")
+        schema = load_json(ROOT / manifest["schema"])
+    except (KeyError, TypeError, ValueError) as error:
+        print(f"Could not load contract manifest or schema: {error}", file=sys.stderr)
+        return 2
+    validate: Callable[[dict], Any] = cast(Callable[[dict], Any], fastjsonschema.compile(schema))
     records = manifest["fixtures"]
     declared = [record["file"] for record in records]
     actual = {str(path.relative_to(ROOT)) for path in (ROOT / "fixtures").glob("*.json")}
@@ -813,7 +1020,12 @@ def main() -> int:
     failures = []
     accepted = rejected = 0
     for record in records:
-        value = json.loads((ROOT / record["file"]).read_text())
+        try:
+            filename = record["file"]
+            value = load_json(ROOT / filename)
+        except (KeyError, TypeError, ValueError) as error:
+            failures.append(f"invalid fixture record: {error}")
+            continue
         try:
             validate(value)
             check_semantics(value)
@@ -827,6 +1039,9 @@ def main() -> int:
                 accepted += 1
             else:
                 failures.append(f"{record['file']}: invalid fixture was accepted")
+    lifecycle_controls = 0
+    validation_display_controls = 0
+    mismatch_controls = 0
     try:
         check_outcomes(manifest, validate)
     except (fastjsonschema.JsonSchemaException, KeyError, TypeError, ValueError) as error:

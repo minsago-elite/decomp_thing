@@ -16,11 +16,12 @@
     "implementationDeclaration": "unaccepted",
     "item": {
       "fileId": "file_1_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-      "displayName": "src/\u00e9.c",
+      "displayName": "src/é.c",
       "sizeBytes": "9007199254740993",
       "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       "declaredUtf8Text": true,
       "declaredViewable": true,
+      "commitment": "source-input",
       "declaredArchivable": false
     }
   }

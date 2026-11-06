@@ -24,7 +24,11 @@ private val publicErrorCodes = setOf(
     "CORRUPT_LEGACY_JOB", "UPLOAD_STAGING_RECOVERY_REQUIRED", "STORE_LIMIT", "STORE_DURABILITY_UNAVAILABLE", "PERSISTENCE_FAILED", "SERVICE_NOT_INITIALIZED",
     "SERVICE_STOPPED", "PROGRESS_RETENTION_FAILED", "VERSION_CONFLICT", "PROGRESS_UNAVAILABLE",
     "STORAGE_ACCOUNTING_UNAVAILABLE", "INPUT_REVISION_UNAVAILABLE", "SHUTDOWN_INCOMPLETE",
+    "SERVER_BUSY", "HEADERS_TOO_LARGE", "AGENT_PREFLIGHT_IN_PROGRESS", "CANCELLATION_RECEIPT_CAPACITY",
 )
+
+/** The closed public vocabulary; anything else is counted and logged as UNCLASSIFIED. */
+internal fun publicWebFailureCode(code: String): String = code.takeIf(publicErrorCodes::contains) ?: "UNCLASSIFIED"
 
 private val diagnosticExecutor = java.util.concurrent.ThreadPoolExecutor(
     1, 1, 0L, java.util.concurrent.TimeUnit.MILLISECONDS,
@@ -32,6 +36,19 @@ private val diagnosticExecutor = java.util.concurrent.ThreadPoolExecutor(
     { task -> Thread(task, "decomp-web-diagnostics").apply { isDaemon = true } },
     java.util.concurrent.ThreadPoolExecutor.DiscardPolicy(),
 )
+
+/** Finite private listing refusal stages; never include caller or persisted values. */
+internal enum class WebListingRefusalBoundary(val label: String) {
+    WORKFLOW_EPOCH("workflow_epoch"), SERVICE_EPOCH("service_epoch"),
+    WORKFLOW_CAPTURE("workflow_capture"), LEGACY_METADATA("legacy_metadata"),
+    ELF_CATEGORIES("elf_categories"), ORGANIZATION("organization"),
+    WORKFLOW_VERSION("workflow_version"), REPORT_CONTEXT("report_context"),
+}
+
+internal fun recordWebListingRefusal(boundary: WebListingRefusalBoundary, output: (String) -> Unit) {
+    val line = "web-listing-refusal boundary=${boundary.label}"
+    diagnosticExecutor.execute { try { output(line) } catch (_: Exception) { } }
+}
 
 internal fun recordWebRequestFailure(
     requestId: String,
@@ -41,8 +58,14 @@ internal fun recordWebRequestFailure(
 ) {
     if (!canonicalRequestId.matches(requestId)) return
     val safeStatus = status.takeIf { it in 400..599 } ?: 500
-    val safeCode = code.takeIf(publicErrorCodes::contains) ?: "UNCLASSIFIED"
+    val safeCode = publicWebFailureCode(code)
     val line = "web-http-failure request_id=$requestId status=$safeStatus code=$safeCode"
     // Queueing is bounded and nonblocking, so a stalled sink cannot delay the response.
+    diagnosticExecutor.execute { try { output(line) } catch (_: Exception) { } }
+}
+
+/** Aggregate capacity lines are built only from counts and fixed names by WebCapacityMetrics. */
+internal fun recordWebCapacityEvent(line: String, output: (String) -> Unit) {
+    if (!line.matches(Regex("web-(?:capacity-summary|overload)(?: [a-z_]+=[0-9]+)+"))) return
     diagnosticExecutor.execute { try { output(line) } catch (_: Exception) { } }
 }

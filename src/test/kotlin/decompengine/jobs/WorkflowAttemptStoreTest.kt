@@ -79,6 +79,84 @@ class WorkflowAttemptStoreTest {
         }
     }
 
+    @Test fun `optimistic listing survives real recent and protected retention no-ops`() = withRoot { root ->
+        val job = upload(root)
+        WorkflowAttemptStore.open(root, CLOCK).use { owner ->
+            val queued = owner.create(job, owner.available(job).snapshot.version,
+                NewWorkflowAttempt(WorkflowKind.EXPLORE, LIMITS)).attempt
+            val running = owner.transition(job, queued.runId, queued.version, WorkflowTransition.Start).attempt
+            val finished = owner.transition(job, running.runId, running.version,
+                WorkflowTransition.Finish(WorkflowRunState.COMPLETED, WorkflowTerminalReason.NO_CHANGES)).attempt
+            for ((protect, pin, label) in listOf(
+                Triple(false, false, "recent unpinned"),
+                Triple(true, false, "protected"),
+                Triple(false, true, "pinned"),
+            )) {
+                if (pin) owner.setProgressRetentionPinned(job, finished.runId, finished.version, true)
+                val snapshotBefore = owner.available(job).snapshot
+                assertEquals(pin, snapshotBefore.attempts.single { it.runId == finished.runId }.progressRetentionPinned, label)
+                val metadataBefore = listOf(jobJson(root, job).readBytes(), stateJson(root, job).readBytes())
+                var reads = 0
+                var captured: WorkflowJobInspection.Available? = null
+                var refusal: WorkflowStoreException? = null
+                try {
+                    owner.inspectForListing(job, { relative, maximum ->
+                        Files.readAllBytes(root.resolve(relative)).also { bytes ->
+                            reads++
+                            assertTrue(bytes.size <= maximum)
+                        }
+                    }) { listing ->
+                        assertEquals(ProgressRetentionResult.RETAINED,
+                            owner.expireProgressJournal(job, finished.runId, protect))
+                        listing.also { captured = it }
+                    }
+                } catch (failure: WorkflowStoreException) { refusal = failure }
+                assertEquals(snapshotBefore, captured?.snapshot, label)
+                assertEquals(2, reads, "$label listing must not retry either metadata read")
+                assertEquals(metadataBefore[0].toList(), jobJson(root, job).readBytes().toList(), label)
+                assertEquals(metadataBefore[1].toList(), stateJson(root, job).readBytes().toList(), label)
+                assertEquals(null, refusal, "$label no-op retention must preserve the listing epoch")
+            }
+        }
+    }
+
+    @Test fun `retention guard failures preserve their errors and invalidate listing captures`() = withRoot { root ->
+        val job = upload(root)
+        WorkflowAttemptStore.open(root, CLOCK).use { owner ->
+            val queued = owner.create(job, owner.available(job).snapshot.version,
+                NewWorkflowAttempt(WorkflowKind.EXPLORE, LIMITS)).attempt
+            val running = owner.transition(job, queued.runId, queued.version, WorkflowTransition.Start).attempt
+            val finished = owner.transition(job, running.runId, running.version,
+                WorkflowTransition.Finish(WorkflowRunState.COMPLETED, WorkflowTerminalReason.NO_CHANGES)).attempt
+            for ((runId, retention, code) in listOf(
+                Triple(finished.runId, java.time.Duration.ZERO, "PROGRESS_RETENTION_FAILED"),
+                Triple(finished.runId, java.time.Duration.ofSeconds(-1), "PROGRESS_RETENTION_FAILED"),
+                Triple("run_missing", AgentProgressJournalRetention.DEFAULT_TERMINAL_RETENTION, "RUN_NOT_FOUND"),
+            )) {
+                val before = owner.available(job).snapshot
+                val metadata = listOf(jobJson(root, job).readBytes(), stateJson(root, job).readBytes())
+                var reads = 0
+                assertCode("JOB_RECORD_UNAVAILABLE") {
+                    owner.inspectForListing(job, { relative, maximum ->
+                        Files.readAllBytes(root.resolve(relative)).also { reads++; assertTrue(it.size <= maximum) }
+                    }) { captured ->
+                        val failure = assertFailsWith<WorkflowStoreException> {
+                            owner.expireProgressJournal(job, runId, false, retention)
+                        }
+                        assertEquals(code, failure.code)
+                        assertEquals(code == "PROGRESS_RETENTION_FAILED", failure.outcomeUnknown)
+                        if (code == "PROGRESS_RETENTION_FAILED") assertTrue(failure.cause is IllegalArgumentException)
+                        captured
+                    }
+                }
+                assertEquals(2, reads, "guard refusal must not retry metadata")
+                assertEquals(before, owner.available(job).snapshot)
+                assertContentEquals(metadata[0], jobJson(root, job).readBytes())
+                assertContentEquals(metadata[1], stateJson(root, job).readBytes())
+            }
+        }
+    }
+
     @Test fun `descriptor read requests keep the buffer bound and a single overflow byte`() {
         assertEquals(8L, decompengine.acp.boundedDescriptorReadRequest(7, 0, 16 * 1024))
         assertEquals(3L, decompengine.acp.boundedDescriptorReadRequest(8, 4, 3))

@@ -78,12 +78,15 @@ class WebArchiveEvidenceTest {
             }
             val sources = WebSourceEvidence(store, listOf(GeneratedCMakeReconstructionProfile.descriptor), reader)
             val archives = WebArchiveEvidence(store, sources, reader)
-            kotlin.test.assertEquals(packed.archiveSha256, archives.read(job.id, reportPrefix = prefix).sha256)
+            val verified = archives.read(job.id, reportPrefix = prefix)
+            kotlin.test.assertEquals(packed.archiveSha256, verified.sha256)
+            kotlin.test.assertEquals(store.readArtifact(job.id, "$prefix/source-tree/source_tree_manifest.json", 1_048_576).sha256,
+                verified.manifestSha256)
             assertTrue(reads.isNotEmpty() && reads.all { it.startsWith("$prefix/") })
             // Other namespaces have no archive: each is refused as a missing pinned read, never served from this attempt.
             // A missing final file is refused by the pinned read itself; a missing namespace directory by the store.
             val missingFile = assertFailsWith<decompengine.jobs.JobStoreException> { archives.read(job.id) }
-            assertEquals("artifact is unavailable", missingFile.message)
+            assertEquals("artifact is unavailable or its path changed", missingFile.message)
             val missingNamespace = assertFailsWith<decompengine.jobs.JobStoreException> {
                 archives.read(job.id, reportPrefix = "reports/runs/run_other")
             }
