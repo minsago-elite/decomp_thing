@@ -7274,7 +7274,7 @@ internal data class StableRegularFile(
     val identity: LinuxFileIdentity,
 )
 
-internal data class StableFileDigest(val sha256: String, val size: Long, val identity: LinuxFileIdentity)
+internal data class StableFileDigest(val sha256: String, val size: Long, val identity: LinuxFileIdentity, val validUtf8: Boolean)
 
 /** Stream a pinned regular file, then revalidate its metadata and every directory binding. */
 internal fun hashStableRegularFile(
@@ -7318,6 +7318,7 @@ internal fun hashStableRegularFile(
         requireUnchanged(before.isRegularFile) { "stable hash descriptor is not regular" }
         declaredSize(before.size())
         val digest = java.security.MessageDigest.getInstance("SHA-256")
+        val utf8 = StrictUtf8ByteValidator()
         val buffer = ByteArray(64 * 1024)
         var size = 0L
         // This kernel-owned proc entry references our still-owned descriptor, not the workspace name.
@@ -7329,6 +7330,7 @@ internal fun hashStableRegularFile(
                 size = Math.addExact(size, count.toLong())
                 readBytes(count, size)
                 digest.update(buffer, 0, count)
+                utf8.accept(buffer, count)
             }
         }
         cancellationCheck()
@@ -7342,12 +7344,47 @@ internal fun hashStableRegularFile(
         }
         revalidateDescriptorPath(base, parts, directories.map { it.identity }, authorized.identity)
         cancellationCheck()
-        return StableFileDigest(digest.digest().joinToString("") { "%02x".format(it) }, size, authorized.identity)
+        return StableFileDigest(digest.digest().joinToString("") { "%02x".format(it) }, size, authorized.identity, utf8.finish())
     } finally {
         readable?.close()
         authorized?.close()
         directories.asReversed().forEach { it.close() }
     }
+}
+
+/** Incremental UTF-8 validation performed on the exact descriptor-bound bytes being hashed. */
+private class StrictUtf8ByteValidator {
+    private var remaining = 0
+    private var codePoint = 0
+    private var minimum = 0
+    private var valid = true
+
+    fun accept(bytes: ByteArray, count: Int) {
+        if (!valid) return
+        for (index in 0 until count) {
+            val value = bytes[index].toInt() and 0xff
+            if (remaining == 0) {
+                when {
+                    value <= 0x7f -> Unit
+                    value in 0xc2..0xdf -> { remaining = 1; codePoint = value and 0x1f; minimum = 0x80 }
+                    value in 0xe0..0xef -> { remaining = 2; codePoint = value and 0x0f; minimum = 0x800 }
+                    value in 0xf0..0xf4 -> { remaining = 3; codePoint = value and 0x07; minimum = 0x10000 }
+                    else -> valid = false
+                }
+            } else if (value !in 0x80..0xbf) {
+                valid = false
+            } else {
+                codePoint = (codePoint shl 6) or (value and 0x3f)
+                remaining--
+                if (remaining == 0 && (codePoint < minimum || codePoint > 0x10ffff || codePoint in 0xd800..0xdfff)) {
+                    valid = false
+                }
+            }
+            if (!valid) return
+        }
+    }
+
+    fun finish(): Boolean = valid && remaining == 0
 }
 
 internal fun readStableRegularFile(

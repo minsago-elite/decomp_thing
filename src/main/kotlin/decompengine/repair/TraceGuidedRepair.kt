@@ -26,6 +26,9 @@ import decompengine.validation.ProcessInput
 import decompengine.project.sha256
 import decompengine.project.AcpExecutionReceiptDocument
 import decompengine.project.BoundedAgentExecutionEventRecorder
+import decompengine.project.DeclaredRoleMutationPolicy
+import decompengine.project.GeneratedCMakeReconstructionProfile
+import decompengine.project.ProjectFileRole
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
@@ -1640,7 +1643,28 @@ class TraceGuidedRepairLoop private constructor(
                                 "editing":"isolated-provisional-candidate","promotionRequires":"complete-retained-validation"}
                             """.trimIndent(), "application/json"),
                         ),
-                        accessPolicy = AgentAccessPolicy(rules),
+                        accessPolicy = AgentAccessPolicy(
+                            rules,
+                            mutationAuthority = if (allowTestOnlyValidation) {
+                                DeclaredRoleMutationPolicy.forTestOnlyPaths(
+                                    profileSha256 = GeneratedCMakeReconstructionProfile.descriptor.sha256,
+                                    rootId = root.id,
+                                    ownerId = "repair-test:${attempt.id}",
+                                    operationsByPath = writable.associateWith { setOf(AgentOperation.WRITE_FILE) },
+                                    maximumBytes = resourceBudget.maximumSourceFileBytes,
+                                )
+                            } else {
+                                DeclaredRoleMutationPolicy.forDeclaredPaths(
+                                    profile = GeneratedCMakeReconstructionProfile.descriptor,
+                                    rootId = root.id,
+                                    ownerId = "repair:${attempt.id}",
+                                    operationsByPath = writable.associateWith { setOf(AgentOperation.WRITE_FILE) },
+                                    requiredOwnershipRoles = setOf(ProjectFileRole.BUILD_INPUT),
+                                    maximumBytes = resourceBudget.maximumSourceFileBytes,
+                                    policyId = "declared-role-generated-c-repair-v1",
+                                )
+                            },
+                        ),
                         limits = limits.copy(wallClockTimeout = Duration.ofNanos(maxOf(1L, activeDeadlineNanos - System.nanoTime()))),
                         cancellation = cancellation,
                     ).also {

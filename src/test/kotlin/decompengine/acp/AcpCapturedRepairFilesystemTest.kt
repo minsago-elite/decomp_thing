@@ -6,6 +6,9 @@ import decompengine.agent.AgentExecutionException
 import decompengine.agent.AgentExecutionRequest
 import decompengine.agent.AgentFailureKind
 import decompengine.agent.AgentOperation
+import decompengine.agent.AgentMutationAuthority
+import decompengine.agent.AgentMutationContentKind
+import decompengine.agent.AgentMutationGrant
 import decompengine.agent.AgentPathRule
 import decompengine.agent.AgentWorkspacePath
 import decompengine.agent.AgentWorkspaceRoot
@@ -132,6 +135,29 @@ class AcpCapturedRepairFilesystemTest {
         assertEquals(5L, captured.changes().single().sizeBytes)
         assertEquals(AcpFilesystemAuditReason.RESOURCE_LIMIT, audit.snapshot().last().reason)
         assertEquals(AcpFilesystemAuditOutcome.DENIED, audit.snapshot().last().outcome)
+    }
+
+    @Test
+    fun `captured sink enforces request-bound role content and size authority`() {
+        val path = AgentWorkspacePath("project", "src/module.c")
+        val owner = "test-owner"
+        val digest = "a".repeat(64)
+        val authority = AgentMutationAuthority(
+            "declared-role-test-v1", owner, digest,
+            listOf(AgentMutationGrant(
+                path, setOf(AgentOperation.WRITE_FILE), owner, digest, "source",
+                setOf("editable"), AgentMutationContentKind.UTF8_TEXT, 4,
+            )),
+        )
+        val access = AgentAccessPolicy(
+            listOf(AgentPathRule(path, setOf(AgentOperation.READ_FILE, AgentOperation.WRITE_FILE))),
+            mutationAuthority = authority,
+        )
+        val initial = mapOf("src/module.c" to "old".toByteArray())
+        val output = BoundedRepairOutput(initial, initial.keys, RepairResourceBudget(), access)
+        assertFailsWith<IllegalArgumentException> { output.replace("src/module.c", byteArrayOf(0xc3.toByte(), 0x28)) }
+        assertFailsWith<IllegalArgumentException> { output.replace("src/module.c", "12345".toByteArray()) }
+        assertEquals(emptyMap(), output.finish())
     }
 
     private fun request(): AgentExecutionRequest = AgentExecutionRequest(
