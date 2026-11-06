@@ -8,6 +8,7 @@ import { seedHistory } from './packaged-browser-history.mjs';
 const origin = 'http://127.0.0.1:41234';
 const job = 'd'.repeat(32);
 const run = 'run_fixture_54';
+const runUrl = `${origin}/nested/jobs/${job}/runs/${run}/activity`;
 const api = path => `${origin}/nested/api/v1/${path}`;
 const token = (n) => `0000000${n}-0000-4000-8000-000000000000`;
 
@@ -112,18 +113,18 @@ function clean() {
       { phase: 'recovery', type: 'online', isTrusted: true, onLine: true },
     ],
     phases: {
-      baseline: { url: `${origin}/nested/jobs/${job}/runs/${run}`, historyLength: 3, pageToken: token(1), privateTextShown: true,
+      baseline: { url: runUrl, historyLength: 3, pageToken: token(1), privateTextShown: true,
         controlStatus: COMMAND_VERIFIED, retryAvailable: false, retryReasonText: 'Unavailable: this workflow is not available on this server.', executionCommandButtons: 0 },
-      offline: { url: `${origin}/nested/jobs/${job}/runs/${run}`, historyLength: 3, pageToken: token(1), noticeHeading: OFFLINE_LABEL,
+      offline: { url: runUrl, historyLength: 3, pageToken: token(1), noticeHeading: OFFLINE_LABEL,
         privateTextShown: true, controlStatus: COMMAND_PAUSED, retryAvailable: false,
         retryReasonText: 'Unavailable: this workflow is not available on this server.',
         executionCommandButtons: 0,
         controlAction: 'read-available-actions', controlDisabled: true,
         disabledClickProbeAttempts: 1, requestsAfterRefusal: 0, screenshot: 'offline-controls.png' },
-      reconnect: { url: `${origin}/nested/jobs/${job}/runs/${run}`, historyLength: 3, pageToken: token(1), noticeHeading: RECONNECT_LABEL,
+      reconnect: { url: runUrl, historyLength: 3, pageToken: token(1), noticeHeading: RECONNECT_LABEL,
         readActionsEnabled: true, retryAvailable: false, retryReasonText: 'Unavailable: this workflow is not available on this server.', executionCommandButtons: 0, recoveryMs: 900 },
       offlineReload: { url: 'chrome-error://chromewebdata/', historyLength: 3, pageToken: token(2), renderedText: 'No internet', documentFailed: true, screenshot: 'offline-reload.png' },
-      recovery: { url: `${origin}/nested/jobs/${job}/runs/${run}`, historyLength: 3, pageToken: token(3), privateTextShown: true,
+      recovery: { url: runUrl, historyLength: 3, pageToken: token(3), privateTextShown: true,
         controlStatus: COMMAND_VERIFIED, retryAvailable: false, retryReasonText: 'Unavailable: this workflow is not available on this server.',
         executionCommandButtons: 0, recoveryMs: 1500, observationMs: 3000 },
     },

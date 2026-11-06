@@ -449,7 +449,9 @@ async function qualifyOfflineMode({ origin, manifest, fixture }) {
   const latestAttempt = workflowState.attempts.at(-1);
   assert.ok(latestAttempt && latestAttempt.state === 'failed', 'Offline scenario requires a seeded latest failed attempt');
   const runId = latestAttempt.runId;
-  const runUrl = `${origin}/nested/jobs/${fixture.jobId}/runs/${runId}`;
+  // Keep the evidence panels out of this offline trace; they are unrelated to connectivity and
+  // their synthetic reports are deliberately not populated for every history row.
+  const runUrl = `${origin}/nested/jobs/${fixture.jobId}/runs/${runId}/activity`;
   const filename = JSON.parse(fixture.retained['job.json']).filename;
   const markers = [fixture.jobId, runId];
   const tab = await makeTarget({ cacheEnabled: true });
@@ -577,7 +579,7 @@ async function qualifyOfflineMode({ origin, manifest, fixture }) {
     await cdp.call('Page.navigate', { url: bootstrapUrl }, sessionId);
     await ready(tab, `document.body.innerText.includes('Local session connected.') && document.body.innerText.includes(${JSON.stringify(filename)})`, 'offline-mode authenticated dashboard');
     await cdp.call('Page.navigate', { url: runUrl }, sessionId);
-    await ready(tab, `document.querySelector('h1')?.textContent === 'Workflow attempt' && document.body.innerText.includes(${JSON.stringify(runId)}) && !!(${readActionsButton})`, 'seeded failed attempt online');
+    await ready(tab, `document.querySelector('h1')?.textContent === 'Attempt activity' && document.body.innerText.includes(${JSON.stringify(runId)}) && !!(${readActionsButton})`, 'seeded failed attempt online');
     await evaluate(tab, `(${readActionsButton}).click()`);
     await ready(tab, `${attemptStatus} === ${JSON.stringify(COMMAND_VERIFIED)} && (${retryAvailability}).reasonText === 'Unavailable: this workflow is not available on this server.'`, 'server-verified unavailable retry');
     await delay(500);
@@ -638,7 +640,7 @@ async function qualifyOfflineMode({ origin, manifest, fixture }) {
     const recoveryStarted = performance.now();
     await setOffline(false);
     await cdp.call('Page.navigate', { url: runUrl }, sessionId);
-    await ready(tab, `document.querySelector('h1')?.textContent === 'Workflow attempt' && document.body.innerText.includes(${JSON.stringify(runId)}) && !!(${readActionsButton})`, 'attempt re-read after recovery');
+    await ready(tab, `document.querySelector('h1')?.textContent === 'Attempt activity' && document.body.innerText.includes(${JSON.stringify(runId)}) && !!(${readActionsButton})`, 'attempt re-read after recovery');
     await evaluate(tab, `(${readActionsButton}).click()`);
     await ready(tab, `${attemptStatus} === ${JSON.stringify(COMMAND_VERIFIED)} && (${retryAvailability}).reasonText === 'Unavailable: this workflow is not available on this server.'`, 'actions re-read after recovery');
     const recoveryMs = Math.round(performance.now() - recoveryStarted);
@@ -822,6 +824,12 @@ try {
     const bytes = JSON.stringify(workflowState);
     offlineFixture.retained['workflow-state.json'] = bytes;
     await fs.writeFile(join(offlineFixture.directory, 'workflow-state.json'), bytes, { flag: 'w', mode: 0o600 });
+    // The activity view performs a real snapshot read on mount. Give this synthetic latest
+    // attempt the same inert, display-only journal used by the history control rather than
+    // treating an intentionally absent report as an offline/cache response.
+    const latestReports = join(offlineFixture.directory, 'reports', 'runs', latest.runId);
+    await fs.mkdir(latestReports, { recursive: true, mode: 0o700 });
+    await fs.writeFile(join(latestReports, 'agent-progress.json'), offlineFixture.progress, { flag: 'wx', mode: 0o600 });
   }
   const scaleFixture = values.mode === 'scale' ? await seedScale(data) : null;
   const liveFixture = values.mode === 'live' ? await seedLive(data) : null;

@@ -270,7 +270,7 @@ function checkPhases(phases, markers, origin, failures) {
   if (!exactKeys(phases, ['baseline', 'offline', 'reconnect', 'offlineReload', 'recovery'], 'phases', failures)) return;
   const { baseline, offline, reconnect, offlineReload, recovery } = phases;
   const pageKeys = ['url', 'historyLength', 'pageToken'];
-  const expectedAttemptUrl = `${origin}/nested/jobs/${markers[0]}/runs/${markers[1]}`;
+  const expectedAttemptUrl = `${origin}/nested/jobs/${markers[0]}/runs/${markers[1]}/activity`;
   if (exactKeys(baseline, [...pageKeys, 'privateTextShown', 'controlStatus', 'retryAvailable', 'retryReasonText', 'executionCommandButtons'], 'phases.baseline', failures)) {
     if (baseline.privateTextShown !== true) failures.push('phases.baseline: seeded job was not rendered online (control)');
     if (baseline.controlStatus !== COMMAND_VERIFIED) failures.push('phases.baseline: actions were not verified by the server read');
