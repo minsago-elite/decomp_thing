@@ -60,10 +60,10 @@ export default function Runtime({ identity, session = null, basePath = '/' }: { 
           </li>)}
         </ul>}
         <SupportExport key={state?.status === 'authenticated' ? state.generation : 'disconnected'} client={client} />
-      </section> : <div class="notice" aria-labelledby="runtime-availability-title">
+      </section> : <section class="notice" aria-labelledby="runtime-availability-title">
         <h2 id="runtime-availability-title">{copy.runtimeInformationIsNotConnected}</h2>
         <p>{copy.connectALocalSessionToSeeReportedToolAvailabilityAnd}</p>
-      </div>}
+      </section>}
     </section>
   );
 }
