@@ -3,6 +3,7 @@ package decompengine.oracle.fulltree
 import com.sun.jna.Memory
 import com.sun.jna.Native
 import com.sun.jna.NativeLong
+import com.sun.jna.Platform
 import decompengine.acp.LinuxDescriptor
 import decompengine.acp.LinuxFilesystemSyscalls
 import java.lang.reflect.InvocationHandler
@@ -134,7 +135,7 @@ class StableControlFileMutationDiagnosticsTest {
     }
 
     @Test
-    fun `bound ignored invalidates registration but retired ignored is harmless`() {
+    fun `bound ignored invalidates registration and retired ignored clears identity`() {
         withMonitor { monitor, fixture ->
             val registration = monitor.register(fixture.parent, fixture.selected, "item.bin", 0, 1)
             fixture.adapter.events += event(fixture.adapter.fileWatch, mask = 0x8000)
@@ -151,6 +152,93 @@ class StableControlFileMutationDiagnosticsTest {
             replacement.call("requireQuiet", "fixture")
             assertEquals(null, replacement.call("firstInvalidation"))
             replacement.call("release")
+        }
+
+        withMonitor { monitor, fixture ->
+            val untouched = monitor.register(fixture.parent, fixture.selected, "item.bin", 0, 1)
+            val other = otherFile()
+            try {
+                val original = monitor.register(other.parent, other.selected, "other.bin", 0, 1)
+                val retiredWatch = fieldInt(original.value, "parentWatch")
+                original.call("release")
+
+                val removalsBeforeReuse = fixture.adapter.removeCalls.count { it == retiredWatch }
+                fixture.adapter.reuseNextWatchId = retiredWatch
+                val failure = assertFailure {
+                    monitor.register(other.parent, other.selected, "other.bin", 0, 1)
+                }
+                assertTrue(diagnostic(failure).contains("reason=RETIRED_WATCH_REUSE"), diagnostic(failure))
+                assertTrue(diagnostic(failure).contains("scope=GLOBAL"), diagnostic(failure))
+                assertTrue(diagnostic(failure).contains("watch=$retiredWatch"), diagnostic(failure))
+                assertEquals(removalsBeforeReuse + 1, fixture.adapter.removeCalls.count { it == retiredWatch })
+
+                val untouchedFailure = assertFailure { untouched.call("requireQuiet", "untouched live guard") }
+                assertTrue(
+                    diagnostic(untouchedFailure).contains("reason=RETIRED_WATCH_REUSE"),
+                    diagnostic(untouchedFailure),
+                )
+                assertTrue(diagnostic(untouchedFailure).contains("scope=GLOBAL"), diagnostic(untouchedFailure))
+            } finally {
+                untouched.call("release")
+                other.selected.close()
+                other.parent.close()
+                other.root.toFile().deleteRecursively()
+            }
+        }
+    }
+
+    @Test
+    fun `retired watch capacity exhaustion invalidates remaining guards`() {
+        withMonitor { monitor, fixture ->
+            fixture.adapter.uniqueWatchIds = true
+            val untouched = monitor.register(fixture.parent, fixture.selected, "item.bin", 0, 1)
+
+            // Two distinct watch ids retire per completed registration. The bound is 256,
+            // so 128 registrations fill the remembered set before the next retirement.
+            repeat(128) {
+                val registration = monitor.register(fixture.parent, fixture.selected, "item.bin", 0, 1)
+                registration.call("release")
+            }
+            val overflow = monitor.register(fixture.parent, fixture.selected, "item.bin", 0, 1)
+            overflow.call("release")
+
+            val failure = assertFailure { untouched.call("requireQuiet", "capacity untouched guard") }
+            assertTrue(diagnostic(failure).contains("reason=RETIRED_CAPACITY"), diagnostic(failure))
+            assertTrue(diagnostic(failure).contains("scope=GLOBAL"), diagnostic(failure))
+            val futureFailure = assertFailsWith<InvocationTargetException> {
+                monitor.register(fixture.parent, fixture.selected, "item.bin", 0, 1)
+            }.targetException
+            assertTrue(futureFailure.message.orEmpty().contains("retired watch capacity"))
+            untouched.call("release")
+        }
+    }
+
+    @Test
+    fun `unterminated record for remembered retired watch still invalidates globally`() {
+        withMonitor { monitor, fixture ->
+            val other = otherFile()
+            try {
+                val untouched = monitor.register(fixture.parent, fixture.selected, "item.bin", 0, 1)
+                val retiring = monitor.register(other.parent, other.selected, "other.bin", 0, 1)
+                val retiredWatch = fieldInt(retiring.value, "parentWatch")
+                retiring.call("release")
+                fixture.adapter.events += event(
+                    retiredWatch,
+                    mask = 0x100,
+                    name = "malformed-name",
+                    terminate = false,
+                )
+
+                val failure = assertFailure { untouched.call("requireQuiet", "malformed retired event") }
+                assertTrue(diagnostic(failure).contains("reason=UNTERMINATED_NAME"), diagnostic(failure))
+                assertTrue(diagnostic(failure).contains("scope=GLOBAL"), diagnostic(failure))
+                assertTrue(diagnostic(failure).contains("watch=$retiredWatch"), diagnostic(failure))
+                untouched.call("release")
+            } finally {
+                other.selected.close()
+                other.parent.close()
+                other.root.toFile().deleteRecursively()
+            }
         }
     }
 
@@ -302,6 +390,217 @@ class StableControlFileMutationDiagnosticsTest {
     }
 
     @Test
+    fun `queued events for fully retired parent and file watches stay off untouched live guards`() {
+        for (retiredKind in listOf("parent", "file")) {
+            withMonitor { monitor, fixture ->
+                val untouched = monitor.register(fixture.parent, fixture.selected, "item.bin", 0, 1)
+                val retired = otherFile()
+                try {
+                    val retiring = monitor.register(retired.parent, retired.selected, "other.bin", 0, 1)
+                    val retiredWatch = fieldInt(
+                        retiring.value,
+                        if (retiredKind == "parent") "parentWatch" else "fileWatch",
+                    )
+                    val retiredRegistrationId = fieldLong(retiring.value, "id")
+                    val removalObservations = mutableListOf<Pair<Int, Set<Long>>>()
+                    fixture.adapter.beforeRemoveWatch = { watch ->
+                        if (watch == retiredWatch) {
+                            removalObservations += watch to monitor.activeRegistrationIds()
+                            assertEquals(null, monitor.bindingRegistrationIds(watch))
+                            assertTrue(retiredRegistrationId !in monitor.activeRegistrationIds())
+                            fixture.adapter.events += if (retiredKind == "parent") {
+                                event(watch, mask = 0x100, name = "sibling")
+                            } else {
+                                event(watch, mask = 0x2)
+                            }
+                        }
+                    }
+
+                    retiring.call("release")
+
+                    assertEquals(listOf(retiredWatch to setOf(fieldLong(untouched.value, "id"))), removalObservations)
+                    untouched.call("requireQuiet", "untouched live fixture")
+                    assertEquals(null, untouched.call("firstInvalidation"))
+                    println(
+                        "STAGE_C_RETIRED_EVENT_IGNORED retiredKind=$retiredKind retiredWatch=$retiredWatch " +
+                            "activeAtRemoval=${removalObservations.single().second}",
+                    )
+                    untouched.call("release")
+                } finally {
+                    retired.selected.close()
+                    retired.parent.close()
+                    retired.root.toFile().deleteRecursively()
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `queued sibling event on a still shared parent binding stays quiet`() {
+        withMonitor { monitor, fixture ->
+            val untouched = monitor.register(fixture.parent, fixture.selected, "item.bin", 0, 1)
+            Files.write(fixture.root.resolve("other.bin"), byteArrayOf(4, 5, 6))
+            val sibling = LinuxFilesystemSyscalls.openPathAtOrNull(fixture.parent.fd, "other.bin")!!
+            try {
+                val retiring = monitor.register(fixture.parent, sibling, "other.bin", 1, 2, prior = listOf(untouched))
+                val sharedParentWatch = fieldInt(untouched.value, "parentWatch")
+                var injectionCount = 0
+                fixture.adapter.beforeRemoveWatch = { watch ->
+                    if (watch == fieldInt(retiring.value, "fileWatch")) {
+                        injectionCount++
+                        assertEquals(setOf(fieldLong(untouched.value, "id")), monitor.bindingRegistrationIds(sharedParentWatch))
+                        fixture.adapter.events += event(sharedParentWatch, mask = 0x100, name = "sibling")
+                    }
+                }
+
+                retiring.call("release")
+                untouched.call("requireQuiet", "untouched shared-parent fixture")
+                assertEquals(null, untouched.call("firstInvalidation"))
+                assertEquals(1, injectionCount, "shared-parent event injection must run")
+                untouched.call("release")
+            } finally {
+                sibling.close()
+            }
+        }
+    }
+
+    @Test
+    fun `real inotify sibling event queued while parent watch retires does not poison untouched guard`() {
+        val rootA = temporaryDirectory("stable-monitor-real-a")
+        val rootB = temporaryDirectory("stable-monitor-real-b")
+        val selectedPath = rootA.resolve("item.bin")
+        Files.write(selectedPath, byteArrayOf(1, 2, 3))
+        Files.write(rootB.resolve("other.bin"), byteArrayOf(4, 5, 6))
+
+        val rootADescriptor = LinuxFilesystemSyscalls.openRoot(rootA)
+        val selectedDescriptor = LinuxFilesystemSyscalls.openPathAtOrNull(rootADescriptor.fd, "item.bin")!!
+        val rootBDescriptor = LinuxFilesystemSyscalls.openRoot(rootB)
+        val otherDescriptor = LinuxFilesystemSyscalls.openPathAtOrNull(rootBDescriptor.fd, "other.bin")!!
+        var targetRetiredWatch = -1
+        lateinit var monitor: PrivateMonitor
+        var expectedActiveAtRemoval = emptySet<Long>()
+        var realSiblingMutationCount = 0
+        val realReadPayloads = mutableListOf<ByteArray>()
+        val adapter = realInotifyProxy(
+            beforeRemove = { descriptor, watch ->
+                if (watch == targetRetiredWatch) {
+                    assertEquals(null, monitor.bindingRegistrationIds(watch))
+                    assertEquals(expectedActiveAtRemoval, monitor.activeRegistrationIds())
+                    val sibling = rootB.resolve("retirement-sibling")
+                    Files.write(sibling, byteArrayOf(9))
+                    Files.delete(sibling)
+                    realSiblingMutationCount++
+                    // The event is generated after the monitor has removed this binding and before
+                    // libc queues IN_IGNORED for the watch.
+                    assertTrue(descriptor >= 0)
+                }
+            },
+            onRead = { realReadPayloads += it },
+        )
+        monitor = PrivateMonitor(adapter)
+        var untouched: RegistrationHandle? = null
+        var retiring: RegistrationHandle? = null
+        try {
+            val untouchedGuard = monitor.register(rootADescriptor, selectedDescriptor, "item.bin", 0, 1)
+            untouched = untouchedGuard
+            retiring = monitor.register(rootBDescriptor, otherDescriptor, "other.bin", 0, 1)
+            val retiringGuard = retiring
+            val retiredParentWatch = fieldInt(retiringGuard.value, "parentWatch")
+            targetRetiredWatch = retiredParentWatch
+            expectedActiveAtRemoval = setOf(fieldLong(untouchedGuard.value, "id"))
+            assertEquals(expectedActiveAtRemoval + fieldLong(retiringGuard.value, "id"), monitor.activeRegistrationIds())
+
+            retiringGuard.call("release")
+            assertEquals(1, realSiblingMutationCount, "real sibling mutation must be injected once")
+
+            untouchedGuard.call("requireQuiet", "real-kernel untouched fixture")
+            assertEquals(null, untouchedGuard.call("firstInvalidation"))
+            val observed = realReadPayloads.flatMap(::decodeRealInotifyRecords)
+            assertTrue(
+                observed.any { (watch, mask) -> watch == retiredParentWatch && mask and 0x100 != 0 },
+                "the real queue must contain IN_CREATE for the retired watch; observed=$observed",
+            )
+            assertTrue(!monitor.retiredWatchPresent(retiredParentWatch), "the real IN_IGNORED event should retire the watch identity")
+            println("STAGE_C_REAL_KERNEL_RETIRED_EVENT_IGNORED retiredParentWatch=$retiredParentWatch")
+        } finally {
+            retiring?.call("release")
+            untouched?.call("release")
+            monitor.close()
+            otherDescriptor.close()
+            rootBDescriptor.close()
+            selectedDescriptor.close()
+            rootADescriptor.close()
+            rootA.toFile().deleteRecursively()
+            rootB.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `real selected file and parent directory mutation events still invalidate`() {
+        val operations: List<Pair<String, (RealFixture) -> Unit>> = listOf(
+            "append" to { fixture ->
+                Files.newOutputStream(fixture.root.resolve("item.bin"), java.nio.file.StandardOpenOption.APPEND)
+                    .use { it.write(0x55) }
+            },
+            "chmod" to { fixture ->
+                Files.setPosixFilePermissions(
+                    fixture.root.resolve("item.bin"),
+                    java.nio.file.attribute.PosixFilePermissions.fromString("r--------"),
+                )
+            },
+            "hardlink" to { fixture ->
+                Files.createLink(fixture.root.resolve("alias.bin"), fixture.root.resolve("item.bin"))
+            },
+            "close-write" to { fixture ->
+                Files.newByteChannel(
+                    fixture.root.resolve("item.bin"),
+                    java.nio.file.StandardOpenOption.WRITE,
+                ).use { }
+            },
+            "rename" to { fixture ->
+                Files.move(fixture.root.resolve("item.bin"), fixture.root.resolve("renamed.bin"))
+            },
+            "unlink" to { fixture -> Files.delete(fixture.root.resolve("item.bin")) },
+            "directory-self-chmod" to { fixture ->
+                Files.setPosixFilePermissions(
+                    fixture.root,
+                    java.nio.file.attribute.PosixFilePermissions.fromString("r-x------"),
+                )
+            },
+        )
+
+        for ((name, mutate) in operations) {
+            withRealMonitor { monitor, fixture ->
+                val registration = monitor.register(fixture.parent, fixture.selected, "item.bin", 0, 1)
+                val originalParentPermissions = Files.getPosixFilePermissions(fixture.root)
+                try {
+                    mutate(fixture)
+                    val failure = assertFailure {
+                        registration.call("requireQuiet", "$name real mutation")
+                    }
+                    val text = diagnostic(failure)
+                    if (name == "directory-self-chmod") {
+                        assertTrue(text.contains("reason=PARENT_NAMELESS"), text)
+                        assertTrue(text.contains("scope=WATCH"), text)
+                    } else {
+                        assertTrue(text.contains("scope=TARGETED"), text)
+                        assertTrue(
+                            text.contains("reason=FILE_EVENT") || text.contains("reason=PARENT_NAME_MATCH"),
+                            "$name did not produce a selected-file event: $text",
+                        )
+                    }
+                    println("STAGE_C_REAL_MUTATION name=$name ${text.substringBefore(' ')}")
+                } finally {
+                    if (name == "directory-self-chmod") {
+                        Files.setPosixFilePermissions(fixture.root, originalParentPermissions)
+                    }
+                    registration.call("release")
+                }
+            }
+        }
+    }
+
+    @Test
     fun `remove watch failure invalidates remaining registrations but EINVAL does not`() {
         withMonitor { monitor, fixture ->
             val other = otherFile()
@@ -369,8 +668,30 @@ class StableControlFileMutationDiagnosticsTest {
         adapter.parentWatch = 101
         adapter.fileWatch = 102
         try {
-            block(PrivateMonitor(adapter.proxy()), Fixture(root, parent, selected, adapter))
+            val monitor = PrivateMonitor(adapter.proxy())
+            try {
+                block(monitor, Fixture(root, parent, selected, adapter))
+            } finally {
+                monitor.close()
+            }
         } finally {
+            selected.close()
+            parent.close()
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    private fun withRealMonitor(block: (PrivateMonitor, RealFixture) -> Unit) {
+        val root = temporaryDirectory("stable-monitor-real-mutation")
+        val input = root.resolve("item.bin")
+        Files.write(input, byteArrayOf(1, 2, 3))
+        val parent = LinuxFilesystemSyscalls.openRoot(root)
+        val selected = LinuxFilesystemSyscalls.openPathAtOrNull(parent.fd, "item.bin")!!
+        val monitor = PrivateMonitor(realInotifyProxy(beforeRemove = { _, _ -> }))
+        try {
+            block(monitor, RealFixture(root, parent, selected))
+        } finally {
+            monitor.close()
             selected.close()
             parent.close()
             root.toFile().deleteRecursively()
@@ -382,6 +703,12 @@ class StableControlFileMutationDiagnosticsTest {
         val parent: LinuxDescriptor,
         val selected: LinuxDescriptor,
         val adapter: ScriptedInotify,
+    )
+
+    private data class RealFixture(
+        val root: Path,
+        val parent: LinuxDescriptor,
+        val selected: LinuxDescriptor,
     )
 
     private data class OtherFile(val root: java.nio.file.Path, val parent: LinuxDescriptor, val selected: LinuxDescriptor)
@@ -434,6 +761,41 @@ class StableControlFileMutationDiagnosticsTest {
             return RegistrationHandle(registrations.first(), composite)
         }
 
+        fun activeRegistrationIds(): Set<Long> {
+            val registrations = monitorClass.getDeclaredField("registrations").apply { isAccessible = true }
+                .get(monitor) as Map<*, *>
+            return registrations.keys.map { it as Long }.toSet()
+        }
+
+        fun bindingRegistrationIds(watch: Int): Set<Long>? {
+            val watches = monitorClass.getDeclaredField("watches").apply { isAccessible = true }
+                .get(monitor) as Map<*, *>
+            val binding = watches[watch] ?: return null
+            return binding.javaClass.getDeclaredField("registrations").apply { isAccessible = true }
+                .get(binding).let { it as Set<*> }.map { it as Long }.toSet()
+        }
+
+        fun retiredWatchPresent(watch: Int): Boolean {
+            val retired = monitorClass.getDeclaredField("retiredWatches").apply { isAccessible = true }
+                .get(monitor) as Map<*, *>
+            return watch in retired
+        }
+
+        fun close() {
+            val descriptorField = monitorClass.getDeclaredField("descriptor").apply { isAccessible = true }
+            val descriptor = descriptorField.getInt(monitor)
+            if (descriptor >= 0) {
+                val libc = monitorClass.getDeclaredField("libc").apply { isAccessible = true }.get(monitor)
+                libc.javaClass.interfaces.single().getDeclaredMethod("close", Int::class.javaPrimitiveType)
+                    .apply { isAccessible = true }
+                    .invoke(libc, descriptor)
+                descriptorField.setInt(monitor, -1)
+            }
+            val bufferField = monitorClass.getDeclaredField("buffer").apply { isAccessible = true }
+            (bufferField.get(monitor) as? Memory)?.close()
+            bufferField.set(monitor, null)
+        }
+
     }
 
     private class RegistrationHandle(val value: Any, private val composite: Any) {
@@ -449,11 +811,16 @@ class StableControlFileMutationDiagnosticsTest {
         val readResults = ArrayDeque<Long>()
         val readErrnos = ArrayDeque<Int>()
         val removeErrors = ArrayDeque<Int>()
+        val removeCalls = mutableListOf<Int>()
         val pathWatches = LinkedHashMap<String, Int>()
         var parentWatch = 101
         var fileWatch = 102
         var enqueueAfterSelectedWatch = false
+        var uniqueWatchIds = false
+        var reuseNextWatchId: Int? = null
+        var beforeRemoveWatch: ((Int) -> Unit)? = null
         private var nextWatch = 101
+        private var watchAddCount = 0
         private var lastError = 11
 
         fun proxy(): Any {
@@ -466,16 +833,29 @@ class StableControlFileMutationDiagnosticsTest {
             "inotify_init1" -> 88
             "inotify_add_watch" -> {
                 val path = args!![1] as String
-                val watch = pathWatches.getOrPut(path) { nextWatch++ }
-                if (pathWatches.size == 1) parentWatch = watch else fileWatch = watch
-                if (enqueueAfterSelectedWatch && pathWatches.size == 2) {
+                val mask = args[2] as Int
+                val watch = reuseNextWatchId?.also { reuseNextWatchId = null }
+                    ?: if (uniqueWatchIds) nextWatch++ else pathWatches.getOrPut(path) { nextWatch++ }
+                watchAddCount++
+                if (mask and 0x01000000 != 0) {
+                    parentWatch = watch
+                } else {
+                    fileWatch = watch
+                }
+                if (enqueueAfterSelectedWatch && watchAddCount % 2 == 0) {
                     enqueueAfterSelectedWatch = false
                     events += event(parentWatch, 0x100, "item.bin")
                 }
                 watch
             }
             "inotify_rm_watch" -> {
+                val watch = args!![1] as Int
+                removeCalls += watch
+                beforeRemoveWatch?.invoke(watch)
                 val errno = removeErrors.pollFirst()
+                if (errno == null || errno == 22) {
+                    pathWatches.entries.removeIf { it.value == watch }
+                }
                 if (errno == null) 0 else {
                     Native.setLastError(errno)
                     -1
@@ -500,6 +880,46 @@ class StableControlFileMutationDiagnosticsTest {
             memory.write(0, event, 0, event.size)
             return NativeLong(event.size.toLong())
         }
+    }
+
+    private fun realInotifyProxy(beforeRemove: (Int, Int) -> Unit, onRead: (ByteArray) -> Unit = {}): Any {
+        val monitorClass = Class.forName("decompengine.oracle.fulltree.StableControlFile\$MutationMonitor")
+        val nativeType = monitorClass.declaredClasses.single { it.simpleName == "InotifyLibC" }
+        val load = Native::class.java.methods.single {
+            it.name == "load" && it.parameterTypes.contentEquals(arrayOf(String::class.java, Class::class.java))
+        }
+        val delegate = load.invoke(null, Platform.C_LIBRARY_NAME, nativeType)
+        return Proxy.newProxyInstance(nativeType.classLoader, arrayOf(nativeType)) { _, method, args ->
+            val actualArgs = args ?: emptyArray()
+            if (method.name == "inotify_rm_watch") {
+                beforeRemove(actualArgs[0] as Int, actualArgs[1] as Int)
+            }
+            try {
+                method.invoke(delegate, *actualArgs)
+            } catch (failure: InvocationTargetException) {
+                throw failure.targetException
+            }.also { result ->
+                if (method.name == "read" && result is NativeLong && result.toLong() > 0L) {
+                    val memory = actualArgs[1] as Memory
+                    onRead(memory.getByteArray(0, result.toLong().toInt()))
+                }
+            }
+        }
+    }
+
+    private fun decodeRealInotifyRecords(bytes: ByteArray): List<Pair<Int, Int>> {
+        val records = ArrayList<Pair<Int, Int>>()
+        val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.nativeOrder())
+        var offset = 0
+        while (offset + 16 <= bytes.size) {
+            val watch = buffer.getInt(offset)
+            val mask = buffer.getInt(offset + 4)
+            val nameLength = buffer.getInt(offset + 12)
+            records += watch to mask
+            offset = Math.addExact(offset, Math.addExact(16, nameLength))
+        }
+        assertEquals(bytes.size, offset, "real inotify payload should contain complete records")
+        return records
     }
 
     private companion object {
@@ -542,5 +962,8 @@ class StableControlFileMutationDiagnosticsTest {
 
     private fun fieldLong(target: Any, name: String): Long =
         target.javaClass.getDeclaredField(name).apply { isAccessible = true }.getLong(target)
+
+    private fun fieldInt(target: Any, name: String): Int =
+        target.javaClass.getDeclaredField(name).apply { isAccessible = true }.getInt(target)
     }
 }
