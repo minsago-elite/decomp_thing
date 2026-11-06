@@ -27,7 +27,7 @@ class WorkspaceSnapshotLimitsTest {
             val limits = WorkspaceSnapshotLimits()
             val before = capture(request, limits)
             names.forEach { root.resolve("src/$it").writeText("new") }
-            val changes = before.diff(capture(request, limits), request, budget(limits))
+            val changes = before.diff(capture(request, limits), request, budget(limits)).changes
             assertEquals(names.size, changes.size)
             assertTrue(changes.all { it.kind == AgentFileChangeKind.MODIFIED && it.beforeSha256 != it.afterSha256 })
         }
@@ -143,7 +143,7 @@ class WorkspaceSnapshotLimitsTest {
         Files.move(replacement, file, java.nio.file.StandardCopyOption.ATOMIC_MOVE,
             java.nio.file.StandardCopyOption.REPLACE_EXISTING)
         val after = capture(request, WorkspaceSnapshotLimits())
-        assertTrue(before.diff(after, request, budget(WorkspaceSnapshotLimits())).isEmpty())
+        assertTrue(before.diff(after, request, budget(WorkspaceSnapshotLimits())).changes.isEmpty())
     }
 
     @Test
@@ -167,7 +167,7 @@ class WorkspaceSnapshotLimitsTest {
         val before = capture(request, WorkspaceSnapshotLimits())
         file.writeText("after")
         val after = capture(request, WorkspaceSnapshotLimits())
-        val change = before.diff(after, request, budget(WorkspaceSnapshotLimits())).single()
+        val change = before.diff(after, request, budget(WorkspaceSnapshotLimits())).changes.single()
         assertEquals(AgentWorkspacePath("project", "src/one/two/data"), change.path)
         assertEquals(AgentFileChangeKind.MODIFIED, change.kind)
     }
@@ -255,7 +255,72 @@ class WorkspaceSnapshotLimitsTest {
         val before = capture(request, WorkspaceSnapshotLimits())
         root.resolve("src/new").writeText("new")
         val after = capture(request, WorkspaceSnapshotLimits())
-        assertEquals(AgentFileChangeKind.CREATED, before.diff(after, request, budget(WorkspaceSnapshotLimits())).single().kind)
+        assertEquals(AgentFileChangeKind.CREATED, before.diff(after, request, budget(WorkspaceSnapshotLimits())).changes.single().kind)
+    }
+
+    @Test
+    fun `same-content rename yields explicit path changes and one deterministic move candidate`() {
+        val root = workspace()
+        val oldFile = root.resolve("src/old.c").also { it.writeText("module source") }
+        val newFile = root.resolve("src/new.c")
+        val path = AgentWorkspacePath("project", "src")
+        val request = AgentExecutionRequest(
+            "snapshot move fixture",
+            listOf(AgentWorkspaceRoot("project", root)),
+            accessPolicy = AgentAccessPolicy(
+                listOf(AgentPathRule(path, setOf(
+                    AgentOperation.READ_FILE,
+                    AgentOperation.CREATE_FILE,
+                    AgentOperation.DELETE_FILE,
+                ), recursive = true)),
+            ),
+        )
+        val before = capture(request, WorkspaceSnapshotLimits())
+        Files.move(oldFile, newFile)
+        val after = capture(request, WorkspaceSnapshotLimits())
+
+        val changeSet = before.diff(after, request, budget(WorkspaceSnapshotLimits()))
+        assertEquals(listOf("src/new.c", "src/old.c"), changeSet.changes.map { it.path.relativePath })
+        assertEquals(listOf(AgentFileChangeKind.CREATED, AgentFileChangeKind.DELETED),
+            changeSet.changes.map { it.kind })
+        assertEquals(1, changeSet.moveCandidates.size)
+        val move = changeSet.moveCandidates.single()
+        assertEquals(AgentWorkspacePath("project", "src/old.c"), move.sourcePath)
+        assertEquals(AgentWorkspacePath("project", "src/new.c"), move.destinationPath)
+        assertEquals(java.security.MessageDigest.getInstance("SHA-256").digest("module source".toByteArray())
+            .joinToString("") { "%02x".format(it) }, move.contentSha256)
+        assertEquals("module source".toByteArray().size.toLong(), move.sizeBytes)
+    }
+
+    @Test
+    fun `rename destination remains independently subject to create authority`() {
+        verifyRenameEndpointAuthority(sourceAuthorized = true)
+    }
+
+    @Test
+    fun `rename source remains independently subject to delete authority`() {
+        verifyRenameEndpointAuthority(sourceAuthorized = false)
+    }
+
+    private fun verifyRenameEndpointAuthority(sourceAuthorized: Boolean) {
+        val root = workspace()
+        val oldFile = root.resolve("src/old.c").also { it.writeText("module source") }
+        val newPath = AgentWorkspacePath("project", "src/new.c")
+        val oldPath = AgentWorkspacePath("project", "src/old.c")
+        val rules = mutableListOf(
+            AgentPathRule(AgentWorkspacePath("project", "src"), setOf(AgentOperation.READ_FILE), recursive = true),
+        )
+        if (sourceAuthorized) rules += AgentPathRule(oldPath, setOf(AgentOperation.DELETE_FILE))
+        else rules += AgentPathRule(newPath, setOf(AgentOperation.CREATE_FILE))
+        val request = AgentExecutionRequest("snapshot move authority fixture",
+            listOf(AgentWorkspaceRoot("project", root)), accessPolicy = AgentAccessPolicy(rules))
+        val before = capture(request, WorkspaceSnapshotLimits())
+        Files.move(oldFile, root.resolve("src/new.c"))
+        val after = capture(request, WorkspaceSnapshotLimits())
+
+        assertFailsWith<AgentExecutionException> {
+            before.diff(after, request, budget(WorkspaceSnapshotLimits()))
+        }
     }
 
     @Test
@@ -309,7 +374,7 @@ class WorkspaceSnapshotLimitsTest {
         val before = capture(request, limits)
         source.writeText("new")
         val after = capture(request, limits)
-        val changes = before.diff(after, request, budget(limits))
+        val changes = before.diff(after, request, budget(limits)).changes
         assertEquals(1, changes.size)
         assertEquals(AgentFileChangeKind.MODIFIED, changes.single().kind)
         assertTrue(changes.single().beforeSha256 != changes.single().afterSha256)
