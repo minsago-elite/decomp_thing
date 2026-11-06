@@ -101,6 +101,9 @@ internal fun requestForCheckpointReconciliation(
 fun interface ModuleReconstructor {
     fun reconstruct(request: ModuleReconstructionRequest): ReconstructedModule
 
+    /** Agent-backed implementations require the complete staged publication session. */
+    fun publicationRequirement(): ReconstructionPublicationRequirement = ReconstructionPublicationRequirement.NONE
+
     /** Stable strategy identity used when resuming checkpoints. */
     fun cacheIdentity(): String = "custom"
 
@@ -119,6 +122,57 @@ fun interface ModuleReconstructor {
         executionEvidenceSha256: String?,
     ) = Unit
 }
+
+enum class ReconstructionPublicationRequirement {
+    NONE,
+    TRANSACTIONAL,
+}
+
+internal enum class ReconstructionModuleDispositionKind {
+    ACCEPTED,
+    EVIDENCE_ONLY_UNRESOLVED,
+    REJECTED,
+}
+
+internal enum class ReconstructionRejectionReason {
+    ACP_REJECTED,
+    AGENT_FAILURE_FALLBACK,
+    ROLE_DENIED,
+    POLICY_INCOMPLETE,
+    COMPILER_REJECTED,
+}
+
+internal data class ReconstructionModuleDisposition(
+    val moduleId: String,
+    val kind: ReconstructionModuleDispositionKind,
+    val rejectionReason: ReconstructionRejectionReason? = null,
+)
+
+internal class ReconstructionGenerationDisposition(
+    modules: List<ReconstructionModuleDisposition>,
+    val publicationRequirement: ReconstructionPublicationRequirement,
+) {
+    val modules: List<ReconstructionModuleDisposition> = modules.sortedBy(ReconstructionModuleDisposition::moduleId)
+    val committable: Boolean = this.modules.none { it.kind == ReconstructionModuleDispositionKind.REJECTED }
+
+    init {
+        require(this.modules.map(ReconstructionModuleDisposition::moduleId).distinct().size == this.modules.size) {
+            "generation disposition contains duplicate modules"
+        }
+        require(this.modules.all { (it.kind == ReconstructionModuleDispositionKind.REJECTED) == (it.rejectionReason != null) }) {
+            "generation rejection reason does not match its disposition"
+        }
+        require(publicationRequirement == ReconstructionPublicationRequirement.NONE ||
+            this.modules.none { it.kind == ReconstructionModuleDispositionKind.EVIDENCE_ONLY_UNRESOLVED }) {
+            "transactional generation cannot classify unresolved modules as evidence-only"
+        }
+    }
+}
+
+internal data class ReconstructionGenerationResult(
+    val manifest: SourceTreeManifest,
+    val disposition: ReconstructionGenerationDisposition,
+)
 
 class BoundedLlmModuleReconstructor(
     private val harness: AgentHarness,
@@ -164,6 +218,9 @@ class BoundedLlmModuleReconstructor(
     }
 
     override fun requiresExecutionEvidenceForCheckpointReuse(): Boolean = true
+
+    override fun publicationRequirement(): ReconstructionPublicationRequirement =
+        ReconstructionPublicationRequirement.TRANSACTIONAL
 
     private fun sessionContinuation(
         request: ModuleReconstructionRequest,
@@ -563,7 +620,7 @@ object SourceTreeGenerator {
     ): SourceTreeManifest = generateWithCompilerFeedback(
         model, projectDir, ReconstructionHostSafetyLimits.DEFAULT, planner, reconstructor, overrides,
         observedBehavior, profile, progress, { null }, {}, onModuleProgress,
-    )
+    ).manifest
 
     /** Explicit host policy can authorize a profile without changing its recorded budgets or identity. */
     fun generate(
@@ -580,7 +637,7 @@ object SourceTreeGenerator {
     ): SourceTreeManifest = generateWithCompilerFeedback(
         model, projectDir, hostSafetyLimits, planner, reconstructor, overrides,
         observedBehavior, profile, progress, { null }, {}, onModuleProgress,
-    )
+    ).manifest
 
     internal fun generateWithCompilerFeedback(
         model: RecoveredProgramModel,
@@ -595,11 +652,12 @@ object SourceTreeGenerator {
         compilerFeedback: (moduleId: String) -> ModuleCompilerFeedback? = { null },
         onCompilerFeedback: (ModuleCompilerFeedback) -> Unit = {},
         onModuleProgress: (completed: Int, total: Int, moduleId: String) -> Unit = { _, _, _ -> },
-    ): SourceTreeManifest {
+    ): ReconstructionGenerationResult {
         hostSafetyLimits.requireAllows(profile.budgets)
         val adapter = ReconstructionAdapters.resolve(profile)
         requireWorkflowOwnedPathsAreReserved(profile)
         val selectedReconstructor = reconstructor ?: adapter.defaultReconstructor()
+        val publicationRequirement = selectedReconstructor.publicationRequirement()
         adapter.admitGeneration(projectDir, profile, selectedReconstructor)
         val unresolvedOutput = adapter.requiresUnresolvedOutput(profile)
         val compilationPolicy = adapter.compilation
@@ -669,6 +727,7 @@ object SourceTreeGenerator {
         val unresolvedImplementations = sortedSetOf<String>()
         val moduleRevisionEvidence = mutableMapOf<String, String>()
         val generationBudgetObservations = mutableListOf<ModuleGenerationBudgetObservation>()
+        val moduleDispositions = mutableListOf<ReconstructionModuleDisposition>()
         var generatedSourceBytes = 0L
 
         moduleDependencyOrder(dependenciesByModule).map(moduleById::getValue).forEachIndexed { index, module ->
@@ -942,6 +1001,7 @@ object SourceTreeGenerator {
                 if (executionEvidence == null) configuredExecutionEvidenceFile?.deleteIfExists()
                 candidateCheckpoint.also { writeAtomically(checkpointPath, it.toJson()) }
             }
+            moduleDispositions += moduleDisposition(module.id, checkpoint, publicationRequirement)
             require(
                 checkpoint.executionEvidencePath == null ||
                     checkpoint.executionEvidencePath == configuredExecutionEvidencePath
@@ -1082,7 +1142,41 @@ object SourceTreeGenerator {
             unresolvedImplementationIds = unresolvedImplementations.toList(),
         )
         projectDir.resolve("source_tree_manifest.json").writeText(manifest.toJson())
-        return manifest
+        require(moduleDispositions.size == plan.modules.size &&
+            moduleDispositions.map(ReconstructionModuleDisposition::moduleId).toSet() == plan.modules.map { it.id }.toSet()) {
+            "generation disposition does not cover the complete module plan"
+        }
+        return ReconstructionGenerationResult(
+            manifest,
+            ReconstructionGenerationDisposition(moduleDispositions, publicationRequirement),
+        )
+    }
+
+    private fun moduleDisposition(
+        moduleId: String,
+        checkpoint: ModuleCheckpoint,
+        publicationRequirement: ReconstructionPublicationRequirement,
+    ): ReconstructionModuleDisposition {
+        if (checkpoint.accepted) {
+            return ReconstructionModuleDisposition(moduleId, ReconstructionModuleDispositionKind.ACCEPTED)
+        }
+        if (publicationRequirement == ReconstructionPublicationRequirement.NONE) {
+            return ReconstructionModuleDisposition(moduleId, ReconstructionModuleDispositionKind.EVIDENCE_ONLY_UNRESOLVED)
+        }
+        val reason = when {
+            checkpoint.workflowOrigin == "exception-fallback" ||
+                checkpoint.workflowOrigin == "pre-dispatch-context-budget-fallback" ->
+                ReconstructionRejectionReason.AGENT_FAILURE_FALLBACK
+            checkpoint.issues.any { it.code in setOf("declared-role-denied", "role-denied", "mutation-authority-denied") } ->
+                ReconstructionRejectionReason.ROLE_DENIED
+            checkpoint.issues.any { it.code == "agent-execution-evidence-incomplete" ||
+                it.code == "prompt-budget-unattributed" || it.code == "prompt-budget-invalid" } ->
+                ReconstructionRejectionReason.POLICY_INCOMPLETE
+            checkpoint.compilation?.passed == false || checkpoint.issues.any { it.code.startsWith("module-compilation-") } ->
+                ReconstructionRejectionReason.COMPILER_REJECTED
+            else -> ReconstructionRejectionReason.ACP_REJECTED
+        }
+        return ReconstructionModuleDisposition(moduleId, ReconstructionModuleDispositionKind.REJECTED, reason)
     }
 
     private data class PreviousBuildDefinition(

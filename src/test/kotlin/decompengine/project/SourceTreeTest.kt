@@ -46,6 +46,81 @@ import kotlinx.serialization.json.jsonPrimitive
 
 class SourceTreeTest {
     @Test
+    fun `agent reconstructors declare transactional publication while fixture reconstructors remain compatible`() {
+        val fixture = ModuleReconstructor { error("not invoked") }
+        val agent = BoundedLlmModuleReconstructor(
+            AgentHarness { _, _ -> AgentExecutionResult(AgentStopReason.NO_CHANGES) },
+        )
+
+        assertEquals(ReconstructionPublicationRequirement.NONE, fixture.publicationRequirement())
+        assertEquals(ReconstructionPublicationRequirement.TRANSACTIONAL, agent.publicationRequirement())
+    }
+
+    @Test
+    fun `generation disposition distinguishes accepted evidence-only and transactional failure fallback`() {
+        val model = oneModuleModel()
+        val buildRoot = Path.of("build").toAbsolutePath().normalize().createDirectories()
+        fun generate(label: String, reconstructor: ModuleReconstructor): ReconstructionGenerationResult {
+            val project = createTempDirectory(buildRoot, "generation-disposition-$label-")
+            return SourceTreeGenerator.generateWithCompilerFeedback(
+                model = model,
+                projectDir = project,
+                hostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
+                reconstructor = reconstructor,
+                profile = GeneratedCMakeReconstructionProfile.descriptor,
+            )
+        }
+
+        val accepted = generate("accepted", validReconstructor())
+        assertTrue(accepted.disposition.committable)
+        assertEquals(ReconstructionModuleDispositionKind.ACCEPTED, accepted.disposition.modules.single().kind)
+
+        val unresolvedFixture = object : ModuleReconstructor {
+            override fun reconstruct(request: ModuleReconstructionRequest): ReconstructedModule =
+                validReconstructor().reconstruct(request).copy(issues = listOf(
+                    ModuleReconstructionIssue("fixture-unresolved", "fixture evidence only", request.module.functionIds),
+                ))
+        }
+        val evidenceOnly = generate("evidence-only", unresolvedFixture)
+        assertTrue(evidenceOnly.disposition.committable)
+        assertEquals(
+            ReconstructionModuleDispositionKind.EVIDENCE_ONLY_UNRESOLVED,
+            evidenceOnly.disposition.modules.single().kind,
+        )
+
+        val failedAgent = object : ModuleReconstructor {
+            override fun reconstruct(request: ModuleReconstructionRequest): ReconstructedModule =
+                error("synthetic agent failure")
+
+            override fun publicationRequirement(): ReconstructionPublicationRequirement =
+                ReconstructionPublicationRequirement.TRANSACTIONAL
+        }
+        val rejected = generate("failed-agent", failedAgent)
+        assertFalse(rejected.disposition.committable)
+        assertEquals(ReconstructionModuleDispositionKind.REJECTED, rejected.disposition.modules.single().kind)
+        assertEquals(
+            ReconstructionRejectionReason.AGENT_FAILURE_FALLBACK,
+            rejected.disposition.modules.single().rejectionReason,
+        )
+
+        val roleDeniedAgent = object : ModuleReconstructor {
+            override fun reconstruct(request: ModuleReconstructionRequest): ReconstructedModule =
+                validReconstructor().reconstruct(request).copy(issues = listOf(
+                    ModuleReconstructionIssue("declared-role-denied", "immutable role refused", request.module.functionIds),
+                ))
+
+            override fun publicationRequirement(): ReconstructionPublicationRequirement =
+                ReconstructionPublicationRequirement.TRANSACTIONAL
+        }
+        val roleDenied = generate("role-denied", roleDeniedAgent)
+        assertFalse(roleDenied.disposition.committable)
+        assertEquals(
+            ReconstructionRejectionReason.ROLE_DENIED,
+            roleDenied.disposition.modules.single().rejectionReason,
+        )
+    }
+
+    @Test
     fun `cached checkpoint reconciliation uses cached prompt fingerprint only on reuse`() {
         val model = oneModuleModel()
         val module = DeterministicModulePlanner().plan(model).modules.single()
