@@ -79,8 +79,42 @@ internal class BuiltinCapturedContextTools(
         val offset = arguments.getValue("offset").jsonPrimitive.int
         val items = evidence.values.sortedBy { it.id }
         if (offset !in 0..items.size) return BuiltinToolResult("invalid evidence page offset", failed = true)
-        val page = items.drop(offset).take(PAGE_ENTRIES)
-        return json { out ->
+        val remaining = items.size - offset
+        val maximumEntries = minOf(PAGE_ENTRIES, remaining)
+        var low = 1
+        var high = maximumEntries
+        var fittingPage: ByteArray? = null
+        while (low <= high) {
+            val entryCount = low + (high - low) / 2
+            try {
+                val page = items.subList(offset, offset + entryCount)
+                val encoded = evidenceListPage(items.size, offset, page, control)
+                fittingPage = encoded
+                low = entryCount + 1
+            } catch (failure: ModelProviderException) {
+                if (failure.kind != ModelFailureKind.RESOURCE_EXHAUSTED) throw failure
+                high = entryCount - 1
+            }
+        }
+        fittingPage?.let { return BuiltinToolResult(it.decodeToString()) }
+        if (maximumEntries == 0) {
+            try {
+                return BuiltinToolResult(evidenceListPage(items.size, offset, emptyList(), control).decodeToString())
+            } catch (failure: ModelProviderException) {
+                if (failure.kind != ModelFailureKind.RESOURCE_EXHAUSTED) throw failure
+            }
+        }
+        val message = if (maximumEntries == 0) "evidence inventory page exceeds the configured result limit"
+        else "next evidence entry exceeds the configured result limit"
+        return BuiltinToolResult(message, failed = true)
+    }
+
+    private fun evidenceListPage(
+        totalEntries: Int,
+        offset: Int,
+        page: List<AgentContextInput>,
+        control: BuiltinExecutionControl,
+    ): ByteArray = boundedProviderJson(maximumResultBytes) { out ->
             out.writeStartObject(); out.writeArrayFieldStart("evidence")
             page.forEach { item ->
                 control.checkpoint()
@@ -88,11 +122,10 @@ internal class BuiltinCapturedContextTools(
                 out.writeFieldName("description"); item.description?.let(out::writeString) ?: out.writeNull()
                 out.writeStringField("sha256", hash(item.content)); out.writeNumberField("utf8Bytes", item.content.toByteArray().size); out.writeEndObject()
             }
-            out.writeEndArray(); out.writeNumberField("totalEntries", items.size)
-            out.writeFieldName("nextOffset"); if (offset + page.size < items.size) out.writeNumber(offset + page.size) else out.writeNull()
+            out.writeEndArray(); out.writeNumberField("totalEntries", totalEntries)
+            out.writeFieldName("nextOffset"); if (offset + page.size < totalEntries) out.writeNumber(offset + page.size) else out.writeNull()
             out.writeEndObject()
         }
-    }
 
     private fun readEvidence(arguments: JsonObject, control: BuiltinExecutionControl): BuiltinToolResult {
         val item = evidence[arguments.getValue("id").jsonPrimitive.content]
