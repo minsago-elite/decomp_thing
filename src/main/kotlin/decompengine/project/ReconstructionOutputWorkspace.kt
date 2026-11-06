@@ -25,12 +25,20 @@ internal class ReconstructionOutputWorkspace private constructor(
     private val ownerKey: Any,
     private val channel: FileChannel,
     private val lock: FileLock,
+    private val ownership: ReconstructionPublicationLock,
     private val syncParentDirectory: (Path) -> Unit,
     val inputSha256: String,
 ) : AutoCloseable {
     private var closed = false
 
+    /** Capability for later publication steps; it is valid only while this workspace is open. */
+    internal val publicationLock: ReconstructionPublicationLock get() = ownership
+
     private fun activate() {
+        ownership.validate()
+        check(!Files.exists(root.resolve(PUBLICATION), NOFOLLOW_LINKS)) {
+            "a pending reconstruction publication journal requires recovery before activation"
+        }
         recoverSwitch()
         val archiveEntries = presentEntries(root)
         val hasActiveIdentity = Files.exists(root.resolve(ACTIVE), NOFOLLOW_LINKS)
@@ -122,6 +130,7 @@ internal class ReconstructionOutputWorkspace private constructor(
     }
 
     private fun moveEntries(source: Path, target: Path, entries: List<String>) {
+        ownership.validate()
         for (name in entries) {
             val from = source.resolve(name)
             val to = target.resolve(name)
@@ -169,6 +178,7 @@ internal class ReconstructionOutputWorkspace private constructor(
     override fun close() {
         if (closed) return
         closed = true
+        ownership.closeOwnership()
         try { if (lock.isValid) lock.release() } finally {
             try { channel.close() } finally { synchronized(OWNERS) { OWNERS.remove(ownerKey) } }
         }
@@ -177,6 +187,7 @@ internal class ReconstructionOutputWorkspace private constructor(
     companion object {
         internal const val ACTIVE = ".reconstruction-active-input.json"
         internal const val SWITCH = ".reconstruction-input-switch.json"
+        internal const val PUBLICATION = ".reconstruction-publication.json"
         internal const val CACHE = "input-cache"
         private val INITIAL_RECONSTRUCTION_OUTPUTS = setOf(
             "analysis", "source-tree", "source-tree.zip", "reconstruction.json", "reconstruction_progress.json",
@@ -203,21 +214,24 @@ internal class ReconstructionOutputWorkspace private constructor(
             require(Files.isRegularFile(input)) { "reconstruction input must be a regular file" }
             Files.createDirectories(root)
             require(Files.isDirectory(root, NOFOLLOW_LINKS)) { "reconstruction output must be an ordinary directory" }
-            val attributes = Files.readAttributes(root, BasicFileAttributes::class.java, NOFOLLOW_LINKS)
+            val canonicalRoot = root.toRealPath()
+            val canonicalInput = input.toRealPath()
+            val attributes = Files.readAttributes(canonicalRoot, BasicFileAttributes::class.java, NOFOLLOW_LINKS)
             val key = root.fileSystem to (attributes.fileKey() ?: root.toRealPath())
             synchronized(OWNERS) { if (!OWNERS.add(key)) throw ReconstructionOutputBusyException() }
             var channel: FileChannel? = null
             var lease: ReconstructionOutputWorkspace? = null
             try {
-                channel = FileChannel.open(root.resolve(".reconstruction.lock"), CREATE, WRITE, NOFOLLOW_LINKS)
+                channel = FileChannel.open(canonicalRoot.resolve(".reconstruction.lock"), CREATE, WRITE, NOFOLLOW_LINKS)
                 val lock = channel.tryLock() ?: throw ReconstructionOutputBusyException()
                 val digest = MessageDigest.getInstance("SHA-256")
-                Files.newInputStream(input).use { stream ->
+                Files.newInputStream(canonicalInput).use { stream ->
                     val bytes = ByteArray(65536)
                     while (true) { val count = stream.read(bytes); if (count < 0) break; digest.update(bytes, 0, count) }
                 }
                 val inputSha = digest.digest().joinToString("") { "%02x".format(it) }
-                lease = ReconstructionOutputWorkspace(root, key, channel, lock, syncParentDirectory, inputSha)
+                val ownership = ReconstructionPublicationLock.opened(canonicalRoot, canonicalInput, inputSha, channel, lock)
+                lease = ReconstructionOutputWorkspace(canonicalRoot, key, channel, lock, ownership, syncParentDirectory, inputSha)
                 lease.activate()
                 return lease
             } catch (failure: Throwable) {

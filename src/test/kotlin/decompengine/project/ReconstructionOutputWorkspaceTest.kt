@@ -186,6 +186,73 @@ class ReconstructionOutputWorkspaceTest {
     }
 
     @Test
+    fun `publication ownership validates lock lifetime and canonical directory identity`() {
+        val base = createTempDirectory("input-publication-ownership-")
+        val root = base.resolve("output")
+        val input = base.resolve("input").apply { writeText("a") }
+        val workspace = ReconstructionOutputWorkspace.open(root, input)
+        workspace.publicationLock.validate()
+        assertSame(workspace.publicationLock, workspace.publicationLock.borrow(root, workspace.inputSha256))
+        assertFailsWith<IllegalArgumentException> {
+            workspace.publicationLock.borrow(base.resolve("other"), workspace.inputSha256)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            workspace.publicationLock.borrow(root, "0".repeat(64))
+        }
+
+        val displaced = base.resolve("displaced-output")
+        Files.move(root, displaced, ATOMIC_MOVE)
+        Files.createDirectory(root)
+        assertFailsWith<IllegalStateException> { workspace.publicationLock.validate() }
+        workspace.close()
+        assertFailsWith<IllegalStateException> { workspace.publicationLock.validate() }
+    }
+
+    @Test
+    fun `publication borrowing refuses input bytes changed after workspace admission`() {
+        val base = createTempDirectory("input-publication-input-change-")
+        val root = base.resolve("output")
+        val input = base.resolve("input").apply { writeText("before") }
+        ReconstructionOutputWorkspace.open(root, input).use { workspace ->
+            input.writeText("after")
+            assertFailsWith<IllegalStateException> {
+                workspace.publicationLock.borrow(root, workspace.inputSha256)
+            }
+        }
+    }
+
+    @Test
+    fun `closed publication ownership cannot be reused`() {
+        val base = createTempDirectory("input-publication-closed-")
+        val workspace = ReconstructionOutputWorkspace.open(
+            base.resolve("output"), base.resolve("input").apply { writeText("a") },
+        )
+        val ownership = workspace.publicationLock
+        workspace.close()
+        assertFailsWith<IllegalStateException> { ownership.validate() }
+    }
+
+    @Test
+    fun `pending publication journal blocks activation before input recovery moves entries`() {
+        val base = createTempDirectory("input-publication-pending-")
+        val root = base.resolve("output")
+        val a = base.resolve("a").apply { writeText("a") }
+        val b = base.resolve("b").apply { writeText("b") }
+        val from = sha256(a.readBytes())
+        val to = sha256(b.readBytes())
+        ReconstructionOutputWorkspace.open(root, a).use { root.resolve("source-tree.zip").writeText("a") }
+        val incoming = root.resolve("input-cache/$to").createDirectories()
+        incoming.resolve("source-tree.zip").writeText("b")
+        root.resolve(ReconstructionOutputWorkspace.SWITCH).writeText(transaction(from, to, "archive").toString())
+        root.resolve(ReconstructionOutputWorkspace.PUBLICATION).writeText("pending")
+
+        assertFailsWith<IllegalStateException> { ReconstructionOutputWorkspace.open(root, b) }
+        assertEquals("a", root.resolve("source-tree.zip").readText())
+        assertEquals("b", incoming.resolve("source-tree.zip").readText())
+        assertTrue(root.resolve(ReconstructionOutputWorkspace.SWITCH).exists())
+    }
+
+    @Test
     fun `interrupted archive and restore phases resume without replacing preserved entries`() {
         for (phase in listOf("archive", "restore")) {
             val base = createTempDirectory("input-switch-recovery-")
