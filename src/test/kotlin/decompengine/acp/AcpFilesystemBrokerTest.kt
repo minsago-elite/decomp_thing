@@ -9,6 +9,9 @@ import decompengine.agent.AgentOperation
 import decompengine.agent.AgentPathRule
 import decompengine.agent.AgentWorkspacePath
 import decompengine.agent.AgentWorkspaceRoot
+import decompengine.agent.AgentMutationAuthority
+import decompengine.agent.AgentMutationContentKind
+import decompengine.agent.AgentMutationGrant
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.file.Files
@@ -145,6 +148,39 @@ class AcpFilesystemBrokerTest {
                 setOf(AgentOperation.WRITE_FILE),
             ),
         )
+    }
+
+    @Test
+    fun `role-bound ordinary callback checks operation size before installing bytes`() {
+        val workspace = createTempDirectory("acp-fs-role-authority-").toAbsolutePath().normalize()
+        val source = workspace.resolve("source.c")
+        source.writeText("old")
+        val path = AgentWorkspacePath("project", "source.c")
+        val owner = "test-owner"
+        val digest = "b".repeat(64)
+        val authority = AgentMutationAuthority(
+            "declared-role-test-v1", owner, digest,
+            listOf(AgentMutationGrant(
+                path, setOf(AgentOperation.WRITE_FILE), owner, digest, "source",
+                setOf("editable"), AgentMutationContentKind.UTF8_TEXT, 4,
+            )),
+        )
+        val request = AgentExecutionRequest(
+            "role-bound write", listOf(AgentWorkspaceRoot("project", workspace)),
+            accessPolicy = AgentAccessPolicy(
+                listOf(rule("source.c", AgentOperation.READ_FILE, AgentOperation.WRITE_FILE)),
+                mutationAuthority = authority,
+            ),
+        )
+        val audit = AcpFilesystemAuditRecorder()
+        AcpFilesystemBroker.open(request, AcpFilesystemLimits(), audit).use { broker ->
+            assertFailsWith<AcpExpectedError> {
+                runBlocking { broker.writeTextFile("session-role", source.toString(), "oversized") }
+            }
+        }
+        assertEquals("old", source.readText())
+        assertEquals(AcpFilesystemAuditOutcome.DENIED, audit.snapshot().single().outcome)
+        assertEquals(AcpFilesystemAuditReason.POLICY_DENIED, audit.snapshot().single().reason)
     }
 
     @Test

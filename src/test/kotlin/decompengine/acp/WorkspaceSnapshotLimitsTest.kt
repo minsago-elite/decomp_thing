@@ -6,6 +6,7 @@ import java.nio.file.Path
 import java.time.Duration
 import kotlin.io.path.createTempDirectory
 import kotlin.io.path.writeText
+import kotlin.io.path.writeBytes
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -29,6 +30,35 @@ class WorkspaceSnapshotLimitsTest {
             val changes = before.diff(capture(request, limits), request, budget(limits))
             assertEquals(names.size, changes.size)
             assertTrue(changes.all { it.kind == AgentFileChangeKind.MODIFIED && it.beforeSha256 != it.afterSha256 })
+        }
+    }
+
+    @Test
+    fun `role-bound snapshot rejects invalid UTF-8 and bytes beyond its grant limit`() {
+        val root = workspace()
+        val file = root.resolve("src/data")
+        file.writeText("before")
+        val path = AgentWorkspacePath("project", "src/data")
+        val operations = setOf(AgentOperation.READ_FILE, AgentOperation.WRITE_FILE)
+        val grant = AgentMutationGrant(
+            path, setOf(AgentOperation.WRITE_FILE), "test-owner", "a".repeat(64), "source",
+            setOf("editable"), AgentMutationContentKind.UTF8_TEXT, 8,
+        )
+        val authority = AgentMutationAuthority("declared-role-test-v1", "test-owner", "a".repeat(64), listOf(grant))
+        val request = AgentExecutionRequest(
+            "role-bound snapshot", listOf(AgentWorkspaceRoot("project", root)),
+            accessPolicy = AgentAccessPolicy(
+                listOf(AgentPathRule(path, operations)), mutationAuthority = authority,
+            ),
+        )
+        val before = capture(request, WorkspaceSnapshotLimits())
+        file.writeBytes(byteArrayOf(0xc3.toByte(), 0x28))
+        assertFailsWith<AgentExecutionException> {
+            before.diff(capture(request, WorkspaceSnapshotLimits()), request, budget(WorkspaceSnapshotLimits()))
+        }
+        file.writeBytes(ByteArray(9) { 'x'.code.toByte() })
+        assertFailsWith<AgentExecutionException> {
+            before.diff(capture(request, WorkspaceSnapshotLimits()), request, budget(WorkspaceSnapshotLimits()))
         }
     }
 
