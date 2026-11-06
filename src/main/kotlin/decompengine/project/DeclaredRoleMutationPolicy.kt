@@ -82,8 +82,10 @@ internal object DeclaredRoleMutationPolicy {
             requireMutablePath(path)
             AgentMutationGrant(
                 AgentWorkspacePath(rootId, path), operations, ownerId, profileSha256,
-                "test-owned-source", setOf("test-only-editable", "utf8-text"),
-                AgentMutationContentKind.UTF8_TEXT, maximumBytes,
+                // This synthetic policy models test adapters whose byte contract may be binary.
+                // Production authorities always come from declared profile content kinds.
+                "test-owned-source", setOf("test-only-editable", "test-fixture-content"),
+                AgentMutationContentKind.BINARY, maximumBytes,
             )
         }
         return AgentMutationAuthority("test-only-role-policy-v1", ownerId, profileSha256, grants)

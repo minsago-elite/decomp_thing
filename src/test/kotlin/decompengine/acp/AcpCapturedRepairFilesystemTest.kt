@@ -160,6 +160,60 @@ class AcpCapturedRepairFilesystemTest {
         assertEquals(emptyMap(), output.finish())
     }
 
+    @Test
+    fun `captured sink validates and retains detached replacement bytes`() {
+        val baseline = "old source".toByteArray()
+        val initial = mapOf("src/module.c" to baseline)
+        val path = AgentWorkspacePath("project", "src/module.c")
+        val owner = "detached-bytes-test"
+        val digest = "b".repeat(64)
+        val access = AgentAccessPolicy(
+            listOf(AgentPathRule(path, setOf(AgentOperation.WRITE_FILE))),
+            mutationAuthority = AgentMutationAuthority(
+                "declared-role-test-v1", owner, digest,
+                listOf(AgentMutationGrant(
+                    path, setOf(AgentOperation.WRITE_FILE), owner, digest, "source",
+                    setOf("editable"), AgentMutationContentKind.UTF8_TEXT, 128,
+                )),
+            ),
+        )
+        val output = BoundedRepairOutput(initial, initial.keys, RepairResourceBudget(), access)
+        val replacement = "valid replacement".toByteArray()
+
+        output.replace("src/module.c", replacement)
+        replacement.fill(0xff.toByte())
+        baseline.fill(0xff.toByte())
+
+        assertContentEquals("valid replacement".toByteArray(), output.finish().getValue("src/module.c"))
+    }
+
+    @Test
+    fun `captured sink does not recreate a deleted entry through replacement`() {
+        val initial = mapOf("src/module.c" to "original source".toByteArray())
+        val path = AgentWorkspacePath("project", "src/module.c")
+        val owner = "delete-recreate-test"
+        val digest = "c".repeat(64)
+        val operations = setOf(AgentOperation.WRITE_FILE, AgentOperation.DELETE_FILE)
+        val access = AgentAccessPolicy(
+            listOf(AgentPathRule(path, operations)),
+            mutationAuthority = AgentMutationAuthority(
+                "declared-role-test-v1", owner, digest,
+                listOf(AgentMutationGrant(
+                    path, operations, owner, digest, "source",
+                    setOf("editable"), AgentMutationContentKind.UTF8_TEXT, 128,
+                )),
+            ),
+        )
+        val output = BoundedRepairOutput(initial, initial.keys, RepairResourceBudget(), access)
+
+        output.delete("src/module.c")
+        assertFailsWith<IllegalArgumentException> {
+            output.replace("src/module.c", "recreated source".toByteArray())
+        }
+
+        assertEquals(null, output.finish().getValue("src/module.c"))
+    }
+
     private fun request(): AgentExecutionRequest = AgentExecutionRequest(
         objective = "repair the captured source",
         workspaceRoots = listOf(AgentWorkspaceRoot("project", ACP_CAPTURED_REPAIR_WORKSPACE)),

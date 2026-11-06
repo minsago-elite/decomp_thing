@@ -103,12 +103,21 @@ interface CapturedRepairAgentHarness : AgentHarness {
 
 /** The only mutation surface exposed by [CapturedRepairStagingAuthority]. */
 class BoundedRepairOutput internal constructor(
-    private val initialFiles: Map<String, ByteArray>,
-    private val writablePaths: Set<String>,
+    initialFiles: Map<String, ByteArray>,
+    writablePaths: Set<String>,
     internal val resourceBudget: RepairResourceBudget,
     private val accessPolicy: AgentAccessPolicy? = null,
     private val workspaceRootId: String = "project",
 ) {
+    private val initialFiles = immutableRequiredCapturedFiles(initialFiles)
+    private val writablePaths: Set<String> = Collections.unmodifiableSet(TreeSet(writablePaths))
+
+    init {
+        require(this.writablePaths.all { it in this.initialFiles }) {
+            "captured repair output can only replace or delete existing source files"
+        }
+    }
+
     /** Detached trusted metadata for adapters binding the effective sink authority across continuation. */
     internal fun allowedReplacementPaths(): Set<String> = Collections.unmodifiableSet(TreeSet(writablePaths))
 
@@ -126,22 +135,28 @@ class BoundedRepairOutput internal constructor(
     fun replace(relativePath: String, bytes: ByteArray) {
         check(!closed) { "captured repair output is closed" }
         require(relativePath in writablePaths) { "captured repair output is unauthorized: $relativePath" }
+        // Replacement bytes can be caller-owned. Accept and retain one detached snapshot so a
+        // concurrent caller mutation cannot change the bytes after validation.
+        val acceptedBytes = bytes.copyOf()
+        if (relativePath !in currentFiles) {
+            throw IllegalArgumentException("captured repair output cannot recreate a deleted source file")
+        }
         if (accessPolicy != null && !accessPolicy.allowsMutation(
                 AgentWorkspacePath(workspaceRootId, relativePath),
                 AgentOperation.WRITE_FILE,
-                bytes.size.toLong(),
-                bytes.isStrictUtf8ForMutation(),
+                acceptedBytes.size.toLong(),
+                acceptedBytes.isStrictUtf8ForMutation(),
             )) {
             throw IllegalArgumentException("captured repair output violates declared mutation authority")
         }
-        if (bytes.size.toLong() > resourceBudget.maximumSourceFileBytes) {
+        if (acceptedBytes.size.toLong() > resourceBudget.maximumSourceFileBytes) {
             throw RepairBudgetExceededException(
                 "captured repair output $relativePath exceeds the source-file byte budget",
             )
         }
         val wasChanged = relativePath in replacements
         val previousReplacementBytes = replacements[relativePath]?.size?.toLong() ?: 0L
-        val remainsChanged = !bytes.contentEquals(initialFiles.getValue(relativePath))
+        val remainsChanged = !acceptedBytes.contentEquals(initialFiles.getValue(relativePath))
         val projectedPatchFiles = replacements.size - (if (wasChanged) 1 else 0) +
             (if (remainsChanged) 1 else 0)
         if (projectedPatchFiles > resourceBudget.maximumPatchFiles) {
@@ -149,7 +164,7 @@ class BoundedRepairOutput internal constructor(
         }
         val projectedReplacementBytes = Math.addExact(
             Math.subtractExact(replacementBytes, previousReplacementBytes),
-            if (remainsChanged) bytes.size.toLong() else 0L,
+            if (remainsChanged) acceptedBytes.size.toLong() else 0L,
         )
         if (projectedReplacementBytes > resourceBudget.maximumPatchBytes) {
             throw RepairBudgetExceededException(
@@ -159,7 +174,7 @@ class BoundedRepairOutput internal constructor(
         }
         val projected = Math.addExact(
             Math.subtractExact(workspaceBytes, currentFiles[relativePath]?.size?.toLong() ?: 0L),
-            bytes.size.toLong(),
+            acceptedBytes.size.toLong(),
         )
         if (projected > resourceBudget.maximumStagingBytes) {
             throw RepairBudgetExceededException(
@@ -168,8 +183,8 @@ class BoundedRepairOutput internal constructor(
         }
         replacementBytes = projectedReplacementBytes
         workspaceBytes = projected
-        currentFiles[relativePath] = bytes.copyOf()
-        if (remainsChanged) replacements[relativePath] = bytes.copyOf() else replacements.remove(relativePath)
+        currentFiles[relativePath] = acceptedBytes
+        if (remainsChanged) replacements[relativePath] = acceptedBytes.copyOf() else replacements.remove(relativePath)
     }
 
     @Synchronized
