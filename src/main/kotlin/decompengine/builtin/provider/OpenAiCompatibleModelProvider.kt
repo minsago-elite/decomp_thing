@@ -82,7 +82,7 @@ class OpenAiCompatibleModelProvider(private val configuration: OpenAiCompatibleC
                                 throw ModelProviderException(kind, transient, status)
                             }
                             val guidance = response.headers().firstValue("Retry-After").orElse(null)
-                            val delay = retryDelay(guidance, attempt, limits)
+                            val delay = retryDelay(guidance, attempt, limits, kind, status)
                             if (delay >= remaining(deadline)) throw ModelProviderException(kind, true, status)
                             onEvent(ModelEvent.Retrying(attempt, kind, delay))
                             pause(delay, request, deadline)
@@ -292,14 +292,26 @@ private fun pause(delay: Duration, request: ModelRequest, deadline: Long) {
     }
 }
 
-private fun retryDelay(header: String?, attempt: Int, limits: ModelCallLimits): Duration {
-    val guidance = header?.let {
-        it.toLongOrNull()?.takeIf { seconds -> seconds >= 0 && seconds <= 86400 }?.let(Duration::ofSeconds)
-            ?: runCatching { Duration.between(Instant.now(), ZonedDateTime.parse(it, DateTimeFormatter.RFC_1123_DATE_TIME).toInstant()) }
-                .getOrNull()?.takeIf { duration -> !duration.isNegative }
+private fun retryDelay(
+    header: String?,
+    attempt: Int,
+    limits: ModelCallLimits,
+    kind: ModelFailureKind,
+    status: Int,
+): Duration {
+    val guidance = header?.let { value ->
+        if (value.isNotEmpty() && value.all { it in '0'..'9' }) {
+            val seconds = value.toLongOrNull()
+                ?: throw ModelProviderException(kind, true, status)
+            Duration.ofSeconds(seconds)
+        } else {
+            runCatching {
+                Duration.between(Instant.now(), ZonedDateTime.parse(value, DateTimeFormatter.RFC_1123_DATE_TIME).toInstant())
+            }.getOrNull()?.takeIf { duration -> !duration.isNegative }
+        }
     }
     // Never retry earlier than provider guidance; an excessive delay stops this call instead.
-    if (guidance != null && guidance > limits.maxRetryDelay) throw ModelProviderException(ModelFailureKind.RATE_LIMIT, true)
+    if (guidance != null && guidance > limits.maxRetryDelay) throw ModelProviderException(kind, true, status)
     val ceiling = minOf(limits.maxRetryDelay.toNanos(), limits.retryBaseDelay.toNanos() * (1L shl (attempt - 1)))
     return maxOf(guidance ?: Duration.ZERO, Duration.ofNanos(Random.nextLong(ceiling / 2, ceiling + 1)))
 }

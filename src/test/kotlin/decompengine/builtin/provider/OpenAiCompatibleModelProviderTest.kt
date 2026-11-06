@@ -6,6 +6,9 @@ import decompengine.agent.AgentCancellationSource
 import kotlinx.serialization.json.*
 import java.net.InetSocketAddress
 import java.time.Duration
+import java.time.ZoneOffset
+import java.time.ZonedDateTime
+import java.time.format.DateTimeFormatter
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Executors
@@ -123,15 +126,82 @@ class OpenAiCompatibleModelProviderTest {
         assertEquals(listOf(1, 2), seen.filterIsInstance<ModelEvent.Retrying>().map { it.attempt })
     }
 
-    @Test fun `retry exhaustion and excessive guidance fail without extra requests`() {
+    @Test fun `retry exhaustion fails after its bounded final request`() {
         server({ exchange, _ -> exchange.reply(503, key) }) { provider, count ->
             val limits = ModelCallLimits(maxRetries = 1, retryBaseDelay = Duration.ofMillis(1))
             val failure = assertFailsWith<ModelProviderException> { provider.generate(request(limits)) {} }
             assertTrue(failure.retryable); assertEquals(2, count.get())
         }
-        server({ exchange, _ -> exchange.responseHeaders.set("Retry-After", "3600"); exchange.reply(429, key) }) { provider, count ->
-            assertFailsWith<ModelProviderException> { provider.generate(request()) {} }
-            assertEquals(1, count.get())
+    }
+
+    @Test fun `excessive retry guidance preserves originating classification and status`() {
+        val farFuture = ZonedDateTime.of(9999, 1, 1, 0, 0, 0, 0, ZoneOffset.UTC)
+            .format(DateTimeFormatter.RFC_1123_DATE_TIME)
+        val cases = listOf(
+            Triple(429, "3600", ModelFailureKind.RATE_LIMIT),
+            Triple(429, "86401", ModelFailureKind.RATE_LIMIT),
+            Triple(503, "86401", ModelFailureKind.TRANSPORT),
+            Triple(503, Long.MAX_VALUE.toString(), ModelFailureKind.TRANSPORT),
+            Triple(503, "0".repeat(64) + "9223372036854775808", ModelFailureKind.TRANSPORT),
+            Triple(504, "99999999999999999999", ModelFailureKind.TIMEOUT),
+            Triple(503, farFuture, ModelFailureKind.TRANSPORT),
+        )
+        val limits = ModelCallLimits(maxRetries = 1, retryBaseDelay = Duration.ofMillis(1), maxRetryDelay = Duration.ofMillis(10))
+        cases.forEach { (status, guidance, kind) ->
+            server({ exchange, _ -> exchange.responseHeaders.set("Retry-After", guidance); exchange.reply(status, key) }) { provider, count ->
+                val seen = mutableListOf<ModelEvent>()
+                val failure = assertFailsWith<ModelProviderException> { provider.generate(request(limits)) { seen += it } }
+                assertEquals(kind, failure.kind, "HTTP $status Retry-After: $guidance")
+                assertTrue(failure.retryable, "HTTP $status Retry-After: $guidance")
+                assertEquals(status, failure.httpStatus, "HTTP $status Retry-After: $guidance")
+                assertEquals(1, count.get(), "HTTP $status Retry-After: $guidance")
+                assertTrue(seen.isEmpty(), "excessive guidance must not emit a retry event")
+            }
+        }
+    }
+
+    @Test fun `valid absent malformed and past retry guidance use bounded retry fallback`() {
+        val cases = listOf<String?>("0", "0".repeat(128), null, "soon", "-1", "+1", "Sun, 06 Nov 1994 08:49:37 GMT")
+        val limits = ModelCallLimits(maxRetries = 1, retryBaseDelay = Duration.ofMillis(1), maxRetryDelay = Duration.ofMillis(10))
+        cases.forEach { guidance ->
+            server({ exchange, count ->
+                if (count == 1) {
+                    guidance?.let { exchange.responseHeaders.set("Retry-After", it) }
+                    exchange.reply(429, key)
+                } else exchange.sse(success())
+            }) { provider, count ->
+                val seen = mutableListOf<ModelEvent>()
+                val response = provider.generate(request(limits)) { seen += it }
+                assertEquals(2, response.attempts, "Retry-After: $guidance")
+                assertEquals(2, count.get(), "Retry-After: $guidance")
+                val retries = seen.filterIsInstance<ModelEvent.Retrying>()
+                assertEquals(1, retries.size, "Retry-After: $guidance")
+                val retry = retries.single()
+                assertEquals(1, retry.attempt, "Retry-After: $guidance")
+                assertEquals(ModelFailureKind.RATE_LIMIT, retry.kind, "Retry-After: $guidance")
+                assertTrue(retry.delay >= Duration.ofNanos(limits.retryBaseDelay.toNanos() / 2) &&
+                    retry.delay <= limits.retryBaseDelay,
+                    "fallback delay should remain bounded by the first retry ceiling")
+            }
+        }
+    }
+
+    @Test fun `positive bounded numeric retry guidance is honored including leading zeros`() {
+        val guidance = "0".repeat(64) + "1"
+        val limits = ModelCallLimits(maxRetries = 1, retryBaseDelay = Duration.ofMillis(1), maxRetryDelay = Duration.ofSeconds(1))
+        server({ exchange, count ->
+            if (count == 1) {
+                exchange.responseHeaders.set("Retry-After", guidance)
+                exchange.reply(429, key)
+            } else exchange.sse(success())
+        }) { provider, count ->
+            val seen = mutableListOf<ModelEvent>()
+            val response = provider.generate(request(limits)) { seen += it }
+            assertEquals(2, response.attempts)
+            assertEquals(2, count.get())
+            val retry = seen.filterIsInstance<ModelEvent.Retrying>().single()
+            assertEquals(Duration.ofSeconds(1), retry.delay)
+            assertEquals(ModelFailureKind.RATE_LIMIT, retry.kind)
         }
     }
 
