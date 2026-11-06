@@ -1,0 +1,123 @@
+{
+  "schema": "proposal-review-fixture/v1",
+  "source": "fixture",
+  "identity": {
+    "proposalId": "proposal_001",
+    "taskId": "task_001",
+    "jobId": "0123456789abcdef0123456789abcdef",
+    "runId": "run_001",
+    "base": {
+      "revisionId": "revision_base_001",
+      "sourceSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "metadataVersion": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "candidate": {
+      "revisionId": "revision_candidate_001",
+      "sourceSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "metadataVersion": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "parentRevisionId": "revision_base_001"
+    },
+    "currentBase": {
+      "revisionId": "revision_base_001",
+      "sourceSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "metadataVersion": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    }
+  },
+  "state": "validated-pass",
+  "supersededBy": null,
+  "validation": {
+    "source": "fixture-record",
+    "binding": {
+      "proposalId": "proposal_001",
+      "taskId": "task_001",
+      "baseRevisionId": "revision_base_001",
+      "candidateRevisionId": "revision_candidate_001",
+      "baseSourceSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "candidateSourceSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "validatorId": "fixture-validator-v1",
+    "checkpointSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "outcome": "passed",
+    "recordedAt": "2026-11-06T00:00:00Z",
+    "findings": [
+      {
+        "code": "OWNERSHIP_REVIEW",
+        "severity": "warning",
+        "summary": "The candidate changes a file assigned to another module.",
+        "fileId": "module_owner_violation"
+      }
+    ]
+  },
+  "files": [
+    {
+      "fileId": "module_source",
+      "path": "src/module.c",
+      "kind": "modified",
+      "baseFileId": "base_module_source",
+      "candidateFileId": "candidate_module_source",
+      "baseOwner": "module_a",
+      "candidateOwner": "module_a",
+      "ownershipViolation": null,
+      "sizeBytes": 1280,
+      "shownLines": 4,
+      "totalLines": 10,
+      "omittedBytes": 42,
+      "truncated": true,
+      "hunks": [
+        {
+          "header": "@@ -12,2 +12,3 @@",
+          "lines": [
+            { "kind": "context", "text": "int calculate(int input) {" },
+            { "kind": "deletion", "text": "  return input;" },
+            { "kind": "addition", "text": "  return input * 2;" },
+            { "kind": "context", "text": "}" }
+          ]
+        }
+      ]
+    },
+    {
+      "fileId": "module_binary",
+      "path": "assets/model.bin",
+      "kind": "binary",
+      "baseFileId": "base_model_binary",
+      "candidateFileId": "candidate_model_binary",
+      "baseOwner": null,
+      "candidateOwner": null,
+      "ownershipViolation": null,
+      "sizeBytes": 1500000,
+      "shownLines": 0,
+      "totalLines": 0,
+      "omittedBytes": 0,
+      "truncated": false,
+      "hunks": []
+    },
+    {
+      "fileId": "module_owner_violation",
+      "path": "src/shared.c",
+      "kind": "modified",
+      "baseFileId": "base_shared_source",
+      "candidateFileId": "candidate_shared_source",
+      "baseOwner": "module_a",
+      "candidateOwner": "module_b",
+      "ownershipViolation": { "expectedOwner": "module_a", "actualOwner": "module_b" },
+      "sizeBytes": 84,
+      "shownLines": 1,
+      "totalLines": 1,
+      "omittedBytes": 0,
+      "truncated": false,
+      "hunks": [
+        {
+          "header": "@@ -3,1 +3,1 @@",
+          "lines": [{ "kind": "addition", "text": "int shared_value = 1;" }]
+        }
+      ]
+    }
+  ],
+  "totalFiles": 3,
+  "omittedFiles": 0,
+  "history": [
+    { "state": "validating", "recordedAt": "2026-11-05T23:59:00Z", "actor": "validation-worker" },
+    { "state": "validated-pass", "recordedAt": "2026-11-06T00:00:00Z", "actor": "validation-worker" }
+  ],
+  "regressionDelta": { "added": 2, "removed": 0, "unchanged": 18 }
+}
