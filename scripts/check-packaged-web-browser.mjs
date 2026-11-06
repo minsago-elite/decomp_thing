@@ -15,7 +15,7 @@ import { qualifyRestart, assertGracefulShutdown, scrubTokens, boundReport } from
 import { qualifyUpgrade, qualifyUpgradeCache } from './packaged-browser-upgrade.mjs';
 import { qualifyAudit, assertAudit } from './packaged-browser-audit.mjs';
 import { PackagedBrowserCdpDiagnostics } from './packaged-browser-cdp-diagnostics.mjs';
-import { COMMAND_PAUSED, COMMAND_VERIFIED, OFFLINE_CLAIMS, OFFLINE_SCHEMA, assertOffline } from './packaged-browser-offline.mjs';
+import { COMMAND_PAUSED, COMMAND_VERIFIED, OFFLINE_CLAIMS, OFFLINE_SCHEMA, assertOffline, isHttpUrl, createServiceWorkerInventory, recordServiceWorkerRegistration, recordServiceWorkerVersion, serviceWorkerScopeEvidence } from './packaged-browser-offline.mjs';
 
 // Test driver only: the application is launched with a separate Node-free PATH.
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -457,11 +457,14 @@ async function qualifyOfflineMode({ origin, manifest, fixture }) {
   const tab = await makeTarget({ cacheEnabled: true });
   const sessionId = tab.sessionId;
   let phase = 'baseline';
-  let recording = true;
+  let recording = false;
   let overflow = false;
   const requests = [];
   const responses = [];
   const failedRequests = [];
+  const setupRequests = [];
+  const setupResponses = [];
+  const setupFailedRequests = [];
   const events = [];
   const subscriptions = [];
   const subscribe = (method, listener) => {
@@ -470,10 +473,22 @@ async function qualifyOfflineMode({ origin, manifest, fixture }) {
   };
   const failedRequestIds = new Map();
   const documentRequestIds = new Map();
-  const swState = { registrations: new Set(), versions: new Set() };
+  const observedRequestPhases = new Map();
+  const setupRequestIds = new Map();
+  const responseRecords = new Map();
+  const completedRequestIds = new Set();
+  const setupFailedRequestIds = new Set();
+  const swState = createServiceWorkerInventory();
+  const sessionExchange = { requestCount: 0, status: null, cacheControl: null, fromDiskCache: false, fromServiceWorker: false, unexpectedMutations: 0 };
+  let sessionExchangeRequestId = null;
   const emulation = { method: 'Network.emulateNetworkConditions', offlineCalls: 0, onlineCalls: 0, restored: false };
   const cleanup = { networkRestored: false, listenersDetached: false, targetClosed: false };
   const screenshots = [];
+  const observedHttpUrl = (url) => {
+    if (!isHttpUrl(url)) return null;
+    try { return new URL(url).origin === origin ? url.split('#')[0].split('?')[0] : url.split('#')[0].split('?')[0]; }
+    catch { return null; }
+  };
   const captureOfflineEvidence = async (name) => {
     await capture(tab, name);
     const bytes = await fs.readFile(join(root, name));
@@ -487,8 +502,27 @@ async function qualifyOfflineMode({ origin, manifest, fixture }) {
     return record;
   };
   subscribe('Network.requestWillBeSent', (event) => {
-    if (!recording) return;
-    const url = event.request.url.split('#')[0].split('?')[0];
+    const url = observedHttpUrl(event.request.url);
+    if (!url) return;
+    if (!recording) {
+      let parsed;
+      try { parsed = new URL(url); } catch { return; }
+      if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(event.request.method)) {
+        if (parsed.origin === origin && event.request.method === 'POST' && parsed.pathname === '/nested/api/v1/session' && sessionExchangeRequestId === null) {
+          sessionExchange.requestCount += 1;
+          sessionExchangeRequestId = event.requestId;
+        } else sessionExchange.unexpectedMutations += 1;
+      }
+      const setupPath = parsed.origin === origin ? parsed.pathname : null;
+      if (parsed.origin !== origin || event.type === 'Document' || (setupPath !== null && setupPath.startsWith('/nested/api/'))) {
+        if (setupRequests.length >= 600) { overflow = true; return; }
+        setupRequests.push({ requestId: event.requestId, method: event.request.method, url, type: event.type ?? 'Other' });
+        setupRequestIds.set(event.requestId, url);
+      }
+      return;
+    }
+    if (observedRequestPhases.size >= 600 && !observedRequestPhases.has(event.requestId)) { overflow = true; return; }
+    observedRequestPhases.set(event.requestId, phase);
     if (documentRequestIds.size >= 600 && !documentRequestIds.has(event.requestId)) { overflow = true; return; }
     if (event.type === 'Document') documentRequestIds.set(event.requestId, phase);
     if (failedRequestIds.size >= 600 && !failedRequestIds.has(event.requestId)) { overflow = true; return; }
@@ -496,17 +530,52 @@ async function qualifyOfflineMode({ origin, manifest, fixture }) {
     requests.push({ requestId: event.requestId, phase, method: event.request.method, url, type: event.type ?? 'Other' });
   });
   subscribe('Network.responseReceived', (event) => {
-    if (!recording) return;
+    if (event.requestId === sessionExchangeRequestId) {
+      sessionExchange.status = event.response.status;
+      sessionExchange.cacheControl = responseHeader(event.response, 'cache-control');
+      sessionExchange.fromDiskCache = event.response.fromDiskCache === true;
+      sessionExchange.fromServiceWorker = event.response.fromServiceWorker === true;
+    }
+    const setupUrl = setupRequestIds.get(event.requestId);
+    if (setupUrl !== undefined) {
+      const url = observedHttpUrl(event.response.url);
+      if (!url) { overflow = true; return; }
+      if (setupResponses.length >= 600) { overflow = true; return; }
+      const response = { requestId: event.requestId, url, status: event.response.status, type: event.type ?? 'Other',
+        cacheControl: responseHeader(event.response, 'cache-control'), fromDiskCache: event.response.fromDiskCache === true,
+        fromServiceWorker: event.response.fromServiceWorker === true, loadingFinished: completedRequestIds.has(event.requestId) };
+      setupResponses.push(response);
+      responseRecords.set(event.requestId, response);
+      return;
+    }
+    if (!recording || !observedRequestPhases.has(event.requestId)) return;
     if (responses.length >= 600) { overflow = true; return; }
-    responses.push({ requestId: event.requestId, phase, url: event.response.url.split('#')[0].split('?')[0], status: event.response.status, type: event.type ?? 'Other',
+    const url = observedHttpUrl(event.response.url);
+    if (!url) return;
+    const response = { requestId: event.requestId, phase: observedRequestPhases.get(event.requestId), url, status: event.response.status, type: event.type ?? 'Other',
       cacheControl: responseHeader(event.response, 'cache-control'), fromDiskCache: event.response.fromDiskCache === true,
-      fromServiceWorker: event.response.fromServiceWorker === true });
+      fromServiceWorker: event.response.fromServiceWorker === true, loadingFinished: completedRequestIds.has(event.requestId) };
+    responses.push(response);
+    responseRecords.set(event.requestId, response);
+  });
+  subscribe('Network.loadingFinished', (event) => {
+    if (!setupRequestIds.has(event.requestId) && !observedRequestPhases.has(event.requestId)) return;
+    if (completedRequestIds.size >= 2000 && !completedRequestIds.has(event.requestId)) { overflow = true; return; }
+    completedRequestIds.add(event.requestId);
+    const response = responseRecords.get(event.requestId);
+    if (response) response.loadingFinished = true;
   });
   subscribe('Network.loadingFailed', (event) => {
-    if (!recording) return;
+    if (setupRequestIds.has(event.requestId)) {
+      if (setupFailedRequests.length >= 600) { overflow = true; return; }
+      setupFailedRequests.push({ requestId: event.requestId, error: /^net::ERR_[A-Z0-9_]+$/.test(event.errorText ?? '') ? event.errorText : 'other' });
+      setupFailedRequestIds.add(event.requestId);
+      return;
+    }
+    if (!recording || !observedRequestPhases.has(event.requestId)) return;
     if (failedRequests.length >= 600) { overflow = true; return; }
     const error = /^net::ERR_[A-Z0-9_]+$/.test(event.errorText ?? '') ? event.errorText : 'other';
-    const failure = { requestId: event.requestId, phase, type: event.type ?? 'Other', error,
+    const failure = { requestId: event.requestId, phase: observedRequestPhases.get(event.requestId), type: event.type ?? 'Other', error,
       blockedReason: event.blockedReason ?? null };
     failedRequests.push(failure);
     failedRequestIds.set(event.requestId, failure);
@@ -520,14 +589,14 @@ async function qualifyOfflineMode({ origin, manifest, fixture }) {
     } catch { events.push({ phase, type: 'malformed', isTrusted: false, onLine: false }); }
   });
   subscribe('ServiceWorker.workerRegistrationUpdated', ({ registrations }) => {
-    for (const registration of registrations ?? []) if (!registration.isDeleted) {
-      if (swState.registrations.size >= 100 && !swState.registrations.has(registration.registrationId)) overflow = true;
-      else swState.registrations.add(registration.registrationId);
+    for (const registration of registrations ?? []) {
+      if (swState.observed.size >= 100 && !swState.observed.has(registration.registrationId) && !registration.isDeleted) overflow = true;
+      else recordServiceWorkerRegistration(swState, registration);
     }
   });
   subscribe('ServiceWorker.workerVersionUpdated', ({ versions }) => { for (const version of versions ?? []) {
     if (swState.versions.size >= 100 && !swState.versions.has(version.versionId)) overflow = true;
-    else swState.versions.add(version.versionId);
+    else recordServiceWorkerVersion(swState, version);
   } });
   const setOffline = async (offline) => {
     await cdp.call('Network.emulateNetworkConditions', { offline, latency: 0, downloadThroughput: -1, uploadThroughput: -1 }, sessionId);
@@ -552,7 +621,7 @@ async function qualifyOfflineMode({ origin, manifest, fixture }) {
     const section = ${attemptSection};
     const heading = [...(section?.querySelectorAll('dt') ?? [])].find((item) => item.textContent.trim() === 'Retry');
     const detail = heading?.nextElementSibling;
-    return { available: !!detail?.querySelector('button'), reasonText: detail?.textContent.trim() ?? null };
+    return { retryAvailable: !!detail?.querySelector('button'), retryReasonText: detail?.textContent.trim() ?? null };
   })()`;
   const commandButtonCount = `(() => {
     const section = ${attemptSection};
@@ -578,10 +647,16 @@ async function qualifyOfflineMode({ origin, manifest, fixture }) {
     })();` }, sessionId);
     await cdp.call('Page.navigate', { url: bootstrapUrl }, sessionId);
     await ready(tab, `document.body.innerText.includes('Local session connected.') && document.body.innerText.includes(${JSON.stringify(filename)})`, 'offline-mode authenticated dashboard');
+    assert.equal(sessionExchange.requestCount, 1, 'Expected exactly one session exchange during authenticated setup');
+    assert.equal(sessionExchange.status, 200, 'Session exchange did not return HTTP 200');
+    assert.equal(sessionExchange.unexpectedMutations, 0, 'Authenticated setup issued an unexpected mutation');
+    await waitFor(() => setupRequests.every((request) => completedRequestIds.has(request.requestId) || setupFailedRequestIds.has(request.requestId)), 'authenticated setup sensitive responses settled');
+    assert.equal(setupFailedRequests.length, 0, 'Authenticated setup had a failed document or API request');
+    recording = true;
     await cdp.call('Page.navigate', { url: runUrl }, sessionId);
     await ready(tab, `document.querySelector('h1')?.textContent === 'Attempt activity' && document.body.innerText.includes(${JSON.stringify(runId)}) && !!(${readActionsButton})`, 'seeded failed attempt online');
     await evaluate(tab, `(${readActionsButton}).click()`);
-    await ready(tab, `${attemptStatus} === ${JSON.stringify(COMMAND_VERIFIED)} && (${retryAvailability}).reasonText === 'Unavailable: this workflow is not available on this server.'`, 'server-verified unavailable retry');
+    await ready(tab, `${attemptStatus} === ${JSON.stringify(COMMAND_VERIFIED)} && (${retryAvailability}).retryReasonText === 'Unavailable: this workflow is not available on this server.'`, 'server-verified unavailable retry');
     await delay(500);
     const before = await sessionGeneration();
     await recordStores();
@@ -642,23 +717,28 @@ async function qualifyOfflineMode({ origin, manifest, fixture }) {
     await cdp.call('Page.navigate', { url: runUrl }, sessionId);
     await ready(tab, `document.querySelector('h1')?.textContent === 'Attempt activity' && document.body.innerText.includes(${JSON.stringify(runId)}) && !!(${readActionsButton})`, 'attempt re-read after recovery');
     await evaluate(tab, `(${readActionsButton}).click()`);
-    await ready(tab, `${attemptStatus} === ${JSON.stringify(COMMAND_VERIFIED)} && (${retryAvailability}).reasonText === 'Unavailable: this workflow is not available on this server.'`, 'actions re-read after recovery');
+    await ready(tab, `${attemptStatus} === ${JSON.stringify(COMMAND_VERIFIED)} && (${retryAvailability}).retryReasonText === 'Unavailable: this workflow is not available on this server.'`, 'actions re-read after recovery');
     const recoveryMs = Math.round(performance.now() - recoveryStarted);
     const observationStarted = performance.now();
     await delay(3000);
     await recordStores();
     const after = await sessionGeneration();
-    const recovery = { ...(await pageState()), privateTextShown: await evaluate(tab, `document.body.innerText.includes(${JSON.stringify(runId)})`),
+    const recovery = { ...(await pageState()), onLine: await evaluate(tab, 'navigator.onLine === true'), privateTextShown: await evaluate(tab, `document.body.innerText.includes(${JSON.stringify(runId)})`),
       controlStatus: await evaluate(tab, attemptStatus), ...await evaluate(tab, retryAvailability),
       executionCommandButtons: await evaluate(tab, commandButtonCount), recoveryMs,
       observationMs: Math.round(performance.now() - observationStarted) };
     await captureOfflineEvidence('offline-recovered.png');
+    const serviceWorkerEvidence = serviceWorkerScopeEvidence(swState, origin, '/nested/');
     evidence = { schema: OFFLINE_SCHEMA, origin, basePath: '/nested/',
       identity: { buildId: manifest.buildId, applicationVersion: manifest.applicationVersion, archiveSha256: report.archiveSha256,
         chromeProduct: report.browser.product, chromeSha256: report.tools.chromeSha256, driverCommit: report.driverCommit },
       privateMarkers: markers,
-      serviceWorker: { registrations: stores.registrations, controlled: stores.controlled, cdpRegistrations: swState.registrations.size,
-        cdpVersions: swState.versions.size, fromServiceWorkerResponses: responses.filter((response) => response.fromServiceWorker).length },
+      setupRequests, setupResponses, setupFailedRequests,
+      sessionExchange,
+      serviceWorker: { registrations: stores.registrations, controlled: stores.controlled, cdpRegistrations: serviceWorkerEvidence.registrations,
+        cdpVersions: serviceWorkerEvidence.versions, controllingScopes: serviceWorkerEvidence.controllingScopes,
+        unknownScopeRegistrations: serviceWorkerEvidence.unknownScopeRegistrations, unknownScopeVersions: serviceWorkerEvidence.unknownScopeVersions,
+        fromServiceWorkerResponses: responses.filter((response) => response.fromServiceWorker).length },
       cacheStorage: { pageNames: [...stores.cacheNames], checkedPhases: stores.checkedPhases },
       storage: { localEntries: stores.localEntries, sessionEntries: stores.sessionEntries, indexedDatabases: stores.indexedDatabases },
       session: { generationBefore: before.generation, generationAfter: after.generation, cookieHttpOnly: before.httpOnly && after.httpOnly },
@@ -687,6 +767,10 @@ async function qualifyOfflineMode({ origin, manifest, fixture }) {
       phase,
       error: String(error?.message ?? error).slice(0, 512),
       page,
+      setupCounts: { requests: setupRequests.length, responses: setupResponses.length, failed: setupFailedRequests.length },
+      sessionExchange: { requestCount: sessionExchange.requestCount, status: sessionExchange.status,
+        noStore: sessionExchange.cacheControl === 'no-store', fromDiskCache: sessionExchange.fromDiskCache,
+        fromServiceWorker: sessionExchange.fromServiceWorker, unexpectedMutations: sessionExchange.unexpectedMutations },
       requests: requests.slice(-100).map(({ requestId, phase: at, method, url, type }) => ({ requestId, phase: at, method, path: safePath(url), type })),
       responses: responses.slice(-100).map(({ requestId, phase: at, url, status, type }) => ({ requestId, phase: at, path: safePath(url), status, type })),
       failedRequests: failedRequests.slice(-100),

@@ -3,7 +3,7 @@
 // packaged JVM and Chrome over CDP; this module only validates that bounded evidence and
 // fails closed on anything missing, unknown or out of bounds. It performs no I/O.
 
-export const OFFLINE_SCHEMA = 'packaged-browser-offline-v2';
+export const OFFLINE_SCHEMA = 'packaged-browser-offline-v3';
 export const MAX_ENTRIES = 2000;
 export const MAX_TEXT = 8192;
 export const RECOVERY_BOUND_MS = 15000;
@@ -35,7 +35,7 @@ export const OFFLINE_CLAIMS = Object.freeze({
   ]),
 });
 
-const TOP_KEYS = ['schema', 'origin', 'basePath', 'identity', 'privateMarkers', 'serviceWorker', 'cacheStorage', 'storage',
+const TOP_KEYS = ['schema', 'origin', 'basePath', 'identity', 'privateMarkers', 'setupRequests', 'setupResponses', 'setupFailedRequests', 'sessionExchange', 'serviceWorker', 'cacheStorage', 'storage',
   'session', 'requests', 'responses', 'failedRequests', 'events', 'phases', 'screenshots', 'emulation', 'cleanup', 'claims'];
 const READ_METHODS = new Set(['GET', 'HEAD']);
 const MUTATION_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
@@ -71,6 +71,72 @@ export function sameOriginPath(url, origin) {
   } catch { return null; }
 }
 
+/** Whether a same-origin service-worker scope can control the packaged application base path. */
+export function serviceWorkerScopeControlsBase(scopeUrl, origin, basePath) {
+  try {
+    const scope = new URL(scopeUrl);
+    if (scope.origin !== origin || (scope.protocol !== 'http:' && scope.protocol !== 'https:')) return false;
+    scope.hash = '';
+    const scopeString = scope.href;
+    const appBaseString = new URL(basePath, origin).href;
+    return appBaseString.startsWith(scopeString) || scopeString.startsWith(appBaseString);
+  } catch { return false; }
+}
+
+/** Ignore non-network schemes; DevTools also reports data: resources as requests. */
+export function isHttpUrl(url) {
+  try { const parsed = new URL(url); return parsed.protocol === 'http:' || parsed.protocol === 'https:'; }
+  catch { return false; }
+}
+
+export function createServiceWorkerInventory() {
+  return { current: new Map(), observed: new Map(), versions: new Map(), unknownRegistrationIds: new Set() };
+}
+
+export function recordServiceWorkerRegistration(inventory, registration) {
+  const id = registration?.registrationId;
+  if (typeof id !== 'string' || id.length === 0) return;
+  if (registration.isDeleted) { inventory.current.delete(id); return; }
+  const scopeURL = typeof registration.scopeURL === 'string' ? registration.scopeURL : null;
+  inventory.current.set(id, scopeURL);
+  inventory.observed.set(id, scopeURL);
+  if (scopeURL === null || !isHttpUrl(scopeURL)) inventory.unknownRegistrationIds.add(id);
+}
+
+export function recordServiceWorkerVersion(inventory, version) {
+  if (typeof version?.versionId === 'string' && version.versionId.length > 0) {
+    inventory.versions.set(version.versionId, typeof version.registrationId === 'string' ? version.registrationId : null);
+  }
+}
+
+export function serviceWorkerScopeEvidence(inventory, origin, basePath) {
+  const controllingScopes = new Map();
+  let unknownScopeVersions = 0;
+  for (const [versionId, registrationId] of inventory.versions) {
+    const scopeURL = registrationId === null ? null : inventory.observed.get(registrationId);
+    if (scopeURL === undefined || scopeURL === null || !isHttpUrl(scopeURL)) { unknownScopeVersions += 1; continue; }
+    let scope;
+    try { scope = new URL(scopeURL); } catch { continue; }
+    if (!serviceWorkerScopeControlsBase(scopeURL, origin, basePath)) continue;
+    const path = scope.pathname;
+    const entry = controllingScopes.get(path) ?? { path, versionCount: 0 };
+    entry.versionCount += 1;
+    controllingScopes.set(path, entry);
+  }
+  for (const [registrationId, scopeURL] of inventory.observed) {
+    if (scopeURL === null || !isHttpUrl(scopeURL)) continue;
+    if ([...inventory.versions.values()].includes(registrationId)) continue;
+    if (serviceWorkerScopeControlsBase(scopeURL, origin, basePath)) {
+      let path;
+      try { path = new URL(scopeURL).pathname; } catch { continue; }
+      if (!controllingScopes.has(path)) controllingScopes.set(path, { path, versionCount: 0 });
+    }
+  }
+  return { registrations: inventory.current.size, versions: inventory.versions.size,
+    controllingScopes: [...controllingScopes.values()].slice(0, 100), unknownScopeRegistrations: inventory.unknownRegistrationIds.size,
+    unknownScopeVersions };
+}
+
 /** Sensitive responses: every document and every API response on the base path. */
 export function responseClass(path, basePath, type) {
   if (path === null) return 'foreign';
@@ -91,11 +157,12 @@ export function isExpectedRead(request, basePath, origin) {
   if (!READ_METHODS.has(request.method)) return false;
   const path = sameOriginPath(request.url, origin);
   if (path === null) return false;
+  if (path === `${basePath}favicon.ico`) return true;
   if (path.startsWith(basePath + 'assets/ui/')) return true;
   if (request.type === 'Document') return path.startsWith(basePath) && !path.startsWith(basePath + 'api/');
   const api = basePath + 'api/v1/';
   if (!path.startsWith(api)) return false;
-  return /^(?:bootstrap|session|runtime|jobs|jobs\/[a-f0-9]{32}|jobs\/[a-f0-9]{32}\/runs\/[A-Za-z0-9_-]+(?:\/controls)?)$/.test(path.slice(api.length));
+  return /^(?:bootstrap|session|runtime|recovery|jobs|jobs\/[a-f0-9]{32}|jobs\/[a-f0-9]{32}\/runs\/[A-Za-z0-9_-]+(?:\/controls)?)$/.test(path.slice(api.length));
 }
 
 function checkIdentity(identity, failures) {
@@ -118,14 +185,80 @@ export function qualifyOffline(evidence) {
   if (basePath !== '/nested/') failures.push('basePath: must be /nested/');
   checkIdentity(evidence.identity, failures);
 
+  const setupRequests = boundedList(evidence.setupRequests, 'setupRequests', failures);
+  const setupResponses = boundedList(evidence.setupResponses, 'setupResponses', failures);
+  const setupFailedRequests = boundedList(evidence.setupFailedRequests, 'setupFailedRequests', failures);
+  const setupRequestKeys = ['requestId', 'method', 'url', 'type'];
+  const setupResponseKeys = ['requestId', 'url', 'status', 'type', 'cacheControl', 'fromDiskCache', 'fromServiceWorker', 'loadingFinished'];
+  let setupSessionPosts = 0;
+  const setupRequestTuples = new Set();
+  const validSetupRequests = [];
+  for (const [index, request] of setupRequests.entries()) {
+    if (!exactKeys(request, setupRequestKeys, `setupRequests[${index}]`, failures)) continue;
+    if (!boundedString(request.requestId, 256) || !request.requestId || !boundedString(request.url, 4096) ||
+      !boundedString(request.method, 16) || !boundedString(request.type, 64)) { failures.push(`setupRequests[${index}]: malformed`); continue; }
+    const path = sameOriginPath(request.url, origin);
+    if (path === null) { failures.push(`setupRequests[${index}]: wrong origin`); continue; }
+    const tuple = `${request.requestId}\n${request.url}`;
+    if (setupRequestTuples.has(tuple)) failures.push(`setupRequests[${index}]: duplicate request identity`);
+    setupRequestTuples.add(tuple);
+    validSetupRequests.push(request);
+    if (request.method === 'POST' && path === `${basePath}api/v1/session`) { setupSessionPosts += 1; continue; }
+    if (!READ_METHODS.has(request.method) || !isExpectedRead(request, basePath, origin)) failures.push(`setupRequests[${index}]: unexpected setup request`);
+  }
+  if (setupSessionPosts !== 1) failures.push(`setupRequests: expected one session exchange POST, saw ${setupSessionPosts}`);
+  const setupDocuments = validSetupRequests.filter(request => request.method === 'GET' && request.type === 'Document' &&
+    sameOriginPath(request.url, origin) === basePath);
+  if (setupDocuments.length !== 1) failures.push(`setupRequests: expected one authenticated application document, saw ${setupDocuments.length}`);
+  const setupBootstrapReads = validSetupRequests.filter(request => request.method === 'GET' &&
+    sameOriginPath(request.url, origin) === `${basePath}api/v1/bootstrap`);
+  if (setupBootstrapReads.length !== 1) failures.push(`setupRequests: expected one authenticated bootstrap API read, saw ${setupBootstrapReads.length}`);
+  const setupResponseTuples = new Set();
+  for (const [index, response] of setupResponses.entries()) {
+    if (!exactKeys(response, setupResponseKeys, `setupResponses[${index}]`, failures)) continue;
+    if (!boundedString(response.requestId, 256) || !response.requestId || !boundedString(response.url, 4096) ||
+      !Number.isInteger(response.status) || !boundedString(response.type, 64) || typeof response.fromDiskCache !== 'boolean' ||
+      typeof response.fromServiceWorker !== 'boolean' || typeof response.loadingFinished !== 'boolean') { failures.push(`setupResponses[${index}]: malformed`); continue; }
+    const joined = validSetupRequests.filter(request => request.requestId === response.requestId && request.url === response.url);
+    if (joined.length !== 1) failures.push(`setupResponses[${index}]: response must join exactly one setup request`);
+    const tuple = `${response.requestId}\n${response.url}`;
+    if (setupResponseTuples.has(tuple)) failures.push(`setupResponses[${index}]: duplicate response identity`);
+    setupResponseTuples.add(tuple);
+    if (response.status < 200 || response.status >= 300) failures.push(`setupResponses[${index}]: unexpected HTTP status ${response.status}`);
+    const kind = responseClass(sameOriginPath(response.url, origin), basePath, response.type);
+    if (kind !== 'api' && kind !== 'document') failures.push(`setupResponses[${index}]: unexpected response class ${kind}`);
+    if (kind === 'api' || kind === 'document') {
+      if (!isNoStore(response.cacheControl)) failures.push(`setupResponses[${index}]: sensitive ${kind} response is not no-store`);
+      if (response.fromDiskCache) failures.push(`setupResponses[${index}]: sensitive ${kind} response was served from the HTTP cache`);
+      if (response.fromServiceWorker) failures.push(`setupResponses[${index}]: sensitive ${kind} response was served by a service worker`);
+    }
+    if (response.loadingFinished !== true) failures.push(`setupResponses[${index}]: response body did not finish loading`);
+  }
+  if (setupFailedRequests.length !== 0) failures.push('setupFailedRequests: authenticated setup contained a failed sensitive request');
+  if (setupResponseTuples.size !== setupRequestTuples.size || [...setupRequestTuples].some(tuple => !setupResponseTuples.has(tuple))) failures.push('setupResponses: missing a response for a retained setup request');
+
+  if (exactKeys(evidence.sessionExchange, ['requestCount', 'status', 'cacheControl', 'fromDiskCache', 'fromServiceWorker', 'unexpectedMutations'], 'sessionExchange', failures)) {
+    const exchange = evidence.sessionExchange;
+    if (exchange.requestCount !== 1 || exchange.status !== 200 || !isNoStore(exchange.cacheControl) ||
+      exchange.fromDiskCache !== false || exchange.fromServiceWorker !== false) failures.push('sessionExchange: expected one successful no-store bootstrap handoff without cache or service worker');
+    if (exchange.unexpectedMutations !== 0) failures.push('sessionExchange: unexpected mutation during authenticated setup');
+  }
+
   const markers = boundedList(evidence.privateMarkers, 'privateMarkers', failures);
   if (markers.length < 2 || !markers.every(marker => boundedString(marker, 256) && marker.length >= 8)) failures.push('privateMarkers: need at least two seeded markers');
 
-  if (exactKeys(evidence.serviceWorker, ['registrations', 'controlled', 'cdpRegistrations', 'cdpVersions', 'fromServiceWorkerResponses'], 'serviceWorker', failures)) {
+  if (exactKeys(evidence.serviceWorker, ['registrations', 'controlled', 'cdpRegistrations', 'cdpVersions', 'controllingScopes', 'unknownScopeRegistrations', 'unknownScopeVersions', 'fromServiceWorkerResponses'], 'serviceWorker', failures)) {
     const sw = evidence.serviceWorker;
     if (sw.registrations !== 0) failures.push('serviceWorker: page reported a registration');
     if (sw.controlled !== false) failures.push('serviceWorker: page is controlled by a service worker');
-    if (sw.cdpRegistrations !== 0 || sw.cdpVersions !== 0) failures.push('serviceWorker: Chrome reported a registration or version');
+    if (!Number.isSafeInteger(sw.cdpRegistrations) || sw.cdpRegistrations < 0 || sw.cdpRegistrations > 100 ||
+      !Number.isSafeInteger(sw.cdpVersions) || sw.cdpVersions < 0 || sw.cdpVersions > 100) failures.push('serviceWorker: malformed bounded CDP inventory');
+    const scopes = boundedList(sw.controllingScopes, 'serviceWorker.controllingScopes', failures);
+    if (!scopes.every(scope => exactKeys(scope, ['path', 'versionCount'], 'serviceWorker.controllingScopes[]', failures) &&
+      boundedString(scope.path, 512) && scope.path.startsWith('/') && Number.isSafeInteger(scope.versionCount) && scope.versionCount >= 0)) failures.push('serviceWorker: malformed controlling scope');
+    if (scopes.length !== 0) failures.push('serviceWorker: Chrome reported a same-origin scope capable of controlling the packaged application');
+    if (sw.unknownScopeRegistrations !== 0) failures.push('serviceWorker: registration scope could not be classified');
+    if (sw.unknownScopeVersions !== 0) failures.push('serviceWorker: version could not be associated with a registration scope');
     if (sw.fromServiceWorkerResponses !== 0) failures.push('serviceWorker: a response was served by a service worker');
   }
   if (exactKeys(evidence.cacheStorage, ['pageNames', 'checkedPhases'], 'cacheStorage', failures)) {
@@ -148,20 +281,17 @@ export function qualifyOffline(evidence) {
   const failedRequests = boundedList(evidence.failedRequests, 'failedRequests', failures);
   const events = boundedList(evidence.events, 'events', failures);
   const requestKeys = ['requestId', 'phase', 'method', 'url', 'type'];
-  const responseKeys = ['requestId', 'phase', 'url', 'status', 'type', 'cacheControl', 'fromDiskCache', 'fromServiceWorker'];
+  const responseKeys = ['requestId', 'phase', 'url', 'status', 'type', 'cacheControl', 'fromDiskCache', 'fromServiceWorker', 'loadingFinished'];
   let sensitive = 0;
   let staticAssets = 0;
-  let baselineMutations = 0;
   for (const [index, request] of requests.entries()) {
     if (!exactKeys(request, requestKeys, `requests[${index}]`, failures)) continue;
     if (!PHASES.includes(request.phase) || !boundedString(request.requestId, 256) || request.requestId.length === 0 ||
       !boundedString(request.url, 4096) || !boundedString(request.method, 16) || !boundedString(request.type, 64)) { failures.push(`requests[${index}]: malformed`); continue; }
-    if (request.url.startsWith('data:')) continue;
     if (sameOriginPath(request.url, origin) === null) { failures.push(`requests[${index}]: wrong origin ${request.url.slice(0, 120)}`); continue; }
     if (request.phase === 'baseline') {
       if (MUTATION_METHODS.has(request.method)) {
-        baselineMutations += 1;
-        if (request.method !== 'POST' || sameOriginPath(request.url, origin) !== basePath + 'api/v1/session') failures.push(`requests[${index}]: unexpected baseline mutation`);
+        failures.push(`requests[${index}]: unexpected baseline mutation`);
       } else if (!READ_METHODS.has(request.method)) failures.push(`requests[${index}]: unexpected baseline method ${request.method}`);
       else if (!isExpectedRead(request, basePath, origin)) failures.push(`requests[${index}]: unexpected baseline fetch ${request.url.slice(0, 120)}`);
       continue;
@@ -171,21 +301,20 @@ export function qualifyOffline(evidence) {
     if (request.phase === 'offline-reload' && request.type !== 'Document') { failures.push(`requests[${index}]: non-document request during offline reload`); continue; }
     if (!isExpectedRead(request, basePath, origin)) failures.push(`requests[${index}]: unexpected fetch ${request.url.slice(0, 120)}`);
   }
-  if (baselineMutations !== 1) failures.push(`baseline: expected exactly one session exchange POST, saw ${baselineMutations}`);
   let fromServiceWorker = 0;
   const seenResponseTuples = new Set();
   for (const [index, response] of responses.entries()) {
     if (!exactKeys(response, responseKeys, `responses[${index}]`, failures)) continue;
     if (!PHASES.includes(response.phase) || !boundedString(response.requestId, 256) || response.requestId.length === 0 ||
       !boundedString(response.url, 4096) || !Number.isInteger(response.status) || !boundedString(response.type, 64) ||
-      typeof response.fromDiskCache !== 'boolean' || typeof response.fromServiceWorker !== 'boolean') { failures.push(`responses[${index}]: malformed`); continue; }
-    if (response.url.startsWith('data:')) continue;
+      typeof response.fromDiskCache !== 'boolean' || typeof response.fromServiceWorker !== 'boolean' || typeof response.loadingFinished !== 'boolean') { failures.push(`responses[${index}]: malformed`); continue; }
     const joinedRequests = requests.filter(request => request?.requestId === response.requestId && request?.url === response.url && request?.phase === response.phase);
     if (joinedRequests.length !== 1) failures.push(`responses[${index}]: response must join exactly one same-phase request by CDP requestId and URL`);
     const responseTuple = `${response.requestId}\n${response.url}\n${response.phase}`;
     if (seenResponseTuples.has(responseTuple)) failures.push(`responses[${index}]: duplicate response for the same request`);
     seenResponseTuples.add(responseTuple);
     if (response.status < 200 || response.status >= 300) failures.push(`responses[${index}]: unexpected HTTP status ${response.status}`);
+    if (response.loadingFinished !== true) failures.push(`responses[${index}]: response body did not finish loading`);
     const path = sameOriginPath(response.url, origin);
     const kind = responseClass(path, basePath, response.type);
     if (kind === 'foreign') { failures.push(`responses[${index}]: wrong origin`); continue; }
@@ -210,6 +339,12 @@ export function qualifyOffline(evidence) {
     else failures.push(`failedRequests[${index}]: unexpected failed request outside the emulated offline document load`);
   }
   if (offlineDocumentFailures !== 1) failures.push(`failedRequests: expected one failed offline document request, saw ${offlineDocumentFailures}`);
+  for (const request of requests) {
+    const responseCount = responses.filter(response => response?.requestId === request?.requestId && response?.phase === request?.phase && response?.url === request?.url).length;
+    const expectedOfflineDocumentFailure = request?.phase === 'offline-reload' && request?.type === 'Document' &&
+      failedRequests.some(failure => failure?.requestId === request?.requestId && failure?.phase === request?.phase);
+    if (responseCount !== (expectedOfflineDocumentFailure ? 0 : 1)) failures.push(`requests: missing or duplicate final response for ${request?.phase} request ${request?.requestId}`);
+  }
   if (fromServiceWorker !== 0) failures.push('responses: served by a service worker');
   if (sensitive === 0) failures.push('responses: no sensitive document/API responses were observed');
   if (staticAssets === 0) failures.push('responses: no static asset responses were observed');
@@ -224,17 +359,17 @@ export function qualifyOffline(evidence) {
     if (event.type !== 'offline' && event.type !== 'online') { failures.push(`events[${index}]: unknown type`); continue; }
     if (event.isTrusted !== true) { failures.push(`events[${index}]: untrusted ${event.type} event`); continue; }
     if (event.onLine !== (event.type === 'online')) failures.push(`events[${index}]: navigator.onLine disagrees with ${event.type}`);
-    const expectedPhase = event.type === 'offline' ? ['offline', 'offline-reload'] : ['reconnect', 'recovery'];
+    const expectedPhase = event.type === 'offline' ? ['offline', 'offline-reload'] : ['reconnect'];
     if (!expectedPhase.includes(event.phase)) failures.push(`events[${index}]: ${event.type} in phase ${event.phase}`);
     seen[event.type] += 1;
   }
-  for (const [type, phase] of [['offline', 'offline'], ['online', 'reconnect'], ['offline', 'offline-reload'], ['online', 'recovery']]) {
+  for (const [type, phase] of [['offline', 'offline'], ['online', 'reconnect'], ['offline', 'offline-reload']]) {
     if (!events.some(e => e?.type === type && e.phase === phase && e.isTrusted === true)) failures.push(`events: missing trusted ${type} event in ${phase}`);
   }
-  if (events.length !== 4 || events.some((event, index) => {
-    const expected = [['offline', 'offline'], ['online', 'reconnect'], ['offline', 'offline-reload'], ['online', 'recovery']][index];
+  if (events.length !== 3 || events.some((event, index) => {
+    const expected = [['offline', 'offline'], ['online', 'reconnect'], ['offline', 'offline-reload']][index];
     return !expected || event?.type !== expected[0] || event?.phase !== expected[1];
-  })) failures.push('events: expected exactly the ordered offline, reconnect, offline-reload and recovery transitions');
+  })) failures.push('events: expected exactly the ordered offline, reconnect and offline-reload transitions');
 
   checkPhases(evidence.phases, markers, origin, failures);
   const screenshots = boundedList(evidence.screenshots, 'screenshots', failures);
@@ -316,7 +451,8 @@ function checkPhases(phases, markers, origin, failures) {
     if (offlineReload.pageToken === baseline?.pageToken) failures.push('phases.offlineReload: reload did not replace the page');
     if (!/^[a-z0-9-]+\.png$/.test(offlineReload.screenshot ?? '')) failures.push('phases.offlineReload: screenshot not retained');
   }
-  if (exactKeys(recovery, [...pageKeys, 'privateTextShown', 'controlStatus', 'retryAvailable', 'retryReasonText', 'executionCommandButtons', 'recoveryMs', 'observationMs'], 'phases.recovery', failures)) {
+  if (exactKeys(recovery, [...pageKeys, 'privateTextShown', 'controlStatus', 'retryAvailable', 'retryReasonText', 'executionCommandButtons', 'recoveryMs', 'observationMs', 'onLine'], 'phases.recovery', failures)) {
+    if (recovery.onLine !== true) failures.push('phases.recovery: newly loaded application did not report an online browser');
     if (recovery.privateTextShown !== true) failures.push('phases.recovery: job not re-read after reconnect');
     if (recovery.controlStatus !== COMMAND_VERIFIED) failures.push('phases.recovery: actions were not re-verified after reconnect');
     if (recovery.retryAvailable !== false || recovery.retryReasonText !== 'Unavailable: this workflow is not available on this server.') {
