@@ -80,6 +80,10 @@ export function hasOpenEventStream(streams) {
   return [...streams.values()].some(stream => stream.open);
 }
 
+export function eventStreamsClosed(streams, requestIds) {
+  return requestIds.length > 0 && requestIds.every(id => streams.has(id) && streams.get(id).open === false);
+}
+
 /** Only the known session exchanges and progress-pin PUTs may mutate in this fixture. */
 export function assertOnlyPinWrites(requests, pinUrl, expectedPuts, sessionUrl = null, expectedSessionPosts = 0) {
   const mutations = requests.filter(r => !['GET', 'HEAD'].includes(r.method));
@@ -257,11 +261,9 @@ export async function qualifyRestart({ fixture, origin, makeTarget, cdp, evaluat
     'hidden tab suspension (fail closed if the tab is not hidden)');
   const hiddenReads = progressReads(old);
   const peerReadsBefore = progressReads(peer);
-  await ready(old, `true`, 'hidden tab stream cancellation observation');
-  await delay(100);
+  await waitFor(() => eventStreamsClosed(old.eventStreams, streamsBeforeBackground),
+    'closure of every activity stream that was open before backgrounding');
   assert.equal(hasOpenEventStream(old.eventStreams), false, 'A hidden tab left its activity event stream open');
-  assert.ok(streamsBeforeBackground.every(id => old.eventStreams.get(id)?.open === false),
-    'Every activity stream that was open before backgrounding must close');
   await delay(3000);
   assert.equal(progressReads(old), hiddenReads, 'A hidden tab made progress requests');
   assert.equal(hasOpenEventStream(old.eventStreams), false, 'A hidden tab reopened its activity event stream');

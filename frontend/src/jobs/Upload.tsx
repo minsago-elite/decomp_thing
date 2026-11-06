@@ -114,6 +114,11 @@ export function Upload({ basePath, session }: { basePath: string; session: Brows
     const uploadId = crypto.randomUUID().replaceAll('-', '');
     let pollTimer: ReturnType<typeof setTimeout>;
     const poll = async () => {
+      // A background tab keeps transferring, but stops sampling progress until it is visible again.
+      if (document.visibilityState === 'hidden') {
+        if (live.current && !controller.signal.aborted) pollTimer = setTimeout(() => { void poll(); }, 1000);
+        return;
+      }
       try {
         const response = await client.get('uploadProgress', `/uploads/${uploadId}`, { signal: controller.signal });
         if (live.current && !controller.signal.aborted && response.data.uploadId === uploadId) setProgress(receive(response.data));
