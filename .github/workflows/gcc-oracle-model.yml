@@ -149,7 +149,8 @@ jobs:
           mkdir -p build/gcc-reproduction-adapter/tmp
           TMPDIR="$GITHUB_WORKSPACE/build/gcc-reproduction-adapter/tmp" \
             python3 -B -m unittest tests.oracle.test_gcc_reproduction_inspect \
-              tests.oracle.test_toolchain_reproduction -v
+              tests.oracle.test_toolchain_reproduction \
+              tests.oracle.test_gcc_snapshot_metadata -v
       - name: Verify source provenance metadata
         run: python3 scripts/verify-gcc-oracle-source.py --metadata-only
       - name: Restore locked GCC source artifacts
@@ -212,6 +213,7 @@ jobs:
           cat "$diagnostics/builder.txt"
           docker --host "$DOCKER_HOST" info --format '{{json .}}' >"$diagnostics/docker-info.json" 2>"$diagnostics/docker-info.stderr" || true
       - name: Reproduce and verify the recorded toolchain image
+        id: toolchain-reproduction
         env:
           DOCKER_HOST: ${{ steps.gcc-reproduction-docker.outputs.sock }}
           DOCKER_CONTEXT: ''
@@ -258,6 +260,18 @@ jobs:
             --container-digest "$observed" \
             --reproduction-lock oracle/gcc/16.2.0/toolchain-reproduction.json
           echo "GCC_TOOLCHAIN_IMAGE_ID=$observed" >> "$GITHUB_ENV"
+      - name: Capture bounded snapshot metadata diagnostics after reproduction failure
+        if: failure() && steps.toolchain-reproduction.outcome == 'failure'
+        continue-on-error: true
+        env:
+          DOCKER_HOST: ${{ steps.gcc-reproduction-docker.outputs.sock }}
+          GCC_REPRODUCTION_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+        run: |
+          python3 -B scripts/diagnose-gcc-snapshot-metadata.py \
+            --output build/gcc-toolchain-reproduction-diagnostics/snapshot-metadata
       - name: Retain GCC toolchain reproduction diagnostics
         if: always()
         uses: actions/upload-artifact@v7
