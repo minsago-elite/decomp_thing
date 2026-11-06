@@ -17,7 +17,7 @@ export function incompatibleBootstrapEnvelope(now = Date.now()) {
   assert.ok(Number.isSafeInteger(now) && now >= 0, 'Bootstrap fixture clock must be a nonnegative safe integer');
   const data = structuredClone(bootstrapFixture.data);
   data.apiVersions = [2];
-  data.sessionExpiresAt = new Date(now + 60_000).toISOString();
+  data.sessionExpiresAt = new Date(now + 300_000).toISOString();
   const requestId = '123e4567-e89b-42d3-a456-426614174099';
   const body = JSON.stringify({ apiVersion: 1, kind: 'bootstrap', requestId, data });
   return { body, requestId, sha256: createHash('sha256').update(body).digest('hex'), fixtureSha256: bootstrapFixtureSha256,

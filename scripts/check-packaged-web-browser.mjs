@@ -433,7 +433,8 @@ async function capture(target, name) {
   await fs.writeFile(join(root, name), Buffer.from(data, 'base64'));
 }
 
-async function captureEvidence(name) {
+async function captureEvidence(target, name) {
+  await capture(target, name);
   const bytes = await fs.readFile(join(root, name));
   assert.ok(bytes.length >= 24 && bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])), `${name} is not a PNG`);
   const width = bytes.readUInt32BE(16), height = bytes.readUInt32BE(20);
@@ -946,7 +947,7 @@ try {
           document.addEventListener('keydown', event => record(event, 'keydown'), true);
           document.addEventListener('click', event => record(event, 'click'), true);
         })();` }, contractTarget.sessionId);
-        await cdp.call('Fetch.enable', { patterns: [{ urlPattern: `${origin}/nested/api/v1/bootstrap`, requestStage: 'Request' }] }, contractTarget.sessionId);
+        await cdp.call('Fetch.enable', { patterns: [{ urlPattern: `${origin}/nested/api/v1/bootstrap*`, requestStage: 'Request' }] }, contractTarget.sessionId);
         fetchEnabled = true;
         await cdp.call('Page.navigate', { url: `${origin}/nested/` }, contractTarget.sessionId);
         await ready(contractTarget, `document.querySelector('#contract-mismatch-title')?.textContent === 'Reload to match the server version'`, 'packaged incompatible-contract notice');
@@ -968,19 +969,19 @@ try {
         })()`);
         assert.equal(evidence.documentsBeforeClick, 1, 'Incompatible-contract page reloaded before activation');
         assert.equal(evidence.bootstrapReadsBeforeClick, 1, 'Initial incompatible-contract observation was not exactly one bootstrap read');
-        evidence.captures.push(await captureEvidence('contract-mismatch-notice.png'));
+        evidence.captures.push(await captureEvidence(contractTarget, 'contract-mismatch-notice.png'));
         const focused = await evaluate(contractTarget, `(() => {
           const button = [...document.querySelectorAll('button')].find(item => item.textContent.trim() === 'Reload application');
           button?.focus(); return document.activeElement === button;
         })()`);
         assert.equal(focused, true, 'Explicit reload button could not receive focus');
-        evidence.clicksSent = 1;
         await cdp.call('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', text: '\r', windowsVirtualKeyCode: 13 }, contractTarget.sessionId);
         await cdp.call('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 }, contractTarget.sessionId);
         await ready(contractTarget, `document.querySelector('#contract-mismatch-title')?.textContent === 'Reload to match the server version'
           && document.body.innerText.includes('Reloading in this tab did not load a different build.')`, 'same-build manual recovery guidance');
         await delay(evidence.observationSeconds * 1000);
         await waitFor(() => activations.length === 2, 'trusted contract-reload Enter activation');
+        evidence.clicksSent = 1;
         await Promise.all(pendingFetchActions);
         evidence.documentsAfterClick = contractTarget.documentRequests.length;
         evidence.bootstrapReadsAfterClick = bootstrapReads();
@@ -991,7 +992,7 @@ try {
           checkSessionButtonCount: [...document.querySelectorAll('button')].filter(button => button.textContent.trim() === 'Check session').length,
           metaBuildId: document.querySelector('meta[name="decomp-ui-build"]')?.content,
         }))()`);
-        evidence.captures.push(await captureEvidence('contract-mismatch-after-reload.png'));
+        evidence.captures.push(await captureEvidence(contractTarget, 'contract-mismatch-after-reload.png'));
         await delay(500);
         evidence.documentsAfterQuiet = contractTarget.documentRequests.length;
         evidence.bootstrapReadsAfterQuiet = bootstrapReads();

@@ -48,7 +48,7 @@ test('constructs a source-bound unsupported bootstrap without changing its envel
   assert.equal(parsed.apiVersion, 1);
   assert.equal(parsed.kind, 'bootstrap');
   assert.deepEqual(parsed.data.apiVersions, [2]);
-  assert.equal(Date.parse(parsed.data.sessionExpiresAt), 1_800_000_060_000);
+  assert.equal(Date.parse(parsed.data.sessionExpiresAt), 1_800_000_300_000);
   assert.equal(envelope.sha256.length, 64);
   assert.equal(envelope.fixtureSha256.length, 64);
 });
