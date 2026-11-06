@@ -85,6 +85,8 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
     private val processTreeFactory: (Process, Duration) -> ExportProcessTree,
     private val streamCloseSubmitter: (Runnable) -> CompletableFuture<*> = { task -> CompletableFuture.runAsync(task) },
     private val analysisTaskExecutor: Executor = ForkJoinPool.commonPool(),
+    private val timingProfileSha256: String? = null,
+    private val timingWorkflowRunId: String? = null,
 ) : ExportBudgetedProgramModelAnalyzer {
     internal constructor(
         commandFactory: (GhidraInvocation) -> List<String>,
@@ -132,7 +134,28 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
             processTreeFactory = processTreeFactory,
             streamCloseSubmitter = streamCloseSubmitter,
             analysisTaskExecutor = analysisTaskExecutor,
+            timingProfileSha256 = timingProfileSha256,
+            timingWorkflowRunId = timingWorkflowRunId,
         )
+
+    internal fun withTimingProfileSha256(profileSha256: String, workflowRunId: String? = null): GhidraHeadlessProgramModelAnalyzer {
+        require(profileSha256.matches(Regex("[0-9a-f]{64}"))) { "reconstruction timing profile identity must be SHA-256" }
+        require(workflowRunId == null || workflowRunId.matches(Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")))
+        return GhidraHeadlessProgramModelAnalyzer(
+            commandFactory = commandFactory,
+            limits = limits,
+            analysisToolSha256 = analysisToolSha256,
+            recoveryMode = recoveryMode,
+            processStarter = processStarter,
+            requiresLaunchPermit = requiresLaunchPermit,
+            processLaunch = processLaunch,
+            processTreeFactory = processTreeFactory,
+            streamCloseSubmitter = streamCloseSubmitter,
+            analysisTaskExecutor = analysisTaskExecutor,
+            timingProfileSha256 = profileSha256,
+            timingWorkflowRunId = workflowRunId,
+        )
+    }
 
     internal fun withProcessLifecycleForTests(
         controller: BoundedAnalysisProcessLaunch,
@@ -148,6 +171,8 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
         processTreeFactory = treeFactory,
         streamCloseSubmitter = streamCloseSubmitter,
         analysisTaskExecutor = analysisTaskExecutor,
+        timingProfileSha256 = timingProfileSha256,
+        timingWorkflowRunId = timingWorkflowRunId,
     )
 
     internal fun withStreamCloseSubmitterForTests(
@@ -163,6 +188,8 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
         processTreeFactory = processTreeFactory,
         streamCloseSubmitter = submitter,
         analysisTaskExecutor = analysisTaskExecutor,
+        timingProfileSha256 = timingProfileSha256,
+        timingWorkflowRunId = timingWorkflowRunId,
     )
 
     internal fun withAnalysisTaskExecutorForTests(executor: Executor): GhidraHeadlessProgramModelAnalyzer =
@@ -177,6 +204,8 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
             processTreeFactory = processTreeFactory,
             streamCloseSubmitter = streamCloseSubmitter,
             analysisTaskExecutor = executor,
+            timingProfileSha256 = timingProfileSha256,
+            timingWorkflowRunId = timingWorkflowRunId,
         )
 
     override fun analyze(binaryPath: Path, workDir: Path): RecoveredProgramModel =
@@ -196,12 +225,25 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
         includeCallSites: Boolean,
         parentDeadline: AnalysisDeadline?,
     ): Pair<RecoveredProgramModel, RecoveredCallSiteReceipt?> {
+        val timing = AnalysisTimingRecord(
+            workDir.resolve("reports/analysis-timings"), recoveryMode.wireName, analysisToolSha256,
+            timingProfileSha256,
+            timingConfigurationSha256(listOf(
+                limits.wallClockTimeout.toNanos().toString(), limits.terminationGrace.toNanos().toString(),
+                limits.maximumResidentBytes.toString(), limits.maximumProgramModelBytes.toString(),
+                limits.maximumDiagnosticBytesPerStream.toString(), includeCallSites.toString(),
+            )),
+            workflowRunId = timingWorkflowRunId,
+        )
         val deadline = AnalysisDeadline.start(
             limits.wallClockTimeout.toNanos(), "Ghidra program recovery", parentDeadline,
             AnalysisDeadline.RECOVERY_TIMEOUT_ADVICE,
         )
-        return deadline.enforceDuring("Ghidra program recovery") {
+        var timingStarted = false
+        return try {
+            val result = timing.measure("analysis-invocation") { deadline.enforceDuring("Ghidra program recovery") {
             deadline.checkpoint("before export preparation")
+            timingStarted = true
             val reports = workDir.resolve("reports").createDirectories()
             val scripts = workDir.resolve("scripts").createDirectories()
             deadline.checkpoint("before reading export scripts")
@@ -209,8 +251,12 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
                 ?.use { it.readBytes() } ?: error("bundled ExportProgramModelOwned.java is missing")
             deadline.checkpoint("after reading export script")
             scripts.resolve("ExportProgramModelOwned.java").writeBytes(scriptBytes)
+            val timingPreScriptBytes = javaClass.getResourceAsStream("/ghidra_scripts/AnalysisTimingPreScript.java")
+                ?.use { it.readBytes() } ?: error("bundled AnalysisTimingPreScript.java is missing")
+            scripts.resolve("AnalysisTimingPreScript.java").writeBytes(timingPreScriptBytes)
             deadline.checkpoint("after writing export script")
             val exporterSha256 = sha256(scriptBytes)
+            timing.bind(exporterSha256 = exporterSha256)
             val output = reports.resolve("program_model.json")
             val modelCandidate = uniqueExportCandidate(output, "model")
             val callOutput = reports.resolve("program_model_calls.json")
@@ -235,18 +281,25 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
                 )),
             )
             deadline.checkpoint("before constructing export command")
-            val command = commandFactory(GhidraInvocation(project, "archival_reconstruction", binaryPath, scripts, postScripts), deadline::checkpoint)
+            val command = timing.measure("worker-command-preparation") {
+                commandFactory(GhidraInvocation(project, "archival_reconstruction", binaryPath, scripts, postScripts,
+                    timing.invocationId, { verify -> timing.measure("bundle-verification", verify) }), deadline::checkpoint)
+            }
             deadline.checkpoint("after constructing export command")
-            val exitCode = executeExport(command, workDir, reports, deadline,
-                listOfNotNull(modelCandidate, callCandidate))
+            val exitCode = timing.measure("worker-process-lifecycle") {
+                executeExport(command, workDir, reports, deadline, listOfNotNull(modelCandidate, callCandidate), timing)
+            }
             deadline.checkpoint("before export result validation")
             require(exitCode == 0) {
                 "Ghidra program recovery failed with exit code $exitCode; see ${reports.resolve("ghidra_stderr.log")}"
             }
-            val modelBytes = readStableProgramModel(modelCandidate, deadline)
-            val model = ProgramModelJson.readCanonical(modelBytes, deadline::checkpoint)
+            val (modelBytes, model) = timing.measure("canonical-model-validation") {
+                val bytes = readStableProgramModel(modelCandidate, deadline)
+                bytes to ProgramModelJson.readCanonical(bytes, deadline::checkpoint)
+            }
+            timing.bind(inputSha256 = model.inputSha256)
             deadline.checkpoint("after canonical model validation")
-            val calls = callScriptBytes?.let { script ->
+            val calls = timing.measure("call-site-validation") { callScriptBytes?.let { script ->
                 val callLimits = RecoveredCallSiteLimits()
                 val callCandidatePath = checkNotNull(callCandidate)
                 fun requireRemainingTime() {
@@ -274,15 +327,23 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
                     RecoveredCallSiteBindings(model.inputSha256, sha256(modelBytes), sha256(script), analysisToolSha256),
                     callLimits,
                 ) { requireRemainingTime() }.also { requireRemainingTime() }
-            }
+            } }
             deadline.checkpoint("before publishing validated export candidates")
             deadline.checkpoint("before publishing validated program model")
-            moveExportCandidate(modelCandidate, output)
-            if (callCandidate != null) {
-                deadline.checkpoint("before publishing validated call-site evidence")
-                moveExportCandidate(callCandidate, callOutput)
+            timing.measure("validated-candidate-publication") {
+                moveExportCandidate(modelCandidate, output)
+                if (callCandidate != null) {
+                    deadline.checkpoint("before publishing validated call-site evidence")
+                    moveExportCandidate(callCandidate, callOutput)
+                }
             }
             model to calls?.copy(path = callOutput.toAbsolutePath().normalize())
+            } }
+            timing.publish(true)
+            result
+        } catch (failure: Throwable) {
+            if (timingStarted) timing.publish(false)
+            throw failure
         }
     }
 
@@ -292,13 +353,17 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
         reports: Path,
         deadline: AnalysisDeadline,
         outputCandidates: List<Path>,
+        timing: AnalysisTimingRecord,
     ): Int {
         val remainingNanosAtLaunch = deadline.remainingNanos("before worker launch")
-        val process = processLaunch.start(
-            deadline::checkpoint,
-            { processStarter(command, workDir) },
-            { lateProcess -> stopLateExportProcess(lateProcess, limits.terminationGrace, processLaunch, outputCandidates) },
-        )
+        val launchRequestedAtNanos = System.nanoTime()
+        val process = timing.measure("native-process-launch-envelope") {
+            processLaunch.start(
+                deadline::checkpoint,
+                { processStarter(command, workDir) },
+                { lateProcess -> stopLateExportProcess(lateProcess, limits.terminationGrace, processLaunch, outputCandidates) },
+            )
+        }
         val processTree = processTreeFactory(process, limits.terminationGrace)
         val taskSettlements = ArrayList<AtomicBoolean>()
         val captureSettlements = ArrayList<AtomicBoolean>()
@@ -329,13 +394,20 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
             )
             diagnosticsPublished = true
         }
+        fun retainStdoutDiagnostics(bytes: ByteArray): ByteArray {
+            if (bytes.size <= limits.maximumDiagnosticBytesPerStream) return bytes
+            diagnosticsExceeded.set(true)
+            return bytes.copyOf(limits.maximumDiagnosticBytesPerStream)
+        }
         try {
             deadline.checkpoint("after worker launch")
             if (requiresLaunchPermit) {
                 // A newly started bundled worker stays inert until its handle is owned here.
                 // The two-byte permit fits in the fresh stdin pipe without a child-side read.
-                process.outputStream.write(byteArrayOf('1'.code.toByte(), '\n'.code.toByte()))
-                process.outputStream.flush()
+                timing.measure("parent-launch-permit-publication") {
+                    process.outputStream.write(byteArrayOf('1'.code.toByte(), '\n'.code.toByte()))
+                    process.outputStream.flush()
+                }
             }
             process.outputStream.close()
             val memoryMonitorFinished = AtomicBoolean(false)
@@ -366,11 +438,12 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
                 captureSettlements += finished
                 return CompletableFuture.supplyAsync({
                     try {
-                        val bytes = stream.readNBytes(limits.maximumDiagnosticBytesPerStream + 1)
-                        if (bytes.size > limits.maximumDiagnosticBytesPerStream) {
+                        val maximum = limits.maximumDiagnosticBytesPerStream
+                        val bytes = stream.readNBytes(maximum + 1)
+                        if (bytes.size > maximum) {
                             diagnosticsExceeded.set(true)
                             processTree.terminate()
-                            bytes.copyOf(limits.maximumDiagnosticBytesPerStream)
+                            bytes.copyOf(maximum)
                         } else bytes
                     } catch (failure: Throwable) {
                         taskFailures.add(failure)
@@ -380,7 +453,79 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
                     }
                 }, analysisTaskExecutor).also(tasks::add)
             }
-            val stdoutTask = capture(process.inputStream).also { stdout = it }
+            fun captureStdout(stream: java.io.InputStream): CompletableFuture<ByteArray> {
+                val finished = AtomicBoolean(false)
+                val entryFrameRecorded = AtomicBoolean(false)
+                taskSettlements += finished
+                captureSettlements += finished
+                return CompletableFuture.supplyAsync({
+                    try {
+                        val diagnostics = java.io.ByteArrayOutputStream()
+                        val telemetry = java.io.ByteArrayOutputStream()
+                        val line = java.io.ByteArrayOutputStream()
+                        val marker = "DECOMP_ANALYSIS_TIMING_V1 ".toByteArray(Charsets.US_ASCII)
+                        var lineIsTelemetryCandidate = true
+                        var diagnosticsSize = 0
+                        var telemetrySize = 0
+                        fun emitLine() {
+                            val bytes = line.toByteArray()
+                            val framed = lineIsTelemetryCandidate && bytes.size in marker.size..256 &&
+                                bytes.copyOfRange(0, marker.size).contentEquals(marker)
+                            if (framed && !entryFrameRecorded.get() && isWorkerEntryTimingFrame(bytes, timing.invocationId) &&
+                                entryFrameRecorded.compareAndSet(false, true)) {
+                                // This is a parent-clock launch-to-frame envelope. It includes
+                                // process creation, JVM bootstrap, scheduling, pipe delivery and
+                                // reader scheduling; it is not reported as pure JVM startup.
+                                timing.workerEntryFrameReceived(launchRequestedAtNanos, System.nanoTime())
+                            }
+                            if (framed && telemetrySize + bytes.size <= MAX_WORKER_TIMING_BYTES) {
+                                telemetry.write(bytes)
+                                telemetrySize += bytes.size
+                            } else {
+                                val room = (limits.maximumDiagnosticBytesPerStream - diagnosticsSize).coerceAtLeast(0)
+                                diagnostics.write(bytes, 0, minOf(room, bytes.size))
+                                diagnosticsSize += bytes.size
+                                if (bytes.size > room) {
+                                    diagnosticsExceeded.set(true)
+                                    processTree.terminate()
+                                }
+                            }
+                            line.reset()
+                            lineIsTelemetryCandidate = true
+                        }
+                        while (true) {
+                            val value = stream.read()
+                            if (value < 0) break
+                            line.write(value)
+                            if (lineIsTelemetryCandidate) {
+                                val current = line.toByteArray()
+                                val compared = minOf(current.size, marker.size)
+                                if (!current.copyOfRange(0, compared).contentEquals(marker.copyOfRange(0, compared))) {
+                                    lineIsTelemetryCandidate = false
+                                }
+                                if (current.size > 256) lineIsTelemetryCandidate = false
+                            }
+                            if (value == '\n'.code) emitLine()
+                            if (!lineIsTelemetryCandidate && diagnosticsSize + line.size() > limits.maximumDiagnosticBytesPerStream) {
+                                diagnosticsExceeded.set(true)
+                                processTree.terminate()
+                                break
+                            }
+                        }
+                        if (line.size() > 0) emitLine()
+                        val combined = java.io.ByteArrayOutputStream(diagnostics.size() + telemetry.size())
+                        combined.write(telemetry.toByteArray())
+                        combined.write(diagnostics.toByteArray())
+                        combined.toByteArray()
+                    } catch (failure: Throwable) {
+                        taskFailures.add(failure)
+                        throw failure
+                    } finally {
+                        finished.set(true)
+                    }
+                }, analysisTaskExecutor).also(tasks::add)
+            }
+            val stdoutTask = captureStdout(process.inputStream).also { stdout = it }
             val stderrTask = capture(process.errorStream).also { stderr = it }
             val completed = try {
                 process.waitFor(deadline.remainingNanosOrZero(), TimeUnit.NANOSECONDS)
@@ -401,10 +546,12 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
                     }
                 }
             }
-            val stdoutBytes = await(stdoutTask)
+            val capturedStdout = await(stdoutTask)
+            val (stdoutBytes, workerTelemetry) = separateWorkerTelemetry(capturedStdout)
+            timing.captureWorkerTelemetry(workerTelemetry, diagnosticsExceeded.get())
             val stderrBytes = await(stderrTask)
             await(memoryMonitor)
-            publishDiagnostics(stdoutBytes, stderrBytes)
+            publishDiagnostics(retainStdoutDiagnostics(stdoutBytes), stderrBytes)
             if (memoryExceeded.get()) throw GhidraAnalysisException(
                 "Ghidra program recovery exceeded ${limits.maximumResidentBytes} resident bytes; " +
                     "rerun with the same output directory to resume durable function checkpoints",
@@ -585,10 +732,12 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
                             }
                         }
                     }
-                    val stdoutBytes = duringCleanup { stdoutTask.get(it, TimeUnit.NANOSECONDS) }
+                    val capturedStdout = duringCleanup { stdoutTask.get(it, TimeUnit.NANOSECONDS) }
+                    val (stdoutBytes, workerTelemetry) = separateWorkerTelemetry(capturedStdout)
+                    timing.captureWorkerTelemetry(workerTelemetry, diagnosticsExceeded.get())
                     val stderrBytes = duringCleanup { stderrTask.get(it, TimeUnit.NANOSECONDS) }
                     // Each attempt opens fresh streams; an interrupt-closed channel is never reused.
-                    duringCleanup { publishDiagnostics(stdoutBytes, stderrBytes) { remainingCleanup() } }
+                    duringCleanup { publishDiagnostics(retainStdoutDiagnostics(stdoutBytes), stderrBytes) { remainingCleanup() } }
                 }
             }
             val usagePath = reports.resolve("ghidra_resource_usage.json")
@@ -613,12 +762,40 @@ class GhidraHeadlessProgramModelAnalyzer private constructor(
         }
     }
 
+    private fun isWorkerEntryTimingFrame(frame: ByteArray, invocationId: String): Boolean {
+        val fields = frame.toString(Charsets.US_ASCII).trimEnd('\r', '\n').split(' ')
+        return fields.size == 6 && fields[0] == "DECOMP_ANALYSIS_TIMING_V1" && fields[1] == invocationId &&
+            fields[2] == "0" && fields[3] == "begin" && fields[4] == "worker-entry-to-parent-permit" &&
+            (fields[5].toLongOrNull() ?: -1L) >= 0L
+    }
+
     private fun readStableProgramModel(path: Path, deadline: AnalysisDeadline): ByteArray {
         return MODEL_ACQUISITION.read(path, path.toAbsolutePath().normalize().parent,
             limits.maximumProgramModelBytes, limits.maximumResidentBytes, deadline)
     }
 
     companion object {
+        private const val MAX_WORKER_TIMING_BYTES = 16 * 256 + 1
+
+        private fun separateWorkerTelemetry(bytes: ByteArray): Pair<ByteArray, ByteArray> {
+            val text = bytes.toString(Charsets.UTF_8)
+            val diagnostics = StringBuilder()
+            val telemetry = StringBuilder()
+            var start = 0
+            while (start < text.length) {
+                val newline = text.indexOf('\n', start)
+                val end = if (newline < 0) text.length else newline
+                val line = text.substring(start, end)
+                val framed = line.startsWith("DECOMP_ANALYSIS_TIMING_V1 ") && line.length <= 256
+                val target = if (framed) telemetry else diagnostics
+                target.append(line)
+                if (newline >= 0) target.append('\n')
+                if (newline < 0) break
+                start = newline + 1
+            }
+            return diagnostics.toString().toByteArray(Charsets.UTF_8) to telemetry.toString().toByteArray(Charsets.UTF_8)
+        }
+
         private val EXPORT_PROCESS_LAUNCH = BoundedAnalysisProcessLaunch()
         private val MODEL_ACQUISITION = BoundedProgramModelAcquisitionProcess()
 
@@ -918,9 +1095,12 @@ class ArchivalReconstructionService(
         val observedBehavior = ReconstructionExplorationInput.read(
             outputDir, profile.budgets.reconstructionMaximumContextCharacters,
         )
-        val selectedAnalyzer = (analyzer as? ExportBudgetedProgramModelAnalyzer)
+        val budgetedAnalyzer = (analyzer as? ExportBudgetedProgramModelAnalyzer)
             ?.withExportBudgets(profile.budgets)
             ?: analyzer
+        val selectedAnalyzer = (budgetedAnalyzer as? GhidraHeadlessProgramModelAnalyzer)
+            ?.withTimingProfileSha256(profile.sha256, progress.workflowRunId)
+            ?: budgetedAnalyzer
         adapter.diagnostics.prepare(profile)
         progress.phase(AgentWorkflowPhase.ANALYZING)
         val model = selectedAnalyzer.analyze(binaryPath, outputDir.resolve("analysis"))

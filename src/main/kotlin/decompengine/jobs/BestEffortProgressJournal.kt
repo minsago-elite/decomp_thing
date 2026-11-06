@@ -21,6 +21,7 @@ internal class BestEffortProgressJournal(
     private val warningIssued = AtomicBoolean(false)
     private var journal: AgentProgressJournal? = null
     internal val journalRunId: String? get() = journal?.journalRunId
+    override val workflowRunId: String? get() = journal?.workflowRunId
     internal val writerAlive: Boolean get() = journal?.writerAlive == true
 
     /** Retain any enclosing output-workspace lease until the asynchronous writer has stopped. */

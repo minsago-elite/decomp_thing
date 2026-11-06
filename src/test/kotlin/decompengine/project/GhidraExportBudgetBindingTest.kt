@@ -93,4 +93,32 @@ class GhidraExportBudgetBindingTest {
             root.toFile().deleteRecursively()
         }
     }
+
+    @Test
+    fun `worker telemetry does not extend the live stdout diagnostic budget`() {
+        val parent = java.nio.file.Files.createDirectories(java.nio.file.Path.of("build/test-tmp"))
+        val root = createTempDirectory(parent, "export-budget-telemetry-diagnostics-")
+        try {
+            val input = root.resolve("authored-input.txt").also { it.writeText("Authored local export input\n") }
+            val work = root.resolve("analysis")
+            val telemetry = "DECOMP_ANALYSIS_TIMING_V1 00000000-0000-0000-0000-000000000000 0 begin application-initialization 1\\n"
+            val command = "printf '$telemetry'; printf 0123456789; sleep 30"
+            val analyzer: ExportBudgetedProgramModelAnalyzer = GhidraHeadlessProgramModelAnalyzer(
+                commandFactory = { listOf("/bin/sh", "-c", command) },
+                limits = GhidraProgramModelExportLimits(
+                    wallClockTimeout = Duration.ofSeconds(5),
+                    terminationGrace = Duration.ofMillis(100),
+                    maximumDiagnosticBytesPerStream = 8,
+                ),
+            )
+
+            val failure = assertFailsWith<GhidraAnalysisException> { analyzer.analyze(input, work) }
+
+            assertTrue(failure.message.orEmpty().contains("8 diagnostic bytes"))
+            assertEquals("01234567", work.resolve("reports/ghidra_stdout.log").readText())
+            assertTrue(work.resolve("reports/ghidra_resource_usage.json").readText().contains("\"diagnosticLimitExceeded\":true"))
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
 }

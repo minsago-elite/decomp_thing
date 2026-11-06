@@ -14,6 +14,36 @@ import java.util.List;
 public final class BundledGhidraWorker {
     private static boolean exportsCompleted;
     private static JvmMxBeanDiagnostics diagnostics;
+    private static String timingInvocationId;
+    private static long timingSequence;
+    private static long workerStartedNanos;
+    private static boolean preAnalysisBoundaryObserved;
+
+    public static void beginTimingPhase(String phase) { timingEvent("begin", phase); }
+
+    public static void endTimingPhase(String phase) { timingEvent("end", phase); }
+
+    public static synchronized void preAnalysisBoundary() {
+        if (preAnalysisBoundaryObserved) {
+            throw new IllegalStateException("Bundled Ghidra pre-analysis timing boundary was observed twice");
+        }
+        preAnalysisBoundaryObserved = true;
+        endTimingPhase("project-open-import-pre-analysis");
+        beginTimingPhase("auto-analysis");
+    }
+
+    public static void postScriptEntry() {
+        if (preAnalysisBoundaryObserved) {
+            endTimingPhase("auto-analysis");
+        }
+    }
+
+    private static synchronized void timingEvent(String event, String phase) {
+        if (timingInvocationId == null) return;
+        long elapsed = Math.max(0L, System.nanoTime() - workerStartedNanos);
+        System.out.println("DECOMP_ANALYSIS_TIMING_V1 " + timingInvocationId + " " + timingSequence++ +
+            " " + event + " " + phase + " " + elapsed);
+    }
 
     public static void exportsCompleted() {
         exportsCompleted = true;
@@ -32,6 +62,15 @@ public final class BundledGhidraWorker {
     }
 
     public static void main(String[] arguments) {
+        workerStartedNanos = System.nanoTime();
+        if (arguments.length >= 2 && arguments[arguments.length - 2].equals("timing-v1")) {
+            String candidate = arguments[arguments.length - 1];
+            if (candidate.matches("[0-9a-fA-F-]{36}")) {
+                timingInvocationId = candidate;
+                arguments = Arrays.copyOf(arguments, arguments.length - 2);
+            }
+        }
+        beginTimingPhase("worker-entry-to-parent-permit");
         if (arguments.length >= 2 && arguments[1].equals("analyze-diagnostics-v1")) {
             runWithDiagnostics(arguments);
             return;
@@ -43,14 +82,17 @@ public final class BundledGhidraWorker {
                 if (System.in.read() != '1' || System.in.read() != '\n') {
                     throw new IllegalStateException("Parent did not authorize bundled analysis launch");
                 }
+                endTimingPhase("worker-entry-to-parent-permit");
                 String[] admitted = new String[arguments.length - 1];
                 admitted[0] = arguments[0];
                 System.arraycopy(arguments, 2, admitted, 1, arguments.length - 2);
                 arguments = admitted;
             }
             run(arguments);
+            timingEvent("terminal", "succeeded");
             System.exit(0);
         } catch (Exception failure) {
+            timingEvent("terminal", "failed");
             failure.printStackTrace(System.err);
             System.exit(1);
         }
@@ -78,7 +120,12 @@ public final class BundledGhidraWorker {
         validateNativeCallInvocation(arguments);
         Path bundle = Path.of(arguments[0]).toAbsolutePath().normalize();
         var configuration = new HeadlessGhidraApplicationConfiguration();
-        Application.initializeApplication(new GhidraApplicationLayout(bundle.toFile()), configuration);
+        beginTimingPhase("application-initialization");
+        try {
+            Application.initializeApplication(new GhidraApplicationLayout(bundle.toFile()), configuration);
+        } finally {
+            endTimingPhase("application-initialization");
+        }
         if (arguments.length == 2 && arguments[1].equals("probe")) {
             var languages = ghidra.program.util.DefaultLanguageService.getLanguageService();
             if (languages.getLanguageDescriptions(false).isEmpty()) {
@@ -131,7 +178,11 @@ public final class BundledGhidraWorker {
         }
         analyzer.getOptions().setPostScriptsWithArgs(List.of(new Pair<>(
             "RunBundledExports.class", guardedArguments.toArray(String[]::new))));
+        if (timingInvocationId != null) {
+            analyzer.getOptions().setPreScriptsWithArgs(List.of(new Pair<>("AnalysisTimingPreScript.java", new String[0])));
+        }
         if (diagnostics != null) diagnostics.phase(JvmMxBeanDiagnostics.Phase.IMPORT_AND_ANALYSIS, null);
+        beginTimingPhase("project-open-import-pre-analysis");
         try {
             analyzer.processLocal(projectLocation.toString(), projectName, "/", List.of(binary.toFile()));
         } finally {
