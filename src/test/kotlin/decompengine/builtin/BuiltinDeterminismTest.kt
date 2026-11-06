@@ -223,7 +223,15 @@ class BuiltinDeterminismTest {
         val inspected = BuiltinJournal.inspect(journal, AgentExecutionRequestBinding.capture(req), finalCommitment)
         assertTrue(inspected.complete)
         assertFalse(inspected.indeterminate)
-        assertEquals(1, inspected.records.count { kind(it) == "RESUME" })
+        val resumeRecord = inspected.records.single { kind(it) == "RESUME" }
+        val resumePayload = resumeRecord.getValue("payload").jsonObject
+        assertEquals(initialCommitment.headSha256, resumePayload.getValue("checkpointHeadSha256").jsonPrimitive.content)
+        assertEquals(initialCommitment.records, resumePayload.getValue("checkpointRecords").jsonPrimitive.int)
+        assertEquals(reference.headSha256, resumePayload.getValue("checkpointHeadSha256").jsonPrimitive.content)
+        assertEquals(reference.records, resumePayload.getValue("checkpointRecords").jsonPrimitive.int)
+        assertEquals(AgentExecutionRequestBinding.capture(req), initial.requestBinding)
+        assertEquals(AgentExecutionRequestBinding.capture(req), resumed.requestBinding)
+        assertNull(resumed.requireResult().session)
         verifyCheckpointRecords(inspected.records, req)
         return RunResult(req, journal, checkpoint, initial, resumed, provider, counters, events.toList(),
             initialCommitment, reference, inspected, Files.readAllBytes(workspace.resolve(sourcePath.relativePath)).toList())
@@ -262,6 +270,14 @@ class BuiltinDeterminismTest {
         assertEquals(listOf("read-1", "edit-1"), toolResults(first.finalInspection.records).map { it.getValue("callId").jsonPrimitive.content })
         assertEquals(logicalJournal(first.finalInspection.records), logicalJournal(second.finalInspection.records))
         assertEquals(outcomeProjection(first.finalReceipt), outcomeProjection(second.finalReceipt))
+        listOf(first, second).forEach { run ->
+            assertEquals(210L, run.finalReceipt.requireResult().usage?.inputTokens)
+            assertEquals(49L, run.finalReceipt.requireResult().usage?.outputTokens)
+            assertEquals(2, run.finalReceipt.requireResult().usage?.toolCalls)
+            assertEquals("candidate-source".encodeToByteArray().toList(), run.finalBytes)
+            assertEquals(listOf(expectedChange("candidate-source")), evidence(run.finalReceipt).candidateChanges.map(::changeProjection))
+            assertEquals(listOf(expectedChange("candidate-source")), run.finalReceipt.requireResult().changes.map(::changeProjection))
+        }
         verifyOutcomeClock(first.finalReceipt, first.request)
         verifyOutcomeClock(second.finalReceipt, second.request)
         assertEquals(first.finalBytes, second.finalBytes)
@@ -307,6 +323,14 @@ class BuiltinDeterminismTest {
         assertEquals(resumedResults, toolResults(directInspection.records))
         assertEquals(resumedEvents, directEvents)
         assertEquals(resumedOutcome, outcomeProjection(directReceipt))
+        assertEquals(AgentExecutionRequestBinding.capture(resumed.request), resumed.finalReceipt.requestBinding)
+        assertEquals(AgentExecutionRequestBinding.capture(directRequest), directReceipt.requestBinding)
+        assertNull(resumed.finalReceipt.requireResult().session)
+        assertNull(directReceipt.requireResult().session)
+        assertEquals(210L, directReceipt.requireResult().usage?.inputTokens)
+        assertEquals(49L, directReceipt.requireResult().usage?.outputTokens)
+        assertEquals(2, directReceipt.requireResult().usage?.toolCalls)
+        assertEquals(listOf(expectedChange("candidate-source")), directReceipt.requireResult().changes.map(::changeProjection))
         verifyOutcomeClock(resumed.finalReceipt, resumed.request)
         verifyOutcomeClock(directReceipt, directRequest)
         assertEquals(resumedChanges, directReceipt.requireResult().changes)
@@ -535,6 +559,7 @@ class BuiltinDeterminismTest {
         val outputTokens: Long?,
         val cachedInputTokens: Long?,
         val toolCalls: Int?,
+        val session: String?,
         val failureKind: String?,
         val failureMessage: String?,
         val failureRetryable: Boolean?,
@@ -545,13 +570,16 @@ class BuiltinDeterminismTest {
         is AgentExecutionOutcome.Returned -> outcome.result.let { result -> OutcomeProjection(
             "returned", result.stopReason.name, result.summary, result.changes.map(::changeProjection),
             result.usage?.inputTokens, result.usage?.outputTokens, result.usage?.cachedInputTokens, result.usage?.toolCalls,
-            null, null, null, emptyMap(),
+            result.session?.toString(), null, null, null, emptyMap(),
         ) }
         is AgentExecutionOutcome.Failed -> outcome.failure.let { failure -> OutcomeProjection(
             "failed", null, null, emptyList(), null, null, null, null,
-            failure.kind.name, failure.message, failure.retryable, failure.details.toSortedMap(),
+            null, failure.kind.name, failure.message, failure.retryable, failure.details.toSortedMap(),
         ) }
     }
+
+    private fun expectedChange(text: String) = changeProjection(AgentFileChange(
+        sourcePath, AgentFileChangeKind.MODIFIED, hash("old".toByteArray()), hash(text.toByteArray()), text.toByteArray().size.toLong()))
 
     private fun verifyOutcomeClock(receipt: AgentExecutionReceipt, request: AgentExecutionRequest) {
         val result = receipt.requireResult()
