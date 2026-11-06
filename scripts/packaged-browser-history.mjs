@@ -22,7 +22,8 @@ export async function seedHistory(root) {
   const attempts = Array.from({ length: 55 }, (_, index) => {
     const state = ['completed', 'failed', 'interrupted'][index % 3];
     const time = new Date(Date.parse(at) + index * 2000).toISOString();
-    return { runId: `run_fixture_${index}`, jobId, workflow: 'reconstruct', state, version: `version_fixture_${index}`,
+    return { runId: `run_fixture_${index}`, jobId, workflow: 'reconstruct', state,
+      version: `version_${index.toString(16).padStart(32, '0')}`,
       createdAt: time, startedAt: time, endedAt: new Date(Date.parse(time) + 1000).toISOString(),
       previousRunId: index ? `run_fixture_${index - 1}` : null, inputRevisionId: null, harnessCapabilityId: null,
       limits: { wallClockMs: '60000', idleMs: '15000', maxOutputBytes: '1048576', maxToolCalls: '16' },
@@ -31,9 +32,12 @@ export async function seedHistory(root) {
       candidate: state === 'completed' ? { revisionId: `revision_fixture_${index}`, sourceSha256: 'e'.repeat(64) } : null,
       acceptedRevision: null };
   });
-  const state = { schemaVersion: 1, jobId, version: 'version_fixture_history',
+  // Public job projections validate the persisted snapshot token using the production version shape.
+  const state = { schemaVersion: 1, jobId, version: `version_${'a'.repeat(32)}`,
     legacy: { originalJobSha256: createHash('sha256').update(jobBytes).digest('hex'), status: 'uploaded', recoveredInterrupted: false },
     attempts, acceptedRevision: null };
+  assert.match(state.version, /^version_[a-f0-9]{32}$/);
+  for (const attempt of attempts) assert.match(attempt.version, /^version_[a-f0-9]{32}$/);
   const retained = { 'input.elf': input, 'job.json': jobBytes, 'workflow-state.json': JSON.stringify(state) };
   for (const [name, bytes] of Object.entries(retained)) await fs.writeFile(join(directory, name), bytes, { flag: 'wx', mode: 0o600 });
   const reportDirectory = join(directory, 'reports', 'runs', 'run_fixture_3');

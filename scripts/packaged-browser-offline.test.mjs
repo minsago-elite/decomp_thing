@@ -1,12 +1,36 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { promises as fs } from 'node:fs';
+import { join } from 'node:path';
 import { OFFLINE_CLAIMS, OFFLINE_SCHEMA, OFFLINE_LABEL, RECONNECT_LABEL, COMMAND_PAUSED, COMMAND_VERIFIED, assertOffline, isExpectedRead, isNoStore, qualifyOffline } from './packaged-browser-offline.mjs';
+import { seedHistory } from './packaged-browser-history.mjs';
 
 const origin = 'http://127.0.0.1:41234';
 const job = 'd'.repeat(32);
 const run = 'run_fixture_54';
 const api = path => `${origin}/nested/api/v1/${path}`;
 const token = (n) => `0000000${n}-0000-4000-8000-000000000000`;
+
+test('offline history seed uses server-valid opaque workflow versions and a valid failed terminal state', async () => {
+  const build = join(process.cwd(), 'build');
+  await fs.mkdir(build, { recursive: true });
+  const parent = await fs.mkdtemp(join(build, 'packaged-offline-history-test-'));
+  try {
+    const fixture = await seedHistory(join(parent, 'fixture'));
+    const state = JSON.parse(fixture.retained['workflow-state.json']);
+    assert.match(state.version, /^version_[a-f0-9]{32}$/);
+    for (const attempt of state.attempts) assert.match(attempt.version, /^version_[a-f0-9]{32}$/);
+    const latest = state.attempts.at(-1);
+    latest.state = 'failed';
+    latest.terminalReason = 'FAILED';
+    latest.candidate = null;
+    assert.equal(latest.endedAt >= latest.startedAt, true);
+    assert.equal(latest.acceptedRevision, null);
+    assert.equal(latest.terminalReason, 'FAILED');
+  } finally {
+    await fs.rm(parent, { recursive: true, force: true });
+  }
+});
 
 function clean() {
   const requestIds = new Map();

@@ -780,8 +780,8 @@ try {
   }
   const scaleFixture = values.mode === 'scale' ? await seedScale(data) : null;
   const liveFixture = values.mode === 'live' ? await seedLive(data) : null;
-  const populated = !!(historyFixture || restartFixture || scaleFixture || liveFixture);
-  const libraryText = historyFixture || restartFixture ? 'synthetic-history.elf' : scaleFixture ? 'synthetic-project-09999.elf'
+  const populated = !!(historyFixture || restartFixture || offlineFixture || scaleFixture || liveFixture);
+  const libraryText = historyFixture || restartFixture || offlineFixture ? 'synthetic-history.elf' : scaleFixture ? 'synthetic-project-09999.elf'
     : liveFixture ? 'live-dashboard-2.elf' : 'No uploaded jobs yet.';
   let developmentPort;
   let browserOrigin;
