@@ -543,9 +543,20 @@ async function qualifyOfflineMode({ origin, manifest, fixture }) {
     return { generation: createHash('sha256').update(cookie.value).digest('hex').slice(0, 16), httpOnly: cookie.httpOnly };
   };
   const notice = `(document.querySelector('.connection-notice h2')?.textContent ?? null)`;
-  const retryButton = `[...document.querySelectorAll('button')].find((button) => button.textContent === 'Retry as a new attempt')`;
   const readActionsButton = `[...document.querySelectorAll('button')].find((button) => button.textContent === 'Read available actions')`;
-  const attemptStatus = `(document.querySelector(${JSON.stringify(`section[aria-labelledby="attempt-controls-title-${runId}"] [role="status"]`)})?.textContent ?? null)`;
+  const attemptSection = `document.querySelector(${JSON.stringify(`section[aria-labelledby="attempt-controls-title-${runId}"]`)})`;
+  const attemptStatus = `((${attemptSection})?.querySelector('[role="status"]')?.textContent ?? null)`;
+  const retryAvailability = `(() => {
+    const section = ${attemptSection};
+    const heading = [...(section?.querySelectorAll('dt') ?? [])].find((item) => item.textContent.trim() === 'Retry');
+    const detail = heading?.nextElementSibling;
+    return { available: !!detail?.querySelector('button'), reasonText: detail?.textContent.trim() ?? null };
+  })()`;
+  const commandButtonCount = `(() => {
+    const section = ${attemptSection};
+    return [...(section?.querySelectorAll('button') ?? [])].filter((button) =>
+      ['Request cancellation', 'Retry as a new attempt', 'Resume from checkpoint'].includes(button.textContent.trim())).length;
+  })()`;
   const stores = { cacheNames: new Set(), checkedPhases: [], registrations: 0, controlled: false, localEntries: 0, sessionEntries: 0, indexedDatabases: 0 };
   const recordStores = async () => {
     const observed = await browserStores();
@@ -568,42 +579,46 @@ async function qualifyOfflineMode({ origin, manifest, fixture }) {
     await cdp.call('Page.navigate', { url: runUrl }, sessionId);
     await ready(tab, `document.querySelector('h1')?.textContent === 'Workflow attempt' && document.body.innerText.includes(${JSON.stringify(runId)}) && !!(${readActionsButton})`, 'seeded failed attempt online');
     await evaluate(tab, `(${readActionsButton}).click()`);
-    await ready(tab, `!!(${retryButton}) && !(${retryButton}).disabled && ${attemptStatus} === ${JSON.stringify(COMMAND_VERIFIED)}`, 'server-verified retry action');
+    await ready(tab, `${attemptStatus} === ${JSON.stringify(COMMAND_VERIFIED)} && (${retryAvailability}).reasonText === 'Unavailable: this workflow is not available on this server.'`, 'server-verified unavailable retry');
     await delay(500);
     const before = await sessionGeneration();
     await recordStores();
     const baseline = { ...(await pageState()), privateTextShown: await evaluate(tab, `document.body.innerText.includes(${JSON.stringify(runId)})`),
-      controlStatus: await evaluate(tab, attemptStatus) };
+      controlStatus: await evaluate(tab, attemptStatus), ...await evaluate(tab, retryAvailability), executionCommandButtons: await evaluate(tab, commandButtonCount) };
     await captureOfflineEvidence('offline-baseline.png');
 
     phase = 'offline';
     await setOffline(true);
-    await ready(tab, `navigator.onLine === false && ${notice} === 'Browser reports offline' && (${retryButton})?.disabled === true && ${attemptStatus} === ${JSON.stringify(COMMAND_PAUSED)}`,
+    await ready(tab, `navigator.onLine === false && ${notice} === 'Browser reports offline' && (${readActionsButton})?.disabled === true && ${attemptStatus} === ${JSON.stringify(COMMAND_PAUSED)}`,
       'offline label and paused attempt controls');
     const commandState = await evaluate(tab, `(() => {
-      const button = (${retryButton});
+      const button = (${readActionsButton});
       if (!button) return { found: false, disabled: false };
       button.click();
       return { found: true, disabled: button.disabled };
     })()`);
-    assert.equal(commandState.found, true, 'Offline retry attempt did not find the verified command');
-    assert.equal(commandState.disabled, true, 'Offline retry command became enabled');
+    assert.equal(commandState.found, true, 'Offline action-read probe did not find the real control');
+    assert.equal(commandState.disabled, true, 'Offline action-read control became enabled');
+    assert.equal(await evaluate(tab, commandButtonCount), 0, 'The unregistered production workflow unexpectedly exposed a command');
     await delay(1500);
     await recordStores();
     const offline = { ...(await pageState()), noticeHeading: await evaluate(tab, notice),
       privateTextShown: await evaluate(tab, `document.body.innerText.includes(${JSON.stringify(runId)})`),
-      controlStatus: await evaluate(tab, attemptStatus), commandAction: 'retry', commandDisabled: await evaluate(tab, `(${retryButton}).disabled`), disabledClickProbeAttempts: 1,
+      controlStatus: await evaluate(tab, attemptStatus), ...await evaluate(tab, retryAvailability),
+      executionCommandButtons: await evaluate(tab, commandButtonCount),
+      controlAction: 'read-available-actions', controlDisabled: await evaluate(tab, `(${readActionsButton}).disabled`), disabledClickProbeAttempts: 1,
       requestsAfterRefusal: requests.filter((request) => request.phase === 'offline').length, screenshot: 'offline-controls.png' };
     await captureOfflineEvidence(offline.screenshot);
 
     phase = 'reconnect';
     const reconnectStarted = performance.now();
     await setOffline(false);
-    await ready(tab, `navigator.onLine === true && ${notice} === 'Refresh loaded information' && (${retryButton})?.disabled === false`, 'reconnect label and recovered controls');
+    await ready(tab, `navigator.onLine === true && ${notice} === 'Refresh loaded information' && (${readActionsButton})?.disabled === false`, 'reconnect label and recovered controls');
     const reconnectMs = Math.round(performance.now() - reconnectStarted);
     await delay(2500); // Bounded window for the jittered session revalidation and any replay.
     const reconnect = { ...(await pageState()), noticeHeading: await evaluate(tab, notice),
-      commandEnabled: await evaluate(tab, `(${retryButton}).disabled === false`), recoveryMs: reconnectMs };
+      readActionsEnabled: await evaluate(tab, `(${readActionsButton}).disabled === false`), ...await evaluate(tab, retryAvailability),
+      executionCommandButtons: await evaluate(tab, commandButtonCount), recoveryMs: reconnectMs };
 
     phase = 'offline-reload';
     await setOffline(true);
@@ -625,14 +640,15 @@ async function qualifyOfflineMode({ origin, manifest, fixture }) {
     await cdp.call('Page.navigate', { url: runUrl }, sessionId);
     await ready(tab, `document.querySelector('h1')?.textContent === 'Workflow attempt' && document.body.innerText.includes(${JSON.stringify(runId)}) && !!(${readActionsButton})`, 'attempt re-read after recovery');
     await evaluate(tab, `(${readActionsButton}).click()`);
-    await ready(tab, `!!(${retryButton}) && !(${retryButton}).disabled && ${attemptStatus} === ${JSON.stringify(COMMAND_VERIFIED)}`, 'retry action re-read after recovery');
+    await ready(tab, `${attemptStatus} === ${JSON.stringify(COMMAND_VERIFIED)} && (${retryAvailability}).reasonText === 'Unavailable: this workflow is not available on this server.'`, 'actions re-read after recovery');
     const recoveryMs = Math.round(performance.now() - recoveryStarted);
     const observationStarted = performance.now();
     await delay(3000);
     await recordStores();
     const after = await sessionGeneration();
     const recovery = { ...(await pageState()), privateTextShown: await evaluate(tab, `document.body.innerText.includes(${JSON.stringify(runId)})`),
-      controlStatus: await evaluate(tab, attemptStatus), recoveryMs,
+      controlStatus: await evaluate(tab, attemptStatus), ...await evaluate(tab, retryAvailability),
+      executionCommandButtons: await evaluate(tab, commandButtonCount), recoveryMs,
       observationMs: Math.round(performance.now() - observationStarted) };
     await captureOfflineEvidence('offline-recovered.png');
     evidence = { schema: OFFLINE_SCHEMA, origin, basePath: '/nested/',
@@ -646,6 +662,35 @@ async function qualifyOfflineMode({ origin, manifest, fixture }) {
       session: { generationBefore: before.generation, generationAfter: after.generation, cookieHttpOnly: before.httpOnly && after.httpOnly },
       requests, responses, failedRequests, events, phases: { baseline, offline, reconnect, offlineReload, recovery }, screenshots, emulation, cleanup,
       claims: structuredClone(OFFLINE_CLAIMS) };
+  } catch (error) {
+    let page = null;
+    try {
+      page = await evaluate(tab, `(() => {
+        const section = ${attemptSection};
+        const retryHeading = [...(section?.querySelectorAll('dt') ?? [])].find((item) => item.textContent.trim() === 'Retry');
+        const readButton = [...document.querySelectorAll('button')].find((button) => button.textContent.trim() === 'Read available actions');
+        return {
+          readyState: document.readyState,
+          routePath: location.pathname,
+          attemptStatus: section?.querySelector('[role="status"]')?.textContent.trim() ?? null,
+          retryReasonText: retryHeading?.nextElementSibling?.textContent.trim() ?? null,
+          executionCommandButtons: [...(section?.querySelectorAll('button') ?? [])].filter((button) =>
+            ['Request cancellation', 'Retry as a new attempt', 'Resume from checkpoint'].includes(button.textContent.trim())).length,
+          actionReadDisabled: readButton?.disabled ?? null,
+        };
+      })()`);
+    } catch { /* retain network diagnostics if page state is no longer readable */ }
+    const safePath = (url) => { try { return new URL(url).pathname.slice(0, 512); } catch { return null; } };
+    report.offlineFailureDiagnostics = {
+      phase,
+      error: String(error?.message ?? error).slice(0, 512),
+      page,
+      requests: requests.slice(-100).map(({ requestId, phase: at, method, url, type }) => ({ requestId, phase: at, method, path: safePath(url), type })),
+      responses: responses.slice(-100).map(({ requestId, phase: at, url, status, type }) => ({ requestId, phase: at, path: safePath(url), status, type })),
+      failedRequests: failedRequests.slice(-100),
+      truncated: requests.length > 100 || responses.length > 100 || failedRequests.length > 100,
+    };
+    throw error;
   } finally {
     recording = false;
     let listenersDetached = true;

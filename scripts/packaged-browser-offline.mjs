@@ -3,7 +3,7 @@
 // packaged JVM and Chrome over CDP; this module only validates that bounded evidence and
 // fails closed on anything missing, unknown or out of bounds. It performs no I/O.
 
-export const OFFLINE_SCHEMA = 'packaged-browser-offline-v1';
+export const OFFLINE_SCHEMA = 'packaged-browser-offline-v2';
 export const MAX_ENTRIES = 2000;
 export const MAX_TEXT = 8192;
 export const RECOVERY_BOUND_MS = 15000;
@@ -25,9 +25,10 @@ export const OFFLINE_CLAIMS = Object.freeze({
   simulated: Object.freeze([
     'network loss is browser-level emulation, not a host interface or server outage',
     'job data is a seeded synthetic fixture, not a real decompilation job',
-    'retry command refusal is exercised on a server-verified failed synthetic attempt',
+    'the packaged server has no registered durable workflow adapter, so retry is unavailable; the gate verifies that the action read is disabled offline and emits no request',
   ]),
   notClaimed: Object.freeze([
+    'execution-command replay or refusal for an available retry action',
     'old-build/new-server upgrade behavior',
     'cross-engine (Firefox/WebKit) qualification (#631)',
     'full parent #222 acceptance',
@@ -270,27 +271,40 @@ function checkPhases(phases, markers, origin, failures) {
   const { baseline, offline, reconnect, offlineReload, recovery } = phases;
   const pageKeys = ['url', 'historyLength', 'pageToken'];
   const expectedAttemptUrl = `${origin}/nested/jobs/${markers[0]}/runs/${markers[1]}`;
-  if (exactKeys(baseline, [...pageKeys, 'privateTextShown', 'controlStatus'], 'phases.baseline', failures)) {
+  if (exactKeys(baseline, [...pageKeys, 'privateTextShown', 'controlStatus', 'retryAvailable', 'retryReasonText', 'executionCommandButtons'], 'phases.baseline', failures)) {
     if (baseline.privateTextShown !== true) failures.push('phases.baseline: seeded job was not rendered online (control)');
-    if (baseline.controlStatus !== COMMAND_VERIFIED) failures.push('phases.baseline: retry action was not verified by the server read');
+    if (baseline.controlStatus !== COMMAND_VERIFIED) failures.push('phases.baseline: actions were not verified by the server read');
+    if (baseline.retryAvailable !== false || baseline.retryReasonText !== 'Unavailable: this workflow is not available on this server.') {
+      failures.push('phases.baseline: retry availability does not match the production server response');
+    }
+    if (baseline.executionCommandButtons !== 0) failures.push('phases.baseline: unregistered workflow exposed an execution command');
     if (!/^[0-9a-f-]{36}$/.test(baseline.pageToken ?? '')) failures.push('phases.baseline: page token missing');
     if (!boundedString(baseline.url, 2048) || !Number.isSafeInteger(baseline.historyLength) || baseline.historyLength < 1) failures.push('phases.baseline: URL or history identity missing');
     if (baseline.url !== expectedAttemptUrl) failures.push('phases.baseline: URL is not the seeded failed attempt');
   }
-  if (exactKeys(offline, [...pageKeys, 'noticeHeading', 'privateTextShown', 'controlStatus', 'commandAction', 'commandDisabled', 'disabledClickProbeAttempts', 'requestsAfterRefusal', 'screenshot'], 'phases.offline', failures)) {
+  if (exactKeys(offline, [...pageKeys, 'noticeHeading', 'privateTextShown', 'controlStatus', 'retryAvailable', 'retryReasonText',
+    'executionCommandButtons', 'controlAction', 'controlDisabled', 'disabledClickProbeAttempts', 'requestsAfterRefusal', 'screenshot'], 'phases.offline', failures)) {
     if (offline.noticeHeading !== OFFLINE_LABEL) failures.push('phases.offline: offline/stale label missing');
     if (offline.privateTextShown !== true) failures.push('phases.offline: already-open attempt is not available from in-memory page state');
     if (offline.controlStatus !== COMMAND_PAUSED) failures.push('phases.offline: attempt command control did not report paused');
-    if (offline.commandAction !== 'retry' || offline.commandDisabled !== true) failures.push('phases.offline: retry command was not disabled');
+    if (offline.retryAvailable !== false || offline.retryReasonText !== 'Unavailable: this workflow is not available on this server.') {
+      failures.push('phases.offline: retry availability changed while offline');
+    }
+    if (offline.executionCommandButtons !== 0) failures.push('phases.offline: execution command appeared while offline');
+    if (offline.controlAction !== 'read-available-actions' || offline.controlDisabled !== true) failures.push('phases.offline: action read was not disabled');
     if (offline.disabledClickProbeAttempts !== 1) failures.push('phases.offline: expected one disabled DOM click probe');
-    if (offline.requestsAfterRefusal !== 0) failures.push('phases.offline: disabled retry probe emitted a request');
+    if (offline.requestsAfterRefusal !== 0) failures.push('phases.offline: disabled action-read probe emitted a request');
     if (offline.pageToken !== baseline?.pageToken) failures.push('phases.offline: page changed before reload');
     if (offline.url !== baseline?.url || offline.historyLength !== baseline?.historyLength) failures.push('phases.offline: URL or history changed before reload');
     if (!/^[a-z0-9-]+\.png$/.test(offline.screenshot ?? '')) failures.push('phases.offline: screenshot not retained');
   }
-  if (exactKeys(reconnect, [...pageKeys, 'noticeHeading', 'commandEnabled', 'recoveryMs'], 'phases.reconnect', failures)) {
+  if (exactKeys(reconnect, [...pageKeys, 'noticeHeading', 'readActionsEnabled', 'retryAvailable', 'retryReasonText', 'executionCommandButtons', 'recoveryMs'], 'phases.reconnect', failures)) {
     if (reconnect.noticeHeading !== RECONNECT_LABEL) failures.push('phases.reconnect: reconnect label missing');
-    if (reconnect.commandEnabled !== true) failures.push('phases.reconnect: retry command control did not recover');
+    if (reconnect.readActionsEnabled !== true) failures.push('phases.reconnect: action-read control did not recover');
+    if (reconnect.retryAvailable !== false || reconnect.retryReasonText !== 'Unavailable: this workflow is not available on this server.') {
+      failures.push('phases.reconnect: retry availability changed without a server response');
+    }
+    if (reconnect.executionCommandButtons !== 0) failures.push('phases.reconnect: unregistered workflow exposed an execution command');
     if (reconnect.pageToken !== baseline?.pageToken || reconnect.url !== baseline?.url || reconnect.historyLength !== baseline?.historyLength) failures.push('phases.reconnect: page identity or history changed during recovery');
     if (!(Number.isFinite(reconnect.recoveryMs) && reconnect.recoveryMs >= 0 && reconnect.recoveryMs <= RECOVERY_BOUND_MS)) failures.push('phases.reconnect: recovery not bounded');
   }
@@ -302,9 +316,13 @@ function checkPhases(phases, markers, origin, failures) {
     if (offlineReload.pageToken === baseline?.pageToken) failures.push('phases.offlineReload: reload did not replace the page');
     if (!/^[a-z0-9-]+\.png$/.test(offlineReload.screenshot ?? '')) failures.push('phases.offlineReload: screenshot not retained');
   }
-  if (exactKeys(recovery, [...pageKeys, 'privateTextShown', 'controlStatus', 'recoveryMs', 'observationMs'], 'phases.recovery', failures)) {
+  if (exactKeys(recovery, [...pageKeys, 'privateTextShown', 'controlStatus', 'retryAvailable', 'retryReasonText', 'executionCommandButtons', 'recoveryMs', 'observationMs'], 'phases.recovery', failures)) {
     if (recovery.privateTextShown !== true) failures.push('phases.recovery: job not re-read after reconnect');
-    if (recovery.controlStatus !== COMMAND_VERIFIED) failures.push('phases.recovery: retry action was not re-verified after reconnect');
+    if (recovery.controlStatus !== COMMAND_VERIFIED) failures.push('phases.recovery: actions were not re-verified after reconnect');
+    if (recovery.retryAvailable !== false || recovery.retryReasonText !== 'Unavailable: this workflow is not available on this server.') {
+      failures.push('phases.recovery: retry availability differs from the server response');
+    }
+    if (recovery.executionCommandButtons !== 0) failures.push('phases.recovery: unregistered workflow exposed an execution command');
     if (recovery.url !== baseline?.url) failures.push('phases.recovery: recovered URL differs from the seeded job');
     if (!(Number.isFinite(recovery.recoveryMs) && recovery.recoveryMs >= 0 && recovery.recoveryMs <= RECOVERY_BOUND_MS)) failures.push('phases.recovery: recovery not bounded');
     if (!(Number.isFinite(recovery.observationMs) && recovery.observationMs >= 2000 && recovery.observationMs <= RECOVERY_BOUND_MS)) failures.push('phases.recovery: replay observation window outside its bound');

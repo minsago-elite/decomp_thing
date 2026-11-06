@@ -112,14 +112,20 @@ function clean() {
       { phase: 'recovery', type: 'online', isTrusted: true, onLine: true },
     ],
     phases: {
-      baseline: { url: `${origin}/nested/jobs/${job}/runs/${run}`, historyLength: 3, pageToken: token(1), privateTextShown: true, controlStatus: COMMAND_VERIFIED },
+      baseline: { url: `${origin}/nested/jobs/${job}/runs/${run}`, historyLength: 3, pageToken: token(1), privateTextShown: true,
+        controlStatus: COMMAND_VERIFIED, retryAvailable: false, retryReasonText: 'Unavailable: this workflow is not available on this server.', executionCommandButtons: 0 },
       offline: { url: `${origin}/nested/jobs/${job}/runs/${run}`, historyLength: 3, pageToken: token(1), noticeHeading: OFFLINE_LABEL,
-        privateTextShown: true, controlStatus: COMMAND_PAUSED, commandAction: 'retry', commandDisabled: true,
+        privateTextShown: true, controlStatus: COMMAND_PAUSED, retryAvailable: false,
+        retryReasonText: 'Unavailable: this workflow is not available on this server.',
+        executionCommandButtons: 0,
+        controlAction: 'read-available-actions', controlDisabled: true,
         disabledClickProbeAttempts: 1, requestsAfterRefusal: 0, screenshot: 'offline-controls.png' },
-      reconnect: { url: `${origin}/nested/jobs/${job}/runs/${run}`, historyLength: 3, pageToken: token(1), noticeHeading: RECONNECT_LABEL, commandEnabled: true, recoveryMs: 900 },
+      reconnect: { url: `${origin}/nested/jobs/${job}/runs/${run}`, historyLength: 3, pageToken: token(1), noticeHeading: RECONNECT_LABEL,
+        readActionsEnabled: true, retryAvailable: false, retryReasonText: 'Unavailable: this workflow is not available on this server.', executionCommandButtons: 0, recoveryMs: 900 },
       offlineReload: { url: 'chrome-error://chromewebdata/', historyLength: 3, pageToken: token(2), renderedText: 'No internet', documentFailed: true, screenshot: 'offline-reload.png' },
       recovery: { url: `${origin}/nested/jobs/${job}/runs/${run}`, historyLength: 3, pageToken: token(3), privateTextShown: true,
-        controlStatus: COMMAND_VERIFIED, recoveryMs: 1500, observationMs: 3000 },
+        controlStatus: COMMAND_VERIFIED, retryAvailable: false, retryReasonText: 'Unavailable: this workflow is not available on this server.',
+        executionCommandButtons: 0, recoveryMs: 1500, observationMs: 3000 },
     },
     screenshots: ['offline-baseline.png', 'offline-controls.png', 'offline-reload.png', 'offline-recovered.png'].map(name => ({ name, bytes: 512, sha256: 'e'.repeat(64) })),
     emulation: { method: 'Network.emulateNetworkConditions', offlineCalls: 2, onlineCalls: 2, restored: true },
@@ -181,9 +187,17 @@ test('offline document failure must be the one expected emulated network failure
 });
 test('missing stale label fails', () => fails(e => { e.phases.offline.noticeHeading = null; }, /offline\/stale label missing/));
 test('offline view must retain only already-open attempt text', () => fails(e => { e.phases.offline.privateTextShown = false; }, /already-open attempt is not available/));
-test('enabled retry command offline fails', () => fails(e => { e.phases.offline.commandDisabled = false; }, /retry command was not disabled/));
-test('retry command must be disabled again after reconnect', () => fails(e => { e.phases.reconnect.commandEnabled = false; }, /retry command control did not recover/));
-test('disabled retry probe emitting a request fails', () => fails(e => { e.phases.offline.requestsAfterRefusal = 1; }, /disabled retry probe emitted a request/));
+test('server-unavailable retry controls are pinned in every online read', () => {
+  fails(e => { e.phases.baseline.retryAvailable = true; }, /retry availability does not match/);
+  fails(e => { e.phases.recovery.retryReasonText = 'Unavailable: changed'; }, /retry availability differs/);
+  fails(e => { e.phases.reconnect.executionCommandButtons = 1; }, /unregistered workflow exposed an execution command/);
+});
+test('offline action read must be disabled while retry remains unavailable', () => {
+  fails(e => { e.phases.offline.controlDisabled = false; }, /action read was not disabled/);
+  fails(e => { e.phases.offline.retryAvailable = true; }, /retry availability changed while offline/);
+  fails(e => { e.phases.offline.requestsAfterRefusal = 1; }, /disabled action-read probe emitted a request/);
+});
+test('action read becomes available again after reconnect', () => fails(e => { e.phases.reconnect.readActionsEnabled = false; }, /action-read control did not recover/));
 test('mutation after reconnect fails', () => fails(e => { e.requests.push({ requestId: 'extra-1', phase: 'reconnect', method: 'PATCH', url: api(`jobs/${job}`), type: 'Fetch' }); }, /PATCH in reconnect/));
 test('command replay after recovery fails', () => fails(e => { e.requests.push({ requestId: 'extra-2', phase: 'recovery', method: 'POST', url: api(`jobs/${job}/runs/r/cancel`), type: 'Fetch' }); }, /command replay/));
 test('read while offline fails', () => fails(e => { e.requests.push({ requestId: 'extra-3', phase: 'offline', method: 'GET', url: api(`jobs/${job}`), type: 'Fetch' }); }, /reads must be suspended/));
