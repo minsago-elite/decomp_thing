@@ -68,6 +68,11 @@ export interface DiffHunk {
   lines: DiffLine[];
 }
 
+export interface OwnershipViolation {
+  expectedOwner: string;
+  actualOwner: string;
+}
+
 export interface ProposalFileChange {
   fileId: string;
   path: string;
@@ -76,7 +81,7 @@ export interface ProposalFileChange {
   candidateFileId: string | null;
   baseOwner: string | null;
   candidateOwner: string | null;
-  ownershipViolation: { expectedOwner: string; actualOwner: string } | null;
+  ownershipViolation: OwnershipViolation | null;
   sizeBytes: number | null;
   shownLines: number;
   totalLines: number | null;
@@ -131,6 +136,10 @@ function hasUnsupportedControl(value: string): boolean {
 
 function nullableText(value: unknown, max = 512): value is string | null {
   return value === null || text(value, max);
+}
+
+function isOwnershipViolation(value: unknown): value is OwnershipViolation | null {
+  return value === null || (record(value) && text(value.expectedOwner, 128) && text(value.actualOwner, 128));
 }
 
 function id(value: unknown): value is string {
@@ -201,7 +210,8 @@ function decodeFiles(value: unknown): ProposalFileChange[] | undefined {
     if (!record(item) || !id(item.fileId) || seen.has(item.fileId) || !text(item.path, 512) ||
       (item.kind !== 'added' && item.kind !== 'modified' && item.kind !== 'deleted' && item.kind !== 'binary') ||
       !(item.baseFileId === null || id(item.baseFileId)) || !(item.candidateFileId === null || id(item.candidateFileId)) ||
-      !nullableText(item.baseOwner, 128) || !nullableText(item.candidateOwner, 128) || !count(item.shownLines, PROPOSAL_REVIEW_LIMITS.linesPerFileInDocument) ||
+      !nullableText(item.baseOwner, 128) || !nullableText(item.candidateOwner, 128) || !isOwnershipViolation(item.ownershipViolation) ||
+      !count(item.shownLines, PROPOSAL_REVIEW_LIMITS.linesPerFileInDocument) ||
       !(item.totalLines === null || count(item.totalLines, 1_000_000)) || !(item.omittedBytes === null || count(item.omittedBytes, 1_000_000_000)) ||
       typeof item.truncated !== 'boolean' || !(item.sizeBytes === null || count(item.sizeBytes, 1_000_000_000_000)) ||
       !Array.isArray(item.hunks) || item.hunks.length > PROPOSAL_REVIEW_LIMITS.hunksPerFile) return undefined;

@@ -92,6 +92,9 @@ describe('proposal review fixture model', () => {
       file.baseFileId = null;
       file.candidateFileId = null;
     }],
+    ['malformed ownership violation evidence', (value: Record<string, unknown>) => {
+      (value.files as Array<Record<string, unknown>>)[0]!.ownershipViolation = {};
+    }],
   ])('rejects %s before exposing a partial review', (_name, mutate) => {
     const value = clone();
     mutate(value);

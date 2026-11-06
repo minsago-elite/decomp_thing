@@ -1,4 +1,5 @@
 import { render } from 'preact';
+import '../styles/app.css';
 import { ProposalReview } from './ProposalReview';
 
 const fixtureUrl = new URL('../../tests/fixtures/proposal-review/valid.json', import.meta.url);
