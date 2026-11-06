@@ -19,9 +19,70 @@ DRIVER_PATH = ROOT / "scripts/diagnose-gcc-snapshot-metadata.py"
 SPEC = importlib.util.spec_from_file_location("gcc_snapshot_diagnostic", DRIVER_PATH)
 diagnostic = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(diagnostic)
+GPG_SOCKET_NAMES = (
+    "S.gpg-agent", "S.gpg-agent.browser", "S.gpg-agent.extra", "S.gpg-agent.ssh",
+)
+GPG_SOCKET_PATH_BYTES = 108
+
+
+def _overlong_gpg_socket_names(home: Path) -> list[str]:
+    return [name for name in GPG_SOCKET_NAMES
+            if len(os.fsencode(home / name)) >= GPG_SOCKET_PATH_BYTES]
 
 
 class RecipeAndSanitizerTest(unittest.TestCase):
+    def test_gpg_socket_path_bound_covers_browser_socket(self):
+        for width in range(1, GPG_SOCKET_PATH_BYTES):
+            home = Path("/" + "x" * width)
+            lengths = {name: len(os.fsencode(home / name)) for name in GPG_SOCKET_NAMES}
+            if (lengths["S.gpg-agent.extra"] < GPG_SOCKET_PATH_BYTES and
+                    lengths["S.gpg-agent.browser"] >= GPG_SOCKET_PATH_BYTES):
+                self.assertEqual(["S.gpg-agent.browser"], _overlong_gpg_socket_names(home))
+                return
+        self.fail("no test path distinguished GnuPG's browser socket from extra socket")
+
+    def test_gpg_fixture_setup_failure_runs_registered_class_cleanup(self):
+        fixture = ActualAptSignatureControlsTest
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0, stdout=b"")
+
+        try:
+            with patch.object(subprocess, "run", side_effect=fake_run):
+                with self.assertRaisesRegex(RuntimeError, "fingerprint unavailable"):
+                    fixture.setUpClass()
+                fixture.doClassCleanups()
+        finally:
+            fixture.doClassCleanups()
+        self.assertTrue(any(command[0] == "gpgconf" for command in calls))
+        self.assertFalse(fixture.root.exists())
+
+    def test_gpg_fixture_cleanup_attempts_all_agents_and_temp_after_error(self):
+        fixture = ActualAptSignatureControlsTest
+        calls = []
+        cleanup_calls = []
+
+        class Temp:
+            def cleanup(self):
+                cleanup_calls.append("temp")
+
+        def fake_run(command, **kwargs):
+            calls.append(command)
+            if len(calls) == 1:
+                raise OSError("first agent cleanup failed")
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch.object(fixture, "homes", {
+                "trusted": Path("/fixture/t"), "unrelated": Path("/fixture/u")}, create=True), \
+             patch.object(fixture, "temp", Temp(), create=True), \
+             patch.object(subprocess, "run", side_effect=fake_run):
+            with self.assertRaisesRegex(RuntimeError, "failed to clean 1 GnuPG fixture resources"):
+                fixture._cleanup_fixture()
+        self.assertEqual(2, len(calls))
+        self.assertEqual(["temp"], cleanup_calls)
+
     def test_derived_recipe_is_exact_locked_metadata_prefix_and_stops_before_download(self):
         dockerfile = diagnostic.DOCKERFILE.read_bytes()
         lock = json.loads(diagnostic.LOCK.read_bytes())
@@ -420,15 +481,31 @@ class ProcessBoundsTest(unittest.TestCase):
     def test_owned_process_group_is_cleaned_after_leader_exits(self):
         scratch = Path(tempfile.mkdtemp(prefix="gcc-snapshot-descendant-", dir=ROOT / "build"))
         pid_file = scratch / "descendant.pid"
-        source = (
-            "import subprocess,sys; "
+        ready_file = scratch / "keeper.ready"
+        keeper_source = (
+            "import signal,subprocess,sys,time\n"
             "p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)'], "
-            "stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); "
-            "open(sys.argv[1],'w').write(str(p.pid))"
+            "stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
+            "signal.signal(signal.SIGTERM,lambda signum,frame:(p.wait(),sys.exit(0)))\n"
+            "open(sys.argv[1],'w').write(str(p.pid))\n"
+            "open(sys.argv[2],'w').write('ready')\n"
+            "while True:\n"
+            "    time.sleep(1)\n"
+        )
+        source = (
+            "import os,subprocess,sys,time\n"
+            "p=subprocess.Popen([sys.executable,'-c',sys.argv[3],sys.argv[1],sys.argv[2]], "
+            "stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
+            "deadline=time.monotonic()+10\n"
+            "while not os.path.exists(sys.argv[2]):\n"
+            "    if p.poll() is not None or time.monotonic() >= deadline:\n"
+            "        raise SystemExit(92)\n"
+            "    time.sleep(0.01)\n"
         )
         try:
             result = diagnostic._run_docker(
-                [os.environ.get("PYTHON", "python3"), "-c", source, str(pid_file)],
+                [os.environ.get("PYTHON", "python3"), "-c", source,
+                 str(pid_file), str(ready_file), keeper_source],
                 {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}, ROOT,
                 time.monotonic() + 45,
             )
@@ -436,6 +513,8 @@ class ProcessBoundsTest(unittest.TestCase):
             self.assertTrue(result["groupCleanupConfirmed"])
             self.assertTrue(result["complete"])
             self.assertTrue(pid_file.is_file())
+            with self.assertRaises(ProcessLookupError):
+                os.kill(int(pid_file.read_text()), 0)
         finally:
             shutil.rmtree(scratch)
 
@@ -450,6 +529,7 @@ class ActualAptSignatureControlsTest(unittest.TestCase):
         base = ROOT / "build"
         base.mkdir(parents=True, exist_ok=True)
         cls.temp = tempfile.TemporaryDirectory(prefix="g", dir=base)
+        cls.addClassCleanup(cls._cleanup_fixture)
         cls.root = Path(cls.temp.name)
         cls.root.chmod(0o755)
         cls.homes = {}
@@ -457,12 +537,12 @@ class ActualAptSignatureControlsTest(unittest.TestCase):
         for name, home_leaf in (("trusted", "t"), ("unrelated", "u")):
             home = cls.root / home_leaf
             home.mkdir(mode=0o700)
-            # Linux sun_path is 108 bytes including its terminating NUL. Keep
-            # GnuPG's longest socket name strictly below that limit.
-            socket_path = os.fsencode(home / "S.gpg-agent.extra")
-            if len(socket_path) >= 108:
-                raise RuntimeError("GnuPG fixture socket path exceeds the Unix-domain limit")
             cls.homes[name] = home
+            # Linux sun_path holds 108 bytes including the terminating NUL.
+            # Bound every named GnuPG socket before starting its agent.
+            too_long = _overlong_gpg_socket_names(home)
+            if too_long:
+                raise RuntimeError("GnuPG fixture socket path exceeds the Unix-domain limit")
             subprocess.run([
                 "gpg", "--batch", "--passphrase", "", "--homedir", str(home),
                 "--quick-generate-key", f"APT fixture {name} <{name}@invalid.example>",
@@ -486,12 +566,23 @@ class ActualAptSignatureControlsTest(unittest.TestCase):
             cls.keyrings[name] = keyring
 
     @classmethod
-    def tearDownClass(cls):
-        for home in cls.homes.values():
-            subprocess.run(["gpgconf", "--homedir", str(home), "--kill", "gpg-agent"],
-                           stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL, timeout=10, check=False)
-        cls.temp.cleanup()
+    def _cleanup_fixture(cls):
+        errors = []
+        for home in getattr(cls, "homes", {}).values():
+            try:
+                subprocess.run(["gpgconf", "--homedir", str(home), "--kill", "gpg-agent"],
+                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, timeout=10, check=False)
+            except (OSError, subprocess.SubprocessError) as error:
+                errors.append(error)
+        temp = getattr(cls, "temp", None)
+        if temp is not None:
+            try:
+                temp.cleanup()
+            except OSError as error:
+                errors.append(error)
+        if errors:
+            raise RuntimeError(f"failed to clean {len(errors)} GnuPG fixture resources") from errors[0]
 
     def setUp(self):
         self.case = Path(tempfile.mkdtemp(prefix="case-", dir=self.root))
