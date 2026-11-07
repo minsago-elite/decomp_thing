@@ -23,5 +23,5 @@ export function MetadataReceipt({ kind, receipt }: { kind: keyof typeof copy.lab
 
 /** A consistent, non-live-region warning for a verified snapshot kept after a transient read failure. */
 export function StaleMetadataNotice() {
-  return <p class="notice metadata-stale">{copy.retainedMetadataMayBeOutdated}</p>;
+  return <p>{copy.retainedMetadataMayBeOutdated}</p>;
 }
