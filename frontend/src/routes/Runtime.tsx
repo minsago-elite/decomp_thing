@@ -3,7 +3,7 @@ import { message as displayMessage } from '../shared/messages';
 import { formatExactBytes } from '../copy/format';
 import { commonCopy } from '../copy/common';
 import { sessionStatusCopy } from '../copy/shell';
-import { useLayoutEffect, useState } from 'preact/hooks';
+import { useLayoutEffect, useRef, useState } from 'preact/hooks';
 import type { BrowserSession } from '../session/session';
 import { SchedulerSummary } from '../jobs/SchedulerSummary';
 import { ProgressRetentionSummary } from '../jobs/ProgressRetentionSummary';
@@ -16,6 +16,16 @@ export default function Runtime({ identity, session = null, basePath = '' }: { i
   useLayoutEffect(() => {
     setState(session?.snapshot());
     return session?.subscribe(setState);
+  }, [session]);
+  // Session invalidation (including unknown-instance refreshes) discards instance-bound storage results.
+  const [storageEpoch, setStorageEpoch] = useState(0);
+  const observedSession = useRef(session);
+  useLayoutEffect(() => {
+    if (observedSession.current !== session) {
+      observedSession.current = session;
+      setStorageEpoch(epoch => epoch + 1);
+    }
+    return session?.onInvalidated(() => { setStorageEpoch(epoch => epoch + 1); });
   }, [session]);
   const snapshot = state && 'runtime' in state ? state.runtime ?? null : null;
   const runtimeReceipt = state && 'runtimeReceipt' in state ? state.runtimeReceipt : undefined;
@@ -55,7 +65,7 @@ export default function Runtime({ identity, session = null, basePath = '' }: { i
         </dl>
         <SchedulerSummary scheduler={snapshot.runtime.scheduler} />
         <ProgressRetentionSummary retention={snapshot.runtime.progressRetention} />
-        <StorageSummary key={snapshot.serverInstanceId ?? ''} basePath={basePath} />
+        <StorageSummary basePath={basePath} invalidationVersion={storageEpoch} />
         <h3>{copy.workflowCapabilities}</h3>
         {snapshot.capabilities.length === 0 ? <p>{copy.noCapabilitiesReported}</p> : <ul>
           {snapshot.capabilities.map(capability => <li key={capability.id}>

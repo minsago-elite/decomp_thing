@@ -170,6 +170,111 @@ it('discards instance-bound storage and maintenance results when the Runtime ser
   } finally { session.dispose(); }
 });
 
+it('discards instance-bound storage and maintenance results when a refresh omits the server instance', async () => {
+  const fixture = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/bootstrap.json'), 'utf8')) as { data: Bootstrap };
+  const data = { ...fixture.data, serverInstanceId: fixture.data.serverInstanceId ?? 'server_fixture_1', sessionExpiresAt: new Date(Date.now() + 60_000).toISOString() };
+  const storage = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/storage-summary.json'), 'utf8')) as { requestId: string; data: { totalBytes: string } };
+  const maintenance = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/maintenance-preview.json'), 'utf8')) as { requestId: string };
+  const { serverInstanceId: knownInstance, ...unknownIdentity } = data;
+  const responses = new Map([
+    ['/api/v1/storage', storage], ['/api/v1/storage/maintenance-preview', maintenance],
+  ]);
+  const fetcher = vi.fn<typeof fetch>(input => {
+    const requestUrl = input instanceof Request ? input.url : input instanceof URL ? input.href : input;
+    const path = new URL(requestUrl, window.location.origin).pathname;
+    const suffix = path.endsWith('/storage/maintenance-preview') ? '/api/v1/storage/maintenance-preview' : '/api/v1/storage';
+    const document = responses.get(suffix);
+    expect(document).toBeTruthy();
+    return Promise.resolve(new Response(JSON.stringify(document), { status: 200, headers: {
+      'Content-Type': 'application/json; charset=utf-8', 'X-Request-ID': document!.requestId,
+    } }));
+  });
+  vi.stubGlobal('fetch', fetcher);
+  const gateway = { bootstrap: vi.fn().mockResolvedValueOnce(data).mockResolvedValueOnce(unknownIdentity).mockResolvedValueOnce(unknownIdentity),
+    exchange: vi.fn(), logout: vi.fn() };
+  const session = createBrowserSession(gateway, '/');
+  try {
+    await session.initialize({ kind: 'absent' });
+    render(<Runtime identity={{ applicationVersion: '0.1.0', uiBuildId: data.uiBuildId }} session={session} />);
+    const read = screen.getByRole('button', { name: 'Read storage and maintenance preview' });
+    read.focus();
+    fireEvent.click(read);
+    await waitFor(() => expect(screen.getByText('Total').nextElementSibling?.textContent).toBe(formatExactBytes(storage.data.totalBytes)));
+    expect(screen.getByText('Maintenance preview (dry run)')).toBeTruthy();
+    await act(async () => { await session.refresh(); });
+    expect(screen.queryByText(knownInstance)).toBeNull();
+    expect(screen.queryByText(formatExactBytes(storage.data.totalBytes))).toBeNull();
+    expect(screen.queryByText('Maintenance preview (dry run)')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Read storage and maintenance preview' })).toBe(read);
+    expect(document.activeElement).toBe(read);
+    expect(screen.getByRole('status').textContent).toContain('Storage results were cleared because the local session changed.');
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    // A second refresh still without identity keys identically, so only session invalidation can clear it.
+    fireEvent.click(screen.getByRole('button', { name: 'Read storage and maintenance preview' }));
+    await waitFor(() => expect(screen.getByText('Total').nextElementSibling?.textContent).toBe(formatExactBytes(storage.data.totalBytes)));
+    await act(async () => { await session.refresh(); });
+    expect(screen.queryByText(formatExactBytes(storage.data.totalBytes))).toBeNull();
+    expect(screen.queryByText('Maintenance preview (dry run)')).toBeNull();
+    expect(fetcher).toHaveBeenCalledTimes(4);
+  } finally { session.dispose(); }
+});
+
+it('preserves storage and maintenance results through a transient reconnect failure', async () => {
+  const fixture = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/bootstrap.json'), 'utf8')) as { data: Bootstrap };
+  const data = { ...fixture.data, sessionExpiresAt: new Date(Date.now() + 60_000).toISOString() };
+  const storage = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/storage-summary.json'), 'utf8')) as { requestId: string; data: { totalBytes: string } };
+  const maintenance = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/maintenance-preview.json'), 'utf8')) as { requestId: string };
+  const fetcher = vi.fn<typeof fetch>(input => {
+    const requestUrl = input instanceof Request ? input.url : input instanceof URL ? input.href : input;
+    const path = new URL(requestUrl, window.location.origin).pathname;
+    const document = path.endsWith('/storage/maintenance-preview') ? maintenance : storage;
+    return Promise.resolve(new Response(JSON.stringify(document), { status: 200, headers: {
+      'Content-Type': 'application/json; charset=utf-8', 'X-Request-ID': document.requestId,
+    } }));
+  });
+  vi.stubGlobal('fetch', fetcher);
+  const gateway = { bootstrap: vi.fn().mockResolvedValueOnce(data).mockRejectedValueOnce(new ApiClientError('network_error')).mockResolvedValueOnce(data),
+    exchange: vi.fn(), logout: vi.fn() };
+  const session = createBrowserSession(gateway, '/');
+  try {
+    await session.initialize({ kind: 'absent' });
+    render(<Runtime identity={{ applicationVersion: '0.1.0', uiBuildId: data.uiBuildId }} session={session} />);
+    const read = screen.getByRole('button', { name: 'Read storage and maintenance preview' });
+    read.focus();
+    fireEvent.click(read);
+    await waitFor(() => expect(screen.getByText('Total').nextElementSibling?.textContent).toBe(formatExactBytes(storage.data.totalBytes)));
+    expect(screen.getByText('Maintenance preview (dry run)')).toBeTruthy();
+    await act(async () => { await session.refresh(); });
+    expect(session.snapshot()).toMatchObject({ status: 'unavailable', reason: 'connection' });
+    expect(screen.getByText(formatExactBytes(storage.data.totalBytes))).toBeTruthy();
+    expect(screen.getByText('Maintenance preview (dry run)')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Read storage and maintenance preview' })).toBe(read);
+    expect(document.activeElement).toBe(read);
+    await act(async () => { await session.refresh(); });
+    expect(screen.getByText(formatExactBytes(storage.data.totalBytes))).toBeTruthy();
+    expect(screen.getByText('Maintenance preview (dry run)')).toBeTruthy();
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  } finally { session.dispose(); }
+});
+
+it('does not announce cleared storage results before they have been read', async () => {
+  const fixture = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/bootstrap.json'), 'utf8')) as { data: Bootstrap };
+  const data = { ...fixture.data, sessionExpiresAt: new Date(Date.now() + 60_000).toISOString() };
+  const unknownIdentity = { ...data };
+  delete unknownIdentity.serverInstanceId;
+  const gateway = { bootstrap: vi.fn().mockResolvedValueOnce(data).mockResolvedValueOnce(unknownIdentity).mockResolvedValueOnce(unknownIdentity),
+    exchange: vi.fn(), logout: vi.fn() };
+  const session = createBrowserSession(gateway, '/');
+  try {
+    await session.initialize({ kind: 'absent' });
+    render(<Runtime identity={{ applicationVersion: '0.1.0', uiBuildId: data.uiBuildId }} session={session} />);
+    await act(async () => { await session.refresh(); });
+    expect(screen.getByRole('status').textContent).toBe('');
+    await act(async () => { await session.refresh(); });
+    expect(screen.getByRole('status').textContent).toBe('');
+  } finally { session.dispose(); }
+});
+
 it('clears retained Runtime facts after a non-transient session refusal', async () => {
   const fixture = JSON.parse(readFileSync(resolve(process.cwd(), '../contracts/web/v1/fixtures/bootstrap.json'), 'utf8')) as { data: Bootstrap };
   const data = { ...fixture.data, sessionExpiresAt: new Date(Date.now() + 60_000).toISOString() };
