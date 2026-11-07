@@ -4,6 +4,9 @@ import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.project.GeneratedCRepairIndexProfile
 import decompengine.project.sha256
 import decompengine.validation.ProcessInput
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonObject
 import java.nio.file.Path
 
 /** Halts at the non-atomic syscall/fsync boundary to qualify schema-6 restart roll-forward. */
@@ -14,9 +17,21 @@ internal object ModuleRevisionGraphPublicationCrashProbe {
         val mode = arguments.getOrNull(2) ?: "after-exchange"
         val targetIndex = arguments.getOrNull(3)?.toInt()
         fun matches(index: Int): Boolean = targetIndex == null || targetIndex == index
-        if (mode == "create-undecided-stage" || mode == "create-undecided-stage-intent") {
+        if (mode == "create-undecided-stage" || mode == "create-undecided-stage-intent" ||
+            mode == "decision-prevalidated" || mode == "decision-exchanged"
+        ) {
             val project = Path.of(arguments[0])
-            val targets = arguments[1].split(',').also { require(it.size >= 2 && it == it.distinct().sorted()) }
+            fun decisionIsPublished(): Boolean = runCatching {
+                val root = Json.parseToJsonElement(
+                    java.nio.file.Files.readString(project.resolve("reports/repair-revisions/graph.json")),
+                ).jsonObject
+                val pending = root["pending"] as? JsonObject ?: return@runCatching false
+                pending["acceptanceDecision"] is JsonObject
+            }.getOrDefault(false)
+            val targets = arguments[1].split(',').also {
+                val minimum = if (mode.startsWith("decision-")) 1 else 2
+                require(it.size >= minimum && it == it.distinct().sorted())
+            }
             val candidates = targets.associateWith { relative ->
                 val parts = relative.split('/')
                 LinuxFilesystemSyscalls.openRoot(project).use { root ->
@@ -48,8 +63,11 @@ internal object ModuleRevisionGraphPublicationCrashProbe {
                     val stop = when (mode) {
                         "create-undecided-stage" -> point is ModuleRevisionFaultPoint.AfterPublicationStage &&
                             point.path == targets.first() && matches(point.index)
-                        else -> point is ModuleRevisionFaultPoint.AfterPublicationStageIntentPersist &&
+                        "create-undecided-stage-intent" -> point is ModuleRevisionFaultPoint.AfterPublicationStageIntentPersist &&
                             point.path == targets.first() && matches(point.index)
+                        "decision-prevalidated" -> point == ModuleRevisionFaultPoint.Schema6DecisionPrevalidated
+                        else -> point is ModuleRevisionFaultPoint.AfterStatePublicationExchange &&
+                            point.scope == "revision-state" && point.name == "graph.json" && decisionIsPublished()
                     }
                     if (armed && stop) {
                         Runtime.getRuntime().halt(86)
@@ -66,7 +84,7 @@ internal object ModuleRevisionGraphPublicationCrashProbe {
                 val metadata = RevisionRepairMetadata(
                     iterationIndex = 1,
                     failureKind = "compile",
-                    prompt = "schema-six child crash before decision",
+                    prompt = "schema-six child crash at decision boundary",
                     summary = null,
                     retainedRegressionIds = corpus.inputs.map { it.id },
                     before = null,
@@ -89,7 +107,7 @@ internal object ModuleRevisionGraphPublicationCrashProbe {
                     cleanupVerified = true,
                     assurance = RepairValidationAssurance.STRICT_CONTAINED,
                 )
-                graph.accept(attempt, RepairEvidence("valid", "must halt after private staging"), proof)
+                graph.accept(attempt, RepairEvidence("valid", "must halt at selected decision boundary"), proof)
             }
             kotlin.system.exitProcess(87)
         }

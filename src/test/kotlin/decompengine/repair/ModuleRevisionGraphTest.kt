@@ -985,6 +985,182 @@ class ModuleRevisionGraphTest {
     }
 
     @Test
+    fun `exception after schema six decision exchange leaves an undecided attempt recoverable`() {
+        val temporaryParent = Path.of("build/test-tmp").also { Files.createDirectories(it) }
+        val project = generatedProject(temporaryParent = temporaryParent)
+        val relative = "src/modules/alpha.c"
+        val sourcePaths = ModuleRepairIndex.load(project, GeneratedCRepairIndexProfile).sourcePaths
+        val before = Schema6SourceInventoryWitness.capture(project, sourcePaths)
+        val candidate = readProjectSourceWithoutAtime(project, relative) +
+            "\n/* ambiguous state exchange must not accept */\n".toByteArray()
+        fun decisionIsPublished(): Boolean = runCatching {
+            val root = Json.parseToJsonElement(project.resolve("reports/repair-revisions/graph.json").readText()).jsonObject
+            val pending = root["pending"] as? JsonObject ?: return@runCatching false
+            pending["acceptanceDecision"] is JsonObject
+        }.getOrDefault(false)
+        var injected = false
+        val graph = ModuleRevisionGraph.openForTesting(
+            project,
+            GeneratedCRepairIndexProfile,
+            faultInjector = ModuleRevisionFaultInjector { point ->
+                if (!injected && point == ModuleRevisionFaultPoint.AfterStatePublicationExchange("revision-state", "graph.json") &&
+                    decisionIsPublished()
+                ) {
+                    injected = true
+                    throw IllegalStateException("injected decision exchange interruption")
+                }
+            },
+        )
+        val metadata = beginSyntheticAcceptedRun(graph)
+        val attempt = graph.beginAttempt(listOf(relative), metadata)
+        graph.installCandidate(attempt, mapOf(relative to candidate))
+        val originalHead = graph.snapshot.headId
+
+        val failure = assertFailsWith<RepairAcceptancePendingException> {
+            graph.accept(attempt, RepairEvidence("valid", "decision exchange boundary"), syntheticAcceptedProof(graph, attempt))
+        }
+        assertTrue(injected)
+        assertTrue(failure.message.orEmpty().contains("ambiguous"))
+        assertFailsWith<IllegalStateException> { graph.snapshot }
+        graph.close()
+
+        val graphPath = project.resolve("reports/repair-revisions/graph.json")
+        val onDiskPending = Json.parseToJsonElement(graphPath.readText()).jsonObject.getValue("pending").jsonObject
+        assertEquals(JsonNull, onDiskPending.getValue("acceptanceDecision"), "the state store must restore its prior graph")
+        assertTrue(onDiskPending.getValue("predecisionStageFiles").jsonArray.isNotEmpty())
+        val revisions = project.resolve("reports/repair-revisions")
+        assertFalse(Files.exists(revisions.resolve(".graph.json.repair-atomic.tmp")))
+
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { recovered ->
+            assertEquals(ModuleRevisionStatus.REJECTED, recovered.snapshot.nodes.last().status)
+            assertTrue(recovered.snapshot.nodes.last().recoveredAfterCrash)
+            assertEquals(originalHead, recovered.snapshot.headId)
+            assertNull(recovered.snapshot.fullyAcceptedHeadId)
+            assertEquals(RepairRunStatus.INTERRUPTED, recovered.snapshot.runs.last().status)
+        }
+        assertEquals(before, Schema6SourceInventoryWitness.capture(project, sourcePaths))
+        assertEquals(0L, Files.list(revisions.resolve("publication-staging")).use { it.count() })
+        assertFalse(Files.exists(graphPath.resolveSibling(".graph.json.repair-atomic.tmp")))
+    }
+
+    @Test
+    fun `child crash before the schema six decision exchange recovers exact undecided source`() {
+        val temporaryParent = Path.of("build/test-tmp").also { Files.createDirectories(it) }
+        val project = generatedProject(temporaryParent = temporaryParent)
+        val relative = "src/modules/alpha.c"
+        val sourcePaths = ModuleRepairIndex.load(project, GeneratedCRepairIndexProfile).sourcePaths
+        val before = Schema6SourceInventoryWitness.capture(project, sourcePaths)
+        val command = listOf(
+            Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+            "-cp", System.getProperty("java.class.path"),
+            ModuleRevisionGraphPublicationCrashProbe::class.java.name,
+            project.toString(), relative, "decision-prevalidated",
+        )
+        val process = ProcessBuilder(command).redirectErrorStream(true).start()
+        val outputReader = Executors.newSingleThreadExecutor()
+        try {
+            val output = outputReader.submit<String> { process.inputStream.use { it.readBytes().toString(Charsets.UTF_8) } }
+            val exited = process.waitFor(20, TimeUnit.SECONDS)
+            if (!exited) {
+                process.destroyForcibly()
+                process.waitFor(5, TimeUnit.SECONDS)
+            }
+            assertTrue(exited, "decision-prevalidated probe did not terminate")
+            assertEquals(86, process.exitValue(), "probe did not halt at the prepared decision: ${output.get(5, TimeUnit.SECONDS)}")
+        } finally {
+            if (process.isAlive) process.destroyForcibly()
+            outputReader.shutdownNow()
+        }
+
+        val revisions = project.resolve("reports/repair-revisions")
+        val pending = Json.parseToJsonElement(revisions.resolve("graph.json").readText()).jsonObject
+            .getValue("pending").jsonObject
+        assertEquals(JsonNull, pending.getValue("acceptanceDecision"))
+        assertTrue(Files.exists(revisions.resolve(".graph.json.repair-atomic.tmp")),
+            "the crash must leave the prepared decision in the private state temporary")
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { recovered ->
+            assertEquals(ModuleRevisionStatus.REJECTED, recovered.snapshot.nodes.last().status)
+            assertTrue(recovered.snapshot.nodes.last().recoveredAfterCrash)
+            assertNull(recovered.snapshot.fullyAcceptedHeadId)
+        }
+        assertEquals(before, Schema6SourceInventoryWitness.capture(project, sourcePaths))
+        assertEquals(0L, Files.list(revisions.resolve("publication-staging")).use { it.count() })
+        assertFalse(Files.exists(revisions.resolve(".graph.json.repair-atomic.tmp")))
+    }
+
+    @Test
+    fun `child crash after the schema six decision exchange rolls forward exact staged identities`() {
+        val temporaryParent = Path.of("build/test-tmp").also { Files.createDirectories(it) }
+        val project = generatedProject(temporaryParent = temporaryParent)
+        val relative = "src/modules/alpha.c"
+        val sourcePaths = ModuleRepairIndex.load(project, GeneratedCRepairIndexProfile).sourcePaths
+        val before = Schema6SourceInventoryWitness.capture(project, sourcePaths)
+        val command = listOf(
+            Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+            "-cp", System.getProperty("java.class.path"),
+            ModuleRevisionGraphPublicationCrashProbe::class.java.name,
+            project.toString(), relative, "decision-exchanged",
+        )
+        val process = ProcessBuilder(command).redirectErrorStream(true).start()
+        val outputReader = Executors.newSingleThreadExecutor()
+        try {
+            val output = outputReader.submit<String> { process.inputStream.use { it.readBytes().toString(Charsets.UTF_8) } }
+            val exited = process.waitFor(20, TimeUnit.SECONDS)
+            if (!exited) {
+                process.destroyForcibly()
+                process.waitFor(5, TimeUnit.SECONDS)
+            }
+            assertTrue(exited, "decision-exchanged probe did not terminate")
+            assertEquals(86, process.exitValue(), "probe did not halt after exchanging the decision: ${output.get(5, TimeUnit.SECONDS)}")
+        } finally {
+            if (process.isAlive) process.destroyForcibly()
+            outputReader.shutdownNow()
+        }
+
+        val revisions = project.resolve("reports/repair-revisions")
+        val pending = Json.parseToJsonElement(revisions.resolve("graph.json").readText()).jsonObject
+            .getValue("pending").jsonObject
+        val decision = pending.getValue("acceptanceDecision").jsonObject
+        assertTrue(Files.exists(revisions.resolve(".graph.json.repair-atomic.tmp")),
+            "the displaced undecided state must remain until recovery")
+        assertTrue(Files.exists(revisions.resolve("publication-staging").resolve(
+            decision.getValue("stagedFiles").jsonArray.single().jsonObject.getValue("stagingName").jsonPrimitive.content,
+        )))
+
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { recovered ->
+            assertEquals(ModuleRevisionStatus.ACCEPTED, recovered.snapshot.nodes.last().status)
+            assertEquals(RepairRunStatus.FULLY_ACCEPTED, recovered.snapshot.runs.last().status)
+            assertNull(recovered.snapshot.pendingAttemptId)
+        }
+        val staged = decision.getValue("stagedFiles").jsonArray.single().jsonObject
+        val after = Schema6SourceInventoryWitness.capture(project, sourcePaths)
+        sourcePaths.filterNot { it == relative }.forEach { unchanged ->
+            assertEquals(before.files.getValue(unchanged), after.files.getValue(unchanged),
+                "unchanged source must retain exact identity and metadata: $unchanged")
+        }
+        val installed = after.files.getValue(relative)
+        assertEquals(staged.getValue("sha256").jsonPrimitive.content, installed.sha256)
+        assertEquals(staged.getValue("device").jsonPrimitive.content.toLong(), installed.state.identity.key.device)
+        assertEquals(staged.getValue("inode").jsonPrimitive.content.toLong(), installed.state.identity.key.inode)
+        assertEquals(staged.getValue("mode").jsonPrimitive.content.toInt(), installed.state.identity.mode)
+        assertEquals(staged.getValue("uid").jsonPrimitive.content.toInt(), installed.state.identity.uid)
+        assertEquals(staged.getValue("gid").jsonPrimitive.content.toInt(), installed.state.identity.gid)
+        assertEquals(1, installed.state.identity.linkCount)
+        before.directories.forEach { (path, directory) ->
+            val recoveredDirectory = after.directories.getValue(path)
+            assertEquals(directory.state.identity, recoveredDirectory.state.identity, "directory identity changed: $path")
+            assertEquals(directory.names, recoveredDirectory.names, "directory inventory changed: $path")
+            assertEquals(directory.state.size, recoveredDirectory.state.size, "directory size changed: $path")
+            assertEquals(directory.state.accessTimeSeconds, recoveredDirectory.state.accessTimeSeconds,
+                "directory atime seconds changed: $path")
+            assertEquals(directory.state.accessTimeNanoseconds, recoveredDirectory.state.accessTimeNanoseconds,
+                "directory atime nanos changed: $path")
+        }
+        assertEquals(0L, Files.list(revisions.resolve("publication-staging")).use { it.count() })
+        assertFalse(Files.exists(revisions.resolve(".graph.json.repair-atomic.tmp")))
+    }
+
+    @Test
     fun `undecided schema six recovery refuses a staged inode replacement before cleanup`() {
         val project = generatedProject()
         val paths = listOf("src/modules/alpha.c", "src/modules/beta.c")

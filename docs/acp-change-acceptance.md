@@ -314,6 +314,18 @@ recaptured output to it. Schema 3's writer-generated run start/deadline
 timestamps are the only fields normalized during reproduction. These fixtures
 do not establish archive admission, hosted checks, or production qualification.
 
+Decision-write failure boundaries have local process-crash controls in
+`ModuleRevisionGraphTest.exception after schema six decision exchange leaves an
+undecided attempt recoverable`, `ModuleRevisionGraphTest.child crash before the
+schema six decision exchange recovers exact undecided source`, and `ModuleRevisionGraphTest.child
+crash after the schema six decision exchange rolls forward exact staged
+identities`. They check the complete indexed source inventory with metadata-
+neutral reads, including file inode and timestamps; the pre-decision controls
+also check ancestor directory metadata and staging cleanup, while roll-forward
+checks the accepted staged inode bindings and unchanged source files. These
+process-crash tests do not establish power-loss ordering or hostile same-UID
+race resistance.
+
 ## Remaining scope of #63
 
 This cleanup removes an unused competing policy path; it does not complete #63.
