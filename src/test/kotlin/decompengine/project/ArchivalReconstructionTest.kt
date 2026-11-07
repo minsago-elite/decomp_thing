@@ -1,5 +1,6 @@
 package decompengine.project
 
+import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.agent.AgentExecutionResult
 import decompengine.agent.AgentFileChange
 import decompengine.agent.AgentFileChangeKind
@@ -14,6 +15,8 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
+import java.nio.file.Files
+import java.nio.file.Path
 
 import kotlin.io.path.createDirectories
 import kotlin.io.path.createTempDirectory
@@ -28,6 +31,143 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 
 class ArchivalReconstructionTest {
+    @Test
+    fun `workflow build failure preserves the published generation metadata`() {
+        val temp = createTempDirectory("archival-validation-rollback-metadata-")
+        val binary = temp.resolve("input.bin").also { it.writeBytes(byteArrayOf(2, 4, 6, 8)) }
+        val output = temp.resolve("result")
+        val base = GeneratedCMakeReconstructionProfile.descriptor
+        val profile = ReconstructionProfile(base.schemaVersion, base.id, base.layout, base.budgets,
+            base.adapterConfiguration + mapOf("build-executable" to listOf("/usr/bin/make"),
+                "compiler-driver" to listOf("/usr/bin/cc")))
+        var invalidCandidate = false
+        val analyzer = budgetedAnalyzer { supplied, _ ->
+            RecoveredProgramModel(
+                inputSha256 = sha256(Files.readAllBytes(supplied)),
+                functions = listOf(RecoveredFunction("fn_1000", "decomp_engine_main", 0x1000UL,
+                    "int decomp_engine_main(void)",
+                    if (invalidCandidate) "int decomp_engine_main(void) { return missing_value; }"
+                    else "int decomp_engine_main(void) { return 0; }")),
+            )
+        }
+        val reconstructor = object : ModuleReconstructor {
+            override fun reconstruct(request: ModuleReconstructionRequest): ReconstructedModule {
+                val generated = EvidenceModuleReconstructor().reconstruct(request)
+                return if (invalidCandidate) generated.copy(source = "not valid generated C") else generated
+            }
+
+            override fun cacheIdentity(): String = if (invalidCandidate) "fixture-invalid-candidate" else "fixture-valid-candidate"
+        }
+        val service = ArchivalReconstructionService(analyzer, reconstructor, profile = profile)
+
+        ReconstructionOutputWorkspace.open(output, binary).use { workspace ->
+            service.reconstructWithWorkspace(binary, output, workspace)
+        }
+        val accepted = capturePublishedMetadata(output)
+        assertTrue(accepted.getValue("source-tree").present)
+        invalidCandidate = true
+
+        assertFailsWith<BuildException> {
+            ReconstructionOutputWorkspace.open(output, binary).use { workspace ->
+                service.reconstructWithWorkspace(binary, output, workspace)
+            }
+        }
+
+        assertEquals(accepted, capturePublishedMetadata(output),
+            "a workflow build failure must preserve all previously published member commitments")
+        assertFalse(output.resolve(ReconstructionOutputWorkspace.PUBLICATION).exists())
+        assertFalse(Files.newDirectoryStream(output).use { entries -> entries.any {
+            it.fileName.toString().startsWith(".reconstruction-stage-") ||
+                it.fileName.toString().startsWith(".reconstruction-previous-")
+        } })
+    }
+
+    @Test
+    fun `post-publication progress write failure does not reject the committed generation`() {
+        val temp = createTempDirectory("archival-progress-after-commit-")
+        val binary = temp.resolve("input.bin").also { it.writeBytes(byteArrayOf(1, 3, 5, 7)) }
+        val output = temp.resolve("result")
+        val analyzer = budgetedAnalyzer { supplied, _ ->
+            RecoveredProgramModel(inputSha256 = sha256(Files.readAllBytes(supplied)), functions = listOf(
+                RecoveredFunction("fn_1000", "decomp_engine_main", 0x1000UL,
+                    "int decomp_engine_main(void)", "int decomp_engine_main(void) { return 0; }"),
+            ))
+        }
+        val base = GeneratedCMakeReconstructionProfile.descriptor
+        val profile = ReconstructionProfile(base.schemaVersion, base.id, base.layout, base.budgets,
+            base.adapterConfiguration + mapOf("build-executable" to listOf("/usr/bin/make"),
+                "compiler-driver" to listOf("/usr/bin/cc")))
+        val progress = object : AgentWorkflowProgress by AgentWorkflowProgress.NONE {
+            override fun phase(phase: AgentWorkflowPhase, taskId: String?, acceptedRevisionSha256: String?) {
+                if (phase == AgentWorkflowPhase.BUILD_VALIDATING) {
+                    val report = output.resolve("reconstruction_progress.json")
+                    Files.delete(report)
+                    Files.createDirectory(report)
+                }
+            }
+        }
+
+        val result = ReconstructionOutputWorkspace.open(output, binary).use { workspace ->
+            ArchivalReconstructionService(analyzer, EvidenceModuleReconstructor(), profile = profile, progress = progress)
+                .reconstructWithWorkspace(binary, output, workspace)
+        }
+
+        assertTrue(output.resolve("source-tree/reports/build_contract.json").exists())
+        assertTrue(result.bundle.archivePath.exists())
+        assertEquals(output.resolve("source-tree"), result.build.projectDir)
+    }
+
+    @Test
+    fun `agent-backed archival API refuses before writes without a workspace lease`() {
+        val temp = createTempDirectory("archival-agent-without-workspace-")
+        val binary = temp.resolve("input.elf").also { it.writeBytes(byteArrayOf(3, 1, 4)) }
+        val output = temp.resolve("result")
+        var analysisCalls = 0
+        val analyzer = budgetedAnalyzer { _, _ ->
+            analysisCalls++
+            error("analysis must not start without publication ownership")
+        }
+        val reconstructor = BoundedLlmModuleReconstructor(AgentHarness { _, _ ->
+            error("agent must not start without publication ownership")
+        })
+
+        val failure = assertFailsWith<IllegalArgumentException> {
+            ArchivalReconstructionService(analyzer, reconstructor).reconstruct(binary, output)
+        }
+
+        assertTrue(failure.message.orEmpty().contains("active output workspace lease"))
+        assertEquals(0, analysisCalls)
+        assertFalse(output.exists())
+    }
+
+    @Test
+    fun `workspace-backed archival call binds output and input paths before analysis`() {
+        val temp = createTempDirectory("archival-workspace-argument-binding-")
+        val admittedInput = temp.resolve("admitted.bin").also { it.writeBytes(byteArrayOf(1, 2, 3)) }
+        val otherInput = temp.resolve("other.bin").also { it.writeBytes(byteArrayOf(4, 5, 6)) }
+        val admittedOutput = temp.resolve("admitted-output")
+        val otherOutput = temp.resolve("other-output")
+        var analysisCalls = 0
+        val analyzer = budgetedAnalyzer { _, _ ->
+            analysisCalls++
+            error("mismatched workspace arguments must be rejected before analysis")
+        }
+        ReconstructionOutputWorkspace.open(admittedOutput, admittedInput).use { workspace ->
+            val service = ArchivalReconstructionService(analyzer)
+            val wrongOutput = assertFailsWith<IllegalArgumentException> {
+                service.reconstructWithWorkspace(admittedInput, otherOutput, workspace)
+            }
+            assertTrue(wrongOutput.message.orEmpty().contains("workspace's canonical root"))
+            val wrongInput = assertFailsWith<IllegalArgumentException> {
+                service.reconstructWithWorkspace(otherInput, admittedOutput, workspace)
+            }
+            assertTrue(wrongInput.message.orEmpty().contains("admitted input"))
+        }
+        assertEquals(0, analysisCalls)
+        assertFalse(otherOutput.exists())
+        assertFalse(admittedOutput.resolve("analysis").exists())
+    }
+
     @Test
     fun `archival Make and Ninja workflows enforce role policy and reject unauthenticated agent archives`() {
         for (base in ReconstructionProfiles.builtIn) {
@@ -95,24 +235,16 @@ class ArchivalReconstructionTest {
 
             val output = temp.resolve("result")
             val failure = assertFailsWith<IllegalArgumentException> {
-                ArchivalReconstructionService(
-                    analyzer, BoundedLlmModuleReconstructor(harness), profile = profile,
-                ).reconstruct(binary, output)
+                ReconstructionOutputWorkspace.open(output, binary).use { workspace ->
+                    ArchivalReconstructionService(
+                        analyzer, BoundedLlmModuleReconstructor(harness), profile = profile,
+                    ).reconstructWithWorkspace(binary, output, workspace)
+                }
             }
-            assertTrue(failure.message.orEmpty().contains("agent-generated module is not accepted"))
+            assertTrue(failure.message.orEmpty().contains("publication was refused"))
             assertEquals(1, calls)
             val project = output.resolve("source-tree")
-            assertTrue(project.resolve("build/reconstructed").exists())
-            assertEquals("0", Json.parseToJsonElement(project.resolve("reports/build_contract.json").readText())
-                .jsonObject.getValue("returnCode").jsonPrimitive.content)
-            val retained = SourceTreeManifestReader.read(project, profile)
-            assertEquals(listOf("fn_1000"), retained.unresolvedImplementationIds)
-            assertTrue(retained.files.filter { ProjectFileRole.MODULE_IMPLEMENTATION in it.roles }
-                .all { it.acceptedImplementation == false })
-            val auditFailure = assertFailsWith<IllegalArgumentException> {
-                ArchivalProjectAuditor.audit(project, profile)
-            }
-            assertTrue(auditFailure.message.orEmpty().contains("agent-generated module is not accepted"))
+            assertFalse(project.exists())
             assertFalse(project.resolve("reports/archival_audit.json").exists())
             assertFalse(output.resolve("source-tree.zip").exists())
 
@@ -140,16 +272,16 @@ class ArchivalReconstructionTest {
                 }
                 val alternateOutput = temp.resolve("alternate")
                 val alternateFailure = assertFailsWith<IllegalArgumentException> {
-                    ArchivalReconstructionService(
-                        analyzer, BoundedLlmModuleReconstructor(alternateHarness), profile = alternate,
-                    ).reconstruct(binary, alternateOutput)
+                    ReconstructionOutputWorkspace.open(alternateOutput, binary).use { workspace ->
+                        ArchivalReconstructionService(
+                            analyzer, BoundedLlmModuleReconstructor(alternateHarness), profile = alternate,
+                        ).reconstructWithWorkspace(binary, alternateOutput, workspace)
+                    }
                 }
                 assertTrue(alternateFailure.message.orEmpty().contains("not declared viewable"))
                 assertEquals(0, alternateCalls)
                 val alternateProject = alternateOutput.resolve("source-tree")
-                assertFalse(alternateProject.resolve("build/reconstructed").exists())
-                assertFalse(alternateProject.resolve("source_tree_manifest.json").exists())
-                assertFalse(alternateProject.resolve("reports/archival_audit.json").exists())
+                assertFalse(alternateProject.exists())
                 assertFalse(alternateOutput.resolve("source-tree.zip").exists())
             }
         }
@@ -187,8 +319,11 @@ class ArchivalReconstructionTest {
             observed = request.observedBehavior
             EvidenceModuleReconstructor().reconstruct(request)
         }
-        val result = ArchivalReconstructionService(analyzer, reconstructor, profile = profile, progress = progress)
-            .reconstruct(binary, temp.resolve("result"))
+        val output = temp.resolve("result")
+        val result = ReconstructionOutputWorkspace.open(output, binary).use { workspace ->
+            ArchivalReconstructionService(analyzer, reconstructor, profile = profile, progress = progress)
+                .reconstructWithWorkspace(binary, output, workspace)
+        }
         assertEquals(exploration, observed)
         val audit = requireNotNull(result.bundle.audit)
         assertTrue(audit.unresolvedEntityIds.isNotEmpty())
@@ -200,6 +335,9 @@ class ArchivalReconstructionTest {
         assertEquals("unresolved", savedProgress.getValue("phase").jsonPrimitive.content)
 
         assertEquals(0, result.build.returnCode)
+        assertEquals(output.resolve("source-tree"), result.build.projectDir)
+        assertTrue(result.build.logPath.exists())
+        assertTrue(result.build.diagnosticsDir.exists())
         assertEquals("/usr/bin/make", result.build.command.first())
         assertTrue("CC=/usr/bin/cc" in result.build.command)
         assertTrue(result.projectDir.resolve("src/modules/decomp.c").exists())
@@ -289,6 +427,14 @@ class ArchivalReconstructionTest {
             assertFalse(output.resolve("analysis").exists())
             assertFalse(output.resolve("source-tree").exists())
             assertFalse(output.resolve("reconstruction_progress.json").exists())
+        }
+    }
+
+    private fun capturePublishedMetadata(output: Path): Map<String, PublicationEntryRecord> {
+        val budget = PublicationTreeBudget()
+        return LinuxFilesystemSyscalls.openRoot(output).use { root ->
+            listOf("source-tree", "source-tree.zip", "reconstruction.json", ".decomp-agent-sessions")
+                .associateWith { relative -> ReconstructionOutputTree.recordAt(root, Path.of(relative), budget) }
         }
     }
 

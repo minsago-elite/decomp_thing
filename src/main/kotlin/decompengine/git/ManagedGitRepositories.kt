@@ -111,8 +111,17 @@ data class GitSourceSnapshot(
     val revisionId: String,
     val sourceSha256: String,
     val commitments: Map<String, GitSourceCommitment>,
-) {
+) : AutoCloseable {
+    /** Optional publication read lease retained until the selected tree has been copied. */
+    internal var readLease: AutoCloseable? = null
+
     init { require(commitments.isNotEmpty()) { "a source snapshot needs its recorded commitments" } }
+
+    override fun close() {
+        val lease = readLease
+        readLease = null
+        lease?.close()
+    }
 }
 
 fun interface GitSourceSnapshotResolver {
@@ -223,7 +232,7 @@ class ManagedGitRepositories(
             }
             when (request) {
                 is GitRepositoryRequest.Init -> {
-                    sources.resolve(jobId, request.runId, request.revisionId)
+                    sources.resolve(jobId, request.runId, request.revisionId).use { }
                     request.initialBranch?.let { branch ->
                         try { GitRefNames.requireBranchName(runner, branch) } catch (_: IllegalArgumentException) {
                             throw ManagedGitException("VALIDATION_FAILED", "The initial branch name is not a valid Git branch name.")
@@ -515,8 +524,10 @@ class ManagedGitRepositories(
     private fun initialize(operation: GitOperationRecord, request: GitRepositoryRequest.Init, staging: Path): GitRepositoryRecord {
         val runner = requireRunner()
         val snapshot = sources.resolve(operation.jobId, request.runId, request.revisionId)
-        val workTree = GitStorage.directories(staging, WORK_TREE)
-        val digests = GitSourceCopy.copy(snapshot.directory, workTree)
+        val (workTree, digests) = try {
+            val workTree = GitStorage.directories(staging, WORK_TREE)
+            workTree to GitSourceCopy.copy(snapshot.directory, workTree)
+        } finally { snapshot.close() }
         // The retained tree may have changed after the attempt ended: every recorded build input must
         // be present with its committed digest and size, or the copy is not this revision.
         for ((path, commitment) in snapshot.commitments) {

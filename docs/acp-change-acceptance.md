@@ -129,6 +129,191 @@ The current module compiler receipt is local validation evidence, not a containe
 production full-project build or complete behavioral-equivalence proof. Those
 limits remain tracked by #64, #84 and the archive/release issues.
 
+## Durable output publication boundary (#732)
+
+The reconstruction output journal makes the four publishable members
+(`source-tree`, `source-tree.zip`, `reconstruction.json`, and
+`.decomp-agent-sessions`) recoverable across process interruption. Before the
+durable decision, recovery aborts the staged generation; after the decision, it
+rolls the selected generation forward. A retained journal, input-switch marker,
+or private transaction residue makes cooperating readers refuse the workspace
+until recovery completes.
+
+CLI repair holds the same workspace's exclusive lease and writes a durable
+in-progress marker before it can mutate the published tree. If the process exits
+before the repair runtime returns a terminal graph outcome with no unresolved
+rollback, the marker keeps cooperating readers and reconstruction activation
+unavailable. A normal return alone is insufficient: an unresolved rollback
+keeps the marker. The next repair runtime may reopen the graph to complete its
+pending recovery before a verified outcome can retire the marker. This is
+fail-closed recovery gating, not automatic rollback by a source reader. Marker
+publication uses a synced private temporary followed by a no-replace rename;
+abandoned temporary markers keep readers unavailable until an exclusive repair
+lease or workspace activation removes them. Workspace activation does this only
+before repair begins; a published final marker still blocks activation.
+
+Regular-file atime is part of the reconstruction member commitment and
+commitment reads use `O_NOATIME`. Directory atime is intentionally excluded:
+directory enumeration can update it as part of ordinary observation, so it is
+not a stable publication property. Directory mode, ownership, identity, size,
+mtime, xattr policy, and the framed child commitments remain bound.
+
+The member renames are sequential. This is **not** an unrestricted atomic
+filesystem swap: readers must hold the reconstruction publication lease for
+the entire read or copy. The contract is crash-recoverable publication with
+generation visibility serialized for cooperating readers on one local
+filesystem. Direct path readers that bypass the lease, other hosts, and network
+filesystems are outside this guarantee. CLI repair holds the same workspace's
+exclusive lease while it mutates a published source tree; web repair works on a
+private per-attempt copy. Repair graph rollback and the reconstruction output
+journal remain separate transaction records.
+
+The reconstruction journal does not include `analysis`, progress reports, or
+compiler feedback in its four-member rollback set. Those records can contain
+attempt diagnostics even when accepted source publication is rejected. The
+current workflows also have deliberately narrow operations: module
+reconstruction accepts one declared target creation or modification, while
+captured repair accepts modifications of selected existing files. General
+delete and move installation, complete parent-directory metadata restoration,
+and a cross-host publication protocol are not established by this boundary.
+
+The durability controls exercise process interruption and journal recovery.
+They do not emulate power loss or qualify storage-controller write ordering.
+Those claims require a separate VM or block-device power-cut qualification.
+Similarly, scripted ACP and local validator tests establish fixture behavior,
+not production-provider acceptance or full-project release qualification.
+
+Acceptance authority controls include the scripted
+`SourceTreeTest.confident completion prose and completed tool status cannot
+accept a missing reconstruction change` case and the ACP repair
+`TraceGuidedRepairAcpIntegrationTest.confident completed ACP claim without
+filesystem changes is rejected` case. They show fixture-level that a completed
+stop, positive prose, or a completed tool status cannot substitute for an
+observed change and the workflow's acceptance checks. The repair graph recovery
+suite also halts a child JVM after `.restore` is renamed to `.restore.cleanup`
+and verifies that reopening restores the original source inode and removes the
+quarantined candidate. These tests do not qualify live ACP providers or replace
+the exact-source hosted gates.
+
+Exact rollback fixtures compare source bytes and descriptor-bound file metadata,
+including identity, mode, ownership, link count, atime, mtime, and ctime, plus
+the witnessed ancestor-directory metadata. Coverage includes
+`ModuleRevisionGraphTest.pre-candidate rejection preserves source identity
+metadata and bytes`, `ModuleRevisionGraphTest.rejected detached candidate leaves
+source inode and ancestor metadata unchanged`, and repair-loop rejection cases
+for compile failure, retained regression, no-write completion claims, and
+scripted terminal failures. Reconstruction publication refusal compares each
+published member's complete commitment in
+`ReconstructionOutputPublicationTest.every accepted member rolls back together
+on agent validator and cancellation refusal`. The public archival workflow test
+`ArchivalReconstructionTest.workflow build failure preserves the published
+generation metadata` also compares all four published member commitments after
+a compiler failure. Directory atime remains excluded from reconstruction tree
+commitments as documented above. These are local fixture checks; they do not
+establish live-provider or power-loss behavior.
+
+Schema-6 staging persists each unlinked candidate inode identity before creating
+its private name. `ModuleRevisionGraphTest.child crash after partial private
+staging recovers undecided schema six without touching source` covers recovery
+after linking; `ModuleRevisionGraphTest.undecided schema six recovery accepts a
+registered stage inode that was never linked` covers the graph-write/link gap;
+and `ModuleRevisionGraphTest.undecided schema six recovery refuses a staged inode
+replacement before cleanup` proves same-bytes inode substitution is preserved as
+unresolved evidence without changing the source or decision. These are local
+process-crash controls, not power-loss or hostile same-UID qualification.
+
+Schema-6 decided-publication recovery also authenticates every ACP receipt
+referenced by retained graph nodes and the pending attempt, checks the bounded
+receipt-file inventory, and derives the accepted node's changed and invalidated
+module sets from a candidate-backed recovery index before the first source
+exchange. The fixture controls
+`ModuleRevisionGraphTest.schema six recovery authenticates its ACP receipt before
+source exchange`, `ModuleRevisionGraphTest.schema six recovery authenticates
+provisional ancestor receipts before promotion`, and `ModuleRevisionGraphTest.schema
+six validates the complete committed graph before source publication` reject
+missing, malformed, or semantically inconsistent decision evidence without
+changing source inodes or rewriting the durable decision. This is local process
+recovery evidence only; it does not establish hosted qualification or power-loss
+durability.
+
+For durable web reconstruction and repair, the committed publication journal is
+retained until the matching workflow attempt records a candidate and terminal
+outcome derived from the published source tree. Startup recovery performs the
+same reconciliation after verifying a decided generation and before removing
+its journal. If candidate verification or attempt persistence fails, recovery
+leaves the journal in place and keeps output unavailable; an installed
+generation is never silently reported as a failed, candidate-less attempt after
+successful reconciliation. Repair publication first persists a receipt binding
+the staged candidate, terminal classification, completion time, and measured
+usage. The durable decision follows that receipt; startup verifies it against
+the recovered source tree and commits those exact values atomically with the
+terminal attempt. A receipt left by an aborted pre-decision publication is
+cleared only after startup has recovered that run's journal.
+
+### Repair preimage and publication decision
+
+Schema-1–5 repair records use the historical rollback contract. Their retained
+preimage metadata may bind file identity and timestamps, but the hard-link and
+per-file replacement protocol can itself change ctime and parent-directory
+metadata. Recovery of those records must remain explicitly legacy; it must not
+infer an exact witness from current filesystem state or upgrade a pending
+attempt into a schema-6 decision.
+
+The schema-6 contract is stronger. Before its durable acceptance decision, the
+transaction must not create, remove, link, rename, or otherwise mutate an entry
+in any witnessed source file or ancestor directory. It records exact file
+identity, ownership, mode, link count, size, supported attribute policy, and
+nanosecond atime/mtime/ctime, plus each ancestor directory's identity,
+metadata, timestamps, and entry inventory. File reads and directory
+enumeration used to capture or check that witness must be metadata-neutral
+(`O_NOATIME`); inability to do so refuses before publication. Rejection or
+failure before the decision verifies the witness and removes only authenticated
+private staging state. After final canonical-source and witness validation, the
+run cancellation and aggregate-deadline check is repeated immediately before
+the durable decision write. Once that decision is durable, cancellation cannot
+turn acceptance into rollback; recovery only rolls the committed publication
+forward.
+
+Before a staged replacement inode is linked to its transaction-bound private
+name, schema 6 persists its device, inode, mount, mode, owner, candidate digest,
+and size in the pending graph. Startup recovery checks that exact inode binding,
+owner, link count, size, and content before removing a linked pre-decision stage;
+an absent stage is safe because no source entry was changed. An unexpected name
+or inode leaves the graph unavailable and preserves the entry as unresolved
+evidence. The later acceptance decision records the complete staged-file and
+target-parent bindings used by roll-forward.
+
+An undecided detached schema-6 attempt is recoverable only when its durable
+install marker proves that candidate installation did not begin. Recovery checks
+the full source witness before discarding transaction-bound stages.
+
+The pending record also carries a compact digest over the metadata-neutral
+observation of the complete accepted source inventory. This covers unchanged
+source files outside the current attempt's writable paths, so content-index
+validation alone cannot miss metadata-only drift elsewhere in the accepted
+revision.
+
+After the complete decision is durable, recovery is roll-forward only. It
+authenticates target and staged identities at every exchange boundary and
+retains an unavailable marker while publication is partial or ambiguous. It
+must never restore preimages or report ordinary usable-source success after
+that point. Legacy schema-1–5 recovery remains separate and cannot claim this
+exactness. These are acceptance requirements, not evidence that schema-6
+recovery or hosted qualification is complete. Immutable pending graph fixtures
+from the historical schema-1–4 writers now exercise current-reader rejection,
+preimage restoration where the old writer installed a candidate, and migration
+to schema 5. Each fixture records its producer revision under
+`src/test/resources/repair/legacy-schema*-writer-pending/PROVENANCE.md`. The
+test preserves the historical profile identity while delegating layout
+resolution to the current generated-C profile; it does not establish admission
+through the production profile registry. Schema 3's detached candidate leaves
+live source unchanged. The capture can be reproduced with
+`python3 scripts/verify-legacy-repair-graph-fixtures.py`; per-fixture
+`SHA256SUMS` files bind the checked-in payload, and the verifier compares
+recaptured output to it. Schema 3's writer-generated run start/deadline
+timestamps are the only fields normalized during reproduction. These fixtures
+do not establish archive admission, hosted checks, or production qualification.
+
 ## Remaining scope of #63
 
 This cleanup removes an unused competing policy path; it does not complete #63.

@@ -9,6 +9,7 @@ import decompengine.project.ProjectFileRole
 import decompengine.project.ReconstructionProfile
 import decompengine.project.ReconstructionAdapters
 import decompengine.project.ReconstructionProfiles
+import decompengine.project.ReconstructionOutputWorkspace
 import decompengine.project.SourceTreeManifest
 import decompengine.project.SourceTreeManifestReader
 import decompengine.project.moduleIdForPath
@@ -38,6 +39,12 @@ internal class WebSourceEvidence(
     }
 
     fun read(jobId: String, reportPrefix: String = "reports"): WebSourceSnapshot {
+        return ReconstructionOutputWorkspace.withReadLease(store.reportDirectoryForRead(jobId, reportPrefix)) {
+            readUnderLease(jobId, reportPrefix)
+        }
+    }
+
+    private fun readUnderLease(jobId: String, reportPrefix: String): WebSourceSnapshot {
         val manifestPath = "$reportPrefix/source-tree/source_tree_manifest.json"
         canonicalReportSegments(manifestPath)
         val input = store.readInput(jobId)

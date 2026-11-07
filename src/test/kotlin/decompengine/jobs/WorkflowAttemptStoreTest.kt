@@ -110,6 +110,36 @@ class WorkflowAttemptStoreTest {
         assertFailsWith<WorkflowStoreException> { retained.checkpoint() }
     }
 
+    @Test fun `committed reconstruction reconciliation is budgeted and preserves measured runtime usage`() = withRoot { root ->
+        val job = upload(root)
+        WorkflowAttemptStore.open(root, CLOCK).use { store ->
+            val queued = store.create(job, store.available(job).snapshot.version,
+                NewWorkflowAttempt(WorkflowKind.RECONSTRUCT, LIMITS)).attempt
+            val started = store.transition(job, queued.runId, queued.version, WorkflowTransition.Start).attempt
+            val interrupted = store.transition(job, started.runId, started.version,
+                WorkflowTransition.Finish(WorkflowRunState.INTERRUPTED, WorkflowTerminalReason.PROCESS_INTERRUPTED)).attempt
+            val candidate = WorkflowCandidate("revision_recovered", SHA)
+            val before = stateJson(root, job).readBytes()
+            val bounded = WorkflowStartupRecoveryBudget(WorkflowStartupRecoveryLimits(maximumPlanBytes = 1))
+            val refused = assertFailsWith<WorkflowStoreException> {
+                store.reconcileCommittedReconstruction(job, interrupted.runId, candidate, bounded)
+            }
+            assertEquals("STORE_LIMIT", refused.code)
+            assertContentEquals(before, stateJson(root, job).readBytes(), "a refused replacement must not change attempt state")
+
+            val reconciled = store.reconcileCommittedReconstruction(job, interrupted.runId, candidate,
+                WorkflowStartupRecoveryBudget(WorkflowStartupRecoveryLimits()))
+            assertEquals(WorkflowRunState.COMPLETED, reconciled.attempt.state)
+            assertEquals(candidate, reconciled.attempt.candidate)
+            assertNull(reconciled.attempt.usage, "usage is unavailable after the process died before its final sample")
+            val usage = WorkflowUsage(inputTokens = 12u, outputTokens = 7u, wallClockMs = 19u)
+            val measured = store.recordCommittedReconstructionUsage(job, interrupted.runId, reconciled.attempt.version,
+                candidate, usage)
+            assertEquals(usage, measured.attempt.usage)
+            assertEquals(measured.attempt, (store.available(job).snapshot.latestRun))
+        }
+    }
+
     @Test fun `reconciliation cancellation is latched between capture units`() {
         var cancelled = false
         val budget = WorkflowStartupRecoveryBudget(cancellation = { cancelled })
@@ -120,6 +150,28 @@ class WorkflowAttemptStoreTest {
         cancelled = false
         assertEquals("RECOVERY_CANCELLED", assertFailsWith<WorkflowStoreException> { budget.checkpoint() }.code)
         assertEquals(2L, budget.readBytes)
+    }
+
+    @Test fun `publication recovery uses aggregate byte and entry limits independent of metadata reads`() {
+        val budget = WorkflowStartupRecoveryBudget(WorkflowStartupRecoveryLimits(
+            maximumReadBytes = 8,
+            maximumPublicationRecoveryEntries = 2,
+            maximumPublicationRecoveryBytes = 5,
+        ))
+        budget.chargeRead(8)
+        budget.publicationRecoveryEntry()
+        budget.publicationRecoveryBytes(3)
+        budget.publicationRecoveryEntry()
+        budget.publicationRecoveryBytes(2)
+        assertEquals(2, budget.publicationRecoveryEntries)
+        assertEquals(5L, budget.publicationRecoveryBytes)
+        assertEquals("STORE_LIMIT", assertFailsWith<WorkflowStoreException> {
+            budget.publicationRecoveryEntry()
+        }.code)
+        assertEquals("STORE_LIMIT", assertFailsWith<WorkflowStoreException> {
+            budget.publicationRecoveryBytes(1)
+        }.code)
+        assertEquals(8L, budget.readBytes, "publication accounting is a separate shared startup budget")
     }
 
     @Test fun `startup reader exhaustion retains the configured limit classification`() {

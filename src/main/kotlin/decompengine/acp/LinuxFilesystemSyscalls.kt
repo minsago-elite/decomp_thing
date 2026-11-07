@@ -193,6 +193,14 @@ internal fun boundedDescriptorReadRequest(maximumBytes: Int, consumed: Long, buf
     return minOf(bufferBytes.toLong(), maximumBytes.toLong() - consumed + 1L)
 }
 
+/** Reads at most one byte past the remaining copy budget, saturating before Long overflow. */
+internal fun boundedCopyReadRequest(maximumBytes: Long, consumed: Long, bufferBytes: Int): Long {
+    require(maximumBytes >= 0 && consumed >= 0 && consumed <= maximumBytes && bufferBytes > 0)
+    val remaining = maximumBytes - consumed
+    val probeLimit = if (remaining == Long.MAX_VALUE) Long.MAX_VALUE else remaining + 1L
+    return minOf(bufferBytes.toLong(), probeLimit)
+}
+
 /**
  * The small Linux descriptor/syscall surface used by the ACP filesystem and process boundaries.
  *
@@ -553,6 +561,31 @@ internal object LinuxFilesystemSyscalls {
         "open workspace directory",
     )
 
+    /** Reopens an already-authorized directory object without resolving its former name. */
+    fun openDirectoryFrom(authorized: LinuxDescriptor): LinuxDescriptor = authorized.whileOpen { authorizedFd ->
+        val authorizedBefore = identity(authorizedFd)
+        requireDirectoryIdentity(authorized.identity, authorizedBefore, "open authorized directory")
+        val reopened = openDescriptor(
+            AT_FDCWD,
+            descriptorPath(authorizedFd).toString(),
+            O_RDONLY or O_DIRECTORY or O_CLOEXEC,
+            0,
+            "open authorized directory",
+        )
+        try {
+            val reopenedIdentity = identity(reopened.fd)
+            val authorizedAfter = identity(authorizedFd)
+            requireDirectoryIdentity(authorizedBefore, reopenedIdentity, "open authorized directory")
+            if (!sameDescriptorObject(reopenedIdentity, authorizedAfter)) {
+                throw IOException("authorized directory identity changed while it was reopened")
+            }
+            reopened
+        } catch (failure: Throwable) {
+            reopened.close()
+            throw failure
+        }
+    }
+
     fun openAbsolutePathOrNull(path: Path): LinuxDescriptor? = try {
         openDescriptor(
             AT_FDCWD,
@@ -737,7 +770,8 @@ internal object LinuxFilesystemSyscalls {
                     measuredCopyOperation(statistics, RuntimeCopyStatistics.Operation.CHECK) { cancellationCheck() }
                     val count = measuredCopyOperation(statistics, RuntimeCopyStatistics.Operation.READ) {
                         retryOnInterrupted("copy authenticated runtime file") {
-                            libc.read(readable.fd, buffer, NativeLong(BUFFER_BYTES.toLong())).toLong()
+                            libc.read(readable.fd, buffer,
+                                NativeLong(boundedCopyReadRequest(maximumBytes, total, BUFFER_BYTES))).toLong()
                         }
                     }
                     statistics?.read(count)
@@ -779,7 +813,8 @@ internal object LinuxFilesystemSyscalls {
                     measuredCopyOperation(statistics, RuntimeCopyStatistics.Operation.CHECK) { cancellationCheck() }
                     val count = measuredCopyOperation(statistics, RuntimeCopyStatistics.Operation.READ) {
                         retryOnInterrupted("copy authenticated runtime file") {
-                            libc.read(readable.fd, buffer, NativeLong(BUFFER_BYTES.toLong())).toLong()
+                            libc.read(readable.fd, buffer,
+                                NativeLong(boundedCopyReadRequest(maximumBytes, total, BUFFER_BYTES))).toLong()
                         }
                     }
                     statistics?.read(count)
@@ -904,6 +939,40 @@ internal object LinuxFilesystemSyscalls {
         call("set secure temporary file mode") { libc.fchmod(descriptor.fd, mode) }
     }
 
+    /** Set only a regular file's atime through an authorized descriptor, preserving mtime. */
+    fun setAccessTime(descriptor: LinuxDescriptor, seconds: Long, nanoseconds: Int) {
+        require(nanoseconds in 0 until 1_000_000_000)
+        openReadableFrom(descriptor).use { writable ->
+            val times = Memory((4 * NativeLong.SIZE).toLong())
+            try {
+                times.setNativeLong(0, NativeLong(seconds))
+                times.setNativeLong(NativeLong.SIZE.toLong(), NativeLong(nanoseconds.toLong()))
+                times.setNativeLong((2 * NativeLong.SIZE).toLong(), NativeLong(0))
+                times.setNativeLong((3 * NativeLong.SIZE).toLong(), NativeLong(UTIME_OMIT.toLong()))
+                call("restore committed file access time") { libc.futimens(writable.fd, times) }
+            } finally {
+                times.close()
+            }
+        }
+    }
+
+    /** Changes mode through the kernel-owned proc-fd reference without opening/closing a second fd. */
+    fun chmodPinnedViaProcFd(authorized: LinuxDescriptor, mode: Int) {
+        val before = identity(authorized.fd)
+        require(before.key == authorized.identity.key && before.mountId == authorized.identity.mountId &&
+            before.isRegularFile && !before.isSymbolicLink) {
+            "pinned filesystem entry identity changed before setting its mode"
+        }
+        call("set pinned filesystem entry mode") {
+            libc.chmod(descriptorPath(authorized.fd).toString(), mode)
+        }
+        val after = identity(authorized.fd)
+        if (after.key != before.key || after.mountId != before.mountId || !after.isRegularFile ||
+            after.isSymbolicLink || after.mode.permissions != mode.permissions) {
+            throw IOException("pinned filesystem entry identity changed while setting its mode")
+        }
+    }
+
     /**
      * Changes the mode of the regular file or directory already pinned by an O_PATH [authorized]
      * descriptor. Linux rejects `fchmod(O_PATH)` with EBADF, so reopen the kernel-owned
@@ -1018,8 +1087,24 @@ internal object LinuxFilesystemSyscalls {
         renameAt2(fromParentFd, from, toParentFd, to, RENAME_NOREPLACE)
     }
 
+    /** Replaces one child name relative to two pinned directories, with ordinary rename semantics. */
+    fun renameReplace(fromParentFd: Int, from: String, toParentFd: Int, to: String) {
+        requireDescriptorRelativeName(from)
+        requireDescriptorRelativeName(to)
+        renameAt2(fromParentFd, from, toParentFd, to, 0)
+    }
+
     fun exchange(parentFd: Int, first: String, second: String) {
         renameAt2(parentFd, first, parentFd, second, RENAME_EXCHANGE)
+    }
+
+    /** Exchanges child names relative to two already-open directory descriptors. */
+    fun exchange(firstParentFd: Int, first: String, secondParentFd: Int, second: String) {
+        requireDescriptorRelativeName(first)
+        requireDescriptorRelativeName(second)
+        requireOpenDirectory(firstParentFd, "exchange first parent")
+        requireOpenDirectory(secondParentFd, "exchange second parent")
+        renameAt2(firstParentFd, first, secondParentFd, second, RENAME_EXCHANGE)
     }
 
     fun unlinkIfPresent(parentFd: Int, name: String) {
@@ -1052,6 +1137,7 @@ internal object LinuxFilesystemSyscalls {
         directory: LinuxDescriptor,
         maximumEntries: Int = MAXIMUM_PRIVATE_DIRECTORY_ENTRIES,
         cancellationCheck: () -> Unit = {},
+        onEntry: (String) -> Unit = {},
     ): List<String> {
         require(maximumEntries > 0) { "directory entry limit must be positive" }
         return Files.newDirectoryStream(descriptorPath(directory.fd)).use { entries ->
@@ -1063,9 +1149,63 @@ internal object LinuxFilesystemSyscalls {
                 if (name.isEmpty() || name == "." || name == ".." || '/' in name || '\u0000' in name) {
                     throw IOException("private directory contains an invalid entry name")
                 }
+                // Charge before retaining the name. A caller with an aggregate allowance can
+                // stop enumeration without first allocating the rest of an oversized listing.
+                onEntry(name)
                 names += name
             }
             names
+        }
+    }
+
+    /** Lists a tree directory through getdents64 on an O_NOATIME fd, preserving committed atime. */
+    fun directoryEntryNamesWithoutAtime(
+        directory: LinuxDescriptor,
+        maximumEntries: Int,
+        cancellationCheck: () -> Unit = {},
+        onEntry: (String) -> Unit = {},
+    ): List<String> {
+        require(maximumEntries > 0)
+        val before = identity(directory.fd)
+        require(before.isDirectory && !before.isSymbolicLink)
+        val fd = openDescriptor(AT_FDCWD, descriptorPath(directory.fd).toString(),
+            O_RDONLY or O_DIRECTORY or O_NOATIME or O_CLOEXEC, 0, "open directory without changing access time")
+        fd.use {
+            require(sameDescriptorObject(before, identity(fd.fd))) { "directory identity changed before enumeration" }
+            val number = when (System.getProperty("os.arch")) {
+                "x86_64", "amd64" -> 217L
+                "aarch64", "arm64" -> 61L
+                else -> throw IOException("metadata-neutral directory enumeration is unsupported on this architecture")
+            }
+            val memory = Memory(32 * 1024L)
+            val result = ArrayList<String>(minOf(maximumEntries, 1024))
+            while (true) {
+                cancellationCheck()
+                val count = retryOnInterrupted("enumerate metadata-neutral publication directory") {
+                    libc.syscall(NativeLong(number), fd.fd, memory, NativeLong(memory.size())).toLong()
+                }
+                if (count == 0L) break
+                if (count < 0L) throw syscallFailure("enumerate metadata-neutral publication directory")
+                var offset = 0
+                while (offset < count.toInt()) {
+                    cancellationCheck()
+                    val recordLength = memory.getShort(offset.toLong() + 16).toInt() and 0xffff
+                    if (recordLength < 20 || offset + recordLength > count.toInt()) throw IOException("directory enumeration returned a malformed record")
+                    val nameBytes = memory.getByteArray(offset.toLong() + 19, recordLength - 19)
+                    val nameLength = nameBytes.indexOf(0).let { if (it < 0) nameBytes.size else it }
+                    val name = nameBytes.copyOf(nameLength).toString(Charsets.UTF_8)
+                    if (name != "." && name != "..") {
+                        if (result.size >= maximumEntries) throw LinuxResourceLimitException()
+                        if (name.isEmpty() || '/' in name || '\u0000' in name || '\ufffd' in name) throw IOException("private directory contains an invalid entry name")
+                        onEntry(name); result += name
+                    }
+                    offset += recordLength
+                }
+            }
+            if (!sameDescriptorObject(before, identity(directory.fd)) || !sameDescriptorObject(before, identity(fd.fd))) {
+                throw IOException("directory identity changed during metadata-neutral enumeration")
+            }
+            return result
         }
     }
 
@@ -1085,6 +1225,123 @@ internal object LinuxFilesystemSyscalls {
     }
 
     fun identity(fd: Int): LinuxFileIdentity = descriptorStatxIdentity(fd) ?: descriptorProcIdentity(fd)
+
+    /** One descriptor-relative observation of stable identity, size, and nanosecond timestamps. */
+    fun fileState(descriptor: LinuxDescriptor): LinuxFileState = descriptor.whileOpen { fd ->
+        descriptorStatxFileState(fd)
+            ?: throw IOException("descriptor file state is unavailable from statx")
+    }
+
+    /** Reads complete directory metadata from its pinned descriptor without opening or reading it. */
+    fun directoryMetadata(descriptor: LinuxDescriptor): LinuxDirectoryMetadata = descriptor.whileOpen { fd ->
+        descriptorStatxDirectoryMetadata(fd)
+            ?: throw IOException("descriptor directory metadata is unavailable from statx")
+    }
+
+    private fun descriptorStatxDirectoryMetadata(fd: Int): LinuxDirectoryMetadata? = Memory(STATX_BYTES).use { statistics ->
+        statistics.clear()
+        descriptorStatxQueryOrNull {
+            retryOnInterrupted("inspect pinned directory metadata") {
+                libc.statx(fd, "", AT_EMPTY_PATH or AT_SYMLINK_NOFOLLOW,
+                    STATX_BASIC_STATS or STATX_MNT_ID, statistics).toLong()
+            }
+        } ?: return@use null
+        val mask = statistics.getInt(0)
+        if (mask and STATX_DIRECTORY_METADATA_MASK != STATX_DIRECTORY_METADATA_MASK) return@use null
+        val identity = decodeDescriptorStatxIdentity(statistics)
+            ?: throw IOException("descriptor statx omitted stable directory identity")
+        if (!identity.isDirectory || identity.isSymbolicLink) {
+            throw IOException("descriptor statx target is not a directory")
+        }
+        LinuxDirectoryMetadata(
+            identity = identity,
+            mode = identity.mode,
+            uid = identity.uid,
+            gid = identity.gid,
+            linkCount = identity.linkCount,
+            size = statistics.getLong(0x28).also { if (it < 0) throw IOException("descriptor statx returned an invalid directory size") },
+            accessTimeSeconds = statistics.getLong(0x40),
+            accessTimeNanoseconds = statistics.getInt(0x48).also { requireValidNanoseconds(it) },
+            modificationTimeSeconds = statistics.getLong(0x70),
+            modificationTimeNanoseconds = statistics.getInt(0x78).also { requireValidNanoseconds(it) },
+            changeTimeSeconds = statistics.getLong(0x60),
+            changeTimeNanoseconds = statistics.getInt(0x68).also { requireValidNanoseconds(it) },
+        )
+    }
+
+    private fun requireOpenDirectory(fd: Int, operation: String) {
+        val current = identity(fd)
+        if (!current.isDirectory || current.isSymbolicLink) throw IOException("$operation requires an open directory descriptor")
+    }
+
+    /** Reads one bounded chunk from the already-open O_NOATIME descriptor. */
+    fun readWithoutAtime(descriptor: LinuxDescriptor, maximumBytes: Int): ByteArray = descriptor.whileOpen { fd ->
+        require(maximumBytes > 0)
+        val buffer = Memory(maximumBytes.toLong())
+        val count = retryOnInterrupted("read metadata-neutral publication file") {
+            libc.read(fd, buffer, NativeLong(maximumBytes.toLong())).toLong()
+        }
+        if (count < 0) throw syscallFailure("read metadata-neutral publication file")
+        buffer.getByteArray(0, count.toInt())
+    }
+
+    /** Hash an authenticated descriptor without allocating the full file or changing atime. */
+    fun sha256WithoutAtime(authorized: LinuxDescriptor, maximumBytes: Long): String {
+        require(maximumBytes >= 0)
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+        openReadableWithoutAtimeFrom(authorized).use { readable ->
+            Memory(BUFFER_BYTES.toLong()).use { buffer ->
+                var total = 0L
+                while (true) {
+                    val count = retryOnInterrupted("hash metadata-neutral authorized file") {
+                        libc.read(readable.fd, buffer, NativeLong(boundedDescriptorReadRequest(
+                            minOf(maximumBytes, Int.MAX_VALUE.toLong()).toInt(), total, BUFFER_BYTES,
+                        ))).toLong()
+                    }
+                    if (count < 0L) throw syscallFailure("hash metadata-neutral authorized file")
+                    if (count == 0L) break
+                    total = Math.addExact(total, count)
+                    if (total > maximumBytes) throw LinuxResourceLimitException()
+                    digest.update(buffer.getByteArray(0, count.toInt()))
+                }
+                require(identity(readable.fd).key == authorized.identity.key) {
+                    "authorized file identity changed while hashing"
+                }
+            }
+        }
+        return digest.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    private fun descriptorStatxFileState(fd: Int): LinuxFileState? = Memory(STATX_BYTES).use { statistics ->
+        statistics.clear()
+        descriptorStatxQueryOrNull {
+            retryOnInterrupted("inspect pinned descriptor file state") {
+                libc.statx(fd, "", AT_EMPTY_PATH or AT_SYMLINK_NOFOLLOW,
+                    STATX_BASIC_STATS or STATX_MNT_ID, statistics).toLong()
+            }
+        } ?: return@use null
+        val mask = statistics.getInt(0)
+        if (mask and STATX_FILE_STATE_MASK != STATX_FILE_STATE_MASK) return@use null
+        val identity = decodeDescriptorStatxIdentity(statistics)
+            ?: throw IOException("descriptor statx omitted stable file identity")
+        LinuxFileState(
+            identity = identity,
+            size = statistics.getLong(0x28).also { if (it < 0) throw IOException("descriptor statx returned an invalid size") },
+            // struct statx stores atime at 0x40; 0x50 is btime. Keep the committed
+            // access-time field distinct from birth time so a forged/unrequested btime
+            // can never satisfy publication recovery metadata checks.
+            accessTimeSeconds = statistics.getLong(0x40),
+            accessTimeNanoseconds = statistics.getInt(0x48).also { requireValidNanoseconds(it) },
+            modificationTimeSeconds = statistics.getLong(0x70),
+            modificationTimeNanoseconds = statistics.getInt(0x78).also { requireValidNanoseconds(it) },
+            changeTimeSeconds = statistics.getLong(0x60),
+            changeTimeNanoseconds = statistics.getInt(0x68).also { requireValidNanoseconds(it) },
+        )
+    }
+
+    private fun requireValidNanoseconds(value: Int) {
+        if (value !in 0 until 1_000_000_000) throw IOException("descriptor statx returned invalid nanoseconds")
+    }
 
     /** Scope-owned query storage only; fd ownership and every fresh observation stay with the caller. */
     class StatxIdentityScratch : AutoCloseable {
@@ -1307,6 +1564,16 @@ internal object LinuxFilesystemSyscalls {
         }
     }
 
+    private fun requireDirectoryIdentity(
+        expected: LinuxFileIdentity,
+        actual: LinuxFileIdentity,
+        operation: String,
+    ) {
+        if (!sameDescriptorObject(expected, actual) || !actual.isDirectory || actual.isSymbolicLink) {
+            throw IOException("$operation requires an authenticated directory")
+        }
+    }
+
     private fun requireSynchronizableIdentity(expected: LinuxFileIdentity, actual: LinuxFileIdentity) {
         if (
             !sameDescriptorObject(expected, actual) ||
@@ -1412,10 +1679,13 @@ internal object LinuxFilesystemSyscalls {
         fun openat(directoryFd: Int, path: String, flags: Int, mode: Int): Int
         fun close(fd: Int): Int
         fun read(fd: Int, buffer: Pointer, count: NativeLong): NativeLong
+        fun syscall(number: NativeLong, vararg arguments: Any): NativeLong
         fun write(fd: Int, buffer: Pointer, count: NativeLong): NativeLong
         fun fsync(fd: Int): Int
         fun flock(fd: Int, operation: Int): Int
         fun fchmod(fd: Int, mode: Int): Int
+        fun futimens(fd: Int, times: Pointer): Int
+        fun chmod(path: String, mode: Int): Int
         fun linkat(oldDirectoryFd: Int, oldPath: String, newDirectoryFd: Int, newPath: String, flags: Int): Int
         fun renameat2(oldDirectoryFd: Int, oldPath: String, newDirectoryFd: Int, newPath: String, flags: Int): Int
         fun unlinkat(directoryFd: Int, path: String, flags: Int): Int
@@ -1470,6 +1740,7 @@ internal object LinuxFilesystemSyscalls {
     private const val O_EXCL = 0x80
     private const val O_NONBLOCK = 0x800
     private const val O_NOATIME = 0x40000
+    private const val UTIME_OMIT = 0x3ffffffe
     private const val O_DIRECTORY = 0x10000
     private const val O_NOFOLLOW = 0x20000
     private const val O_CLOEXEC = 0x80000
@@ -1482,6 +1753,12 @@ internal object LinuxFilesystemSyscalls {
     private const val STATX_BASIC_STATS = 0x7ff
     private const val STATX_MNT_ID = 0x1000
     private const val STATX_IDENTITY_MASK = 0x111f // TYPE | MODE | NLINK | UID | GID | INO | MNT_ID
+    private const val STATX_SIZE = 0x0200
+    private const val STATX_ATIME = 0x0020
+    private const val STATX_MTIME = 0x0040
+    private const val STATX_CTIME = 0x0080
+    private const val STATX_FILE_STATE_MASK = STATX_IDENTITY_MASK or STATX_SIZE or STATX_ATIME or STATX_MTIME or STATX_CTIME
+    private const val STATX_DIRECTORY_METADATA_MASK = STATX_FILE_STATE_MASK
     private const val AT_REMOVEDIR = 0x200
     private const val RENAME_NOREPLACE = 1
     private const val RENAME_EXCHANGE = 2
@@ -1541,6 +1818,33 @@ internal data class LinuxFileIdentity(
     val isRegularFile: Boolean,
     val isDirectory: Boolean,
     val isSymbolicLink: Boolean,
+)
+
+internal data class LinuxFileState(
+    val identity: LinuxFileIdentity,
+    val size: Long,
+    val accessTimeSeconds: Long,
+    val accessTimeNanoseconds: Int,
+    val modificationTimeSeconds: Long,
+    val modificationTimeNanoseconds: Int,
+    /** Observation-only race detector: never included in publication equality or restoration. */
+    val changeTimeSeconds: Long,
+    val changeTimeNanoseconds: Int,
+)
+
+internal data class LinuxDirectoryMetadata(
+    val identity: LinuxFileIdentity,
+    val mode: Int,
+    val uid: Int,
+    val gid: Int,
+    val linkCount: Int,
+    val size: Long,
+    val accessTimeSeconds: Long,
+    val accessTimeNanoseconds: Int,
+    val modificationTimeSeconds: Long,
+    val modificationTimeNanoseconds: Int,
+    val changeTimeSeconds: Long,
+    val changeTimeNanoseconds: Int,
 )
 
 internal val Int.permissions: Int

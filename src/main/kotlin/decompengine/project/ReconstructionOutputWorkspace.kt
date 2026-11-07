@@ -1,9 +1,13 @@
 package decompengine.project
 
+import decompengine.acp.LinuxDescriptor
+import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.StrictJsonLimits
 import decompengine.jobs.FullRunJournal
+import decompengine.jobs.WorkflowStartupRecoveryBudget
 import java.nio.ByteBuffer
+import java.io.IOException
 import java.nio.channels.FileChannel
 import java.nio.channels.FileLock
 import java.nio.file.Files
@@ -15,9 +19,19 @@ import java.nio.file.StandardOpenOption.*
 import java.nio.file.attribute.BasicFileAttributes
 import java.security.MessageDigest
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.locks.Condition
+import java.util.concurrent.locks.ReentrantLock
+import java.util.concurrent.locks.StampedLock
+import java.util.concurrent.TimeUnit
 import kotlinx.serialization.json.*
 
-internal class ReconstructionOutputBusyException : IllegalStateException("another reconstruction owns this output directory")
+internal open class ReconstructionOutputReadUnavailableException(message: String) : IllegalStateException(message)
+
+internal class ReconstructionOutputBusyException : ReconstructionOutputReadUnavailableException(
+    "another reconstruction owns this output directory",
+)
 
 /** Routes generated state by input identity while preserving the original receipt-bound active paths. */
 internal class ReconstructionOutputWorkspace private constructor(
@@ -28,17 +42,40 @@ internal class ReconstructionOutputWorkspace private constructor(
     private val ownership: ReconstructionPublicationLock,
     private val syncParentDirectory: (Path) -> Unit,
     val inputSha256: String,
+    private val processGate: ProcessGate,
+    private val processGateStamp: Long,
 ) : AutoCloseable {
     private var closed = false
 
     /** Capability for later publication steps; it is valid only while this workspace is open. */
     internal val publicationLock: ReconstructionPublicationLock get() = ownership
 
-    private fun activate() {
+    /** Build and publish an explicit subset while this workspace owns the output lease. */
+    @Synchronized
+    internal fun publish(
+        members: Set<String>,
+        buildStage: (Path) -> Unit,
+        cancellationCheck: () -> Unit = {},
+        onCommitted: () -> Unit = {},
+        beforeDecision: (Path) -> Unit = {},
+    ): PublicationResult {
+        check(!closed) { "reconstruction output workspace is closed" }
+        ownership.borrow(root, inputSha256)
+        return ReconstructionOutputPublication.ownedBy(ownership, syncParentDirectory)
+            .publish(members, buildStage, cancellationCheck, onCommitted, beforeDecision)
+    }
+
+    private fun activate(recoveryBudget: WorkflowStartupRecoveryBudget? = null, onCommittedPublication: () -> Unit = {}) {
         ownership.validate()
-        check(!Files.exists(root.resolve(PUBLICATION), NOFOLLOW_LINKS)) {
-            "a pending reconstruction publication journal requires recovery before activation"
+        LinuxFilesystemSyscalls.openRoot(root).use { rootDescriptor ->
+            removeAbandonedRepairMutationTemps(rootDescriptor, root)
         }
+        if (Files.exists(root.resolve(REPAIR_MUTATION), NOFOLLOW_LINKS)) {
+            throw ReconstructionOutputReadUnavailableException(
+                "repair recovery is required before reconstruction output can be activated",
+            )
+        }
+        ReconstructionOutputPublication.recover(ownership, syncParentDirectory, recoveryBudget, onCommittedPublication)
         recoverSwitch()
         val archiveEntries = presentEntries(root)
         val hasActiveIdentity = Files.exists(root.resolve(ACTIVE), NOFOLLOW_LINKS)
@@ -178,27 +215,694 @@ internal class ReconstructionOutputWorkspace private constructor(
     override fun close() {
         if (closed) return
         closed = true
-        ownership.closeOwnership()
-        try { if (lock.isValid) lock.release() } finally {
-            try { channel.close() } finally { synchronized(OWNERS) { OWNERS.remove(ownerKey) } }
+        var failure: Throwable? = null
+        fun close(action: () -> Unit) {
+            try { action() } catch (caught: Throwable) {
+                if (failure == null) failure = caught else if (failure !== caught) failure!!.addSuppressed(caught)
+            }
         }
+        close { ownership.closeOwnership() }
+        close { if (lock.isValid) lock.release() }
+        close { channel.close() }
+        synchronized(OWNERS) { OWNERS.remove(ownerKey) }
+        processGate.lock.unlockWrite(processGateStamp)
+        releaseGate(processGate)
+        failure?.let { throw it }
     }
 
     companion object {
+        private data class SharedFileLock(
+            val root: LinuxDescriptor,
+            val lockFile: LinuxDescriptor,
+            val channel: FileChannel,
+            val lock: FileLock,
+        )
+
+        private class ProcessGate {
+            // StampedLock permits the owning lease to be retired from a different thread. CLI
+            // progress writers can outlive the command thread, so a thread-owned RW lock would
+            // strand the process-local publication gate when that cleanup worker closes it.
+            val lock = StampedLock()
+            data class ReadHold(val stamp: Long, var leases: Int)
+            val readHolds = java.util.IdentityHashMap<Thread, ReadHold>()
+            var users: Int = 0
+            val sharedLockMonitor = ReentrantLock()
+            val sharedLockChanged: Condition = sharedLockMonitor.newCondition()
+            var sharedLockTransition: Boolean = false
+            var sharedReaders: Int = 0
+            var sharedFileLock: SharedFileLock? = null
+        }
+
         internal const val ACTIVE = ".reconstruction-active-input.json"
         internal const val SWITCH = ".reconstruction-input-switch.json"
         internal const val PUBLICATION = ".reconstruction-publication.json"
+        private const val REPAIR_MUTATION = ".reconstruction-repair-in-progress"
+        private const val REPAIR_MUTATION_TEMP_PREFIX = ".reconstruction-repair-in-progress."
+        private val REPAIR_MUTATION_BYTES = "repair-mutation-v1\n".toByteArray(Charsets.US_ASCII)
         internal const val CACHE = "input-cache"
         private val INITIAL_RECONSTRUCTION_OUTPUTS = setOf(
             "analysis", "source-tree", "source-tree.zip", "reconstruction.json", "reconstruction_progress.json",
         )
-        internal val ENTRIES = listOf("analysis", "source-tree", "source-tree.zip", "reconstruction.json", "reconstruction_progress.json", "exploration.json", ModuleObservedBehavior.FILE_NAME, "agent-progress.json", FullRunJournal.DIRECTORY, ModuleCompilerFeedbackStore.DIRECTORY)
+        internal val ENTRIES = listOf(
+            "analysis", "source-tree", "source-tree.zip", "reconstruction.json", "reconstruction_progress.json",
+            "exploration.json", ModuleObservedBehavior.FILE_NAME, "agent-progress.json", FullRunJournal.DIRECTORY,
+            ModuleCompilerFeedbackStore.DIRECTORY, ".decomp-agent-sessions",
+        )
         private val HASH = Regex("[0-9a-f]{64}")
         private val KEY = Regex("[0-9a-f]{64}|unidentified-[0-9a-f-]{36}")
         private val OWNERS = mutableSetOf<Any>()
+        private val PROCESS_GATES = mutableMapOf<Path, ProcessGate>()
+
+        /** Run a complete cooperating read against one stable publication generation. */
+        internal fun <T> withReadLease(reportDirectory: Path, action: () -> T): T =
+            acquireReadLease(reportDirectory).use { action() }
+
+        /** Apply the lease only to directories that are explicitly managed as publication roots. */
+        internal fun <T> withReadLeaseIfManaged(reportDirectory: Path, action: () -> T): T {
+            val active = reportDirectory.resolve(ACTIVE)
+            val lock = reportDirectory.resolve(LOCK_FILE)
+            val hasActive = Files.exists(active, NOFOLLOW_LINKS)
+            val hasLock = Files.exists(lock, NOFOLLOW_LINKS)
+            if (!hasActive && !hasLock) return action()
+            // A lock-only root is a legacy/inactive workspace: retain the lock protocol if one
+            // was already created, but do not require an active-input marker until activation.
+            // If the active marker exists, the lock must be present and both names must be safe.
+            if ((hasActive && !hasLock) ||
+                (hasActive && (!Files.isRegularFile(active, NOFOLLOW_LINKS) || Files.isSymbolicLink(active))) ||
+                (hasLock && (!Files.isRegularFile(lock, NOFOLLOW_LINKS) || Files.isSymbolicLink(lock)))) {
+                throw ReconstructionOutputReadUnavailableException(
+                    "published reconstruction workspace markers are incomplete",
+                )
+            }
+            return withReadLease(reportDirectory, action)
+        }
+
+        /**
+         * Hold the reconstruction-output read lease while a CLI repair consumes a published
+         * `source-tree`. Ordinary user projects have no adjacent workspace marker and remain
+         * outside this lease protocol.
+         */
+        internal fun <T> withProjectReadLease(projectDirectory: Path, action: (Path) -> T): T {
+            val project = resolveProjectAuthority(projectDirectory)
+            // Resolve aliases before deciding whether this is an ordinary project. A caller may
+            // reach the published source tree through a differently named symlink; checking the
+            // lexical basename first would let that read bypass the publication lease.
+            if (project.fileName?.toString() != "source-tree") return action(project)
+            val reports = project.parent ?: return action(project)
+            val hasActiveMarker = Files.exists(reports.resolve(ACTIVE), NOFOLLOW_LINKS)
+            val hasLockMarker = Files.exists(reports.resolve(LOCK_FILE), NOFOLLOW_LINKS)
+            if (!hasActiveMarker && !hasLockMarker) return action(project)
+            if (!Files.isRegularFile(reports.resolve(ACTIVE), NOFOLLOW_LINKS) ||
+                !Files.isRegularFile(reports.resolve(LOCK_FILE), NOFOLLOW_LINKS)) {
+                throw ReconstructionOutputReadUnavailableException(
+                    "published reconstruction workspace markers are incomplete",
+                )
+            }
+            return withReadLease(reports) { action(project) }
+        }
+
+        /** Hold an exclusive publication lease while a CLI repair mutates a published project. */
+        internal fun <T> withProjectMutationLease(
+            projectDirectory: Path,
+            canRetireRepairMarker: (T) -> Boolean,
+            action: (Path) -> T,
+        ): T {
+            val project = resolveProjectAuthority(projectDirectory)
+            if (project.fileName?.toString() != "source-tree") return action(project)
+            val reports = project.parent ?: return action(project)
+            val hasActiveMarker = Files.exists(reports.resolve(ACTIVE), NOFOLLOW_LINKS)
+            val hasLockMarker = Files.exists(reports.resolve(LOCK_FILE), NOFOLLOW_LINKS)
+            if (!hasActiveMarker && !hasLockMarker) return action(project)
+            if (!Files.isRegularFile(reports.resolve(ACTIVE), NOFOLLOW_LINKS) ||
+                !Files.isRegularFile(reports.resolve(LOCK_FILE), NOFOLLOW_LINKS)) {
+                throw ReconstructionOutputReadUnavailableException(
+                    "published reconstruction workspace markers are incomplete",
+                )
+            }
+
+            val canonicalRoot = try { reports.toRealPath() } catch (_: IOException) {
+                throw ReconstructionOutputReadUnavailableException(
+                    "published reconstruction workspace root is unavailable",
+                )
+            }
+            val gate = retainGate(canonicalRoot)
+            var stamp = 0L
+            var gateOwned = false
+            var rootDescriptor: LinuxDescriptor? = null
+            var lockDescriptor: LinuxDescriptor? = null
+            var channel: FileChannel? = null
+            var fileLock: FileLock? = null
+            try {
+                stamp = acquireWriteLock(gate)
+                gateOwned = true
+                rootDescriptor = LinuxFilesystemSyscalls.openRoot(canonicalRoot)
+                lockDescriptor = LinuxFilesystemSyscalls.openRegularFileAtOrNull(rootDescriptor.fd, LOCK_FILE)
+                    ?: throw ReconstructionOutputReadUnavailableException(
+                        "published reconstruction output lock is unavailable",
+                    )
+                channel = FileChannel.open(LinuxFilesystemSyscalls.descriptorPath(lockDescriptor), READ, WRITE)
+                while (fileLock == null) {
+                    if (Thread.currentThread().isInterrupted) throw InterruptedException(
+                        "published reconstruction mutation lease acquisition was interrupted",
+                    )
+                    try { fileLock = channel.tryLock() }
+                    catch (_: java.nio.channels.OverlappingFileLockException) { /* another local owner is retiring */ }
+                    if (fileLock == null) TimeUnit.MILLISECONDS.sleep(100)
+                }
+                normalizePublicationLock(rootDescriptor, lockDescriptor, channel)
+                val identity = LinuxFilesystemSyscalls.identity(lockDescriptor.fd)
+                require(identity.isRegularFile && identity.linkCount == 1 &&
+                    (identity.mode and 0xfff) == OWNER_READ_WRITE && identity.uid == rootDescriptor.identity.uid) {
+                    "reconstruction output lock is not an owned private regular file"
+                }
+                validateExclusiveMutationAuthority(rootDescriptor, lockDescriptor, canonicalRoot)
+                val active = readObject(canonicalRoot.resolve(ACTIVE))
+                    ?: throw ReconstructionOutputReadUnavailableException(
+                        "published reconstruction input identity disappeared during mutation lease acquisition",
+                    )
+                require(active.keys == setOf("schemaVersion", "inputSha256") &&
+                    active["schemaVersion"] == JsonPrimitive(1) &&
+                    active["inputSha256"]?.jsonPrimitive?.content?.matches(HASH) == true) {
+                    "published reconstruction input identity is malformed"
+                }
+                requireReadablePublicationState(canonicalRoot, allowRepairInProgress = true)
+                removeAbandonedRepairMutationTemps(rootDescriptor, canonicalRoot)
+                ensureRepairMutationMarker(rootDescriptor, canonicalRoot)
+                val result = action(project)
+                validateExclusiveMutationAuthority(rootDescriptor, lockDescriptor, canonicalRoot)
+                if (!canRetireRepairMarker(result)) return result
+                val restoreInterrupt = Thread.interrupted()
+                try {
+                    try {
+                        LinuxFilesystemSyscalls.unlink(rootDescriptor.fd, REPAIR_MUTATION)
+                        LinuxFilesystemSyscalls.synchronize(rootDescriptor)
+                        sync(canonicalRoot)
+                    } catch (failure: Throwable) {
+                        try { ensureRepairMutationMarker(rootDescriptor, canonicalRoot) }
+                        catch (restoreFailure: Throwable) { if (failure !== restoreFailure) failure.addSuppressed(restoreFailure) }
+                        throw failure
+                    }
+                } finally {
+                    if (restoreInterrupt) Thread.currentThread().interrupt()
+                }
+                return result
+            } finally {
+                try { fileLock?.takeIf(FileLock::isValid)?.release() }
+                finally {
+                    try { channel?.close() }
+                    finally {
+                        try { lockDescriptor?.close() }
+                        finally {
+                            try { rootDescriptor?.close() }
+                            finally {
+                                if (gateOwned) gate.lock.unlockWrite(stamp)
+                                releaseGate(gate)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        /** Resolve a possibly absent source-tree against its real parent before any lock wait. */
+        private fun resolveProjectAuthority(projectDirectory: Path): Path {
+            val requested = projectDirectory.toAbsolutePath().normalize()
+            return try {
+                requested.toRealPath()
+            } catch (_: IOException) {
+                if (Files.exists(requested, NOFOLLOW_LINKS)) {
+                    throw ReconstructionOutputReadUnavailableException(
+                        "published reconstruction project authority could not be resolved",
+                    )
+                }
+                if (requested.fileName?.toString() == "source-tree") {
+                    val parent = requested.parent ?: throw ReconstructionOutputReadUnavailableException(
+                        "published reconstruction project parent could not be resolved",
+                    )
+                    try { parent.toRealPath().resolve("source-tree") }
+                    catch (_: IOException) {
+                        throw ReconstructionOutputReadUnavailableException(
+                            "published reconstruction project parent could not be resolved",
+                        )
+                    }
+                } else requested
+            }
+        }
+
+        private fun validateExclusiveMutationAuthority(root: LinuxDescriptor, lock: LinuxDescriptor, namedRoot: Path) {
+            LinuxFilesystemSyscalls.openRoot(namedRoot).use { currentRoot ->
+                if (!sameObject(currentRoot.identity, LinuxFilesystemSyscalls.identity(root.fd))) {
+                    throw ReconstructionOutputReadUnavailableException(
+                        "reconstruction output root name changed during mutation lease acquisition",
+                    )
+                }
+                val currentLock = LinuxFilesystemSyscalls.openRegularFileAtOrNull(currentRoot.fd, LOCK_FILE)
+                    ?: throw ReconstructionOutputReadUnavailableException(
+                        "reconstruction output lock name disappeared during mutation lease acquisition",
+                    )
+                currentLock.use {
+                    if (!sameObject(it.identity, LinuxFilesystemSyscalls.identity(lock.fd))) {
+                        throw ReconstructionOutputReadUnavailableException(
+                            "reconstruction output lock name changed during mutation lease acquisition",
+                        )
+                    }
+                }
+            }
+        }
+
+        private fun requireReadablePublicationState(reportDirectory: Path, allowRepairInProgress: Boolean = false) {
+            LinuxFilesystemSyscalls.openRoot(reportDirectory).use { root ->
+                LinuxFilesystemSyscalls.openPathAtOrNull(root.fd, SWITCH)?.use {
+                    throw ReconstructionOutputReadUnavailableException(
+                        "reconstruction input recovery is required before reading this output",
+                    )
+                }
+                LinuxFilesystemSyscalls.openPathAtOrNull(root.fd, PUBLICATION)?.use {
+                    throw ReconstructionOutputReadUnavailableException(
+                        "reconstruction publication recovery is required before reading this output",
+                    )
+                }
+                val repairMarkerExists = LinuxFilesystemSyscalls.openPathAtOrNull(root.fd, REPAIR_MUTATION).use { it != null }
+                val repairTempExists = LinuxFilesystemSyscalls.directoryEntryNames(root, ReconstructionOutputTree.MAX_ENTRIES)
+                    .any { it.matches(Regex("\\.reconstruction-repair-in-progress\\.[0-9a-f-]{36}\\.tmp")) }
+                if (repairMarkerExists || repairTempExists) {
+                    if (allowRepairInProgress) return@use
+                    throw ReconstructionOutputReadUnavailableException(
+                        "repair recovery is required before reading this output",
+                    )
+                }
+                val privateResidue = LinuxFilesystemSyscalls.directoryEntryNames(root, ReconstructionOutputTree.MAX_ENTRIES)
+                    .firstOrNull { name -> name.startsWith(".reconstruction-stage-") ||
+                        name.startsWith(".reconstruction-previous-") || name.startsWith(".publication-") }
+                if (privateResidue != null) {
+                    throw ReconstructionOutputReadUnavailableException(
+                        "reconstruction publication recovery is required before reading private transaction residue",
+                    )
+                }
+            }
+        }
+
+        private fun ensureRepairMutationMarker(root: LinuxDescriptor, canonicalRoot: Path) {
+            val marker = LinuxFilesystemSyscalls.openRegularFileAtOrNull(root.fd, REPAIR_MUTATION)
+                ?: run {
+                    val temporaryName = "$REPAIR_MUTATION_TEMP_PREFIX${UUID.randomUUID()}.tmp"
+                    val created = LinuxFilesystemSyscalls.createRegularFile(root.fd, temporaryName, OWNER_READ_WRITE)
+                    try {
+                        FileChannel.open(LinuxFilesystemSyscalls.descriptorPath(created), WRITE).use { channel ->
+                            val buffer = ByteBuffer.wrap(REPAIR_MUTATION_BYTES)
+                            while (buffer.hasRemaining()) channel.write(buffer)
+                            channel.force(true)
+                        }
+                        LinuxFilesystemSyscalls.synchronize(created)
+                        LinuxFilesystemSyscalls.renameNoReplace(root.fd, temporaryName, root.fd, REPAIR_MUTATION)
+                        LinuxFilesystemSyscalls.synchronize(root)
+                        created.close()
+                        LinuxFilesystemSyscalls.openRegularFileAtOrNull(root.fd, REPAIR_MUTATION)
+                            ?: throw ReconstructionOutputReadUnavailableException("repair mutation marker publication failed")
+                    } catch (failure: Throwable) {
+                        runCatching { created.close() }.exceptionOrNull()?.let(failure::addSuppressed)
+                        runCatching { LinuxFilesystemSyscalls.unlink(root.fd, temporaryName) }
+                            .exceptionOrNull()?.let(failure::addSuppressed)
+                        throw failure
+                    }
+                }
+            marker.use {
+                val identity = LinuxFilesystemSyscalls.identity(it.fd)
+                require(identity.isRegularFile && !identity.isSymbolicLink && identity.linkCount == 1 &&
+                    identity.uid == root.identity.uid && (identity.mode and 0xfff) == OWNER_READ_WRITE) {
+                    "repair mutation marker is not an owned private regular file"
+                }
+                val bytes = FileChannel.open(LinuxFilesystemSyscalls.descriptorPath(it), READ).use { channel ->
+                    val buffer = ByteBuffer.allocate(REPAIR_MUTATION_BYTES.size + 1)
+                    while (buffer.hasRemaining()) {
+                        val count = channel.read(buffer)
+                        if (count < 0) break
+                    }
+                    buffer.flip()
+                    ByteArray(buffer.remaining()).also(buffer::get)
+                }
+                require(bytes.contentEquals(REPAIR_MUTATION_BYTES)) { "repair mutation marker is malformed" }
+                // A previous attempt may have renamed the marker but failed its directory
+                // durability fence. Re-sync both the marker and its name before admitting any
+                // source mutation, including when reusing an existing marker.
+                LinuxFilesystemSyscalls.reopenReadWrite(it).use(LinuxFilesystemSyscalls::synchronize)
+            }
+            LinuxFilesystemSyscalls.synchronize(root)
+            sync(canonicalRoot)
+        }
+
+        /** Remove only private marker staging files left before atomic marker publication. */
+        private fun removeAbandonedRepairMutationTemps(root: LinuxDescriptor, canonicalRoot: Path) {
+            val names = LinuxFilesystemSyscalls.directoryEntryNames(root, ReconstructionOutputTree.MAX_ENTRIES)
+                .filter { it.startsWith(REPAIR_MUTATION_TEMP_PREFIX) }
+            require(names.size <= 8) { "too many abandoned repair mutation marker files" }
+            for (name in names) {
+                require(name.matches(Regex("\\.reconstruction-repair-in-progress\\.[0-9a-f-]{36}\\.tmp"))) {
+                    "repair mutation temporary name is malformed"
+                }
+                val staged = LinuxFilesystemSyscalls.openRegularFileAtOrNull(root.fd, name)
+                    ?: throw ReconstructionOutputReadUnavailableException("repair mutation temporary is unavailable")
+                staged.use {
+                    val identity = LinuxFilesystemSyscalls.identity(it.fd)
+                    require(identity.isRegularFile && identity.linkCount == 1 && identity.uid == root.identity.uid &&
+                        (identity.mode and 0xfff) == OWNER_READ_WRITE) {
+                        "repair mutation temporary is not an owned private regular file"
+                    }
+                }
+                LinuxFilesystemSyscalls.unlink(root.fd, name)
+            }
+            if (names.isNotEmpty()) {
+                LinuxFilesystemSyscalls.synchronize(root)
+                sync(canonicalRoot)
+            }
+        }
+
+        /** Acquire a read lease for APIs that must return a path consumed synchronously later. */
+        internal fun acquireReadLease(reportDirectory: Path): AutoCloseable {
+            val canonicalRoot = reportDirectory.toRealPath()
+            val gate = retainGate(canonicalRoot)
+            val ownerThread = Thread.currentThread()
+            val inherited = synchronized(gate) {
+                gate.readHolds[ownerThread]?.also { it.leases++ }
+            }
+            var gateStamp = inherited?.stamp ?: 0L
+            var readHoldRegistered = inherited != null
+            var sharedReaderAcquired = false
+            try {
+                if (inherited == null) {
+                    gateStamp = acquireReadLock(gate)
+                    synchronized(gate) {
+                        check(gate.readHolds.put(ownerThread, ProcessGate.ReadHold(gateStamp, 1)) == null) {
+                            "a read lease was concurrently registered for the same thread"
+                        }
+                        readHoldRegistered = true
+                    }
+                }
+                acquireSharedReader(gate, canonicalRoot)
+                sharedReaderAcquired = true
+                validateSharedReaderAuthority(gate, canonicalRoot)
+            } catch (failure: Throwable) {
+                if (sharedReaderAcquired) {
+                    try { releaseSharedReader(gate) } catch (closing: Throwable) {
+                        if (failure !== closing) failure.addSuppressed(closing)
+                    }
+                }
+                if (readHoldRegistered) releaseReadHold(gate, ownerThread)
+                else if (gateStamp != 0L) gate.lock.unlockRead(gateStamp)
+                releaseGate(gate)
+                throw failure
+            }
+            val closed = AtomicBoolean()
+            val lease = AutoCloseable {
+                if (closed.compareAndSet(false, true)) {
+                    var failure: Throwable? = null
+                    var stampToRelease = 0L
+                    try { releaseSharedReader(gate) } catch (caught: Throwable) { failure = caught }
+                    try {
+                        synchronized(gate) {
+                            val hold = checkNotNull(gate.readHolds[ownerThread]) {
+                                "shared publication read hold disappeared"
+                            }
+                            check(hold.leases > 0) { "shared publication read hold count underflow" }
+                            hold.leases--
+                            if (hold.leases == 0) {
+                                gate.readHolds.remove(ownerThread)
+                                stampToRelease = hold.stamp
+                            }
+                        }
+                    } catch (caught: Throwable) {
+                        if (failure == null) failure = caught else if (failure !== caught) failure!!.addSuppressed(caught)
+                    }
+                    finally {
+                        if (stampToRelease != 0L) gate.lock.unlockRead(stampToRelease)
+                        releaseGate(gate)
+                    }
+                    failure?.let { throw it }
+                }
+            }
+            try {
+                requireReadablePublicationState(canonicalRoot)
+                return lease
+            } catch (failure: Throwable) {
+                try { lease.close() } catch (closing: Throwable) { if (failure !== closing) failure.addSuppressed(closing) }
+                throw failure
+            }
+        }
+
+        /**
+         * One local reader opens the shared OS lock outside all process-gate monitors. Other
+         * readers wait interruptibly for that transition, so cancellation cannot strand a
+         * workflow behind a synchronized block while cross-process lock acquisition is blocked.
+         */
+        private fun acquireSharedReader(gate: ProcessGate, root: Path) {
+            val monitor = gate.sharedLockMonitor
+            while (true) {
+                var opener = false
+                monitor.lockInterruptibly()
+                try {
+                    if (gate.sharedFileLock != null) {
+                        gate.sharedReaders++
+                        return
+                    }
+                    if (!gate.sharedLockTransition) {
+                        gate.sharedLockTransition = true
+                        opener = true
+                    } else {
+                        gate.sharedLockChanged.await()
+                    }
+                } finally {
+                    monitor.unlock()
+                }
+                if (!opener) continue
+
+                var opened: SharedFileLock? = null
+                var installed = false
+                try {
+                    opened = openSharedFileLock(root)
+                    monitor.lock()
+                    try {
+                        check(gate.sharedFileLock == null && gate.sharedReaders == 0 && gate.sharedLockTransition)
+                        gate.sharedFileLock = opened
+                        gate.sharedReaders = 1
+                        installed = true
+                        gate.sharedLockTransition = false
+                        gate.sharedLockChanged.signalAll()
+                    } finally {
+                        monitor.unlock()
+                    }
+                    return
+                } catch (failure: Throwable) {
+                    if (opened != null && !installed) {
+                        try { closeSharedFileLock(opened) } catch (closing: Throwable) {
+                            if (failure !== closing) failure.addSuppressed(closing)
+                        }
+                    }
+                    monitor.lock()
+                    try {
+                        gate.sharedLockTransition = false
+                        gate.sharedLockChanged.signalAll()
+                    } finally {
+                        monitor.unlock()
+                    }
+                    throw failure
+                }
+            }
+        }
+
+        /** A wait or local-reader reuse may outlive replacement of either authorized name. */
+        private fun validateSharedReaderAuthority(gate: ProcessGate, root: Path) {
+            val monitor = gate.sharedLockMonitor
+            monitor.lock()
+            val shared = try {
+                check(gate.sharedReaders > 0)
+                checkNotNull(gate.sharedFileLock)
+            } finally {
+                monitor.unlock()
+            }
+            LinuxFilesystemSyscalls.openRoot(root).use { namedRoot ->
+                if (!sameObject(namedRoot.identity, LinuxFilesystemSyscalls.identity(shared.root.fd))) {
+                    throw ReconstructionOutputReadUnavailableException(
+                        "reconstruction output root changed while its publication lease was acquired",
+                    )
+                }
+                val namedLock = LinuxFilesystemSyscalls.openRegularFileAtOrNull(namedRoot.fd, LOCK_FILE)
+                    ?: throw ReconstructionOutputReadUnavailableException(
+                        "reconstruction output lock name disappeared while its publication lease was acquired",
+                    )
+                namedLock.use {
+                    if (!sameObject(it.identity, LinuxFilesystemSyscalls.identity(shared.lockFile.fd))) {
+                        throw ReconstructionOutputReadUnavailableException(
+                            "reconstruction output lock changed while its publication lease was acquired",
+                        )
+                    }
+                }
+            }
+        }
+
+        private fun sameObject(first: decompengine.acp.LinuxFileIdentity, second: decompengine.acp.LinuxFileIdentity): Boolean =
+            first.key == second.key && first.mountId == second.mountId &&
+                first.isDirectory == second.isDirectory && first.isRegularFile == second.isRegularFile &&
+                first.isSymbolicLink == second.isSymbolicLink
+
+        private fun releaseSharedReader(gate: ProcessGate) {
+            val monitor = gate.sharedLockMonitor
+            var closing: SharedFileLock? = null
+            monitor.lock()
+            try {
+                check(gate.sharedReaders > 0) { "shared publication reader count underflow" }
+                gate.sharedReaders--
+                if (gate.sharedReaders == 0) {
+                    closing = checkNotNull(gate.sharedFileLock) { "shared publication lock disappeared" }
+                    gate.sharedFileLock = null
+                    gate.sharedLockTransition = true
+                }
+            } finally {
+                monitor.unlock()
+            }
+            val old = closing ?: return
+            var failure: Throwable? = null
+            try { closeSharedFileLock(old) } catch (caught: Throwable) { failure = caught }
+            finally {
+                monitor.lock()
+                try {
+                    gate.sharedLockTransition = false
+                    gate.sharedLockChanged.signalAll()
+                } finally {
+                    monitor.unlock()
+                }
+            }
+            failure?.let { throw it }
+        }
+
+        /** Release an acquisition that failed before its shared OS lease was installed. */
+        private fun releaseReadHold(gate: ProcessGate, ownerThread: Thread) {
+            var stamp = 0L
+            synchronized(gate) {
+                val hold = checkNotNull(gate.readHolds[ownerThread]) { "shared publication read hold disappeared" }
+                check(hold.leases > 0) { "shared publication read hold count underflow" }
+                hold.leases--
+                if (hold.leases == 0) {
+                    gate.readHolds.remove(ownerThread)
+                    stamp = hold.stamp
+                }
+            }
+            if (stamp != 0L) gate.lock.unlockRead(stamp)
+        }
+
+        private fun openSharedFileLock(root: Path): SharedFileLock {
+            var rootDescriptor: LinuxDescriptor? = null
+            var lockDescriptor: LinuxDescriptor? = null
+            var channel: FileChannel? = null
+            try {
+                rootDescriptor = LinuxFilesystemSyscalls.openRoot(root)
+                lockDescriptor = LinuxFilesystemSyscalls.openRegularFileAtOrNull(rootDescriptor.fd, LOCK_FILE)
+                    ?: LinuxFilesystemSyscalls.createRegularFile(rootDescriptor.fd, LOCK_FILE, OWNER_READ_WRITE).also {
+                        LinuxFilesystemSyscalls.synchronize(rootDescriptor)
+                    }
+                channel = FileChannel.open(LinuxFilesystemSyscalls.descriptorPath(lockDescriptor), READ, WRITE)
+                // Normalized 0600 workspaces need no migration. Taking an exclusive migration
+                // lock on every read serializes independent readers across processes for the
+                // entire lifetime of the first reader's shared lease.
+                val current = LinuxFilesystemSyscalls.identity(lockDescriptor.fd)
+                if ((current.mode and 0xfff) == OWNER_READ_WRITE) {
+                    normalizePublicationLock(rootDescriptor, lockDescriptor, channel)
+                } else {
+                    // Earlier releases created the advisory lock with the process umask (often
+                    // 0644). Normalize those workspaces while exclusively locked, then downgrade.
+                    val migrationLock = channel.lock()
+                    try { normalizePublicationLock(rootDescriptor, lockDescriptor, channel) }
+                    finally { migrationLock.release() }
+                }
+                val fileLock = channel.lock(0L, Long.MAX_VALUE, true)
+                val identity = LinuxFilesystemSyscalls.identity(lockDescriptor.fd)
+                require(identity.isRegularFile && identity.linkCount == 1 &&
+                    (identity.mode and 0xfff) == OWNER_READ_WRITE && identity.uid == rootDescriptor.identity.uid) {
+                    "reconstruction output lock is not an owned private regular file"
+                }
+                val shared = SharedFileLock(rootDescriptor, lockDescriptor, channel, fileLock)
+                validateSharedFileLockAuthority(shared, root)
+                return shared
+            } catch (failure: Throwable) {
+                runCatching { channel?.close() }.exceptionOrNull()?.let(failure::addSuppressed)
+                runCatching { lockDescriptor?.close() }.exceptionOrNull()?.let(failure::addSuppressed)
+                runCatching { rootDescriptor?.close() }.exceptionOrNull()?.let(failure::addSuppressed)
+                throw failure
+            }
+        }
+
+        private fun validateSharedFileLockAuthority(shared: SharedFileLock, root: Path) {
+            LinuxFilesystemSyscalls.openRoot(root).use { namedRoot ->
+                if (!sameObject(namedRoot.identity, LinuxFilesystemSyscalls.identity(shared.root.fd))) {
+                    throw ReconstructionOutputReadUnavailableException(
+                        "reconstruction output root name changed during publication lease acquisition",
+                    )
+                }
+                val namedLock = LinuxFilesystemSyscalls.openRegularFileAtOrNull(namedRoot.fd, LOCK_FILE)
+                    ?: throw ReconstructionOutputReadUnavailableException(
+                        "reconstruction output lock name disappeared after lock acquisition",
+                    )
+                namedLock.use {
+                    if (!sameObject(it.identity, LinuxFilesystemSyscalls.identity(shared.lockFile.fd))) {
+                        throw ReconstructionOutputReadUnavailableException(
+                            "reconstruction output lock name changed during publication lease acquisition",
+                        )
+                    }
+                }
+            }
+        }
+
+        private fun normalizePublicationLock(root: LinuxDescriptor, lock: LinuxDescriptor, channel: FileChannel) {
+            val identity = LinuxFilesystemSyscalls.identity(lock.fd)
+            require(identity.isRegularFile && identity.linkCount == 1 && identity.uid == root.identity.uid &&
+                identity.mountId == lock.identity.mountId && identity.key == lock.identity.key &&
+                (identity.mode and 0x12) == 0) {
+                "reconstruction output lock has an unsafe owner, type, link count, or writable mode"
+            }
+            if ((identity.mode and 0xfff) != OWNER_READ_WRITE) {
+                // Do not close a second descriptor for this inode while the POSIX record lock is
+                // held: Linux releases this process's locks on that inode after any such close.
+                LinuxFilesystemSyscalls.chmodPinnedViaProcFd(lock, OWNER_READ_WRITE)
+                channel.force(true)
+                LinuxFilesystemSyscalls.synchronize(root)
+            }
+        }
+
+        private fun closeSharedFileLock(shared: SharedFileLock) {
+            var failure: Throwable? = null
+            fun close(action: () -> Unit) {
+                try { action() } catch (caught: Throwable) {
+                    if (failure == null) failure = caught else if (failure !== caught) failure!!.addSuppressed(caught)
+                }
+            }
+            close { if (shared.lock.isValid) shared.lock.release() }
+            close { shared.channel.close() }
+            close { shared.lockFile.close() }
+            close { shared.root.close() }
+            failure?.let { throw it }
+        }
+
+        private fun retainGate(root: Path): ProcessGate = synchronized(PROCESS_GATES) {
+            val gate = PROCESS_GATES.getOrPut(root) { ProcessGate() }
+            gate.users++
+            gate
+        }
+
+        private fun releaseGate(gate: ProcessGate) = synchronized(PROCESS_GATES) {
+            gate.users--
+            check(gate.users >= 0)
+            if (gate.users == 0) PROCESS_GATES.entries.removeIf { it.value === gate }
+        }
 
         fun open(root: Path, input: Path): ReconstructionOutputWorkspace =
             openInternal(root, input, ::sync)
+
+        /** Startup-only entry point: aggregate accepted-tree traversal into the store recovery budget. */
+        internal fun openForStartupRecovery(
+            root: Path,
+            input: Path,
+            recoveryBudget: WorkflowStartupRecoveryBudget,
+            onCommittedPublication: () -> Unit = {},
+        ): ReconstructionOutputWorkspace = openInternal(root, input, ::sync, recoveryBudget, onCommittedPublication)
 
         internal fun openWithParentSyncForTest(
             root: Path,
@@ -210,6 +914,8 @@ internal class ReconstructionOutputWorkspace private constructor(
             root: Path,
             input: Path,
             syncParentDirectory: (Path) -> Unit,
+            recoveryBudget: WorkflowStartupRecoveryBudget? = null,
+            onCommittedPublication: () -> Unit = {},
         ): ReconstructionOutputWorkspace {
             require(Files.isRegularFile(input)) { "reconstruction input must be a regular file" }
             Files.createDirectories(root)
@@ -219,28 +925,124 @@ internal class ReconstructionOutputWorkspace private constructor(
             val attributes = Files.readAttributes(canonicalRoot, BasicFileAttributes::class.java, NOFOLLOW_LINKS)
             val key = root.fileSystem to (attributes.fileKey() ?: root.toRealPath())
             synchronized(OWNERS) { if (!OWNERS.add(key)) throw ReconstructionOutputBusyException() }
+            val processGate = retainGate(canonicalRoot)
+            var processGateStamp = 0L
+            var gateOwned = false
             var channel: FileChannel? = null
             var lease: ReconstructionOutputWorkspace? = null
+            var rootDescriptor: LinuxDescriptor? = null
+            var lockDescriptor: LinuxDescriptor? = null
+            var inputParentDescriptor: LinuxDescriptor? = null
+            var inputDescriptor: LinuxDescriptor? = null
             try {
-                channel = FileChannel.open(canonicalRoot.resolve(".reconstruction.lock"), CREATE, WRITE, NOFOLLOW_LINKS)
+                // Workspace acquisition runs inside the bounded workflow child. StampedLock's
+                // unbounded writeLock ignores interruption, so wait in interruptible slices; a
+                // deadline or cancellation can then unwind without holding OWNERS or the gate.
+                processGateStamp = acquireWriteLock(processGate)
+                gateOwned = true
+                rootDescriptor = LinuxFilesystemSyscalls.openRoot(canonicalRoot)
+                lockDescriptor = LinuxFilesystemSyscalls.openRegularFileAtOrNull(rootDescriptor.fd, LOCK_FILE)
+                    ?: LinuxFilesystemSyscalls.createRegularFile(rootDescriptor.fd, LOCK_FILE, OWNER_READ_WRITE).also {
+                        LinuxFilesystemSyscalls.synchronize(rootDescriptor)
+                    }
+                require(lockDescriptor.identity.isRegularFile && !lockDescriptor.identity.isSymbolicLink && lockDescriptor.identity.linkCount == 1) {
+                    "reconstruction output lock must be an unlinked regular file"
+                }
+                channel = FileChannel.open(LinuxFilesystemSyscalls.descriptorPath(lockDescriptor), READ, WRITE)
                 val lock = channel.tryLock() ?: throw ReconstructionOutputBusyException()
+                normalizePublicationLock(rootDescriptor, lockDescriptor, channel)
+                inputParentDescriptor = LinuxFilesystemSyscalls.openRoot(canonicalInput.parent)
+                inputDescriptor = LinuxFilesystemSyscalls.openRegularFileAtOrNull(
+                    inputParentDescriptor.fd, canonicalInput.fileName.toString(),
+                ) ?: error("reconstruction input disappeared while opening its workspace")
+                require(inputDescriptor.identity.isRegularFile && !inputDescriptor.identity.isSymbolicLink && inputDescriptor.identity.linkCount == 1) {
+                    "reconstruction input must be an unlinked regular file"
+                }
                 val digest = MessageDigest.getInstance("SHA-256")
-                Files.newInputStream(canonicalInput).use { stream ->
-                    val bytes = ByteArray(65536)
-                    while (true) { val count = stream.read(bytes); if (count < 0) break; digest.update(bytes, 0, count) }
+                recoveryBudget?.checkpoint()
+                val inputBefore = LinuxFilesystemSyscalls.fileState(inputDescriptor)
+                require(inputBefore.size >= 0) { "reconstruction input has an invalid size" }
+                // Startup recovery re-hashes the admitted input before it can inspect any
+                // publication journal. Charge that read against the same aggregate recovery
+                // allowance and checkpoint within the stream, not merely before opening it.
+                recoveryBudget?.publicationRecoveryBytes(inputBefore.size)
+                LinuxFilesystemSyscalls.openReadableWithoutAtimeFrom(inputDescriptor).use { inputReadable ->
+                    require(inputReadable.identity == inputDescriptor.identity) {
+                        "reconstruction input descriptor changed while opening its metadata-neutral reader"
+                    }
+                    var readBytes = 0L
+                    while (readBytes < inputBefore.size) {
+                        recoveryBudget?.checkpoint()
+                        val request = minOf(65536L, inputBefore.size - readBytes).toInt()
+                        val bytes = LinuxFilesystemSyscalls.readWithoutAtime(inputReadable, request)
+                        if (bytes.isEmpty()) {
+                            throw java.io.IOException("reconstruction input ended while its workspace identity was admitted")
+                        }
+                        digest.update(bytes)
+                        readBytes = Math.addExact(readBytes, bytes.size.toLong())
+                    }
+                }
+                require(inputBefore == LinuxFilesystemSyscalls.fileState(inputDescriptor)) {
+                    "reconstruction input changed while its workspace identity was admitted"
                 }
                 val inputSha = digest.digest().joinToString("") { "%02x".format(it) }
-                val ownership = ReconstructionPublicationLock.opened(canonicalRoot, canonicalInput, inputSha, channel, lock)
-                lease = ReconstructionOutputWorkspace(canonicalRoot, key, channel, lock, ownership, syncParentDirectory, inputSha)
-                lease.activate()
+                val ownership = ReconstructionPublicationLock.opened(
+                    canonicalRoot,
+                    canonicalInput,
+                    inputSha,
+                    channel,
+                    lock,
+                    rootDescriptor,
+                    lockDescriptor,
+                    inputParentDescriptor,
+                    inputDescriptor,
+                )
+                lease = ReconstructionOutputWorkspace(canonicalRoot, key, channel, lock, ownership, syncParentDirectory,
+                    inputSha, processGate, processGateStamp)
+                lease.activate(recoveryBudget, onCommittedPublication)
                 return lease
             } catch (failure: Throwable) {
-                if (lease != null) lease.close() else {
-                    try { channel?.close() } finally { synchronized(OWNERS) { OWNERS.remove(key) } }
+                var gateReleasedByLease = false
+                if (lease != null) {
+                    gateOwned = false // close() releases the writer gate, even if resource closing fails.
+                    try { lease.close() } catch (closing: Throwable) {
+                        if (failure !== closing) failure.addSuppressed(closing)
+                    } finally {
+                        gateReleasedByLease = true
+                    }
+                } else {
+                    try { channel?.close() } finally {
+                        inputDescriptor?.close()
+                        inputParentDescriptor?.close()
+                        lockDescriptor?.close()
+                        rootDescriptor?.close()
+                        synchronized(OWNERS) { OWNERS.remove(key) }
+                    }
+                }
+                if (!gateReleasedByLease) {
+                    if (gateOwned) processGate.lock.unlockWrite(processGateStamp)
+                    releaseGate(processGate)
                 }
                 throw failure
             }
         }
+
+        private fun acquireWriteLock(gate: ProcessGate): Long {
+            while (true) {
+                val stamp = gate.lock.tryWriteLock(100, TimeUnit.MILLISECONDS)
+                if (stamp != 0L) return stamp
+            }
+        }
+
+        private fun acquireReadLock(gate: ProcessGate): Long {
+            while (true) {
+                val stamp = gate.lock.tryReadLock(100, TimeUnit.MILLISECONDS)
+                if (stamp != 0L) return stamp
+            }
+        }
+
+        private const val LOCK_FILE = ".reconstruction.lock"
+        private const val OWNER_READ_WRITE = 0x180 // 0600; mkdir/file modes are numeric at the syscall seam.
 
         private fun readObject(path: Path): JsonObject? {
             if (!Files.exists(path, NOFOLLOW_LINKS)) return null

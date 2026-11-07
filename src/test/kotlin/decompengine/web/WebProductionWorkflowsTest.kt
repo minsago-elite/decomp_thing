@@ -6,8 +6,10 @@ import decompengine.agent.AgentToolEvent
 import decompengine.agent.AgentToolStatus
 import decompengine.agent.AgentWorkflowProgress
 import decompengine.agent.AgentWorkspaceRoot
+import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.jobs.*
 import decompengine.project.sha256
+import decompengine.project.ReconstructionOutputWorkspace
 import decompengine.repair.DeclarativeRepairIndexProfile
 import decompengine.repair.ModuleRevisionGraph
 import decompengine.repair.open
@@ -17,6 +19,8 @@ import decompengine.repair.RepairIndexLayout
 import decompengine.repair.RepairModuleEvidence
 import decompengine.repair.RepairPublicationMode
 import decompengine.repair.RepairRunStatus
+import decompengine.repair.RepairRunOutcome
+import decompengine.repair.RepairRunState
 import decompengine.repair.RepairValidationAssurance
 import decompengine.repair.RepairValidationProof
 import decompengine.repair.RevisionRepairMetadata
@@ -32,16 +36,20 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.jupiter.api.extension.ExtendWith
 import java.nio.file.Files
+import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.time.Clock
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.io.path.createDirectories
+import kotlin.io.path.exists
 import kotlin.io.path.readBytes
+import kotlin.io.path.writeBytes
 import kotlin.io.path.readText
 import kotlin.io.path.writeText
 import kotlin.test.*
@@ -49,6 +57,102 @@ import kotlin.test.*
 /** Inert engines only: no binary, Ghidra, sandbox or model agent runs in these controls. */
 @ExtendWith(RecoveryMatrixEvidence::class)
 class WebProductionWorkflowsTest {
+    @Test
+    fun `legacy report root enumeration uses the publication recovery budget`() = withRoot { root ->
+        val store = JobStore(root.resolve("jobs"))
+        val job = store.createFromUpload("report-entry-budget.elf", elfFixture())
+        val reports = store.reportsDirectory(job.id)
+        repeat(600) { index -> reports.resolve("ordinary-$index.txt").writeText("retained report") }
+        val engines = FakeEngines()
+
+        service(store, listOf(ReconstructWorkflowAdapter(engines, FAST, WebReconstructionMode.EVIDENCE_ONLY,
+            EVIDENCE_ONLY_CAPABILITY, emptyList()))).use { service ->
+            service.initializeExistingStorage(WorkflowStartupRecoveryLimits(
+                maximumEntries = 512,
+                maximumPublicationRecoveryEntries = 1_024,
+            )) { false }
+        }
+    }
+
+    @Test
+    fun `startup publication inventory enforces its entry allowance across report roots`() = withRoot { root ->
+        val store = JobStore(root.resolve("jobs"))
+        val jobs = List(2) { index -> store.createFromUpload("aggregate-$index.elf", elfFixture()) }
+        val orderedIds = store.jobIds().sorted()
+        orderedIds.forEachIndexed { rootIndex, id ->
+            val reports = store.reportsDirectory(id)
+            repeat(250) { entry -> reports.resolve("retained-$rootIndex-$entry.txt").writeText("retained") }
+        }
+        // Put transaction evidence in the later root. Startup must stop during its bounded
+        // enumeration, before considering the incomplete directory trustworthy or recoverable.
+        val pendingRoot = store.reportsDirectory(orderedIds.last())
+        val pendingEvidence = pendingRoot.resolve(ReconstructionOutputWorkspace.PUBLICATION)
+        pendingEvidence.writeText("pending publication fixture")
+        val expectedEvidence = pendingEvidence.readBytes()
+        val visitedEntries = AtomicInteger()
+        val startup = service(store, emptyList())
+        try {
+            val failure = assertFailsWith<decompengine.jobs.WorkflowStoreException> {
+                startup.initializeExistingStorage(
+                    WorkflowStartupRecoveryLimits(maximumPublicationRecoveryEntries = 400),
+                    { false },
+                    { visitedEntries.incrementAndGet() },
+                )
+            }
+            assertEquals("STORE_LIMIT", failure.code)
+            assertEquals(400, visitedEntries.get(), "the aggregate limit is charged before retaining the next name")
+            assertContentEquals(expectedEvidence, pendingEvidence.readBytes(),
+                "startup exhaustion must leave the unresolved transaction evidence intact")
+        } finally { startup.close() }
+    }
+
+    @Test
+    fun `startup treats retained input switch marker as recovery evidence`() = withRoot { root ->
+        val store = JobStore(root.resolve("jobs"))
+        val job = store.createFromUpload("input-switch-recovery.elf", elfFixture())
+        val reports = store.reportsDirectory(job.id)
+        val marker = reports.resolve(ReconstructionOutputWorkspace.SWITCH)
+        marker.writeText("incomplete switch transaction")
+        val before = marker.readBytes()
+        val startup = service(store, emptyList())
+        try {
+            assertFails {
+                startup.initializeExistingStorage(
+                    WorkflowStartupRecoveryLimits(),
+                    { false },
+                )
+            }
+            assertContentEquals(before, marker.readBytes(), "startup refusal must preserve unresolved switch evidence")
+        } finally { startup.close() }
+    }
+
+    @Test
+    fun `startup cancellation during publication enumeration preserves pending evidence`() = withRoot { root ->
+        val store = JobStore(root.resolve("jobs"))
+        val job = store.createFromUpload("cancel-inventory.elf", elfFixture())
+        val reports = store.reportsDirectory(job.id)
+        repeat(2_000) { entry -> reports.resolve("retained-$entry.txt").writeText("retained") }
+        val pendingEvidence = reports.resolve(ReconstructionOutputWorkspace.PUBLICATION)
+        pendingEvidence.writeText("pending publication fixture")
+        val expectedEvidence = pendingEvidence.readBytes()
+        val visitedEntries = AtomicInteger()
+        val cancelled = AtomicBoolean()
+        val startup = service(store, emptyList())
+        try {
+            val failure = assertFailsWith<decompengine.jobs.WorkflowStoreException> {
+                startup.initializeExistingStorage(
+                    WorkflowStartupRecoveryLimits(maximumPublicationRecoveryEntries = 10_000),
+                    { cancelled.get() },
+                    { if (visitedEntries.incrementAndGet() == 32) cancelled.set(true) },
+                )
+            }
+            assertEquals("RECOVERY_CANCELLED", failure.code)
+            assertEquals(32, visitedEntries.get(), "cancellation must stop enumeration before the complete listing is retained")
+            assertContentEquals(expectedEvidence, pendingEvidence.readBytes(),
+                "cancelled inventory must preserve unresolved publication evidence")
+        } finally { startup.close() }
+    }
+
     @Test
     fun `explore enforces wall-clock, idle and output limits and stops its child before returning`() = withRoot { root ->
         val engines = FakeEngines()
@@ -111,6 +215,634 @@ class WebProductionWorkflowsTest {
         engines.exploreBody = { reports -> Thread.sleep(100); reports.resolve("exploration.json").writeText("{}") }
         assertIs<DurableWebWorkflowOutcome.Completed>(ExploreWorkflowAdapter(engines, sparse, allowTestOnlyExecution = true).execute(context(root, root.resolve("active"),
             WorkflowExecutionLimits(60_000uL, 10uL, 1_048_576uL, 0uL))))
+    }
+
+    @Test
+    fun `reconstruction limit is admitted before a candidate can replace accepted output`() = withRoot { root ->
+        val reports = root.resolve("reports").createDirectories()
+        val context = context(root, reports, WorkflowExecutionLimits(60_000uL, 60_000uL, 2048uL, 10uL))
+        ReconstructionOutputWorkspace.open(reports, context.job.binaryPath).use {
+            reports.resolve("source-tree").createDirectories().resolve("accepted.c").writeText("accepted generation")
+        }
+        val engines = FakeEngines().apply {
+            reconstructBody = { candidate, _, _ ->
+                writeSourceTree(candidate.resolve("source-tree"), "candidate")
+                candidate.resolve("source-tree/large-output.bin").writeBytes(ByteArray(4096) { 7 })
+            }
+        }
+        val adapter = ReconstructWorkflowAdapter(engines,
+            BoundedWorkflowExecutor(pollMillis = 500, outputPollMillis = 1000),
+            WebReconstructionMode.EVIDENCE_ONLY, EVIDENCE_ONLY_CAPABILITY, emptyList())
+
+        assertLimitExhausted(adapter.execute(context))
+        assertEquals("accepted generation", reports.resolve("source-tree/accepted.c").readText())
+        assertFalse(reports.resolve("source-tree/large-output.bin").exists())
+        assertFalse(reports.resolve(ReconstructionOutputWorkspace.PUBLICATION).exists())
+    }
+
+    @Test
+    fun `reconstruction wall limit interrupts workspace admission blocked by a reader`() = withRoot { root ->
+        val reports = root.resolve("reader-blocked-reconstruction").createDirectories()
+        val limits = WorkflowExecutionLimits(200uL, 200uL, 1024uL * 1024uL, 10uL)
+        val workflowContext = context(root, reports, limits)
+        ReconstructionOutputWorkspace.open(reports, workflowContext.job.binaryPath).close()
+        val readerReady = CountDownLatch(1)
+        val releaseReader = CountDownLatch(1)
+        val readerFailure = AtomicReference<Throwable?>()
+        val reader = Thread({
+            try {
+                ReconstructionOutputWorkspace.withReadLease(reports) {
+                    readerReady.countDown()
+                    check(releaseReader.await(5, TimeUnit.SECONDS))
+                }
+            } catch (failure: Throwable) { readerFailure.set(failure) }
+        }, "publication-read-lease-fixture").apply { isDaemon = true }
+        val engines = FakeEngines()
+        engines.reconstructBody = { _, _, _ -> error("engine must not run before workspace admission") }
+        val adapter = ReconstructWorkflowAdapter(engines, FAST, WebReconstructionMode.EVIDENCE_ONLY,
+            EVIDENCE_ONLY_CAPABILITY, emptyList())
+        val result = AtomicReference<DurableWebWorkflowOutcome?>()
+        val executionFailure = AtomicReference<Throwable?>()
+        val caller = Thread({
+            try { result.set(adapter.execute(workflowContext)) }
+            catch (failure: Throwable) { executionFailure.set(failure) }
+        }, "bounded-workspace-admission-fixture").apply { isDaemon = true }
+
+        reader.start()
+        try {
+            assertTrue(readerReady.await(5, TimeUnit.SECONDS))
+            caller.start()
+            caller.join(5_000)
+            assertFalse(caller.isAlive, "workflow deadline must cancel an exclusive-lease wait")
+            assertNull(executionFailure.get())
+            assertLimitExhausted(checkNotNull(result.get()))
+            assertEquals(0, engines.calls.get(), "reconstruction must not begin without its exclusive lease")
+        } finally {
+            releaseReader.countDown()
+            caller.join(5_000)
+            reader.join(5_000)
+        }
+        assertFalse(caller.isAlive)
+        assertFalse(reader.isAlive)
+        assertNull(readerFailure.get())
+    }
+
+    @Test
+    fun `repair wall limit interrupts read lease admission blocked by a publisher`() = withRoot { root ->
+        val selectedRoot = root.resolve("selected-input").createDirectories()
+        val reports = root.resolve("repair-attempt").createDirectories()
+        val limits = WorkflowExecutionLimits(200uL, 200uL, 1024uL * 1024uL, 10uL)
+        val workflowContext = context(root, reports, limits)
+        val input = selectedRoot.resolve("source-tree")
+        ReconstructionOutputWorkspace.open(selectedRoot, workflowContext.job.binaryPath).use {
+            writeSourceTree(input, "selected generation")
+        }
+        val writer = ReconstructionOutputWorkspace.open(selectedRoot, workflowContext.job.binaryPath)
+        val engines = FakeEngines().apply { repairBody = { error("repair must not start before read lease admission") } }
+        val adapter = RepairWorkflowAdapter(engines, FAST, "agent-acp")
+        val result = AtomicReference<DurableWebWorkflowOutcome?>()
+        val executionFailure = AtomicReference<Throwable?>()
+        val caller = Thread({
+            try { result.set(adapter.execute(workflowContext.copy(inputSourceTree = input))) }
+            catch (failure: Throwable) { executionFailure.set(failure) }
+        }, "bounded-repair-read-admission-fixture").apply { isDaemon = true }
+
+        try {
+            caller.start()
+            caller.join(5_000)
+            assertFalse(caller.isAlive, "workflow deadline must cancel a read-lease wait")
+            assertNull(executionFailure.get())
+            assertLimitExhausted(checkNotNull(result.get()))
+            assertEquals(0, engines.calls.get(), "repair must not run before its selected input is leased")
+        } finally {
+            writer.close()
+            caller.join(5_000)
+        }
+        assertFalse(caller.isAlive)
+        ReconstructionOutputWorkspace.withReadLease(selectedRoot) { assertTrue(input.resolve("code.c").exists()) }
+    }
+
+    @Test
+    fun `repair publishes staged tree atomically for source readers`() = withRoot { root ->
+        val selectedRoot = root.resolve("selected-input").createDirectories()
+        val reports = root.resolve("repair-attempt").createDirectories()
+        val workflowContext = context(root, reports, WorkflowExecutionLimits(30_000uL, 30_000uL, 64uL * 1024uL * 1024uL, 10uL))
+        val input = selectedRoot.resolve("source-tree")
+        ReconstructionOutputWorkspace.open(selectedRoot, workflowContext.job.binaryPath).use { writeSourceTree(input, "before") }
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val engines = FakeEngines().apply { repairBody = { project ->
+            entered.countDown()
+            check(release.await(5, TimeUnit.SECONDS))
+            Files.writeString(project.resolve("code.c"), "complete published tree")
+        } }
+        val adapter = RepairWorkflowAdapter(engines, FAST, "agent-acp")
+        val result = AtomicReference<DurableWebWorkflowOutcome?>()
+        val caller = Thread({ result.set(adapter.execute(workflowContext.copy(inputSourceTree = input))) }, "staged-repair-fixture")
+        caller.start()
+        try {
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            val readDone = CountDownLatch(1)
+            val observed = AtomicReference<String?>()
+            val reader = Thread({
+                try { ReconstructionOutputWorkspace.withReadLease(reports) { observed.set(Files.readString(reports.resolve("source-tree/code.c"))) } }
+                catch (_: decompengine.project.ReconstructionOutputReadUnavailableException) { observed.set("unavailable") }
+                finally { readDone.countDown() }
+            }, "repair-source-reader-fixture")
+            reader.start()
+            assertFalse(readDone.await(100, TimeUnit.MILLISECONDS), "reader must not see a partial staged tree")
+            release.countDown()
+            assertTrue(readDone.await(5, TimeUnit.SECONDS))
+            reader.join(5_000)
+            caller.join(5_000)
+            assertEquals("complete published tree", observed.get())
+            assertTrue(result.get() is DurableWebWorkflowOutcome.Completed)
+        } finally { release.countDown(); caller.join(5_000) }
+    }
+
+    @Test
+    fun `incomplete repair recovery fails without candidate or published tree`() = withRoot { root ->
+        val selectedRoot = root.resolve("selected-input").createDirectories()
+        val reports = root.resolve("repair-attempt").createDirectories()
+        val workflowContext = context(root, reports, WorkflowExecutionLimits(30_000uL, 30_000uL, 64uL * 1024uL * 1024uL, 10uL))
+        val input = selectedRoot.resolve("source-tree")
+        ReconstructionOutputWorkspace.open(selectedRoot, workflowContext.job.binaryPath).use { writeSourceTree(input, "selected") }
+        val engines = FakeEngines().apply { repairRecoveryComplete = false }
+        val result = RepairWorkflowAdapter(engines, FAST, "agent-acp").execute(workflowContext.copy(inputSourceTree = input))
+        assertTrue(result is DurableWebWorkflowOutcome.Failed)
+        assertNull((result as DurableWebWorkflowOutcome.Failed).candidate)
+        assertFalse(reports.resolve("source-tree").exists())
+    }
+
+    @Test
+    fun `completed repair publishes candidate tree`() = withRoot { root ->
+        val selectedRoot = root.resolve("selected-input").createDirectories()
+        val reports = root.resolve("repair-attempt").createDirectories()
+        val workflowContext = context(root, reports, WorkflowExecutionLimits(30_000uL, 30_000uL, 64uL * 1024uL * 1024uL, 10uL))
+        val input = selectedRoot.resolve("source-tree")
+        ReconstructionOutputWorkspace.open(selectedRoot, workflowContext.job.binaryPath).use { writeSourceTree(input, "selected") }
+        val result = RepairWorkflowAdapter(FakeEngines(), FAST, "agent-acp").execute(workflowContext.copy(inputSourceTree = input))
+        assertTrue(result is DurableWebWorkflowOutcome.Completed)
+        assertEquals("repaired", Files.readString(reports.resolve("source-tree/code.c")))
+        assertNotNull((result as DurableWebWorkflowOutcome.Completed).candidate)
+    }
+
+    @Test
+    fun `failed web repair copy preserves stale source file and directory access times`() = withRoot { root ->
+        val selectedRoot = root.resolve("selected-input").createDirectories()
+        val reports = root.resolve("repair-attempt").createDirectories()
+        val workflowContext = context(root, reports,
+            WorkflowExecutionLimits(30_000uL, 30_000uL, 64uL * 1024uL * 1024uL, 10uL))
+        val input = selectedRoot.resolve("source-tree")
+        ReconstructionOutputWorkspace.open(selectedRoot, workflowContext.job.binaryPath).use {
+            writeSourceTree(input, "selected")
+        }
+        val oldAtime = java.time.Instant.ofEpochSecond(1_234_567_890L, 123_456_789)
+        val reportsSource = input.resolve("reports")
+        java.nio.file.Files.getFileAttributeView(input, java.nio.file.attribute.BasicFileAttributeView::class.java)
+            .setTimes(null, java.nio.file.attribute.FileTime.from(oldAtime), null)
+        java.nio.file.Files.getFileAttributeView(reportsSource, java.nio.file.attribute.BasicFileAttributeView::class.java)
+            .setTimes(null, java.nio.file.attribute.FileTime.from(oldAtime), null)
+        data class SourceMetadata(
+            val root: decompengine.acp.LinuxDirectoryMetadata,
+            val code: decompengine.acp.LinuxFileState,
+            val reports: decompengine.acp.LinuxDirectoryMetadata,
+            val contract: decompengine.acp.LinuxFileState,
+        )
+        val sourceBefore = LinuxFilesystemSyscalls.openAbsolutePathOrNull(input)!!.use { rootPath ->
+            LinuxFilesystemSyscalls.openDirectoryFrom(rootPath).use { sourceRoot ->
+                val rootState = LinuxFilesystemSyscalls.directoryMetadata(sourceRoot)
+                val codeState = LinuxFilesystemSyscalls.openRegularFileAtOrNull(sourceRoot.fd, "code.c")!!.use {
+                    LinuxFilesystemSyscalls.setAccessTime(it, oldAtime.epochSecond, oldAtime.nano)
+                    LinuxFilesystemSyscalls.fileState(it)
+                }
+                val reportsState = LinuxFilesystemSyscalls.openDirectoryAt(sourceRoot.fd, "reports").use { reportsDir ->
+                    val directoryState = LinuxFilesystemSyscalls.directoryMetadata(reportsDir)
+                    val contractState = LinuxFilesystemSyscalls.openRegularFileAtOrNull(reportsDir.fd, "build_contract.json")!!.use {
+                        LinuxFilesystemSyscalls.setAccessTime(it, oldAtime.epochSecond, oldAtime.nano)
+                        LinuxFilesystemSyscalls.fileState(it)
+                    }
+                    directoryState to contractState
+                }
+                SourceMetadata(rootState, codeState, reportsState.first, reportsState.second)
+            }
+        }
+        assertEquals(oldAtime.epochSecond, sourceBefore.root.accessTimeSeconds)
+        assertEquals(oldAtime.epochSecond, sourceBefore.code.accessTimeSeconds)
+        assertEquals(oldAtime.epochSecond, sourceBefore.reports.accessTimeSeconds)
+        assertEquals(oldAtime.epochSecond, sourceBefore.contract.accessTimeSeconds)
+        val engines = FakeEngines().apply { repairBody = { error("fixture failure after private source copy") } }
+
+        val result = RepairWorkflowAdapter(engines, FAST, "agent-acp")
+            .execute(workflowContext.copy(inputSourceTree = input))
+
+        assertTrue(result is DurableWebWorkflowOutcome.Failed)
+        LinuxFilesystemSyscalls.openAbsolutePathOrNull(input)!!.use { rootPath ->
+            LinuxFilesystemSyscalls.openDirectoryFrom(rootPath).use { sourceRoot ->
+                assertEquals(sourceBefore.root, LinuxFilesystemSyscalls.directoryMetadata(sourceRoot))
+                LinuxFilesystemSyscalls.openRegularFileAtOrNull(sourceRoot.fd, "code.c")!!.use { sourceFile ->
+                    assertEquals(sourceBefore.code, LinuxFilesystemSyscalls.fileState(sourceFile))
+                }
+                LinuxFilesystemSyscalls.openDirectoryAt(sourceRoot.fd, "reports").use { reportsDir ->
+                    assertEquals(sourceBefore.reports, LinuxFilesystemSyscalls.directoryMetadata(reportsDir))
+                    LinuxFilesystemSyscalls.openRegularFileAtOrNull(reportsDir.fd, "build_contract.json")!!.use { contract ->
+                        assertEquals(sourceBefore.contract, LinuxFilesystemSyscalls.fileState(contract))
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `pre decision publication rejection cannot return a repair candidate`() = withRoot { root ->
+        val selectedRoot = root.resolve("selected-input").createDirectories()
+        val reports = root.resolve("repair-attempt").createDirectories()
+        val workflowContext = context(root, reports, WorkflowExecutionLimits(30_000uL, 30_000uL, 64uL * 1024uL * 1024uL, 10uL))
+        val input = selectedRoot.resolve("source-tree")
+        ReconstructionOutputWorkspace.open(selectedRoot, workflowContext.job.binaryPath).use { writeSourceTree(input, "selected") }
+        val adapter = RepairWorkflowAdapter(FakeEngines(), FAST, "agent-acp", publicationAdmission = { _, _ ->
+            throw InterruptedException("fixture cancellation before publication decision")
+        })
+
+        val result = adapter.execute(workflowContext.copy(inputSourceTree = input))
+
+        assertTrue(result is DurableWebWorkflowOutcome.Failed)
+        assertNull((result as DurableWebWorkflowOutcome.Failed).candidate)
+        assertFalse(reports.resolve("source-tree").exists())
+    }
+
+    @Test
+    fun `cancellation after output publication cannot interrupt candidate finalization`() = withRoot { root ->
+        val enteredFinalization = java.util.concurrent.CountDownLatch(1)
+        val releaseFinalization = java.util.concurrent.CountDownLatch(1)
+        val engines = FakeEngines().apply {
+            reconstructBody = { reports, _, _ -> writeSourceTree(reports.resolve("source-tree"), "published") }
+            afterReconstructPublication = {
+                enteredFinalization.countDown()
+                check(releaseFinalization.await(10, TimeUnit.SECONDS))
+            }
+        }
+        val reports = root.resolve("post-publish-cancel").createDirectories()
+        val adapter = ReconstructWorkflowAdapter(engines, FAST, WebReconstructionMode.EVIDENCE_ONLY,
+            EVIDENCE_ONLY_CAPABILITY, emptyList())
+        val result = AtomicReference<DurableWebWorkflowOutcome?>()
+        val failure = AtomicReference<Throwable?>()
+        val caller = Thread {
+            try { result.set(adapter.execute(context(root, reports, WebWorkflowDefaults.RECONSTRUCT_EVIDENCE))) }
+            catch (caught: Throwable) { failure.set(caught) }
+        }
+        caller.start()
+        assertTrue(enteredFinalization.await(5, TimeUnit.SECONDS), "publication did not reach child-side finalization")
+        try {
+            caller.interrupt()
+            Thread.sleep(25)
+            assertTrue(caller.isAlive, "the admitted publication must finish candidate finalization")
+            assertTrue(reports.resolve("source-tree/reports/build_contract.json").exists(), "published tree must remain available")
+        } finally {
+            releaseFinalization.countDown()
+        }
+        caller.join(5_000)
+        assertFalse(caller.isAlive)
+        assertNull(failure.get())
+        val completed = assertIs<DurableWebWorkflowOutcome.Completed>(result.get())
+        val digest = sha256("published".toByteArray())
+        assertEquals(WorkflowCandidate(webSourceRevisionId(digest), digest), completed.candidate)
+    }
+
+    @Test
+    fun `durable cancellation after reconstruction publication completes the committed attempt`() = withRoot { root ->
+        val store = JobStore(root.resolve("jobs"))
+        val job = store.createFromUpload("cancel-after-publication.elf", elfFixture())
+        val enteredFinalization = CountDownLatch(1)
+        val releaseFinalization = CountDownLatch(1)
+        val engines = FakeEngines().apply {
+            reconstructBody = { reports, _, _ -> writeSourceTree(reports.resolve("source-tree"), "published") }
+            afterReconstructPublication = {
+                enteredFinalization.countDown()
+                check(releaseFinalization.await(10, TimeUnit.SECONDS))
+            }
+        }
+        val adapter = ReconstructWorkflowAdapter(engines, FAST, WebReconstructionMode.EVIDENCE_ONLY,
+            EVIDENCE_ONLY_CAPABILITY, emptyList())
+        val worker = Executors.newSingleThreadExecutor()
+        val service = service(store, listOf(adapter), Executor { command -> worker.execute(command) })
+        try {
+            service.initializeExistingStorage()
+            val started = service.requestDurableStart(
+                job.id,
+                version(service, job.id),
+                NewWorkflowAttempt(WorkflowKind.RECONSTRUCT, WebWorkflowDefaults.RECONSTRUCT_EVIDENCE,
+                    harnessCapabilityId = EVIDENCE_ONLY_CAPABILITY),
+                "cancel_after_publication_key",
+            )
+            val runId = started.attempt.runId
+            assertTrue(enteredFinalization.await(5, TimeUnit.SECONDS), "publication did not reach child-side finalization")
+            val committed = service.getAttempt(job.id, runId)
+            assertEquals(WorkflowRunState.COMPLETED, committed.state,
+                "the attempt receipt must commit before the publication journal can be cleaned")
+            val cancellation = service.cancelDurable(job.id, committed.runId, committed.version)
+            assertEquals(WorkflowRunState.COMPLETED, cancellation.state,
+                "cancellation after the durable publication commit cannot rewrite the outcome")
+            try {
+                assertEquals(WorkflowRunState.COMPLETED, service.getAttempt(job.id, runId).state,
+                    "workflow completion is durable while child-side finalization is held")
+                assertTrue(store.runReportsDirectory(job.id, runId, create = false)
+                    .resolve("source-tree/reports/build_contract.json").exists(), "accepted generation disappeared after cancellation")
+            } finally {
+                releaseFinalization.countDown()
+            }
+            worker.shutdown()
+            assertTrue(worker.awaitTermination(5, TimeUnit.SECONDS), "durable workflow did not finish after finalization was released")
+            val terminal = service.getAttempt(job.id, runId)
+            assertEquals(WorkflowRunState.COMPLETED, terminal.state)
+            assertEquals(WorkflowTerminalReason.COMPLETED, terminal.terminalReason)
+            assertNull(terminal.acceptedRevision, "evidence-only publication is not an accepted source revision")
+            assertNotNull(terminal.usage, "runtime completion must retain the final usage sample committed after publication")
+            val contract = store.runReportsDirectory(job.id, runId, create = false)
+                .resolve("source-tree/reports/build_contract.json")
+            assertTrue(contract.exists())
+        } finally {
+            releaseFinalization.countDown()
+            worker.shutdownNow()
+            worker.awaitTermination(5, TimeUnit.SECONDS)
+            service.close()
+        }
+    }
+
+    @Test
+    fun `reconstruction candidate receipt read preserves committed atime`() = withRoot { root ->
+        val sourceTree = root.resolve("candidate-source-tree").createDirectories()
+        val contract = sourceTree.resolve("reports/build_contract.json")
+        contract.parent.createDirectories()
+        val sourceSha = sha256("candidate-source".toByteArray())
+        contract.writeText("""{"schemaVersion":3,"sourceRevisionSha256":"$sourceSha"}""")
+        val oldAtime = java.nio.file.attribute.FileTime.fromMillis(1_000)
+        Files.setAttribute(contract, "basic:lastAccessTime", oldAtime, LinkOption.NOFOLLOW_LINKS)
+        val before = Files.readAttributes(contract, java.nio.file.attribute.BasicFileAttributes::class.java,
+            LinkOption.NOFOLLOW_LINKS).lastAccessTime()
+
+        assertEquals(WorkflowCandidate(webSourceRevisionId(sourceSha), sourceSha), reconstructionCandidate(sourceTree))
+        val after = Files.readAttributes(contract, java.nio.file.attribute.BasicFileAttributes::class.java,
+            LinkOption.NOFOLLOW_LINKS).lastAccessTime()
+        assertEquals(before, after, "reading the candidate receipt must not invalidate committed tree metadata")
+    }
+
+    @Test
+    fun `retention pin during reconstruction publication does not stale its terminal write`() = withRoot { root ->
+        val store = JobStore(root.resolve("jobs"))
+        val job = store.createFromUpload("pin-during-publication.elf", elfFixture())
+        val enteredBuild = CountDownLatch(1)
+        val releaseBuild = CountDownLatch(1)
+        val engines = FakeEngines().apply {
+            reconstructBody = { reports, _, _ ->
+                enteredBuild.countDown()
+                check(releaseBuild.await(10, TimeUnit.SECONDS))
+                writeSourceTree(reports.resolve("source-tree"), "pin-race")
+            }
+        }
+        val adapter = ReconstructWorkflowAdapter(engines, FAST, WebReconstructionMode.EVIDENCE_ONLY,
+            EVIDENCE_ONLY_CAPABILITY, emptyList())
+        val worker = Executors.newSingleThreadExecutor()
+        val service = service(store, listOf(adapter), Executor { command -> worker.execute(command) })
+        try {
+            service.initializeExistingStorage()
+            val started = service.requestDurableStart(job.id, version(service, job.id),
+                NewWorkflowAttempt(WorkflowKind.RECONSTRUCT, WebWorkflowDefaults.RECONSTRUCT_EVIDENCE,
+                    harnessCapabilityId = EVIDENCE_ONLY_CAPABILITY), "pin_during_publication_key")
+            assertTrue(enteredBuild.await(5, TimeUnit.SECONDS), "reconstruction did not enter its staged build")
+            val running = service.getAttempt(job.id, started.attempt.runId)
+            val pinned = service.setProgressRetentionPinned(job.id, running.runId, running.version, true)
+            assertTrue(pinned.progressRetentionPinned)
+            releaseBuild.countDown()
+            worker.shutdown()
+            assertTrue(worker.awaitTermination(10, TimeUnit.SECONDS), "reconstruction did not finish after publication admission")
+            val completed = service.getAttempt(job.id, started.attempt.runId)
+            assertEquals(WorkflowRunState.COMPLETED, completed.state,
+                "terminalReason=${completed.terminalReason}, candidate=${completed.candidate}, recovery=${completed.recovery}")
+            assertTrue(completed.progressRetentionPinned)
+            assertNotNull(completed.candidate)
+            assertNotNull(completed.usage)
+        } finally {
+            releaseBuild.countDown()
+            worker.shutdownNow()
+            worker.awaitTermination(5, TimeUnit.SECONDS)
+            service.close()
+        }
+    }
+
+    @Test
+    fun `service shutdown after reconstruction publication preserves committed outcome`() = withRoot { root ->
+        val store = JobStore(root.resolve("jobs"))
+        val job = store.createFromUpload("shutdown-after-publication.elf", elfFixture())
+        val enteredFinalization = CountDownLatch(1)
+        val releaseFinalization = CountDownLatch(1)
+        val engines = FakeEngines().apply {
+            reconstructBody = { reports, _, _ -> writeSourceTree(reports.resolve("source-tree"), "published") }
+            afterReconstructPublication = {
+                enteredFinalization.countDown()
+                releaseFinalization.await()
+            }
+        }
+        val adapter = ReconstructWorkflowAdapter(engines, FAST, WebReconstructionMode.EVIDENCE_ONLY,
+            EVIDENCE_ONLY_CAPABILITY, emptyList())
+        val service = service(store, listOf(adapter), executor = null)
+        val shutdownFailure = AtomicReference<Throwable?>()
+        try {
+            service.initializeExistingStorage()
+            val started = service.requestDurableStart(job.id, version(service, job.id),
+                NewWorkflowAttempt(WorkflowKind.RECONSTRUCT, WebWorkflowDefaults.RECONSTRUCT_EVIDENCE,
+                    harnessCapabilityId = EVIDENCE_ONLY_CAPABILITY), "shutdown_after_publication_key")
+            assertTrue(enteredFinalization.await(5, TimeUnit.SECONDS), "publication did not reach child-side finalization")
+            val closer = Thread {
+                try { service.close() } catch (failure: Throwable) { shutdownFailure.set(failure) }
+            }
+            closer.start()
+            try {
+                val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+                var stopped = false
+                while (!stopped && System.nanoTime() < deadline) {
+                    try { service.schedulerSnapshot() }
+                    catch (_: WebJobServiceException) { stopped = true }
+                    if (!stopped) Thread.yield()
+                }
+                assertTrue(stopped, "shutdown did not publish its stop signal")
+            } finally {
+                releaseFinalization.countDown()
+            }
+            closer.join(10_000)
+            assertFalse(closer.isAlive, "service shutdown did not finish after publication finalization")
+            assertNull(shutdownFailure.get(), "completed publication should be recorded before storage ownership is released")
+
+            service(store, listOf(adapter)).use { reopened ->
+                reopened.initializeExistingStorage()
+                val completed = reopened.getAttempt(job.id, started.attempt.runId)
+                assertEquals(WorkflowRunState.COMPLETED, completed.state)
+                assertEquals(WorkflowTerminalReason.COMPLETED, completed.terminalReason)
+                assertNotNull(completed.candidate, "shutdown must not discard the committed candidate")
+                assertTrue(store.runReportsDirectory(job.id, started.attempt.runId, create = false)
+                    .resolve("source-tree/reports/build_contract.json").exists())
+            }
+        } finally {
+            releaseFinalization.countDown()
+            runCatching { service.close() }
+        }
+    }
+
+    @Test
+    fun `service startup recovers a pending publication from its original run directory`() = withRoot { root ->
+        val store = JobStore(root.resolve("jobs"))
+        val job = store.createFromUpload("pending-publication.elf", elfFixture())
+        val engines = FakeEngines().apply {
+            reconstructBody = { reports, _, _ ->
+                writeSourceTree(reports.resolve("source-tree"), "initial")
+                reports.resolve("source-tree.zip").writeText("initial archive")
+            }
+        }
+        var rootSyncs = 0
+        val faultingAdapter = ReconstructWorkflowAdapter(engines, FAST, WebReconstructionMode.EVIDENCE_ONLY,
+            EVIDENCE_ONLY_CAPABILITY, emptyList(), workspaceOpener = { reports, input ->
+                ReconstructionOutputWorkspace.openWithParentSyncForTest(reports, input) { directory ->
+                    java.nio.channels.FileChannel.open(directory, java.nio.file.StandardOpenOption.READ).use { it.force(true) }
+                    if (directory == reports && ++rootSyncs == 6) throw java.io.IOException("decision sync interruption")
+                }
+            })
+        val first = service(store, listOf(faultingAdapter))
+        val started = try {
+            first.initializeExistingStorage()
+            val started = first.requestDurableStart(job.id, version(first, job.id),
+                NewWorkflowAttempt(WorkflowKind.RECONSTRUCT, WebWorkflowDefaults.RECONSTRUCT_EVIDENCE,
+                    harnessCapabilityId = EVIDENCE_ONLY_CAPABILITY), "pending_publication_start_key")
+            assertFailsWith<WebJobServiceException> { first.getAttempt(job.id, started.attempt.runId) }
+            started
+        } finally {
+            first.close()
+        }
+        val reports = store.runReportsDirectory(job.id, started.attempt.runId)
+        assertTrue(reports.resolve(ReconstructionOutputWorkspace.PUBLICATION).exists())
+
+        service(store, listOf(ReconstructWorkflowAdapter(engines, FAST, WebReconstructionMode.EVIDENCE_ONLY,
+            EVIDENCE_ONLY_CAPABILITY, emptyList()))).use { reopened ->
+            reopened.initializeExistingStorage()
+            assertTrue(reports.resolve("source-tree.zip").exists())
+            assertFalse(reports.resolve(ReconstructionOutputWorkspace.PUBLICATION).exists())
+            val recovered = reopened.getAttempt(job.id, started.attempt.runId)
+            assertEquals(WorkflowRunState.COMPLETED, recovered.state)
+            assertEquals(WorkflowTerminalReason.COMPLETED, recovered.terminalReason)
+            val digest = sha256("initial".toByteArray())
+            assertEquals(WorkflowCandidate(webSourceRevisionId(digest), digest), recovered.candidate,
+                "startup must reconcile the committed generation to its original attempt before removing the journal")
+        }
+    }
+
+    @Test
+    fun `repair publication startup reconciles committed tree before deleting its journal`() = withRoot { root ->
+        val store = JobStore(root.resolve("jobs"))
+        val job = store.createFromUpload("pending-repair-publication.elf", elfFixture())
+        val failAttemptCommit = AtomicBoolean(false)
+        val attemptPublicationWrites = java.util.concurrent.atomic.AtomicInteger()
+        val engines = FakeEngines().apply {
+            repairBody = { project ->
+                acceptRepairGraph(project)
+                failAttemptCommit.set(true)
+            }
+        }
+        val faultingStoreFactory: (Path) -> WorkflowAttemptStore = { storage ->
+            WorkflowAttemptStore.open(storage, Clock.systemUTC(), WorkflowStoreFaultInjector { point ->
+                if (failAttemptCommit.get() && point == WorkflowStoreFaultPoint.BEFORE_RENAME &&
+                    attemptPublicationWrites.incrementAndGet() == 2 && failAttemptCommit.compareAndSet(true, false)) {
+                    throw java.io.IOException("workflow outcome acknowledgement interrupted before terminal state replacement")
+                }
+            })
+        }
+        val first = service(store, adapters(engines, acceptTestOnly = true), storeFaultInjector = faultingStoreFactory)
+        lateinit var repair: WorkflowAttempt
+        try {
+            first.initializeExistingStorage()
+            val reconstructed = first.requestDurableStart(job.id, version(first, job.id),
+                NewWorkflowAttempt(WorkflowKind.RECONSTRUCT, WebWorkflowDefaults.RECONSTRUCT_EVIDENCE,
+                    harnessCapabilityId = EVIDENCE_ONLY_CAPABILITY), "repair_reconcile_reconstruct").attempt
+            assertEquals(WorkflowRunState.COMPLETED, reconstructed.state)
+            repair = first.requestDurableStart(job.id, version(first, job.id),
+                NewWorkflowAttempt(WorkflowKind.REPAIR, WebWorkflowDefaults.REPAIR,
+                    reconstructed.candidate!!.revisionId, "agent-acp"), "repair_reconcile_start_01").attempt
+            // The first state write is the pre-decision receipt; fail the second, terminal
+            // acknowledgement after the filesystem decision while preserving that receipt.
+            val reports = store.runReportsDirectory(job.id, repair.runId, create = false)
+            assertTrue(reports.resolve(ReconstructionOutputWorkspace.PUBLICATION).exists(),
+                "failed workflow acknowledgement must retain the decided repair journal")
+            assertNotEquals(WorkflowRunState.COMPLETED, repair.state,
+                "the injected failed persistence must not be mistaken for an acknowledged outcome")
+        } finally {
+            first.close()
+        }
+
+        val preparedReceipt = WorkflowAttemptStore.open(store.storageRoot).use { attempts ->
+            val snapshot = (attempts.inspect(job.id) as WorkflowJobInspection.Available).snapshot
+            assertEquals(WorkflowRunState.RUNNING, snapshot.attempts.single { it.runId == repair.runId }.state)
+            assertNotNull(snapshot.attempts.single { it.runId == repair.runId }.repairPublicationReceipt,
+                "the staged repair outcome must be durable before the filesystem decision")
+            snapshot.attempts.single { it.runId == repair.runId }.repairPublicationReceipt!!
+        }
+
+        service(store, adapters(engines, acceptTestOnly = true)).use { reopened ->
+            reopened.initializeExistingStorage()
+            val recovered = reopened.getAttempt(job.id, repair.runId)
+            assertEquals(WorkflowRunState.COMPLETED, recovered.state)
+            assertEquals(WorkflowTerminalReason.COMPLETED, recovered.terminalReason)
+            assertNotNull(recovered.candidate, "the accepted repair candidate must be reconciled durably")
+            assertNotNull(recovered.usage, "the single atomic repair outcome write must include measured usage")
+            assertEquals(preparedReceipt.usage, recovered.usage,
+                "restart must preserve the exact usage captured before the durable publication decision")
+            assertEquals(preparedReceipt.preparedAt, recovered.endedAt,
+                "restart must preserve the original publication completion time")
+            val reports = store.runReportsDirectory(job.id, repair.runId, create = false)
+            assertFalse(reports.resolve(ReconstructionOutputWorkspace.PUBLICATION).exists(),
+                "the journal can be removed only after its workflow outcome is durable")
+            assertEquals("repaired", reports.resolve("source-tree/code.c").readText())
+        }
+    }
+
+    @Test
+    fun `service startup recovers a pending legacy job reports publication`() = withRoot { root ->
+        val store = JobStore(root.resolve("jobs"))
+        val job = store.createFromUpload("legacy-pending-publication.elf", elfFixture())
+        val reports = store.reportsDirectory(job.id)
+        val engines = FakeEngines().apply {
+            reconstructBody = { output, _, _ ->
+                writeSourceTree(output.resolve("source-tree"), "legacy-initial")
+                output.resolve("source-tree.zip").writeText("legacy initial archive")
+            }
+        }
+        var rootSyncs = 0
+        val faultingAdapter = ReconstructWorkflowAdapter(engines, FAST, WebReconstructionMode.EVIDENCE_ONLY,
+            EVIDENCE_ONLY_CAPABILITY, emptyList(), workspaceOpener = { reportRoot, input ->
+                ReconstructionOutputWorkspace.openWithParentSyncForTest(reportRoot, input) { directory ->
+                    java.nio.channels.FileChannel.open(directory, java.nio.file.StandardOpenOption.READ).use { it.force(true) }
+                    if (directory == reports && ++rootSyncs == 6) throw java.io.IOException("decision sync interruption")
+                }
+            })
+        val first = service(store, listOf(faultingAdapter))
+        try {
+            first.initializeExistingStorage()
+            val attempt = WorkflowAttempt("legacy_reconstruction_fixture", job.id, WorkflowKind.RECONSTRUCT,
+                WorkflowRunState.RUNNING, "legacy_version_fixture", java.time.Instant.now(),
+                java.time.Instant.now(), null, null, null, EVIDENCE_ONLY_CAPABILITY,
+                WebWorkflowDefaults.RECONSTRUCT_EVIDENCE, null, null, null, null)
+            val workflowContext = DurableWebWorkflowContext(job, attempt, reports)
+            assertFailsWith<decompengine.project.ReconstructionPublicationPendingException> {
+                faultingAdapter.execute(workflowContext)
+            }
+            assertTrue(reports.resolve(ReconstructionOutputWorkspace.PUBLICATION).exists())
+        } finally {
+            first.close()
+        }
+
+        service(store, listOf(ReconstructWorkflowAdapter(engines, FAST, WebReconstructionMode.EVIDENCE_ONLY,
+            EVIDENCE_ONLY_CAPABILITY, emptyList()))).use { reopened ->
+            reopened.initializeExistingStorage()
+            assertFalse(reports.resolve(ReconstructionOutputWorkspace.PUBLICATION).exists())
+            assertEquals("legacy initial archive", reports.resolve("source-tree.zip").readText())
+        }
     }
 
     @Test
@@ -324,7 +1056,7 @@ class WebProductionWorkflowsTest {
         val agent = ReconstructWorkflowAdapter(engines, FAST, WebReconstructionMode.AGENT, "agent-acp", emptyList(), allowTestOnlyExecution = true)
         val exhausted = agent.execute(context(root, root.resolve("tools"), WebWorkflowDefaults.RECONSTRUCT_AGENT.copy(maxToolCalls = 2uL)))
         assertLimitExhausted(exhausted)
-        assertEquals(baseCandidate(), (exhausted as DurableWebWorkflowOutcome.Failed).candidate, "candidate output is retained, not accepted")
+        assertNull((exhausted as DurableWebWorkflowOutcome.Failed).candidate, "an uncommitted private stage is not a candidate")
         val completed = assertIs<DurableWebWorkflowOutcome.Completed>(agent.execute(context(root, root.resolve("agent"), WebWorkflowDefaults.RECONSTRUCT_AGENT)))
         assertEquals(baseCandidate(), completed.candidate); assertEquals(3uL, completed.usage?.toolCalls)
         val evidence = ReconstructWorkflowAdapter(engines, FAST, WebReconstructionMode.EVIDENCE_ONLY, EVIDENCE_ONLY_CAPABILITY, emptyList())
@@ -477,6 +1209,8 @@ class WebProductionWorkflowsTest {
             val repaired = start(NewWorkflowAttempt(WorkflowKind.REPAIR, WebWorkflowDefaults.REPAIR, reconstructed.candidate!!.revisionId,
                 "agent-acp"), "test_only_repair_start_1").attempt
             assertEquals(WorkflowRunState.COMPLETED, repaired.state); assertNotNull(repaired.candidate)
+            assertNotNull(repaired.usage, "committed repair publication must retain the final measured usage")
+            assertTrue(repaired.endedAt!!.isAfter(repaired.startedAt!!), "repair completion must not record zero elapsed time")
             assertNull(repaired.acceptedRevision); assertTrue(repaired.publicationPending)
             assertNull(service.presentation(job.id).snapshot!!.acceptedRevision)
         }
@@ -600,9 +1334,12 @@ class WebProductionWorkflowsTest {
                 fun start(request: NewWorkflowAttempt, key: String) = service.requestDurableStart(job.id, version(service, job.id), request, key)
                 val reconstructed = start(NewWorkflowAttempt(WorkflowKind.RECONSTRUCT, WebWorkflowDefaults.RECONSTRUCT_EVIDENCE,
                     harnessCapabilityId = EVIDENCE_ONLY_CAPABILITY), "baseline_reconstruct_01").attempt
-                val repaired = start(NewWorkflowAttempt(WorkflowKind.REPAIR, WebWorkflowDefaults.REPAIR, reconstructed.candidate!!.revisionId,
+                val startedRepair = start(NewWorkflowAttempt(WorkflowKind.REPAIR, WebWorkflowDefaults.REPAIR, reconstructed.candidate!!.revisionId,
                     "agent-acp"), "baseline_repair_start_01").attempt
+                val repaired = service.getAttempt(job.id, startedRepair.runId)
                 assertEquals(WorkflowRunState.COMPLETED, repaired.state)
+                assertNotNull(repaired.usage, "committed baseline repair must retain measured usage")
+                assertTrue(repaired.endedAt!!.isAfter(repaired.startedAt!!))
                 val history = readProjectRecordedRepairHistory(store.runReportsDirectory(job.id, repaired.runId).resolve("source-tree"))
                 val baseline = assertNotNull(history.snapshot?.acceptedBaseline, "the accepted root was not projected")
                 assertEquals(WorkflowCandidate(webSourceRevisionId(baseline.sourceRevisionSha256), baseline.sourceRevisionSha256), repaired.candidate)
@@ -804,15 +1541,34 @@ class WebProductionWorkflowsTest {
             modes += mode; writeSourceTree(reports.resolve("source-tree"), "base")
         }
         var repairBody: (Path) -> Unit = { project -> acceptRepairGraph(project) }
+        var afterReconstructPublication: () -> Unit = {}
         var activity: () -> Unit = {}
         override fun explore(binary: Path, reportsDirectory: Path, activity: () -> Unit) {
             calls.incrementAndGet(); this.activity = activity; exploreBody(reportsDirectory)
         }
-        override fun reconstruct(binary: Path, reportsDirectory: Path, mode: WebReconstructionMode, progress: AgentWorkflowProgress) {
-            calls.incrementAndGet(); reconstructBody(reportsDirectory, mode, progress)
+        override fun reconstruct(
+            binary: Path,
+            reportsDirectory: Path,
+            mode: WebReconstructionMode,
+            progress: AgentWorkflowProgress,
+            workspace: ReconstructionOutputWorkspace,
+            publicationAdmission: () -> Unit,
+            onCommittedPublication: () -> Unit,
+        ) {
+            calls.incrementAndGet()
+            val publication = workspace.publish(setOf("source-tree", "source-tree.zip", "reconstruction.json", ".decomp-agent-sessions"),
+                { stage -> reconstructBody(stage, mode, progress) }, publicationAdmission, onCommittedPublication)
+            if (publication == decompengine.project.PublicationResult.PENDING)
+                throw decompengine.project.ReconstructionPublicationPendingException()
+            afterReconstructPublication()
         }
-        override fun repair(project: Path, binary: Path, reportsDirectory: Path, harness: String): RepairRunStatus {
-            calls.incrementAndGet(); check(harness == "acp"); repairBody(project); return RepairRunStatus.FULLY_ACCEPTED
+        var repairRecoveryComplete = true
+        var repairStatus = RepairRunStatus.FULLY_ACCEPTED
+        override fun repair(project: Path, binary: Path, reportsDirectory: Path, harness: String): RepairRunOutcome {
+            calls.incrementAndGet(); check(harness == "acp"); repairBody(project)
+            val state = RepairRunState("run_20261107", repairStatus, "revision_baseline", "revision_accepted", null,
+                "0".repeat(64), 1, 1, 1, 2)
+            return RepairRunOutcome(emptyList(), null, state, repairRecoveryComplete)
         }
     }
 
@@ -822,12 +1578,14 @@ class WebProductionWorkflowsTest {
         ReconstructWorkflowAdapter(engines, FAST, WebReconstructionMode.EVIDENCE_ONLY, EVIDENCE_ONLY_CAPABILITY, emptyList()),
         RepairWorkflowAdapter(engines, FAST, "agent-acp", acceptTestOnly),
     )
-    private fun service(store: JobStore, adapters: List<DurableWebWorkflowAdapter>) = WebJobService(store,
+    private fun service(store: JobStore, adapters: List<DurableWebWorkflowAdapter>, executor: Executor? = Executor(Runnable::run),
+        storeFaultInjector: (Path) -> WorkflowAttemptStore = { WorkflowAttemptStore.open(it, Clock.systemUTC()) }) = WebJobService(store,
         JobAnalyzer { _, _ -> throw AssertionError("legacy analyzer fallback") },
-        JobReconstructor { _, _ -> throw AssertionError("legacy reconstructor fallback") }, Executor(Runnable::run),
-        durableAdapters = adapters, attemptStoreFactory = { WorkflowAttemptStore.open(it, Clock.systemUTC()) })
+        JobReconstructor { _, _ -> throw AssertionError("legacy reconstructor fallback") }, executor,
+        durableAdapters = adapters, attemptStoreFactory = storeFaultInjector)
     private fun context(root: Path, reports: Path, limits: WorkflowExecutionLimits): DurableWebWorkflowContext {
         Files.createDirectories(reports)
+        Files.write(root.resolve("input.elf"), elfFixture())
         val job = Job("a".repeat(32), "fixture.elf", "uploaded", "2026-01-01T00:00:00Z", sizeBytes = 1,
             binaryPath = root.resolve("input.elf"), metadata = decompengine.binary.ElfMetadataReader.read(elfFixture()))
         val attempt = WorkflowAttempt("run_fixture", job.id, WorkflowKind.EXPLORE, WorkflowRunState.RUNNING, "version_fixture",
@@ -845,7 +1603,7 @@ class WebProductionWorkflowsTest {
     }
 
     private companion object {
-        val FAST = BoundedWorkflowExecutor(pollMillis = 10, outputPollMillis = 10, reinterruptMillis = 10)
+        val FAST = BoundedWorkflowExecutor(pollMillis = 10, outputPollMillis = 10)
         val PROFILE = DeclarativeRepairIndexProfile("web-workflow-fixture", RepairIndexLayout(listOf("code.c"), listOf("code.c"),
             modules = listOf(RepairModuleEvidence("fixture-module", listOf("code.c")))))
         val INPUTS = listOf(ProcessInput("fixture-case"))

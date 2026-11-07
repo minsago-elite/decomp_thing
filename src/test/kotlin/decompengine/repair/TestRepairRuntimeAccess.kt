@@ -4,6 +4,8 @@ import decompengine.agent.AgentCancellation
 import decompengine.agent.AgentExecutionEvent
 import decompengine.agent.AgentExecutionLimits
 import decompengine.agent.AgentHarness
+import java.nio.file.Files
+import java.nio.file.LinkOption
 import java.nio.file.Path
 
 /**
@@ -103,6 +105,28 @@ internal fun ModuleRevisionGraph.Companion.openForTesting(
     budget: RepairResourceBudget = RepairResourceBudget(),
     faultInjector: ModuleRevisionFaultInjector,
 ): ModuleRevisionGraph = TestRepairRuntimeAccess.openGraph(projectDir, profile, budget, faultInjector)
+
+/**
+ * Exercise the current legacy recovery branch with a synthetic schema-1..4 graph. This fixture
+ * projects current canonical state through the legacy serializer; it is not historical wire
+ * evidence and must not be used to claim compatibility with an older released writer.
+ */
+internal fun ModuleRevisionGraph.Companion.openLegacyForTesting(
+    projectDir: Path,
+    profile: RepairIndexProfile,
+    budget: RepairResourceBudget = RepairResourceBudget(),
+    faultInjector: ModuleRevisionFaultInjector? = null,
+    schemaVersion: Int = 4,
+): ModuleRevisionGraph {
+    require(schemaVersion in 1..4)
+    val graphPath = projectDir.resolve("reports/repair-revisions/graph.json")
+    if (!Files.exists(graphPath, LinkOption.NOFOLLOW_LINKS)) {
+        ModuleRevisionGraph.open(projectDir, profile, budget).close()
+    }
+    val current = Files.readString(graphPath)
+    Files.writeString(graphPath, authoredLegacyGraphFixture(current, schemaVersion))
+    return TestRepairRuntimeAccess.openGraph(projectDir, profile, budget, faultInjector)
+}
 
 internal fun ModuleRepairIndex.Companion.load(
     projectDir: Path,

@@ -6,8 +6,12 @@ import decompengine.agent.AgentExecutionResult
 import decompengine.agent.AgentFileChange
 import decompengine.agent.AgentFileChangeKind
 import decompengine.agent.AgentHarness
+import decompengine.agent.AgentMessageEvent
+import decompengine.agent.AgentMessageRole
 import decompengine.agent.AgentOperation
 import decompengine.agent.AgentStopReason
+import decompengine.agent.AgentToolEvent
+import decompengine.agent.AgentToolStatus
 import decompengine.agent.AgentWorkspacePath
 import decompengine.agent.AgentWorkflowProgress
 import java.nio.ByteBuffer
@@ -57,18 +61,76 @@ class SourceTreeTest {
     }
 
     @Test
+    fun `transactional generation requires the active lease stage and admitted model input`() {
+        val base = Path.of("build").toAbsolutePath().normalize().createDirectories()
+        val output = createTempDirectory(base, "generation-stage-authority-")
+        val input = output.resolveSibling("${output.fileName}.input").also { Files.write(it, byteArrayOf(9, 8, 7)) }
+        var harnessCalls = 0
+        val reconstructor = BoundedLlmModuleReconstructor(AgentHarness { _, _ ->
+            harnessCalls++
+            error("a rejected generation target must not dispatch")
+        })
+        ReconstructionOutputWorkspace.open(output, input).use { workspace ->
+            val validModel = oneModuleModel().copy(inputSha256 = workspace.inputSha256)
+            val directFailure = assertFailsWith<IllegalArgumentException> {
+                SourceTreeGenerator.generateWithCompilerFeedback(
+                    validModel, output.resolve("source-tree"), ReconstructionHostSafetyLimits.DEFAULT,
+                    profile = GeneratedCMakeReconstructionProfile.descriptor,
+                    reconstructor = reconstructor,
+                    publicationLock = workspace.publicationLock,
+                )
+            }
+            assertTrue(directFailure.message.orEmpty().contains("active publication stage"))
+            assertFalse(output.resolve("source-tree").exists())
+
+            val wrongInputFailure = assertFailsWith<IllegalArgumentException> {
+                workspace.publish(setOf("source-tree"), buildStage = { stage ->
+                    SourceTreeGenerator.generateWithCompilerFeedback(
+                        validModel.copy(inputSha256 = "a".repeat(64)), stage.resolve("source-tree"),
+                        ReconstructionHostSafetyLimits.DEFAULT,
+                        profile = GeneratedCMakeReconstructionProfile.descriptor,
+                        reconstructor = reconstructor,
+                        publicationLock = workspace.publicationLock,
+                    )
+                })
+            }
+            assertTrue(wrongInputFailure.message.orEmpty().contains("admitted publication input"))
+            assertFalse(output.resolve("source-tree").exists())
+        }
+        assertEquals(0, harnessCalls)
+    }
+
+    @Test
     fun `generation disposition distinguishes accepted evidence-only and transactional failure fallback`() {
         val model = oneModuleModel()
         val buildRoot = Path.of("build").toAbsolutePath().normalize().createDirectories()
         fun generate(label: String, reconstructor: ModuleReconstructor): ReconstructionGenerationResult {
             val project = createTempDirectory(buildRoot, "generation-disposition-$label-")
-            return SourceTreeGenerator.generateWithCompilerFeedback(
-                model = model,
-                projectDir = project,
-                hostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
-                reconstructor = reconstructor,
-                profile = GeneratedCMakeReconstructionProfile.descriptor,
-            )
+            val input = project.resolveSibling("${project.fileName}.input")
+            Files.write(input, byteArrayOf(1, 2, 3))
+            return ReconstructionOutputWorkspace.open(project, input).use { workspace ->
+                var result: ReconstructionGenerationResult? = null
+                val generateInto = { candidate: Path ->
+                    result = SourceTreeGenerator.generateWithCompilerFeedback(
+                        model = model.copy(inputSha256 = workspace.inputSha256),
+                        projectDir = candidate,
+                        hostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
+                        reconstructor = reconstructor,
+                        profile = GeneratedCMakeReconstructionProfile.descriptor,
+                        publicationLock = workspace.publicationLock,
+                    )
+                }
+                if (reconstructor.publicationRequirement() == ReconstructionPublicationRequirement.TRANSACTIONAL) {
+                    assertEquals(PublicationResult.PUBLISHED,
+                        workspace.publish(setOf("source-tree", ".decomp-agent-sessions"), buildStage = { stage ->
+                            generateInto(stage.resolve("source-tree"))
+                        })
+                    )
+                } else {
+                    generateInto(project)
+                }
+                requireNotNull(result)
+            }
         }
 
         val accepted = generate("accepted", validReconstructor())
@@ -1086,7 +1148,7 @@ class SourceTreeTest {
         SourceTreeGenerator.generate(
             oneModule,
             project,
-            reconstructor = BoundedLlmModuleReconstructor(harness),
+            reconstructor = fixtureOnlyAgent(BoundedLlmModuleReconstructor(harness)),
             observedBehavior = "case default: stdout=ok",
         )
 
@@ -1097,6 +1159,37 @@ class SourceTreeTest {
         assertTrue(checkpoint.contains("agent-execution-evidence-incomplete"))
         assertTrue(checkpoint.contains("\"promptCharacters\":"))
         assertTrue(checkpoint.contains("\"promptBudgetCharacters\": 120000"))
+    }
+
+    @Test
+    fun `confident completion prose and completed tool status cannot accept a missing reconstruction change`() {
+        val testRoot = Path.of("build").toAbsolutePath().normalize().createDirectories()
+        val project = createTempDirectory(testRoot, "source-tree-agent-claim-without-change-")
+        val claim = "Change accepted; all tests pass."
+        var dispatched = false
+        val harness = AgentHarness { _, onEvent ->
+            dispatched = true
+            onEvent(AgentMessageEvent(0, "assistant-claim", AgentMessageRole.ASSISTANT, claim, completed = true))
+            onEvent(AgentToolEvent(1, "write-1", "write_text_file", AgentToolStatus.SUCCEEDED))
+            AgentExecutionResult(AgentStopReason.COMPLETED, claim, emptyList())
+        }
+
+        val manifest = SourceTreeGenerator.generate(
+            oneModuleModel(),
+            project,
+            reconstructor = fixtureOnlyAgent(BoundedLlmModuleReconstructor(harness)),
+        )
+
+        assertTrue(dispatched)
+        val source = project.resolve("src/modules/parse.c").readText()
+        assertFalse(source.contains(claim), "peer prose must not become generated source")
+        val sourceEvidence = manifest.files.single { it.path == "src/modules/parse.c" }
+        assertEquals(false, sourceEvidence.acceptedImplementation,
+            "completed stop reason and tool status must not make a nonexistent change acceptable")
+        assertEquals(oneModuleModel().functions.map { it.id }.toSet(), manifest.unresolvedImplementationIds.toSet())
+        val checkpoint = Json.parseToJsonElement(project.resolve("reports/modules/parse.json").readText()).jsonObject
+        assertEquals(JsonPrimitive(false), checkpoint.getValue("accepted"))
+        assertTrue(checkpoint.toString().contains("reconstruction-failed"))
     }
 
     @Test
@@ -1187,10 +1280,10 @@ class SourceTreeTest {
         val manifest = SourceTreeGenerator.generate(
             oneModuleModel(),
             project,
-            reconstructor = BoundedLlmModuleReconstructor(
+            reconstructor = fixtureOnlyAgent(BoundedLlmModuleReconstructor(
                 harness,
                 harnessProvenanceDescriptor = "agent-harness-v1:acp:configuration-${"a".repeat(64)}",
-            ),
+            )),
             profile = alternateProfile,
         )
 
@@ -1247,7 +1340,9 @@ class SourceTreeTest {
 
     @Test
     fun `configured reconstruction supplies a durable session scoped to its module evidence`() {
-        val project = createTempDirectory("source-tree-session-descriptor-")
+        val buildRoot = Path.of("build").toAbsolutePath().normalize().createDirectories()
+        val project = createTempDirectory(buildRoot, "source-tree-session-descriptor-")
+        val input = project.resolveSibling("${project.fileName}.input").also { Files.write(it, byteArrayOf(4, 5, 6)) }
         val requests = mutableListOf<AgentExecutionRequest>()
         val harness = AgentHarness { request, _ ->
             requests += request
@@ -1256,17 +1351,35 @@ class SourceTreeTest {
         val reconstructor = BoundedLlmModuleReconstructor(
             harness, harnessProvenanceDescriptor = "agent-harness-v1:acp:configuration-${"a".repeat(64)}",
         )
-        listOf("observed case one", "observed case two").forEach { behavior ->
-            val failure = assertFailsWith<decompengine.agent.AgentExecutionException> {
-                SourceTreeGenerator.generate(oneModuleModel(), project, reconstructor = reconstructor, observedBehavior = behavior)
+        ReconstructionOutputWorkspace.open(project, input).use { workspace ->
+            assertFailsWith<IllegalStateException> {
+                workspace.publish(setOf("source-tree", ".decomp-agent-sessions"), buildStage = { stage ->
+                    listOf("observed case one", "observed case two").forEach { behavior ->
+                        val failure = assertFailsWith<decompengine.agent.AgentExecutionException> {
+                        SourceTreeGenerator.generateWithCompilerFeedback(
+                            oneModuleModel().copy(inputSha256 = workspace.inputSha256),
+                            stage.resolve("source-tree"),
+                            hostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
+                            profile = GeneratedCMakeReconstructionProfile.descriptor,
+                            reconstructor = reconstructor,
+                            observedBehavior = behavior,
+                            publicationLock = workspace.publicationLock,
+                        )
+                    }
+                        assertTrue(generateSequence<Throwable>(failure) { it.cause }.any {
+                            it is decompengine.agent.AgentSessionRecoveryException
+                        })
+                    }
+                    error("synthetic request observations were collected; abort the unaccepted generation")
+                })
             }
-            assertTrue(generateSequence<Throwable>(failure) { it.cause }.any { it is decompengine.agent.AgentSessionRecoveryException })
         }
         val first = requireNotNull(requests[0].sessionContinuation)
         val second = requireNotNull(requests[1].sessionContinuation)
         assertEquals("parse", first.taskId)
         assertNull(first.acceptedRevisionSha256)
-        assertFalse(first.directory.startsWith(project))
+        assertTrue(first.directory.startsWith(project))
+        assertFalse(first.directory.startsWith(project.resolve("source-tree")))
         assertTrue(AgentWorkspacePath("project", "src/modules/parse.c") in first.workspaceFiles)
         assertTrue(first.workspaceFiles.keys.none { requests[0].accessPolicy.allows(it, AgentOperation.READ_FILE) })
         // Different opaque whole-program observations supply no selected module evidence.
@@ -1692,7 +1805,7 @@ class SourceTreeTest {
         val manifest = SourceTreeGenerator.generate(
             oneModule,
             project,
-            reconstructor = BoundedLlmModuleReconstructor(harness),
+            reconstructor = fixtureOnlyAgent(BoundedLlmModuleReconstructor(harness)),
         )
 
         assertEquals(listOf("fn_0000000000401000"), manifest.unresolvedImplementationIds)
@@ -1717,7 +1830,7 @@ class SourceTreeTest {
         val manifest = SourceTreeGenerator.generate(
             sameModule,
             project,
-            reconstructor = BoundedLlmModuleReconstructor(harness),
+            reconstructor = fixtureOnlyAgent(BoundedLlmModuleReconstructor(harness)),
         )
 
         assertEquals(functions.map { it.id }.sorted(), manifest.unresolvedImplementationIds.sorted())
@@ -1844,7 +1957,7 @@ class SourceTreeTest {
         val manifest = SourceTreeGenerator.generate(
             huge,
             project,
-            reconstructor = BoundedLlmModuleReconstructor(harness, 4_096),
+            reconstructor = fixtureOnlyAgent(BoundedLlmModuleReconstructor(harness, 4_096)),
         )
 
         assertEquals(0, calls)
@@ -1962,6 +2075,11 @@ class SourceTreeTest {
             }
         }
         ReconstructedModule(source, "scripted-valid", sha256(source.toByteArray()))
+    }
+
+    /** Unit tests that exercise generation internals use fixture semantics, not accepted publication. */
+    private fun fixtureOnlyAgent(delegate: ModuleReconstructor): ModuleReconstructor = object : ModuleReconstructor by delegate {
+        override fun publicationRequirement(): ReconstructionPublicationRequirement = ReconstructionPublicationRequirement.NONE
     }
 
     private fun cacheReconstructor(

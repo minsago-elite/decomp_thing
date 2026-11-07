@@ -86,9 +86,19 @@ data class WorkflowAttempt(
     val progressRetentionPinned: Boolean = false,
     internal val startReceipt: WorkflowStartReceipt? = null,
     val recovery: WorkflowAttemptRecovery? = null,
+    /** Durable pre-decision outcome data used only if a repair tree commit needs startup recovery. */
+    internal val repairPublicationReceipt: WorkflowRepairPublicationReceipt? = null,
 ) {
     val publicationPending: Boolean get() = state == WorkflowRunState.COMPLETED && candidate != null && acceptedRevision == null
 }
+
+data class WorkflowRepairPublicationReceipt(
+    val candidate: WorkflowCandidate,
+    val state: WorkflowRunState,
+    val reason: WorkflowTerminalReason,
+    val usage: WorkflowUsage,
+    val preparedAt: Instant,
+)
 
 /**
  * How a restarted server must treat an attempt, derived only from durable state. Startup recovery
@@ -171,6 +181,19 @@ class WorkflowAttemptStore private constructor(
     private var closed = false
 
     fun inspect(jobId: String): WorkflowJobInspection = withJob(jobId, readOnly = true) { directory -> inspectLocked(jobId, directory) }
+
+    /** Startup-only reread charged to the same aggregate evidence budget as recovery mutations. */
+    internal fun inspectForStartupRecovery(jobId: String, budget: WorkflowStartupRecoveryBudget): WorkflowJobInspection =
+        withJob(jobId, readOnly = true) { directory ->
+            try {
+                inspectRecord(jobId, directory) { path, maximum ->
+                    budget.read(root, "$jobId/${path.fileName}", maximum)
+                }
+            } catch (failure: WorkflowStoreException) {
+                WorkflowJobInspection.Unavailable(jobId, WorkflowStoreDiagnostic(failure.code,
+                    failure.message ?: "The job record is unavailable."))
+            }
+        }
 
     /** Optimistic display-only read: neither lifetime nor stripe locks span physical listing I/O.
      * Validate after presentation too, so a command crossing either metadata read refuses the row.
@@ -382,9 +405,203 @@ class WorkflowAttemptStore private constructor(
                     fail("INVALID_TRANSITION", "An unstarted attempt cannot report completed execution.")
                 }
                 if (old.startedAt == null && transition.candidate != null) fail("INVALID_TRANSITION", "An unstarted attempt cannot publish candidate output.")
-                old.copy(state = transition.state, endedAt = now, terminalReason = transition.reason, candidate = transition.candidate, usage = transition.usage)
+                old.copy(state = transition.state, endedAt = now, terminalReason = transition.reason,
+                    candidate = transition.candidate, usage = transition.usage, repairPublicationReceipt = null)
             }
         }.copy(version = newId("version"))
+        val updated = replace(current, updatedAttempt)
+        persist(directory, updated)
+        WorkflowMutation(updated, updatedAttempt)
+    }
+
+    /**
+     * Persist the exact repair outcome before the publication journal can make its decision.
+     * If the process dies after the tree swap, startup can reconcile the same candidate, terminal
+     * classification, completion time, and measured usage without inventing recovery-time values.
+     */
+    internal fun prepareRepairPublication(
+        jobId: String,
+        runId: String,
+        candidate: WorkflowCandidate,
+        state: WorkflowRunState,
+        reason: WorkflowTerminalReason,
+        usage: WorkflowUsage,
+    ): WorkflowMutation = withJob(jobId) { directory ->
+        val current = available(jobId, directory).snapshot
+        requireRecovered(current, directory)
+        val old = current.attempts.singleOrNull { it.runId == runId }
+            ?: fail("RUN_NOT_FOUND", "The repair publication attempt is unavailable.")
+        if (current.latestRun?.runId != runId || old.workflow != WorkflowKind.REPAIR || old.startedAt == null ||
+            old.state !in setOf(WorkflowRunState.RUNNING, WorkflowRunState.CANCELLING) || old.acceptedRevision != null) {
+            fail("PUBLICATION_ATTEMPT_CONFLICT", "Only the active repair attempt can prepare a publication receipt.")
+        }
+        validateTerminal(state, reason)
+        val existing = old.repairPublicationReceipt
+        val receipt = existing ?: WorkflowRepairPublicationReceipt(candidate, state, reason, usage,
+            maxOf(clock.instant(), old.startedAt))
+        if (existing != null && (existing.candidate != candidate || existing.state != state ||
+                existing.reason != reason || existing.usage != usage)) {
+            fail("PUBLICATION_ATTEMPT_CONFLICT", "The repair publication receipt cannot be replaced.")
+        }
+        if (existing != null) return@withJob WorkflowMutation(current, old)
+        val prepared = old.copy(version = newId("version"), repairPublicationReceipt = receipt)
+        val updated = replace(current, prepared)
+        persist(directory, updated)
+        WorkflowMutation(updated, prepared)
+    }
+
+    /** Clear a pre-decision receipt only after startup has recovered/aborted its run journal. */
+    internal fun clearAbortedRepairPublicationReceipt(jobId: String, runId: String,
+        startup: WorkflowStartupRecoveryBudget? = null): WorkflowMutation = withJob(jobId) { directory ->
+        startup?.checkpoint()
+        val current = if (startup == null) available(jobId, directory).snapshot else
+            inspectRecord(jobId, directory) { path, maximum -> startup.read(root, root.relativize(path).toString(), maximum) }.snapshot
+        requireRecovered(current, directory)
+        val old = current.attempts.singleOrNull { it.runId == runId }
+            ?: fail("RUN_NOT_FOUND", "The repair publication attempt is unavailable.")
+        if (old.repairPublicationReceipt == null) return@withJob WorkflowMutation(current, old)
+        if (old.workflow != WorkflowKind.REPAIR || old.state != WorkflowRunState.INTERRUPTED ||
+            old.terminalReason != WorkflowTerminalReason.PROCESS_INTERRUPTED) {
+            fail("PUBLICATION_ATTEMPT_CONFLICT", "Only an aborted interrupted repair receipt can be discarded.")
+        }
+        val cleared = old.copy(version = newId("version"), repairPublicationReceipt = null)
+        val updated = replace(current, cleared)
+        if (startup == null) persist(directory, updated) else {
+            val replacement = encodeSnapshot(updated)
+            startup.retain(replacement.size.toLong())
+            persistPrepared(directory, replacement, startup::checkpoint)
+        }
+        WorkflowMutation(updated, cleared)
+    }
+
+    /**
+     * A reconstruction publication journal is the commit authority for this narrow recovery.
+     * Called only while reopening that run's leased reports root, after the publisher verified the
+     * decided generation and before it removes the journal. It repairs the crash window between
+     * filesystem commit and workflow-attempt completion; it never accepts arbitrary interrupted
+     * executions or changes an already-recorded different candidate.
+     */
+    internal fun reconcileCommittedReconstruction(
+        jobId: String,
+        runId: String,
+        candidate: WorkflowCandidate,
+        startup: WorkflowStartupRecoveryBudget? = null,
+    ): WorkflowMutation = withJob(jobId) { directory ->
+        startup?.checkpoint()
+        val current = if (startup == null) available(jobId, directory).snapshot else
+            inspectRecord(jobId, directory) { path, maximum -> startup.read(root, root.relativize(path).toString(), maximum) }.snapshot
+        requireRecovered(current, directory)
+        val old = current.attempts.singleOrNull { it.runId == runId }
+            ?: fail("RUN_NOT_FOUND", "The committed reconstruction attempt is unavailable.")
+        if (current.latestRun?.runId != runId || old.workflow != WorkflowKind.RECONSTRUCT || old.startedAt == null ||
+            old.acceptedRevision != null) {
+            fail("PUBLICATION_ATTEMPT_CONFLICT", "The committed output does not bind to the latest reconstruction attempt.")
+        }
+        if (old.state == WorkflowRunState.COMPLETED) {
+            if (old.candidate != candidate || old.terminalReason !in setOf(WorkflowTerminalReason.COMPLETED, WorkflowTerminalReason.NO_CHANGES)) {
+                fail("PUBLICATION_ATTEMPT_CONFLICT", "The recorded reconstruction outcome differs from its committed output.")
+            }
+            startup?.checkpoint()
+            return@withJob WorkflowMutation(current, old)
+        }
+        if (old.state != WorkflowRunState.INTERRUPTED || old.terminalReason != WorkflowTerminalReason.PROCESS_INTERRUPTED) {
+            fail("PUBLICATION_ATTEMPT_CONFLICT", "Only a process-interrupted reconstruction can be reconciled from its publication journal.")
+        }
+        val repaired = old.copy(version = newId("version"), state = WorkflowRunState.COMPLETED,
+            endedAt = maxOf(old.endedAt ?: old.startedAt, old.startedAt),
+            terminalReason = WorkflowTerminalReason.COMPLETED, candidate = candidate, usage = null)
+        val updated = replace(current, repaired)
+        if (startup == null) persist(directory, updated) else {
+            val replacement = encodeSnapshot(updated)
+            startup.retain(replacement.size.toLong())
+            persistPrepared(directory, replacement, startup::checkpoint)
+        }
+        WorkflowMutation(updated, repaired)
+    }
+
+    /**
+     * A repair tree publication journal is also a commit authority for its terminal workflow
+     * outcome. The repair graph inside the committed tree supplies the bounded status and source
+     * identity; this single transition records candidate, terminal time and measured usage before
+     * the journal can be removed.
+     */
+    internal fun reconcileCommittedRepair(
+        jobId: String,
+        runId: String,
+        candidate: WorkflowCandidate,
+        state: WorkflowRunState,
+        reason: WorkflowTerminalReason,
+        usage: WorkflowUsage? = null,
+        startup: WorkflowStartupRecoveryBudget? = null,
+    ): WorkflowMutation = withJob(jobId) { directory ->
+        startup?.checkpoint()
+        require(state in setOf(WorkflowRunState.COMPLETED, WorkflowRunState.FAILED))
+        validateTerminal(state, reason)
+        val current = if (startup == null) available(jobId, directory).snapshot else
+            inspectRecord(jobId, directory) { path, maximum -> startup.read(root, root.relativize(path).toString(), maximum) }.snapshot
+        requireRecovered(current, directory)
+        val old = current.attempts.singleOrNull { it.runId == runId }
+            ?: fail("RUN_NOT_FOUND", "The committed repair attempt is unavailable.")
+        if (current.latestRun?.runId != runId || old.workflow != WorkflowKind.REPAIR || old.startedAt == null ||
+            old.acceptedRevision != null) {
+            fail("PUBLICATION_ATTEMPT_CONFLICT", "The committed output does not bind to the latest repair attempt.")
+        }
+        if (old.state == state && old.terminalReason == reason && old.candidate == candidate) {
+            if (usage != null && old.usage != usage)
+                fail("PUBLICATION_ATTEMPT_CONFLICT", "Committed repair usage cannot be replaced.")
+            startup?.checkpoint()
+            return@withJob WorkflowMutation(current, old)
+        }
+        val recoveredInterrupted = old.state == WorkflowRunState.INTERRUPTED &&
+            old.terminalReason == WorkflowTerminalReason.PROCESS_INTERRUPTED
+        if (old.state.terminal && !recoveredInterrupted) {
+            fail("PUBLICATION_ATTEMPT_CONFLICT", "A different terminal repair outcome is already recorded.")
+        }
+        if (!recoveredInterrupted && old.state !in setOf(WorkflowRunState.RUNNING, WorkflowRunState.CANCELLING)) {
+            fail("PUBLICATION_ATTEMPT_CONFLICT", "Only an active or process-interrupted repair can be reconciled from its publication journal.")
+        }
+        val receipt = old.repairPublicationReceipt
+        if (receipt != null && (receipt.candidate != candidate || receipt.state != state || receipt.reason != reason ||
+                (usage != null && receipt.usage != usage))) {
+            fail("PUBLICATION_ATTEMPT_CONFLICT", "The committed repair differs from its pre-decision receipt.")
+        }
+        val committedUsage = receipt?.usage ?: usage
+        val committedAt = receipt?.preparedAt ?: maxOf(old.endedAt ?: old.startedAt, clock.instant())
+        val repaired = old.copy(version = newId("version"), state = state,
+            endedAt = committedAt,
+            terminalReason = reason, candidate = candidate, usage = committedUsage, repairPublicationReceipt = null)
+        val updated = replace(current, repaired)
+        if (startup == null) persist(directory, updated) else {
+            val replacement = encodeSnapshot(updated)
+            startup.retain(replacement.size.toLong())
+            persistPrepared(directory, replacement, startup::checkpoint)
+        }
+        WorkflowMutation(updated, repaired)
+    }
+
+    /** Attach the final measured usage after a runtime publication was durably completed in-place. */
+    internal fun recordCommittedReconstructionUsage(
+        jobId: String,
+        runId: String,
+        expectedRunVersion: String,
+        candidate: WorkflowCandidate,
+        usage: WorkflowUsage,
+    ): WorkflowMutation = withJob(jobId) { directory ->
+        val current = available(jobId, directory).snapshot
+        requireRecovered(current, directory)
+        val old = current.attempts.singleOrNull { it.runId == runId }
+            ?: fail("RUN_NOT_FOUND", "The committed reconstruction attempt is unavailable.")
+        if (current.latestRun?.runId != runId || old.workflow != WorkflowKind.RECONSTRUCT ||
+            old.state != WorkflowRunState.COMPLETED || old.candidate != candidate || old.acceptedRevision != null ||
+            old.terminalReason !in setOf(WorkflowTerminalReason.COMPLETED, WorkflowTerminalReason.NO_CHANGES)) {
+            fail("PUBLICATION_ATTEMPT_CONFLICT", "Usage must bind to the exact completed reconstruction candidate.")
+        }
+        if (old.usage != null) {
+            if (old.usage != usage) fail("PUBLICATION_ATTEMPT_CONFLICT", "Committed reconstruction usage cannot be replaced.")
+            return@withJob WorkflowMutation(current, old)
+        }
+        checkVersion(old.version, expectedRunVersion)
+        val updatedAttempt = old.copy(version = newId("version"), usage = usage)
         val updated = replace(current, updatedAttempt)
         persist(directory, updated)
         WorkflowMutation(updated, updatedAttempt)
@@ -761,6 +978,14 @@ class WorkflowAttemptStore private constructor(
             val previous = mutableSetOf<String>()
             snapshot.attempts.forEach { attempt ->
                 attempt.startReceipt?.validate(attempt)
+                attempt.repairPublicationReceipt?.let { receipt ->
+                    require(attempt.workflow == WorkflowKind.REPAIR && attempt.startedAt != null &&
+                        attempt.state in setOf(WorkflowRunState.RUNNING, WorkflowRunState.CANCELLING,
+                            WorkflowRunState.INTERRUPTED) && receipt.preparedAt >= attempt.startedAt)
+                    validateTerminal(receipt.state, receipt.reason)
+                    requireId(receipt.candidate.revisionId)
+                    requireSha(receipt.candidate.sourceSha256)
+                }
                 require(attempt.recovery == null || (attempt.previousRunId != null && attempt.startReceipt != null)) {
                     "a recovery attempt requires its predecessor and keyed receipt"
                 }
@@ -806,16 +1031,48 @@ class WorkflowAttemptStore private constructor(
             if (a.progressRetentionPinned) put("progressRetentionPinned", true)
             a.startReceipt?.let { put("startReceipt", it.encode()) }
             a.recovery?.let { put("recovery", it.encode()) }
+            a.repairPublicationReceipt?.let { receipt -> put("repairPublicationReceipt", buildJsonObject {
+                put("candidate", buildJsonObject {
+                    put("revisionId", receipt.candidate.revisionId)
+                    put("sourceSha256", receipt.candidate.sourceSha256)
+                })
+                put("state", receipt.state.wireName)
+                put("reason", receipt.reason.name)
+                put("usage", encodeUsage(receipt.usage))
+                put("preparedAt", receipt.preparedAt.toString())
+            }) }
+        }
+        private fun encodeUsage(u: WorkflowUsage): JsonObject = buildJsonObject {
+            put("inputTokens", u.inputTokens?.toString()); put("outputTokens", u.outputTokens?.toString())
+            put("cachedInputTokens", u.cachedInputTokens?.toString()); put("toolCalls", u.toolCalls?.toString())
+            put("wallClockMs", u.wallClockMs?.toString())
         }
         private fun encodeAcceptance(a: WorkflowAcceptanceReference): JsonObject = buildJsonObject {
             put("jobId", a.jobId); put("runId", a.runId); put("revisionId", a.revisionId); put("sourceSha256", a.sourceSha256)
             put("graphNodeId", a.graphNodeId); put("artifactId", a.artifactId); put("artifactSha256", a.artifactSha256)
         }
         private fun parseAttempt(value: JsonElement): WorkflowAttempt {
-            val a = value.asObject().also { JsonObject(it - "progressRetentionPinned" - "startReceipt" - "recovery").keysExactly("runId", "jobId", "workflow", "state", "version", "createdAt", "startedAt", "endedAt", "previousRunId", "inputRevisionId", "harnessCapabilityId", "limits", "terminalReason", "usage", "candidate", "acceptedRevision") }
+            val a = value.asObject().also { JsonObject(it - "progressRetentionPinned" - "startReceipt" - "recovery" - "repairPublicationReceipt").keysExactly("runId", "jobId", "workflow", "state", "version", "createdAt", "startedAt", "endedAt", "previousRunId", "inputRevisionId", "harnessCapabilityId", "limits", "terminalReason", "usage", "candidate", "acceptedRevision") }
             val limits = a.getValue("limits").asObject().also { it.keysExactly("wallClockMs", "idleMs", "maxOutputBytes", "maxToolCalls") }
             val usage = a.optional("usage")?.asObject()?.also { it.keysExactly("inputTokens", "outputTokens", "cachedInputTokens", "toolCalls", "wallClockMs") }
             val candidate = a.optional("candidate")?.asObject()?.also { it.keysExactly("revisionId", "sourceSha256") }
+            val publicationReceipt = a["repairPublicationReceipt"]?.takeUnless { it == JsonNull }?.asObject()?.also {
+                it.keysExactly("candidate", "state", "reason", "usage", "preparedAt")
+            }?.let { receipt ->
+                val receiptCandidate = receipt.getValue("candidate").asObject().also { it.keysExactly("revisionId", "sourceSha256") }
+                val receiptUsage = receipt.getValue("usage").asObject().also {
+                    it.keysExactly("inputTokens", "outputTokens", "cachedInputTokens", "toolCalls", "wallClockMs")
+                }
+                WorkflowRepairPublicationReceipt(
+                    WorkflowCandidate(receiptCandidate.string("revisionId"), receiptCandidate.string("sourceSha256")),
+                    WorkflowRunState.entries.single { it.wireName == receipt.string("state") },
+                    WorkflowTerminalReason.valueOf(receipt.string("reason")),
+                    WorkflowUsage(receiptUsage.optionalUInt("inputTokens"), receiptUsage.optionalUInt("outputTokens"),
+                        receiptUsage.optionalUInt("cachedInputTokens"), receiptUsage.optionalUInt("toolCalls"),
+                        receiptUsage.optionalUInt("wallClockMs")),
+                    Instant.parse(receipt.string("preparedAt")),
+                )
+            }
             return WorkflowAttempt(a.string("runId"), a.string("jobId"), WorkflowKind.entries.single { it.wireName == a.string("workflow") }, WorkflowRunState.entries.single { it.wireName == a.string("state") }, a.string("version"),
                 Instant.parse(a.string("createdAt")), a.optionalString("startedAt")?.let(Instant::parse), a.optionalString("endedAt")?.let(Instant::parse), a.optionalString("previousRunId"), a.optionalString("inputRevisionId"), a.optionalString("harnessCapabilityId"),
                 WorkflowExecutionLimits(limits.uint("wallClockMs"), limits.uint("idleMs"), limits.uint("maxOutputBytes"), limits.uint("maxToolCalls")), a.optionalString("terminalReason")?.let(WorkflowTerminalReason::valueOf),
@@ -823,7 +1080,8 @@ class WorkflowAttemptStore private constructor(
                 candidate?.let { WorkflowCandidate(it.string("revisionId"), it.string("sourceSha256")) }, a.optional("acceptedRevision")?.let(::parseAcceptance),
                 if ("progressRetentionPinned" in a) a.boolean("progressRetentionPinned") else false,
                 if ("startReceipt" in a) WorkflowStartReceipt.decode(a.getValue("startReceipt").asObject()) else null,
-                if ("recovery" in a) WorkflowAttemptRecovery.decode(a.getValue("recovery").asObject()) else null)
+                if ("recovery" in a) WorkflowAttemptRecovery.decode(a.getValue("recovery").asObject()) else null,
+                publicationReceipt)
         }
         private fun parseAcceptance(value: JsonElement): WorkflowAcceptanceReference {
             val a = value.asObject().also { it.keysExactly("jobId", "runId", "revisionId", "sourceSha256", "graphNodeId", "artifactId", "artifactSha256") }
@@ -846,10 +1104,14 @@ internal data class WorkflowStartupRecoveryLimits(
     val maximumEntries: Int = 4096, val maximumReadBytes: Long = 64L * 1024 * 1024,
     val maximumPlanBytes: Long = 64L * 1024 * 1024,
     val profile: WorkflowStartupRecoveryProfile = WorkflowStartupRecoveryProfile.LEGACY,
+    val maximumPublicationRecoveryEntries: Int = 1_000_000,
+    val maximumPublicationRecoveryBytes: Long = 16L * 1024 * 1024 * 1024,
 ) {
     init {
         require(maximumEntries in 1..profile.maximumEntries)
         require(maximumReadBytes in 1..64L * 1024 * 1024 && maximumPlanBytes in 1..64L * 1024 * 1024)
+        require(maximumPublicationRecoveryEntries in 1..2_000_000)
+        require(maximumPublicationRecoveryBytes in 1..(32L * 1024 * 1024 * 1024))
     }
     companion object {
         fun webLibrary() = WorkflowStartupRecoveryLimits(
@@ -863,11 +1125,14 @@ internal data class WorkflowStartupRecoveryLimits(
 internal class WorkflowStartupRecoveryBudget(
     private val limits: WorkflowStartupRecoveryLimits = WorkflowStartupRecoveryLimits(),
     private val cancellation: () -> Boolean = { false },
+    private val onPublicationRecoveryEntry: () -> Unit = {},
 ) {
     var entries: Int = 0; private set
     var jobs: Int = 0; private set
     var readBytes: Long = 0; private set
     var planBytes: Long = 0; private set
+    var publicationRecoveryEntries: Int = 0; private set
+    var publicationRecoveryBytes: Long = 0; private set
     var changesStarted: Boolean = false; private set
     private var cancelled = false
     private var refusal: WorkflowStoreException? = null
@@ -930,6 +1195,22 @@ internal class WorkflowStartupRecoveryBudget(
 
     /** Reserve BEFORE an evidence capture; conservatively retain its full size through this operation. */
     fun reserveEvidence(bytes: Long) { checkpoint(); chargeRead(bytes); retain(bytes) }
+    /** Separate aggregate bound for recovery of accepted source trees, which are larger than metadata receipts. */
+    fun publicationRecoveryEntry() {
+        checkpoint()
+        if (publicationRecoveryEntries >= limits.maximumPublicationRecoveryEntries)
+            refuse("STORE_LIMIT", "Startup publication recovery exceeds its aggregate entry limit.")
+        publicationRecoveryEntries++
+        onPublicationRecoveryEntry()
+    }
+    fun publicationRecoveryBytes(bytes: Long) {
+        checkpoint()
+        require(bytes >= 0)
+        if (bytes > limits.maximumPublicationRecoveryBytes - publicationRecoveryBytes)
+            refuse("STORE_LIMIT", "Startup publication recovery exceeds its aggregate byte limit.")
+        publicationRecoveryBytes += bytes
+        checkpoint()
+    }
     fun beginChanges() { checkpoint(); changesStarted = true }
 }
 

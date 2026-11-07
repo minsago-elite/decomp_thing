@@ -11,6 +11,7 @@ import decompengine.oracle.core.OracleJson
 import decompengine.project.ArchivalBundleLimits
 import decompengine.project.ArchivalBundleVerifier
 import decompengine.project.ReconstructionAdapters
+import decompengine.project.ReconstructionOutputWorkspace
 import decompengine.project.checkedTransportLayout
 import decompengine.project.requireNormalizedProjectPath
 import decompengine.repair.StableRegularFile
@@ -34,6 +35,12 @@ internal class WebArchiveEvidence(private val store: JobStore, private val sourc
     private data class ReadIdentity(val sha256: String, val identity: LinuxFileIdentity)
 
     fun read(jobId: String, expectedSha256: String? = null, reportPrefix: String = "reports"): WebArchiveSnapshot {
+        return ReconstructionOutputWorkspace.withReadLease(store.reportDirectoryForRead(jobId, reportPrefix)) {
+            readUnderLease(jobId, expectedSha256, reportPrefix)
+        }
+    }
+
+    private fun readUnderLease(jobId: String, expectedSha256: String?, reportPrefix: String): WebArchiveSnapshot {
         canonicalReportSegments("$reportPrefix/source-tree.zip")
         require(expectedSha256 == null || expectedSha256.matches(Regex("[a-f0-9]{64}"))) { "archive digest is not canonical" }
         val archive = readArtifact(jobId, "$reportPrefix/source-tree.zip", MAXIMUM_BYTES)

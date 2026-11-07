@@ -8,6 +8,7 @@ import java.nio.file.FileVisitResult
 import decompengine.repair.RepairHistoryReadResult
 import decompengine.repair.RepairRecordedHistoryPage
 import decompengine.repair.RepairRecordedHistorySelection
+import decompengine.project.ReconstructionOutputWorkspace
 
 /** Display metadata only; download authorization still validates the selected artifact. */
 data class WebArtifactSummary(val relativePath: String, val displayName: String, val sizeBytes: Long)
@@ -20,6 +21,14 @@ internal fun listLegacyArtifactSummaries(context: WebReportContext, recordedRepa
         RepairRecordedHistoryPage.select(it, RepairRecordedHistorySelection(), MAXIMUM_VISIBLE_RECORDED_REPAIR_ATTEMPTS) })
 
 internal fun listLegacyArtifactSummaries(context: WebReportContext, recordedRepair: RepairHistoryReadResult?,
+    page: RepairRecordedHistoryPage?): List<WebArtifactSummary> {
+    if (!Files.isDirectory(context.reportsDirectory, NOFOLLOW_LINKS)) return emptyList()
+    return ReconstructionOutputWorkspace.withReadLease(context.reportsDirectory) {
+        listLegacyArtifactSummariesUnderLease(context, recordedRepair, page)
+    }
+}
+
+private fun listLegacyArtifactSummariesUnderLease(context: WebReportContext, recordedRepair: RepairHistoryReadResult?,
     page: RepairRecordedHistoryPage?): List<WebArtifactSummary> {
     val snapshot = recordedRepair?.snapshot
     require(if (snapshot == null) page == null else page?.snapshot === snapshot) {
@@ -37,6 +46,9 @@ internal fun listLegacyArtifactSummaries(context: WebReportContext, recordedRepa
     Files.walkFileTree(root, object : java.nio.file.SimpleFileVisitor<Path>() {
         override fun preVisitDirectory(directory: Path, attributes: BasicFileAttributes): FileVisitResult {
             require(++entries <= 10_000 && root.relativize(directory).nameCount <= 32) { "report listing exceeds its traversal bound" }
+            if (directory != root && directory.fileName?.toString()?.let(::isPrivatePublicationPathSegment) == true) {
+                return FileVisitResult.SKIP_SUBTREE
+            }
             if (directory == sourceTree) {
                 selectedMetadata[directory] = attributes
                 return FileVisitResult.SKIP_SUBTREE
@@ -47,7 +59,9 @@ internal fun listLegacyArtifactSummaries(context: WebReportContext, recordedRepa
             require(++entries <= 10_000) { "report listing exceeds its entry bound" }
             if (attributes.isRegularFile) {
                 val relative = root.relativize(file).toString().replace('\\', '/')
-                summaries += WebArtifactSummary("${context.artifactPrefix}/$relative", file.fileName.toString(), attributes.size())
+                if (!isReconstructionPublicationControl(relative)) {
+                    summaries += WebArtifactSummary("${context.artifactPrefix}/$relative", file.fileName.toString(), attributes.size())
+                }
             }
             return FileVisitResult.CONTINUE
         }
@@ -81,3 +95,14 @@ internal fun listLegacyArtifactSummaries(context: WebReportContext, recordedRepa
     }
     return summaries.sortedBy { it.relativePath }
 }
+
+private fun isReconstructionPublicationControl(relative: String): Boolean {
+    val name = relative.substringAfterLast('/')
+    return isPrivatePublicationPathSegment(name)
+}
+
+private fun isPrivatePublicationPathSegment(name: String): Boolean =
+    name == ".reconstruction.lock" || name == ".reconstruction-active-input.json" ||
+        name == ".reconstruction-input-switch.json" || name == ".reconstruction-publication.json" ||
+        name.startsWith(".reconstruction-stage-") || name.startsWith(".reconstruction-previous-") ||
+        name.startsWith(".publication-")

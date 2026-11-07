@@ -652,12 +652,21 @@ object SourceTreeGenerator {
         compilerFeedback: (moduleId: String) -> ModuleCompilerFeedback? = { null },
         onCompilerFeedback: (ModuleCompilerFeedback) -> Unit = {},
         onModuleProgress: (completed: Int, total: Int, moduleId: String) -> Unit = { _, _, _ -> },
+        publicationLock: ReconstructionPublicationLock? = null,
     ): ReconstructionGenerationResult {
         hostSafetyLimits.requireAllows(profile.budgets)
         val adapter = ReconstructionAdapters.resolve(profile)
         requireWorkflowOwnedPathsAreReserved(profile)
         val selectedReconstructor = reconstructor ?: adapter.defaultReconstructor()
         val publicationRequirement = selectedReconstructor.publicationRequirement()
+        require(publicationRequirement != ReconstructionPublicationRequirement.TRANSACTIONAL || publicationLock != null) {
+            "agent-backed reconstruction requires a lease-owned staged publication session"
+        }
+        if (publicationRequirement == ReconstructionPublicationRequirement.TRANSACTIONAL) {
+            requireNotNull(publicationLock).requireAuthorizedGenerationTarget(projectDir, model.inputSha256)
+        } else {
+            publicationLock?.validate()
+        }
         adapter.admitGeneration(projectDir, profile, selectedReconstructor)
         val unresolvedOutput = adapter.requiresUnresolvedOutput(profile)
         val compilationPolicy = adapter.compilation

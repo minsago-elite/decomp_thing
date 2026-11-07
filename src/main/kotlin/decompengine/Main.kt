@@ -19,6 +19,7 @@ import decompengine.acp.AcpHarnessFactory
 import decompengine.project.GeneratedCMakeReconstructionProfile
 import decompengine.project.ReconstructionProfiles
 import decompengine.project.ReconstructionOutputWorkspace
+import decompengine.project.ReconstructionOutputReadUnavailableException
 import decompengine.project.ArchivalReconstructionService
 import decompengine.project.BoundedLlmModuleReconstructor
 import decompengine.project.ReconstructionAdapters
@@ -32,6 +33,7 @@ import decompengine.jobs.ProgressRedactor
 import decompengine.oracle.behavior.LlvmBehaviorNativeRuntimeMeasurementV2
 import decompengine.repair.RepairRuntimeConfiguration
 import decompengine.repair.SecureRepairRuntime
+import decompengine.repair.RepairHistoryReadResult
 import decompengine.validation.ProcessInput
 import decompengine.web.UploadServer
 import decompengine.web.WebUiMode
@@ -81,17 +83,46 @@ internal fun renderUnknownCommand(
     return 2
 }
 
+internal fun <T> withCliRepairReadLease(projectDirectory: Path, action: (Path) -> T): T =
+    ReconstructionOutputWorkspace.withProjectReadLease(projectDirectory, action)
+
+internal fun <R : AutoCloseable, T> withRepairRuntimeUnderPublicationLease(
+    projectDirectory: Path,
+    openRuntime: (Path) -> R,
+    canRetireRepairMarker: (T) -> Boolean,
+    action: (R, Path) -> T,
+): T = ReconstructionOutputWorkspace.withProjectMutationLease(
+    projectDirectory, canRetireRepairMarker,
+) { admittedProject -> openRuntime(admittedProject).use { runtime -> action(runtime, admittedProject) } }
+
+internal fun repairOutcomeAllowsWorkspaceMarkerRetirement(outcome: decompengine.repair.RepairRunOutcome): Boolean =
+    outcome.recoveryComplete && outcome.runState.terminal && outcome.runState.rollbackFailureAttemptId == null &&
+        outcome.runState.rollbackResolution == null
+
 private fun runRecordedRepairHistory(args: List<String>) {
     val options = runCatching { parseRecordedRepairHistoryArguments(args) }.getOrNull()
     if (options == null) {
         System.err.println("usage: llm_bin_patch repair-history <project-dir> [--page N] [--case-page N] [--graph SHA256]")
         kotlin.system.exitProcess(2)
     }
-    val presentation = presentRecordedRepairHistory(
-        decompengine.repair.readProjectRecordedRepairHistory(options.project), options.selection)
+    val presentation = presentRecordedRepairHistory(readRecordedRepairHistoryUnderPublicationLease(options), options.selection)
     presentation.lines.forEach(::println)
     if (presentation.exitCode != 0) kotlin.system.exitProcess(presentation.exitCode)
 }
+
+/** Capture all project-backed repair history under the same lease as other source-tree readers. */
+internal fun readRecordedRepairHistoryUnderPublicationLease(
+    options: RecordedRepairHistoryCliOptions,
+): decompengine.repair.RepairHistoryReadResult =
+    try {
+        withCliRepairReadLease(options.project) { admittedProject ->
+            decompengine.repair.readProjectRecordedRepairHistory(admittedProject)
+        }
+    } catch (_: ReconstructionOutputReadUnavailableException) {
+        // A retained or incomplete publication intentionally hides this generation. Preserve the
+        // CLI's closed unavailable-history diagnostic instead of leaking an exception/stack trace.
+        RepairHistoryReadResult.unavailable()
+    }
 
 private fun runLlvmNativeRuntimeMeasurement(args: List<String>) {
     val listenerContinuity = args.firstOrNull() == "--listener-continuity"
@@ -223,7 +254,13 @@ private fun runReconstruct(args: List<String>) {
                 ArchivalReconstructionService(
                     GhidraHeadlessProgramModelAnalyzer.bundled(), strategy.reconstructor,
                     profile = strategy.profile, progress = progress,
-                ).reconstruct(binary, output)
+                ).reconstructWithWorkspace(
+                    binary,
+                    output,
+                    requireNotNull(progress.publicationWorkspace) {
+                        "CLI reconstruction progress must own the output workspace lease"
+                    },
+                )
             } catch (failure: Exception) {
                 progress.phase(AgentWorkflowPhase.FAILED)
                 throw failure
@@ -415,15 +452,17 @@ private fun runRepair(args: List<String>) {
     if (original == null || project == null) repairUsageError("repair requires an original binary and project directory")
     val originalBinary: Path = original
     val projectDirectory: Path = project
-    val reportsDir = decompengine.repair.repairReportsDirectory(projectDirectory, reports)
     val environment = System.getenv()
     val exitCode = runRepairCliAction(environment.values) { redactor ->
-        val configuration = prepareRepairCliConfiguration(reportsDir.resolve("repair_history.json"), harnessOverride)
-        val result = SecureRepairRuntime.open(configuration).use { runtime ->
+        val result = withRepairRuntimeUnderPublicationLease(projectDirectory, { admittedProject ->
+            val reportsDir = decompengine.repair.repairReportsDirectory(admittedProject, reports)
+            SecureRepairRuntime.open(prepareRepairCliConfiguration(reportsDir.resolve("repair_history.json"), harnessOverride))
+        }, ::repairOutcomeAllowsWorkspaceMarkerRetirement) { runtime, admittedProject ->
+            val reportsDir = decompengine.repair.repairReportsDirectory(admittedProject, reports)
             renderWorkflowProvenance(WorkflowCliCommand.REPAIR, runtime.harnessProvenance, redactor, System.err)
             RepairCliProgress(reportsDir).use {
                 if (exploreInputs) {
-                    val snapshot = runtime.prepareExploration(projectDirectory, originalBinary)
+                    val snapshot = runtime.prepareExploration(admittedProject, originalBinary)
                     val exploration = AutomaticExplorer().explore(
                         originalBinary,
                         listOf(CandidateInput("seed_default", CandidateSource.SEED)),
@@ -434,12 +473,12 @@ private fun runRepair(args: List<String>) {
                         exploration.candidates.size, exploration.coverage.expandedSignatures.size, redactor,
                     )
                     runtime.runRepair(
-                        projectDirectory, originalBinary, exploration.candidates.map(CandidateInput::toProcessInput),
+                        admittedProject, originalBinary, exploration.candidates.map(CandidateInput::toProcessInput),
                         reportsDir, maxIterations, snapshot,
                     )
                 } else {
                     runtime.runRepair(
-                        projectDirectory, originalBinary, listOf(ProcessInput("default")), reportsDir, maxIterations,
+                        admittedProject, originalBinary, listOf(ProcessInput("default")), reportsDir, maxIterations,
                     )
                 }
             }

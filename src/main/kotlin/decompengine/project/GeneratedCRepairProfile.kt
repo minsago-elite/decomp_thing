@@ -17,7 +17,6 @@ import decompengine.repair.RepairCandidateValidationOutcome
 import decompengine.repair.RepairCandidateValidationRequest
 import decompengine.repair.readStableRegularFile
 import decompengine.repair.openRepairRootDirectory
-import decompengine.repair.repairDescriptorPath
 import decompengine.validation.BehaviorComparisonReport
 import decompengine.validation.ProcessInput
 import decompengine.validation.SandboxUnavailableException
@@ -642,19 +641,17 @@ private class DescriptorGeneratedCRepairIndexProfile(private val profile: Recons
             }
         }
         fun names(directory: LinuxDescriptor, relativeDirectory: String): List<String> {
-            val discovered = ArrayList<String>()
-            Files.newDirectoryStream(repairDescriptorPath(directory)).use { stream ->
-                stream.forEach { path ->
-                    val name = path.fileName.toString()
-                    require(name.isNotBlank() && '/' !in name && name !in setOf(".", "..")) {
-                        "generated C discovery returned an invalid directory entry"
-                    }
-                    countEntry(normalizedProfilePath("$relativeDirectory/$name"))
-                    discovered += name
+            val discovered = LinuxFilesystemSyscalls.directoryEntryNamesWithoutAtime(
+                directory,
+                budget.maximumDiscoveryEntries - entries + 1,
+                onEntry = { name -> countEntry(normalizedProfilePath("$relativeDirectory/$name")) },
+            )
+            discovered.forEach { name ->
+                require(name.isNotBlank() && '/' !in name && name !in setOf(".", "..")) {
+                    "generated C discovery returned an invalid directory entry"
                 }
             }
-            discovered.sort()
-            return discovered
+            return discovered.sorted()
         }
         fun traverse(
             directory: LinuxDescriptor,

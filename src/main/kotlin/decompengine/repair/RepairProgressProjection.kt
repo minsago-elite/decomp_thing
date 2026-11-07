@@ -11,13 +11,14 @@ internal class RepairProgressProjection(
     private val onUnavailable: () -> Unit = {
         ProgressWarnings.repairUnavailable()
     },
+    private val journalFactory: (Path) -> AgentProgressJournal = { directory ->
+        AgentProgressJournal(directory, "repair", System.getenv().values)
+    },
 ) : AutoCloseable {
     private var warned = false
     private var journal: AgentProgressJournal? = null
 
-    init {
-        observe { journal = AgentProgressJournal(reportsDirectory, "repair", System.getenv().values) }
-    }
+    init { observe { journal = journalFactory(reportsDirectory) } }
 
     fun task(id: String, request: AgentExecutionRequest, graph: ModuleRevisionGraph): AgentTaskProgress {
         var task: AgentTaskProgress = AgentTaskProgress.NONE
@@ -74,6 +75,28 @@ internal class RepairProgressProjection(
             observe(evenIfFailed = true) { journal?.close() }
         } finally {
             if (interrupted) Thread.currentThread().interrupt()
+        }
+    }
+
+    /** Close the optional projection, then retain enclosing workspace ownership until no writer remains. */
+    internal fun closeAndAwaitWriterTermination() {
+        try { close() } finally { journal?.awaitWriterTermination() }
+    }
+
+    companion object {
+        private val testFactory = ThreadLocal<((Path) -> RepairProgressProjection)?>()
+
+        internal fun create(reportsDirectory: Path): RepairProgressProjection =
+            testFactory.get()?.invoke(reportsDirectory) ?: RepairProgressProjection(reportsDirectory)
+
+        /** Scoped deterministic writer control for exercising the actual repair-loop boundary. */
+        internal fun <T> withFactoryForTesting(
+            factory: (Path) -> RepairProgressProjection,
+            action: () -> T,
+        ): T {
+            check(testFactory.get() == null) { "repair progress test factory is already installed" }
+            testFactory.set(factory)
+            return try { action() } finally { testFactory.remove() }
         }
     }
 }

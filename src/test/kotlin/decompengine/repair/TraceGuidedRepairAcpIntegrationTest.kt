@@ -10,6 +10,7 @@ import decompengine.acp.AcpLiveContractHost
 import decompengine.acp.AcpProcessConfiguration
 import decompengine.acp.AcpSandboxReadOnlyMount
 import decompengine.acp.AcpSandboxResourceLimits
+import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.acp.calculateAcpRuntimeManifestSha256
 import decompengine.acp.productionAcpGateHelper
 import decompengine.agent.AGENT_EXECUTION_CONTRACT_VERSION
@@ -144,6 +145,34 @@ class TraceGuidedRepairAcpIntegrationTest {
         }
     }
 
+    @Test
+    fun `confident completed ACP claim without filesystem changes is rejected`() {
+        val fixture = fixture("#include \"fixture.h\"\nint main(void) {\n")
+        val before = sourceSnapshot(fixture.project)
+        val head = head(fixture.project)
+
+        assertFailsWith<Exception> {
+            loop(fixture, acp = true, mode = "confident-no-write").use {
+                it.repairUntilValid(fixture.project, fixture.original, INPUTS, maxIterations = 1)
+            }
+        }
+
+        ModuleRevisionGraph.open(fixture.project, PROFILE).use { graph ->
+            assertEquals(head, graph.snapshot.headId)
+            assertTrue(graph.snapshot.nodes.none { it.status == ModuleRevisionStatus.ACCEPTED })
+        }
+        val after = sourceSnapshot(fixture.project)
+        assertSourceUnchanged(before, after, "confident no-write completion")
+
+        val iteration = RepairHistory(fixture.reports.resolve("repair_history.json")).all().single()
+        assertFalse(iteration.succeeded)
+        val invocation = assertNotNull(iteration.agentInvocation)
+        assertEquals("returned-no-changes", invocation.terminalOutcome)
+        assertEquals(RepairAgentAssessmentStatus.REJECTED, invocation.assessmentStatus)
+        assertEquals("no-change", repairAttemptLabel(iteration))
+        assertFalse(invocation.receiptReleaseComplete)
+    }
+
     private fun assertAccepted(fixture: Fixture, iteration: RepairIteration, acp: Boolean) {
         ModuleRevisionGraph.open(fixture.project, PROFILE).use { graph ->
             val node = graph.snapshot.nodes.last()
@@ -161,7 +190,7 @@ class TraceGuidedRepairAcpIntegrationTest {
     private fun assertRejected(
         fixture: Fixture,
         head: String,
-        before: Map<String, ByteArray>,
+        before: SourceTreeWitness,
         acp: Boolean,
         completed: Boolean = true,
     ) {
@@ -173,8 +202,7 @@ class TraceGuidedRepairAcpIntegrationTest {
             assertEquals(INPUTS.sortedBy { it.id }, graph.retainedRegressionCorpus().inputs)
         }
         val after = sourceSnapshot(fixture.project)
-        assertEquals(before.keys, after.keys)
-        before.forEach { (path, bytes) -> assertContentEquals(bytes, after.getValue(path), path) }
+        assertSourceUnchanged(before, after, "rejected ${fixture.project.fileName}")
         val iteration = RepairHistory(fixture.reports.resolve("repair_history.json")).all().single()
         assertFalse(iteration.succeeded)
         if (completed) assertEquals("rejected", repairAttemptLabel(iteration))
@@ -252,9 +280,69 @@ class TraceGuidedRepairAcpIntegrationTest {
         return Fixture(project, original)
     }
 
-    private fun sourceSnapshot(project: Path): Map<String, ByteArray> = listOf(
-        "src/program.c", "src/unrelated.c", "include/fixture.h", "Makefile",
-    ).associateWith { project.resolve(it).readBytes() }
+    private data class SourceTreeWitness(
+        val bytes: Map<String, ByteArray>,
+        val files: Map<String, decompengine.acp.LinuxFileState>,
+        val directories: Map<String, decompengine.acp.LinuxDirectoryMetadata>,
+    )
+
+    /** Captures the canonical fixture source without advancing file or directory atimes. */
+    private fun sourceSnapshot(project: Path): SourceTreeWitness {
+        val paths = listOf("src/program.c", "src/unrelated.c", "include/fixture.h", "Makefile")
+        val directories = listOf(".", "src", "include")
+        val bytes = sortedMapOf<String, ByteArray>()
+        val files = sortedMapOf<String, decompengine.acp.LinuxFileState>()
+        val directoryStates = sortedMapOf<String, decompengine.acp.LinuxDirectoryMetadata>()
+        LinuxFilesystemSyscalls.openRoot(project).use { root ->
+            directories.forEach { relative ->
+                val opened = mutableListOf<decompengine.acp.LinuxDescriptor>()
+                try {
+                    var current = root
+                    if (relative != ".") {
+                        relative.split('/').forEach { component ->
+                            current = LinuxFilesystemSyscalls.openDirectoryAt(current.fd, component)
+                            opened += current
+                        }
+                    }
+                    directoryStates[relative] = LinuxFilesystemSyscalls.directoryMetadata(current)
+                } finally {
+                    opened.asReversed().forEach(decompengine.acp.LinuxDescriptor::close)
+                }
+            }
+            paths.forEach { relative ->
+                val parts = relative.split('/')
+                val openedParents = mutableListOf<decompengine.acp.LinuxDescriptor>()
+                try {
+                    var parent = root
+                    parts.dropLast(1).forEach { component ->
+                        parent = LinuxFilesystemSyscalls.openDirectoryAt(parent.fd, component)
+                        openedParents += parent
+                    }
+                    requireNotNull(LinuxFilesystemSyscalls.openRegularFileAtOrNull(parent.fd, parts.last())).use { file ->
+                        val before = LinuxFilesystemSyscalls.fileState(file)
+                        require(before.size <= Int.MAX_VALUE) { "fixture source exceeds test snapshot bound" }
+                        LinuxFilesystemSyscalls.openReadableWithoutAtimeFrom(file).use { readable ->
+                            bytes[relative] = LinuxFilesystemSyscalls.read(readable, before.size.toInt()) {}
+                            require(LinuxFilesystemSyscalls.fileState(readable) == before) {
+                                "fixture source changed during metadata-neutral test snapshot: $relative"
+                            }
+                        }
+                        files[relative] = before
+                    }
+                } finally {
+                    openedParents.asReversed().forEach(decompengine.acp.LinuxDescriptor::close)
+                }
+            }
+        }
+        return SourceTreeWitness(bytes, files, directoryStates)
+    }
+
+    private fun assertSourceUnchanged(before: SourceTreeWitness, after: SourceTreeWitness, context: String) {
+        assertEquals(before.bytes.keys, after.bytes.keys, "$context source inventory")
+        before.bytes.forEach { (path, bytes) -> assertContentEquals(bytes, after.bytes.getValue(path), "$context $path") }
+        assertEquals(before.files, after.files, "$context file identity and complete metadata")
+        assertEquals(before.directories, after.directories, "$context ancestor directory identity and complete metadata")
+    }
 
     private fun head(project: Path): String = ModuleRevisionGraph.open(project, PROFILE)
         .use { it.snapshot.headId }

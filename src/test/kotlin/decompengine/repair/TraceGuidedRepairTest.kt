@@ -72,6 +72,14 @@ import kotlin.test.assertTrue
 
 class TraceGuidedRepairTest {
     @Test
+    fun `repair caller never terminalizes an unresolved acceptance decision`() {
+        val unexpectedAfterDecision = IllegalStateException("decision write outcome was ambiguous")
+        assertFalse(repairFailureCanBeFinalized(unexpectedAfterDecision, "attempt_123"))
+        assertFalse(repairFailureCanBeFinalized(RepairAcceptancePendingException("roll-forward required"), null))
+        assertTrue(repairFailureCanBeFinalized(unexpectedAfterDecision, null))
+    }
+
+    @Test
     fun `ordinary ACP terminal outcomes persist immutable receipts before rejected repair history`() {
         val cases = listOf(
             "returned-no-changes" to AgentExecutionOutcome.Returned(
@@ -996,13 +1004,13 @@ class TraceGuidedRepairTest {
         val tempDir = createTempDirectory("repair-pending-public-")
         val original = compileC(tempDir, "original", helloProgramSource("hello, world"))
         val projectDir = createProject(tempDir.resolve("project"), reconstructedSource = "int decomp_engine_main(void) {\n")
-        val target = projectDir.resolve("src/modules/reconstructed.c")
-        val parentBytes = target.readBytes()
+        val parentBytes = readStableRepairFile(projectDir, "src/modules/reconstructed.c", 1_048_576)
         val interrupted = ModuleRevisionGraph.open(projectDir, GeneratedCRepairIndexProfile)
         val pending = interrupted.beginAttempt(listOf("src/modules/reconstructed.c"))
         interrupted.installCandidate(pending, mapOf("src/modules/reconstructed.c" to goodHelloSource().toByteArray()))
         interrupted.close()
-        assertTrue(!target.readBytes().contentEquals(parentBytes))
+        assertContentEquals(parentBytes, readStableRepairFile(projectDir, "src/modules/reconstructed.c", 1_048_576),
+            "schema-6 candidate installation must remain detached before acceptance")
         val client = QueueRepairClient(
             RepairResponse("repair recovered parent", listOf(SourcePatch("src/modules/reconstructed.c", goodHelloSource()))),
         )
@@ -1025,8 +1033,7 @@ class TraceGuidedRepairTest {
         val original = compileC(tempDir, "original", helloProgramSource("hello, world"))
         val projectDir = createProject(tempDir.resolve("project"), reconstructedSource = helloMainSource("wrong"))
         val initialBuild = MakeProjectBuilder.build(projectDir)
-        val target = projectDir.resolve("src/modules/reconstructed.c")
-        val before = target.readBytes()
+        val before = readStableRepairFile(projectDir, "src/modules/reconstructed.c", 1_048_576)
         val client = FakeRepairClient(
             RepairResponse("still wrong", listOf(SourcePatch("src/modules/reconstructed.c", helloMainSource("also wrong")))),
         )
@@ -1044,7 +1051,7 @@ class TraceGuidedRepairTest {
 
         assertEquals(false, iteration.succeeded)
         assertEquals("no-validated-improvement", iteration.after?.kind)
-        assertContentEquals(before, target.readBytes())
+        assertContentEquals(before, readStableRepairFile(projectDir, "src/modules/reconstructed.c", 1_048_576))
     }
 
     @Test
@@ -1133,7 +1140,7 @@ class TraceGuidedRepairTest {
             loop.repairCompileError(projectDir, collectCompileFailure(projectDir), emptyList())
         }
         loop.close()
-        assertContentEquals(before, target.readBytes())
+        assertContentEquals(before, readStableRepairFile(projectDir, "src/modules/reconstructed.c", 1_048_576))
 
         ModuleRevisionGraph.open(projectDir, GeneratedCRepairIndexProfile, budget).use { recovered ->
             assertEquals(null, recovered.snapshot.pendingAttemptId)
@@ -1373,7 +1380,6 @@ class TraceGuidedRepairTest {
         val tempDir = createTempDirectory("repair-compile-throw-")
         val parent = "int decomp_engine_main(void) {\n"
         val project = createProject(tempDir.resolve("project"), parent)
-        val target = project.resolve("src/modules/reconstructed.c")
         val candidate = goodHelloSource().toByteArray()
         val originalFailure = IllegalStateException("compile boundary failed after observing candidate")
         val validation = object : RepairValidationStrategy {
@@ -1381,7 +1387,8 @@ class TraceGuidedRepairTest {
             override fun requireAvailable() = Unit
             override fun compile(projectDir: Path, logPath: Path, budget: RepairResourceBudget): CompileFailure? {
                 assertContentEquals(candidate, projectDir.resolve("src/modules/reconstructed.c").readBytes())
-                assertEquals(parent, target.readText())
+                assertEquals(parent,
+                    readStableRepairFile(project, "src/modules/reconstructed.c", 1_048_576).decodeToString())
                 throw originalFailure
             }
             override fun rebuiltProgram(projectDir: Path, budget: RepairResourceBudget): Path =
@@ -1413,7 +1420,7 @@ class TraceGuidedRepairTest {
         }
 
         assertTrue(observed === originalFailure)
-        assertEquals(parent, target.readText())
+        assertEquals(parent, readStableRepairFile(project, "src/modules/reconstructed.c", 1_048_576).decodeToString())
         assertEquals("validation-error",
             RepairHistory(project.resolve("reports/repair_history.json")).all().single().after?.kind)
         ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { graph ->
@@ -1518,6 +1525,7 @@ class TraceGuidedRepairTest {
             },
         )
         val corpus = graph.retainRegressionInputs(listOf(ProcessInput("default")))
+        graph.beginRun(maximumAttempts = 1, maximumWallMillis = 60_000)
         val attempt = graph.beginAttempt(
             listOf("src/modules/reconstructed.c"),
             RevisionRepairMetadata(
@@ -1533,8 +1541,29 @@ class TraceGuidedRepairTest {
         )
         graph.annotateAttempt(attempt, "append a harmless comment")
         graph.installCandidate(attempt, mapOf("src/modules/reconstructed.c" to candidate.toByteArray()))
+        val snapshot = graph.snapshot
+        val proof = RepairValidationProof(
+            sourceRevisionSha256 = repairCandidateSourceSha256(graph.candidateSources(attempt)),
+            profileSha256 = snapshot.profileSha256,
+            indexSha256 = snapshot.indexSha256,
+            regressionCorpusSha256 = graph.retainedRegressionCorpus().sha256,
+            originalBinarySha256 = sha256("synthetic original binary".toByteArray()),
+            rebuiltBinarySha256 = sha256("synthetic rebuilt binary".toByteArray()),
+            runtimeSha256 = sha256("synthetic runtime".toByteArray()),
+            evidenceSha256 = sha256("synthetic validation evidence".toByteArray()),
+            cleanupVerified = true,
+            assurance = RepairValidationAssurance.TEST_ONLY_HOST_PROCESS,
+        )
+        graph.bindOriginalBinary(requireNotNull(proof.originalBinarySha256))
+        graph.bindExpectedObservations(sha256(buildString {
+            append(proof.originalBinarySha256).append('\n')
+            corpus.inputs.forEach { input ->
+                append(input.id.length).append(':').append(input.id).append(":0:")
+                    .append(sha256(byteArrayOf())).append(':').append(sha256(byteArrayOf())).append('\n')
+            }
+        }.toByteArray()))
         assertFailsWith<SimulatedEvidenceCrash> {
-            graph.accept(attempt, RepairEvidence("valid", "retained behavior matched", "reports/valid.json"))
+            graph.accept(attempt, RepairEvidence("valid", "retained behavior matched", "reports/valid.json"), proof)
         }
         graph.close()
         assertTrue(!projectDir.resolve("reports/repair_history.json").exists())

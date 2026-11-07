@@ -253,6 +253,31 @@ class JobStoreTest {
     }
 
     @Test
+    fun `artifact APIs refuse private publication roots before acquiring a read lease`() {
+        val root = createTempDirectory("jobs-private-publication-artifact-")
+        val store = JobStore(root)
+        val job = store.createFromUpload("private-stage.elf", elfFixture())
+        val report = java.nio.file.Files.createDirectory(root.resolve(job.id).resolve("reports"))
+        val stage = java.nio.file.Files.createDirectory(report.resolve(".reconstruction-stage-0123456789abcdef0123456789abcdef"))
+        val source = java.nio.file.Files.createDirectory(stage.resolve("source-tree"))
+        val payload = source.resolve("candidate.c")
+        java.nio.file.Files.writeString(payload, "unpublished candidate")
+        val relative = "reports/${stage.fileName}/source-tree/candidate.c"
+
+        assertFailsWith<IllegalArgumentException> {
+            store.readArtifact(job.id, relative, 1024)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            store.resolveArtifact(job.id, relative)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            store.artifactReceipt(job.id, relative, 1024)
+        }
+        assertTrue(java.nio.file.Files.readString(payload).contains("unpublished candidate"))
+        assertTrue(!java.nio.file.Files.exists(stage.resolve(".reconstruction.lock")))
+    }
+
+    @Test
     fun `upload admission reserves room for every supported status message`() {
         val root = createTempDirectory("jobs-status-reserve-")
         val store = JobStore(root)
@@ -572,6 +597,23 @@ class JobStoreTest {
         val missingHistory = store.readRecordedRepairHistory("a".repeat(32), null)
         assertEquals(decompengine.repair.RepairHistoryReadStatus.NOT_RECORDED, missingHistory.status)
         java.nio.file.Files.list(selected).use { assertEquals(0L, it.count()) }
+    }
+
+    @Test
+    fun `recorded repair history refuses while publication recovery is pending`() {
+        val root = historyTestRoot()
+        val id = "a".repeat(32)
+        val reports = java.nio.file.Files.createDirectories(root.resolve(id).resolve("reports"))
+        java.nio.file.Files.writeString(reports.resolve(".reconstruction-publication.json"), "pending")
+        val sessionDirectory = java.nio.file.Files.createDirectories(reports.resolve(".decomp-agent-sessions"))
+        java.nio.file.Files.writeString(sessionDirectory.resolve("session.json"), "session")
+
+        assertFailsWith<IllegalStateException> {
+            JobStore(root).readRecordedRepairHistory(id, null)
+        }
+        assertFailsWith<IllegalStateException> {
+            JobStore(root).readArtifact(id, "reports/.decomp-agent-sessions/session.json", 1024)
+        }
     }
 
     @Test

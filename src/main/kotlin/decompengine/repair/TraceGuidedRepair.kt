@@ -705,11 +705,16 @@ data class RepairRunResult(
     val runState: RepairRunState? = null,
 )
 
-data class RepairRunOutcome(
+data class RepairRunOutcome @JvmOverloads constructor(
     val iterations: List<RepairIteration>,
     val validation: BehaviorComparisonReport?,
     val runState: RepairRunState,
+    /** True only when no source mutation is pending and every reader-visible graph projection was reconciled. */
+    val recoveryComplete: Boolean = false,
 )
+
+internal fun repairFailureCanBeFinalized(failure: Exception, pendingAttemptId: String?): Boolean =
+    failure !is RepairAcceptancePendingException && pendingAttemptId == null
 
 internal fun RepairIteration.deepFrozenCopy(): RepairIteration = RepairIteration(
     index = index,
@@ -1216,11 +1221,10 @@ class TraceGuidedRepairLoop private constructor(
 
     private inline fun <T> withProgress(reportsDir: Path, action: () -> T): T {
         check(progress == null) { "repair run already owns a progress projection" }
-        val projection = RepairProgressProjection(reportsDir)
+        val projection = RepairProgressProjection.create(reportsDir)
         progress = projection
         return try { action() } finally {
-            projection.close()
-            progress = null
+            try { projection.closeAndAwaitWriterTermination() } finally { progress = null }
         }
     }
 
@@ -1428,20 +1432,29 @@ class TraceGuidedRepairLoop private constructor(
                 }
             } catch (failure: Exception) {
                 lastRunFailure = failure
-                finishFailedRun(graph, failure)
+                // Never terminalize a run while its attempt remains pending. This also covers
+                // ambiguous decision writes and unexpected exception types after the graph's
+                // point of no return; startup must reconcile the authoritative graph before any
+                // accepted or rejected terminal projection is emitted.
+                if (repairFailureCanBeFinalized(failure, graph.snapshot.pendingAttemptId)) {
+                    finishFailedRun(graph, failure)
+                }
             } finally {
                 activeDeadlineNanos = Long.MAX_VALUE
                 progress?.state(graph)
             }
-            try {
-                graph.synchronizeRepairHistory()
+            val publicationProjectionsReady = try {
+                graph.synchronizePublicationProjections()
+                true
             } catch (_: Exception) {
-                // The canonical graph already records the terminal outcome; this disk projection
-                // is retried on open and cannot turn committed acceptance into an API failure.
+                // The canonical graph commit remains authoritative, but a caller must retain its
+                // publication-unavailable marker until all derived reader projections reconcile.
+                false
             }
             history.adoptCanonicalProjection(graph.derivedRepairIterations(), corpus.inputs, graph.snapshot.runs)
             RepairRunOutcome(graph.derivedRepairIterations().filter { it.runId == run.id }, finalReport,
-                graph.snapshot.runs.single { it.id == run.id })
+                graph.snapshot.runs.single { it.id == run.id },
+                graph.snapshot.pendingAttemptId == null && publicationProjectionsReady)
         } }
     }
 
@@ -1519,7 +1532,9 @@ class TraceGuidedRepairLoop private constructor(
 
         /** Preserve [original] while making rollback/close failures available as suppressed detail. */
         fun abortAndClose(original: Exception, evidenceKind: String) {
-            if (!finalized) {
+            // A durable schema-6 acceptance decision is the point of no return. Publication
+            // failures after it must remain pending for roll-forward, never become a rejection.
+            if (!finalized && original !is RepairAcceptancePendingException) {
                 runCatching {
                     reject(repairFailureEvidence(evidenceKind, original))
                     reconcile()

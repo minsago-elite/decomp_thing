@@ -100,7 +100,8 @@ public final class SecureRepairSession implements AutoCloseable {
         ArrayList<RepairIteration> iterations = new ArrayList<>(result.getIterations().size());
         for (RepairIteration iteration : result.getIterations()) iterations.add(copyIteration(iteration));
         return new RepairRunOutcome(List.copyOf(iterations),
-            result.getValidation() == null ? null : copyReport(result.getValidation()), result.getRunState());
+            result.getValidation() == null ? null : copyReport(result.getValidation()), result.getRunState(),
+            result.getRecoveryComplete());
     }
 
     /** Read retained inputs through the graph authority without exposing the graph or its lock. */
@@ -132,7 +133,8 @@ public final class SecureRepairSession implements AutoCloseable {
         ArrayList<RepairIteration> iterations = new ArrayList<>(result.getIterations().size());
         for (RepairIteration iteration : result.getIterations()) iterations.add(copyIteration(iteration));
         return new RepairRunOutcome(List.copyOf(iterations),
-            result.getValidation() == null ? null : copyReport(result.getValidation()), result.getRunState());
+            result.getValidation() == null ? null : copyReport(result.getValidation()), result.getRunState(),
+            result.getRecoveryComplete());
     }
 
     @Override

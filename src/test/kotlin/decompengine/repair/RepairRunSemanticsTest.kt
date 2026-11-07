@@ -1,8 +1,11 @@
 package decompengine.repair
 
 import decompengine.agent.*
+import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.project.sha256
 import decompengine.jobs.AgentProgressJournal
+import decompengine.project.ReconstructionOutputWorkspace
+import decompengine.withRepairRuntimeUnderPublicationLease
 import decompengine.validation.*
 import java.nio.file.Files
 import java.nio.file.Path
@@ -18,6 +21,67 @@ import kotlinx.serialization.json.jsonPrimitive
 class RepairRunSemanticsTest {
     private val profile = repairRunFixtureProfile()
     private val inputs = (0..2).map { ProcessInput("case$it", listOf("arg$it"), byteArrayOf(it.toByte())) }
+
+    @Test
+    fun `repair loop retains publication lease through interrupted delayed progress writer cleanup`() {
+        val parent = Files.createTempDirectory(Files.createDirectories(Path.of("build/test-tmp")), "repair-loop-publication-lease-")
+        val reports = Files.createDirectories(parent.resolve("reports"))
+        val project = reports.resolve("source-tree")
+        val original = parent.resolve("reference.fixture").apply { writeText("reference") }
+        ReconstructionOutputWorkspace.open(reports, original).use { }
+        val fixture = fixture("broken", "pass3", rootDirectory = project, originalFile = original)
+        val writerEntered = java.util.concurrent.CountDownLatch(1)
+        val releaseWriter = java.util.concurrent.CountDownLatch(1)
+        val closeTimedOut = java.util.concurrent.CountDownLatch(1)
+        val executor = java.util.concurrent.Executors.newFixedThreadPool(2)
+        val repairThread = java.util.concurrent.atomic.AtomicReference<Thread?>()
+        val interruptObserved = java.util.concurrent.atomic.AtomicBoolean()
+        val journal = java.util.concurrent.atomic.AtomicReference<AgentProgressJournal?>()
+        try {
+            val repair = executor.submit {
+                repairThread.set(Thread.currentThread())
+                RepairProgressProjection.withFactoryForTesting({ reports ->
+                    RepairProgressProjection(reports, onUnavailable = { closeTimedOut.countDown() },
+                        journalFactory = { directory ->
+                            AgentProgressJournal.withSnapshotWriteHook(directory, "repair") {
+                                writerEntered.countDown()
+                                releaseWriter.await()
+                            }.also {
+                                journal.set(it)
+                            }
+                        })
+                }) {
+                    withRepairRuntimeUnderPublicationLease(project, { fixture.loop }, { recovered: Boolean -> recovered }) { loop, admittedProject ->
+                        val result = loop.runRepair(admittedProject, fixture.original, inputs, maxIterations = 1)
+                        interruptObserved.set(Thread.currentThread().isInterrupted)
+                        assertEquals(RepairRunStatus.FULLY_ACCEPTED, result.runState.status)
+                        assertTrue(result.recoveryComplete)
+                        assertTrue(decompengine.repairOutcomeAllowsWorkspaceMarkerRetirement(result))
+                        assertFalse(decompengine.repairOutcomeAllowsWorkspaceMarkerRetirement(
+                            result.copy(recoveryComplete = false),
+                        ))
+                        result.recoveryComplete
+                    }
+                }
+            }
+            assertTrue(writerEntered.await(5, java.util.concurrent.TimeUnit.SECONDS), "repair loop did not start its progress writer")
+            assertTrue(closeTimedOut.await(7, java.util.concurrent.TimeUnit.SECONDS), "repair loop did not reach bounded writer shutdown")
+            requireNotNull(repairThread.get()).interrupt()
+            val publication = executor.submit { ReconstructionOutputWorkspace.open(project.parent, fixture.original).use { } }
+            assertFails { publication.get(100, java.util.concurrent.TimeUnit.MILLISECONDS) }
+            releaseWriter.countDown()
+            repair.get(10, java.util.concurrent.TimeUnit.SECONDS)
+            assertEquals(RepairRunStatus.FULLY_ACCEPTED, fixture.history.runStates().single().status)
+            assertTrue(interruptObserved.get(), "interrupted writer wait must restore interruption after cleanup")
+            publication.get(5, java.util.concurrent.TimeUnit.SECONDS)
+            assertFalse(requireNotNull(journal.get()).writerAlive)
+        } finally {
+            releaseWriter.countDown()
+            executor.shutdownNow()
+            assertTrue(executor.awaitTermination(15, java.util.concurrent.TimeUnit.SECONDS))
+            parent.toFile().deleteRecursively()
+        }
+    }
 
     @Test
     fun `stale exploration snapshot refuses before retained input or run mutation`() {
@@ -89,6 +153,7 @@ class RepairRunSemanticsTest {
 
         val outcome = session.runRepair(fixture.root, fixture.original, inputs, fixture.root.resolve("reports"), 1, snapshot)
         assertEquals(RepairRunStatus.VALIDATION_FAILED, outcome.runState.status)
+        assertTrue(outcome.recoveryComplete, "the Java session projection must preserve the graph's no-pending result")
         assertTrue(fixture.seenSources.isEmpty(), "a changed input must not trigger an agent repair")
         ModuleRevisionGraph.open(fixture.root, profile).use { graph ->
             assertNull(graph.snapshot.fullyAcceptedHeadId)
@@ -141,7 +206,7 @@ class RepairRunSemanticsTest {
         assertEquals("pass3", fixture.root.resolve("code.c").readText())
         ModuleRevisionGraph.open(fixture.root, profile).use { graph ->
             val state = graph.snapshot
-            assertEquals(4, state.schemaVersion)
+            assertEquals(6, state.schemaVersion)
             assertEquals(state.headId, state.fullyAcceptedHeadId)
             assertNull(state.provisionalHeadId)
             assertEquals(state.nodes[1].id, state.nodes[2].parentId)
@@ -182,7 +247,7 @@ class RepairRunSemanticsTest {
 
     @Test
     fun `interrupted projection close preserves cancellation and releases its writer lock`() {
-        val reports = createTempDirectory("repair-progress-close-")
+        val reports = Files.createTempDirectory(Files.createDirectories(Path.of("build/test-tmp")), "repair-progress-close-")
         val projection = RepairProgressProjection(reports)
         try {
             Thread.currentThread().interrupt()
@@ -350,7 +415,8 @@ class RepairRunSemanticsTest {
             graph.beginRun(3, 60_000)
             val attempt = graph.beginAttempt(listOf("code.c"), metadata(corpus))
             graph.installCandidate(attempt, mapOf("code.c" to "pass1".toByteArray()))
-            assertEquals("broken", fixture.root.resolve("code.c").readText())
+            // Do not read the live source through an ordinary pathname while an exact
+            // schema-6 witness is pending: that can advance atime and is external drift.
         }
         ModuleRevisionGraph.open(fixture.root, profile).use { graph ->
             assertEquals(RepairRunStatus.INTERRUPTED, graph.snapshot.runs.single().status)
@@ -490,7 +556,7 @@ class RepairRunSemanticsTest {
                 pendingId = candidate.id
                 graph.installCandidate(candidate, mapOf("code.c" to "pass2".toByteArray()))
                 assertEquals("pass2", graph.candidateSources(candidate).getValue("code.c").toString(Charsets.UTF_8))
-                assertEquals("broken", fixture.root.resolve("code.c").readText())
+                assertEquals("broken", readProjectSourceWithoutAtime(fixture.root, "code.c").decodeToString())
                 assertEquals(publishedHead, graph.snapshot.headId)
                 assertEquals(provisionalId, graph.snapshot.provisionalHeadId)
             }
@@ -518,7 +584,7 @@ class RepairRunSemanticsTest {
             val attempt = graph.beginAttempt(listOf("code.c"), metadata(corpus))
             graph.installCandidate(attempt, mapOf("code.c" to "pass1".toByteArray()))
 
-            assertEquals("broken", fixture.root.resolve("code.c").readText())
+            assertEquals("broken", readProjectSourceWithoutAtime(fixture.root, "code.c").decodeToString())
             val rejected = graph.reject(attempt, RepairEvidence("rejected", "staged candidate was never promoted"))
 
             val rollback = requireNotNull(rejected.rollbackRecord)
@@ -530,12 +596,14 @@ class RepairRunSemanticsTest {
     }
 
     @Test
-    fun `interrupted canonical publication restores exact baseline before recording terminal recovery`() {
+    fun `interrupted schema six publication rolls its durable acceptance decision forward`() {
         val fixture = fixture("broken")
         class InterruptedPublication : Error()
         assertFailsWith<InterruptedPublication> {
             ModuleRevisionGraph.openForTesting(fixture.root, profile, faultInjector = ModuleRevisionFaultInjector { point ->
-                if (point is ModuleRevisionFaultPoint.AfterPublicationExchange && point.phase == "promotion") throw InterruptedPublication()
+                if (point is ModuleRevisionFaultPoint.AfterPublicationExchange && point.phase == "schema6-roll-forward") {
+                    throw InterruptedPublication()
+                }
             }).use { graph ->
                 graph.enableRunContract()
                 val corpus = graph.retainRegressionInputs(inputs)
@@ -553,14 +621,11 @@ class RepairRunSemanticsTest {
             }
         }
         ModuleRevisionGraph.open(fixture.root, profile).use { graph ->
-            assertEquals("broken", fixture.root.resolve("code.c").readText())
-            assertNull(graph.snapshot.fullyAcceptedHeadId)
-            assertEquals(RepairRunStatus.INTERRUPTED, graph.snapshot.runs.single().status)
-            assertEquals(ModuleRevisionStatus.REJECTED, graph.snapshot.nodes.last().status)
-            val rollback = requireNotNull(graph.snapshot.nodes.last().rollbackRecord)
-            assertEquals(RepairRollbackState.RESTORED_VERIFIED, rollback.state)
-            assertEquals(false, rollback.legacyPendingStateUnknown)
-            assertEquals(true, rollback.candidateSourceInstallStarted)
+            assertEquals("pass3", fixture.root.resolve("code.c").readText())
+            assertEquals(graph.snapshot.nodes.last().id, graph.snapshot.fullyAcceptedHeadId)
+            assertEquals(RepairRunStatus.FULLY_ACCEPTED, graph.snapshot.runs.single().status)
+            assertEquals(ModuleRevisionStatus.ACCEPTED, graph.snapshot.nodes.last().status)
+            assertNull(graph.snapshot.nodes.last().rollbackRecord)
         }
     }
 
@@ -595,12 +660,34 @@ class RepairRunSemanticsTest {
     fun `legacy accepted records and history bytes migrate as unverified`() {
         val fixture = fixture("pass0")
         ModuleRevisionGraph.open(fixture.root, profile).use { graph ->
-            val attempt = graph.beginAttempt(listOf("code.c"))
+            val corpus = graph.retainRegressionInputs(listOf(ProcessInput("legacy-acceptance", emptyList(), byteArrayOf(0))))
+            val originalBinary = sha256("legacy reference".toByteArray())
+            graph.beginRun(maximumAttempts = 4, maximumWallMillis = 60_000)
+            graph.bindOriginalBinary(originalBinary)
+            graph.bindExpectedObservations(sha256("legacy expected observations".toByteArray()))
+            val metadata = RevisionRepairMetadata(1, "behavior", "historical accepted record", null,
+                corpus.inputs.map(ProcessInput::id), null, corpus.sha256,
+                publicationMode = RepairPublicationMode.TEST_ONLY_NON_RELEASE)
+            val attempt = graph.beginAttempt(listOf("code.c"), metadata)
             graph.installCandidate(attempt, mapOf("code.c" to "pass1".toByteArray()))
-            graph.accept(attempt, RepairEvidence("valid", "historical unchecked label"))
+            val snapshot = graph.snapshot
+            val proof = RepairValidationProof(
+                sourceRevisionSha256 = repairCandidateSourceSha256(graph.candidateSources(attempt)),
+                profileSha256 = snapshot.profileSha256,
+                indexSha256 = snapshot.indexSha256,
+                regressionCorpusSha256 = corpus.sha256,
+                originalBinarySha256 = originalBinary,
+                rebuiltBinarySha256 = sha256("legacy rebuilt binary".toByteArray()),
+                runtimeSha256 = sha256("legacy runtime".toByteArray()),
+                evidenceSha256 = sha256("legacy evidence".toByteArray()),
+                cleanupVerified = true,
+                assurance = RepairValidationAssurance.TEST_ONLY_HOST_PROCESS,
+            )
+            graph.accept(attempt, RepairEvidence("valid", "historically accepted with source-bound proof"), proof)
         }
         val graphPath = fixture.root.resolve("reports/repair-revisions/graph.json")
-        val legacyBytes = graphPath.readBytes()
+        val legacyBytes = authoredLegacyGraphFixture(graphPath.readText(), 2).toByteArray()
+        graphPath.writeBytes(legacyBytes)
         val historyPath = fixture.root.resolve("reports/repair_history.json")
         val legacyHistory = "{\"schemaVersion\":2,\"regressionInputs\":[],\"iterations\":[]}\n".toByteArray()
         historyPath.writeBytes(legacyHistory)
@@ -608,6 +695,7 @@ class RepairRunSemanticsTest {
             session.prepareExploration(fixture.root, fixture.original)
         }
         ModuleRevisionGraph.open(fixture.root, profile).use { graph ->
+            graph.enableRunContract()
             assertEquals(ModuleRevisionStatus.LEGACY_UNVERIFIED, graph.snapshot.nodes.last().status)
             assertNull(graph.snapshot.fullyAcceptedHeadId)
             assertEquals("pass1", fixture.root.resolve("code.c").readText())
@@ -686,7 +774,7 @@ class RepairRunSemanticsTest {
         val root = rollbackRoot()
         var armed = false
         var attemptId = ""
-        ModuleRevisionGraph.openForTesting(root, profile, faultInjector = ModuleRevisionFaultInjector { point ->
+        ModuleRevisionGraph.openLegacyForTesting(root, profile, faultInjector = ModuleRevisionFaultInjector { point ->
             if (point is ModuleRevisionFaultPoint.AfterPublicationExchange && point.phase == "promotion") throw PromotionFailure()
             if (point is ModuleRevisionFaultPoint.BeforeRollbackExchange && point.phase == "promotion") throw PromotionRollbackRefusal()
             if (armed && point is ModuleRevisionFaultPoint.BeforePublicationExchange && point.phase == "promotion-rollback") {
@@ -756,7 +844,7 @@ class RepairRunSemanticsTest {
     @Test
     fun `startup failure commits same coupled outcome and rejects forged pending links before restoration`() {
         val root = rollbackRoot()
-        ModuleRevisionGraph.openForTesting(root, profile, faultInjector = ModuleRevisionFaultInjector { point ->
+        ModuleRevisionGraph.openLegacyForTesting(root, profile, faultInjector = ModuleRevisionFaultInjector { point ->
             if (point is ModuleRevisionFaultPoint.AfterPublicationExchange && point.phase == "promotion") throw PromotionCrash()
         }).use { leavePromotedPending(it) }
         assertFailsWith<StartupRestoreRefusal> {
@@ -799,7 +887,7 @@ class RepairRunSemanticsTest {
         val root = rollbackRoot()
         var armed = false
         var writes = 0
-        ModuleRevisionGraph.openForTesting(root, profile, faultInjector = ModuleRevisionFaultInjector { point ->
+        ModuleRevisionGraph.openLegacyForTesting(root, profile, faultInjector = ModuleRevisionFaultInjector { point ->
             if (point is ModuleRevisionFaultPoint.AfterPublicationExchange && point.phase == "promotion") throw PromotionFailure()
             if (point is ModuleRevisionFaultPoint.BeforeRollbackExchange && point.phase == "promotion") throw PromotionRollbackRefusal()
             if (armed && point is ModuleRevisionFaultPoint.BeforePublicationExchange && point.phase == "promotion-rollback") {
@@ -827,6 +915,8 @@ class RepairRunSemanticsTest {
             assertNull(graph.snapshot.runs.single().rollbackFailureAttemptId)
             armed = false
             assertEquals(RepairRunStatus.VALIDATION_FAILED, graph.finishRun(RepairRunStatus.VALIDATION_FAILED, null).status)
+            assertNotNull(graph.snapshot.pendingAttemptId,
+                "failed rollback publication must remain distinguishable from a terminal recovered run")
         }
         ModuleRevisionGraph.open(root, profile).use { graph ->
             assertEquals(RepairRunStatus.VALIDATION_FAILED, graph.snapshot.runs.single().status)
@@ -836,19 +926,79 @@ class RepairRunSemanticsTest {
     }
 
     @Test
-    fun `generic workflow exception preserves canonical rollback failure instead of validation failure`() {
+    fun `legacy detached promotion graph write failure remains rejectable`() {
+        val root = rollbackRoot()
+        val source = root.resolve("code.c")
+        val before = source.readBytes()
+        val beforeKey = Files.readAttributes(source, java.nio.file.attribute.BasicFileAttributes::class.java).fileKey()
+        var armed = false
+        var injected = false
+        val injectedFailure = LegacyPromotionWriteFailure()
+        ModuleRevisionGraph.openLegacyForTesting(
+            root,
+            profile,
+            faultInjector = ModuleRevisionFaultInjector { point ->
+                if (armed && !injected && point == ModuleRevisionFaultPoint.AfterStateTemporaryDirectorySync(
+                        "revision-state", "graph.json")) {
+                    injected = true
+                    throw injectedFailure
+                }
+            },
+        ).use { graph ->
+            graph.enableRunContract()
+            val corpus = graph.retainRegressionInputs(inputs)
+            graph.beginRun(2, 60_000)
+            graph.bindOriginalBinary(sha256("reference".toByteArray()))
+            graph.bindExpectedObservations(sha256("fixture-expected".toByteArray()))
+            assertEquals(5, graph.snapshot.schemaVersion)
+            val attempt = graph.beginAttempt(listOf("code.c"), metadata(corpus))
+            graph.installCandidate(attempt, mapOf("code.c" to "pass3".toByteArray()))
+            val proof = rollbackProof(graph, attempt)
+
+            armed = true
+            val failure = assertFailsWith<LegacyPromotionWriteFailure> {
+                graph.accept(attempt, RepairEvidence("valid", "fixture matched"), proof)
+            }
+
+            assertEquals("authored legacy promotion graph-write failure", failure.message)
+            assertSame(injectedFailure, failure)
+            assertTrue(injected)
+            assertEquals(5, graph.snapshot.schemaVersion)
+            assertEquals(attempt.id, graph.snapshot.pendingAttemptId)
+            assertContentEquals(before, source.readBytes())
+            assertEquals(beforeKey,
+                Files.readAttributes(source, java.nio.file.attribute.BasicFileAttributes::class.java).fileKey())
+
+            val rejected = graph.reject(attempt, RepairEvidence("rejected", "legacy write was not committed"))
+            assertEquals(ModuleRevisionStatus.REJECTED, rejected.status)
+            assertNull(graph.snapshot.pendingAttemptId)
+            assertNull(graph.snapshot.nodes.last().rollbackRecord?.failureCode)
+            assertContentEquals(before, source.readBytes())
+            assertEquals(beforeKey,
+                Files.readAttributes(source, java.nio.file.attribute.BasicFileAttributes::class.java).fileKey())
+        }
+    }
+
+    @Test
+    fun `external source drift leaves an undecided candidate unavailable instead of fabricating rollback`() {
         lateinit var fixture: Fixture
         fixture = fixture("broken", "pass3", temporaryParent = Path.of("build/test-tmp").toAbsolutePath().normalize()
             .also { Files.createDirectories(it) }, afterValidation = { source ->
             if (source == "pass3") fixture.root.resolve("code.c").writeText("foreign replacement")
         })
         val result = fixture.loop.runRepair(fixture.root, fixture.original, inputs, maxIterations = 1)
-        assertEquals(RepairRunStatus.ROLLBACK_FAILED, result.runState.status)
-        assertNotNull(result.runState.rollbackFailureAttemptId)
-        assertEquals(RepairRollbackState.RESTORE_FAILED_UNRESOLVED, result.runState.rollbackResolution)
+        assertEquals(RepairRunStatus.RUNNING, result.runState.status)
+        assertNull(result.runState.rollbackFailureAttemptId)
+        assertNull(result.runState.rollbackResolution)
         assertNull(result.runState.acceptedHeadId)
         assertTrue(result.iterations.isEmpty())
+        assertFalse(result.recoveryComplete)
         assertEquals("foreign replacement", fixture.root.resolve("code.c").readText())
+        val durable = Json.parseToJsonElement(
+            fixture.root.resolve("reports/repair-revisions/graph.json").readText(),
+        ).jsonObject
+        assertTrue(durable.getValue("pending").jsonObject.getValue("acceptanceDecision") is kotlinx.serialization.json.JsonNull,
+            "witness drift before the acceptance decision must not be converted into a commit")
     }
 
     @Test
@@ -863,7 +1013,7 @@ class RepairRunSemanticsTest {
             val budget = if (graphLimit) RepairResourceBudget(maximumGraphBytes = limit)
                 else RepairResourceBudget(maximumProjectionBytes = limit)
             fun legacyPending(root: Path): String {
-                ModuleRevisionGraph.openForTesting(root, wideProfile, budget, ModuleRevisionFaultInjector { point ->
+                ModuleRevisionGraph.openLegacyForTesting(root, wideProfile, budget, ModuleRevisionFaultInjector { point ->
                     if (point is ModuleRevisionFaultPoint.AfterPublicationExchange && point.phase == "promotion") throw PromotionCrash()
                 }).use { graph ->
                     leavePromotedPending(graph, "RESERVATION_PADDING")
@@ -964,9 +1114,11 @@ class RepairRunSemanticsTest {
                 .jsonObject.getValue("pending").jsonObject
             assertEquals(attempt.id, pending.getValue("id").jsonPrimitive.content)
             assertEquals("true", pending.getValue("detached").jsonPrimitive.content)
-            // Detached staging has not published any source-install record; recovery creates false later.
-            assertEquals(kotlinx.serialization.json.JsonNull, pending.getValue("rollbackRecord"))
-            assertEquals("broken", reference.resolve("code.c").readText())
+            // Schema 6 records a durable no-install marker before creating private stages.
+            val rollback = pending.getValue("rollbackRecord").jsonObject
+            assertEquals("false", rollback.getValue("candidateSourceInstallStarted").jsonPrimitive.content)
+            assertEquals("restore_in_progress", rollback.getValue("state").jsonPrimitive.content)
+            assertEquals("broken", readProjectSourceWithoutAtime(reference, "code.c").decodeToString())
         }
         lateinit var iterations: List<RepairIteration>
         lateinit var runs: List<RepairRunState>
@@ -975,7 +1127,7 @@ class RepairRunSemanticsTest {
             val rollback = requireNotNull(graph.snapshot.nodes.last().rollbackRecord)
             assertEquals(RepairRollbackState.NOT_REQUIRED_VERIFIED, rollback.state)
             assertEquals(false, rollback.candidateSourceInstallStarted)
-            assertEquals("broken", reference.resolve("code.c").readText())
+            assertEquals("broken", readProjectSourceWithoutAtime(reference, "code.c").decodeToString())
             assertNull(graph.snapshot.runs.single().rollbackFailureAttemptId)
             iterations = graph.derivedRepairIterations()
             runs = graph.snapshot.runs
@@ -1058,7 +1210,7 @@ class RepairRunSemanticsTest {
             source.writeBytes(original)
             root.resolve("b.c").writeBytes(unchanged)
             var exchanges = 0
-            ModuleRevisionGraph.openForTesting(root, boundedProfile, budget, ModuleRevisionFaultInjector { point ->
+            ModuleRevisionGraph.openLegacyForTesting(root, boundedProfile, budget, ModuleRevisionFaultInjector { point ->
                 if (point is ModuleRevisionFaultPoint.AfterPublicationExchange && point.phase == "candidate") {
                     exchanges++
                     throw CandidateInstallCrash()
@@ -1107,7 +1259,7 @@ class RepairRunSemanticsTest {
     @Test
     fun `schema one owning run cannot hide pending or finalized committed rollback failure`() {
         val root = rollbackRoot()
-        ModuleRevisionGraph.openForTesting(root, profile, faultInjector = ModuleRevisionFaultInjector { point ->
+        ModuleRevisionGraph.openLegacyForTesting(root, profile, faultInjector = ModuleRevisionFaultInjector { point ->
             if (point is ModuleRevisionFaultPoint.AfterPublicationExchange && point.phase == "promotion") throw PromotionCrash()
         }).use { leavePromotedPending(it) }
         assertFailsWith<StartupRestoreRefusal> {
@@ -1159,6 +1311,7 @@ class RepairRunSemanticsTest {
     private class CandidateInstallCrash : Error()
     private class PromotionCrash : Error()
     private class PromotionFailure : IllegalStateException("authored promotion failure")
+    private class LegacyPromotionWriteFailure : IllegalStateException("authored legacy promotion graph-write failure")
     private class PromotionRollbackRefusal : IllegalStateException("authored promotion CAS rollback refusal")
     private class RestorationRefusal : IllegalStateException("authored restoration refusal")
     private class FailurePublicationRefusal : IllegalStateException("authored failure-publication refusal")
@@ -1224,9 +1377,7 @@ class RepairRunSemanticsTest {
         }
         // Existing authored schema3 compatibility technique, NOT historical writer proof.
         val native = path.readText()
-        val defaults = ",\"legacyRecoveryRequired\":false,\"rollbackRecord\":null"
-        assertTrue(defaults in native)
-        val original = native.replaceFirst("\"schemaVersion\": 4", "\"schemaVersion\": 3").replace(defaults, "")
+        val original = authoredLegacyGraphFixture(native, 3)
         path.writeText(original)
         class MarkerCrash : Error()
         assertFailsWith<MarkerCrash> {
@@ -1310,11 +1461,12 @@ class RepairRunSemanticsTest {
         val history: RepairHistory, val seenSources: MutableList<String>, val canonicalDuringPrompts: MutableList<String>)
 
     private fun fixture(initial: String, vararg replacements: String, cancellation: AgentCancellationSource = AgentCancellationSource(),
-        afterValidation: (String) -> Unit = {}, omitCase: Boolean = false, temporaryParent: Path? = null): Fixture {
-        val root = if (temporaryParent == null) Files.createTempDirectory("repair-run-semantics-")
+        afterValidation: (String) -> Unit = {}, omitCase: Boolean = false, temporaryParent: Path? = null,
+        rootDirectory: Path? = null, originalFile: Path? = null): Fixture {
+        val root = rootDirectory?.also { Files.createDirectories(it) } ?: if (temporaryParent == null) Files.createTempDirectory("repair-run-semantics-")
             else Files.createTempDirectory(temporaryParent, "repair-run-semantics-")
         root.resolve("code.c").writeText(initial)
-        val original = root.resolve("reference.fixture").also { it.writeText("reference") }
+        val original = (originalFile ?: root.resolve("reference.fixture")).also { it.writeText("reference") }
         val seen = mutableListOf<String>()
         val canonical = mutableListOf<String>()
         val harness = object : CapturedRepairAgentHarness {
@@ -1323,7 +1475,7 @@ class RepairRunSemanticsTest {
                 output: BoundedRepairOutput, onEvent: (AgentExecutionEvent) -> Unit): AgentExecutionResult {
                 val before = initialFiles.getValue("code.c")
                 seen += before.toString(Charsets.UTF_8)
-                canonical += root.resolve("code.c").readText()
+                canonical += readProjectSourceWithoutAtime(root, "code.c").decodeToString()
                 val bytes = replacements[seen.lastIndex].toByteArray()
                 output.replace("code.c", bytes)
                 return AgentExecutionResult(AgentStopReason.COMPLETED, "bounded fixture edit", listOf(AgentFileChange(
@@ -1339,7 +1491,7 @@ class RepairRunSemanticsTest {
                 inputs: List<ProcessInput>, reportsDir: Path, budget: RepairResourceBudget): BehaviorComparisonReport = error("immutable candidate API required")
             override fun validateCandidate(request: RepairCandidateValidationRequest): RepairCandidateValidationOutcome {
                 val source = request.candidateSources.getValue("code.c").toString(Charsets.UTF_8)
-                assertEquals(initial, root.resolve("code.c").readText())
+                assertEquals(initial, readProjectSourceWithoutAtime(root, "code.c").decodeToString())
                 val proof = RepairValidationProof(request.sourceRevisionSha256, request.profileSha256, request.indexSha256,
                     request.regressionCorpusSha256, request.originalBinary?.let { sha256(original.readBytes()) },
                     if (source == "broken") null else sha256(source.toByteArray()), sha256("fixture-runtime".toByteArray()),
@@ -1360,6 +1512,28 @@ class RepairRunSemanticsTest {
         return Fixture(root, original, TraceGuidedRepairLoop.forTesting(harness, history, profile, validator,
             CapturedRepairStagingAuthority, limits = AgentExecutionLimits(wallClockTimeout = Duration.ofSeconds(20)),
             cancellation = cancellation.cancellation), history, seen, canonical)
+    }
+}
+
+private fun readProjectSourceWithoutAtime(root: Path, relative: String): ByteArray {
+    val components = relative.split('/')
+    return LinuxFilesystemSyscalls.openRoot(root).use { rootDescriptor ->
+        var parent = rootDescriptor
+        val opened = mutableListOf<decompengine.acp.LinuxDescriptor>()
+        try {
+            components.dropLast(1).forEach { segment ->
+                parent = LinuxFilesystemSyscalls.openDirectoryAt(parent.fd, segment)
+                opened += parent
+            }
+            val path = requireNotNull(LinuxFilesystemSyscalls.openRegularFileAtOrNull(parent.fd, components.last()))
+            path.use { pinned ->
+                LinuxFilesystemSyscalls.openReadableWithoutAtimeFrom(pinned).use {
+                    LinuxFilesystemSyscalls.readWithoutAtime(it, 1_048_576)
+                }
+            }
+        } finally {
+            opened.asReversed().forEach(decompengine.acp.LinuxDescriptor::close)
+        }
     }
 }
 

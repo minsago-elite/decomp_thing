@@ -171,6 +171,13 @@ class JobStore internal constructor(
     @Synchronized
     fun get(jobId: String): Job = getInternal(jobId, null)
 
+    /** Startup-only metadata read charged to the shared workflow recovery budget. */
+    internal fun getForStartupRecovery(jobId: String, budget: WorkflowStartupRecoveryBudget): Job {
+        jobDirectory(jobId)
+        val payload = OracleJson.parse(budget.read(root, "$jobId/job.json", MAX_METADATA_BYTES)).jsonObject
+        return decodeJobRecord(jobId, payload)
+    }
+
     @Synchronized
     internal fun getWithMetadataAuthorization(jobId: String, afterAuthorization: () -> Unit): Job =
         getInternal(jobId, afterAuthorization)
@@ -254,6 +261,16 @@ class JobStore internal constructor(
 
     fun reportsDirectory(jobId: String): Path = jobDirectory(jobId).resolve("reports").createDirectories()
 
+    /** Returns the legacy job-level report root without creating it during startup inspection. */
+    internal fun existingReportsDirectory(jobId: String): Path? {
+        val reports = jobDirectory(jobId).resolve("reports")
+        if (!Files.exists(reports, java.nio.file.LinkOption.NOFOLLOW_LINKS)) return null
+        if (!Files.isDirectory(reports, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+            throw JobStoreException("legacy workflow report storage is invalid")
+        }
+        return reports
+    }
+
     /** The caller first verifies run ownership through the durable attempt store. Reads never create directories. */
     internal fun runReportsDirectory(jobId: String, runId: String, create: Boolean = false): Path {
         require(runId.matches(Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}"))) { "invalid workflow report identity" }
@@ -267,6 +284,27 @@ class JobStore internal constructor(
             } else if (create) Files.createDirectory(current)
         }
         return current
+    }
+
+    /** Resolve an existing canonical report directory for a publication-coordinated read. */
+    internal fun reportDirectoryForRead(jobId: String, reportPrefix: String): Path {
+        require(reportPrefix.length <= 4096 && !reportPrefix.contains('\\') &&
+            reportPrefix.none { it.code < 32 || it.code == 127 }) { "invalid report prefix" }
+        val segments = reportPrefix.split('/')
+        require(segments.firstOrNull() == "reports" && segments.size <= 32 &&
+            segments.none { it.isBlank() || it == "." || it == ".." }) { "invalid report prefix" }
+        var current = jobDirectory(jobId)
+        if (!Files.isDirectory(current, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+            throw JobStoreException("job storage is unavailable")
+        }
+        for (segment in segments) {
+            current = current.resolve(segment)
+            if (!Files.isDirectory(current, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+                throw JobStoreException(if (segments.size == 1) "artifact is unavailable"
+                    else "artifact is unavailable or its path changed")
+            }
+        }
+        return current.toRealPath()
     }
 
     internal fun resolveRunArtifact(jobId: String, runId: String, relativePath: String): Path {
@@ -284,8 +322,7 @@ class JobStore internal constructor(
     }
 
     fun resolveArtifact(jobId: String, relativePath: String): Path {
-        require(relativePath.isNotBlank()) { "artifact path must not be blank" }
-        require(relativePath.replace('\\', '/').startsWith("reports/")) { "only report artifacts may be downloaded" }
+        requireCanonicalReportPath(relativePath)
         val jobDir = jobDirectory(jobId).toAbsolutePath().normalize()
         val artifact = jobDir.resolve(relativePath).normalize()
         if (!artifact.startsWith(jobDir) || !artifact.isRegularFile()) {
@@ -299,7 +336,20 @@ class JobStore internal constructor(
         jobId: String,
         runId: String?,
         cancel: () -> Unit = {},
-    ): RepairHistoryReadResult = readSelectedJobRecordedRepairHistory(root, jobId, runId, cancel)
+    ): RepairHistoryReadResult {
+        if (!jobId.matches(Regex("[a-f0-9]{32}")) ||
+            (runId != null && !runId.matches(Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}")))) {
+            return readSelectedJobRecordedRepairHistory(root, jobId, runId, cancel)
+        }
+        val reportPrefix = if (runId == null) "reports" else "reports/runs/$runId"
+        val reportPath = jobDirectory(jobId).resolve(reportPrefix)
+        val capture = { readSelectedJobRecordedRepairHistory(root, jobId, runId, cancel) }
+        // A missing report directory cannot contain an active publication transaction. Preserve the
+        // history reader's missing/unavailable result without creating directories just to lock them.
+        if (!Files.isDirectory(reportPath, java.nio.file.LinkOption.NOFOLLOW_LINKS)) return capture()
+        val canonical = reportDirectoryForRead(jobId, reportPrefix)
+        return decompengine.project.ReconstructionOutputWorkspace.withReadLease(canonical, capture)
+    }
 
     internal fun readArtifact(
         jobId: String,
@@ -307,15 +357,24 @@ class JobStore internal constructor(
         maximumBytes: Long,
     ): StableRegularFile {
         jobDirectory(jobId)
-        require(relativePath.startsWith("reports/") && relativePath.length <= 4096 &&
-            relativePath.none { it == '\\' || it.code < 32 || it.code == 127 } &&
-            relativePath.split('/').let { parts ->
-                parts.size <= 32 && parts.none { it.isBlank() || it == "." || it == ".." }
-            }
-        ) { "artifact path must be a canonical report path" }
-        return contained("artifact") {
-            readStableRegularFile(root, "$jobId/$relativePath", maximumBytes).requireSingleName("artifact")
+        requireCanonicalReportPath(relativePath)
+        val parts = relativePath.split('/')
+        val publicationRoot = when {
+            "source-tree" in parts -> parts.take(parts.indexOf("source-tree")).joinToString("/")
+            ".decomp-agent-sessions" in parts -> parts.take(parts.indexOf(".decomp-agent-sessions")).joinToString("/")
+            parts.last() in setOf("source-tree.zip", "reconstruction.json") -> parts.dropLast(1).joinToString("/")
+            else -> null
         }
+        val read = {
+            contained("artifact") {
+                readStableRegularFile(root, "$jobId/$relativePath", maximumBytes).requireSingleName("artifact")
+            }
+        }
+        return if (publicationRoot != null) {
+            decompengine.project.ReconstructionOutputWorkspace.withReadLease(
+                jobDirectory(jobId).resolve(publicationRoot), read,
+            )
+        } else read()
     }
 
     /**
@@ -415,10 +474,16 @@ class JobStore internal constructor(
         require(relativePath.startsWith("reports/") && relativePath.length <= 4096 &&
             relativePath.none { it == '\\' || it.code < 32 || it.code == 127 } &&
             relativePath.split('/').let { parts ->
-                parts.size <= 32 && parts.none { it.isBlank() || it == "." || it == ".." }
+                parts.size <= 32 && parts.none { it.isBlank() || it == "." || it == ".." || isPrivatePublicationPathSegment(it) }
             }
         ) { "artifact path must be a canonical report path" }
     }
+
+    private fun isPrivatePublicationPathSegment(segment: String): Boolean =
+        segment == ".reconstruction.lock" || segment == ".reconstruction-active-input.json" ||
+            segment == ".reconstruction-input-switch.json" || segment == ".reconstruction-publication.json" ||
+            segment.startsWith(".reconstruction-stage-") || segment.startsWith(".reconstruction-previous-") ||
+            segment.startsWith(".publication-")
 
     internal fun readInput(jobId: String): StableRegularFile {
         jobDirectory(jobId)

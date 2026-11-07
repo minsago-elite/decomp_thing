@@ -3,6 +3,10 @@ package decompengine.acp
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.LinkOption
+import java.nio.channels.FileChannel
+import java.nio.file.StandardOpenOption.READ
+import java.nio.file.StandardOpenOption.WRITE
 import java.time.Duration
 import java.util.concurrent.TimeUnit
 import kotlin.io.path.createTempDirectory
@@ -15,6 +19,58 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class LinuxFilesystemSyscallsTest {
+    @Test
+    fun `directory listing charges each entry before retaining later names`() {
+        val root = Files.createTempDirectory("directory-entry-accounting-")
+        repeat(100) { index -> Files.writeString(root.resolve("entry-$index"), "x") }
+        val descriptor = LinuxFilesystemSyscalls.openRoot(root)
+        var charged = 0
+        try {
+            val failure = assertFailsWith<IOException> {
+                LinuxFilesystemSyscalls.directoryEntryNames(descriptor, maximumEntries = 1_000,
+                    onEntry = {
+                        charged++
+                        if (charged == 3) throw IOException("aggregate entry allowance exhausted")
+                    })
+            }
+            assertEquals("aggregate entry allowance exhausted", failure.message)
+            assertEquals(3, charged, "enumeration must stop at the first rejected entry")
+        } finally {
+            descriptor.close()
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `changing a pinned lock mode does not release the process record lock`() {
+        val parent = Files.createDirectories(Path.of("build/test-tmp/pinned-mode-lock").toAbsolutePath())
+        val root = Files.createDirectory(parent.resolve(java.util.UUID.randomUUID().toString()))
+        val lockPath = root.resolve("lock")
+        Files.writeString(lockPath, "lock")
+        Files.setPosixFilePermissions(lockPath,
+            java.nio.file.attribute.PosixFilePermissions.fromString("rw-r--r--"))
+        val rootDescriptor = LinuxFilesystemSyscalls.openRoot(root)
+        val lockDescriptor = LinuxFilesystemSyscalls.openRegularFileAtOrNull(rootDescriptor.fd, "lock")!!
+        try {
+            FileChannel.open(LinuxFilesystemSyscalls.descriptorPath(lockDescriptor), READ, WRITE).use { channel ->
+                channel.lock().use {
+                    LinuxFilesystemSyscalls.chmodPinnedViaProcFd(lockDescriptor, 0x180)
+                    val script = "import fcntl,sys\nf=open(sys.argv[1], 'r+')\ntry:\n fcntl.lockf(f, fcntl.LOCK_EX|fcntl.LOCK_NB)\n print('ACQUIRED')\nexcept BlockingIOError:\n print('BLOCKED')\n"
+                    val contender = ProcessBuilder("python3", "-c", script, lockPath.toString())
+                        .redirectErrorStream(true).start()
+                    assertTrue(contender.waitFor(5, TimeUnit.SECONDS), "cross-process lock probe timed out")
+                    val output = contender.inputStream.readAllBytes().toString(Charsets.UTF_8)
+                    assertEquals(0, contender.exitValue(), output)
+                    assertEquals("BLOCKED", output.trim(), "chmod must not close another descriptor for the locked inode")
+                }
+            }
+        } finally {
+            lockDescriptor.close()
+            rootDescriptor.close()
+            root.toFile().deleteRecursively()
+        }
+    }
+
     @Test
     fun `prefix observations retain successful owners through a later failed pin and cleanup`() {
         var clock = 0L
@@ -951,6 +1007,214 @@ class LinuxFilesystemSyscallsTest {
             }
 
             assertNull(LinuxFilesystemSyscalls.openRegularFileAtOrNull(directory.fd, "missing"))
+        }
+    }
+
+    @Test
+    fun `authorized directory reopen follows its pinned object after its name is replaced`() {
+        withLinuxDirectory("linux-syscall-directory-reopen-") { path, directory ->
+            Files.createDirectory(path.resolve("child"))
+            LinuxFilesystemSyscalls.openDirectoryAt(directory.fd, "child").use { authorized ->
+                Files.move(path.resolve("child"), path.resolve("moved"))
+                Files.createDirectory(path.resolve("child"))
+                LinuxFilesystemSyscalls.openDirectoryFrom(authorized).use { reopened ->
+                    assertEquals(authorized.identity.key, reopened.identity.key)
+                    assertEquals(authorized.identity.mountId, reopened.identity.mountId)
+                    LinuxFilesystemSyscalls.openDirectoryAt(directory.fd, "child").use { replacement ->
+                        assertFalse(replacement.identity.key == reopened.identity.key &&
+                            replacement.identity.mountId == reopened.identity.mountId)
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `authorized directory reopen rejects regular files and symlinks`() {
+        withLinuxDirectory("linux-syscall-directory-kind-") { path, directory ->
+            Files.writeString(path.resolve("file"), "regular")
+            Files.createSymbolicLink(path.resolve("link"), Path.of("file"))
+            for (name in listOf("file", "link")) {
+                LinuxFilesystemSyscalls.openPathAtOrNull(directory.fd, name)!!.use { authorized ->
+                    assertFailsWith<IOException> { LinuxFilesystemSyscalls.openDirectoryFrom(authorized).close() }
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `descriptor relative rename replace works across pinned directories`() {
+        withLinuxDirectory("linux-syscall-rename-replace-") { path, directory ->
+            Files.createDirectory(path.resolve("from"))
+            Files.createDirectory(path.resolve("to"))
+            Files.writeString(path.resolve("from/source"), "new payload")
+            Files.writeString(path.resolve("to/destination"), "old")
+            LinuxFilesystemSyscalls.openDirectoryAt(directory.fd, "from").use { from ->
+                LinuxFilesystemSyscalls.openDirectoryAt(directory.fd, "to").use { to ->
+                    LinuxFilesystemSyscalls.renameReplace(from.fd, "source", to.fd, "destination")
+                }
+            }
+            assertFalse(Files.exists(path.resolve("from/source")))
+            assertEquals("new payload", Files.readString(path.resolve("to/destination")))
+        }
+    }
+
+    @Test
+    fun `descriptor relative exchange works across pinned directories`() {
+        withLinuxDirectory("linux-syscall-exchange-cross-directory-") { path, directory ->
+            Files.createDirectory(path.resolve("from"))
+            Files.createDirectory(path.resolve("to"))
+            Files.writeString(path.resolve("from/source"), "left")
+            Files.writeString(path.resolve("to/destination"), "right")
+            LinuxFilesystemSyscalls.openDirectoryAt(directory.fd, "from").use { from ->
+                LinuxFilesystemSyscalls.openDirectoryAt(directory.fd, "to").use { to ->
+                    LinuxFilesystemSyscalls.exchange(from.fd, "source", to.fd, "destination")
+                }
+            }
+            assertEquals("right", Files.readString(path.resolve("from/source")))
+            assertEquals("left", Files.readString(path.resolve("to/destination")))
+        }
+    }
+
+    @Test
+    fun `cross directory exchange refuses non-directory descriptors and invalid child paths`() {
+        withLinuxDirectory("linux-syscall-exchange-refusal-") { path, directory ->
+            Files.writeString(path.resolve("file"), "file")
+            Files.createDirectory(path.resolve("child"))
+            LinuxFilesystemSyscalls.openRegularFileAtOrNull(directory.fd, "file")!!.use { file ->
+                assertFailsWith<IOException> {
+                    LinuxFilesystemSyscalls.exchange(file.fd, "entry", directory.fd, "entry")
+                }
+            }
+            assertFailsWith<IllegalArgumentException> {
+                LinuxFilesystemSyscalls.exchange(directory.fd, "../file", directory.fd, "entry")
+            }
+            assertFailsWith<IllegalArgumentException> {
+                LinuxFilesystemSyscalls.exchange(directory.fd, ".", directory.fd, "entry")
+            }
+            assertFailsWith<IOException> {
+                LinuxFilesystemSyscalls.exchange(directory.fd, "missing", directory.fd, "also-missing")
+            }
+            assertTrue(Files.isDirectory(path.resolve("child")))
+        }
+    }
+
+    @Test
+    fun `descriptor directory metadata reports statx fields without changing atime`() {
+        withLinuxDirectory("linux-syscall-directory-metadata-") { path, directory ->
+            Files.createDirectory(path.resolve("metadata"))
+            val target = path.resolve("metadata")
+            Files.writeString(target.resolve("child"), "payload")
+            val committedAtime = java.time.Instant.ofEpochSecond(1_234_567_890L, 123_456_789)
+            Files.setAttribute(target, "basic:lastAccessTime",
+                java.nio.file.attribute.FileTime.from(committedAtime), LinkOption.NOFOLLOW_LINKS)
+            LinuxFilesystemSyscalls.openDirectoryAt(directory.fd, "metadata").use { descriptor ->
+                val before = LinuxFilesystemSyscalls.fileState(descriptor)
+                val metadata = LinuxFilesystemSyscalls.directoryMetadata(descriptor)
+                val unix = Files.readAttributes(target, "unix:mode,uid,gid,nlink,size")
+                assertEquals(descriptor.identity.key, metadata.identity.key)
+                assertTrue(metadata.identity.isDirectory)
+                assertEquals((unix["mode"] as Number).toInt(), metadata.mode)
+                assertEquals((unix["uid"] as Number).toInt(), metadata.uid)
+                assertEquals((unix["gid"] as Number).toInt(), metadata.gid)
+                assertEquals((unix["nlink"] as Number).toInt(), metadata.linkCount)
+                assertEquals((unix["size"] as Number).toLong(), metadata.size)
+                assertEquals(before.accessTimeSeconds, metadata.accessTimeSeconds)
+                assertEquals(before.accessTimeNanoseconds, metadata.accessTimeNanoseconds)
+                assertEquals(before.modificationTimeSeconds, metadata.modificationTimeSeconds)
+                assertEquals(before.modificationTimeNanoseconds, metadata.modificationTimeNanoseconds)
+                assertEquals(before.changeTimeSeconds, metadata.changeTimeSeconds)
+                assertEquals(before.changeTimeNanoseconds, metadata.changeTimeNanoseconds)
+                assertEquals(before.accessTimeSeconds, LinuxFilesystemSyscalls.fileState(descriptor).accessTimeSeconds)
+                assertEquals(before.accessTimeNanoseconds, LinuxFilesystemSyscalls.fileState(descriptor).accessTimeNanoseconds)
+            }
+        }
+    }
+
+    @Test
+    fun `descriptor file state reports identity size and nanosecond timestamp changes`() {
+        withLinuxDirectory("linux-syscall-file-state-") { path, directory ->
+            Files.writeString(path.resolve("state"), "old")
+            LinuxFilesystemSyscalls.openRegularFileAtOrNull(directory.fd, "state")!!.use { authorized ->
+                val initial = LinuxFilesystemSyscalls.fileState(authorized)
+                Files.writeString(path.resolve("state"), "a substantially longer payload")
+                val changed = LinuxFilesystemSyscalls.fileState(authorized)
+                assertEquals(authorized.identity, initial.identity)
+                assertEquals(initial.identity, changed.identity)
+                assertEquals(3L, initial.size)
+                assertEquals("a substantially longer payload".length.toLong(), changed.size)
+                assertTrue(initial.modificationTimeNanoseconds in 0 until 1_000_000_000)
+                assertTrue(initial.changeTimeNanoseconds in 0 until 1_000_000_000)
+                assertTrue(changed.modificationTimeNanoseconds in 0 until 1_000_000_000)
+                assertTrue(changed.changeTimeNanoseconds in 0 until 1_000_000_000)
+                assertTrue(initial.changeTimeSeconds != changed.changeTimeSeconds ||
+                    initial.changeTimeNanoseconds != changed.changeTimeNanoseconds)
+            }
+        }
+        assertEquals(8192L, boundedCopyReadRequest(Long.MAX_VALUE, 0, 8192))
+        assertEquals(2L, boundedCopyReadRequest(1L, 0, 8192))
+        assertEquals(1L, boundedCopyReadRequest(1L, 1, 8192))
+    }
+
+    @Test
+    fun `descriptor statx file state decodes access time instead of birth time`() {
+        withLinuxDirectory("linux-syscall-atime-decode-") { path, directory ->
+            val file = path.resolve("atime")
+            Files.writeString(file, "metadata-bound")
+            val requested = java.time.Instant.ofEpochSecond(1_234_567_890L, 123_456_789)
+            Files.setAttribute(file, "basic:lastAccessTime",
+                java.nio.file.attribute.FileTime.from(requested), LinkOption.NOFOLLOW_LINKS)
+            val expected = Files.readAttributes(file, java.nio.file.attribute.BasicFileAttributes::class.java,
+                LinkOption.NOFOLLOW_LINKS).lastAccessTime().toInstant()
+
+            LinuxFilesystemSyscalls.openRegularFileAtOrNull(directory.fd, "atime")!!.use { descriptor ->
+                val state = LinuxFilesystemSyscalls.fileState(descriptor)
+                assertEquals(expected.epochSecond, state.accessTimeSeconds)
+                assertEquals(expected.nano, state.accessTimeNanoseconds)
+            }
+        }
+    }
+
+    @Test
+    fun `descriptor access time restoration leaves committed mtime unchanged`() {
+        withLinuxDirectory("linux-syscall-atime-restore-") { path, directory ->
+            val file = path.resolve("atime")
+            Files.writeString(file, "metadata-bound")
+            LinuxFilesystemSyscalls.openRegularFileAtOrNull(directory.fd, "atime")!!.use { descriptor ->
+                val before = LinuxFilesystemSyscalls.fileState(descriptor)
+                val oldAtime = java.time.Instant.ofEpochSecond(1_234_567_890L, 123_456_789)
+                LinuxFilesystemSyscalls.setAccessTime(descriptor, oldAtime.epochSecond, oldAtime.nano)
+                val after = LinuxFilesystemSyscalls.fileState(descriptor)
+                assertEquals(oldAtime.epochSecond, after.accessTimeSeconds)
+                assertEquals(oldAtime.nano, after.accessTimeNanoseconds)
+                assertEquals(before.modificationTimeSeconds, after.modificationTimeSeconds)
+                assertEquals(before.modificationTimeNanoseconds, after.modificationTimeNanoseconds)
+            }
+        }
+    }
+
+    @Test
+    fun `metadata neutral repair reads consume the complete bounded file`() {
+        withLinuxDirectory("linux-syscall-atime-read-") { path, directory ->
+            val file = path.resolve("content")
+            val content = "complete bounded content".toByteArray()
+            Files.write(file, content)
+            val oldAtime = java.time.Instant.ofEpochSecond(1_234_567_890L, 123_456_789)
+            Files.setAttribute(file, "basic:lastAccessTime", java.nio.file.attribute.FileTime.from(oldAtime), LinkOption.NOFOLLOW_LINKS)
+            LinuxFilesystemSyscalls.openRegularFileAtOrNull(directory.fd, "content")!!.use { authorized ->
+                val committedAtime = LinuxFilesystemSyscalls.fileState(authorized)
+                LinuxFilesystemSyscalls.openReadableWithoutAtimeFrom(authorized).use { readable ->
+                    assertContentEquals(content, LinuxFilesystemSyscalls.read(readable, content.size) { })
+                }
+                LinuxFilesystemSyscalls.openReadableWithoutAtimeFrom(authorized).use { readable ->
+                    assertFailsWith<LinuxResourceLimitException> {
+                        LinuxFilesystemSyscalls.read(readable, content.size - 1) { }
+                    }
+                }
+                val after = LinuxFilesystemSyscalls.fileState(authorized)
+                assertEquals(committedAtime.accessTimeSeconds, after.accessTimeSeconds)
+                assertEquals(committedAtime.accessTimeNanoseconds, after.accessTimeNanoseconds)
+            }
         }
     }
 

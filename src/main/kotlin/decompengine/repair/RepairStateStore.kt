@@ -22,6 +22,7 @@ internal class RepairStateStore private constructor(
     private val reports: LinuxDescriptor,
     private val revisions: LinuxDescriptor,
     private val blobs: LinuxDescriptor,
+    private val publicationStaging: LinuxDescriptor,
     private val faultInjector: ModuleRevisionFaultInjector?,
 ) : AutoCloseable {
     private var closed = false
@@ -32,6 +33,105 @@ internal class RepairStateStore private constructor(
     val reportsPath: Path = LinuxFilesystemSyscalls.descriptorPath(reports)
     val revisionsPath: Path = LinuxFilesystemSyscalls.descriptorPath(revisions)
     val blobsPath: Path = LinuxFilesystemSyscalls.descriptorPath(blobs)
+    val publicationStagingPath: Path = LinuxFilesystemSyscalls.descriptorPath(publicationStaging)
+
+    fun publicationStagingIdentity(): LinuxFileIdentity = LinuxFilesystemSyscalls.identity(publicationStaging.fd)
+
+    fun openPublicationStagingDirectory(): LinuxDescriptor =
+        LinuxFilesystemSyscalls.openDirectoryAt(revisions.fd, PUBLICATION_STAGING_DIRECTORY)
+
+    fun publicationStagingEntries(maximumEntries: Int): List<String> =
+        LinuxFilesystemSyscalls.directoryEntryNames(publicationStaging, maximumEntries).sorted()
+
+    /** Stage a durable replacement inode outside source ancestors and bind it to a private name. */
+    fun stagePublicationFile(
+        name: String,
+        bytes: ByteArray,
+        mode: Int,
+        beforeLink: (LinuxFileIdentity) -> Unit = {},
+    ): LinuxFileIdentity {
+        require(name.matches(PUBLICATION_STAGING_NAME))
+        require(!exists(publicationStaging, name)) { "repair publication staging name already exists" }
+        val temporary = LinuxFilesystemSyscalls.createTemporaryAt(publicationStaging.fd)
+        try {
+            LinuxFilesystemSyscalls.write(temporary, bytes) { }
+            LinuxFilesystemSyscalls.chmod(temporary, mode)
+            LinuxFilesystemSyscalls.synchronize(temporary)
+            val before = LinuxFilesystemSyscalls.identity(temporary.fd)
+            require(before.isRegularFile && before.linkCount == 0 && before.mode.permissions == mode)
+            // The caller durably records this unlinked inode before it gains a private name.
+            // A crash after the record but before link is harmless (the name is absent); a crash
+            // after link can be cleaned only if the recorded inode identity still matches.
+            beforeLink(before)
+            LinuxFilesystemSyscalls.linkTemporaryAt(temporary, publicationStaging.fd, name)
+            LinuxFilesystemSyscalls.synchronize(publicationStaging)
+            val linked = requireNotNull(LinuxFilesystemSyscalls.openRegularFileAtOrNull(publicationStaging.fd, name))
+            linked.use { held ->
+                val state = LinuxFilesystemSyscalls.fileState(held)
+                require(state.identity.key == before.key && state.identity.mountId == before.mountId &&
+                    state.identity.linkCount == 1 && state.identity.mode.permissions == mode &&
+                    state.size == bytes.size.toLong() &&
+                    LinuxFilesystemSyscalls.sha256WithoutAtime(held, state.size) == decompengine.project.sha256(bytes)) {
+                    "repair staged publication bytes or inode identity changed before the decision"
+                }
+                return state.identity
+            }
+        } finally {
+            temporary.close()
+        }
+    }
+
+    fun openPublicationStage(name: String): LinuxDescriptor? {
+        require(name.matches(PUBLICATION_STAGING_NAME))
+        return LinuxFilesystemSyscalls.openRegularFileAtOrNull(publicationStaging.fd, name)
+    }
+
+    fun publicationStageState(name: String): decompengine.acp.LinuxFileState {
+        val held = requireNotNull(openPublicationStage(name)) { "repair publication stage is missing" }
+        return held.use { LinuxFilesystemSyscalls.fileState(it) }
+    }
+
+    fun removePublicationStage(name: String, expected: LinuxFileIdentity, digest: String, size: Long) {
+        require(name.matches(PUBLICATION_STAGING_NAME) && digest.matches(SHA256_NAME))
+        val held = openPublicationStage(name) ?: return
+        held.use {
+            val observed = LinuxFilesystemSyscalls.fileState(held)
+            require(observed.identity.key == expected.key && observed.identity.mountId == expected.mountId &&
+                observed.identity.linkCount == 1 && observed.size == size &&
+                LinuxFilesystemSyscalls.sha256WithoutAtime(held, size) == digest) {
+                "repair publication staging entry is not the authenticated transaction inode"
+            }
+            requireNamedIdentity(publicationStaging, name, expected, "repair publication staging cleanup")
+            LinuxFilesystemSyscalls.unlink(publicationStaging.fd, name)
+            LinuxFilesystemSyscalls.synchronize(publicationStaging)
+        }
+    }
+
+    /** Remove a pre-decision stage only when its transaction-bound name and candidate bytes agree. */
+    fun discardUndecidedPublicationStage(
+        name: String,
+        digest: String,
+        size: Long,
+        expected: RepairPredecisionStage? = null,
+    ) {
+        require(name.matches(PUBLICATION_STAGING_NAME) && digest.matches(SHA256_NAME) && size >= 0)
+        val held = openPublicationStage(name) ?: return
+        held.use {
+            val observed = LinuxFilesystemSyscalls.fileState(held)
+            require((expected == null || (observed.identity.key.device == expected.device &&
+                observed.identity.key.inode == expected.inode && observed.identity.mountId == expected.mountId &&
+                observed.identity.mode == expected.mode && observed.identity.uid == expected.uid &&
+                observed.identity.gid == expected.gid)) &&
+                observed.identity.uid == publicationStaging.identity.uid && observed.identity.linkCount == 1 &&
+                observed.size == size && LinuxFilesystemSyscalls.sha256WithoutAtime(held, size) == digest) {
+                "undecided repair staging entry does not match its candidate commitment"
+            }
+            requireNamedIdentity(publicationStaging, name, observed.identity, "undecided repair staging cleanup")
+            faultInjector?.hit(ModuleRevisionFaultPoint.BeforeUndecidedStageUnlink(expected?.path ?: name))
+            LinuxFilesystemSyscalls.unlink(publicationStaging.fd, name)
+            LinuxFilesystemSyscalls.synchronize(publicationStaging)
+        }
+    }
 
     fun graphExists(): Boolean = exists(revisions, GRAPH_NAME)
 
@@ -60,7 +160,12 @@ internal class RepairStateStore private constructor(
         return readRequiredStable(revisions, revisionsPath, name, maximumBytes, "repair revision evidence")
     }
 
-    fun writeGraph(bytes: ByteArray) = writeAtomically(revisions, GRAPH_NAME, bytes, "revision-state")
+    /** Bounded inventory used to authenticate schema-6 recovery evidence before publication. */
+    fun revisionFileNames(maximumEntries: Int): List<String> =
+        LinuxFilesystemSyscalls.directoryEntryNames(revisions, maximumEntries)
+
+    fun writeGraph(bytes: ByteArray, beforePublication: (() -> Unit)? = null) =
+        writeAtomically(revisions, GRAPH_NAME, bytes, "revision-state", beforePublication = beforePublication)
 
     fun preserveLegacyState(kind: String, bytes: ByteArray, maximumBytes: Long) {
         require(kind in setOf("graph", "history"))
@@ -427,9 +532,13 @@ internal class RepairStateStore private constructor(
             try {
                 validationDiffs?.close()
             } finally {
-                blobs.close()
-                revisions.close()
-                reports.close()
+                try {
+                    publicationStaging.close()
+                } finally {
+                    blobs.close()
+                    revisions.close()
+                    reports.close()
+                }
             }
         }
     }
@@ -479,6 +588,7 @@ internal class RepairStateStore private constructor(
         scope: String,
         requireAbsent: Boolean = false,
         keepDisplaced: Boolean = false,
+        beforePublication: (() -> Unit)? = null,
     ) {
         checkOpen()
         val temporaryName = repairAtomicTemporaryName(name)
@@ -521,6 +631,9 @@ internal class RepairStateStore private constructor(
             // Make the recovery name durable before it participates in an exchange.
             LinuxFilesystemSyscalls.synchronize(parent)
             faultInjector?.hit(ModuleRevisionFaultPoint.AfterStateTemporaryDirectorySync(scope, name))
+            // For the schema-6 acceptance record, run the final source/witness check only after
+            // the complete graph payload is prepared and durable, immediately before exposing it.
+            beforePublication?.invoke()
             if (targetIdentity == null) {
                 var published = false
                 try {
@@ -637,12 +750,15 @@ internal class RepairStateStore private constructor(
             var reports: LinuxDescriptor? = null
             var revisions: LinuxDescriptor? = null
             var blobs: LinuxDescriptor? = null
+            var publicationStaging: LinuxDescriptor? = null
             try {
                 reports = openOrCreateDirectory(projectRoot, REPORTS_NAME)
                 revisions = openOrCreateDirectory(reports, REVISIONS_NAME)
                 blobs = openOrCreateDirectory(revisions, BLOBS_NAME)
-                return RepairStateStore(projectRoot, reports, revisions, blobs, faultInjector)
+                publicationStaging = openOrCreateDirectory(revisions, PUBLICATION_STAGING_DIRECTORY)
+                return RepairStateStore(projectRoot, reports, revisions, blobs, publicationStaging, faultInjector)
             } catch (failure: Throwable) {
+                publicationStaging?.close()
                 blobs?.close()
                 revisions?.close()
                 reports?.close()
@@ -774,6 +890,7 @@ internal fun repairAtomicTemporaryName(targetName: String): String {
 private const val REPORTS_NAME = "reports"
 private const val REVISIONS_NAME = "repair-revisions"
 private const val BLOBS_NAME = "blobs"
+private const val PUBLICATION_STAGING_DIRECTORY = "publication-staging"
 private const val GRAPH_NAME = "graph.json"
 private const val RECOVERY_BINDING_NAME = "recovery-binding.json"
 private val REVISION_EVIDENCE_NAME = Regex("revision_[A-Za-z0-9_]+\\.acp-receipt\\.json")
@@ -781,6 +898,7 @@ private const val OWNER_ALL = 0x1c0 // 0700
 private const val OWNER_READ_WRITE = 0x180 // 0600
 private const val GROUP_OR_OTHER_WRITE = 0x12 // 0022
 private val SHA256_NAME = Regex("[0-9a-f]{64}")
+private val PUBLICATION_STAGING_NAME = Regex("\\.revision_[A-Za-z0-9_]+-[0-9a-f]{64}\\.preimage")
 private val BLOB_ATOMIC_NAME = Regex("\\.([0-9a-f]{64})\\.repair-atomic\\.tmp")
 private val BLOB_CLEANUP_NAME = Regex("([0-9a-f]{64})\\.cleanup")
 

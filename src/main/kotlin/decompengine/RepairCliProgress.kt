@@ -52,6 +52,8 @@ internal class ReconstructionCliProgress private constructor(
     private val observer: CliProgressObserver,
     private val workspace: decompengine.project.ReconstructionOutputWorkspace?,
 ) : AgentWorkflowProgress by journal, AutoCloseable {
+    internal val publicationWorkspace: decompengine.project.ReconstructionOutputWorkspace? get() = workspace
+
     private val closed = AtomicBoolean()
 
     override fun close() {
