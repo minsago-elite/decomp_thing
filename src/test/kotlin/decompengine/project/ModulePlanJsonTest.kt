@@ -6,6 +6,12 @@ import kotlin.test.assertFails
 import kotlin.test.assertFailsWith
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
+import kotlin.test.assertContentEquals
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
 
 class ModulePlanJsonTest {
     private val layout = GeneratedCMakeReconstructionProfile.descriptor.layout
@@ -73,6 +79,89 @@ class ModulePlanJsonTest {
         ModulePlanJson.requireExactOwnership(parsed, model, layout, 1)
         val empty = model.copy(functions = emptyList(), globals = emptyList(), types = emptyList())
         ModulePlanJson.requireExactOwnership(DeterministicModulePlanner().plan(empty), empty, layout, 1)
+    }
+
+    @Test
+    fun `canonical comparison preserves rejection message and after rendering checkpoint`() {
+        val bytes = plan.toJson().toByteArray(Charsets.UTF_8)
+        assertTrue(plan.hasCanonicalBytes(bytes))
+        val parsed = Json.parseToJsonElement(String(bytes, Charsets.UTF_8)).jsonObject
+        val reorderedFields = parsed.toMutableMap().also {
+            it["modules"] = JsonArray(parsed.getValue("modules").jsonArray.reversed())
+        }
+        val reordered = JsonObject(reorderedFields)
+            .toString().toByteArray(Charsets.UTF_8)
+        val oneByteChanged = bytes.copyOf().also {
+            val versionDigit = it.indexOf('2'.code.toByte())
+            it[versionDigit] = '3'.code.toByte()
+        }
+        assertTrue(!plan.hasCanonicalBytes(oneByteChanged))
+        assertTrue(!plan.hasCanonicalBytes(bytes.copyOf(bytes.size - 1)))
+        assertTrue(!plan.hasCanonicalBytes(bytes + byteArrayOf(0x20)))
+        assertTrue(!plan.hasCanonicalBytes(bytes.copyOf().also { it[0] = 0x20 }))
+        val changedValue = String(bytes, Charsets.UTF_8).replaceFirst("schemaVersion\": 2", "schemaVersion\":2")
+            .toByteArray(Charsets.UTF_8)
+        for (changed in listOf(changedValue, reordered, bytes + byteArrayOf(0x20))) {
+            val stages = mutableListOf<String>()
+            val error = assertFailsWith<IllegalArgumentException> {
+                ModulePlanJson.readCanonical(changed, changed.size) { stages += it }
+            }
+            assertEquals("module plan must use exact canonical fields, ordering, and bytes", error.message)
+            assertTrue("after rendering canonical module plan" in stages)
+        }
+        val mismatch = bytes + byteArrayOf(0x20)
+        val cancellation = InterruptedException("cancel after render")
+        val actual = assertFailsWith<InterruptedException> {
+            ModulePlanJson.readCanonical(mismatch, mismatch.size) {
+                if (it == "after rendering canonical module plan") throw cancellation
+            }
+        }
+        assertSame(cancellation, actual)
+    }
+
+    @Test
+    fun `renderer keeps Java UTF8 replacement for supplementary and lone surrogates`() {
+        val value = ModulePlan(modules = listOf(PlannedModule(
+            "😀\uD800\uDC00\uD800", "p", "h", emptyList(), emptyList(),
+            boundaryEvidence = listOf("é\uD800", "\uDC00\uD801\uD802", "漢"),
+        )))
+        val expectedText = """
+{
+  "schemaVersion": 2,
+  "modules": [    {
+      "id": "😀𐀀?",
+      "sourcePath": "p",
+      "headerPath": "h",
+      "functionIds": [],
+      "globalIds": [],
+      "typeIds": [],
+      "boundaryEvidence": ["é?", "???", "漢"]
+    }
+  ],
+  "dependencyCycles": []
+}
+""".trimIndent() + "\n"
+        val expected = expectedText.toByteArray(Charsets.UTF_8) // frozen from the pre-emitter String renderer
+        assertContentEquals(expected, value.toJson().toByteArray(Charsets.UTF_8))
+        assertTrue(value.hasCanonicalBytes(expected))
+    }
+
+    @Test
+    fun `canonical byte comparison finishes traversal after the first mismatch`() {
+        var lastValueRead = false
+        val tail = object : AbstractList<String>() {
+            override val size: Int = 3
+            override fun get(index: Int): String {
+                if (index == size - 1) lastValueRead = true
+                return "evidence-$index"
+            }
+        }
+        val candidate = ModulePlan(modules = listOf(
+            plan.modules.first().copy(boundaryEvidence = tail),
+        ))
+
+        assertTrue(!candidate.hasCanonicalBytes(byteArrayOf(0)))
+        assertTrue(lastValueRead)
     }
 
     @Test

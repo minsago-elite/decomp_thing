@@ -68,9 +68,9 @@ internal object ModulePlanJson {
             })
         }
         checkpoint("before rendering canonical module plan")
-        val canonical = measured("render-canonical-plan") { plan.toJson().toByteArray(Charsets.UTF_8) }
+        val canonical = measured("render-canonical-plan") { plan.hasCanonicalBytes(bytes) }
         checkpoint("after rendering canonical module plan")
-        require(bytes.contentEquals(canonical)) {
+        require(canonical) {
             "module plan must use exact canonical fields, ordering, and bytes"
         }
         checkpoint("before returning module plan")
