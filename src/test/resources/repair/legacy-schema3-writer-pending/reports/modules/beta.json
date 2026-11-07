@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 6,
+  "fingerprint": "0834c1cf345856de905eefe45ca55ee628eb9a23e24445e7046f4d61f07294d6",
+  "sourceSha256": "be742bdf436b609121bf6fe4981117706ce731904a9e5a9629d0bc5c5db6b9d0",
+  "generator": "evidence-only",
+  "workflowOrigin": "reconstructor-return",
+  "reconstructorIdentity": "evidence-only:v5",
+  "promptSha256": "d61c1b519fa960a791886ec6c927a1410cfee0def9e3eee82a5f48f4df9ee4e0",
+  "promptCharacters": null,
+  "promptBudgetCharacters": null,
+  "executionEvidencePath": null,
+  "executionEvidenceSha256": null,
+  "executionEvidenceSchemaVersion": null,
+  "executionRequestSha256": null,
+  "executionTerminalOutcome": null,
+  "executionReleaseComplete": null,
+  "inputBinarySha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "modelSchemaVersion": 1,
+  "profileSha256": "a448a139a09f28ad9f2e08bfcebcb9d85765a0a557ebb11db6d7634bc145f28f",
+  "accepted": false,
+  "compilation": null,
+  "retryable": false,
+  "entityStatuses": [
+    {"id":"fn_beta","status":"unresolved"}
+  ],
+  "issues": [    {
+      "code": "evidence-only-placeholder",
+      "message": "evidence-only mode emits placeholders and does not accept implementations",
+      "entityIds": ["fn_beta"]
+    },    {
+      "code": "generic-return-placeholder",
+      "message": "candidate implementation for fn_beta is indistinguishable from the evidence-only return stub",
+      "entityIds": ["fn_beta"]
+    }
+  ]
+}

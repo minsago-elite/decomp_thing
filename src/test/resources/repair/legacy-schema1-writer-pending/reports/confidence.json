@@ -1,0 +1,11 @@
+{
+  "basis": "recovery evidence only; behavioral equivalence is not implied",
+  "projectScore": 1.0000,
+  "modules": [
+    {"id":"alpha","score":1.0000},
+    {"id":"beta","score":1.0000},
+    {"id":"charlie","score":1.0000},
+    {"id":"delta","score":1.0000}
+  ],
+  "unresolvedEntityIds": []
+}

@@ -1,0 +1,226 @@
+{
+  "schemaVersion": 3,
+  "profileId": "generated-c-make-v1",
+  "profileSha256": "026371e742d94b8a4dadd5a6b591f649721f0edbdcc9222dece5d30c0c709cc5",
+  "inputSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "files": [    {
+      "path": "Makefile",
+      "sha256": "9a882d9d3a9650c15557774ea8a8e682f9855836dd728c2f256b1a50b6b91248",
+      "generator": "planner",
+      "promptSha256": null,
+      "acceptedImplementation": null,
+      "contentKind": "utf8-text",
+      "roles": ["archive-payload", "build-definition", "build-input", "editable", "viewable"],
+      "entityIds": []
+    },    {
+      "path": "UNRESOLVED.md",
+      "sha256": "e6b9dd8f68453cb0282e48932ebba164b213ab322e7e2bcf1f8bee52a303ed19",
+      "generator": "evidence",
+      "promptSha256": null,
+      "acceptedImplementation": null,
+      "contentKind": "utf8-text",
+      "roles": ["archive-payload", "evidence", "viewable"],
+      "entityIds": ["fn_alpha", "fn_beta", "fn_charlie", "fn_delta"]
+    },    {
+      "path": "include/decomp_types.h",
+      "sha256": "aa27788da371c7d5cd8215620e33cfeb012f9a4784e5af59807cd05a4a830f1e",
+      "generator": "planner",
+      "promptSha256": null,
+      "acceptedImplementation": null,
+      "contentKind": "utf8-text",
+      "roles": ["archive-payload", "build-input", "editable", "public-interface", "viewable"],
+      "entityIds": []
+    },    {
+      "path": "include/modules/alpha.h",
+      "sha256": "8e98dfcdbae465088bdf966b178b1b02e14e95a4e961bcb33978f06e36d1cdbc",
+      "generator": "planner",
+      "promptSha256": null,
+      "acceptedImplementation": null,
+      "contentKind": "utf8-text",
+      "roles": ["archive-payload", "build-input", "editable", "public-interface", "viewable"],
+      "entityIds": ["fn_alpha"]
+    },    {
+      "path": "include/modules/beta.h",
+      "sha256": "09f4348b623e32b0a1b31f546ef79a244ddbc81f44824897f41890fbd51abaa5",
+      "generator": "planner",
+      "promptSha256": null,
+      "acceptedImplementation": null,
+      "contentKind": "utf8-text",
+      "roles": ["archive-payload", "build-input", "editable", "public-interface", "viewable"],
+      "entityIds": ["fn_beta"]
+    },    {
+      "path": "include/modules/charlie.h",
+      "sha256": "f8c58a4d9b02070450498c520bbc619b7f919edf7a10608db941165857c0a5e6",
+      "generator": "planner",
+      "promptSha256": null,
+      "acceptedImplementation": null,
+      "contentKind": "utf8-text",
+      "roles": ["archive-payload", "build-input", "editable", "public-interface", "viewable"],
+      "entityIds": ["fn_charlie"]
+    },    {
+      "path": "include/modules/delta.h",
+      "sha256": "aeb6a27eedf67d54f839c18ae611ef085ab5a6e9820baf99b426e57b4f28238f",
+      "generator": "planner",
+      "promptSha256": null,
+      "acceptedImplementation": null,
+      "contentKind": "utf8-text",
+      "roles": ["archive-payload", "build-input", "editable", "public-interface", "viewable"],
+      "entityIds": ["fn_delta"]
+    },    {
+      "path": "reports/confidence.json",
+      "sha256": "1400b3e7ede8a5267000083068e77077e8393c522d949772c8d49e61454498e9",
+      "generator": "evidence",
+      "promptSha256": null,
+      "acceptedImplementation": null,
+      "contentKind": "utf8-text",
+      "roles": ["archive-payload", "evidence", "viewable"],
+      "entityIds": ["fn_alpha", "fn_beta", "fn_charlie", "fn_delta"]
+    },    {
+      "path": "reports/module_plan.json",
+      "sha256": "b001e630d4955932b7768dc71c1ccdccc1dddd516bb8a4704ffd6ce9ceb11371",
+      "generator": "planner",
+      "promptSha256": null,
+      "acceptedImplementation": null,
+      "contentKind": "utf8-text",
+      "roles": ["archive-payload", "evidence", "viewable"],
+      "entityIds": ["fn_alpha", "fn_beta", "fn_charlie", "fn_delta"]
+    },    {
+      "path": "reports/modules/alpha.json",
+      "sha256": "c426b36c6ec01eb5211f03e92df5ca4729b9b1b9ac6f91bbf7dd384d9ccc5b5f",
+      "generator": "planner",
+      "promptSha256": null,
+      "acceptedImplementation": null,
+      "contentKind": "utf8-text",
+      "roles": ["archive-payload", "evidence", "viewable"],
+      "entityIds": ["fn_alpha"]
+    },    {
+      "path": "reports/modules/beta.json",
+      "sha256": "048ff02f19ee94315930528b0795fc720fad127bc5ed36a832e9de69f5636cad",
+      "generator": "planner",
+      "promptSha256": null,
+      "acceptedImplementation": null,
+      "contentKind": "utf8-text",
+      "roles": ["archive-payload", "evidence", "viewable"],
+      "entityIds": ["fn_beta"]
+    },    {
+      "path": "reports/modules/charlie.json",
+      "sha256": "e48212ff7d00b764caae1d3e0945a292ab107308bdf8c159a2ab4d17b4ad3d46",
+      "generator": "planner",
+      "promptSha256": null,
+      "acceptedImplementation": null,
+      "contentKind": "utf8-text",
+      "roles": ["archive-payload", "evidence", "viewable"],
+      "entityIds": ["fn_charlie"]
+    },    {
+      "path": "reports/modules/delta.json",
+      "sha256": "2fbb5e6e34c639a3916e5b9f6c9ee5aa8273fc5ac0ec011b514b7419ddcbf439",
+      "generator": "planner",
+      "promptSha256": null,
+      "acceptedImplementation": null,
+      "contentKind": "utf8-text",
+      "roles": ["archive-payload", "evidence", "viewable"],
+      "entityIds": ["fn_delta"]
+    },    {
+      "path": "reports/program_model.json",
+      "sha256": "23206f7b7f7c3cd94707681ec7c04765329a941ba7a1c12af653cf6ddd284b54",
+      "generator": "analysis",
+      "promptSha256": null,
+      "acceptedImplementation": null,
+      "contentKind": "utf8-text",
+      "roles": ["archive-payload", "evidence", "viewable"],
+      "entityIds": ["fn_alpha", "fn_beta", "fn_charlie", "fn_delta"]
+    },    {
+      "path": "reports/toolchain.json",
+      "sha256": "ba04c6abd5fdf381ad8906b1e845b9ce87bf9e0b255aa997fe8aa6aac215fd57",
+      "generator": "environment",
+      "promptSha256": null,
+      "acceptedImplementation": null,
+      "contentKind": "utf8-text",
+      "roles": ["archive-payload", "evidence", "viewable"],
+      "entityIds": []
+    },    {
+      "path": "src/main.c",
+      "sha256": "ae2f8a813d6644d1e9565135c18bc0e55258b3eb138ed4b1a1fdb8ccd9720603",
+      "generator": "planner",
+      "promptSha256": null,
+      "acceptedImplementation": null,
+      "contentKind": "utf8-text",
+      "roles": ["archive-payload", "build-input", "editable", "entrypoint-implementation", "viewable"],
+      "entityIds": ["fn_alpha"]
+    },    {
+      "path": "src/modules/alpha.c",
+      "sha256": "6c33ee365f44bc5e452426b3ad5a0220c1378808e886c4953de57acbc812f81f",
+      "generator": "evidence-only",
+      "promptSha256": "f10382fee01d47b2bb8597e6586acda18c403af722c2fbe82132a973af08c776",
+      "acceptedImplementation": false,
+      "contentKind": "utf8-text",
+      "roles": ["archive-payload", "build-input", "editable", "module-implementation", "viewable"],
+      "entityIds": ["fn_alpha"]
+    },    {
+      "path": "src/modules/alpha_internal.h",
+      "sha256": "10749633ec7aba4b6bb24828c6e937ac6fea051d751c0dcd20f578e9e8166113",
+      "generator": "planner",
+      "promptSha256": null,
+      "acceptedImplementation": null,
+      "contentKind": "utf8-text",
+      "roles": ["archive-payload", "build-input", "editable", "private-interface", "viewable"],
+      "entityIds": ["fn_alpha"]
+    },    {
+      "path": "src/modules/beta.c",
+      "sha256": "545cc49668c54902d3b42724671b2bcbcc7cea8cff5be343d5cf8f653bfa3609",
+      "generator": "evidence-only",
+      "promptSha256": "97e267da2f3ee84d74b5863c4a18396c7090f53e3814481c9d86820c3a286828",
+      "acceptedImplementation": false,
+      "contentKind": "utf8-text",
+      "roles": ["archive-payload", "build-input", "editable", "module-implementation", "viewable"],
+      "entityIds": ["fn_beta"]
+    },    {
+      "path": "src/modules/beta_internal.h",
+      "sha256": "868e45c41cf0d374a0720049d5abe16401446dc94388b2abeca1518eb9915ac9",
+      "generator": "planner",
+      "promptSha256": null,
+      "acceptedImplementation": null,
+      "contentKind": "utf8-text",
+      "roles": ["archive-payload", "build-input", "editable", "private-interface", "viewable"],
+      "entityIds": ["fn_beta"]
+    },    {
+      "path": "src/modules/charlie.c",
+      "sha256": "0517a4df4603c8676a779c69efa20fb3c715a9363824454ce764e990a2da5511",
+      "generator": "evidence-only",
+      "promptSha256": "9e514a8c601e71e5fc4004a62d9dc22791108507e83fb3faf0b3da0e9a359f97",
+      "acceptedImplementation": false,
+      "contentKind": "utf8-text",
+      "roles": ["archive-payload", "build-input", "editable", "module-implementation", "viewable"],
+      "entityIds": ["fn_charlie"]
+    },    {
+      "path": "src/modules/charlie_internal.h",
+      "sha256": "ed3528c97c392465559f53deb10d0ff0715685d392917520ff94211e586dfbae",
+      "generator": "planner",
+      "promptSha256": null,
+      "acceptedImplementation": null,
+      "contentKind": "utf8-text",
+      "roles": ["archive-payload", "build-input", "editable", "private-interface", "viewable"],
+      "entityIds": ["fn_charlie"]
+    },    {
+      "path": "src/modules/delta.c",
+      "sha256": "7b83b3f8fa455712da5cdeafd74f70a7f6a6aee55e5b8a9c3ff2988e1f3b5599",
+      "generator": "evidence-only",
+      "promptSha256": "e0b83b93255b8bee24b0f51f916b49e6ffa03f82b1f3193612b933d0ba528762",
+      "acceptedImplementation": false,
+      "contentKind": "utf8-text",
+      "roles": ["archive-payload", "build-input", "editable", "module-implementation", "viewable"],
+      "entityIds": ["fn_delta"]
+    },    {
+      "path": "src/modules/delta_internal.h",
+      "sha256": "499bc94fc99b88560a50f81ffdcbfa6e4cb32d0bbfba417f3032a2fba1f4f7ac",
+      "generator": "planner",
+      "promptSha256": null,
+      "acceptedImplementation": null,
+      "contentKind": "utf8-text",
+      "roles": ["archive-payload", "build-input", "editable", "private-interface", "viewable"],
+      "entityIds": ["fn_delta"]
+    }
+  ],
+  "unresolvedEntityIds": [],
+  "unresolvedImplementationIds": ["fn_alpha", "fn_beta", "fn_charlie", "fn_delta"]
+}

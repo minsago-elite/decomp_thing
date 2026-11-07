@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 6,
+  "fingerprint": "aba6933a31c4b9046a2c8252b97f459f5269202ffdd5d3e3833005bf618318c9",
+  "sourceSha256": "4ebdfd1cb3ee223bbff98aa942b8856f5fa911eb8b8d2d5d0f42eed13349c99f",
+  "generator": "evidence-only",
+  "workflowOrigin": "reconstructor-return",
+  "reconstructorIdentity": "evidence-only:v5",
+  "promptSha256": "2d8f6d8b88060893c67c4989a001383035abd58db57a71b6ce97e0ceaac146f6",
+  "promptCharacters": null,
+  "promptBudgetCharacters": null,
+  "executionEvidencePath": null,
+  "executionEvidenceSha256": null,
+  "executionEvidenceSchemaVersion": null,
+  "executionRequestSha256": null,
+  "executionTerminalOutcome": null,
+  "executionReleaseComplete": null,
+  "inputBinarySha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "modelSchemaVersion": 1,
+  "profileSha256": "a448a139a09f28ad9f2e08bfcebcb9d85765a0a557ebb11db6d7634bc145f28f",
+  "accepted": false,
+  "compilation": null,
+  "retryable": false,
+  "entityStatuses": [
+    {"id":"fn_delta","status":"unresolved"}
+  ],
+  "issues": [    {
+      "code": "evidence-only-placeholder",
+      "message": "evidence-only mode emits placeholders and does not accept implementations",
+      "entityIds": ["fn_delta"]
+    },    {
+      "code": "generic-return-placeholder",
+      "message": "candidate implementation for fn_delta is indistinguishable from the evidence-only return stub",
+      "entityIds": ["fn_delta"]
+    }
+  ]
+}

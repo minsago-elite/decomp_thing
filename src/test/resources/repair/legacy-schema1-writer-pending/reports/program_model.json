@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "inputSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "functions": [    {
+      "id": "fn_alpha",
+      "name": "alpha_run",
+      "address": "0x1000",
+      "prototype": "int alpha_run(void)",
+      "status": "recovered",
+      "calls": ["fn_beta"],
+      "referencedGlobals": [],
+      "strings": [],
+      "decompiledC": null
+    },    {
+      "id": "fn_beta",
+      "name": "beta_read",
+      "address": "0x2000",
+      "prototype": "int beta_read(void)",
+      "status": "recovered",
+      "calls": [],
+      "referencedGlobals": [],
+      "strings": [],
+      "decompiledC": null
+    },    {
+      "id": "fn_charlie",
+      "name": "charlie_emit",
+      "address": "0x3000",
+      "prototype": "int charlie_emit(void)",
+      "status": "recovered",
+      "calls": [],
+      "referencedGlobals": [],
+      "strings": [],
+      "decompiledC": null
+    },    {
+      "id": "fn_delta",
+      "name": "delta_idle",
+      "address": "0x4000",
+      "prototype": "int delta_idle(void)",
+      "status": "recovered",
+      "calls": [],
+      "referencedGlobals": [],
+      "strings": [],
+      "decompiledC": null
+    }
+  ],
+  "globals": [
+  ],
+  "types": [
+  ]
+}

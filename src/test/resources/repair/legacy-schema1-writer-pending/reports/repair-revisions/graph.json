@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "budget": {"maximumIndexedModules":100000,"maximumIndexedEntities":2000000,"maximumDependencyEdges":20000000,"maximumSourceFiles":500000,"maximumSourceFileBytes":134217728,"maximumSourceBytes":4294967296,"maximumIndexEvidenceBytes":536870912,"maximumDiagnosticCharacters":1000000,"maximumRegressionInputBytes":1048576,"maximumRegressionInputs":10000,"maximumRegressionArguments":100000,"maximumRequestBytes":4194304,"maximumResponseBytes":16777216,"maximumProjectionBytes":67108864,"maximumContextModules":64,"maximumContextFiles":256,"maximumContextBytes":2097152,"maximumStagingDirectories":512,"maximumStagingBytes":2097152,"maximumPatchFiles":32,"maximumPatchBytes":2097152,"maximumBehaviorStdoutBytes":8388608,"maximumBehaviorStderrBytes":8388608,"maximumBehaviorOutputBytes":16777216,"maximumBehaviorExecutionMillis":5000,"maximumDiscoveryEntries":1000000,"maximumDiscoveryDirectories":100000,"maximumDiscoveryDepth":128,"maximumStateDirectoryEntries":1000000,"maximumGraphLockWaitMillis":10000,"maximumRevisionNodes":10000,"maximumGraphBytes":268435456,"maximumStoredBlobBytes":4294967296},
+  "profileId": "generated-c-make-v1",
+  "profileSha256": "015a739f0d24858938462e5a17f605d7e9a06109a9fa2b0b2a19983d24962b9c",
+  "editablePaths": ["Makefile", "include/decomp_types.h", "include/modules/alpha.h", "include/modules/beta.h", "include/modules/charlie.h", "include/modules/delta.h", "src/main.c", "src/modules/alpha.c", "src/modules/alpha_internal.h", "src/modules/beta.c", "src/modules/beta_internal.h", "src/modules/charlie.c", "src/modules/charlie_internal.h", "src/modules/delta.c", "src/modules/delta_internal.h"],
+  "indexSha256": "cece91349e5443324fc85b378a894ab4e71f25bc75b21524184c3cb80e02d7dd",
+  "retainedRegressionInputs": [],
+  "regressionCorpusSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "headId": "root_a661b388cb04add88301f17e",
+  "nextOrdinal": 2,
+  "storedBlobBytes": 3096,
+  "nodes": [
+    {
+      "id": "root_a661b388cb04add88301f17e",
+      "parentId": null,
+      "ordinal": 0,
+      "status": "root",
+      "sourceRevisionSha256": "c83b9fc34dcd8bf64a23b7c781aa36588665d9e3a445624564c5e0ebf434944b",
+      "changedModules": [],
+      "invalidatedModules": [],
+      "evidenceKind": "initial-source",
+      "evidenceArtifact": "source_tree_manifest.json",
+      "evidenceSummary": "initial accepted source tree",
+      "repairMetadata": null,
+      "recoveredAfterCrash": false,
+      "changes": [
+        {"path":"Makefile","beforeSha256":null,"beforeBytes":null,"afterSha256":"9a882d9d3a9650c15557774ea8a8e682f9855836dd728c2f256b1a50b6b91248","beforeBlobSha256":null,"afterBlobSha256":"9a882d9d3a9650c15557774ea8a8e682f9855836dd728c2f256b1a50b6b91248","afterBytes":923},
+        {"path":"include/decomp_types.h","beforeSha256":null,"beforeBytes":null,"afterSha256":"aa27788da371c7d5cd8215620e33cfeb012f9a4784e5af59807cd05a4a830f1e","beforeBlobSha256":null,"afterBlobSha256":"aa27788da371c7d5cd8215620e33cfeb012f9a4784e5af59807cd05a4a830f1e","afterBytes":95},
+        {"path":"include/modules/alpha.h","beforeSha256":null,"beforeBytes":null,"afterSha256":"8e98dfcdbae465088bdf966b178b1b02e14e95a4e961bcb33978f06e36d1cdbc","beforeBlobSha256":null,"afterBlobSha256":"8e98dfcdbae465088bdf966b178b1b02e14e95a4e961bcb33978f06e36d1cdbc","afterBytes":96},
+        {"path":"include/modules/beta.h","beforeSha256":null,"beforeBytes":null,"afterSha256":"09f4348b623e32b0a1b31f546ef79a244ddbc81f44824897f41890fbd51abaa5","beforeBlobSha256":null,"afterBlobSha256":"09f4348b623e32b0a1b31f546ef79a244ddbc81f44824897f41890fbd51abaa5","afterBytes":138},
+        {"path":"include/modules/charlie.h","beforeSha256":null,"beforeBytes":null,"afterSha256":"f8c58a4d9b02070450498c520bbc619b7f919edf7a10608db941165857c0a5e6","beforeBlobSha256":null,"afterBlobSha256":"f8c58a4d9b02070450498c520bbc619b7f919edf7a10608db941165857c0a5e6","afterBytes":100},
+        {"path":"include/modules/delta.h","beforeSha256":null,"beforeBytes":null,"afterSha256":"aeb6a27eedf67d54f839c18ae611ef085ab5a6e9820baf99b426e57b4f28238f","beforeBlobSha256":null,"afterBlobSha256":"aeb6a27eedf67d54f839c18ae611ef085ab5a6e9820baf99b426e57b4f28238f","afterBytes":96},
+        {"path":"src/main.c","beforeSha256":null,"beforeBytes":null,"afterSha256":"ae2f8a813d6644d1e9565135c18bc0e55258b3eb138ed4b1a1fdb8ccd9720603","beforeBlobSha256":null,"afterBlobSha256":"ae2f8a813d6644d1e9565135c18bc0e55258b3eb138ed4b1a1fdb8ccd9720603","afterBytes":147},
+        {"path":"src/modules/alpha.c","beforeSha256":null,"beforeBytes":null,"afterSha256":"6c33ee365f44bc5e452426b3ad5a0220c1378808e886c4953de57acbc812f81f","beforeBlobSha256":null,"afterBlobSha256":"6c33ee365f44bc5e452426b3ad5a0220c1378808e886c4953de57acbc812f81f","afterBytes":182},
+        {"path":"src/modules/alpha_internal.h","beforeSha256":null,"beforeBytes":null,"afterSha256":"10749633ec7aba4b6bb24828c6e937ac6fea051d751c0dcd20f578e9e8166113","beforeBlobSha256":null,"afterBlobSha256":"10749633ec7aba4b6bb24828c6e937ac6fea051d751c0dcd20f578e9e8166113","afterBytes":168},
+        {"path":"src/modules/beta.c","beforeSha256":null,"beforeBytes":null,"afterSha256":"545cc49668c54902d3b42724671b2bcbcc7cea8cff5be343d5cf8f653bfa3609","beforeBlobSha256":null,"afterBlobSha256":"545cc49668c54902d3b42724671b2bcbcc7cea8cff5be343d5cf8f653bfa3609","afterBytes":153},
+        {"path":"src/modules/beta_internal.h","beforeSha256":null,"beforeBytes":null,"afterSha256":"868e45c41cf0d374a0720049d5abe16401446dc94388b2abeca1518eb9915ac9","beforeBlobSha256":null,"afterBlobSha256":"868e45c41cf0d374a0720049d5abe16401446dc94388b2abeca1518eb9915ac9","afterBytes":112},
+        {"path":"src/modules/charlie.c","beforeSha256":null,"beforeBytes":null,"afterSha256":"0517a4df4603c8676a779c69efa20fb3c715a9363824454ce764e990a2da5511","beforeBlobSha256":null,"afterBlobSha256":"0517a4df4603c8676a779c69efa20fb3c715a9363824454ce764e990a2da5511","afterBytes":165},
+        {"path":"src/modules/charlie_internal.h","beforeSha256":null,"beforeBytes":null,"afterSha256":"ed3528c97c392465559f53deb10d0ff0715685d392917520ff94211e586dfbae","beforeBlobSha256":null,"afterBlobSha256":"ed3528c97c392465559f53deb10d0ff0715685d392917520ff94211e586dfbae","afterBytes":179},
+        {"path":"src/modules/delta.c","beforeSha256":null,"beforeBytes":null,"afterSha256":"7b83b3f8fa455712da5cdeafd74f70a7f6a6aee55e5b8a9c3ff2988e1f3b5599","beforeBlobSha256":null,"afterBlobSha256":"7b83b3f8fa455712da5cdeafd74f70a7f6a6aee55e5b8a9c3ff2988e1f3b5599","afterBytes":157},
+        {"path":"src/modules/delta_internal.h","beforeSha256":null,"beforeBytes":null,"afterSha256":"499bc94fc99b88560a50f81ffdcbfa6e4cb32d0bbfba417f3032a2fba1f4f7ac","beforeBlobSha256":null,"afterBlobSha256":"499bc94fc99b88560a50f81ffdcbfa6e4cb32d0bbfba417f3032a2fba1f4f7ac","afterBytes":169}
+      ]
+    }
+  ],
+  "pending": {"id":"revision_00000001_73d18c22cc37601f","parentId":"root_a661b388cb04add88301f17e","ordinal":1,"allowedPaths":["src/modules/alpha.c"],"parentSourceRevisionSha256":"c83b9fc34dcd8bf64a23b7c781aa36588665d9e3a445624564c5e0ebf434944b","candidateSourceRevisionSha256":"4fc037d072fa05bd190c5e5f4f1a6a4812012bc84e31762ad767803155466e83","preimages":[{"path":"src/modules/alpha.c","beforeSha256":"6c33ee365f44bc5e452426b3ad5a0220c1378808e886c4953de57acbc812f81f","beforeBytes":182,"afterSha256":"6c33ee365f44bc5e452426b3ad5a0220c1378808e886c4953de57acbc812f81f","beforeBlobSha256":"6c33ee365f44bc5e452426b3ad5a0220c1378808e886c4953de57acbc812f81f","afterBlobSha256":"6c33ee365f44bc5e452426b3ad5a0220c1378808e886c4953de57acbc812f81f","afterBytes":182}],"candidateChanges":[{"path":"src/modules/alpha.c","beforeSha256":"6c33ee365f44bc5e452426b3ad5a0220c1378808e886c4953de57acbc812f81f","beforeBytes":182,"afterSha256":"d1fd85c9a8fa79fd7d3c0d91ca96166aa109fbf2b2ef46ea710f122b0b40fd78","beforeBlobSha256":"6c33ee365f44bc5e452426b3ad5a0220c1378808e886c4953de57acbc812f81f","afterBlobSha256":"d1fd85c9a8fa79fd7d3c0d91ca96166aa109fbf2b2ef46ea710f122b0b40fd78","afterBytes":216}],"repairMetadata":null}
+}

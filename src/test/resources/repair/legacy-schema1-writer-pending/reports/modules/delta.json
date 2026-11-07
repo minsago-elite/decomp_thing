@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 2,
+  "fingerprint": "83215cf70379bc8d36ce8bd64463aecc78cb59a17bba76b8b72a35cabd017060",
+  "sourceSha256": "7b83b3f8fa455712da5cdeafd74f70a7f6a6aee55e5b8a9c3ff2988e1f3b5599",
+  "generator": "evidence-only",
+  "reconstructorIdentity": "evidence-only:v1",
+  "promptSha256": "e0b83b93255b8bee24b0f51f916b49e6ffa03f82b1f3193612b933d0ba528762",
+  "promptCharacters": null,
+  "promptBudgetCharacters": null,
+  "accepted": false,
+  "retryable": false,
+  "entityStatuses": [
+    {"id":"fn_delta","status":"unresolved"}
+  ],
+  "issues": [    {
+      "code": "evidence-only-placeholder",
+      "message": "evidence-only mode emits placeholders and does not accept implementations",
+      "entityIds": ["fn_delta"]
+    },    {
+      "code": "generic-return-placeholder",
+      "message": "candidate implementation for fn_delta is indistinguishable from the evidence-only return stub",
+      "entityIds": ["fn_delta"]
+    }
+  ]
+}

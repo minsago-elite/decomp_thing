@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 2,
+  "modules": [    {
+      "id": "alpha",
+      "sourcePath": "src/modules/alpha.c",
+      "headerPath": "include/modules/alpha.h",
+      "functionIds": ["fn_alpha"],
+      "globalIds": [],
+      "typeIds": [],
+      "boundaryEvidence": ["symbol prefix 'alpha'", "calls modules: beta"]
+    },    {
+      "id": "beta",
+      "sourcePath": "src/modules/beta.c",
+      "headerPath": "include/modules/beta.h",
+      "functionIds": ["fn_beta"],
+      "globalIds": [],
+      "typeIds": [],
+      "boundaryEvidence": ["symbol prefix 'beta'"]
+    },    {
+      "id": "charlie",
+      "sourcePath": "src/modules/charlie.c",
+      "headerPath": "include/modules/charlie.h",
+      "functionIds": ["fn_charlie"],
+      "globalIds": [],
+      "typeIds": [],
+      "boundaryEvidence": ["symbol prefix 'charlie'"]
+    },    {
+      "id": "delta",
+      "sourcePath": "src/modules/delta.c",
+      "headerPath": "include/modules/delta.h",
+      "functionIds": ["fn_delta"],
+      "globalIds": [],
+      "typeIds": [],
+      "boundaryEvidence": ["symbol prefix 'delta'"]
+    }
+  ],
+  "dependencyCycles": []
+}
