@@ -1,0 +1,256 @@
+{
+  "issue": "#1910",
+  "baselineHead": "de4c5c7257bf36d8cd4fed6783568b71acfb49b9",
+  "fixtureRoot": "build/orchestration/issue-1910/baseline/data",
+  "fixtureInventorySha256": "0cb49284408e5849a3b8952909ddfa70b64fce66df2074d9c6aa70be922622ac",
+  "fixtureFiles": 8344,
+  "sourceFiles": {
+    "src/main/kotlin/decompengine/project/ModulePlanJson.kt": {
+      "r1Sha256": "7dcff8654c81a74959a60a4f96166e90720b48709ed51ba33193bdd6e2124c3d",
+      "r2Sha256": "f4539deff4ac9fd79fa064a771442bc6623ced1aa953a28054af4f24edda9fa4"
+    },
+    "src/main/kotlin/decompengine/project/ProgramModel.kt": {
+      "r1Sha256": "337650f7e1bfb348575e84feb84a26062c95f30f406f5b5c1c22ddee904aa63e",
+      "r2Sha256": "2fd67cd680ce18b6378e76efa8ae28497ce3b22ae0f5f212e5520eb7f4b4dfa8"
+    },
+    "src/test/kotlin/decompengine/project/ModulePlanJsonTest.kt": {
+      "r1Sha256": "1ca20c10891c972eb799ea5d81f43ed2d2e72ae9ca5f5a4b9710e2c7698c9f8a",
+      "r2Sha256": "4ee4d07ab25fe857d55e12b3e492782236165c4f282630249ab209d73d63afcb"
+    }
+  },
+  "catalog": {
+    "r1": {
+      "runs": [
+        {
+          "id": "01",
+          "renderNanos": 59057044,
+          "renderAllocatedBytes": 48666656,
+          "page0Nanos": 769340185,
+          "page0AllocatedBytes": 259274808,
+          "fixtureRestored": true,
+          "fixtureFiles": 8344,
+          "failure": null
+        },
+        {
+          "id": "02",
+          "renderNanos": 49719007,
+          "renderAllocatedBytes": 48666656,
+          "page0Nanos": 816192725,
+          "page0AllocatedBytes": 259139792,
+          "fixtureRestored": true,
+          "fixtureFiles": 8344,
+          "failure": null
+        },
+        {
+          "id": "03",
+          "renderNanos": 59779369,
+          "renderAllocatedBytes": 48666656,
+          "page0Nanos": 861781718,
+          "page0AllocatedBytes": 259616688,
+          "fixtureRestored": true,
+          "fixtureFiles": 8344,
+          "failure": null
+        },
+        {
+          "id": "04",
+          "renderNanos": 57398256,
+          "renderAllocatedBytes": 48666656,
+          "page0Nanos": 827684353,
+          "page0AllocatedBytes": 259173208,
+          "fixtureRestored": true,
+          "fixtureFiles": 8344,
+          "failure": null
+        },
+        {
+          "id": "05",
+          "renderNanos": 76490773,
+          "renderAllocatedBytes": 48666656,
+          "page0Nanos": 831115498,
+          "page0AllocatedBytes": 259093968,
+          "fixtureRestored": true,
+          "fixtureFiles": 8344,
+          "failure": null
+        }
+      ],
+      "medians": {
+        "renderNanos": 59057044,
+        "renderAllocatedBytes": 48666656,
+        "page0Nanos": 827684353,
+        "page0AllocatedBytes": 259173208
+      },
+      "normalizedFirstPageSha256": "049a4ebda91da3b65b25510473bdbab604436f393b1af14aabbd7d72321069c8"
+    },
+    "r2": {
+      "runs": [
+        {
+          "id": "01",
+          "renderNanos": 33547344,
+          "renderAllocatedBytes": 621784,
+          "page0Nanos": 860689790,
+          "page0AllocatedBytes": 244025456,
+          "fixtureRestored": true,
+          "fixtureFiles": 8344,
+          "failure": null
+        },
+        {
+          "id": "02",
+          "renderNanos": 35017541,
+          "renderAllocatedBytes": 621784,
+          "page0Nanos": 670433005,
+          "page0AllocatedBytes": 243610936,
+          "fixtureRestored": true,
+          "fixtureFiles": 8344,
+          "failure": null
+        },
+        {
+          "id": "03",
+          "renderNanos": 34144783,
+          "renderAllocatedBytes": 621784,
+          "page0Nanos": 735500174,
+          "page0AllocatedBytes": 243741176,
+          "fixtureRestored": true,
+          "fixtureFiles": 8344,
+          "failure": null
+        },
+        {
+          "id": "04",
+          "renderNanos": 31622865,
+          "renderAllocatedBytes": 621784,
+          "page0Nanos": 673767271,
+          "page0AllocatedBytes": 243647384,
+          "fixtureRestored": true,
+          "fixtureFiles": 8344,
+          "failure": null
+        },
+        {
+          "id": "05",
+          "renderNanos": 31380435,
+          "renderAllocatedBytes": 621784,
+          "page0Nanos": 987310650,
+          "page0AllocatedBytes": 243266960,
+          "fixtureRestored": true,
+          "fixtureFiles": 8344,
+          "failure": null
+        }
+      ],
+      "medians": {
+        "renderNanos": 33547344,
+        "renderAllocatedBytes": 621784,
+        "page0Nanos": 735500174,
+        "page0AllocatedBytes": 243647384
+      },
+      "normalizedFirstPageSha256": "049a4ebda91da3b65b25510473bdbab604436f393b1af14aabbd7d72321069c8"
+    }
+  },
+  "service": {
+    "r1": {
+      "runs": [
+        {
+          "id": "01",
+          "renderNanos": 0,
+          "renderAllocatedBytes": 0,
+          "page0Nanos": 1027815836,
+          "page0AllocatedBytes": 259126104,
+          "fixtureRestored": true,
+          "fixtureFiles": 8344,
+          "failure": null
+        },
+        {
+          "id": "02",
+          "renderNanos": 0,
+          "renderAllocatedBytes": 0,
+          "page0Nanos": 899141590,
+          "page0AllocatedBytes": 259553848,
+          "fixtureRestored": true,
+          "fixtureFiles": 8344,
+          "failure": null
+        },
+        {
+          "id": "03",
+          "renderNanos": 0,
+          "renderAllocatedBytes": 0,
+          "page0Nanos": 808308626,
+          "page0AllocatedBytes": 259842664,
+          "fixtureRestored": true,
+          "fixtureFiles": 8344,
+          "failure": null
+        }
+      ],
+      "medians": {
+        "renderNanos": 0,
+        "renderAllocatedBytes": 0,
+        "page0Nanos": 899141590,
+        "page0AllocatedBytes": 259553848
+      },
+      "normalizedFirstPageSha256": "049a4ebda91da3b65b25510473bdbab604436f393b1af14aabbd7d72321069c8"
+    },
+    "r2": {
+      "runs": [
+        {
+          "id": "01",
+          "renderNanos": 0,
+          "renderAllocatedBytes": 0,
+          "page0Nanos": 827113183,
+          "page0AllocatedBytes": 242909352,
+          "fixtureRestored": true,
+          "fixtureFiles": 8344,
+          "failure": null
+        },
+        {
+          "id": "02",
+          "renderNanos": 0,
+          "renderAllocatedBytes": 0,
+          "page0Nanos": 932650265,
+          "page0AllocatedBytes": 243756952,
+          "fixtureRestored": true,
+          "fixtureFiles": 8344,
+          "failure": null
+        },
+        {
+          "id": "03",
+          "renderNanos": 0,
+          "renderAllocatedBytes": 0,
+          "page0Nanos": 950927877,
+          "page0AllocatedBytes": 243513224,
+          "fixtureRestored": true,
+          "fixtureFiles": 8344,
+          "failure": null
+        }
+      ],
+      "medians": {
+        "renderNanos": 0,
+        "renderAllocatedBytes": 0,
+        "page0Nanos": 932650265,
+        "page0AllocatedBytes": 243513224
+      },
+      "normalizedFirstPageSha256": "049a4ebda91da3b65b25510473bdbab604436f393b1af14aabbd7d72321069c8"
+    }
+  },
+  "conclusion": {
+    "claim": "Reduced allocation in canonical-plan rendering and first-page work; no latency improvement claimed.",
+    "d0FirstPageLatencyGoalMs": 500,
+    "observedPage0LatencyMediansMs": {
+      "catalogR1": 827.684353,
+      "catalogR2": 735.500174,
+      "serviceR1": 899.14159,
+      "serviceR2": 932.650265
+    },
+    "page0LatencyInterpretation": "No claim; samples are noisy and do not meet the 500ms D0 target."
+  },
+  "r1SourceCommit": "de4c5c7257bf36d8cd4fed6783568b71acfb49b9",
+  "r2SourceCommit": "a74d06c28a4a40a31a01ba1c5cbb49e714452176",
+  "measurement": {
+    "scope": "Local 100000-function structure fixture diagnostic; not packaged-browser CI or release qualification.",
+    "jvm": "openjdk version \"21.0.12.1\" 2026-08-18 LTS",
+    "kernel": "Linux 7.2.12-gentoo-dist-hardened",
+    "policy": "Fresh JVM process; fixture inventory commitment computed externally before launch. This does not establish filesystem-cache-cold state. The 54-request checkpoint covers 51 pages, reload, search and modules; catalog mode then adds two invalidation/rebind controls. No warm-up, fixture generation, parsing, or forced GC before the first measured request.",
+    "fixtureModel": {
+      "path": "ffffffffffffffffffffffffffffffff/reports/runs/run_structure_scale/source-tree/reports/program_model.json",
+      "bytes": 29349734,
+      "sha256": "be44553df47a17b40aac623a27a957b32e923f8137edf743a172525d0182c832"
+    },
+    "runs": "Five fresh catalog JVMs and three fresh service JVMs for each source version. The fixture inventory was hashed externally before and after each process; all 16 captures preserved the same 8344-file inventory.",
+    "command": "java -cp <captured Gradle test runtime classpath> decompengine.web.StructureAllocationDiagnostic <fixture-root> <catalog|service> <output-prefix> <inventory-sha256>",
+    "allocationInterpretation": "Thread allocation totals are diagnostic marker deltas; they are not peak RSS or exclusive process allocation. Page timings are noisy. No filesystem-cache-cold state is claimed."
+  }
+}
