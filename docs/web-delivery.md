@@ -105,6 +105,31 @@ round-trip latency. Record 20 cold loads and 50 interactions per workload; repor
 median/p95 and failures. Empty browser cache/storage and a fresh process define
 cold load; warm data is measured separately. Do not hide failing runs as outliers.
 
+The packaged D0 dashboard gate currently enforces four measures: ready-dashboard
+p95, first data-page response p95, peak browser heap, and incremental server RSS
+above a warmed idle baseline. It runs twenty cold loads against distinct server
+processes, using the checked-in 10,000-job fixture and the selected loopback or
+constrained profile. The constrained profile applies four-times CPU throttling,
+100 ms network latency, 10 Mbit/s download and 2 Mbit/s upload. Both profiles
+retain the complete report on success or failure. The 50-page keyboard traversal
+reports its own p95; this network-dependent measure does not stand in for local
+interaction-feedback latency. Request-head bytes are
+reconstructed from CDP's method, URL and header metadata, not captured from the
+wire; response bytes use CDP transfer accounting. For the recorded D0 job API
+requests, the driver also enforces an 8 KiB request-head ceiling, a 1 MiB
+response-transfer ceiling and a 6 s end-to-end request ceiling; the cancellation
+control reads the paused response body to measure its complete size. Other
+request timings, startup latency and forced-scan latency are diagnostics. The
+broader local interaction-feedback p95 and non-job API limits still require
+their own measured gate before they can be reported as qualified.
+Dashboard search fields accept at most 256 characters. A direct URL with an
+overlong or otherwise invalid saved filter is rejected before the jobs API read
+and shows the bounded “The saved filters are invalid. Reset filters to load
+jobs.” recovery message; the packaged scale control verifies both the response
+and the absence of a job-list request.
+Forced-scan controls verify that an over-deadline library returns no partial rows,
+shows a bounded listing-limit error, and recommends narrowing filters.
+
 | Metric | Initial acceptance budget and measurement | Fixture / owner |
 | --- | --- | --- |
 | Entry payload | ≤150 KiB gzip-9 combined HTML + initial JS/CSS; ≤500 KiB gzip-9 all UI resources excluding private maps; sum exact shipped bytes and identify lazy chunks | Asset manifest; #151 #157 #219 |

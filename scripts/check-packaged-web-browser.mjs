@@ -7,7 +7,7 @@ import { createServer as createHttpServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { qualifyUpload, qualifyUploadFailures, qualifyMeasuredUpload } from './packaged-browser-upload.mjs';
-import { seedScale, qualifyScale, dashboardFiltersWithSnapshot } from './packaged-browser-scale.mjs';
+import { seedScale, qualifyScale, dashboardFiltersWithSnapshot, evaluateBudgetGate, evaluateApiRequestBudgetGate } from './packaged-browser-scale.mjs';
 import { seedLive, qualifyLive } from './packaged-browser-live.mjs';
 import { seedHistory, qualifyHistory } from './packaged-browser-history.mjs';
 import { seedLegacy, qualifyLegacy } from './packaged-browser-legacy.mjs';
@@ -22,6 +22,7 @@ const { values } = parseArgs({ options: {
   archive: { type: 'string' },
   'previous-archive': { type: 'string' },
   mode: { type: 'string', default: 'public' },
+  profile: { type: 'string', default: 'loopback' },
   'work-parent': { type: 'string', default: join(repo, 'build') },
   'keep-workdir': { type: 'boolean', default: false },
   chrome: { type: 'string' },
@@ -31,9 +32,9 @@ const { values } = parseArgs({ options: {
   help: { type: 'boolean', default: false },
 } });
 if (values.help) {
-  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|metadata|history|restart|scale|live|proxy|upgrade|legacy|audit] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
+  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|metadata|history|restart|scale|live|proxy|upgrade|legacy|audit] [--profile loopback|constrained (scale only)] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
   console.log('restart: seeded history on one JVM, graceful SIGTERM-only restart on the same installation/data/port, fresh bootstrap and serverInstanceId, then two tabs with a progress-pin stale If-Match 412. No live worker, no restart-while-running, one Chromium only.');
-  console.log('public: packaged home/Runtime/recovery; session: public plus local session journey; upload: session plus inert upload and lost-response retry; history: session plus preseeded inert multi-page attempts; scale: session plus 10,000 persisted jobs and keyboard pagination; proxy: real Vite HMR and session journey against packaged JVM; upgrade: previous JVM to current JVM on one origin with an old tab.');
+  console.log('public: packaged home/Runtime/recovery; session: public plus local session journey; upload: session plus inert upload and lost-response retry; history: session plus preseeded inert multi-page attempts; scale: exactly D0 persisted jobs, full keyboard pagination, 20 fresh-process cold loads and enforced loopback or constrained-profile budgets; proxy: real Vite HMR and session journey against packaged JVM; upgrade: previous JVM to current JVM on one origin with an old tab.');
   console.log('legacy: inert legacy HTML/polling with explicit test-owned state edits; no workflow execution.');
   console.log('audit: every route at 1440x900, 390x844, 320px and 200%/400% zoom in light/dark themes with contract-fixture API reads fulfilled in DevTools; measures reflow, text/focus contrast, target size, reduced motion, every packaged asset under CSP and navigation timing budgets.');
   console.log('metadata: session plus one inert header upload/retry, real packaged job metadata, maximum uint64 address, and simulated malformed-response recovery; no workflow execution or upload quota/scale measurement.');
@@ -50,6 +51,8 @@ for (const option of ['archive', 'chrome', 'java-home', 'python']) {
   await fs.access(values[option]);
 }
 assert.ok(['public', 'session', 'upload', 'metadata', 'history', 'restart', 'scale', 'live', 'proxy', 'upgrade', 'legacy', 'audit'].includes(values.mode), '--mode must be public, session, upload, metadata, history, restart, scale, live, proxy, upgrade, legacy or audit');
+assert.ok(['loopback', 'constrained'].includes(values.profile), '--profile must be loopback or constrained');
+assert.ok(values.mode === 'scale' || values.profile === 'loopback', '--profile is only supported with --mode scale');
 if (values.mode === 'upgrade') {
   assert.ok(values['previous-archive'] && isAbsolute(values['previous-archive']), 'upgrade requires --previous-archive as an absolute existing ZIP path');
   await fs.access(values['previous-archive']);
@@ -95,7 +98,7 @@ let applicationError = '';
 let applicationOutput = '';
 let browserError = '';
 let viteError = '';
-const report = { status: 'running', mode: values.mode, testDirectory: root, driverNode: nodeVersion,
+const report = { status: 'running', mode: values.mode, ...(values.mode === 'scale' ? { profile: values.profile } : {}), testDirectory: root, driverNode: nodeVersion,
   driverCommit: process.env.GITHUB_SHA ?? execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8', maxBuffer: 1024 }).trim(),
   tools: { node: process.execPath, chrome: chromeBinary, javaHome, python: values.python }, requests: {} };
 const launchErrors = new WeakMap();
@@ -492,6 +495,37 @@ async function launchApplication(installation, port = '0', frontendOrigin) {
   return origin;
 }
 
+async function restartScaleApplication(installation, { forceScan = false } = {}) {
+  await stop(application);
+  const startupStarted = performance.now();
+  const environment = forceScan ? { ...installation.environment, JAVA_TOOL_OPTIONS:
+    [installation.environment.JAVA_TOOL_OPTIONS, '-Ddecomp.web.dashboardSeedDisabled=true'].filter(Boolean).join(' ') } : installation.environment;
+  const freshOrigin = await launchApplication({ ...installation, environment }, '0');
+  const bootstrapUrl = await waitFor(() => applicationOutput.split(/\s+/)
+    .find((part) => part.startsWith(freshOrigin + '/nested/#bootstrap=')), 'fresh-process local bootstrap handoff');
+  const token = new URL(bootstrapUrl).hash.slice('#bootstrap='.length);
+  assert.ok(token, 'Fresh packaged process did not issue a bootstrap token');
+  sensitiveValues.push(token);
+  const response = await fetch(freshOrigin + '/nested/api/v1/session', {
+    method: 'POST',
+    headers: { Origin: freshOrigin, Accept: 'application/json', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token }),
+  });
+  assert.equal(response.status, 200, 'Fresh-process benchmark session exchange failed');
+  const cookieHeader = response.headers.getSetCookie?.().find((value) => value.startsWith('decomp_session_'));
+  assert.ok(cookieHeader, 'Fresh-process session response did not set its HttpOnly cookie');
+  const cookiePair = cookieHeader.split(';', 1)[0];
+  const separator = cookiePair.indexOf('=');
+  assert.ok(separator > 0, 'Fresh-process session cookie is malformed');
+  const sessionCookie = { name: cookiePair.slice(0, separator), value: cookiePair.slice(separator + 1),
+    path: '/nested/', secure: false, httpOnly: true, sameSite: 'Strict' };
+  sensitiveValues.push(sessionCookie.value);
+  assert.ok(sessionCookie.value, 'Fresh-process session cookie is empty');
+  const seedDiagnostic = applicationError.match(/Web job-library startup observation: ([^\r\n]+)/)?.[1] ?? 'missing';
+  return { serverPid: application.pid, processId: `${application.pid}:${freshOrigin}`, browserOrigin: freshOrigin,
+    sessionCookie, startupMs: Math.round(performance.now() - startupStarted), seedDiagnostic, forceScan };
+}
+
 async function removeOwnedWork() {
   if (!work) return;
   if (await fs.stat(join(work, '.packaged-browser-owned')).then(() => true, () => false)) {
@@ -534,9 +568,10 @@ try {
   }
   report.browserDisplayMode = observeNativeVisibility ? 'headful-x11' : 'headless';
 
-  // Chrome places SingletonSocket under TMPDIR. Keep it short enough even on hosted
-  // runners whose checkout path is /home/runner/work/<repo>/<repo>.
-  browserTmp = await fs.mkdtemp(join(repo, '.ct-'));
+  // Keep Chrome's per-browser SingletonSocket below AF_UNIX sun_path limits.
+  // --work-parent is already the caller's owned, writable scratch boundary and
+  // can be shorter than a deeply nested source materialization.
+  browserTmp = await fs.mkdtemp(join(values['work-parent'], 'b-'));
   report.browserTempDirectory = browserTmp;
   await fs.mkdir(profile);
   browser = startOwned(chromeBinary, [...(observeNativeVisibility ? [] : ['--headless=new']), '--disable-gpu', ...(values['no-sandbox'] ? ['--no-sandbox'] : []), '--no-first-run', '--no-default-browser-check', '--disable-background-networking', '--disable-extensions', '--disable-default-apps', '--disable-sync', '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1', `--user-data-dir=${profile}`, 'about:blank'], {
@@ -1013,7 +1048,6 @@ try {
     assert.ok(runTab.requests.every(request => ['GET', 'HEAD'].includes(request.method)));
     report.attemptHistory = { navigation: true, directReload: true, missingExplained: true, mutationRequests: 0 };
 
-    if (scaleFixture) report.scale = await qualifyScale({ fixture: scaleFixture, makeTarget, cdp, evaluate, ready, browserOrigin });
     if (liveFixture) {
       report.liveDashboard = await qualifyLive({ fixture: liveFixture, makeTarget, cdp, evaluate, ready, waitFor, browserOrigin });
       report.jobDataCreated = true;
@@ -1118,6 +1152,18 @@ try {
     report.requests.authenticated = authenticated.requests;
   }
 
+  if (scaleFixture) {
+    report.scale = await qualifyScale({ fixture: scaleFixture, makeTarget, cdp, evaluate, ready,
+      restartServer: (options) => restartScaleApplication(installation, options),
+      profileName: values.profile,
+      onProgress: (progress) => { report.scaleProgress = progress; } });
+    browserOrigin = report.scale.measurementOrigin;
+    report.origin = browserOrigin;
+    console.log('D0 resource and API request budget evaluation: ' + JSON.stringify({
+      resources: report.scale.budgets, coldRequests: report.scale.cold.requestBudgetGate,
+      interactionRequests: report.scale.requestBudgetGate }));
+  }
+
   // Let the final DevTools events drain before taking the evidence snapshot.
   await delay(100);
   report.contentSecurityPolicy = cspEvidence();
@@ -1139,10 +1185,25 @@ try {
   assert.deepEqual(await snapshot(installation.app), installation.before, 'Read-only installation bytes changed');
   report.installationUnchanged = true;
 
-  report.status = 'passed';
+  if (values.mode === 'scale') {
+    const resourceGate = evaluateBudgetGate(report.scale?.budgets, values.profile);
+    const coldRequestGate = report.scale?.cold?.requestBudgetGate ?? evaluateApiRequestBudgetGate([]);
+    const interactionRequestGate = report.scale?.requestBudgetGate ?? evaluateApiRequestBudgetGate([]);
+    report.scaleBudgetGate = { passed: resourceGate.passed && coldRequestGate.passed && interactionRequestGate.passed,
+      resources: resourceGate, coldRequests: coldRequestGate, interactionRequests: interactionRequestGate };
+    if (!report.scaleBudgetGate.passed) {
+      report.status = 'failed';
+      process.exitCode = 1;
+      console.error('D0 scale budgets failed; full measurements are retained in report.json.');
+    } else report.status = 'passed';
+  } else report.status = 'passed';
 
 } catch (error) {
   report.status = 'failed';
+  if (values.mode === 'scale') report.scaleBudgetGate = { passed: false,
+    resources: evaluateBudgetGate(report.scale?.budgets, values.profile),
+    coldRequests: report.scale?.cold?.requestBudgetGate ?? evaluateApiRequestBudgetGate([]),
+    interactionRequests: report.scale?.requestBudgetGate ?? evaluateApiRequestBudgetGate([]) };
   report.contentSecurityPolicy = cspEvidence();
   report.error = safeDiagnostic(error.stack);
   report.applicationError = safeDiagnostic(applicationError);

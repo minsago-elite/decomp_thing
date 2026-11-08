@@ -57,7 +57,11 @@ internal class WebApiController(
     private val eventStream = WebEventStream(access, streamResources, progressPages, read = { jobId, runId ->
         readWebProgress(jobs, jobId, runId).second
     }, clock = clock, deleted = { jobId -> jobs.deletedJob(jobId) != null })
-    private val jobPages = WebJobPages(jobs::collectionRecords, checkpointedSource = jobs::collectionRecordsWithProgress)
+    private val jobPages = WebJobPages(jobs::collectionRecords,
+        checkpointedSource = jobs::collectionRecordsWithProgress,
+        collectionVersion = jobs::dashboardCollectionVersion,
+        collectionStamp = jobs::dashboardStorageStamp,
+        collectionSeed = jobs::takeDashboardCollectionSeed)
     private val lifecycle = WebJobLifecycleController(access, jobs, jobMutations, assets.basePath, jobPages::invalidate)
 
     // One private resource pattern per line, so independent route additions merge cleanly.
