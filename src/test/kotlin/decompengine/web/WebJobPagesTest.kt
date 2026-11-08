@@ -6,6 +6,8 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.security.MessageDigest
 import java.nio.charset.StandardCharsets
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.*
 
 class WebJobPagesTest {
@@ -153,6 +155,44 @@ class WebJobPagesTest {
         stamp = WebJobCollectionStamp("second", idDigest("b"), cacheable = true)
         assertEquals(listOf("b"), ids(pages.page("owner", query, null)))
         assertEquals(2, scans)
+    }
+
+    @Test fun `warm image stamp is serialized by listing admission`() {
+        val stampCalls = AtomicInteger()
+        val blockNextStamp = AtomicBoolean(false)
+        val stampEntered = CountDownLatch(1)
+        val releaseStamp = CountDownLatch(1)
+        val stableStamp = WebJobCollectionStamp("stable", idDigest("a"), cacheable = true)
+        val pages = WebJobPages({ sequenceOf(row("a")) }, collectionVersion = { 1L }, collectionStamp = { _, _ ->
+            stampCalls.incrementAndGet()
+            if (blockNextStamp.compareAndSet(true, false)) {
+                stampEntered.countDown()
+                assertTrue(releaseStamp.await(5, TimeUnit.SECONDS), "the test must release the admitted stamp")
+            }
+            stableStamp
+        })
+        val query = WebJobQuery()
+        assertEquals(listOf("a"), ids(pages.page("owner", query, null))) // Populate the reusable image.
+        val beforeWarmHit = stampCalls.get()
+        assertEquals(2, beforeWarmHit, "a cold image is bracketed by two storage stamps")
+
+        val callers = Executors.newFixedThreadPool(2)
+        try {
+            blockNextStamp.set(true)
+            val admitted = callers.submit<JsonObject> { pages.page("owner", query, null) }
+            assertTrue(stampEntered.await(5, TimeUnit.SECONDS), "the warm hit must stamp storage while holding admission")
+
+            val refusal = assertFailsWith<WebAccessDenied> { pages.page("owner", query, null) }
+            assertEquals("LISTING_BUSY", refusal.code)
+            assertEquals(beforeWarmHit + 1, stampCalls.get(), "a competing first-page request must not start another full stamp")
+
+            releaseStamp.countDown()
+            assertEquals(listOf("a"), ids(admitted.get(5, TimeUnit.SECONDS)))
+        } finally {
+            releaseStamp.countDown()
+            callers.shutdownNow()
+            assertTrue(callers.awaitTermination(5, TimeUnit.SECONDS))
+        }
     }
 
     @Test fun `filesystem changes during a cold collection prevent publishing a mixed image`() {

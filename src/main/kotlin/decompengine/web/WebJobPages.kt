@@ -130,28 +130,16 @@ internal class WebJobPages(
             if ((offset != 0 && offset >= snapshot.items.size) || offset % query.limit != 0) invalidCursor()
             response(snapshot, offset)
         }
-        adoptStartupSeed()
         val collectedGeneration = generation
-        val scanStartedAtMillis = System.currentTimeMillis()
-        val deadline = WebJobCollectionDeadline(now(), now)
-        val initialVersion = collectionVersion?.invoke()
-        val reusable = initialVersion?.let(::imageForVersion)
-        if (reusable != null && collectionStamp != null) {
-            val stamp = collectionStamp.invoke(scanStartedAtMillis, deadline::checkpoint)
-            val finalVersion = collectionVersion.invoke()
-            if (initialVersion == finalVersion && stamp.cacheable && stamp == reusable.stamp) {
-                val selected = select(reusable, query, deadline)
-                deadline.checkpoint()
-                return createSnapshot(owner, query, selected, deadline, expectedGeneration = collectedGeneration)
-            }
-            discardImage(reusable)
-        } else if (initialVersion == null) {
-            synchronized(imageLock) { image = null }
+        if (!admission.tryAcquire()) {
+            if (generation != collectedGeneration && retry < 2) return pageFirst(owner, query, cursor, retry + 1)
+            throw WebAccessDenied(503, "LISTING_BUSY", "Another job snapshot is being collected. Retry this read shortly.")
         }
-        if (!admission.tryAcquire()) throw WebAccessDenied(503, "LISTING_BUSY", "Another job snapshot is being collected. Retry this read shortly.")
         var admissionReleasedForRetry = false
         try {
-            // Another request may have completed the bounded image while this request waited for admission.
+            adoptStartupSeed()
+            val scanStartedAtMillis = System.currentTimeMillis()
+            val deadline = WebJobCollectionDeadline(now(), now)
             val admittedVersion = collectionVersion?.invoke()
             val admittedImage = admittedVersion?.let(::imageForVersion)
             if (admittedImage != null && collectionStamp != null) {
@@ -163,6 +151,8 @@ internal class WebJobPages(
                     return createSnapshot(owner, query, selected, deadline, expectedGeneration = collectedGeneration)
                 }
                 discardImage(admittedImage)
+            } else if (admittedVersion == null) {
+                synchronized(imageLock) { image = null }
             }
             val beforeScanStamp = if (admittedVersion != null && collectionStamp != null)
                 collectionStamp.invoke(scanStartedAtMillis, deadline::checkpoint) else null
