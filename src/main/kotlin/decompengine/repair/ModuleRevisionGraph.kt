@@ -2,6 +2,7 @@ package decompengine.repair
 
 import decompengine.acp.LinuxFileIdentity
 import decompengine.acp.LinuxFileKey
+import decompengine.acp.LinuxFileSizeChangedException
 import decompengine.acp.LinuxDescriptor
 import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.acp.LinuxResourceLimitException
@@ -7314,36 +7315,29 @@ internal fun hashStableRegularFile(
         }
         authorized = LinuxFilesystemSyscalls.openRegularFileAtOrNull(parent.fd, parts.last())
             ?: throw StableFileUnavailableException("stable hash target is unavailable")
-        readable = LinuxFilesystemSyscalls.openReadableFrom(authorized)
+        // Metadata revalidation must not advance the retained file's atime; stream directly from
+        // this O_NOATIME descriptor rather than reopening its /proc/self/fd link.
+        readable = LinuxFilesystemSyscalls.openReadableWithoutAtimeFrom(authorized)
         requireUnchanged(readable.identity == authorized.identity) { "stable hash descriptor identity changed" }
         validateMetadata(readable)
-        val descriptorPath = Path.of("/proc/self/fd/${readable.fd}")
-        val before = Files.readAttributes(descriptorPath, BasicFileAttributes::class.java)
-        requireUnchanged(before.isRegularFile) { "stable hash descriptor is not regular" }
-        declaredSize(before.size())
+        val before = LinuxFilesystemSyscalls.metadata(readable.fd)
+        requireUnchanged(before.identity.isRegularFile && !before.identity.isSymbolicLink) { "stable hash descriptor is not regular" }
+        declaredSize(before.size)
         val digest = java.security.MessageDigest.getInstance("SHA-256")
         val utf8 = StrictUtf8ByteValidator()
-        val buffer = ByteArray(64 * 1024)
-        var size = 0L
-        // This kernel-owned proc entry references our still-owned descriptor, not the workspace name.
-        Files.newInputStream(descriptorPath).use { input ->
-            while (true) {
-                cancellationCheck()
-                val count = input.read(buffer)
-                if (count < 0) break
-                size = Math.addExact(size, count.toLong())
-                readBytes(count, size)
-                digest.update(buffer, 0, count)
-                utf8.accept(buffer, count)
-            }
+        var bytesRead = 0L
+        val chunkBytes = minOf(64 * 1024L, maxOf(1L, before.size)).toInt()
+        val size = LinuxFilesystemSyscalls.readChunks(readable, chunkBytes, cancellationCheck) { chunk, length ->
+            val next = Math.addExact(bytesRead, length.toLong())
+            readBytes(length, next)
+            bytesRead = next
+            digest.update(chunk, 0, length)
+            utf8.accept(chunk, length)
         }
         cancellationCheck()
-        val after = Files.readAttributes(descriptorPath, BasicFileAttributes::class.java)
+        val after = LinuxFilesystemSyscalls.metadata(readable.fd)
         validateMetadata(readable)
-        requireUnchanged(after.isRegularFile && before.fileKey() == after.fileKey() &&
-            before.size() == after.size() && after.size() == size &&
-            before.lastModifiedTime() == after.lastModifiedTime() &&
-            LinuxFilesystemSyscalls.identity(readable.fd) == readable.identity) {
+        requireUnchanged(before == after && after.identity == readable.identity && after.size == size && size == bytesRead) {
             "stable hash file changed during reading"
         }
         revalidateDescriptorPath(base, parts, directories.map { it.identity }, authorized.identity)
@@ -7453,7 +7447,6 @@ private fun readStableRegularFileInternal(
         if (!authorized.identity.isRegularFile || authorized.identity.isSymbolicLink) {
             throw StableFileUnavailableException("stable file-read target is not a regular non-symbolic-link file: $relative")
         }
-        afterAuthorization?.invoke()
         readable = LinuxFilesystemSyscalls.openReadableFrom(authorized)
         requireUnchanged(readable.identity == authorized.identity) {
             "stable file-read descriptor identity differs from its authorized path: $relative"
@@ -7466,8 +7459,14 @@ private fun readStableRegularFileInternal(
                 "stable file-read target $relative has ${before.size()} bytes; limit=$maximumBytes",
             )
         }
+        // Capture the descriptor-bound size before the test/fault hook. This makes a resize
+        // between observation and the first read deterministic, so readKnownSize can classify it
+        // as a changed artifact instead of reporting a misleading budget or I/O failure.
+        afterAuthorization?.invoke()
         val bytes = try {
-            LinuxFilesystemSyscalls.read(readable, maximumBytes.toInt(), cancellationCheck)
+            LinuxFilesystemSyscalls.readKnownSize(readable, before.size().toInt(), cancellationCheck)
+        } catch (_: LinuxFileSizeChangedException) {
+            throw StableFileChangedException("stable file-read target changed size while it was read: $relative")
         } catch (_: LinuxResourceLimitException) {
             throw RepairBudgetExceededException("stable file-read target $relative grew beyond $maximumBytes bytes")
         }

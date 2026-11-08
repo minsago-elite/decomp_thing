@@ -7,7 +7,6 @@ import { parseArgs } from 'node:util';
 
 const profileId = 'generated-c-make-v1';
 const sourceFiles = 25_000;
-const fixtureEpoch = '2026-01-01T00:00:00.000Z';
 const runId = 'run_source_d0';
 const revisionId = 'revision_source_d0';
 const generator = 'd0-source-tree-fixture-v1';
@@ -98,12 +97,14 @@ export async function seedSourceTreeFixture(root, fileCount = sourceFiles) {
 
   const binary = elfHeader();
   const binarySha256 = sha256(binary);
-  const createdAt = fixtureEpoch;
+  // Keep this fixture inside the job-retention window when browser CI runs it.
+  // Source bytes, manifest records and revision identity remain deterministic.
+  const createdAt = new Date(Date.now() - 300_000).toISOString();
   const filename = 'synthetic-source-tree.elf';
   const job = {
     id: jobId,
     filename,
-    status: 'complete',
+    status: 'uploaded',
     created_at: createdAt,
     updated_at: createdAt,
     size_bytes: binary.length,
@@ -162,7 +163,7 @@ export async function seedSourceTreeFixture(root, fileCount = sourceFiles) {
     schemaVersion: 1,
     jobId,
     version: 'version_source_d0',
-    legacy: { originalJobSha256: sha256(jobBytes), status: 'complete', recoveredInterrupted: false },
+    legacy: { originalJobSha256: sha256(jobBytes), status: 'uploaded', recoveredInterrupted: false },
     attempts: [{
       runId, jobId, workflow: 'reconstruct', state: 'completed', version: 'attempt_version_source_d0',
       createdAt, startedAt: createdAt, endedAt: createdAt, previousRunId: null, inputRevisionId: null,

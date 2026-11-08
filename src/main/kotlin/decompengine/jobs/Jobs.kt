@@ -32,6 +32,11 @@ import kotlin.io.path.exists
 import kotlin.io.path.name
 import kotlin.io.path.isRegularFile
 
+private val JOB_ID_PATTERN = Regex("[a-f0-9]{32}")
+private val WORKFLOW_RUN_ID_PATTERN = Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
+private val ARCHIVE_REPORT_PREFIX_PATTERN = Regex("reports/runs/[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
+private val STATUS_LINE_BREAKS_PATTERN = Regex("[\\r\\n]+")
+
 open class JobStoreException(message: String) : RuntimeException(message)
 
 /** A contained read saw its file or a path binding change (concurrent publication or deletion). */
@@ -113,7 +118,7 @@ class JobStore internal constructor(
         if (!Files.isDirectory(root, java.nio.file.LinkOption.NOFOLLOW_LINKS)) throw JobStoreException("job storage is not a directory")
         val ids = mutableListOf<String>()
         Files.newDirectoryStream(root).use { entries ->
-            for (entry in entries) if (entry.fileName.toString().matches(Regex("[a-f0-9]{32}"))) {
+            for (entry in entries) if (entry.fileName.toString().matches(JOB_ID_PATTERN)) {
                 if (ids.size >= 10_000) throw JobStoreException("job storage exceeds its listing limit")
                 ids += entry.fileName.toString()
             }
@@ -132,7 +137,7 @@ class JobStore internal constructor(
         }
 
         prepareStorageDirectories()
-        val jobId = newJobId().also { require(it.matches(Regex("[a-f0-9]{32}"))) }
+        val jobId = newJobId().also { require(it.matches(JOB_ID_PATTERN)) }
         val jobDir = root.resolve(jobId)
         val binaryPath = jobDir.resolve("input.elf")
         val job = Job(
@@ -246,7 +251,7 @@ class JobStore internal constructor(
         val updated = get(jobId).copy(
             status = status,
             updatedAt = clock.instant().toString(),
-            statusMessage = message?.replace(Regex("[\\r\\n]+"), " ")?.take(MAX_STATUS_MESSAGE_CHARACTERS),
+            statusMessage = message?.replace(STATUS_LINE_BREAKS_PATTERN, " ")?.take(MAX_STATUS_MESSAGE_CHARACTERS),
         )
         persist(updated)
         return updated
@@ -256,7 +261,7 @@ class JobStore internal constructor(
 
     /** The caller first verifies run ownership through the durable attempt store. Reads never create directories. */
     internal fun runReportsDirectory(jobId: String, runId: String, create: Boolean = false): Path {
-        require(runId.matches(Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}"))) { "invalid workflow report identity" }
+        require(runId.matches(WORKFLOW_RUN_ID_PATTERN)) { "invalid workflow report identity" }
         val job = jobDirectory(jobId)
         if (!Files.isDirectory(job, java.nio.file.LinkOption.NOFOLLOW_LINKS)) throw JobStoreException("job storage is unavailable")
         var current = job
@@ -315,6 +320,31 @@ class JobStore internal constructor(
         ) { "artifact path must be a canonical report path" }
         return contained("artifact") {
             readStableRegularFile(root, "$jobId/$relativePath", maximumBytes).requireSingleName("artifact")
+        }
+    }
+
+    /** Stream a fresh, descriptor-bound receipt for metadata cache validation without retaining file bytes. */
+    internal fun readArtifactDigest(
+        jobId: String,
+        relativePath: String,
+        maximumBytes: Long,
+        cancellationCheck: () -> Unit = {},
+    ): decompengine.repair.StableFileDigest {
+        jobDirectory(jobId)
+        requireCanonicalReportPath(relativePath)
+        require(maximumBytes in 1..4L * 1024 * 1024 * 1024) { "artifact digest limit is invalid" }
+        return contained("artifact") {
+            decompengine.repair.hashStableRegularFile(root, "$jobId/$relativePath",
+                declaredSize = { size ->
+                    if (size > maximumBytes) throw decompengine.repair.RepairBudgetExceededException("artifact exceeds its digest limit")
+                },
+                readBytes = { _, total ->
+                    if (total > maximumBytes) throw decompengine.repair.RepairBudgetExceededException("artifact grew beyond its digest limit")
+                },
+                cancellationCheck = cancellationCheck,
+                validateMetadata = { descriptor ->
+                    if (descriptor.identity.linkCount != 1) throw decompengine.repair.StableFileUnavailableException("artifact has more than one filesystem name")
+                })
         }
     }
 
@@ -425,10 +455,28 @@ class JobStore internal constructor(
         return contained("job input") { readStableRegularFile(root, "$jobId/input.elf", MAX_INPUT_BYTES.toLong()) }
     }
 
+    /** Fresh descriptor-bound input digest used to bracket cached source metadata observations. */
+    internal fun readInputDigest(jobId: String, cancellationCheck: () -> Unit = {}): decompengine.repair.StableFileDigest {
+        jobDirectory(jobId)
+        return contained("job input") {
+            decompengine.repair.hashStableRegularFile(root, "$jobId/input.elf",
+                declaredSize = { size ->
+                    if (size > MAX_INPUT_BYTES) throw decompengine.repair.RepairBudgetExceededException("job input exceeds its digest limit")
+                },
+                readBytes = { _, total ->
+                    if (total > MAX_INPUT_BYTES) throw decompengine.repair.RepairBudgetExceededException("job input grew beyond its digest limit")
+                },
+                cancellationCheck = cancellationCheck,
+                validateMetadata = { descriptor ->
+                    if (descriptor.identity.linkCount != 1) throw decompengine.repair.StableFileUnavailableException("job input has more than one filesystem name")
+                })
+        }
+    }
+
     /** Exact selected source namespace, using the same pinned-descriptor containment primitive. */
     internal fun readSourceInput(jobId: String, runId: String, sourcePath: String, maximumBytes: Long): StableRegularFile {
         jobDirectory(jobId)
-        require(runId.matches(Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}"))) { "source attempt identity is invalid" }
+        require(runId.matches(WORKFLOW_RUN_ID_PATTERN)) { "source attempt identity is invalid" }
         decompengine.project.requireNormalizedProjectPath(sourcePath, "selected source input")
         require(maximumBytes in 1..8L * 1024 * 1024) { "source input read limit is invalid" }
         return contained("source input") {
@@ -443,7 +491,7 @@ class JobStore internal constructor(
         reportPrefix: String = "reports",
     ): Map<String, LinuxFileIdentity> {
         jobDirectory(jobId)
-        require(reportPrefix == "reports" || reportPrefix.matches(Regex("reports/runs/[A-Za-z0-9][A-Za-z0-9_-]{0,127}"))) { "archive report prefix is invalid" }
+        require(reportPrefix == "reports" || reportPrefix.matches(ARCHIVE_REPORT_PREFIX_PATTERN)) { "archive report prefix is invalid" }
         val inventory = sortedMapOf<String, LinuxFileIdentity>()
         var entries = 1
         var regularFiles = 0
@@ -563,7 +611,7 @@ class JobStore internal constructor(
         if (Files.notExists(root)) return
         var scanned = 0
         var remaining = maximumMetadataBytes
-        val jobName = Regex("[a-f0-9]{32}")
+                val jobName = JOB_ID_PATTERN
         Files.newDirectoryStream(root).use { entries ->
             for (entry in entries) {
                 checkProgress()
@@ -581,7 +629,7 @@ class JobStore internal constructor(
     }
 
     private fun jobDirectory(jobId: String): Path {
-        if (jobId.isBlank() || !jobId.matches(Regex("[a-f0-9]{32}"))) {
+        if (jobId.isBlank() || !jobId.matches(JOB_ID_PATTERN)) {
             throw JobStoreException("invalid job id: $jobId")
         }
         return root.resolve(jobId)

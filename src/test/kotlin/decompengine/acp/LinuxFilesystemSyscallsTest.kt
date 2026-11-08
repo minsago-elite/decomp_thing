@@ -16,6 +16,155 @@ import kotlin.test.assertTrue
 
 class LinuxFilesystemSyscallsTest {
     @Test
+    fun `primitive read binding is limited to supported 64 bit Linux ABIs`() {
+        for (architecture in listOf("amd64", "x86_64", "aarch64")) {
+            assertTrue(LinuxFilesystemSyscalls.supportsPrimitiveReadAbi("Linux", architecture, 8, 8))
+        }
+        assertFalse(LinuxFilesystemSyscalls.supportsPrimitiveReadAbi("Linux", "i386", 4, 4))
+        assertFalse(LinuxFilesystemSyscalls.supportsPrimitiveReadAbi("Linux", "amd64", 4, 8))
+        assertFalse(LinuxFilesystemSyscalls.supportsPrimitiveReadAbi("Linux", "amd64", 8, 4))
+        assertFalse(LinuxFilesystemSyscalls.supportsPrimitiveReadAbi("Darwin", "amd64", 8, 8))
+
+        var registrations = 0
+        assertTrue(LinuxFilesystemSyscalls.registerPrimitiveReadBindingIfSupported("Linux", "x86_64", 8, 8) {
+            registrations++
+        })
+        assertEquals(1, registrations)
+        assertFalse(LinuxFilesystemSyscalls.registerPrimitiveReadBindingIfSupported("Linux", "x86_64", 8, 8) {
+            throw UnsatisfiedLinkError("registration unavailable")
+        })
+        assertFalse(LinuxFilesystemSyscalls.registerPrimitiveReadBindingIfSupported("Darwin", "x86_64", 8, 8) {
+            error("unsupported ABI must not attempt registration")
+        })
+
+        var directCalls = 0
+        var proxyCalls = 0
+        assertEquals(7L, LinuxFilesystemSyscalls.readWithPrimitiveFallback(true, { directCalls++; 7L },
+            { proxyCalls++; error("direct binding must be selected") }))
+        assertEquals(0L, LinuxFilesystemSyscalls.readWithPrimitiveFallback(false,
+            { directCalls++; error("unavailable binding must use the proxy") }, { proxyCalls++; 0L }))
+        assertEquals(1, directCalls)
+        assertEquals(1, proxyCalls)
+    }
+
+    @Test
+    fun `openat and close optional dispatch selects only registered bindings and preserves failures`() {
+        var direct = 0
+        var proxy = 0
+        assertEquals(23, LinuxFilesystemSyscalls.openAtWithPrimitiveFallback(true, { direct++; 23 }, { proxy++; -1 }))
+        assertEquals(24, LinuxFilesystemSyscalls.closeWithPrimitiveFallback(true, { direct++; 24 }, { proxy++; -1 }))
+        assertEquals(-1, LinuxFilesystemSyscalls.openAtWithPrimitiveFallback(false, { direct++; 1 }, { proxy++; -1 }))
+        assertEquals(-1, LinuxFilesystemSyscalls.closeWithPrimitiveFallback(false, { direct++; 1 }, { proxy++; -1 }))
+        assertEquals(2, direct)
+        assertEquals(2, proxy)
+        val failure = IllegalStateException("native dispatch failure")
+        assertTrue(assertFailsWith<IllegalStateException> {
+            LinuxFilesystemSyscalls.openAtWithPrimitiveFallback(true, { throw failure }, { -1 })
+        } === failure)
+    }
+
+    @Test
+    fun `production descriptor close shares the registered direct binding`() {
+        val path = createTempDirectory(Files.createDirectories(Path.of("build")).toAbsolutePath(), "direct-close-")
+        try {
+            LinuxFilesystemSyscalls.openRoot(path).use { root ->
+                assertTrue(com.sun.jna.Native.registered(LinuxOwnedOpenCloseDirect::class.java))
+                val descriptor = LinuxFilesystemSyscalls.openRegularFileAtOrNull(root.fd, "missing")
+                assertNull(descriptor)
+            }
+            assertTrue(com.sun.jna.Native.registered(LinuxOwnedOpenCloseDirect::class.java))
+        } finally { path.toFile().deleteRecursively() }
+    }
+
+    @Test
+    fun `primitive read direct ABI returns raw result and leaves errno capture immediate`() {
+        withLinuxDirectory("read-direct-abi-") { path, directory ->
+            val expected = byteArrayOf(0x41, 0x42, 0x43)
+            Files.write(path.resolve("input"), expected)
+            LinuxFilesystemSyscalls.openRegularFileAtOrNull(directory.fd, "input")!!.use { authorized ->
+                LinuxFilesystemSyscalls.openReadableFrom(authorized).use { readable ->
+                    assertContentEquals(expected, LinuxFilesystemSyscalls.readKnownSize(readable, expected.size) {})
+                }
+                LinuxFilesystemSyscalls.openReadableFrom(authorized).use { readable ->
+                    assertTrue(com.sun.jna.Native.registered(LinuxOwnedReadDirect::class.java),
+                        "the supported Linux test lane must exercise the primitive binding, not silently qualify its proxy fallback")
+                    com.sun.jna.Memory(1).use { buffer ->
+                        com.sun.jna.Native.setLastError(123)
+                        val successful = LinuxOwnedReadDirect.read(readable.fd, buffer, 1)
+                        assertEquals(1L, successful)
+                        assertEquals(expected[0], buffer.getByte(0))
+
+                        val failed = LinuxOwnedReadDirect.read(-1, buffer, 1)
+                        val error = com.sun.jna.Native.getLastError()
+                        assertEquals(-1L, failed)
+                        assertEquals(9, error) // EBADF from the immediately preceding read.
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `sized descriptor reads preserve bounds and classify size races`() {
+        val parent = Files.createDirectories(Path.of("build")).toAbsolutePath()
+        val rootPath = createTempDirectory(parent, "sized-read-").normalize()
+        try {
+            val empty = Files.createFile(rootPath.resolve("empty"))
+            val exact = ByteArray(128 * 1024) { (it % 251).toByte() }
+            val exactPath = rootPath.resolve("exact")
+            Files.write(exactPath, exact)
+            val grewPath = rootPath.resolve("grew")
+            Files.write(grewPath, byteArrayOf(1, 2, 3, 4))
+            val shrankPath = rootPath.resolve("shrank")
+            Files.write(shrankPath, byteArrayOf(5, 6, 7))
+
+            LinuxFilesystemSyscalls.openRoot(rootPath).use { root ->
+                fun read(name: String, expectedSize: Int): ByteArray =
+                    LinuxFilesystemSyscalls.openRegularFileAtOrNull(root.fd, name).use { authorized ->
+                        LinuxFilesystemSyscalls.openReadableWithoutAtimeFrom(requireNotNull(authorized)).use { readable ->
+                            LinuxFilesystemSyscalls.readKnownSize(readable, expectedSize) { }
+                        }
+                    }
+
+                assertEquals(0, read(empty.fileName.toString(), 0).size)
+                assertContentEquals(exact, read("exact", exact.size))
+                assertFailsWith<LinuxFileSizeChangedException> { read("grew", 3) }
+                assertFailsWith<LinuxFileSizeChangedException> { read("shrank", 4) }
+
+                val cancelled = java.util.concurrent.CancellationException("authored sized-read cancellation")
+                LinuxFilesystemSyscalls.openRegularFileAtOrNull(root.fd, "exact").use { authorized ->
+                    LinuxFilesystemSyscalls.openReadableWithoutAtimeFrom(requireNotNull(authorized)).use { readable ->
+                        val observed = assertFailsWith<java.util.concurrent.CancellationException> {
+                            LinuxFilesystemSyscalls.readKnownSize(readable, exact.size) { throw cancelled }
+                        }
+                        assertTrue(observed === cancelled)
+                    }
+                }
+            }
+        } finally {
+            rootPath.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `openat byte pathname preserves non ASCII filesystem names`() {
+        val parent = Files.createDirectories(Path.of("build")).toAbsolutePath()
+        val path = createTempDirectory(parent, "openat-한글-").normalize()
+        try {
+            Files.writeString(path.resolve("café-雪.txt"), "utf8")
+            LinuxFilesystemSyscalls.openRoot(path).use { root ->
+                LinuxFilesystemSyscalls.openRegularFileAtOrNull(root.fd, "café-雪.txt").use { authorized ->
+                    LinuxFilesystemSyscalls.openReadableWithoutAtimeFrom(requireNotNull(authorized)).use { readable ->
+                        assertEquals("utf8", String(LinuxFilesystemSyscalls.read(readable, 4) { }, Charsets.UTF_8))
+                    }
+                }
+            }
+        } finally {
+            path.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
     fun `prefix observations retain successful owners through a later failed pin and cleanup`() {
         var clock = 0L
         val prefix = requireNotNull(RuntimeCopyStatistics.Prefix.create {
@@ -951,6 +1100,34 @@ class LinuxFilesystemSyscallsTest {
             }
 
             assertNull(LinuxFilesystemSyscalls.openRegularFileAtOrNull(directory.fd, "missing"))
+        }
+    }
+
+    @Test
+    fun `bounded streaming digests reuse one thread-local bridge array`() {
+        withLinuxDirectory("linux-syscall-stream-buffer-") { path, directory ->
+            val first = ByteArray(4096) { 0x31 }
+            val second = ByteArray(4096) { 0x72 }
+            Files.write(path.resolve("first"), first)
+            Files.write(path.resolve("second"), second)
+            val observedBuffers = mutableListOf<ByteArray>()
+            listOf("first" to first, "second" to second).forEach { (name, expected) ->
+                LinuxFilesystemSyscalls.openRegularFileAtOrNull(directory.fd, name)!!.use { authorized ->
+                    LinuxFilesystemSyscalls.openReadableWithoutAtimeFrom(authorized).use { readable ->
+                        val copied = ByteArray(expected.size)
+                        var offset = 0
+                        LinuxFilesystemSyscalls.readChunks(readable, 64 * 1024, {}) { bytes, length ->
+                            observedBuffers += bytes
+                            bytes.copyInto(copied, offset, 0, length)
+                            offset += length
+                        }
+                        assertEquals(expected.size, offset)
+                        assertContentEquals(expected, copied)
+                    }
+                }
+            }
+            assertEquals(2, observedBuffers.size)
+            assertTrue(observedBuffers[0] === observedBuffers[1])
         }
     }
 

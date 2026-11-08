@@ -185,6 +185,8 @@ jobs:
           node --test scripts/packaged-browser-restart.test.mjs
           node --check scripts/packaged-browser-cdp-diagnostics.mjs
           node --test scripts/packaged-browser-cdp-diagnostics.test.mjs
+          node --check scripts/packaged-browser-source-tree.mjs
+          node --test scripts/packaged-browser-source-tree.test.mjs
       - name: Build archives and verify browser expiry and distribution contents
         env:
           DECOMP_BROWSER_CHROME: ${{ runner.temp }}/web-test-browser/chrome
@@ -249,6 +251,12 @@ jobs:
             --archive "$WEB_TEST_ARCHIVE" \
             --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
             --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode scale --no-sandbox
+      - name: Verify bounded source-tree browsing with twenty-five thousand files
+        run: |
+          node scripts/check-packaged-web-browser.mjs \
+            --archive "$WEB_TEST_ARCHIVE" \
+            --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
+            --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode source-tree --no-sandbox
       - name: Exercise same-origin JVM restart and two-tab stale progress pin
         run: |
           xvfb-run -a node scripts/check-packaged-web-browser.mjs \

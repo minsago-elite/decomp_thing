@@ -28,7 +28,25 @@ each fixture. The stored `binary_path` binds to the supplied absolute root, so
 the job-store record is root-specific while source paths, source contents,
 manifest records and source revision identity are deterministic.
 
-This fixture checkpoint establishes reproducible source-tree data and the real
-metadata-reader ceiling. It does not establish packaged-browser request,
-latency, heap or RSS budgets. Those measurements remain part of #1056 and need
-to be wired into the packaged browser journey separately.
+The packaged `source-tree` browser mode uses the same fixture and real
+application readers. It visits all 500 pages of the 24,999-file `modules`
+directory, checks exact ordering and keyboard focus, opens a file and its first
+bounded preview chunk, runs common/rare/missing searches, and cancels an in-flight
+search by navigating away. The CI mode records request-head and response bytes,
+route durations, mounted rows, browser heap, and application process-tree RSS.
+Its required gate applies the loopback source budgets from
+[`web-delivery.md`](web-delivery.md#measurement-profiles-and-budgets), including
+the 500 ms repeated first-page p95, 500 ms first chunk, 2 s first search page,
+128 MiB browser heap, 256 MiB incremental application RSS, 50 directory rows,
+8 KiB request heads, and 1 MB response ceilings. The integration test also
+seeds 25,001 files and confirms the real catalog and revision readers refuse
+that over-limit input.
+
+The repeated page samples are taken from one warmed packaged JVM; they are not
+fresh-process cold-load measurements. The synthetic tree does not qualify real
+generated projects, cross-browser behavior, long sessions, or production
+workloads. A client abort proves stale browser work is discarded, not that
+server processing stopped. The larger-than-supported tree is refused rather
+than partially displayed; if the job provides `source-tree.zip`, use its
+verified archive route as the alternative. These fixture and CI results are
+evidence for #1056, not production qualification or completion of parent #625.

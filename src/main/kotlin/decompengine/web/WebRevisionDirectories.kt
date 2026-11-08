@@ -52,7 +52,12 @@ internal fun resolveRevisionSourceDirectory(snapshot: WebRevisionSourceSnapshot,
     }
     // A forged selector must not bypass a file/directory collision by skipping its parent page.
     selected.path?.let { path ->
-        if (snapshot.files.any { path == it.evidence.path || path.startsWith("${it.evidence.path}/") }) revisionSourceChanged()
+        val parts = path.split('/')
+        for (depth in 1..parts.size) {
+            val prefix = parts.take(depth).joinToString("/")
+            val index = snapshot.files.binarySearch { it.evidence.path.compareTo(prefix) }
+            if (index >= 0) revisionSourceChanged()
+        }
     }
     return selected
 }
@@ -64,6 +69,9 @@ private fun revisionDirectoryNotFound(): Nothing = throw WebAccessDenied(404, "S
 internal class WebRevisionDirectoryPages(private val source: (String, String, String) -> WebRevisionSourceSnapshot) {
     private val secret = ByteArray(32).also(SecureRandom()::nextBytes)
     private class Child(val name: String, val first: Int, val directoryPath: String?, var files: Int = 1)
+    private data class DirectoryMemo(val snapshot: WebRevisionSourceSnapshot, val directoryId: String,
+        val sourceFiles: Int, val ordered: List<Child>)
+    @Volatile private var directoryMemo: DirectoryMemo? = null
 
     fun page(owner: String, jobId: String, runId: String, revisionId: String, directoryId: String, rawQuery: String?): JsonObject {
         requireRevisionSourceDirectoryId(directoryId)
@@ -81,27 +89,10 @@ internal class WebRevisionDirectoryPages(private val source: (String, String, St
         val ref = snapshot.reference
         check(ref.jobId == jobId && ref.runId == runId && ref.revisionId == revisionId)
         val selected = resolveRevisionSourceDirectory(snapshot, directoryId)
-        val prefix = selected.path?.let { "$it/" }.orEmpty()
-        val children = linkedMapOf<String, Child>()
-        var sourceFiles = 0
-        for (index in selected.first until snapshot.files.size) {
-            val path = snapshot.files[index].evidence.path
-            if (!path.startsWith(prefix)) break
-            sourceFiles++
-            val relative = path.substring(prefix.length)
-            val slash = relative.indexOf('/')
-            val name = if (slash < 0) relative else relative.substring(0, slash)
-            val child = children[name]
-            if (slash < 0) {
-                if (child != null) revisionSourceChanged()
-                children[name] = Child(name, index, null)
-            } else if (child == null) children[name] = Child(name, index, prefix + name)
-            else {
-                if (child.directoryPath == null) revisionSourceChanged()
-                child.files++
-            }
-        }
-        val ordered = children.values.sortedWith(compareBy<Child> { if (it.directoryPath == null) 1 else 0 }.thenBy { it.name })
+        val cached = directoryMemo?.takeIf { it.snapshot === snapshot && it.directoryId == directoryId }
+        val directory = cached ?: buildDirectoryMemo(snapshot, directoryId, selected).also { directoryMemo = it }
+        val sourceFiles = directory.sourceFiles
+        val ordered = directory.ordered
         check(ordered.isNotEmpty())
         val offset = continuation?.let { parts ->
             if (parts[0] != snapshot.metadataVersion) throw WebAccessDenied(410, "CURSOR_EXPIRED",
@@ -123,8 +114,10 @@ internal class WebRevisionDirectoryPages(private val source: (String, String, St
                     put("declaredViewable", ProjectFileRole.VIEWABLE in file.evidence.roles)
                 }
             }
-            val bytes = item.toString().toByteArray(Charsets.UTF_8).size + 1
-            if (itemBytes + bytes > 1_000_000) break
+            val itemLimit = 1_000_000 - itemBytes - 1 // Retain the existing comma allowance per entry.
+            val itemSize = try { WebJsonUtf8.encodedByteCount(item, itemLimit) }
+                catch (_: WebJsonByteLimitException) { break }
+            val bytes = itemSize + 1
             itemBytes += bytes; items += item
         }
         check(items.isNotEmpty())
@@ -159,8 +152,39 @@ internal class WebRevisionDirectoryPages(private val source: (String, String, St
                 ) else JsonNull)
             })
         }
-        check(result.toString().toByteArray(Charsets.UTF_8).size <= 1_048_000)
+        try { WebJsonUtf8.encodedByteCount(result, 1_048_000) }
+        catch (failure: WebJsonByteLimitException) {
+            throw IllegalStateException("The source directory response exceeds its byte ceiling", failure)
+        }
         return result
+    }
+
+    /** Build the immediate-child ordering once for a freshly authenticated immutable snapshot. */
+    private fun buildDirectoryMemo(snapshot: WebRevisionSourceSnapshot, directoryId: String,
+        selected: WebRevisionSourceDirectory): DirectoryMemo {
+        val prefix = selected.path?.let { "$it/" }.orEmpty()
+        val children = linkedMapOf<String, Child>()
+        var sourceFiles = 0
+        for (index in selected.first until snapshot.files.size) {
+            val path = snapshot.files[index].evidence.path
+            if (!path.startsWith(prefix)) break
+            sourceFiles++
+            val relative = path.substring(prefix.length)
+            val slash = relative.indexOf('/')
+            val name = if (slash < 0) relative else relative.substring(0, slash)
+            val child = children[name]
+            if (slash < 0) {
+                if (child != null) revisionSourceChanged()
+                children[name] = Child(name, index, null)
+            } else if (child == null) children[name] = Child(name, index, prefix + name)
+            else {
+                if (child.directoryPath == null) revisionSourceChanged()
+                child.files++
+            }
+        }
+        val ordered = children.values.sortedWith(compareBy<Child> { if (it.directoryPath == null) 1 else 0 }.thenBy { it.name })
+        check(ordered.isNotEmpty())
+        return DirectoryMemo(snapshot, directoryId, sourceFiles, ordered)
     }
 
     private fun signature(vararg fields: Any): String {

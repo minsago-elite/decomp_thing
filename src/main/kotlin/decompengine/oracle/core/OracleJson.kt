@@ -231,8 +231,30 @@ private class StrictParser(
 
     private fun parseStringAndCharge(): String {
         expect('"')
-        val result = StringBuilder()
+        val start = offset
         var lastProgressOffset = offset
+        while (offset < source.length) {
+            val current = source[offset]
+            when {
+                current == '"' -> {
+                    val value = source.substring(start, offset)
+                    offset++
+                    chargeAsciiString(value.length)
+                    return value
+                }
+                current == '\\' || current.code > 0x7f || current.code < 0x20 -> break
+                else -> offset++
+            }
+            if (offset - lastProgressOffset >= PROGRESS_CHECKPOINT_CHARACTERS) {
+                checkpoint("while parsing strict JSON string")
+                lastProgressOffset = offset
+            }
+        }
+
+        // Continue through the general path only when the string contains an escape,
+        // non-ASCII character, or invalid control. Keep the original checkpoint cadence.
+        val result = StringBuilder()
+        result.append(source, start, offset)
         while (offset < source.length) {
             val current = source[offset++]
             when {
@@ -315,6 +337,14 @@ private class StrictParser(
 
     private fun chargeString(value: String) {
         val byteCount = value.toByteArray(StandardCharsets.UTF_8).size
+        chargeStringBytes(byteCount)
+    }
+
+    private fun chargeAsciiString(byteCount: Int) {
+        chargeStringBytes(byteCount)
+    }
+
+    private fun chargeStringBytes(byteCount: Int) {
         if (byteCount > limits.maximumStringBytes) fail("JSON string exceeds the configured byte limit")
         if (totalStringBytes > limits.maximumTotalStringBytes - byteCount) {
             fail("JSON strings exceed the configured aggregate byte limit")

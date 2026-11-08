@@ -15,13 +15,17 @@ internal fun requireNoWebApiQuery(exchange: HttpExchange) {
 
 internal fun sendWebApiResponse(exchange: HttpExchange, status: Int, kind: String, data: JsonElement) {
     val requestId = UUID.randomUUID().toString()
-    val body = buildJsonObject {
+    val response = buildJsonObject {
         put("apiVersion", 1)
         put("kind", kind)
         put("requestId", requestId)
         put("data", data)
-    }.toString().toByteArray(Charsets.UTF_8)
-    check(body.size <= 1024 * 1024) { "The API response exceeds its byte ceiling" }
+    }
+    // Finish bounded encoding before setting headers: an oversized document must not leave a partial response.
+    val body = try { WebJsonUtf8.encode(response, MAXIMUM_WEB_API_RESPONSE_BYTES) }
+        catch (failure: WebJsonByteLimitException) {
+            throw IllegalStateException("The API response exceeds its byte ceiling", failure)
+        }
     webApiHeaders(exchange, requestId)
     exchange.responseHeaders.set("Content-Type", "application/json; charset=utf-8")
     exchange.responseHeaders.set("Content-Length", body.size.toString())
@@ -33,6 +37,8 @@ internal fun sendWebApiResponse(exchange: HttpExchange, status: Int, kind: Strin
         }
     } finally { exchange.close() }
 }
+
+private const val MAXIMUM_WEB_API_RESPONSE_BYTES = 1024 * 1024
 
 internal fun webApiHeaders(exchange: HttpExchange, requestId: String) {
     exchange.responseHeaders.set("X-Request-ID", requestId)

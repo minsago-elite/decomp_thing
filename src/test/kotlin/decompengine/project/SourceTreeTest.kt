@@ -962,6 +962,28 @@ class SourceTreeTest {
                 expected,
             )
         }
+        val root = Json.parseToJsonElement(text).jsonObject
+        val entries = root.getValue("files").jsonArray
+        fun rejectRoot(changed: JsonObject) {
+            assertFailsWith<IllegalArgumentException> { SourceTreeManifestReader.parse(changed.toString(), expected) }
+        }
+        val firstEntry = entries.first().jsonObject
+        rejectRoot(JsonObject(root + ("files" to JsonArray(listOf(
+            JsonObject(firstEntry + ("entityIds" to JsonArray(listOf(JsonPrimitive("duplicate"), JsonPrimitive("duplicate"))))),
+        ) + entries.drop(1)))))
+        rejectRoot(JsonObject(root + ("files" to JsonArray(listOf(
+            JsonObject(firstEntry + ("entityIds" to JsonArray(listOf(JsonPrimitive("z"), JsonPrimitive("a"))))),
+        ) + entries.drop(1)))))
+        val roleIndex = entries.indexOfFirst { it.jsonObject.getValue("roles").jsonArray.size > 1 }
+        assertTrue(roleIndex >= 0, "the generated manifest fixture should exercise multiple roles")
+        val roleEntry = entries[roleIndex].jsonObject
+        val roles = roleEntry.getValue("roles").jsonArray
+        rejectRoot(JsonObject(root + ("files" to JsonArray(entries.mapIndexed { index, entry ->
+            if (index == roleIndex) JsonObject(roleEntry + ("roles" to JsonArray(roles.reversed()))) else entry
+        }))))
+        assertTrue(entries.size > 1, "the generated manifest fixture should contain multiple files")
+        rejectRoot(JsonObject(root + ("files" to JsonArray(entries.reversed()))))
+        rejectRoot(JsonObject(root + ("unresolvedEntityIds" to JsonArray(listOf(JsonPrimitive("z"), JsonPrimitive("a"))))))
         project.resolve("source_tree_manifest.json").writeText(
             text.replaceFirst("\"editable\"", "\"evidence\""),
         )

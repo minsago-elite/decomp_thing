@@ -12,6 +12,7 @@ import java.io.IOException
 import java.io.OutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.nio.charset.StandardCharsets
 import java.nio.file.FileSystems
 import java.nio.file.Files
 import java.nio.file.Path
@@ -202,7 +203,48 @@ internal fun boundedDescriptorReadRequest(maximumBytes: Int, consumed: Long, buf
  * I/O or numeric-PID signaling.
  */
 internal object LinuxFilesystemSyscalls {
+    /** Reused only by synchronous bounded digests; callbacks must consume bytes before returning. */
+    private val streamingReadScratch = ThreadLocal.withInitial { ByteArray(0) }
+    /** ASCII pathnames dominate descriptor walks; reuse one bounded NUL-terminated call buffer per thread. */
+    private val openAtPathScratch = ThreadLocal.withInitial { ByteArray(4096) }
+    /** One small reusable statx buffer per caller thread; it retains no descriptor or identity. */
+    private val descriptorIdentityScratch = ThreadLocal.withInitial { StatxIdentityScratch() }
     private val libc: LibC by lazy { Native.load(Platform.C_LIBRARY_NAME, LibC::class.java) }
+    private val ownedReadDirectReady: Boolean by lazy {
+        registerPrimitiveReadBindingIfSupported(System.getProperty("os.name", ""), System.getProperty("os.arch", ""),
+            Native.POINTER_SIZE, NativeLong.SIZE) {
+            Native.register(LinuxOwnedReadDirect::class.java, Native.getNativeLibrary(libc))
+        }
+    }
+    private val ownedOpenCloseDirectReady: Boolean by lazy {
+        registerPrimitiveReadBindingIfSupported(System.getProperty("os.name", ""), System.getProperty("os.arch", ""),
+            Native.POINTER_SIZE, NativeLong.SIZE) {
+            Native.register(LinuxOwnedOpenCloseDirect::class.java, Native.getNativeLibrary(libc))
+        }
+    }
+    internal inline fun openAtWithPrimitiveFallback(ready: Boolean, direct: () -> Int, proxy: () -> Int): Int =
+        if (ready) direct() else proxy()
+    internal inline fun closeWithPrimitiveFallback(ready: Boolean, direct: () -> Int, proxy: () -> Int): Int =
+        if (ready) direct() else proxy()
+    private fun nativeOpenAt(directoryFd: Int, path: ByteArray, flags: Int, mode: Int): Int =
+        openAtWithPrimitiveFallback(ownedOpenCloseDirectReady,
+            { LinuxOwnedOpenCloseDirect.openat(directoryFd, path, flags, mode) },
+            { libc.openat(directoryFd, path, flags, mode) })
+    internal fun closeNativeDescriptor(fd: Int): Int = closeWithPrimitiveFallback(ownedOpenCloseDirectReady,
+        { LinuxOwnedOpenCloseDirect.close(fd) }, { libc.close(fd) })
+    internal fun supportsPrimitiveReadAbi(os: String, architecture: String, pointerBytes: Int, nativeLongBytes: Int) =
+        os == "Linux" && architecture in SUPPORTED_ARCHITECTURES && pointerBytes == 8 && nativeLongBytes == 8
+    internal fun registerPrimitiveReadBindingIfSupported(os: String, architecture: String, pointerBytes: Int,
+        nativeLongBytes: Int, register: () -> Unit): Boolean {
+        if (!supportsPrimitiveReadAbi(os, architecture, pointerBytes, nativeLongBytes)) return false
+        return try { register(); true } catch (_: Throwable) { false }
+    }
+    internal inline fun readWithPrimitiveFallback(directReady: Boolean, direct: () -> Long, proxy: () -> Long): Long =
+        if (directReady) direct() else proxy()
+    private fun nativeRead(fd: Int, buffer: Pointer, count: Long): Long =
+        readWithPrimitiveFallback(ownedReadDirectReady,
+            { LinuxOwnedReadDirect.read(fd, buffer, count) },
+            { libc.read(fd, buffer, NativeLong(count)).toLong() })
     // Register one call site against the existing proxy's library, never an identity/approval cache.
     private val ownedStatxDirectReady: Boolean by lazy {
         try {
@@ -686,23 +728,89 @@ internal object LinuxFilesystemSyscalls {
     }
 
     fun read(descriptor: LinuxDescriptor, maximumBytes: Int, cancellationCheck: () -> Unit): ByteArray {
-        val output = ByteArrayOutputStream(minOf(maximumBytes, BUFFER_BYTES))
-        val buffer = Memory(BUFFER_BYTES.toLong())
-        var total = 0L
-        while (true) {
-            cancellationCheck()
-            val count = retryOnInterrupted("read authorized filesystem entry") {
-                libc.read(descriptor.fd, buffer, NativeLong(boundedDescriptorReadRequest(maximumBytes, total, BUFFER_BYTES))).toLong()
+        require(maximumBytes >= 0) { "read byte limit must not be negative" }
+        val bufferBytes = minOf(BUFFER_BYTES, maxOf(1, maximumBytes))
+        return Memory(bufferBytes.toLong()).use { buffer ->
+            val output = ByteArrayOutputStream(minOf(maximumBytes, BUFFER_BYTES))
+            var total = 0L
+            while (true) {
+                cancellationCheck()
+                val count = retryOnInterrupted("read authorized filesystem entry") {
+                    nativeRead(descriptor.fd, buffer, boundedDescriptorReadRequest(maximumBytes, total, bufferBytes))
+                }
+                if (count == 0L) break
+                if (count < 0L) throw syscallFailure("read authorized filesystem entry")
+                total += count
+                if (total > maximumBytes.toLong()) throw LinuxResourceLimitException()
+                output.write(buffer.getByteArray(0, count.toInt()))
             }
-            if (count == 0L) break
-            if (count < 0L) throw syscallFailure("read authorized filesystem entry")
-            total += count
-            if (total > maximumBytes.toLong()) {
-                throw LinuxResourceLimitException()
-            }
-            output.write(buffer.getByteArray(0, count.toInt()))
+            output.toByteArray()
         }
-        return output.toByteArray()
+    }
+
+    /** Read a file whose descriptor-bound size was already checked, without chunk or stream copies. */
+    fun readKnownSize(descriptor: LinuxDescriptor, expectedBytes: Int, cancellationCheck: () -> Unit): ByteArray {
+        require(expectedBytes >= 0) { "expected file size must not be negative" }
+        val result = ByteArray(expectedBytes)
+        val bufferBytes = minOf(BUFFER_BYTES, maxOf(1, expectedBytes))
+        return Memory(bufferBytes.toLong()).use { buffer ->
+            var offset = 0
+            while (offset < expectedBytes) {
+                cancellationCheck()
+                val request = minOf(bufferBytes, expectedBytes - offset)
+                val count = retryOnInterrupted("read sized authorized filesystem entry") {
+                    nativeRead(descriptor.fd, buffer, request.toLong())
+                }
+                if (count == 0L) throw LinuxFileSizeChangedException(
+                    "authorized filesystem entry became shorter than its observed size",
+                )
+                if (count < 0L) throw syscallFailure("read sized authorized filesystem entry")
+                val length = count.toInt()
+                buffer.read(0, result, offset, length)
+                offset += length
+            }
+            cancellationCheck()
+            val trailing = retryOnInterrupted("verify sized authorized filesystem entry EOF") {
+                nativeRead(descriptor.fd, buffer, 1)
+            }
+            if (trailing < 0L) throw syscallFailure("verify sized authorized filesystem entry EOF")
+            if (trailing != 0L) throw LinuxFileSizeChangedException(
+                "authorized filesystem entry grew beyond its observed size",
+            )
+            result
+        }
+    }
+
+    /**
+     * Stream bytes from the owned descriptor in bounded chunks without reopening its procfs name.
+     * The callback must consume only the first [length] bytes synchronously and must not retain the array.
+     */
+    fun readChunks(descriptor: LinuxDescriptor, bufferBytes: Int, cancellationCheck: () -> Unit,
+        consume: (ByteArray, Int) -> Unit): Long {
+        require(bufferBytes in 1..MAXIMUM_STREAMING_READ_BUFFER_BYTES) { "streaming read buffer is invalid" }
+        return Memory(bufferBytes.toLong()).use { buffer ->
+            // Reuse one bounded bridge buffer per thread. Freshly allocating even one array per
+            // digest caused repeated page freshness checks to expand the packaged JVM heap.
+            // Larger caller-selected buffers remain ephemeral, keeping retained scratch bounded.
+            val bytes = if (bufferBytes <= REUSABLE_STREAMING_READ_BUFFER_BYTES) {
+                streamingReadScratch.get().takeIf { it.size >= bufferBytes }
+                    ?: ByteArray(bufferBytes).also(streamingReadScratch::set)
+            } else ByteArray(bufferBytes)
+            var total = 0L
+            while (true) {
+                cancellationCheck()
+                val count = retryOnInterrupted("read authorized filesystem entry") {
+                    nativeRead(descriptor.fd, buffer, bufferBytes.toLong())
+                }
+                if (count == 0L) break
+                if (count < 0L) throw syscallFailure("read authorized filesystem entry")
+                val length = count.toInt()
+                buffer.read(0, bytes, 0, length)
+                total = Math.addExact(total, count)
+                consume(bytes, length)
+            }
+            total
+        }
     }
 
     /** Reads at most [maximumBytes] from the start of an already-pinned regular file. */
@@ -710,12 +818,13 @@ internal object LinuxFilesystemSyscalls {
         require(maximumBytes >= 0) { "prefix byte limit must not be negative" }
         if (maximumBytes == 0) return ByteArray(0)
         openReadableFrom(authorized).use { readable ->
-            val buffer = Memory(maximumBytes.toLong())
-            val count = retryOnInterrupted("read authenticated filesystem prefix") {
-                libc.read(readable.fd, buffer, NativeLong(maximumBytes.toLong())).toLong()
+            return Memory(maximumBytes.toLong()).use { buffer ->
+                val count = retryOnInterrupted("read authenticated filesystem prefix") {
+                    nativeRead(readable.fd, buffer, maximumBytes.toLong())
+                }
+                if (count < 0L) throw syscallFailure("read authenticated filesystem prefix")
+                buffer.getByteArray(0, count.toInt())
             }
-            if (count < 0L) throw syscallFailure("read authenticated filesystem prefix")
-            return buffer.getByteArray(0, count.toInt())
         }
     }
 
@@ -737,7 +846,7 @@ internal object LinuxFilesystemSyscalls {
                     measuredCopyOperation(statistics, RuntimeCopyStatistics.Operation.CHECK) { cancellationCheck() }
                     val count = measuredCopyOperation(statistics, RuntimeCopyStatistics.Operation.READ) {
                         retryOnInterrupted("copy authenticated runtime file") {
-                            libc.read(readable.fd, buffer, NativeLong(BUFFER_BYTES.toLong())).toLong()
+                            nativeRead(readable.fd, buffer, BUFFER_BYTES.toLong())
                         }
                     }
                     statistics?.read(count)
@@ -779,7 +888,7 @@ internal object LinuxFilesystemSyscalls {
                     measuredCopyOperation(statistics, RuntimeCopyStatistics.Operation.CHECK) { cancellationCheck() }
                     val count = measuredCopyOperation(statistics, RuntimeCopyStatistics.Operation.READ) {
                         retryOnInterrupted("copy authenticated runtime file") {
-                            libc.read(readable.fd, buffer, NativeLong(BUFFER_BYTES.toLong())).toLong()
+                            nativeRead(readable.fd, buffer, BUFFER_BYTES.toLong())
                         }
                     }
                     statistics?.read(count)
@@ -1084,7 +1193,33 @@ internal object LinuxFilesystemSyscalls {
         }
     }
 
-    fun identity(fd: Int): LinuxFileIdentity = descriptorStatxIdentity(fd) ?: descriptorProcIdentity(fd)
+    fun identity(fd: Int): LinuxFileIdentity = descriptorIdentityScratch.get().identity(fd)
+
+    /** Descriptor-bound timestamps and size for stable content observations. Fails closed without statx. */
+    fun metadata(fd: Int): LinuxDescriptorMetadata = Memory(STATX_BYTES).use { statistics ->
+        statistics.clear()
+        val observed = descriptorStatxQueryOrNull {
+            retryOnInterrupted("inspect pinned descriptor metadata") {
+                val emptyPath = byteArrayOf(0)
+                if (ownedStatxDirectReady) LinuxOwnedStatxDirect.statx(fd, emptyPath,
+                    AT_EMPTY_PATH or AT_SYMLINK_NOFOLLOW, STATX_BASIC_STATS or STATX_MNT_ID, statistics).toLong()
+                else libc.statx(fd, emptyPath, AT_EMPTY_PATH or AT_SYMLINK_NOFOLLOW,
+                    STATX_BASIC_STATS or STATX_MNT_ID, statistics).toLong()
+            }
+        } ?: throw IOException("descriptor statx metadata is unavailable")
+        val mask = statistics.getInt(0)
+        val requiredMask = STATX_SIZE or STATX_ATIME or STATX_MTIME or STATX_CTIME
+        if (mask and requiredMask != requiredMask) throw IOException("descriptor statx omitted stable metadata fields")
+        val identity = decodeDescriptorStatxIdentity(statistics)
+            ?: throw IOException("descriptor statx omitted required identity fields")
+        fun seconds(offset: Int) = statistics.getLong(offset.toLong())
+        fun nanoseconds(offset: Int): Int = statistics.getInt(offset.toLong()).also {
+            if (it !in 0..999_999_999) throw IOException("descriptor statx returned invalid timestamp nanoseconds")
+        }
+        LinuxDescriptorMetadata(identity, statistics.getLong(0x28),
+            seconds(0x40), nanoseconds(0x48), seconds(0x50), nanoseconds(0x58),
+            seconds(0x60), nanoseconds(0x68))
+    }
 
     /** Scope-owned query storage only; fd ownership and every fresh observation stay with the caller. */
     class StatxIdentityScratch : AutoCloseable {
@@ -1217,7 +1352,25 @@ internal object LinuxFilesystemSyscalls {
     }
 
     private fun openDescriptor(parentFd: Int, path: String, flags: Int, mode: Int, operation: String): LinuxDescriptor {
-        val fd = retryOnInterrupted(operation) { libc.openat(parentFd, path, flags, mode).toLong() }.toInt()
+        // JNA's String conversion allocates a NativeString and cleaner registration on every
+        // pathname syscall. The byte-array mapping passes the same NUL-terminated UTF-8 operand
+        // without creating those per-call native wrapper objects.
+        val scratch = openAtPathScratch.get()
+        var ascii = path.length < scratch.size
+        if (ascii) {
+            for (character in path) {
+                if (character.code >= 0x80) { ascii = false; break }
+            }
+        }
+        val nulTerminatedPath = if (ascii) {
+            path.forEachIndexed { index, character -> scratch[index] = character.code.toByte() }
+            scratch[path.length] = 0
+            scratch
+        } else {
+            val pathBytes = path.toByteArray(StandardCharsets.UTF_8)
+            pathBytes.copyOf(pathBytes.size + 1)
+        }
+        val fd = retryOnInterrupted(operation) { nativeOpenAt(parentFd, nulTerminatedPath, flags, mode).toLong() }.toInt()
         if (fd < 0) throw syscallFailure(operation)
         return try {
             LinuxDescriptor(fd, identity(fd))
@@ -1382,7 +1535,7 @@ internal object LinuxFilesystemSyscalls {
             first.isSymbolicLink == second.isSymbolicLink
 
     private fun close(fd: Int) {
-        while (libc.close(fd) != 0 && Native.getLastError() == EINTR) {
+        while (closeNativeDescriptor(fd) != 0 && Native.getLastError() == EINTR) {
             // POSIX leaves close-after-EINTR semantics implementation-specific. Linux closes the descriptor.
             return
         }
@@ -1409,7 +1562,7 @@ internal object LinuxFilesystemSyscalls {
 
     private interface LibC : Library {
         fun syscall(number: NativeLong, directoryFd: NativeLong, path: String, how: Pointer, size: NativeLong): NativeLong
-        fun openat(directoryFd: Int, path: String, flags: Int, mode: Int): Int
+        fun openat(directoryFd: Int, path: ByteArray, flags: Int, mode: Int): Int
         fun close(fd: Int): Int
         fun read(fd: Int, buffer: Pointer, count: NativeLong): NativeLong
         fun write(fd: Int, buffer: Pointer, count: NativeLong): NativeLong
@@ -1481,6 +1634,10 @@ internal object LinuxFilesystemSyscalls {
     private const val STATX_BYTES = 256L
     private const val STATX_BASIC_STATS = 0x7ff
     private const val STATX_MNT_ID = 0x1000
+    private const val STATX_SIZE = 0x200
+    private const val STATX_ATIME = 0x20
+    private const val STATX_MTIME = 0x40
+    private const val STATX_CTIME = 0x80
     private const val STATX_IDENTITY_MASK = 0x111f // TYPE | MODE | NLINK | UID | GID | INO | MNT_ID
     private const val AT_REMOVEDIR = 0x200
     private const val RENAME_NOREPLACE = 1
@@ -1509,6 +1666,8 @@ internal object LinuxFilesystemSyscalls {
     internal const val ENOSPC = 28
     internal const val ELOOP = 40
     private const val BUFFER_BYTES = 16 * 1024
+    private const val REUSABLE_STREAMING_READ_BUFFER_BYTES = 64 * 1024
+    private const val MAXIMUM_STREAMING_READ_BUFFER_BYTES = 1024 * 1024
     private const val MAXIMUM_XATTR_NAME_BYTES = 1024L * 1024L
     private const val MAXIMUM_XATTR_NAMES = 1024
     private const val MAXIMUM_XATTR_VALUE_BYTES = 1024 * 1024
@@ -1518,6 +1677,21 @@ internal object LinuxFilesystemSyscalls {
     private val NULL_DEVICE = Path.of("/dev/null")
     private val SUPPORTED_ARCHITECTURES = setOf("amd64", "x86_64", "aarch64")
 }
+
+internal class LinuxOwnedReadDirect {
+    companion object {
+        @JvmStatic external fun read(fd: Int, buffer: Pointer, count: Long): Long
+    }
+}
+
+internal class LinuxOwnedOpenCloseDirect {
+    companion object {
+        @JvmStatic external fun openat(directoryFd: Int, path: ByteArray, flags: Int, mode: Int): Int
+        @JvmStatic external fun close(fd: Int): Int
+    }
+}
+
+internal class LinuxFileSizeChangedException(message: String) : IOException(message)
 
 internal data class LinuxFileKey(val device: Long, val inode: Long)
 
@@ -1541,6 +1715,17 @@ internal data class LinuxFileIdentity(
     val isRegularFile: Boolean,
     val isDirectory: Boolean,
     val isSymbolicLink: Boolean,
+)
+
+internal data class LinuxDescriptorMetadata(
+    val identity: LinuxFileIdentity,
+    val size: Long,
+    val accessSeconds: Long,
+    val accessNanoseconds: Int,
+    val modifiedSeconds: Long,
+    val modifiedNanoseconds: Int,
+    val changedSeconds: Long,
+    val changedNanoseconds: Int,
 )
 
 internal val Int.permissions: Int
@@ -1615,14 +1800,8 @@ internal class LinuxDescriptorReserve(
 
 /** Avoid exposing libc outside the syscall object while keeping [LinuxDescriptor] independently closeable. */
 private object NativeClose {
-    private interface LibC : Library {
-        fun close(fd: Int): Int
-    }
-
-    private val libc: LibC by lazy { Native.load(Platform.C_LIBRARY_NAME, LibC::class.java) }
-
     fun close(fd: Int) {
-        libc.close(fd)
+        LinuxFilesystemSyscalls.closeNativeDescriptor(fd)
     }
 }
 
