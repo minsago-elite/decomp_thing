@@ -116,9 +116,11 @@ internal class WebJobPages(
     /** Retires in-flight first-page publication when an owned mutation invalidates the collection. */
     @Volatile private var generation = 0L
 
-    fun page(owner: String, query: WebJobQuery, cursor: String?): JsonObject = pageFirst(owner, query, cursor, 0)
+    fun page(owner: String, query: WebJobQuery, cursor: String?): JsonObject =
+        pageFirst(owner, query, cursor, 0, WebJobCollectionDeadline(now(), now))
 
-    private fun pageFirst(owner: String, query: WebJobQuery, cursor: String?, retry: Int): JsonObject {
+    private fun pageFirst(owner: String, query: WebJobQuery, cursor: String?, retry: Int,
+        deadline: WebJobCollectionDeadline): JsonObject {
         if (cursor != null) return synchronized(snapshots) {
             val parts = cursor.split('_', limit = 3)
             if (parts.size != 3 || !parts[0].matches(Regex("[a-f0-9]{32}")) || !parts[1].matches(Regex("0|[1-9][0-9]{0,4}")) ||
@@ -130,16 +132,17 @@ internal class WebJobPages(
             if ((offset != 0 && offset >= snapshot.items.size) || offset % query.limit != 0) invalidCursor()
             response(snapshot, offset)
         }
+        // Invalidation retries are still the same HTTP request and share its original allowance.
+        deadline.checkpoint()
         val collectedGeneration = generation
         if (!admission.tryAcquire()) {
-            if (generation != collectedGeneration && retry < 2) return pageFirst(owner, query, cursor, retry + 1)
+            if (generation != collectedGeneration && retry < 2) return pageFirst(owner, query, cursor, retry + 1, deadline)
             throw WebAccessDenied(503, "LISTING_BUSY", "Another job snapshot is being collected. Retry this read shortly.")
         }
         var admissionReleasedForRetry = false
         try {
             adoptStartupSeed()
             val scanStartedAtMillis = System.currentTimeMillis()
-            val deadline = WebJobCollectionDeadline(now(), now)
             val admittedVersion = collectionVersion?.invoke()
             val admittedImage = admittedVersion?.let(::imageForVersion)
             if (admittedImage != null && collectionStamp != null) {
@@ -201,7 +204,7 @@ internal class WebJobPages(
             if (failure.code == "LISTING_BUSY" && generation != collectedGeneration && retry < 2) {
                 admissionReleasedForRetry = true
                 admission.release()
-                return pageFirst(owner, query, cursor, retry + 1)
+                return pageFirst(owner, query, cursor, retry + 1, deadline)
             }
             throw failure
         } finally { if (!admissionReleasedForRetry) admission.release() }

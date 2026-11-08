@@ -225,6 +225,28 @@ class WebJobPagesTest {
         assertEquals(2, scans)
     }
 
+    @Test fun `collection invalidation retries retain the original request deadline`() {
+        var time = 0L
+        var generation = 1L
+        var stamps = 0
+        var scans = 0
+        val stamp = WebJobCollectionStamp("stable", idDigest("a"), cacheable = true)
+        lateinit var pages: WebJobPages
+        pages = WebJobPages({ scans++; sequenceOf(row("a")) }, now = { time },
+            collectionVersion = { generation }, collectionStamp = { _, checkpoint ->
+                checkpoint()
+                when (++stamps) {
+                    1 -> { time = 4_500_000_000L; generation++; pages.invalidate() }
+                    2 -> time = 5_000_000_001L
+                }
+                stamp
+            })
+
+        val failure = assertFailsWith<WebAccessDenied> { pages.page("owner", WebJobQuery(), null) }
+        assertEquals("LISTING_LIMIT", failure.code)
+        assertEquals(2, scans, "the retry starts within the remaining original allowance, then expires")
+    }
+
     @Test fun `cursor binds session normalized filters limit signature and expiry`() {
         var clock = 0L
         val pages = WebJobPages({ sequenceOf(row("a"), row("b")) }, { clock })

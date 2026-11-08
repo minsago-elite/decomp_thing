@@ -518,9 +518,12 @@ class WebJobService(
             "RECOVERY_CANCELLED", "Startup recovery was cancelled before acquiring storage.")
         val acquired = attemptStoreFactory(store.storageRoot)
         val budget = decompengine.jobs.WorkflowStartupRecoveryBudget(startupRecoveryLimits) { stopping || cancellation() }
+        // Cache seeding is optional work. Give it an independent byte allowance so parsing rich
+        // organization sidecars cannot consume or latch the budget required for recovery.
+        val seedBudget = decompengine.jobs.WorkflowStartupRecoveryBudget(startupRecoveryLimits) { stopping || cancellation() }
         var recoveryCompleted = false
         val freshSince = dashboardFreshnessClock()
-        fun seedCheckpoint() { budget.checkpoint() }
+        fun seedCheckpoint() { seedBudget.checkpoint() }
         val seedBefore = if (java.lang.Boolean.getBoolean("decomp.web.dashboardSeedDisabled")) null else try {
             dashboardStorageStamp(freshSince, ::seedCheckpoint).takeIf { it.cacheable }
         } catch (_: Exception) { null }
@@ -549,8 +552,8 @@ class WebJobService(
                                 .read(jobId) { relative, maximum ->
                                     seedCheckpoint()
                                     val bytes = decompengine.repair.readStableRegularFile(store.storageRoot, relative,
-                                        budget.readAllowance(maximum), cancellationCheck = ::seedCheckpoint).bytes
-                                    budget.chargeRead(bytes.size.toLong())
+                                        seedBudget.readAllowance(maximum), cancellationCheck = ::seedCheckpoint).bytes
+                                    seedBudget.chargeRead(bytes.size.toLong())
                                     bytes
                                 }
                             val reports = latest?.let { context(jobId, it.runId) }

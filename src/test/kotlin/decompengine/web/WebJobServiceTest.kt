@@ -85,6 +85,28 @@ class WebJobServiceTest {
         } finally { service.close() }
     }
 
+    @Test fun `optional organization seed reads have an independent recovery byte allowance`() = withStore { store, root ->
+        val job = store.createFromUpload("fixture.elf", elfFixture())
+        val receipts = (0 until JobOrganization.MAX_RECEIPTS).map { index ->
+            val digest = (index + 1).toString(16).padStart(64, '0')
+            decompengine.jobs.JobOrganizationReceipt(digest, digest.reversed(), java.time.Instant.parse("2026-11-08T00:00:00Z"))
+        }
+        val organization = JobOrganization("organization receipts", archived = true, receipts = receipts).toJson().toString().toByteArray()
+        Files.write(root.resolve(job.id).resolve(JobOrganization.FILE_NAME), organization)
+        val jobBytes = Files.size(root.resolve(job.id).resolve("job.json"))
+        val readLimit = jobBytes + organization.size - 1L
+        assertTrue(readLimit > jobBytes && readLimit > organization.size && jobBytes + organization.size > readLimit)
+
+        val service = WebJobService(store, JobAnalyzer { _, _ -> }, inertReconstructor)
+        try {
+            service.dashboardFreshnessClock = { Long.MAX_VALUE }
+            service.initializeExistingStorage(decompengine.jobs.WorkflowStartupRecoveryLimits(maximumReadBytes = readLimit)) { false }
+            val seed = assertNotNull(service.takeDashboardCollectionSeed())
+            assertEquals("organization receipts", seed.rows.single().item.getValue("label").jsonPrimitive.content)
+            assertEquals("true", seed.rows.single().item.getValue("archived").jsonPrimitive.content)
+        } finally { service.close() }
+    }
+
     @Test fun `startup recovery mutation prevents publishing a pre-recovery collection seed`() = withStore { store, _ ->
         val job = store.createFromUpload("fixture.elf", elfFixture())
         WorkflowAttemptStore.open(store.storageRoot).use { attempts ->
