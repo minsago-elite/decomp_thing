@@ -76,7 +76,7 @@ class WebJobServiceTest {
             val seed = assertNotNull(service.takeDashboardCollectionSeed())
             val item = seed.rows.single().item
             assertEquals(webJob(service.presentation(job.id)), item,
-                "The startup seed must be byte-for-byte equivalent to the ordinary presentation projection")
+                "The startup seed must match the ordinary presentation projection")
             assertEquals("completed", item.getValue("status").jsonPrimitive.content)
             assertEquals(completed.runId, item.getValue("latestRunId").jsonPrimitive.content)
             assertEquals("release review", item.getValue("label").jsonPrimitive.content)
