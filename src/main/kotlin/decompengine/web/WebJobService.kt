@@ -533,16 +533,28 @@ class WebJobService(
                         else try {
                             val raw = store.decodeJobRecord(jobId, OracleJson.parse(jobJson).jsonObject)
                             val latest = inspected.snapshot.latestRun
-                            val projected = if (latest == null) raw else raw.copy(status = when (latest.state) {
-                                decompengine.jobs.WorkflowRunState.QUEUED -> "queued"
-                                decompengine.jobs.WorkflowRunState.RUNNING, decompengine.jobs.WorkflowRunState.CANCELLING -> "running"
-                                decompengine.jobs.WorkflowRunState.COMPLETED -> "completed"
-                                decompengine.jobs.WorkflowRunState.CANCELLED -> "cancelled"
-                                decompengine.jobs.WorkflowRunState.INTERRUPTED -> "interrupted"
-                                decompengine.jobs.WorkflowRunState.FAILED -> "failed"
-                            }, updatedAt = (latest.endedAt ?: latest.startedAt ?: latest.createdAt).toString(),
-                                statusMessage = "Workflow ${latest.workflow.wireName}: ${latest.state.wireName}. Completion does not establish acceptance.")
-                            val item = webJob(projected)
+                            val legacyInterrupted = latest == null && inspected.snapshot.legacy.recoveredInterrupted &&
+                                raw.status in setOf("queued", "analyzing")
+                            val projected = when {
+                                latest != null -> raw.copy(status = legacyStatus(latest.state),
+                                    updatedAt = (latest.endedAt ?: latest.startedAt ?: latest.createdAt).toString(),
+                                    statusMessage = "Workflow ${latest.workflow.wireName}: ${latest.state.wireName}. Completion does not establish acceptance.")
+                                legacyInterrupted -> raw.copy(status = "failed",
+                                    statusMessage = "Historical legacy work was interrupted; its workflow identity is unknown.")
+                                else -> raw
+                            }
+                            val organization = decompengine.jobs.JobOrganizationStore(store.storageRoot, organizationWriter)
+                                .read(jobId) { relative, maximum ->
+                                    seedCheckpoint()
+                                    val bytes = decompengine.repair.readStableRegularFile(store.storageRoot, relative,
+                                        budget.readAllowance(maximum), cancellationCheck = ::seedCheckpoint).bytes
+                                    budget.chargeRead(bytes.size.toLong())
+                                    bytes
+                                }
+                            val reports = latest?.let { context(jobId, it.runId) }
+                                ?: WebReportContext(store.storageRoot.resolve(jobId).resolve("reports"))
+                            val item = webJob(WebJobPresentation(projected, inspected.snapshot, reports,
+                                inspected.diagnostics.map { publicWorkflowDiagnostic(it.code) }, legacyInterrupted, organization))
                             val bytes = item.toString().toByteArray(StandardCharsets.UTF_8).size
                             if (bytes > 4096 || seedBytes + bytes + seedBefore!!.retainedBytes > 16L * 1024 * 1024) {
                                 seedEligible = false; seedRows.clear()
@@ -651,12 +663,12 @@ class WebJobService(
     /**
      * Revalidate the persisted inputs used by the dashboard image, including writes performed
      * through another JobStore instance or by a cooperating external process. This is metadata
-     * only: no job JSON is opened or parsed on a cache hit. A recent ctime/mtime disables reuse
+     * only: no job JSON or organization JSON is opened or parsed on a cache hit. A recent ctime/mtime disables reuse
      * briefly to avoid caching across filesystems with coarse timestamp resolution.
      */
     internal fun dashboardStorageStamp(freshSinceMillis: Long, checkpoint: () -> Unit): WebJobCollectionStamp {
         val digest = MessageDigest.getInstance("SHA-256")
-        digest.update("web-job-library-stamp-v2".toByteArray(StandardCharsets.US_ASCII))
+        digest.update("web-job-library-stamp-v3".toByteArray(StandardCharsets.US_ASCII))
         var cacheable = true
         var probe = try { LinuxFilesystemSyscalls.pathMetadataProbe() } catch (_: Exception) { null }
         data class EntryStamp(
@@ -790,8 +802,9 @@ class WebJobService(
             stampFile(directory.resolve("job.json"), 4, 0x8000, missingAllowed = false)
             stampFile(directory.resolve(decompengine.jobs.WorkflowAttemptStore.LISTING_STATE_FILE), 5, 0x8000, missingAllowed = true)
             stampFile(directory.resolve(decompengine.jobs.WorkflowAttemptStore.LISTING_PENDING_FILE), 6, 0x8000, missingAllowed = true)
+            stampFile(directory.resolve(decompengine.jobs.JobOrganization.FILE_NAME), 7, 0x8000, missingAllowed = true)
         }
-        val rootAfter = stampFile(root, 7, 0x4000, missingAllowed = false)
+        val rootAfter = stampFile(root, 8, 0x4000, missingAllowed = false)
         if (rootAfter == null || rootBefore != rootAfter) cacheable = false
         return WebJobCollectionStamp(HexFormat.of().formatHex(digest.digest()), jobIdsDigest, cacheable)
         } finally { probe?.close() }
