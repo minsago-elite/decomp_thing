@@ -18,6 +18,7 @@ import decompengine.jobs.Job
 import decompengine.jobs.JobRecoveryInventory
 import decompengine.jobs.toJson
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
@@ -253,7 +254,8 @@ internal fun renderJobDocument(job: Job, reportContext: WebReportContext? = null
     artifacts: List<WebArtifactSummary>? = null,
     repairEvidenceArtifactStates: Map<String, RepairEvidenceArtifactState>? = null,
     repairReceiptBindingStates: Map<RepairReceiptBindingIdentity, RepairEvidenceArtifactState>? = null,
-    recordedRepairHistory: RecordedRepairHistoryView? = null): WebApplicationDocument {
+    recordedRepairHistory: RecordedRepairHistoryView? = null,
+    explorationClassification: WebExplorationClassification? = null): WebApplicationDocument {
     requirePublicElfCategories(job.metadata)
     val reports = reportsFor(job, reportContext)
     val active = job.status in setOf("queued", "analyzing")
@@ -358,7 +360,8 @@ internal fun renderJobDocument(job: Job, reportContext: WebReportContext? = null
                 </ol>
               </section>
             </div>
-            ${runCatching { renderExploration(job, reports, explorationReport) }.getOrElse { renderExploration(job, reports, null) }}
+            ${renderExploration(job, reports, explorationClassification ?: classifyWebExploration(
+                explorationReport?.toString()?.encodeToByteArray()))}
             ${runCatching { renderReconstructionProgress(reconstructionProgress) }.getOrElse { renderReconstructionProgress(null) }}
             ${renderAgentProgress(progressSnapshot)}
             ${sourceTree?.let { renderSourceTree(job, it, reports) }.orEmpty()}
@@ -519,42 +522,104 @@ private fun renderJobList(jobs: List<Job>): String {
     } + "</div>"
 }
 
-private fun renderExploration(job: Job, reports: WebReportContext, root: JsonObject?): String {
-    if (root == null) return """
-        <section class="panel evidence-panel pending-evidence">
-          <div class="section-heading compact"><span class="step">03</span><div><p class="kicker">Evidence</p><h2>Exploration report</h2></div></div>
-          <p>The exploration report is unavailable or has not been generated for this attempt.</p>
-        </section>
-    """.trimIndent()
-    val confidence = root["confidence"]?.jsonObject
-    val score = confidence?.get("score")?.jsonPrimitive?.doubleOrNull?.takeIf { it.isFinite() && it in 0.0..1.0 }
-    val candidates = root["candidates"]?.jsonArray ?: JsonArray(emptyList())
-    val observations = root["observations"]?.jsonArray?.associateBy {
-        it.jsonObject["candidateId"]?.jsonPrimitive?.contentOrNull.orEmpty()
-    }.orEmpty()
+private fun renderExploration(job: Job, reports: WebReportContext, classification: WebExplorationClassification): String {
+    val download = if (classification.bytesCaptured)
+        "<a class=\"text-link\" href=\"${artifactHref(job, "${reports.artifactPrefix}/exploration.json")}\">Download JSON ↓</a>"
+    else ""
+    val heading = "<div class=\"section-heading compact\"><span class=\"step\">03</span><div><p class=\"kicker\">Evidence</p><h2>Exploration report</h2></div>$download</div>"
+    if (classification.state != "available") {
+        val (stateLabel, wording) = when (classification.state) {
+            "unknown" -> "unknown" to "Report bytes are unavailable, inaccessible, or changed during the bounded read."
+            "partial" -> "partial" to "The producer reported an incomplete exploration result; summary metrics are withheld."
+            "unsupported" -> "unsupported" to "The declared producer schema is not supported by this presentation."
+            "invalid" -> "invalid" to "The captured report is malformed or internally inconsistent."
+            else -> "unknown" to "The report state is not recognized; summary metrics are withheld."
+        }
+        return "<section class=\"panel evidence-panel pending-evidence\">$heading" +
+            "<p>Evidence state: ${stateLabel.escapeHtml()}.</p><p>${wording.escapeHtml()}</p>" +
+            "<p>${classification.limitation.escapeHtml()}</p></section>"
+    }
+
+    val summary = classification.summary ?: return "<section class=\"panel evidence-panel pending-evidence\">$heading" +
+        "<p>Evidence state: invalid.</p><p>The available classification omitted its required summary.</p></section>"
+    val confidence = summary["confidence"] as? JsonObject
+    val scorePrimitive = confidence?.get("score") as? JsonPrimitive
+    val score = scorePrimitive?.takeUnless { it.isString }?.doubleOrNull?.takeIf { it.isFinite() && it in 0.0..1.0 }
+    val scoreText = scorePrimitive?.content ?: "Not reported"
+    fun count(objectValue: JsonObject?, name: String): String {
+        val value = objectValue?.get(name) as? JsonPrimitive ?: return "Not reported"
+        return value.content.takeIf { it.matches(Regex("0|[1-9][0-9]{0,19}")) && it.toULongOrNull() != null }
+            ?: "Not reported"
+    }
+    fun reportedBoolean(name: String): String = when ((confidence?.get(name) as? JsonPrimitive)?.booleanOrNull) {
+        true -> "yes"
+        false -> "no"
+        null -> "not reported"
+    }
+    fun capped(value: String, maximum: Int): String = if (value.length > maximum) value.take(maximum) + "…" else value
+    fun hexBytes(value: String?, visibleBytes: Int): String? {
+        if (value == null || value.length % 2 != 0 || !value.matches(Regex("[0-9a-fA-F]*"))) return null
+        if (value.isEmpty()) return ""
+        val prefix = value.take(visibleBytes * 2).chunked(2).joinToString(" ")
+        return if (value.length > visibleBytes * 2) "$prefix …" else prefix
+    }
+    fun stringArray(value: JsonElement?): String = (value as? JsonArray)?.let { args ->
+        if (args.isEmpty()) "—"
+        else if (args.any { it.stringContentOrNull() == null }) "Not reported"
+        else args.mapNotNull { it.stringContentOrNull() }.joinToString(" ") { capped(it, 256) }
+    } ?: "Not reported"
+
+    val candidates = classification.root?.get("candidates") as? JsonArray ?: JsonArray(emptyList())
+    val candidateObjects = candidates.map { it as? JsonObject }
+    val candidateIds = candidateObjects.mapNotNull { it?.get("id").stringContentOrNull() }.groupingBy { it }.eachCount()
+    val observations = (classification.root?.get("observations") as? JsonArray).orEmpty()
+    val observationGroups = observations.mapNotNull { element ->
+        val observation = element as? JsonObject ?: return@mapNotNull null
+        val id = observation["candidateId"].stringContentOrNull() ?: return@mapNotNull null
+        id to observation
+    }.groupBy({ it.first }, { it.second })
     val rows = candidates.take(50).joinToString("") { element ->
-        val candidate = element.jsonObject
-        val id = candidate.text("id")
-        val source = candidate.text("source")
+        val candidate = element as? JsonObject
+        val rawId = candidate?.get("id").stringContentOrNull()
+        val id = rawId?.let { capped(it, 128) } ?: "Not reported"
+        val source = candidate?.get("source").stringContentOrNull()?.let { capped(it, 64) } ?: "Not reported"
         val sourceClass = when (source.lowercase()) {
             "angr", "mutation", "static_hint", "seed" -> source.lowercase()
             else -> "unknown"
         }
-        val args = candidate["args"]?.jsonArray?.joinToString(" ") { it.jsonPrimitive.content }.orEmpty()
-        val stdinHex = candidate.text("stdinHex")
-        val observation = observations[id]?.jsonObject
-        val exitCode = observation?.get("exitCode")?.jsonPrimitive?.intOrNull?.toString() ?: "—"
-        val output = observation?.text("stdoutHex")?.hexPreview().orEmpty().ifBlank { "∅" }
-        "<tr><td><code>${id.escapeHtml()}</code></td><td><span class=\"source-tag $sourceClass\">${source.escapeHtml()}</span></td><td>${args.escapeHtml().ifBlank { "—" }}</td><td><code>${stdinHex.chunked(2).take(12).joinToString(" ").escapeHtml().ifBlank { "—" }}</code></td><td>$exitCode</td><td><code>${output.escapeHtml()}</code></td></tr>"
+        val observation = rawId?.takeIf { candidateIds[it] == 1 }?.let { observationGroups[it]?.singleOrNull() }
+        val exitCode = (observation?.get("exitCode") as? JsonPrimitive)?.let { value ->
+            value.takeUnless { it.isString }?.intOrNull?.toString()
+        } ?: "Not reported"
+        val output = observation?.get("stdoutHex").stringContentOrNull()?.let { hex ->
+            val encoded = hexBytes(hex, 48) ?: return@let "Not reported"
+            if (encoded.isEmpty()) "∅"
+            else {
+                val clipped = encoded.removeSuffix(" …").replace(" ", "")
+                clipped.hexPreview() + if (hex.length > 96) " …" else ""
+            }
+        } ?: if (rawId != null && candidateIds[rawId] != 1) "Not reported (ambiguous candidate id)" else "Not reported"
+        val stdin = hexBytes(candidate?.get("stdinHex").stringContentOrNull(), 12)
+            ?.let { if (it.isEmpty()) "—" else it } ?: "Not reported"
+        "<tr><td><code>${id.escapeHtml()}</code></td><td><span class=\"source-tag $sourceClass\">${source.escapeHtml()}</span></td>" +
+            "<td>${stringArray(candidate?.get("args")).escapeHtml()}</td><td><code>${stdin.escapeHtml()}</code></td>" +
+            "<td>${exitCode.escapeHtml()}</td><td><code>${output.escapeHtml()}</code></td></tr>"
     }
     return """
       <section class="panel evidence-panel">
-        <div class="section-heading compact"><span class="step">03</span><div><p class="kicker">Evidence</p><h2>Exploration report</h2></div><a class="text-link" href="${artifactHref(job, "${reports.artifactPrefix}/exploration.json")}">Download JSON ↓</a></div>
+        $heading
+        <p>Evidence state: available.</p>
+        <p>${classification.limitation.escapeHtml()}</p>
+        <p>Isolation is producer-reported: sandboxed ${reportedBoolean("sandboxed")}; network isolated ${reportedBoolean("networkIsolated")}.</p>
         <div class="metric-grid">
-          ${metric("Exploration heuristic", score?.let { "%.3f".format(java.util.Locale.ROOT, it) } ?: "Unavailable", "Uncalibrated", score)}
-          ${metric("Candidates", root.number("candidateCount"), "Generated inputs")}
-          ${metric("Output paths", root.number("expandedOutputSignatures"), "Distinct signatures")}
-          ${metric("New paths", root["newOutputSignatures"]?.jsonArray?.size?.toString() ?: "0", "Beyond baseline")}
+          ${metric("Exploration heuristic", scoreText, "Uncalibrated", score)}
+          ${metric("Candidates", count(summary, "candidateCount"), "Generated inputs")}
+          ${metric("Baseline output paths", count(classification.root, "baselineOutputSignatures"), "Before exploration")}
+          ${metric("Output paths", count(summary, "expandedOutputSignatures"), "Distinct signatures")}
+          ${metric("Reported inputs", count(confidence, "inputCount"), "Producer-reported")}
+          ${metric("Reported sources", count(confidence, "sourceCount"), "Producer-reported")}
+          ${metric("Reported output paths", count(confidence, "outputSignatureCount"), "Producer-reported")}
+          ${metric("New paths", count(confidence, "newOutputSignatureCount"), "Beyond baseline")}
         </div>
         <div class="table-wrap">
           <table><thead><tr><th>Case</th><th>Source</th><th>Arguments</th><th>stdin · hex</th><th>Exit</th><th>stdout</th></tr></thead><tbody>$rows</tbody></table>
@@ -979,8 +1044,13 @@ private fun renderSourceTree(job: Job, source: SourceTreeView, reports: WebRepor
 private fun renderReconstructionProgress(progress: JsonObject?): String {
     if (progress == null) return "<section class=\"panel reconstruction-progress\"><h2>Source reconstruction</h2><p>Reconstruction progress is unavailable or has not been generated for this attempt.</p></section>"
     val phase = progress.text("phase")
-    val completed = progress.number("completed")
-    val total = progress.number("total")
+    fun exactCount(name: String): String {
+        val value = progress[name] as? JsonPrimitive ?: return "Not reported"
+        if (value.isString) return "Not reported"
+        return value.content.takeIf { it.matches(Regex("0|[1-9][0-9]*")) && it.toULongOrNull() != null } ?: "Not reported"
+    }
+    val completed = exactCount("completed")
+    val total = exactCount("total")
     val module = progress.text("module")
     return """
       <section class="panel reconstruction-progress">
@@ -1039,7 +1109,7 @@ $body
     })
 
 private fun JsonObject.text(name: String): String = get(name)?.jsonPrimitive?.contentOrNull.orEmpty()
-private fun JsonObject.number(name: String): String = get(name)?.jsonPrimitive?.contentOrNull ?: "0"
+private fun JsonElement?.stringContentOrNull(): String? = (this as? JsonPrimitive)?.takeIf { it.isString }?.content
 
 private fun String.hexPreview(): String = runCatching {
     if (length % 2 != 0) return@runCatching this
@@ -1052,12 +1122,12 @@ private fun String.escapeHtml(): String =
 
 private fun String.title(): String = split(' ').joinToString(" ") { it.replaceFirstChar(Char::uppercase) }
 private fun formatTimestamp(value: String): String = value.replace('T', ' ').removeSuffix("Z").substringBefore('.') + " UTC"
-private fun formatBytes(bytes: Int): String = formatBytes(bytes.toLong())
+internal fun formatBytes(bytes: Int): String = formatBytes(bytes.toLong())
 
-private fun formatBytes(bytes: Long): String = when {
-    bytes >= 1024 * 1024 -> "%.1f MiB".format(java.util.Locale.ROOT, bytes / (1024.0 * 1024.0))
-    bytes >= 1024 -> "%.1f KiB".format(java.util.Locale.ROOT, bytes / 1024.0)
-    else -> "$bytes B"
+internal fun formatBytes(bytes: Long): String = when {
+    bytes >= 1024 * 1024 -> "%.1f MiB (%d bytes)".format(java.util.Locale.ROOT, bytes / (1024.0 * 1024.0), bytes)
+    bytes >= 1024 -> "%.1f KiB (%d bytes)".format(java.util.Locale.ROOT, bytes / 1024.0, bytes)
+    else -> "$bytes B ($bytes bytes)"
 }
 private fun jsString(value: String): String = "'" + value
     .replace("\\", "\\\\")

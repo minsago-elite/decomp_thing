@@ -900,6 +900,9 @@ class UploadServer(
         val source = runCatching { archiveEvidence.read(jobId, reportPrefix = reports.artifactPrefix).source }
             .recoverCatching { sourceEvidence.read(jobId, reports.artifactPrefix).view() }
         val progress = runCatching { readLegacyProgress(jobId, reports.runId) }.getOrNull()
+        val explorationClassification = captureWebExploration {
+            jobs.readArtifact(jobId, "${reports.artifactPrefix}/exploration.json", 1_048_576).bytes
+        }
         // The fixed reader already captured diagnostic H once. Never reread it as display input.
         val legacyOnly = recorded.status == decompengine.repair.RepairHistoryReadStatus.NOT_RECORDED
         val repairHistory = if (legacyOnly) readLegacyJsonReport(jobId, reports, LegacyJsonReport.REPAIR_HISTORY) else null
@@ -910,13 +913,13 @@ class UploadServer(
         val recordedView = if (legacyOnly) null else recordedRepairEvidenceView(jobId, reports, recorded, artifacts, page, query.validationCasePageNumber)
         exchange.sendHtml(200, renderJobDocument(view.job, reports, view.diagnostics, source.getOrNull(), source.isFailure,
             progressSnapshot = progress,
-            explorationReport = readLegacyJsonReport(jobId, reports, LegacyJsonReport.EXPLORATION),
             repairHistory = repairHistory,
             reconstructionProgress = readLegacyJsonReport(jobId, reports, LegacyJsonReport.RECONSTRUCTION_PROGRESS),
             artifacts = artifacts,
             repairEvidenceArtifactStates = repairEvidenceStates?.first,
             repairReceiptBindingStates = repairEvidenceStates?.second,
-            recordedRepairHistory = recordedView))
+            recordedRepairHistory = recordedView,
+            explorationClassification = explorationClassification))
     }
 
     /** Links need the same checked listing; receipt integrity is checked per canonical attempt. */

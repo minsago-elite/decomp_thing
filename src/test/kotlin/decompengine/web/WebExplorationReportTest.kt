@@ -17,6 +17,14 @@ class WebExplorationReportTest {
         assertNotEquals(result.getValue("reportId"), report(valid.replace("0.5", "0.4")).getValue("reportId"))
     }
 
+    @Test fun `version one available payload keeps its exact serialized envelope`() {
+        val jobId = "a".repeat(32)
+        val digest = "f27b046267380691935cf4d19e40ba0a220991be7df1134caaea873887679d61"
+        val artifactId = "exploration_22310e3ca71dbaace90d40ed264025a4_$digest"
+        val expected = """{"reportId":"exploration_f27b046267380691935cf4d19e40ba0a","binding":{"jobId":"$jobId","runId":"run_1","revisionId":null},"reportType":"exploration","adapterVersion":1,"producerSchemaVersion":null,"state":"available","authority":"observations","sourceArtifact":{"artifactId":"$artifactId","binding":{"jobId":"$jobId","runId":"run_1","revisionId":null},"displayName":"exploration.json","mediaType":"application/json","sizeBytes":"355","sha256":"$digest","contentHref":"/api/v1/jobs/$jobId/artifacts/$artifactId/content","role":"raw-evidence","derivedFromArtifactId":null},"acceptance":"not-evaluated","acceptanceArtifactId":null,"limitations":["Observed sample breadth and producer-reported isolation are not proof of equivalence or independent containment verification."],"summary":{"candidateCount":"1","expandedOutputSignatures":"1","confidence":{"score":0.5,"inputCount":"18446744073709551615","sourceCount":"1","outputSignatureCount":"1","newOutputSignatureCount":"1","sandboxed":true,"networkIsolated":false}},"validationCases":null,"validationFailure":null}"""
+        assertEquals(expected, report(valid).toString())
+    }
+
     @Test fun `versioned retained input report is available without granting acceptance authority`() {
         val fields = Json.parseToJsonElement(valid).jsonObject.toMutableMap()
         fields["schema"] = JsonPrimitive("decomp-exploration")
@@ -58,6 +66,19 @@ class WebExplorationReportTest {
             assertEquals(state, result.getValue("state").jsonPrimitive.content)
             assertEquals(JsonNull, result.getValue("summary"))
         }
+    }
+
+    @Test fun `legacy capture reads once and distinguishes unavailable bytes from malformed captures`() {
+        var reads = 0
+        val captured = captureWebExploration {
+            reads++
+            "{".toByteArray()
+        }
+        assertEquals(1, reads)
+        assertEquals("invalid", captured.state)
+        val unavailable = captureWebExploration { throw IllegalStateException("read unavailable") }
+        assertEquals("unknown", unavailable.state)
+        assertEquals(false, unavailable.bytesCaptured)
     }
 
     private val failed = """{"schema":"decomp-exploration-failure","schemaVersion":1,"state":"partial","failure":{"phase":"expanded","candidateIndex":0,"kind":"timeout","code":"behavior-deadline-exceeded"},"samples":{"baselineInputs":1,"expandedInputs":1,"baselineObserved":1,"expandedObserved":0},"details":{"baselineInputs":[{"id":"seed","source":"SEED","args":[""],"stdinHex":"00"}],"expandedInputs":[{"id":"generated","source":"MUTATION","args":[],"stdinHex":""}],"baselineObservations":[{"candidateId":"seed","signature":"0::","exitCode":0,"stdoutHex":"","stderrHex":"","networkIsolated":false}],"expandedObservations":[]},"detailsOmitted":null,"coverage":null,"confidence":null}"""
