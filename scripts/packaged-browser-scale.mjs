@@ -712,12 +712,13 @@ async function qualifyControls({ fixture, makeTarget, cdp, evaluate, ready, brow
 
   // Explicit search then detail for the last record in the exact D0 corpus.
   const lastD0 = n - 1;
+  const lastD0Text = `synthetic-project-${String(lastD0).padStart(5, '0')}.elf`;
   phase = 'search-last-d0-job';
   await cdp.call('Page.navigate', { url: browserOrigin + `/nested/?search=synthetic-project-${String(lastD0).padStart(5, '0')}.elf` }, tab.sessionId);
   await ready(tab, `(${rows}).length === 1 && (${rows})[0] === ${JSON.stringify(href(lastD0))}`, 'explicit search for the last D0 record');
   phase = 'detail-last-d0-job';
   await evaluate(tab, `document.querySelector('ul[aria-label="Uploaded jobs"] a').click()`);
-  await ready(tab, `location.pathname === ${JSON.stringify(href(lastD0))} && document.querySelector('main h2')?.textContent === ${JSON.stringify(detailText)}`, 'last D0 job detail');
+  await ready(tab, `location.pathname === ${JSON.stringify(href(lastD0))} && document.querySelector('main h2')?.textContent === ${JSON.stringify(lastD0Text)}`, 'last D0 job detail');
   result.searchDetailLastD0 = true;
 
   // Cancelled in-flight continuation: a superseding reset must win over the late response.
