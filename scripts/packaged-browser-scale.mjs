@@ -717,7 +717,7 @@ async function qualifyControls({ fixture, makeTarget, cdp, evaluate, ready, brow
   await ready(tab, `(${rows}).length === 1 && (${rows})[0] === ${JSON.stringify(href(lastD0))}`, 'explicit search for the last D0 record');
   phase = 'detail-last-d0-job';
   await evaluate(tab, `document.querySelector('ul[aria-label="Uploaded jobs"] a').click()`);
-  await ready(tab, `location.pathname === ${JSON.stringify(href(lastD0))}`, 'last D0 job detail');
+  await ready(tab, `location.pathname === ${JSON.stringify(href(lastD0))} && document.querySelector('main h2')?.textContent === ${JSON.stringify(detailText)}`, 'last D0 job detail');
   result.searchDetailLastD0 = true;
 
   // Cancelled in-flight continuation: a superseding reset must win over the late response.
