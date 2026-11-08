@@ -326,6 +326,8 @@ class WebJobService(
     private val uploads = mutableMapOf<Thread, CountDownLatch>()
     private val dashboardGeneration = AtomicLong()
     private var startupCollectionSeed: WebJobCollectionSeed? = null
+    /** Sidecars whose per-file metadata must be checked; absent sidecars rely on job-directory ctime/mtime. */
+    @Volatile private var dashboardOrganizationIds: Set<String>? = null
     private val uploadStorage = WebUploadStorage(store.storageRoot, maximumRetainedStorageBytes)
     private val sourceCatalogEvidence = WebSourceCatalogEvidence(sourceProfiles, ::readSourceCatalogInput, ::readArtifact)
 
@@ -646,7 +648,8 @@ class WebJobService(
     @Synchronized
     internal fun dashboardCollectionVersion(): Long? {
         if (!initialized || closed || stopping || uploads.isNotEmpty() || active.isNotEmpty() ||
-            deletionWorkers.isNotEmpty() || purgingOperations.isNotEmpty() || publicationFailures.isNotEmpty()) return null
+            deletionWorkers.isNotEmpty() || purgingOperations.isNotEmpty() || publicationFailures.isNotEmpty() ||
+            dashboardOrganizationIds == null) return null
         return dashboardGeneration.get()
     }
 
@@ -670,6 +673,9 @@ class WebJobService(
         val digest = MessageDigest.getInstance("SHA-256")
         digest.update("web-job-library-stamp-v3".toByteArray(StandardCharsets.US_ASCII))
         var cacheable = true
+        var inventoryComplete = true
+        val knownOrganizations = dashboardOrganizationIds
+        val observedOrganizations = linkedSetOf<String>()
         var probe = try { LinuxFilesystemSyscalls.pathMetadataProbe() } catch (_: Exception) { null }
         data class EntryStamp(
             val device: Long, val inode: Long, val mode: Int, val links: Int, val size: Long,
@@ -717,6 +723,7 @@ class WebJobService(
             } catch (_: Exception) {
                 addRecord(tag, 3)
                 cacheable = false
+                inventoryComplete = false
                 return null
             }
             var stamp: EntryStamp?
@@ -730,6 +737,7 @@ class WebJobService(
                 } catch (_: Exception) {
                     addRecord(tag, 3)
                     cacheable = false
+                    inventoryComplete = false
                     return null
                 }
                 if (attributes == null) return null
@@ -766,6 +774,7 @@ class WebJobService(
         val root = store.storageRoot
         val rootBefore = stampFile(root, 1, 0x4000, missingAllowed = true)
         if (rootBefore == null) {
+            if (inventoryComplete) dashboardOrganizationIds = emptySet()
             val emptyIds = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest())
             return WebJobCollectionStamp(HexFormat.of().formatHex(digest.digest()), emptyIds, cacheable)
         }
@@ -784,11 +793,12 @@ class WebJobService(
             }
         } catch (_: Exception) {
             cacheable = false
+            inventoryComplete = false
             emptyList()
         }
         for (name in allNames) addName(2, name)
         val ids = try { collectWebJobLibraryIds(allNames.asSequence(), checkpoint) }
-        catch (_: Exception) { cacheable = false; emptyList() }
+        catch (_: Exception) { cacheable = false; inventoryComplete = false; emptyList() }
         val jobIdsDigest = MessageDigest.getInstance("SHA-256").also { hash ->
             ids.forEach { id -> hash.update(id.toByteArray(StandardCharsets.UTF_8)); hash.update(0.toByte()) }
         }.digest().let { HexFormat.of().formatHex(it) }
@@ -797,15 +807,24 @@ class WebJobService(
             val directoryState = stampFile(directory, 3, 0x4000, missingAllowed = false)
             if (directoryState == null) {
                 cacheable = false
+                inventoryComplete = false
                 continue
             }
             stampFile(directory.resolve("job.json"), 4, 0x8000, missingAllowed = false)
             stampFile(directory.resolve(decompengine.jobs.WorkflowAttemptStore.LISTING_STATE_FILE), 5, 0x8000, missingAllowed = true)
             stampFile(directory.resolve(decompengine.jobs.WorkflowAttemptStore.LISTING_PENDING_FILE), 6, 0x8000, missingAllowed = true)
-            stampFile(directory.resolve(decompengine.jobs.JobOrganization.FILE_NAME), 7, 0x8000, missingAllowed = true)
+            if (knownOrganizations == null || id in knownOrganizations) {
+                if (stampFile(directory.resolve(decompengine.jobs.JobOrganization.FILE_NAME), 7, 0x8000, missingAllowed = true) != null) {
+                    observedOrganizations += id
+                }
+            } else {
+                // Creating or removing a sidecar changes the already-stamped containing directory.
+                addRecord(7, 1)
+            }
         }
         val rootAfter = stampFile(root, 8, 0x4000, missingAllowed = false)
-        if (rootAfter == null || rootBefore != rootAfter) cacheable = false
+        if (rootAfter == null || rootBefore != rootAfter) { cacheable = false; inventoryComplete = false }
+        if (knownOrganizations == null && inventoryComplete) dashboardOrganizationIds = observedOrganizations.toSet()
         return WebJobCollectionStamp(HexFormat.of().formatHex(digest.digest()), jobIdsDigest, cacheable)
         } finally { probe?.close() }
     }
@@ -839,13 +858,14 @@ class WebJobService(
      * The store validates its command epoch after the complete row capture; service ownership
      * and legacy admission are separately rechecked before publication.
      */
-    private fun inspectListedJob(jobId: String, read: (String, Int) -> ByteArray): WebJobInspection {
+    private fun inspectListedJob(jobId: String, read: (String, Int) -> ByteArray,
+        organizationObserved: ((String, Boolean) -> Unit)? = null): WebJobInspection {
         val (state, epoch) = synchronized(this) {
             requireInitializedRead()
             Triple(publicationFailures[jobId], attempts, active[jobId]) to legacyListingEpoch
         }
         val (failure, owner, task) = state
-        val inspection = inspectRecord(jobId, failure, owner, { task is LegacyTask }, read)
+        val inspection = inspectRecord(jobId, failure, owner, { task is LegacyTask }, read, organizationObserved)
         return synchronized(this) {
             requireInitializedRead() // A row read across shutdown is never published.
             publicationFailures[jobId]?.let { return@synchronized WebJobInspection.Unavailable(it) }
@@ -858,7 +878,8 @@ class WebJobService(
     }
 
     private fun inspectRecord(jobId: String, failure: WebJobDiagnostic?, owner: WorkflowAttemptStore?,
-        legacyActive: () -> Boolean, read: ((String, Int) -> ByteArray)?): WebJobInspection {
+        legacyActive: () -> Boolean, read: ((String, Int) -> ByteArray)?,
+        organizationObserved: ((String, Boolean) -> Unit)? = null): WebJobInspection {
         failure?.let { return WebJobInspection.Unavailable(it) }
         if (!jobId.matches(Regex("[0-9a-f]{32}")) || owner == null) return WebJobInspection.Unavailable(
             WebJobDiagnostic(jobId, "JOB_NOT_FOUND", "The requested job is unavailable."))
@@ -869,7 +890,9 @@ class WebJobService(
             val raw = if (read == null) store.get(jobId) else store.getForListing(jobId, read)
             requirePublicElfCategories(raw.metadata)
             val organizations = decompengine.jobs.JobOrganizationStore(store.storageRoot, organizationWriter)
-            val organization = if (read == null) organizations.read(jobId) else organizations.read(jobId, read)
+            val organizationRead = if (read == null) organizations.readObserved(jobId) else organizations.readObserved(jobId, read)
+            organizationObserved?.invoke(jobId, organizationRead.present)
+            val organization = organizationRead.organization
             if (snapshot != null && snapshot.attempts.isNotEmpty()) {
                 require(snapshot.version.matches(Regex("version_[a-f0-9]{32}"))) { "Invalid stored workflow version" }
             }
@@ -970,9 +993,12 @@ class WebJobService(
             catch (failure: Exception) { progress(); budget.incomplete(failure) }
         }
         return sequence {
+            val organizationIds = linkedSetOf<String>()
             for (id in ids) {
                 checkpoint()
-                val inspection = inspectListedJob(id, read)
+                val inspection = inspectListedJob(id, read) { observedJob, present ->
+                    if (present) organizationIds += observedJob
+                }
                 checkpoint()
                 val record = when (inspection) {
                     is WebJobInspection.Available -> webJob(inspection.presentation)
@@ -987,6 +1013,7 @@ class WebJobService(
                 if (record != null) yield(record)
             }
             checkpoint()
+            dashboardOrganizationIds = organizationIds.toSet()
         }
     }
 
