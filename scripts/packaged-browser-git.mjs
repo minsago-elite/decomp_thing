@@ -150,6 +150,13 @@ export async function qualifyGit({ fixture, makeTarget, cdp, evaluate, ready, br
       throw new Error(`${failure.message}; expected history window ${nextWindowStart}..${Math.min(nextLoadedCount, nextWindowStart + MAX_VISIBLE_HISTORY_ROWS)} `
         + `after ${nextHistoryAction.kind} with focus=${terminalWindow || newestWindow ? 'history-heading' : 'continuation'}; observed=${observed}`);
     }
+    if (terminalWindow) {
+      assert.ok(await evaluate(tab, `[...${historyRows}].some(row =>
+        row.querySelector('code')?.title === ${JSON.stringify(fixture.repository.commits.base)}
+          && row.textContent.includes('fixture: baseline')
+          && row.textContent.includes('Not mapped to a reconstruction revision')))`,
+      'The oldest baseline entry and its unmapped state must be visible in the terminal history window');
+    }
     const visibleIds = await evaluate(tab, `[...${historyRows}].map(row => row.querySelector('code')?.title ?? null)`);
     assertUiHistoryWindow(visibleIds, expectedHistoryIds, nextLoadedCount, historyActions + 1, nextWindowStart);
     const previousWindowEnd = Math.min(loadedCount, historyWindowStart + MAX_VISIBLE_HISTORY_ROWS);
@@ -173,7 +180,6 @@ export async function qualifyGit({ fixture, makeTarget, cdp, evaluate, ready, br
   assert.ok(tab.requests.slice(historyStart).every(request => ['GET', 'HEAD'].includes(request.method)), 'History pagination sent a mutation');
   assert.equal(countGitHistoryReads(tab.requests.slice(historyStart)), historyPages - 1,
     'Each keyboard continuation must issue exactly one history read (recorded URLs omit query strings)');
-  assert.ok(await evaluate(tab, `document.body.innerText.includes('fixture: baseline') && document.body.innerText.includes('Not mapped to a reconstruction revision')`));
   assert.equal(fixture.repository.git('local', ['rev-parse', 'main']).stdout.trim(), fixture.repository.commits.local, 'Import changed the admitted repository');
 
   const worktree = await managedWorktree(data, fixture.jobId);
