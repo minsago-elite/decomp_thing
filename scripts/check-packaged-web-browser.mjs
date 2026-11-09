@@ -13,7 +13,7 @@ import { seedHistory, qualifyHistory } from './packaged-browser-history.mjs';
 import { seedLegacy, qualifyLegacy } from './packaged-browser-legacy.mjs';
 import { qualifyRestart, assertGracefulShutdown, scrubTokens, boundReport } from './packaged-browser-restart.mjs';
 import { qualifyUpgrade, qualifyUpgradeCache } from './packaged-browser-upgrade.mjs';
-import { qualifyAudit, assertAudit } from './packaged-browser-audit.mjs';
+import { qualifyAudit, assertAudit, connectionNoticeNames } from './packaged-browser-audit.mjs';
 import { PackagedBrowserCdpDiagnostics } from './packaged-browser-cdp-diagnostics.mjs';
 import { CdpProtocol, createCapture, assertCaptureLedger, recordPrimaryError, captureFailureDiagnostic, recordCleanupTruth } from './packaged-browser-capture.mjs';
 import { sessionSemanticsGate, statusRecorderSource, assertStatusObservations } from './packaged-browser-session-semantics.mjs';
@@ -1123,7 +1123,7 @@ try {
       const reconnectActivation = await semantics.activate(authenticated, 'Check session', { allowed: { mutations: [], reads: ['GET /nested/api/v1/bootstrap'], requiredReads: ['GET /nested/api/v1/bootstrap'] },
         settled: `document.querySelector('aside.session-notice [role="status"]')?.textContent.includes('To access private work, open the sign-in link')` });
       await semantics.checkpoint(authenticated, 'required-after-reconnect', { statusText: 'To access private work, open the sign-in link',
-        externalStatusText: 'The browser reports a connection again', buttons: ['Check session'] });
+        externalStatusText: connectionNoticeNames.reconnected, buttons: ['Check session'] });
       await delay(5000);
       semantics.results.reconnectAfterQuietWindow = await semantics.verifyActivationQuiet(authenticated, reconnectActivation);
     }
