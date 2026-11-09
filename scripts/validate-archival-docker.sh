@@ -15,6 +15,8 @@ validation_inode=""
 permission_repair_attempted=0
 permission_repair_status=1
 image_built=0
+image_build_started=0
+image_build_verified=0
 
 check_root() {
   timeout --signal=TERM --kill-after=1s 2s python3 -I -B scripts/collect-archival-diagnostics.py \
@@ -72,6 +74,11 @@ cleanup() {
       echo "Archival diagnostic retention unavailable; retaining the validation tree" >&2
     fi
   fi
+  if ((image_build_started && !image_build_verified)); then
+    removal_allowed=0
+    cleanup_failed=1
+    echo "Archival image build was not fully verified; retaining the validation tree" >&2
+  fi
   if ((removal_allowed)); then
     if check_root; then
       case "$validation_root" in
@@ -97,10 +104,25 @@ mkdir -p "$validation_root/input" "$validation_root/output"
 gcc -O0 -g benchmarks/archival/large_project.c -o "$validation_root/input/large-symbols"
 cp "$validation_root/input/large-symbols" "$validation_root/input/large-stripped"
 strip --strip-all "$validation_root/input/large-stripped"
+mkdir -p "$validation_root/output/archival-image/reports"
 chmod -R a+rwX "$validation_root"
 
 image=decomp-thing-archival-ci
-docker build --tag "$image" .
+# archival-image-build: begin
+image_build_started=1
+set +e
+timeout --signal=TERM --kill-after=5s 2740s python3 -I -B scripts/capture-archival-image-build.py \
+  "$validation_root" "$validation_device" "$validation_inode" --deadline-seconds 2700 \
+  -- docker build --tag "$image" . \
+  | timeout --signal=TERM --kill-after=1s 2750s python3 -I -B scripts/capture-archival-image-build.py \
+  --parse-receipt --deadline-seconds 2700
+image_build_status=("${PIPESTATUS[@]}")
+set -e
+if (( ${#image_build_status[@]} != 2 )); then exit 126; fi
+if ((image_build_status[0] != 0)); then exit "${image_build_status[0]}"; fi
+if ((image_build_status[1] != 0)); then exit 126; fi
+image_build_verified=1
+# archival-image-build: end
 image_built=1
 
 run_reconstruction() {
