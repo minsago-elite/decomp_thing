@@ -87,10 +87,17 @@ export async function verifyStructureSourceRevision(repoRoot, sourceCommit, {
 } = {}) {
   const fullObjectId = value => typeof value === 'string' && /^[0-9a-f]{40,64}$/.test(value);
   if (!fullObjectId(sourceCommit)) throw new TypeError('qualification source commit must be a full Git object ID');
-  const parentLine = runGit(['rev-list', '--parents', '-n', '1', sourceCommit]);
-  const [resolvedCommit, ...parents] = parentLine.split(/\s+/);
-  if (resolvedCommit !== sourceCommit || parents.some(parent => !fullObjectId(parent))) {
-    throw new Error('qualification source commit or parent list is invalid');
+  // Read the commit object itself: `rev-list --parents` hides parents at a
+  // shallow boundary, which is exactly how checkout@v* provisions CI builds.
+  const commitObject = runGit(['cat-file', '-p', sourceCommit]);
+  const header = commitObject.split('\n\n', 1)[0];
+  const headerLines = header.split('\n');
+  if (!headerLines.some(line => /^tree [0-9a-f]{40,64}$/.test(line))) {
+    throw new Error('qualification source commit object is malformed');
+  }
+  const parents = headerLines.filter(line => line.startsWith('parent ')).map(line => line.slice('parent '.length));
+  if (parents.some(parent => !fullObjectId(parent)) || new Set(parents).size !== parents.length) {
+    throw new Error('qualification source commit parent list is invalid');
   }
   if (expectedHeadCommit === null && expectedBaseCommit === null) {
     return { verified: true, kind: 'commit-only', sourceCommit, headCommit: null, baseCommit: null, parents };
@@ -117,8 +124,8 @@ export async function verifyStructureSourceRevision(repoRoot, sourceCommit, {
   if (kind === 'push-commit') {
     // A push event binds the exact checked-out source commit.
   } else if (sourceCommit === expectedHeadCommit) {
-    try { runGit(['merge-base', '--is-ancestor', expectedBaseCommit, expectedHeadCommit]); }
-    catch { throw new Error('declared pull-request base is not an ancestor of the source head'); }
+    // Exact head identity plus the event's base/head pair is sufficient. A
+    // feature head need not contain a base that advanced after it diverged.
     kind = 'head-commit';
   } else if (parents.length === 2 && parents[0] === expectedBaseCommit && parents[1] === expectedHeadCommit) {
     kind = 'pull-request-merge-commit';

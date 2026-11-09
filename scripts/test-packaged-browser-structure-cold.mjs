@@ -83,34 +83,49 @@ test('qualification source identity matches committed Git blobs and refuses edit
 test('source revision binding derives pull-request identity from the source commit graph', async () => {
   const base = '1'.repeat(40), head = '2'.repeat(40), merge = '3'.repeat(40), unrelated = '4'.repeat(40);
   const mergeRunGit = args => {
-    if (args[0] === 'rev-list') return `${merge} ${base} ${head}`;
+    if (args[0] === 'cat-file' && args[1] === '-p') return `tree ${'5'.repeat(40)}\nparent ${base}\nparent ${head}\n\nmerge candidate`;
     throw new Error(`unexpected git call: ${args.join(' ')}`);
   };
-  const mergeBinding = await verifyStructureSourceRevision('/repo', merge, {expectedHeadCommit:head,expectedBaseCommit:base,runGit:mergeRunGit});
+  const mergeBinding = await verifyStructureSourceRevision('/repo', merge, {expectedHeadCommit:head,expectedBaseCommit:base,eventPath:null,runGit:mergeRunGit});
   assert.deepEqual(mergeBinding,{verified:true,kind:'pull-request-merge-commit',sourceCommit:merge,headCommit:head,baseCommit:base,parents:[base,head]});
-  await assert.rejects(verifyStructureSourceRevision('/repo', merge, {expectedHeadCommit:unrelated,expectedBaseCommit:base,runGit:mergeRunGit}),/not the declared pull-request/);
+  await assert.rejects(verifyStructureSourceRevision('/repo', merge, {expectedHeadCommit:unrelated,expectedBaseCommit:base,eventPath:null,runGit:mergeRunGit}),/not the declared pull-request/);
 
   const headRunGit = args => {
-    if (args[0] === 'rev-list') return `${head} ${base}`;
-    if (args[0] === 'merge-base' && args[1] === '--is-ancestor') return '';
+    if (args[0] === 'cat-file' && args[1] === '-p') return `tree ${'6'.repeat(40)}\nparent ${unrelated}\n\nfeature head diverged before base advanced`;
     throw new Error(`unexpected git call: ${args.join(' ')}`);
   };
-  assert.equal((await verifyStructureSourceRevision('/repo',head,{expectedHeadCommit:head,expectedBaseCommit:base,runGit:headRunGit})).kind,'head-commit');
-  const pushRunGit=args=>args[0]==='rev-list'?`${head} ${base}`:null;
+  assert.equal((await verifyStructureSourceRevision('/repo',head,{expectedHeadCommit:head,expectedBaseCommit:base,eventPath:null,runGit:headRunGit})).kind,'head-commit');
+  const pushRunGit=args=>args[0]==='cat-file'&&args[1]==='-p'?`tree ${'7'.repeat(40)}\nparent ${base}\n\npush source`:null;
   const pushEvent=Buffer.from(JSON.stringify({after:head,ref:'refs/heads/master'}));
   assert.equal((await verifyStructureSourceRevision('/repo',head,{expectedHeadCommit:head,expectedBaseCommit:null,eventPath:'/event',
     readFile:async()=>pushEvent,runGit:pushRunGit})).kind,'push-commit');
-  await assert.rejects(verifyStructureSourceRevision('/repo',merge,{expectedHeadCommit:head,expectedBaseCommit:null,runGit:mergeRunGit}),/push source revision/);
+  await assert.rejects(verifyStructureSourceRevision('/repo',merge,{expectedHeadCommit:head,expectedBaseCommit:null,eventPath:null,runGit:mergeRunGit}),/push source revision/);
 });
 
 test('source revision binding refuses environment values that contradict the GitHub event', async () => {
   const base='1'.repeat(40),head='2'.repeat(40),merge='3'.repeat(40);
-  const runGit=args=>args[0]==='rev-list'?`${merge} ${base} ${head}`:null;
+  const runGit=args=>args[0]==='cat-file'&&args[1]==='-p'?`tree ${'5'.repeat(40)}\nparent ${base}\nparent ${head}\n\nmerge candidate`:null;
   const event=Buffer.from(JSON.stringify({pull_request:{head:{sha:head},base:{sha:base}}}));
   assert.equal((await verifyStructureSourceRevision('/repo',merge,{expectedHeadCommit:head,expectedBaseCommit:base,eventPath:'/event',
     readFile:async()=>event,runGit})).verified,true);
   await assert.rejects(verifyStructureSourceRevision('/repo',merge,{expectedHeadCommit:'4'.repeat(40),expectedBaseCommit:base,eventPath:'/event',
     readFile:async()=>event,runGit}),/do not match the GitHub event payload/);
+});
+
+test('source revision binding honors an ambient GitHub event path when one is present', async () => {
+  const base='1'.repeat(40),head='2'.repeat(40),merge='3'.repeat(40);
+  const runGit=args=>args[0]==='cat-file'&&args[1]==='-p'?`tree ${'5'.repeat(40)}\nparent ${base}\nparent ${head}\n\nshallow merge candidate`:null;
+  const event=Buffer.from(JSON.stringify({pull_request:{head:{sha:head},base:{sha:base}}}));
+  const previous=process.env.GITHUB_EVENT_PATH;
+  process.env.GITHUB_EVENT_PATH='/ambient-event';
+  try {
+    const binding=await verifyStructureSourceRevision('/repo',merge,{expectedHeadCommit:head,expectedBaseCommit:base,
+      readFile:async path=>{assert.equal(path,'/ambient-event');return event;},runGit});
+    assert.equal(binding.kind,'pull-request-merge-commit');
+  } finally {
+    if(previous===undefined) delete process.env.GITHUB_EVENT_PATH;
+    else process.env.GITHUB_EVENT_PATH=previous;
+  }
 });
 
 test('browser identity requires the reviewed installed lock, binary hash, and exact version', async () => {
