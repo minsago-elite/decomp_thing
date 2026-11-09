@@ -146,119 +146,8 @@ const MAX_TRACKED = 64;
 const MAX_COUNT = 100_000;
 const MAX_MS = 3_600_000;
 const MAX_BYTES = 2 ** 31;
-const MAXIMUM_CAPTURE_BYTES = 1_048_576;
-const CDP_NO_DATA_MESSAGE = 'No data found for resource with given identifier';
 const MODULE_DETAIL = /\/api\/v1\/jobs\/[^/]+\/runs\/[^/]+\/revisions\/[^/]+\/modules\/[^/]+$/;
 const structureFailures = new WeakMap();
-
-/**
- * Test-only capture for one synthetic module response. Install before app scripts create their API
- * client. The bounded clone leaves the original response untouched and retains only fields used to
- * verify the rendered source link; request IDs and response text never leave the page.
- */
-export function installStructureModuleResponseCapture(target, expectedPath, expectedModuleId, expectedBinding, maximumBytes) {
-  const key = '__decompStructureModuleResponseV1';
-  const state = { status: 'waiting', responseCount: 0, snapshot: null };
-  Object.defineProperty(target, key, { value: state, configurable: true, enumerable: false });
-  const originalFetch = target.fetch;
-  if (typeof originalFetch !== 'function' || !Number.isSafeInteger(maximumBytes) || maximumBytes < 1
-    || maximumBytes > 1_048_576 || typeof expectedPath !== 'string' || !expectedPath.startsWith('/')) {
-    state.status = 'unavailable';
-    return state;
-  }
-  target.fetch = function (input, init) {
-    let matches = false;
-    try {
-      const rawUrl = typeof input === 'string' ? input : typeof input?.url === 'string' ? input.url : String(input);
-      const requestUrl = new URL(rawUrl, target.location.href);
-      const method = String(init?.method ?? input?.method ?? 'GET').toUpperCase();
-      matches = requestUrl.origin === target.location.origin && requestUrl.pathname === expectedPath && method === 'GET';
-    } catch { /* Malformed and unrelated requests remain outside this observer. */ }
-    const pending = originalFetch.apply(this, arguments);
-    if (!matches) return pending;
-    state.responseCount += 1;
-    if (state.responseCount !== 1) {
-      state.status = 'ambiguous';
-      state.snapshot = null;
-      return pending;
-    }
-    return pending.then((response) => {
-      let responsePath = null;
-      let responseOrigin = target.location.origin;
-      try {
-        if (response?.url) {
-          const responseUrl = new URL(response.url, target.location.href);
-          responsePath = responseUrl.pathname;
-          responseOrigin = responseUrl.origin;
-        } else responsePath = expectedPath;
-      } catch {}
-      if (state.responseCount !== 1) return response;
-      if (!response || response.status !== 200 || responseOrigin !== target.location.origin || responsePath !== expectedPath) {
-        state.status = 'unexpected-response';
-        return response;
-      }
-      const length = response.headers?.get('Content-Length');
-      if (length !== null && length !== undefined && /^(0|[1-9][0-9]*)$/.test(length) && Number(length) > maximumBytes) {
-        state.status = 'too-large';
-        return response;
-      }
-      const body = response.clone().body;
-      if (!body || typeof body.getReader !== 'function') {
-        state.status = 'unavailable';
-        return response;
-      }
-      void (async () => {
-        const reader = body.getReader();
-        const chunks = [];
-        let total = 0;
-        try {
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            total += value.byteLength;
-            if (total > maximumBytes) {
-              state.status = 'too-large';
-              void reader.cancel().catch(() => undefined);
-              return;
-            }
-            chunks.push(value);
-          }
-          const bytes = new Uint8Array(total);
-          let offset = 0;
-          for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
-          const document = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
-          const data = document?.kind === 'moduleDetail' ? document.data : null;
-          const module = data?.module;
-          const requestId = document?.requestId;
-          const headerRequestId = response.headers?.get('X-Request-ID');
-          if (state.responseCount !== 1) return;
-          if (!data || !module || data.binding?.jobId !== expectedBinding.jobId
-            || data.binding?.runId !== expectedBinding.runId || data.binding?.revisionId !== expectedBinding.revisionId
-            || module.moduleId !== expectedModuleId || !/^[a-f0-9]{64}$/.test(data.sourceSha256 ?? '')
-            || !/^[a-f0-9]{64}$/.test(data.metadataVersion ?? '')
-            || typeof module.implementationFileId !== 'string'
-            || !/^file_[0-9]+_[a-f0-9]{64}$/.test(module.implementationFileId)
-            || typeof requestId !== 'string' || requestId.length < 1 || requestId.length > 128
-            || headerRequestId !== null && headerRequestId !== undefined && headerRequestId !== requestId) {
-            state.status = 'invalid';
-            return;
-          }
-          state.snapshot = { sourceSha256: data.sourceSha256, metadataVersion: data.metadataVersion,
-            module: { moduleId: module.moduleId, implementationFileId: module.implementationFileId } };
-          state.status = 'captured';
-        } catch {
-          if (state.responseCount === 1) state.status = 'invalid';
-        }
-      })();
-      return response;
-    }, (error) => {
-      state.status = 'fetch-failed';
-      throw error;
-    });
-  };
-  return state;
-}
-
 /** Body-read observations recorded when qualifyStructure threw this error, or null. Never reads the error itself. */
 export function structureFailureEvidence(error) {
   return (error !== null && typeof error === 'object' && structureFailures.get(error)) || null;
@@ -416,12 +305,6 @@ export async function qualifyStructure(context) {
 
 async function qualify({ fixture, makeTarget, cdp, evaluate, ready, browserOrigin }, observer) {
   const tab = await makeTarget();
-  const module = fixture.moduleId(Math.floor(99998 / 24));
-  const modulePath = `/nested/api/v1/jobs/${fixture.jobId}/runs/${fixture.runId}/revisions/${fixture.revisionId}/modules/${module}`;
-  const captureSource = `(${installStructureModuleResponseCapture.toString()})(window,${JSON.stringify(modulePath)},${JSON.stringify(module)},${JSON.stringify({
-    jobId: fixture.jobId, runId: fixture.runId, revisionId: fixture.revisionId,
-  })},${MAXIMUM_CAPTURE_BYTES});`;
-  await cdp.call('Page.addScriptToEvaluateOnNewDocument', { source: captureSource }, tab.sessionId);
   await cdp.call('Performance.enable', {}, tab.sessionId);
   const inventoryReads = [];
   const moduleResponses = new Map();
@@ -489,48 +372,22 @@ async function qualify({ fixture, makeTarget, cdp, evaluate, ready, browserOrigi
   assert.ok(await evaluate(tab, `document.body.innerText.includes('Recovery assessment: unassessed')`));
   await evaluate(tab, `[...document.querySelectorAll('a')].find(a => a.textContent === 'synthetic_function_99998').click()`);
   await ready(tab, `document.querySelector('main h2')?.textContent === 'synthetic_function_99998'`, 'caller cross-link within the pinned structure version');
+  const module = fixture.moduleId(Math.floor(99998 / 24));
   await evaluate(tab, `[...document.querySelectorAll('a')].find(a => a.textContent === ${JSON.stringify(module)}).click()`);
   await ready(tab, `document.querySelector('main h2')?.textContent === ${JSON.stringify(module)} && document.querySelector('table caption')?.textContent === 'Functions'`, 'owning module detail');
   const owned = Math.min(24, OWNED - Math.floor(99998 / 24) * 24);
   assert.equal(await evaluate(tab, `document.querySelectorAll('table tbody tr').length`), owned);
   const implementation = await evaluate(tab, `[...document.querySelectorAll('a')].find(a => a.textContent === 'src/modules/${module}.c')?.getAttribute('href')`);
   observer.stage('lookup');
+  const modulePath = `/nested/api/v1/jobs/${fixture.jobId}/runs/${fixture.runId}/revisions/${fixture.revisionId}/modules/${module}`;
   const requestId = moduleResponses.get(modulePath);
   assert.ok(requestId, 'Missing originating module detail response');
   observer.select(requestId, modulePath);
   observer.stage('body-call');
-  // Prefer the original CDP body when Chrome retained it. SPA-consumed responses can be canceled
-  // after rendering and lose their CDP body; in that case use the exact bounded fetch clone captured
-  // before the app read it, never a second API request or a link-derived pin.
-  let snapshot;
-  let moduleResponseBodySource = 'cdp';
-  try {
-    const response = await observer.bodyCall(() => cdp.call('Network.getResponseBody', { requestId }, tab.sessionId));
-    observer.stage('body-decode');
-    snapshot = JSON.parse(response.base64Encoded ? Buffer.from(response.body, 'base64').toString('utf8') : response.body).data;
-  } catch (error) {
-    const observed = observer.snapshot().selected;
-    const canceledBodyEviction = error instanceof Error && error.message === CDP_NO_DATA_MESSAGE
-      && observed?.loadingFailed === true && observed.loadingCanceled === true && observed.loadingFinished === false;
-    if (!canceledBodyEviction) throw error;
-    let captured = null;
-    try {
-      captured = await evaluate(tab, `new Promise(resolve => {
-        const deadline = performance.now() + 1000;
-        const poll = () => {
-          const capture = window.__decompStructureModuleResponseV1;
-          if (capture && capture.status !== 'waiting') resolve(capture.status === 'captured' ? capture.snapshot : null);
-          else if (performance.now() >= deadline) resolve(null);
-          else setTimeout(poll, 10);
-        };
-        poll();
-      })`);
-    } catch { /* Retain the original CDP failure below. */ }
-    if (!captured) throw error;
-    snapshot = captured;
-    moduleResponseBodySource = 'page-fetch-clone';
-    observer.stage('body-decode');
-  }
+  // Rendering has completed, so the response body consumed by the UI is available without another API read.
+  const response = await observer.bodyCall(() => cdp.call('Network.getResponseBody', { requestId }, tab.sessionId));
+  observer.stage('body-decode');
+  const snapshot = JSON.parse(response.base64Encoded ? Buffer.from(response.body, 'base64').toString('utf8') : response.body).data;
   assert.equal(snapshot.module.moduleId, module);
   observer.stage('source-link');
   assertStructureSourceLink(implementation, { revision, browserOrigin, snapshot });
@@ -552,6 +409,5 @@ async function qualify({ fixture, makeTarget, cdp, evaluate, ready, browserOrigi
   return { recordedFunctions: fixture.functions, modules: fixture.modules, modelBytes: fixture.modelBytes, rowsPerPage: 100,
     pagesVisited: 21, maximumMountedRows: 100, firstPageMs: Math.round(firstPageMs), pageMsP50: Math.round(pageMs[10]),
     pageMsP95: Math.round(pageMs[18]), searchMs: Math.round(searchMs), peakBrowserHeapBytes, cursorReload: true,
-    pinnedCrossLinks: true, moduleSourceLink: true, moduleResponseBodySource, narrowReflow: true,
-    boundedInventoryReads: inventoryReads.length, mutationRequests: 0 };
+    pinnedCrossLinks: true, moduleSourceLink: true, narrowReflow: true, boundedInventoryReads: inventoryReads.length, mutationRequests: 0 };
 }
