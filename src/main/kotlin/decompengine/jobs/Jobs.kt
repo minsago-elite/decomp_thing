@@ -344,7 +344,8 @@ class JobStore internal constructor(
                 cancellationCheck = cancellationCheck,
                 validateMetadata = { descriptor ->
                     if (descriptor.identity.linkCount != 1) throw decompengine.repair.StableFileUnavailableException("artifact has more than one filesystem name")
-                })
+                },
+                requireAtimeNeutralOpen = true)
         }
     }
 
@@ -380,7 +381,8 @@ class JobStore internal constructor(
             decompengine.repair.hashStableRegularFile(root, "$jobId/$relativePath",
                 declaredSize = { size -> if (size > maximumBytes) throw decompengine.repair.RepairBudgetExceededException("artifact exceeds its receipt limit") },
                 readBytes = { _, total -> if (total > maximumBytes) throw decompengine.repair.RepairBudgetExceededException("artifact grew beyond its receipt limit") },
-                cancellationCheck = cancellationCheck)
+                cancellationCheck = cancellationCheck,
+                requireAtimeNeutralOpen = true)
         }
         return ContainedFileReceipt(relativePath, digest.size, digest.sha256, digest.identity)
     }
@@ -469,7 +471,8 @@ class JobStore internal constructor(
                 cancellationCheck = cancellationCheck,
                 validateMetadata = { descriptor ->
                     if (descriptor.identity.linkCount != 1) throw decompengine.repair.StableFileUnavailableException("job input has more than one filesystem name")
-                })
+                },
+                requireAtimeNeutralOpen = true)
         }
     }
 

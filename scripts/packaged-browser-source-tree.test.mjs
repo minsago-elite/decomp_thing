@@ -1,6 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { maximumFirstSearchPageMs, nearestRankPercentile, sourceTreeBudgetGate, sourceTreeBudgetsForProfile, SOURCE_TREE_BUDGETS } from './packaged-browser-source-tree.mjs';
+import { maximumFirstSearchPageMs, nearestRankPercentile, sourceTreeBudgetGate, sourceTreeBudgetsForProfile, SOURCE_TREE_BUDGETS, waitForCompletedRequest } from './packaged-browser-source-tree.mjs';
+
+test('resource timing fallback accepts supplied timing records without a status field', async () => {
+  const observed = { route: 'chunk', pathname: '/assets/chunk.js', status: 200, responseBytes: null };
+  const result = await waitForCompletedRequest([observed], 'chunk', 100, async () => [{
+    route: 'chunk', pathname: '/assets/chunk.js', responseEnd: 10, transferSize: 1234, encodedBodySize: 1000,
+  }]);
+  assert.equal(result, observed);
+  assert.equal(result.responseBytes, 1234);
+});
 
 test('source-tree percentile uses nearest rank for deterministic measurements', () => {
   assert.equal(nearestRankPercentile([9, 1, 5, 3, 7], 0.5), 5);

@@ -7289,6 +7289,7 @@ internal fun hashStableRegularFile(
     readBytes: (Int, Long) -> Unit,
     cancellationCheck: () -> Unit,
     validateMetadata: (LinuxDescriptor) -> Unit = {},
+    requireAtimeNeutralOpen: Boolean = false,
 ): StableFileDigest {
     cancellationCheck()
     // Snapshot paths use Linux filename semantics, independently of repair manifest grammar.
@@ -7315,9 +7316,10 @@ internal fun hashStableRegularFile(
         }
         authorized = LinuxFilesystemSyscalls.openRegularFileAtOrNull(parent.fd, parts.last())
             ?: throw StableFileUnavailableException("stable hash target is unavailable")
-        // Metadata revalidation must not advance the retained file's atime; stream directly from
-        // this O_NOATIME descriptor rather than reopening its /proc/self/fd link.
-        readable = LinuxFilesystemSyscalls.openReadableWithoutAtimeFrom(authorized)
+        // Ordinary callers must remain able to read files whose owner differs from the caller.
+        // Metadata-sensitive callers may opt into O_NOATIME and receive a strict atime check.
+        readable = if (requireAtimeNeutralOpen) LinuxFilesystemSyscalls.openReadableWithoutAtimeFrom(authorized)
+            else LinuxFilesystemSyscalls.openReadableFrom(authorized)
         requireUnchanged(readable.identity == authorized.identity) { "stable hash descriptor identity changed" }
         validateMetadata(readable)
         val before = LinuxFilesystemSyscalls.metadata(readable.fd)
@@ -7337,7 +7339,13 @@ internal fun hashStableRegularFile(
         cancellationCheck()
         val after = LinuxFilesystemSyscalls.metadata(readable.fd)
         validateMetadata(readable)
-        requireUnchanged(before == after && after.identity == readable.identity && after.size == size && size == bytesRead) {
+        val timestampsStable = before.modifiedSeconds == after.modifiedSeconds &&
+            before.modifiedNanoseconds == after.modifiedNanoseconds &&
+            before.changedSeconds == after.changedSeconds && before.changedNanoseconds == after.changedNanoseconds &&
+            (!requireAtimeNeutralOpen || before.accessSeconds == after.accessSeconds &&
+                before.accessNanoseconds == after.accessNanoseconds)
+        requireUnchanged(timestampsStable && before.identity == after.identity &&
+            after.identity == readable.identity && before.size == after.size && after.size == size && size == bytesRead) {
             "stable hash file changed during reading"
         }
         revalidateDescriptorPath(base, parts, directories.map { it.identity }, authorized.identity)

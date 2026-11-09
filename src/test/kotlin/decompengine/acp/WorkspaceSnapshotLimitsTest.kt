@@ -463,6 +463,52 @@ class WorkspaceSnapshotLimitsTest {
     }
 
     @Test
+    fun `stable hashing allows ordinary reads by default and preserves atime when explicitly required`() {
+        val root = workspace()
+        val file = root.resolve("src/data")
+        Files.writeString(file, "stable readable content")
+        val oldAtime = java.nio.file.attribute.FileTime.from(java.time.Instant.parse("2000-01-01T00:00:00Z"))
+        Files.setAttribute(file, "basic:lastAccessTime", oldAtime)
+        Files.setLastModifiedTime(file, java.nio.file.attribute.FileTime.from(java.time.Instant.parse("2020-01-01T00:00:00Z")))
+        fun atime() = Files.getAttribute(file, "basic:lastAccessTime") as java.nio.file.attribute.FileTime
+
+        decompengine.repair.hashStableRegularFile(root, "src/data", {}, { _, _ -> }, {})
+        assertTrue(atime().compareTo(oldAtime) > 0,
+            "default hashing must not require O_NOATIME ownership permission")
+
+        Files.setAttribute(file, "basic:lastAccessTime", oldAtime)
+        decompengine.repair.hashStableRegularFile(root, "src/data", {}, { _, _ -> }, {},
+            requireAtimeNeutralOpen = true)
+        assertEquals(oldAtime, atime(),
+            "the opt-in metadata-neutral path must preserve atime when available")
+    }
+
+    @Test
+    fun `stable hashing rejects same-size content mutation even when mtime is restored`() {
+        val root = workspace()
+        val file = root.resolve("src/data")
+        val original = ByteArray(128 * 1024) { 'A'.code.toByte() }
+        val replacement = ByteArray(original.size) { 'B'.code.toByte() }
+        Files.write(file, original)
+        val originalMtime = Files.getLastModifiedTime(file)
+        var changed = false
+
+        val failure = assertFailsWith<IllegalArgumentException> {
+            decompengine.repair.hashStableRegularFile(root, "src/data", {}, { _, total ->
+                if (!changed && total >= 64 * 1024) {
+                    // The first chunk has already been read. Replace the entire same-sized file,
+                    // then put mtime back; the stream would otherwise combine old and new bytes.
+                    Files.write(file, replacement)
+                    Files.setLastModifiedTime(file, originalMtime)
+                    changed = true
+                }
+            }, {})
+        }
+        assertTrue(changed)
+        assertTrue(failure.message.orEmpty().contains("file changed during reading"))
+    }
+
+    @Test
     fun `recursive inventory rejects symlinks instead of silently omitting them`() {
         val root = workspace()
         val outside = root.resolve("outside")

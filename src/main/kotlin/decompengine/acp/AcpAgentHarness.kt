@@ -3407,7 +3407,8 @@ internal class WorkspaceSnapshot private constructor(
                         if (LinuxFilesystemSyscalls.extendedAttributeNames(descriptor, budget::checkpoint).isNotEmpty()) {
                             throw WorkspaceSnapshotInvalidEntry("unsupported-extended-attributes")
                         }
-                    })
+                    },
+                )
             } catch (_: IOException) {
                 throw WorkspaceSnapshotInvalidEntry("file-binding-unavailable")
             } catch (_: IllegalArgumentException) {

@@ -164,7 +164,7 @@ function summarizeRequests(requests, route) {
   }));
 }
 
-async function waitForCompletedRequest(requests, route, timeoutMs = 10_000, readResourceTiming = null) {
+export async function waitForCompletedRequest(requests, route, timeoutMs = 10_000, readResourceTiming = null) {
   const deadline = Date.now() + timeoutMs;
   let resourceTimings = readResourceTiming ? await readResourceTiming() : [];
   while (Date.now() < deadline) {
@@ -174,7 +174,7 @@ async function waitForCompletedRequest(requests, route, timeoutMs = 10_000, read
     // consumed a same-origin response (for example during navigation cleanup).
     // In that case the rendered data plus Resource Timing's completed transfer
     // remains direct browser evidence of the response and its transferred size.
-    const timing = resourceTimings.find(item => item.route === route && item.status === 200
+    const timing = resourceTimings.find(item => item.route === route
       && item.responseEnd > 0 && item.transferSize > 0 && Number.isSafeInteger(item.transferSize));
     if (timing) {
       const observed = requests.find(item => item.route === route && item.pathname === timing.pathname && item.status === 200);

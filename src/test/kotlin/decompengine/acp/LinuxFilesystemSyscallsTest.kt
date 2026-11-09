@@ -1104,6 +1104,22 @@ class LinuxFilesystemSyscallsTest {
     }
 
     @Test
+    fun `descriptor metadata decodes modification time from statx mtime fields`() {
+        withLinuxDirectory("linux-syscall-mtime-offset-") { path, directory ->
+            val target = path.resolve("timestamped")
+            Files.writeString(target, "mtime offset fixture")
+            val expected = java.nio.file.attribute.FileTime.from(java.time.Instant.parse("2001-02-03T04:05:06.123456789Z"))
+            Files.setLastModifiedTime(target, expected)
+
+            LinuxFilesystemSyscalls.openRegularFileAtOrNull(directory.fd, "timestamped")!!.use { authorized ->
+                val observed = LinuxFilesystemSyscalls.metadata(authorized.fd)
+                assertEquals(expected.toInstant().epochSecond, observed.modifiedSeconds)
+                assertEquals(expected.toInstant().nano, observed.modifiedNanoseconds)
+            }
+        }
+    }
+
+    @Test
     fun `bounded streaming digests reuse one thread-local bridge array`() {
         withLinuxDirectory("linux-syscall-stream-buffer-") { path, directory ->
             val first = ByteArray(4096) { 0x31 }

@@ -1217,7 +1217,7 @@ internal object LinuxFilesystemSyscalls {
             if (it !in 0..999_999_999) throw IOException("descriptor statx returned invalid timestamp nanoseconds")
         }
         LinuxDescriptorMetadata(identity, statistics.getLong(0x28),
-            seconds(0x40), nanoseconds(0x48), seconds(0x50), nanoseconds(0x58),
+            seconds(0x40), nanoseconds(0x48), seconds(0x70), nanoseconds(0x78),
             seconds(0x60), nanoseconds(0x68))
     }
 
