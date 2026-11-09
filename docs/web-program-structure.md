@@ -170,3 +170,16 @@ local timing is variable and does not establish stable qualification. These are 
 projection measurements, not hosted production qualification. The packaged browser
 measurements above remain separate evidence for response paging, heap, keyboard
 interaction and reflow.
+
+The packaged driver retains failed same-origin request duration and header timing so a
+canceled first response remains visible in the latency diagnosis. A `loadingFailed`
+terminal is accepted as consumed only for Chromium's exact `net::ERR_ABORTED` canceled
+signature and only when the complete streamed body matches the fixture oracle and
+Content-Length, the response is an uncached HTTP 200, Resource Timing reports matching
+encoded/decoded sizes and HTTP 200, and the expected ready DOM follows the failure.
+All other failed, partial, stale, or uncorrelated responses remain unproven. This
+classifies the observed browser terminal after the body and UI have completed; it does
+not claim that the HTTP request itself terminated successfully. Structure-mode server
+phase timings can be enabled for the packaged diagnostic with
+`-Ddecompengine.web.structureTiming=true`; they are stderr diagnostics and do not alter
+the response or any budget.

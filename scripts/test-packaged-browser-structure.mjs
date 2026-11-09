@@ -39,10 +39,10 @@ test('structure phase timings retain only bounded same-origin GET route and inve
     url: `${browserOrigin}/nested/api/v1/jobs/${'a'.repeat(32)}/runs/run/revisions/rev/functions` } });
   recorder.requestWillBeSent({ requestId: 'failed', timestamp: 3, request: { method: 'GET',
     url: `${browserOrigin}/nested/assets/ui/assets/Structure-failed.js` } });
-  recorder.loadingFailed({ requestId: 'failed', errorText: 'private request detail' });
+  recorder.loadingFailed({ requestId: 'failed', timestamp: 3.3, errorText: 'private request detail' });
   assert.deepEqual(recorder.summary(), { routeChunkRequests: [{ durationMs: 80, status: 200 }],
     functionRequests: [{ durationMs: 120, status: 200, headersMs: 100 }],
-    failedRequests: [{ phase: 'route-chunk' }], pendingRequestCount: 0 });
+    failedRequests: [{ phase: 'route-chunk', durationMs: 300, status: null, headersMs: null }], pendingRequestCount: 0 });
 });
 
 test('JVM RSS budget is measured above warmed baseline and incomplete sampling stays explicit', () => {
@@ -493,7 +493,7 @@ async function runProofScenario(o = {}) {
   for (const requestId of requestIds) {
     proof.requestWillBeSent({ requestId, frameId: 'F', loaderId: o.requestLoader ?? loader, type: 'Fetch', initiator: { type: 'script' }, request: { method: 'GET', url } });
     if (o.memoryCache) proof.requestServedFromCache({ requestId });
-    if (o.readyBeforeResponse && requestId === 'r1') bind(INVENTORY_PROOF_BINDINGS[2], readyPayload(), o.readyContext ?? activeContext);
+    if ((o.readyBeforeResponse || o.readyBeforeFailure) && requestId === 'r1') bind(INVENTORY_PROOF_BINDINGS[2], readyPayload(), o.readyContext ?? activeContext);
     if (o.failBeforeResponse) {
       commands.get(requestId)?.reject(new Error('stream refused'));
       await Promise.resolve();
@@ -509,7 +509,7 @@ async function runProofScenario(o = {}) {
       proof.dataReceived({ requestId, dataLength: o.dataLength ?? bytes, encodedDataLength: bytes,
         data: Buffer.from(o.truncate ? body.slice(0, -10) : body).toString('base64') });
     }
-    if (o.failBeforeBody || o.canceled) proof.loadingFailed({ requestId, errorText: 'net::ERR_ABORTED', canceled: true });
+    if (o.failBeforeBody || o.canceled) proof.loadingFailed({ requestId, errorText: o.failureErrorText ?? 'net::ERR_ABORTED', canceled: o.failureCanceled ?? true });
     else if (!o.pending) proof.loadingFinished({ requestId, encodedDataLength: bytes });
   }
   function readyPayload() {
@@ -520,8 +520,8 @@ async function runProofScenario(o = {}) {
   const timingNonce = o.timingNonce ?? docNonce;
   const timings = o.missingTiming ? 0 : o.duplicateTiming ? 2 : 1;
   for (let i = 0; i < timings; i++) bind(INVENTORY_PROOF_BINDINGS[1], { nonce: timingNonce, timeOrigin, name: url, initiatorType: 'fetch', nextHopProtocol: 'http/1.1',
-    responseStatus: 200, deliveryType: o.timingDelivery ?? '', encodedBodySize: bytes, decodedBodySize: o.timingDecoded ?? bytes, transferSize: bytes + 300, startTime: 10, responseStart: 40, responseEnd: o.responseEnd ?? 50 }, o.timingContext ?? activeContext);
-  if (!o.readyBeforeResponse && !o.noReady) bind(INVENTORY_PROOF_BINDINGS[2], readyPayload(), o.readyContext ?? activeContext);
+    responseStatus: o.timingStatus === undefined ? 200 : o.timingStatus, deliveryType: o.timingDelivery ?? '', encodedBodySize: bytes, decodedBodySize: o.timingDecoded ?? bytes, transferSize: bytes + 300, startTime: 10, responseStart: 40, responseEnd: o.responseEnd ?? 50 }, o.timingContext ?? activeContext);
+  if (!o.readyBeforeResponse && !o.readyBeforeFailure && !o.noReady) bind(INVENTORY_PROOF_BINDINGS[2], readyPayload(), o.readyContext ?? activeContext);
   if (o.invalidPayload) bind(INVENTORY_PROOF_BINDINGS[2], '{');
   return { proof, call, calls, expectation };
 }
@@ -859,18 +859,37 @@ for (const failed of [false, true]) {
   });
 }
 
-test('perfect canceled body remains FAIL with raw loadingFailed preserved', async () => {
+test('canceled-after-consumption is proven only by matching body, timing, and ready evidence', async () => {
   const { proof, call, calls } = await runProofScenario({ canceled: true, capture: prefixAndSpans(true) });
   await proof.drain(call);
   const action = proof.summary().actions[0];
-  assert.deepEqual(action.reasons, ['loading-failed']);
-  assert.equal(action.validatedConsumption, false);
+  assert.deepEqual(action.reasons, []);
+  assert.equal(action.validatedConsumption, true);
   assert.equal(action.request.failure.errorText, 'net::ERR_ABORTED');
   assert.equal(action.request.failure.canceled, true);
+  assert.equal(action.request.terminalEvidence, 'canceled-after-consumption');
   assert.equal(action.request.body.digest, inventoryPageOracle(proofFixture, 100).digest);
   assert.equal(action.request.bodyCross.state, 'not-required-failed-terminal');
   assert.deepEqual(calls, [['Network.streamResourceContent', 'r1']]);
 });
+
+for (const [name, options] of [
+  ['different failure text', { failureErrorText: 'net::ERR_FAILED' }],
+  ['not marked canceled', { failureCanceled: false }],
+  ['ready precedes failure', { readyBeforeFailure: true }],
+  ['missing Resource Timing status', { timingStatus: null }],
+  ['Resource Timing status is not 200', { timingStatus: 304 }],
+  ['response end follows ready', { responseEnd: 70 }],
+  ['partial body bytes', { contentLength: Buffer.byteLength(inventoryBody(100)) - 1 }],
+  ['wrong response status', { status: 206 }],
+]) {
+  test(`canceled terminal remains unproven with ${name}`, async () => {
+    const action = await proofVerdict({ canceled: true, capture: prefixAndSpans(true), ...options });
+    assert.equal(action.validatedConsumption, false, name);
+    assert.ok(action.reasons.includes('loading-failed'), action.reasons.join(','));
+    assert.equal(action.request.terminalEvidence, 'unproven-loading-failure');
+  });
+}
 
 test('absent body does not manufacture an independent decoded-length mismatch', async () => {
   const action = await proofVerdict({ failBeforeBody: true });

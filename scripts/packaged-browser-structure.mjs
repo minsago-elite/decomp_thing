@@ -292,7 +292,9 @@ export function createStructureTimingRecorder(browserOrigin) {
     const value = pending.get(event.requestId);
     if (!value) return;
     pending.delete(event.requestId);
-    if (failedRequests.length < 16) failedRequests.push({ phase: value.routeChunk ? 'route-chunk' : 'function-request' });
+    if (failedRequests.length < 16) failedRequests.push({ phase: value.routeChunk ? 'route-chunk' : 'function-request',
+      durationMs: Math.round(Math.max(0, (event.timestamp - value.start) * 1000)),
+      status: value.response?.status ?? null, headersMs: value.response?.headersMs ?? null });
   }
   return {
     requestWillBeSent, responseReceived, loadingFinished, loadingFailed,
@@ -1144,7 +1146,6 @@ export function createInventoryConsumptionProof({ browserOrigin, fixture, call,
         if (ready && !(ready.ordinal > response.ordinal)) reasons.push('ready-before-response');
       }
       if (!request.finished && !request.failure) reasons.push('terminal-pending');
-      if (request.failure) reasons.push('loading-failed');
       if (request.finished && request.bodyCross.state !== 'matched') reasons.push(request.bodyCross.state === 'mismatch'
         ? 'body-capture-mismatch' : 'body-cross-' + request.bodyCross.state);
       if (request.body.state !== 'parsed') reasons.push(`body-${request.body.state}`);
@@ -1164,6 +1165,22 @@ export function createInventoryConsumptionProof({ browserOrigin, fixture, call,
         if (timing.deliveryType) reasons.push('timing-delivery-cache');
         if (!(timing.responseEnd <= ready.readyAt)) reasons.push('ready-before-response-end');
       }
+      const canceledAfterConsumption = Boolean(request.failure && !request.finished &&
+        request.failure.canceled === true && request.failure.errorText === 'net::ERR_ABORTED' &&
+        response?.status === 200 && response.sameOrigin && !request.servedFromCache &&
+        !response.fromDiskCache && !response.fromPrefetchCache && !response.fromServiceWorker &&
+        !response.serviceWorkerResponseSource &&
+        response.contentLength !== null && request.dataLength === response.contentLength &&
+        request.stream.problem === null && request.stream.firstSpanOrdinal !== null &&
+        request.failure.ordinal > request.stream.firstSpanOrdinal &&
+        request.body.state === 'parsed' && request.body.validUtf8 === true && request.body.reasons.length === 0 &&
+        request.body.bytes === response.contentLength && ready && ready.ordinal > request.failure.ordinal &&
+        matches.length === 1 && timing.responseStatus === 200 &&
+        timing.encodedBodySize === response.contentLength && timing.decodedBodySize === response.contentLength &&
+        timing.responseEnd <= ready.readyAt);
+      if (request.failure && !canceledAfterConsumption) reasons.push('loading-failed');
+      request.terminalEvidence = canceledAfterConsumption ? 'canceled-after-consumption'
+        : request.failure ? 'unproven-loading-failure' : request.finished ? 'finished' : 'pending';
     }
     const unique = [...new Set(reasons)];
     return { label: action.label, kind: action.kind, validatedConsumption: unique.length === 0, reasons: unique.slice(0, 32),
@@ -1178,6 +1195,7 @@ export function createInventoryConsumptionProof({ browserOrigin, fixture, call,
         fromPrefetchCache: request.response?.fromPrefetchCache ?? null, contentLength: request.response?.contentLength ?? null,
         servedFromCache: request.servedFromCache, stream: { ...request.stream, dataEvents: request.dataEvents }, bodyCross: { ...request.bodyCross },
         contentEncoding: request.response?.contentEncoding ?? null, dataLength: request.dataLength, failure: request.failure,
+        terminalEvidence: request.terminalEvidence,
         body: request.body.state === 'parsed' ? { bytes: request.body.bytes, sha256: request.body.sha256, digest: request.body.digest,
           first: request.body.first, last: request.body.last, structureVersion: request.body.structureVersion,
           snapshotVersion: request.body.snapshotVersion, binding: request.body.binding, total: request.body.total,

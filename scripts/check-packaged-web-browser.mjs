@@ -71,6 +71,16 @@ const safeDiagnostic = (value) => {
   for (const sensitive of sensitiveValues) if (sensitive) safe = safe.replaceAll(sensitive, '[redacted]');
   return safe;
 };
+const structureServerTimingSummary = (output) => {
+  const timings = [];
+  let overflow = 0;
+  for (const match of output.matchAll(/web-structure-timing phase=([a-z0-9-]{1,64}) elapsedNanos=(\d{1,16})/g)) {
+    const elapsedNanos = Number(match[2]);
+    if (timings.length >= 512 || !Number.isSafeInteger(elapsedNanos)) { overflow++; continue; }
+    timings.push({ phase: match[1], elapsedNanos });
+  }
+  return { timings, limit: 512, overflow };
+};
 const safeEvidence = (value) => {
   if (Array.isArray(value)) return value.map(safeEvidence);
   if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, safeEvidence(item)]));
@@ -467,9 +477,10 @@ async function prepareArchive(archivePath) {
   // HOME/TMPDIR alone do not set HotSpot's directory properties. These controlled
   // options keep the test JVM and its native extraction inside the owned workspace.
   assert.ok(!/["\r\n]/.test(runtimeHome + runtimeTmp), 'JVM test directory cannot be represented in launcher options');
+  const structureTimingOption = values.mode === 'structure' ? ' -Ddecompengine.web.structureTiming=true' : '';
   const environment = { PATH: bins, JAVA_HOME: javaHome, LANG: 'C.UTF-8', HOME: runtimeHome,
     TMPDIR: runtimeTmp, TMP: runtimeTmp, TEMP: runtimeTmp,
-    JAVA_TOOL_OPTIONS: `-XX:-UsePerfData -Duser.home="${runtimeHome}" -Djava.io.tmpdir="${runtimeTmp}" -Djna.tmpdir="${runtimeTmp}"` };
+    JAVA_TOOL_OPTIONS: `-XX:-UsePerfData -Duser.home="${runtimeHome}" -Djava.io.tmpdir="${runtimeTmp}" -Djna.tmpdir="${runtimeTmp}"${structureTimingOption}` };
   for (const name of ['node', 'npm']) assert.notEqual(spawnSync('/bin/sh', ['-c', `command -v ${name}`], { env: environment }).status, 0);
   const data = join(working, 'untouched jobs');
   return { ...setup, archivePath, archiveSha256, work, before, working, environment, data };
@@ -1225,6 +1236,7 @@ try {
       report.audit = summarizeAuditEvidence(report.audit, { status: 'unavailable' });
     }
   }
+  if (values.mode === 'structure') report.structureServerTiming = structureServerTimingSummary(applicationError);
   const retained = scrubTokens(boundReport(report), sensitiveValues);
   await fs.writeFile(join(root, 'report.json'), JSON.stringify(retained, null, 2) + '\n');
   console.log(JSON.stringify(retained, null, 2));

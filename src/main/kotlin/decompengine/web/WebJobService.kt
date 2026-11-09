@@ -875,7 +875,10 @@ class WebJobService(
     internal fun <T> readProgramStructure(jobId: String, runId: String, revisionId: String,
         project: (WebProgramStructureIndex, () -> ByteArray) -> T): T {
         val reference = revisionSourceReference(jobId, runId, revisionId)
-        val result = try { sourceCatalogEvidence.readStructure(reference, programStructureCache, project) }
+        val timing = if (java.lang.Boolean.getBoolean("decompengine.web.structureTiming")) { phase: String, elapsedNanos: Long ->
+            System.err.println("web-structure-timing phase=$phase elapsedNanos=$elapsedNanos")
+        } else null
+        val result = try { sourceCatalogEvidence.readStructureMeasured(reference, programStructureCache, timing, project) }
             catch (changed: WebAccessDenied) { throw changed }
             catch (failure: Exception) {
                 if (failure is java.util.concurrent.CancellationException || failure is InterruptedException || Thread.currentThread().isInterrupted) throw failure
