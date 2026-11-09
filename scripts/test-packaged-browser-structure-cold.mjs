@@ -59,7 +59,7 @@ test('runner executes twenty sequential fresh-child cold modes and retains the e
       const sample = launches;
       return { path:`/tmp/report-${sample}.json`, sha256:`${sample}`,
         report:{ status:'passed', driverCommit:'a'.repeat(40), archiveSha256:'b'.repeat(64), applicationJarSha256:'c'.repeat(64), shutdownConfirmed:true,
-          testDirectory:`/tmp/run-${sample}`,browserProfileDirectory:`/tmp/run-${sample}/browser profile`,runtimeProcesses:{applicationPid:1000+sample,browserPid:2000+sample},
+          testDirectory:`/tmp/run-${sample}`,browserProfileDirectory:`/tmp/run-${sample}/browser profile`,runtimeProcesses:{applicationPid:1000+sample,applicationStartTimeTicks:3000+sample,browserPid:2000+sample,browserStartTimeTicks:4000+sample},
           structureCold:{ passed:true, firstPageMs:sample === 20 ? 900 : sample, failedInventoryRequestCount:0, profileApplied:'loopback',
             browserHeapMemory:{sampledPeakBytes:1024}, jvmMemory:{incrementalPeakBytes:2048} } } };
     } });
@@ -75,7 +75,7 @@ test('runner fails closed on raw transport failures, missing source identities, 
   let launches=0;
   const result = await runColdSamples({ driver:'/repo/driver.mjs', driverArgs:[], profile:'constrained', spawnImpl:()=>{launches++;return fakeChild();},
     reportReader:async()=>({path:`/tmp/${launches}.json`,sha256:'d'.repeat(64),report:{status:'passed',driverCommit:'a'.repeat(40),archiveSha256:launches===2?null:'b'.repeat(64),applicationJarSha256:'c'.repeat(64),shutdownConfirmed:true,
-      testDirectory:`/tmp/run-${launches}`,browserProfileDirectory:`/tmp/run-${launches}/browser profile`,runtimeProcesses:{applicationPid:1000+launches,browserPid:2000+launches},
+      testDirectory:`/tmp/run-${launches}`,browserProfileDirectory:`/tmp/run-${launches}/browser profile`,runtimeProcesses:{applicationPid:1000+launches,applicationStartTimeTicks:3000+launches,browserPid:2000+launches,browserStartTimeTicks:4000+launches},
       structureCold:{passed:true,firstPageMs:launches===20?1100:700,failedInventoryRequestCount:launches===1?1:0,profileApplied:'constrained',browserHeapMemory:{sampledPeakBytes:1},jvmMemory:{incrementalPeakBytes:1}}}}) });
   assert.equal(result.rawFailedRequests,1); assert.equal(result.successfulSamples,19); assert.equal(result.passed,false);
   const noIdentity = summarizeColdSamples(Array.from({length:20},(_,i)=>({status:'passed',firstPageMs:i+1,rawFailedRequests:0})));

@@ -29,6 +29,13 @@ async function waitForProcessGroupExit(pid, timeoutMs) {
   catch (error) { return error?.code === 'ESRCH'; }
 }
 
+async function forceStopProcessGroup(pid) {
+  if (process.platform !== 'linux' || !Number.isSafeInteger(pid) || pid <= 0) return false;
+  try { process.kill(-pid, 'SIGKILL'); }
+  catch (error) { if (error?.code === 'ESRCH') return true; }
+  return waitForProcessGroupExit(pid, 10_000);
+}
+
 export function summarizeColdSamples(samples, expected = COLD_SAMPLE_COUNT) {
   if (!Number.isSafeInteger(expected) || expected < 1) throw new TypeError('expected sample count must be positive');
   if (!Array.isArray(samples) || samples.length !== expected) throw new RangeError(`expected exactly ${expected} samples; received ${samples?.length ?? 'invalid'}`);
@@ -129,9 +136,12 @@ export async function runColdSamples({ driver, driverArgs, count = COLD_SAMPLE_C
       const firstPageMs = Number.isFinite(evidence?.firstPageMs) && evidence.firstPageMs >= 0 ? evidence.firstPageMs : null;
       processTreeConfirmed = outcome.shutdownConfirmed ?? (childClosed && processGroupId
         ? await waitForProcessGroupExit(processGroupId, 10_000) : false);
+      const processTreeForced = !processTreeConfirmed && childClosed && processGroupId
+        ? await forceStopProcessGroup(processGroupId) : false;
+      processTreeConfirmed ||= processTreeForced;
       const shutdownConfirmed = processTreeConfirmed;
       const diagnostic = stderr.length ? { byteLength: Buffer.byteLength(stderr), sha256: createHash('sha256').update(stderr).digest('hex') } : null;
-      const passed = !interrupted && !timedOut && exitCode === 0 && report?.status === 'passed' && evidence?.passed === true
+      const passed = !interrupted && !timedOut && !processTreeForced && exitCode === 0 && report?.status === 'passed' && evidence?.passed === true
         && evidence?.profileApplied === profile.name && rawFailedRequests === 0 && firstPageMs !== null && shutdownConfirmed;
       samples.push({ index: index + 1, status: passed ? 'passed' : 'failed', profile: profile.name, exitCode, firstPageMs, rawFailedRequests,
         browserHeapBytes: evidence?.browserHeapMemory?.sampledPeakBytes ?? null,
@@ -141,15 +151,24 @@ export async function runColdSamples({ driver, driverArgs, count = COLD_SAMPLE_C
         archiveSha256: report?.archiveSha256 ?? null, applicationJarSha256: report?.applicationJarSha256 ?? null,
         testDirectory: report?.testDirectory ?? null, browserProfileDirectory: report?.browserProfileDirectory ?? null,
         runtimeProcesses: report?.runtimeProcesses ?? null,
-        shutdownConfirmed, timedOut, error: outcome.error ? String(outcome.error.message).slice(0, 512)
-          : evidence?.failures?.[0] ?? (evidence?.profileApplied !== profile.name ? 'Child report did not confirm the requested profile' : null),
+        shutdownConfirmed, processTreeForced, timedOut, error: outcome.error ? String(outcome.error.message).slice(0, 512)
+          : evidence?.failures?.[0] ?? (processTreeForced ? 'Forced process-group kill was required after the packaged driver exited'
+            : evidence?.profileApplied !== profile.name ? 'Child report did not confirm the requested profile' : null),
         diagnostic });
       if (!shutdownConfirmed) break; // Never overlap another run with an unconfirmed child process tree.
       if (interrupted) break;
     } catch (error) {
-      if (!processTreeConfirmed && childClosed && processGroupId) processTreeConfirmed = await waitForProcessGroupExit(processGroupId, 10_000).catch(() => false);
+      let catchTreeForced = false;
+      if (!processTreeConfirmed && processGroupId) {
+        processTreeConfirmed = await waitForProcessGroupExit(processGroupId, 10_000).catch(() => false);
+        if (!processTreeConfirmed) {
+          catchTreeForced = await forceStopProcessGroup(processGroupId).catch(() => false);
+          processTreeConfirmed = catchTreeForced;
+        }
+      }
       samples.push({ index: index + 1, status: 'failed', profile: profile.name, exitCode, firstPageMs: null,
         rawFailedRequests: null, shutdownConfirmed: processTreeConfirmed, timedOut, error: String(error.message).slice(0, 512),
+        processTreeForced: catchTreeForced,
         diagnostic: stderr.length ? { byteLength: Buffer.byteLength(stderr), sha256: createHash('sha256').update(stderr).digest('hex') } : null });
       if (!processTreeConfirmed) break;
     } finally { activeChild = null; }
@@ -170,14 +189,21 @@ export async function runColdSamples({ driver, driverArgs, count = COLD_SAMPLE_C
     && identity.every((value, index) => value === identities[0][index]));
   const directories = samples.map(sample => sample.testDirectory);
   const runDirectoriesUnique = directories.every(Boolean) && new Set(directories).size === count;
+  const processIdentities = samples.map(sample => sample.runtimeProcesses).filter(Boolean)
+    .map(value => `${value.applicationPid}:${value.applicationStartTimeTicks}:${value.browserPid}:${value.browserStartTimeTicks}`);
   const processIdentitiesPresent = samples.every(sample => Number.isSafeInteger(sample.runtimeProcesses?.applicationPid)
-    && sample.runtimeProcesses.applicationPid > 0 && Number.isSafeInteger(sample.runtimeProcesses?.browserPid) && sample.runtimeProcesses.browserPid > 0
+    && sample.runtimeProcesses.applicationPid > 0 && Number.isSafeInteger(sample.runtimeProcesses?.applicationStartTimeTicks)
+    && sample.runtimeProcesses.applicationStartTimeTicks > 0 && Number.isSafeInteger(sample.runtimeProcesses?.browserPid)
+    && sample.runtimeProcesses.browserPid > 0 && Number.isSafeInteger(sample.runtimeProcesses?.browserStartTimeTicks)
+    && sample.runtimeProcesses.browserStartTimeTicks > 0
     && sample.browserProfileDirectory && sample.testDirectory && sample.browserProfileDirectory.startsWith(sample.testDirectory + '/'));
+  const processIdentitiesUnique = processIdentities.length === count && new Set(processIdentities).size === count;
   return { profile: profile.name, firstPageLimitMs: profile.firstPageLimitMs, ...summary, identityConsistent,
-    runDirectoriesUnique, processIdentitiesPresent,
+    runDirectoriesUnique, processIdentitiesPresent, processIdentitiesUnique,
     overBudgetSamples: samples.filter(sample => Number.isFinite(sample.firstPageMs) && sample.firstPageMs > profile.firstPageLimitMs)
       .map(sample => ({ index: sample.index, firstPageMs: sample.firstPageMs })),
-    passed: summary.successfulSamples === count && summary.rawFailedRequests === 0 && identityConsistent && runDirectoriesUnique && processIdentitiesPresent
+    passed: summary.successfulSamples === count && summary.rawFailedRequests === 0 && identityConsistent && runDirectoriesUnique
+      && processIdentitiesPresent && processIdentitiesUnique
       && Number.isFinite(summary.nearestRankP95FirstPageMs) && summary.nearestRankP95FirstPageMs <= profile.firstPageLimitMs };
 }
 

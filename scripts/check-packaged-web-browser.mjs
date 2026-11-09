@@ -113,7 +113,7 @@ let applicationOutput = '';
 let browserError = '';
 let viteError = '';
 const report = { status: 'running', mode: values.mode, testDirectory: root, browserProfileDirectory: profile, startedAt: new Date().toISOString(), driverNode: nodeVersion,
-  driverCommit: process.env.GITHUB_SHA ?? execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8', maxBuffer: 1024 }).trim(),
+  driverCommit: process.env.PACKAGED_WEB_SOURCE_COMMIT ?? process.env.GITHUB_SHA ?? null,
   tools: { node: process.execPath, chrome: chromeBinary, javaHome, python: values.python }, requests: {} };
 const launchErrors = new WeakMap();
 console.log(`Evidence directory: ${root}`);
@@ -122,6 +122,15 @@ function startOwned(command, args, options) {
   const child = spawn(command, args, options);
   child.on('error', (error) => launchErrors.set(child, error));
   return child;
+}
+
+async function processStartTimeTicks(pid) {
+  const stat = await fs.readFile(`/proc/${pid}/stat`, 'utf8');
+  const commandEnd = stat.lastIndexOf(') ');
+  assert.ok(commandEnd >= 0, 'Linux process identity record is malformed');
+  const startTimeTicks = Number(stat.slice(commandEnd + 2).trim().split(/\s+/)[19]);
+  assert.ok(Number.isSafeInteger(startTimeTicks) && startTimeTicks > 0, 'Linux process start time is unavailable');
+  return startTimeTicks;
 }
 
 async function waitFor(check, label, timeout = 20000) {
@@ -571,7 +580,8 @@ try {
   browser = startOwned(chromeBinary, [...(observeNativeVisibility ? [] : ['--headless=new']), '--disable-gpu', ...(values['no-sandbox'] ? ['--no-sandbox'] : []), '--no-first-run', '--no-default-browser-check', '--disable-background-networking', '--disable-extensions', '--disable-default-apps', '--disable-sync', '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1', `--user-data-dir=${profile}`, 'about:blank'], {
     env: { ...process.env, TMPDIR: browserTmp }, stdio: ['ignore', 'ignore', 'pipe'],
   });
-  report.runtimeProcesses = { applicationPid: application.pid, browserPid: browser.pid };
+  report.runtimeProcesses = { applicationPid: application.pid, applicationStartTimeTicks: await processStartTimeTicks(application.pid),
+    browserPid: browser.pid, browserStartTimeTicks: await processStartTimeTicks(browser.pid) };
   browser.stderr.on('data', (chunk) => { browserError = (browserError + chunk).slice(-1048576); });
   const portFile = await waitFor(async () => {
     if (browser.exitCode !== null || browser.signalCode !== null) throw new Error(`Browser exited: ${browserError}`);
