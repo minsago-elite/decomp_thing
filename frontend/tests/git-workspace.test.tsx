@@ -353,6 +353,16 @@ it('offers bounded anchored continuation beyond 2,000 refs without duplicate adm
   expect(button('Older branches and tags')).toBeUndefined();
   await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Branches and tags' })));
   expect(button('More branches and tags')).toBeUndefined();
+  const newerRefs = button('Newer branches and tags') as HTMLButtonElement;
+  expect(newerRefs.disabled).toBe(false);
+  while (!newerRefs.disabled) {
+    newerRefs.focus();
+    fireEvent.click(newerRefs);
+  }
+  await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Branches and tags' })));
+  expect(button('Switch to topic0')).toBeTruthy();
+  expect(button('Switch to topic2000')).toBeUndefined();
+  while (!button('Switch to topic2000')) fireEvent.click(button('Older branches and tags')!);
   fireEvent.click(button('Switch to topic2000')!);
   await waitFor(() => expect(transport.post).toHaveBeenCalledOnce());
   expect(transport.post.mock.calls[0]?.[3]).toMatchObject({ refId: 'ref_2000', objectId: other });
