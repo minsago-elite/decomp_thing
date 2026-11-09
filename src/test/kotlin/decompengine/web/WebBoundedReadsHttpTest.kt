@@ -352,6 +352,26 @@ class WebBoundedReadsHttpTest {
                 assertEquals("SOURCE_REVISION_CHANGED", refusedChangedBody.errorCode())
                 Files.write(changedSource, sourceFiles.getValue("Makefile"))
 
+                // The selected-source reader must reject a second name even when the bytes
+                // still match the admitted manifest; report-download coverage is a different route.
+                val alias = Files.createLink(root.resolve("selected-source-alias"), changedSource)
+                try {
+                    val linkedNames = entries()
+                    val linkedBytes = digest()
+                    for ((path, accept) in listOf(contentPath to "application/octet-stream",
+                        "$base/source-files/$fileId/chunk?offset=0&maxBytes=8&metadataVersion=$metadataVersion" to "application/json")) {
+                        val linked = browser.get(path, mapOf("Accept" to accept))
+                        assertEquals(503, linked.statusCode(), linked.text())
+                        assertEquals("SOURCE_FILE_UNAVAILABLE", linked.errorCode())
+                        assertFalse(linked.text().contains(root.toAbsolutePath().toString()))
+                        assertFalse(linked.text().contains(alias.fileName.toString()))
+                    }
+                    assertStorageRestored(linkedNames, linkedBytes)
+                } finally { Files.delete(alias) }
+                val recovered = browser.get(contentPath, mapOf("Accept" to "application/octet-stream"))
+                assertEquals(200, recovered.statusCode(), recovered.text())
+                assertContentEquals(sourceFiles.getValue("Makefile"), recovered.body())
+
                 assertEquals(beforeNames, entries(), "read requests create no storage entries")
                 assertEquals(beforeBytes, digest(), "read requests do not mutate persisted upload or source artifacts")
             }

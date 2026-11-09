@@ -4,6 +4,22 @@ set -euo pipefail
 scratch="$(mktemp -d)"
 trap 'rm -rf -- "$scratch"' EXIT
 
+mkdir "$scratch/bin"
+sleep_log="$scratch/sleep.log"
+export SLEEP_LOG="$sleep_log"
+cat > "$scratch/bin/sleep" <<'SLEEP'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$#" != 1 || "$1" != 3 ]]; then
+  echo "unexpected retry pause: $*" >&2
+  exit 90
+fi
+printf '%s\n' "$1" >> "$SLEEP_LOG"
+SLEEP
+chmod +x "$scratch/bin/sleep"
+PATH="$scratch/bin:$PATH"
+export PATH
+
 cat > "$scratch/fetch" <<'FETCH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -54,37 +70,124 @@ case "$mode" in
     echo 'LLVM release artifact fetch failed: HTTPS exchange failed' >&2
     exit 1
     ;;
+  http-504-once)
+    if ((count == 1)); then
+      echo 'LLVM release artifact fetch failed: HTTPS download returned HTTP 504' >&2
+      exit 1
+    fi
+    ;;
+  http-504-always)
+    echo 'LLVM release artifact fetch failed: HTTPS download returned HTTP 504' >&2
+    exit 1
+    ;;
+  http-504-then-integrity)
+    if ((count == 1)); then
+      echo 'LLVM release artifact fetch failed: HTTPS download returned HTTP 504' >&2
+      exit 1
+    fi
+    echo 'LLVM release artifact fetch failed: HTTPS body SHA-256 differs from its release lock' >&2
+    exit 1
+    ;;
+  http-other-*)
+    code="${mode#http-other-}"
+    echo "LLVM release artifact fetch failed: HTTPS download returned HTTP $code" >&2
+    exit 1
+    ;;
+  http-504-prefix)
+    echo 'prefix LLVM release artifact fetch failed: HTTPS download returned HTTP 504' >&2
+    exit 1
+    ;;
+  http-504-suffix)
+    echo 'LLVM release artifact fetch failed: HTTPS download returned HTTP 504 extra' >&2
+    exit 1
+    ;;
+  http-5040)
+    echo 'LLVM release artifact fetch failed: HTTPS download returned HTTP 5040' >&2
+    exit 1
+    ;;
 esac
 echo 'verified full release artifact'
 FETCH
 chmod +x "$scratch/fetch"
 
-for mode in transient-once timeout-once gateway-once; do
+run_wrapper() {
+  bash scripts/ci-fetch-llvm-release-artifacts.sh "$@"
+}
+
+reset_control() {
+  mode="$1"
   state="$scratch/$mode.count"
-  if ! bash scripts/ci-fetch-llvm-release-artifacts.sh "$scratch/fetch" "$state" "$mode" > "$scratch/$mode.log" 2>&1; then
-    echo "unexpected failed $mode fetch" >&2
-    cat -- "$scratch/$mode.log" >&2
-    exit 1
-  fi
-  [[ "$(cat -- "$state")" == 2 ]]
-  grep -Fq 'verified full release artifact' "$scratch/$mode.log"
-  echo "passed $mode (2 attempts)"
+  log="$scratch/$mode.log"
+  : > "$sleep_log"
+  rm -f -- "$state"
+}
+
+assert_attempts_and_pauses() {
+  expected_attempts="$1"
+  expected_pauses="$2"
+  [[ "$(cat -- "$state")" == "$expected_attempts" ]]
+  [[ "$(cat -- "$sleep_log")" == "$expected_pauses" ]]
+}
+
+for mode in transient-once timeout-once http-504-once; do
+  reset_control "$mode"
+  run_wrapper "$scratch/fetch" "$state" "$mode" > "$log" 2>&1
+  assert_attempts_and_pauses 2 3
+  grep -Fq 'verified full release artifact' "$log"
 done
 
-for mode in integrity transient-always gateway-always other-http integrity-after-gateway; do
-  state="$scratch/$mode.count"
-  if bash scripts/ci-fetch-llvm-release-artifacts.sh "$scratch/fetch" "$state" "$mode" > "$scratch/$mode.log" 2>&1; then
+for mode in integrity; do
+  reset_control "$mode"
+  if run_wrapper "$scratch/fetch" "$state" "$mode" > "$log" 2>&1; then
     echo "unexpected successful $mode fetch" >&2
     exit 1
   fi
-  if [[ "$mode" == integrity || "$mode" == other-http ]]; then
-    [[ "$(cat -- "$state")" == 1 ]]
-  elif [[ "$mode" == integrity-after-gateway ]]; then
-    [[ "$(cat -- "$state")" == 2 ]]
-  else
-    [[ "$(cat -- "$state")" == 3 ]]
-  fi
-  echo "passed $mode ($(cat -- "$state") attempts)"
+  assert_attempts_and_pauses 1 ''
 done
 
-echo 'bounded LLVM release transport retry checks passed (8 controls)'
+for mode in transient-always http-504-always; do
+  reset_control "$mode"
+  if run_wrapper "$scratch/fetch" "$state" "$mode" > "$log" 2>&1; then
+    echo "unexpected successful $mode fetch" >&2
+    exit 1
+  else
+    status=$?
+  fi
+  [[ "$status" == 1 ]]
+  assert_attempts_and_pauses 3 $'3\n3'
+done
+
+reset_control http-504-then-integrity
+if run_wrapper "$scratch/fetch" "$state" http-504-then-integrity > "$log" 2>&1; then
+  echo 'unexpected successful HTTP 504 then integrity failure' >&2
+  exit 1
+else
+  status=$?
+fi
+[[ "$status" == 1 ]]
+assert_attempts_and_pauses 2 3
+[[ "$(grep -Fc 'HTTPS body SHA-256 differs from its release lock' "$log")" == 1 ]]
+
+for code in 403 429 500 502 503 505; do
+  mode="http-other-$code"
+  reset_control "$mode"
+  if run_wrapper "$scratch/fetch" "$state" "$mode" > "$log" 2>&1; then
+    echo "unexpected retry success for HTTP $code" >&2
+    exit 1
+  fi
+  assert_attempts_and_pauses 1 ''
+done
+
+for mode in http-504-prefix http-504-suffix http-5040; do
+  reset_control "$mode"
+  if run_wrapper "$scratch/fetch" "$state" "$mode" > "$log" 2>&1; then
+    echo "unexpected retry success for near-match $mode" >&2
+    exit 1
+  fi
+  assert_attempts_and_pauses 1 ''
+done
+
+reset_control success
+run_wrapper "$scratch/fetch" "$state" success > "$log" 2>&1
+assert_attempts_and_pauses 1 ''
+grep -Fq 'verified full release artifact' "$log"

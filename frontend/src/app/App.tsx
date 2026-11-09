@@ -36,13 +36,16 @@ type ShellProps = {
 /** Browser connectivity is a hint; it never establishes freshness or server-work lifetime. */
 function ConnectionNotice({ availability }: { availability: ReturnType<typeof useBrowserAvailability> }) {
   if (!availability.hasBeenOffline) return null;
-  return <aside class="connection-notice notice" role="status" aria-label={copy.connectionStatus}>
-    <h2>{availability.online ? copy.refreshLoadedInformation : copy.browserReportsOffline}</h2>
+  // A labelled section holds the notice; the named status region wraps only the changing message (#1896).
+  return <section class="connection-notice notice" aria-labelledby="connection-notice-heading">
+    <div role="status" aria-label={copy.connectionStatus}>
+    <h2 id="connection-notice-heading">{availability.online ? copy.refreshLoadedInformation : copy.browserReportsOffline}</h2>
     <p>{availability.online
       ? copy.theBrowserReportsAConnectionAgainPreviouslyLoadedInformationMay
       : copy.previouslyLoadedInformationMayBeOutOfDateReconnectAnd}</p>
     {!availability.online && <p>{copy.serverWorkMayContinueWhileThisPageIsDisconnected}</p>}
-  </aside>;
+    </div>
+  </section>;
 }
 
 function Shell({ basePath, guard, identity, recovery, reload, session }: ShellProps) {
