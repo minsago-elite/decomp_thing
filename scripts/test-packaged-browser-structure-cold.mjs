@@ -83,6 +83,7 @@ function fakeChild(code = 0, diagnostic = '') {
 test('runner executes twenty sequential fresh-child cold modes and retains the exact profile and evidence identity', async () => {
   let active = 0, maximumActive = 0, launches = 0;
   const result = await runColdSamples({ driver:'/repo/scripts/check-packaged-web-browser.mjs', driverArgs:['--archive','/pkg.zip'], profile:'loopback',
+    expectedHeadCommit:'d'.repeat(40), expectedBaseCommit:'f'.repeat(40),
     spawnImpl: (_command, args) => {
       assert.ok(args.includes('--mode') && args.includes('structure-cold'));
       assert.ok(args.includes('--structure-profile') && args.includes('loopback'));
@@ -92,7 +93,8 @@ test('runner executes twenty sequential fresh-child cold modes and retains the e
     reportReader: async () => {
       const sample = launches;
       return { path:`/tmp/report-${sample}.json`, sha256:`${sample}`,
-        report:{ status:'passed', driverCommit:'a'.repeat(40), sourceIdentity:{ verified:true, commit:'a'.repeat(40), sourceSha256:'e'.repeat(64), files:[] },
+        report:{ status:'passed', driverCommit:'a'.repeat(40), driverPullRequestHeadCommit:'d'.repeat(40), driverPullRequestBaseCommit:'f'.repeat(40),
+          sourceIdentity:{ verified:true, commit:'a'.repeat(40), sourceSha256:'e'.repeat(64), files:[] },
           archiveSha256:'b'.repeat(64), applicationJarSha256:'c'.repeat(64), shutdownConfirmed:true,
           testDirectory:`/tmp/run-${sample}`,browserProfileDirectory:`/tmp/run-${sample}/browser profile`,runtimeProcesses:{applicationPid:1000+sample,applicationStartTimeTicks:3000+sample,browserPid:2000+sample,browserStartTimeTicks:4000+sample},
           structureCold:{ passed:true, firstPageMs:sample === 20 ? 900 : sample, failedInventoryRequestCount:0, profileApplied:'loopback',
@@ -102,6 +104,9 @@ test('runner executes twenty sequential fresh-child cold modes and retains the e
   assert.equal(result.successfulSamples,20); assert.equal(result.nearestRankP95FirstPageMs,19);
   assert.deepEqual(result.overBudgetSamples,[{index:20,firstPageMs:900}]);
   assert.equal(result.identityConsistent,true); assert.equal(result.passed,true);
+  assert.equal(result.expectedHeadCommit,'d'.repeat(40));
+  assert.equal(result.expectedBaseCommit,'f'.repeat(40));
+  assert.equal(result.samples[0].driverPullRequestHeadCommit,'d'.repeat(40));
   assert.ok(!JSON.stringify(result).includes('private diagnostic'));
   assert.equal(result.samples[0].diagnostic.byteLength, 'private diagnostic'.length);
 });
@@ -117,6 +122,22 @@ test('runner fails closed on raw transport failures, missing source identities, 
   assert.equal(result.rawFailedRequests,1); assert.equal(result.successfulSamples,18); assert.equal(result.identityConsistent,false); assert.equal(result.passed,false);
   const noIdentity = summarizeColdSamples(Array.from({length:20},(_,i)=>({status:'passed',firstPageMs:i+1,rawFailedRequests:0})));
   assert.equal(noIdentity.nearestRankP95FirstPageMs,19);
+});
+
+test('runner refuses a child report attributed to a different pull-request head or base', async () => {
+  let launches = 0;
+  const result = await runColdSamples({ driver:'/repo/driver.mjs', driverArgs:[], profile:'loopback',
+    expectedHeadCommit:'d'.repeat(40), expectedBaseCommit:'f'.repeat(40), spawnImpl:()=>{launches++;return fakeChild();},
+    reportReader:async()=>({path:`/tmp/${launches}.json`,sha256:'a'.repeat(64),report:{status:'passed',driverCommit:'b'.repeat(40),
+      driverPullRequestHeadCommit:'c'.repeat(40),driverPullRequestBaseCommit:'e'.repeat(40),
+      sourceIdentity:{verified:true,commit:'b'.repeat(40),sourceSha256:'1'.repeat(64),files:[]},archiveSha256:'2'.repeat(64),
+      applicationJarSha256:'3'.repeat(64),testDirectory:`/tmp/run-${launches}`,browserProfileDirectory:`/tmp/run-${launches}/profile`,
+      runtimeProcesses:{applicationPid:10_000+launches,applicationStartTimeTicks:20_000+launches,browserPid:30_000+launches,browserStartTimeTicks:40_000+launches},
+      structureCold:{passed:true,firstPageMs:10,failedInventoryRequestCount:0,profileApplied:'loopback'}}})});
+  assert.equal(result.successfulSamples,0);
+  assert.equal(result.identityConsistent,false);
+  assert.match(result.samples[0].error,/declared pull-request head SHA/);
+  assert.equal(result.passed,false);
 });
 
 test('runner records the timeout state even when the child exits during termination grace', { skip: process.platform !== 'linux' }, async () => {

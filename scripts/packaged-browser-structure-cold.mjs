@@ -122,7 +122,9 @@ export async function applyStructureProfile(cdp, sessionId, name = 'loopback') {
 }
 
 export async function runColdSamples({ driver, driverArgs, count = COLD_SAMPLE_COUNT, profile = 'loopback', spawnImpl = spawn,
-  timeoutMs = COLD_SAMPLE_TIMEOUT_MS, terminationGraceMs = 10_000, processGroupGraceMs = 10_000, reportReader = readChildReport }) {
+  timeoutMs = COLD_SAMPLE_TIMEOUT_MS, terminationGraceMs = 10_000, processGroupGraceMs = 10_000,
+  expectedHeadCommit = process.env.PACKAGED_WEB_SOURCE_HEAD_SHA || null,
+  expectedBaseCommit = process.env.PACKAGED_WEB_SOURCE_BASE_SHA || null, reportReader = readChildReport }) {
   if (count !== COLD_SAMPLE_COUNT) throw new RangeError(`cold structure run requires exactly ${COLD_SAMPLE_COUNT} samples`);
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 30 * 60_000) throw new RangeError('cold sample timeout is outside its allowed bound');
   if (!Number.isSafeInteger(terminationGraceMs) || terminationGraceMs < 100 || terminationGraceMs > 30_000) {
@@ -130,6 +132,11 @@ export async function runColdSamples({ driver, driverArgs, count = COLD_SAMPLE_C
   }
   if (!Number.isSafeInteger(processGroupGraceMs) || processGroupGraceMs < 100 || processGroupGraceMs > 30_000) {
     throw new RangeError('process group grace is outside its allowed bound');
+  }
+  for (const [label, commit] of [['pull request head', expectedHeadCommit], ['pull request base', expectedBaseCommit]]) {
+    if (commit !== null && (typeof commit !== 'string' || !/^[0-9a-f]{40,64}$/.test(commit))) {
+      throw new TypeError(`declared ${label} commit must be a full Git object ID`);
+    }
   }
   profile = structureProfile(typeof profile === 'string' ? profile : profile?.name);
   const samples = [];
@@ -194,6 +201,8 @@ export async function runColdSamples({ driver, driverArgs, count = COLD_SAMPLE_C
       const rawFailedRequests = Number.isSafeInteger(evidence?.failedInventoryRequestCount) && evidence.failedInventoryRequestCount >= 0
         ? evidence.failedInventoryRequestCount : null;
       const firstPageMs = Number.isFinite(evidence?.firstPageMs) && evidence.firstPageMs >= 0 ? evidence.firstPageMs : null;
+      const sourceHeadMatches = !expectedHeadCommit || report?.driverPullRequestHeadCommit === expectedHeadCommit;
+      const sourceBaseMatches = !expectedBaseCommit || report?.driverPullRequestBaseCommit === expectedBaseCommit;
       processTreeConfirmed = outcome.shutdownConfirmed ?? (childClosed && processGroupId
         ? await waitForProcessGroupExit(processGroupId, processGroupGraceMs) : false);
       let processTreeForced = outcome.processTreeForced ?? false;
@@ -204,7 +213,8 @@ export async function runColdSamples({ driver, driverArgs, count = COLD_SAMPLE_C
       }
       const shutdownConfirmed = processTreeConfirmed;
       const diagnostic = stderr.length ? { byteLength: Buffer.byteLength(stderr), sha256: createHash('sha256').update(stderr).digest('hex') } : null;
-      const passed = !interrupted && !timedOut && !processTreeForced && exitCode === 0 && report?.status === 'passed' && evidence?.passed === true
+      const passed = sourceHeadMatches && sourceBaseMatches && !interrupted && !timedOut && !processTreeForced
+        && exitCode === 0 && report?.status === 'passed' && evidence?.passed === true
         && evidence?.profileApplied === profile.name && rawFailedRequests === 0 && firstPageMs !== null && shutdownConfirmed
         && report?.sourceIdentity?.verified === true && report.sourceIdentity.commit === report.driverCommit;
       samples.push({ index: index + 1, status: passed ? 'passed' : 'failed', profile: profile.name, exitCode, firstPageMs, rawFailedRequests,
@@ -212,12 +222,16 @@ export async function runColdSamples({ driver, driverArgs, count = COLD_SAMPLE_C
         jvmRssIncrementBytes: evidence?.jvmMemory?.incrementalPeakBytes ?? null,
         profileApplied: evidence?.profileApplied ?? null,
         reportPath: childReport?.path ?? null, reportSha256: childReport?.sha256 ?? null, driverCommit: report?.driverCommit ?? null,
+        driverPullRequestHeadCommit: report?.driverPullRequestHeadCommit ?? null,
+        driverPullRequestBaseCommit: report?.driverPullRequestBaseCommit ?? null,
         sourceIdentity: report?.sourceIdentity ?? null,
         archiveSha256: report?.archiveSha256 ?? null, applicationJarSha256: report?.applicationJarSha256 ?? null,
         testDirectory: report?.testDirectory ?? null, browserProfileDirectory: report?.browserProfileDirectory ?? null,
         runtimeProcesses: report?.runtimeProcesses ?? null,
         shutdownConfirmed, processTreeForced, timedOut, error: outcome.timeout ? 'Cold sample timed out'
           : outcome.error ? String(outcome.error.message).slice(0, 512)
+          : !sourceHeadMatches ? 'Child report did not match the declared pull-request head SHA'
+          : !sourceBaseMatches ? 'Child report did not match the declared pull-request base SHA'
           : evidence?.failures?.[0] ?? (processTreeForced ? 'Forced process-group kill was required after the packaged driver exited'
             : evidence?.profileApplied !== profile.name ? 'Child report did not confirm the requested profile' : null),
         diagnostic });
@@ -250,7 +264,8 @@ export async function runColdSamples({ driver, driverArgs, count = COLD_SAMPLE_C
   }
   const summary = summarizeColdSamples(samples);
   const identities = samples.filter(sample => sample.status === 'passed')
-    .map(sample => [sample.driverCommit, sample.sourceIdentity?.sourceSha256, sample.archiveSha256, sample.applicationJarSha256]);
+    .map(sample => [sample.driverCommit, sample.driverPullRequestHeadCommit ?? sample.driverCommit,
+      sample.driverPullRequestBaseCommit ?? 'unspecified', sample.sourceIdentity?.sourceSha256, sample.archiveSha256, sample.applicationJarSha256]);
   const identityConsistent = identities.length === count && identities.every(identity => identity.every(Boolean)
     && identity.every((value, index) => value === identities[0][index]));
   const directories = samples.map(sample => sample.testDirectory);
@@ -264,7 +279,7 @@ export async function runColdSamples({ driver, driverArgs, count = COLD_SAMPLE_C
     && sample.runtimeProcesses.browserStartTimeTicks > 0
     && sample.browserProfileDirectory && sample.testDirectory && sample.browserProfileDirectory.startsWith(sample.testDirectory + '/'));
   const processIdentitiesUnique = processIdentities.length === count && new Set(processIdentities).size === count;
-  return { profile: profile.name, firstPageLimitMs: profile.firstPageLimitMs, ...summary, identityConsistent,
+  return { profile: profile.name, firstPageLimitMs: profile.firstPageLimitMs, expectedHeadCommit, expectedBaseCommit, ...summary, identityConsistent,
     runDirectoriesUnique, processIdentitiesPresent, processIdentitiesUnique,
     overBudgetSamples: samples.filter(sample => Number.isFinite(sample.firstPageMs) && sample.firstPageMs > profile.firstPageLimitMs)
       .map(sample => ({ index: sample.index, firstPageMs: sample.firstPageMs })),

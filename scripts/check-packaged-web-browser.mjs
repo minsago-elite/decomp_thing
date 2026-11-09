@@ -113,12 +113,14 @@ let applicationOutput = '';
 let browserError = '';
 let viteError = '';
 let driverCommit = process.env.PACKAGED_WEB_SOURCE_COMMIT ?? process.env.GITHUB_SHA ?? null;
+const driverPullRequestHeadCommit = process.env.PACKAGED_WEB_SOURCE_HEAD_SHA || null;
+const driverPullRequestBaseCommit = process.env.PACKAGED_WEB_SOURCE_BASE_SHA || null;
 if (!driverCommit) {
   try { driverCommit = execFileSync('git', ['-C', repo, 'rev-parse', 'HEAD'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim(); }
   catch { /* The report records unavailable provenance; structure qualification fails closed below. */ }
 }
 const report = { status: 'running', mode: values.mode, testDirectory: root, browserProfileDirectory: profile, startedAt: new Date().toISOString(), driverNode: nodeVersion,
-  driverCommit,
+  driverCommit, driverPullRequestHeadCommit, driverPullRequestBaseCommit,
   tools: { node: process.execPath, chrome: chromeBinary, javaHome, python: values.python }, requests: {} };
 const launchErrors = new WeakMap();
 console.log(`Evidence directory: ${root}`);

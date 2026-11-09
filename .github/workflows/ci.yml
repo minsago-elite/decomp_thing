@@ -132,6 +132,8 @@ jobs:
     needs: frontend
     env:
       NPM_CONFIG_CACHE: ${{ github.workspace }}/build/npm-download-cache
+      PACKAGED_WEB_SOURCE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      PACKAGED_WEB_SOURCE_BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
     name: Packaged web contracts and browser
     runs-on: ubuntu-24.04
     timeout-minutes: 60

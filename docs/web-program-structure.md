@@ -156,7 +156,10 @@ qualification script it imports or invokes has the same Git blob identity as the
 declared source commit. Each report retains the per-file Git blob ID and SHA-256;
 the cold aggregate requires the verified source digest to match across all 20 runs.
 If the checkout is detached from the declared commit, or any qualification source
-is modified, source verification fails and the sample cannot pass.
+is modified, source verification fails and the sample cannot pass. Packaged CI
+records the checked-out `driverCommit` separately from the pull-request head and
+base SHAs; each cold sample must match those declared PR revisions so a merge
+candidate is not reported as if it were the standalone PR head.
 
 The browser profile starts with empty cache and storage. Private requests use the
 normal HttpOnly session cookie after the bootstrap fragment is scrubbed. The JVM and
