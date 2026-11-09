@@ -6,83 +6,82 @@ qualify hosted CI, production workloads, or completion of #1056, #625, or #220.
 ## Source and package binding
 
 - Base: PR #1937 checkpoint `b97f96712caa3afcb712f5f97b8303bcb4205d39`.
-- Implementation commit: `da1a3342abd2a3692962ab276ff2b61cef1ddc4f`.
-- Implementation tree: `c2503c30ae04dc9916228736bc8e74bc35bb08e6`.
-- `git archive` SHA-256 for that commit: `723abc8b39b5378408914614327c8afe4bdf1ed41929c6742f054d6b01bc88ca`.
-- Distribution ZIP SHA-256: `24de58b7e542e7d9dd7972a519818e96229f64ad813641a215be132fa81f3dc8`.
+- Tested implementation commit: `20302fee2110dc7e6505dee6ef28663ce0b7405f`.
+- Tested implementation tree: `32965cc72571c95cc70ecac8adfff0681bc34bd3`.
+- `git archive` SHA-256 for that commit: `ede73a568fff61040633f593fd255dc8fafb080bb1f4a316df2348dbffb47c4a`.
+- Distribution ZIP SHA-256: `f4b738fc6f9835505c6070190e93c92c13edd3d7c5f3482fe2c946d143900c3d`.
 - Application JAR SHA-256 inside the ZIP:
-  `ee4334ca0bdc9f578888904555642fd388f906f2a6b985a607daee7623944568`.
+  `45292f034ba8191109fa5f0a8538294bbec333eab84e4c024e3da1f93620c803`.
 - Frontend build ID: `f12f2619b0a8b37890e024453573f10b51aa7ddb800079232c3e328f71b4fcb4`.
 - Chrome SHA-256: `2d18db9d8608b052b6a552ee00ec1e830f93692e928b65ecc67d693bd33fe801`.
 - Node/npm: 24.20.0 / 11.19.0; Java: Temurin 21.0.12.1+1.
 
-The two passing browser report SHA-256 values are:
+Both browser runs used the same freshly built ZIP and exact implementation commit.
+The driver reports `driverCommit: null` because the package was built from a
+Git archive; `workflowSha` was also null because these were local runs. The
+commit and driver hashes below bind the source independently.
 
-- `0ca0f1b894849bf35674bd4a3d5334915aa83584cc07c9af27d25b31da328767`
-- `5cd7efee405dfebb2c63574b8a286a8b8d4ca400378c6c9d6bb2969c986e6817`
-
-The source-tree driver hashes recorded by both reports are:
-
-- `check-packaged-web-browser.mjs`: `3b579720e3997dff20c87bca856e667fb615d94dd1cf58eed283cc78e954a0db`
-- `packaged-browser-source-tree.mjs`: `5e361ee3d1c9b33cbcaf2d38573473dafe7dcf414ecd6558707ba324aadd765e`
-- `packaged-source-tree-fixture.mjs`: `d4f01b9d64496bf1cac93330d3f33cf487c5238beec1c5e642a464c6931468e8`
+| Driver | SHA-256 |
+|---|---|
+| `scripts/check-packaged-web-browser.mjs` | `1315e83139706fcd34104af1a25ab973751207e19666c4c4013b8e3e4121152d` |
+| `scripts/packaged-browser-source-tree.mjs` | `aaeb82a9f5ed8c8b7c5f19e5a0a57483cf75a69b8a91b6d9fc7f19078e3cc196` |
+| `scripts/packaged-source-tree-fixture.mjs` | `d4f01b9d64496bf1cac93330d3f33cf487c5238beec1c5e642a464c6931468e8` |
 
 ## Run results
 
-Two consecutive source-tree browser runs against the same freshly built ZIP
-passed all twelve budgets. Selected measurements:
+The final candidate passed all 13 gates in both profiles. Reports:
 
-| Measurement | Run 1 | Run 2 | Limit |
+- Loopback report SHA-256: `89c2c308734aa67e8f9d1dc29cda8dca6bdfe5b84464c07272d1b4cad1b1ad5e`.
+- Constrained report SHA-256: `f09d1154bee10c032f8fda74dc06e3c9d0d21e0233237d59289c4e4df34f003e`.
+
+| Measurement | Loopback | Constrained | Limit |
 |---|---:|---:|---:|
-| First data page p95 | 321.38 ms | 427.78 ms | 500 ms |
-| First preview chunk | 200.36 ms | 205.41 ms | 500 ms |
-| Common-query first page | 286.56 ms | 322.98 ms | 2,000 ms |
-| Browser heap | 1,972,296 B | 1,972,828 B | 134,217,728 B |
-| Server process-tree RSS growth | 188,317,696 B | 231,985,152 B | 268,435,456 B |
-| Rare search to final file | 1,716.97 ms | 1,655.99 ms | 10,000 ms |
+| First directory page p95 (10 samples) | 411.75 ms | 901.47 ms | 500 ms / 1,000 ms |
+| First preview chunk | 109.43 ms | 203.85 ms | 500 ms |
+| Local feedback p95 (50 interactions) | 11.8 ms | 23 ms | 100 ms |
+| Slowest common/rare/missing search first page | 1,980.95 ms | 1,606.52 ms | 2,000 ms |
+| Browser heap after browsing | 1,978,336 B | 1,977,912 B | 134,217,728 B |
+| Server process-tree RSS growth | 197,386,240 B | 200,007,680 B | 268,435,456 B |
+| Maximum mounted rows | 50 | 50 | 500 |
+| Maximum directory rows | 50 | 50 | 50 |
+| Maximum API response | 15,163 B | 15,163 B | 1,000,000 B |
+| Maximum search response | 20,690 B | 1,911 B | 1,000,000 B |
+| Maximum request head estimate | 665 B | 665 B | 8,192 B |
+| Maximum URL length | 466 chars | 466 chars | 4,096 chars |
+| Maximum search continuation elapsed | 1,980.95 ms | 1,612.43 ms | 10,000 ms |
 
-The other six checks also passed in both reports: 50 mounted rows (limit 500),
-50 directory rows (limit 50), 15,163 B maximum API response (1,000,000 B),
-20,690 B maximum search response (1,000,000 B), 665 B request-head estimate
-(8,192 B), and a 466-character maximum URL (4,096).
+The constrained profile applies fourfold browser CPU throttling, 100 ms round-trip
+latency, 10 Mbit/s download and 2 Mbit/s upload. Each run traversed all 500
+directory pages / 25,000 files with stable ordering and keyboard navigation,
+opened a file and its first bounded preview chunk, and ran common, rare and
+missing searches. The search first-page gate now uses the maximum of the first
+response durations for all three queries. Local feedback is measured from
+keyboard activation until the source view visibly announces “Loading recorded
+inputs”; page data readiness is separately measured by the first-page metric.
+The cancellation probe submits a pending search and leaves its view through the
+application's in-app Runtime route, exercising the route unmount and transport
+abort. It does not assert that server-side work stopped after disconnect.
 
-Both journeys traversed all 500 pages and 25,000 files, checked stable ordering
-and keyboard focus, opened a file and its first bounded preview chunk, ran
-common/rare/missing searches, and exercised browser navigation cancellation.
 The fixture contains inert files and invoked no compiler or credentials. The
-packaged `web` launcher used `-Xmx256m` and `-XX:ActiveProcessorCount=4`; this is
-part of the candidate and affects all work performed in the web process.
-
-These reports predate the follow-up search/interaction gate: their two-second
-search check covered only the common query, and they did not record local
-feedback for 50 interactions. The follow-up adds those checks and runs the
-constrained profile as well; these older reports should not be used as evidence
-for those requirements.
-
-An earlier invocation of the same ZIP traversed all 500 directory pages but
-failed the driver's 10-second wait for a completed preview-chunk network event.
-The UI had displayed the preview, but the browser event was recorded as aborted
-during cleanup. That report is retained with SHA-256
-`c5bd7345b33089aad01c4bbecc072b3e429b498f2ed183b7a9eff7b1195b29c0`; two
-immediate unchanged reruns passed the complete gate. This intermittent
-observation is disclosed rather than counted as a passing run.
+packaged `web` launcher used `-Xmx256m` and `-XX:ActiveProcessorCount=4`; those
+options apply to all work performed in the web process and are part of the
+candidate.
 
 ## JVM checks
 
-Against the same implementation commit, the selected JVM suite completed with
-243 tests, 1 skipped, 0 failures, and 0 errors. The run covered filesystem
-syscalls, job storage, JSON parsing, source-tree/catalog capture, search,
-pagination, output encoding, and packaged CLI launcher behavior. `distZip` also
-completed successfully.
+Against parent implementation commit `da1a3342abd2a3692962ab276ff2b61cef1ddc4f`,
+the selected JVM suite completed with 243 tests, 1 skipped, 0 failures, and 0
+errors. `distZip` passed for the tested commit `20302fee`; its build ran the pinned
+frontend toolchain verification and completed the frontend contracts, typecheck,
+lint, frontend build, Kotlin compilation and distribution packaging. The small
+source-tree Node suite passed 4/4 on the final driver.
 
 ## Limits
 
 These are local fixture results, not a hosted Actions run. The browser journey
 uses a warmed packaged JVM; it is not a fresh-process cold-load measurement.
-The client navigation test proves stale browser work is discarded, not that
-server processing stopped. The 256 MiB web heap cap was exercised for this
-fixture, not qualified for every web workflow or production workload. No
-production ACP-provider, long-session, power-loss, or real-project qualification
-is claimed. Attempt-scoped child-JVM workers remain unimplemented because
-descendant termination and parent-death cleanup have not been proved on
-supported hosts.
+The 256 MiB web heap cap was exercised for this fixture, not qualified for every
+web workflow or production workload. No production ACP-provider, long-session,
+power-loss, or real-project qualification is claimed. Attempt-scoped child-JVM
+workers remain unimplemented because descendant termination and parent-death
+cleanup have not been proved on supported hosts.
