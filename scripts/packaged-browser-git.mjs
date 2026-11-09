@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 import { createWebGitFixture } from './web-git-fixtures.mjs';
+import { assertUiHistoryWindow } from './packaged-browser-git-ui-scale.mjs';
 
 const SUBJECT = 'Packaged journey: add notes';
 
@@ -105,20 +106,35 @@ export async function qualifyGit({ fixture, makeTarget, cdp, evaluate, ready, br
   await ready(tab, `document.body.innerText.includes('Branch main') && document.body.innerText.includes('fixture: history 1000')`, 'imported repository status and history');
   const historyRows = `document.querySelectorAll('ol[aria-label="History"] li')`;
   assert.equal(await evaluate(tab, `${historyRows}.length`), 20, 'History must start with one bounded page');
+  const expectedHistoryIds = fixture.repository.git('local', ['rev-list', 'main']).stdout.trim().split('\n');
+  assert.equal(expectedHistoryIds.length, fixture.repository.historyLength, 'Git fixture history identities are incomplete');
   const historyStart = tab.requests.length;
   let historyPages = 1;
-  for (let count = 20; count < fixture.repository.historyLength; count += 20) {
+  let loadedCount = Math.min(20, expectedHistoryIds.length);
+  const initialRows = await evaluate(tab, `[...${historyRows}].map(row => row.querySelector('code')?.title ?? null)`);
+  assertUiHistoryWindow(initialRows, expectedHistoryIds, loadedCount, historyPages);
+  const observedHistoryIds = [...initialRows];
+  while (loadedCount < expectedHistoryIds.length) {
+    const nextCount = Math.min(loadedCount + 20, expectedHistoryIds.length);
+    const expectedWindow = expectedHistoryIds.slice(Math.max(0, nextCount - 200), nextCount);
+    const terminalPage = nextCount === expectedHistoryIds.length;
     await evaluate(tab, `${button('Older commits')}.focus()`);
     await key(cdp, tab, 'Enter', 'Enter', 13, '\r');
-    await ready(tab, `${historyRows}.length === ${Math.min(count + 20, fixture.repository.historyLength)}`, 'next anchored history page');
+    const focus = terminalPage
+      ? `document.activeElement === document.querySelector('#git-history-title')`
+      : `document.activeElement === ${button('Older commits')}`;
+    await ready(tab, `${historyRows}.length === ${expectedWindow.length} && JSON.stringify([...${historyRows}].map(row => row.querySelector('code')?.title ?? null)) === ${JSON.stringify(JSON.stringify(expectedWindow))} && ${focus}`,
+      'next anchored history window');
+    const visibleIds = await evaluate(tab, `[...${historyRows}].map(row => row.querySelector('code')?.title ?? null)`);
+    assertUiHistoryWindow(visibleIds, expectedHistoryIds, nextCount, historyPages + 1);
+    observedHistoryIds.push(...expectedHistoryIds.slice(loadedCount, nextCount));
+    loadedCount = nextCount;
     historyPages++;
   }
-  const historyIds = await evaluate(tab, `[...${historyRows}].map(row => row.querySelector('code').title)`);
-  assert.equal(new Set(historyIds).size, fixture.repository.historyLength, 'History repeats a commit');
-  assert.deepEqual(historyIds, fixture.repository.git('local', ['rev-list', 'main']).stdout.trim().split('\n'),
-    'Every displayed history page must match the admitted repository, in order');
-  assert.equal(historyIds[0], fixture.repository.commits.local);
-  assert.equal(historyIds.at(-1), fixture.repository.commits.base);
+  assert.equal(new Set(observedHistoryIds).size, fixture.repository.historyLength, 'History repeats a commit');
+  assert.deepEqual(observedHistoryIds, expectedHistoryIds, 'Every displayed history window must match the admitted repository, in order');
+  assert.equal(observedHistoryIds[0], fixture.repository.commits.local);
+  assert.equal(observedHistoryIds.at(-1), fixture.repository.commits.base);
   assert.equal(await evaluate(tab, `!!${button('Older commits')}`), false, 'Exhausted history must not offer another page');
   assert.ok(tab.requests.slice(historyStart).every(request => ['GET', 'HEAD'].includes(request.method)), 'History pagination sent a mutation');
   assert.equal(countGitHistoryReads(tab.requests.slice(historyStart)), historyPages - 1,
@@ -178,7 +194,7 @@ export async function qualifyGit({ fixture, makeTarget, cdp, evaluate, ready, br
   const mutations = tab.requests.slice(beforeView).filter(request => !['GET', 'HEAD'].includes(request.method));
   assert.equal(mutations.length, 3, 'Expected exactly the import, stage and commit requests');
   return { path, objectId, exportSha256: shown, exportEntries: names, viewReadRequests: viewRequests.length, mutationRequests: mutations.length,
-    historyCommits: historyIds.length, historyPages, historyKeyboardPagination: true,
+    historyCommits: observedHistoryIds.length, historyPages, historyKeyboardPagination: true,
     keyboardSelection: true, keyboardActivation: true, hooksInert: true, sourceRepositoryUnchanged: true, policyExcludedCounted: 1 };
 }
 

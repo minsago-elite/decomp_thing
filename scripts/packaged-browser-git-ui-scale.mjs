@@ -18,6 +18,18 @@ export function assertUiHistoryPage(tail, expected, page) {
   assert.deepEqual(tail, expected, `Git scale UI page ${page} shifted history identities`);
 }
 
+/** Verify the currently mounted bounded window against the complete expected history prefix. */
+export function assertUiHistoryWindow(rows, expected, loadedCount, page, maximumRows = MAX_VISIBLE_HISTORY_ROWS) {
+  assert.ok(Number.isInteger(loadedCount) && loadedCount >= 0 && loadedCount <= expected.length,
+    `Git scale UI history page ${page} has an invalid loaded count`);
+  assert.ok(rows.length <= maximumRows, `Git scale UI history page ${page} mounted ${rows.length} rows`);
+  const windowStart = Math.max(0, loadedCount - maximumRows);
+  const expectedWindow = expected.slice(windowStart, loadedCount);
+  assert.equal(rows.length, expectedWindow.length, `Git scale UI history page ${page} has an unexpected window size`);
+  assert.deepEqual(rows, expectedWindow, `Git scale UI history page ${page} shifted, skipped, or reordered identities`);
+  return expectedWindow;
+}
+
 /**
  * Drive the real Git SPA after the separate API-scale qualification has established the bounded
  * read cases. This keeps keyboard-focus evidence tied to the same deterministic 10,000-commit
