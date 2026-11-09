@@ -24,6 +24,7 @@ const { values } = parseArgs({ options: {
   archive: { type: 'string' },
   'previous-archive': { type: 'string' },
   mode: { type: 'string', default: 'public' },
+  profile: { type: 'string', default: 'loopback' },
   'work-parent': { type: 'string', default: join(repo, 'build') },
   'keep-workdir': { type: 'boolean', default: false },
   chrome: { type: 'string' },
@@ -33,7 +34,7 @@ const { values } = parseArgs({ options: {
   help: { type: 'boolean', default: false },
 } });
 if (values.help) {
-  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|metadata|history|restart|scale|source-tree|live|proxy|upgrade|legacy|audit] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
+  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|metadata|history|restart|scale|source-tree|live|proxy|upgrade|legacy|audit] [--profile loopback|constrained] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
   console.log('restart: seeded history on one JVM, graceful SIGTERM-only restart on the same installation/data/port, fresh bootstrap and serverInstanceId, then two tabs with a progress-pin stale If-Match 412. No live worker, no restart-while-running, one Chromium only.');
   console.log('public: packaged home/Runtime/recovery; session: public plus local session journey; upload: session plus inert upload and lost-response retry; history: session plus preseeded inert multi-page attempts; scale: session plus 10,000 persisted jobs and keyboard pagination; proxy: real Vite HMR and session journey against packaged JVM; upgrade: previous JVM to current JVM on one origin with an old tab.');
   console.log('legacy: inert legacy HTML/polling with explicit test-owned state edits; no workflow execution.');
@@ -52,6 +53,7 @@ for (const option of ['archive', 'chrome', 'java-home', 'python']) {
   await fs.access(values[option]);
 }
 assert.ok(['public', 'session', 'upload', 'metadata', 'history', 'restart', 'scale', 'source-tree', 'live', 'proxy', 'upgrade', 'legacy', 'audit'].includes(values.mode), '--mode must be public, session, upload, metadata, history, restart, scale, source-tree, live, proxy, upgrade, legacy or audit');
+if (values.mode === 'source-tree') assert.ok(['loopback', 'constrained'].includes(values.profile), '--profile must be loopback or constrained for source-tree mode');
 if (values.mode === 'upgrade') {
   assert.ok(values['previous-archive'] && isAbsolute(values['previous-archive']), 'upgrade requires --previous-archive as an absolute existing ZIP path');
   await fs.access(values['previous-archive']);
@@ -104,7 +106,7 @@ let applicationError = '';
 let applicationOutput = '';
 let browserError = '';
 let viteError = '';
-const report = { status: 'running', mode: values.mode, testDirectory: root, driverNode: nodeVersion,
+const report = { status: 'running', mode: values.mode, ...(values.mode === 'source-tree' ? { profile: values.profile } : {}), testDirectory: root, driverNode: nodeVersion,
   driverCommit: checkoutCommit, workflowSha: process.env.GITHUB_SHA ?? null,
   ...(values.mode === 'source-tree' ? { sourceTreeDriverSha256: Object.fromEntries(sourceTreeDriverFiles.map(path =>
     [path, createHash('sha256').update(readFileSync(join(repo, path))).digest('hex')])) } : {}),
@@ -921,7 +923,7 @@ try {
     if (sourceTreeFixture) {
       await ready(authenticated, `document.querySelector('h1')?.textContent === 'Runtime status'`, 'authenticated source-tree session route');
       report.sourceTreeScale = await qualifySourceTree({ fixture: sourceTreeFixture, makeTarget, cdp, evaluate, ready,
-        browserOrigin, serverPid: application.pid });
+        browserOrigin, serverPid: application.pid, profile: values.profile });
       report.jobDataCreated = true;
       report.session = { authenticated: true, sessionRoute: '/nested/runtime', jobDataCreated: true,
         automaticMutationRetries: 0, installationUnchanged: true };

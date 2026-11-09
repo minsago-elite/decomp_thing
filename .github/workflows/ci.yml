@@ -256,7 +256,13 @@ jobs:
           node scripts/check-packaged-web-browser.mjs \
             --archive "$WEB_TEST_ARCHIVE" \
             --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
-            --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode source-tree --no-sandbox
+            --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode source-tree --profile loopback --no-sandbox
+      - name: Verify bounded source-tree browsing under the constrained profile
+        run: |
+          node scripts/check-packaged-web-browser.mjs \
+            --archive "$WEB_TEST_ARCHIVE" \
+            --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
+            --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode source-tree --profile constrained --no-sandbox
       - name: Exercise same-origin JVM restart and two-tab stale progress pin
         run: |
           xvfb-run -a node scripts/check-packaged-web-browser.mjs \

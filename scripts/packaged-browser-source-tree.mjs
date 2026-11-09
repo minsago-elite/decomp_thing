@@ -5,6 +5,7 @@ const MiB = 1024 * 1024;
 export const SOURCE_TREE_BUDGETS = Object.freeze({
   firstDataPageP95Ms: 500,
   firstChunkMs: 500,
+  localFeedbackP95Ms: 100,
   searchFirstPageMs: 2_000,
   browserHeapBytes: 128 * MiB,
   serverRssGrowthBytes: 256 * MiB,
@@ -16,6 +17,17 @@ export const SOURCE_TREE_BUDGETS = Object.freeze({
   maximumUrlCharacters: 4_096,
   maximumSearchContinuationMs: 10_000,
 });
+
+export function sourceTreeBudgetsForProfile(profile) {
+  assert.ok(profile === 'loopback' || profile === 'constrained', `Unknown source-tree profile: ${profile}`);
+  return Object.freeze({ ...SOURCE_TREE_BUDGETS,
+    ...(profile === 'constrained' ? { firstDataPageP95Ms: 1_000 } : {}) });
+}
+
+export function maximumFirstSearchPageMs(searches) {
+  const durations = ['common', 'rare', 'missing'].map(name => searches[name]?.durationMs);
+  return durations.every(value => Number.isFinite(value) && value >= 0) ? Math.max(...durations) : Number.NaN;
+}
 
 export function nearestRankPercentile(values, percentile) {
   assert.ok(Array.isArray(values) && values.length > 0, 'percentile needs at least one observation');
@@ -29,6 +41,7 @@ export function sourceTreeBudgetGate(measurements, budgets = SOURCE_TREE_BUDGETS
   const requirements = [
     ['firstDataPageP95Ms', budgets.firstDataPageP95Ms],
     ['firstChunkMs', budgets.firstChunkMs],
+    ['localFeedbackP95Ms', budgets.localFeedbackP95Ms],
     ['searchFirstPageMs', budgets.searchFirstPageMs],
     ['browserHeapBytes', budgets.browserHeapBytes],
     ['serverRssGrowthBytes', budgets.serverRssGrowthBytes],
@@ -220,12 +233,20 @@ async function collectSearchPage({ target, cdp, evaluate, ready, query, label })
   return { ...result, durationMs };
 }
 
-export async function qualifySourceTree({ fixture, makeTarget, cdp, evaluate, ready, browserOrigin, serverPid }) {
+export async function qualifySourceTree({ fixture, makeTarget, cdp, evaluate, ready, browserOrigin, serverPid, profile = 'loopback' }) {
   assert.equal(fixture.fileCount, 25_000, 'The browser profile requires the exact D0-sized source tree');
+  const budgets = sourceTreeBudgetsForProfile(profile);
   assert.ok(Number.isSafeInteger(serverPid) && serverPid > 0, 'The packaged application PID is required for RSS measurement');
   const target = await makeTarget();
   await cdp.call('Performance.enable', {}, target.sessionId);
   await cdp.call('HeapProfiler.enable', {}, target.sessionId);
+  if (profile === 'constrained') {
+    await cdp.call('Emulation.setCPUThrottlingRate', { rate: 4 }, target.sessionId);
+    await cdp.call('Network.emulateNetworkConditions', {
+      offline: false, latency: 100, downloadThroughput: 1_250_000, uploadThroughput: 250_000,
+      connectionType: 'cellular3g',
+    }, target.sessionId);
+  }
   await cdp.call('Page.addScriptToEvaluateOnNewDocument', { source: `(() => {
     const observations = []; Object.defineProperty(window, '__sourceTreeFetchObservations', { value: observations });
     const original = window.fetch;
@@ -249,6 +270,7 @@ export async function qualifySourceTree({ fixture, makeTarget, cdp, evaluate, re
   const sourceRoot = `${sourceBase}/sources/root`;
   const firstDataPageMs = [];
   const pageLatenciesMs = [];
+  const localFeedbackSamplesMs = [];
   let maximumMountedRows = 0;
   let maximumDirectoryRows = 0;
   let maximumUrlCharacters = 0;
@@ -293,10 +315,17 @@ export async function qualifySourceTree({ fixture, makeTarget, cdp, evaluate, re
       maximumUrlCharacters = Math.max(maximumUrlCharacters, (await evaluate(target, 'location.href')).length);
       if (page < pageCount - 1) {
         await selectButton(evaluate, target, 'Next directory page');
+        if (page < 50) await evaluate(target, 'window.__sourceTreeInteractionStart = performance.now()');
         const started = performance.now();
         await dispatchEnter(cdp, target);
         await ready(target, `document.querySelector('h2')?.textContent === 'modules' && document.activeElement === document.querySelector('h2') && document.querySelector('ul[aria-label="Recorded source inputs"]')?.children.length > 0`, `keyboard directory page ${page + 2}`);
         pageLatenciesMs.push(Math.round((performance.now() - started) * 100) / 100);
+        if (page < 50) {
+          const feedbackMs = await evaluate(target, 'performance.now() - window.__sourceTreeInteractionStart');
+          assert.ok(Number.isFinite(feedbackMs) && feedbackMs >= 0,
+            `No local feedback measurement for source interaction ${page + 1}`);
+          localFeedbackSamplesMs.push(Math.round(feedbackMs * 100) / 100);
+        }
         if ((page + 1) % 50 === 0) browserHeapPeakBytes = Math.max(browserHeapPeakBytes, await browserHeapBytes(cdp, target));
       }
       if ((page + 1) % 50 === 0) console.log(`Verified ${page + 1}/${pageCount} source directory pages`);
@@ -369,6 +398,7 @@ export async function qualifySourceTree({ fixture, makeTarget, cdp, evaluate, re
 
     const rareStarted = performance.now();
     let rare = await collectSearchPage({ target, cdp, evaluate, ready, query: '24998', label: 'rare final-file search' });
+    const rareFirstPageMs = rare.durationMs;
     let rarePages = 1;
     while (!rare.names.some(name => name.endsWith('/m_24998.c')) && rare.canContinue && rarePages < 8
       && performance.now() - rareStarted < SOURCE_TREE_BUDGETS.maximumSearchContinuationMs) {
@@ -394,13 +424,13 @@ export async function qualifySourceTree({ fixture, makeTarget, cdp, evaluate, re
     assert.ok(missing.state === 'no-matches' || (missing.state === 'partial-empty' && missing.text.toLowerCase().includes('time limit')),
       'Missing search must finish or explicitly report its deadline');
     assert.equal(missing.items, 0);
-    assert.ok(missingFirstPageMs <= SOURCE_TREE_BUDGETS.maximumSearchContinuationMs);
+    assert.ok(missingFirstPageMs <= budgets.maximumSearchContinuationMs);
     await cdp.call('HeapProfiler.collectGarbage', {}, target.sessionId);
     sourceHeapBytes = await browserHeapBytes(cdp, target);
     browserHeapPeakBytes = Math.max(browserHeapPeakBytes, sourceHeapBytes);
 
-    // Pause a new search request at the browser boundary, navigate away, and verify
-    // the view aborts its transport and never publishes a stale result on Runtime.
+    // Hold a new search request at the browser boundary and navigate through the
+    // application's own router. The unmounted search view must abort its transport.
     let pausedRequest;
     let resolvePaused;
     const paused = new Promise(resolve => { resolvePaused = resolve; });
@@ -412,15 +442,16 @@ export async function qualifySourceTree({ fixture, makeTarget, cdp, evaluate, re
     await cdp.call('Fetch.enable', { patterns: [{ urlPattern: '*source-search*', requestStage: 'Request' }] }, target.sessionId);
     await evaluate(target, `(() => { const input = document.querySelector('input[name="q"]'); input.value = 'Inert'; input.dispatchEvent(new Event('input', { bubbles: true })); document.querySelector('form[role="search"] button[type="submit"]').click(); })()`);
     await Promise.race([paused, new Promise((_, reject) => setTimeout(() => reject(new Error('Source-search request did not reach the cancellation gate')), 10_000))]);
-    await cdp.call('Page.navigate', { url: `${browserOrigin}/nested/runtime` }, target.sessionId);
-    await ready(target, `document.querySelector('h1')?.textContent === 'Runtime status'`, 'navigate away from pending source search');
-    // Navigation destroys the intercepted request. Chrome reports the stale
-    // interception ID rather than emitting Network.loadingFailed for a request
-    // that never passed the Fetch boundary.
+    assert.equal(await evaluate(target, `(() => { const link = document.querySelector('.app-nav a[href="/nested/runtime"]'); if (!link) return false; link.click(); return true; })()`), true,
+      'The Runtime route must be reachable through the application navigation');
+    await ready(target, `location.pathname === '/nested/runtime' && document.querySelector('h1')?.textContent === 'Runtime status'`, 'navigate in-app away from pending source search');
+    // The SPA route transition unmounts the search component. Its abort signal
+    // removes the intercepted request before it can reach the server.
     await assert.rejects(cdp.call('Fetch.continueRequest', { requestId: pausedRequest.requestId }, target.sessionId), /Invalid InterceptionId/u);
     await cdp.call('Fetch.disable', {}, target.sessionId);
     assert.equal(await evaluate(target, `location.pathname === '/nested/runtime' && document.querySelector('.source-search') === null`), true);
-    const cancelNavigation = { requestWasPaused: true, chromeDroppedInterceptionOnNavigation: true, staleSearchNotRendered: true,
+    const cancelNavigation = { requestWasPaused: true, applicationRouteTransition: true, searchTransportAbortedOnUnmount: true,
+      staleSearchNotRendered: true,
       serverWorkMayContinueAfterDisconnect: true };
 
     await cdp.call('HeapProfiler.collectGarbage', {}, target.sessionId);
@@ -451,12 +482,14 @@ export async function qualifySourceTree({ fixture, makeTarget, cdp, evaluate, re
     const completed = requests.filter(item => item.responseBytes !== null);
     const maximumApiResponseBytes = Math.max(0, ...completed.filter(item => item.route !== 'search').map(item => item.responseBytes));
     const maximumSearchResponseBytes = Math.max(0, ...completed.filter(item => item.route === 'search').map(item => item.responseBytes));
-    const searchFirstPageMs = common.durationMs;
+    const searchFirstPageMs = maximumFirstSearchPageMs({ common, rare: { durationMs: rareFirstPageMs }, missing: { durationMs: missingFirstPageMs } });
+    assert.equal(localFeedbackSamplesMs.length, 50, 'The local interaction feedback p95 requires 50 interactions');
+    const localFeedbackP95Ms = nearestRankPercentile(localFeedbackSamplesMs, 0.95);
     const firstDataPageP95Ms = nearestRankPercentile(firstDataPageMs, 0.95);
     const measuredMaximumUrlCharacters = Math.max(maximumUrlCharacters, ...requests.map(item => item.urlCharacters));
     const maximumRequestHeadBytes = Math.max(0, ...requests.map(item => item.requestHeadBytes));
     const maximumMountedRowsMeasured = Math.max(maximumMountedRows, maximumDirectoryRows);
-    const measurements = { firstDataPageP95Ms, firstChunkMs, searchFirstPageMs, browserHeapBytes: sourceHeapBytes,
+    const measurements = { firstDataPageP95Ms, firstChunkMs, localFeedbackP95Ms, searchFirstPageMs, browserHeapBytes: sourceHeapBytes,
       serverRssGrowthBytes: rssGrowthBytes, maximumMountedRows: maximumMountedRowsMeasured,
       maximumDirectoryRows, maximumApiResponseBytes, maximumSearchResponseBytes, maximumRequestHeadBytes,
       maximumUrlCharacters: measuredMaximumUrlCharacters,
@@ -464,7 +497,7 @@ export async function qualifySourceTree({ fixture, makeTarget, cdp, evaluate, re
       searchContinuationElapsedMs: rareElapsedMs, browserHeapPeakBytes,
       firstDataPageSamples: firstDataPageMs.length, pageCount, exactFileCount: fixture.fileCount,
       rssSamples: samples.length, initialBrowserHeapBytes: initialHeapBytes };
-    const gate = sourceTreeBudgetGate(measurements);
+    const gate = sourceTreeBudgetGate(measurements, budgets);
     assert.ok(gate.every(entry => entry.passed), `Source-tree scale budgets failed: ${JSON.stringify(gate)}`);
     assert.ok(requests.length >= pageCount + 20, 'The browser did not issue the expected source-tree page requests');
     assert.ok(routeMetrics.directory.length >= pageCount);
@@ -473,6 +506,7 @@ export async function qualifySourceTree({ fixture, makeTarget, cdp, evaluate, re
     assert.deepEqual(target.exceptions, []);
 
     return {
+      profile,
       fixture: { fileCount: fixture.fileCount, sourceSha256: fixture.sourceSha256, runId: fixture.runId,
         revisionId: fixture.revisionId, profileId: fixture.profileId, profileSha256: fixture.profileSha256,
         inertFilesOnly: true, compilerInvoked: false, credentialsUsed: false },
@@ -485,7 +519,7 @@ export async function qualifySourceTree({ fixture, makeTarget, cdp, evaluate, re
         digest: detail.digest, completeDownloadRequests: routeMetrics.content.length },
       search: { common: { state: common.state, items: common.items, continuation: common.canContinue,
           firstPageMs: common.durationMs, continuesWithoutDuplicates: true },
-        rare: { state: rare.state, foundLastFile: true, continuationPages: rarePages, elapsedMs: rareElapsedMs,
+        rare: { state: rare.state, foundLastFile: true, firstPageMs: rareFirstPageMs, continuationPages: rarePages, elapsedMs: rareElapsedMs,
           resultNavigatesToFile: true },
         missing: { state: missing.state, noResults: missing.items === 0, firstPageMs: missingFirstPageMs,
           explicitDeadlineWhenPartial: missing.state === 'complete' || missing.text.toLowerCase().includes('time limit') } },
@@ -495,6 +529,7 @@ export async function qualifySourceTree({ fixture, makeTarget, cdp, evaluate, re
         applicationProcessTreeRssPeakBytes: peakRssBytes, applicationProcessTreeRssGrowthBytes: rssGrowthBytes,
         rssSamples: samples.length, rssSamplingErrors: rss.errors(), requestHeadBytesMaximum: maximumRequestHeadBytes,
         responseBytesMaximum: maximumApiResponseBytes, searchResponseBytesMaximum: maximumSearchResponseBytes },
+      interactions: { localFeedbackSamplesMs, localFeedbackP95Ms },
       measurements, budgetGate: gate,
       proofLimits: ['One warmed packaged JVM; the repeated page sample is not a fresh-process cold-load p95.',
         'Chromium headless only; no screen-reader or cross-engine qualification.',

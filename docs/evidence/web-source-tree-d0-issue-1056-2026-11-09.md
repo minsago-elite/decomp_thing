@@ -19,7 +19,7 @@ qualify hosted CI, production workloads, or completion of #1056, #625, or #220.
 The two passing browser report SHA-256 values are:
 
 - `0ca0f1b894849bf35674bd4a3d5334915aa83584cc07c9af27d25b31da328767`
-- `5cd7efee405dfebb2c6374b8a286a8b8d4ca400378c6c9d6bb2969c986e6817`
+- `5cd7efee405dfebb2c63574b8a286a8b8d4ca400378c6c9d6bb2969c986e6817`
 
 The source-tree driver hashes recorded by both reports are:
 
@@ -36,10 +36,10 @@ passed all twelve budgets. Selected measurements:
 |---|---:|---:|---:|
 | First data page p95 | 321.38 ms | 427.78 ms | 500 ms |
 | First preview chunk | 200.36 ms | 205.41 ms | 500 ms |
-| First search page | 286.56 ms | 322.98 ms | 2,000 ms |
-| Browser heap | 1,972,296 B | 1,972,296 B | 134,217,728 B |
+| Common-query first page | 286.56 ms | 322.98 ms | 2,000 ms |
+| Browser heap | 1,972,296 B | 1,972,828 B | 134,217,728 B |
 | Server process-tree RSS growth | 188,317,696 B | 231,985,152 B | 268,435,456 B |
-| Search continuation p95 | 1,716.97 ms | 1,590.23 ms | 10,000 ms |
+| Rare search to final file | 1,716.97 ms | 1,655.99 ms | 10,000 ms |
 
 The other six checks also passed in both reports: 50 mounted rows (limit 500),
 50 directory rows (limit 50), 15,163 B maximum API response (1,000,000 B),
@@ -52,6 +52,12 @@ common/rare/missing searches, and exercised browser navigation cancellation.
 The fixture contains inert files and invoked no compiler or credentials. The
 packaged `web` launcher used `-Xmx256m` and `-XX:ActiveProcessorCount=4`; this is
 part of the candidate and affects all work performed in the web process.
+
+These reports predate the follow-up search/interaction gate: their two-second
+search check covered only the common query, and they did not record local
+feedback for 50 interactions. The follow-up adds those checks and runs the
+constrained profile as well; these older reports should not be used as evidence
+for those requirements.
 
 An earlier invocation of the same ZIP traversed all 500 directory pages but
 failed the driver's 10-second wait for a completed preview-chunk network event.

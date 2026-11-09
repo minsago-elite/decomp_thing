@@ -32,15 +32,19 @@ The packaged `source-tree` browser mode uses the same fixture and real
 application readers. It visits all 500 pages of the 24,999-file `modules`
 directory, checks exact ordering and keyboard focus, opens a file and its first
 bounded preview chunk, runs common/rare/missing searches, and cancels an in-flight
-search by navigating away. The CI mode records request-head and response bytes,
-route durations, mounted rows, browser heap, and application process-tree RSS.
-Its required gate applies the loopback source budgets from
-[`web-delivery.md`](web-delivery.md#measurement-profiles-and-budgets), including
-the 500 ms repeated first-page p95, 500 ms first chunk, 2 s first search page,
-128 MiB browser heap, 256 MiB incremental application RSS, 50 directory rows,
-8 KiB request heads, and 1 MB response ceilings. The integration test also
-seeds 25,001 files and confirms the real catalog and revision readers refuse
-that over-limit input.
+search through the SPA's own navigation. It measures the first-page duration for
+all three search terms, plus local feedback for 50 keyboard page interactions.
+CI records request-head and response bytes, route durations, mounted rows,
+browser heap, and application process-tree RSS.
+
+CI runs both profiles. Loopback uses the 500 ms first-page ceiling; constrained
+emulates fourfold browser CPU slowdown, 10 Mbit/s download, 2 Mbit/s upload and
+100 ms round-trip latency, and uses the documented 1 s first-page ceiling. Both
+profiles gate the 100 ms local-feedback p95, 500 ms first preview chunk, 2 s
+maximum search first page, 128 MiB browser heap, 256 MiB incremental application
+RSS, 50 directory rows, 8 KiB request heads, and 1 MB response ceilings. The
+integration test also seeds 25,001 files and confirms the real catalog and
+revision readers refuse that over-limit input.
 
 The repeated page samples are taken from one warmed packaged JVM; they are not
 fresh-process cold-load measurements. The synthetic tree does not qualify real
