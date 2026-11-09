@@ -1113,7 +1113,7 @@ class SourceTreeTest {
                 val stringBytes = if (element is JsonPrimitive && element.isString) {
                     element.content.toByteArray(Charsets.UTF_8).size
                 } else 0
-                Triple(0, stringBytes, 0)
+                Triple(0, stringBytes, stringBytes)
             }
         }
         fun countValues(element: kotlinx.serialization.json.JsonElement): Int = when (element) {
@@ -1129,21 +1129,25 @@ class SourceTreeTest {
             maximumStringBytes = maximumStringBytes,
             maximumTotalStringBytes = totalStringBytes,
         )
-        assertEquals(treeResult(bytes, exactLimits).isSuccess, byteResult(bytes, exactLimits).isSuccess, "exact limits")
+        assertTrue(treeResult(bytes, exactLimits).isSuccess,
+            "tree reader must accept exact limits: ${treeResult(bytes, exactLimits).exceptionOrNull()}")
+        assertTrue(byteResult(bytes, exactLimits).isSuccess,
+            "byte reader must accept exact limits: ${byteResult(bytes, exactLimits).exceptionOrNull()}")
         val oneByteShort = exactLimits.copy(maximumInputBytes = bytes.size - 1)
-        assertEquals(treeResult(bytes, oneByteShort).isSuccess, byteResult(bytes, oneByteShort).isSuccess, "input limit minus one")
+        assertFalse(treeResult(bytes, oneByteShort).isSuccess, "tree reader must reject input limit minus one")
+        assertFalse(byteResult(bytes, oneByteShort).isSuccess, "byte reader must reject input limit minus one")
         val oneStringByteShort = exactLimits.copy(maximumStringBytes = maximumStringBytes - 1)
-        assertEquals(treeResult(bytes, oneStringByteShort).isSuccess,
-            byteResult(bytes, oneStringByteShort).isSuccess, "string limit minus one")
+        assertFalse(treeResult(bytes, oneStringByteShort).isSuccess, "tree reader must reject string limit minus one")
+        assertFalse(byteResult(bytes, oneStringByteShort).isSuccess, "byte reader must reject string limit minus one")
         val aggregateByteShort = exactLimits.copy(maximumTotalStringBytes = totalStringBytes - 1)
-        assertEquals(treeResult(bytes, aggregateByteShort).isSuccess,
-            byteResult(bytes, aggregateByteShort).isSuccess, "aggregate limit minus one")
+        assertFalse(treeResult(bytes, aggregateByteShort).isSuccess, "tree reader must reject aggregate limit minus one")
+        assertFalse(byteResult(bytes, aggregateByteShort).isSuccess, "byte reader must reject aggregate limit minus one")
         val oneLevelShort = exactLimits.copy(maximumDepth = maximumDepth - 1)
-        assertEquals(treeResult(bytes, oneLevelShort).isSuccess,
-            byteResult(bytes, oneLevelShort).isSuccess, "depth limit minus one")
+        assertFalse(treeResult(bytes, oneLevelShort).isSuccess, "tree reader must reject depth limit minus one")
+        assertFalse(byteResult(bytes, oneLevelShort).isSuccess, "byte reader must reject depth limit minus one")
         val oneNodeShort = exactLimits.copy(maximumNodes = countValues(decodedRoot) - 1)
-        assertEquals(treeResult(bytes, oneNodeShort).isSuccess,
-            byteResult(bytes, oneNodeShort).isSuccess, "node limit minus one")
+        assertFalse(treeResult(bytes, oneNodeShort).isSuccess, "tree reader must reject node limit minus one")
+        assertFalse(byteResult(bytes, oneNodeShort).isSuccess, "byte reader must reject node limit minus one")
 
         val missingInput = JsonObject(decodedRoot.filterKeys { it != "inputSha256" })
         val wrongRoleRoot = JsonObject(decodedRoot.toMutableMap().apply {
@@ -1182,6 +1186,31 @@ class SourceTreeTest {
             }
         }
         assertSame(cancellation, validationCancellation, "semantic-pass cancellation must retain its identity")
+
+        val manyOrderedFiles = JsonObject(decodedRoot.toMutableMap().apply {
+            val template = decodedRoot.getValue("files").jsonArray.first().jsonObject
+            put("files", JsonArray(List(1_100) { index ->
+                JsonObject(template + ("path" to JsonPrimitive("manifest-entry-${index.toString().padStart(5, '0')}")))
+            }))
+        }).toString().toByteArray(Charsets.UTF_8)
+        val orderCancellation = assertFailsWith<CancellationException> {
+            SourceTreeManifestByteReader.parse(manyOrderedFiles, limits).validate(profile, null) { stage ->
+                if (stage == "while checking source manifest file order") throw cancellation
+            }
+        }
+        assertSame(cancellation, orderCancellation, "sortedness cancellation must retain its identity")
+
+        val manyEntityIds = JsonObject(decodedRoot.toMutableMap().apply {
+            val template = decodedRoot.getValue("files").jsonArray.first().jsonObject
+            val ids = JsonArray(List(3_000) { index -> JsonPrimitive("entity-${index.toString().padStart(5, '0')}") })
+            put("files", JsonArray(listOf(JsonObject(template + ("entityIds" to ids)))))
+        }).toString().toByteArray(Charsets.UTF_8)
+        val constructionCancellation = assertFailsWith<CancellationException> {
+            SourceTreeManifestByteReader.parse(manyEntityIds, limits).validate(profile, null) { stage ->
+                if (stage == "while constructing source manifest file evidence") throw cancellation
+            }
+        }
+        assertSame(cancellation, constructionCancellation, "record-construction cancellation must retain its identity")
 
         Thread.currentThread().interrupt()
         try {

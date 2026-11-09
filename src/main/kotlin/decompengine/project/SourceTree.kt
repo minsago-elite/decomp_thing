@@ -382,7 +382,9 @@ private class ModuleReconstructionEvidencePersistenceException(cause: Exception)
 
 private val SHA256_HEX_PATTERN = Regex("[0-9a-f]{64}")
 
-class GeneratedFileEvidence(
+private class GeneratedFileEvidenceValidation(val checkpoint: () -> Unit)
+
+class GeneratedFileEvidence private constructor(
     val path: String,
     val sha256: String,
     val generator: String,
@@ -391,8 +393,34 @@ class GeneratedFileEvidence(
     val acceptedImplementation: Boolean? = null,
     roles: Set<ProjectFileRole>,
     val contentKind: ProjectContentKind,
+    validationHooks: GeneratedFileEvidenceValidation?,
 ) {
-    val entityIds: List<String> = Collections.unmodifiableList(entityIds.toList().sorted())
+    constructor(
+        path: String,
+        sha256: String,
+        generator: String,
+        promptSha256: String? = null,
+        entityIds: List<String> = emptyList(),
+        acceptedImplementation: Boolean? = null,
+        roles: Set<ProjectFileRole>,
+        contentKind: ProjectContentKind,
+    ) : this(path, sha256, generator, promptSha256, entityIds, acceptedImplementation, roles, contentKind, null)
+
+    internal constructor(
+        path: String,
+        sha256: String,
+        generator: String,
+        promptSha256: String?,
+        entityIds: List<String>,
+        acceptedImplementation: Boolean?,
+        roles: Set<ProjectFileRole>,
+        contentKind: ProjectContentKind,
+        validationCheckpoint: () -> Unit,
+    ) : this(path, sha256, generator, promptSha256, entityIds, acceptedImplementation, roles, contentKind,
+        GeneratedFileEvidenceValidation(validationCheckpoint))
+
+    val entityIds: List<String> = immutableSortedEntityIds(entityIds, path, validationHooks?.checkpoint)
+    private val validationCheckpoint: (() -> Unit)? = validationHooks?.checkpoint
     val roles: Set<ProjectFileRole> = Collections.unmodifiableSet(
         if (roles.isEmpty()) EnumSet.noneOf(ProjectFileRole::class.java) else EnumSet.copyOf(roles),
     )
@@ -413,9 +441,25 @@ class GeneratedFileEvidence(
         require(ProjectFileRole.MODULE_IMPLEMENTATION !in this.roles || acceptedImplementation != null) {
             "module implementation acceptance is not classified: $path"
         }
-        require(this.entityIds.distinct().size == this.entityIds.size) {
-            "source tree manifest entity IDs must be unique: $path"
-        }
+        requireEntityIdsUnique(this.entityIds, path, validationCheckpoint)
+    }
+}
+
+private fun immutableSortedEntityIds(values: List<String>, path: String, checkpoint: (() -> Unit)?): List<String> {
+    var comparisons = 0
+    val sorted = values.sortedWith { left, right ->
+        comparisons++
+        if (comparisons % 1024 == 0) checkpoint?.invoke()
+        left.compareTo(right)
+    }
+    return Collections.unmodifiableList(sorted)
+}
+
+private fun requireEntityIdsUnique(values: List<String>, path: String, checkpoint: (() -> Unit)?) {
+    val seen = HashSet<String>(values.size)
+    values.forEachIndexed { index, value ->
+        if (index % 1024 == 0) checkpoint?.invoke()
+        require(seen.add(value)) { "source tree manifest entity IDs must be unique: $path" }
     }
 }
 

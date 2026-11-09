@@ -85,7 +85,7 @@ internal object SourceTreeManifestByteReader {
                             require(role is String) { "source tree manifest file roles must be strings" }
                             ProjectFileRole.fromWireName(role)
                         }
-                        require(rolesAreStrictlySorted(roles)) {
+                        require(rolesAreStrictlySorted(roles, progress)) {
                             "source tree manifest file roles must be unique and sorted"
                         }
                         val entityIds = rawArray(item.entityIds, "entityIds").mapIndexed { idIndex, id ->
@@ -93,7 +93,7 @@ internal object SourceTreeManifestByteReader {
                             require(id is String) { "source tree manifest entity IDs must be strings" }
                             id
                         }
-                        require(stringsAreStrictlySorted(entityIds)) {
+                        require(stringsAreStrictlySorted(entityIds, progress)) {
                             "source tree manifest entity IDs must be unique and sorted"
                         }
                         val accepted = when (val value = item.acceptedImplementation) {
@@ -118,7 +118,9 @@ internal object SourceTreeManifestByteReader {
                         val contentKind = ProjectContentKind.fromWireName(requiredString(item.contentKind, "contentKind"))
                         probe?.startSafely(SourceTreeManifestStage.FILE_EVIDENCE_INIT)
                         files += GeneratedFileEvidence(path, sha256, generator, promptSha256, entityIds,
-                            accepted, roleSet, contentKind)
+                            accepted, roleSet, contentKind) {
+                            progress("while constructing source manifest file evidence")
+                        }
                     } finally {
                         probe?.endSafely()
                     }
@@ -126,7 +128,7 @@ internal object SourceTreeManifestByteReader {
 
                 progress("before validating source manifest order")
                 probe?.startSafely(SourceTreeManifestStage.PATH_ORDER)
-                require(filesAreStrictlySorted(files)) {
+                require(filesAreStrictlySorted(files, progress)) {
                     "source tree manifest files must be unique and sorted"
                 }
                 val inputSha256 = requiredString(document.inputSha256, "inputSha256")
@@ -460,21 +462,30 @@ internal object SourceTreeManifestByteReader {
         require(id is String) { "source tree manifest $name values must be strings" }
         id
     }.also { ids ->
-        require(stringsAreStrictlySorted(ids)) { "source tree manifest $name must be unique and sorted" }
+        require(stringsAreStrictlySorted(ids, checkpoint)) { "source tree manifest $name must be unique and sorted" }
     }
 
-    private fun stringsAreStrictlySorted(values: List<String>): Boolean {
-        for (index in 1 until values.size) if (values[index - 1] >= values[index]) return false
+    private fun stringsAreStrictlySorted(values: List<String>, checkpoint: (String) -> Unit): Boolean {
+        for (index in 1 until values.size) {
+            if (index % 1024 == 0) checkpoint("while checking source manifest string order")
+            if (values[index - 1] >= values[index]) return false
+        }
         return true
     }
 
-    private fun rolesAreStrictlySorted(values: List<ProjectFileRole>): Boolean {
-        for (index in 1 until values.size) if (values[index - 1].wireName >= values[index].wireName) return false
+    private fun rolesAreStrictlySorted(values: List<ProjectFileRole>, checkpoint: (String) -> Unit): Boolean {
+        for (index in 1 until values.size) {
+            if (index % 1024 == 0) checkpoint("while checking source manifest role order")
+            if (values[index - 1].wireName >= values[index].wireName) return false
+        }
         return true
     }
 
-    private fun filesAreStrictlySorted(values: List<GeneratedFileEvidence>): Boolean {
-        for (index in 1 until values.size) if (values[index - 1].path >= values[index].path) return false
+    private fun filesAreStrictlySorted(values: List<GeneratedFileEvidence>, checkpoint: (String) -> Unit): Boolean {
+        for (index in 1 until values.size) {
+            if (index % 1024 == 0) checkpoint("while checking source manifest file order")
+            if (values[index - 1].path >= values[index].path) return false
+        }
         return true
     }
 
