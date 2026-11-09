@@ -154,7 +154,7 @@ export async function qualifyGit({ fixture, makeTarget, cdp, evaluate, ready, br
       assert.ok(await evaluate(tab, `[...${historyRows}].some(row =>
         row.querySelector('code')?.title === ${JSON.stringify(fixture.repository.commits.base)}
           && row.textContent.includes('fixture: baseline')
-          && row.textContent.includes('Not mapped to a reconstruction revision')))`,
+          && row.textContent.includes('Not mapped to a reconstruction revision'))`),
       'The oldest baseline entry and its unmapped state must be visible in the terminal history window');
     }
     const visibleIds = await evaluate(tab, `[...${historyRows}].map(row => row.querySelector('code')?.title ?? null)`);
