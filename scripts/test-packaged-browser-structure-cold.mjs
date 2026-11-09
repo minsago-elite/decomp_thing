@@ -5,6 +5,8 @@ import { PassThrough } from 'node:stream';
 import { spawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
+import { dirname, relative, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { COLD_PROFILES, STRUCTURE_QUALIFICATION_SOURCE_FILES, applyStructureProfile, makeChromeThrottlingCommands, summarizeColdSamples, runColdSamples,
   verifyStructureQualificationSource } from './packaged-browser-structure-cold.mjs';
 
@@ -79,6 +81,30 @@ test('source identity includes the Node and browser qualification toolchain pins
     'scripts/test-packaged-browser-install.py', 'scripts/test-packaged-browser-structure.mjs',
     'scripts/test-packaged-browser-structure-cold.mjs']) {
     assert.ok(STRUCTURE_QUALIFICATION_SOURCE_FILES.includes(path), `qualification source identity is missing ${path}`);
+  }
+});
+
+test('source identity covers the complete relative import graph of the browser driver', async () => {
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+  const pending = ['scripts/check-packaged-web-browser.mjs'];
+  const visited = new Set();
+  while (pending.length) {
+    const source = pending.pop();
+    if (visited.has(source)) continue;
+    visited.add(source);
+    assert.ok(STRUCTURE_QUALIFICATION_SOURCE_FILES.includes(source), `qualification source identity is missing imported module ${source}`);
+    const contents = await readFile(resolve(root, source), 'utf8');
+    const specifiers = [
+      ...contents.matchAll(/\bfrom\s*(['"])(\.{1,2}\/[^'"]+)\1/g),
+      ...contents.matchAll(/\bimport\s*\(\s*(['"])(\.{1,2}\/[^'"]+)\1\s*\)/g),
+      ...contents.matchAll(/\bimport\s*(['"])(\.{1,2}\/[^'"]+)\1/g),
+    ].map(match => match[2]);
+    for (const specifier of specifiers) {
+      const target = resolve(dirname(resolve(root, source)), specifier);
+      const relativeTarget = relative(root, target);
+      assert.ok(relativeTarget && !relativeTarget.startsWith('..'), `relative module escapes qualification root: ${specifier}`);
+      pending.push(relativeTarget);
+    }
   }
 });
 
