@@ -10,6 +10,7 @@ import decompengine.project.ProjectContentKind
 import decompengine.project.ProjectFileRole
 import decompengine.project.SourceTreeManifest
 import decompengine.repair.RepairBudgetExceededException
+import decompengine.repair.StableFileDigest
 import decompengine.repair.StableRegularFile
 import kotlinx.serialization.json.*
 import kotlin.test.*
@@ -162,7 +163,7 @@ class WebRecordedModuleProvenanceTest {
     }
 
     private data class CaptureControl(val source: WebSourceCatalogEvidence, val reference: WebRevisionSourceReference,
-        val fileId: String, val reads: MutableMap<String, Int>)
+        val fileId: String, val reads: MutableMap<String, Int>, val digests: MutableMap<String, Int>)
 
     /** Existing capture machinery with memory-only callbacks; no filesystem or native identity sampling. */
     private fun captureControl(change: (String, Int, StableRegularFile) -> StableRegularFile = { _, _, value -> value }): CaptureControl {
@@ -187,6 +188,8 @@ class WebRecordedModuleProvenanceTest {
             prefix + profile.layout.declaration("confidence-evidence").materialize() to stable(value.generation, 4),
         )
         val reads = mutableMapOf<String, Int>()
+        val digests = mutableMapOf<String, Int>()
+        fun digest(file: StableRegularFile) = StableFileDigest(file.sha256, file.bytes.size.toLong(), file.identity)
         val source = WebSourceCatalogEvidence(listOf(profile), { selectedJob ->
             assertEquals(job, selectedJob); reads["input"] = (reads["input"] ?: 0) + 1
             stable(inputBytes, 5)
@@ -196,17 +199,32 @@ class WebRecordedModuleProvenanceTest {
             val record = records[path] ?: error("Unselected artifact read")
             assertEquals(WebRecordedModuleProvenance.MAXIMUM_BYTES.toLong(), maximum)
             change(path, count, record)
+        }, { selectedJob ->
+            assertEquals(job, selectedJob)
+            digests["input"] = (digests["input"] ?: 0) + 1
+            digest(stable(inputBytes, 5))
+        }, { selectedJob, path, maximum ->
+            assertEquals(job, selectedJob)
+            assertEquals(WebRecordedModuleProvenance.MAXIMUM_BYTES.toLong(), maximum)
+            digests[path] = (digests[path] ?: 0) + 1
+            digest(records[path] ?: error("Unselected artifact digest"))
         })
         val index = inputs.indexOfFirst { it === value.selected.evidence }
-        return CaptureControl(source, reference, revisionSourceFileId(reference, index, value.selected.evidence.path), reads)
+        return CaptureControl(source, reference, revisionSourceFileId(reference, index, value.selected.evidence.path), reads, digests)
     }
 
     @Test fun `memory-only capture rechecks both declared evidence files without checkpoint or source reads`() {
         val control = captureControl()
         val result = control.source.readFileMetadata(control.reference, control.fileId)
         assertNotNull(result.recordedModule)
-        assertEquals(5, control.reads.size)
-        assertTrue(control.reads.values.all { it == 2 })
+        val manifest = "reports/runs/run_1/source-tree/source_tree_manifest.json"
+        val descriptor = "reports/runs/run_1/source-tree/reports/build_contract.json"
+        assertEquals(4, control.reads.size)
+        assertEquals(1, control.reads[manifest])
+        assertEquals(1, control.reads[descriptor])
+        assertEquals(2, control.reads["reports/runs/run_1/source-tree/reports/module_plan.json"])
+        assertEquals(2, control.reads["reports/runs/run_1/source-tree/reports/confidence.json"])
+        assertEquals(mapOf("input" to 2, manifest to 2, descriptor to 2), control.digests)
         assertTrue(control.reads.keys.none { it.contains("modules/") || it.contains("agent-executions/") })
         assertEquals(control.reference, result.source.reference)
     }
@@ -232,8 +250,12 @@ class WebRecordedModuleProvenanceTest {
         val id = revisionSourceFileId(control.reference, 0, buildPath)
         val result = control.source.readFileMetadata(control.reference, id)
         assertNull(result.recordedModule)
-        assertEquals(3, control.reads.size)
-        assertTrue(control.reads.values.all { it == 2 })
+        val manifest = "reports/runs/run_1/source-tree/source_tree_manifest.json"
+        val descriptor = "reports/runs/run_1/source-tree/reports/build_contract.json"
+        assertEquals(2, control.reads.size)
+        assertEquals(1, control.reads[manifest])
+        assertEquals(1, control.reads[descriptor])
+        assertEquals(mapOf("input" to 2, manifest to 2, descriptor to 2), control.digests)
         assertFalse(control.reads.keys.any { it.endsWith("/reports/module_plan.json") || it.endsWith("/reports/confidence.json") })
     }
 
@@ -247,9 +269,9 @@ class WebRecordedModuleProvenanceTest {
             assertNull(result.recordedModule)
             assertEquals(control.reference, result.source.reference)
             assertEquals(implementationSha, resolveRevisionSourceFile(result.source, control.fileId).evidence.sha256)
-            assertEquals(2, control.reads["input"])
-            assertEquals(2, control.reads["reports/runs/run_1/source-tree/source_tree_manifest.json"])
-            assertEquals(2, control.reads["reports/runs/run_1/source-tree/reports/build_contract.json"])
+            assertEquals(2, control.digests["input"])
+            assertEquals(2, control.digests["reports/runs/run_1/source-tree/source_tree_manifest.json"])
+            assertEquals(2, control.digests["reports/runs/run_1/source-tree/reports/build_contract.json"])
         }
     }
 

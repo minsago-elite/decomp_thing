@@ -48,7 +48,7 @@ The final candidate passed all 13 gates in both profiles. Reports:
 | Maximum search response | 20,690 B | 1,911 B | 1,000,000 B |
 | Maximum request head estimate | 665 B | 665 B | 8,192 B |
 | Maximum URL length | 466 chars | 466 chars | 4,096 chars |
-| Maximum search continuation elapsed | 1,980.95 ms | 1,612.43 ms | 10,000 ms |
+| Rare query elapsed through completion (including continuations) | 1,741.23 ms | 1,612.43 ms | 10,000 ms |
 
 The constrained profile applies fourfold browser CPU throttling, 100 ms round-trip
 latency, 10 Mbit/s download and 2 Mbit/s upload. Each run traversed all 500
