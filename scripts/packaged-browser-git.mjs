@@ -120,17 +120,19 @@ export async function qualifyGit({ fixture, makeTarget, cdp, evaluate, ready, br
   while (true) {
     const nextHistoryAction = nextUiHistoryAction(loadedCount, expectedHistoryIds.length, historyWindowStart);
     if (nextHistoryAction === null) break;
-    const advanceWindow = nextHistoryAction.kind === 'window';
+    const advanceWindow = nextHistoryAction.kind !== 'page';
     const { loadedCount: nextLoadedCount, windowStart: nextWindowStart } = nextHistoryAction;
     const expectedWindow = expectedHistoryIds.slice(nextWindowStart,
       Math.min(nextLoadedCount, nextWindowStart + MAX_VISIBLE_HISTORY_ROWS));
-    const terminalWindow = nextLoadedCount === expectedHistoryIds.length
+    const terminalWindow = nextHistoryAction.kind !== 'newer-window'
+      && nextLoadedCount === expectedHistoryIds.length
       && nextWindowStart + MAX_VISIBLE_HISTORY_ROWS >= nextLoadedCount;
-    await evaluate(tab, `${button('Older commits')}.focus()`);
+    const actionButton = button(nextHistoryAction.kind === 'newer-window' ? 'Newer commits' : 'Older commits');
+    await evaluate(tab, `${actionButton}.focus()`);
     await key(cdp, tab, 'Enter', 'Enter', 13, '\r');
     const focus = terminalWindow
       ? `document.activeElement === document.querySelector('#git-history-title')`
-      : `document.activeElement === ${button('Older commits')}`;
+      : `document.activeElement === ${actionButton}`;
     await ready(tab, `${historyRows}.length === ${expectedWindow.length} && JSON.stringify([...${historyRows}].map(row => row.querySelector('code')?.title ?? null)) === ${JSON.stringify(JSON.stringify(expectedWindow))} && ${focus}`,
       'next anchored history window');
     const visibleIds = await evaluate(tab, `[...${historyRows}].map(row => row.querySelector('code')?.title ?? null)`);
@@ -151,7 +153,8 @@ export async function qualifyGit({ fixture, makeTarget, cdp, evaluate, ready, br
   assert.deepEqual(observedHistoryIds, expectedHistoryIds, 'Every displayed history window must match the admitted repository, in order');
   assert.equal(observedHistoryIds[0], fixture.repository.commits.local);
   assert.equal(observedHistoryIds.at(-1), fixture.repository.commits.base);
-  assert.equal(await evaluate(tab, `!!${button('Older commits')}`), false, 'Exhausted history must not offer another page');
+  const finalHistoryWindow = await evaluate(tab, `[...${historyRows}].map(row => row.querySelector('code')?.title ?? null)`);
+  assertUiHistoryWindow(finalHistoryWindow, expectedHistoryIds, loadedCount, historyActions, historyWindowStart);
   assert.ok(tab.requests.slice(historyStart).every(request => ['GET', 'HEAD'].includes(request.method)), 'History pagination sent a mutation');
   assert.equal(countGitHistoryReads(tab.requests.slice(historyStart)), historyPages - 1,
     'Each keyboard continuation must issue exactly one history read (recorded URLs omit query strings)');

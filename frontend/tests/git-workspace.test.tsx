@@ -403,8 +403,12 @@ it('traverses a 1,001-commit history without omissions, duplicates or mutations'
   expect(newer).toHaveProperty('disabled', false);
   fireEvent.click(newer);
   await waitFor(() => expect([...items()].map(item => item.querySelector('code')?.title)).toEqual(all.slice(601, 801).map(item => item.objectId)));
-  fireEvent.click(screen.getByRole('button', { name: 'Older commits' }));
+  const oldestWindow = screen.getByRole('button', { name: 'Older commits' });
+  oldestWindow.focus();
+  fireEvent.click(oldestWindow);
   await waitFor(() => expect([...items()].map(item => item.querySelector('code')?.title)).toEqual(all.slice(801, 1001).map(item => item.objectId)));
+  expect(screen.queryByRole('button', { name: 'Older commits' })).toBeNull();
+  await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'History' })));
   expect(transport.post).not.toHaveBeenCalled();
 }, 20_000);
 

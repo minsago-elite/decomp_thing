@@ -86,8 +86,8 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
   const olderPending = useRef(false);
   const historyHeading = useRef<HTMLHeadingElement | null>(null);
   const historyContinuation = useRef<HTMLButtonElement | null>(null);
-  // The final older-history page removes the focused continuation control. Restore focus to
-  // the durable history landmark only for that user-initiated transition.
+  // A terminal older-history page or cached-window move can remove the focused continuation
+  // control. Restore focus to the durable history landmark only for that user-initiated move.
   const focusHistoryAfterFinalPage = useRef(false);
   const refsPending = useRef(false);
   const commitRequest = useRef(0);
@@ -141,10 +141,12 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
   useEffect(() => () => { active.current?.abort(); active.current = null; }, []);
 
   useLayoutEffect(() => {
-    if (!focusHistoryAfterFinalPage.current || loaded?.history?.nextCursor !== null) return;
+    const history = loaded?.history;
+    if (!focusHistoryAfterFinalPage.current || !history
+      || historyWindowStart + MAX_HISTORY_RENDERED_ROWS < history.entries.length || history.nextCursor !== null) return;
     focusHistoryAfterFinalPage.current = false;
     historyHeading.current?.focus();
-  }, [loaded?.history?.entries.length, loaded?.history?.nextCursor]);
+  }, [loaded?.history?.entries.length, loaded?.history?.nextCursor, historyWindowStart]);
 
   /** Bounded automatic ref loading; any remaining anchored cursor is offered as explicit continuation. */
   async function readRefs(prefix: string, signal: AbortSignal): Promise<GitRefs> {
@@ -308,8 +310,11 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
     const history = loaded?.history;
     if (!history) return;
     if (historyWindowStart + MAX_HISTORY_RENDERED_ROWS < history.entries.length) {
-      setHistoryWindowStart(previous => Math.min(history.entries.length - MAX_HISTORY_RENDERED_ROWS,
-        previous + MAX_HISTORY_RENDERED_ROWS));
+      const nextWindowStart = Math.min(history.entries.length - MAX_HISTORY_RENDERED_ROWS,
+        historyWindowStart + MAX_HISTORY_RENDERED_ROWS);
+      focusHistoryAfterFinalPage.current = nextWindowStart + MAX_HISTORY_RENDERED_ROWS >= history.entries.length
+        && history.nextCursor === null && document.activeElement === historyContinuation.current;
+      setHistoryWindowStart(nextWindowStart);
     } else if (history.nextCursor) {
       void older(history.nextCursor);
     }

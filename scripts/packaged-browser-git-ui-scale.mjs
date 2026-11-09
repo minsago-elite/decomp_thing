@@ -41,12 +41,18 @@ export function nextUiHistoryAction(loadedCount, totalCount, windowStart, pageSi
     'Git UI history has an invalid window start');
   assert.ok(Number.isInteger(pageSize) && pageSize > 0 && Number.isInteger(maximumRows) && maximumRows > 0,
     'Git UI history bounds must be positive integers');
-  if (windowStart + maximumRows < loadedCount) {
-    return { kind: 'window', loadedCount,
-      windowStart: Math.min(loadedCount - maximumRows, windowStart + maximumRows) };
-  }
   if (loadedCount < totalCount) {
-    return { kind: 'page', loadedCount: Math.min(loadedCount + pageSize, totalCount), windowStart };
+    if (windowStart + maximumRows < loadedCount) {
+      return { kind: 'older-window', loadedCount,
+        windowStart: Math.min(loadedCount - maximumRows, windowStart + maximumRows) };
+    }
+    const nextLoadedCount = Math.min(loadedCount + pageSize, totalCount);
+    return { kind: 'page', loadedCount: nextLoadedCount,
+      windowStart: Math.max(0, nextLoadedCount - maximumRows) };
+  }
+  if (windowStart > 0) {
+    return { kind: 'newer-window', loadedCount,
+      windowStart: Math.max(0, windowStart - maximumRows) };
   }
   return null;
 }

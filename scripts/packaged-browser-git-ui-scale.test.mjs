@@ -17,11 +17,16 @@ test('legacy Git UI journey verifies loaded history through a moving 200-row win
   const windows = [
     { loaded: 20, start: 0 },
     { loaded: 200, start: 0 },
-    { loaded: 220, start: 0 }, // A new API page may load before the UI scrolls its 200-row window.
-    { loaded: 220, start: 20 },
+    { loaded: 220, start: 20 }, // Appending a page advances the mounted window with the UI.
+    { loaded: 240, start: 40 },
     { loaded: 1000, start: 800 },
     { loaded: 1001, start: 800 },
     { loaded: 1001, start: 801 },
+    { loaded: 1001, start: 601 },
+    { loaded: 1001, start: 401 },
+    { loaded: 1001, start: 201 },
+    { loaded: 1001, start: 1 },
+    { loaded: 1001, start: 0 },
   ];
   for (const [page, { loaded, start }] of windows.entries()) {
     const visible = expected.slice(start, Math.min(loaded, start + 200));
@@ -34,6 +39,8 @@ test('legacy Git UI journey verifies loaded history through a moving 200-row win
 
 test('history traversal loads each API page and scrolls each window without gaps or duplicates', () => {
   const expected = Array.from({ length: 1001 }, (_, index) => `commit-${index}`);
+  assert.deepEqual(nextUiHistoryAction(200, 1001, 0), { kind: 'page', loadedCount: 220, windowStart: 20 });
+  assert.deepEqual(nextUiHistoryAction(600, 1001, 0), { kind: 'older-window', loadedCount: 600, windowStart: 200 });
   let loadedCount = 20;
   let windowStart = 0;
   let pageCount = 1;
@@ -54,8 +61,8 @@ test('history traversal loads each API page and scrolls each window without gaps
     actions++;
   }
   assert.equal(pageCount, 51);
-  assert.equal(windowTransitions, 41);
-  assert.equal(actions, 91);
+  assert.equal(windowTransitions, 5);
+  assert.equal(actions, 55);
   assert.deepEqual(observed, expected);
   assert.equal(new Set(observed).size, expected.length);
   assert.equal(nextUiHistoryAction(loadedCount, expected.length, windowStart), null);
