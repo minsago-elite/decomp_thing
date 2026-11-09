@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { gitCopy as copy } from '../copy/git';
 import { textMessage } from '../shared/messages';
 import { usePrivateTransport } from '../session/PrivateTransport';
@@ -22,6 +22,15 @@ function sleep(milliseconds: number, signal: AbortSignal) {
 
 const MAX_STATUS_PAGES = 10;
 const MAX_REF_PAGES = 10;
+const MAX_COMMIT_DIFF_PAGES = 1;
+const MAX_HISTORY_RENDERED_ROWS = 200;
+// These per-surface ceilings sum to the parent workbench's 500 mounted-result bound.
+const MAX_REF_RENDERED_ROWS = 45;
+const MAX_WORKTREE_RENDERED_ROWS = 50;
+const MAX_NOTICE_RENDERED_ROWS = 5;
+const MAX_STATUS_RENDERED_ROWS = 70;
+const MAX_STAGED_PREVIEW_ROWS = 30;
+const MAX_COMMIT_DIFF_RENDERED_ROWS = 100;
 /** The mutation contract's `selectedFileIds` bound for stage, unstage and commit. */
 const MAX_SELECTION = 200;
 
@@ -65,12 +74,21 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
   const [status, setStatus] = useState('');
   const [busy, setBusy] = useState(false);
   const [worktree, setWorktree] = useState<string | null>(null);
+  const [statusWindowStart, setStatusWindowStart] = useState(0);
+  const [historyWindowStart, setHistoryWindowStart] = useState(0);
+  const [refWindowStart, setRefWindowStart] = useState(0);
+  const [worktreeWindowStart, setWorktreeWindowStart] = useState(0);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [diff, setDiff] = useState<GitDiff | null>(null);
   const [commit, setCommit] = useState<{ objectId: string; diff: GitDiff; provenance: GitProvenance | null; provenanceError: string; provenancePending: boolean } | null>(null);
   // Refreshing guards unmounts the detail, but a refused tag must remain retryable for the same immutable target.
   const [tagDraft, setTagDraft] = useState<{ target: string; name: string } | null>(null);
   const olderPending = useRef(false);
+  const historyHeading = useRef<HTMLHeadingElement | null>(null);
+  const historyContinuation = useRef<HTMLButtonElement | null>(null);
+  // Removing the focused continuation control after either a final API page or a cached
+  // window transition restores focus to the durable history landmark.
+  const focusHistoryAfterContinuationRemoved = useRef(false);
   const refsPending = useRef(false);
   const commitRequest = useRef(0);
   const [refresh, setRefresh] = useState(0);
@@ -85,6 +103,11 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
   useEffect(() => {
     if (!supported) return;
     const controller = new AbortController();
+    setHistoryWindowStart(0);
+    setStatusWindowStart(0);
+    setRefWindowStart(0);
+    setWorktreeWindowStart(0);
+    focusHistoryAfterContinuationRemoved.current = false;
     diffGeneration.current++;
     setDiff(null); setCommit(null);
     setError('');
@@ -116,6 +139,12 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
   }, [client, jobId, supported, worktree, refresh]);
 
   useEffect(() => () => { active.current?.abort(); active.current = null; }, []);
+
+  useLayoutEffect(() => {
+    if (!focusHistoryAfterContinuationRemoved.current || loaded?.history?.nextCursor !== null) return;
+    focusHistoryAfterContinuationRemoved.current = false;
+    historyHeading.current?.focus();
+  }, [loaded?.history?.entries.length, loaded?.history?.nextCursor, historyWindowStart]);
 
   /** Bounded automatic ref loading; any remaining anchored cursor is offered as explicit continuation. */
   async function readRefs(prefix: string, signal: AbortSignal): Promise<GitRefs> {
@@ -152,6 +181,12 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
       conflicted: entries.filter(entry => entry.conflict !== null),
     };
   }, [statusData]);
+  const allStatusRows = (['staged', 'unstaged', 'untracked', 'conflicted'] as const)
+    .flatMap(group => groups[group].map(entry => ({ group, entry })));
+  const visibleStatusRows = allStatusRows.slice(statusWindowStart, statusWindowStart + MAX_STATUS_RENDERED_ROWS);
+  const visibleGroups = Object.fromEntries((['staged', 'unstaged', 'untracked', 'conflicted'] as const).map(group =>
+    [group, visibleStatusRows.filter(row => row.group === group).map(row => row.entry)])) as typeof groups;
+  const statusRowsTruncated = allStatusRows.length > MAX_STATUS_RENDERED_ROWS;
 
   function guards(): RequestData<'gitStageRequest'>['guards'] | null {
     if (!statusData) return null;
@@ -213,7 +248,7 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
       const first = await client.get('gitDiff', path);
       let page = first.data;
       const files = [...page.files];
-      for (let pages = 1; page.nextCursor && pages < MAX_STATUS_PAGES; pages++) {
+      for (let pages = 1; page.nextCursor && pages < MAX_COMMIT_DIFF_PAGES; pages++) {
         page = (await client.get('gitDiff', `${path}&cursor=${page.nextCursor}`)).data;
         files.push(...page.files);
       }
@@ -221,7 +256,7 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
       const target = `${base}:${objectId}`;
       setTagDraft(previous => previous?.target === target ? previous : { target, name: '' });
       // Changed files and immutable-target tagging do not depend on the optional export finishing.
-      setCommit({ objectId, diff: { ...page, files, complete: page.complete && page.nextCursor === null }, provenance: null,
+      setCommit({ objectId, diff: { ...page, files, complete: page.complete && page.nextCursor === null && files.length <= MAX_COMMIT_DIFF_RENDERED_ROWS }, provenance: null,
         provenanceError: '', provenancePending: true });
       void provenanceRead.then(provenance => {
         if (!current()) return;
@@ -254,11 +289,46 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
       const page = (await client.get('gitHistory', `${base}/history?cursor=${cursor}&limit=20${query ? `&${query}` : ''}`)).data;
       if (generation !== diffGeneration.current) return;
       // Append only to the history this page continues; a duplicate or stale page is dropped.
-      setLoaded(previous => previous?.history && previous.history.nextCursor === cursor
-        ? { ...previous, history: { ...page, entries: [...previous.history.entries, ...page.entries] } } : previous);
+      // Restore terminal focus only if the disappearing continuation still owns focus.
+      const shouldRestoreFocus = page.nextCursor === null && document.activeElement === historyContinuation.current;
+      focusHistoryAfterContinuationRemoved.current = false;
+      const nextHistoryLength = loaded.history.entries.length + page.entries.length;
+      setHistoryWindowStart(Math.max(0, nextHistoryLength - MAX_HISTORY_RENDERED_ROWS));
+      setLoaded(previous => {
+        if (!previous?.history || previous.history.nextCursor !== cursor) return previous;
+        if (shouldRestoreFocus && document.activeElement === historyContinuation.current) focusHistoryAfterContinuationRemoved.current = true;
+        return { ...previous, history: { ...page, entries: [...previous.history.entries, ...page.entries] } };
+      });
     } catch (failure: unknown) {
       if (generation === diffGeneration.current) setStatus(withApiFailureReference(copy.historyChanged, failure));
     } finally { olderPending.current = false; }
+  }
+
+  function olderHistoryWindow() {
+    const history = loaded?.history;
+    if (!history) return;
+    if (historyWindowStart + MAX_HISTORY_RENDERED_ROWS < history.entries.length) {
+      const nextStart = Math.min(history.entries.length - MAX_HISTORY_RENDERED_ROWS,
+        historyWindowStart + MAX_HISTORY_RENDERED_ROWS);
+      const continuationWillDisappear = nextStart + MAX_HISTORY_RENDERED_ROWS >= history.entries.length && history.nextCursor === null;
+      if (continuationWillDisappear && document.activeElement === historyContinuation.current) {
+        focusHistoryAfterContinuationRemoved.current = true;
+      }
+      setHistoryWindowStart(nextStart);
+    } else if (history.nextCursor) {
+      void older(history.nextCursor);
+    }
+  }
+
+  function olderRefsWindow() {
+    const refs = loaded?.refs;
+    if (!refs) return;
+    if (refWindowStart + MAX_REF_RENDERED_ROWS < refs.refs.length) {
+      setRefWindowStart(previous => Math.min(refs.refs.length - MAX_REF_RENDERED_ROWS,
+        previous + MAX_REF_RENDERED_ROWS));
+    } else if (refs.nextCursor) {
+      void moreRefs(refs.nextCursor);
+    }
   }
 
   function toggle(id: string) {
@@ -331,14 +401,18 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
             {statusData.headObjectId && <> <code title={statusData.headObjectId}>{short(statusData.headObjectId)}</code></>}</dd>
           <dt>{copy.objectFormat}</dt><dd><code>{repository.objectFormat}</code></dd>
         </dl>
-        <ul aria-label={copy.worktrees}>{statusData.notices.map(notice => <li key={notice.code}>
+        {statusData.notices.length > MAX_NOTICE_RENDERED_ROWS && <p role="alert">{copy.noticesWindowed}</p>}
+        <ul aria-label={copy.worktrees}>{statusData.notices.slice(0, MAX_NOTICE_RENDERED_ROWS).map(notice => <li key={notice.code}>
           <StateMark tone={notice.code === 'clean' ? 'settled' : notice.code === 'busy' || notice.code === 'active-worker' ? 'active' : notice.code === 'conflicted' ? 'stopped' : 'pending'}>{notice.code}</StateMark> {notice.message}
         </li>)}</ul>
         {statusData.busy && <p>{copy.busy}</p>}
       </section>
       {loaded.worktrees && loaded.worktrees.worktrees.length > 1 && <section aria-labelledby="git-worktrees-title">
         <h3 id="git-worktrees-title">{copy.worktrees}</h3>
-        <ul>{loaded.worktrees.worktrees.map(item => <li key={item.worktreeId}>
+        {loaded.worktrees.worktrees.length > MAX_WORKTREE_RENDERED_ROWS && <p role="alert">{copy.worktreesWindowed}</p>}
+        {loaded.worktrees.worktrees.length > MAX_WORKTREE_RENDERED_ROWS && <button type="button" disabled={worktreeWindowStart === 0}
+          onClick={() => setWorktreeWindowStart(value => Math.max(0, value - MAX_WORKTREE_RENDERED_ROWS))}>{copy.newerWorktrees}</button>}
+        <ul>{loaded.worktrees.worktrees.slice(worktreeWindowStart, worktreeWindowStart + MAX_WORKTREE_RENDERED_ROWS).map(item => <li key={item.worktreeId}>
           <code>{item.worktreeId}</code> {item.primary ? copy.primary : copy.linked} · {headLabel(item.headState, item.headRefName, item.headObjectId)}
           {item.ownerRunId && <> · {textMessage(copy.owner, { run: item.ownerRunId })}</>}
           {' '}<button type="button" disabled={busy || item.worktreeId === worktreeId} onClick={() => { setWorktree(item.primary ? null : item.worktreeId); }}>
@@ -348,13 +422,20 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
               ({ action: 'git.worktree.remove', worktreeId: item.worktreeId, guards: guarded })).then(done => { if (done) setWorktree(null); }); }}>
             {textMessage(copy.removeWorktree, { worktree: item.worktreeId })}</button>}
         </li>)}</ul>
+        {loaded.worktrees.worktrees.length > MAX_WORKTREE_RENDERED_ROWS && <button type="button"
+          disabled={worktreeWindowStart + MAX_WORKTREE_RENDERED_ROWS >= loaded.worktrees.worktrees.length}
+          onClick={() => setWorktreeWindowStart(value => Math.min(loaded.worktrees!.worktrees.length - MAX_WORKTREE_RENDERED_ROWS,
+            value + MAX_WORKTREE_RENDERED_ROWS))}>{copy.olderWorktrees}</button>}
       </section>}
       <section aria-labelledby="git-changes-title">
         <h3 id="git-changes-title">{copy.changes}</h3>
         {!statusData.complete && <p role="alert">{copy.incomplete}</p>}
-        {(['staged', 'unstaged', 'untracked', 'conflicted'] as const).map(group => groups[group].length > 0 && <fieldset key={group}>
+        {statusRowsTruncated && <p role="status">{copy.changesWindowed}</p>}
+        {statusRowsTruncated && <button type="button" disabled={statusWindowStart === 0}
+          onClick={() => setStatusWindowStart(previous => Math.max(0, previous - MAX_STATUS_RENDERED_ROWS))}>{copy.previousChanges}</button>}
+        {(['staged', 'unstaged', 'untracked', 'conflicted'] as const).map(group => visibleGroups[group].length > 0 && <fieldset key={group}>
           <legend>{copy[group]}</legend>
-          <ul>{groups[group].map(entry => <li key={`${group}:${entry.fileId}`}>
+          <ul>{visibleGroups[group].map(entry => <li key={`${group}:${entry.fileId}`}>
             {group !== 'conflicted' && <input type="checkbox" id={`git-${group}-${entry.fileId}`} checked={selected.has(`${group}:${entry.fileId}`)}
               aria-label={textMessage(copy.select, { path: entry.path, group: copy[group] })} onChange={() => { toggle(`${group}:${entry.fileId}`); }} />}
             <code>{entry.path}</code>{entry.originalPath && <> ← <code>{entry.originalPath}</code></>}
@@ -363,6 +444,9 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
               {textMessage(copy.showDiff, { path: entry.path })}</button>}
           </li>)}</ul>
         </fieldset>)}
+        {statusRowsTruncated && <button type="button" disabled={statusWindowStart + MAX_STATUS_RENDERED_ROWS >= allStatusRows.length}
+          onClick={() => setStatusWindowStart(previous => Math.min(allStatusRows.length - MAX_STATUS_RENDERED_ROWS,
+            previous + MAX_STATUS_RENDERED_ROWS))}>{copy.nextChanges}</button>}
         {groups.staged.length + groups.unstaged.length + groups.untracked.length + groups.conflicted.length === 0 && <p>{copy.noChanges}</p>}
         {statusData.counts.ignored > 0 && <p>{textMessage(copy.ignoredCount, { count: String(statusData.counts.ignored) })}</p>}
         {(selectedIn('unstaged', 'untracked').length > MAX_SELECTION || selectedIn('staged').length > MAX_SELECTION) &&
@@ -380,14 +464,18 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
           {diff.patch.truncated && <p>{copy.truncated}</p>}
         </section>}
       </section>
+      {groups.staged.length > MAX_STAGED_PREVIEW_ROWS && <p role="alert">{textMessage(copy.stagedPreviewLimited, { count: String(MAX_STAGED_PREVIEW_ROWS) })}</p>}
       {groups.staged.length > MAX_SELECTION && <p role="alert">{textMessage(copy.commitTooLarge, { max: MAX_SELECTION, count: groups.staged.length })}</p>}
-      <CommitForm staged={groups.staged} parent={statusData.headObjectId}
+      <CommitForm staged={groups.staged} parent={statusData.headObjectId} resetKey={statusData.worktreeVersion}
         disabled={!writable || !statusData.complete || groups.conflicted.length > 0 || groups.staged.length > MAX_SELECTION}
         onCommit={message => act('gitCommitRequest', copy.commitAction, guarded => ({ action: 'git.commit', worktreeId, guards: guarded,
           selectedFileIds: groups.staged.map(entry => entry.fileId), message }))} />
       <section aria-labelledby="git-history-title">
-        <h3 id="git-history-title">{copy.history}</h3>
-        {loaded.history?.entries.length ? <ol aria-label={copy.history}>{loaded.history.entries.map(entry => <li key={entry.objectId}>
+        <h3 id="git-history-title" ref={historyHeading} tabIndex={-1}>{copy.history}</h3>
+        {loaded.history?.entries.length ? <>
+          {loaded.history.entries.length > MAX_HISTORY_RENDERED_ROWS && <button type="button" disabled={historyWindowStart === 0}
+            onClick={() => setHistoryWindowStart(previous => Math.max(0, previous - MAX_HISTORY_RENDERED_ROWS))}>{copy.newerHistory}</button>}
+          <ol aria-label={copy.history}>{loaded.history.entries.slice(historyWindowStart, historyWindowStart + MAX_HISTORY_RENDERED_ROWS).map(entry => <li key={entry.objectId}>
           <code title={entry.objectId}>{short(entry.objectId)}</code> {entry.subject}
           {' '}{entry.mapping
             ? <StateMark tone={entry.mapping.acceptance === 'accepted' ? 'settled' : 'pending'}>{textMessage(copy.mapped, { revision: entry.mapping.revisionId, acceptance: entry.mapping.acceptance })}</StateMark>
@@ -396,11 +484,13 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
             {' '}<a href={sourceDirectoryPath(basePath, { jobId, runId: repository.runId, revisionId: entry.mapping.revisionId })}>{copy.openSources}</a>
             {' '}<a href={runPath(basePath, jobId, repository.runId)}>{copy.openRevision}</a></>}
           {' '}<button type="button" onClick={() => { void showCommit(entry.objectId); }}>{textMessage(copy.inspect, { object: short(entry.objectId) })}</button>
-        </li>)}</ol> : <p>{copy.noHistory}</p>}
-        {loaded.history?.nextCursor && <button type="button" disabled={busy} onClick={() => { void older(loaded.history?.nextCursor ?? ''); }}>{copy.olderHistory}</button>}
+          </li>)}</ol></> : <p>{copy.noHistory}</p>}
+        {loaded.history && (historyWindowStart + MAX_HISTORY_RENDERED_ROWS < loaded.history.entries.length || loaded.history.nextCursor) && <button ref={historyContinuation} type="button" disabled={busy}
+          onBlur={event => { if (event.currentTarget.isConnected) focusHistoryAfterContinuationRemoved.current = false; }}
+          onClick={olderHistoryWindow}>{copy.olderHistory}</button>}
         {commit && <section aria-labelledby="git-commit-title">
           <h4 id="git-commit-title">{textMessage(copy.commitDetail, { object: short(commit.objectId) })}</h4>
-          <ul>{commit.diff.files.map(file => <li key={file.fileId}><code>{file.path}</code> {file.change}{file.binary && <> <span>{copy.binaryCommit}</span></>}</li>)}</ul>
+          <ul>{commit.diff.files.slice(0, MAX_COMMIT_DIFF_RENDERED_ROWS).map(file => <li key={file.fileId}><code>{file.path}</code> {file.change}{file.binary && <> <span>{copy.binaryCommit}</span></>}</li>)}</ul>
           {!commit.diff.complete && <p role="alert">{copy.commitIncomplete}</p>}
           <h5>{copy.provenance}</h5>
           {commit.provenance ? <>
@@ -419,8 +509,10 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
       <section aria-labelledby="git-branches-title">
         <h3 id="git-branches-title">{copy.branches}</h3>
         {dirty && <p>{copy.dirtySwitch}</p>}
-        {loaded.refs?.nextCursor && <p>{copy.refsIncomplete}</p>}
-        <ul>{loaded.refs?.refs.map(ref => {
+        {(loaded.refs?.nextCursor || (loaded.refs?.refs.length ?? 0) > MAX_REF_RENDERED_ROWS) && <p>{copy.refsIncomplete}</p>}
+        {loaded.refs && loaded.refs.refs.length > MAX_REF_RENDERED_ROWS && <button type="button" disabled={refWindowStart === 0}
+          onClick={() => setRefWindowStart(previous => Math.max(0, previous - MAX_REF_RENDERED_ROWS))}>{copy.newerRefs}</button>}
+        <ul>{loaded.refs?.refs.slice(refWindowStart, refWindowStart + MAX_REF_RENDERED_ROWS).map(ref => {
           // /refs is repository-scoped; its current flag describes only the primary checkout.
           const current = ref.kind === 'branch' && statusData.headState !== 'detached' && ref.displayName === statusData.headRefName;
           const elsewhere = ref.kind === 'branch' && (loaded.worktrees?.worktrees.some(tree => tree.worktreeId !== worktreeId &&
@@ -437,8 +529,8 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
               {textMessage(copy.deleteAction, { name: branch(ref.displayName) })}</button>
           </>}
         </li>; })}</ul>
-        {loaded.refs?.nextCursor && <button type="button" disabled={busy}
-          onClick={() => { void moreRefs(loaded.refs?.nextCursor ?? ''); }}>{copy.moreRefs}</button>}
+        {loaded.refs && (refWindowStart + MAX_REF_RENDERED_ROWS < loaded.refs.refs.length || loaded.refs.nextCursor) && <button type="button" disabled={busy}
+          onClick={olderRefsWindow}>{refWindowStart + MAX_REF_RENDERED_ROWS < loaded.refs.refs.length ? copy.olderRefs : copy.moreRefs}</button>}
         {statusData.headObjectId && <>
           <NameForm label={copy.branchName} action={copy.branchAction} disabled={!writable} onSubmit={name => act('gitBranchCreateRequest', copy.branchAction,
             guarded => ({ action: 'git.branch.create', worktreeId, guards: guarded, name, startObjectId: statusData.headObjectId ?? '' }))} />
@@ -472,15 +564,21 @@ function NameForm({ label, action, disabled, onSubmit, draft }: {
   </form>;
 }
 
-function CommitForm({ staged, parent, disabled, onCommit }: {
-  staged: GitStatusEntry[]; parent: string | null; disabled: boolean; onCommit: (message: string) => Promise<boolean>;
+function CommitForm({ staged, parent, resetKey, disabled, onCommit }: {
+  staged: GitStatusEntry[]; parent: string | null; resetKey: string; disabled: boolean; onCommit: (message: string) => Promise<boolean>;
 }) {
   const [message, setMessage] = useState('');
+  const [start, setStart] = useState(0);
+  useEffect(() => setStart(0), [resetKey]);
   return <section aria-labelledby="git-commit-form-title">
     <h3 id="git-commit-form-title">{copy.commitTitle}</h3>
-    {staged.length === 0 ? <p>{copy.nothingStaged}</p> : <>
+        {staged.length === 0 ? <p>{copy.nothingStaged}</p> : <>
       <p>{copy.commitFiles}</p>
-      <ul aria-label={copy.commitFiles}>{staged.map(entry => <li key={entry.fileId}><code>{entry.path}</code> {entry.staged}</li>)}</ul>
+      {staged.length > MAX_STAGED_PREVIEW_ROWS && <button type="button" disabled={start === 0}
+        onClick={() => setStart(previous => Math.max(0, previous - MAX_STAGED_PREVIEW_ROWS))}>{copy.previousStaged}</button>}
+      <ul aria-label={copy.commitFiles}>{staged.slice(start, start + MAX_STAGED_PREVIEW_ROWS).map(entry => <li key={entry.fileId}><code>{entry.path}</code> {entry.staged}</li>)}</ul>
+      {staged.length > MAX_STAGED_PREVIEW_ROWS && <button type="button" disabled={start + MAX_STAGED_PREVIEW_ROWS >= staged.length}
+        onClick={() => setStart(previous => Math.min(staged.length - MAX_STAGED_PREVIEW_ROWS, previous + MAX_STAGED_PREVIEW_ROWS))}>{copy.nextStaged}</button>}
       <p>{parent ? textMessage(copy.parent, { object: parent }) : copy.noParent}</p>
       <form onSubmit={event => { event.preventDefault(); if (message.trim()) void onCommit(message).then(done => { if (done) setMessage(''); }); }}>
         <label for="git-commit-message">{copy.message}</label>

@@ -337,6 +337,8 @@ it('offers bounded anchored continuation beyond 2,000 refs without duplicate adm
   const view = mount();
   // Avoid computing thousands of accessible names in jsdom; these are native, text-labelled buttons.
   const button = (name: string) => [...view.container.querySelectorAll('button')].find(item => item.textContent === name);
+  await waitFor(() => expect(button('Older branches and tags')).toBeTruthy());
+  for (let page = 0; page < 44; page++) fireEvent.click(button('Older branches and tags')!);
   await waitFor(() => expect(button('Switch to topic1999')).toBeTruthy());
   expect(button('Switch to topic2000')).toBeUndefined();
   expect(screen.getByText(/branch and tag list is incomplete/i)).toBeTruthy();
@@ -344,6 +346,8 @@ it('offers bounded anchored continuation beyond 2,000 refs without duplicate adm
   fireEvent.click(more); fireEvent.click(more);
   expect(transport.get.mock.calls.filter(call => call[1].includes('cursor=2000'))).toHaveLength(1);
   gate.resolve();
+  await waitFor(() => expect(button('Older branches and tags')).toBeTruthy());
+  fireEvent.click(button('Older branches and tags')!);
   await waitFor(() => expect(button('Switch to topic2000')).toBeTruthy());
   expect(button('More branches and tags')).toBeUndefined();
   fireEvent.click(button('Switch to topic2000')!);
@@ -385,12 +389,92 @@ it('traverses a 1,001-commit history without omissions, duplicates or mutations'
   for (let count = 20; count < all.length; count += 20) {
     const more = [...view.container.querySelectorAll('button')].find(button => button.textContent === 'Older commits')!;
     fireEvent.click(more);
-    await waitFor(() => expect(items().length).toBe(Math.min(count + 20, all.length)));
+    const nextCount = Math.min(count + 20, all.length);
+    const expectedWindow = all.slice(Math.max(0, nextCount - 200), nextCount).map(item => item.objectId);
+    await waitFor(() => {
+      expect(items().length).toBe(Math.min(nextCount, 200));
+      expect([...items()].map(item => item.querySelector('code')?.title)).toEqual(expectedWindow);
+    });
   }
-  expect([...items()].map(item => item.querySelector('code')?.title)).toEqual(all.map(item => item.objectId));
+  expect(items().length).toBeLessThanOrEqual(200);
+  expect([...items()].map(item => item.querySelector('code')?.title)).toEqual(all.slice(-200).map(item => item.objectId));
   expect(transport.get.mock.calls.filter(call => call[0] === 'gitHistory')).toHaveLength(51);
+  const newer = screen.getByRole('button', { name: 'Newer commits' });
+  expect(newer).toHaveProperty('disabled', false);
+  fireEvent.click(newer);
+  await waitFor(() => expect([...items()].map(item => item.querySelector('code')?.title)).toEqual(all.slice(601, 801).map(item => item.objectId)));
+  const older = screen.getByRole('button', { name: 'Older commits' });
+  older.focus();
+  fireEvent.click(older);
+  await waitFor(() => expect([...items()].map(item => item.querySelector('code')?.title)).toEqual(all.slice(801, 1001).map(item => item.objectId)));
+  await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'History' })));
   expect(transport.post).not.toHaveBeenCalled();
 }, 20_000);
+
+it('bounds a large commit detail to 100 rows and labels the remaining diff incomplete', async () => {
+  const diffPage = (start: number, nextCursor: string | null) => ({ data: {
+    repositoryId, worktreeId, scope: 'commit', commitObjectId: head, parentObjectId: null, complete: true, nextCursor, patch: null,
+    files: Array.from({ length: 200 }, (_, index) => ({ fileId: `file_${String(start + index).padStart(32, '0')}`,
+      path: `large/file-${start + index}.c`, pathEscaped: false, originalPath: null, change: 'modified', oldObjectId: older,
+      newObjectId: head, oldMode: '100644', newMode: '100644', binary: false, additions: 1, deletions: 0, newSizeBytes: 8 })),
+  } });
+  transport.get.mockImplementation(async (kind, path) => {
+    if (kind === 'gitDiff' && path.includes('scope=commit')) {
+      return path.includes('cursor=diff_page_2') ? diffPage(200, 'diff_page_3') : diffPage(0, 'diff_page_2');
+    }
+    return serve(kind, path);
+  });
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: `Inspect ${head.slice(0, 12)}` }));
+  const heading = await screen.findByRole('heading', { name: `Commit ${head.slice(0, 12)}` });
+  const detail = heading.closest('section');
+  expect(detail?.querySelectorAll('ul li')).toHaveLength(100);
+  expect(within(detail!).getByText(/This commit changes more files than the workbench lists/).textContent).toMatch(/list above is incomplete/);
+  expect(transport.get.mock.calls.filter(([kind, path]) => kind === 'gitDiff' && path.includes('scope=commit'))).toHaveLength(1);
+  expect(detail?.querySelectorAll('li')).toHaveLength(100);
+  expect(transport.get.mock.calls.some(([kind, path]) => kind === 'gitDiff' && path.includes('cursor=diff_page_3'))).toBe(false);
+});
+
+it('keeps the total mounted Git result rows at or below 500 with duplicated status groups', async () => {
+  entries = Array.from({ length: 400 }, (_, index) => entry(`file_${index}`, `src/f${index}.c`, 'modified', 'modified'));
+  historyPages.first = { entries: [commitSummary(head, 'Head', false), ...Array.from({ length: 199 }, (_, index) =>
+    commitSummary(`a${String(index).padStart(39, '0')}`, `Commit ${index}`, false))], nextCursor: null };
+  const refs = Array.from({ length: 200 }, (_, index) => ({ refId: `ref_${index}`, kind: 'branch',
+    displayName: index === 0 ? 'refs/heads/main' : `refs/heads/topic${index}`, objectId: other, peeledObjectId: null,
+    version: 'v1', current: index === 0 }));
+  const worktrees = Array.from({ length: 60 }, (_, index) => ({ worktreeId: index === 0 ? worktreeId : `worktree_${String(index).padStart(32, '0')}`,
+    primary: index === 0, ownerRunId: null, worktreeVersion: 'tree_v1', headState: 'attached', headObjectId: head,
+    headRefName: 'refs/heads/main', dirty: false }));
+  const notices = Array.from({ length: 10 }, (_, index) => ({ code: `notice-${index}`, message: `Notice ${index}` }));
+  const diffFiles = Array.from({ length: 200 }, (_, index) => ({ fileId: `diff_${index}`, path: `diff/${index}.c`, pathEscaped: false,
+    originalPath: null, change: 'modified', oldObjectId: older, newObjectId: head, oldMode: '100644', newMode: '100644',
+    binary: false, additions: 1, deletions: 0, newSizeBytes: 1 }));
+  transport.get.mockImplementation(async (kind, path) => {
+    if (kind === 'gitRefs') return { data: { repositoryId, refs, nextCursor: null } };
+    if (kind === 'gitWorktrees') return { data: { repositoryId, worktrees } };
+    if (kind === 'gitStatus') return { data: { ...status(false), notices } };
+    if (kind === 'gitDiff' && path.includes('scope=commit')) return { data: { repositoryId, worktreeId, scope: 'commit',
+      commitObjectId: head, parentObjectId: older, complete: true, nextCursor: null, files: diffFiles, patch: null } };
+    return serve(kind, path);
+  });
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: `Inspect ${head.slice(0, 12)}` }));
+  await screen.findByRole('heading', { name: `Commit ${head.slice(0, 12)}` });
+  expect(screen.getByText(/This commit changes more files than the workbench lists/)).toBeTruthy();
+  expect(document.querySelectorAll('li').length).toBe(500);
+  expect(screen.getByText(/bounded window of changed files/)).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'Older work trees' })).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'Older branches and tags' })).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Next changes' }));
+  expect(screen.getByText('src/f70.c')).toBeTruthy();
+  expect(document.querySelectorAll('li').length).toBe(500);
+  fireEvent.click(screen.getByRole('button', { name: 'Next staged files' }));
+  expect(document.querySelectorAll('li').length).toBe(500);
+  fireEvent.click(screen.getByRole('button', { name: 'Older branches and tags' }));
+  expect(document.querySelectorAll('li').length).toBe(500);
+  fireEvent.click(screen.getByRole('button', { name: 'Older work trees' }));
+  expect(document.querySelectorAll('li').length).toBe(500);
+});
 
 it('explains unavailable Git without any request and keeps the route usable', () => {
   mount([capability('git', 'unavailable', 'Git 2.20.1 is older than the required 2.36.0.', 'GIT_VERSION_UNSUPPORTED')]);
@@ -443,9 +527,12 @@ it('pages history, links a mapped commit to its recorded source and verifies its
   mount();
   expect(await screen.findByText('Work in progress')).toBeTruthy();
   expect(screen.getByText('Not mapped to a reconstruction revision')).toBeTruthy();
-  fireEvent.click(screen.getByRole('button', { name: 'Older commits' }));
+  const olderButton = screen.getByRole('button', { name: 'Older commits' });
+  olderButton.focus();
+  fireEvent.click(olderButton);
   expect(await screen.findByText('Reconstruction revision revision_1 (accepted)')).toBeTruthy();
   expect(screen.queryByRole('button', { name: 'Older commits' })).toBeNull();
+  await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'History' })));
   const sources = screen.getByRole('link', { name: 'Open the recorded source revision' });
   expect(sources.getAttribute('href')).toBe(`/nested/jobs/${jobId}/runs/run_1/revisions/revision_1/sources/root`);
   fireEvent.click(screen.getByRole('button', { name: `Inspect ${older.slice(0, 12)}` }));
@@ -453,6 +540,23 @@ it('pages history, links a mapped commit to its recorded source and verifies its
   expect(screen.getByText(/Export verified against the commit tree/)).toBeTruthy();
   expect(screen.getByRole('link', { name: 'Download source export' }).getAttribute('href')).toBe(`/nested/api/v1${base}/exports/${older}`);
   expect(screen.getByText('Named by: refs/tags/v1')).toBeTruthy();
+});
+
+it('does not steal focus when the user moves away while the final history page is pending', async () => {
+  let release!: () => void;
+  historyGate = new Promise<void>(resolve => { release = resolve; });
+  mount();
+  const olderButton = await screen.findByRole('button', { name: 'Older commits' });
+  olderButton.focus();
+  fireEvent.click(olderButton);
+  await waitFor(() => expect(transport.get.mock.calls.some(([kind, path]) => kind === 'gitHistory' && path.includes('cursor=page2'))).toBe(true));
+
+  const refresh = screen.getByRole('button', { name: 'Refresh repository' });
+  refresh.focus();
+  release();
+  await screen.findByText('Record candidate');
+  await waitFor(() => expect(screen.queryByRole('button', { name: 'Older commits' })).toBeNull());
+  expect(document.activeElement).toBe(refresh);
 });
 
 it('disables switching while the work tree is dirty and switches to the exact ref when clean', async () => {
@@ -513,6 +617,37 @@ it('reads every status page before review and keeps the commit message when the 
   expect(screen.getByLabelText('Commit message')).toHaveProperty('value', 'Keep this draft');
 });
 
+it('keeps the staged subset actionable when status spans three bounded pages', async () => {
+  const all = Array.from({ length: 401 }, (_, index) => entry(
+    `file_${String(index).padStart(3, '0')}`,
+    index === 0 ? 'src/first.c' : `src/untracked-${index}.c`,
+    index === 0 ? 'added' : 'none', 'none', index !== 0,
+  ));
+  const cursors = new Map<string | null, readonly [number, string | null]>([
+    [null, [0, 'status_page_2']], ['status_page_2', [200, 'status_page_3']], ['status_page_3', [400, null]],
+  ]);
+  transport.get.mockImplementation(async (kind, path) => {
+    const [route, query = ''] = path.split('?');
+    if (kind === 'gitStatus' && route === `${base}/status`) {
+      const cursor = new URLSearchParams(query).get('cursor');
+      const page = cursors.get(cursor);
+      if (!page) throw new Error(`unexpected status cursor ${String(cursor)}`);
+      const [start, nextCursor] = page;
+      return { data: { ...status(true), counts: { staged: 1, unstaged: 0, untracked: 400, ignored: 0, conflicted: 0 },
+        entries: all.slice(start, start + 200), nextCursor } };
+    }
+    return serve(kind, path);
+  });
+  mount();
+  expect(await screen.findByRole('list', { name: /Exactly these staged files/ })).toBeTruthy();
+  expect(transport.get.mock.calls.filter(call => call[0] === 'gitStatus').map(call => call[1])).toEqual([
+    `${base}/status?limit=200`, `${base}/status?limit=200&cursor=status_page_2`,
+    `${base}/status?limit=200&cursor=status_page_3`,
+  ]);
+  expect(screen.getByRole('list', { name: /Exactly these staged files/ }).textContent).toContain('src/first.c');
+  expect(screen.getByRole('button', { name: 'Commit staged files' })).toHaveProperty('disabled', false);
+});
+
 it('follows ref pages so every branch stays reachable, and drops a displayed diff when the status is read again', async () => {
   paged = true;
   entries = [entry('file_s', 'src/util.c', 'modified', 'none')];
@@ -530,21 +665,24 @@ it('explains and disables a commit or selection beyond the 200-file request boun
   mount();
   expect(await screen.findByText(/201 files are staged, but one commit can include at most 200/)).toBeTruthy();
   expect(screen.getByRole('button', { name: 'Commit staged files' })).toHaveProperty('disabled', true);
-  document.querySelectorAll<HTMLInputElement>('input[type="checkbox"]').forEach(box => { fireEvent.click(box); });
+  for (let index = 0; index < 201; index++) {
+    if (index > 0 && index % 70 === 0) fireEvent.click(screen.getByRole('button', { name: 'Next changes' }));
+    fireEvent.click(screen.getByLabelText(`Select src/f${index}.c (Staged)`));
+  }
   expect(screen.getByText(/At most 200 files can be staged or unstaged in one action/)).toBeTruthy();
   expect(screen.getByRole('button', { name: 'Unstage selected' })).toHaveProperty('disabled', true);
 }, 20_000);
 
-it('lists every file of an inspected commit and drops an older-history page that arrives after a refresh', async () => {
+it('bounds an inspected commit diff and drops an older-history page that arrives after a refresh', async () => {
   paged = true;
   entries = [];
   mount();
   fireEvent.click(await screen.findByRole('button', { name: 'Older commits' }));
   expect(await screen.findByText('Record candidate')).toBeTruthy();
   fireEvent.click(screen.getByRole('button', { name: `Inspect ${older.slice(0, 12)}` }));
-  expect(await screen.findByText('src/second.c')).toBeTruthy();
-  expect(screen.getByText('src/main.c')).toBeTruthy();
-  expect(transport.get).toHaveBeenCalledWith('gitDiff', `${base}/diff?scope=commit&commit=${older}&limit=200&cursor=diff_page_2`);
+  expect(await screen.findByText('src/main.c')).toBeTruthy();
+  expect(screen.getByText(/This commit changes more files than the workbench lists/)).toBeTruthy();
+  expect(transport.get).not.toHaveBeenCalledWith('gitDiff', `${base}/diff?scope=commit&commit=${older}&limit=200&cursor=diff_page_2`);
   // A pending older page must not be appended to history that was read again meanwhile.
   let open = () => {};
   historyGate = new Promise<void>(resolve => { open = resolve; });
@@ -573,7 +711,7 @@ it('requests each older history page once and keeps changed files visible when p
   expect(screen.getByLabelText('Tag name')).toBeTruthy();
 });
 
-it.each(['success', 'timeout'])('shows paginated commit files and tagging while provenance is pending, then handles %s independently', async outcome => {
+it.each(['success', 'timeout'])('shows bounded commit files and tagging while provenance is pending, then handles %s independently', async outcome => {
   paged = true;
   historyPages.first = { entries: [commitSummary(older, 'Previous', true)], nextCursor: null };
   const gate = deferred();
@@ -586,8 +724,8 @@ it.each(['success', 'timeout'])('shows paginated commit files and tagging while 
   });
   mount();
   fireEvent.click(await screen.findByRole('button', { name: `Inspect ${older.slice(0, 12)}` }));
-  await screen.findByText('src/second.c');
-  expect(screen.getByText('src/main.c')).toBeTruthy();
+  expect(await screen.findByText('src/main.c')).toBeTruthy();
+  expect(screen.getByText(/This commit changes more files than the workbench lists/)).toBeTruthy();
   expect(screen.getByText('Reading provenance and source export…')).toBeTruthy();
   expect(screen.queryByRole('link', { name: 'Download source export' })).toBeNull();
   fireEvent.input(screen.getByLabelText('Tag name'), { target: { value: 'draft-without-export' } });
