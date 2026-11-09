@@ -23,8 +23,13 @@ test('source-tree budget gate refuses missing, non-finite, and over-budget evide
   assert.ok(sourceTreeBudgetGate(measurements).every(entry => entry.passed));
   assert.equal(sourceTreeBudgetGate({ ...measurements, firstChunkMs: undefined })
     .find(entry => entry.name === 'firstChunkMs').passed, false);
-  assert.equal(sourceTreeBudgetGate({ ...measurements, browserHeapBytes: Number.POSITIVE_INFINITY })
-    .find(entry => entry.name === 'browserHeapBytes').passed, false);
+  assert.equal(sourceTreeBudgetGate({ ...measurements, browserHeapPeakBytes: Number.POSITIVE_INFINITY })
+    .find(entry => entry.name === 'browserHeapPeakBytes').passed, false);
+  const heapPeakOverBudget = sourceTreeBudgetGate({ ...measurements, browserHeapBytes: 1,
+    browserHeapPeakBytes: SOURCE_TREE_BUDGETS.browserHeapPeakBytes + 1 })
+    .find(entry => entry.name === 'browserHeapPeakBytes');
+  assert.equal(heapPeakOverBudget.passed, false,
+    'A low later heap sample must not hide an over-budget observed peak');
   assert.equal(sourceTreeBudgetGate({ ...measurements, maximumMountedRows: 501 })
     .find(entry => entry.name === 'maximumMountedRows').passed, false);
   assert.equal(sourceTreeBudgetGate({ ...measurements, firstDataPageP95Ms: 501 })

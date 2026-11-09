@@ -41,8 +41,11 @@ CI runs both profiles. Loopback uses the 500 ms first-page ceiling; constrained
 emulates fourfold browser CPU slowdown, 10 Mbit/s download, 2 Mbit/s upload and
 100 ms round-trip latency, and uses the documented 1 s first-page ceiling. Both
 profiles gate the 100 ms local-feedback p95, 500 ms first preview chunk, 2 s
-maximum search first page, 128 MiB browser heap, 256 MiB incremental application
-RSS, 50 directory rows, 8 KiB request heads, and 1 MB response ceilings. The
+maximum search first page, 128 MiB maximum observed browser heap, 256 MiB
+incremental application RSS, 50 directory rows, 8 KiB request heads, and 1 MB
+response ceilings. The post-browsing and post-navigation heap samples remain
+separate measurements; neither can mask an over-budget peak sampled during the
+journey. The
 integration test also seeds 25,001 files and confirms the real catalog and
 revision readers refuse that over-limit input.
 
