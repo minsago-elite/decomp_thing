@@ -283,34 +283,36 @@ data class ModulePlan(
     val modules: List<PlannedModule>,
     val dependencyCycles: List<List<String>> = emptyList(),
 ) {
-    fun toJson(): String = buildString {
-        append("{\n  \"schemaVersion\": ").append(schemaVersion).append(",\n  \"modules\": [")
-        modules.sortedBy { it.id }.forEachIndexed { index, module ->
-            if (index > 0) append(',')
-            append("    {\n      \"id\": ").appendJsonString(module.id)
-            append(",\n      \"sourcePath\": ").appendJsonString(module.sourcePath)
-            append(",\n      \"headerPath\": ").appendJsonString(module.headerPath)
-            append(",\n      \"functionIds\": ").appendJsonStringArray(module.functionIds)
-            append(",\n      \"globalIds\": ").appendJsonStringArray(module.globalIds)
-            append(",\n      \"typeIds\": ").appendJsonStringArray(module.typeIds)
-            append(",\n      \"boundaryEvidence\": ").appendJsonStringArray(module.boundaryEvidence)
-            append("\n    }")
-        }
-        append("\n  ],\n  \"dependencyCycles\": [")
-        dependencyCycles.forEachIndexed { cycleIndex, cycle ->
-            if (cycleIndex > 0) append(',')
-            append('[')
-            cycle.forEachIndexed { moduleIndex, moduleId ->
-                if (moduleIndex > 0) append(',')
-                appendJsonString(moduleId)
-            }
-            append(']')
-        }
-        append("]\n}\n")
-    }
+    fun toJson(): String = buildString { appendCanonicalJson(this) }
 }
 
-private fun StringBuilder.appendJsonStringArray(values: List<String>) {
+internal fun ModulePlan.appendCanonicalJson(output: Appendable) {
+    output.append("{\n  \"schemaVersion\": ").append(schemaVersion.toString()).append(",\n  \"modules\": [")
+    modules.sortedBy { it.id }.forEachIndexed { index, module ->
+        if (index > 0) output.append(',')
+        output.append("    {\n      \"id\": ").appendJsonString(module.id)
+        output.append(",\n      \"sourcePath\": ").appendJsonString(module.sourcePath)
+        output.append(",\n      \"headerPath\": ").appendJsonString(module.headerPath)
+        output.append(",\n      \"functionIds\": ").appendJsonStringArray(module.functionIds)
+        output.append(",\n      \"globalIds\": ").appendJsonStringArray(module.globalIds)
+        output.append(",\n      \"typeIds\": ").appendJsonStringArray(module.typeIds)
+        output.append(",\n      \"boundaryEvidence\": ").appendJsonStringArray(module.boundaryEvidence)
+        output.append("\n    }")
+    }
+    output.append("\n  ],\n  \"dependencyCycles\": [")
+    dependencyCycles.forEachIndexed { cycleIndex, cycle ->
+        if (cycleIndex > 0) output.append(',')
+        output.append('[')
+        cycle.forEachIndexed { moduleIndex, moduleId ->
+            if (moduleIndex > 0) output.append(',')
+            output.appendJsonString(moduleId)
+        }
+        output.append(']')
+    }
+    output.append("]\n}\n")
+}
+
+private fun Appendable.appendJsonStringArray(values: List<String>) {
     append('[')
     values.forEachIndexed { index, value ->
         if (index > 0) append(", ")
@@ -319,7 +321,7 @@ private fun StringBuilder.appendJsonStringArray(values: List<String>) {
     append(']')
 }
 
-private fun StringBuilder.appendJsonString(value: String) {
+private fun Appendable.appendJsonString(value: String) {
     append('"')
     value.forEach { char ->
         when (char) {
