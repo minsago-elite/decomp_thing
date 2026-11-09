@@ -359,6 +359,152 @@ export async function prepareAuditPage({ tab, page, evaluate, ready, fulfilled }
   return interactions;
 }
 
+// Connection notice (#1896): the real offline/online path, driven by DevTools network emulation
+// so Chrome itself dispatches trusted `offline`/`online` events. Copy is from frontend/src/copy/shell.ts.
+export const connectionNoticeNames = { status: 'Connection status', offline: 'Browser reports offline', reconnected: 'Refresh loaded information' };
+export const connectedSessionText = 'Local session connected.';
+export const connectionNoticeShots = { offline: 'audit-connection-notice-offline.png', reconnected: 'audit-connection-notice-reconnected.png' };
+const onlineConditions = { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 };
+
+export const installConnectionProbe = `(() => {
+  const probe = window.__auditConnection = { events: [], token: Math.random().toString(36).slice(2) };
+  const record = event => probe.events.push({ type: event.type, isTrusted: event.isTrusted, onLine: navigator.onLine, atMs: performance.now() });
+  probe.remove = () => { removeEventListener('offline', record); removeEventListener('online', record); probe.removed = true; };
+  addEventListener('offline', record); addEventListener('online', record);
+  return probe.token;
+})()`;
+
+export const measureConnectionState = `(() => {
+  const storage = area => { try { const out = {}; for (let i = 0; i < area.length; i++) { const key = area.key(i); out[key] = area.getItem(key); } return JSON.stringify(out); } catch { return null; } };
+  const focused = document.activeElement;
+  const sections = [...document.querySelectorAll('section.connection-notice')];
+  const statuses = [...document.querySelectorAll('[role="status"]')].filter(element => element.getAttribute('aria-label') === ${JSON.stringify(connectionNoticeNames.status)});
+  const session = document.querySelector('aside.session-notice.is-connected');
+  return {
+    token: window.__auditConnection?.token ?? null, events: [...(window.__auditConnection?.events ?? [])],
+    onLine: navigator.onLine, href: location.href, historyLength: history.length,
+    navigations: performance.getEntriesByType('navigation').length, resources: performance.getEntriesByType('resource').length,
+    fetches: performance.getEntriesByType('resource').filter(entry => entry.initiatorType === 'fetch').map(entry => ({ path: new URL(entry.name).pathname, startTime: entry.startTime })),
+    sessionAuthenticated: !!session && [...session.querySelectorAll('p')].some(element => element.textContent.trim() === ${JSON.stringify(connectedSessionText)}),
+    local: storage(localStorage), session: storage(sessionStorage),
+    focus: focused ? focused.tagName.toLowerCase() + (focused.id ? '#' + focused.id : '') + ' ' + (focused.textContent || '').trim().slice(0, 40) : null,
+    dom: {
+      sections: sections.length,
+      sectionName: sections.length === 1 ? (document.getElementById(sections[0].getAttribute('aria-labelledby') || '')?.textContent ?? '').trim() : null,
+      statuses: statuses.length, statusInSection: statuses.length === 1 && sections.length === 1 && sections[0].contains(statuses[0]),
+      invalidAsides: sections.reduce((count, section) => count + section.querySelectorAll('aside[role="status"]').length, 0),
+    },
+  };
+})()`;
+
+/** Reduces an Accessibility.getFullAXTree response to the connection-notice roles. */
+export function connectionAxSummary(nodes) {
+  const shown = (Array.isArray(nodes) ? nodes : []).filter(node => !node.ignored);
+  const named = (role) => shown.filter(node => node.role?.value === role).map(node => String(node.name?.value ?? ''));
+  return { regions: named('region'), statuses: named('status') };
+}
+
+export async function qualifyConnectionNotice({ tab, cdp, evaluate, capture, delay, fulfilled, waitForValue }) {
+  const result = { events: [], phases: [], restoration: null };
+  const conditions = []; let offline = false; let probe = false; let accessibility = false;
+  const emulate = async (params) => { conditions.push(params); await cdp.call('Network.emulateNetworkConditions', params, tab.sessionId); offline = params.offline; };
+  const phase = async (name, online, sent) => {
+    const label = connectionNoticeNames[name];
+    const state = await waitForValue(async () => {
+      const value = await evaluate(tab, measureConnectionState);
+      return value.onLine === online && value.dom.sectionName === label ? value : null;
+    }, `connection notice ${name}`, 5000);
+    const { nodes } = await cdp.call('Accessibility.getFullAXTree', {}, tab.sessionId);
+    await capture(tab, connectionNoticeShots[name]);
+    const requests = fulfilled.slice(sent).map(({ method, path, status }) => ({ method, path, status }));
+    result.phases.push({ phase: name, dom: state.dom, ax: connectionAxSummary(nodes), screenshot: connectionNoticeShots[name],
+      requestsAtCapture: requests, requests });
+    return state;
+  };
+  try {
+    const token = await evaluate(tab, installConnectionProbe); probe = true;
+    await cdp.call('Network.enable', {}, tab.sessionId);
+    await cdp.call('Accessibility.enable', {}, tab.sessionId); accessibility = true;
+    const baseline = await evaluate(tab, measureConnectionState);
+    if (baseline.sessionAuthenticated !== true) throw new Error('Connection notice qualification requires an authenticated local session');
+    const start = fulfilled.length;
+    await emulate({ offline: true, latency: 0, downloadThroughput: -1, uploadThroughput: -1 });
+    await phase('offline', false, start);
+    const reconnectStart = fulfilled.length;
+    await emulate(onlineConditions);
+    await phase('reconnected', true, reconnectStart);
+    // Cover the shell's 250–1250 ms session revalidation jitter plus bounded render/CI scheduling.
+    await delay(2250);
+    const after = await evaluate(tab, measureConnectionState);
+    result.phases[1].requests = fulfilled.slice(reconnectStart).map(({ method, path, status }) => ({ method, path, status }));
+    result.events = after.events;
+    const onlineAt = after.events.find(event => event.type === 'online')?.atMs;
+    const baselineFetches = new Set(baseline.fetches.map(entry => `${entry.path}\0${entry.startTime}`));
+    const newFetches = after.fetches.filter(entry => !baselineFetches.has(`${entry.path}\0${entry.startTime}`));
+    const bootstrapFetch = newFetches.filter(entry => entry.path.endsWith('/api/v1/bootstrap'));
+    result.invariants = { token: after.token === token, href: after.href === baseline.href, history: after.historyLength === baseline.historyLength,
+      reload: after.navigations !== baseline.navigations, storage: after.local === baseline.local && after.session === baseline.session,
+      focus: after.focus === baseline.focus, authenticatedSession: baseline.sessionAuthenticated === true && after.sessionAuthenticated === true,
+      fetchResourceDelta: newFetches.length,
+      revalidationDelayMs: bootstrapFetch.length === 1 && Number.isFinite(onlineAt) ? Number((bootstrapFetch[0].startTime - onlineAt).toFixed(1)) : null };
+  } finally {
+    // Always leave the shared tab online with listeners and the AX domain released.
+    const failed = [];
+    if (offline || conditions.length) await emulate(onlineConditions).catch(error => failed.push(String(error)));
+    if (accessibility) await cdp.call('Accessibility.disable', {}, tab.sessionId).catch(error => failed.push(String(error)));
+    const removed = probe ? await evaluate(tab, `(() => { window.__auditConnection?.remove(); return window.__auditConnection?.removed === true && navigator.onLine; })()`).catch(() => false) : false;
+    result.restoration = { conditions: conditions.at(-1) ?? null, offline, listenersRemoved: removed === true, accessibilityDisabled: accessibility && !failed.length, failed };
+  }
+  return result;
+}
+
+/** Fails closed on any missing, duplicate, misbound or incorrect connection-notice evidence. */
+export function connectionNoticeFailures(evidence) {
+  const failures = []; const fail = (message) => failures.push(`connection notice: ${message}`);
+  if (!evidence || typeof evidence !== 'object') { fail('missing evidence'); return failures; }
+  const events = Array.isArray(evidence.events) ? evidence.events : [];
+  const expectedEvents = [{ type: 'offline', onLine: false }, { type: 'online', onLine: true }];
+  if (events.length !== 2 || !expectedEvents.every((want, index) => events[index]?.type === want.type && events[index]?.onLine === want.onLine))
+    fail(`event sequence ${JSON.stringify(events)}`);
+  if (!events.length || events.some(event => event?.isTrusted !== true)) fail('connectivity events were not trusted browser events');
+  const phases = Array.isArray(evidence.phases) ? evidence.phases : [];
+  if (phases.length !== 2 || phases[0]?.phase !== 'offline' || phases[1]?.phase !== 'reconnected') fail(`phases ${JSON.stringify(phases.map(entry => entry?.phase))}`);
+  for (const name of ['offline', 'reconnected']) {
+    const entry = phases.find(candidate => candidate?.phase === name);
+    if (!entry) { fail(`${name}: missing phase`); continue; }
+    const label = connectionNoticeNames[name]; const dom = entry.dom ?? {}; const ax = entry.ax ?? {};
+    if (dom.sections !== 1 || dom.sectionName !== label) fail(`${name}: DOM section ${JSON.stringify(dom)}`);
+    if (dom.statuses !== 1 || dom.statusInSection !== true) fail(`${name}: DOM status ${JSON.stringify(dom)}`);
+    if (dom.invalidAsides !== 0) fail(`${name}: aside[role=status] present`);
+    const regions = Array.isArray(ax.regions) ? ax.regions : []; const statuses = Array.isArray(ax.statuses) ? ax.statuses : [];
+    if (regions.filter(value => value === label).length !== 1 || regions.some(value => value === connectionNoticeNames[name === 'offline' ? 'reconnected' : 'offline']))
+      fail(`${name}: accessibility region ${JSON.stringify(regions)}`);
+    if (statuses.filter(value => value === connectionNoticeNames.status).length !== 1) fail(`${name}: accessibility status ${JSON.stringify(statuses)}`);
+    if (entry.screenshot !== connectionNoticeShots[name]) fail(`${name}: screenshot ${JSON.stringify(entry.screenshot)}`);
+    const requests = Array.isArray(entry.requests) ? entry.requests : null;
+    if (!requests) fail(`${name}: missing request evidence`);
+    else if (requests.some(request => request?.method !== 'GET')) fail(`${name}: connectivity sent a mutation ${JSON.stringify(requests)}`);
+    // Only the shell's documented session revalidation may follow a reconnect.
+    else if (name === 'offline' ? requests.length !== 0 : requests.length !== 1 || requests.some(request => request.path !== '/bootstrap' || request.status !== 200))
+      fail(`${name}: connectivity made requests ${JSON.stringify(requests)}`);
+    if (!Array.isArray(entry.requestsAtCapture)) fail(`${name}: missing screenshot-time request evidence`);
+  }
+  const invariants = evidence.invariants ?? {};
+  for (const key of ['token', 'href', 'history', 'storage', 'focus', 'authenticatedSession']) if (invariants[key] !== true) fail(`${key} changed or unmeasured`);
+  if (invariants.reload !== false) fail('page reloaded or unmeasured');
+  const revalidations = phases[1]?.requests?.length ?? 0;
+  if (!Number.isInteger(invariants.fetchResourceDelta) || invariants.fetchResourceDelta !== revalidations)
+    fail(`unexpected fetch-resource delta ${invariants.fetchResourceDelta}`);
+  if (!Number.isFinite(invariants.revalidationDelayMs) || invariants.revalidationDelayMs < 250 || invariants.revalidationDelayMs > 2250)
+    fail(`session revalidation timing ${invariants.revalidationDelayMs}`);
+  const restoration = evidence.restoration ?? {};
+  const restored = restoration.conditions ?? {};
+  if (restoration.offline !== false || Object.entries(onlineConditions).some(([key, value]) => restored[key] !== value)
+    || restoration.listenersRemoved !== true || restoration.accessibilityDisabled !== true || (restoration.failed?.length ?? 1) !== 0)
+    fail(`network/probe cleanup ${JSON.stringify(restoration)}`);
+  return failures;
+}
+
 export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, cdp, makeTarget, evaluate, ready, capture, delay }) {
   const waitForValue = async (check, label, timeout = 20000) => {
     const deadline = Date.now() + timeout;
@@ -533,6 +679,16 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
   rmSync(join(evidenceDirectory, guid));
   await cdp.call('Browser.setDownloadBehavior', { behavior: 'default' });
 
+  // Connectivity alone must announce once and leave requests, storage, URL and focus untouched.
+  const workspace = fixtures.pages[0];
+  await cdp.call('Page.navigate', { url: origin + workspace.path }, tab.sessionId);
+  await ready(tab, populated(workspace), 'workspace for connection notice');
+  const connectionNotice = await qualifyConnectionNotice({ tab, cdp, evaluate, capture, delay, fulfilled, waitForValue: async (check, label, timeout) => {
+    const deadline = Date.now() + timeout;
+    while (Date.now() < deadline) { const value = await check(); if (value) return value; await delay(75); }
+    throw new Error(`Timed out waiting for ${label}`);
+  } });
+
   // Timing on the reference profile: cold loads use a new target with an empty cache; route
   // changes are in-app link activations measured to heading focus and initial-route metadata.
   // Explicit activity/evidence reads are recorded separately in interactions above.
@@ -570,12 +726,12 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
     feedback.push(timing.focused); data.push(timing.populated);
   }
   return { fixtures: fixtures.pages.map(({ name, path }) => ({ name, path })), layout, contrast, focus, fulfilled, unmapped, interactions,
-    workers: { highlightedTokens: highlighted, targets: workers }, keyboard,
+    workers: { highlightedTokens: highlighted, targets: workers }, keyboard, connectionNotice,
     timing: { coldLoad: summary(cold), routeFeedback: summary(feedback), routeData: summary(data), raw: { cold, feedback, data } } };
 }
 
 /** Assertions are separate from measurement so the full report is retained when one fails. */
-export function assertAudit(audit, manifest, responses, origin, budgets = { coldLoadP95: 1500, routeFeedbackP95: 100, routeDataP95: 500 }) {
+export function assertAudit(audit, manifest, responses, origin, budgets = { coldLoadP95: 1500, routeFeedbackP95: 100, routeDataP95: 500 }, { connectionNotice = true } = {}) {
   const failures = [];
   // Expectations come from the qualification contract, not the report's claimed coverage.
   const schemes = ['light', 'dark'];
@@ -635,6 +791,8 @@ export function assertAudit(audit, manifest, responses, origin, budgets = { cold
         failures.push(`${entry.page} (${entry.scheme}): focus ${JSON.stringify(stop)}`);
     }
   }
+  // Chrome-DevTools-only evidence; the Playwright cross-engine runner opts out explicitly.
+  if (connectionNotice !== false) failures.push(...connectionNoticeFailures(audit.connectionNotice));
   if (audit.unmapped.length) failures.push(`unmapped API reads: ${[...new Set(audit.unmapped)].join(', ')}`);
   // Every packaged script, style, worker and font must resolve under the deployment base.
   const assetBase = `${origin}/nested/assets/ui/`;
