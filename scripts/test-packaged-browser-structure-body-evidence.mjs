@@ -21,7 +21,7 @@ const modulePath = process.env.STRUCTURE_MODULE ?? './packaged-browser-structure
 const lifecyclePath = process.env.LIFECYCLE_MODULE ?? './packaged-browser-target-lifecycle.mjs';
 const structure = await import(new URL(modulePath, import.meta.url));
 const { TargetProtocol } = await import(new URL(lifecyclePath, import.meta.url));
-const { qualifyStructure, structureFailureEvidence, STRUCTURE_BODY_STAGES } = structure;
+const { qualifyStructure, structureFailureEvidence, STRUCTURE_BODY_STAGES, installStructureModuleResponseCapture } = structure;
 
 const origin = 'http://127.0.0.1:41879';
 const SESSION = 'SESSION-SECRET-1879';
@@ -40,7 +40,8 @@ const NO_DATA = 'No data found for resource with given identifier';
 /** Scenario: events emitted when the owning module link is clicked; body reply for the one getResponseBody. */
 function harness({ moduleEvents = 'finished', body = { result: { body: goodBody(), base64Encoded: false } },
   href = `${revision}/source-files/${pins.fileId}?sourceSha256=${pins.sourceSha256}&metadataVersion=${pins.metadataVersion}`,
-  extraModuleResponses = 0, hostile = false, real = false, requestId = REQUEST, events = () => {}, onBody = () => {}, syncThrow = null } = {}) {
+  extraModuleResponses = 0, hostile = false, real = false, requestId = REQUEST, events = () => {}, onBody = () => {}, syncThrow = null,
+  pageCapture = null } = {}) {
   const calls = [];
   const sent = [];
   const listeners = new Map();
@@ -58,7 +59,8 @@ function harness({ moduleEvents = 'finished', body = { result: { body: goodBody(
     socket.close = () => {};
     socket.send = (text) => {
       const { id, method, params, sessionId } = JSON.parse(text);
-      calls.push(method);sent.push({method,params,sessionId});
+      if (method !== 'Page.addScriptToEvaluateOnNewDocument') calls.push(method);
+      sent.push({method,params,sessionId});
       queueMicrotask(() => socket.dispatchEvent(Object.assign(new Event('message'), { data: JSON.stringify({ id, sessionId, ...answer(method) }) })));
     };
     cdp = new TargetProtocol(socket);
@@ -68,7 +70,8 @@ function harness({ moduleEvents = 'finished', body = { result: { body: goodBody(
     cdp = {
       on(method, listener, sessionId) { const key = `${sessionId ?? ''}:${method}`; if (!listeners.has(key)) listeners.set(key, []); listeners.get(key).push(listener); },
       call(method, params = {}, sessionId) {
-        calls.push(method);sent.push({method,params,sessionId});
+        if (method !== 'Page.addScriptToEvaluateOnNewDocument') calls.push(method);
+        sent.push({method,params,sessionId});
         if (method === 'Network.getResponseBody' && syncThrow) { thrownByCall = syncThrow; throw syncThrow; }
         const reply = answer(method);
         if (reply.error) { thrownByCall = new Error(reply.error.message); return Promise.reject(thrownByCall); }
@@ -86,6 +89,7 @@ function harness({ moduleEvents = 'finished', body = { result: { body: goodBody(
     fire('Network.responseReceived', { requestId, type: 'Fetch', response: { url, status: 200 } });
   };
   const evaluate = async (_tab, expression) => {
+    if (expression.includes('window.__decompStructureModuleResponseV1')) return pageCapture?.snapshot ?? pageCapture;
     if (expression === 'location.pathname') return `${revision}/functions`;
     if (expression.startsWith("[...document.querySelectorAll('table[aria-label]")) return rows++ === 0 ? Array.from({ length: 100 }, (_, i) => address(i)) : Array(100).fill('x');
     if (expression.includes("querySelectorAll('tr').length")) return 100;
@@ -120,14 +124,97 @@ const sequence = async (options) => { const h = harness(options); try { await h.
 // Performance.enable, navigate, 22 heap reads, 40 Enter key events, reload, getResponseBody, navigate, 2 metrics overrides.
 const BASE_SEQUENCE = ["Performance.enable", "Page.navigate", "Performance.getMetrics", "Input.dispatchKeyEvent", "Input.dispatchKeyEvent", "Performance.getMetrics", "Input.dispatchKeyEvent", "Input.dispatchKeyEvent", "Performance.getMetrics", "Input.dispatchKeyEvent", "Input.dispatchKeyEvent", "Performance.getMetrics", "Input.dispatchKeyEvent", "Input.dispatchKeyEvent", "Performance.getMetrics", "Input.dispatchKeyEvent", "Input.dispatchKeyEvent", "Performance.getMetrics", "Input.dispatchKeyEvent", "Input.dispatchKeyEvent", "Performance.getMetrics", "Input.dispatchKeyEvent", "Input.dispatchKeyEvent", "Performance.getMetrics", "Input.dispatchKeyEvent", "Input.dispatchKeyEvent", "Performance.getMetrics", "Input.dispatchKeyEvent", "Input.dispatchKeyEvent", "Performance.getMetrics", "Input.dispatchKeyEvent", "Input.dispatchKeyEvent", "Performance.getMetrics", "Input.dispatchKeyEvent", "Input.dispatchKeyEvent", "Performance.getMetrics", "Input.dispatchKeyEvent", "Input.dispatchKeyEvent", "Performance.getMetrics", "Input.dispatchKeyEvent", "Input.dispatchKeyEvent", "Performance.getMetrics", "Input.dispatchKeyEvent", "Input.dispatchKeyEvent", "Performance.getMetrics", "Input.dispatchKeyEvent", "Input.dispatchKeyEvent", "Performance.getMetrics", "Input.dispatchKeyEvent", "Input.dispatchKeyEvent", "Performance.getMetrics", "Input.dispatchKeyEvent", "Input.dispatchKeyEvent", "Performance.getMetrics", "Input.dispatchKeyEvent", "Input.dispatchKeyEvent", "Performance.getMetrics", "Input.dispatchKeyEvent", "Input.dispatchKeyEvent", "Performance.getMetrics", "Input.dispatchKeyEvent", "Input.dispatchKeyEvent", "Performance.getMetrics", "Page.reload", "Network.getResponseBody", "Page.navigate", "Performance.getMetrics", "Emulation.setDeviceMetricsOverride", "Emulation.setDeviceMetricsOverride"];
 
+const captureBinding = { jobId: fixture.jobId, runId: fixture.runId, revisionId: fixture.revisionId };
+const captureDocument = (binding = captureBinding) => JSON.stringify({ kind: 'moduleDetail', requestId: 'capture-request-1879', data: {
+  binding, sourceSha256: pins.sourceSha256, metadataVersion: pins.metadataVersion,
+  module: { moduleId: module, implementationFileId: pins.fileId },
+} });
+const settleCapture = async (state) => {
+  for (let attempt = 0; state.status === 'waiting' && attempt < 100; attempt++) await new Promise(resolve => setTimeout(resolve, 5));
+  return state;
+};
+
+test('page fetch capture is exact-route, bounded, and leaves the application response readable', async () => {
+  const target = { location: { href: `${origin}/nested/jobs`, origin }, fetch: async () => new Response(captureDocument(), {
+    status: 200, headers: { 'Content-Type': 'application/json', 'X-Request-ID': 'capture-request-1879' },
+  }) };
+  const state = installStructureModuleResponseCapture(target, apiPath, module, captureBinding, 1_048_576);
+  await target.fetch(`${origin}${apiPath}/different`);
+  assert.equal(state.responseCount, 0, 'other routes are not captured');
+  const response = await target.fetch(`${origin}${apiPath}?limit=50`);
+  assert.equal((await response.json()).kind, 'moduleDetail');
+  await settleCapture(state);
+  assert.equal(state.status, 'captured');
+  assert.equal(state.responseCount, 1);
+  assert.deepEqual(state.snapshot, { sourceSha256: pins.sourceSha256, metadataVersion: pins.metadataVersion,
+    module: { moduleId: module, implementationFileId: pins.fileId } });
+  assert.ok(!JSON.stringify(state).includes('capture-request-1879'), 'request ID must not leave the page');
+});
+
+test('page fetch capture refuses duplicate routes, wrong bindings, and over-budget response bodies', async () => {
+  const makeTarget = (body) => ({ location: { href: `${origin}/nested/jobs`, origin }, fetch: async () => new Response(body, {
+    status: 200, headers: { 'Content-Type': 'application/json', 'X-Request-ID': 'capture-request-1879' },
+  }) });
+  const duplicate = makeTarget(captureDocument());
+  const duplicateState = installStructureModuleResponseCapture(duplicate, apiPath, module, captureBinding, 1_048_576);
+  await Promise.all([duplicate.fetch(`${origin}${apiPath}`), duplicate.fetch(`${origin}${apiPath}`)]);
+  await settleCapture(duplicateState);
+  assert.equal(duplicateState.status, 'ambiguous');
+  assert.equal(duplicateState.snapshot, null);
+
+  const wrongBinding = makeTarget(captureDocument({ ...captureBinding, runId: 'another_run' }));
+  const wrongBindingState = installStructureModuleResponseCapture(wrongBinding, apiPath, module, captureBinding, 1_048_576);
+  await wrongBinding.fetch(`${origin}${apiPath}`);
+  await settleCapture(wrongBindingState);
+  assert.equal(wrongBindingState.status, 'invalid');
+  assert.equal(wrongBindingState.snapshot, null);
+
+  const oversized = makeTarget('x'.repeat(1_048_577));
+  const oversizedState = installStructureModuleResponseCapture(oversized, apiPath, module, captureBinding, 1_048_576);
+  await oversized.fetch(`${origin}${apiPath}`);
+  await settleCapture(oversizedState);
+  assert.equal(oversizedState.status, 'too-large');
+  assert.equal(oversizedState.snapshot, null);
+});
+
 test('normal sequence: one body call, no evidence, unchanged result shape', async () => {
   const h = harness();
   const result = await h.run();
   assert.equal(result.moduleSourceLink, true);
+  assert.equal(result.moduleResponseBodySource, 'cdp');
+  assert.equal(h.sent.filter((call) => call.method === 'Page.addScriptToEvaluateOnNewDocument').length, 1);
+  assert.ok(!h.sent.find((call) => call.method === 'Page.addScriptToEvaluateOnNewDocument').params.source.includes(SESSION));
   assert.equal(h.calls.filter((m) => m === 'Network.getResponseBody').length, 1);
   assert.deepEqual(h.calls, BASE_SEQUENCE);
   assert.deepEqual(h.sent.find(c=>c.method==='Network.getResponseBody'), {method:'Network.getResponseBody',params:{requestId:REQUEST},sessionId:SESSION});
-  assert.deepEqual(Object.keys(result).sort(), ['boundedInventoryReads', 'cursorReload', 'firstPageMs', 'maximumMountedRows', 'modelBytes', 'moduleSourceLink', 'modules', 'mutationRequests', 'narrowReflow', 'pageMsP50', 'pageMsP95', 'pagesVisited', 'peakBrowserHeapBytes', 'pinnedCrossLinks', 'recordedFunctions', 'rowsPerPage', 'searchMs']);
+  assert.deepEqual(Object.keys(result).sort(), ['boundedInventoryReads', 'cursorReload', 'firstPageMs', 'maximumMountedRows', 'modelBytes', 'moduleResponseBodySource', 'moduleSourceLink', 'modules', 'mutationRequests', 'narrowReflow', 'pageMsP50', 'pageMsP95', 'pagesVisited', 'peakBrowserHeapBytes', 'pinnedCrossLinks', 'recordedFunctions', 'rowsPerPage', 'searchMs']);
+});
+
+test('canceled CDP body uses the exact bounded response already consumed by the page', async () => {
+  const h = harness({ moduleEvents: 'canceled', body: noData, pageCapture: {
+    status: 'captured', responseCount: 1, snapshot: { sourceSha256: pins.sourceSha256, metadataVersion: pins.metadataVersion,
+      module: { moduleId: module, implementationFileId: pins.fileId } },
+  } });
+  const result = await h.run();
+  assert.equal(result.moduleSourceLink, true);
+  assert.equal(result.moduleResponseBodySource, 'page-fetch-clone');
+  assert.equal(h.calls.filter((method) => method === 'Network.getResponseBody').length, 1);
+  assert.ok(h.calls.includes('Page.navigate'), 'the journey continues through the normal route assertion');
+});
+
+test('page capture never hides unrelated DevTools or non-canceled body failures', async () => {
+  const pageCapture = { status: 'captured', responseCount: 1, snapshot: { sourceSha256: pins.sourceSha256,
+    metadataVersion: pins.metadataVersion, module: { moduleId: module, implementationFileId: pins.fileId } } };
+  const transportFailure = new Error('DevTools connection closed');
+  const transport = harness({ moduleEvents: 'canceled', body: { error: { code: -1, message: transportFailure.message } }, pageCapture });
+  const transportError = await transport.run().then(() => null, error => error);
+  assert.equal(transportError, transport.thrown());
+  assert.equal(transportError.message, transportFailure.message);
+
+  const nonCanceled = harness({ body: noData, pageCapture });
+  const nonCanceledError = await nonCanceled.run().then(() => null, error => error);
+  assert.equal(nonCanceledError.message, NO_DATA);
+  assert.equal(structureFailureEvidence(nonCanceledError).selected.loadingCanceled, false);
 });
 
 test('no-data rejection: same error object and message, no retry, frozen bounded evidence', async () => {
