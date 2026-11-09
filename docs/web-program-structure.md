@@ -151,6 +151,12 @@ that interval. The 20 child reports retain every timing and failure; no failed s
 is replaced. The aggregate gates nearest-rank p95 and requires 20 complete samples,
 zero raw inventory loading failures, matching source/archive/JAR identities, unique
 run directories and observed JVM/Chrome process identities.
+Before either structure mode launches the package, the driver verifies that every
+qualification script it imports or invokes has the same Git blob identity as the
+declared source commit. Each report retains the per-file Git blob ID and SHA-256;
+the cold aggregate requires the verified source digest to match across all 20 runs.
+If the checkout is detached from the declared commit, or any qualification source
+is modified, source verification fails and the sample cannot pass.
 
 The browser profile starts with empty cache and storage. Private requests use the
 normal HttpOnly session cookie after the bootstrap fragment is scrubbed. The JVM and

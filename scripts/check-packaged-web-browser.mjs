@@ -9,7 +9,7 @@ import { parseArgs } from 'node:util';
 import { qualifyUpload, qualifyUploadFailures, qualifyMeasuredUpload } from './packaged-browser-upload.mjs';
 import { seedScale, qualifyScale, dashboardFiltersWithSnapshot } from './packaged-browser-scale.mjs';
 import { seedStructure, qualifyStructure, qualifyStructureColdSample } from './packaged-browser-structure.mjs';
-import { structureProfile } from './packaged-browser-structure-cold.mjs';
+import { structureProfile, verifyStructureQualificationSource } from './packaged-browser-structure-cold.mjs';
 import { seedLive, qualifyLive } from './packaged-browser-live.mjs';
 import { seedHistory, qualifyHistory } from './packaged-browser-history.mjs';
 import { seedLegacy, qualifyLegacy } from './packaged-browser-legacy.mjs';
@@ -112,8 +112,13 @@ let applicationError = '';
 let applicationOutput = '';
 let browserError = '';
 let viteError = '';
+let driverCommit = process.env.PACKAGED_WEB_SOURCE_COMMIT ?? process.env.GITHUB_SHA ?? null;
+if (!driverCommit) {
+  try { driverCommit = execFileSync('git', ['-C', repo, 'rev-parse', 'HEAD'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim(); }
+  catch { /* The report records unavailable provenance; structure qualification fails closed below. */ }
+}
 const report = { status: 'running', mode: values.mode, testDirectory: root, browserProfileDirectory: profile, startedAt: new Date().toISOString(), driverNode: nodeVersion,
-  driverCommit: process.env.PACKAGED_WEB_SOURCE_COMMIT ?? process.env.GITHUB_SHA ?? null,
+  driverCommit,
   tools: { node: process.execPath, chrome: chromeBinary, javaHome, python: values.python }, requests: {} };
 const launchErrors = new WeakMap();
 console.log(`Evidence directory: ${root}`);
@@ -538,6 +543,9 @@ async function removeOwnedWork() {
 }
 
 try {
+  if (values.mode === 'structure' || values.mode === 'structure-cold') {
+    report.sourceIdentity = await verifyStructureQualificationSource(repo, report.driverCommit);
+  }
   report.tools.chromeSha256 = await fileHash(chromeBinary);
   let installation = await prepareArchive(values.mode === 'upgrade' ? values['previous-archive'] : archive);
   recordInstallation(installation);

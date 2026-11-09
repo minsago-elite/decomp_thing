@@ -2,7 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { COLD_PROFILES, applyStructureProfile, makeChromeThrottlingCommands, summarizeColdSamples, runColdSamples } from './packaged-browser-structure-cold.mjs';
+import { createHash } from 'node:crypto';
+import { COLD_PROFILES, applyStructureProfile, makeChromeThrottlingCommands, summarizeColdSamples, runColdSamples,
+  verifyStructureQualificationSource } from './packaged-browser-structure-cold.mjs';
+
+function gitBlob(bytes) { return createHash('sha1').update(`blob ${bytes.byteLength}\0`).update(bytes).digest('hex'); }
 
 test('profiles configure CPU, RTT and asymmetric bandwidth; limits are profile specific', async () => {
   assert.equal(COLD_PROFILES.loopback.firstPageLimitMs, 500);
@@ -39,6 +43,33 @@ test('runner refuses incorrect count', async () => {
   await assert.rejects(runColdSamples({driver:'unused',driverArgs:[],count:19}),/exactly 20/);
 });
 
+test('qualification source identity matches committed Git blobs and refuses edited driver bytes', async () => {
+  const commit = 'a'.repeat(40);
+  const paths = ['scripts/check-packaged-web-browser.mjs', 'scripts/packaged-browser-structure-cold.mjs'];
+  const committed = new Map(paths.map((path, i) => [path, Buffer.from(`committed source ${i}`)]));
+  const working = new Map([...committed].map(([path, bytes]) => [path, Buffer.from(bytes)]));
+  const runGit = (args, input) => {
+    if (args[0] === 'rev-parse') {
+      const path = args[1].slice(commit.length + 1);
+      return gitBlob(committed.get(path));
+    }
+    assert.deepEqual(args, ['hash-object', '--stdin']);
+    return gitBlob(input);
+  };
+  const identity = await verifyStructureQualificationSource('/repo', commit, {
+    sourceFiles: paths, runGit, readFile: async path => working.get(path.slice('/repo/'.length)),
+  });
+  assert.equal(identity.verified, true);
+  assert.equal(identity.commit, commit);
+  assert.equal(identity.files.length, paths.length);
+  assert.match(identity.sourceSha256, /^[0-9a-f]{64}$/);
+
+  working.set(paths[1], Buffer.from('edited after source commit'));
+  await assert.rejects(verifyStructureQualificationSource('/repo', commit, {
+    sourceFiles: paths, runGit, readFile: async path => working.get(path.slice('/repo/'.length)),
+  }), /qualification source differs from declared commit/);
+});
+
 function fakeChild(code = 0, diagnostic = '') {
   const child = new EventEmitter();
   child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.pid = 12345;
@@ -59,7 +90,8 @@ test('runner executes twenty sequential fresh-child cold modes and retains the e
     reportReader: async () => {
       const sample = launches;
       return { path:`/tmp/report-${sample}.json`, sha256:`${sample}`,
-        report:{ status:'passed', driverCommit:'a'.repeat(40), archiveSha256:'b'.repeat(64), applicationJarSha256:'c'.repeat(64), shutdownConfirmed:true,
+        report:{ status:'passed', driverCommit:'a'.repeat(40), sourceIdentity:{ verified:true, commit:'a'.repeat(40), sourceSha256:'e'.repeat(64), files:[] },
+          archiveSha256:'b'.repeat(64), applicationJarSha256:'c'.repeat(64), shutdownConfirmed:true,
           testDirectory:`/tmp/run-${sample}`,browserProfileDirectory:`/tmp/run-${sample}/browser profile`,runtimeProcesses:{applicationPid:1000+sample,applicationStartTimeTicks:3000+sample,browserPid:2000+sample,browserStartTimeTicks:4000+sample},
           structureCold:{ passed:true, firstPageMs:sample === 20 ? 900 : sample, failedInventoryRequestCount:0, profileApplied:'loopback',
             browserHeapMemory:{sampledPeakBytes:1024}, jvmMemory:{incrementalPeakBytes:2048} } } };
@@ -75,10 +107,12 @@ test('runner executes twenty sequential fresh-child cold modes and retains the e
 test('runner fails closed on raw transport failures, missing source identities, or p95 over budget', async () => {
   let launches=0;
   const result = await runColdSamples({ driver:'/repo/driver.mjs', driverArgs:[], profile:'constrained', spawnImpl:()=>{launches++;return fakeChild();},
-    reportReader:async()=>({path:`/tmp/${launches}.json`,sha256:'d'.repeat(64),report:{status:'passed',driverCommit:'a'.repeat(40),archiveSha256:launches===2?null:'b'.repeat(64),applicationJarSha256:'c'.repeat(64),shutdownConfirmed:true,
+    reportReader:async()=>({path:`/tmp/${launches}.json`,sha256:'d'.repeat(64),report:{status:'passed',driverCommit:'a'.repeat(40),
+      sourceIdentity:{verified:launches!==3,commit:'a'.repeat(40),sourceSha256:'e'.repeat(64),files:[]},
+      archiveSha256:launches===2?null:'b'.repeat(64),applicationJarSha256:'c'.repeat(64),shutdownConfirmed:true,
       testDirectory:`/tmp/run-${launches}`,browserProfileDirectory:`/tmp/run-${launches}/browser profile`,runtimeProcesses:{applicationPid:1000+launches,applicationStartTimeTicks:3000+launches,browserPid:2000+launches,browserStartTimeTicks:4000+launches},
       structureCold:{passed:true,firstPageMs:launches===20?1100:700,failedInventoryRequestCount:launches===1?1:0,profileApplied:'constrained',browserHeapMemory:{sampledPeakBytes:1},jvmMemory:{incrementalPeakBytes:1}}}}) });
-  assert.equal(result.rawFailedRequests,1); assert.equal(result.successfulSamples,19); assert.equal(result.passed,false);
+  assert.equal(result.rawFailedRequests,1); assert.equal(result.successfulSamples,18); assert.equal(result.identityConsistent,false); assert.equal(result.passed,false);
   const noIdentity = summarizeColdSamples(Array.from({length:20},(_,i)=>({status:'passed',firstPageMs:i+1,rawFailedRequests:0})));
   assert.equal(noIdentity.nearestRankP95FirstPageMs,19);
 });
@@ -95,7 +129,8 @@ test('runner records the timeout state even when the child exits during terminat
       return child;
     },
     reportReader: async () => ({ path:'/tmp/report.json', sha256:'a'.repeat(64),
-      report:{ status:'passed', driverCommit:'b'.repeat(40), archiveSha256:'c'.repeat(64), applicationJarSha256:'d'.repeat(64),
+      report:{ status:'passed', driverCommit:'b'.repeat(40), sourceIdentity:{ verified:true, commit:'b'.repeat(40), sourceSha256:'e'.repeat(64), files:[] },
+        archiveSha256:'c'.repeat(64), applicationJarSha256:'d'.repeat(64),
         testDirectory:`/tmp/run-${launches}`, browserProfileDirectory:`/tmp/run-${launches}/profile`,
         runtimeProcesses:{ applicationPid:1000+launches, applicationStartTimeTicks:2000+launches,
           browserPid:3000+launches, browserStartTimeTicks:4000+launches },

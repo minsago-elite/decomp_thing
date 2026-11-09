@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { basename, resolve } from 'node:path';
@@ -6,6 +6,23 @@ import { pathToFileURL } from 'node:url';
 
 export const COLD_SAMPLE_COUNT = 20;
 export const COLD_SAMPLE_TIMEOUT_MS = 45_000;
+export const STRUCTURE_QUALIFICATION_SOURCE_FILES = Object.freeze([
+  'scripts/check-packaged-web-browser.mjs',
+  'scripts/packaged-browser-structure.mjs',
+  'scripts/packaged-browser-structure-cold.mjs',
+  'scripts/packaged-browser-structure-profile.json',
+  'scripts/packaged-browser-install.py',
+  'scripts/packaged-browser-upload.mjs',
+  'scripts/packaged-browser-scale.mjs',
+  'scripts/packaged-browser-contrast.mjs',
+  'scripts/packaged-browser-live.mjs',
+  'scripts/packaged-browser-history.mjs',
+  'scripts/packaged-browser-legacy.mjs',
+  'scripts/packaged-browser-restart.mjs',
+  'scripts/packaged-browser-upgrade.mjs',
+  'scripts/packaged-browser-audit.mjs',
+  'scripts/packaged-browser-cdp-diagnostics.mjs',
+]);
 export const COLD_PROFILES = Object.freeze({
   loopback: Object.freeze({ name: 'loopback', firstPageLimitMs: 500, cpuRate: 1, latencyMs: 0, downloadBytesPerSecond: 0, uploadBytesPerSecond: 0 }),
   constrained: Object.freeze({ name: 'constrained', firstPageLimitMs: 1000, cpuRate: 4, latencyMs: 100, downloadBytesPerSecond: 1_250_000, uploadBytesPerSecond: 250_000 }),
@@ -15,6 +32,37 @@ export function structureProfile(name = 'loopback') {
   const profile = COLD_PROFILES[name];
   if (!profile) throw new TypeError(`unknown structure profile: ${name}`);
   return profile;
+}
+
+export async function verifyStructureQualificationSource(repoRoot, commit, {
+  sourceFiles = STRUCTURE_QUALIFICATION_SOURCE_FILES,
+  readFile = fs.readFile,
+  runGit = (args, input) => execFileSync('git', ['-C', repoRoot, ...args], {
+    encoding: input === undefined ? 'utf8' : undefined,
+    input,
+    stdio: ['pipe', 'pipe', 'pipe'],
+  }).toString().trim(),
+} = {}) {
+  if (typeof commit !== 'string' || !/^[0-9a-f]{40,64}$/.test(commit)) throw new TypeError('qualification source commit must be a full Git object ID');
+  if (!Array.isArray(sourceFiles) || sourceFiles.length === 0 || new Set(sourceFiles).size !== sourceFiles.length) {
+    throw new TypeError('qualification source file list must be non-empty and unique');
+  }
+  const files = [];
+  for (const path of sourceFiles) {
+    if (typeof path !== 'string' || path.startsWith('/') || path.split('/').includes('..') || !path.startsWith('scripts/')) {
+      throw new TypeError(`invalid qualification source path: ${String(path)}`);
+    }
+    const committedBlob = runGit(['rev-parse', `${commit}:${path}`]);
+    const bytes = await readFile(`${repoRoot}/${path}`);
+    const executedBlob = runGit(['hash-object', '--stdin'], bytes);
+    if (!/^[0-9a-f]{40,64}$/.test(committedBlob) || !/^[0-9a-f]{40,64}$/.test(executedBlob)) {
+      throw new Error(`Git returned an invalid blob identity for qualification source ${path}`);
+    }
+    if (executedBlob !== committedBlob) throw new Error(`qualification source differs from declared commit: ${path}`);
+    files.push({ path, gitBlob: committedBlob, sha256: createHash('sha256').update(bytes).digest('hex'), byteLength: bytes.byteLength });
+  }
+  const sourceSha256 = createHash('sha256').update(JSON.stringify({ commit, files })).digest('hex');
+  return { verified: true, commit, sourceSha256, files };
 }
 
 async function waitForProcessGroupExit(pid, timeoutMs) {
@@ -146,12 +194,14 @@ export async function runColdSamples({ driver, driverArgs, count = COLD_SAMPLE_C
       const shutdownConfirmed = processTreeConfirmed;
       const diagnostic = stderr.length ? { byteLength: Buffer.byteLength(stderr), sha256: createHash('sha256').update(stderr).digest('hex') } : null;
       const passed = !interrupted && !timedOut && !processTreeForced && exitCode === 0 && report?.status === 'passed' && evidence?.passed === true
-        && evidence?.profileApplied === profile.name && rawFailedRequests === 0 && firstPageMs !== null && shutdownConfirmed;
+        && evidence?.profileApplied === profile.name && rawFailedRequests === 0 && firstPageMs !== null && shutdownConfirmed
+        && report?.sourceIdentity?.verified === true && report.sourceIdentity.commit === report.driverCommit;
       samples.push({ index: index + 1, status: passed ? 'passed' : 'failed', profile: profile.name, exitCode, firstPageMs, rawFailedRequests,
         browserHeapBytes: evidence?.browserHeapMemory?.sampledPeakBytes ?? null,
         jvmRssIncrementBytes: evidence?.jvmMemory?.incrementalPeakBytes ?? null,
         profileApplied: evidence?.profileApplied ?? null,
         reportPath: childReport?.path ?? null, reportSha256: childReport?.sha256 ?? null, driverCommit: report?.driverCommit ?? null,
+        sourceIdentity: report?.sourceIdentity ?? null,
         archiveSha256: report?.archiveSha256 ?? null, applicationJarSha256: report?.applicationJarSha256 ?? null,
         testDirectory: report?.testDirectory ?? null, browserProfileDirectory: report?.browserProfileDirectory ?? null,
         runtimeProcesses: report?.runtimeProcesses ?? null,
@@ -189,7 +239,7 @@ export async function runColdSamples({ driver, driverArgs, count = COLD_SAMPLE_C
   }
   const summary = summarizeColdSamples(samples);
   const identities = samples.filter(sample => sample.status === 'passed')
-    .map(sample => [sample.driverCommit, sample.archiveSha256, sample.applicationJarSha256]);
+    .map(sample => [sample.driverCommit, sample.sourceIdentity?.sourceSha256, sample.archiveSha256, sample.applicationJarSha256]);
   const identityConsistent = identities.length === count && identities.every(identity => identity.every(Boolean)
     && identity.every((value, index) => value === identities[0][index]));
   const directories = samples.map(sample => sample.testDirectory);
