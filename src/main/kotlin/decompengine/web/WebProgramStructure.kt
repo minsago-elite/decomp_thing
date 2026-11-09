@@ -388,13 +388,24 @@ internal object WebProgramStructureBuilder {
             // Canonical bytes are accepted only when parsed modules match appendCanonicalJson's
             // sorted-by-ID output; validatePlan has already enforced uniqueness and module limits.
             // Iterate that order directly instead of allocating another ID set and sorting a list.
+            // The same validation pass resolved each reference to its table row, so use those
+            // indices for ownership instead of looking the canonicalized IDs up a second time.
             measured("form-modules-and-owners") {
                 for ((plannedIndex, planned) in plan.modules.withIndex()) {
                     fun owned(kind: WebStructureKind, raw: List<String>): List<String> {
                         if (raw.isEmpty()) return emptyList()
                         val rows = resolutions[plannedIndex][kind.ordinal]
-                        val ids = parsed.tables[kind.ordinal].ids
-                        return List(raw.size) { slot -> rows[slot].let { if (it < 0) raw[slot] else ids[it] } }
+                        val table = parsed.tables[kind.ordinal]
+                        return List(raw.size) { slot ->
+                            val row = rows[slot]
+                            if (row < 0) {
+                                unknown++
+                                raw[slot]
+                            } else {
+                                table.owners[row] = if (table.owners[row] == OWNER_UNOWNED) plannedIndex else OWNER_AMBIGUOUS
+                                table.ids[row]
+                            }
+                        }
                     }
                     val implementationFile = filesByPath[planned.sourcePath]
                     modules += WebStructureModule(planned.id, planned.sourcePath, planned.headerPath,
@@ -406,17 +417,6 @@ internal object WebProgramStructureBuilder {
                         when (implementationFile?.acceptedImplementation) {
                             true -> "accepted"; false -> "unaccepted"; null -> "not-classified"
                         }, cycles[planned.id].orEmpty())
-                }
-                for ((moduleIndex, module) in modules.withIndex()) {
-                    for ((kind, owned) in listOf(WebStructureKind.FUNCTION to module.functionIds,
-                        WebStructureKind.GLOBAL to module.globalIds, WebStructureKind.TYPE to module.typeIds)) {
-                        val table = parsed.tables[kind.ordinal]
-                        for (id in owned) {
-                            val row = table.index[id]
-                            if (row == null) { unknown++; continue }
-                            table.owners[row] = if (table.owners[row] == OWNER_UNOWNED) moduleIndex else OWNER_AMBIGUOUS
-                        }
-                    }
                 }
             }
         }
