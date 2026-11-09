@@ -3,6 +3,7 @@ import { promises as fs, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { isUtf8 } from 'node:buffer';
+import { applyStructureProfile, structureProfile } from './packaged-browser-structure-cold.mjs';
 
 // Kept current by WebProgramStructureTest; the seed writes manifests without the JVM profile registry.
 const pins = JSON.parse(readFileSync(new URL('./packaged-browser-structure-profile.json', import.meta.url), 'utf8'));
@@ -792,11 +793,12 @@ const boundedFailure = (message) => String(message).slice(0, 4096);
 export function evaluateStructureBudgets(m) {
   const failures = [];
   const check = (condition, message) => { if (!condition) failures.push(boundedFailure(message)); };
-  check(m.firstPageMs <= FIRST_DATA_BUDGET_MS,
-    `First function data page ${m.firstPageMs}ms exceeds the D0 ${FIRST_DATA_BUDGET_MS}ms budget; phase timings: ${JSON.stringify(m.structureTiming)}`);
-  check(m.pageDataP95Ms <= FIRST_DATA_BUDGET_MS, `Paged function data p95 ${m.pageDataP95Ms}ms exceeds the D0 ${FIRST_DATA_BUDGET_MS}ms budget`);
-  check(m.searchMs <= FIRST_DATA_BUDGET_MS, `Function search first data ${m.searchMs}ms exceeds the D0 ${FIRST_DATA_BUDGET_MS}ms budget`);
-  check(m.requestP95Ms <= FIRST_DATA_BUDGET_MS, `Function inventory request p95 ${m.requestP95Ms}ms exceeds the D0 ${FIRST_DATA_BUDGET_MS}ms budget`);
+  const firstDataBudgetMs = Number.isSafeInteger(m.firstPageBudgetMs) ? m.firstPageBudgetMs : FIRST_DATA_BUDGET_MS;
+  check(m.firstPageMs <= firstDataBudgetMs,
+    `First function data page ${m.firstPageMs}ms exceeds the D0 ${firstDataBudgetMs}ms budget; phase timings: ${JSON.stringify(m.structureTiming)}`);
+  check(m.pageDataP95Ms <= firstDataBudgetMs, `Paged function data p95 ${m.pageDataP95Ms}ms exceeds the D0 ${firstDataBudgetMs}ms budget`);
+  check(m.searchMs <= firstDataBudgetMs, `Function search first data ${m.searchMs}ms exceeds the D0 ${firstDataBudgetMs}ms budget`);
+  check(m.requestP95Ms <= firstDataBudgetMs, `Function inventory request p95 ${m.requestP95Ms}ms exceeds the D0 ${firstDataBudgetMs}ms budget`);
   check(m.localFeedbackSamples === 51, 'Every page/filter interaction must expose immediate loading feedback');
   check(m.invalidFeedbackSamples === 0, 'Browser feedback telemetry must be valid, bounded, and complete');
   check(m.localFeedbackP95Ms <= LOCAL_FEEDBACK_BUDGET_MS,
@@ -916,13 +918,14 @@ export function inventorySummaryPrefix(start, kind) {
 }
 
 /** Node-side consumption ledger; all inputs are CDP events/bindings already delivered to this session. */
-export function createInventoryConsumptionProof({ browserOrigin, fixture, call,
+export function createInventoryConsumptionProof({ browserOrigin, fixture, call, expectedActions = PROOF_ACTION_LIMIT,
   bodyLimitBytes = PROOF_BODY_LIMIT_BYTES, ledgerLimit = PROOF_LEDGER_LIMIT,
   rawLimitBytes = PROOF_RAW_LIMIT_BYTES, pendingLimit = PROOF_STREAM_PENDING_LIMIT, dataEventLimit = PROOF_DATA_EVENT_LIMIT }) {
   for (const [value, max] of [[bodyLimitBytes, PROOF_BODY_LIMIT_BYTES], [ledgerLimit, PROOF_LEDGER_LIMIT],
     [rawLimitBytes, PROOF_RAW_LIMIT_BYTES], [pendingLimit, PROOF_STREAM_PENDING_LIMIT], [dataEventLimit, PROOF_DATA_EVENT_LIMIT]]) {
     if (!Number.isSafeInteger(value) || value < 1 || value > max) throw new Error('Invalid inventory proof bound');
   }
+  if (!Number.isSafeInteger(expectedActions) || expectedActions < 1 || expectedActions > PROOF_ACTION_LIMIT) throw new Error('Invalid inventory proof action bound');
   const origin = new URL(browserOrigin).origin;
   let ordinal = 0, mainFrameId = null, mainLoaderId = null, current = null, closed = false;
   const counters = { invalid: 0, requestOverflow: 0, terminalOverflow: 0, bodyQueueOverflow: 0, actionOverflow: 0,
@@ -1232,7 +1235,7 @@ export function createInventoryConsumptionProof({ browserOrigin, fixture, call,
   }
   function beginAction({ label, kind, start }) {
     tick();
-    if (actions.length >= PROOF_ACTION_LIMIT) { counters.actionOverflow++; current = null; return null; }
+    if (actions.length >= expectedActions) { counters.actionOverflow++; current = null; return null; }
     const token = `${label}:${crypto.randomUUID()}`;
     const priorDocument = [...documents.values()].at(-1) ?? null;
     current = { label, kind, token, start, oracle: inventoryPageOracle(fixture, start), summaryPrefix: inventorySummaryPrefix(start, kind),
@@ -1364,8 +1367,8 @@ export function createInventoryConsumptionProof({ browserOrigin, fixture, call,
     return { policy: 'evidence-only; unproven means FAIL; does not change request handling, failure classification or budgets',
       clockPolicy: 'CDP event ordinals give same-session event order only; responseEnd/readyAt compared only within one document clock',
       structureVersionOracle: 'consistency across actions only; the fixture does not expose an absolute structureVersion',
-      expectedActions: PROOF_ACTION_LIMIT, recordedActions: actions.length, provenActions: proven,
-      consumptionProven: actions.length === PROOF_ACTION_LIMIT && proven === PROOF_ACTION_LIMIT,
+      expectedActions, recordedActions: actions.length, provenActions: proven,
+      consumptionProven: actions.length === expectedActions && proven === expectedActions,
       counters: { ...counters }, documents: documents.size,
       captureBounds: { bodyLimitBytes, rawLimitBytes, ledgerLimit, pendingLimit, dataEventLimit },
       captureStats: { streamCommands, pendingStreams: pendingStreams.size, peakPendingStreams, retainedRawBytes, peakRawBytes, drainMs },
@@ -1397,8 +1400,17 @@ export async function qualifyStructure(options) {
   finally { await jvmRssSampler.stop(); }
 }
 
-async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evaluate, ready, browserOrigin }, jvmRssSampler) {
+export async function qualifyStructureColdSample(options) {
+  const jvmRssSampler = await startJvmRssSampler(options.applicationPid);
+  try { return await qualifyStructureWithRssSampler({ ...options, coldSample: true }, jvmRssSampler); }
+  finally { await jvmRssSampler.stop(); }
+}
+
+async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evaluate, ready, browserOrigin,
+  profile: profileName = 'loopback', coldSample = false }, jvmRssSampler) {
   const tab = await makeTarget();
+  const profile = structureProfile(profileName);
+  await applyStructureProfile(cdp, tab.sessionId, profile);
   const localFeedbackMs = [];
   let invalidFeedbackSamples = 0;
   await tab.initialize('Runtime.addBinding', { name: LOCAL_FEEDBACK_BINDING });
@@ -1430,7 +1442,7 @@ async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evalua
   })();` });
   cdp.on('Network.dataReceived', coldEvidence.dataReceived, tab.sessionId);
   const proofCall = (method, params) => cdp.call(method, params, tab.sessionId);
-  const proof = createInventoryConsumptionProof({ browserOrigin, fixture, call: proofCall });
+  const proof = createInventoryConsumptionProof({ browserOrigin, fixture, call: proofCall, expectedActions: coldSample ? 1 : PROOF_ACTION_LIMIT });
   for (const name of INVENTORY_PROOF_BINDINGS) await tab.initialize('Runtime.addBinding', { name });
   cdp.on('Runtime.bindingCalled', proof.bindingCalled, tab.sessionId);
   cdp.on('Runtime.executionContextCreated', proof.executionContextCreated, tab.sessionId);
@@ -1513,17 +1525,71 @@ async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evalua
   const beforeMetrics = (await cdp.call('Performance.getMetrics', {}, tab.sessionId)).metrics;
   phase('first-page');
   coldEvidence.begin();
+  const requestsBeforeFirstPage = tab.requests.length;
   let started = performance.now();
-  await evaluate(tab, `[...document.querySelectorAll('a')].find(a => a.textContent === 'Browse recovered functions').click()`);
-  await ready(tab, `(${ROWS}).length === 100 && document.body.innerText.includes('of 100000 matching functions (100000 recorded)')`, 'first page of 100000 recorded functions');
-  const firstPageMs = performance.now() - started;
-  coldEvidence.end();
-  const afterMetrics = (await cdp.call('Performance.getMetrics', {}, tab.sessionId)).metrics;
-  const firstPagePerformance = Object.fromEntries(['ScriptDuration', 'LayoutDuration', 'TaskDuration'].map(name => [name, { before: beforeMetrics.find(m => m.name === name)?.value, after: afterMetrics.find(m => m.name === name)?.value, delta: afterMetrics.find(m => m.name === name)?.value - beforeMetrics.find(m => m.name === name)?.value }]));
-  assert.equal(await evaluate(tab, 'location.pathname'), `${revision}/functions`);
-  assert.deepEqual(await evaluate(tab, ROWS), Array.from({ length: 100 }, (_, index) => address(index)));
-  await heap();
-  await proof.drain(proofCall);
+  let firstPageMs = null, firstPageError = null, firstPagePerformance = null;
+  try {
+    await evaluate(tab, `[...document.querySelectorAll('a')].find(a => a.textContent === 'Browse recovered functions').click()`);
+    await ready(tab, `(${ROWS}).length === 100 && document.body.innerText.includes('of 100000 matching functions (100000 recorded)')`, 'first page of 100000 recorded functions');
+    firstPageMs = performance.now() - started;
+    assert.equal(await evaluate(tab, 'location.pathname'), `${revision}/functions`);
+    assert.deepEqual(await evaluate(tab, ROWS), Array.from({ length: 100 }, (_, index) => address(index)));
+    await heap();
+    if (!coldSample) {
+      const afterMetrics = (await cdp.call('Performance.getMetrics', {}, tab.sessionId)).metrics;
+      firstPagePerformance = Object.fromEntries(['ScriptDuration', 'LayoutDuration', 'TaskDuration'].map(name => [name, { before: beforeMetrics.find(m => m.name === name)?.value, after: afterMetrics.find(m => m.name === name)?.value, delta: afterMetrics.find(m => m.name === name)?.value - beforeMetrics.find(m => m.name === name)?.value }]));
+    }
+  } catch (error) {
+    if (!coldSample) throw error;
+    firstPageError = String(error?.message ?? error).slice(0, 1024);
+  } finally { coldEvidence.end(); }
+  let proofDrainError = null;
+  try { await proof.drain(proofCall); }
+  catch (error) {
+    if (!coldSample) throw error;
+    proofDrainError = String(error?.message ?? error).slice(0, 1024);
+  }
+  if (coldSample) {
+    proof.close();
+    const inventoryConsumption = proof.summary({ exceptions: tab.exceptions?.length ?? 1 });
+    const coldEvidenceSummary = coldEvidence.summary();
+    const inventoryFailureClassification = classifyFailedInventoryRequests(coldEvidenceSummary, inventoryConsumption);
+    const browserHeapMemory = await browserHeapSampler.stop();
+    const jvmMemory = await jvmRssSampler.stop();
+    const firstPageRequestMs = inventoryRequestDurationsMs.length === 1 ? inventoryRequestDurationsMs[0] : null;
+    const failures = [];
+    if (firstPageError) failures.push(`First-page action failed: ${firstPageError}`);
+    if (proofDrainError) failures.push(`Inventory proof drain failed: ${proofDrainError}`);
+    if (inventoryConsumption.consumptionProven !== true) failures.push(`Inventory response consumption was not proven: ${JSON.stringify(inventoryConsumption.actions)}`);
+    if (inventoryFailureClassification.failedInventoryRequestEvidenceComplete !== true || coldEvidenceSummary.failedInventoryRequestCount !== 0) {
+      failures.push(`Raw inventory loading failures must be zero: ${coldEvidenceSummary.failedInventoryRequestCount ?? 'unknown'}`);
+    }
+    if (coldEvidenceSummary.firstPageRequestOverflow !== 0 || coldEvidenceSummary.terminalEvidenceOverflow !== 0
+      || coldEvidenceSummary.invalidTransportEvidence !== 0 || coldEvidenceSummary.pendingEvidenceRequests !== 0) failures.push('Bounded transport evidence was incomplete or overflowed');
+    if (inventoryReads.length !== 1 || inventoryReads[0] !== '100' || inventoryRequests.size !== 0) failures.push('Cold sample must contain exactly one completed limit=100 inventory read');
+    if (firstPageRequestMs === null) failures.push('Cold sample did not complete exactly one inventory request');
+    if (tab.exceptions.length !== 0) failures.push(`Browser exceptions: ${tab.exceptions.length}`);
+    const firstPageRequestMethods = tab.requests.slice(requestsBeforeFirstPage).map(request => request.method);
+    if (firstPageRequestMethods.some(method => !['GET', 'HEAD'].includes(method))) failures.push('Structure browsing issued a mutation request');
+    if (browserHeapMemory.coverageComplete !== true || !Number.isFinite(browserHeapMemory.sampledPeakBytes)
+      || browserHeapMemory.sampledPeakBytes > 128 * 1024 * 1024) failures.push('Initial-browser heap measurement was incomplete or exceeded 128 MiB');
+    if (jvmMemory.coverageComplete !== true || !Number.isFinite(jvmMemory.incrementalPeakBytes)
+      || jvmMemory.incrementalPeakBytes > JVM_RSS_BUDGET_BYTES) failures.push('JVM RSS measurement was incomplete or exceeded 256 MiB');
+    if (coldEvidenceSummary.resourceTimingOverflow !== 0) failures.push('Resource Timing evidence overflowed');
+    const result = { profile: profile.name, profileLimits: { firstPageMs: profile.firstPageLimitMs, browserHeapBytes: 128 * 1024 * 1024,
+      jvmRssIncrementBytes: JVM_RSS_BUDGET_BYTES }, firstPageMs, firstPageRequestMs, inventoryReads,
+      failedInventoryRequestCount: coldEvidenceSummary.failedInventoryRequestCount,
+      failedInventoryRequestEvidenceComplete: inventoryFailureClassification.failedInventoryRequestEvidenceComplete,
+      inventoryConsumption, resourceEvidence: { resourceTimingCount: coldEvidenceSummary.resourceTimings?.length ?? 0,
+        resourceTimingOverflow: coldEvidenceSummary.resourceTimingOverflow ?? null, firstPageRequestCount: coldEvidenceSummary.firstPageRequestCount,
+        terminalEvidenceOverflow: coldEvidenceSummary.terminalEvidenceOverflow, invalidTransportEvidence: coldEvidenceSummary.invalidTransportEvidence,
+        pendingEvidenceRequests: coldEvidenceSummary.pendingEvidenceRequests },
+      browserHeapMemory, jvmMemory, exceptions: tab.exceptions, requestMethods: firstPageRequestMethods,
+      recordedFunctions: fixture.functions, profileApplied: profile.name, failures,
+      latencyWithinBudget: Number.isFinite(firstPageMs) && firstPageMs <= profile.firstPageLimitMs, passed: failures.length === 0 };
+    return result;
+  }
+  assert.ok(Number.isFinite(firstPageMs));
   const pageMs = [];
   for (let page = 1; page <= 50; page++) {
     phase(`page${page + 1}`);
@@ -1617,7 +1683,7 @@ async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evalua
   if (!inventoryConsumption.consumptionProven) {
     evidenceFailures.push(boundedFailure(`Inventory consumption unproven: ${inventoryConsumption.provenActions}/${inventoryConsumption.expectedActions} actions; ${JSON.stringify(inventoryConsumption.actions.filter(a => !a.validatedConsumption).slice(0, 4).map(a => [a.label, a.reasons.slice(0, 6)]))}`));
   }
-  const measurements = { firstPageMs, pageDataP95Ms, searchMs, requestP95Ms,
+  const measurements = { firstPageMs, firstPageBudgetMs: profile.firstPageLimitMs, pageDataP95Ms, searchMs, requestP95Ms,
     localFeedbackSamples: localFeedbackMs.length, invalidFeedbackSamples, localFeedbackP95Ms,
     pendingInventoryRequests: inventoryRequests.size, inventoryReads, exceptions: tab.exceptions,
     requestMethods: tab.requests.map(request => request.method), peakBrowserHeapBytes, browserHeapMemory, jvmMemory,
@@ -1630,7 +1696,7 @@ async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evalua
     firstPageMs: Math.round(firstPageMs), structureTiming: structureTimingSummary,
     pageMsP50: Math.round(pageMs[Math.ceil(pageMs.length * 0.5) - 1]), pageMsP95: Math.round(pageDataP95Ms),
     functionRequestP95Ms: Math.round(requestP95Ms), localFeedbackP95Ms: Math.round(localFeedbackP95Ms),
-    firstPageBudgetMs: FIRST_DATA_BUDGET_MS, localFeedbackBudgetMs: LOCAL_FEEDBACK_BUDGET_MS, jvmMemory,
+    firstPageBudgetMs: profile.firstPageLimitMs, localFeedbackBudgetMs: LOCAL_FEEDBACK_BUDGET_MS, jvmMemory,
     searchMs: Math.round(searchMs), peakBrowserHeapBytes, cursorReload: true,
     pinnedCrossLinks: true, moduleSourceLink: true, moduleResponse: moduleResponseEvidence, narrowReflow: true, boundedInventoryReads: inventoryReads.length, mutationRequests: 0 };
 }

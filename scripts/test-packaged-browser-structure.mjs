@@ -281,6 +281,9 @@ test('every D0 budget is evaluated even when several fail', () => {
     unprovenFailedInventoryRequestCount: 0,
     structureTiming: {} };
   assert.deepEqual(evaluateStructureBudgets(passing), []);
+  const constrained = { ...passing, firstPageBudgetMs: 1000, firstPageMs: 900, pageDataP95Ms: 900, searchMs: 900, requestP95Ms: 900 };
+  assert.deepEqual(evaluateStructureBudgets(constrained), []);
+  assert.ok(evaluateStructureBudgets({ ...constrained, firstPageMs: 1001 }).some(failure => failure.includes('1000ms budget')));
   const failures = evaluateStructureBudgets({ ...passing, firstPageMs: 501, localFeedbackP95Ms: 101,
     peakBrowserHeapBytes: 128 * 1024 * 1024 + 1,
     browserHeapMemory: { coverageComplete: true, sampledPeakBytes: 128 * 1024 * 1024 + 1 },
@@ -711,6 +714,17 @@ test('a proof cannot be complete with fewer than 52 actions and adds no budget c
   const proven = { consumptionProven: true, actions: Array(52).fill({ validatedConsumption: true }) };
   assert.deepEqual(evaluateStructureBudgets({ ...failing, inventoryConsumption: proven }), before, 'evidence additions never relax budgets');
   assert.equal(before.length, 3);
+});
+
+test('cold inventory proof can bound exactly one first-page action without weakening the full-journey default', () => {
+  const fixture = { functionAddress: index => 0x400000 + index * 16, functionId: index => `fn_${index}` };
+  const one = proofModule.createInventoryConsumptionProof({ browserOrigin, fixture, call: async () => ({}), expectedActions: 1 });
+  assert.equal(one.summary().expectedActions, 1);
+  assert.equal(one.summary().consumptionProven, false);
+  assert.equal(one.beginAction({ label:'first',kind:'first',start:0 }).addresses.length,100);
+  assert.equal(one.beginAction({ label:'duplicate',kind:'first',start:0 }),null);
+  assert.equal(one.summary().counters.actionOverflow,1);
+  assert.throws(() => proofModule.createInventoryConsumptionProof({ browserOrigin, fixture, call: async () => ({}), expectedActions: 53 }), /action bound/);
 });
 
 test('archived seq20/seq82 metadata lacking bodies and nonces stays unproven FAIL', () => {

@@ -140,11 +140,26 @@ browser lists these families explicitly rather than omitting them.
 
 ## Scale
 
-The checks below exercise the 100,000-function budget (#536), but they do not by
-themselves satisfy the complete D0 cold-load protocol. In particular, the packaged
-structure run records one first-page sample in one JVM; it does not run 20 fresh
-processes or the constrained 4× CPU / 10 Mbit profile. Those qualification gaps must
-remain explicit until separately measured.
+The packaged qualification separates cold first-page samples from the full interaction
+journey. `scripts/packaged-browser-structure-cold.mjs --run loopback|constrained --`
+starts 20 sequential instances of `check-packaged-web-browser.mjs --mode
+structure-cold`. Each instance seeds the 100,000-function revision before launching
+the packaged JVM, creates a fresh Chrome process and profile, exchanges a new local
+session handoff, then measures the existing click-to-first-100-rendered-rows boundary.
+Bootstrap, JVM startup, fixture seeding and navigation to the attempt page are outside
+that interval. The 20 child reports retain every timing and failure; no failed sample
+is replaced. The aggregate gates nearest-rank p95 and requires 20 complete samples,
+zero raw inventory loading failures, matching source/archive/JAR identities, unique
+run directories and observed JVM/Chrome process identities.
+
+The browser profile starts with empty cache and storage. Private requests use the
+normal HttpOnly session cookie after the bootstrap fragment is scrubbed. The JVM and
+browser are fresh for each sample, so server-side structure caches cannot warm later
+samples. The protocol does not clear the operating-system page cache; results are cold
+application-process/browser-profile measurements, not cold-storage measurements.
+Loopback first-page p95 is limited to 500 ms. The constrained profile applies 4× CPU
+slowdown, 100 ms round-trip latency, 10 Mbit/s download and 2 Mbit/s upload and limits
+first-page p95 to 1 s. Both profiles also gate the browser heap and JVM RSS budgets.
 
 - `WebProgramStructureTest` builds a 100,000-function synthetic revision (4,167
   modules) through the real capture path and requires pages of at most 200 rows and
@@ -153,7 +168,7 @@ remain explicit until separately measured.
   bound. The 20 reads use fresh cache instances in one already-running test JVM;
   they are not 20 fresh-process cold loads. It prints each sample plus the median,
   p95 and max.
-- `node scripts/check-packaged-web-browser.mjs --mode structure` seeds a persisted
+- `node scripts/check-packaged-web-browser.mjs --mode structure --structure-profile <loopback-or-constrained>` seeds a persisted
   100,000-function revision (`scripts/packaged-browser-structure.mjs`) into the
   packaged application and drives pinned Chrome: it opens the inventory from the
   attempt page, traverses 50 pages by keyboard (focus returns to the results heading),
