@@ -69,6 +69,11 @@ jobs:
           node --check scripts/packaged-browser-engines.mjs
       - name: Verify packaged upload route readiness controls
         run: node scripts/test-packaged-browser-upload.mjs
+      - name: Verify packaged Git API scale controls
+        timeout-minutes: 1
+        run: |
+          node --test scripts/generate-git-scale-repo.test.mjs scripts/packaged-browser-git-scale.test.mjs
+          node --check scripts/packaged-browser-git-scale.mjs
       - name: Verify bounded archival cleanup controls
         timeout-minutes: 1
         run: python3 -B scripts/test-archival-diagnostics.py --verbose
@@ -249,6 +254,13 @@ jobs:
             --archive "$WEB_TEST_ARCHIVE" \
             --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
             --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode scale --no-sandbox
+      - name: Verify bounded Git history and diff API with ten thousand commits
+        run: |
+          git --version
+          node scripts/check-packaged-web-browser.mjs \
+            --archive "$WEB_TEST_ARCHIVE" \
+            --chrome "$RUNNER_TEMP/web-test-browser/chrome" --java-home "$JAVA_HOME" \
+            --python "$(command -v python3)" --work-parent "$GITHUB_WORKSPACE/build" --mode git-scale --no-sandbox
       - name: Exercise same-origin JVM restart and two-tab stale progress pin
         run: |
           xvfb-run -a node scripts/check-packaged-web-browser.mjs \
