@@ -199,3 +199,43 @@ reader, deadline timer or listener on that live signal may remain. The harness p
 DOM and the runtime `EventTarget` implementations, so abort-signal listeners are counted. Control
 cases prove it reports an injected global listener, interval, channel and live-signal listener. This is a structural retention check in jsdom; the Chromium heap
 budgets above still need a heap trace on the reference profile.
+
+## Packaged long-session soak (#626)
+
+`xvfb-run -a node scripts/check-packaged-web-browser.mjs --mode soak` runs the authenticated
+packaged application against four inert persisted jobs in one browser document and one JVM.
+Its 120 ten-second slots require repeated job/attempt selection, bounded source-directory and
+source-file reads, a bounded 200-row Activity read per slot, continuation to the live tail at the
+initial and reconnect slots, 20 offline/online
+reconnects with snapshot reconciliation and a newly rendered observation, ten visibility
+transitions, and an explicit retained-history-gap recovery. Four additional 35-second foreground
+dwells exercise natural replacement of the 30-second Activity stream lease; these 140 seconds
+are reported separately and extend wall duration beyond the 20-minute workload schedule. After
+the final route transition, first stream acquisition has a 45-second bound to allow an earlier
+lease to finish cleanup and one capped stream-limit retry cycle.
+
+The driver samples the JVM process tree's RSS and descriptor count once per second, renderer heap,
+stream count, process start identities, and declared route/event timings. Renderer GC is forced
+before the initial heap baseline, at each of the four five-minute checkpoints, and after the final
+renewal dwell before the final heap sample. The soak inherits the D0 browser-heap limits (128 MiB after
+initial browsing, 192 MiB at the end, and at most 16 MiB growth between adjacent post-GC
+checkpoints) and the D0 web-workload RSS limit (256 MiB above warmed idle). The proposed #626
+descriptor limits are a separate candidate policy, not an existing delivery-contract commitment:
+peak JVM process-tree descriptors may grow by at most 64 above the warmed baseline, and the
+post-logout quiescent sample may retain at most eight above baseline. The 35-second stream-drain
+allowance is likewise proposed. Changing these values requires agreement in #626 and evidence under
+the original values; they must not be silently loosened to obtain a pass.
+
+The packaged application launcher starts with `-Xms64m` to avoid reserving the host-selected
+multi-gigabyte initial heap before the web workload begins. It has no maximum-heap cap: other
+commands use the same launcher and must be able to grow for their own workloads. The soak report
+records both these packaged defaults and any diagnostic-only `LLM_BIN_PATCH_OPTS` override; only
+the shipped default profile can qualify.
+
+This profile is a deterministic fixture qualification, not a production workload or cross-engine
+result. It does not run workflows or establish production provider behavior. The current fixture
+uses persisted inert Activity observations and a one-file registered source revision; it does not
+qualify the 100,000-function, 25,000-file, 10,000-commit or real workflow workload boundaries.
+The process sampler records counts and start identities, never command lines or descriptor target
+paths. A passing local or hosted run must retain its exact source, archive, browser, fixture and
+report hashes separately from production qualification.

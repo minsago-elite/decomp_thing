@@ -11,6 +11,7 @@ import type { ActivityGroup } from './ActivityRow';
 import { useBrowserAvailability } from '../session/useBrowserAvailability';
 import { browserCapabilities } from '../shared/browserCapabilities';
 import { createUsageDisplay, isContextUsageUpdate } from './usageDisplay';
+import { streamLimitRetryDelayMs } from './activityRetry';
 
 import { ActivityHistory } from './ActivityHistory';
 import { ActivityStages } from './ActivityStages';
@@ -79,6 +80,8 @@ function LiveActivity({ jobId, runId, basePath, windowLinks }: { jobId: string; 
     // Catch up one bounded page before switching to live delivery, including on resume.
     let useStreaming = false;
     let readingStream = false;
+    let streamLimitFailures = 0;
+    let streamRetryAt = 0;
     const display = createUsageDisplay<ActivityDisplay, ReturnType<typeof setTimeout>>({
       schedule: callback => setTimeout(callback, 100),
       cancel: handle => clearTimeout(handle),
@@ -128,11 +131,16 @@ function LiveActivity({ jobId, runId, basePath, windowLinks }: { jobId: string; 
           }
           reconcile.current = false;
         }
-        readingStream = useStreaming && !fallback.current;
+        readingStream = useStreaming && !fallback.current && performance.now() >= streamRetryAt;
         if (readingStream) {
           const started = performance.now();
           const cursor = position.current.cursor;
-          for await (const event of stream({ jobId, runId, ...(cursor ? { after: cursor } : {}), signal: controller.signal })) {
+          for await (const event of stream({ jobId, runId, ...(cursor ? { after: cursor } : {}), signal: controller.signal,
+            onConnected: () => {
+              // Only report live delivery after the server accepted the leased stream.
+              setPeriodic(false); streamLimitFailures = 0; streamRetryAt = 0;
+              failures.current = 0; streamFailures.current = 0; setRetry(0);
+            } })) {
             if (controller.signal.aborted) return;
             if (!accept([event], event.cursor)) return;
             streamFailures.current = 0;
@@ -151,11 +159,26 @@ function LiveActivity({ jobId, runId, basePath, windowLinks }: { jobId: string; 
           if (!accept(data.items, data.nextCursor)) return;
           useStreaming = !data.hasMore;
         }
-        timer = setTimeout(() => { void poll(); }, 2500);
+        // Once the bounded catch-up page reaches the live tail, connect without
+        // the periodic-poll delay. This keeps reconnect delivery inside the
+        // interaction latency budget and renews leased streams promptly.
+        const streamRetryDue = streamLimitFailures === 0 || performance.now() >= streamRetryAt;
+        const nextPollDelay = useStreaming && !fallback.current && streamRetryDue ? 0 : 2500;
+        timer = setTimeout(() => { void poll(); }, nextPollDelay);
       } catch (failure: unknown) {
         if (controller.signal.aborted) return;
-        const unsupported = readingStream && failure instanceof ApiClientError && ([406, 415, 501].includes(failure.status ?? 0)
-          || (failure.status === 429 && failure.serverCode === 'STREAM_LIMIT'));
+        const streamLimit = readingStream && failure instanceof ApiClientError && failure.status === 429 && failure.serverCode === 'STREAM_LIMIT';
+        if (streamLimit) {
+          // A lease can remain charged while another view finishes cleanup.
+          // Keep bounded event polling active and probe again with capped,
+          // jittered backoff so a temporary collision does not disable streams.
+          streamLimitFailures = Math.min(streamLimitFailures + 1, 6);
+          streamRetryAt = performance.now() + streamLimitRetryDelayMs(streamLimitFailures, Math.random());
+          setPeriodic(true); reconcile.current = true; useStreaming = false;
+          timer = setTimeout(() => { void poll(); }, 2500);
+          return;
+        }
+        const unsupported = readingStream && failure instanceof ApiClientError && [406, 415, 501].includes(failure.status ?? 0);
         if (unsupported) {
           fallback.current = true; setPeriodic(true); readingStream = false;
           void poll();

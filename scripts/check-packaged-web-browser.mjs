@@ -15,6 +15,10 @@ import { qualifyRestart, assertGracefulShutdown, scrubTokens, boundReport } from
 import { qualifyUpgrade, qualifyUpgradeCache } from './packaged-browser-upgrade.mjs';
 import { qualifyAudit, assertAudit } from './packaged-browser-audit.mjs';
 import { PackagedBrowserCdpDiagnostics } from './packaged-browser-cdp-diagnostics.mjs';
+import { seedSoak, qualifySoak } from './packaged-browser-soak.mjs';
+import { evaluate as evaluateSoak } from './soak626/evaluate.mjs';
+import { sampleProcessTree } from './soak626/resources.mjs';
+import { closeCompanionTargets } from './soak626/target-cleanup.mjs';
 
 // Test driver only: the application is launched with a separate Node-free PATH.
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -28,13 +32,17 @@ const { values } = parseArgs({ options: {
   'java-home': { type: 'string' },
   python: { type: 'string', default: '/usr/bin/python3' },
   'no-sandbox': { type: 'boolean', default: false },
+  'soak-duration-ms': { type: 'string' },
+  'experiment-jvm-profile': { type: 'string', default: 'default' },
   help: { type: 'boolean', default: false },
 } });
 if (values.help) {
-  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|metadata|history|restart|scale|live|proxy|upgrade|legacy|audit] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
+  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|metadata|history|restart|scale|live|soak|proxy|upgrade|legacy|audit] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
   console.log('restart: seeded history on one JVM, graceful SIGTERM-only restart on the same installation/data/port, fresh bootstrap and serverInstanceId, then two tabs with a progress-pin stale If-Match 412. No live worker, no restart-while-running, one Chromium only.');
   console.log('public: packaged home/Runtime/recovery; session: public plus local session journey; upload: session plus inert upload and lost-response retry; history: session plus preseeded inert multi-page attempts; scale: session plus 10,000 persisted jobs and keyboard pagination; proxy: real Vite HMR and session journey against packaged JVM; upgrade: previous JVM to current JVM on one origin with an old tab.');
   console.log('legacy: inert legacy HTML/polling with explicit test-owned state edits; no workflow execution.');
+  console.log('soak accepts --soak-duration-ms for short diagnostic runs only; the evaluator still requires the full twenty-minute profile.');
+  console.log('soak accepts --experiment-jvm-profile default|xms64|xms64-xmx384 for diagnostics; only the default packaged JVM profile can qualify.');
   console.log('audit: every route at 1440x900, 390x844, 320px and 200%/400% zoom in light/dark themes with contract-fixture API reads fulfilled in DevTools; measures reflow, text/focus contrast, target size, reduced motion, every packaged asset under CSP and navigation timing budgets.');
   console.log('metadata: session plus one inert header upload/retry, real packaged job metadata, maximum uint64 address, and simulated malformed-response recovery; no workflow execution or upload quota/scale measurement.');
   console.log('live: session plus authored inert job changes and real background listing reads; preserves focused row order and applies new jobs on explicit refresh.');
@@ -49,7 +57,16 @@ for (const option of ['archive', 'chrome', 'java-home', 'python']) {
   assert.ok(values[option] && isAbsolute(values[option]), `--${option} must name an absolute existing path; see --help`);
   await fs.access(values[option]);
 }
-assert.ok(['public', 'session', 'upload', 'metadata', 'history', 'restart', 'scale', 'live', 'proxy', 'upgrade', 'legacy', 'audit'].includes(values.mode), '--mode must be public, session, upload, metadata, history, restart, scale, live, proxy, upgrade, legacy or audit');
+assert.ok(['public', 'session', 'upload', 'metadata', 'history', 'restart', 'scale', 'live', 'soak', 'proxy', 'upgrade', 'legacy', 'audit'].includes(values.mode), '--mode must be public, session, upload, metadata, history, restart, scale, live, soak, proxy, upgrade, legacy or audit');
+assert.ok(values['soak-duration-ms'] === undefined || values.mode === 'soak', '--soak-duration-ms is only supported with --mode soak');
+const soakDurationMs = values['soak-duration-ms'] === undefined ? 20 * 60_000 : Number(values['soak-duration-ms']);
+assert.ok(Number.isSafeInteger(soakDurationMs) && soakDurationMs > 0 && soakDurationMs <= 20 * 60_000,
+  '--soak-duration-ms must be a positive integer no greater than twenty minutes');
+assert.ok(values['experiment-jvm-profile'] === 'default' || values['experiment-jvm-profile'] === 'xms64' ||
+  values['experiment-jvm-profile'] === 'xms64-xmx384', '--experiment-jvm-profile must be default, xms64 or xms64-xmx384');
+assert.ok(values['experiment-jvm-profile'] === 'default' || values.mode === 'soak', '--experiment-jvm-profile is only supported with --mode soak');
+const experimentJvmOptions = values['experiment-jvm-profile'] === 'xms64' ? ['-Xms64m']
+  : values['experiment-jvm-profile'] === 'xms64-xmx384' ? ['-Xms64m', '-Xmx384m'] : [];
 if (values.mode === 'upgrade') {
   assert.ok(values['previous-archive'] && isAbsolute(values['previous-archive']), 'upgrade requires --previous-archive as an absolute existing ZIP path');
   await fs.access(values['previous-archive']);
@@ -249,6 +266,15 @@ function correlateDocumentResponse(state, requestId, response, source) {
   state.pendingDocumentRequests.delete(requestId);
 }
 
+const MAX_BROWSER_OBSERVATIONS = 20_000;
+function recordBrowserObservation(state, destination, value) {
+  if (destination.length >= MAX_BROWSER_OBSERVATIONS) {
+    state.instrumentationTruncated = true;
+    return;
+  }
+  destination.push(value);
+}
+
 async function makeTarget({ cspProbe = false, cacheEnabled = false, newWindow = false } = {}) {
   assert.equal(typeof cacheEnabled, 'boolean', 'Browser cache policy must be explicit');
   const initialization = cdpDiagnostics.beginTarget();
@@ -259,6 +285,7 @@ async function makeTarget({ cspProbe = false, cacheEnabled = false, newWindow = 
     cdp.call('Target.attachToTarget', { targetId, flatten: true }));
   cdpDiagnostics.setTargetIds(initialization, targetId, sessionId);
   const state = { targetId, sessionId, cspProbe, cacheEnabled, requests: [], responses: [], exceptions: [], requestUrls: new Map(),
+    instrumentationTruncated: false,
     initializationComplete: false,
     cacheRequests: [], cacheResponses: [], cacheRequestIds: new Set(),
     documentRequests: [], pendingDocumentRequests: new Map(), orphanDocumentResponses: [],
@@ -272,14 +299,15 @@ async function makeTarget({ cspProbe = false, cacheEnabled = false, newWindow = 
     }
     const type = event.type ?? (priorDocument ? 'Document' : undefined);
     const url = event.request.url.split('#')[0].split('?')[0];
-    state.requestUrls.set(event.requestId, url);
-    state.requests.push({ requestId: event.requestId, method: event.request.method, url, type });
-    if (cacheEnabled) state.cacheRequests.push({ requestId: event.requestId, method: event.request.method, url, type });
+    if (state.requestUrls.size < MAX_BROWSER_OBSERVATIONS) state.requestUrls.set(event.requestId, url);
+    else state.instrumentationTruncated = true;
+    recordBrowserObservation(state, state.requests, { requestId: event.requestId, method: event.request.method, url, type });
+    if (cacheEnabled) recordBrowserObservation(state, state.cacheRequests, { requestId: event.requestId, method: event.request.method, url, type });
     if (type === 'Document') {
       const request = { requestId: event.requestId, sequence: state.documentRequests.length,
         route: urlPath(url), method: event.request.method, status: null,
         contentSecurityPolicy: null, source: null, failure: null };
-      state.documentRequests.push(request);
+      recordBrowserObservation(state, state.documentRequests, request);
       state.pendingDocumentRequests.set(event.requestId, request);
     }
   }, sessionId);
@@ -288,36 +316,36 @@ async function makeTarget({ cspProbe = false, cacheEnabled = false, newWindow = 
   }, sessionId);
   cdp.on('Network.responseReceived', (event) => {
     const response = { requestId: event.requestId, url: event.response.url.split('#')[0].split('?')[0], status: event.response.status, type: event.type };
-    if (cacheEnabled) state.cacheResponses.push({ requestId: event.requestId, ...response,
+    if (cacheEnabled) recordBrowserObservation(state, state.cacheResponses, { requestId: event.requestId, ...response,
       fromDiskCache: event.response.fromDiskCache ?? null, fromServiceWorker: event.response.fromServiceWorker ?? null });
     if (event.type === 'Document' || state.pendingDocumentRequests.has(event.requestId)) {
       response.contentSecurityPolicy = responseHeader(event.response, 'content-security-policy');
       correlateDocumentResponse(state, event.requestId, event.response, 'responseReceived');
     }
-    state.responses.push(response);
+    recordBrowserObservation(state, state.responses, response);
   }, sessionId);
   cdp.on('Network.loadingFailed', (event) => {
     if (event.type === 'Document') {
       const request = state.pendingDocumentRequests.get(event.requestId);
       if (request) request.failure = { errorText: event.errorText, blockedReason: event.blockedReason ?? null };
     }
-    if (event.blockedReason === 'csp') state.cspBlockedRequests.push({ requestId: event.requestId,
+    if (event.blockedReason === 'csp') recordBrowserObservation(state, state.cspBlockedRequests, { requestId: event.requestId,
       url: state.requestUrls.get(event.requestId) ?? null, errorText: event.errorText,
       blockedReason: event.blockedReason, type: event.type });
   }, sessionId);
-  cdp.on('Runtime.exceptionThrown', (event) => state.exceptions.push(event.exceptionDetails.text), sessionId);
+  cdp.on('Runtime.exceptionThrown', (event) => recordBrowserObservation(state, state.exceptions, event.exceptionDetails.text), sessionId);
   cdp.on('Runtime.bindingCalled', (event) => {
     if (event.name !== '__decompRecordCspViolation') return;
-    try { state.cspViolations.push(JSON.parse(event.payload)); }
-    catch { state.cspViolations.push({ malformedPayload: String(event.payload) }); }
+    try { recordBrowserObservation(state, state.cspViolations, JSON.parse(event.payload)); }
+    catch { recordBrowserObservation(state, state.cspViolations, { malformedPayload: String(event.payload) }); }
   }, sessionId);
   cdp.on('Log.entryAdded', ({ entry }) => {
     if (/content[- ]security[- ]policy|refused to (?:load|execute|apply|connect|frame)|blocked by[^.]*\bcsp\b/i.test(entry.text)) {
-      state.cspLogEntries.push({ source: entry.source, level: entry.level, text: entry.text, url: entry.url ?? null, lineNumber: entry.lineNumber ?? null });
+      recordBrowserObservation(state, state.cspLogEntries, { source: entry.source, level: entry.level, text: entry.text, url: entry.url ?? null, lineNumber: entry.lineNumber ?? null });
     }
   }, sessionId);
   cdp.on('Audits.issueAdded', ({ issue }) => {
-    if (issue.code === 'ContentSecurityPolicyIssue') state.cspIssues.push(issue.details?.contentSecurityPolicyIssueDetails ?? issue);
+    if (issue.code === 'ContentSecurityPolicyIssue') recordBrowserObservation(state, state.cspIssues, issue.details?.contentSecurityPolicyIssueDetails ?? issue);
   }, sessionId);
   const initialize = (method, params = {}) => cdpDiagnostics.command(initialization, method,
     () => cdp.call(method, params, sessionId));
@@ -408,6 +436,7 @@ async function qualifyCspDetector() {
 }
 
 async function evaluate(target, expression) {
+  lastTarget = target;
   const result = await cdp.call('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true }, target.sessionId);
   if (result.exceptionDetails) {
     const exception = result.exceptionDetails.exception;
@@ -455,7 +484,8 @@ async function prepareArchive(archivePath) {
   }
   // Gradle uses xargs with its default external echo command while parsing JVM options.
   await fs.symlink('/usr/bin/echo', join(bins, 'echo'));
-  const environment = { PATH: bins, JAVA_HOME: javaHome, LANG: 'C.UTF-8' };
+  const environment = { PATH: bins, JAVA_HOME: javaHome, LANG: 'C.UTF-8', ...(experimentJvmOptions.length
+    ? { LLM_BIN_PATCH_OPTS: experimentJvmOptions.join(' ') } : {}) };
   for (const name of ['node', 'npm']) assert.notEqual(spawnSync('/bin/sh', ['-c', `command -v ${name}`], { env: environment }).status, 0);
   const data = join(working, 'untouched jobs');
   return { ...setup, archivePath, archiveSha256, work, before, working, environment, data };
@@ -469,8 +499,14 @@ function installationIdentity(installation) {
 }
 
 function recordInstallation(installation) {
+  const launcher = readFileSync(join(installation.app, 'bin/llm_bin_patch'), 'utf8');
+  const defaultOptionsLine = launcher.match(/^DEFAULT_JVM_OPTS=(.*)$/m)?.[1] ?? '';
+  const packagedJvmDefaultOptions = [...defaultOptionsLine.matchAll(/\"([^\"]+)\"/g)].map(match => match[1]);
   Object.assign(report, installationIdentity(installation), {
     workDirectory: installation.work, unrelatedWorkingDirectory: installation.working,
+    applicationJvmProfile: values.mode === 'soak' ? values['experiment-jvm-profile'] : 'default',
+    applicationJvmOptions: values.mode === 'soak' ? experimentJvmOptions : [],
+    packagedJvmDefaultOptions,
     basePath: values.mode === 'legacy' ? '/' : '/nested/', nodeOnApplicationPath: false, npmOnApplicationPath: false, readOnlyInstallation: true,
   });
 }
@@ -510,9 +546,10 @@ try {
   const restartFixture = values.mode === 'restart' ? await seedHistory(data) : null;
   const scaleFixture = values.mode === 'scale' ? await seedScale(data) : null;
   const liveFixture = values.mode === 'live' ? await seedLive(data) : null;
-  const populated = !!(historyFixture || restartFixture || scaleFixture || liveFixture);
+  const soakFixture = values.mode === 'soak' ? await seedSoak(data) : null;
+  const populated = !!(historyFixture || restartFixture || scaleFixture || liveFixture || soakFixture);
   const libraryText = historyFixture || restartFixture ? 'synthetic-history.elf' : scaleFixture ? 'synthetic-project-09999.elf'
-    : liveFixture ? 'live-dashboard-2.elf' : 'No uploaded jobs yet.';
+    : liveFixture ? 'live-dashboard-2.elf' : soakFixture ? 'synthetic-soak-4.elf' : 'No uploaded jobs yet.';
   let developmentPort;
   let browserOrigin;
   if (values.mode === 'proxy') {
@@ -528,7 +565,7 @@ try {
   const origin = await launchApplication(installation, '0', values.mode === 'proxy' ? browserOrigin : undefined);
   report.origin = origin;
   browserOrigin ??= origin;
-  const observeNativeVisibility = values.mode === 'restart';
+  const observeNativeVisibility = values.mode === 'restart' || values.mode === 'soak';
   if (observeNativeVisibility && !process.env.DISPLAY) {
     throw new Error('restart mode requires a real X display; run it under xvfb-run rather than emulating visibility');
   }
@@ -540,7 +577,10 @@ try {
   report.browserTempDirectory = browserTmp;
   await fs.mkdir(profile);
   browser = startOwned(chromeBinary, [...(observeNativeVisibility ? [] : ['--headless=new']), '--disable-gpu', ...(values['no-sandbox'] ? ['--no-sandbox'] : []), '--no-first-run', '--no-default-browser-check', '--disable-background-networking', '--disable-extensions', '--disable-default-apps', '--disable-sync', '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1', `--user-data-dir=${profile}`, 'about:blank'], {
-    env: { ...process.env, TMPDIR: browserTmp }, stdio: ['ignore', 'ignore', 'pipe'],
+    // Keep the Unix-domain socket path short even when the checkout itself is
+    // nested deeply. The directory still lives inside this repository; Chrome
+    // resolves the relative TMPDIR from the inherited repository cwd.
+    cwd: repo, env: { ...process.env, TMPDIR: basename(browserTmp) }, stdio: ['ignore', 'ignore', 'pipe'],
   });
   browser.stderr.on('data', (chunk) => { browserError = (browserError + chunk).slice(-1048576); });
   const portFile = await waitFor(async () => {
@@ -884,7 +924,7 @@ try {
     report.requests = {};
   }
 
-  if (values.mode === 'session' || values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'history' || values.mode === 'scale' || values.mode === 'live' || values.mode === 'proxy') {
+  if (values.mode === 'session' || values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'history' || values.mode === 'scale' || values.mode === 'live' || values.mode === 'soak' || values.mode === 'proxy') {
     const bootstrapUrl = await waitFor(() => applicationOutput.split(/\s+/).find((part) => part.startsWith(browserOrigin + '/nested/#bootstrap=')), 'local bootstrap handoff');
     const token = new URL(bootstrapUrl).hash.slice('#bootstrap='.length);
     sensitiveValues.push(token);
@@ -913,6 +953,30 @@ try {
       report.backendBootstrap = apiProof;
     }
     await ready(authenticated, `document.body.innerText.includes('${libraryText}')`, 'persistent job library');
+    if (soakFixture) {
+      report.soak = await qualifySoak({ fixture: soakFixture, tab: authenticated, cdp, evaluate, ready,
+        origin: browserOrigin, applicationPid: application.pid, delay, durationMs: soakDurationMs,
+        onProgress: (progress) => { console.log(`Packaged long-session slot ${progress.slot}/${progress.slots} (${progress.minute} active minutes)`); },
+        onPartial: (partial) => {
+          report.soak = partial;
+          report.soak.requestSummary = authenticated.requests.slice(-32).map(request => ({ method: request.method,
+            path: new URL(request.url).pathname, type: request.type }));
+          report.soak.responseSummary = authenticated.responses.slice(-32).map(response => ({
+            path: new URL(response.url).pathname, status: response.status, mimeType: response.mimeType }));
+        } });
+      report.soak.applicationJvmProfile = report.applicationJvmProfile;
+      report.soak.applicationJvmOptions = report.applicationJvmOptions;
+      report.soak.packagedJvmDefaultOptions = report.packagedJvmDefaultOptions;
+      report.jobDataCreated = true;
+      await evaluate(authenticated, `[...document.querySelectorAll('button')].find(button => button.textContent === 'Sign out').click()`);
+      await ready(authenticated, `document.body.innerText.includes('You signed out of this browser.')`, 'soak explicit logout');
+      assert.equal(authenticated.requests.filter((request) => request.method === 'DELETE').length, 1);
+      assert.equal(await evaluate(authenticated, 'localStorage.length + sessionStorage.length'), 0);
+      assert.deepEqual(authenticated.exceptions, []);
+      report.session = { authenticated: true, explicitLogoutRequests: 1, storageEntries: 0,
+        jobDataCreated: true, soakOnlyFlow: true };
+      report.requests.authenticated = authenticated.requests;
+    } else {
     await evaluate(authenticated, `(() => {
       const field = [...document.querySelectorAll('label')].find(label => label.textContent.startsWith('Filename or label search')).querySelector('input');
       field.value = 'absent fixture'; field.dispatchEvent(new Event('input', { bubbles: true }));
@@ -1116,6 +1180,24 @@ try {
     assert.equal(await fs.stat(data).then(() => true, () => false), values.mode === 'upload' || values.mode === 'metadata' || populated);
     report.session = { authenticated: true, cookie: { httpOnly: true, sameSite: 'Strict', path: '/nested/', secure: false }, fragmentRemovedBeforeFetch: true, restoredAfterReload: true, explicitLogoutRequests: 1, successfulExchangeRequests: 1, consumedLinkRequests: 1, automaticMutationRetries: 0, storageEntries: 0, installationUnchanged: true, jobDataCreated: values.mode === 'upload' || values.mode === 'metadata' || populated };
     report.requests.authenticated = authenticated.requests;
+    }
+    if (soakFixture) {
+      const targetCleanup = await closeCompanionTargets({
+        primaryTargetId: authenticated.targetId,
+        deadlineMs: Date.now() + 10_000,
+        getTargets: () => cdp.call('Target.getTargets'),
+        closeTarget: targetId => cdp.call('Target.closeTarget', { targetId }),
+        delay,
+      });
+      assert.ok(targetCleanup.closed, `Companion browser targets remain after soak cleanup (${targetCleanup.remainingCount})`);
+      report.soak.targetCleanup = targetCleanup;
+      const quiescent = await sampleProcessTree(application.pid);
+      report.soak.postLogoutQuiescent = { jvmTreeRssMiB: quiescent.jvmTreeRssBytes / (1024 * 1024),
+        fdCount: quiescent.fdCount, processCount: quiescent.processCount,
+        rootPid: quiescent.rootPid, rootStartTime: quiescent.rootStartTime };
+      report.soak.fdQuiescent = quiescent.fdCount - report.soak.baseline.fdCount;
+      report.soakVerdict = evaluateSoak(report.soak, report.soak.baseline);
+    }
   }
 
   // Let the final DevTools events drain before taking the evidence snapshot.

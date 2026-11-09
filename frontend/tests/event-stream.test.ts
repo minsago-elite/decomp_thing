@@ -22,9 +22,12 @@ describe('one bounded authenticated SSE connection', () => {
   it('uses cookie authority and header resume, yields lazily and cancels on consumer exit', async () => {
     const input = source(new Uint8Array([...wire(), ...wire()]));
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(response(input.body));
-    const stream = createEventStream({ basePath: '/nested/', fetch: fetcher })({ ...selection, after: 'cursor_previous' });
+    const onConnected = vi.fn();
+    const stream = createEventStream({ basePath: '/nested/', fetch: fetcher })({ ...selection, after: 'cursor_previous', onConnected });
     expect(fetcher).not.toHaveBeenCalled();
+    expect(onConnected).not.toHaveBeenCalled();
     expect((await stream.next()).value).toEqual(decodeContract(JSON.stringify(observation)));
+    expect(onConnected).toHaveBeenCalledOnce();
     const [url, options] = fetcher.mock.calls[0]!;
     expect(url).toBe(`/nested/api/v1/jobs/${selection.jobId}/runs/${selection.runId}/events`);
     expect(options).toMatchObject({ method: 'GET', credentials: 'same-origin', mode: 'same-origin', redirect: 'error', cache: 'no-store' });
