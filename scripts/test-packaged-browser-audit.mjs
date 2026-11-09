@@ -575,12 +575,12 @@ test('connection DOM check ignores legacy status asides outside the notice secti
   const h1 = { tagName: 'H1', id: '', textContent: 'Workspace' };
   const document = {
     activeElement: h1,
-    querySelector: selector => selector === 'aside.session-notice.is-connected' ? connectedSession : null,
+    querySelector: selector => selector === '.session-notice.is-connected' ? connectedSession : null,
     querySelectorAll(selector) {
       if (selector === 'section.connection-notice') return [section];
       if (selector === '[role="status"]') return [status];
       if (selector === 'aside[role="status"]') return [{ tagName: 'ASIDE' }]; // unrelated session notice
-      if (selector === 'aside.session-notice.is-connected') return connectedSession;
+      if (selector === '.session-notice.is-connected') return [connectedSession];
       throw new Error(`unexpected selector ${selector}`);
     },
     getElementById: () => ({ textContent: connectionNoticeNames.offline }),

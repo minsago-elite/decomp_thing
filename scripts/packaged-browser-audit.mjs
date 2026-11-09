@@ -379,7 +379,7 @@ export const measureConnectionState = `(() => {
   const focused = document.activeElement;
   const sections = [...document.querySelectorAll('section.connection-notice')];
   const statuses = [...document.querySelectorAll('[role="status"]')].filter(element => element.getAttribute('aria-label') === ${JSON.stringify(connectionNoticeNames.status)});
-  const session = document.querySelector('aside.session-notice.is-connected');
+  const session = document.querySelector('.session-notice.is-connected');
   return {
     token: window.__auditConnection?.token ?? null, events: [...(window.__auditConnection?.events ?? [])],
     onLine: navigator.onLine, href: location.href, historyLength: history.length,
@@ -685,6 +685,7 @@ export async function qualifyAudit({ origin, repo, manifest, evidenceDirectory, 
 
   // Connectivity alone must announce once and leave requests, storage, URL and focus untouched.
   const workspace = fixtures.pages[0];
+  await cdp.call('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false }, tab.sessionId);
   await cdp.call('Page.navigate', { url: origin + workspace.path }, tab.sessionId);
   await ready(tab, populated(workspace), 'workspace for connection notice');
   const connectionNotice = await qualifyConnectionNotice({ tab, cdp, evaluate, capture, delay, fulfilled, waitForValue: async (check, label, timeout) => {
