@@ -122,9 +122,12 @@ export async function applyStructureProfile(cdp, sessionId, name = 'loopback') {
 }
 
 export async function runColdSamples({ driver, driverArgs, count = COLD_SAMPLE_COUNT, profile = 'loopback', spawnImpl = spawn,
-  timeoutMs = COLD_SAMPLE_TIMEOUT_MS, processGroupGraceMs = 10_000, reportReader = readChildReport }) {
+  timeoutMs = COLD_SAMPLE_TIMEOUT_MS, terminationGraceMs = 10_000, processGroupGraceMs = 10_000, reportReader = readChildReport }) {
   if (count !== COLD_SAMPLE_COUNT) throw new RangeError(`cold structure run requires exactly ${COLD_SAMPLE_COUNT} samples`);
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 30 * 60_000) throw new RangeError('cold sample timeout is outside its allowed bound');
+  if (!Number.isSafeInteger(terminationGraceMs) || terminationGraceMs < 100 || terminationGraceMs > 30_000) {
+    throw new RangeError('termination grace is outside its allowed bound');
+  }
   if (!Number.isSafeInteger(processGroupGraceMs) || processGroupGraceMs < 100 || processGroupGraceMs > 30_000) {
     throw new RangeError('process group grace is outside its allowed bound');
   }
@@ -164,20 +167,22 @@ export async function runColdSamples({ driver, driverArgs, count = COLD_SAMPLE_C
             if (process.platform === 'linux' && child.pid) process.kill(-child.pid, 'SIGTERM');
             else child.kill('SIGTERM');
           } catch {}
-          const childClosedInGrace = childClosed || await Promise.race([new Promise(resolve => child.once('close', () => resolve(true))), new Promise(resolve => setTimeout(() => resolve(false), 10_000))]);
-          let shutdownConfirmed = childClosedInGrace && await waitForProcessGroupExit(processGroupId, 1000);
+          const childClosedInGrace = childClosed || await Promise.race([new Promise(resolve => child.once('close', () => resolve(true))), new Promise(resolve => setTimeout(() => resolve(false), terminationGraceMs))]);
+          let shutdownConfirmed = childClosedInGrace && await waitForProcessGroupExit(processGroupId, terminationGraceMs);
+          let processTreeForced = false;
           if (!shutdownConfirmed) {
+            processTreeForced = true;
             try {
               if (process.platform === 'linux' && child.pid) process.kill(-child.pid, 'SIGKILL');
               else child.kill('SIGKILL');
             } catch {}
             const childClosedAfterKill = childClosed || await Promise.race([new Promise(resolve => child.once('close', () => resolve(true))),
-              new Promise(resolve => setTimeout(() => resolve(false), 10_000))]);
-            shutdownConfirmed = childClosedAfterKill && await waitForProcessGroupExit(processGroupId, 10_000);
+              new Promise(resolve => setTimeout(() => resolve(false), terminationGraceMs))]);
+            shutdownConfirmed = childClosedAfterKill && await waitForProcessGroupExit(processGroupId, terminationGraceMs);
           }
           // A closed launcher process is not proof that Chrome or the JVM exited.
           // Only the process-group probe confirms that no owned descendant remains.
-          settle({ timeout: true, shutdownConfirmed });
+          settle({ timeout: true, shutdownConfirmed, processTreeForced });
         }, timeoutMs);
         timer.unref?.();
         child.once('close', () => clearTimeout(timer));
@@ -191,9 +196,12 @@ export async function runColdSamples({ driver, driverArgs, count = COLD_SAMPLE_C
       const firstPageMs = Number.isFinite(evidence?.firstPageMs) && evidence.firstPageMs >= 0 ? evidence.firstPageMs : null;
       processTreeConfirmed = outcome.shutdownConfirmed ?? (childClosed && processGroupId
         ? await waitForProcessGroupExit(processGroupId, processGroupGraceMs) : false);
-      const processTreeForced = !processTreeConfirmed && childClosed && processGroupId
-        ? await forceStopProcessGroup(processGroupId, processGroupGraceMs) : false;
-      processTreeConfirmed ||= processTreeForced;
+      let processTreeForced = outcome.processTreeForced ?? false;
+      if (!processTreeConfirmed && childClosed && processGroupId) {
+        const forcedCleanupConfirmed = await forceStopProcessGroup(processGroupId, processGroupGraceMs);
+        processTreeForced ||= forcedCleanupConfirmed;
+        processTreeConfirmed ||= forcedCleanupConfirmed;
+      }
       const shutdownConfirmed = processTreeConfirmed;
       const diagnostic = stderr.length ? { byteLength: Buffer.byteLength(stderr), sha256: createHash('sha256').update(stderr).digest('hex') } : null;
       const passed = !interrupted && !timedOut && !processTreeForced && exitCode === 0 && report?.status === 'passed' && evidence?.passed === true

@@ -171,7 +171,7 @@ test('runner confirms real process groups and escalates when a surviving descend
         structureCold:{passed:true,firstPageMs:10,failedInventoryRequestCount:0,profileApplied:'loopback'}}};
     }});
   assert.equal(launches,20);
-  assert.equal(result.samples[0].processTreeForced,true);
+  assert.equal(result.samples[0].processTreeForced,true,JSON.stringify(result.samples[0]));
   assert.equal(result.samples[0].shutdownConfirmed,true);
   assert.equal(result.samples[0].status,'failed','forced cleanup must be reported as a failed cold sample');
   assert.equal(result.samples[1].processTreeForced,false,'a descendant that exits during the grace window needs no escalation');
@@ -182,4 +182,40 @@ test('runner confirms real process groups and escalates when a surviving descend
     const state = stat === null ? null : stat.slice(stat.lastIndexOf(') ') + 2, stat.lastIndexOf(') ') + 3);
     assert.ok(stat === null || state === 'Z', `owned descendant ${pid} should be gone or reaped after the sample closes`);
   }
+});
+
+test('timeout sends SIGTERM then SIGKILL to a real launcher and descendant that both ignore termination', { skip: process.platform !== 'linux' }, async () => {
+  let launches = 0;
+  let descendantPid = null;
+  const result = await runColdSamples({ driver:'/unused/driver.mjs', driverArgs:[], profile:'loopback', timeoutMs:1000,
+    terminationGraceMs:150, processGroupGraceMs:150,
+    spawnImpl:(command, _args, options) => {
+      const index = ++launches;
+      const launch = index === 1
+        ? `const {spawn}=require('node:child_process'); const child=spawn(process.execPath,['-e',${JSON.stringify("process.on('SIGTERM',()=>{});setInterval(()=>{},1000);")}],{stdio:'ignore'}); child.unref(); process.on('SIGTERM',()=>{}); process.stdout.write('descendant-pid='+child.pid+'\\nReport: /tmp/child/report.json\\n'); setInterval(()=>{},1000);`
+        : `process.stdout.write('Report: /tmp/child/report.json\\n',()=>process.exit(0));`;
+      const child = spawn(command, ['-e', launch], options);
+      child.stdout.on('data', chunk => {
+        const pid = Number(chunk.toString('utf8').match(/descendant-pid=(\d+)/)?.[1]);
+        if (pid) descendantPid = pid;
+      });
+      return child;
+    },
+    reportReader:async stdout => {
+      const sample = launches;
+      return {path:`/tmp/report-${sample}.json`,sha256:String(sample),report:{status:'passed',driverCommit:'a'.repeat(40),
+        sourceIdentity:{verified:true,commit:'a'.repeat(40),sourceSha256:'e'.repeat(64),files:[]},archiveSha256:'b'.repeat(64),
+        applicationJarSha256:'c'.repeat(64),testDirectory:`/tmp/run-${sample}`,browserProfileDirectory:`/tmp/run-${sample}/profile`,
+        runtimeProcesses:{applicationPid:50_000+sample,applicationStartTimeTicks:60_000+sample,browserPid:70_000+sample,browserStartTimeTicks:80_000+sample},
+        structureCold:{passed:true,firstPageMs:10,failedInventoryRequestCount:0,profileApplied:'loopback'}}};
+    }});
+  assert.equal(launches,20);
+  assert.equal(result.samples[0].timedOut,true);
+  assert.equal(result.samples[0].processTreeForced,true,JSON.stringify(result.samples[0]));
+  assert.equal(result.samples[0].shutdownConfirmed,true);
+  assert.equal(result.samples[0].status,'failed');
+  assert.ok(descendantPid > 0);
+  const stat = await readFile(`/proc/${descendantPid}/stat`, 'utf8').catch(error => error?.code === 'ENOENT' ? null : Promise.reject(error));
+  const state = stat === null ? null : stat.slice(stat.lastIndexOf(') ') + 2, stat.lastIndexOf(') ') + 3);
+  assert.ok(stat === null || state === 'Z', 'the real descendant must be gone or reaped after timeout escalation');
 });
