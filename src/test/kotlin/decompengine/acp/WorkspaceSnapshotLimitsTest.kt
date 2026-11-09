@@ -63,6 +63,193 @@ class WorkspaceSnapshotLimitsTest {
     }
 
     @Test
+    fun `role-bound snapshot authorizes deletion independently from modification`() {
+        for ((operations, shouldSucceed) in listOf(
+            setOf(AgentOperation.DELETE_FILE) to true,
+            setOf(AgentOperation.WRITE_FILE) to false,
+        )) {
+            val root = workspace()
+            val file = root.resolve("src/data")
+            val original = "payload".toByteArray()
+            Files.write(file, original)
+            val path = AgentWorkspacePath("project", "src/data")
+            val request = roleBoundRequest(root, listOf(mutationGrant(path, operations)))
+            val before = capture(request, WorkspaceSnapshotLimits())
+            Files.delete(file)
+            val after = capture(request, WorkspaceSnapshotLimits())
+
+            if (shouldSucceed) {
+                val change = before.diff(after, request, budget(WorkspaceSnapshotLimits())).single()
+                assertEquals(AgentFileChangeKind.DELETED, change.kind)
+                assertEquals(path, change.path)
+                assertEquals(java.security.MessageDigest.getInstance("SHA-256").digest(original)
+                    .joinToString("") { "%02x".format(it) }, change.beforeSha256)
+                assertEquals(null, change.afterSha256)
+                assertEquals(null, change.sizeBytes)
+            } else {
+                assertMutationRefused(before, after, request, path.relativePath)
+            }
+        }
+    }
+
+    @Test
+    fun `role-bound snapshot authorizes move source deletion and destination creation independently`() {
+        val cases = listOf(
+            // Source sorts first: its DELETE is allowed, then the destination CREATE must be refused.
+            MoveAuthorizationCase(
+                sourceOperations = setOf(AgentOperation.DELETE_FILE),
+                destinationOperations = setOf(AgentOperation.WRITE_FILE),
+                refusedPath = "src/z-target",
+            ),
+            // Source sorts first and must be refused even though destination CREATE is allowed.
+            MoveAuthorizationCase(
+                sourceOperations = setOf(AgentOperation.WRITE_FILE),
+                destinationOperations = setOf(AgentOperation.CREATE_FILE),
+                refusedPath = "src/a-source",
+            ),
+            MoveAuthorizationCase(
+                sourceOperations = setOf(AgentOperation.DELETE_FILE),
+                destinationOperations = setOf(AgentOperation.CREATE_FILE),
+                refusedPath = null,
+            ),
+        )
+
+        for (case in cases) {
+            val root = workspace()
+            val sourcePath = AgentWorkspacePath("project", "src/a-source")
+            val destinationPath = AgentWorkspacePath("project", "src/z-target")
+            Files.write(root.resolve(sourcePath.relativePath), "payload".toByteArray())
+            val request = roleBoundRequest(root, listOf(
+                mutationGrant(sourcePath, case.sourceOperations),
+                mutationGrant(destinationPath, case.destinationOperations),
+            ))
+            val before = capture(request, WorkspaceSnapshotLimits())
+            Files.move(root.resolve(sourcePath.relativePath), root.resolve(destinationPath.relativePath))
+            val after = capture(request, WorkspaceSnapshotLimits())
+
+            if (case.refusedPath != null) {
+                assertMutationRefused(before, after, request, case.refusedPath)
+            } else {
+                val changes = before.diff(after, request, budget(WorkspaceSnapshotLimits())).associateBy { it.path }
+                assertEquals(setOf(sourcePath, destinationPath), changes.keys)
+                assertEquals(AgentFileChangeKind.DELETED, changes.getValue(sourcePath).kind)
+                assertEquals(AgentFileChangeKind.CREATED, changes.getValue(destinationPath).kind)
+                assertEquals(changes.getValue(sourcePath).beforeSha256, changes.getValue(destinationPath).afterSha256)
+                assertEquals(7L, changes.getValue(destinationPath).sizeBytes)
+            }
+        }
+    }
+
+    @Test
+    fun `streaming UTF-8 validation accepts multibyte sequences split across read chunks`() {
+        val sequences = listOf(
+            byteArrayOf(0xc2.toByte(), 0xa2.toByte()),
+            byteArrayOf(0xe2.toByte(), 0x82.toByte(), 0xac.toByte()),
+            byteArrayOf(0xf0.toByte(), 0x9f.toByte(), 0x98.toByte(), 0x80.toByte()),
+        )
+        for (sequence in sequences) {
+            for (split in 1 until sequence.size) {
+                val root = workspace()
+                val file = root.resolve("src/data")
+                file.writeText("before")
+                val path = AgentWorkspacePath("project", "src/data")
+                val request = roleBoundRequest(root, listOf(mutationGrant(path, setOf(AgentOperation.WRITE_FILE))))
+                val before = capture(request, WorkspaceSnapshotLimits())
+                val prefix = ByteArray(65_536 - split) { 'x'.code.toByte() }
+                Files.write(file, prefix + sequence)
+                val change = before.diff(capture(request, WorkspaceSnapshotLimits()), request,
+                    budget(WorkspaceSnapshotLimits())).single()
+                assertEquals(AgentFileChangeKind.MODIFIED, change.kind)
+                assertEquals(path, change.path)
+            }
+        }
+    }
+
+    @Test
+    fun `streaming UTF-8 validation rejects truncated overlong surrogate and out of range encodings`() {
+        val invalidSequences = listOf(
+            byteArrayOf(0x80.toByte()),
+            byteArrayOf(0xc0.toByte(), 0xaf.toByte()),
+            byteArrayOf(0xe0.toByte(), 0x80.toByte(), 0xaf.toByte()),
+            byteArrayOf(0xed.toByte(), 0xa0.toByte(), 0x80.toByte()),
+            byteArrayOf(0xf4.toByte(), 0x90.toByte(), 0x80.toByte(), 0x80.toByte()),
+            byteArrayOf(0xc2.toByte()),
+            byteArrayOf(0xe2.toByte(), 0x82.toByte()),
+            byteArrayOf(0xf0.toByte(), 0x9f.toByte(), 0x98.toByte()),
+        )
+        for (invalid in invalidSequences) {
+            val root = workspace()
+            val file = root.resolve("src/data")
+            file.writeText("before")
+            val path = AgentWorkspacePath("project", "src/data")
+            val request = roleBoundRequest(root, listOf(mutationGrant(path, setOf(AgentOperation.WRITE_FILE))))
+            val before = capture(request, WorkspaceSnapshotLimits())
+            Files.write(file, ByteArray(65_535) { 'x'.code.toByte() } + invalid)
+            val after = capture(request, WorkspaceSnapshotLimits())
+            assertMutationRefused(before, after, request, path.relativePath)
+        }
+    }
+
+    @Test
+    fun `binary mutation grants continue to accept non UTF-8 content`() {
+        val root = workspace()
+        val file = root.resolve("src/data")
+        file.writeText("before")
+        val path = AgentWorkspacePath("project", "src/data")
+        val grant = mutationGrant(path, setOf(AgentOperation.WRITE_FILE), AgentMutationContentKind.BINARY)
+        val request = roleBoundRequest(root, listOf(grant))
+        val before = capture(request, WorkspaceSnapshotLimits())
+        Files.write(file, byteArrayOf(0xc0.toByte(), 0xaf.toByte()))
+        val change = before.diff(capture(request, WorkspaceSnapshotLimits()), request,
+            budget(WorkspaceSnapshotLimits())).single()
+        assertEquals(AgentFileChangeKind.MODIFIED, change.kind)
+    }
+
+    private data class MoveAuthorizationCase(
+        val sourceOperations: Set<AgentOperation>,
+        val destinationOperations: Set<AgentOperation>,
+        val refusedPath: String?,
+    )
+
+    private fun mutationGrant(
+        path: AgentWorkspacePath,
+        operations: Set<AgentOperation>,
+        contentKind: AgentMutationContentKind = AgentMutationContentKind.UTF8_TEXT,
+    ) = AgentMutationGrant(
+        path, operations, "test-owner", "a".repeat(64), path.relativePath.substringAfterLast('/'),
+        setOf("editable"), contentKind, 70_000,
+    )
+
+    private fun roleBoundRequest(root: Path, grants: List<AgentMutationGrant>): AgentExecutionRequest {
+        val allowed = setOf(
+            AgentOperation.READ_FILE,
+            AgentOperation.WRITE_FILE,
+            AgentOperation.CREATE_FILE,
+            AgentOperation.DELETE_FILE,
+        )
+        val authority = AgentMutationAuthority("declared-role-test-v1", "test-owner", "a".repeat(64), grants)
+        return AgentExecutionRequest(
+            "role-bound snapshot", listOf(AgentWorkspaceRoot("project", root)),
+            accessPolicy = AgentAccessPolicy(grants.map { AgentPathRule(it.path, allowed) }, mutationAuthority = authority),
+        )
+    }
+
+    private fun assertMutationRefused(
+        before: WorkspaceSnapshot,
+        after: WorkspaceSnapshot,
+        request: AgentExecutionRequest,
+        relativePath: String,
+    ) {
+        val failure = assertFailsWith<AgentExecutionException> {
+            before.diff(after, request, budget(WorkspaceSnapshotLimits()))
+        }.failure
+        assertEquals(AgentFailureKind.WORKSPACE_VIOLATION, failure.kind)
+        assertEquals("final-workspace-snapshot", failure.details["phase"])
+        assertEquals("project", failure.details["rootId"])
+        assertEquals(relativePath, failure.details["relativePath"])
+    }
+
+    @Test
     fun `snapshot hash paths still reject absolute traversal empty and NUL segments`() {
         val root = workspace()
         for (path in listOf("", "/src/data", "../data", "src/../data", "src/./data", "src//data", "src/data/", "src/\u0000data")) {
