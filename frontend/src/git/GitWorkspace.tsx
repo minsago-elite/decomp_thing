@@ -396,7 +396,7 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
             {statusData.headObjectId && <> <code title={statusData.headObjectId}>{short(statusData.headObjectId)}</code></>}</dd>
           <dt>{copy.objectFormat}</dt><dd><code>{repository.objectFormat}</code></dd>
         </dl>
-        {statusData.notices.length > MAX_NOTICE_RENDERED_ROWS && <p role="alert">Showing a bounded window of repository notices.</p>}
+        {statusData.notices.length > MAX_NOTICE_RENDERED_ROWS && <p role="alert">{copy.noticesWindowed}</p>}
         <ul aria-label={copy.worktrees}>{statusData.notices.slice(0, MAX_NOTICE_RENDERED_ROWS).map(notice => <li key={notice.code}>
           <StateMark tone={notice.code === 'clean' ? 'settled' : notice.code === 'busy' || notice.code === 'active-worker' ? 'active' : notice.code === 'conflicted' ? 'stopped' : 'pending'}>{notice.code}</StateMark> {notice.message}
         </li>)}</ul>
@@ -404,9 +404,9 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
       </section>
       {loaded.worktrees && loaded.worktrees.worktrees.length > 1 && <section aria-labelledby="git-worktrees-title">
         <h3 id="git-worktrees-title">{copy.worktrees}</h3>
-        {loaded.worktrees.worktrees.length > MAX_WORKTREE_RENDERED_ROWS && <p role="alert">Showing a bounded window of work trees.</p>}
+        {loaded.worktrees.worktrees.length > MAX_WORKTREE_RENDERED_ROWS && <p role="alert">{copy.worktreesWindowed}</p>}
         {loaded.worktrees.worktrees.length > MAX_WORKTREE_RENDERED_ROWS && <button type="button" disabled={worktreeWindowStart === 0}
-          onClick={() => setWorktreeWindowStart(value => Math.max(0, value - MAX_WORKTREE_RENDERED_ROWS))}>Newer work trees</button>}
+          onClick={() => setWorktreeWindowStart(value => Math.max(0, value - MAX_WORKTREE_RENDERED_ROWS))}>{copy.newerWorktrees}</button>}
         <ul>{loaded.worktrees.worktrees.slice(worktreeWindowStart, worktreeWindowStart + MAX_WORKTREE_RENDERED_ROWS).map(item => <li key={item.worktreeId}>
           <code>{item.worktreeId}</code> {item.primary ? copy.primary : copy.linked} · {headLabel(item.headState, item.headRefName, item.headObjectId)}
           {item.ownerRunId && <> · {textMessage(copy.owner, { run: item.ownerRunId })}</>}
@@ -420,14 +420,14 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
         {loaded.worktrees.worktrees.length > MAX_WORKTREE_RENDERED_ROWS && <button type="button"
           disabled={worktreeWindowStart + MAX_WORKTREE_RENDERED_ROWS >= loaded.worktrees.worktrees.length}
           onClick={() => setWorktreeWindowStart(value => Math.min(loaded.worktrees!.worktrees.length - MAX_WORKTREE_RENDERED_ROWS,
-            value + MAX_WORKTREE_RENDERED_ROWS))}>Older work trees</button>}
+            value + MAX_WORKTREE_RENDERED_ROWS))}>{copy.olderWorktrees}</button>}
       </section>}
       <section aria-labelledby="git-changes-title">
         <h3 id="git-changes-title">{copy.changes}</h3>
         {!statusData.complete && <p role="alert">{copy.incomplete}</p>}
-        {statusRowsTruncated && <p role="status">Showing a bounded window of changed files. Use the previous and next controls to review all changes.</p>}
+        {statusRowsTruncated && <p role="status">{copy.changesWindowed}</p>}
         {statusRowsTruncated && <button type="button" disabled={statusWindowStart === 0}
-          onClick={() => setStatusWindowStart(previous => Math.max(0, previous - MAX_STATUS_RENDERED_ROWS))}>Previous changes</button>}
+          onClick={() => setStatusWindowStart(previous => Math.max(0, previous - MAX_STATUS_RENDERED_ROWS))}>{copy.previousChanges}</button>}
         {(['staged', 'unstaged', 'untracked', 'conflicted'] as const).map(group => visibleGroups[group].length > 0 && <fieldset key={group}>
           <legend>{copy[group]}</legend>
           <ul>{visibleGroups[group].map(entry => <li key={`${group}:${entry.fileId}`}>
@@ -441,7 +441,7 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
         </fieldset>)}
         {statusRowsTruncated && <button type="button" disabled={statusWindowStart + MAX_STATUS_RENDERED_ROWS >= allStatusRows.length}
           onClick={() => setStatusWindowStart(previous => Math.min(allStatusRows.length - MAX_STATUS_RENDERED_ROWS,
-            previous + MAX_STATUS_RENDERED_ROWS))}>Next changes</button>}
+            previous + MAX_STATUS_RENDERED_ROWS))}>{copy.nextChanges}</button>}
         {groups.staged.length + groups.unstaged.length + groups.untracked.length + groups.conflicted.length === 0 && <p>{copy.noChanges}</p>}
         {statusData.counts.ignored > 0 && <p>{textMessage(copy.ignoredCount, { count: String(statusData.counts.ignored) })}</p>}
         {(selectedIn('unstaged', 'untracked').length > MAX_SELECTION || selectedIn('staged').length > MAX_SELECTION) &&
@@ -459,7 +459,7 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
           {diff.patch.truncated && <p>{copy.truncated}</p>}
         </section>}
       </section>
-      {groups.staged.length > MAX_STAGED_PREVIEW_ROWS && <p role="alert">Showing the first {MAX_STAGED_PREVIEW_ROWS} staged files in the commit preview.</p>}
+      {groups.staged.length > MAX_STAGED_PREVIEW_ROWS && <p role="alert">{textMessage(copy.stagedPreviewLimited, { count: String(MAX_STAGED_PREVIEW_ROWS) })}</p>}
       {groups.staged.length > MAX_SELECTION && <p role="alert">{textMessage(copy.commitTooLarge, { max: MAX_SELECTION, count: groups.staged.length })}</p>}
       <CommitForm staged={groups.staged} parent={statusData.headObjectId} resetKey={statusData.worktreeVersion}
         disabled={!writable || !statusData.complete || groups.conflicted.length > 0 || groups.staged.length > MAX_SELECTION}
@@ -506,7 +506,7 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
         {dirty && <p>{copy.dirtySwitch}</p>}
         {(loaded.refs?.nextCursor || (loaded.refs?.refs.length ?? 0) > MAX_REF_RENDERED_ROWS) && <p>{copy.refsIncomplete}</p>}
         {loaded.refs && loaded.refs.refs.length > MAX_REF_RENDERED_ROWS && <button type="button" disabled={refWindowStart === 0}
-          onClick={() => setRefWindowStart(previous => Math.max(0, previous - MAX_REF_RENDERED_ROWS))}>Newer branches and tags</button>}
+          onClick={() => setRefWindowStart(previous => Math.max(0, previous - MAX_REF_RENDERED_ROWS))}>{copy.newerRefs}</button>}
         <ul>{loaded.refs?.refs.slice(refWindowStart, refWindowStart + MAX_REF_RENDERED_ROWS).map(ref => {
           // /refs is repository-scoped; its current flag describes only the primary checkout.
           const current = ref.kind === 'branch' && statusData.headState !== 'detached' && ref.displayName === statusData.headRefName;
@@ -525,7 +525,7 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
           </>}
         </li>; })}</ul>
         {loaded.refs && (refWindowStart + MAX_REF_RENDERED_ROWS < loaded.refs.refs.length || loaded.refs.nextCursor) && <button type="button" disabled={busy}
-          onClick={olderRefsWindow}>{refWindowStart + MAX_REF_RENDERED_ROWS < loaded.refs.refs.length ? 'Older branches and tags' : copy.moreRefs}</button>}
+          onClick={olderRefsWindow}>{refWindowStart + MAX_REF_RENDERED_ROWS < loaded.refs.refs.length ? copy.olderRefs : copy.moreRefs}</button>}
         {statusData.headObjectId && <>
           <NameForm label={copy.branchName} action={copy.branchAction} disabled={!writable} onSubmit={name => act('gitBranchCreateRequest', copy.branchAction,
             guarded => ({ action: 'git.branch.create', worktreeId, guards: guarded, name, startObjectId: statusData.headObjectId ?? '' }))} />
@@ -570,10 +570,10 @@ function CommitForm({ staged, parent, resetKey, disabled, onCommit }: {
         {staged.length === 0 ? <p>{copy.nothingStaged}</p> : <>
       <p>{copy.commitFiles}</p>
       {staged.length > MAX_STAGED_PREVIEW_ROWS && <button type="button" disabled={start === 0}
-        onClick={() => setStart(previous => Math.max(0, previous - MAX_STAGED_PREVIEW_ROWS))}>Previous staged files</button>}
+        onClick={() => setStart(previous => Math.max(0, previous - MAX_STAGED_PREVIEW_ROWS))}>{copy.previousStaged}</button>}
       <ul aria-label={copy.commitFiles}>{staged.slice(start, start + MAX_STAGED_PREVIEW_ROWS).map(entry => <li key={entry.fileId}><code>{entry.path}</code> {entry.staged}</li>)}</ul>
       {staged.length > MAX_STAGED_PREVIEW_ROWS && <button type="button" disabled={start + MAX_STAGED_PREVIEW_ROWS >= staged.length}
-        onClick={() => setStart(previous => Math.min(staged.length - MAX_STAGED_PREVIEW_ROWS, previous + MAX_STAGED_PREVIEW_ROWS))}>Next staged files</button>}
+        onClick={() => setStart(previous => Math.min(staged.length - MAX_STAGED_PREVIEW_ROWS, previous + MAX_STAGED_PREVIEW_ROWS))}>{copy.nextStaged}</button>}
       <p>{parent ? textMessage(copy.parent, { object: parent }) : copy.noParent}</p>
       <form onSubmit={event => { event.preventDefault(); if (message.trim()) void onCommit(message).then(done => { if (done) setMessage(''); }); }}>
         <label for="git-commit-message">{copy.message}</label>
