@@ -113,7 +113,8 @@ test('runner executes twenty sequential fresh-child cold modes and retains the e
 
 test('runner fails closed on raw transport failures, missing source identities, or p95 over budget', async () => {
   let launches=0;
-  const result = await runColdSamples({ driver:'/repo/driver.mjs', driverArgs:[], profile:'constrained', spawnImpl:()=>{launches++;return fakeChild();},
+  const result = await runColdSamples({ driver:'/repo/driver.mjs', driverArgs:[], profile:'constrained', expectedHeadCommit:null, expectedBaseCommit:null,
+    spawnImpl:()=>{launches++;return fakeChild();},
     reportReader:async()=>({path:`/tmp/${launches}.json`,sha256:'d'.repeat(64),report:{status:'passed',driverCommit:'a'.repeat(40),
       sourceIdentity:{verified:launches!==3,commit:'a'.repeat(40),sourceSha256:'e'.repeat(64),files:[]},
       archiveSha256:launches===2?null:'b'.repeat(64),applicationJarSha256:'c'.repeat(64),shutdownConfirmed:true,
@@ -155,6 +156,7 @@ test('runner refuses a child report attributed to a different pull-request head 
 test('runner records the timeout state even when the child exits during termination grace', { skip: process.platform !== 'linux' }, async () => {
   let launches = 0;
   const result = await runColdSamples({ driver:'/repo/driver.mjs', driverArgs:[], profile:'loopback', timeoutMs:1000,
+    expectedHeadCommit:null, expectedBaseCommit:null,
     spawnImpl:() => {
       const index = ++launches;
       const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.pid = 999999999;
@@ -180,6 +182,7 @@ test('runner confirms real process groups and escalates when a surviving descend
   let launches = 0;
   const descendantPids = [];
   const result = await runColdSamples({ driver:'/unused/driver.mjs', driverArgs:[], profile:'loopback', processGroupGraceMs:150,
+    expectedHeadCommit:null, expectedBaseCommit:null,
     spawnImpl:(command, _args, options) => {
       const index = ++launches;
       const descendant = index === 1 ? `process.on('SIGTERM',()=>{}); setInterval(()=>{},1000);`
@@ -221,6 +224,7 @@ test('timeout sends SIGTERM then SIGKILL to a real launcher and descendant that 
   let launches = 0;
   let descendantPid = null;
   const result = await runColdSamples({ driver:'/unused/driver.mjs', driverArgs:[], profile:'loopback', timeoutMs:1000,
+    expectedHeadCommit:null, expectedBaseCommit:null,
     terminationGraceMs:150, processGroupGraceMs:150,
     spawnImpl:(command, _args, options) => {
       const index = ++launches;
