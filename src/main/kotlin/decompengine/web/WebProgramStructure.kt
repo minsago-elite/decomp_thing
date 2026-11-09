@@ -645,27 +645,28 @@ internal object WebProgramStructureBuilder {
                     // currentName is decoded, so escaped aliases collide before their value is consumed.
                     if (bit and expectedFields == 0 || bit and seenFields != 0) malformed()
                     seenFields = seenFields or bit
-                    when (key) {
-                        "id" -> id = identifier(parser)
-                        "name" -> name = identifier(parser)
-                        "address", "sourceAddress" -> {
-                            addressState = address(parser, nullable = key == "sourceAddress")
+                    when (bit) {
+                        1 shl 0 -> id = identifier(parser)
+                        1 shl 1 -> name = identifier(parser)
+                        1 shl 2, 1 shl 12 -> {
+                            addressState = address(parser, nullable = bit == (1 shl 12))
                             parsedAddress = decodedAddress
                         }
-                        "status", "extractionStatus" -> {
+                        1 shl 13, 1 shl 14 -> {
                             labelState = extractionStatus(parser)
                             label = decodedStatus
                         }
-                        "recoveryAssessment" -> {
+                        1 shl 15 -> {
                             expect(parser.nextToken(), JsonToken.VALUE_STRING)
                             assessmentState = if (decodedTextEquals(parser, "unassessed")) ScalarState.VALUE else ScalarState.INVALID
                         }
-                        "calls" -> called = identifiers(parser)
-                        "referencedGlobals" -> referenced = identifiers(parser)
-                        "strings" -> stringCount = count(parser)
-                        "prototype", "type", "declaration" -> discardString(parser, nullable = false)
-                        "decompiledC", "initializer" -> discardString(parser, nullable = true)
-                        "byteEvidence" -> byteEvidence(parser)
+                        1 shl 4 -> called = identifiers(parser)
+                        1 shl 5 -> referenced = identifiers(parser)
+                        1 shl 6 -> stringCount = count(parser)
+                        1 shl 3, 1 shl 8, 1 shl 11 -> discardString(parser, nullable = false)
+                        1 shl 7, 1 shl 9 -> discardString(parser, nullable = true)
+                        1 shl 10 -> byteEvidence(parser)
+                        else -> malformed()
                     }
                 }
                 if (seenFields != expectedFields || id == null) malformed()
