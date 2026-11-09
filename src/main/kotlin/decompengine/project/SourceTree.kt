@@ -1970,14 +1970,14 @@ object SourceTreeManifestReader {
                         require(role.jsonPrimitive.isString) { "source tree manifest file roles must be strings" }
                         ProjectFileRole.fromWireName(role.jsonPrimitive.content)
                     }
-                    require(roles.map(ProjectFileRole::wireName) == roles.map(ProjectFileRole::wireName).distinct().sorted()) {
+                    require(rolesAreStrictlySorted(roles)) {
                         "source tree manifest file roles must be unique and sorted"
                     }
                     val entityIds = item.getValue("entityIds").jsonArray.map {
                         require(it.jsonPrimitive.isString) { "source tree manifest entity IDs must be strings" }
                         it.jsonPrimitive.content
                     }
-                    require(entityIds == entityIds.distinct().sorted()) {
+                    require(stringsAreStrictlySorted(entityIds)) {
                         "source tree manifest entity IDs must be unique and sorted"
                     }
                     val accepted = item.getValue("acceptedImplementation").let { value ->
@@ -2021,14 +2021,14 @@ object SourceTreeManifestReader {
                 }
             }
             probe?.startSafely(SourceTreeManifestStage.PATH_ORDER)
-            require(files.map(GeneratedFileEvidence::path) == files.map(GeneratedFileEvidence::path).distinct().sorted()) {
+            require(filesAreStrictlySorted(files)) {
                 "source tree manifest files must be unique and sorted"
             }
             fun sortedIds(name: String): List<String> = root.getValue(name).jsonArray.map {
                 require(it.jsonPrimitive.isString) { "source tree manifest $name values must be strings" }
                 it.jsonPrimitive.content
             }.also { ids ->
-                require(ids == ids.distinct().sorted()) { "source tree manifest $name must be unique and sorted" }
+                require(stringsAreStrictlySorted(ids)) { "source tree manifest $name must be unique and sorted" }
             }
             val inputSha256 = requiredManifestString(root, "inputSha256")
             val unresolvedEntityIds = sortedIds("unresolvedEntityIds")
@@ -2072,6 +2072,27 @@ object SourceTreeManifestReader {
         val primitive = objectValue.getValue(name).jsonPrimitive
         require(primitive.isString) { "source tree manifest $name must be a string" }
         return primitive.content
+    }
+
+    private fun stringsAreStrictlySorted(values: List<String>): Boolean {
+        for (index in 1 until values.size) {
+            if (values[index - 1] >= values[index]) return false
+        }
+        return true
+    }
+
+    private fun rolesAreStrictlySorted(values: List<ProjectFileRole>): Boolean {
+        for (index in 1 until values.size) {
+            if (values[index - 1].wireName >= values[index].wireName) return false
+        }
+        return true
+    }
+
+    private fun filesAreStrictlySorted(values: List<GeneratedFileEvidence>): Boolean {
+        for (index in 1 until values.size) {
+            if (values[index - 1].path >= values[index].path) return false
+        }
+        return true
     }
 }
 

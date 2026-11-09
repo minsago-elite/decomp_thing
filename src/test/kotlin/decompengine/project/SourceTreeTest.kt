@@ -972,6 +972,92 @@ class SourceTreeTest {
     }
 
     @Test
+    fun `manifest collection ordering rejects descending and duplicate values without changing decode precedence`() {
+        val project = createTempDirectory("source-tree-manifest-order-")
+        val manifest = SourceTreeGenerator.generate(model(), project)
+        val expectedProfile = GeneratedCMakeReconstructionProfile.descriptor
+        val root = Json.parseToJsonElement(manifest.toJson()).jsonObject
+        val files = root.getValue("files").jsonArray
+        val multiRoleIndex = files.indexOfFirst { it.jsonObject.getValue("roles").jsonArray.size >= 2 }
+        val multiEntityIndex = files.indexOfFirst { it.jsonObject.getValue("entityIds").jsonArray.size >= 2 }
+        assertTrue(multiRoleIndex >= 0)
+        assertTrue(multiEntityIndex >= 0)
+        assertTrue(files.size >= 2)
+
+        fun fileCollection(index: Int, field: String, values: JsonArray): JsonArray = JsonArray(
+            files.mapIndexed { current, element ->
+                if (current != index) element else JsonObject(element.jsonObject.toMutableMap().apply { put(field, values) })
+            },
+        )
+        fun rootWith(name: String, values: JsonArray) = JsonObject(root.toMutableMap().apply { put(name, values) })
+        fun rejects(candidate: JsonObject, message: String) {
+            val failure = assertFailsWith<IllegalArgumentException> {
+                SourceTreeManifestReader.parse(candidate, expectedProfile)
+            }
+            assertEquals(message, failure.message)
+        }
+
+        assertEquals(
+            1,
+            SourceTreeManifestReader.parse(rootWith("files", JsonArray(files.take(1))), expectedProfile).files.size,
+        )
+
+        val roles = files[multiRoleIndex].jsonObject.getValue("roles").jsonArray
+        rejects(
+            rootWith("files", fileCollection(multiRoleIndex, "roles", JsonArray(roles.reversed()))),
+            "source tree manifest file roles must be unique and sorted",
+        )
+        rejects(
+            rootWith("files", fileCollection(multiRoleIndex, "roles", JsonArray(roles + roles.last()))),
+            "source tree manifest file roles must be unique and sorted",
+        )
+
+        val entityIds = files[multiEntityIndex].jsonObject.getValue("entityIds").jsonArray
+        rejects(
+            rootWith("files", fileCollection(multiEntityIndex, "entityIds", JsonArray(entityIds.reversed()))),
+            "source tree manifest entity IDs must be unique and sorted",
+        )
+        rejects(
+            rootWith("files", fileCollection(multiEntityIndex, "entityIds", JsonArray(entityIds + entityIds.last()))),
+            "source tree manifest entity IDs must be unique and sorted",
+        )
+
+        rejects(rootWith("files", JsonArray(files.reversed())), "source tree manifest files must be unique and sorted")
+        rejects(rootWith("files", JsonArray(files + files.last())), "source tree manifest files must be unique and sorted")
+
+        // String.compareTo sorts supplementary code points by their UTF-16 surrogate pair.
+        val unicodeSortedIds = listOf("ascii", "\uD83D\uDE00", "\uE000")
+        for (name in listOf("unresolvedEntityIds", "unresolvedImplementationIds")) {
+            val message = "source tree manifest $name must be unique and sorted"
+            val parsedEmpty = SourceTreeManifestReader.parse(rootWith(name, JsonArray(emptyList())), expectedProfile)
+            assertTrue(if (name == "unresolvedEntityIds") parsedEmpty.unresolvedEntityIds.isEmpty() else parsedEmpty.unresolvedImplementationIds.isEmpty())
+            val parsedSingleton = SourceTreeManifestReader.parse(rootWith(name, JsonArray(listOf(JsonPrimitive("one")))), expectedProfile)
+            assertEquals(
+                listOf("one"),
+                if (name == "unresolvedEntityIds") parsedSingleton.unresolvedEntityIds else parsedSingleton.unresolvedImplementationIds,
+            )
+            val unicode = JsonArray(unicodeSortedIds.map(::JsonPrimitive))
+            val parsedUnicode = SourceTreeManifestReader.parse(rootWith(name, unicode), expectedProfile)
+            assertEquals(
+                unicodeSortedIds,
+                if (name == "unresolvedEntityIds") parsedUnicode.unresolvedEntityIds else parsedUnicode.unresolvedImplementationIds,
+            )
+            rejects(rootWith(name, JsonArray(unicodeSortedIds.reversed().map(::JsonPrimitive))), message)
+            rejects(rootWith(name, JsonArray((unicodeSortedIds + unicodeSortedIds.last()).map(::JsonPrimitive))), message)
+        }
+
+        val mixedInvalidEntityIds = JsonArray(listOf(entityIds.last(), entityIds.first(), JsonPrimitive(7)))
+        val mixedInvalid = rootWith(
+            "files",
+            fileCollection(multiEntityIndex, "entityIds", mixedInvalidEntityIds),
+        )
+        val failure = assertFailsWith<IllegalArgumentException> {
+            SourceTreeManifestReader.parse(mixedInvalid, expectedProfile)
+        }
+        assertEquals("source tree manifest entity IDs must be strings", failure.message)
+    }
+
+    @Test
     fun `LLM reconstruction is restricted to the planned module path`() {
         val project = createTempDirectory("source-tree-llm-")
         val harness = object : AgentHarness {
