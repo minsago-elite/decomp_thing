@@ -21,12 +21,21 @@ test('accepts page landmarks and the named connected header group', () => {
 });
 
 test('scopes session semantics while recording the independent browser connection notice', () => {
-  const facts = { asides: [aside({ session: false, role: 'status', label: 'Connection status' })], sessionCount: 1,
+  const connectionStatus = { tag: 'div', text: 'Browser reports offline. Previously loaded information may be out of date.',
+    inSession: false, controls: 0, ownTabIndex: false, connectionNotice: true, role: 'status', label: 'Connection status',
+    connectionTag: 'section', connectionRole: null, connectionLabelledBy: 'connection-notice-heading',
+    connectionHeading: 'Browser reports offline', connectionHeadingId: 'connection-notice-heading' };
+  const facts = { asides: [aside()], sessionCount: 1,
     sessionContainers: [connectedContainer()],
-    statuses: [{ tag: 'aside', text: 'Browser reports offline', inSession: false, controls: 1, ownTabIndex: false,
-      connectionNotice: true, role: 'status', label: 'Connection status' }], buttons: [button('Sign out')] };
+    statuses: [connectionStatus], buttons: [button('Sign out')] };
   assert.doesNotThrow(() => assertSessionFacts(facts, { container: 'connected', statusText: null, externalStatusText: 'Browser reports offline', buttons: ['Sign out'] }));
   assert.throws(() => assertSessionFacts(facts, { container: 'connected', statusText: null, buttons: ['Sign out'] }), /Unexpected browser-connection status/);
+  assert.throws(() => assertSessionFacts({ ...facts, statuses: [{ ...connectionStatus, connectionTag: 'aside' }] },
+    { container: 'connected', statusText: null, externalStatusText: 'Browser reports offline', buttons: ['Sign out'] }), /section/);
+  assert.throws(() => assertSessionFacts({ ...facts, statuses: [{ ...connectionStatus, role: null }] },
+    { container: 'connected', statusText: null, externalStatusText: 'Browser reports offline', buttons: ['Sign out'] }), /status/);
+  assert.throws(() => assertSessionFacts({ ...facts, statuses: [{ ...connectionStatus, connectionLabelledBy: 'missing-heading' }] },
+    { container: 'connected', statusText: null, externalStatusText: 'Browser reports offline', buttons: ['Sign out'] }), /connection-notice-heading/);
 });
 
 test('allows unrelated route statuses while strictly checking the connected session status', () => {

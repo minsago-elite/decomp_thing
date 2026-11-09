@@ -35,10 +35,14 @@ export const sessionFactsExpression = `(() => {
     sessionCount: session.length,
     sessionContainers: session.map(container => ({ tag: container.tagName.toLowerCase(), role: container.getAttribute('role'),
       label: container.getAttribute('aria-label'), inBanner: Boolean(container.closest('header')) })),
-    statuses: statuses.map(node => { const connection = node.closest('aside.connection-notice'); return {
+    statuses: statuses.map(node => { const connection = node.closest('.connection-notice'); return {
       tag: node.tagName.toLowerCase(), text: node.textContent.trim(), inSession: Boolean(node.closest('.session-notice')),
       controls: node.querySelectorAll(${JSON.stringify(CONTROL_SELECTOR)}).length, ownTabIndex: node.hasAttribute('tabindex'),
-      connectionNotice: Boolean(connection), role: node.getAttribute('role'), label: connection?.getAttribute('aria-label') ?? null,
+      connectionNotice: Boolean(connection), role: node.getAttribute('role'), label: node.getAttribute('aria-label'),
+      connectionTag: connection?.tagName.toLowerCase() ?? null, connectionRole: connection?.getAttribute('role') ?? null,
+      connectionLabelledBy: connection?.getAttribute('aria-labelledby') ?? null,
+      connectionHeading: connection?.querySelector('h2')?.textContent.trim() ?? null,
+      connectionHeadingId: connection?.querySelector('h2')?.id ?? null,
     }; }),
     activeElement: { tag: document.activeElement?.tagName?.toLowerCase() ?? null,
       label: document.activeElement?.textContent?.trim() ?? null },
@@ -79,9 +83,16 @@ export function assertSessionFacts(facts, expected) {
   const connectionStatuses = facts.statuses.filter((status) => !status.inSession && status.connectionNotice);
   if (expected.externalStatusText) {
     assert.equal(connectionStatuses.length, 1, 'Expected one separately scoped browser-connection status');
-    assert.equal(connectionStatuses[0].tag, 'aside');
+    assert.equal(connectionStatuses[0].tag, 'div');
     assert.equal(connectionStatuses[0].role, 'status');
     assert.equal(connectionStatuses[0].label, 'Connection status');
+    assert.equal(connectionStatuses[0].connectionTag, 'section');
+    assert.equal(connectionStatuses[0].connectionRole, null);
+    assert.ok(connectionStatuses[0].connectionLabelledBy, 'Browser-connection section must be named by its heading');
+    assert.equal(connectionStatuses[0].connectionLabelledBy, connectionStatuses[0].connectionHeadingId,
+      'Browser-connection section must reference its heading by id');
+    assert.equal(connectionStatuses[0].connectionHeading, expected.externalStatusText,
+      'Browser-connection status heading did not match');
     assert.ok(connectionStatuses[0].text.includes(expected.externalStatusText), 'Browser-connection status text did not match');
   } else assert.equal(connectionStatuses.length, 0, 'Unexpected browser-connection status');
   const labels = facts.buttons.map((button) => button.label);
