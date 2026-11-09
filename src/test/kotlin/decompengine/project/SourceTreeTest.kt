@@ -1037,6 +1037,17 @@ class SourceTreeTest {
         val reversedRoot = JsonObject(decodedRoot.entries.reversed().associate { it.key to it.value })
         assertEquals(treeResult(reversedRoot.toString().toByteArray()).getOrThrow(),
             byteResult(reversedRoot.toString().toByteArray()).getOrThrow(), "root field order")
+        val firstFile = decodedRoot.getValue("files").jsonArray.first().jsonObject
+        val reorderedFile = JsonObject(firstFile.entries.reversed().associate { it.key to it.value })
+        val reorderedNestedRoot = JsonObject(decodedRoot.toMutableMap().apply {
+            put("files", JsonArray(listOf(reorderedFile) + decodedRoot.getValue("files").jsonArray.drop(1)))
+        })
+        val reorderedNestedBytes = reorderedNestedRoot.toString().toByteArray(Charsets.UTF_8)
+        assertEquals(treeResult(reorderedNestedBytes).getOrThrow(), byteResult(reorderedNestedBytes).getOrThrow(),
+            "file record field order")
+        val unicodeGenerator = replaceGeneratorPayload(bytes, "π😃".toByteArray(Charsets.UTF_8))
+        assertEquals(treeResult(unicodeGenerator).getOrThrow(), byteResult(unicodeGenerator).getOrThrow(),
+            "valid multibyte and supplementary UTF-8")
         val malformed = listOf(
             bytes + " trailing".toByteArray(),
             replaceOnce(bytes, "\"schemaVersion\": 3,", "\"schemaVersion\": 3, \"\\u0073chemaVersion\": 3,"),
