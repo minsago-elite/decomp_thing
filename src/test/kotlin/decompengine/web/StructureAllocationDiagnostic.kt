@@ -16,17 +16,20 @@ import kotlinx.serialization.json.*
 /** Explicit CLI only. Uses production service callbacks; never executes a workflow. */
 object StructureAllocationDiagnostic {
     @JvmStatic fun main(args: Array<String>) {
+        require(args.size == 4) { "Usage: <fixture-root> <catalog|service> <output-prefix> <inventory-sha256>" }
         val root = Path.of(args[0]); val mode = args[1]
+        val inventoryCommitment = args[3]
         require(mode == "catalog" || mode == "service")
+        require(inventoryCommitment.matches(Regex("[0-9a-f]{64}"))) { "Invalid inventory SHA-256 commitment" }
         fun sha(bytes: ByteArray) = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+        // Canonical inventory encoding: UTF-8 rows sorted by repository-relative path,
+        // each row is lowercase content SHA-256, two ASCII spaces, path, LF.
+        fun inventoryDigest(pins: Map<String, String>): String = sha(pins.toSortedMap().entries.joinToString("", transform = { (path, hash) -> "$hash  $path\n" }).toByteArray(Charsets.UTF_8))
+        fun relativePath(path: Path): String = root.relativize(path).joinToString("/") { it.toString() }
         fun pins(): Map<String, String> = Files.walk(root).use { paths ->
-            paths.filter { Files.isRegularFile(it) }.sorted().toList().associate { root.relativize(it).toString() to sha(Files.readAllBytes(it)) }
+            paths.filter { Files.isRegularFile(it) }.sorted().toList().associate { relativePath(it) to sha(Files.readAllBytes(it)) }
         }
-        val sourcePins = pins()
         val sourceTree = "${"f".repeat(32)}/reports/runs/run_structure_scale/source-tree"
-        check(sourcePins.size == 8344)
-        check(Files.size(root.resolve("$sourceTree/reports/program_model.json")) == 29_349_734L)
-        check(sourcePins["$sourceTree/reports/program_model.json"] == "be44553df47a17b40aac623a27a957b32e923f8137edf743a172525d0182c832")
         val bean = ManagementFactory.getThreadMXBean() as com.sun.management.ThreadMXBean
         bean.isThreadAllocatedMemoryEnabled = true
         fun allocated() = bean.getThreadAllocatedBytes(Thread.currentThread().threadId())
@@ -62,6 +65,7 @@ object StructureAllocationDiagnostic {
         }
         val baseline = memory()
         var failureMessage: String? = null
+        var primaryFailure: Throwable? = null
         try {
             WebJobService(JobStore(root), JobAnalyzer { _, _ -> error("No execution") },
                 JobReconstructor { _, _ -> error("No execution") }).use { service ->
@@ -207,34 +211,46 @@ object StructureAllocationDiagnostic {
                 }
             }
         } catch (failure: Throwable) {
+            primaryFailure = failure
             failureMessage = "${failure.javaClass.name}: ${failure.message}"
             throw failure
         } finally {
-            val finalPins = pins()
-            val restored = finalPins == sourcePins
-            if (!restored && failureMessage == null) failureMessage = "Fixture source pins changed"
-            Files.writeString(Path.of(args[2] + ".pins.json"), buildJsonObject {
-                put("restored", restored); put("files", sourcePins.size)
-                put("before", buildJsonObject { sourcePins.forEach { (path, hash) -> put(path, hash) } })
-                put("after", buildJsonObject { finalPins.forEach { (path, hash) -> put(path, hash) } })
-            }.toString())
-            Files.writeString(Path.of(args[2]), buildJsonObject {
-                put("mode", mode); put("fixtureRestored", restored); put("fixtureFiles", sourcePins.size); put("baseline", baseline); put("events", JsonArray(events))
-                put("failure", failureMessage?.let(::JsonPrimitive) ?: JsonNull)
-                put("manifestAttribution", JsonArray(manifestAttributions))
-                put("coldMeasurementLimitation", "Fixture hashes are computed inside this JVM before its first request, warming filesystem/JVM state. These are attribution runs, not genuine-cold or D0 qualification evidence.")
-                put("manifestAttributionNote", "Stage totals are exclusive and omit collector overhead and inter-stage map bookkeeping. FILE_FIELDS includes argument evaluation; FILE_EVIDENCE_INIT is the entire constructor; PATH_ORDER includes input identity and unresolved-ID checks. Do not add sub-markers to the enclosing validate-manifest or other nested phase/request timings and allocation deltas.")
-                put("counters", buildJsonObject {
-                    for (kind in listOf("read", "compare", "phase", "request")) {
-                        put(kind, buildJsonObject {
-                            events.filter { it["kind"]?.jsonPrimitive?.content == kind }
-                                .groupingBy { it["name"]!!.jsonPrimitive.content }.eachCount().forEach { (name, count) -> put(name, count) }
-                        })
-                    }
-                })
-                put("allocationNote", "Request totals include nested reads; phase marker deltas overlap nested timing scopes and are not exclusive. Heap used is not retained charge; no forced GC.")
-            }.toString())
-            check(restored) { "Fixture source pins changed" }
+            try {
+                val finalPins = pins()
+                val modelPath = "$sourceTree/reports/program_model.json"
+                val restored = finalPins.size == 8344 && inventoryDigest(finalPins) == inventoryCommitment &&
+                    finalPins[modelPath] == "be44553df47a17b40aac623a27a957b32e923f8137edf743a172525d0182c832" &&
+                    Files.size(root.resolve(modelPath)) == 29_349_734L
+                if (!restored && failureMessage == null) failureMessage = "Fixture source pins changed"
+                Files.writeString(Path.of(args[2] + ".pins.json"), buildJsonObject {
+                    put("restored", restored); put("files", finalPins.size)
+                    put("inventorySha256", inventoryCommitment)
+                    put("after", buildJsonObject { finalPins.forEach { (path, hash) -> put(path, hash) } })
+                }.toString())
+                Files.writeString(Path.of(args[2]), buildJsonObject {
+                    put("mode", mode); put("fixtureRestored", restored); put("fixtureFiles", finalPins.size); put("baseline", baseline); put("events", JsonArray(events))
+                    put("failure", failureMessage?.let(::JsonPrimitive) ?: JsonNull)
+                    put("manifestAttribution", JsonArray(manifestAttributions))
+                    val actualRequests = events.count { it["kind"]?.jsonPrimitive?.content == "request" }
+                    put("measurementPolicy", "Fresh JVM process; fixture inventory commitment computed externally before launch. This does not establish filesystem-cache-cold state. The 54-request checkpoint covers 51 pages, reload, search and modules; catalog mode then adds two invalidation/rebind controls. No warm-up, fixture generation, parsing, or forced GC before the first measured request.")
+                    put("actualMeasuredRequests", actualRequests)
+                    put("postCheckpointInvalidationRebindRequests", if (mode == "catalog") 2 else 0)
+                    put("inventoryEncoding", "SHA-256 of UTF-8 rows sorted by relative path: lowercase file SHA-256, two ASCII spaces, relative path, LF.")
+                    put("manifestAttributionNote", "Stage totals are exclusive and omit collector overhead and inter-stage map bookkeeping. FILE_FIELDS includes argument evaluation; FILE_EVIDENCE_INIT is the entire constructor; PATH_ORDER includes input identity and unresolved-ID checks. Do not add sub-markers to the enclosing validate-manifest or other nested phase/request timings and allocation deltas.")
+                    put("counters", buildJsonObject {
+                        for (kind in listOf("read", "compare", "phase", "request")) {
+                            put(kind, buildJsonObject {
+                                events.filter { it["kind"]?.jsonPrimitive?.content == kind }
+                                    .groupingBy { it["name"]!!.jsonPrimitive.content }.eachCount().forEach { (name, count) -> put(name, count) }
+                            })
+                        }
+                    })
+                    put("allocationNote", "Request totals include nested reads; phase marker deltas overlap nested timing scopes and are not exclusive. Heap used is not retained charge; no forced GC.")
+                }.toString())
+                check(restored) { "Fixture source pins differ from supplied inventory commitment" }
+            } catch (verificationFailure: Throwable) {
+                primaryFailure?.addSuppressed(verificationFailure) ?: throw verificationFailure
+            }
         }
     }
 }

@@ -1908,6 +1908,20 @@ private fun rethrowManifestProbeCancellation(failure: Throwable) {
     // Ordinary diagnostic failures cannot change validation results or refusals.
 }
 
+private fun List<ProjectFileRole>.areWireNamesStrictlyAscending(): Boolean {
+    for (index in 1 until size) {
+        if (this[index - 1].wireName.compareTo(this[index].wireName) >= 0) return false
+    }
+    return true
+}
+
+private fun List<String>.areStrictlyAscending(): Boolean {
+    for (index in 1 until size) {
+        if (this[index - 1].compareTo(this[index]) >= 0) return false
+    }
+    return true
+}
+
 object SourceTreeManifestReader {
     private val rootKeys = setOf(
         "schemaVersion",
@@ -1970,14 +1984,14 @@ object SourceTreeManifestReader {
                         require(role.jsonPrimitive.isString) { "source tree manifest file roles must be strings" }
                         ProjectFileRole.fromWireName(role.jsonPrimitive.content)
                     }
-                    require(roles.map(ProjectFileRole::wireName) == roles.map(ProjectFileRole::wireName).distinct().sorted()) {
+                    require(roles.areWireNamesStrictlyAscending()) {
                         "source tree manifest file roles must be unique and sorted"
                     }
                     val entityIds = item.getValue("entityIds").jsonArray.map {
                         require(it.jsonPrimitive.isString) { "source tree manifest entity IDs must be strings" }
                         it.jsonPrimitive.content
                     }
-                    require(entityIds == entityIds.distinct().sorted()) {
+                    require(entityIds.areStrictlyAscending()) {
                         "source tree manifest entity IDs must be unique and sorted"
                     }
                     val accepted = item.getValue("acceptedImplementation").let { value ->

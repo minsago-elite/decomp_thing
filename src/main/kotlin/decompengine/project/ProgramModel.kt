@@ -283,8 +283,17 @@ data class ModulePlan(
     val modules: List<PlannedModule>,
     val dependencyCycles: List<List<String>> = emptyList(),
 ) {
-    fun toJson(): String = buildString {
-        append("{\n  \"schemaVersion\": ").append(schemaVersion).append(",\n  \"modules\": [")
+    fun toJson(): String = buildString { emitTo(this) }
+
+    internal fun hasCanonicalBytes(bytes: ByteArray): Boolean {
+        val sink = Utf8ComparisonSink(bytes)
+        emitTo(sink)
+        return sink.finish()
+    }
+
+    internal fun emitTo(out: Appendable) {
+        with(out) {
+        append("{\n  \"schemaVersion\": ").append(schemaVersion.toString()).append(",\n  \"modules\": [")
         modules.sortedBy { it.id }.forEachIndexed { index, module ->
             if (index > 0) append(',')
             append("    {\n      \"id\": ").appendJsonString(module.id)
@@ -307,10 +316,51 @@ data class ModulePlan(
             append(']')
         }
         append("]\n}\n")
+        }
     }
 }
 
-private fun StringBuilder.appendJsonStringArray(values: List<String>) {
+/** Streams UTF-8 bytes using the same replacement byte as String.toByteArray for malformed UTF-16. */
+private class Utf8ComparisonSink(private val expected: ByteArray) : Appendable {
+    private var index = 0
+    private var pendingHigh: Char? = null
+    var matches = true
+        private set
+
+    override fun append(csq: CharSequence?): Appendable {
+        val value = csq ?: "null"
+        for (char in value) append(char)
+        return this
+    }
+    override fun append(csq: CharSequence?, start: Int, end: Int): Appendable {
+        val value = csq ?: "null"
+        for (i in start until end) append(value[i])
+        return this
+    }
+    override fun append(char: Char): Appendable {
+        val high = pendingHigh
+        pendingHigh = null
+        if (high != null) {
+            if (char.isLowSurrogate()) emitCodePoint(Character.toCodePoint(high, char))
+            else { emitByte(0x3f); append(char) }
+        } else if (char.isHighSurrogate()) pendingHigh = char
+        else if (char.isLowSurrogate()) emitByte(0x3f)
+        else emitCodePoint(char.code)
+        return this
+    }
+    private fun emitCodePoint(cp: Int) {
+        when {
+            cp < 0x80 -> emitByte(cp)
+            cp < 0x800 -> { emitByte(0xc0 or (cp shr 6)); emitByte(0x80 or (cp and 0x3f)) }
+            cp < 0x10000 -> { emitByte(0xe0 or (cp shr 12)); emitByte(0x80 or ((cp shr 6) and 0x3f)); emitByte(0x80 or (cp and 0x3f)) }
+            else -> { emitByte(0xf0 or (cp shr 18)); emitByte(0x80 or ((cp shr 12) and 0x3f)); emitByte(0x80 or ((cp shr 6) and 0x3f)); emitByte(0x80 or (cp and 0x3f)) }
+        }
+    }
+    private fun emitByte(value: Int) { if (index >= expected.size || (expected[index].toInt() and 0xff) != value) matches = false; index++ }
+    fun finish(): Boolean { if (pendingHigh != null) { emitByte(0x3f); pendingHigh = null }; return matches && index == expected.size }
+}
+
+private fun Appendable.appendJsonStringArray(values: List<String>) {
     append('[')
     values.forEachIndexed { index, value ->
         if (index > 0) append(", ")
@@ -319,7 +369,7 @@ private fun StringBuilder.appendJsonStringArray(values: List<String>) {
     append(']')
 }
 
-private fun StringBuilder.appendJsonString(value: String) {
+private fun Appendable.appendJsonString(value: String) {
     append('"')
     value.forEach { char ->
         when (char) {

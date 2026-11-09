@@ -972,6 +972,72 @@ class SourceTreeTest {
     }
 
     @Test
+    fun `manifest role and entity ordering uses strict adjacent comparisons`() {
+        val project = createTempDirectory("source-tree-ordering-")
+        SourceTreeGenerator.generate(oneModuleModel(), project)
+        val original = project.resolve("source_tree_manifest.json").readText()
+        val profile = GeneratedCMakeReconstructionProfile.descriptor
+
+        fun parse(roles: List<String>, ids: List<String> = emptyList()) = SourceTreeManifestReader.parse(
+            alterInactiveBuildRecord(
+                alterInactiveBuildRecord(original, "roles", JsonArray(roles.map(::JsonPrimitive))),
+                "entityIds", JsonArray(ids.map(::JsonPrimitive)),
+            ), profile,
+        )
+        fun rejected(roles: List<String>, ids: List<String> = emptyList(), message: String) {
+            val error = assertFailsWith<IllegalArgumentException> { parse(roles, ids) }
+            assertEquals(message, error.message)
+        }
+
+        val actualRoles = Json.parseToJsonElement(original).jsonObject.getValue("files").jsonArray
+            .map { it.jsonObject }.first { it.getValue("path").jsonPrimitive.content == "Makefile" }
+            .getValue("roles").jsonArray.map { it.jsonPrimitive.content }
+        parse(actualRoles)
+        assertEquals("source tree manifest file roles are empty: Makefile",
+            assertFailsWith<IllegalArgumentException> { parse(emptyList()) }.message)
+        rejected(listOf("editable", "editable"), message = "source tree manifest file roles must be unique and sorted")
+        rejected(listOf("build-definition", "build-input", "build-definition"),
+            message = "source tree manifest file roles must be unique and sorted")
+        rejected(listOf("build-input", "build-definition"), message = "source tree manifest file roles must be unique and sorted")
+        rejected(listOf("build-definition", "unknown-role"), message = "unknown project file role: unknown-role")
+
+        val roleNames = ProjectFileRole.entries.map(ProjectFileRole::wireName)
+        for (mask in 1 until (1 shl roleNames.size)) {
+            val combination = roleNames.indices.filter { mask and (1 shl it) != 0 }
+                .map(roleNames::get).sorted()
+            val failure = runCatching { parse(combination) }.exceptionOrNull()
+            assertNotEquals("source tree manifest file roles must be unique and sorted", failure?.message,
+                "ordered role combination was rejected by the ordering predicate: $combination")
+        }
+
+        parse(actualRoles)
+        parse(actualRoles, listOf("singleton-id"))
+        rejected(actualRoles, listOf("a", "a"), "source tree manifest entity IDs must be unique and sorted")
+        rejected(actualRoles, listOf("a", "b", "a"), "source tree manifest entity IDs must be unique and sorted")
+        rejected(actualRoles, listOf("b", "a"), "source tree manifest entity IDs must be unique and sorted")
+        parse(actualRoles, listOf("a", "aa", "aab"))
+        val longPrefix = "shared-prefix-" + "x".repeat(512)
+        parse(actualRoles, listOf("$longPrefix-a", "$longPrefix-aa", "$longPrefix-b"))
+        rejected(actualRoles, listOf("$longPrefix-b", "$longPrefix-a"),
+            "source tree manifest entity IDs must be unique and sorted")
+        parse(actualRoles, listOf("😀", "\uE000"))
+        rejected(actualRoles, listOf("\uE000", "😀"), "source tree manifest entity IDs must be unique and sorted")
+
+        val malformedId = JsonArray(listOf(JsonPrimitive("b"), JsonPrimitive("a"), JsonPrimitive(3)))
+        val precedence = alterInactiveBuildRecord(
+            alterInactiveBuildRecord(original, "roles", JsonArray(listOf(
+                JsonPrimitive("editable"), JsonPrimitive("editable"), JsonPrimitive("unknown-role"),
+            ))),
+            "entityIds", malformedId,
+        )
+        assertEquals("unknown project file role: unknown-role",
+            assertFailsWith<IllegalArgumentException> { SourceTreeManifestReader.parse(precedence, profile) }.message)
+        val unsortedThenNonString = alterInactiveBuildRecord(original, "entityIds", malformedId)
+        assertEquals("source tree manifest entity IDs must be strings",
+            assertFailsWith<IllegalArgumentException> { SourceTreeManifestReader.parse(unsortedThenNonString, profile) }.message)
+    }
+
+    @Test
     fun `LLM reconstruction is restricted to the planned module path`() {
         val project = createTempDirectory("source-tree-llm-")
         val harness = object : AgentHarness {
