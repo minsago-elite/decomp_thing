@@ -337,6 +337,7 @@ export async function qualifyGitScale({ evaluate, tab, basePath = '/nested/', fi
     workspace: { tipMatches: true }, history,
     diff: { exactTwoThousand: twoThousand, boundedTwoThousandOne: twoThousandOne },
     patches: { utf8Truncated: true, binaryWithheld: true, textElapsedMs: textPatch.elapsedMs, binaryElapsedMs: binaryPatch.elapsedMs },
-    stableFocus: { exercised: false, limitation: 'The Git SPA views are supplied by a separate unmerged UI stack; this driver qualifies the authenticated packaged API only.' },
+    stableFocus: { scope: 'api-only', exercised: false,
+      limitation: 'This API fixture does not render the Git SPA; packaged UI focus evidence is reported by the separate git-scale UI journey.' },
   };
 }
