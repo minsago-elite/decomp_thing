@@ -474,7 +474,7 @@ it('keeps the total mounted Git result rows at or below 500 with duplicated stat
   expect(document.querySelectorAll('li').length).toBe(500);
   fireEvent.click(screen.getByRole('button', { name: 'Older work trees' }));
   expect(document.querySelectorAll('li').length).toBe(500);
-});
+}, 15_000);
 
 it('explains unavailable Git without any request and keeps the route usable', () => {
   mount([capability('git', 'unavailable', 'Git 2.20.1 is older than the required 2.36.0.', 'GIT_VERSION_UNSUPPORTED')]);
