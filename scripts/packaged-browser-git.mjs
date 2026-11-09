@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 import { createWebGitFixture } from './web-git-fixtures.mjs';
-import { assertUiHistoryWindow } from './packaged-browser-git-ui-scale.mjs';
+import { assertUiHistoryWindow, MAX_VISIBLE_HISTORY_ROWS, nextUiHistoryAction } from './packaged-browser-git-ui-scale.mjs';
 
 const SUBJECT = 'Packaged journey: add notes';
 
@@ -111,25 +111,41 @@ export async function qualifyGit({ fixture, makeTarget, cdp, evaluate, ready, br
   const historyStart = tab.requests.length;
   let historyPages = 1;
   let loadedCount = Math.min(20, expectedHistoryIds.length);
+  let historyWindowStart = 0;
+  let historyWindowTransitions = 0;
+  let historyActions = 1;
   const initialRows = await evaluate(tab, `[...${historyRows}].map(row => row.querySelector('code')?.title ?? null)`);
-  assertUiHistoryWindow(initialRows, expectedHistoryIds, loadedCount, historyPages);
+  assertUiHistoryWindow(initialRows, expectedHistoryIds, loadedCount, historyActions, historyWindowStart);
   const observedHistoryIds = [...initialRows];
-  while (loadedCount < expectedHistoryIds.length) {
-    const nextCount = Math.min(loadedCount + 20, expectedHistoryIds.length);
-    const expectedWindow = expectedHistoryIds.slice(Math.max(0, nextCount - 200), nextCount);
-    const terminalPage = nextCount === expectedHistoryIds.length;
+  while (true) {
+    const nextHistoryAction = nextUiHistoryAction(loadedCount, expectedHistoryIds.length, historyWindowStart);
+    if (nextHistoryAction === null) break;
+    const advanceWindow = nextHistoryAction.kind === 'window';
+    const { loadedCount: nextLoadedCount, windowStart: nextWindowStart } = nextHistoryAction;
+    const expectedWindow = expectedHistoryIds.slice(nextWindowStart,
+      Math.min(nextLoadedCount, nextWindowStart + MAX_VISIBLE_HISTORY_ROWS));
+    const terminalWindow = nextLoadedCount === expectedHistoryIds.length
+      && nextWindowStart + MAX_VISIBLE_HISTORY_ROWS >= nextLoadedCount;
     await evaluate(tab, `${button('Older commits')}.focus()`);
     await key(cdp, tab, 'Enter', 'Enter', 13, '\r');
-    const focus = terminalPage
+    const focus = terminalWindow
       ? `document.activeElement === document.querySelector('#git-history-title')`
       : `document.activeElement === ${button('Older commits')}`;
     await ready(tab, `${historyRows}.length === ${expectedWindow.length} && JSON.stringify([...${historyRows}].map(row => row.querySelector('code')?.title ?? null)) === ${JSON.stringify(JSON.stringify(expectedWindow))} && ${focus}`,
       'next anchored history window');
     const visibleIds = await evaluate(tab, `[...${historyRows}].map(row => row.querySelector('code')?.title ?? null)`);
-    assertUiHistoryWindow(visibleIds, expectedHistoryIds, nextCount, historyPages + 1);
-    observedHistoryIds.push(...expectedHistoryIds.slice(loadedCount, nextCount));
-    loadedCount = nextCount;
-    historyPages++;
+    assertUiHistoryWindow(visibleIds, expectedHistoryIds, nextLoadedCount, historyActions + 1, nextWindowStart);
+    const previousWindowEnd = Math.min(loadedCount, historyWindowStart + MAX_VISIBLE_HISTORY_ROWS);
+    const nextWindowEnd = Math.min(nextLoadedCount, nextWindowStart + MAX_VISIBLE_HISTORY_ROWS);
+    const firstNewVisibleIndex = Math.max(previousWindowEnd, nextWindowStart);
+    if (firstNewVisibleIndex < nextWindowEnd) {
+      observedHistoryIds.push(...expectedHistoryIds.slice(firstNewVisibleIndex, nextWindowEnd));
+    }
+    loadedCount = nextLoadedCount;
+    historyWindowStart = nextWindowStart;
+    if (advanceWindow) historyWindowTransitions++;
+    else historyPages++;
+    historyActions++;
   }
   assert.equal(new Set(observedHistoryIds).size, fixture.repository.historyLength, 'History repeats a commit');
   assert.deepEqual(observedHistoryIds, expectedHistoryIds, 'Every displayed history window must match the admitted repository, in order');
@@ -194,7 +210,7 @@ export async function qualifyGit({ fixture, makeTarget, cdp, evaluate, ready, br
   const mutations = tab.requests.slice(beforeView).filter(request => !['GET', 'HEAD'].includes(request.method));
   assert.equal(mutations.length, 3, 'Expected exactly the import, stage and commit requests');
   return { path, objectId, exportSha256: shown, exportEntries: names, viewReadRequests: viewRequests.length, mutationRequests: mutations.length,
-    historyCommits: observedHistoryIds.length, historyPages, historyKeyboardPagination: true,
+    historyCommits: observedHistoryIds.length, historyPages, historyWindowTransitions, historyKeyboardPagination: true,
     keyboardSelection: true, keyboardActivation: true, hooksInert: true, sourceRepositoryUnchanged: true, policyExcludedCounted: 1 };
 }
 

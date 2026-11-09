@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { assertUiHistoryPage, assertUiHistoryWindow } from './packaged-browser-git-ui-scale.mjs';
+import { assertUiHistoryPage, assertUiHistoryWindow, nextUiHistoryAction } from './packaged-browser-git-ui-scale.mjs';
 
 test('Git UI scale page keeps the exact fixture tail order', () => {
   assert.doesNotThrow(() => assertUiHistoryPage(['c3', 'b2', 'a1'], ['c3', 'b2', 'a1'], 4));
@@ -14,11 +14,50 @@ test('Git UI scale page rejects missing, duplicate, and reordered fixture identi
 
 test('legacy Git UI journey verifies loaded history through a moving 200-row window', () => {
   const expected = Array.from({ length: 1001 }, (_, index) => `commit-${index}`);
-  for (const loadedCount of [20, 200, 220, 1000, 1001]) {
-    const start = Math.max(0, loadedCount - 200);
-    const visible = expected.slice(start, loadedCount);
-    assert.deepEqual(assertUiHistoryWindow(visible, expected, loadedCount, Math.ceil(loadedCount / 20)), visible);
+  const windows = [
+    { loaded: 20, start: 0 },
+    { loaded: 200, start: 0 },
+    { loaded: 220, start: 0 }, // A new API page may load before the UI scrolls its 200-row window.
+    { loaded: 220, start: 20 },
+    { loaded: 1000, start: 800 },
+    { loaded: 1001, start: 800 },
+    { loaded: 1001, start: 801 },
+  ];
+  for (const [page, { loaded, start }] of windows.entries()) {
+    const visible = expected.slice(start, Math.min(loaded, start + 200));
+    assert.deepEqual(assertUiHistoryWindow(visible, expected, loaded, page + 1, start), visible);
   }
-  assert.throws(() => assertUiHistoryWindow(expected.slice(0, 220), expected, 220, 11), /mounted 220 rows/);
-  assert.throws(() => assertUiHistoryWindow(expected.slice(801, 1001).reverse(), expected, 1001, 51), /shifted, skipped, or reordered/);
+  assert.throws(() => assertUiHistoryWindow(expected.slice(0, 220), expected, 220, 11, 0), /mounted 220 rows/);
+  assert.throws(() => assertUiHistoryWindow(expected.slice(801, 1001).reverse(), expected, 1001, 51, 801), /shifted, skipped, or reordered/);
+  assert.throws(() => assertUiHistoryWindow(expected.slice(800, 1000), expected, 1001, 52, 1002), /invalid window start/);
+});
+
+test('history traversal loads each API page and scrolls each window without gaps or duplicates', () => {
+  const expected = Array.from({ length: 1001 }, (_, index) => `commit-${index}`);
+  let loadedCount = 20;
+  let windowStart = 0;
+  let pageCount = 1;
+  let windowTransitions = 0;
+  let actions = 0;
+  const observed = expected.slice(0, loadedCount);
+  while (true) {
+    const action = nextUiHistoryAction(loadedCount, expected.length, windowStart);
+    if (action === null) break;
+    const previousEnd = Math.min(loadedCount, windowStart + 200);
+    const nextEnd = Math.min(action.loadedCount, action.windowStart + 200);
+    const newlyVisible = Math.max(previousEnd, action.windowStart);
+    if (newlyVisible < nextEnd) observed.push(...expected.slice(newlyVisible, nextEnd));
+    if (action.kind === 'page') pageCount++;
+    else windowTransitions++;
+    loadedCount = action.loadedCount;
+    windowStart = action.windowStart;
+    actions++;
+  }
+  assert.equal(pageCount, 51);
+  assert.equal(windowTransitions, 41);
+  assert.equal(actions, 91);
+  assert.deepEqual(observed, expected);
+  assert.equal(new Set(observed).size, expected.length);
+  assert.equal(nextUiHistoryAction(loadedCount, expected.length, windowStart), null);
+  assert.throws(() => nextUiHistoryAction(5, 4, 0), /invalid loaded totals/);
 });

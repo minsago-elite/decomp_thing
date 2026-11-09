@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 
-const PAGE_SIZE = 20;
-const MAX_VISIBLE_HISTORY_ROWS = 200;
+export const GIT_HISTORY_PAGE_SIZE = 20;
+export const MAX_VISIBLE_HISTORY_ROWS = 200;
 const MAX_VISIBLE_DIFF_ROWS = 100;
 
 async function key(cdp, target, keyName, code, keyCode, text) {
@@ -19,15 +19,36 @@ export function assertUiHistoryPage(tail, expected, page) {
 }
 
 /** Verify the currently mounted bounded window against the complete expected history prefix. */
-export function assertUiHistoryWindow(rows, expected, loadedCount, page, maximumRows = MAX_VISIBLE_HISTORY_ROWS) {
+export function assertUiHistoryWindow(rows, expected, loadedCount, page, windowStart = 0,
+  maximumRows = MAX_VISIBLE_HISTORY_ROWS) {
   assert.ok(Number.isInteger(loadedCount) && loadedCount >= 0 && loadedCount <= expected.length,
     `Git scale UI history page ${page} has an invalid loaded count`);
+  assert.ok(Number.isInteger(windowStart) && windowStart >= 0 && windowStart <= loadedCount,
+    `Git scale UI history page ${page} has an invalid window start`);
   assert.ok(rows.length <= maximumRows, `Git scale UI history page ${page} mounted ${rows.length} rows`);
-  const windowStart = Math.max(0, loadedCount - maximumRows);
-  const expectedWindow = expected.slice(windowStart, loadedCount);
+  const expectedWindow = expected.slice(windowStart, Math.min(loadedCount, windowStart + maximumRows));
   assert.equal(rows.length, expectedWindow.length, `Git scale UI history page ${page} has an unexpected window size`);
   assert.deepEqual(rows, expectedWindow, `Git scale UI history page ${page} shifted, skipped, or reordered identities`);
   return expectedWindow;
+}
+
+/** Model the UI's distinct API-page and mounted-window actions for the history list. */
+export function nextUiHistoryAction(loadedCount, totalCount, windowStart, pageSize = GIT_HISTORY_PAGE_SIZE,
+  maximumRows = MAX_VISIBLE_HISTORY_ROWS) {
+  assert.ok(Number.isInteger(totalCount) && totalCount >= 0 && Number.isInteger(loadedCount)
+    && loadedCount >= 0 && loadedCount <= totalCount, 'Git UI history has invalid loaded totals');
+  assert.ok(Number.isInteger(windowStart) && windowStart >= 0 && windowStart <= loadedCount,
+    'Git UI history has an invalid window start');
+  assert.ok(Number.isInteger(pageSize) && pageSize > 0 && Number.isInteger(maximumRows) && maximumRows > 0,
+    'Git UI history bounds must be positive integers');
+  if (windowStart + maximumRows < loadedCount) {
+    return { kind: 'window', loadedCount,
+      windowStart: Math.min(loadedCount - maximumRows, windowStart + maximumRows) };
+  }
+  if (loadedCount < totalCount) {
+    return { kind: 'page', loadedCount: Math.min(loadedCount + pageSize, totalCount), windowStart };
+  }
+  return null;
 }
 
 /**
