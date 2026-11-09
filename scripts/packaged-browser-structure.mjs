@@ -16,6 +16,8 @@ const LOCAL_FEEDBACK_SAMPLE_MAX_MS = 60_000;
 const LOCAL_FEEDBACK_BINDING = '__decompRecordStructureFeedback';
 const JVM_RSS_BUDGET_BYTES = 256 * 1024 * 1024;
 const JVM_RSS_SAMPLE_INTERVAL_MS = 25;
+const BROWSER_HEAP_SAMPLE_INTERVAL_MS = 50;
+const BROWSER_HEAP_MAX_SAMPLE_GAP_MS = 500;
 const sha = (bytes) => createHash('sha256').update(bytes).digest('hex');
 const hex = (value) => value.toString(16);
 const functionAddress = (index) => 0x400000 + index * 16;
@@ -252,7 +254,7 @@ export function assertStructureQualification(measurements, evidenceFailures = []
 }
 
 /**
- * A Chromium canceled-after-consumption terminal is acceptable only when the independent inventory proof
+ * A Chromium canceled-after-consumption terminal is acceptable only when the complete inventory-consumption proof
  * authenticates the same request and proves the complete response was read and rendered. All other failures,
  * missing rows, duplicate identities and capture overflow remain unproven failures.
  */
@@ -405,6 +407,81 @@ export function summarizeJvmRss(summary) {
     budgetBytes: JVM_RSS_BUDGET_BYTES, sampleIntervalMs: JVM_RSS_SAMPLE_INTERVAL_MS,
     sampleCount: summary.sampleCount, failedSamples: summary.failedSamples,
     coverageComplete: summary.sampleCount > 0 && summary.failedSamples === 0 };
+}
+
+export function createBrowserHeapSummary({ intervalMs = BROWSER_HEAP_SAMPLE_INTERVAL_MS,
+  maximumGapMs = BROWSER_HEAP_MAX_SAMPLE_GAP_MS } = {}) {
+  if (!Number.isSafeInteger(intervalMs) || intervalMs < 10 || intervalMs > 1000 ||
+    !Number.isSafeInteger(maximumGapMs) || maximumGapMs < intervalMs || maximumGapMs > 10_000) {
+    throw new TypeError('Browser heap sampling bounds are invalid');
+  }
+  return { intervalMs, maximumGapMs, peakBytes: null, sampleCount: 0, failedSamples: 0,
+    skippedTicks: 0, maximumObservedGapMs: 0, previousSampleAtMs: null };
+}
+
+export function recordBrowserHeapSample(summary, valueBytes, sampledAtMs) {
+  if (!Number.isSafeInteger(valueBytes) || valueBytes < 0 || !Number.isFinite(sampledAtMs) || sampledAtMs < 0) {
+    summary.failedSamples++;
+    return false;
+  }
+  if (summary.previousSampleAtMs !== null) {
+    summary.maximumObservedGapMs = Math.max(summary.maximumObservedGapMs, sampledAtMs - summary.previousSampleAtMs);
+  }
+  summary.previousSampleAtMs = sampledAtMs;
+  summary.sampleCount++;
+  summary.peakBytes = Math.max(summary.peakBytes ?? 0, valueBytes);
+  return true;
+}
+
+export function summarizeBrowserHeap(summary) {
+  return { measurement: 'chrome-performance-js-heap-used-size', sampleIntervalMs: summary.intervalMs,
+    maximumAllowedSampleGapMs: summary.maximumGapMs, sampledPeakBytes: summary.peakBytes,
+    sampleCount: summary.sampleCount, failedSamples: summary.failedSamples, skippedTicks: summary.skippedTicks,
+    maximumObservedGapMs: Math.ceil(summary.maximumObservedGapMs),
+    coverageComplete: summary.sampleCount >= 2 && summary.failedSamples === 0 &&
+      summary.maximumObservedGapMs <= summary.maximumGapMs };
+}
+
+/** Periodic, bounded CDP heap sampling across the complete measured browsing journey. */
+export async function startBrowserHeapSampler(readMetrics, { intervalMs = BROWSER_HEAP_SAMPLE_INTERVAL_MS,
+  maximumGapMs = BROWSER_HEAP_MAX_SAMPLE_GAP_MS } = {}) {
+  if (typeof readMetrics !== 'function') throw new TypeError('Browser heap metrics reader is required');
+  const summary = createBrowserHeapSummary({ intervalMs, maximumGapMs });
+  const startedAt = performance.now();
+  let inFlight = null;
+  let stopped = false;
+  let stoppedSummary = null;
+  const takeSample = () => {
+    if (inFlight) {
+      summary.skippedTicks++;
+      return inFlight;
+    }
+    inFlight = Promise.resolve().then(readMetrics).then((response) => {
+      const value = response?.metrics?.find((metric) => metric?.name === 'JSHeapUsedSize')?.value;
+      recordBrowserHeapSample(summary, value, performance.now() - startedAt);
+    }, () => {
+      summary.failedSamples++;
+    }).finally(() => { inFlight = null; });
+    return inFlight;
+  };
+  const timer = setInterval(() => { if (!stopped) void takeSample(); }, intervalMs);
+  timer.unref?.();
+  await takeSample();
+  return {
+    async sampleNow() {
+      if (stopped) return;
+      await takeSample();
+    },
+    async stop() {
+      if (stoppedSummary) return stoppedSummary;
+      stopped = true;
+      clearInterval(timer);
+      if (inFlight) await inFlight;
+      await takeSample();
+      stoppedSummary = summarizeBrowserHeap(summary);
+      return stoppedSummary;
+    },
+  };
 }
 
 async function readJvmRssBytes(pid) {
@@ -725,8 +802,8 @@ export function evaluateStructureBudgets(m) {
   check(m.localFeedbackP95Ms <= LOCAL_FEEDBACK_BUDGET_MS,
     `Local function-inventory feedback p95 ${m.localFeedbackP95Ms}ms exceeds the D0 ${LOCAL_FEEDBACK_BUDGET_MS}ms budget`);
   check(['terminalEvidenceOverflow', 'resourceTimingOverflow', 'invalidTransportEvidence'].every(key => (m[key] ?? 0) === 0), 'Transport evidence overflow or invalid data');
-  check(m.failedInventoryRequestEvidenceComplete === true && Number.isSafeInteger(m.unprovenFailedInventoryRequestCount) &&
-    m.unprovenFailedInventoryRequestCount === 0,
+  check(m.failedInventoryRequestEvidenceComplete === true && Number.isSafeInteger(m.failedInventoryRequestCount) &&
+    m.failedInventoryRequestCount === 0,
   'Function inventory requests failed or their terminal evidence is incomplete');
   check((m.firstPageRequestOverflow ?? 0) === 0 && (m.pendingEvidenceRequestOverflow ?? 0) === 0,
     'Cold request evidence exceeded its bounded capture');
@@ -735,7 +812,10 @@ export function evaluateStructureBudgets(m) {
     'Every inventory read must request one bounded page');
   check(Array.isArray(m.exceptions) && m.exceptions.length === 0, `Browser exceptions: ${m.exceptions?.length ?? 'unknown'}`);
   check(Array.isArray(m.requestMethods) && m.requestMethods.every((method) => ['GET', 'HEAD'].includes(method)), 'Structure browsing issued a mutation request');
-  check(Number.isFinite(m.peakBrowserHeapBytes) && m.peakBrowserHeapBytes <= 128 * 1024 * 1024, `Browser heap ${m.peakBrowserHeapBytes} exceeds the D0 budget`);
+  check(m.browserHeapMemory?.coverageComplete === true,
+    `Browser heap sampling was incomplete: ${JSON.stringify(m.browserHeapMemory)}`);
+  check(Number.isFinite(m.browserHeapMemory?.sampledPeakBytes) && m.browserHeapMemory.sampledPeakBytes <= 128 * 1024 * 1024,
+    `Browser heap ${m.browserHeapMemory?.sampledPeakBytes} exceeds the D0 budget`);
   check(m.jvmMemory?.coverageComplete === true, `JVM RSS sampling was incomplete: ${JSON.stringify(m.jvmMemory)}`);
   check(Number.isFinite(m.jvmMemory?.incrementalPeakBytes) && m.jvmMemory.incrementalPeakBytes <= JVM_RSS_BUDGET_BYTES,
     `JVM incremental RSS ${m.jvmMemory?.incrementalPeakBytes} exceeds the D0 ${JVM_RSS_BUDGET_BYTES}-byte budget`);
@@ -1417,11 +1497,6 @@ async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evalua
     inventoryRequests.delete(event.requestId);
     inventoryRequestDurationsMs.push((event.timestamp - started) * 1000);
   }, tab.sessionId);
-  let peakBrowserHeapBytes = 0;
-  const heap = async () => {
-    const metrics = (await cdp.call('Performance.getMetrics', {}, tab.sessionId)).metrics;
-    peakBrowserHeapBytes = Math.max(peakBrowserHeapBytes, metrics.find((metric) => metric.name === 'JSHeapUsedSize').value);
-  };
   const enter = async () => {
     await cdp.call('Input.dispatchKeyEvent', { type: 'keyDown', text: '\r', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 }, tab.sessionId);
     await cdp.call('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 }, tab.sessionId);
@@ -1431,6 +1506,9 @@ async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evalua
   const address = (index) => `0x${fixture.functionAddress(index).toString(16)}`;
   await cdp.call('Page.navigate', { url: browserOrigin + run }, tab.sessionId);
   await ready(tab, `[...document.querySelectorAll('a')].some(a => a.textContent === 'Browse recovered functions')`, 'structure links on the result revision');
+  const browserHeapSampler = await startBrowserHeapSampler(
+    () => cdp.call('Performance.getMetrics', {}, tab.sessionId));
+  const heap = () => browserHeapSampler.sampleNow();
   await armProof(proof.beginAction({ label: 'first', kind: 'first', start: 0 }));
   const beforeMetrics = (await cdp.call('Performance.getMetrics', {}, tab.sessionId)).metrics;
   phase('first-page');
@@ -1530,6 +1608,8 @@ async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evalua
   const requestP95Ms = nearestRankP95(inventoryRequestDurationsMs);
   const localFeedbackP95Ms = nearestRankP95(localFeedbackMs);
   const jvmMemory = await jvmRssSampler.stop();
+  const browserHeapMemory = await browserHeapSampler.stop();
+  const peakBrowserHeapBytes = browserHeapMemory.sampledPeakBytes;
   const structureTimingSummary = structureTiming.summary();
   const inventoryConsumption = proof.summary({ exceptions: tab.exceptions?.length ?? 1 });
   const coldEvidenceSummary = coldEvidence.summary();
@@ -1540,7 +1620,7 @@ async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evalua
   const measurements = { firstPageMs, pageDataP95Ms, searchMs, requestP95Ms,
     localFeedbackSamples: localFeedbackMs.length, invalidFeedbackSamples, localFeedbackP95Ms,
     pendingInventoryRequests: inventoryRequests.size, inventoryReads, exceptions: tab.exceptions,
-    requestMethods: tab.requests.map(request => request.method), peakBrowserHeapBytes, jvmMemory,
+    requestMethods: tab.requests.map(request => request.method), peakBrowserHeapBytes, browserHeapMemory, jvmMemory,
     moduleResponse: moduleResponseEvidence, structureTiming: structureTimingSummary, firstPagePerformance,
     ...coldEvidenceSummary, ...inventoryFailureClassification, inventoryConsumption };
   assertStructureQualification(measurements, evidenceFailures);

@@ -2,9 +2,10 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createHash } from 'node:crypto';
 import { runInNewContext } from 'node:vm';
-import { appendStructureFeedbackSample, assertStructureSourceLink, createJvmRssSummary, createModuleResponseInterceptor,
+import { appendStructureFeedbackSample, assertStructureSourceLink, createBrowserHeapSummary, createJvmRssSummary, createModuleResponseInterceptor,
   classifyFailedInventoryRequests, createStructureResponseRecorder, createStructureTimingRecorder, evaluateStructureBudgets,
-  isModuleDetailUrl, moduleDetailFetchPattern, nearestRankP95, recordJvmRssSample, structureFeedbackInstrumentation, summarizeJvmRss } from './packaged-browser-structure.mjs';
+  isModuleDetailUrl, moduleDetailFetchPattern, nearestRankP95, recordBrowserHeapSample, recordJvmRssSample,
+  startBrowserHeapSampler, structureFeedbackInstrumentation, summarizeBrowserHeap, summarizeJvmRss } from './packaged-browser-structure.mjs';
 
 const revision = `/nested/jobs/${'f'.repeat(32)}/runs/run_structure_scale/revisions/revision_structure_scale`;
 const browserOrigin = 'http://127.0.0.1:12345';
@@ -60,6 +61,41 @@ test('JVM RSS budget is measured above warmed baseline and incomplete sampling s
   assert.equal(incomplete.failedSamples, 1);
   assert.equal(incomplete.coverageComplete, false);
   assert.throws(() => createJvmRssSummary(Number.NaN), TypeError);
+});
+
+test('browser heap qualification retains the sampled peak and fails on missing or sparse telemetry', async () => {
+  const summary = createBrowserHeapSummary({ intervalMs: 10, maximumGapMs: 50 });
+  assert.equal(recordBrowserHeapSample(summary, 100, 0), true);
+  assert.equal(recordBrowserHeapSample(summary, 300, 10), true);
+  assert.equal(recordBrowserHeapSample(summary, 200, 20), true);
+  assert.deepEqual(summarizeBrowserHeap(summary), {
+    measurement: 'chrome-performance-js-heap-used-size', sampleIntervalMs: 10,
+    maximumAllowedSampleGapMs: 50, sampledPeakBytes: 300, sampleCount: 3, failedSamples: 0,
+    skippedTicks: 0, maximumObservedGapMs: 10, coverageComplete: true,
+  });
+  recordBrowserHeapSample(summary, Number.NaN, 30);
+  assert.equal(summarizeBrowserHeap(summary).coverageComplete, false);
+  const sparse = createBrowserHeapSummary({ intervalMs: 10, maximumGapMs: 20 });
+  recordBrowserHeapSample(sparse, 1, 0);
+  recordBrowserHeapSample(sparse, 2, 21);
+  assert.equal(summarizeBrowserHeap(sparse).coverageComplete, false);
+  assert.throws(() => createBrowserHeapSummary({ intervalMs: 5 }), TypeError);
+
+  const values = [10, 30, 20];
+  const sampler = await startBrowserHeapSampler(async () => ({ metrics: [{ name: 'JSHeapUsedSize', value: values.shift() ?? 20 }] }),
+    { intervalMs: 10, maximumGapMs: 100 });
+  await new Promise(resolve => setTimeout(resolve, 25));
+  const captured = await sampler.stop();
+  assert.ok(captured.sampleCount >= 2);
+  assert.equal(captured.sampledPeakBytes, 30);
+  assert.equal(captured.coverageComplete, true);
+
+  const missingMetrics = await startBrowserHeapSampler(async () => ({ metrics: [] }),
+    { intervalMs: 10, maximumGapMs: 100 });
+  const missing = await missingMetrics.stop();
+  assert.equal(missing.sampledPeakBytes, null);
+  assert.equal(missing.coverageComplete, false);
+  assert.ok(missing.failedSamples >= 2);
 });
 
 const modulePath = `/nested/api/v1/jobs/${'a'.repeat(32)}/runs/run/revisions/rev/modules/module_0041`;
@@ -239,15 +275,22 @@ test('module ledger bounds candidates and oversize bodies, failing closed', asyn
 test('every D0 budget is evaluated even when several fail', () => {
   const passing = { firstPageMs: 100, pageDataP95Ms: 100, searchMs: 100, requestP95Ms: 100, localFeedbackSamples: 51,
     invalidFeedbackSamples: 0, localFeedbackP95Ms: 10, pendingInventoryRequests: 0, inventoryReads: Array(52).fill('100'),
-    exceptions: [], requestMethods: ['GET'], peakBrowserHeapBytes: 1, jvmMemory: { coverageComplete: true, incrementalPeakBytes: 1 },
+    exceptions: [], requestMethods: ['GET'], peakBrowserHeapBytes: 1,
+    browserHeapMemory: { coverageComplete: true, sampledPeakBytes: 1 }, jvmMemory: { coverageComplete: true, incrementalPeakBytes: 1 },
     failedInventoryRequestCount: 0, failedInventoryRequestEvidenceComplete: true, provenCanceledAfterConsumptionCount: 0,
     unprovenFailedInventoryRequestCount: 0,
     structureTiming: {} };
   assert.deepEqual(evaluateStructureBudgets(passing), []);
   const failures = evaluateStructureBudgets({ ...passing, firstPageMs: 501, localFeedbackP95Ms: 101,
-    peakBrowserHeapBytes: 128 * 1024 * 1024 + 1, jvmMemory: { coverageComplete: true, incrementalPeakBytes: 256 * 1024 * 1024 + 1 } });
+    peakBrowserHeapBytes: 128 * 1024 * 1024 + 1,
+    browserHeapMemory: { coverageComplete: true, sampledPeakBytes: 128 * 1024 * 1024 + 1 },
+    jvmMemory: { coverageComplete: true, incrementalPeakBytes: 256 * 1024 * 1024 + 1 } });
   assert.equal(failures.length, 4);
-  assert.equal(evaluateStructureBudgets({ ...passing, firstPageMs: Number.NaN, peakBrowserHeapBytes: undefined, jvmMemory: undefined }).length, 4);
+  assert.ok(evaluateStructureBudgets({ ...passing,
+    browserHeapMemory: { coverageComplete: false, sampledPeakBytes: 1 } })
+    .some(failure => failure.startsWith('Browser heap sampling was incomplete:')));
+  assert.equal(evaluateStructureBudgets({ ...passing, firstPageMs: Number.NaN, peakBrowserHeapBytes: undefined,
+    browserHeapMemory: undefined, jvmMemory: undefined }).length, 5);
 });
 
 test('structure feedback samples survive document replacement through the parent binding', () => {
@@ -341,6 +384,7 @@ test('cold evidence records failures, strips identities and caps the click windo
   const measurements = { ...evidence, firstPageMs: 100, pageDataP95Ms: 100, searchMs: 100, requestP95Ms: 100,
     localFeedbackSamples: 51, invalidFeedbackSamples: 0, localFeedbackP95Ms: 10, pendingInventoryRequests: 0,
     inventoryReads: Array(52).fill('100'), exceptions: [], requestMethods: ['GET'], peakBrowserHeapBytes: 1,
+    browserHeapMemory: { coverageComplete: true, sampledPeakBytes: 1 },
     jvmMemory: summarizeJvmRss(Object.assign(createJvmRssSummary(100), { sampleCount: 1 })), moduleResponse: { terminal: 'finished', candidates: 1 } };
   assert.equal(evidence.pendingEvidenceRequests, 0);
   assert.deepEqual(evaluateStructureBudgets(measurements), [
@@ -398,8 +442,15 @@ test('only exact complete Chromium cancellations proven consumed by every invent
   const budget = { ...cold, ...classifyFailedInventoryRequests(cold, proof), firstPageMs: 100, pageDataP95Ms: 100,
     searchMs: 100, requestP95Ms: 100, localFeedbackSamples: 51, invalidFeedbackSamples: 0, localFeedbackP95Ms: 10,
     pendingInventoryRequests: 0, inventoryReads: Array(52).fill('100'), exceptions: [], requestMethods: ['GET'],
-    peakBrowserHeapBytes: 1, jvmMemory: { coverageComplete: true, incrementalPeakBytes: 1 }, structureTiming: {} };
-  assert.ok(!evaluateStructureBudgets(budget).includes('Function inventory requests failed or their terminal evidence is incomplete'));
+    peakBrowserHeapBytes: 1, browserHeapMemory: { coverageComplete: true, sampledPeakBytes: 1 },
+    jvmMemory: { coverageComplete: true, incrementalPeakBytes: 1 }, structureTiming: {} };
+  assert.equal(budget.provenCanceledAfterConsumptionCount, 1);
+  assert.equal(budget.unprovenFailedInventoryRequestCount, 0);
+  assert.ok(evaluateStructureBudgets(budget)
+    .includes('Function inventory requests failed or their terminal evidence is incomplete'),
+  'complete consumption proof remains diagnostic and cannot waive a raw loading failure');
+  assert.ok(!evaluateStructureBudgets({ ...budget, failedInventoryRequestCount: 0 })
+    .includes('Function inventory requests failed or their terminal evidence is incomplete'));
   assert.ok(evaluateStructureBudgets({ ...budget, unprovenFailedInventoryRequestCount: 1 })
     .includes('Function inventory requests failed or their terminal evidence is incomplete'));
 });
@@ -654,7 +705,8 @@ test('a proof cannot be complete with fewer than 52 actions and adds no budget c
   assert.equal(summary.provenActions, 1);
   const failing = { firstPageMs: 1339, pageDataP95Ms: 100, searchMs: 100, requestP95Ms: 100, localFeedbackSamples: 51, invalidFeedbackSamples: 0,
     localFeedbackP95Ms: 10, pendingInventoryRequests: 0, inventoryReads: Array(52).fill('100'), exceptions: [], requestMethods: ['GET'],
-    peakBrowserHeapBytes: 1, jvmMemory: { coverageComplete: true, incrementalPeakBytes: 311934976 }, failedInventoryRequestCount: 2, structureTiming: {} };
+    peakBrowserHeapBytes: 1, browserHeapMemory: { coverageComplete: true, sampledPeakBytes: 1 },
+    jvmMemory: { coverageComplete: true, incrementalPeakBytes: 311934976 }, failedInventoryRequestCount: 2, structureTiming: {} };
   const before = evaluateStructureBudgets(failing);
   const proven = { consumptionProven: true, actions: Array(52).fill({ validatedConsumption: true }) };
   assert.deepEqual(evaluateStructureBudgets({ ...failing, inventoryConsumption: proven }), before, 'evidence additions never relax budgets');

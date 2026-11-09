@@ -140,21 +140,30 @@ browser lists these families explicitly rather than omitting them.
 
 ## Scale
 
-Two checks qualify the 100,000-function budget (#536):
+The checks below exercise the 100,000-function budget (#536), but they do not by
+themselves satisfy the complete D0 cold-load protocol. In particular, the packaged
+structure run records one first-page sample in one JVM; it does not run 20 fresh
+processes or the constrained 4× CPU / 10 Mbit profile. Those qualification gaps must
+remain explicit until separately measured.
 
 - `WebProgramStructureTest` builds a 100,000-function synthetic revision (4,167
   modules) through the real capture path and requires pages of at most 200 rows and
   under 1 MiB, a p95 across 20 fresh-cache first-page reads below 500 ms, a median
-  warm page read below 500 ms and a retained projection below its 256 MiB test
-  bound. It prints each cold sample plus the median, p95 and max.
+  warm page read below 500 ms and a retained projection below its 96 MiB test
+  bound. The 20 reads use fresh cache instances in one already-running test JVM;
+  they are not 20 fresh-process cold loads. It prints each sample plus the median,
+  p95 and max.
 - `node scripts/check-packaged-web-browser.mjs --mode structure` seeds a persisted
   100,000-function revision (`scripts/packaged-browser-structure.mjs`) into the
   packaged application and drives pinned Chrome: it opens the inventory from the
-  attempt page, pages 20 times by keyboard (focus returns to the results heading),
+  attempt page, traverses 50 pages by keyboard (focus returns to the results heading),
   reloads a cursor page, searches across all records, follows pinned caller and
   module links to the module source link, checks 390/320 px reflow, refuses any
-  inventory read without the 100-row limit, and asserts a peak JS heap of at most
-  128 MiB and at most 500 mounted table rows. CI runs it in the `web-packaged` job.
+  inventory read without the 100-row limit, and asserts a sampled JS heap peak of at
+  most 128 MiB and at most 500 mounted table rows. It samples `JSHeapUsedSize` every
+  50 ms throughout the measured journey and fails if a sample fails or the largest
+  observed gap exceeds 500 ms; the reported peak is sampled, not a continuous heap
+  trace. CI runs it in the `web-packaged` job.
   Its seed writes manifests directly, so `WebProgramStructureTest` keeps
   `scripts/packaged-browser-structure-profile.json` equal to the current profile.
   During that journey the driver samples the packaged JVM's Linux `VmRSS` every
@@ -163,10 +172,12 @@ Two checks qualify the 100,000-function budget (#536):
   This is sampled process RSS for this synthetic journey; it does not establish a
   maximum over every request pattern or long-running session.
 
-Five local 20-sample runs measured cold projection p50/p95/max of 323/438/569 ms,
+Five historical local 20-sample runs measured cold projection p50/p95/max of 323/438/569 ms,
 392/487/595 ms, 398/588/751 ms, 270/362/521 ms, and 333/493/502 ms; retained
-projection was about 47 MB. Four runs met the 500 ms p95 budget and one did not, so
-local timing is variable and does not establish stable qualification. These are synthetic
+projection had an estimated post-GC heap delta of about 47 MB under the then-current
+test. This heap delta is distinct from the separately charged cache-entry size, which
+is about 87 MB for the current 100,000-function fixture. Four runs met the 500 ms p95
+budget and one did not, so local timing is variable and does not establish stable qualification. These are synthetic
 projection measurements, not hosted production qualification. The packaged browser
 measurements above remain separate evidence for response paging, heap, keyboard
 interaction and reflow.
@@ -177,12 +188,11 @@ terminal is accepted as consumed only for Chromium's exact `net::ERR_ABORTED` ca
 signature and only when the complete streamed body matches the fixture oracle and
 Content-Length, the response is an uncached HTTP 200, Resource Timing reports matching
 encoded/decoded sizes and HTTP 200, and the expected ready DOM follows the failure.
-The inventory-failure budget reconciles that classification by request-ID and URL hashes
-only after all 52 consumption actions are proven; it retains the raw failure count and
-accepts no unmatched row, overflow, or incomplete evidence. All other failed, partial,
-stale, or uncorrelated responses remain unproven. This
-classifies the observed browser terminal after the body and UI have completed; it does
-not claim that the HTTP request itself terminated successfully. Structure-mode server
+The driver may classify a narrowly proven cancellation for diagnosis using request-ID
+and URL hashes after all 52 consumption actions are proven. This classification is
+diagnostic only: the qualification gate still requires zero raw `loadingFailed`
+inventory requests. A consumed-body proof does not establish why Chromium reported
+failure or turn that request into a successful terminal. Structure-mode server
 phase timings can be enabled for the packaged diagnostic with
 `-Ddecompengine.web.structureTiming=true`; they are stderr diagnostics and do not alter
 the response or any budget.
