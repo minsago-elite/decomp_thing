@@ -5,7 +5,7 @@ import { PassThrough } from 'node:stream';
 import { spawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
-import { COLD_PROFILES, applyStructureProfile, makeChromeThrottlingCommands, summarizeColdSamples, runColdSamples,
+import { COLD_PROFILES, STRUCTURE_QUALIFICATION_SOURCE_FILES, applyStructureProfile, makeChromeThrottlingCommands, summarizeColdSamples, runColdSamples,
   verifyStructureQualificationSource } from './packaged-browser-structure-cold.mjs';
 
 function gitBlob(bytes) { return createHash('sha1').update(`blob ${bytes.byteLength}\0`).update(bytes).digest('hex'); }
@@ -47,7 +47,8 @@ test('runner refuses incorrect count', async () => {
 
 test('qualification source identity matches committed Git blobs and refuses edited driver bytes', async () => {
   const commit = 'a'.repeat(40);
-  const paths = ['.github/workflows/ci.yml', 'scripts/check-packaged-web-browser.mjs', 'scripts/packaged-browser-structure-cold.mjs'];
+  const paths = ['.github/workflows/ci.yml', '.node-version', 'frontend/package.json',
+    'scripts/check-packaged-web-browser.mjs', 'scripts/packaged-browser-structure-cold.mjs'];
   const committed = new Map(paths.map((path, i) => [path, Buffer.from(`committed source ${i}`)]));
   const working = new Map([...committed].map(([path, bytes]) => [path, Buffer.from(bytes)]));
   const runGit = (args, input) => {
@@ -70,6 +71,15 @@ test('qualification source identity matches committed Git blobs and refuses edit
   await assert.rejects(verifyStructureQualificationSource('/repo', commit, {
     sourceFiles: paths, runGit, readFile: async path => working.get(path.slice('/repo/'.length)),
   }), /qualification source differs from declared commit/);
+});
+
+test('source identity includes the Node and browser qualification toolchain pins', () => {
+  for (const path of ['.node-version', 'frontend/package.json', 'scripts/install-frontend-node.sh',
+    'scripts/frontend-node-sha256.txt', 'scripts/install-web-test-browser.py', 'scripts/web-test-browser.json',
+    'scripts/test-packaged-browser-install.py', 'scripts/test-packaged-browser-structure.mjs',
+    'scripts/test-packaged-browser-structure-cold.mjs']) {
+    assert.ok(STRUCTURE_QUALIFICATION_SOURCE_FILES.includes(path), `qualification source identity is missing ${path}`);
+  }
 });
 
 function fakeChild(code = 0, diagnostic = '') {

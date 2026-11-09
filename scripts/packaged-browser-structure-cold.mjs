@@ -8,11 +8,18 @@ export const COLD_SAMPLE_COUNT = 20;
 export const COLD_SAMPLE_TIMEOUT_MS = 45_000;
 export const STRUCTURE_QUALIFICATION_SOURCE_FILES = Object.freeze([
   '.github/workflows/ci.yml',
+  '.node-version',
+  'frontend/package.json',
   'scripts/check-packaged-web-browser.mjs',
   'scripts/packaged-browser-structure.mjs',
   'scripts/packaged-browser-structure-cold.mjs',
   'scripts/packaged-browser-structure-profile.json',
+  'scripts/frontend-node-sha256.txt',
+  'scripts/install-frontend-node.sh',
+  'scripts/install-web-test-browser.py',
+  'scripts/web-test-browser.json',
   'scripts/packaged-browser-install.py',
+  'scripts/test-packaged-browser-install.py',
   'scripts/packaged-browser-upload.mjs',
   'scripts/packaged-browser-scale.mjs',
   'scripts/packaged-browser-contrast.mjs',
@@ -23,6 +30,8 @@ export const STRUCTURE_QUALIFICATION_SOURCE_FILES = Object.freeze([
   'scripts/packaged-browser-upgrade.mjs',
   'scripts/packaged-browser-audit.mjs',
   'scripts/packaged-browser-cdp-diagnostics.mjs',
+  'scripts/test-packaged-browser-structure.mjs',
+  'scripts/test-packaged-browser-structure-cold.mjs',
 ]);
 export const COLD_PROFILES = Object.freeze({
   loopback: Object.freeze({ name: 'loopback', firstPageLimitMs: 500, cpuRate: 1, latencyMs: 0, downloadBytesPerSecond: 0, uploadBytesPerSecond: 0 }),
@@ -50,7 +59,8 @@ export async function verifyStructureQualificationSource(repoRoot, commit, {
   }
   const files = [];
   for (const path of sourceFiles) {
-    const approvedSourcePath = typeof path === 'string' && (path.startsWith('scripts/') || path === '.github/workflows/ci.yml');
+    const approvedSourcePath = typeof path === 'string' && (path.startsWith('scripts/')
+      || path === '.github/workflows/ci.yml' || path === '.node-version' || path === 'frontend/package.json');
     if (!approvedSourcePath || path.startsWith('/') || path.split('/').includes('..')) {
       throw new TypeError(`invalid qualification source path: ${String(path)}`);
     }
