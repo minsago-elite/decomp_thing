@@ -13,6 +13,8 @@ import { seedHistory, qualifyHistory } from './packaged-browser-history.mjs';
 import { seedLegacy, qualifyLegacy } from './packaged-browser-legacy.mjs';
 import { qualifyUpgrade, qualifyUpgradeCache } from './packaged-browser-upgrade.mjs';
 import { seedGit, qualifyGit, qualifyGitRestart } from './packaged-browser-git.mjs';
+import { seedGitScale, qualifyGitScale } from './packaged-browser-git-scale.mjs';
+import { qualifyGitUiScale } from './packaged-browser-git-ui-scale.mjs';
 import { qualifyAudit, assertAudit } from './packaged-browser-audit.mjs';
 
 // Test driver only: the application is launched with a separate Node-free PATH.
@@ -30,10 +32,11 @@ const { values } = parseArgs({ options: {
   help: { type: 'boolean', default: false },
 } });
 if (values.help) {
-  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|metadata|history|scale|live|proxy|upgrade|legacy|git|audit] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
+  console.log('Usage: node scripts/check-packaged-web-browser.mjs --archive /absolute/distribution.zip --chrome /absolute/chrome --java-home /absolute/jdk [--mode public|session|upload|metadata|history|scale|live|proxy|upgrade|legacy|git|git-scale|audit] [--previous-archive /absolute/previous.zip] [--work-parent /absolute/scratch] [--keep-workdir] [--python /absolute/python3] [--no-sandbox]');
   console.log('public: packaged home/Runtime/recovery; session: public plus local session journey; upload: session plus inert upload and lost-response retry; history: session plus preseeded inert multi-page attempts; scale: session plus 10,000 persisted jobs and keyboard pagination; proxy: real Vite HMR and session journey against packaged JVM; upgrade: previous JVM to current JVM on one origin with an old tab.');
   console.log('legacy: inert legacy HTML/polling with explicit test-owned state edits; no workflow execution.');
   console.log('git: session plus a disposable admitted repository: keyboard import, external edit, stage, commit, export digest against provenance, and a JVM restart; needs git >= 2.36 on PATH and no network.');
+  console.log('git-scale: session plus a deterministic 10,000-commit admitted repository: bounded real API history/diff/patch reads and every 20-entry SPA history page activated by keyboard with retained continuation focus; needs git >= 2.36 on PATH and no network.');
   console.log('audit: every route at 1440x900, 390x844, 320px and 200%/400% zoom in light/dark themes with contract-fixture API reads fulfilled in DevTools; measures reflow, text/focus contrast, target size, reduced motion, every packaged asset under CSP and navigation timing budgets.');
   console.log('metadata: session plus one inert header upload/retry, real packaged job metadata, maximum uint64 address, and simulated malformed-response recovery; no workflow execution or upload quota/scale measurement.');
   console.log('live: session plus authored inert job changes and real background listing reads; preserves focused row order and applies new jobs on explicit refresh.');
@@ -48,7 +51,7 @@ for (const option of ['archive', 'chrome', 'java-home', 'python']) {
   assert.ok(values[option] && isAbsolute(values[option]), `--${option} must name an absolute existing path; see --help`);
   await fs.access(values[option]);
 }
-assert.ok(['public', 'session', 'upload', 'metadata', 'history', 'scale', 'live', 'proxy', 'upgrade', 'legacy', 'git', 'audit'].includes(values.mode), '--mode must be public, session, upload, metadata, history, scale, live, proxy, upgrade, legacy, git or audit');
+assert.ok(['public', 'session', 'upload', 'metadata', 'history', 'scale', 'live', 'proxy', 'upgrade', 'legacy', 'git', 'git-scale', 'audit'].includes(values.mode), '--mode must be public, session, upload, metadata, history, scale, live, proxy, upgrade, legacy, git, git-scale or audit');
 if (values.mode === 'upgrade') {
   assert.ok(values['previous-archive'] && isAbsolute(values['previous-archive']), 'upgrade requires --previous-archive as an absolute existing ZIP path');
   await fs.access(values['previous-archive']);
@@ -95,6 +98,7 @@ let browserError = '';
 let viteError = '';
 let gitImportRoot;
 let gitFixture;
+let gitScaleFixture;
 const report = { status: 'running', mode: values.mode, testDirectory: root, driverNode: nodeVersion,
   tools: { node: process.execPath, chrome: chromeBinary, javaHome, python: values.python }, requests: {} };
 const launchErrors = new WeakMap();
@@ -438,7 +442,7 @@ async function prepareArchive(archivePath) {
   await fs.mkdir(bins);
   await fs.mkdir(working);
   // Git is an optional runtime prerequisite: only the Git journey puts it on the application PATH.
-  for (const name of ['uname', 'ls', 'xargs', 'sed', 'tr', ...(values.mode === 'git' ? ['git'] : [])]) {
+  for (const name of ['uname', 'ls', 'xargs', 'sed', 'tr', ...((values.mode === 'git' || values.mode === 'git-scale') ? ['git'] : [])]) {
     const executable = execFileSync('/bin/sh', ['-c', `command -v ${name}`], { encoding: 'utf8' }).trim();
     await fs.symlink(executable, join(bins, name));
   }
@@ -500,7 +504,8 @@ try {
   const scaleFixture = values.mode === 'scale' ? await seedScale(data) : null;
   const liveFixture = values.mode === 'live' ? await seedLive(data) : null;
   gitFixture = values.mode === 'git' ? await seedGit(values['work-parent']) : null;
-  gitImportRoot = gitFixture?.importRoot;
+  gitScaleFixture = values.mode === 'git-scale' ? await seedGitScale({ repo, root }) : null;
+  gitImportRoot = gitFixture?.importRoot ?? gitScaleFixture?.importRoot;
   const populated = !!(historyFixture || scaleFixture || liveFixture);
   const libraryText = historyFixture ? 'synthetic-history.elf' : scaleFixture ? 'synthetic-project-09999.elf'
     : liveFixture ? 'live-dashboard-2.elf' : 'No uploaded jobs yet.';
@@ -671,7 +676,7 @@ try {
     assert.equal(await fs.stat(data).then(() => true, () => false), false, 'Fixture-backed audit created job data');
     report.jobDataCreated = false;
   }
-  if (values.mode === 'public' || values.mode === 'session' || values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'history' || values.mode === 'scale' || values.mode === 'live' || values.mode === 'git') {
+  if (values.mode === 'public' || values.mode === 'session' || values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'history' || values.mode === 'scale' || values.mode === 'live' || values.mode === 'git' || values.mode === 'git-scale') {
     const identityExpression = `(() => ({ buildId: document.querySelector('meta[name="decomp-ui-build"]')?.content, applicationVersion: document.querySelector('meta[name="decomp-application-version"]')?.content, page: location.pathname, text: document.body.innerText }))()`;
     const home = await makeTarget();
     await cdp.call('Page.navigate', { url: `${origin}/nested/` }, home.sessionId);
@@ -828,7 +833,7 @@ try {
     report.requests = {};
   }
 
-  if (values.mode === 'session' || values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'history' || values.mode === 'scale' || values.mode === 'live' || values.mode === 'proxy' || values.mode === 'git') {
+  if (values.mode === 'session' || values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'history' || values.mode === 'scale' || values.mode === 'live' || values.mode === 'proxy' || values.mode === 'git' || values.mode === 'git-scale') {
     const bootstrapUrl = await waitFor(() => applicationOutput.split(/\s+/).find((part) => part.startsWith(browserOrigin + '/nested/#bootstrap=')), 'local bootstrap handoff');
     const token = new URL(bootstrapUrl).hash.slice('#bootstrap='.length);
     sensitiveValues.push(token);
@@ -967,6 +972,11 @@ try {
       report.git = await qualifyGit({ fixture: gitFixture, makeTarget, cdp, evaluate, ready, browserOrigin, data });
       report.jobDataCreated = true;
     }
+    if (gitScaleFixture) {
+      report.gitScaleApi = await qualifyGitScale({ fixture: gitScaleFixture, tab: authenticated, evaluate });
+      report.gitScaleUi = await qualifyGitUiScale({ fixture: gitScaleFixture, tab: authenticated, cdp, evaluate, ready, browserOrigin });
+      report.jobDataCreated = true;
+    }
     if (values.mode === 'metadata') {
       report.upload = await qualifyUpload({ makeTarget, cdp, evaluate, ready, browserOrigin, data });
       report.jobDataCreated = true;
@@ -1051,14 +1061,17 @@ try {
     await cdp.call('Page.navigate', { url: bootstrapUrl }, authenticated.sessionId);
     await ready(authenticated, `document.body.innerText.includes('This sign-in link is no longer available.')`, 'consumed link denial');
     await delay(5000);
-    assert.equal(authenticated.requests.filter((request) => request.method === 'POST').length, 2);
+    const expectedPostCount = gitScaleFixture ? 6 : 2;
+    assert.equal(authenticated.requests.filter((request) => request.method === 'POST').length, expectedPostCount);
     assert.equal(authenticated.requests.filter((request) => request.method === 'DELETE').length, 1);
     assert.equal(await evaluate(authenticated, 'location.hash'), '');
     assert.deepEqual(authenticated.exceptions, []);
     assert.equal(await evaluate(authenticated, 'localStorage.length + sessionStorage.length'), 0);
     assert.ok(authenticated.requests.every((request) => request.url.startsWith(browserOrigin + '/')));
-    assert.ok(authenticated.requests.every((request) => ['GET', 'HEAD'].includes(request.method) || request.url === browserOrigin + '/nested/api/v1/session'));
-    const createsJobs = values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'git' || populated;
+    assert.ok(authenticated.requests.every((request) => ['GET', 'HEAD'].includes(request.method) || request.url === browserOrigin + '/nested/api/v1/session' ||
+      (gitScaleFixture && (request.url === browserOrigin + '/nested/api/v1/jobs' ||
+        /^http:\/\/127\.0\.0\.1:\d+\/nested\/api\/v1\/jobs\/[a-f0-9]{32}\/repositories$/.test(request.url)))));
+    const createsJobs = values.mode === 'upload' || values.mode === 'metadata' || values.mode === 'git' || values.mode === 'git-scale' || populated;
     assert.equal(await fs.stat(data).then(() => true, () => false), createsJobs);
     report.session = { authenticated: true, cookie: { httpOnly: true, sameSite: 'Strict', path: '/nested/', secure: false }, fragmentRemovedBeforeFetch: true, restoredAfterReload: true, explicitLogoutRequests: 1, successfulExchangeRequests: 1, consumedLinkRequests: 1, automaticMutationRetries: 0, storageEntries: 0, installationUnchanged: true, jobDataCreated: createsJobs };
     report.requests.authenticated = authenticated.requests;
@@ -1128,6 +1141,7 @@ try {
   if (cdp) await cdp.call('Browser.close').catch(() => {});
   const cleanup = await Promise.allSettled([stop(browser), stop(application), stop(vite)]);
   if (gitFixture) await gitFixture.dispose().catch((error) => { report.gitFixtureCleanupError = safeDiagnostic(error.stack); process.exitCode = 1; });
+  if (gitScaleFixture) await fs.rm(gitScaleFixture.importRoot, { recursive: true, force: true }).catch((error) => { report.gitScaleFixtureCleanupError = safeDiagnostic(error.stack); process.exitCode = 1; });
   report.shutdownConfirmed = cleanup.every((result) => result.status === 'fulfilled');
   if (!report.shutdownConfirmed) {
     report.status = 'failed';

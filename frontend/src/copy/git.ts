@@ -59,6 +59,7 @@ export const gitCopy = {
   nothingStaged: 'Stage files to review a commit.',
   history: 'History',
   noHistory: 'No commits yet.',
+  newerHistory: 'Newer commits',
   olderHistory: 'Older commits',
   mapped: 'Reconstruction revision {revision} ({acceptance})',
   unmapped: 'Not mapped to a reconstruction revision',
