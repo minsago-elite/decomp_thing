@@ -59,6 +59,26 @@ export function sourceTreeBudgetGate(measurements, budgets = SOURCE_TREE_BUDGETS
   });
 }
 
+/** Require a CDP Fetch pause after the application request has received a successful HTTP response. */
+export function sourceSearchResponsePause(event) {
+  assert.ok(event && typeof event === 'object', 'source-search cancellation needs a Fetch pause event');
+  assert.ok(typeof event.request?.url === 'string' && event.request.url.includes('/source-search?'),
+    'The paused response must be the source-search request');
+  assert.ok(typeof event.requestId === 'string' && event.requestId.length > 0,
+    'The paused response must have a Fetch request id');
+  assert.ok(typeof event.networkId === 'string' && event.networkId.length > 0,
+    'The paused response must bind to the dispatched Network request');
+  assert.equal(event.responseStatusCode, 200, 'The source-search request must reach a successful response');
+  const headers = new Map((event.responseHeaders ?? []).map(header => [header.name.toLowerCase(), header.value]));
+  const contentLength = headers.get('content-length');
+  assert.ok(typeof contentLength === 'string' && /^(0|[1-9][0-9]{0,6})$/u.test(contentLength),
+    'The source-search response must declare a bounded decimal Content-Length');
+  const responseBytes = Number(contentLength);
+  assert.ok(Number.isSafeInteger(responseBytes) && responseBytes <= SOURCE_TREE_BUDGETS.maximumSearchResponseBytes,
+    'The source-search response exceeds its documented byte limit');
+  return { requestId: event.requestId, networkId: event.networkId, responseStatus: 200, responseBytes };
+}
+
 function processId(value) { return /^[1-9][0-9]{0,8}$/.test(value) ? Number(value) : null; }
 
 /** Sum VmRSS for one owned process and its live descendants. Linux packaged-browser runner only. */
@@ -439,8 +459,9 @@ export async function qualifySourceTree({ fixture, makeTarget, cdp, evaluate, re
     sourceHeapBytes = await browserHeapBytes(cdp, target);
     browserHeapPeakBytes = Math.max(browserHeapPeakBytes, sourceHeapBytes);
 
-    // Hold a new search request at the browser boundary and navigate through the
-    // application's own router. The unmounted search view must abort its transport.
+    // Hold a new search response after it has reached the server and returned HTTP 200.
+    // Navigate through the application's own router; the unmounted search view must
+    // abort its outstanding response read without rendering stale results.
     let pausedRequest;
     let resolvePaused;
     const paused = new Promise(resolve => { resolvePaused = resolve; });
@@ -449,18 +470,21 @@ export async function qualifySourceTree({ fixture, makeTarget, cdp, evaluate, re
       pausedRequest = event;
       resolvePaused(event);
     }, target.sessionId);
-    await cdp.call('Fetch.enable', { patterns: [{ urlPattern: '*source-search*', requestStage: 'Request' }] }, target.sessionId);
+    await cdp.call('Fetch.enable', { patterns: [{ urlPattern: '*source-search*', requestStage: 'Response' }] }, target.sessionId);
     await evaluate(target, `(() => { const input = document.querySelector('input[name="q"]'); input.value = 'Inert'; input.dispatchEvent(new Event('input', { bubbles: true })); document.querySelector('form[role="search"] button[type="submit"]').click(); })()`);
     await Promise.race([paused, new Promise((_, reject) => setTimeout(() => reject(new Error('Source-search request did not reach the cancellation gate')), 10_000))]);
+    const pausedResponse = sourceSearchResponsePause(pausedRequest);
     assert.equal(await evaluate(target, `(() => { const link = document.querySelector('.app-nav a[href="/nested/runtime"]'); if (!link) return false; link.click(); return true; })()`), true,
       'The Runtime route must be reachable through the application navigation');
     await ready(target, `location.pathname === '/nested/runtime' && document.querySelector('h1')?.textContent === 'Runtime status'`, 'navigate in-app away from pending source search');
-    // The SPA route transition unmounts the search component. Its abort signal
-    // removes the intercepted request before it can reach the server.
+    // The response-stage pause proves the request was dispatched and returned
+    // successful headers before the SPA aborts it during route unmount.
     await assert.rejects(cdp.call('Fetch.continueRequest', { requestId: pausedRequest.requestId }, target.sessionId), /Invalid InterceptionId/u);
     await cdp.call('Fetch.disable', {}, target.sessionId);
     assert.equal(await evaluate(target, `location.pathname === '/nested/runtime' && document.querySelector('.source-search') === null`), true);
-    const cancelNavigation = { requestWasPaused: true, applicationRouteTransition: true, searchTransportAbortedOnUnmount: true,
+    const cancelNavigation = { requestWasPausedAfterDispatch: true, responseStatus: pausedResponse.responseStatus,
+      networkRequestObserved: true, declaredResponseBytes: pausedResponse.responseBytes,
+      applicationRouteTransition: true, searchTransportAbortedOnUnmount: true,
       staleSearchNotRendered: true,
       serverWorkMayContinueAfterDisconnect: true };
 

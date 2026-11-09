@@ -1,6 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { maximumFirstSearchPageMs, nearestRankPercentile, sourceTreeBudgetGate, sourceTreeBudgetsForProfile, SOURCE_TREE_BUDGETS, waitForCompletedRequest } from './packaged-browser-source-tree.mjs';
+import { maximumFirstSearchPageMs, nearestRankPercentile, sourceSearchResponsePause, sourceTreeBudgetGate, sourceTreeBudgetsForProfile, SOURCE_TREE_BUDGETS, waitForCompletedRequest } from './packaged-browser-source-tree.mjs';
+
+test('cancelled navigation only qualifies a dispatched successful bounded search response', () => {
+  const event = { requestId: 'fetch-1', networkId: 'network-1', responseStatusCode: 200,
+    request: { url: 'http://127.0.0.1/nested/api/v1/source-search?q=Inert' },
+    responseHeaders: [{ name: 'Content-Length', value: '998' }] };
+  assert.deepEqual(sourceSearchResponsePause(event), {
+    requestId: 'fetch-1', networkId: 'network-1', responseStatus: 200, responseBytes: 998,
+  });
+  assert.throws(() => sourceSearchResponsePause({ ...event, networkId: undefined }), /dispatched Network request/u);
+  assert.throws(() => sourceSearchResponsePause({ ...event, responseStatusCode: 500 }), /successful response/u);
+  assert.throws(() => sourceSearchResponsePause({ ...event, responseHeaders: [{ name: 'Content-Length', value: '1000001' }] }), /byte limit/u);
+});
 
 test('resource timing fallback accepts supplied timing records without a status field', async () => {
   const observed = { route: 'chunk', pathname: '/assets/chunk.js', status: 200, responseBytes: null };

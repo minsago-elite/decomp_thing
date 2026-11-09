@@ -31,8 +31,11 @@ manifest records and source revision identity are deterministic.
 The packaged `source-tree` browser mode uses the same fixture and real
 application readers. It visits all 500 pages of the 24,999-file `modules`
 directory, checks exact ordering and keyboard focus, opens a file and its first
-bounded preview chunk, runs common/rare/missing searches, and cancels an in-flight
-search through the SPA's own navigation. It measures the first-page duration for
+bounded preview chunk, runs common/rare/missing searches, and cancels a search
+through the SPA's own navigation after the server has returned successful bounded
+response headers. This proves the in-app route transition aborts the outstanding
+browser response read; it does not prove server work stopped after disconnect. It
+measures the first-page duration for
 all three search terms, plus local feedback for 50 keyboard page interactions.
 CI records request-head and response bytes, route durations, mounted rows,
 browser heap, and application process-tree RSS.
