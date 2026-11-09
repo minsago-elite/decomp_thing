@@ -443,11 +443,11 @@ export async function qualifySoak({ fixture, tab, cdp, evaluate, ready, origin, 
     feedbackSamples.push(await clickHref(tab, evaluate, finalAttempt));
     await ready(tab, `location.pathname === ${JSON.stringify(finalAttempt)}`, 'final activity attempt');
     await ready(tab, `[...document.querySelectorAll('button')].some(button => button.textContent === 'Follow activity')`, 'final Activity control');
-    const streamStart = successfulStreamOpens;
     await evaluate(tab, ` [...document.querySelectorAll('button')].find(button => button.textContent === 'Follow activity').click()`);
     await ready(tab, `(${activityRows}).length === 200`, 'final Activity first page');
     const finalContinuation = await evaluate(tab, `(() => { const button = [...document.querySelectorAll('button')].find(b => b.textContent === 'Continue activity on next page'); if (!button || button.disabled) return null; button.focus(); return document.activeElement.textContent; })()`);
     assert.equal(finalContinuation, 'Continue activity on next page');
+    const streamStart = successfulStreamOpens;
     // The stream response can arrive before either first-page or rendered-tail readiness settles.
     await evaluate(tab, `document.activeElement.click()`);
     const finalNextSequence = JSON.parse(await fs.readFile(finalJob.progressPath, 'utf8')).nextSequence;
