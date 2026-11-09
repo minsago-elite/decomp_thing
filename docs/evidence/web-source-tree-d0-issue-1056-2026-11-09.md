@@ -85,3 +85,53 @@ web workflow or production workload. No production ACP-provider, long-session,
 power-loss, or real-project qualification is claimed. Attempt-scoped child-JVM
 workers remain unimplemented because descendant termination and parent-death
 cleanup have not been proved on supported hosts.
+
+## Exact-head hosted packaged evidence (2026-11-09)
+
+GitHub Actions run [42625438851](https://github.com/minsago-elite/decomp_thing/actions/runs/42625438851)
+completed successfully for PR #1937 head
+`f4895018a8d48b9f225c06c9a9434e014aece815`. The packaged browser reports identify
+checkout commit `0ff82c9a00db556b38aebd9363d7388fd23e9d38`; its parents are base
+`2b1121999c806d5b3f89d3723fca8a39879c49b1` and that PR head. I independently
+matched the three source-tree driver SHA-256 values in both reports to the files
+at that merge commit.
+
+The `packaged-web-verification` artifact (artifact ID `13680136585`) contains
+reports `packaged-browser-7DlSRV/report.json` and
+`packaged-browser-BripZ5/report.json`. Both report `status: passed` and all 13
+source-tree budget checks passed:
+
+| Measurement | Loopback | Constrained | Limit |
+|---|---:|---:|---:|
+| First data page p95 (10 samples) | 300.99 ms | 848.08 ms | 500 ms / 1,000 ms |
+| First preview chunk | 91.34 ms | 224.67 ms | 500 ms |
+| Local feedback p95 | 4.3 ms | 16.3 ms | 100 ms |
+| Slowest search first page | 1,639.58 ms | 1,628.54 ms | 2,000 ms |
+| Browser heap peak | 28,360,104 B | 25,447,288 B | 134,217,728 B |
+| Application process-tree RSS growth | 212,467,712 B | 221,741,056 B | 268,435,456 B |
+| Maximum mounted / directory rows | 50 / 50 | 50 / 50 | 500 / 50 |
+| Maximum API / search response | 15,163 / 20,679 B | 15,163 / 20,690 B | 1,000,000 B each |
+| Maximum request head / URL | 668 B / 466 chars | 668 B / 466 chars | 8,192 B / 4,096 chars |
+| Search continuation elapsed | 3,601.50 ms | 4,139.71 ms | 10,000 ms |
+
+Both journeys traversed all 500 pages and 25,000 files in stable order. The
+reports record zero RSS sampling errors. The distribution ZIP SHA-256 is
+`25e5cdc9c1d4ba160a2af5f6ed8eca265a2877824e68bed3794f30f35b14dbc6`; the
+application JAR SHA-256 is
+`4c6016f0aea5e4463d19d2229eea2ae4a97c48c4aa3597ee64f6c8c57c7cd815`. Both
+used Chrome 149.0.7827.55 (SHA-256
+`2d18db9d8608b052b6a552ee00ec1e830f93692e928b65ecc67d693bd33fe801`) and the
+same frontend build ID recorded above.
+
+Report SHA-256 values:
+
+- Loopback: `f4d3b6151c22064bee72b703d810b7297da5b6ba208aec7a406fa0eede5e4635`.
+- Constrained: `7f0f849de264f3dcd64dca298a7eb9fb40e9e491f93850bb5ccb8fb6ffd0fa3d`.
+
+This is exact-merge-candidate hosted evidence for the packaged 25,000-file
+journey. It is one journey per profile, not the documented 20 fresh-process
+cold-load protocol. It does not qualify production trees, all web workflows
+under the web JVM heap cap, or long-session behavior. The reports also record
+browser-observed request cancellations; the passing resource gates do not prove
+that server work stopped after client disconnect. Keep #1056, #625 and #220 open
+until their full acceptance scope is independently satisfied.
