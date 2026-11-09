@@ -1,12 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, symlink } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
 const dir = path.dirname(fileURLToPath(import.meta.url));
-const root = path.resolve(dir, '../../..');
+const root = path.resolve(dir, '..');
 const build = path.join(root, 'build');
 
 function runGit(repo, ...args) {
@@ -16,6 +16,7 @@ function runGit(repo, ...args) {
 }
 
 test('generates reproducible 10,000 commit scale repositories with boundary commits', async t => {
+  await mkdir(build, { recursive: true });
   const tempA = await mkdtemp(path.join(build, '.git-scale-a-'));
   const tempB = await mkdtemp(path.join(build, '.git-scale-b-'));
   const a = path.join(tempA, 'fixture');
@@ -49,6 +50,7 @@ test('generates reproducible 10,000 commit scale repositories with boundary comm
 });
 
 test('rejects output parents reached through symlinks before creating fixture files', async t => {
+  await mkdir(build, { recursive: true });
   const parent = await mkdtemp(path.join(build, '.git-scale-safety-'));
   t.after(() => rm(parent, { recursive: true, force: true }));
   const outsideBuild = path.join(parent, 'link');

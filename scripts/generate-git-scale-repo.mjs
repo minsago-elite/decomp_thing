@@ -5,7 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const repoRoot = path.resolve(here, '../../..');
+const repoRoot = path.resolve(here, '..');
 const COMMIT_COUNT = 10_000;
 const identity = 'Scale Fixture <scale-fixture@example.invalid>';
 const epoch = 1_700_000_000;
