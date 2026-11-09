@@ -9,7 +9,7 @@ import { parseArgs } from 'node:util';
 import { qualifyUpload, qualifyUploadFailures, qualifyMeasuredUpload } from './packaged-browser-upload.mjs';
 import { seedScale, qualifyScale, dashboardFiltersWithSnapshot } from './packaged-browser-scale.mjs';
 import { seedStructure, qualifyStructure, qualifyStructureColdSample } from './packaged-browser-structure.mjs';
-import { structureProfile, verifyStructureQualificationSource } from './packaged-browser-structure-cold.mjs';
+import { structureProfile, verifyStructureQualificationSource, verifyStructureSourceRevision, verifyStructureBrowser } from './packaged-browser-structure-cold.mjs';
 import { seedLive, qualifyLive } from './packaged-browser-live.mjs';
 import { seedHistory, qualifyHistory } from './packaged-browser-history.mjs';
 import { seedLegacy, qualifyLegacy } from './packaged-browser-legacy.mjs';
@@ -547,8 +547,16 @@ async function removeOwnedWork() {
 try {
   if (values.mode === 'structure' || values.mode === 'structure-cold') {
     report.sourceIdentity = await verifyStructureQualificationSource(repo, report.driverCommit);
+    report.sourceIdentity.revisionBinding = await verifyStructureSourceRevision(repo, report.driverCommit);
+    report.browserIdentity = await verifyStructureBrowser({ repoRoot: repo, chromePath: chromeBinary });
+    const browserLockSource = report.sourceIdentity.files.find(file => file.path === 'scripts/web-test-browser.json');
+    if (browserLockSource?.sha256 !== report.browserIdentity.lockSha256) {
+      throw new Error('verified browser lock changed after qualification source identity capture');
+    }
+    report.tools.chromeSha256 = report.browserIdentity.executableSha256;
+  } else {
+    report.tools.chromeSha256 = await fileHash(chromeBinary);
   }
-  report.tools.chromeSha256 = await fileHash(chromeBinary);
   let installation = await prepareArchive(values.mode === 'upgrade' ? values['previous-archive'] : archive);
   recordInstallation(installation);
   const { manifest, data } = installation;

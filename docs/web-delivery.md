@@ -115,6 +115,14 @@ nearest-rank p95, raw inventory failures, browser heap and incremental JVM RSS. 
 separate full structure journey still supplies the 50 interactions and navigation
 evidence for each profile.
 
+Structure reports bind the files actually read by the qualification driver to Git
+blobs in the declared source commit. Pull-request attribution is accepted only
+when that commit is the declared head or a merge commit whose parents are the
+declared base and head; push runs bind to the checked-out commit and event. The
+browser must be the installed Chrome whose executable digest, version and
+installation lock match the reviewed browser lock. Cold-sample aggregation rejects
+missing or inconsistent source, browser, archive or application identities.
+
 | Metric | Initial acceptance budget and measurement | Fixture / owner |
 | --- | --- | --- |
 | Entry payload | ≤150 KiB gzip-9 combined HTML + initial JS/CSS; ≤500 KiB gzip-9 all UI resources excluding private maps; sum exact shipped bytes and identify lazy chunks | Asset manifest; #151 #157 #219 |

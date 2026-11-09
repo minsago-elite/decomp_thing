@@ -1,7 +1,8 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
-import { basename, resolve } from 'node:path';
+import { basename, dirname, resolve } from 'node:path';
+import { createReadStream } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
 export const COLD_SAMPLE_COUNT = 20;
@@ -77,6 +78,88 @@ export async function verifyStructureQualificationSource(repoRoot, commit, {
   return { verified: true, commit, sourceSha256, files };
 }
 
+export async function verifyStructureSourceRevision(repoRoot, sourceCommit, {
+  expectedHeadCommit = process.env.PACKAGED_WEB_SOURCE_HEAD_SHA || null,
+  expectedBaseCommit = process.env.PACKAGED_WEB_SOURCE_BASE_SHA || null,
+  eventPath = process.env.GITHUB_EVENT_PATH || null,
+  readFile = fs.readFile,
+  runGit = args => execFileSync('git', ['-C', repoRoot, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim(),
+} = {}) {
+  const fullObjectId = value => typeof value === 'string' && /^[0-9a-f]{40,64}$/.test(value);
+  if (!fullObjectId(sourceCommit)) throw new TypeError('qualification source commit must be a full Git object ID');
+  const parentLine = runGit(['rev-list', '--parents', '-n', '1', sourceCommit]);
+  const [resolvedCommit, ...parents] = parentLine.split(/\s+/);
+  if (resolvedCommit !== sourceCommit || parents.some(parent => !fullObjectId(parent))) {
+    throw new Error('qualification source commit or parent list is invalid');
+  }
+  if (expectedHeadCommit === null && expectedBaseCommit === null) {
+    return { verified: true, kind: 'commit-only', sourceCommit, headCommit: null, baseCommit: null, parents };
+  }
+  if (!fullObjectId(expectedHeadCommit) || (expectedBaseCommit !== null && !fullObjectId(expectedBaseCommit))) {
+    throw new TypeError('declared source head/base must be full Git object IDs');
+  }
+  let event = null;
+  if (eventPath) event = JSON.parse(await readFile(eventPath, 'utf8'));
+  let kind;
+  if (expectedBaseCommit === null) {
+    const branchPushMismatch = event?.ref?.startsWith('refs/heads/') && event?.after !== expectedHeadCommit;
+    if (event?.pull_request || sourceCommit !== expectedHeadCommit || branchPushMismatch) {
+      throw new Error('declared push source revision does not match the checked-out commit and event payload');
+    }
+    kind = 'push-commit';
+  } else if (event) {
+    const eventHead = event?.pull_request?.head?.sha;
+    const eventBase = event?.pull_request?.base?.sha;
+    if (eventHead !== expectedHeadCommit || eventBase !== expectedBaseCommit) {
+      throw new Error('declared pull-request revisions do not match the GitHub event payload');
+    }
+  }
+  if (kind === 'push-commit') {
+    // A push event binds the exact checked-out source commit.
+  } else if (sourceCommit === expectedHeadCommit) {
+    try { runGit(['merge-base', '--is-ancestor', expectedBaseCommit, expectedHeadCommit]); }
+    catch { throw new Error('declared pull-request base is not an ancestor of the source head'); }
+    kind = 'head-commit';
+  } else if (parents.length === 2 && parents[0] === expectedBaseCommit && parents[1] === expectedHeadCommit) {
+    kind = 'pull-request-merge-commit';
+  } else {
+    throw new Error('qualification source commit is not the declared pull-request head or its base/head merge');
+  }
+  return { verified: true, kind, sourceCommit, headCommit: expectedHeadCommit, baseCommit: expectedBaseCommit, parents };
+}
+
+export async function verifyStructureBrowser({ repoRoot, chromePath, sourceLockPath = 'scripts/web-test-browser.json',
+  readFile = fs.readFile, realpath = fs.realpath, hashFile = async path => {
+    const digest = createHash('sha256');
+    for await (const chunk of createReadStream(path)) digest.update(chunk);
+    return digest.digest('hex');
+  }, runVersion = path => execFileSync(path, ['--version'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 5000 }).trim() }) {
+  const sourceLockBytes = await readFile(resolve(repoRoot, sourceLockPath));
+  const sourceLock = JSON.parse(sourceLockBytes.toString('utf8'));
+  if (sourceLock?.schemaVersion !== 1 || sourceLock?.product !== 'chrome' || sourceLock?.platform !== 'linux64'
+      || typeof sourceLock?.version !== 'string' || !/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/.test(sourceLock.version)
+      || typeof sourceLock?.chromeSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(sourceLock.chromeSha256)) {
+    throw new Error('reviewed browser lock does not contain a valid Chrome binary identity');
+  }
+  const executable = await realpath(chromePath);
+  if (basename(executable) !== 'chrome') throw new Error('Chrome executable is not the reviewed installation entry point');
+  const installationRoot = dirname(executable);
+  if (await realpath(dirname(chromePath)) !== installationRoot) throw new Error('Chrome executable is not directly inside its reviewed installation');
+  const installedLockBytes = await readFile(resolve(installationRoot, 'decomp-browser-lock.json'));
+  const installedLock = JSON.parse(installedLockBytes.toString('utf8'));
+  const canonical = value => JSON.stringify(value, Object.keys(value).sort());
+  if (canonical(installedLock) !== canonical(sourceLock)) throw new Error('installed browser lock differs from the reviewed source lock');
+  const executableSha256 = await hashFile(executable);
+  if (executableSha256 !== sourceLock.chromeSha256) throw new Error('Chrome executable differs from the reviewed binary SHA-256');
+  const versionOutput = runVersion(executable);
+  const escapedVersion = sourceLock.version.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  if (!new RegExp(`(?:^|\\s)${escapedVersion}(?:\\s|$)`).test(versionOutput)) {
+    throw new Error('Chrome version output differs from the reviewed browser version');
+  }
+  return { verified: true, product: sourceLock.product, platform: sourceLock.platform, version: sourceLock.version,
+    revision: sourceLock.revision, archiveSha256: sourceLock.sha256, executableSha256, lockSha256: createHash('sha256').update(sourceLockBytes).digest('hex') };
+}
+
 async function waitForProcessGroupExit(pid, timeoutMs) {
   if (process.platform !== 'linux' || !Number.isSafeInteger(pid) || pid <= 0) return false;
   const deadline = Date.now() + timeoutMs;
@@ -150,6 +233,9 @@ export async function runColdSamples({ driver, driverArgs, count = COLD_SAMPLE_C
       throw new TypeError(`declared ${label} commit must be a full Git object ID`);
     }
   }
+  if (expectedHeadCommit === null && expectedBaseCommit !== null) {
+    throw new TypeError('a declared pull-request base cannot be supplied without its head commit');
+  }
   profile = structureProfile(typeof profile === 'string' ? profile : profile?.name);
   const samples = [];
   let activeChild = null, interrupted = null;
@@ -215,6 +301,17 @@ export async function runColdSamples({ driver, driverArgs, count = COLD_SAMPLE_C
       const firstPageMs = Number.isFinite(evidence?.firstPageMs) && evidence.firstPageMs >= 0 ? evidence.firstPageMs : null;
       const sourceHeadMatches = !expectedHeadCommit || report?.driverPullRequestHeadCommit === expectedHeadCommit;
       const sourceBaseMatches = !expectedBaseCommit || report?.driverPullRequestBaseCommit === expectedBaseCommit;
+      const revisionBinding = report?.sourceIdentity?.revisionBinding;
+      const revisionBindingMatches = revisionBinding?.verified === true && revisionBinding.sourceCommit === report?.driverCommit
+        && revisionBinding.headCommit === (expectedHeadCommit ?? null) && revisionBinding.baseCommit === (expectedBaseCommit ?? null);
+      const browserIdentity = report?.browserIdentity;
+      const sourceBrowserLock = report?.sourceIdentity?.files?.find(file => file.path === 'scripts/web-test-browser.json');
+      const browserIdentityVerified = browserIdentity?.verified === true && browserIdentity.product === 'chrome'
+        && browserIdentity.platform === 'linux64' && /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/.test(browserIdentity.version ?? '')
+        && /^[0-9a-f]{64}$/.test(browserIdentity.archiveSha256 ?? '') && /^[0-9a-f]{64}$/.test(browserIdentity.executableSha256 ?? '')
+        && /^[0-9a-f]{64}$/.test(browserIdentity.lockSha256 ?? '')
+        && sourceBrowserLock?.sha256 === browserIdentity.lockSha256
+        && report?.tools?.chromeSha256 === browserIdentity.executableSha256;
       processTreeConfirmed = outcome.shutdownConfirmed ?? (childClosed && processGroupId
         ? await waitForProcessGroupExit(processGroupId, processGroupGraceMs) : false);
       let processTreeForced = outcome.processTreeForced ?? false;
@@ -225,7 +322,8 @@ export async function runColdSamples({ driver, driverArgs, count = COLD_SAMPLE_C
       }
       const shutdownConfirmed = processTreeConfirmed;
       const diagnostic = stderr.length ? { byteLength: Buffer.byteLength(stderr), sha256: createHash('sha256').update(stderr).digest('hex') } : null;
-      const passed = sourceHeadMatches && sourceBaseMatches && !interrupted && !timedOut && !processTreeForced
+      const passed = sourceHeadMatches && sourceBaseMatches && revisionBindingMatches && browserIdentityVerified
+        && !interrupted && !timedOut && !processTreeForced
         && exitCode === 0 && report?.status === 'passed' && evidence?.passed === true
         && evidence?.profileApplied === profile.name && rawFailedRequests === 0 && firstPageMs !== null && shutdownConfirmed
         && report?.sourceIdentity?.verified === true && report.sourceIdentity.commit === report.driverCommit;
@@ -237,6 +335,7 @@ export async function runColdSamples({ driver, driverArgs, count = COLD_SAMPLE_C
         driverPullRequestHeadCommit: report?.driverPullRequestHeadCommit ?? null,
         driverPullRequestBaseCommit: report?.driverPullRequestBaseCommit ?? null,
         sourceIdentity: report?.sourceIdentity ?? null,
+        browserIdentity: browserIdentity ?? null,
         archiveSha256: report?.archiveSha256 ?? null, applicationJarSha256: report?.applicationJarSha256 ?? null,
         testDirectory: report?.testDirectory ?? null, browserProfileDirectory: report?.browserProfileDirectory ?? null,
         runtimeProcesses: report?.runtimeProcesses ?? null,
@@ -244,6 +343,8 @@ export async function runColdSamples({ driver, driverArgs, count = COLD_SAMPLE_C
           : outcome.error ? String(outcome.error.message).slice(0, 512)
           : !sourceHeadMatches ? 'Child report did not match the declared pull-request head SHA'
           : !sourceBaseMatches ? 'Child report did not match the declared pull-request base SHA'
+          : !revisionBindingMatches ? 'Child report did not bind the source commit to the declared pull-request revisions'
+          : !browserIdentityVerified ? 'Child report did not verify the reviewed browser installation'
           : evidence?.failures?.[0] ?? (processTreeForced ? 'Forced process-group kill was required after the packaged driver exited'
             : evidence?.profileApplied !== profile.name ? 'Child report did not confirm the requested profile' : null),
         diagnostic });
@@ -277,7 +378,9 @@ export async function runColdSamples({ driver, driverArgs, count = COLD_SAMPLE_C
   const summary = summarizeColdSamples(samples);
   const identities = samples.filter(sample => sample.status === 'passed')
     .map(sample => [sample.driverCommit, sample.driverPullRequestHeadCommit ?? sample.driverCommit,
-      sample.driverPullRequestBaseCommit ?? 'unspecified', sample.sourceIdentity?.sourceSha256, sample.archiveSha256, sample.applicationJarSha256]);
+      sample.driverPullRequestBaseCommit ?? 'unspecified', sample.sourceIdentity?.sourceSha256,
+      sample.browserIdentity?.version, sample.browserIdentity?.archiveSha256, sample.browserIdentity?.executableSha256,
+      sample.browserIdentity?.lockSha256, sample.archiveSha256, sample.applicationJarSha256]);
   const identityConsistent = identities.length === count && identities.every(identity => identity.every(Boolean)
     && identity.every((value, index) => value === identities[0][index]));
   const directories = samples.map(sample => sample.testDirectory);

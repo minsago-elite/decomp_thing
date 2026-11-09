@@ -3,14 +3,19 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { spawn } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
+import { readFile, mkdtemp, mkdir, writeFile, rm, realpath } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { dirname, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { COLD_PROFILES, STRUCTURE_QUALIFICATION_SOURCE_FILES, applyStructureProfile, makeChromeThrottlingCommands, summarizeColdSamples, runColdSamples,
-  verifyStructureQualificationSource } from './packaged-browser-structure-cold.mjs';
+  verifyStructureQualificationSource, verifyStructureSourceRevision, verifyStructureBrowser } from './packaged-browser-structure-cold.mjs';
 
 function gitBlob(bytes) { return createHash('sha1').update(`blob ${bytes.byteLength}\0`).update(bytes).digest('hex'); }
+const approvedBrowserIdentity = Object.freeze({verified:true,product:'chrome',platform:'linux64',version:'149.0.7827.55',archiveSha256:'b'.repeat(64),
+  executableSha256:'c'.repeat(64),lockSha256:'d'.repeat(64)});
+const revisionBinding = (sourceCommit, headCommit, baseCommit) => ({verified:true,kind:headCommit ? 'pull-request-merge-commit' : 'commit-only',
+  sourceCommit,headCommit:headCommit ?? null,baseCommit:baseCommit ?? null,parents:headCommit ? [baseCommit,headCommit] : []});
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 test('profiles configure CPU, RTT and asymmetric bandwidth; limits are profile specific', async () => {
   assert.equal(COLD_PROFILES.loopback.firstPageLimitMs, 500);
@@ -75,6 +80,60 @@ test('qualification source identity matches committed Git blobs and refuses edit
   }), /qualification source differs from declared commit/);
 });
 
+test('source revision binding derives pull-request identity from the source commit graph', async () => {
+  const base = '1'.repeat(40), head = '2'.repeat(40), merge = '3'.repeat(40), unrelated = '4'.repeat(40);
+  const mergeRunGit = args => {
+    if (args[0] === 'rev-list') return `${merge} ${base} ${head}`;
+    throw new Error(`unexpected git call: ${args.join(' ')}`);
+  };
+  const mergeBinding = await verifyStructureSourceRevision('/repo', merge, {expectedHeadCommit:head,expectedBaseCommit:base,runGit:mergeRunGit});
+  assert.deepEqual(mergeBinding,{verified:true,kind:'pull-request-merge-commit',sourceCommit:merge,headCommit:head,baseCommit:base,parents:[base,head]});
+  await assert.rejects(verifyStructureSourceRevision('/repo', merge, {expectedHeadCommit:unrelated,expectedBaseCommit:base,runGit:mergeRunGit}),/not the declared pull-request/);
+
+  const headRunGit = args => {
+    if (args[0] === 'rev-list') return `${head} ${base}`;
+    if (args[0] === 'merge-base' && args[1] === '--is-ancestor') return '';
+    throw new Error(`unexpected git call: ${args.join(' ')}`);
+  };
+  assert.equal((await verifyStructureSourceRevision('/repo',head,{expectedHeadCommit:head,expectedBaseCommit:base,runGit:headRunGit})).kind,'head-commit');
+  const pushRunGit=args=>args[0]==='rev-list'?`${head} ${base}`:null;
+  const pushEvent=Buffer.from(JSON.stringify({after:head,ref:'refs/heads/master'}));
+  assert.equal((await verifyStructureSourceRevision('/repo',head,{expectedHeadCommit:head,expectedBaseCommit:null,eventPath:'/event',
+    readFile:async()=>pushEvent,runGit:pushRunGit})).kind,'push-commit');
+  await assert.rejects(verifyStructureSourceRevision('/repo',merge,{expectedHeadCommit:head,expectedBaseCommit:null,runGit:mergeRunGit}),/push source revision/);
+});
+
+test('source revision binding refuses environment values that contradict the GitHub event', async () => {
+  const base='1'.repeat(40),head='2'.repeat(40),merge='3'.repeat(40);
+  const runGit=args=>args[0]==='rev-list'?`${merge} ${base} ${head}`:null;
+  const event=Buffer.from(JSON.stringify({pull_request:{head:{sha:head},base:{sha:base}}}));
+  assert.equal((await verifyStructureSourceRevision('/repo',merge,{expectedHeadCommit:head,expectedBaseCommit:base,eventPath:'/event',
+    readFile:async()=>event,runGit})).verified,true);
+  await assert.rejects(verifyStructureSourceRevision('/repo',merge,{expectedHeadCommit:'4'.repeat(40),expectedBaseCommit:base,eventPath:'/event',
+    readFile:async()=>event,runGit}),/do not match the GitHub event payload/);
+});
+
+test('browser identity requires the reviewed installed lock, binary hash, and exact version', async () => {
+  const root=await mkdtemp(resolve(repoRoot,'build/structure-browser-pin-test-'));
+  try {
+    const install=resolve(root,'web-test-browser'); await mkdir(install);
+    const chrome=resolve(install,'chrome'); const bytes=Buffer.from('pinned test browser executable');
+    const lock={schemaVersion:1,product:'chrome',platform:'linux64',version:'149.0.7827.55',revision:'1625079',sha256:'a'.repeat(64),chromeSha256:createHash('sha256').update(bytes).digest('hex')};
+    await writeFile(resolve(root,'web-test-browser.json'),JSON.stringify(lock));
+    await writeFile(resolve(install,'decomp-browser-lock.json'),JSON.stringify(lock)); await writeFile(chrome,bytes);
+    const options={repoRoot:root,chromePath:chrome,sourceLockPath:'web-test-browser.json',readFile,realpath,hashFile:async path=>createHash('sha256').update(await readFile(path)).digest('hex'),
+      runVersion:()=>`Google Chrome for Testing ${lock.version}`};
+    const identity=await verifyStructureBrowser(options);
+    assert.equal(identity.verified,true); assert.equal(identity.executableSha256,lock.chromeSha256); assert.equal(identity.version,lock.version);
+    await writeFile(chrome,'substituted browser');
+    await assert.rejects(verifyStructureBrowser(options),/differs from the reviewed binary/);
+    await writeFile(chrome,bytes);
+    await assert.rejects(verifyStructureBrowser({...options,runVersion:()=>`Chromium 148.0.0.0`}),/version output/);
+    await writeFile(resolve(install,'decomp-browser-lock.json'),JSON.stringify({...lock,version:'148.0.0.0'}));
+    await assert.rejects(verifyStructureBrowser(options),/installed browser lock differs/);
+  } finally { await rm(root,{recursive:true,force:true}); }
+});
+
 test('source identity includes the Node and browser qualification toolchain pins', () => {
   for (const path of ['.node-version', 'frontend/package.json', 'scripts/install-frontend-node.sh',
     'scripts/frontend-node-sha256.txt', 'scripts/install-web-test-browser.py', 'scripts/web-test-browser.json',
@@ -130,7 +189,8 @@ test('runner executes twenty sequential fresh-child cold modes and retains the e
       const sample = launches;
       return { path:`/tmp/report-${sample}.json`, sha256:`${sample}`,
         report:{ status:'passed', driverCommit:'a'.repeat(40), driverPullRequestHeadCommit:'d'.repeat(40), driverPullRequestBaseCommit:'f'.repeat(40),
-          sourceIdentity:{ verified:true, commit:'a'.repeat(40), sourceSha256:'e'.repeat(64), files:[] },
+          sourceIdentity:{ verified:true, commit:'a'.repeat(40), sourceSha256:'e'.repeat(64), files:[{path:'scripts/web-test-browser.json',sha256:'d'.repeat(64)}],
+            revisionBinding:revisionBinding('a'.repeat(40),'d'.repeat(40),'f'.repeat(40)) },browserIdentity:approvedBrowserIdentity,tools:{chromeSha256:'c'.repeat(64)},
           archiveSha256:'b'.repeat(64), applicationJarSha256:'c'.repeat(64), shutdownConfirmed:true,
           testDirectory:`/tmp/run-${sample}`,browserProfileDirectory:`/tmp/run-${sample}/browser profile`,runtimeProcesses:{applicationPid:1000+sample,applicationStartTimeTicks:3000+sample,browserPid:2000+sample,browserStartTimeTicks:4000+sample},
           structureCold:{ passed:true, firstPageMs:sample === 20 ? 900 : sample, failedInventoryRequestCount:0, profileApplied:'loopback',
@@ -147,12 +207,29 @@ test('runner executes twenty sequential fresh-child cold modes and retains the e
   assert.equal(result.samples[0].diagnostic.byteLength, 'private diagnostic'.length);
 });
 
+test('cold aggregation refuses individually pinned but inconsistent browser builds', async () => {
+  let launches=0;
+  const result=await runColdSamples({driver:'/repo/driver.mjs',driverArgs:[],profile:'loopback',expectedHeadCommit:null,expectedBaseCommit:null,
+    spawnImpl:()=>{launches++;return fakeChild();},
+    reportReader:async()=>({path:`/tmp/browser-${launches}.json`,sha256:String(launches),report:{status:'passed',driverCommit:'a'.repeat(40),
+      sourceIdentity:{verified:true,commit:'a'.repeat(40),sourceSha256:'e'.repeat(64),revisionBinding:revisionBinding('a'.repeat(40)),files:[{path:'scripts/web-test-browser.json',sha256:'d'.repeat(64)}]},
+      browserIdentity:launches===9?{...approvedBrowserIdentity,version:'150.0.0.0'}:approvedBrowserIdentity,tools:{chromeSha256:'c'.repeat(64)},
+      archiveSha256:'b'.repeat(64),applicationJarSha256:'c'.repeat(64),testDirectory:`/tmp/browser-run-${launches}`,
+      browserProfileDirectory:`/tmp/browser-run-${launches}/profile`,runtimeProcesses:{applicationPid:1000+launches,applicationStartTimeTicks:2000+launches,
+        browserPid:3000+launches,browserStartTimeTicks:4000+launches},structureCold:{passed:true,firstPageMs:10,failedInventoryRequestCount:0,
+        profileApplied:'loopback',browserHeapMemory:{sampledPeakBytes:1},jvmMemory:{incrementalPeakBytes:1}}}})});
+  assert.equal(result.successfulSamples,20);
+  assert.equal(result.identityConsistent,false);
+  assert.equal(result.passed,false);
+});
+
 test('runner fails closed on raw transport failures, missing source identities, or p95 over budget', async () => {
   let launches=0;
   const result = await runColdSamples({ driver:'/repo/driver.mjs', driverArgs:[], profile:'constrained', expectedHeadCommit:null, expectedBaseCommit:null,
     spawnImpl:()=>{launches++;return fakeChild();},
     reportReader:async()=>({path:`/tmp/${launches}.json`,sha256:'d'.repeat(64),report:{status:'passed',driverCommit:'a'.repeat(40),
-      sourceIdentity:{verified:launches!==3,commit:'a'.repeat(40),sourceSha256:'e'.repeat(64),files:[]},
+      sourceIdentity:{verified:launches!==3,commit:'a'.repeat(40),sourceSha256:'e'.repeat(64),files:[{path:'scripts/web-test-browser.json',sha256:'d'.repeat(64)}],revisionBinding:revisionBinding('a'.repeat(40))},
+      browserIdentity:approvedBrowserIdentity,tools:{chromeSha256:'c'.repeat(64)},
       archiveSha256:launches===2?null:'b'.repeat(64),applicationJarSha256:'c'.repeat(64),shutdownConfirmed:true,
       testDirectory:`/tmp/run-${launches}`,browserProfileDirectory:`/tmp/run-${launches}/browser profile`,runtimeProcesses:{applicationPid:1000+launches,applicationStartTimeTicks:3000+launches,browserPid:2000+launches,browserStartTimeTicks:4000+launches},
       structureCold:{passed:true,firstPageMs:launches===20?1100:700,failedInventoryRequestCount:launches===1?1:0,profileApplied:'constrained',browserHeapMemory:{sampledPeakBytes:1},jvmMemory:{incrementalPeakBytes:1}}}}) });
@@ -167,7 +244,8 @@ test('runner refuses a child report attributed to a different pull-request head 
     expectedHeadCommit:'d'.repeat(40), expectedBaseCommit:'f'.repeat(40), spawnImpl:()=>{launches++;return fakeChild();},
     reportReader:async()=>({path:`/tmp/${launches}.json`,sha256:'a'.repeat(64),report:{status:'passed',driverCommit:'b'.repeat(40),
       driverPullRequestHeadCommit:'c'.repeat(40),driverPullRequestBaseCommit:'e'.repeat(40),
-      sourceIdentity:{verified:true,commit:'b'.repeat(40),sourceSha256:'1'.repeat(64),files:[]},archiveSha256:'2'.repeat(64),
+      sourceIdentity:{verified:true,commit:'b'.repeat(40),sourceSha256:'1'.repeat(64),files:[{path:'scripts/web-test-browser.json',sha256:'d'.repeat(64)}],revisionBinding:revisionBinding('b'.repeat(40),'c'.repeat(40),'e'.repeat(40))},
+      browserIdentity:approvedBrowserIdentity,archiveSha256:'2'.repeat(64),
       applicationJarSha256:'3'.repeat(64),testDirectory:`/tmp/run-${launches}`,browserProfileDirectory:`/tmp/run-${launches}/profile`,
       runtimeProcesses:{applicationPid:10_000+launches,applicationStartTimeTicks:20_000+launches,browserPid:30_000+launches,browserStartTimeTicks:40_000+launches},
       structureCold:{passed:true,firstPageMs:10,failedInventoryRequestCount:0,profileApplied:'loopback'}}})});
@@ -181,7 +259,8 @@ test('runner refuses a child report attributed to a different pull-request head 
     expectedHeadCommit:'d'.repeat(40), expectedBaseCommit:'f'.repeat(40), spawnImpl:()=>{launches++;return fakeChild();},
     reportReader:async()=>({path:`/tmp/base-${launches}.json`,sha256:'b'.repeat(64),report:{status:'passed',driverCommit:'a'.repeat(40),
       driverPullRequestHeadCommit:'d'.repeat(40),driverPullRequestBaseCommit:'e'.repeat(40),
-      sourceIdentity:{verified:true,commit:'a'.repeat(40),sourceSha256:'1'.repeat(64),files:[]},archiveSha256:'2'.repeat(64),
+      sourceIdentity:{verified:true,commit:'a'.repeat(40),sourceSha256:'1'.repeat(64),files:[{path:'scripts/web-test-browser.json',sha256:'d'.repeat(64)}],revisionBinding:revisionBinding('a'.repeat(40),'d'.repeat(40),'e'.repeat(40))},
+      browserIdentity:approvedBrowserIdentity,archiveSha256:'2'.repeat(64),
       applicationJarSha256:'3'.repeat(64),testDirectory:`/tmp/base-run-${launches}`,browserProfileDirectory:`/tmp/base-run-${launches}/profile`,
       runtimeProcesses:{applicationPid:20_000+launches,applicationStartTimeTicks:30_000+launches,browserPid:40_000+launches,browserStartTimeTicks:50_000+launches},
       structureCold:{passed:true,firstPageMs:10,failedInventoryRequestCount:0,profileApplied:'loopback'}}})});
@@ -202,7 +281,7 @@ test('runner records the timeout state even when the child exits during terminat
       return child;
     },
     reportReader: async () => ({ path:'/tmp/report.json', sha256:'a'.repeat(64),
-      report:{ status:'passed', driverCommit:'b'.repeat(40), sourceIdentity:{ verified:true, commit:'b'.repeat(40), sourceSha256:'e'.repeat(64), files:[] },
+      report:{ status:'passed', driverCommit:'b'.repeat(40), sourceIdentity:{ verified:true, commit:'b'.repeat(40), sourceSha256:'e'.repeat(64), files:[{path:'scripts/web-test-browser.json',sha256:'d'.repeat(64)}],revisionBinding:revisionBinding('b'.repeat(40)) },browserIdentity:approvedBrowserIdentity,
         archiveSha256:'c'.repeat(64), applicationJarSha256:'d'.repeat(64),
         testDirectory:`/tmp/run-${launches}`, browserProfileDirectory:`/tmp/run-${launches}/profile`,
         runtimeProcesses:{ applicationPid:1000+launches, applicationStartTimeTicks:2000+launches,
@@ -237,7 +316,7 @@ test('runner confirms real process groups and escalates when a surviving descend
       }
       const sample = launches;
       return {path:`/tmp/report-${sample}.json`,sha256:String(sample),report:{status:'passed',driverCommit:'a'.repeat(40),
-        sourceIdentity:{verified:true,commit:'a'.repeat(40),sourceSha256:'e'.repeat(64),files:[]},archiveSha256:'b'.repeat(64),
+        sourceIdentity:{verified:true,commit:'a'.repeat(40),sourceSha256:'e'.repeat(64),files:[{path:'scripts/web-test-browser.json',sha256:'d'.repeat(64)}],revisionBinding:revisionBinding('a'.repeat(40))},browserIdentity:approvedBrowserIdentity,archiveSha256:'b'.repeat(64),
         applicationJarSha256:'c'.repeat(64),testDirectory:`/tmp/run-${sample}`,browserProfileDirectory:`/tmp/run-${sample}/profile`,
         runtimeProcesses:{applicationPid:10_000+sample,applicationStartTimeTicks:20_000+sample,browserPid:30_000+sample,browserStartTimeTicks:40_000+sample},
         structureCold:{passed:true,firstPageMs:10,failedInventoryRequestCount:0,profileApplied:'loopback'}}};
@@ -277,7 +356,7 @@ test('timeout sends SIGTERM then SIGKILL to a real launcher and descendant that 
     reportReader:async stdout => {
       const sample = launches;
       return {path:`/tmp/report-${sample}.json`,sha256:String(sample),report:{status:'passed',driverCommit:'a'.repeat(40),
-        sourceIdentity:{verified:true,commit:'a'.repeat(40),sourceSha256:'e'.repeat(64),files:[]},archiveSha256:'b'.repeat(64),
+        sourceIdentity:{verified:true,commit:'a'.repeat(40),sourceSha256:'e'.repeat(64),files:[{path:'scripts/web-test-browser.json',sha256:'d'.repeat(64)}],revisionBinding:revisionBinding('a'.repeat(40))},browserIdentity:approvedBrowserIdentity,archiveSha256:'b'.repeat(64),
         applicationJarSha256:'c'.repeat(64),testDirectory:`/tmp/run-${sample}`,browserProfileDirectory:`/tmp/run-${sample}/profile`,
         runtimeProcesses:{applicationPid:50_000+sample,applicationStartTimeTicks:60_000+sample,browserPid:70_000+sample,browserStartTimeTicks:80_000+sample},
         structureCold:{passed:true,firstPageMs:10,failedInventoryRequestCount:0,profileApplied:'loopback'}}};
