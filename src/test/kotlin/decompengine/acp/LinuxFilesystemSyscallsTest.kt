@@ -1120,6 +1120,34 @@ class LinuxFilesystemSyscallsTest {
     }
 
     @Test
+    fun `descriptor metadata retains the procfs fallback when statx metadata is unavailable`() {
+        withLinuxDirectory("linux-syscall-metadata-fallback-") { path, directory ->
+            val target = path.resolve("fallback")
+            Files.writeString(target, "proc metadata fallback")
+            val expectedMtime = java.nio.file.attribute.FileTime.from(
+                java.time.Instant.parse("2002-03-04T05:06:07.234567890Z"),
+            )
+            Files.setLastModifiedTime(target, expectedMtime)
+            LinuxFilesystemSyscalls.openRegularFileAtOrNull(directory.fd, "fallback")!!.use { authorized ->
+                val unix = Files.readAttributes(
+                    target,
+                    "unix:dev,ino,mode,uid,gid,nlink,size,lastAccessTime,lastModifiedTime,ctime",
+                )
+                val metadata = LinuxFilesystemSyscalls.metadataWithFallback(authorized.fd) { null }
+                assertEquals(authorized.identity.key, metadata.identity.key)
+                assertEquals(authorized.identity.mountId, metadata.identity.mountId)
+                assertEquals((unix.getValue("size") as Number).toLong(), metadata.size)
+                val mtime = (unix.getValue("lastModifiedTime") as java.nio.file.attribute.FileTime).toInstant()
+                val ctime = (unix.getValue("ctime") as java.nio.file.attribute.FileTime).toInstant()
+                assertEquals(mtime.epochSecond, metadata.modifiedSeconds)
+                assertEquals(mtime.nano, metadata.modifiedNanoseconds)
+                assertEquals(ctime.epochSecond, metadata.changedSeconds)
+                assertEquals(ctime.nano, metadata.changedNanoseconds)
+            }
+        }
+    }
+
+    @Test
     fun `bounded streaming digests reuse one thread-local bridge array`() {
         withLinuxDirectory("linux-syscall-stream-buffer-") { path, directory ->
             val first = ByteArray(4096) { 0x31 }

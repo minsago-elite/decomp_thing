@@ -1195,8 +1195,18 @@ internal object LinuxFilesystemSyscalls {
 
     fun identity(fd: Int): LinuxFileIdentity = descriptorIdentityScratch.get().identity(fd)
 
-    /** Descriptor-bound timestamps and size for stable content observations. Fails closed without statx. */
-    fun metadata(fd: Int): LinuxDescriptorMetadata = Memory(STATX_BYTES).use { statistics ->
+    /** Descriptor-bound timestamps and size for stable content observations. */
+    fun metadata(fd: Int): LinuxDescriptorMetadata = metadataWithFallback(fd) {
+        statxMetadataOrNull(fd)
+    }
+
+    /** Keep the existing descriptor-proc compatibility boundary when statx cannot supply a full record. */
+    internal fun metadataWithFallback(
+        fd: Int,
+        statxObservation: () -> LinuxDescriptorMetadata?,
+    ): LinuxDescriptorMetadata = statxObservation() ?: descriptorProcMetadata(fd)
+
+    private fun statxMetadataOrNull(fd: Int): LinuxDescriptorMetadata? = Memory(STATX_BYTES).use { statistics ->
         statistics.clear()
         val observed = descriptorStatxQueryOrNull {
             retryOnInterrupted("inspect pinned descriptor metadata") {
@@ -1206,12 +1216,12 @@ internal object LinuxFilesystemSyscalls {
                 else libc.statx(fd, emptyPath, AT_EMPTY_PATH or AT_SYMLINK_NOFOLLOW,
                     STATX_BASIC_STATS or STATX_MNT_ID, statistics).toLong()
             }
-        } ?: throw IOException("descriptor statx metadata is unavailable")
+        } ?: return@use null
         val mask = statistics.getInt(0)
         val requiredMask = STATX_SIZE or STATX_ATIME or STATX_MTIME or STATX_CTIME
-        if (mask and requiredMask != requiredMask) throw IOException("descriptor statx omitted stable metadata fields")
+        if (mask and requiredMask != requiredMask) return@use null
         val identity = decodeDescriptorStatxIdentity(statistics)
-            ?: throw IOException("descriptor statx omitted required identity fields")
+            ?: return@use null
         fun seconds(offset: Int) = statistics.getLong(offset.toLong())
         fun nanoseconds(offset: Int): Int = statistics.getInt(offset.toLong()).also {
             if (it !in 0..999_999_999) throw IOException("descriptor statx returned invalid timestamp nanoseconds")
@@ -1219,6 +1229,49 @@ internal object LinuxFilesystemSyscalls {
         LinuxDescriptorMetadata(identity, statistics.getLong(0x28),
             seconds(0x40), nanoseconds(0x48), seconds(0x70), nanoseconds(0x78),
             seconds(0x60), nanoseconds(0x68))
+    }
+
+    /** One descriptor-bound Unix attribute query mirrors statx fields for supported procfs fallback hosts. */
+    private fun descriptorProcMetadata(fd: Int): LinuxDescriptorMetadata {
+        val attributes = Files.readAttributes(
+            descriptorPath(fd),
+            "unix:dev,ino,mode,uid,gid,nlink,size,lastAccessTime,lastModifiedTime,ctime",
+        )
+        fun number(name: String): Number = attributes[name] as? Number
+            ?: throw IOException("descriptor proc metadata omitted $name")
+        fun time(name: String): java.time.Instant {
+            val value = attributes[name] as? java.nio.file.attribute.FileTime
+                ?: throw IOException("descriptor proc metadata omitted $name")
+            return value.toInstant().also {
+                if (it.nano !in 0..999_999_999) throw IOException("descriptor proc metadata returned invalid $name")
+            }
+        }
+        val mode = number("mode").toInt()
+        val kind = mode and 0xf000
+        val identity = LinuxFileIdentity(
+            key = LinuxFileKey(number("dev").toLong(), number("ino").toLong()),
+            mode = mode,
+            uid = number("uid").toInt(),
+            gid = number("gid").toInt(),
+            linkCount = number("nlink").toInt(),
+            mountId = descriptorMountId(fd),
+            isRegularFile = kind == 0x8000,
+            isDirectory = kind == 0x4000,
+            isSymbolicLink = kind == 0xa000,
+        )
+        val access = time("lastAccessTime")
+        val modified = time("lastModifiedTime")
+        val changed = time("ctime")
+        return LinuxDescriptorMetadata(
+            identity = identity,
+            size = number("size").toLong(),
+            accessSeconds = access.epochSecond,
+            accessNanoseconds = access.nano,
+            modifiedSeconds = modified.epochSecond,
+            modifiedNanoseconds = modified.nano,
+            changedSeconds = changed.epochSecond,
+            changedNanoseconds = changed.nano,
+        )
     }
 
     /** Scope-owned query storage only; fd ownership and every fresh observation stay with the caller. */
