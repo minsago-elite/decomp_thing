@@ -1890,11 +1890,11 @@ internal enum class SourceTreeManifestStage(val marker: String) {
 }
 
 // A broken diagnostic collector must not replace the reader's result or original refusal.
-private fun SourceTreeManifestProbe.startSafely(stage: SourceTreeManifestStage) {
+internal fun SourceTreeManifestProbe.startSafely(stage: SourceTreeManifestStage) {
     try { start(stage) } catch (failure: Throwable) { rethrowManifestProbeCancellation(failure) }
 }
 
-private fun SourceTreeManifestProbe.endSafely() {
+internal fun SourceTreeManifestProbe.endSafely() {
     try { end() } catch (failure: Throwable) { rethrowManifestProbeCancellation(failure) }
 }
 
@@ -2048,7 +2048,8 @@ object SourceTreeManifestReader {
                 "source tree manifest reconstruction profile does not match the expected profile"
             }
             manifest.files.forEach { file ->
-                val declaration = expectedProfile.layout.declarationForPath(file.path)
+                // GeneratedFileEvidence validated path normalization during construction above.
+                val declaration = expectedProfile.layout.declarationForValidatedPath(file.path)
                 require(file.roles == declaration.roles && file.contentKind == declaration.contentKind) {
                     "source tree manifest file policy does not match the reconstruction profile: ${file.path}"
                 }

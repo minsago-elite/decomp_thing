@@ -15,6 +15,8 @@ import decompengine.jobs.WorkflowStoreException
 import decompengine.jobs.WorkflowTerminalReason
 import decompengine.jobs.WorkflowTransition
 import decompengine.jobs.recoveryDisposition
+import decompengine.project.SourceTreeManifestProbe
+import decompengine.project.SourceTreeManifestStage
 import kotlinx.serialization.json.jsonPrimitive
 import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
@@ -875,10 +877,30 @@ class WebJobService(
     internal fun <T> readProgramStructure(jobId: String, runId: String, revisionId: String,
         project: (WebProgramStructureIndex, () -> ByteArray) -> T): T {
         val reference = revisionSourceReference(jobId, runId, revisionId)
-        val timing = if (java.lang.Boolean.getBoolean("decompengine.web.structureTiming")) { phase: String, elapsedNanos: Long ->
+        val structureTiming = java.lang.Boolean.getBoolean("decompengine.web.structureTiming")
+        val timing = if (structureTiming) { phase: String, elapsedNanos: Long ->
             System.err.println("web-structure-timing phase=$phase elapsedNanos=$elapsedNanos")
         } else null
-        val result = try { sourceCatalogEvidence.readStructureMeasured(reference, programStructureCache, timing, project) }
+        val manifestProbe = if (structureTiming) object : SourceTreeManifestProbe {
+            private var active: SourceTreeManifestStage? = null
+            private var startedNanos = 0L
+
+            override fun start(stage: SourceTreeManifestStage) {
+                end()
+                active = stage
+                startedNanos = System.nanoTime()
+            }
+
+            override fun end() {
+                val stage = active ?: return
+                val elapsedNanos = System.nanoTime() - startedNanos
+                active = null
+                System.err.println("web-structure-manifest-timing stage=${stage.marker} elapsedNanos=$elapsedNanos")
+            }
+        } else null
+        val result = try {
+            sourceCatalogEvidence.readStructureDiagnosed(reference, programStructureCache, timing, null, manifestProbe, project)
+        }
             catch (changed: WebAccessDenied) { throw changed }
             catch (failure: Exception) {
                 if (failure is java.util.concurrent.CancellationException || failure is InterruptedException || Thread.currentThread().isInterrupted) throw failure

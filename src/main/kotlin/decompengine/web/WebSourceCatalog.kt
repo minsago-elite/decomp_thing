@@ -7,6 +7,7 @@ import decompengine.project.ProjectContentKind
 import decompengine.project.ProjectFileRole
 import decompengine.project.ReconstructionProfile
 import decompengine.project.SourceTreeManifestReader
+import decompengine.project.SourceTreeManifestByteReader
 import decompengine.project.SourceTreeManifestProbe
 import decompengine.repair.RepairBudgetExceededException
 import decompengine.repair.StableRegularFile
@@ -162,14 +163,14 @@ internal class WebSourceCatalogEvidence(
                 reference.sourceSha256, captured.sha256, descriptor.sha256, input.sha256)
             // Rebuild every miss, including byte-identical replacement with a new inode and the same digest key.
             val index = entry?.index ?: measured("build-projection") { run {
-                val document = measured("parse-manifest-json") { OracleJson.parse(captured.bytes, JSON_LIMITS) } as? JsonObject
-                    ?: throw IllegalArgumentException("Source catalog manifest is invalid.")
-                val profileId = (document["profileId"] as? JsonPrimitive)?.takeIf { it.isString }?.content
-                val profileSha256 = (document["profileSha256"] as? JsonPrimitive)?.takeIf { it.isString }?.content
-                val profile = profiles[profileId to profileSha256]
+                val document = measured("parse-manifest-json") {
+                    SourceTreeManifestByteReader.parse(captured.bytes, JSON_LIMITS)
+                }
+                require(document.isObject) { "Source catalog manifest is invalid." }
+                val profile = profiles[document.profileId to document.profileSha256]
                     ?: throw IllegalArgumentException("Source catalog profile is unavailable.")
-                require(((document["files"] as? JsonArray)?.size ?: Int.MAX_VALUE) <= WebSourceCatalogSnapshot.MAXIMUM_FILES)
-                val manifest = measured("validate-manifest") { SourceTreeManifestReader.parse(document, profile, manifestProbe) }
+                require((document.fileCount ?: Int.MAX_VALUE) <= WebSourceCatalogSnapshot.MAXIMUM_FILES)
+                val manifest = measured("validate-manifest") { document.validate(profile, manifestProbe) }
                 require(manifest.inputSha256 == input.sha256)
                 val descriptorDocument = measured("parse-descriptor-json") { OracleJson.parse(descriptor.bytes, JSON_LIMITS) } as? JsonObject
                     ?: throw IllegalArgumentException("Source input descriptor is invalid.")

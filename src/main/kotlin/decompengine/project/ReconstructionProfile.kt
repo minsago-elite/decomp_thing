@@ -187,16 +187,25 @@ class ProjectLayoutProfile(
 
     fun declarationForPath(path: String): ProjectFileDeclaration {
         val normalized = requireNormalizedProjectPath(path, "project path")
+        return declarationForValidatedPath(normalized)
+    }
+
+    /** Resolve a path already validated by its owning record, avoiding a duplicate normalization pass. */
+    internal fun declarationForValidatedPath(path: String): ProjectFileDeclaration {
         var matching: ProjectFileDeclaration? = null
         fun consider(declaration: ProjectFileDeclaration) {
-            if (!declaration.matches(normalized)) return
-            require(matching == null) { "project path matches multiple layout declarations: $normalized" }
+            if (!declaration.matches(path)) return
+            require(matching == null) { "project path matches multiple layout declarations: $path" }
             matching = declaration
         }
-        val first = normalized.substringBefore('/')
-        declarationsByFirstPathComponent[first].orEmpty().forEach(::consider)
+        val firstPathComponentEnd = path.indexOf('/').let { if (it < 0) path.length else it }
+        declarationsByFirstPathComponent.forEach { (first, declarations) ->
+            if (first.length == firstPathComponentEnd && path.regionMatches(0, first, 0, firstPathComponentEnd)) {
+                declarations.forEach(::consider)
+            }
+        }
         declarationsWithDynamicFirstPathComponent.forEach(::consider)
-        return matching ?: throw IllegalArgumentException("project path is not declared by the layout profile: $normalized")
+        return matching ?: throw IllegalArgumentException("project path is not declared by the layout profile: $path")
     }
 
     internal fun canonicalJson(): String = buildString {

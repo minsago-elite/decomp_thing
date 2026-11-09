@@ -10,6 +10,8 @@ import decompengine.agent.AgentOperation
 import decompengine.agent.AgentStopReason
 import decompengine.agent.AgentWorkspacePath
 import decompengine.agent.AgentWorkflowProgress
+import decompengine.oracle.core.OracleJson
+import decompengine.oracle.core.StrictJsonLimits
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.nio.file.Files
@@ -21,6 +23,7 @@ import java.util.zip.CRC32
 import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
+import java.util.concurrent.CancellationException
 import kotlin.io.path.createDirectories
 import kotlin.io.path.createTempDirectory
 import kotlin.io.path.exists
@@ -33,6 +36,7 @@ import kotlin.test.assertContentEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNotEquals
+import kotlin.test.assertSame
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.Json
@@ -968,6 +972,218 @@ class SourceTreeTest {
         )
         assertFailsWith<IllegalArgumentException> {
             SourceTreeManifestReader.editablePaths(project)
+        }
+    }
+
+    @Test
+    fun `structure manifest byte reader matches strict tree reader acceptance and projection`() {
+        val project = createTempDirectory(Path.of("build").toAbsolutePath().normalize().createDirectories(), "manifest-byte-reader-")
+        val manifest = SourceTreeGenerator.generate(model(), project)
+        val profile = GeneratedCMakeReconstructionProfile.descriptor
+        val bytes = manifest.toJson().toByteArray(Charsets.UTF_8)
+        val limits = StrictJsonLimits(
+            maximumInputBytes = 16 * 1024 * 1024,
+            maximumCanonicalBytes = 16 * 1024 * 1024,
+            maximumDepth = 32,
+            maximumNodes = 1_000_000,
+            maximumStringBytes = 16 * 1024,
+            maximumTotalStringBytes = 16 * 1024 * 1024,
+        )
+
+        fun treeResult(candidate: ByteArray, candidateLimits: StrictJsonLimits = limits): Result<String> = runCatching {
+            val root = OracleJson.parse(candidate, candidateLimits) as? JsonObject
+                ?: throw IllegalArgumentException("Source catalog manifest is invalid.")
+            SourceTreeManifestReader.parse(root, profile).toJson()
+        }
+        fun byteResult(candidate: ByteArray, candidateLimits: StrictJsonLimits = limits): Result<String> = runCatching {
+            SourceTreeManifestByteReader.parse(candidate, candidateLimits).also { document ->
+                require(document.isObject) { "Source catalog manifest is invalid." }
+            }.validate(profile, null).toJson()
+        }
+        fun ByteArray.indexOfSubArray(needle: ByteArray): Int {
+            if (needle.isEmpty()) return 0
+            for (start in 0..this.size - needle.size) {
+                var matches = true
+                for (offset in needle.indices) if (this[start + offset] != needle[offset]) {
+                    matches = false
+                    break
+                }
+                if (matches) return start
+            }
+            return -1
+        }
+        fun replaceOnce(candidate: ByteArray, old: String, replacement: String): ByteArray {
+            val needle = old.toByteArray(Charsets.UTF_8)
+            val start = candidate.indexOfSubArray(needle)
+            check(start >= 0) { "fixture marker not found: $old" }
+            return candidate.copyOfRange(0, start) + replacement.toByteArray(Charsets.UTF_8) +
+                candidate.copyOfRange(start + needle.size, candidate.size)
+        }
+        fun replaceGeneratorPayload(candidate: ByteArray, payload: ByteArray): ByteArray {
+            val marker = "\"generator\": \"".toByteArray(Charsets.UTF_8)
+            val start = candidate.indexOfSubArray(marker)
+            check(start >= 0) { "generator marker not found" }
+            val payloadStart = start + marker.size
+            var end = payloadStart
+            while (end < candidate.size && candidate[end] != '"'.code.toByte()) end++
+            check(end < candidate.size) { "generator string did not terminate" }
+            return candidate.copyOfRange(0, payloadStart) + payload + candidate.copyOfRange(end, candidate.size)
+        }
+        fun treeFailure(candidate: ByteArray): String? = treeResult(candidate).exceptionOrNull()?.message
+        fun byteFailure(candidate: ByteArray): String? = byteResult(candidate).exceptionOrNull()?.message
+
+        assertEquals(treeResult(bytes).getOrThrow(), byteResult(bytes).getOrThrow())
+        val decodedRoot = OracleJson.parse(bytes, limits) as JsonObject
+        val reversedRoot = JsonObject(decodedRoot.entries.reversed().associate { it.key to it.value })
+        assertEquals(treeResult(reversedRoot.toString().toByteArray()).getOrThrow(),
+            byteResult(reversedRoot.toString().toByteArray()).getOrThrow(), "root field order")
+        val malformed = listOf(
+            bytes + " trailing".toByteArray(),
+            replaceOnce(bytes, "\"schemaVersion\": 3,", "\"schemaVersion\": 3, \"\\u0073chemaVersion\": 3,"),
+            replaceOnce(bytes, "\"schemaVersion\": 3", "\"schemaVersion\": \"3\""),
+            bytes.copyOf().also { copy -> copy[copy.lastIndex] = 0xFF.toByte() },
+            bytes.copyOf().also { copy ->
+                val marker = "\"generator\": \"".toByteArray()
+                val at = copy.indexOfSubArray(marker)
+                check(at >= 0)
+                copy[at + marker.size] = 0xC0.toByte()
+            },
+            replaceOnce(bytes, "\"acceptedImplementation\": false", "\"acceptedImplementation\": \"false\""),
+            replaceOnce(bytes, "archive-payload", "unknown-role"),
+            replaceOnce(bytes, "\"path\": \"Makefile\"", "\"path\": \"../Makefile\""),
+            replaceOnce(bytes, "\"files\": [", "\"files\": {"),
+            replaceOnce(bytes, "\"schemaVersion\": 3,", "\"schemaVersion\": 3, \"ignored\": false,"),
+            replaceOnce(bytes, "\"schemaVersion\": 3,", "\"schemaVersion\": 3, \"ignored\": {\"a\": [true, null]},"),
+            replaceOnce(bytes, "\"schemaVersion\": 3", "\"schemaVersion\": 3.0"),
+            replaceOnce(bytes, "\"schemaVersion\": 3", "\"schemaVersion\": 03"),
+            replaceGeneratorPayload(bytes, "\\uD800".toByteArray(Charsets.UTF_8)),
+            replaceGeneratorPayload(bytes, "\\uDC00".toByteArray(Charsets.UTF_8)),
+            replaceGeneratorPayload(bytes, "\\uD800x".toByteArray(Charsets.UTF_8)),
+            replaceGeneratorPayload(bytes, "\\uZZZZ".toByteArray(Charsets.UTF_8)),
+            replaceGeneratorPayload(bytes, byteArrayOf(0xC0.toByte(), 0xAF.toByte())), // overlong
+            replaceGeneratorPayload(bytes, byteArrayOf(0xED.toByte(), 0xA0.toByte(), 0x80.toByte())), // encoded surrogate
+            replaceGeneratorPayload(bytes, byteArrayOf(0xE2.toByte(), 0x82.toByte())), // truncated sequence
+            replaceGeneratorPayload(bytes, byteArrayOf(0xF4.toByte(), 0x90.toByte(), 0x80.toByte(), 0x80.toByte())), // > U+10FFFF
+        )
+        malformed.forEachIndexed { index, candidate ->
+            assertEquals(treeResult(candidate).isSuccess, byteResult(candidate).isSuccess, "case $index")
+        }
+
+        val tightStringLimits = limits.copy(maximumStringBytes = 8)
+        assertEquals(treeResult(bytes, tightStringLimits).isSuccess,
+            byteResult(bytes, tightStringLimits).isSuccess, "per-string byte limit")
+        val tightAggregateLimits = limits.copy(maximumTotalStringBytes = 128)
+        assertEquals(treeResult(bytes, tightAggregateLimits).isSuccess,
+            byteResult(bytes, tightAggregateLimits).isSuccess, "aggregate string byte limit")
+        val tightDepthLimits = limits.copy(maximumDepth = 2)
+        assertEquals(treeResult(bytes, tightDepthLimits).isSuccess,
+            byteResult(bytes, tightDepthLimits).isSuccess, "depth limit")
+        val tightNodeLimits = limits.copy(maximumNodes = 8)
+        assertEquals(treeResult(bytes, tightNodeLimits).isSuccess,
+            byteResult(bytes, tightNodeLimits).isSuccess, "node limit")
+
+        fun measure(element: kotlinx.serialization.json.JsonElement, depth: Int = 1): Triple<Int, Int, Int> = when (element) {
+            is JsonObject -> {
+                val keys = element.keys.map { it.toByteArray(Charsets.UTF_8).size }
+                val children = element.values.map { measure(it, depth + 1) }
+                Triple(
+                    maxOf(depth, children.maxOfOrNull { it.first } ?: depth),
+                    keys.maxOrNull()?.let { maxOf(it, children.maxOfOrNull { child -> child.second } ?: 0) }
+                        ?: (children.maxOfOrNull { it.second } ?: 0),
+                    keys.sum() + children.sumOf { it.third },
+                )
+            }
+            is JsonArray -> {
+                val children = element.map { measure(it, depth + 1) }
+                Triple(maxOf(depth, children.maxOfOrNull { it.first } ?: depth),
+                    children.maxOfOrNull { it.second } ?: 0, children.sumOf { it.third })
+            }
+            else -> {
+                val stringBytes = if (element is JsonPrimitive && element.isString) {
+                    element.content.toByteArray(Charsets.UTF_8).size
+                } else 0
+                Triple(0, stringBytes, 0)
+            }
+        }
+        fun countValues(element: kotlinx.serialization.json.JsonElement): Int = when (element) {
+            is JsonObject -> 1 + element.values.sumOf(::countValues)
+            is JsonArray -> 1 + element.sumOf(::countValues)
+            else -> 1
+        }
+        val (maximumDepth, maximumStringBytes, totalStringBytes) = measure(decodedRoot)
+        val exactLimits = limits.copy(
+            maximumInputBytes = bytes.size,
+            maximumDepth = maximumDepth,
+            maximumNodes = countValues(decodedRoot),
+            maximumStringBytes = maximumStringBytes,
+            maximumTotalStringBytes = totalStringBytes,
+        )
+        assertEquals(treeResult(bytes, exactLimits).isSuccess, byteResult(bytes, exactLimits).isSuccess, "exact limits")
+        val oneByteShort = exactLimits.copy(maximumInputBytes = bytes.size - 1)
+        assertEquals(treeResult(bytes, oneByteShort).isSuccess, byteResult(bytes, oneByteShort).isSuccess, "input limit minus one")
+        val oneStringByteShort = exactLimits.copy(maximumStringBytes = maximumStringBytes - 1)
+        assertEquals(treeResult(bytes, oneStringByteShort).isSuccess,
+            byteResult(bytes, oneStringByteShort).isSuccess, "string limit minus one")
+        val aggregateByteShort = exactLimits.copy(maximumTotalStringBytes = totalStringBytes - 1)
+        assertEquals(treeResult(bytes, aggregateByteShort).isSuccess,
+            byteResult(bytes, aggregateByteShort).isSuccess, "aggregate limit minus one")
+        val oneLevelShort = exactLimits.copy(maximumDepth = maximumDepth - 1)
+        assertEquals(treeResult(bytes, oneLevelShort).isSuccess,
+            byteResult(bytes, oneLevelShort).isSuccess, "depth limit minus one")
+        val oneNodeShort = exactLimits.copy(maximumNodes = countValues(decodedRoot) - 1)
+        assertEquals(treeResult(bytes, oneNodeShort).isSuccess,
+            byteResult(bytes, oneNodeShort).isSuccess, "node limit minus one")
+
+        val missingInput = JsonObject(decodedRoot.filterKeys { it != "inputSha256" })
+        val wrongRoleRoot = JsonObject(decodedRoot.toMutableMap().apply {
+            val records = getValue("files").jsonArray
+            val first = records.first().jsonObject
+            put("files", JsonArray(listOf(JsonObject(first.toMutableMap().apply {
+                put("roles", JsonArray(listOf(JsonPrimitive("unknown-role"))))
+            }))))
+        })
+        val precedence = JsonObject(wrongRoleRoot.filterKeys { it != "inputSha256" })
+        val precedenceBytes = precedence.toString().toByteArray(Charsets.UTF_8)
+        assertEquals(treeFailure(precedenceBytes), byteFailure(precedenceBytes), "semantic refusal precedence")
+        assertTrue(treeFailure(missingInput.toString().toByteArray()) != null)
+
+        val cancellation = CancellationException("cancel source manifest parse")
+        val manyNodes = "{\"values\":[${List(1100) { "null" }.joinToString(",")}] }"
+            .toByteArray(Charsets.UTF_8)
+        val syntaxCancellation = assertFailsWith<CancellationException> {
+            SourceTreeManifestByteReader.parse(manyNodes, limits) { stage ->
+                if (stage == "while validating source manifest JSON values") throw cancellation
+            }
+        }
+        assertSame(cancellation, syntaxCancellation, "syntax-pass cancellation must retain its identity")
+        val manyFiles = JsonObject(decodedRoot.toMutableMap().apply {
+            put("files", JsonArray(List(300) { decodedRoot.getValue("files").jsonArray.first() }))
+        }).toString().toByteArray(Charsets.UTF_8)
+        val typedCancellation = assertFailsWith<CancellationException> {
+            SourceTreeManifestByteReader.parse(manyFiles, limits) { stage ->
+                if (stage == "while parsing source manifest files") throw cancellation
+            }
+        }
+        assertSame(cancellation, typedCancellation, "typed-pass cancellation must retain its identity")
+        val validationCancellation = assertFailsWith<CancellationException> {
+            SourceTreeManifestByteReader.parse(bytes, limits).validate(profile, null) { stage ->
+                if (stage == "while validating source manifest files") throw cancellation
+            }
+        }
+        assertSame(cancellation, validationCancellation, "semantic-pass cancellation must retain its identity")
+
+        Thread.currentThread().interrupt()
+        try {
+            assertFailsWith<InterruptedException> { SourceTreeManifestByteReader.parse(bytes, limits) }
+        } finally {
+            Thread.interrupted()
+        }
+        val parsed = SourceTreeManifestByteReader.parse(bytes, limits)
+        Thread.currentThread().interrupt()
+        try {
+            assertFailsWith<InterruptedException> { parsed.validate(profile, null) }
+        } finally {
+            Thread.interrupted()
         }
     }
 
