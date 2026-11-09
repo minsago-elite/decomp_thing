@@ -251,6 +251,69 @@ export function assertStructureQualification(measurements, evidenceFailures = []
   if (budgetFailures.length || evidenceFailures.length) throw new Error(`Structure qualification failed: ${JSON.stringify({ evidenceFailures, budgetFailures, measurements })}`);
 }
 
+/**
+ * A Chromium canceled-after-consumption terminal is acceptable only when the independent inventory proof
+ * authenticates the same request and proves the complete response was read and rendered. All other failures,
+ * missing rows, duplicate identities and capture overflow remain unproven failures.
+ */
+export function classifyFailedInventoryRequests(coldEvidence, inventoryConsumption) {
+  const rows = coldEvidence?.failedInventoryRequests;
+  const count = coldEvidence?.failedInventoryRequestCount;
+  const overflow = coldEvidence?.failedInventoryRequestOverflow;
+  const captureComplete = Array.isArray(rows) && Number.isSafeInteger(count) && count >= 0 &&
+    rows.length === Math.min(count, 16) && overflow === Math.max(0, count - 16);
+  const actions = inventoryConsumption?.actions;
+  const proofComplete = inventoryConsumption?.consumptionProven === true &&
+    inventoryConsumption?.expectedActions === PROOF_ACTION_LIMIT && inventoryConsumption?.recordedActions === PROOF_ACTION_LIMIT &&
+    inventoryConsumption?.provenActions === PROOF_ACTION_LIMIT && Array.isArray(actions) && actions.length === PROOF_ACTION_LIMIT &&
+    actions.every(action => action?.validatedConsumption === true);
+  const candidates = new Map();
+  if (proofComplete) {
+    for (const action of actions) {
+      const request = action?.request;
+      const failure = request?.failure;
+      const contentLength = request?.contentLength;
+      if (action.validatedConsumption !== true || request?.terminalEvidence !== 'canceled-after-consumption' ||
+        !/^[a-f0-9]{64}$/.test(request?.idHash ?? '') || !/^[a-f0-9]{64}$/.test(request?.urlHash ?? '') ||
+        request?.status !== 200 || request?.sameOrigin !== true || request?.servedFromCache !== false ||
+        request?.fromDiskCache !== false || request?.fromServiceWorker !== false ||
+        request?.fromPrefetchCache !== false || failure?.errorText !== 'net::ERR_ABORTED' ||
+        failure?.canceled !== true || !Number.isSafeInteger(contentLength) || contentLength < 0 ||
+        request?.dataLength !== contentLength || request?.body?.bytes !== contentLength ||
+        request?.stream?.problem !== null || request?.stream?.firstSpanOrdinal === null) continue;
+      const ids = Array.isArray(action.requestIdHashes) ? action.requestIdHashes : [];
+      if (ids.length !== 1 || ids[0] !== request.idHash || typeof request.urlHash !== 'string') continue;
+      const key = `${request.idHash}:${request.urlHash}`;
+      candidates.set(key, (candidates.get(key) ?? 0) + 1);
+    }
+  }
+  let provenCanceledAfterConsumptionCount = 0;
+  const matched = new Set();
+  if (captureComplete && proofComplete) {
+    for (const row of rows) {
+      const key = `${row?.networkIdHash}:${row?.urlHash}`;
+      const headerLength = row?.responseHeaders?.['content-length'];
+      const contentLength = typeof headerLength === 'string' && /^(?:0|[1-9][0-9]{0,8})$/.test(headerLength)
+        ? Number(headerLength) : null;
+      const eligible = row?.method === 'GET' && row?.pathTemplate === '/nested/api/v1/jobs/{id}/runs/{id}/revisions/{id}/functions' &&
+        row?.status === 200 && row?.failure?.errorText === 'net::ERR_ABORTED' && row?.failure?.canceled === true &&
+        /^[a-f0-9]{64}$/.test(row?.networkIdHash ?? '') && /^[a-f0-9]{64}$/.test(row?.urlHash ?? '') &&
+        row?.lateFailedAfterFinished !== true && row?.loadingFinishedEncodedDataLength === null &&
+        Number.isSafeInteger(contentLength) && row?.dataLength === contentLength &&
+        candidates.get(key) === 1 && !matched.has(key);
+      if (eligible) {
+        matched.add(key);
+        provenCanceledAfterConsumptionCount++;
+      }
+    }
+  }
+  const unprovenFailedInventoryRequestCount = captureComplete
+    ? count - provenCanceledAfterConsumptionCount
+    : Math.max(1, Number.isSafeInteger(count) && count >= 0 ? count - provenCanceledAfterConsumptionCount : 0);
+  return { failedInventoryRequestEvidenceComplete: captureComplete,
+    provenCanceledAfterConsumptionCount, unprovenFailedInventoryRequestCount };
+}
+
 /** Retain bounded, same-origin phase timings without storing request URLs or response bodies. */
 export function createStructureTimingRecorder(browserOrigin) {
   const origin = new URL(browserOrigin).origin;
@@ -662,7 +725,9 @@ export function evaluateStructureBudgets(m) {
   check(m.localFeedbackP95Ms <= LOCAL_FEEDBACK_BUDGET_MS,
     `Local function-inventory feedback p95 ${m.localFeedbackP95Ms}ms exceeds the D0 ${LOCAL_FEEDBACK_BUDGET_MS}ms budget`);
   check(['terminalEvidenceOverflow', 'resourceTimingOverflow', 'invalidTransportEvidence'].every(key => (m[key] ?? 0) === 0), 'Transport evidence overflow or invalid data');
-  check((m.failedInventoryRequestCount ?? 0) === 0, 'Function inventory requests failed explicitly');
+  check(m.failedInventoryRequestEvidenceComplete === true && Number.isSafeInteger(m.unprovenFailedInventoryRequestCount) &&
+    m.unprovenFailedInventoryRequestCount === 0,
+  'Function inventory requests failed or their terminal evidence is incomplete');
   check((m.firstPageRequestOverflow ?? 0) === 0 && (m.pendingEvidenceRequestOverflow ?? 0) === 0,
     'Cold request evidence exceeded its bounded capture');
   check(m.pendingInventoryRequests === 0, 'Every function inventory request must finish before evidence is retained');
@@ -1467,6 +1532,8 @@ async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evalua
   const jvmMemory = await jvmRssSampler.stop();
   const structureTimingSummary = structureTiming.summary();
   const inventoryConsumption = proof.summary({ exceptions: tab.exceptions?.length ?? 1 });
+  const coldEvidenceSummary = coldEvidence.summary();
+  const inventoryFailureClassification = classifyFailedInventoryRequests(coldEvidenceSummary, inventoryConsumption);
   if (!inventoryConsumption.consumptionProven) {
     evidenceFailures.push(boundedFailure(`Inventory consumption unproven: ${inventoryConsumption.provenActions}/${inventoryConsumption.expectedActions} actions; ${JSON.stringify(inventoryConsumption.actions.filter(a => !a.validatedConsumption).slice(0, 4).map(a => [a.label, a.reasons.slice(0, 6)]))}`));
   }
@@ -1474,7 +1541,8 @@ async function qualifyStructureWithRssSampler({ fixture, makeTarget, cdp, evalua
     localFeedbackSamples: localFeedbackMs.length, invalidFeedbackSamples, localFeedbackP95Ms,
     pendingInventoryRequests: inventoryRequests.size, inventoryReads, exceptions: tab.exceptions,
     requestMethods: tab.requests.map(request => request.method), peakBrowserHeapBytes, jvmMemory,
-    moduleResponse: moduleResponseEvidence, structureTiming: structureTimingSummary, firstPagePerformance, ...coldEvidence.summary(), inventoryConsumption };
+    moduleResponse: moduleResponseEvidence, structureTiming: structureTimingSummary, firstPagePerformance,
+    ...coldEvidenceSummary, ...inventoryFailureClassification, inventoryConsumption };
   assertStructureQualification(measurements, evidenceFailures);
   pageMs.sort((a, b) => a - b);
   return { ...measurements, recordedFunctions: fixture.functions, modules: fixture.modules, modelBytes: fixture.modelBytes, rowsPerPage: 100,

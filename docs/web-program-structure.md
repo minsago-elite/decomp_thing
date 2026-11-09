@@ -177,7 +177,10 @@ terminal is accepted as consumed only for Chromium's exact `net::ERR_ABORTED` ca
 signature and only when the complete streamed body matches the fixture oracle and
 Content-Length, the response is an uncached HTTP 200, Resource Timing reports matching
 encoded/decoded sizes and HTTP 200, and the expected ready DOM follows the failure.
-All other failed, partial, stale, or uncorrelated responses remain unproven. This
+The inventory-failure budget reconciles that classification by request-ID and URL hashes
+only after all 52 consumption actions are proven; it retains the raw failure count and
+accepts no unmatched row, overflow, or incomplete evidence. All other failed, partial,
+stale, or uncorrelated responses remain unproven. This
 classifies the observed browser terminal after the body and UI have completed; it does
 not claim that the HTTP request itself terminated successfully. Structure-mode server
 phase timings can be enabled for the packaged diagnostic with

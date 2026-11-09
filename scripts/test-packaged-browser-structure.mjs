@@ -3,7 +3,8 @@ import test from 'node:test';
 import { createHash } from 'node:crypto';
 import { runInNewContext } from 'node:vm';
 import { appendStructureFeedbackSample, assertStructureSourceLink, createJvmRssSummary, createModuleResponseInterceptor,
-  createStructureResponseRecorder, createStructureTimingRecorder, evaluateStructureBudgets, isModuleDetailUrl, moduleDetailFetchPattern, nearestRankP95, recordJvmRssSample, structureFeedbackInstrumentation, summarizeJvmRss } from './packaged-browser-structure.mjs';
+  classifyFailedInventoryRequests, createStructureResponseRecorder, createStructureTimingRecorder, evaluateStructureBudgets,
+  isModuleDetailUrl, moduleDetailFetchPattern, nearestRankP95, recordJvmRssSample, structureFeedbackInstrumentation, summarizeJvmRss } from './packaged-browser-structure.mjs';
 
 const revision = `/nested/jobs/${'f'.repeat(32)}/runs/run_structure_scale/revisions/revision_structure_scale`;
 const browserOrigin = 'http://127.0.0.1:12345';
@@ -239,6 +240,8 @@ test('every D0 budget is evaluated even when several fail', () => {
   const passing = { firstPageMs: 100, pageDataP95Ms: 100, searchMs: 100, requestP95Ms: 100, localFeedbackSamples: 51,
     invalidFeedbackSamples: 0, localFeedbackP95Ms: 10, pendingInventoryRequests: 0, inventoryReads: Array(52).fill('100'),
     exceptions: [], requestMethods: ['GET'], peakBrowserHeapBytes: 1, jvmMemory: { coverageComplete: true, incrementalPeakBytes: 1 },
+    failedInventoryRequestCount: 0, failedInventoryRequestEvidenceComplete: true, provenCanceledAfterConsumptionCount: 0,
+    unprovenFailedInventoryRequestCount: 0,
     structureTiming: {} };
   assert.deepEqual(evaluateStructureBudgets(passing), []);
   const failures = evaluateStructureBudgets({ ...passing, firstPageMs: 501, localFeedbackP95Ms: 101,
@@ -340,14 +343,65 @@ test('cold evidence records failures, strips identities and caps the click windo
     inventoryReads: Array(52).fill('100'), exceptions: [], requestMethods: ['GET'], peakBrowserHeapBytes: 1,
     jvmMemory: summarizeJvmRss(Object.assign(createJvmRssSummary(100), { sampleCount: 1 })), moduleResponse: { terminal: 'finished', candidates: 1 } };
   assert.equal(evidence.pendingEvidenceRequests, 0);
-  assert.deepEqual(evaluateStructureBudgets(measurements), ['Function inventory requests failed explicitly', 'Cold request evidence exceeded its bounded capture']);
+  assert.deepEqual(evaluateStructureBudgets(measurements), [
+    'Function inventory requests failed or their terminal evidence is incomplete', 'Cold request evidence exceeded its bounded capture']);
   assert.throws(() => assertStructureQualification(measurements), error => {
     const payload = JSON.parse(error.message.slice('Structure qualification failed: '.length));
     assert.deepEqual(payload.measurements.jvmMemory, measurements.jvmMemory);
     assert.deepEqual(payload.measurements.moduleResponse, measurements.moduleResponse);
     return true;
   });
-  assertStructureQualification({ ...measurements, failedInventoryRequestCount: 0, firstPageRequestOverflow: 0 });
+  assertStructureQualification({ ...measurements, failedInventoryRequestCount: 0, failedInventoryRequestEvidenceComplete: true,
+    provenCanceledAfterConsumptionCount: 0, unprovenFailedInventoryRequestCount: 0, firstPageRequestOverflow: 0 });
+});
+
+test('only exact complete Chromium cancellations proven consumed by every inventory action are classified as proven', () => {
+  const digest = value => createHash('sha256').update(value).digest('hex');
+  const actionFor = index => {
+    const idHash = digest(`request-${index}`), urlHash = digest(`url-${index}`);
+    return { validatedConsumption: true, requestIdHashes: [idHash], request: { idHash, urlHash,
+      terminalEvidence: 'canceled-after-consumption', status: 200, sameOrigin: true,
+      servedFromCache: false, fromDiskCache: false, fromServiceWorker: false, fromPrefetchCache: false,
+      failure: { errorText: 'net::ERR_ABORTED', canceled: true }, contentLength: 123, dataLength: 123,
+      body: { bytes: 123 }, stream: { problem: null, firstSpanOrdinal: 4 } } };
+  };
+  const proofActions = Array.from({ length: 52 }, (_, index) => actionFor(index));
+  const proof = { consumptionProven: true, expectedActions: 52, recordedActions: 52, provenActions: 52, actions: proofActions };
+  const matched = proofActions[0].request;
+  const row = { networkIdHash: matched.idHash, urlHash: matched.urlHash, method: 'GET',
+    pathTemplate: '/nested/api/v1/jobs/{id}/runs/{id}/revisions/{id}/functions', status: 200,
+    failure: { errorText: 'net::ERR_ABORTED', canceled: true }, lateFailedAfterFinished: false,
+    loadingFinishedEncodedDataLength: null, responseHeaders: { 'content-length': '123' }, dataLength: 123 };
+  const cold = { failedInventoryRequests: [row], failedInventoryRequestCount: 1, failedInventoryRequestOverflow: 0 };
+  assert.deepEqual(classifyFailedInventoryRequests(cold, proof), { failedInventoryRequestEvidenceComplete: true,
+    provenCanceledAfterConsumptionCount: 1, unprovenFailedInventoryRequestCount: 0 });
+
+  for (const mutation of [
+    value => { value.failedInventoryRequests[0].networkIdHash = digest('different request'); },
+    value => { value.failedInventoryRequests[0].urlHash = digest('different URL'); },
+    value => { value.failedInventoryRequests[0].responseHeaders['content-length'] = '124'; },
+    value => { value.failedInventoryRequests[0].failure.errorText = 'net::ERR_FAILED'; },
+    value => { value.failedInventoryRequests[0].failure.canceled = false; },
+    value => { value.failedInventoryRequests[0].lateFailedAfterFinished = true; },
+  ]) {
+    const changed = structuredClone(cold); mutation(changed);
+    const classification = classifyFailedInventoryRequests(changed, proof);
+    assert.equal(classification.provenCanceledAfterConsumptionCount, 0);
+    assert.equal(classification.unprovenFailedInventoryRequestCount, 1);
+  }
+  const incompleteProof = { ...proof, consumptionProven: false };
+  assert.equal(classifyFailedInventoryRequests(cold, incompleteProof).unprovenFailedInventoryRequestCount, 1);
+  const duplicateProof = { ...proof, actions: [proofActions[0], proofActions[0], ...proofActions.slice(2)] };
+  assert.equal(classifyFailedInventoryRequests(cold, duplicateProof).unprovenFailedInventoryRequestCount, 1);
+  const overflow = { ...cold, failedInventoryRequestCount: 17, failedInventoryRequestOverflow: 1 };
+  assert.equal(classifyFailedInventoryRequests(overflow, proof).failedInventoryRequestEvidenceComplete, false);
+  const budget = { ...cold, ...classifyFailedInventoryRequests(cold, proof), firstPageMs: 100, pageDataP95Ms: 100,
+    searchMs: 100, requestP95Ms: 100, localFeedbackSamples: 51, invalidFeedbackSamples: 0, localFeedbackP95Ms: 10,
+    pendingInventoryRequests: 0, inventoryReads: Array(52).fill('100'), exceptions: [], requestMethods: ['GET'],
+    peakBrowserHeapBytes: 1, jvmMemory: { coverageComplete: true, incrementalPeakBytes: 1 }, structureTiming: {} };
+  assert.ok(!evaluateStructureBudgets(budget).includes('Function inventory requests failed or their terminal evidence is incomplete'));
+  assert.ok(evaluateStructureBudgets({ ...budget, unprovenFailedInventoryRequestCount: 1 })
+    .includes('Function inventory requests failed or their terminal evidence is incomplete'));
 });
 
 test('RSS evidence bounds retain all-sample peak and coverage and phase boundaries', () => {
@@ -438,7 +492,7 @@ test('a late failure after loadingFinished is retained and still fails qualifica
   assert.equal(evidence.failedInventoryRequestCount, 1);
   assert.equal(evidence.failedInventoryRequests[0].lateFailedAfterFinished, true);
   assert.equal(evidence.failedInventoryRequests[0].loadingFinishedEncodedDataLength, 100);
-  assert.ok(evaluateStructureBudgets(evidence).includes('Function inventory requests failed explicitly'));
+  assert.ok(evaluateStructureBudgets(evidence).includes('Function inventory requests failed or their terminal evidence is incomplete'));
 });
 
 // #536 inventory consumption proof: synthetic controls (evidence only, no real browser).
