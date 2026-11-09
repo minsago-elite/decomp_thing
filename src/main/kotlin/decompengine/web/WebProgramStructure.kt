@@ -385,38 +385,36 @@ internal object WebProgramStructureBuilder {
             val cycles = HashMap<String, List<String>>()
             plan.dependencyCycles.forEach { cycle -> cycle.forEach { cycles[it] = cycle } }
             val filesByPath = manifest.files.associateBy(GeneratedFileEvidence::path)
-            val ids = plan.modules.map { it.id }
-            if (ids.distinct().size != ids.size || plan.modules.size > WebSourceCatalogSnapshot.MAXIMUM_FILES) {
-                planOutcome = WebStructureOutcome("invalid", "PLAN_DUPLICATE_MODULE")
-            } else {
-                measured("form-modules-and-owners") {
-                    plan.modules.withIndex().sortedBy { it.value.id }.forEach { (plannedIndex, planned) ->
-                        fun owned(kind: WebStructureKind, raw: List<String>): List<String> {
-                            if (raw.isEmpty()) return emptyList()
-                            val rows = resolutions[plannedIndex][kind.ordinal]
-                            val ids = parsed.tables[kind.ordinal].ids
-                            return List(raw.size) { slot -> rows[slot].let { if (it < 0) raw[slot] else ids[it] } }
-                        }
-                        val implementationFile = filesByPath[planned.sourcePath]
-                        modules += WebStructureModule(planned.id, planned.sourcePath, planned.headerPath,
-                            owned(WebStructureKind.FUNCTION, planned.functionIds),
-                            owned(WebStructureKind.GLOBAL, planned.globalIds), owned(WebStructureKind.TYPE, planned.typeIds), planned.boundaryEvidence,
-                            // The source-tree manifest was already checked against this profile by
-                            // SourceTreeManifestReader; repeating the declaration's regex match for
-                            // every planned module adds substantial cold-path cost at scale.
-                            when (implementationFile?.acceptedImplementation) {
-                                true -> "accepted"; false -> "unaccepted"; null -> "not-classified"
-                            }, cycles[planned.id].orEmpty())
+            // Canonical bytes are accepted only when parsed modules match appendCanonicalJson's
+            // sorted-by-ID output; validatePlan has already enforced uniqueness and module limits.
+            // Iterate that order directly instead of allocating another ID set and sorting a list.
+            measured("form-modules-and-owners") {
+                for ((plannedIndex, planned) in plan.modules.withIndex()) {
+                    fun owned(kind: WebStructureKind, raw: List<String>): List<String> {
+                        if (raw.isEmpty()) return emptyList()
+                        val rows = resolutions[plannedIndex][kind.ordinal]
+                        val ids = parsed.tables[kind.ordinal].ids
+                        return List(raw.size) { slot -> rows[slot].let { if (it < 0) raw[slot] else ids[it] } }
                     }
-                    for ((moduleIndex, module) in modules.withIndex()) {
-                        for ((kind, owned) in listOf(WebStructureKind.FUNCTION to module.functionIds,
-                            WebStructureKind.GLOBAL to module.globalIds, WebStructureKind.TYPE to module.typeIds)) {
-                            val table = parsed.tables[kind.ordinal]
-                            for (id in owned) {
-                                val row = table.index[id]
-                                if (row == null) { unknown++; continue }
-                                table.owners[row] = if (table.owners[row] == OWNER_UNOWNED) moduleIndex else OWNER_AMBIGUOUS
-                            }
+                    val implementationFile = filesByPath[planned.sourcePath]
+                    modules += WebStructureModule(planned.id, planned.sourcePath, planned.headerPath,
+                        owned(WebStructureKind.FUNCTION, planned.functionIds),
+                        owned(WebStructureKind.GLOBAL, planned.globalIds), owned(WebStructureKind.TYPE, planned.typeIds), planned.boundaryEvidence,
+                        // The source-tree manifest was already checked against this profile by
+                        // SourceTreeManifestReader; repeating the declaration's regex match for
+                        // every planned module adds substantial cold-path cost at scale.
+                        when (implementationFile?.acceptedImplementation) {
+                            true -> "accepted"; false -> "unaccepted"; null -> "not-classified"
+                        }, cycles[planned.id].orEmpty())
+                }
+                for ((moduleIndex, module) in modules.withIndex()) {
+                    for ((kind, owned) in listOf(WebStructureKind.FUNCTION to module.functionIds,
+                        WebStructureKind.GLOBAL to module.globalIds, WebStructureKind.TYPE to module.typeIds)) {
+                        val table = parsed.tables[kind.ordinal]
+                        for (id in owned) {
+                            val row = table.index[id]
+                            if (row == null) { unknown++; continue }
+                            table.owners[row] = if (table.owners[row] == OWNER_UNOWNED) moduleIndex else OWNER_AMBIGUOUS
                         }
                     }
                 }
