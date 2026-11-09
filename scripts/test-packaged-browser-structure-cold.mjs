@@ -47,7 +47,7 @@ test('runner refuses incorrect count', async () => {
 
 test('qualification source identity matches committed Git blobs and refuses edited driver bytes', async () => {
   const commit = 'a'.repeat(40);
-  const paths = ['scripts/check-packaged-web-browser.mjs', 'scripts/packaged-browser-structure-cold.mjs'];
+  const paths = ['.github/workflows/ci.yml', 'scripts/check-packaged-web-browser.mjs', 'scripts/packaged-browser-structure-cold.mjs'];
   const committed = new Map(paths.map((path, i) => [path, Buffer.from(`committed source ${i}`)]));
   const working = new Map([...committed].map(([path, bytes]) => [path, Buffer.from(bytes)]));
   const runGit = (args, input) => {
@@ -138,6 +138,18 @@ test('runner refuses a child report attributed to a different pull-request head 
   assert.equal(result.identityConsistent,false);
   assert.match(result.samples[0].error,/declared pull-request head SHA/);
   assert.equal(result.passed,false);
+
+  launches = 0;
+  const baseMismatch = await runColdSamples({ driver:'/repo/driver.mjs', driverArgs:[], profile:'loopback',
+    expectedHeadCommit:'d'.repeat(40), expectedBaseCommit:'f'.repeat(40), spawnImpl:()=>{launches++;return fakeChild();},
+    reportReader:async()=>({path:`/tmp/base-${launches}.json`,sha256:'b'.repeat(64),report:{status:'passed',driverCommit:'a'.repeat(40),
+      driverPullRequestHeadCommit:'d'.repeat(40),driverPullRequestBaseCommit:'e'.repeat(40),
+      sourceIdentity:{verified:true,commit:'a'.repeat(40),sourceSha256:'1'.repeat(64),files:[]},archiveSha256:'2'.repeat(64),
+      applicationJarSha256:'3'.repeat(64),testDirectory:`/tmp/base-run-${launches}`,browserProfileDirectory:`/tmp/base-run-${launches}/profile`,
+      runtimeProcesses:{applicationPid:20_000+launches,applicationStartTimeTicks:30_000+launches,browserPid:40_000+launches,browserStartTimeTicks:50_000+launches},
+      structureCold:{passed:true,firstPageMs:10,failedInventoryRequestCount:0,profileApplied:'loopback'}}})});
+  assert.equal(baseMismatch.successfulSamples,0);
+  assert.match(baseMismatch.samples[0].error,/declared pull-request base SHA/);
 });
 
 test('runner records the timeout state even when the child exits during termination grace', { skip: process.platform !== 'linux' }, async () => {

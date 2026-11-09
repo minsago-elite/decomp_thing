@@ -7,6 +7,7 @@ import { pathToFileURL } from 'node:url';
 export const COLD_SAMPLE_COUNT = 20;
 export const COLD_SAMPLE_TIMEOUT_MS = 45_000;
 export const STRUCTURE_QUALIFICATION_SOURCE_FILES = Object.freeze([
+  '.github/workflows/ci.yml',
   'scripts/check-packaged-web-browser.mjs',
   'scripts/packaged-browser-structure.mjs',
   'scripts/packaged-browser-structure-cold.mjs',
@@ -49,7 +50,8 @@ export async function verifyStructureQualificationSource(repoRoot, commit, {
   }
   const files = [];
   for (const path of sourceFiles) {
-    if (typeof path !== 'string' || path.startsWith('/') || path.split('/').includes('..') || !path.startsWith('scripts/')) {
+    const approvedSourcePath = typeof path === 'string' && (path.startsWith('scripts/') || path === '.github/workflows/ci.yml');
+    if (!approvedSourcePath || path.startsWith('/') || path.split('/').includes('..')) {
       throw new TypeError(`invalid qualification source path: ${String(path)}`);
     }
     const committedBlob = runGit(['rev-parse', `${commit}:${path}`]);
