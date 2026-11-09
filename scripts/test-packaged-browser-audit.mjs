@@ -4,7 +4,7 @@ import { dirname, resolve } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { runInNewContext } from 'node:vm';
-import { assertAudit, auditContentReady, auditFixtures, auditPageNames, auditPageReady, auditTokenKinds, auditViewports, measureContrast, measureFocus, measurePage, prepareAuditPage, qualifyAudit } from './packaged-browser-audit.mjs';
+import { assertAudit, connectedSessionText, connectionAxSummary, connectionNoticeFailures, connectionNoticeNames, connectionNoticeShots, measureConnectionState, qualifyConnectionNotice, auditContentReady, auditFixtures, auditPageNames, auditPageReady, auditTokenKinds, auditViewports, measureContrast, measureFocus, measurePage, prepareAuditPage, qualifyAudit } from './packaged-browser-audit.mjs';
 
 // Controls for the packaged audit's own verdict: each injected defect must be reported, so a
 // passing CI audit cannot be a vacuous one.
@@ -34,6 +34,20 @@ function clean() {
     unmapped: [],
     workers: { highlightedTokens: 12, targets: [{ url: `${base}assets/highlight.worker-a.js`, responses: [{ url: `${base}assets/highlight.worker-a.js`, status: 200 }] }] },
     timing: timingEvidence(),
+    connectionNotice: connectionEvidence(),
+  };
+}
+function connectionEvidence() {
+  const phase = (name, requests) => ({ phase: name, screenshot: connectionNoticeShots[name], requestsAtCapture: requests, requests,
+    dom: { sections: 1, sectionName: connectionNoticeNames[name], statuses: 1, statusInSection: true, invalidAsides: 0 },
+    ax: { regions: [connectionNoticeNames[name]], statuses: [connectionNoticeNames.status] } });
+  return {
+    events: [{ type: 'offline', isTrusted: true, onLine: false }, { type: 'online', isTrusted: true, onLine: true }],
+    phases: [phase('offline', []), phase('reconnected', [{ method: 'GET', path: '/bootstrap', status: 200 }])],
+    invariants: { token: true, href: true, history: true, reload: false, storage: true, focus: true, authenticatedSession: true,
+      fetchResourceDelta: 1, revalidationDelayMs: 750 },
+    restoration: { conditions: { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 }, offline: false,
+      listenersRemoved: true, accessibilityDisabled: true, failed: [] },
   };
 }
 const verdict = (audit, served = responses) => assertAudit(audit, manifest, served, origin).failures;
@@ -481,4 +495,172 @@ test('measures visible input values and placeholders and rejects low contrast fo
 test('covers the documented desktop, narrow, 320px and 200%/400% zoom profiles', () => {
   assert.deepEqual(auditViewports.map(({ width, height, deviceScaleFactor }) => [width, height, deviceScaleFactor]),
     [[1440, 900, 1], [390, 844, 1], [320, 640, 1], [640, 400, 2], [320, 200, 4]]);
+});
+
+
+test('connection notice evidence fails closed when missing, misbound, mis-ordered, untrusted, mutating or not restored', () => {
+  const fails = (mutate, pattern) => {
+    const audit = clean(); mutate(audit.connectionNotice, audit);
+    assert.match(verdict(audit).join('\n'), pattern);
+  };
+  fails((_, audit) => { delete audit.connectionNotice; }, /connection notice: missing evidence/);
+  fails(c => { c.phases.pop(); }, /reconnected: missing phase/);
+  fails(c => { c.phases.reverse(); }, /connection notice: phases/);
+  fails(c => { c.phases.push(structuredClone(c.phases[1])); }, /connection notice: phases/);
+  fails(c => { c.phases[0].dom.sections = 2; }, /offline: DOM section/);
+  fails(c => { c.phases[0].dom.sectionName = connectionNoticeNames.reconnected; }, /offline: DOM section/);
+  fails(c => { c.phases[1].dom.statuses = 0; }, /reconnected: DOM status/);
+  fails(c => { c.phases[1].dom.statusInSection = false; }, /reconnected: DOM status/);
+  fails(c => { c.phases[0].dom.invalidAsides = 1; }, /aside\[role=status\]/);
+  fails(c => { delete c.phases[0].dom; }, /offline: DOM section/);
+  fails(c => { c.phases[0].ax.regions = []; }, /offline: accessibility region/);
+  fails(c => { c.phases[0].ax.regions.push(connectionNoticeNames.offline); }, /offline: accessibility region/);
+  fails(c => { c.phases[1].ax.regions.push(connectionNoticeNames.offline); }, /reconnected: accessibility region/);
+  fails(c => { c.phases[1].ax.statuses = ['Status']; }, /reconnected: accessibility status/);
+  fails(c => { c.phases[1].ax.statuses.push(connectionNoticeNames.status); }, /reconnected: accessibility status/);
+  fails(c => { delete c.phases[1].ax; }, /reconnected: accessibility/);
+  fails(c => { c.phases[0].screenshot = null; }, /offline: screenshot/);
+  fails(c => { c.events.reverse(); }, /event sequence/);
+  fails(c => { c.events.push({ ...c.events[1] }); }, /event sequence/);
+  fails(c => { c.events = []; }, /event sequence[\s\S]*not trusted/);
+  fails(c => { c.events[0].onLine = true; }, /event sequence/);
+  fails(c => { c.events[1].isTrusted = false; }, /not trusted/);
+  fails(c => { c.phases[0].requests = [{ method: 'GET', path: '/jobs', status: 200 }]; }, /offline: connectivity made requests/);
+  fails(c => { c.phases[1].requests.push({ method: 'GET', path: '/bootstrap', status: 200 }); }, /reconnected: connectivity made requests/);
+  fails(c => { c.phases[1].requests = [{ method: 'POST', path: '/bootstrap', status: 200 }]; }, /sent a mutation/);
+  fails(c => { delete c.phases[1].requests; }, /missing request evidence/);
+  for (const key of ['token', 'href', 'history', 'storage', 'focus']) {
+    fails(c => { c.invariants[key] = false; }, new RegExp(`${key} changed`));
+    fails(c => { delete c.invariants[key]; }, new RegExp(`${key} changed`));
+  }
+  fails(c => { c.invariants.reload = true; }, /page reloaded/);
+  fails(c => { c.invariants.fetchResourceDelta = 2; }, /unexpected fetch-resource delta/);
+  fails(c => { delete c.invariants.fetchResourceDelta; }, /unexpected fetch-resource delta/);
+  fails(c => { c.phases[1].requests = []; c.invariants.fetchResourceDelta = 0; }, /reconnected: connectivity made requests/);
+  fails(c => { c.phases[1].requests[0].status = 503; }, /reconnected: connectivity made requests/);
+  fails(c => { delete c.phases[1].requestsAtCapture; }, /missing screenshot-time request evidence/);
+  fails(c => { c.invariants.revalidationDelayMs = 249; }, /session revalidation timing/);
+  fails(c => { c.invariants.revalidationDelayMs = 2251; }, /session revalidation timing/);
+  fails(c => { c.invariants.revalidationDelayMs = null; }, /session revalidation timing/);
+  fails(c => { c.invariants.authenticatedSession = false; }, /authenticatedSession changed/);
+  fails(c => { c.restoration.offline = true; }, /cleanup/);
+  fails(c => { c.restoration.conditions.latency = 500; }, /cleanup/);
+  fails(c => { c.restoration.conditions = null; }, /cleanup/);
+  fails(c => { c.restoration.listenersRemoved = false; }, /cleanup/);
+  fails(c => { c.restoration.accessibilityDisabled = false; }, /cleanup/);
+  fails(c => { c.restoration.failed = ['Accessibility.disable failed']; }, /cleanup/);
+  fails(c => { delete c.restoration; }, /cleanup/);
+  assert.deepEqual(connectionNoticeFailures(connectionEvidence()), []);
+  const engine = clean(); delete engine.connectionNotice;
+  assert.deepEqual(assertAudit(engine, manifest, responses, origin, undefined, { connectionNotice: false }).failures, [],
+    'only the explicit cross-engine opt-out skips Chrome connection evidence');
+  assert.match(assertAudit(engine, manifest, responses, origin, undefined, {}).failures.join('\n'), /missing evidence/);
+});
+
+test('connection accessibility summary keeps only exposed region and status names', () => {
+  assert.deepEqual(connectionAxSummary([
+    { role: { value: 'region' }, name: { value: connectionNoticeNames.offline } },
+    { role: { value: 'status' }, name: { value: connectionNoticeNames.status } },
+    { ignored: true, role: { value: 'status' }, name: { value: connectionNoticeNames.status } },
+    { role: { value: 'complementary' }, name: { value: 'aside' } },
+  ]), { regions: [connectionNoticeNames.offline], statuses: [connectionNoticeNames.status] });
+  assert.deepEqual(connectionAxSummary(undefined), { regions: [], statuses: [] });
+});
+
+test('connection DOM check ignores legacy status asides outside the notice section', () => {
+  const status = { getAttribute: name => name === 'aria-label' ? connectionNoticeNames.status : null };
+  const section = { getAttribute: () => 'connection-notice-heading', contains: element => element === status,
+    querySelectorAll: selector => selector === 'aside[role="status"]' ? [] : [{ tagName: 'ASIDE' }] };
+  const connectedSession = { querySelectorAll: () => [{ textContent: connectedSessionText }] };
+  const h1 = { tagName: 'H1', id: '', textContent: 'Workspace' };
+  const document = {
+    activeElement: h1,
+    querySelector: selector => selector === 'aside.session-notice.is-connected' ? connectedSession : null,
+    querySelectorAll(selector) {
+      if (selector === 'section.connection-notice') return [section];
+      if (selector === '[role="status"]') return [status];
+      if (selector === 'aside[role="status"]') return [{ tagName: 'ASIDE' }]; // unrelated session notice
+      if (selector === 'aside.session-notice.is-connected') return connectedSession;
+      throw new Error(`unexpected selector ${selector}`);
+    },
+    getElementById: () => ({ textContent: connectionNoticeNames.offline }),
+  };
+  const storage = { length: 0, key: () => null, getItem: () => null };
+  const performance = { getEntriesByType: type => type === 'navigation' ? [{}] : [] };
+  const state = runInNewContext(measureConnectionState, {
+    document, window: { __auditConnection: { token: 't', events: [] } }, navigator: { onLine: false },
+    location: { href: 'http://x/nested/' }, history: { length: 1 }, performance, localStorage: storage, sessionStorage: storage,
+  });
+  assert.equal(state.dom.sections, 1);
+  assert.equal(state.dom.statuses, 1);
+  assert.equal(state.dom.invalidAsides, 0);
+  assert.equal(state.sessionAuthenticated, true);
+});
+
+// A modeled browser: emulation toggles navigator.onLine and dispatches trusted events.
+function connectionModel({ failAt = null, sideEffect = null, revalidationDelayMs = 750, authenticatedSession = true } = {}) {
+  const calls = []; const shots = []; const fulfilled = []; let online = true; let installed = false; let removed = false;
+  const events = [];
+  const state = () => {
+    const name = events.length ? (online ? connectionNoticeNames.reconnected : connectionNoticeNames.offline) : null;
+    const onlineAt = events.find(event => event.type === 'online')?.atMs;
+    const fetches = onlineAt === undefined ? [] : [{ path: '/nested/api/v1/bootstrap', startTime: onlineAt + revalidationDelayMs }];
+    return { token: 't', events: [...events], onLine: online, href: 'http://x/nested/', historyLength: 1, navigations: 1,
+      resources: fulfilled.length, fetches, local: sideEffect === 'storage' && events.length ? '{"x":"1"}' : '{}', session: '{}', focus: 'h1 Workspace',
+      sessionAuthenticated: authenticatedSession,
+      dom: { sections: name ? 1 : 0, sectionName: name, statuses: name ? 1 : 0, statusInSection: !!name, invalidAsides: 0 } };
+  };
+  const cdp = { async call(method, params) {
+    calls.push([method, params]);
+    if (method === failAt) throw new Error(`modeled ${method} failure`);
+    if (method === 'Network.emulateNetworkConditions' && params.offline === online) {
+      online = !params.offline;
+      if (installed && !removed) events.push({ type: online ? 'online' : 'offline', isTrusted: true, onLine: online, atMs: calls.length * 10 });
+      if (online) fulfilled.push({ method: sideEffect === 'post' ? 'POST' : 'GET', path: '/bootstrap', status: 200 });
+    }
+    if (method === 'Accessibility.getFullAXTree') return { nodes: [
+      { role: { value: 'region' }, name: { value: online ? connectionNoticeNames.reconnected : connectionNoticeNames.offline } },
+      { role: { value: 'status' }, name: { value: connectionNoticeNames.status } }] };
+    return {};
+  } };
+  const evaluate = async (_, expression) => {
+    if (expression === measureConnectionState) return state();
+    if (expression.includes('__auditConnection = {')) { installed = true; return 't'; }
+    if (expression.includes('remove()')) { removed = true; return online; }
+    throw new Error('unexpected expression');
+  };
+  const waitForValue = async (check, label) => { for (let i = 0; i < 3; i++) { const value = await check(); if (value) return value; } throw new Error(label); };
+  const run = () => qualifyConnectionNotice({ tab: { sessionId: 's' }, cdp, evaluate, fulfilled, waitForValue,
+    capture: async (_, name) => { shots.push(name); }, delay: async () => {} });
+  return { run, calls, shots, isOnline: () => online, isRemoved: () => removed };
+}
+
+test('connection scenario records clean evidence and restores network, listeners and accessibility', async () => {
+  const model = connectionModel();
+  const evidence = await model.run();
+  assert.deepEqual(connectionNoticeFailures(evidence), []);
+  assert.deepEqual(model.shots, [connectionNoticeShots.offline, connectionNoticeShots.reconnected]);
+  assert.ok(model.isOnline() && model.isRemoved());
+  assert.equal(model.calls.filter(([method]) => method === 'Accessibility.disable').length, 1);
+  for (const sideEffect of ['post', 'storage']) {
+    assert.ok(connectionNoticeFailures(await connectionModel({ sideEffect }).run()).length > 0, sideEffect);
+  }
+  for (const revalidationDelayMs of [249, 2251]) {
+    assert.ok(connectionNoticeFailures(await connectionModel({ revalidationDelayMs }).run()).some(failure => failure.includes('session revalidation timing')),
+      `revalidation delay ${revalidationDelayMs} must fail`);
+  }
+  const signedOut = connectionModel({ authenticatedSession: false });
+  await assert.rejects(signedOut.run(), /requires an authenticated local session/);
+  assert.ok(signedOut.isOnline() && signedOut.isRemoved(), 'signed-out precondition failure must still clean up');
+});
+
+test('connection scenario restores the tab even when a step fails mid-way', async () => {
+  for (const failAt of ['Accessibility.getFullAXTree', 'Accessibility.enable']) {
+    const model = connectionModel({ failAt });
+    await assert.rejects(model.run(), new RegExp(failAt));
+    assert.ok(model.isOnline(), `${failAt}: network left offline`);
+    assert.ok(model.isRemoved(), `${failAt}: probe listeners left installed`);
+    const last = model.calls.filter(([method]) => method === 'Network.emulateNetworkConditions').at(-1);
+    if (last) assert.deepEqual(last[1], { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 });
+  }
 });
