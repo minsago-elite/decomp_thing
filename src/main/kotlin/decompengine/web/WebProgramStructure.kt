@@ -169,8 +169,15 @@ internal class WebProgramStructureIndex(
         val slots = IntArray(capacity)
         val mask = capacity - 1
         fun slot(name: String): Int {
-            val hash = name.hashCode()
-            var slot = (hash xor (hash ushr 16)) and mask
+            var hash = name.hashCode()
+            // String.hashCode is predictable; avalanche all bits before masking so ordinary
+            // sequential names do not create a long linear-probe cluster at this capacity.
+            hash = hash xor (hash ushr 16)
+            hash *= 0x7feb352d
+            hash = hash xor (hash ushr 15)
+            hash *= 0x846ca68b.toInt()
+            hash = hash xor (hash ushr 16)
+            var slot = hash and mask
             // Bound hostile equal-hash chains; the fallback uses HashMap's String-key tree bins.
             repeat(64) {
                 val entry = slots[slot]
@@ -203,14 +210,23 @@ internal class WebProgramStructureIndex(
         return groups
     }
 
-    private fun collisionGroupsFallback(): Map<String, List<Pair<WebStructureKind, Int>>> =
-        HashMap<String, MutableList<Pair<WebStructureKind, Int>>>().also { groups ->
-            for (table in tables) if (table.kind != WebStructureKind.TYPE) {
-                for (row in 0 until table.size) table.names[row]?.let { name ->
-                    groups.getOrPut(name) { ArrayList(1) } += table.kind to row
+    private fun collisionGroupsFallback(): Map<String, List<Pair<WebStructureKind, Int>>> {
+        val firstRowByName = HashMap<String, Int>()
+        val groups = HashMap<String, MutableList<Pair<WebStructureKind, Int>>>()
+        for (kind in 0..1) {
+            val table = if (kind == 0) table(WebStructureKind.FUNCTION) else table(WebStructureKind.GLOBAL)
+            for (row in 0 until table.size) {
+                val name = table.names[row] ?: continue
+                val first = firstRowByName.putIfAbsent(name, (row shl 1) or kind)
+                if (first != null) {
+                    val firstKind = if (first and 1 == 0) WebStructureKind.FUNCTION else WebStructureKind.GLOBAL
+                    val firstRow = first ushr 1
+                    groups.getOrPut(name) { arrayListOf(firstKind to firstRow) } += table.kind to row
                 }
             }
-        }.filterValues { it.size > 1 }
+        }
+        return groups
+    }
 
     fun table(kind: WebStructureKind): WebStructureTable = tables[kind.ordinal]
     val available: Boolean get() = outcome.state == "available"
@@ -468,8 +484,21 @@ internal object WebProgramStructureBuilder {
         }
         fun path(value: String) {
             if (value.length > 4096) throw WebStructureFailure("limit-exceeded", "PLAN_PATH_EXCEEDED")
-            if (value.isEmpty() || value.startsWith('/') || value.any { it == '\\' || it == ':' || it.code < 32 || it.code == 127 } ||
-                value.split('/').any { it.isEmpty() || it == "." || it == ".." }) invalid()
+            if (value.isEmpty() || value[0] == '/') invalid()
+            var segmentStart = 0
+            for (index in value.indices) {
+                val character = value[index]
+                if (character == '\\' || character == ':' || character.code < 32 || character.code == 127) invalid()
+                if (character == '/') {
+                    val length = index - segmentStart
+                    if (length == 0 || length == 1 && value[segmentStart] == '.' ||
+                        length == 2 && value[segmentStart] == '.' && value[segmentStart + 1] == '.') invalid()
+                    segmentStart = index + 1
+                }
+            }
+            val finalLength = value.length - segmentStart
+            if (finalLength == 0 || finalLength == 1 && value[segmentStart] == '.' ||
+                finalLength == 2 && value[segmentStart] == '.' && value[segmentStart + 1] == '.') invalid()
             budget.string(value, WebStructureCharge.PLAN_MODULE_STRINGS)
         }
         if (plan.modules.size > WebSourceCatalogSnapshot.MAXIMUM_FILES) throw WebStructureFailure("limit-exceeded", "PLAN_MODULES_EXCEEDED")
