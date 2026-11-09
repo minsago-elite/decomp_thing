@@ -351,7 +351,7 @@ it('offers bounded anchored continuation beyond 2,000 refs without duplicate adm
   fireEvent.click(button('Older branches and tags')!);
   await waitFor(() => expect(button('Switch to topic2000')).toBeTruthy());
   expect(button('Older branches and tags')).toBeUndefined();
-  await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Branches' })));
+  await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Branches and tags' })));
   expect(button('More branches and tags')).toBeUndefined();
   fireEvent.click(button('Switch to topic2000')!);
   await waitFor(() => expect(transport.post).toHaveBeenCalledOnce());
