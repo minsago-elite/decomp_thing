@@ -28,9 +28,10 @@ test('aggregation retains all twenty samples and uses nearest-rank p95 and media
 
 test('failures and raw failed requests remain in outcomes and refuse pass', () => {
   const samples = Array.from({length:20},()=>({status:'passed',firstPageMs:1,rawFailedRequests:0}));
-  samples[3] = {status:'failed',firstPageMs:null,rawFailedRequests:0,error:'child exited'};
-  samples[8] = {status:'passed',firstPageMs:1,rawFailedRequests:1};
+  samples[3] = {status:'failed',firstPageMs:1000,rawFailedRequests:0,error:'slow sample later failed a separate assertion'};
+  samples[8] = {status:'passed',firstPageMs:900,rawFailedRequests:1};
   const r=summarizeColdSamples(samples); assert.equal(r.samples.length,20); assert.equal(r.failures,2); assert.equal(r.passed,false);
+  assert.equal(r.timedSamples,20); assert.equal(r.nearestRankP95FirstPageMs,900);
   assert.throws(()=>summarizeColdSamples(samples.slice(1)),/exactly 20/);
 });
 

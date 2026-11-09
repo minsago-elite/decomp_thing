@@ -42,12 +42,16 @@ export function summarizeColdSamples(samples, expected = COLD_SAMPLE_COUNT) {
   const validRawCount = sample => Number.isSafeInteger(sample?.rawFailedRequests) && sample.rawFailedRequests >= 0;
   const successful = samples.filter(s => s?.status === 'passed' && validRawCount(s) && s.rawFailedRequests === 0
     && Number.isFinite(s.firstPageMs) && s.firstPageMs >= 0);
-  const values = successful.map(s => s.firstPageMs).sort((a,b) => a-b);
+  // Failed runs remain failures, but any timing they produced still belongs in
+  // the latency distribution; otherwise a slow failed request could disappear
+  // from p95 simply because a separate assertion also failed.
+  const values = samples.filter(s => Number.isFinite(s?.firstPageMs) && s.firstPageMs >= 0)
+    .map(s => s.firstPageMs).sort((a,b) => a-b);
   const failures = samples.reduce((n,s) => n + (s?.status === 'passed' ? 0 : 1)
     + (validRawCount(s) ? s.rawFailedRequests : 1), 0);
   const p95 = values.length ? values[Math.ceil(values.length * .95)-1] : null;
   const median = values.length ? (values.length % 2 ? values[(values.length-1)/2] : (values[values.length/2-1]+values[values.length/2])/2) : null;
-  return { expectedSamples: expected, sampleCount: samples.length, samples, successfulSamples: successful.length,
+  return { expectedSamples: expected, sampleCount: samples.length, timedSamples: values.length, samples, successfulSamples: successful.length,
     medianFirstPageMs: median, nearestRankP95FirstPageMs: p95,
     rawFailedRequests: samples.reduce((n,s)=>n+(validRawCount(s) ? s.rawFailedRequests : 0),0), invalidRawCountSamples: samples.filter(s=>!validRawCount(s)).length, failures,
     passed: samples.length === expected && successful.length === expected && failures === 0 };
