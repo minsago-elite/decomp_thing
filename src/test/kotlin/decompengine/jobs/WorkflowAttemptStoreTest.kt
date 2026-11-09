@@ -661,6 +661,46 @@ class WorkflowAttemptStoreTest {
         }
     }
 
+    @Test fun `no-op progress retention preserves optimistic listing while expiry invalidates it`() = withRoot { root ->
+        val job = upload(root)
+        lateinit var finished: WorkflowAttempt
+        lateinit var progressFile: Path
+        WorkflowAttemptStore.open(root, CLOCK).use { store ->
+            val queued = store.create(job, store.available(job).snapshot.version,
+                NewWorkflowAttempt(WorkflowKind.EXPLORE, LIMITS)).attempt
+            val running = store.transition(job, queued.runId, queued.version, WorkflowTransition.Start).attempt
+            finished = store.transition(job, running.runId, running.version,
+                WorkflowTransition.Finish(WorkflowRunState.COMPLETED, WorkflowTerminalReason.NO_CHANGES)).attempt
+            val reportDirectory = root.resolve("$job/reports/runs/${finished.runId}")
+            AgentProgressJournal(reportDirectory, "explore").use { }
+            progressFile = reportDirectory.resolve(AgentProgressJournal.FILE_NAME)
+
+            val observed = store.inspectForListing(job, { relative, maximum ->
+                Files.readAllBytes(root.resolve(relative)).also { assertTrue(it.size <= maximum) }
+            }) { captured ->
+                assertEquals(ProgressRetentionResult.RETAINED,
+                    store.expireProgressJournal(job, finished.runId, protectedFromRetention = false))
+                captured
+            }
+            assertEquals(job, observed.snapshot.jobId)
+            assertFalse(Json.parseToJsonElement(progressFile.readText()).jsonObject.containsKey("retentionExpiredAt"))
+        }
+
+        // An actual retention replacement still invalidates a listing that captured the old journal.
+        WorkflowAttemptStore.open(root, Clock.offset(CLOCK, java.time.Duration.ofHours(25))).use { store ->
+            assertCode("JOB_RECORD_UNAVAILABLE") {
+                store.inspectForListing(job, { relative, maximum ->
+                    Files.readAllBytes(root.resolve(relative)).also { assertTrue(it.size <= maximum) }
+                }) { captured ->
+                    assertEquals(ProgressRetentionResult.EXPIRED,
+                        store.expireProgressJournal(job, finished.runId, protectedFromRetention = false))
+                    captured
+                }
+            }
+            assertTrue(Json.parseToJsonElement(progressFile.readText()).jsonObject.containsKey("retentionExpiredAt"))
+        }
+    }
+
     @Test fun `pin mutations use run CAS and no-op pins do not rewrite metadata`() = withRoot { root ->
         val job = upload(root)
         val another = upload(root)
