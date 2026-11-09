@@ -249,6 +249,16 @@ export async function qualifySourceTree({ fixture, makeTarget, cdp, evaluate, re
   }
   await cdp.call('Page.addScriptToEvaluateOnNewDocument', { source: `(() => {
     const observations = []; Object.defineProperty(window, '__sourceTreeFetchObservations', { value: observations });
+    Object.defineProperty(window, '__sourceTreeInteractionFeedbackMs', { value: null, writable: true });
+    const feedbackObserver = new MutationObserver(() => {
+      if (!Number.isFinite(window.__sourceTreeInteractionStart) || window.__sourceTreeInteractionFeedbackMs !== null) return;
+      const status = document.querySelector('.source-navigation p[role="status"]');
+      if (status?.textContent.trim().startsWith('Loading recorded inputs')) {
+        window.__sourceTreeInteractionFeedbackMs = performance.now() - window.__sourceTreeInteractionStart;
+        window.__sourceTreeInteractionStart = null;
+      }
+    });
+    feedbackObserver.observe(document, { subtree: true, childList: true, characterData: true });
     const original = window.fetch;
     window.fetch = function(input, options) {
       const url = new URL(typeof input === 'string' ? input : input.url, location.href);
@@ -315,13 +325,13 @@ export async function qualifySourceTree({ fixture, makeTarget, cdp, evaluate, re
       maximumUrlCharacters = Math.max(maximumUrlCharacters, (await evaluate(target, 'location.href')).length);
       if (page < pageCount - 1) {
         await selectButton(evaluate, target, 'Next directory page');
-        if (page < 50) await evaluate(target, 'window.__sourceTreeInteractionStart = performance.now()');
+        if (page < 50) await evaluate(target, 'window.__sourceTreeInteractionFeedbackMs = null; window.__sourceTreeInteractionStart = performance.now()');
         const started = performance.now();
         await dispatchEnter(cdp, target);
         await ready(target, `document.querySelector('h2')?.textContent === 'modules' && document.activeElement === document.querySelector('h2') && document.querySelector('ul[aria-label="Recorded source inputs"]')?.children.length > 0`, `keyboard directory page ${page + 2}`);
         pageLatenciesMs.push(Math.round((performance.now() - started) * 100) / 100);
         if (page < 50) {
-          const feedbackMs = await evaluate(target, 'performance.now() - window.__sourceTreeInteractionStart');
+          const feedbackMs = await evaluate(target, 'window.__sourceTreeInteractionFeedbackMs');
           assert.ok(Number.isFinite(feedbackMs) && feedbackMs >= 0,
             `No local feedback measurement for source interaction ${page + 1}`);
           localFeedbackSamplesMs.push(Math.round(feedbackMs * 100) / 100);
