@@ -288,7 +288,17 @@ data class ModulePlan(
 
 internal fun ModulePlan.appendCanonicalJson(output: Appendable) {
     output.append("{\n  \"schemaVersion\": ").append(schemaVersion.toString()).append(",\n  \"modules\": [")
-    modules.sortedBy { it.id }.forEachIndexed { index, module ->
+    var modulesAreSorted = true
+    var moduleIndex = 1
+    while (moduleIndex < modules.size) {
+        if (modules[moduleIndex - 1].id.compareTo(modules[moduleIndex].id) > 0) {
+            modulesAreSorted = false
+            break
+        }
+        moduleIndex++
+    }
+    val canonicalModules = if (modulesAreSorted) modules else modules.sortedBy { it.id }
+    canonicalModules.forEachIndexed { index, module ->
         if (index > 0) output.append(',')
         output.append("    {\n      \"id\": ").appendJsonString(module.id)
         output.append(",\n      \"sourcePath\": ").appendJsonString(module.sourcePath)
