@@ -210,23 +210,19 @@ class WorkflowAttemptStore private constructor(
      */
     internal fun expireProgressJournal(jobId: String, runId: String, protectedFromRetention: Boolean,
         retention: java.time.Duration = AgentProgressJournalRetention.DEFAULT_TERMINAL_RETENTION,
-        fault: (ProgressRetentionFaultPoint) -> Unit = {}): ProgressRetentionResult = withJob(jobId, invalidateListing = false) { directory ->
-        val attempt = available(jobId, directory).snapshot.attempts.singleOrNull { it.runId == runId }
-            ?: fail("RUN_NOT_FOUND", "The requested attempt does not belong to this job.")
-        if (protectedFromRetention || attempt.progressRetentionPinned) ProgressRetentionResult.RETAINED else try {
-            AgentProgressJournalMaintenance.expire(root, attempt, clock.instant(), retention, fault).also { result ->
-                // A no-op retention scan is common and must not make an optimistic dashboard read
-                // look like a concurrent metadata mutation. Only an actual journal replacement
-                // advances the epoch. This still runs under the job stripe held by withJob.
-                if (result == ProgressRetentionResult.EXPIRED) invalidateListingEpoch(jobId)
+        fault: (ProgressRetentionFaultPoint) -> Unit = {}): ProgressRetentionResult {
+        var filesystemPhase = false
+        return withJob(jobId, invalidateOnSuccess = { filesystemPhase }) { directory ->
+            val attempt = available(jobId, directory).snapshot.attempts.singleOrNull { it.runId == runId }
+                ?: fail("RUN_NOT_FOUND", "The requested attempt does not belong to this job.")
+            if (protectedFromRetention || attempt.progressRetentionPinned) ProgressRetentionResult.RETAINED else try {
+                AgentProgressJournalMaintenance.expire(root, attempt, clock.instant(), retention, fault,
+                    beforeFilesystem = { filesystemPhase = true })
+            } catch (failure: Exception) {
+                throw WorkflowStoreException("PROGRESS_RETENTION_FAILED",
+                    "Progress retention did not finish. Preserve the journal and pending retention file, then retry maintenance with storage ownership.",
+                    outcomeUnknown = true, cause = failure)
             }
-        } catch (failure: Exception) {
-            // A failed retention publication may have left a pending marker or uncertain file state.
-            // Conservatively invalidate a listing capture even though the operation did not return.
-            invalidateListingEpoch(jobId)
-            throw WorkflowStoreException("PROGRESS_RETENTION_FAILED",
-                "Progress retention did not finish. Preserve the journal and pending retention file, then retry maintenance with storage ownership.",
-                outcomeUnknown = true, cause = failure)
         }
     }
 
@@ -675,7 +671,8 @@ class WorkflowAttemptStore private constructor(
         throw WorkflowStoreException("CORRUPT_WORKFLOW_STATE", "The workflow state is invalid; preserve workflow-state.json and restore a verified backup before retrying.", cause = failure)
     }
 
-    private fun <T> withJob(jobId: String, invalidateListing: Boolean = true, operation: (Path) -> T): T = lifetime.read {
+    private fun <T> withJob(jobId: String, invalidateListing: Boolean = true,
+        invalidateOnSuccess: () -> Boolean = { true }, operation: (Path) -> T): T = lifetime.read {
         ensureOpen()
         requireJobId(jobId)
         val stripe = (jobId.hashCode() and Int.MAX_VALUE) % stripes.size
@@ -683,11 +680,15 @@ class WorkflowAttemptStore private constructor(
             ensureOpen()
             val directory = root.resolve(jobId)
             if (!Files.isDirectory(directory, NOFOLLOW_LINKS)) fail("JOB_NOT_FOUND", "The job storage directory is missing or invalid.")
-            try { operation(directory) } finally {
+            var invalidate = invalidateListing
+            try {
+                val result = operation(directory)
+                if (invalidateListing) invalidate = invalidateOnSuccess()
+                result
+            } finally {
                 // Invalidate even a failed/uncertain command, and conservatively include colliding
-                // jobs. Explicitly non-invalidating operations must advance the epoch themselves
-                // if they actually change durable listing metadata.
-                if (invalidateListing) listingEpochs[stripe] = Any()
+                // jobs. Successful no-op operations may prove that no filesystem work began.
+                if (invalidate) listingEpochs[stripe] = Any()
             }
         }
     }
