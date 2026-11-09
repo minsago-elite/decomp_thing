@@ -139,7 +139,9 @@ function LiveActivity({ jobId, runId, basePath, windowLinks }: { jobId: string; 
             onConnected: () => {
               // Only report live delivery after the server accepted the leased stream.
               setPeriodic(false); streamLimitFailures = 0; streamRetryAt = 0;
-              failures.current = 0; setRetry(0);
+              // Headers alone do not prove the stream is healthy; only an event or a
+              // sufficiently long lease resets the consecutive transport failures.
+              setRetry(0);
             } })) {
             if (controller.signal.aborted) return;
             if (!accept([event], event.cursor)) return;

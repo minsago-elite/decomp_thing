@@ -4,6 +4,7 @@ import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 import { sampleProcessTree } from './soak626/resources.mjs';
 import { waitForSuccessfulStreamOpen } from './soak626/stream-renewal.mjs';
+import { routeFeedbackExpression } from './soak626/route-feedback.mjs';
 
 const RUN_PREFIX = 'run_fixture_soak_';
 const JOB_PREFIX = 'c';
@@ -82,7 +83,22 @@ export async function seedSoak(root) {
 
 const activityRows = `Array.from(document.querySelectorAll('ol[aria-label="Activity observations"] li span')).map(node => node.textContent)`;
 
-async function clickHref(tab, evaluate, href) {
+async function clickHref(tab, evaluate, href, measureRouteCommit = false) {
+  if (measureRouteCommit) {
+    const target = new URL(href, 'http://soak.invalid');
+    const heading = target.pathname === '/nested/' ? { id: 'workspace-title', text: 'Your work, with its evidence' }
+      : /^\/nested\/jobs\/[^/]+$/.test(target.pathname) ? { id: 'job-title', text: 'Job overview' }
+        : /^\/nested\/jobs\/[^/]+\/runs\/[^/]+$/.test(target.pathname) ? { id: 'attempt-title', text: 'Workflow attempt' }
+          : /^\/nested\/jobs\/[^/]+\/runs\/[^/]+\/revisions\/[^/]+\/sources\/root$/.test(target.pathname)
+            ? { id: 'source-title', text: 'Recorded source inputs' } : null;
+    assert.ok(heading, `No route-heading expectation is defined for measured route ${target.pathname}`);
+    const result = await evaluate(tab, routeFeedbackExpression({ href, headingId: heading.id, headingText: heading.text }));
+    assert.equal(result.found, true, `Expected in-app link ${href}; destination route measurement found no link`);
+    assert.equal(result.address, target.pathname + target.search, `In-app route did not synchronously publish ${href}`);
+    assert.equal(result.settled, true, `Destination heading did not commit and receive focus for ${href}`);
+    assert.equal(result.settledAddress, target.pathname + target.search, `Destination changed before route feedback completed for ${href}`);
+    return result.elapsedMs;
+  }
   const started = Date.now();
   const result = await evaluate(tab, `(() => { const links = [...document.querySelectorAll('a')]; const link = links.find(a => a.getAttribute('href') === ${JSON.stringify(href)}); if (!link) return { found: false, path: location.pathname, heading: document.querySelector('h1')?.textContent, text: document.body.innerText.slice(0, 900), links: links.map(a => a.getAttribute('href')).slice(0, 32) }; link.click(); return { found: true, address: location.pathname + location.search }; })()`);
   assert.equal(result.found, true, `Expected in-app link ${href}; page ${JSON.stringify(result)}`);
@@ -214,7 +230,7 @@ export async function qualifySoak({ fixture, tab, cdp, evaluate, ready, origin, 
     const job = fixture.jobs[slot % fixture.jobs.length];
     const routeStarted = Date.now();
     const current = await evaluate(tab, 'location.pathname');
-    if (current !== '/nested/') feedbackSamples.push(await clickHref(tab, evaluate, '/nested/'));
+    if (current !== '/nested/') feedbackSamples.push(await clickHref(tab, evaluate, '/nested/', true));
     await ready(tab, `location.pathname === '/nested/'`, `dashboard before slot ${slot}`);
     try {
       await ready(tab, `!!document.querySelector('ul[aria-label="Uploaded jobs"] a[href="/nested/jobs/${job.jobId}"]')`, `job ${job.index} visible before slot ${slot}`);
@@ -232,7 +248,7 @@ export async function qualifySoak({ fixture, tab, cdp, evaluate, ready, origin, 
       throw new Error(`Job library did not expose job ${job.index}: ${JSON.stringify(listingFailure)}; ${failure.message}`);
     }
     stage = `slot-${slot}-job`;
-    feedbackSamples.push(await clickHref(tab, evaluate, `/nested/jobs/${job.jobId}`));
+    feedbackSamples.push(await clickHref(tab, evaluate, `/nested/jobs/${job.jobId}`, true));
     try {
       await ready(tab, `location.pathname === '/nested/jobs/${job.jobId}' && document.body.innerText.includes(${JSON.stringify(job.filename)})`, `selected job ${job.index}`);
     } catch (failure) {
@@ -250,12 +266,12 @@ export async function qualifySoak({ fixture, tab, cdp, evaluate, ready, origin, 
       throw new Error(`Selected job page did not settle: ${JSON.stringify(responseSummary)}; ${failure.message}`);
     }
     stage = `slot-${slot}-attempt`;
-    feedbackSamples.push(await clickHref(tab, evaluate, `/nested/jobs/${job.jobId}/runs/${job.runId}`));
+    feedbackSamples.push(await clickHref(tab, evaluate, `/nested/jobs/${job.jobId}/runs/${job.runId}`, true));
     await ready(tab, `location.pathname === '/nested/jobs/${job.jobId}/runs/${job.runId}'`, `attempt ${job.runId}`);
     const sourceDirectory = `/nested/jobs/${job.jobId}/runs/${job.runId}/revisions/${job.revisionId}/sources/root`;
     stage = `slot-${slot}-source-directory`;
     await ready(tab, `!!document.querySelector('a[href=${JSON.stringify(sourceDirectory)}]')`, `attempt source link ${job.index}`);
-    feedbackSamples.push(await clickHref(tab, evaluate, sourceDirectory));
+    feedbackSamples.push(await clickHref(tab, evaluate, sourceDirectory, true));
     await ready(tab, `location.pathname === ${JSON.stringify(sourceDirectory)} && document.body.innerText.includes('Makefile')`, `source directory ${job.index}`);
     const sourceHref = await evaluate(tab, `([...document.querySelectorAll('a')].find(link => link.textContent.includes('Makefile'))?.getAttribute('href'))`);
     assert.ok(sourceHref && sourceHref.includes('/source-files/'), 'Source directory did not expose its authenticated file route');
@@ -397,7 +413,7 @@ export async function qualifySoak({ fixture, tab, cdp, evaluate, ready, origin, 
         fdCount: checkpointProcess.fdCount, processCount: checkpointProcess.processCount });
       await onProgress({ minute, slot: slot + 1, slots, elapsedMs: activeScheduleMs, wallElapsedMs: Date.now() - startedAt });
       if (slot + 1 < slots) {
-        feedbackSamples.push(await clickHref(tab, evaluate, '/nested/'));
+        feedbackSamples.push(await clickHref(tab, evaluate, '/nested/', true));
         await ready(tab, `location.pathname === '/nested/'`, `resume after minute ${minute} checkpoint`);
       }
     }
@@ -406,7 +422,7 @@ export async function qualifySoak({ fixture, tab, cdp, evaluate, ready, origin, 
     // drained and closed that stream. Keep this document foregrounded for each natural renewal.
     const finalJob = fixture.jobs[(slots - 1) % fixture.jobs.length];
     const finalAttempt = `/nested/jobs/${finalJob.jobId}/runs/${finalJob.runId}`;
-    feedbackSamples.push(await clickHref(tab, evaluate, '/nested/'));
+    feedbackSamples.push(await clickHref(tab, evaluate, '/nested/', true));
     await ready(tab, `location.pathname === '/nested/'`, 'dashboard before final renewal');
     await ready(tab, `(() => { const button = [...document.querySelectorAll('button')].find(item => item.textContent === 'Refresh jobs'); return !!button && !button.disabled; })()`,
       'final dashboard listing settled');
@@ -438,9 +454,9 @@ export async function qualifySoak({ fixture, tab, cdp, evaluate, ready, origin, 
         throw new Error(`Final dashboard refresh did not restore the selected fixture job: ${JSON.stringify(listingSummary)}; ${failure.message}`);
       }
     }
-    feedbackSamples.push(await clickHref(tab, evaluate, `/nested/jobs/${finalJob.jobId}`));
+    feedbackSamples.push(await clickHref(tab, evaluate, `/nested/jobs/${finalJob.jobId}`, true));
     await ready(tab, `location.pathname === '/nested/jobs/${finalJob.jobId}' && document.body.innerText.includes(${JSON.stringify(finalJob.filename)})`, 'job before final renewal');
-    feedbackSamples.push(await clickHref(tab, evaluate, finalAttempt));
+    feedbackSamples.push(await clickHref(tab, evaluate, finalAttempt, true));
     await ready(tab, `location.pathname === ${JSON.stringify(finalAttempt)}`, 'final activity attempt');
     await ready(tab, `[...document.querySelectorAll('button')].some(button => button.textContent === 'Follow activity')`, 'final Activity control');
     await evaluate(tab, ` [...document.querySelectorAll('button')].find(button => button.textContent === 'Follow activity').click()`);

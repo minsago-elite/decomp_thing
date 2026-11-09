@@ -88,7 +88,12 @@ it('falls back to bounded polling after two short failed connections without res
   await advance(1000);
   await act(async () => { await Promise.resolve(); two.close(); });
   transport.get.mockResolvedValueOnce(snapshot).mockResolvedValueOnce({ data: { items: [], nextCursor: page.data.nextCursor, hasMore: false } });
-  await advance(2000);
+  await advance(0);
+  expect(screen.getByRole('status').textContent).toContain('retry 2 of 4');
+  const readsBeforeRetry = transport.get.mock.calls.length;
+  await advance(1999);
+  expect(transport.get.mock.calls).toHaveLength(readsBeforeRetry);
+  await advance(1);
   expect(fetcher).toHaveBeenCalledTimes(2);
   expect(transport.get.mock.calls.at(-1)![1]).toContain(`transport=poll&limit=199&after=${page.data.nextCursor}`);
   expect(screen.getByRole('status').textContent).toContain('Using periodic refresh');

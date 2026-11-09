@@ -215,7 +215,11 @@ the final route transition, first stream acquisition has a 45-second bound to al
 lease to finish cleanup and one capped stream-limit retry cycle.
 
 The driver samples the JVM process tree's RSS and descriptor count once per second, renderer heap,
-stream count, process start identities, and declared route/event timings. Renderer GC is forced
+stream count, process start identities, and declared route/event timings. Route-feedback samples
+start immediately before in-app link activation and stop when the expected destination path and
+query, exact main heading, and heading focus are observed in the browser. The timer runs in the
+page, so CDP command-delivery delay is excluded; this measures route-heading commit and focus, not
+completion of all route data reads or presentation of every pixel. Renderer GC is forced
 before the initial heap baseline, at each of the four five-minute checkpoints, and after the final
 renewal dwell before the final heap sample. The soak inherits the D0 browser-heap limits (128 MiB after
 initial browsing, 192 MiB at the end, and at most 16 MiB growth between adjacent post-GC
