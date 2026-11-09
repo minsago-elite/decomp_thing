@@ -101,7 +101,7 @@ export async function runColdSamples({ driver, driverArgs, count = COLD_SAMPLE_C
       processGroupId = child.pid;
       const retain = (current, chunk) => (current + chunk.toString('utf8')).slice(-1_048_576);
       const outcome = await new Promise(resolveOutcome => {
-        let settled = false, timedOut = false;
+        let settled = false;
         const settle = result => { if (!settled) { settled = true; resolveOutcome(result); } };
         child.stdout.on('data', b => { stdout = retain(stdout, b); });
         child.stderr.on('data', b => { stderr = retain(stderr, b); });
@@ -155,7 +155,8 @@ export async function runColdSamples({ driver, driverArgs, count = COLD_SAMPLE_C
         archiveSha256: report?.archiveSha256 ?? null, applicationJarSha256: report?.applicationJarSha256 ?? null,
         testDirectory: report?.testDirectory ?? null, browserProfileDirectory: report?.browserProfileDirectory ?? null,
         runtimeProcesses: report?.runtimeProcesses ?? null,
-        shutdownConfirmed, processTreeForced, timedOut, error: outcome.error ? String(outcome.error.message).slice(0, 512)
+        shutdownConfirmed, processTreeForced, timedOut, error: outcome.timeout ? 'Cold sample timed out'
+          : outcome.error ? String(outcome.error.message).slice(0, 512)
           : evidence?.failures?.[0] ?? (processTreeForced ? 'Forced process-group kill was required after the packaged driver exited'
             : evidence?.profileApplied !== profile.name ? 'Child report did not confirm the requested profile' : null),
         diagnostic });

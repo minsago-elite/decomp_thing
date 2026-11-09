@@ -82,3 +82,26 @@ test('runner fails closed on raw transport failures, missing source identities, 
   const noIdentity = summarizeColdSamples(Array.from({length:20},(_,i)=>({status:'passed',firstPageMs:i+1,rawFailedRequests:0})));
   assert.equal(noIdentity.nearestRankP95FirstPageMs,19);
 });
+
+test('runner records the timeout state even when the child exits during termination grace', { skip: process.platform !== 'linux' }, async () => {
+  let launches = 0;
+  const result = await runColdSamples({ driver:'/repo/driver.mjs', driverArgs:[], profile:'loopback', timeoutMs:1000,
+    spawnImpl:() => {
+      const index = ++launches;
+      const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.pid = 999999999;
+      const close = () => { child.stdout.end('Report: /tmp/child/report.json\n'); child.stderr.end(); child.emit('close', 0); };
+      setTimeout(close, index === 1 ? 1050 : 0);
+      child.kill = () => true;
+      return child;
+    },
+    reportReader: async () => ({ path:'/tmp/report.json', sha256:'a'.repeat(64),
+      report:{ status:'passed', driverCommit:'b'.repeat(40), archiveSha256:'c'.repeat(64), applicationJarSha256:'d'.repeat(64),
+        testDirectory:`/tmp/run-${launches}`, browserProfileDirectory:`/tmp/run-${launches}/profile`,
+        runtimeProcesses:{ applicationPid:1000+launches, applicationStartTimeTicks:2000+launches,
+          browserPid:3000+launches, browserStartTimeTicks:4000+launches },
+        structureCold:{ passed:true, firstPageMs:10, failedInventoryRequestCount:0, profileApplied:'loopback' } } }) });
+  assert.equal(result.samples[0].status, 'failed');
+  assert.equal(result.samples[0].timedOut, true);
+  assert.equal(result.samples[0].error, 'Cold sample timed out');
+  assert.equal(result.passed, false);
+});
