@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
+import { spawn } from 'node:child_process';
+import { readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { COLD_PROFILES, applyStructureProfile, makeChromeThrottlingCommands, summarizeColdSamples, runColdSamples,
   verifyStructureQualificationSource } from './packaged-browser-structure-cold.mjs';
@@ -139,4 +141,45 @@ test('runner records the timeout state even when the child exits during terminat
   assert.equal(result.samples[0].timedOut, true);
   assert.equal(result.samples[0].error, 'Cold sample timed out');
   assert.equal(result.passed, false);
+});
+
+test('runner confirms real process groups and escalates when a surviving descendant ignores termination', { skip: process.platform !== 'linux' }, async () => {
+  let launches = 0;
+  const descendantPids = [];
+  const result = await runColdSamples({ driver:'/unused/driver.mjs', driverArgs:[], profile:'loopback', processGroupGraceMs:150,
+    spawnImpl:(command, _args, options) => {
+      const index = ++launches;
+      const descendant = index === 1 ? `process.on('SIGTERM',()=>{}); setInterval(()=>{},1000);`
+        : index === 2 ? `setTimeout(()=>process.exit(0),30);`
+          : null;
+      const launch = descendant === null
+        ? `process.stdout.write('Report: /tmp/child/report.json\\n',()=>process.exit(0));`
+        : `const {spawn}=require('node:child_process'); const child=spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:'ignore'}); child.unref(); process.stdout.write('descendant-pid='+child.pid+'\\nReport: /tmp/child/report.json\\n',()=>process.exit(0));`;
+      return spawn(command, ['-e', launch], options);
+    },
+    reportReader:async stdout => {
+      const pid = Number(stdout.match(/descendant-pid=(\d+)/)?.[1]);
+      if (pid) {
+        assert.doesNotThrow(() => process.kill(pid, 0), 'the runner should observe the live descendant before cleanup');
+        descendantPids.push(pid);
+      }
+      const sample = launches;
+      return {path:`/tmp/report-${sample}.json`,sha256:String(sample),report:{status:'passed',driverCommit:'a'.repeat(40),
+        sourceIdentity:{verified:true,commit:'a'.repeat(40),sourceSha256:'e'.repeat(64),files:[]},archiveSha256:'b'.repeat(64),
+        applicationJarSha256:'c'.repeat(64),testDirectory:`/tmp/run-${sample}`,browserProfileDirectory:`/tmp/run-${sample}/profile`,
+        runtimeProcesses:{applicationPid:10_000+sample,applicationStartTimeTicks:20_000+sample,browserPid:30_000+sample,browserStartTimeTicks:40_000+sample},
+        structureCold:{passed:true,firstPageMs:10,failedInventoryRequestCount:0,profileApplied:'loopback'}}};
+    }});
+  assert.equal(launches,20);
+  assert.equal(result.samples[0].processTreeForced,true);
+  assert.equal(result.samples[0].shutdownConfirmed,true);
+  assert.equal(result.samples[0].status,'failed','forced cleanup must be reported as a failed cold sample');
+  assert.equal(result.samples[1].processTreeForced,false,'a descendant that exits during the grace window needs no escalation');
+  assert.equal(result.samples[1].shutdownConfirmed,true);
+  assert.equal(descendantPids.length,2);
+  for (const pid of descendantPids) {
+    const stat = await readFile(`/proc/${pid}/stat`, 'utf8').catch(error => error?.code === 'ENOENT' ? null : Promise.reject(error));
+    const state = stat === null ? null : stat.slice(stat.lastIndexOf(') ') + 2, stat.lastIndexOf(') ') + 3);
+    assert.ok(stat === null || state === 'Z', `owned descendant ${pid} should be gone or reaped after the sample closes`);
+  }
 });

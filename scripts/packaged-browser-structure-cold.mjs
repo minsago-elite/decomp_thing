@@ -77,11 +77,11 @@ async function waitForProcessGroupExit(pid, timeoutMs) {
   catch (error) { return error?.code === 'ESRCH'; }
 }
 
-async function forceStopProcessGroup(pid) {
+async function forceStopProcessGroup(pid, timeoutMs = 10_000) {
   if (process.platform !== 'linux' || !Number.isSafeInteger(pid) || pid <= 0) return false;
   try { process.kill(-pid, 'SIGKILL'); }
   catch (error) { if (error?.code === 'ESRCH') return true; }
-  return waitForProcessGroupExit(pid, 10_000);
+  return waitForProcessGroupExit(pid, timeoutMs);
 }
 
 export function summarizeColdSamples(samples, expected = COLD_SAMPLE_COUNT) {
@@ -122,9 +122,12 @@ export async function applyStructureProfile(cdp, sessionId, name = 'loopback') {
 }
 
 export async function runColdSamples({ driver, driverArgs, count = COLD_SAMPLE_COUNT, profile = 'loopback', spawnImpl = spawn,
-  timeoutMs = COLD_SAMPLE_TIMEOUT_MS, reportReader = readChildReport }) {
+  timeoutMs = COLD_SAMPLE_TIMEOUT_MS, processGroupGraceMs = 10_000, reportReader = readChildReport }) {
   if (count !== COLD_SAMPLE_COUNT) throw new RangeError(`cold structure run requires exactly ${COLD_SAMPLE_COUNT} samples`);
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 30 * 60_000) throw new RangeError('cold sample timeout is outside its allowed bound');
+  if (!Number.isSafeInteger(processGroupGraceMs) || processGroupGraceMs < 100 || processGroupGraceMs > 30_000) {
+    throw new RangeError('process group grace is outside its allowed bound');
+  }
   profile = structureProfile(typeof profile === 'string' ? profile : profile?.name);
   const samples = [];
   let activeChild = null, interrupted = null;
@@ -187,9 +190,9 @@ export async function runColdSamples({ driver, driverArgs, count = COLD_SAMPLE_C
         ? evidence.failedInventoryRequestCount : null;
       const firstPageMs = Number.isFinite(evidence?.firstPageMs) && evidence.firstPageMs >= 0 ? evidence.firstPageMs : null;
       processTreeConfirmed = outcome.shutdownConfirmed ?? (childClosed && processGroupId
-        ? await waitForProcessGroupExit(processGroupId, 10_000) : false);
+        ? await waitForProcessGroupExit(processGroupId, processGroupGraceMs) : false);
       const processTreeForced = !processTreeConfirmed && childClosed && processGroupId
-        ? await forceStopProcessGroup(processGroupId) : false;
+        ? await forceStopProcessGroup(processGroupId, processGroupGraceMs) : false;
       processTreeConfirmed ||= processTreeForced;
       const shutdownConfirmed = processTreeConfirmed;
       const diagnostic = stderr.length ? { byteLength: Buffer.byteLength(stderr), sha256: createHash('sha256').update(stderr).digest('hex') } : null;

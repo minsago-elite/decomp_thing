@@ -163,6 +163,9 @@ normal HttpOnly session cookie after the bootstrap fragment is scrubbed. The JVM
 browser are fresh for each sample, so server-side structure caches cannot warm later
 samples. The protocol does not clear the operating-system page cache; results are cold
 application-process/browser-profile measurements, not cold-storage measurements.
+The lifecycle control also launches real Linux process groups: it waits for an
+ordinary descendant to exit, escalates to a group kill when a surviving child
+ignores cleanup, and refuses to treat forced cleanup as a passing sample.
 Loopback first-page p95 is limited to 500 ms. The constrained profile applies 4× CPU
 slowdown, 100 ms round-trip latency, 10 Mbit/s download and 2 Mbit/s upload and limits
 first-page p95 to 1 s. Both profiles also gate the browser heap and JVM RSS budgets.
