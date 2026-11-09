@@ -91,7 +91,7 @@ export async function qualifyGitUiScale({ fixture, tab, cdp, evaluate, ready, br
     field.dispatchEvent(new Event('input', { bubbles: true })); return true;
   })()`);
   await key(cdp, tab, 'Enter', 'Enter', 13, '\r');
-  await ready(tab, `document.querySelector('ol[aria-label="History"]')?.children.length === ${PAGE_SIZE}`,
+  await ready(tab, `document.querySelector('ol[aria-label="History"]')?.children.length === ${GIT_HISTORY_PAGE_SIZE}`,
     'imported 10,000-commit Git history');
 
   const expected = [...fixture.manifest.commitIds].reverse();
@@ -99,15 +99,15 @@ export async function qualifyGitUiScale({ fixture, tab, cdp, evaluate, ready, br
   const observed = [];
   const readsStart = tab.requests.length;
   let maximumMountedGitRows = 0;
-  await ready(tab, `${rows}.length === ${PAGE_SIZE}`, 'Git scale UI initial history page');
+  await ready(tab, `${rows}.length === ${GIT_HISTORY_PAGE_SIZE}`, 'Git scale UI initial history page');
   const mountedResultRows = `document.querySelector('[aria-labelledby="git-title"]')?.querySelectorAll('li').length ?? 0`;
-  for (let page = 0; page < expected.length / PAGE_SIZE; page++) {
-    const expectedCount = Math.min((page + 1) * PAGE_SIZE, expected.length);
+  for (let page = 0; page < expected.length / GIT_HISTORY_PAGE_SIZE; page++) {
+    const expectedCount = Math.min((page + 1) * GIT_HISTORY_PAGE_SIZE, expected.length);
     const visibleCount = Math.min(expectedCount, MAX_VISIBLE_HISTORY_ROWS);
     await ready(tab, `${rows}.length === ${visibleCount}`, `Git scale UI history page ${page + 1}`, 15_000);
     assert.ok(visibleCount <= MAX_VISIBLE_HISTORY_ROWS, 'Git scale UI mounted more than 500 history rows');
-    const tail = await evaluate(tab, `[...${rows}].slice(-${PAGE_SIZE}).map(row => row.querySelector('code')?.title ?? null)`);
-    const expectedTail = expected.slice(page * PAGE_SIZE, expectedCount);
+    const tail = await evaluate(tab, `[...${rows}].slice(-${GIT_HISTORY_PAGE_SIZE}).map(row => row.querySelector('code')?.title ?? null)`);
+    const expectedTail = expected.slice(page * GIT_HISTORY_PAGE_SIZE, expectedCount);
     assertUiHistoryPage(tail, expectedTail, page + 1);
     const mountedPageRows = await evaluate(tab, mountedResultRows);
     maximumMountedGitRows = Math.max(maximumMountedGitRows, mountedPageRows);
@@ -121,7 +121,7 @@ export async function qualifyGitUiScale({ fixture, tab, cdp, evaluate, ready, br
       const newerDisabled = await evaluate(tab, `${button('Newer commits')}.disabled`);
       assert.equal(newerDisabled, false, `Git scale UI newer-window control was disabled at page ${page + 1}`);
     }
-    if (page + 1 === expected.length / PAGE_SIZE) {
+    if (page + 1 === expected.length / GIT_HISTORY_PAGE_SIZE) {
       assert.equal(hasContinuation, false, 'Exhausted Git history must not retain a continuation control');
       await ready(tab, `document.activeElement === document.querySelector('#git-history-title')`,
         'Git scale UI final history focus');
@@ -134,14 +134,14 @@ export async function qualifyGitUiScale({ fixture, tab, cdp, evaluate, ready, br
     await key(cdp, tab, 'Enter', 'Enter', 13, '\r');
     // The button remains mounted during every nonterminal append. Its focus must survive the
     // asynchronous response rather than falling back to body or an unrelated control.
-    const nextCount = Math.min(expectedCount + PAGE_SIZE, expected.length);
+    const nextCount = Math.min(expectedCount + GIT_HISTORY_PAGE_SIZE, expected.length);
     const nextVisibleCount = Math.min(nextCount, MAX_VISIBLE_HISTORY_ROWS);
-    const nextTail = expected.slice((page + 1) * PAGE_SIZE, nextCount);
+    const nextTail = expected.slice((page + 1) * GIT_HISTORY_PAGE_SIZE, nextCount);
     if (nextCount === expected.length) {
-      await ready(tab, `${rows}.length === ${nextVisibleCount} && JSON.stringify([...${rows}].slice(-${PAGE_SIZE}).map(row => row.querySelector('code')?.title ?? null)) === ${JSON.stringify(JSON.stringify(nextTail))} && document.activeElement === document.querySelector('#git-history-title')`,
+      await ready(tab, `${rows}.length === ${nextVisibleCount} && JSON.stringify([...${rows}].slice(-${GIT_HISTORY_PAGE_SIZE}).map(row => row.querySelector('code')?.title ?? null)) === ${JSON.stringify(JSON.stringify(nextTail))} && document.activeElement === document.querySelector('#git-history-title')`,
         `Git scale UI terminal focus after page ${page + 1}`, 15_000);
     } else {
-      await ready(tab, `${rows}.length === ${nextVisibleCount} && JSON.stringify([...${rows}].slice(-${PAGE_SIZE}).map(row => row.querySelector('code')?.title ?? null)) === ${JSON.stringify(JSON.stringify(nextTail))} && document.activeElement === ${button('Older commits')}`,
+      await ready(tab, `${rows}.length === ${nextVisibleCount} && JSON.stringify([...${rows}].slice(-${GIT_HISTORY_PAGE_SIZE}).map(row => row.querySelector('code')?.title ?? null)) === ${JSON.stringify(JSON.stringify(nextTail))} && document.activeElement === ${button('Older commits')}`,
         `Git scale UI continuation focus after page ${page + 1}`, 15_000);
     }
   }
@@ -149,19 +149,19 @@ export async function qualifyGitUiScale({ fixture, tab, cdp, evaluate, ready, br
   assert.equal(new Set(observed).size, expected.length, 'Git scale UI history repeated a commit');
   const historyReads = tab.requests.slice(readsStart).filter(request => request.method === 'GET' &&
     new URL(request.url).pathname.endsWith('/history')).length;
-  assert.equal(historyReads, expected.length / PAGE_SIZE - 1, 'Git scale UI continuation count did not match history requests');
+  assert.equal(historyReads, expected.length / GIT_HISTORY_PAGE_SIZE - 1, 'Git scale UI continuation count did not match history requests');
 
   // Exercise reverse navigation and return to the newest window so the large changed-file commits remain reachable.
   await evaluate(tab, `${button('Newer commits')}.focus()`);
   await key(cdp, tab, 'Enter', 'Enter', 13, '\r');
-  const reverseTail = expected.slice(expected.length - MAX_VISIBLE_HISTORY_ROWS - PAGE_SIZE,
+  const reverseTail = expected.slice(expected.length - MAX_VISIBLE_HISTORY_ROWS - GIT_HISTORY_PAGE_SIZE,
     expected.length - MAX_VISIBLE_HISTORY_ROWS);
-  await ready(tab, `JSON.stringify([...${rows}].slice(-${PAGE_SIZE}).map(row => row.querySelector('code')?.title ?? null)) === ${JSON.stringify(JSON.stringify(reverseTail))}`,
+  await ready(tab, `JSON.stringify([...${rows}].slice(-${GIT_HISTORY_PAGE_SIZE}).map(row => row.querySelector('code')?.title ?? null)) === ${JSON.stringify(JSON.stringify(reverseTail))}`,
     'Git scale UI newer-window navigation');
   await evaluate(tab, `${button('Older commits')}.focus()`);
   await key(cdp, tab, 'Enter', 'Enter', 13, '\r');
-  const finalTail = expected.slice(-PAGE_SIZE);
-  await ready(tab, `JSON.stringify([...${rows}].slice(-${PAGE_SIZE}).map(row => row.querySelector('code')?.title ?? null)) === ${JSON.stringify(JSON.stringify(finalTail))}`,
+  const finalTail = expected.slice(-GIT_HISTORY_PAGE_SIZE);
+  await ready(tab, `JSON.stringify([...${rows}].slice(-${GIT_HISTORY_PAGE_SIZE}).map(row => row.querySelector('code')?.title ?? null)) === ${JSON.stringify(JSON.stringify(finalTail))}`,
     'Git scale UI older-window return');
   let windowStart = expected.length - MAX_VISIBLE_HISTORY_ROWS;
   for (;;) {
@@ -170,13 +170,13 @@ export async function qualifyGitUiScale({ fixture, tab, cdp, evaluate, ready, br
     await evaluate(tab, `${button('Newer commits')}.focus()`);
     await key(cdp, tab, 'Enter', 'Enter', 13, '\r');
     windowStart = Math.max(0, windowStart - MAX_VISIBLE_HISTORY_ROWS);
-    const expectedWindowTail = expected.slice(windowStart + MAX_VISIBLE_HISTORY_ROWS - PAGE_SIZE,
+    const expectedWindowTail = expected.slice(windowStart + MAX_VISIBLE_HISTORY_ROWS - GIT_HISTORY_PAGE_SIZE,
       windowStart + MAX_VISIBLE_HISTORY_ROWS);
-    await ready(tab, `JSON.stringify([...${rows}].slice(-${PAGE_SIZE}).map(row => row.querySelector('code')?.title ?? null)) === ${JSON.stringify(JSON.stringify(expectedWindowTail))}`,
+    await ready(tab, `JSON.stringify([...${rows}].slice(-${GIT_HISTORY_PAGE_SIZE}).map(row => row.querySelector('code')?.title ?? null)) === ${JSON.stringify(JSON.stringify(expectedWindowTail))}`,
       'Git scale UI newer-window page');
   }
-  const initialWindowTail = expected.slice(MAX_VISIBLE_HISTORY_ROWS - PAGE_SIZE, MAX_VISIBLE_HISTORY_ROWS);
-  await ready(tab, `JSON.stringify([...${rows}].slice(-${PAGE_SIZE}).map(row => row.querySelector('code')?.title ?? null)) === ${JSON.stringify(JSON.stringify(initialWindowTail))}`,
+  const initialWindowTail = expected.slice(MAX_VISIBLE_HISTORY_ROWS - GIT_HISTORY_PAGE_SIZE, MAX_VISIBLE_HISTORY_ROWS);
+  await ready(tab, `JSON.stringify([...${rows}].slice(-${GIT_HISTORY_PAGE_SIZE}).map(row => row.querySelector('code')?.title ?? null)) === ${JSON.stringify(JSON.stringify(initialWindowTail))}`,
     'Git scale UI returned to newest history window');
 
   // The large changed-file boundary commits are old. Move back through loaded windows before inspecting them.
@@ -186,9 +186,9 @@ export async function qualifyGitUiScale({ fixture, tab, cdp, evaluate, ready, br
     await evaluate(tab, `${button('Older commits')}.focus()`);
     await key(cdp, tab, 'Enter', 'Enter', 13, '\r');
     targetWindowStart = Math.min(oldestBoundaryWindow, targetWindowStart + MAX_VISIBLE_HISTORY_ROWS);
-    const expectedWindowTail = expected.slice(targetWindowStart + MAX_VISIBLE_HISTORY_ROWS - PAGE_SIZE,
+    const expectedWindowTail = expected.slice(targetWindowStart + MAX_VISIBLE_HISTORY_ROWS - GIT_HISTORY_PAGE_SIZE,
       targetWindowStart + MAX_VISIBLE_HISTORY_ROWS);
-    await ready(tab, `JSON.stringify([...${rows}].slice(-${PAGE_SIZE}).map(row => row.querySelector('code')?.title ?? null)) === ${JSON.stringify(JSON.stringify(expectedWindowTail))}`,
+    await ready(tab, `JSON.stringify([...${rows}].slice(-${GIT_HISTORY_PAGE_SIZE}).map(row => row.querySelector('code')?.title ?? null)) === ${JSON.stringify(JSON.stringify(expectedWindowTail))}`,
       'Git scale UI navigated to historical boundary commits');
   }
 
@@ -215,7 +215,7 @@ export async function qualifyGitUiScale({ fixture, tab, cdp, evaluate, ready, br
   await inspectChangedFiles(fixture.manifest.commitIds[99], fixture.manifest.pathSets['100'].slice(0, MAX_VISIBLE_DIFF_ROWS), true, '2,000-file');
   await inspectChangedFiles(fixture.manifest.commitIds[199], fixture.manifest.pathSets['200'].slice(0, MAX_VISIBLE_DIFF_ROWS), true, '2,001-file');
   assert.deepEqual(tab.exceptions, []);
-  return { jobId, commits: observed.length, pages: expected.length / PAGE_SIZE, keyboardContinuation: true,
+  return { jobId, commits: observed.length, pages: expected.length / GIT_HISTORY_PAGE_SIZE, keyboardContinuation: true,
     retainedContinuationFocus: true, finalFocus: 'history-heading', historyReads, maximumMountedHistoryRows: MAX_VISIBLE_HISTORY_ROWS,
     reverseHistoryWindowNavigation: true, changedFileViews: { exactApiBoundaries: true, renderedRowsPerDiff: MAX_VISIBLE_DIFF_ROWS,
       safeTruncationAtBothBoundaries: true, focusRetained: true, maximumMountedGitRows } };

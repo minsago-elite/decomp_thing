@@ -20,7 +20,7 @@ function sleep(milliseconds: number, signal: AbortSignal) {
   });
 }
 
-const MAX_STATUS_PAGES = 2;
+const MAX_STATUS_PAGES = 10;
 const MAX_REF_PAGES = 10;
 const MAX_COMMIT_DIFF_PAGES = 1;
 const MAX_HISTORY_RENDERED_ROWS = 200;
@@ -85,10 +85,15 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
   const [tagDraft, setTagDraft] = useState<{ target: string; name: string } | null>(null);
   const olderPending = useRef(false);
   const historyHeading = useRef<HTMLHeadingElement | null>(null);
+  const newerHistory = useRef<HTMLButtonElement | null>(null);
   const historyContinuation = useRef<HTMLButtonElement | null>(null);
+  const refsHeading = useRef<HTMLHeadingElement | null>(null);
+  const refsContinuation = useRef<HTMLButtonElement | null>(null);
   // A terminal older-history page or cached-window move can remove the focused continuation
   // control. Restore focus to the durable history landmark only for that user-initiated move.
   const focusHistoryAfterFinalPage = useRef(false);
+  const focusHistoryAfterNewerDisabled = useRef(false);
+  const focusRefsAfterFinalPage = useRef(false);
   const refsPending = useRef(false);
   const commitRequest = useRef(0);
   const [refresh, setRefresh] = useState(0);
@@ -128,6 +133,15 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
         if (controller.signal.aborted) return;
         diffGeneration.current++;
         setDiff(null); setCommit(null);
+        // Window offsets belong to the snapshot that produced them. A refresh can shrink either
+        // collection while the user is paging the previous snapshot.
+        setHistoryWindowStart(0);
+        setStatusWindowStart(0);
+        setRefWindowStart(0);
+        setWorktreeWindowStart(0);
+        focusHistoryAfterFinalPage.current = false;
+        focusHistoryAfterNewerDisabled.current = false;
+        focusRefsAfterFinalPage.current = false;
         setLoaded({ listing, status, worktrees: worktrees.data, refs, history: history.data });
         // A selection survives a refresh only while the same file identity is still listed.
         setSelected(previous => new Set([...previous].filter(key => status.entries.some(entry => key.endsWith(`:${entry.fileId}`)))));
@@ -147,6 +161,20 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
     focusHistoryAfterFinalPage.current = false;
     historyHeading.current?.focus();
   }, [loaded?.history?.entries.length, loaded?.history?.nextCursor, historyWindowStart]);
+
+  useLayoutEffect(() => {
+    if (!focusHistoryAfterNewerDisabled.current || historyWindowStart !== 0) return;
+    focusHistoryAfterNewerDisabled.current = false;
+    historyHeading.current?.focus();
+  }, [historyWindowStart]);
+
+  useLayoutEffect(() => {
+    const refs = loaded?.refs;
+    if (!focusRefsAfterFinalPage.current || !refs
+      || refWindowStart + MAX_REF_RENDERED_ROWS < refs.refs.length || refs.nextCursor !== null) return;
+    focusRefsAfterFinalPage.current = false;
+    refsHeading.current?.focus();
+  }, [loaded?.refs?.refs.length, loaded?.refs?.nextCursor, refWindowStart]);
 
   /** Bounded automatic ref loading; any remaining anchored cursor is offered as explicit continuation. */
   async function readRefs(prefix: string, signal: AbortSignal): Promise<GitRefs> {
@@ -275,8 +303,13 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
     try {
       const page = (await client.get('gitRefs', `${base}/refs?limit=200&cursor=${cursor}`)).data;
       if (generation !== diffGeneration.current) return;
-      setLoaded(previous => previous?.refs?.nextCursor === cursor
-        ? { ...previous, refs: { ...page, refs: [...previous.refs.refs, ...page.refs] } } : previous);
+      const shouldRestoreFocus = page.nextCursor === null && document.activeElement === refsContinuation.current;
+      focusRefsAfterFinalPage.current = false;
+      setLoaded(previous => {
+        if (previous?.refs?.nextCursor !== cursor) return previous;
+        if (shouldRestoreFocus && document.activeElement === refsContinuation.current) focusRefsAfterFinalPage.current = true;
+        return { ...previous, refs: { ...page, refs: [...previous.refs.refs, ...page.refs] } };
+      });
     } catch (failure: unknown) {
       if (generation === diffGeneration.current) setStatus(withApiFailureReference(copy.refsChanged, failure));
     } finally { refsPending.current = false; }
@@ -324,8 +357,11 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
     const refs = loaded?.refs;
     if (!refs) return;
     if (refWindowStart + MAX_REF_RENDERED_ROWS < refs.refs.length) {
-      setRefWindowStart(previous => Math.min(refs.refs.length - MAX_REF_RENDERED_ROWS,
-        previous + MAX_REF_RENDERED_ROWS));
+      const nextWindowStart = Math.min(refs.refs.length - MAX_REF_RENDERED_ROWS,
+        refWindowStart + MAX_REF_RENDERED_ROWS);
+      focusRefsAfterFinalPage.current = nextWindowStart + MAX_REF_RENDERED_ROWS >= refs.refs.length
+        && refs.nextCursor === null && document.activeElement === refsContinuation.current;
+      setRefWindowStart(nextWindowStart);
     } else if (refs.nextCursor) {
       void moreRefs(refs.nextCursor);
     }
@@ -473,8 +509,13 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
       <section aria-labelledby="git-history-title">
         <h3 id="git-history-title" ref={historyHeading} tabIndex={-1}>{copy.history}</h3>
         {loaded.history?.entries.length ? <>
-          {loaded.history.entries.length > MAX_HISTORY_RENDERED_ROWS && <button type="button" disabled={historyWindowStart === 0}
-            onClick={() => setHistoryWindowStart(previous => Math.max(0, previous - MAX_HISTORY_RENDERED_ROWS))}>{copy.newerHistory}</button>}
+          {loaded.history.entries.length > MAX_HISTORY_RENDERED_ROWS && <button ref={newerHistory} type="button" disabled={historyWindowStart === 0}
+            onBlur={event => { if (event.currentTarget.isConnected && !event.currentTarget.disabled) focusHistoryAfterNewerDisabled.current = false; }}
+            onClick={() => {
+              const nextStart = Math.max(0, historyWindowStart - MAX_HISTORY_RENDERED_ROWS);
+              focusHistoryAfterNewerDisabled.current = nextStart === 0 && document.activeElement === newerHistory.current;
+              setHistoryWindowStart(nextStart);
+            }}>{copy.newerHistory}</button>}
           <ol aria-label={copy.history}>{loaded.history.entries.slice(historyWindowStart, historyWindowStart + MAX_HISTORY_RENDERED_ROWS).map(entry => <li key={entry.objectId}>
           <code title={entry.objectId}>{short(entry.objectId)}</code> {entry.subject}
           {' '}{entry.mapping
@@ -507,7 +548,7 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
         </section>}
       </section>
       <section aria-labelledby="git-branches-title">
-        <h3 id="git-branches-title">{copy.branches}</h3>
+        <h3 id="git-branches-title" ref={refsHeading} tabIndex={-1}>{copy.branches}</h3>
         {dirty && <p>{copy.dirtySwitch}</p>}
         {(loaded.refs?.nextCursor || (loaded.refs?.refs.length ?? 0) > MAX_REF_RENDERED_ROWS) && <p>{copy.refsIncomplete}</p>}
         {loaded.refs && loaded.refs.refs.length > MAX_REF_RENDERED_ROWS && <button type="button" disabled={refWindowStart === 0}
@@ -529,7 +570,8 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
               {textMessage(copy.deleteAction, { name: branch(ref.displayName) })}</button>
           </>}
         </li>; })}</ul>
-        {loaded.refs && (refWindowStart + MAX_REF_RENDERED_ROWS < loaded.refs.refs.length || loaded.refs.nextCursor) && <button type="button" disabled={busy}
+        {loaded.refs && (refWindowStart + MAX_REF_RENDERED_ROWS < loaded.refs.refs.length || loaded.refs.nextCursor) && <button ref={refsContinuation} type="button" disabled={busy}
+          onBlur={event => { if (event.currentTarget.isConnected) focusRefsAfterFinalPage.current = false; }}
           onClick={olderRefsWindow}>{refWindowStart + MAX_REF_RENDERED_ROWS < loaded.refs.refs.length ? copy.olderRefs : copy.moreRefs}</button>}
         {statusData.headObjectId && <>
           <NameForm label={copy.branchName} action={copy.branchAction} disabled={!writable} onSubmit={name => act('gitBranchCreateRequest', copy.branchAction,

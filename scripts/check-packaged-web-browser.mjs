@@ -409,14 +409,14 @@ async function evaluate(target, expression) {
   return result.result.value;
 }
 
-async function ready(target, expression, label) {
+async function ready(target, expression, label, timeout = 20000) {
   return waitFor(async () => {
     try { return await evaluate(target, `document.body !== null && (${expression})`); }
     catch (error) {
       if (/context|navigat|Cannot find/i.test(error.message)) return false;
       throw error;
     }
-  }, label);
+  }, label, timeout);
 }
 
 async function capture(target, name) {

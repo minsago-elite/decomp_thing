@@ -347,8 +347,11 @@ it('offers bounded anchored continuation beyond 2,000 refs without duplicate adm
   expect(transport.get.mock.calls.filter(call => call[1].includes('cursor=2000'))).toHaveLength(1);
   gate.resolve();
   await waitFor(() => expect(button('Older branches and tags')).toBeTruthy());
+  button('Older branches and tags')!.focus();
   fireEvent.click(button('Older branches and tags')!);
   await waitFor(() => expect(button('Switch to topic2000')).toBeTruthy());
+  expect(button('Older branches and tags')).toBeUndefined();
+  await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Branches' })));
   expect(button('More branches and tags')).toBeUndefined();
   fireEvent.click(button('Switch to topic2000')!);
   await waitFor(() => expect(transport.post).toHaveBeenCalledOnce());
@@ -409,6 +412,13 @@ it('traverses a 1,001-commit history without omissions, duplicates or mutations'
   await waitFor(() => expect([...items()].map(item => item.querySelector('code')?.title)).toEqual(all.slice(801, 1001).map(item => item.objectId)));
   expect(screen.queryByRole('button', { name: 'Older commits' })).toBeNull();
   await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'History' })));
+  const newerAgain = screen.getByRole('button', { name: 'Newer commits' });
+  while (!newerAgain.disabled) {
+    newerAgain.focus();
+    fireEvent.click(newerAgain);
+  }
+  await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'History' })));
+  await waitFor(() => expect([...items()].map(item => item.querySelector('code')?.title)).toEqual(all.slice(0, 200).map(item => item.objectId)));
   expect(transport.post).not.toHaveBeenCalled();
 }, 20_000);
 
@@ -616,6 +626,37 @@ it('reads every status page before review and keeps the commit message when the 
   expect(await screen.findByText(/Commit staged files did not complete/)).toBeTruthy();
   expect(transport.post.mock.calls[0]?.[3]).toMatchObject({ selectedFileIds: ['file_s', 'file_t'] });
   expect(screen.getByLabelText('Commit message')).toHaveProperty('value', 'Keep this draft');
+});
+
+it('keeps the staged subset actionable when status spans three bounded pages', async () => {
+  const all = Array.from({ length: 401 }, (_, index) => entry(
+    `file_${String(index).padStart(3, '0')}`,
+    index === 0 ? 'src/first.c' : `src/untracked-${index}.c`,
+    index === 0 ? 'added' : 'none', 'none', index !== 0,
+  ));
+  const cursors = new Map<string | null, readonly [number, string | null]>([
+    [null, [0, 'status_page_2']], ['status_page_2', [200, 'status_page_3']], ['status_page_3', [400, null]],
+  ]);
+  transport.get.mockImplementation(async (kind, path) => {
+    const [route, query = ''] = path.split('?');
+    if (kind === 'gitStatus' && route === `${base}/status`) {
+      const cursor = new URLSearchParams(query).get('cursor');
+      const page = cursors.get(cursor);
+      if (!page) throw new Error(`unexpected status cursor ${String(cursor)}`);
+      const [start, nextCursor] = page;
+      return { data: { ...status(true), counts: { staged: 1, unstaged: 0, untracked: 400, ignored: 0, conflicted: 0 },
+        entries: all.slice(start, start + 200), nextCursor } };
+    }
+    return serve(kind, path);
+  });
+  mount();
+  expect(await screen.findByRole('list', { name: /Exactly these staged files/ })).toBeTruthy();
+  expect(transport.get.mock.calls.filter(call => call[0] === 'gitStatus').map(call => call[1])).toEqual([
+    `${base}/status?limit=200`, `${base}/status?limit=200&cursor=status_page_2`,
+    `${base}/status?limit=200&cursor=status_page_3`,
+  ]);
+  expect(screen.getByRole('list', { name: /Exactly these staged files/ }).textContent).toContain('src/first.c');
+  expect(screen.getByRole('button', { name: 'Commit staged files' })).toHaveProperty('disabled', false);
 });
 
 it('follows ref pages so every branch stays reachable, and drops a displayed diff when the status is read again', async () => {

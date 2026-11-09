@@ -127,14 +127,29 @@ export async function qualifyGit({ fixture, makeTarget, cdp, evaluate, ready, br
     const terminalWindow = nextHistoryAction.kind !== 'newer-window'
       && nextLoadedCount === expectedHistoryIds.length
       && nextWindowStart + MAX_VISIBLE_HISTORY_ROWS >= nextLoadedCount;
+    const newestWindow = nextHistoryAction.kind === 'newer-window' && nextWindowStart === 0;
     const actionButton = button(nextHistoryAction.kind === 'newer-window' ? 'Newer commits' : 'Older commits');
     await evaluate(tab, `${actionButton}.focus()`);
     await key(cdp, tab, 'Enter', 'Enter', 13, '\r');
-    const focus = terminalWindow
+    const focus = terminalWindow || newestWindow
       ? `document.activeElement === document.querySelector('#git-history-title')`
       : `document.activeElement === ${actionButton}`;
-    await ready(tab, `${historyRows}.length === ${expectedWindow.length} && JSON.stringify([...${historyRows}].map(row => row.querySelector('code')?.title ?? null)) === ${JSON.stringify(JSON.stringify(expectedWindow))} && ${focus}`,
-      'next anchored history window');
+    try {
+      await ready(tab, `${historyRows}.length === ${expectedWindow.length} && JSON.stringify([...${historyRows}].map(row => row.querySelector('code')?.title ?? null)) === ${JSON.stringify(JSON.stringify(expectedWindow))} && ${focus}`,
+        'next anchored history window');
+    } catch (failure) {
+      const observed = await evaluate(tab, `JSON.stringify((() => {
+        const rows = [...${historyRows}];
+        const buttons = [...document.querySelectorAll('button')].map(item => item.textContent);
+        const active = document.activeElement;
+        return { rows: rows.length, first: rows[0]?.querySelector('code')?.title ?? null,
+          last: rows.at(-1)?.querySelector('code')?.title ?? null, older: buttons.includes('Older commits'),
+          newer: buttons.includes('Newer commits'), active: active?.textContent?.slice(0, 80) ?? null,
+          activeId: active?.id ?? null, historyHeadingFocused: active === document.querySelector('#git-history-title') };
+      })())`);
+      throw new Error(`${failure.message}; expected history window ${nextWindowStart}..${Math.min(nextLoadedCount, nextWindowStart + MAX_VISIBLE_HISTORY_ROWS)} `
+        + `after ${nextHistoryAction.kind} with focus=${terminalWindow || newestWindow ? 'history-heading' : 'continuation'}; observed=${observed}`);
+    }
     const visibleIds = await evaluate(tab, `[...${historyRows}].map(row => row.querySelector('code')?.title ?? null)`);
     assertUiHistoryWindow(visibleIds, expectedHistoryIds, nextLoadedCount, historyActions + 1, nextWindowStart);
     const previousWindowEnd = Math.min(loadedCount, historyWindowStart + MAX_VISIBLE_HISTORY_ROWS);
