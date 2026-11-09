@@ -373,10 +373,34 @@ internal fun requireNormalizedProjectPath(value: String, subject: String): Strin
         value.isNotBlank() && value.length <= 4_096 && !value.startsWith('/') && '\\' !in value &&
             value.none { it.code < 0x20 || it.code == 0x7f || it == ':' },
     ) { "$subject is not a normalized relative path: $value" }
-    require(value.split('/').none { it.isBlank() || it == "." || it == ".." || it.length > 255 }) {
-        "$subject is not a normalized relative path: $value"
+    var componentStart = 0
+    var componentHasNonWhitespace = false
+    for (index in value.indices) {
+        val character = value[index]
+        if (character == '/') {
+            requireNormalizedProjectPathComponent(value, componentStart, index, componentHasNonWhitespace, subject)
+            componentStart = index + 1
+            componentHasNonWhitespace = false
+        } else if (!character.isWhitespace()) {
+            componentHasNonWhitespace = true
+        }
     }
+    requireNormalizedProjectPathComponent(value, componentStart, value.length, componentHasNonWhitespace, subject)
     return value
+}
+
+private fun requireNormalizedProjectPathComponent(
+    value: String,
+    start: Int,
+    end: Int,
+    hasNonWhitespace: Boolean,
+    subject: String,
+) {
+    require(
+        hasNonWhitespace && end - start <= 255 &&
+            !(end - start == 1 && value[start] == '.') &&
+            !(end - start == 2 && value[start] == '.' && value[start + 1] == '.'),
+    ) { "$subject is not a normalized relative path: $value" }
 }
 
 private fun compileTemplateMatcher(template: String): Regex {

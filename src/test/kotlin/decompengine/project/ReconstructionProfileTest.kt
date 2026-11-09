@@ -8,6 +8,64 @@ import kotlin.test.assertTrue
 
 class ReconstructionProfileTest {
     @Test
+    fun `normalized project path scan matches split predicate and preserves identity`() {
+        val maximumLengthPath = (List(15) { "a".repeat(255) } + listOf("x", "b".repeat(254))).joinToString("/")
+        val overMaximumLengthPath = (List(15) { "a".repeat(255) } + listOf("x", "y", "b".repeat(253)))
+            .joinToString("/")
+        assertEquals(4_096, maximumLengthPath.length)
+        assertEquals(4_097, overMaximumLengthPath.length)
+        val paths = listOf(
+            "src/main.c",
+            "目录/模块.c",
+            "src/emoji-😀.c",
+            "src/e\u0301.c",
+            "src/\u00a0file.c",
+            "src/\u2003/file.c",
+            "",
+            "   ",
+            "/rooted/file",
+            "src/",
+            "src//file",
+            "src/./file",
+            "src/../file",
+            "src/\u2003/file",
+            "src/\t/file",
+            "src/\u0000/file",
+            "src/\u001f/file",
+            "src/\u007f/file",
+            "src/a:b",
+            "src\\file",
+            "a".repeat(255),
+            "a".repeat(256),
+            "a".repeat(253) + "😀",
+            "a".repeat(254) + "😀",
+            maximumLengthPath,
+            overMaximumLengthPath,
+            listOf("a".repeat(255), "b".repeat(255), "c".repeat(255), "d".repeat(255), "e".repeat(255),
+                "f".repeat(255), "g".repeat(255), "h".repeat(255), "i".repeat(255), "j".repeat(255),
+                "k".repeat(255), "l".repeat(255), "m".repeat(255), "n".repeat(255), "o".repeat(255),
+                "p".repeat(255)).joinToString("/"),
+            "a".repeat(4_096),
+            "a".repeat(4_097),
+        )
+
+        paths.forEach { value ->
+            val expectedValid = value.isNotBlank() && value.length <= 4_096 && !value.startsWith('/') &&
+                '\\' !in value && value.none { it.code < 0x20 || it.code == 0x7f || it == ':' } &&
+                value.split('/').none { it.isBlank() || it == "." || it == ".." || it.length > 255 }
+            val subject = "test path"
+            if (expectedValid) {
+                assertTrue(requireNormalizedProjectPath(value, subject) === value, "accepted path should be returned unchanged")
+            } else {
+                val failure = assertFailsWith<IllegalArgumentException> {
+                    requireNormalizedProjectPath(value, subject)
+                }
+                assertEquals("$subject is not a normalized relative path: $value", failure.message)
+            }
+        }
+    }
+
+    @Test
     fun `canonical profile digest is stable across collection order`() {
         val original = GeneratedCMakeReconstructionProfile.descriptor
         val reversedConfiguration = linkedMapOf<String, List<String>>().apply {
