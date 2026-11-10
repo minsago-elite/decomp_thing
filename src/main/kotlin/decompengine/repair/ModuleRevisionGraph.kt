@@ -7743,10 +7743,16 @@ private fun validateSchema7RetainedNodeEvidence(
     }
 
     if (invocation == null) {
-        require(node.status == ModuleRevisionStatus.REJECTED && node.recoveredAfterCrash &&
+        val rollback = node.rollbackRecord
+        val verifiedNoInstallRollback = rollback != null && rollback.state in setOf(
+            RepairRollbackState.RESTORED_AFTER_FAILURE,
+            RepairRollbackState.RESTORED_VERIFIED,
+            RepairRollbackState.NOT_REQUIRED_VERIFIED,
+        ) && rollback.candidateSourceInstallStarted == false
+        require(node.status == ModuleRevisionStatus.REJECTED && verifiedNoInstallRollback &&
             !store.revisionFileExists("${node.id}.acp-receipt.json") &&
             !store.revisionFileExists("${node.id}.acp-assessment.json")) {
-            "schema-7 retained intent-only turn has unexpected invocation evidence: ${node.id}"
+            "schema-7 retained intent-only turn lacks verified rejection or has unexpected invocation evidence: ${node.id}"
         }
         return
     }

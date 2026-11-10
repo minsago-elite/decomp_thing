@@ -1549,7 +1549,7 @@ class ModuleRevisionGraphTest {
 
     @Test
     fun `schema seven recovery authenticates intent and assessment before source roll forward`() {
-        for (missingEvidence in listOf("intent", "assessment", "retained-assessment", "none")) {
+        for (missingEvidence in listOf("intent", "assessment", "retained-assessment", "retained-intent-only", "none")) {
             val project = generatedProject()
             val relative = "src/modules/alpha.c"
             val target = project.resolve(relative)
@@ -1572,6 +1572,42 @@ class ModuleRevisionGraphTest {
             ).copy(prompt = "bounded failure")
             var retainedAssessmentPath: Path? = null
             var retainedAncestorOriginal: ByteArray? = null
+            if (missingEvidence == "retained-intent-only") {
+                val rejectedPath = "src/modules/beta.c"
+                val rejectedBefore = project.resolve(rejectedPath).readBytes()
+                val rejected = graph.beginAttempt(listOf(rejectedPath), metadata)
+                val rejectedWorkflow = "schema-seven-rejected-intent-workflow"
+                val rejectedDocument = completeAcpReceiptDocument(
+                    project, rejected, rejectedPath, rejectedBefore,
+                    rejectedBefore + "intent-only-candidate".toByteArray(Charsets.UTF_8),
+                    turnWorkflowId = rejectedWorkflow,
+                )
+                val rejectedReceipt = decompengine.project.verifyAcpExecutionReceiptDocument(
+                    rejectedDocument.json.toByteArray(Charsets.UTF_8),
+                    TRACE_REPAIR_ACP_RECEIPT_KIND,
+                    TRACE_REPAIR_ACP_TASK_FIELD,
+                    rejected.id,
+                )
+                val rejectedIdentity = requireNotNull(rejectedDocument.turnIdentity)
+                val rejectedIntent = decompengine.project.AgentTurnIntent.create(
+                    rejectedIdentity,
+                    rejectedWorkflow,
+                    rejected.id,
+                    graph.snapshot.profileSha256,
+                    rejectedReceipt.accessPolicySha256,
+                    graph.snapshot.nodes.single {
+                        it.id == (graph.snapshot.provisionalHeadId ?: graph.snapshot.headId)
+                    }.sourceRevisionSha256,
+                )
+                graph.persistAndBindAgentTurnIntent(rejected, rejectedIntent)
+                graph.reject(rejected, RepairEvidence("agent-error", "failed after durable turn intent"))
+                val corpus = graph.retainedRegressionCorpus()
+                metadata = metadata.copy(
+                    iterationIndex = 2,
+                    retainedRegressionIds = corpus.inputs.map { it.id },
+                    regressionCorpusSha256 = corpus.sha256,
+                )
+            }
             if (missingEvidence == "retained-assessment") {
                 val ancestorPath = "src/modules/beta.c"
                 val ancestorBefore = project.resolve(ancestorPath).readBytes()
@@ -1689,12 +1725,19 @@ class ModuleRevisionGraphTest {
             }
             graph.close()
             assertContentEquals(before, target.readBytes(), "the durable decision must precede source publication")
-            if (missingEvidence == "none") {
+            if (missingEvidence == "none" || missingEvidence == "retained-intent-only") {
                 ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { recovered ->
                     assertEquals(ModuleRevisionStatus.ACCEPTED, recovered.snapshot.nodes.last().status)
                     assertEquals(intent.sha256, recovered.snapshot.nodes.last().repairMetadata?.turnIntent?.intentSha256)
                     assertEquals(assessment.sha256, recovered.snapshot.nodes.last().repairMetadata
                         ?.agentInvocation?.assessmentSha256)
+                    if (missingEvidence == "retained-intent-only") {
+                        val rejectedNode = recovered.snapshot.nodes.single { it.id != recovered.snapshot.nodes.last().id &&
+                            it.status == ModuleRevisionStatus.REJECTED }
+                        assertNotNull(rejectedNode.repairMetadata?.turnIntent)
+                        assertNull(rejectedNode.repairMetadata?.agentInvocation)
+                        assertEquals(false, rejectedNode.rollbackRecord?.candidateSourceInstallStarted)
+                    }
                 }
                 assertContentEquals(candidate, target.readBytes(), "valid bound provenance permits roll-forward")
             } else {
