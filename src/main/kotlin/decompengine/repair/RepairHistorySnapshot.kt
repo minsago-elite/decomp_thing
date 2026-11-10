@@ -407,7 +407,12 @@ internal enum class RepairHistoryProjectionStatus {
     UNVERIFIABLE_ENCODING, DOES_NOT_MATCH_CAPTURED_GRAPH, MATCHED_CAPTURED_PROJECTION,
 }
 internal enum class RepairHistoryProjectionReason { NONE, CAPTURE, ENCODING, VERSION, CORPUS, ITERATIONS, METADATA, PATCH, RUNS, CANONICAL }
-internal enum class RepairHistoryProjectionCoverage { NOT_INSPECTED, LEGACY_FINALIZED_AND_CORPUS, FINALIZED_CORPUS_AND_RUNS }
+internal enum class RepairHistoryProjectionCoverage {
+    NOT_INSPECTED,
+    LEGACY_FINALIZED_AND_CORPUS,
+    FINALIZED_CORPUS_AND_RUNS,
+    FINALIZED_CORPUS_RUNS_AND_INVOCATION_TURNS,
+}
 internal data class RepairHistoryProjectionDiagnostic(
     val status: RepairHistoryProjectionStatus,
     val reason: RepairHistoryProjectionReason = RepairHistoryProjectionReason.NONE,
@@ -418,10 +423,11 @@ internal data class RepairHistoryProjectionDiagnostic(
     val coverage: RepairHistoryProjectionCoverage get() = when (schemaVersion) {
         1, 2 -> RepairHistoryProjectionCoverage.LEGACY_FINALIZED_AND_CORPUS
         3 -> RepairHistoryProjectionCoverage.FINALIZED_CORPUS_AND_RUNS
+        4 -> RepairHistoryProjectionCoverage.FINALIZED_CORPUS_RUNS_AND_INVOCATION_TURNS
         else -> RepairHistoryProjectionCoverage.NOT_INSPECTED
     }
     init {
-        require(schemaVersion == null || schemaVersion in 1..3)
+        require(schemaVersion == null || schemaVersion in 1..4)
         require(admittedBytes == null || admittedBytes in 0..MAXIMUM_REPAIR_PROJECTION_BYTES)
         require(capturedSha256 == null || capturedSha256.matches(Regex("[0-9a-f]{64}")))
     }

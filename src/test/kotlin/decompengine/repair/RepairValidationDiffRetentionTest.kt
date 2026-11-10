@@ -26,7 +26,7 @@ class RepairValidationDiffRetentionTest {
     @Test fun `new role population accounts for runs and attempts without widening the original root cap`() {
         for (nodes in listOf(2, 10, 10_000, 1_000_000)) {
             val budget = RepairResourceBudget(maximumRevisionNodes = nodes)
-            assertEquals(nodes + 16, repairRevisionDirectoryEntryLimit(budget))
+            assertEquals(3 * nodes + 16, repairRevisionDirectoryEntryLimit(budget))
             assertEquals(2 * nodes + 16, repairValidationDiffDirectoryEntryLimit(budget))
         }
     }

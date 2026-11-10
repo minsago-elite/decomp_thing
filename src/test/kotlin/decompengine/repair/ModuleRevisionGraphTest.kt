@@ -8396,9 +8396,9 @@ class ModuleRevisionGraphTest {
 
 
     @Test
-    fun `revision directory role helper preserves admitted node arithmetic and blob budget`() {
+    fun `revision directory role helper admits three immutable invocation documents per revision`() {
         assertFailsWith<IllegalArgumentException> { RepairResourceBudget(maximumRevisionNodes = 1) }
-        for ((nodes, expected) in listOf(2 to 18, 64 to 80, 1_000_000 to 1_000_016)) {
+        for ((nodes, expected) in listOf(2 to 22, 64 to 208, 1_000_000 to 3_000_016)) {
             val selected = RepairResourceBudget(maximumRevisionNodes = nodes, maximumStateDirectoryEntries = 2)
             assertEquals(expected, repairRevisionDirectoryEntryLimit(selected))
             assertEquals(2, selected.maximumStateDirectoryEntries)

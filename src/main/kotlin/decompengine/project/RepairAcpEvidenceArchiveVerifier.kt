@@ -765,7 +765,33 @@ internal object RepairAcpEvidenceArchiveVerifier {
         val verifiedByNode = linkedMapOf<String, VerifiedAcpExecutionReceiptDocument>()
         graph.nodes.drop(1).forEach { node ->
             val metadata = requireNotNull(node.repairMetadata)
-            val invocation = requireNotNull(metadata.agentInvocation)
+            val invocation = metadata.agentInvocation
+            if (invocation == null) {
+                require(graph.schemaVersion >= 7 && node.status == "rejected" && metadata.turnIntent != null) {
+                    "repair revision is missing its invocation receipt: ${node.id}"
+                }
+                val binding = metadata.turnIntent
+                require(binding.intentPath == "reports/repair-revisions/${node.id}.acp-intent.json") {
+                    "interrupted repair intent path is cross-paired: ${node.id}"
+                }
+                val bytes = readPayloadFile(projectDir, binding.intentPath, 1024L * 1024L, payloadSha256, payloadSizes)
+                require(sha256(bytes) == binding.intentSha256) {
+                    "interrupted repair intent digest differs from graph binding: ${node.id}"
+                }
+                val intent = AgentTurnIntent.parse(bytes)
+                val parent = graph.nodes.singleOrNull { it.id == node.parentId }
+                    ?: error("interrupted repair intent parent is missing: ${node.id}")
+                require(intent.turnId == binding.turnId && intent.attemptId == node.id &&
+                    intent.requestSha256.isNotBlank() && intent.profileSha256 == graph.profileSha256 &&
+                    intent.beforeSha256 == parent.sourceRevisionSha256) {
+                    "interrupted repair intent is cross-paired with graph state: ${node.id}"
+                }
+                require("reports/repair-revisions/${node.id}.acp-receipt.json" !in payloadSha256 &&
+                    "reports/repair-revisions/${node.id}.acp-assessment.json" !in payloadSha256) {
+                    "interrupted repair intent has unbound later evidence: ${node.id}"
+                }
+                return@forEach
+            }
             val expectedPath = "reports/repair-revisions/${node.id}.acp-receipt.json"
             require(invocation.receiptPath == expectedPath && invocation.receiptSchemaVersion == 2) {
                 "repair ACP receipt path or schema is cross-paired: ${node.id}"
@@ -818,10 +844,18 @@ internal object RepairAcpEvidenceArchiveVerifier {
                     intent.beforeSha256 == parent.sourceRevisionSha256) {
                     "repair turn intent identity or preimage differs from graph: ${node.id}"
                 }
-                val assessmentPath = requireNotNull(invocation.assessmentPath) {
-                    "schema-7 repair invocation lacks a workflow assessment: ${node.id}"
+                val assessmentPath = invocation.assessmentPath
+                val assessmentSha = invocation.assessmentSha256
+                if (assessmentPath == null || assessmentSha == null) {
+                    require(node.status == "rejected" && assessmentPath == null && assessmentSha == null) {
+                        "schema-7 finalized repair invocation lacks a workflow assessment: ${node.id}"
+                    }
+                    require("reports/repair-revisions/${node.id}.acp-assessment.json" !in payloadSha256) {
+                        "repair assessment exists without a graph binding: ${node.id}"
+                    }
+                    verifiedByNode[node.id] = verified
+                    return@forEach
                 }
-                val assessmentSha = requireNotNull(invocation.assessmentSha256)
                 require(assessmentPath == "reports/repair-revisions/${node.id}.acp-assessment.json") {
                     "repair assessment path is cross-paired: ${node.id}"
                 }
@@ -839,10 +873,14 @@ internal object RepairAcpEvidenceArchiveVerifier {
                     "repair workflow assessment is cross-paired with invocation: ${node.id}"
                 }
                 if (node.status == "accepted" || node.status == "provisional") {
+                    val proof = requireNotNull(node.validationProof) {
+                        "published repair revision lacks an independently persisted validation proof: ${node.id}"
+                    }
                     require(assessment.observation == AcpChangeObservationStatus.COMPLETE &&
                         assessment.afterSha256 == node.sourceRevisionSha256 &&
                         assessment.policyVerdict == AcpChangePolicyVerdict.ALLOW &&
                         assessment.validationStatus == AcpChangeValidationStatus.PASSED &&
+                        assessment.validationProofSha256 == listOf(proof.evidenceSha256) &&
                         assessment.eligibility == if (node.status == "accepted") {
                             AcpChangePublicationEligibility.VALIDATED_FOR_PUBLICATION
                         } else AcpChangePublicationEligibility.PROVISIONAL) {
@@ -850,7 +888,9 @@ internal object RepairAcpEvidenceArchiveVerifier {
                     }
                 } else if (node.status == "rejected") {
                     require(assessment.eligibility == AcpChangePublicationEligibility.REJECTED ||
-                        assessment.eligibility == AcpChangePublicationEligibility.INTERRUPTED) {
+                        assessment.eligibility == AcpChangePublicationEligibility.INTERRUPTED ||
+                        assessment.eligibility == AcpChangePublicationEligibility.VALIDATED_FOR_PUBLICATION &&
+                            node.rollbackRecord?.candidateSourceInstallStarted == false) {
                         "rejected repair revision has a non-rejection assessment: ${node.id}"
                     }
                 }
@@ -1094,7 +1134,11 @@ internal object RepairAcpEvidenceArchiveVerifier {
             root.optionalString("revisionId", "repair release history iteration") == node.id &&
             root.optionalString("parentRevisionId", "repair release history iteration") == node.parentId &&
             root.optionalString("runId", "repair release history iteration") == metadata.runId &&
-            root.optionalInvocation("agentInvocation", "repair release history iteration", historySchema) == metadata.agentInvocation
+            root.optionalInvocation(
+                "agentInvocation",
+                "repair release history iteration",
+                turnFieldsPresent = historySchema >= 4,
+            ) == metadata.agentInvocation
         ) { "repair release history is cross-paired with graph revision ${node.id}" }
 
         val patches = root.requiredArray("patches", "repair release history iteration")
@@ -1334,7 +1378,11 @@ internal object RepairAcpEvidenceArchiveVerifier {
             before = root.optionalEvidence("before", "repair release workflow metadata"),
             regressionCorpusSha256 = root.optionalString("regressionCorpusSha256", "repair release workflow metadata"),
             agentInvocation = if (schemaVersion >= 2) {
-                root.optionalInvocation("agentInvocation", "repair release workflow metadata", schemaVersion)
+                root.optionalInvocation(
+                    "agentInvocation",
+                    "repair release workflow metadata",
+                    turnFieldsPresent = schemaVersion >= 7,
+                )
             } else null,
             publicationMode = if (schemaVersion >= 2) {
                 root.requiredString("publicationMode", "repair release workflow metadata")
@@ -2227,10 +2275,14 @@ private fun JsonObject.optionalEvidence(field: String, label: String): ReleaseRe
         )
     }
 
-private fun JsonObject.optionalInvocation(field: String, label: String, schemaVersion: Int = 6): ReleaseRepairInvocation? =
+private fun JsonObject.optionalInvocation(
+    field: String,
+    label: String,
+    turnFieldsPresent: Boolean,
+): ReleaseRepairInvocation? =
     getValue(field).takeUnless { it is JsonNull }?.requiredObject("$label $field")?.let { root ->
         root.requireExactKeys(INVOCATION_FIELDS +
-            (if (schemaVersion >= 7) INVOCATION_TURN_FIELDS else emptySet()), "$label $field")
+            (if (turnFieldsPresent) INVOCATION_TURN_FIELDS else emptySet()), "$label $field")
         ReleaseRepairInvocation(
             receiptPath = root.requiredString("receiptPath", "$label $field"),
             receiptSha256 = root.requiredSha256("receiptSha256", "$label $field"),
@@ -2240,11 +2292,11 @@ private fun JsonObject.optionalInvocation(field: String, label: String, schemaVe
             terminalOutcome = root.requiredString("terminalOutcome", "$label $field"),
             releaseComplete = root.requiredBoolean("receiptReleaseComplete", "$label $field"),
             assessmentStatus = root.requiredString("assessmentStatus", "$label $field"),
-            intentPath = if (schemaVersion >= 7) root.optionalString("intentPath", "$label $field") else null,
-            intentSha256 = if (schemaVersion >= 7) root.optionalSha256("intentSha256", "$label $field") else null,
-            turnId = if (schemaVersion >= 7) root.optionalString("turnId", "$label $field") else null,
-            assessmentPath = if (schemaVersion >= 7) root.optionalString("assessmentPath", "$label $field") else null,
-            assessmentSha256 = if (schemaVersion >= 7) root.optionalSha256("assessmentSha256", "$label $field") else null,
+            intentPath = if (turnFieldsPresent) root.optionalString("intentPath", "$label $field") else null,
+            intentSha256 = if (turnFieldsPresent) root.optionalSha256("intentSha256", "$label $field") else null,
+            turnId = if (turnFieldsPresent) root.optionalString("turnId", "$label $field") else null,
+            assessmentPath = if (turnFieldsPresent) root.optionalString("assessmentPath", "$label $field") else null,
+            assessmentSha256 = if (turnFieldsPresent) root.optionalSha256("assessmentSha256", "$label $field") else null,
         )
     }
 

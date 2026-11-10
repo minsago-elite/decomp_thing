@@ -178,13 +178,41 @@ class TraceGuidedRepairAcpIntegrationTest {
             val node = graph.snapshot.nodes.last()
             assertEquals(ModuleRevisionStatus.ACCEPTED, node.status)
             assertEquals(node.id, graph.snapshot.headId)
+            assertEquals(7, graph.snapshot.schemaVersion)
+            val intent = assertNotNull(node.repairMetadata?.turnIntent)
+            if (acp) {
+                val invocation = assertNotNull(node.repairMetadata?.agentInvocation)
+                assertEquals(intent.intentPath, invocation.intentPath)
+                assertEquals(intent.intentSha256, invocation.intentSha256)
+                assertEquals(intent.turnId, invocation.turnId)
+                val assessmentPath = assertNotNull(invocation.assessmentPath)
+                val assessment = decompengine.project.AcpChangeAssessment.parse(
+                    fixture.project.resolve(assessmentPath).readBytes(),
+                )
+                assertEquals(intent.turnId, assessment.turnId)
+                assertEquals(intent.intentSha256, assessment.intentSha256)
+                assertEquals(invocation.receiptSha256, assessment.receiptSha256)
+                assertEquals(node.sourceRevisionSha256, assessment.afterSha256)
+                assertEquals(node.validationProof?.evidenceSha256?.let(::listOf), assessment.validationProofSha256)
+                assertEquals(decompengine.project.AcpChangePublicationEligibility.VALIDATED_FOR_PUBLICATION,
+                    assessment.eligibility)
+            }
             assertEquals(INPUTS.sortedBy { it.id }, graph.retainedRegressionCorpus().inputs)
         }
         assertEquals(program("argc > 1 ? \"argument\" : \"default\""),
             fixture.project.resolve("src/program.c").readText())
         assertEquals(listOf("src/program.c"), iteration.patches.map { it.relativePath })
         assertFalse(iteration.releaseComplete, "host build fixture must remain non-release")
-        if (acp) assertReceipt(fixture, iteration, accepted = true, completed = true)
+        if (acp) {
+            assertReceipt(fixture, iteration, accepted = true, completed = true)
+            val history = Json.parseToJsonElement(fixture.reports.resolve("repair_history.json").readText()).jsonObject
+            assertEquals(4, history.getValue("schemaVersion").jsonPrimitive.content.toInt())
+            val row = history.getValue("iterations").jsonArray.single().jsonObject
+            val invocation = row.getValue("agentInvocation").jsonObject
+            assertEquals(iteration.agentInvocation?.turnId, invocation.getValue("turnId").jsonPrimitive.content)
+            assertEquals(iteration.agentInvocation?.assessmentSha256,
+                invocation.getValue("assessmentSha256").jsonPrimitive.content)
+        }
     }
 
     private fun assertRejected(

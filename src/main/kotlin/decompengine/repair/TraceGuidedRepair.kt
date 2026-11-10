@@ -1012,7 +1012,7 @@ internal fun renderRepairHistoryProjection(
     runs: List<RepairRunState> = emptyList(),
 ): String {
     require(maximumBytes in 1..MAXIMUM_REPAIR_PROJECTION_BYTES) { "repair history byte limit is invalid" }
-    require(schemaVersion in 1..3) { "repair history schema is unsupported" }
+    require(schemaVersion in 1..4) { "repair history schema is unsupported" }
     val iterations = authoritative.map(RepairIteration::deepFrozenCopy)
     val regressionInputs = authoritativeRegressionInputs.map(ProcessInput::detachedCopy)
     require(iterations.map { it.index } == iterations.map { it.index }.distinct().sorted()) {
@@ -1523,11 +1523,12 @@ class TraceGuidedRepairLoop private constructor(
         val projectionHistory: RepairHistory,
         val checkAcceptance: () -> Unit,
         val progress: RepairProgressProjection?,
-        private val turnIntent: AgentTurnIntent,
+        private val turnIntent: AgentTurnIntent?,
         private val executionEvidence: AcpExecutionReceiptDocument?,
     ) : AutoCloseable {
         private var finalized = false
         private var closed = false
+        private var assessmentPersisted = false
 
         fun accept(evidence: RepairEvidence?, proof: RepairValidationProof): ModuleRevisionNode {
             persistAssessment(
@@ -1555,6 +1556,7 @@ class TraceGuidedRepairLoop private constructor(
             proof: RepairValidationProof?,
         ) {
             val evidence = executionEvidence ?: return
+            val intent = turnIntent ?: return
             val root = Json.parseToJsonElement(evidence.json).jsonObject
             val session = root["session"]?.takeUnless { it === JsonNull }?.jsonObject
                 ?: error("agent receipt lacks session identity")
@@ -1571,11 +1573,11 @@ class TraceGuidedRepairLoop private constructor(
                 AcpChangePublicationEligibility.INTERRUPTED
             } else eligibility
             val assessment = AcpChangeAssessment.create(
-                intent = turnIntent,
+                intent = intent,
                 receiptSha256 = evidence.sha256,
                 sessionIdSha256 = sha256("acp-session-commitment-v1:$sessionCommitment".toByteArray(Charsets.UTF_8)),
                 changesSha256 = evidence.resultChangesSha256,
-                beforeSha256 = turnIntent.beforeSha256,
+                beforeSha256 = intent.beforeSha256,
                 afterSha256 = candidateSha256.takeIf { observation == AcpChangeObservationStatus.COMPLETE },
                 observation = observation,
                 protocolStopCode = null,
@@ -1592,12 +1594,15 @@ class TraceGuidedRepairLoop private constructor(
                 updatesSha256 = evidence.updatesSha256,
             )
             graph.persistAndBindAgentAssessment(attempt, assessment)
+            assessmentPersisted = true
         }
 
         private fun stagedResultStopReason(): AgentStopReason = result.stopReason
 
         fun reject(evidence: RepairEvidence?): ModuleRevisionNode {
-            persistAssessment(AcpChangePublicationEligibility.REJECTED, AcpChangeValidationStatus.FAILED, null)
+            if (turnIntent != null && !assessmentPersisted) {
+                persistAssessment(AcpChangePublicationEligibility.REJECTED, AcpChangeValidationStatus.FAILED, null)
+            }
             return graph.reject(attempt, evidence).also {
                 finalized = true
                 progress?.state(graph, decompengine.agent.AgentWorkflowPhase.ROLLED_BACK, it.id)
@@ -1608,7 +1613,8 @@ class TraceGuidedRepairLoop private constructor(
         fun abortAndClose(original: Exception, evidenceKind: String) {
             // A durable schema-6 acceptance decision is the point of no return. Publication
             // failures after it must remain pending for roll-forward, never become a rejection.
-            if (!finalized && original !is RepairAcceptancePendingException) {
+            if (!finalized && original !is RepairAcceptancePendingException &&
+                original !is RepairAgentEvidencePersistenceException) {
                 runCatching {
                     reject(repairFailureEvidence(evidenceKind, original))
                     reconcile()
@@ -1764,12 +1770,14 @@ class TraceGuidedRepairLoop private constructor(
                         val identity = AgentTurnIdentity.create(attempt.id, it, graph.snapshot.runs.last().id)
                         turnIdentity = identity
                         val requestBinding = AgentExecutionRequestBinding.capture(it)
-                        turnIntent = graph.createAndPersistAgentTurnIntent(
-                            attempt = attempt,
-                            identity = identity,
-                            workflowId = graph.snapshot.runs.last().id,
-                            policySha256 = requestBinding.accessPolicySha256,
-                        )
+                        turnIntent = if (graph.snapshot.schemaVersion >= 6) {
+                            graph.createAndPersistAgentTurnIntent(
+                                attempt = attempt,
+                                identity = identity,
+                                workflowId = graph.snapshot.runs.last().id,
+                                policySha256 = requestBinding.accessPolicySha256,
+                            )
+                        } else null
                         taskProgress = progress?.task(attempt.id, it, graph, identity)
                             ?: decompengine.agent.AgentTaskProgress.NONE
                     }
@@ -1881,7 +1889,7 @@ class TraceGuidedRepairLoop private constructor(
             val patches = applied.map { patch -> RepairPatch(patch.path, patch.afterContent) }
             return ExecutedRepair(
                 result, applied, patches, graph, attempt, history, ::checkRunBudget, progress,
-                requireNotNull(turnIntent), executionEvidence,
+                turnIntent, executionEvidence,
             )
         } catch (failure: Throwable) {
             if (failure is Exception) {

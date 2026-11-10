@@ -71,7 +71,11 @@ private const val MAXIMUM_REPAIR_STATE_NON_RECEIPT_ENTRIES = 16
 
 /** Existing revision-directory traversal role; blob and declared-body populations keep their own D. */
 internal fun repairRevisionDirectoryEntryLimit(budget: RepairResourceBudget): Int =
-    Math.addExact(budget.maximumRevisionNodes, MAXIMUM_REPAIR_STATE_NON_RECEIPT_ENTRIES)
+    Math.addExact(Math.multiplyExact(budget.maximumRevisionNodes, 3), MAXIMUM_REPAIR_STATE_NON_RECEIPT_ENTRIES)
+
+/** History schema is independent from the graph schema: graph v7 adds the provenance columns. */
+private fun repairHistorySchemaForGraph(graphSchema: Int): Int =
+    if (graphSchema >= 7) 4 else minOf(graphSchema, 3)
 private val REPAIR_BLOB_DIGEST = Regex("[0-9a-f]{64}")
 private val BLOB_ATOMIC_TEMPORARY = Regex("\\.([0-9a-f]{64})\\.repair-atomic\\.tmp")
 private val REPAIR_RECEIPT_PATH =
@@ -2324,12 +2328,55 @@ private fun recoverPersistedInvocationBinding(
     pending: PendingAttempt,
     schemaVersion: Int,
     store: RepairStateStore,
+    expectedProfileSha256: String? = null,
 ): PendingAttempt {
-    if (schemaVersion < 2 || pending.repairMetadata?.agentInvocation != null) return pending
     val metadata = pending.repairMetadata ?: return pending
-    val fileName = "${pending.id}.acp-receipt.json"
-    if (!store.revisionFileExists(fileName)) return pending
-    val receipt = store.readRevisionFile(fileName, MAXIMUM_REPAIR_ACP_RECEIPT_BYTES)
+    val intentName = "${pending.id}.acp-intent.json"
+    val receiptName = "${pending.id}.acp-receipt.json"
+    val assessmentName = "${pending.id}.acp-assessment.json"
+    val hasIntent = store.revisionFileExists(intentName)
+    val hasReceipt = store.revisionFileExists(receiptName)
+    val hasAssessment = store.revisionFileExists(assessmentName)
+    if (schemaVersion < 2) {
+        require(!hasIntent && !hasReceipt && !hasAssessment && metadata.agentInvocation == null) {
+            "legacy repair graph contains unbound invocation evidence"
+        }
+        return pending
+    }
+    if (!hasIntent && !hasReceipt && !hasAssessment) return pending
+    require(schemaVersion >= 6 || !hasIntent && !hasAssessment) {
+        "legacy repair graph contains unsupported schema-7 turn evidence"
+    }
+
+    val intentFile = if (hasIntent) store.readRevisionFile(intentName, MAXIMUM_REPAIR_INTENT_BYTES.toLong()) else null
+    val intent = intentFile?.let { AgentTurnIntent.parse(it.bytes) }
+    intent?.let {
+        require(it.taskId == pending.id && it.attemptId == pending.id &&
+            it.beforeSha256 == pending.parentSourceRevisionSha256 &&
+            (expectedProfileSha256 == null || it.profileSha256 == expectedProfileSha256)) {
+            "recovered repair intent is cross-paired with its pending attempt"
+        }
+    }
+    val recoveredIntentBinding = intentFile?.let { file ->
+        RepairAgentTurnIntentBinding(
+            "reports/repair-revisions/$intentName",
+            file.sha256,
+            requireNotNull(intent).turnId,
+        )
+    }
+    require(metadata.turnIntent == null || metadata.turnIntent == recoveredIntentBinding || recoveredIntentBinding == null) {
+        "persisted repair intent binding conflicts with its immutable document"
+    }
+    val intentBinding = metadata.turnIntent ?: recoveredIntentBinding
+
+    if (!hasReceipt) {
+        require(!hasAssessment) { "repair assessment exists without its invocation receipt" }
+        return if (intentBinding == metadata.turnIntent) pending else pending.copy(
+            repairMetadata = metadata.copy(turnIntent = intentBinding),
+        )
+    }
+
+    val receipt = store.readRevisionFile(receiptName, MAXIMUM_REPAIR_ACP_RECEIPT_BYTES)
     val verified = verifyAcpExecutionReceiptDocument(
         receipt.bytes,
         TRACE_REPAIR_ACP_RECEIPT_KIND,
@@ -2339,8 +2386,12 @@ private fun recoverPersistedInvocationBinding(
     require(verified.promptSha256 == metadata.prompt) {
         "recovered repair ACP receipt is cross-paired with a different workflow prompt"
     }
+    require(intent == null || intent.requestSha256 == verified.requestSha256) {
+        "recovered repair receipt request differs from its pre-dispatch intent"
+    }
+    val oldBinding = metadata.agentInvocation
     val binding = RepairAgentInvocationBinding(
-        receiptPath = "reports/repair-revisions/$fileName",
+        receiptPath = "reports/repair-revisions/$receiptName",
         receiptSha256 = receipt.sha256,
         receiptSchemaVersion = 2,
         requestSha256 = verified.requestSha256,
@@ -2348,8 +2399,36 @@ private fun recoverPersistedInvocationBinding(
         terminalOutcome = verified.terminalOutcome,
         receiptReleaseComplete = verified.releaseComplete,
         assessmentStatus = RepairAgentAssessmentStatus.PENDING,
+        intentPath = intentBinding?.intentPath,
+        intentSha256 = intentBinding?.intentSha256,
+        turnId = intentBinding?.turnId,
     )
-    return pending.copy(repairMetadata = metadata.copy(agentInvocation = binding))
+    require(oldBinding == null || oldBinding.copy(assessmentStatus = RepairAgentAssessmentStatus.PENDING) == binding) {
+        "persisted repair receipt binding conflicts with its immutable document"
+    }
+    val assessmentFile = if (hasAssessment) {
+        store.readRevisionFile(assessmentName, MAXIMUM_REPAIR_ASSESSMENT_BYTES.toLong())
+    } else null
+    val assessedBinding = assessmentFile?.let { file ->
+        val parsed = AcpChangeAssessment.parse(file.bytes)
+        val intentValue = requireNotNull(intent) { "repair assessment exists without its pre-dispatch intent" }
+        require(parsed.turnId == intentValue.turnId && parsed.intentSha256 == intentValue.sha256 &&
+            parsed.receiptSha256 == receipt.sha256 && parsed.changesSha256 == verified.resultChangesSha256 &&
+            parsed.beforeSha256 == intentValue.beforeSha256 && parsed.policySha256 == intentValue.policySha256) {
+            "recovered repair assessment is cross-paired with its immutable intent or receipt"
+        }
+        binding.copy(
+            assessmentPath = "reports/repair-revisions/$assessmentName",
+            assessmentSha256 = file.sha256,
+        )
+    } ?: binding
+    require(oldBinding == null || oldBinding.copy(assessmentStatus = RepairAgentAssessmentStatus.PENDING) == assessedBinding) {
+        "persisted repair assessment binding conflicts with its immutable document"
+    }
+    return pending.copy(repairMetadata = metadata.copy(
+        turnIntent = intentBinding,
+        agentInvocation = assessedBinding,
+    ))
 }
 
 private fun RevisionRepairMetadata.deepFrozenCopy(): RevisionRepairMetadata = copy(
@@ -2689,7 +2768,7 @@ internal class ModuleRevisionGraph private constructor(
 
     init {
         validateLoadedState()
-        bindPendingOrphanTurnIntentForRecovery()
+        synchronized(this) { bindPendingOrphanTurnIntentForRecovery() }
         cleanupUnreferencedValidationArtifacts()
         cleanupSourceTemporaries(state.pending)
         recoverPendingAttempt()
@@ -3536,7 +3615,7 @@ internal class ModuleRevisionGraph private constructor(
             beforeSha256 = beforeSha256,
         )
         persistAndBindAgentTurnIntent(attempt, intent)
-        intent
+        return intent
     }
 
     /**
@@ -4311,7 +4390,7 @@ internal class ModuleRevisionGraph private constructor(
                 derivedRepairIterations(),
                 retainedRegressionCorpus().inputs,
                 state.budget.maximumProjectionBytes,
-                minOf(state.schemaVersion, 4),
+                repairHistorySchemaForGraph(state.schemaVersion),
                 state.runs,
             ).toByteArray(Charsets.UTF_8),
         )
@@ -4334,7 +4413,7 @@ internal class ModuleRevisionGraph private constructor(
             derivedRepairIterations(candidate),
             candidate.retainedRegressionInputs,
             candidate.budget.maximumProjectionBytes,
-            minOf(candidate.schemaVersion, 3),
+            repairHistorySchemaForGraph(candidate.schemaVersion),
             candidate.runs,
         )
         renderCompatibilityProjection(candidate.nodes, candidate.budget.maximumProjectionBytes)
@@ -4935,7 +5014,8 @@ internal class ModuleRevisionGraph private constructor(
                         assessment.eligibility in setOf(
                             decompengine.project.AcpChangePublicationEligibility.REJECTED,
                             decompengine.project.AcpChangePublicationEligibility.INTERRUPTED,
-                        ),
+                        ) || assessment.eligibility == decompengine.project.AcpChangePublicationEligibility.VALIDATED_FOR_PUBLICATION &&
+                            state.nodes.singleOrNull { it.id == attemptId }?.rollbackRecord?.candidateSourceInstallStarted == false,
                     ) { "rejected repair has inconsistent assessment: $attemptId" }
                     if (expectedAssessment in setOf(RepairAgentAssessmentStatus.ACCEPTED, RepairAgentAssessmentStatus.PROVISIONAL)) {
                         val expectedProof = state.nodes.singleOrNull { it.id == attemptId }?.validationProof
@@ -5040,8 +5120,13 @@ internal class ModuleRevisionGraph private constructor(
                 "repair acceptance decision is durable; graph is unavailable until roll-forward publication recovery completes",
             )
         }
-        val recoverablePending = recoverPersistedInvocationBinding(pending)
-        if (recoverablePending !== pending) persist(state.copy(pending = recoverablePending))
+        val recoverablePending = recoverPersistedInvocationBinding(
+            pending, state.schemaVersion, stateStore, state.profileSha256,
+        )
+        if (recoverablePending != pending) persist(state.copy(
+            schemaVersion = if (recoverablePending.repairMetadata?.turnIntent != null) 7 else state.schemaVersion,
+            pending = recoverablePending,
+        ))
         val rollbackRecord = rollbackPending(recoverablePending)
         val restoredPending = requireNotNull(state.pending)
         val node = finalizeNode(
@@ -5056,7 +5141,7 @@ internal class ModuleRevisionGraph private constructor(
     }
 
     private fun recoverPersistedInvocationBinding(pending: PendingAttempt): PendingAttempt =
-        recoverPersistedInvocationBinding(pending, state.schemaVersion, stateStore)
+        recoverPersistedInvocationBinding(pending, state.schemaVersion, stateStore, state.profileSha256)
 
     private fun finalizeNode(
         pending: PendingAttempt,
@@ -7041,7 +7126,7 @@ internal fun compareCapturedRepairHistoryProjection(
         val rendered = renderRepairHistoryProjection(iterations, inputs, requestedBudget.maximumProjectionBytes, wireVersion, runs)
         if (!rendered.toByteArray(Charsets.UTF_8).contentEquals(historyPayload)) throw HistoryProjectionEncodingRefusal()
         completeEncoding = true
-        historySame(wireVersion == minOf(state.schemaVersion, 4), RepairHistoryProjectionReason.VERSION)
+        historySame(wireVersion == repairHistorySchemaForGraph(state.schemaVersion), RepairHistoryProjectionReason.VERSION)
         historySame(inputs.size == state.retainedRegressionInputs.size, RepairHistoryProjectionReason.CORPUS)
         inputs.zip(state.retainedRegressionInputs).forEach { (actual, expected) ->
             historySame(actual.id == expected.id && actual.args == expected.args && actual.stdin.contentEquals(expected.stdin),
@@ -7635,7 +7720,9 @@ private fun restorePendingPreimagesBeforeIndex(
         )
         return
     }
-    val oldPending = recoverPersistedInvocationBinding(persistedPending, loaded.schemaVersion, store)
+    val oldPending = recoverPersistedInvocationBinding(
+        persistedPending, loaded.schemaVersion, store, loaded.profileSha256,
+    )
     val legacyRunContract = loaded.schemaVersion < 3
     if (loaded.schemaVersion < 5 &&
         !(loaded.schemaVersion == 4 && persistedPending.legacyRecoveryRequired)) {
@@ -7670,7 +7757,8 @@ private fun restorePendingPreimagesBeforeIndex(
     // Preserve schema-5 recovery authority across every startup marker write. Older pending
     // records stay at v4 because they have no historical metadata commitment and must not be
     // relabeled as metadata-verified merely to use the current wire schema.
-    val upgraded = loaded.copy(schemaVersion = maxOf(loaded.schemaVersion, 4), nodes = upgradedNodes, pending = upgradedPending)
+    val provenanceSchema = if (oldPending.repairMetadata?.turnIntent != null) 7 else 4
+    val upgraded = loaded.copy(schemaVersion = maxOf(loaded.schemaVersion, provenanceSchema), nodes = upgradedNodes, pending = upgradedPending)
     val targetId = if (upgradedPending.detached) upgraded.headId else upgradedPending.parentId
     val targetSources = revisionSourcesAt(upgraded.nodes, targetId)
     require(targetSources.keys.sorted() == binding.sourcePaths)
@@ -7730,7 +7818,7 @@ private fun restorePendingPreimagesBeforeIndex(
             blob.bytes
         }
         renderRepairHistoryProjection(iterations, next.retainedRegressionInputs,
-            requestedBudget.maximumProjectionBytes, minOf(next.schemaVersion, 3), next.runs)
+            requestedBudget.maximumProjectionBytes, repairHistorySchemaForGraph(next.schemaVersion), next.runs)
         renderCompatibilityProjection(next.nodes, requestedBudget.maximumProjectionBytes)
     }
     // This atomic, synced marker is durable before source preflight can proceed to an exchange.
@@ -7883,7 +7971,9 @@ private fun recoverUndecidedSchema6BeforeIndex(
     val changes = deriveSchema6PromotionChanges(source, persistedPending)
     discardUndecidedPublicationStages(store, changes, persistedPending.id, persistedPending.predecisionStageFiles)
 
-    val pending = recoverPersistedInvocationBinding(persistedPending, source.schemaVersion, store)
+    val pending = recoverPersistedInvocationBinding(
+        persistedPending, source.schemaVersion, store, source.profileSha256,
+    )
     val targetId = source.headId // Physical source remains the accepted head, even with provisional lineage.
     val targetSources = revisionSourcesAt(source.nodes, targetId)
     require(targetSources.keys.sorted() == binding.sourcePaths) {
@@ -7947,7 +8037,10 @@ private fun recoverUndecidedSchema6BeforeIndex(
     require(storedBytes <= budget.maximumStoredBlobBytes) {
         "schema-6 recovered graph exceeds its stored blob budget"
     }
-    val ready = complete.copy(storedBlobBytes = storedBytes)
+    val ready = complete.copy(
+        schemaVersion = if (pending.repairMetadata?.turnIntent != null) 7 else complete.schemaVersion,
+        storedBlobBytes = storedBytes,
+    )
     val payload = renderGraph(ready).toByteArray(Charsets.UTF_8)
     require(payload.size.toLong() <= budget.maximumGraphBytes) {
         "schema-6 recovered graph exceeds its graph-byte budget"
@@ -7966,7 +8059,7 @@ private fun recoverUndecidedSchema6BeforeIndex(
     }
     renderRepairHistoryProjection(
         iterations, ready.retainedRegressionInputs, budget.maximumProjectionBytes,
-        minOf(ready.schemaVersion, 3), ready.runs,
+        repairHistorySchemaForGraph(ready.schemaVersion), ready.runs,
     )
     renderCompatibilityProjection(ready.nodes, budget.maximumProjectionBytes)
 
