@@ -1,22 +1,17 @@
 package decompengine.project
 
 import decompengine.acp.LinuxFilesystemSyscalls
-import decompengine.agent.isCanonicalAgentTurnId
+import decompengine.acp.LinuxDescriptor
+import decompengine.acp.LinuxSyscallException
+import decompengine.acp.permissions
 import decompengine.agent.AgentStopReason
+import decompengine.agent.isCanonicalAgentTurnId
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.StrictJsonLimits
-import java.nio.ByteBuffer
-import java.nio.channels.FileChannel
-import java.nio.file.Files
-import java.nio.file.LinkOption.NOFOLLOW_LINKS
-import java.nio.file.Path
-import java.nio.file.StandardCopyOption.ATOMIC_MOVE
-import java.nio.file.StandardOpenOption.CREATE_NEW
-import java.nio.file.StandardOpenOption.READ
-import java.nio.file.StandardOpenOption.WRITE
-import java.nio.file.attribute.PosixFilePermissions
-import java.security.MessageDigest
 import java.nio.charset.StandardCharsets
+import java.nio.file.Path
+import java.security.MessageDigest
+import java.util.UUID
 import kotlinx.serialization.json.Json
 
 /**
@@ -24,9 +19,17 @@ import kotlinx.serialization.json.Json
  * binds every write to one live output root and input. The directory is a preserved workspace
  * entry, so an input switch archives it with the corresponding reconstruction outputs.
  */
+internal enum class ReconstructionTurnEvidenceStorePoint {
+    AFTER_TURN_DIRECTORY_OPEN,
+    BEFORE_TEMPORARY_LINK,
+    AFTER_PUBLICATION_RENAME,
+    BEFORE_READBACK,
+}
+
 internal class ReconstructionTurnEvidenceStore(
     private val publicationLock: ReconstructionPublicationLock,
     private val inputSha256: String,
+    private val faultInjector: ((ReconstructionTurnEvidenceStorePoint) -> Unit)? = null,
 ) {
     private val root: Path
         get() = publicationLock.canonicalRoot
@@ -40,43 +43,44 @@ internal class ReconstructionTurnEvidenceStore(
 
     fun persistIntent(intent: AgentTurnIntent): String {
         require(intent.profileSha256.matches(HASH))
-        val directory = turnDirectory(intent.taskId, intent.turnId)
-        writeOnce(directory.resolve(INTENT_FILE), intent.canonicalBytes(), MAXIMUM_DOCUMENT_BYTES)
-        return relative(directory.resolve(INTENT_FILE))
+        return openTurnDirectory(intent.taskId, intent.turnId, create = true).use { directory ->
+            writeOnce(directory, INTENT_FILE, intent.canonicalBytes(), MAXIMUM_DOCUMENT_BYTES)
+            directory.relative(INTENT_FILE)
+        }
     }
 
     fun persistReceipt(intent: AgentTurnIntent, receiptBytes: ByteArray): Pair<String, String> {
-        val directory = turnDirectory(intent.taskId, intent.turnId)
-        require(readBoundedRegularFile(directory.resolve(INTENT_FILE), MAXIMUM_DOCUMENT_BYTES)
-            .contentEquals(intent.canonicalBytes())) { "turn receipt has no matching durable intent" }
-        val path = directory.resolve(RECEIPT_FILE)
-        writeOnce(path, receiptBytes, MAXIMUM_RECEIPT_BYTES)
-        return relative(path) to sha256(receiptBytes)
+        return openTurnDirectory(intent.taskId, intent.turnId, create = true).use { directory ->
+            require(readFileAt(directory, INTENT_FILE, MAXIMUM_DOCUMENT_BYTES)
+                .contentEquals(intent.canonicalBytes())) { "turn receipt has no matching durable intent" }
+            writeOnce(directory, RECEIPT_FILE, receiptBytes, MAXIMUM_RECEIPT_BYTES)
+            directory.relative(RECEIPT_FILE) to sha256(receiptBytes)
+        }
     }
 
     fun persistAssessment(intent: AgentTurnIntent, assessment: AcpChangeAssessment): String {
         require(assessment.turnId == intent.turnId && assessment.intentSha256 == intent.sha256) {
             "turn assessment does not match its persisted intent"
         }
-        val directory = turnDirectory(intent.taskId, intent.turnId)
-        // Intent is a mandatory pre-dispatch witness. Refuse to write a derived assessment if
-        // that exact immutable source document is absent or was replaced.
-        val intentPath = directory.resolve(INTENT_FILE)
-        require(readBoundedRegularFile(intentPath, MAXIMUM_DOCUMENT_BYTES).contentEquals(intent.canonicalBytes())) {
-            "turn assessment has no matching durable intent"
-        }
-        if (assessment.receiptSha256 == null) {
-            require(!Files.exists(directory.resolve(RECEIPT_FILE), NOFOLLOW_LINKS)) {
-                "turn without a receipt cannot retain receipt bytes"
+        return openTurnDirectory(intent.taskId, intent.turnId, create = true).use { directory ->
+            // Intent is a mandatory pre-dispatch witness. Refuse to write a derived assessment if
+            // that exact immutable source document is absent or was replaced.
+            require(readFileAt(directory, INTENT_FILE, MAXIMUM_DOCUMENT_BYTES).contentEquals(intent.canonicalBytes())) {
+                "turn assessment has no matching durable intent"
             }
-        } else {
-            val receipt = readBoundedRegularFile(directory.resolve(RECEIPT_FILE), MAXIMUM_RECEIPT_BYTES)
-            require(sha256(receipt) == assessment.receiptSha256) {
-                "turn assessment differs from its immutable receipt"
+            if (assessment.receiptSha256 == null) {
+                require(!fileExistsAt(directory, RECEIPT_FILE)) {
+                    "turn without a receipt cannot retain receipt bytes"
+                }
+            } else {
+                val receipt = readFileAt(directory, RECEIPT_FILE, MAXIMUM_RECEIPT_BYTES)
+                require(sha256(receipt) == assessment.receiptSha256) {
+                    "turn assessment differs from its immutable receipt"
+                }
             }
+            writeOnce(directory, ASSESSMENT_FILE, assessment.canonicalBytes(), MAXIMUM_DOCUMENT_BYTES)
+            directory.relative(ASSESSMENT_FILE)
         }
-        writeOnce(directory.resolve(ASSESSMENT_FILE), assessment.canonicalBytes(), MAXIMUM_DOCUMENT_BYTES)
-        return relative(directory.resolve(ASSESSMENT_FILE))
     }
 
     /**
@@ -200,101 +204,144 @@ internal class ReconstructionTurnEvidenceStore(
         }
     }
 
-    private fun turnDirectory(taskId: String, turnId: String): Path {
+    private fun openTurnDirectory(taskId: String, turnId: String, create: Boolean): TurnDirectory {
         publicationLock.borrow(root, inputSha256)
         require(taskId.matches(MODULE)) { "turn evidence task ID is invalid" }
         require(isCanonicalAgentTurnId(turnId)) { "turn evidence ID is invalid" }
-        val base = root.resolve(DIRECTORY)
-        ensurePrivateDirectory(root, base)
-        val inputDirectory = base.resolve(inputSha256)
-        ensurePrivateDirectory(base, inputDirectory)
-        val taskDirectory = inputDirectory.resolve(taskId)
-        ensurePrivateDirectory(inputDirectory, taskDirectory)
-        val directory = taskDirectory.resolve(turnId)
-        ensurePrivateDirectory(taskDirectory, directory)
-        return directory
+        val rootDirectory = publicationLock.rootDirectoryDescriptor()
+        val names = listOf(DIRECTORY, inputSha256, taskId, turnId)
+        val opened = mutableListOf<LinuxDescriptor>()
+        try {
+            names.forEach { name ->
+                publicationLock.borrow(root, inputSha256)
+                val parent = opened.lastOrNull() ?: rootDirectory
+                val next = openPrivateDirectoryAt(parent, name, rootDirectory.identity.uid, create)
+                opened += next
+            }
+            return TurnDirectory(rootDirectory, names, opened.toList()).also {
+                faultInjector?.invoke(ReconstructionTurnEvidenceStorePoint.AFTER_TURN_DIRECTORY_OPEN)
+            }
+        } catch (failure: Throwable) {
+            opened.asReversed().forEach { it.close() }
+            throw failure
+        }
     }
 
-    private fun writeOnce(path: Path, bytes: ByteArray, maximumBytes: Int) {
+    private fun openPrivateDirectoryAt(
+        parent: LinuxDescriptor,
+        name: String,
+        ownerUid: Int,
+        create: Boolean,
+    ): LinuxDescriptor {
+        val descriptor = try {
+            LinuxFilesystemSyscalls.openDirectoryAt(parent.fd, name)
+        } catch (failure: LinuxSyscallException) {
+            if (failure.errno != LinuxFilesystemSyscalls.ENOENT || !create) {
+                throw IllegalArgumentException("turn evidence namespace is missing or unsafe", failure)
+            }
+            try {
+                LinuxFilesystemSyscalls.createDirectory(parent.fd, name, PRIVATE_DIRECTORY_MODE)
+                LinuxFilesystemSyscalls.synchronize(parent)
+            } catch (race: LinuxSyscallException) {
+                if (race.errno != LinuxFilesystemSyscalls.EEXIST) throw race
+            }
+            try {
+                LinuxFilesystemSyscalls.openDirectoryAt(parent.fd, name)
+            } catch (openFailure: LinuxSyscallException) {
+                throw IllegalArgumentException("turn evidence namespace is missing or unsafe", openFailure)
+            }
+        }
+        val identity = descriptor.identity
+        if (!identity.isDirectory || identity.isSymbolicLink || identity.uid != ownerUid ||
+            identity.mode.permissions != PRIVATE_DIRECTORY_MODE) {
+            descriptor.close()
+            throw IllegalArgumentException("turn evidence directory is not private to the workspace owner")
+        }
+        return descriptor
+    }
+
+    private fun writeOnce(directory: TurnDirectory, name: String, bytes: ByteArray, maximumBytes: Int) {
         require(bytes.size <= maximumBytes) { "turn evidence document exceeds its byte bound" }
         publicationLock.borrow(root, inputSha256)
-        require(!Files.exists(path, NOFOLLOW_LINKS)) {
+        directory.verifyNamespace()
+        require(!fileExistsAt(directory, name)) {
             "turn evidence is immutable and already exists"
         }
-        val temporary = Files.createTempFile(
-            path.parent,
-            ".turn-evidence-",
-            ".tmp",
-            PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")),
-        )
+        val temporaryName = ".turn-evidence-${UUID.randomUUID()}.tmp"
+        val temporary = LinuxFilesystemSyscalls.createTemporaryAt(directory.descriptor.fd)
+        var linked = false
         try {
-            FileChannel.open(temporary, WRITE, NOFOLLOW_LINKS).use { channel ->
-                val buffer = ByteBuffer.wrap(bytes)
-                while (buffer.hasRemaining()) channel.write(buffer)
-                channel.force(true)
-            }
+            LinuxFilesystemSyscalls.chmod(temporary, PRIVATE_FILE_MODE)
+            LinuxFilesystemSyscalls.write(temporary, bytes) { }
             publicationLock.borrow(root, inputSha256)
+            faultInjector?.invoke(ReconstructionTurnEvidenceStorePoint.BEFORE_TEMPORARY_LINK)
+            directory.verifyNamespace()
+            LinuxFilesystemSyscalls.linkTemporaryAt(temporary, directory.descriptor.fd, temporaryName)
+            linked = true
+            LinuxFilesystemSyscalls.synchronize(directory.descriptor)
             try {
-                Files.move(temporary, path, ATOMIC_MOVE)
-            } catch (failure: java.nio.file.FileAlreadyExistsException) {
-                throw IllegalStateException("turn evidence is immutable and already exists", failure)
+                LinuxFilesystemSyscalls.renameNoReplace(directory.descriptor.fd, temporaryName, name)
+                linked = false
+                faultInjector?.invoke(ReconstructionTurnEvidenceStorePoint.AFTER_PUBLICATION_RENAME)
+            } catch (failure: LinuxSyscallException) {
+                if (failure.errno == LinuxFilesystemSyscalls.EEXIST) {
+                    throw IllegalStateException("turn evidence is immutable and already exists", failure)
+                }
+                throw failure
             }
-            require(Files.isRegularFile(path, NOFOLLOW_LINKS) && !Files.isSymbolicLink(path)) {
-                "turn evidence write did not publish an ordinary file"
+            LinuxFilesystemSyscalls.synchronize(directory.descriptor)
+            directory.verifyNamespace()
+            val published = requireNotNull(LinuxFilesystemSyscalls.openRegularFileAtOrNull(directory.descriptor.fd, name))
+            published.use { actual ->
+                require(actual.identity.key == temporary.identity.key && actual.identity.mountId == temporary.identity.mountId &&
+                    actual.identity.uid == directory.descriptor.identity.uid && actual.identity.linkCount == 1 &&
+                    actual.identity.mode.permissions == PRIVATE_FILE_MODE) {
+                    "turn evidence publication identity or permissions changed"
+                }
             }
-            val attributes = Files.readAttributes(path, java.nio.file.attribute.PosixFileAttributes::class.java, NOFOLLOW_LINKS)
-            require(attributes.owner() == Files.readAttributes(root, java.nio.file.attribute.PosixFileAttributes::class.java, NOFOLLOW_LINKS).owner() &&
-                attributes.permissions() == PosixFilePermissions.fromString("rw-------") &&
-                attributes.size() == bytes.size.toLong() && bytes.size <= maximumBytes) {
-                "turn evidence file identity or bounds changed during publication"
-            }
-            require(readBoundedRegularFile(path, maximumBytes).contentEquals(bytes)) {
+            faultInjector?.invoke(ReconstructionTurnEvidenceStorePoint.BEFORE_READBACK)
+            require(readFileAt(directory, name, maximumBytes).contentEquals(bytes)) {
                 "turn evidence readback differs from the immutable document"
             }
-            FileChannel.open(path.parent, READ, NOFOLLOW_LINKS).use { it.force(true) }
+            directory.verifyNamespace()
             LinuxFilesystemSyscalls.synchronize(publicationLock.rootDirectoryDescriptor())
         } finally {
-            Files.deleteIfExists(temporary)
+            if (linked) runCatching { LinuxFilesystemSyscalls.unlinkIfPresent(directory.descriptor.fd, temporaryName) }
+            temporary.close()
         }
     }
 
-    private fun ensurePrivateDirectory(parent: Path, directory: Path) {
+    private fun fileExistsAt(directory: TurnDirectory, name: String): Boolean =
+        LinuxFilesystemSyscalls.openRegularFileAtOrNull(directory.descriptor.fd, name)?.use { true } ?: false
+
+    private fun readFileAt(directory: TurnDirectory, name: String, maximumBytes: Int): ByteArray {
         publicationLock.borrow(root, inputSha256)
-        if (!Files.exists(directory, NOFOLLOW_LINKS)) {
-            try {
-                Files.createDirectory(directory,
-                    PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")))
-                FileChannel.open(parent, READ, NOFOLLOW_LINKS).use { it.force(true) }
-            } catch (_: java.nio.file.FileAlreadyExistsException) {
-                // Validate the winner below; never accept a link or non-directory race.
-            }
-        }
-        require(!Files.isSymbolicLink(directory) && Files.isDirectory(directory, NOFOLLOW_LINKS)) {
-            "turn evidence path is not an ordinary directory"
-        }
-        val attrs = Files.readAttributes(directory, java.nio.file.attribute.PosixFileAttributes::class.java, NOFOLLOW_LINKS)
-        require(attrs.permissions() == PosixFilePermissions.fromString("rwx------") &&
-            attrs.owner() == Files.readAttributes(root, java.nio.file.attribute.PosixFileAttributes::class.java, NOFOLLOW_LINKS).owner()) {
-            "turn evidence directory is not private to the workspace owner"
-        }
-    }
-
-    private fun relative(path: Path): String = root.relativize(path).toString().replace('\\', '/')
-
-    private fun readBoundedRegularFile(path: Path, maximumBytes: Int): ByteArray {
-        require(Files.isRegularFile(path, NOFOLLOW_LINKS) && !Files.isSymbolicLink(path)) {
+        directory.verifyNamespace()
+        val pinned = requireNotNull(LinuxFilesystemSyscalls.openRegularFileAtOrNull(directory.descriptor.fd, name)) {
             "turn evidence is missing or is not an ordinary file"
         }
-        FileChannel.open(path, READ, NOFOLLOW_LINKS).use { channel ->
-            val size = channel.size()
-            require(size in 0..maximumBytes.toLong()) { "turn evidence exceeds its byte bound" }
-            val bytes = ByteArray(size.toInt())
-            val buffer = ByteBuffer.wrap(bytes)
-            while (buffer.hasRemaining()) {
-                require(channel.read(buffer) >= 0) { "turn evidence became truncated during readback" }
+        pinned.use { entry ->
+            val identity = entry.identity
+            require(identity.uid == directory.descriptor.identity.uid && identity.linkCount == 1 &&
+                identity.mode.permissions == PRIVATE_FILE_MODE) {
+                "turn evidence file is not private to the workspace owner"
             }
-            require(channel.size() == size) { "turn evidence changed during readback" }
-            return bytes
+            val readable = LinuxFilesystemSyscalls.openReadableFrom(entry)
+            readable.use { file ->
+                val before = LinuxFilesystemSyscalls.fileState(file)
+                require(before.size in 0..maximumBytes.toLong()) { "turn evidence exceeds its byte bound" }
+                val bytes = LinuxFilesystemSyscalls.read(file, maximumBytes) { }
+                val after = LinuxFilesystemSyscalls.fileState(file)
+                require(before.identity.key == after.identity.key && before.identity.mountId == after.identity.mountId &&
+                    before.size == after.size && before.modificationTimeSeconds == after.modificationTimeSeconds &&
+                    before.modificationTimeNanoseconds == after.modificationTimeNanoseconds &&
+                    before.changeTimeSeconds == after.changeTimeSeconds &&
+                    before.changeTimeNanoseconds == after.changeTimeNanoseconds && bytes.size.toLong() == before.size) {
+                    "turn evidence changed while it was read"
+                }
+                directory.verifyNamespace()
+                return bytes
+            }
         }
     }
 
@@ -303,31 +350,46 @@ internal class ReconstructionTurnEvidenceStore(
             !relativePath.split('/').any { it == "." || it == ".." }) {
             "turn evidence path is outside its admitted namespace"
         }
-        val path = root.resolve(relativePath).normalize()
-        require(path.startsWith(root) && Files.isRegularFile(path, NOFOLLOW_LINKS) && !Files.isSymbolicLink(path)) {
-            "turn evidence is missing or is not an ordinary file"
+        val components = relativePath.split('/')
+        require(components.size == 5 && components[0] == DIRECTORY && components[1] == inputSha256 &&
+            components[2].matches(MODULE) && isCanonicalAgentTurnId(components[3]) &&
+            components[4] in setOf(INTENT_FILE, RECEIPT_FILE, ASSESSMENT_FILE)) {
+            "turn evidence path has an invalid namespace shape"
         }
-        val components = root.relativize(path).toList()
-        var parent = root
-        val rootOwner = Files.readAttributes(root, java.nio.file.attribute.PosixFileAttributes::class.java, NOFOLLOW_LINKS).owner()
-        components.dropLast(1).forEach { component ->
-            parent = parent.resolve(component)
-            require(Files.isDirectory(parent, NOFOLLOW_LINKS) && !Files.isSymbolicLink(parent)) {
-                "turn evidence namespace contains a link or non-directory"
+        return openTurnDirectory(components[2], components[3], create = false).use { directory ->
+            readFileAt(directory, components[4], maximumBytes)
+        }
+    }
+
+    private class TurnDirectory(
+        private val root: LinuxDescriptor,
+        private val names: List<String>,
+        private val directories: List<LinuxDescriptor>,
+    ) : AutoCloseable {
+        val descriptor: LinuxDescriptor get() = directories.last()
+
+        fun relative(fileName: String): String = "${names.joinToString("/")}/$fileName"
+
+        fun verifyNamespace() {
+            require(names.size == directories.size)
+            var parent = root
+            names.indices.forEach { index ->
+                val named = try {
+                    LinuxFilesystemSyscalls.openDirectoryAt(parent.fd, names[index])
+                } catch (failure: LinuxSyscallException) {
+                    throw IllegalArgumentException("turn evidence directory binding is missing or unsafe", failure)
+                }
+                named.use {
+                    val expected = directories[index].identity
+                    require(it.identity.key == expected.key && it.identity.mountId == expected.mountId) {
+                        "turn evidence directory binding changed during the operation"
+                    }
+                }
+                parent = directories[index]
             }
-            val directoryAttributes = Files.readAttributes(
-                parent, java.nio.file.attribute.PosixFileAttributes::class.java, NOFOLLOW_LINKS,
-            )
-            require(directoryAttributes.owner() == rootOwner &&
-                directoryAttributes.permissions() == PosixFilePermissions.fromString("rwx------")) {
-                "turn evidence directory is not private to the workspace owner"
-            }
         }
-        val attributes = Files.readAttributes(path, java.nio.file.attribute.PosixFileAttributes::class.java, NOFOLLOW_LINKS)
-        require(attributes.owner() == rootOwner && attributes.permissions() == PosixFilePermissions.fromString("rw-------")) {
-            "turn evidence file is not private to the workspace owner"
-        }
-        return readBoundedRegularFile(path, maximumBytes)
+
+        override fun close() = directories.asReversed().forEach { it.close() }
     }
 
     private fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256")
@@ -342,6 +404,8 @@ internal class ReconstructionTurnEvidenceStore(
         private const val RECONSTRUCTION_ACP_TASK_FIELD = "moduleId"
         private const val MAXIMUM_DOCUMENT_BYTES = 1024 * 1024
         private const val MAXIMUM_RECEIPT_BYTES = 64 * 1024 * 1024
+        private const val PRIVATE_DIRECTORY_MODE = 0x1c0 // 0700
+        private const val PRIVATE_FILE_MODE = 0x180 // 0600
         private val HASH = Regex("[0-9a-f]{64}")
         private val MODULE = Regex("[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}")
     }

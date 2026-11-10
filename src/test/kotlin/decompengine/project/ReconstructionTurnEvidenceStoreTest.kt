@@ -4,6 +4,7 @@ import decompengine.agent.AgentStopReason
 import decompengine.agent.AgentTurnIdentity
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.StandardCopyOption.ATOMIC_MOVE
 import java.nio.file.attribute.PosixFilePermissions
 import java.security.MessageDigest
 import java.util.UUID
@@ -20,12 +21,14 @@ class ReconstructionTurnEvidenceStoreTest {
         val base = Files.createTempDirectory(scratch, "turn-evidence-")
         val root = base.resolve("output")
         val input = base.resolve("input").also { Files.writeString(it, "input") }
+        val external = base.resolve("external").also(Files::createDirectory)
         try {
             ReconstructionOutputWorkspace.open(root, input).use { workspace ->
                 val store = ReconstructionTurnEvidenceStore(workspace.publicationLock, workspace.inputSha256)
                 val turnId = UUID.randomUUID().toString()
                 val intent = intent(turnId, "a".repeat(64), workspace.inputSha256)
-                val intentPath = root.resolve(store.persistIntent(intent))
+                val intentRelativePath = store.persistIntent(intent)
+                val intentPath = root.resolve(intentRelativePath)
                 assertTrue(Files.isRegularFile(intentPath))
                 assertEquals(intent.sha256, AgentTurnIntent.parse(Files.readAllBytes(intentPath)).sha256)
                 assertEquals("rwx------", PosixFilePermissions.toString(
@@ -49,7 +52,8 @@ class ReconstructionTurnEvidenceStoreTest {
                     eligibility = AcpChangePublicationEligibility.INTERRUPTED,
                     updatesSha256 = null,
                 )
-                val assessmentPath = root.resolve(store.persistAssessment(intent, assessment))
+                val assessmentRelativePath = store.persistAssessment(intent, assessment)
+                val assessmentPath = root.resolve(assessmentRelativePath)
                 assertEquals(assessment.sha256, AcpChangeAssessment.parse(Files.readAllBytes(assessmentPath)).sha256)
                 assertFailsWith<IllegalArgumentException> { store.persistIntent(intent) }
 
@@ -73,6 +77,41 @@ class ReconstructionTurnEvidenceStoreTest {
                     updatesSha256 = null,
                 )
                 assertFailsWith<IllegalArgumentException> { store.persistAssessment(intent, crossedAssessment) }
+
+                val turnDirectory = intentPath.parent
+                var substituted = false
+                val verifier = ReconstructionTurnEvidenceStore(
+                    workspace.publicationLock,
+                    workspace.inputSha256,
+                ) { point ->
+                    if (point == ReconstructionTurnEvidenceStorePoint.AFTER_TURN_DIRECTORY_OPEN && !substituted) {
+                        Files.move(turnDirectory, turnDirectory.resolveSibling("detached-$turnId"), ATOMIC_MOVE)
+                        Files.createSymbolicLink(turnDirectory, external)
+                        substituted = true
+                    }
+                }
+                assertFalse(verifier.verifyCheckpointProvenance(
+                    moduleId = intent.taskId,
+                    profileSha256 = intent.profileSha256,
+                    sourcePath = "src/modules/parse.c",
+                    sourceSha256 = workspace.inputSha256,
+                    accepted = false,
+                    intentPath = intentRelativePath,
+                    intentSha256 = intent.sha256,
+                    intent = intent,
+                    receiptPath = null,
+                    receiptSha256 = null,
+                    executionEvidenceSha256 = null,
+                    assessmentPath = assessmentRelativePath,
+                    assessmentSha256 = assessment.sha256,
+                    assessment = assessment,
+                    compilation = null,
+                    executionRequestSha256 = intent.requestSha256,
+                    executionTerminalOutcome = null,
+                    executionReleaseComplete = null,
+                ))
+                assertTrue(substituted)
+                assertFalse(Files.exists(external.resolve(ReconstructionTurnEvidenceStore.INTENT_FILE)))
             }
         } finally {
             Files.walk(base).use { paths ->
@@ -102,6 +141,47 @@ class ReconstructionTurnEvidenceStoreTest {
         } finally {
             Files.walk(base).use { paths ->
                 paths.sorted(java.util.Comparator.reverseOrder()).forEach(Files::deleteIfExists)
+            }
+        }
+    }
+
+    @Test
+    fun `turn evidence directory substitution never writes through the replacement symlink`() {
+        val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize().also { Files.createDirectories(it) }
+        for (point in ReconstructionTurnEvidenceStorePoint.entries) {
+            val base = Files.createTempDirectory(scratch, "turn-evidence-race-")
+            val root = base.resolve("output")
+            val input = base.resolve("input").also { Files.writeString(it, "input") }
+            val external = base.resolve("external")
+            Files.createDirectory(external)
+            try {
+                ReconstructionOutputWorkspace.open(root, input).use { workspace ->
+                    val turnId = UUID.randomUUID().toString()
+                    val intent = intent(turnId, "a".repeat(64), workspace.inputSha256)
+                    val turnDirectory = root.resolve(
+                        "${ReconstructionTurnEvidenceStore.DIRECTORY}/${workspace.inputSha256}/parse/$turnId",
+                    )
+                    var substituted = false
+                    val store = ReconstructionTurnEvidenceStore(
+                        workspace.publicationLock,
+                        workspace.inputSha256,
+                    ) { observed ->
+                        if (observed == point && !substituted) {
+                            val detached = turnDirectory.resolveSibling("detached-$turnId")
+                            Files.move(turnDirectory, detached, ATOMIC_MOVE)
+                            Files.createSymbolicLink(turnDirectory, external)
+                            substituted = true
+                        }
+                    }
+
+                    assertFailsWith<IllegalArgumentException>(point.name) { store.persistIntent(intent) }
+                    assertTrue(substituted, "the race control must replace the directory at $point")
+                    assertFalse(Files.exists(external.resolve(ReconstructionTurnEvidenceStore.INTENT_FILE)))
+                }
+            } finally {
+                Files.walk(base).use { paths ->
+                    paths.sorted(java.util.Comparator.reverseOrder()).forEach(Files::deleteIfExists)
+                }
             }
         }
     }
