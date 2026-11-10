@@ -42,10 +42,15 @@ class RecordedRepairHistoryCliTest {
         try {
             val repair = executor.submit(java.util.concurrent.Callable {
                 started.countDown()
-                withRepairRuntimeUnderPublicationLease(sourceTree, { _ ->
-                    runtimeOpened.incrementAndGet()
-                    runtime
-                }, { true }) { _, _ -> 7 }
+                withRepairRuntimeUnderPublicationLease(
+                    projectDirectory = sourceTree,
+                    openRuntime = { _ ->
+                        runtimeOpened.incrementAndGet()
+                        runtime
+                    },
+                    canRetireRepairMarker = { true },
+                    action = { _, _ -> 7 },
+                )
             })
             assertTrue(started.await(5, TimeUnit.SECONDS))
             assertEquals(0, runtimeOpened.get(), "repair runtime construction must wait behind publication")
@@ -160,9 +165,12 @@ class RecordedRepairHistoryCliTest {
         val executor = Executors.newFixedThreadPool(2)
         try {
             val repair = executor.submit {
-                withRepairRuntimeUnderPublicationLease(sourceTree, { _ -> projection }, { true }) { runtime, _ ->
-                    runtime.closeAndAwaitWriterTermination()
-                }
+                withRepairRuntimeUnderPublicationLease(
+                    projectDirectory = sourceTree,
+                    openRuntime = { _ -> projection },
+                    canRetireRepairMarker = { true },
+                    action = { runtime, _ -> runtime.closeAndAwaitWriterTermination() },
+                )
             }
             assertTrue(writerEntered.await(5, TimeUnit.SECONDS), "progress writer did not reach the delayed write")
             assertTrue(closeTimedOut.await(7, TimeUnit.SECONDS), "bounded close did not report its writer timeout")

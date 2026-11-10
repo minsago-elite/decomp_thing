@@ -51,17 +51,22 @@ class RepairRunSemanticsTest {
                             }
                         })
                 }) {
-                    withRepairRuntimeUnderPublicationLease(project, { fixture.loop }, { recovered: Boolean -> recovered }) { loop, admittedProject ->
-                        val result = loop.runRepair(admittedProject, fixture.original, inputs, maxIterations = 1)
-                        interruptObserved.set(Thread.currentThread().isInterrupted)
-                        assertEquals(RepairRunStatus.FULLY_ACCEPTED, result.runState.status)
-                        assertTrue(result.recoveryComplete)
-                        assertTrue(decompengine.repairOutcomeAllowsWorkspaceMarkerRetirement(result))
-                        assertFalse(decompengine.repairOutcomeAllowsWorkspaceMarkerRetirement(
-                            result.copy(recoveryComplete = false),
-                        ))
-                        result.recoveryComplete
-                    }
+                    withRepairRuntimeUnderPublicationLease(
+                        projectDirectory = project,
+                        openRuntime = { _ -> fixture.loop },
+                        canRetireRepairMarker = { recovered: Boolean -> recovered },
+                        action = { loop, admittedProject ->
+                            val result = loop.runRepair(admittedProject, fixture.original, inputs, maxIterations = 1)
+                            interruptObserved.set(Thread.currentThread().isInterrupted)
+                            assertEquals(RepairRunStatus.FULLY_ACCEPTED, result.runState.status)
+                            assertTrue(result.recoveryComplete)
+                            assertTrue(decompengine.repairOutcomeAllowsWorkspaceMarkerRetirement(result))
+                            assertFalse(decompengine.repairOutcomeAllowsWorkspaceMarkerRetirement(
+                                result.copy(recoveryComplete = false),
+                            ))
+                            result.recoveryComplete
+                        },
+                    )
                 }
             }
             assertTrue(writerEntered.await(5, java.util.concurrent.TimeUnit.SECONDS), "repair loop did not start its progress writer")
