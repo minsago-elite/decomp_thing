@@ -314,26 +314,41 @@ internal class ReconstructionOutputWorkspace private constructor(
             // the whole action when the root is genuinely unmanaged. If it is managed, release
             // the stamp and acquire the ordinary file-backed lease before allowing the action.
             val gate = retainGate(canonicalRoot)
+            val ownerThread = Thread.currentThread()
             var gateStamp = 0L
             var gateRetained = true
+            var readHoldRegistered = false
             try {
-                gateStamp = if (failFast) gate.lock.tryReadLock() else acquireReadLock(gate)
-                if (gateStamp == 0L) throw ReconstructionOutputReadUnavailableException(
-                    "published reconstruction workspace is currently being updated",
-                )
+                val inherited = synchronized(gate) {
+                    gate.readHolds[ownerThread]?.also { it.leases++ }
+                }
+                if (inherited != null) {
+                    readHoldRegistered = true
+                } else {
+                    gateStamp = if (failFast) gate.lock.tryReadLock() else acquireReadLock(gate)
+                    if (gateStamp == 0L) throw ReconstructionOutputReadUnavailableException(
+                        "published reconstruction workspace is currently being updated",
+                    )
+                    synchronized(gate) {
+                        check(gate.readHolds.put(ownerThread, ProcessGate.ReadHold(gateStamp, 1)) == null) {
+                            "a read lease was concurrently registered for the same thread"
+                        }
+                        readHoldRegistered = true
+                    }
+                }
                 val active = canonicalRoot.resolve(ACTIVE)
                 val lock = canonicalRoot.resolve(LOCK_FILE)
                 val hasActive = Files.exists(active, NOFOLLOW_LINKS)
                 val hasLock = Files.exists(lock, NOFOLLOW_LINKS)
                 if (!hasActive && !hasLock) {
                     requireReadablePublicationState(canonicalRoot)
-                    val stamp = gateStamp
                     gateStamp = 0L
                     gateRetained = false
+                    readHoldRegistered = false
                     val closed = AtomicBoolean()
                     return AutoCloseable {
                         if (closed.compareAndSet(false, true)) {
-                            try { gate.lock.unlockRead(stamp) } finally { releaseGate(gate) }
+                            try { releaseReadHold(gate, ownerThread) } finally { releaseGate(gate) }
                         }
                     }
                 }
@@ -349,7 +364,8 @@ internal class ReconstructionOutputWorkspace private constructor(
                 }
                 return null
             } finally {
-                if (gateStamp != 0L) gate.lock.unlockRead(gateStamp)
+                if (readHoldRegistered) releaseReadHold(gate, ownerThread)
+                else if (gateStamp != 0L) gate.lock.unlockRead(gateStamp)
                 if (gateRetained) releaseGate(gate)
             }
         }

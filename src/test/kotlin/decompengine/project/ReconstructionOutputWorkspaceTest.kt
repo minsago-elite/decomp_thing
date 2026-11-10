@@ -10,6 +10,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
+import java.util.concurrent.atomic.AtomicReference
 import decompengine.testing.recoveryMatrixTempDirectory as createTempDirectory
 import decompengine.testing.RecoveryMatrixEvidence
 import decompengine.jobs.WorkflowStartupRecoveryBudget
@@ -53,6 +54,61 @@ class ReconstructionOutputWorkspaceTest {
             assertTrue(root.resolve(".reconstruction.lock").exists())
         } finally {
             releaseReader.countDown()
+            executor.shutdownNow()
+            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS))
+        }
+    }
+
+    @Test
+    fun `nested read reuses the outer gate hold when a writer is queued`() {
+        val base = createTempDirectory("input-nested-read-gate-")
+        val root = base.resolve("output")
+        val input = base.resolve("input").apply { writeText("input") }
+        ReconstructionOutputWorkspace.open(root, input).use { }
+        val executor = Executors.newFixedThreadPool(2)
+        val outerReadEntered = CountDownLatch(1)
+        val allowNestedRead = CountDownLatch(1)
+        val nestedReadReturned = CountDownLatch(1)
+        val releaseOuterRead = CountDownLatch(1)
+        val writerStarted = CountDownLatch(1)
+        val writerThread = AtomicReference<Thread>()
+        try {
+            val reader = executor.submit {
+                ReconstructionOutputWorkspace.withReadLease(root) {
+                    outerReadEntered.countDown()
+                    check(allowNestedRead.await(5, TimeUnit.SECONDS))
+                    ReconstructionOutputWorkspace.withReadLeaseIfManaged(root, failFast = false) {
+                        nestedReadReturned.countDown()
+                    }
+                    check(releaseOuterRead.await(5, TimeUnit.SECONDS))
+                }
+            }
+            assertTrue(outerReadEntered.await(5, TimeUnit.SECONDS))
+            val writer = executor.submit {
+                writerThread.set(Thread.currentThread())
+                writerStarted.countDown()
+                ReconstructionOutputWorkspace.open(root, input).use { }
+            }
+            assertTrue(writerStarted.await(5, TimeUnit.SECONDS))
+            assertFailsWith<TimeoutException> { writer.get(100, TimeUnit.MILLISECONDS) }
+            val queuedUntil = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+            while (writerThread.get()?.state !in setOf(Thread.State.WAITING, Thread.State.TIMED_WAITING) &&
+                System.nanoTime() < queuedUntil) {
+                Thread.yield()
+            }
+            assertTrue(
+                writerThread.get()?.state in setOf(Thread.State.WAITING, Thread.State.TIMED_WAITING),
+                "writer must be waiting for the outer read lease before starting the nested read",
+            )
+
+            allowNestedRead.countDown()
+            assertTrue(nestedReadReturned.await(1, TimeUnit.SECONDS), "nested read must reuse its outer read hold")
+            releaseOuterRead.countDown()
+            reader.get(5, TimeUnit.SECONDS)
+            writer.get(5, TimeUnit.SECONDS)
+        } finally {
+            allowNestedRead.countDown()
+            releaseOuterRead.countDown()
             executor.shutdownNow()
             assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS))
         }
