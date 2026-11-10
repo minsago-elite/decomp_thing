@@ -395,6 +395,11 @@ internal class AcpExecutionReceiptDocument private constructor(
 ) {
     val schemaVersion: Int = 2
     val sha256: String = sha256(json.toByteArray(StandardCharsets.UTF_8))
+    /** Digest of the bounded, sequenced event/update section, independent of its raw peer text. */
+    val updatesSha256: String = run {
+        val receiptRoot = OracleJson.parse(json.toByteArray(StandardCharsets.UTF_8), ACP_RECEIPT_BINDING_JSON_LIMITS).jsonObject
+        sha256(OracleJson.canonicalBytes(receiptRoot.getValue("events"), ACP_RECEIPT_BINDING_JSON_LIMITS))
+    }
 
     companion object {
         fun captureOrNull(

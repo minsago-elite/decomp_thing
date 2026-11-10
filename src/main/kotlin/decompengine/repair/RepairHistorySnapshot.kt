@@ -215,6 +215,11 @@ internal data class RepairRecordedInvocation internal constructor(
     val terminal: RepairRecordedTerminal,
     val terminalSha256: String,
     val receiptReleaseComplete: Boolean,
+    val turnId: String? = null,
+    val intentSha256: String? = null,
+    val intentArtifact: RepairRecordedArtifactReference? = null,
+    val assessmentSha256: String? = null,
+    val assessmentArtifact: RepairRecordedArtifactReference? = null,
 ) {
     val receiptStatus: RepairRecordedReceiptStatus get() = RepairRecordedReceiptStatus.NOT_READ
 }

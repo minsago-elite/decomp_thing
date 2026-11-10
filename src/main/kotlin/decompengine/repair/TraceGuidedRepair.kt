@@ -15,6 +15,7 @@ import decompengine.agent.AgentOperation
 import decompengine.agent.AgentPathRule
 import decompengine.agent.AgentStopReason
 import decompengine.agent.AgentTurnIdentity
+import decompengine.agent.AgentExecutionRequestBinding
 import decompengine.agent.AgentFailure
 import decompengine.agent.AgentFailureKind
 import decompengine.agent.AgentWorkspacePath
@@ -26,6 +27,12 @@ import decompengine.validation.BehaviorComparisonReport
 import decompengine.validation.ProcessInput
 import decompengine.project.sha256
 import decompengine.project.AcpExecutionReceiptDocument
+import decompengine.project.AgentTurnIntent
+import decompengine.project.AcpChangeAssessment
+import decompengine.project.AcpChangeObservationStatus
+import decompengine.project.AcpChangePolicyVerdict
+import decompengine.project.AcpChangeValidationStatus
+import decompengine.project.AcpChangePublicationEligibility
 import decompengine.project.BoundedAgentExecutionEventRecorder
 import decompengine.project.DeclaredRoleMutationPolicy
 import decompengine.project.ProjectFileRole
@@ -859,7 +866,7 @@ class RepairHistory(
         val root = runCatching { Json.parseToJsonElement(payload).jsonObject }
             .getOrElse { error("invalid repair history at ${path.pathString}: ${it.message}") }
         schemaVersion = root["schemaVersion"]?.jsonPrimitive?.intOrNull ?: 1
-        require(schemaVersion in 1..3) { "unsupported repair history schema" }
+        require(schemaVersion in 1..4) { "unsupported repair history schema" }
         root["regressionInputs"]?.jsonArray?.map(::parseProcessInput)?.map(ProcessInput::detachedCopy)
             ?.let(regressionInputs::addAll)
         root["iterations"]?.jsonArray?.map { parseIteration(it, schemaVersion) }?.map(RepairIteration::deepFrozenCopy)
@@ -876,7 +883,7 @@ internal fun validateRepairHistoryProjection(root: JsonObject) {
         require(!primitive.isString) { "repair history schemaVersion is malformed" }
         primitive.intOrNull ?: error("repair history schemaVersion is malformed")
     } ?: 1
-    require(version in 1..3) { "unsupported repair history schema" }
+    require(version in 1..4) { "unsupported repair history schema" }
     val regressionInputs = root["regressionInputs"]?.let { element ->
         element as? JsonArray ?: error("repair history regressionInputs are malformed")
     } ?: if (version < 3) JsonArray(emptyList()) else error("schema-3 repair history regressionInputs are missing")
@@ -891,10 +898,10 @@ internal fun validateRepairHistoryProjection(root: JsonObject) {
     }
     iterations.forEach { element ->
         val value = element as? JsonObject ?: error("repair history iteration is malformed")
-        if (version == 1) require(value.keys.none { it in setOf("agentInvocation", "publicationMode", "disposition", "revisionId", "parentRevisionId", "runId") }) {
+        if (version == 1) require(value.keys.none { it in setOf("agentInvocation", "publicationMode", "disposition", "revisionId", "parentRevisionId", "runId", "intentPath", "intentSha256", "turnId", "assessmentPath", "assessmentSha256") }) {
             "schema-1 repair history contains fields from a newer schema"
         }
-        if (version == 2) require(value.keys.none { it in setOf("disposition", "revisionId", "parentRevisionId", "runId") }) {
+        if (version == 2) require(value.keys.none { it in setOf("disposition", "revisionId", "parentRevisionId", "runId", "intentPath", "intentSha256", "turnId", "assessmentPath", "assessmentSha256") }) {
             "schema-2 repair history contains fields from a newer schema"
         }
         value.requireString("failureKind")
@@ -921,7 +928,7 @@ internal fun validateRepairHistoryProjection(root: JsonObject) {
         }
         if (version >= 2) {
             value["agentInvocation"]?.let { invocation ->
-                if (invocation !== JsonNull) validateHistoryInvocation(invocation)
+                if (invocation !== JsonNull) validateHistoryInvocation(invocation, version)
             }
         }
         if (version >= 3) {
@@ -945,7 +952,7 @@ internal fun validateRepairHistoryProjection(root: JsonObject) {
     }
 }
 
-private fun validateHistoryInvocation(element: kotlinx.serialization.json.JsonElement) {
+private fun validateHistoryInvocation(element: kotlinx.serialization.json.JsonElement, version: Int) {
     val value = element as? JsonObject ?: error("repair history invocation is malformed")
     for (field in listOf("receiptPath", "receiptSha256", "requestSha256", "resultChangesSha256", "terminalOutcome", "assessmentStatus")) {
         value.requireString(field)
@@ -956,7 +963,12 @@ private fun validateHistoryInvocation(element: kotlinx.serialization.json.JsonEl
     require(!releaseComplete.isString && releaseComplete.booleanOrNull != null) {
         "repair history invocation release completeness is malformed"
     }
-    parseHistoryAgentInvocation(element)
+    if (version >= 4) {
+        for (field in listOf("intentPath", "intentSha256", "turnId", "assessmentPath", "assessmentSha256")) {
+            value.requireOptionalNullableString(field)
+        }
+    }
+    parseHistoryAgentInvocation(element, version)
 }
 
 private fun JsonObject.requireOptionalString(name: String) {
@@ -1511,24 +1523,85 @@ class TraceGuidedRepairLoop private constructor(
         val projectionHistory: RepairHistory,
         val checkAcceptance: () -> Unit,
         val progress: RepairProgressProjection?,
+        private val turnIntent: AgentTurnIntent,
+        private val executionEvidence: AcpExecutionReceiptDocument?,
     ) : AutoCloseable {
         private var finalized = false
         private var closed = false
 
-        fun accept(evidence: RepairEvidence?, proof: RepairValidationProof): ModuleRevisionNode = graph.accept(attempt, evidence, proof, checkAcceptance).also {
+        fun accept(evidence: RepairEvidence?, proof: RepairValidationProof): ModuleRevisionNode {
+            persistAssessment(
+                AcpChangePublicationEligibility.VALIDATED_FOR_PUBLICATION,
+                AcpChangeValidationStatus.PASSED,
+                proof,
+            )
+            return graph.accept(attempt, evidence, proof, checkAcceptance).also {
             finalized = true
             progress?.state(graph, decompengine.agent.AgentWorkflowPhase.ACCEPTED, it.id)
+            }
         }
 
-        fun provisional(evidence: RepairEvidence, proof: RepairValidationProof): ModuleRevisionNode =
-            graph.recordProvisional(attempt, evidence, proof).also {
+        fun provisional(evidence: RepairEvidence, proof: RepairValidationProof): ModuleRevisionNode {
+            persistAssessment(AcpChangePublicationEligibility.PROVISIONAL, AcpChangeValidationStatus.PASSED, proof)
+            return graph.recordProvisional(attempt, evidence, proof).also {
                 finalized = true
                 progress?.state(graph, decompengine.agent.AgentWorkflowPhase.PROVISIONAL, it.id)
             }
+        }
 
-        fun reject(evidence: RepairEvidence?): ModuleRevisionNode = graph.reject(attempt, evidence).also {
-            finalized = true
-            progress?.state(graph, decompengine.agent.AgentWorkflowPhase.ROLLED_BACK, it.id)
+        private fun persistAssessment(
+            eligibility: AcpChangePublicationEligibility,
+            validationStatus: AcpChangeValidationStatus,
+            proof: RepairValidationProof?,
+        ) {
+            val evidence = executionEvidence ?: return
+            val root = Json.parseToJsonElement(evidence.json).jsonObject
+            val session = root["session"]?.takeUnless { it === JsonNull }?.jsonObject
+                ?: error("agent receipt lacks session identity")
+            val sessionCommitment = session["sessionId"]?.jsonObject?.get("sha256")?.jsonPrimitive?.content
+                ?: error("agent receipt lacks session commitment")
+            val candidateSha256 = proof?.sourceRevisionSha256 ?: runCatching {
+                repairCandidateSourceSha256(graph.candidateSources(attempt))
+            }.getOrNull()
+            val observation = if (candidateSha256 != null && evidence.releaseComplete) {
+                AcpChangeObservationStatus.COMPLETE
+            } else AcpChangeObservationStatus.INCOMPLETE
+            val effectiveEligibility = if (eligibility == AcpChangePublicationEligibility.REJECTED &&
+                stagedResultStopReason() in setOf(AgentStopReason.CANCELLED, AgentStopReason.LIMIT_EXHAUSTED)) {
+                AcpChangePublicationEligibility.INTERRUPTED
+            } else eligibility
+            val assessment = AcpChangeAssessment.create(
+                intent = turnIntent,
+                receiptSha256 = evidence.sha256,
+                sessionIdSha256 = sha256("acp-session-commitment-v1:$sessionCommitment".toByteArray(Charsets.UTF_8)),
+                changesSha256 = evidence.resultChangesSha256,
+                beforeSha256 = turnIntent.beforeSha256,
+                afterSha256 = candidateSha256.takeIf { observation == AcpChangeObservationStatus.COMPLETE },
+                observation = observation,
+                protocolStopCode = null,
+                normalizedStopReason = result.stopReason,
+                policyVerdict = if (effectiveEligibility == AcpChangePublicationEligibility.REJECTED) {
+                    AcpChangePolicyVerdict.NOT_EVALUATED
+                } else AcpChangePolicyVerdict.ALLOW,
+                reasonCodes = if (effectiveEligibility == AcpChangePublicationEligibility.REJECTED) {
+                    listOf("validation-failed")
+                } else emptyList(),
+                validationStatus = validationStatus,
+                validationProofSha256 = listOfNotNull(proof?.evidenceSha256),
+                eligibility = effectiveEligibility,
+                updatesSha256 = evidence.updatesSha256,
+            )
+            graph.persistAndBindAgentAssessment(attempt, assessment)
+        }
+
+        private fun stagedResultStopReason(): AgentStopReason = result.stopReason
+
+        fun reject(evidence: RepairEvidence?): ModuleRevisionNode {
+            persistAssessment(AcpChangePublicationEligibility.REJECTED, AcpChangeValidationStatus.FAILED, null)
+            return graph.reject(attempt, evidence).also {
+                finalized = true
+                progress?.state(graph, decompengine.agent.AgentWorkflowPhase.ROLLED_BACK, it.id)
+            }
         }
 
         /** Preserve [original] while making rollback/close failures available as suppressed detail. */
@@ -1623,6 +1696,7 @@ class TraceGuidedRepairLoop private constructor(
         val stagedBefore = baseContent
         lateinit var agentRequest: AgentExecutionRequest
         var turnIdentity: AgentTurnIdentity? = null
+        var turnIntent: AgentTurnIntent? = null
         val eventRecorder = BoundedAgentExecutionEventRecorder()
         var taskProgress = decompengine.agent.AgentTaskProgress.NONE
         val stagedExecution = try {
@@ -1689,6 +1763,13 @@ class TraceGuidedRepairLoop private constructor(
                         agentRequest = it
                         val identity = AgentTurnIdentity.create(attempt.id, it, graph.snapshot.runs.last().id)
                         turnIdentity = identity
+                        val requestBinding = AgentExecutionRequestBinding.capture(it)
+                        turnIntent = graph.createAndPersistAgentTurnIntent(
+                            attempt = attempt,
+                            identity = identity,
+                            workflowId = graph.snapshot.runs.last().id,
+                            policySha256 = requestBinding.accessPolicySha256,
+                        )
                         taskProgress = progress?.task(attempt.id, it, graph, identity)
                             ?: decompengine.agent.AgentTaskProgress.NONE
                     }
@@ -1718,6 +1799,12 @@ class TraceGuidedRepairLoop private constructor(
             taskIdentityField = TRACE_REPAIR_ACP_TASK_FIELD,
             taskId = attempt.id,
         )
+        val expectedTurnIdentity = requireNotNull(turnIdentity) {
+            "repair agent turn identity was not created before dispatch"
+        }
+        require(stagedExecution.receipt.turnIdentity == expectedTurnIdentity) {
+            "repair execution receipt does not retain its host turn identity"
+        }
         if (executionEvidence == null && !allowTestOnlyValidation) {
             val failure = IllegalStateException(
                 "repair agent invocation lacks schema-v2 ACP provider evidence",
@@ -1792,7 +1879,10 @@ class TraceGuidedRepairLoop private constructor(
             val replacements = applied.associate { patch -> patch.path to patch.afterContent }
             graph.installCandidate(attempt, replacements)
             val patches = applied.map { patch -> RepairPatch(patch.path, patch.afterContent) }
-            return ExecutedRepair(result, applied, patches, graph, attempt, history, ::checkRunBudget, progress)
+            return ExecutedRepair(
+                result, applied, patches, graph, attempt, history, ::checkRunBudget, progress,
+                requireNotNull(turnIntent), executionEvidence,
+            )
         } catch (failure: Throwable) {
             if (failure is Exception) {
                 val evidenceKind = when (val terminal = stagedExecution.receipt.outcome) {
@@ -2103,7 +2193,7 @@ private fun RepairIteration.toJson(schemaVersion: Int): String = buildString {
     append("\n  \"after\": ").append(after?.toJson() ?: "null").append(',')
     if (schemaVersion >= 2) {
         append("\n  \"agentInvocation\": ")
-            .append(agentInvocation?.toHistoryJson() ?: "null").append(',')
+            .append(agentInvocation?.toHistoryJson(schemaVersion) ?: "null").append(',')
         append("\n  \"publicationMode\": \"")
             .append(publicationMode.name.lowercase()).append("\",")
     }
@@ -2118,13 +2208,21 @@ private fun RepairIteration.toJson(schemaVersion: Int): String = buildString {
     append("\n  ]\n}")
 }
 
-private fun RepairAgentInvocationBinding.toHistoryJson(): String =
-    "{\"receiptPath\":\"${receiptPath.escapeJson()}\",\"receiptSha256\":\"$receiptSha256\"," +
-        "\"receiptSchemaVersion\":$receiptSchemaVersion,\"requestSha256\":\"$requestSha256\"," +
-        "\"resultChangesSha256\":\"$resultChangesSha256\"," +
-        "\"terminalOutcome\":\"${terminalOutcome.escapeJson()}\"," +
-        "\"receiptReleaseComplete\":$receiptReleaseComplete," +
-        "\"assessmentStatus\":\"${assessmentStatus.name.lowercase()}\"}"
+private fun RepairAgentInvocationBinding.toHistoryJson(schemaVersion: Int): String = buildString {
+    append("{\"receiptPath\":\"").append(receiptPath.escapeJson()).append("\",\"receiptSha256\":\"").append(receiptSha256).append('\"')
+    append(",\"receiptSchemaVersion\":").append(receiptSchemaVersion).append(",\"requestSha256\":\"").append(requestSha256).append('\"')
+    append(",\"resultChangesSha256\":\"").append(resultChangesSha256).append('\"')
+    append(",\"terminalOutcome\":\"").append(terminalOutcome.escapeJson()).append('\"')
+    append(",\"receiptReleaseComplete\":").append(receiptReleaseComplete)
+    if (schemaVersion >= 4) {
+        append(",\"intentPath\":").append(intentPath?.let { "\"${it.escapeJson()}\"" } ?: "null")
+        append(",\"intentSha256\":").append(intentSha256?.let { "\"$it\"" } ?: "null")
+        append(",\"turnId\":").append(turnId?.let { "\"$it\"" } ?: "null")
+        append(",\"assessmentPath\":").append(assessmentPath?.let { "\"${it.escapeJson()}\"" } ?: "null")
+        append(",\"assessmentSha256\":").append(assessmentSha256?.let { "\"$it\"" } ?: "null")
+    }
+    append(",\"assessmentStatus\":\"").append(assessmentStatus.name.lowercase()).append("\"}")
+}
 
 private fun RepairEvidence.toJson(): String = """
 {
@@ -2177,7 +2275,7 @@ private fun parseIteration(element: kotlinx.serialization.json.JsonElement, sche
         after = value["after"]?.let(::parseEvidence),
         succeeded = schemaVersion >= 3 && (value["succeeded"]?.jsonPrimitive?.contentOrNull?.toBooleanStrictOrNull() ?: false),
         agentInvocation = if (schemaVersion >= 2) {
-            value["agentInvocation"]?.takeUnless { it.toString() == "null" }?.let(::parseHistoryAgentInvocation)
+            value["agentInvocation"]?.takeUnless { it.toString() == "null" }?.let { parseHistoryAgentInvocation(it, schemaVersion) }
         } else {
             null
         },
@@ -2195,6 +2293,7 @@ private fun parseIteration(element: kotlinx.serialization.json.JsonElement, sche
 
 private fun parseHistoryAgentInvocation(
     element: kotlinx.serialization.json.JsonElement,
+    schemaVersion: Int,
 ): RepairAgentInvocationBinding {
     val value = element.jsonObject
     return RepairAgentInvocationBinding(
@@ -2207,6 +2306,11 @@ private fun parseHistoryAgentInvocation(
         terminalOutcome = value.requiredString("terminalOutcome"),
         receiptReleaseComplete = value["receiptReleaseComplete"]?.jsonPrimitive?.contentOrNull
             ?.toBooleanStrictOrNull() ?: error("repair history invocation is missing receiptReleaseComplete"),
+        intentPath = if (schemaVersion >= 4) value["intentPath"]?.takeUnless { it === JsonNull }?.jsonPrimitive?.content else null,
+        intentSha256 = if (schemaVersion >= 4) value["intentSha256"]?.takeUnless { it === JsonNull }?.jsonPrimitive?.content else null,
+        turnId = if (schemaVersion >= 4) value["turnId"]?.takeUnless { it === JsonNull }?.jsonPrimitive?.content else null,
+        assessmentPath = if (schemaVersion >= 4) value["assessmentPath"]?.takeUnless { it === JsonNull }?.jsonPrimitive?.content else null,
+        assessmentSha256 = if (schemaVersion >= 4) value["assessmentSha256"]?.takeUnless { it === JsonNull }?.jsonPrimitive?.content else null,
         assessmentStatus = RepairAgentAssessmentStatus.valueOf(
             value.requiredString("assessmentStatus").uppercase(),
         ),

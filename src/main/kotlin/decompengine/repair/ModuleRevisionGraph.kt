@@ -7,6 +7,8 @@ import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.acp.LinuxResourceLimitException
 import decompengine.acp.permissions
 import decompengine.project.AcpExecutionReceiptDocument
+import decompengine.project.AgentTurnIntent
+import decompengine.project.AcpChangeAssessment
 import decompengine.project.agentFileChangeSetSha256
 import decompengine.project.verifyAcpExecutionReceiptDocument
 import decompengine.project.UniqueJsonObjectKeyValidator
@@ -17,6 +19,8 @@ import decompengine.project.sha256
 import decompengine.agent.receiptCommitmentBytes
 import decompengine.agent.AgentFileChange
 import decompengine.agent.AgentFileChangeKind
+import decompengine.agent.AgentTurnIdentity
+import decompengine.agent.isCanonicalAgentTurnId
 import decompengine.agent.AgentWorkspacePath
 import decompengine.validation.ProcessInput
 import kotlinx.serialization.json.Json
@@ -61,6 +65,8 @@ import kotlin.math.min
 
 internal const val MAXIMUM_REPAIR_PROJECTION_BYTES: Long = 64L * 1024 * 1024
 internal const val MAXIMUM_REPAIR_ACP_RECEIPT_BYTES: Long = 64L * 1024 * 1024
+internal const val MAXIMUM_REPAIR_INTENT_BYTES: Int = 1024 * 1024
+internal const val MAXIMUM_REPAIR_ASSESSMENT_BYTES: Int = 1024 * 1024
 private const val MAXIMUM_REPAIR_STATE_NON_RECEIPT_ENTRIES = 16
 
 /** Existing revision-directory traversal role; blob and declared-body populations keep their own D. */
@@ -70,6 +76,10 @@ private val REPAIR_BLOB_DIGEST = Regex("[0-9a-f]{64}")
 private val BLOB_ATOMIC_TEMPORARY = Regex("\\.([0-9a-f]{64})\\.repair-atomic\\.tmp")
 private val REPAIR_RECEIPT_PATH =
     Regex("reports/repair-revisions/revision_[A-Za-z0-9_]+\\.acp-receipt\\.json")
+private val REPAIR_INTENT_PATH =
+    Regex("reports/repair-revisions/revision_[A-Za-z0-9_]+\\.acp-intent\\.json")
+private val REPAIR_ASSESSMENT_PATH =
+    Regex("reports/repair-revisions/revision_[A-Za-z0-9_]+\\.acp-assessment\\.json")
 internal const val TRACE_REPAIR_ACP_RECEIPT_KIND = "decomp-engine.trace-repair-acp-execution-receipt"
 internal const val TRACE_REPAIR_ACP_TASK_FIELD = "attemptId"
 
@@ -1620,6 +1630,7 @@ data class RevisionRepairMetadata(
     val before: RepairEvidence?,
     val regressionCorpusSha256: String? = null,
     val agentInvocation: RepairAgentInvocationBinding? = null,
+    val turnIntent: RepairAgentTurnIntentBinding? = null,
     val publicationMode: RepairPublicationMode = RepairPublicationMode.ACP_RELEASE,
     val runId: String? = null,
 ) {
@@ -1635,6 +1646,19 @@ enum class RepairPublicationMode { ACP_RELEASE, TEST_ONLY_NON_RELEASE }
 
 enum class RepairAgentAssessmentStatus { PENDING, ACCEPTED, REJECTED, PROVISIONAL }
 
+/** Content-addressed reference to the host-authored intent persisted before provider dispatch. */
+data class RepairAgentTurnIntentBinding(
+    val intentPath: String,
+    val intentSha256: String,
+    val turnId: String,
+) {
+    init {
+        require(intentPath.matches(REPAIR_INTENT_PATH)) { "repair ACP intent path is invalid" }
+        require(intentSha256.matches(REPAIR_BLOB_DIGEST)) { "repair ACP intent digest is invalid" }
+        require(decompengine.agent.isCanonicalAgentTurnId(turnId)) { "repair ACP intent turn id is invalid" }
+    }
+}
+
 /**
  * Content-addressed link from a repair assessment to its immutable schema-v2 ACP invocation.
  * The raw provider evidence remains a separate artifact and is never rewritten as workflow state
@@ -1649,11 +1673,24 @@ data class RepairAgentInvocationBinding(
     val terminalOutcome: String,
     val receiptReleaseComplete: Boolean,
     val assessmentStatus: RepairAgentAssessmentStatus,
+    val intentPath: String? = null,
+    val intentSha256: String? = null,
+    val turnId: String? = null,
+    val assessmentPath: String? = null,
+    val assessmentSha256: String? = null,
 ) {
     init {
         require(receiptPath.matches(REPAIR_RECEIPT_PATH)) { "repair ACP receipt path is invalid" }
         require(receiptSha256.matches(REPAIR_BLOB_DIGEST)) { "repair ACP receipt digest is invalid" }
         require(receiptSchemaVersion == 2) { "repair ACP receipt schema is unsupported" }
+        require((intentPath == null) == (intentSha256 == null)) { "repair ACP intent reference is incomplete" }
+        intentPath?.let { require(it.matches(REPAIR_INTENT_PATH)) { "repair ACP intent path is invalid" } }
+        intentSha256?.let { require(it.matches(REPAIR_BLOB_DIGEST)) { "repair ACP intent digest is invalid" } }
+        turnId?.let { require(decompengine.agent.isCanonicalAgentTurnId(it)) { "repair ACP turn id is invalid" } }
+        require((intentPath == null) == (turnId == null)) { "repair ACP turn identity reference is incomplete" }
+        require((assessmentPath == null) == (assessmentSha256 == null)) { "repair ACP assessment reference is incomplete" }
+        assessmentPath?.let { require(it.matches(REPAIR_ASSESSMENT_PATH)) { "repair ACP assessment path is invalid" } }
+        assessmentSha256?.let { require(it.matches(REPAIR_BLOB_DIGEST)) { "repair ACP assessment digest is invalid" } }
         require(requestSha256.matches(REPAIR_BLOB_DIGEST)) { "repair ACP request digest is invalid" }
         require(resultChangesSha256.matches(REPAIR_BLOB_DIGEST)) {
             "repair ACP result-change digest is invalid"
@@ -1889,7 +1926,7 @@ private fun verifySchema6PendingWitness(
     pending: PendingAttempt,
     budget: RepairResourceBudget,
 ) {
-    require(state.schemaVersion == 6 && pending.detached && pending.acceptanceDecision == null)
+    require(state.schemaVersion >= 6 && pending.detached && pending.acceptanceDecision == null)
     val published = revisionSourcesAt(state.nodes, revisionCanonicalBase(state.nodes, state.headId))
     val metadata = requireNotNull(pending.preimageMetadata)
     metadata.forEach { (path, witness) ->
@@ -2652,6 +2689,7 @@ internal class ModuleRevisionGraph private constructor(
 
     init {
         validateLoadedState()
+        bindPendingOrphanTurnIntentForRecovery()
         cleanupUnreferencedValidationArtifacts()
         cleanupSourceTemporaries(state.pending)
         recoverPendingAttempt()
@@ -3401,9 +3439,9 @@ internal class ModuleRevisionGraph private constructor(
         // Do not mutate a legacy graph merely because a caller supplied an invalid attempt.
         // Upgrade only after path, content, metadata and aggregate-budget preflight completed.
         if (state.schemaVersion < 5) upgradeGraphToRollbackContract(allowPending = false)
-        val pendingState = state.copy(schemaVersion = if (detached && state.schemaVersion == 6) 6 else state.schemaVersion,
-            nextOrdinal = ordinal + 1, pending = if (detached && state.schemaVersion == 6) {
-                pending.copy(rollbackRecord = initialRollbackRecord(state.copy(schemaVersion = 6), pending, false))
+        val pendingState = state.copy(
+            nextOrdinal = ordinal + 1, pending = if (detached && state.schemaVersion >= 6) {
+                pending.copy(rollbackRecord = initialRollbackRecord(state, pending, false))
             } else pending,
             runs = if (run == null) state.runs else state.runs.dropLast(1) + run.copy(attemptedCount = run.attemptedCount + 1))
         requireRecoverablePendingState(pendingState)
@@ -3426,6 +3464,82 @@ internal class ModuleRevisionGraph private constructor(
     }
 
     /**
+     * Persists the host-authored turn intent and binds it into the pending graph before any
+     * provider dispatch. The immutable document remains if the graph exchange fails, making the
+     * turn safely classifiable as interrupted/unknown on recovery.
+     */
+    @Synchronized
+    internal fun persistAndBindAgentTurnIntent(
+        attempt: ModuleRevisionAttempt,
+        intent: AgentTurnIntent,
+    ): RepairAgentTurnIntentBinding = graphOperation {
+        require(state.schemaVersion >= 6) { "legacy repair graph schema cannot bind durable turn intents" }
+        val pending = requirePending(attempt)
+        val metadata = requireNotNull(pending.repairMetadata) { "repair attempt has no iteration metadata" }
+        require(metadata.turnIntent == null && metadata.agentInvocation == null) {
+            "repair attempt already has turn evidence"
+        }
+        require(intent.attemptId == pending.id && intent.taskId == pending.id &&
+            intent.requestSha256.matches(REPAIR_BLOB_DIGEST) &&
+            intent.beforeSha256 == pending.parentSourceRevisionSha256 &&
+            intent.profileSha256 == state.profileSha256) {
+            "repair turn intent is not bound to the admitted attempt"
+        }
+        val fileName = "${pending.id}.acp-intent.json"
+        val path = "reports/repair-revisions/$fileName"
+        val bytes = intent.canonicalBytes()
+        require(bytes.size <= MAXIMUM_REPAIR_INTENT_BYTES) { "repair turn intent exceeds its 1 MiB limit" }
+        try {
+            stateStore.writeImmutableRevisionFile(fileName, bytes, MAXIMUM_REPAIR_INTENT_BYTES.toLong())
+            val observed = stateStore.readRevisionFile(fileName, MAXIMUM_REPAIR_INTENT_BYTES.toLong())
+            require(observed.sha256 == intent.sha256 && observed.bytes.contentEquals(bytes)) {
+                "published repair turn intent differs from its descriptor"
+            }
+            val parsed = AgentTurnIntent.parse(observed.bytes)
+            require(parsed.turnId == intent.turnId && parsed.requestSha256 == intent.requestSha256) {
+                "published repair turn intent is cross-paired"
+            }
+        } catch (failure: Exception) {
+            throw RepairAgentEvidencePersistenceException("repair turn intent could not be persisted before dispatch", failure)
+        }
+        val binding = RepairAgentTurnIntentBinding(path, intent.sha256, intent.turnId)
+        try {
+            val bound = state.copy(
+                schemaVersion = 7,
+                pending = pending.copy(repairMetadata = metadata.copy(turnIntent = binding)),
+            )
+            requireRecoverablePendingState(bound)
+            persist(bound)
+        } catch (failure: Exception) {
+            throw RepairAgentEvidencePersistenceException("repair turn intent was preserved but graph binding failed", failure)
+        }
+        binding
+    }
+
+    @Synchronized
+    internal fun createAndPersistAgentTurnIntent(
+        attempt: ModuleRevisionAttempt,
+        identity: AgentTurnIdentity,
+        workflowId: String,
+        policySha256: String,
+    ): AgentTurnIntent {
+        val (beforeSha256, profileSha256) = graphOperation {
+            val pending = requirePending(attempt)
+            pending.parentSourceRevisionSha256 to state.profileSha256
+        }
+        val intent = AgentTurnIntent.create(
+            identity = identity,
+            workflowId = workflowId,
+            attemptId = attempt.id,
+            profileSha256 = profileSha256,
+            policySha256 = policySha256,
+            beforeSha256 = beforeSha256,
+        )
+        persistAndBindAgentTurnIntent(attempt, intent)
+        intent
+    }
+
+    /**
      * Durably publishes the immutable invocation before the graph assessment refers to it. If the
      * second (graph) publication fails, the raw receipt intentionally remains available for audit;
      * callers must propagate [RepairAgentEvidencePersistenceException] without fallback/retry.
@@ -3441,6 +3555,15 @@ internal class ModuleRevisionGraph private constructor(
         val pending = requirePending(attempt)
         val metadata = requireNotNull(pending.repairMetadata) { "repair attempt has no iteration metadata" }
         require(metadata.agentInvocation == null) { "repair attempt already has invocation evidence" }
+        val intentBinding = requireNotNull(metadata.turnIntent) {
+            "repair invocation cannot be persisted without its pre-dispatch turn intent"
+        }
+        require(intentBinding.intentSha256.isNotBlank())
+        require(document.requestSha256 == AgentTurnIntent.parse(
+            stateStore.readRevisionFile(
+                "${pending.id}.acp-intent.json", MAXIMUM_REPAIR_INTENT_BYTES.toLong(),
+            ).bytes,
+        ).requestSha256) { "repair ACP receipt request differs from its pre-dispatch intent" }
         val fileName = "${pending.id}.acp-receipt.json"
         val receiptPath = "reports/repair-revisions/$fileName"
         val bytes = document.json.toByteArray(Charsets.UTF_8)
@@ -3481,6 +3604,9 @@ internal class ModuleRevisionGraph private constructor(
             terminalOutcome = document.terminalOutcome,
             receiptReleaseComplete = document.releaseComplete,
             assessmentStatus = RepairAgentAssessmentStatus.PENDING,
+            intentPath = intentBinding.intentPath,
+            intentSha256 = intentBinding.intentSha256,
+            turnId = intentBinding.turnId,
         )
         val boundState = state.copy(
             pending = pending.copy(
@@ -3497,6 +3623,67 @@ internal class ModuleRevisionGraph private constructor(
             )
         }
         binding.copy()
+    }
+
+    /** Persist an immutable post-validation assessment before any acceptance/publication decision. */
+    @Synchronized
+    internal fun persistAndBindAgentAssessment(
+        attempt: ModuleRevisionAttempt,
+        assessment: AcpChangeAssessment,
+    ): RepairAgentInvocationBinding = graphOperation {
+        require(state.schemaVersion >= 7) { "repair graph schema cannot bind durable assessments" }
+        val pending = requirePending(attempt)
+        val metadata = requireNotNull(pending.repairMetadata)
+        val invocation = requireNotNull(metadata.agentInvocation) {
+            "repair assessment cannot be persisted without invocation evidence"
+        }
+        require(invocation.assessmentPath == null && invocation.assessmentSha256 == null) {
+            "repair attempt already has a durable assessment"
+        }
+        require(assessment.turnId == metadata.turnIntent?.turnId &&
+            assessment.intentSha256 == metadata.turnIntent.intentSha256 &&
+            assessment.receiptSha256 == invocation.receiptSha256 &&
+            assessment.beforeSha256 == pending.parentSourceRevisionSha256) {
+            "repair assessment is cross-paired with its pending attempt"
+        }
+        if (assessment.afterSha256 != null) {
+            require(assessment.afterSha256 == pending.candidateSourceRevisionSha256) {
+                "repair assessment candidate commitment differs from graph"
+            }
+        }
+        if (assessment.eligibility in setOf(
+                decompengine.project.AcpChangePublicationEligibility.PROVISIONAL,
+                decompengine.project.AcpChangePublicationEligibility.VALIDATED_FOR_PUBLICATION,
+            )) {
+            require(assessment.afterSha256 != null && pending.candidateSourceRevisionSha256 != null) {
+                "publishable repair assessment requires a persisted candidate"
+            }
+        }
+        val fileName = "${pending.id}.acp-assessment.json"
+        val path = "reports/repair-revisions/$fileName"
+        val bytes = assessment.canonicalBytes()
+        require(bytes.size <= MAXIMUM_REPAIR_ASSESSMENT_BYTES) {
+            "repair assessment exceeds its 1 MiB limit"
+        }
+        try {
+            stateStore.writeImmutableRevisionFile(fileName, bytes, MAXIMUM_REPAIR_ASSESSMENT_BYTES.toLong())
+            val observed = stateStore.readRevisionFile(fileName, MAXIMUM_REPAIR_ASSESSMENT_BYTES.toLong())
+            require(observed.sha256 == assessment.sha256 && observed.bytes.contentEquals(bytes) &&
+                AcpChangeAssessment.parse(observed.bytes).canonicalBytes().contentEquals(bytes)) {
+                "published repair assessment differs from its descriptor"
+            }
+        } catch (failure: Exception) {
+            throw RepairAgentEvidencePersistenceException("repair assessment could not be persisted before decision", failure)
+        }
+        val updated = invocation.copy(assessmentPath = path, assessmentSha256 = assessment.sha256)
+        val boundState = state.copy(pending = pending.copy(repairMetadata = metadata.copy(agentInvocation = updated)))
+        try {
+            requireRecoverablePendingState(boundState)
+            persist(boundState)
+        } catch (failure: Exception) {
+            throw RepairAgentEvidencePersistenceException("repair assessment was preserved but graph binding failed", failure)
+        }
+        updated
     }
 
     @Synchronized
@@ -3640,6 +3827,7 @@ internal class ModuleRevisionGraph private constructor(
             validateAgentInvocationBinding(
                 invocation,
                 pending.id,
+                metadata.turnIntent,
                 metadata.prompt,
                 RepairAgentAssessmentStatus.PENDING,
                 verifyReceiptContents = true,
@@ -4123,7 +4311,7 @@ internal class ModuleRevisionGraph private constructor(
                 derivedRepairIterations(),
                 retainedRegressionCorpus().inputs,
                 state.budget.maximumProjectionBytes,
-                minOf(state.schemaVersion, 3),
+                minOf(state.schemaVersion, 4),
                 state.runs,
             ).toByteArray(Charsets.UTF_8),
         )
@@ -4240,7 +4428,7 @@ internal class ModuleRevisionGraph private constructor(
     }
 
     private fun validateLoadedState(verifyBlobContents: Boolean = true) {
-        require(state.schemaVersion in 1..6) { "unsupported repair revision graph schema" }
+        require(state.schemaVersion in 1..7) { "unsupported repair revision graph schema" }
         require(state.budget == index.budget) { "revision graph resource budget differs from the requested budget" }
         require(state.profileId == index.profileId && state.profileSha256 == index.profileSha256) {
             "revision graph repair index profile does not match current project evidence"
@@ -4332,10 +4520,14 @@ internal class ModuleRevisionGraph private constructor(
                         ModuleRevisionStatus.ROOT -> error("repair graph root cannot contain iteration metadata")
                     }
                     requireRecordedAcceptedInvocation(node.status, metadata, node.id)
+                if (state.schemaVersion >= 7) metadata.turnIntent?.let { binding ->
+                    validateTurnIntentBinding(binding, node.id, null)
+                }
                     metadata.agentInvocation?.let { invocation ->
                         validateAgentInvocationBinding(
                             invocation,
                             node.id,
+                            metadata.turnIntent,
                             metadata.prompt,
                             expectedAssessment,
                             verifyBlobContents,
@@ -4487,7 +4679,7 @@ internal class ModuleRevisionGraph private constructor(
                 "legacy repair record contains schema-6 staging metadata"
             }
             pending.acceptanceDecision?.let { decision ->
-                require(state.schemaVersion == 6 && pending.detached) {
+                require(state.schemaVersion >= 6 && pending.detached) {
                     "acceptance decision is only valid for a schema-6 detached candidate"
                 }
                 require(decision.intendedHeadId == pending.id)
@@ -4586,10 +4778,14 @@ internal class ModuleRevisionGraph private constructor(
                         "legacy pending repair contains schema-v2 ACP invocation evidence"
                     }
                 } else {
+                    if (state.schemaVersion >= 7) metadata.turnIntent?.let { binding ->
+                        validateTurnIntentBinding(binding, pending.id, pending.parentSourceRevisionSha256)
+                    }
                     metadata.agentInvocation?.let { invocation ->
                         validateAgentInvocationBinding(
                             invocation,
                             pending.id,
+                            metadata.turnIntent,
                             metadata.prompt,
                             RepairAgentAssessmentStatus.PENDING,
                             verifyBlobContents,
@@ -4617,16 +4813,22 @@ internal class ModuleRevisionGraph private constructor(
         }
         validateRepairRunContract(state)
         val expectedReceipts = buildSet {
-            state.nodes.mapNotNull { it.repairMetadata?.agentInvocation }.forEach { binding ->
-                add(binding.receiptPath.substringAfterLast('/'))
+            state.nodes.mapNotNull { it.repairMetadata }.forEach { metadata ->
+                metadata.turnIntent?.let { add(it.intentPath.substringAfterLast('/')) }
+                metadata.agentInvocation?.let { binding ->
+                    add(binding.receiptPath.substringAfterLast('/'))
+                    binding.assessmentPath?.let { add(it.substringAfterLast('/')) }
+                }
             }
             state.pending?.let { pending ->
-                pending.repairMetadata?.agentInvocation?.let { binding ->
+                val metadata = pending.repairMetadata
+                metadata?.turnIntent?.let { add(it.intentPath.substringAfterLast('/')) }
+                metadata?.agentInvocation?.let { binding ->
                     add(binding.receiptPath.substringAfterLast('/'))
-                } ?: run {
-                    val recoveryName = "${pending.id}.acp-receipt.json"
-                    if (stateStore.revisionFileExists(recoveryName)) add(recoveryName)
+                    binding.assessmentPath?.let { add(it.substringAfterLast('/')) }
                 }
+                listOf("${pending.id}.acp-intent.json", "${pending.id}.acp-receipt.json", "${pending.id}.acp-assessment.json")
+                    .filter(stateStore::revisionFileExists).forEach(::add)
             }
         }.sorted()
         // Invocation artifacts live beside the graph rather than in the content-blob directory.
@@ -4669,6 +4871,7 @@ internal class ModuleRevisionGraph private constructor(
     private fun validateAgentInvocationBinding(
         binding: RepairAgentInvocationBinding,
         attemptId: String,
+        intentBinding: RepairAgentTurnIntentBinding?,
         expectedPromptSha256: String,
         expectedAssessment: RepairAgentAssessmentStatus,
         verifyReceiptContents: Boolean,
@@ -4691,7 +4894,116 @@ internal class ModuleRevisionGraph private constructor(
                 verified.terminalOutcome == binding.terminalOutcome &&
                 verified.releaseComplete == binding.receiptReleaseComplete
             ) { "repair ACP receipt content is cross-paired with its graph binding: $attemptId" }
+            if (state.schemaVersion >= 7 && binding.intentPath != null) {
+                val intentPath = requireNotNull(binding.intentPath) { "schema-7 invocation lacks its turn intent reference" }
+                val intentSha = requireNotNull(binding.intentSha256) { "schema-7 invocation lacks its turn intent digest" }
+                require(intentPath == "reports/repair-revisions/$attemptId.acp-intent.json") {
+                    "repair turn intent path is cross-paired with attempt: $attemptId"
+                }
+                val metadataIntent = requireNotNull(intentBinding)
+                require(metadataIntent.intentPath == intentPath && metadataIntent.intentSha256 == intentSha &&
+                    metadataIntent.turnId == binding.turnId) { "repair invocation and graph intent binding disagree: $attemptId" }
+                val intent = validateTurnIntentBinding(metadataIntent, attemptId, null)
+                require(intent.turnId == binding.turnId &&
+                    intent.taskId == attemptId && intent.requestSha256 == verified.requestSha256) {
+                    "repair turn intent is cross-paired with invocation receipt: $attemptId"
+                }
+                val assessmentPath = binding.assessmentPath
+                val assessmentSha = binding.assessmentSha256
+                if (assessmentPath != null || assessmentSha != null) {
+                    require(assessmentPath == "reports/repair-revisions/$attemptId.acp-assessment.json" && assessmentSha != null) {
+                        "repair assessment path is cross-paired with attempt: $attemptId"
+                    }
+                    val assessmentFile = stateStore.readRevisionFile("$attemptId.acp-assessment.json", MAXIMUM_REPAIR_ASSESSMENT_BYTES.toLong())
+                    require(assessmentFile.sha256 == assessmentSha) {
+                        "repair assessment digest differs from graph binding: $attemptId"
+                    }
+                    val assessment = AcpChangeAssessment.parse(assessmentFile.bytes)
+                    require(assessment.turnId == intent.turnId && assessment.intentSha256 == intentSha &&
+                        assessment.receiptSha256 == binding.receiptSha256 &&
+                        assessment.changesSha256 == binding.resultChangesSha256 &&
+                        assessment.policySha256 == intent.policySha256) {
+                        "repair assessment is cross-paired with intent or receipt: $attemptId"
+                    }
+                    if (expectedAssessment == RepairAgentAssessmentStatus.ACCEPTED) require(
+                        assessment.eligibility == decompengine.project.AcpChangePublicationEligibility.VALIDATED_FOR_PUBLICATION,
+                    ) { "accepted repair lacks validated-for-publication assessment: $attemptId" }
+                    if (expectedAssessment == RepairAgentAssessmentStatus.PROVISIONAL) require(
+                        assessment.eligibility == decompengine.project.AcpChangePublicationEligibility.PROVISIONAL,
+                    ) { "provisional repair has inconsistent assessment: $attemptId" }
+                    if (expectedAssessment == RepairAgentAssessmentStatus.REJECTED) require(
+                        assessment.eligibility in setOf(
+                            decompengine.project.AcpChangePublicationEligibility.REJECTED,
+                            decompengine.project.AcpChangePublicationEligibility.INTERRUPTED,
+                        ),
+                    ) { "rejected repair has inconsistent assessment: $attemptId" }
+                    if (expectedAssessment in setOf(RepairAgentAssessmentStatus.ACCEPTED, RepairAgentAssessmentStatus.PROVISIONAL)) {
+                        val expectedProof = state.nodes.singleOrNull { it.id == attemptId }?.validationProof
+                            ?: state.pending?.takeIf { it.id == attemptId }?.acceptanceDecision?.proof
+                            ?: error("finalized repair assessment has no independently persisted validation proof: $attemptId")
+                        require(assessment.afterSha256 == expectedProof.sourceRevisionSha256 &&
+                            assessment.validationProofSha256 == listOf(expectedProof.evidenceSha256) &&
+                            assessment.validationStatus == decompengine.project.AcpChangeValidationStatus.PASSED) {
+                            "repair assessment validation outcome differs from graph proof: $attemptId"
+                        }
+                    }
+                } else if (expectedAssessment == RepairAgentAssessmentStatus.ACCEPTED) {
+                    error("accepted schema-7 repair is missing its durable assessment: $attemptId")
+                } else if (expectedAssessment == RepairAgentAssessmentStatus.PROVISIONAL) {
+                    error("provisional schema-7 repair is missing its durable assessment: $attemptId")
+                }
+            } else if (state.schemaVersion >= 7) {
+                require(intentBinding == null && binding.intentSha256 == null && binding.turnId == null &&
+                    binding.assessmentPath == null && binding.assessmentSha256 == null) {
+                    "legacy schema-6 repair invocation has partial schema-7 provenance: $attemptId"
+                }
+            }
         }
+    }
+
+    private fun validateTurnIntentBinding(
+        binding: RepairAgentTurnIntentBinding,
+        attemptId: String,
+        expectedBeforeSha256: String?,
+    ): AgentTurnIntent {
+        val expectedPath = "reports/repair-revisions/$attemptId.acp-intent.json"
+        require(binding.intentPath == expectedPath) { "repair turn intent path is cross-paired: $attemptId" }
+        val file = stateStore.readRevisionFile("$attemptId.acp-intent.json", MAXIMUM_REPAIR_INTENT_BYTES.toLong())
+        require(file.sha256 == binding.intentSha256) { "repair turn intent digest differs from graph binding: $attemptId" }
+        val intent = AgentTurnIntent.parse(file.bytes)
+        require(intent.turnId == binding.turnId && intent.attemptId == attemptId &&
+            intent.profileSha256 == state.profileSha256 &&
+            (expectedBeforeSha256 == null || intent.beforeSha256 == expectedBeforeSha256)) {
+            "repair turn intent content is cross-paired with graph state: $attemptId"
+        }
+        return intent
+    }
+
+    /** A crash may occur after the immutable intent write but before its graph exchange. */
+    private fun bindPendingOrphanTurnIntentForRecovery() = graphOperation {
+        val pending = state.pending ?: return@graphOperation
+        val metadata = pending.repairMetadata ?: return@graphOperation
+        if (metadata.turnIntent != null) return@graphOperation
+        val name = "${pending.id}.acp-intent.json"
+        if (!stateStore.revisionFileExists(name)) return@graphOperation
+        val file = stateStore.readRevisionFile(name, MAXIMUM_REPAIR_INTENT_BYTES.toLong())
+        val intent = AgentTurnIntent.parse(file.bytes)
+        require(intent.taskId == pending.id && intent.attemptId == pending.id &&
+            intent.profileSha256 == state.profileSha256 &&
+            intent.beforeSha256 == pending.parentSourceRevisionSha256) {
+            "orphaned repair turn intent does not match its pending attempt"
+        }
+        val binding = RepairAgentTurnIntentBinding(
+            "reports/repair-revisions/$name",
+            file.sha256,
+            intent.turnId,
+        )
+        val updated = state.copy(
+            schemaVersion = 7,
+            pending = pending.copy(repairMetadata = metadata.copy(turnIntent = binding)),
+        )
+        requireRecoverablePendingState(updated)
+        persist(updated)
     }
 
     private fun validateEvidence(evidence: RepairEvidence?) {
@@ -6353,7 +6665,7 @@ private fun validateRecordedGraphBody(state: RevisionGraphState, rootPaths: List
             }
         }
         pending.acceptanceDecision?.let { decision ->
-            require(state.schemaVersion == 6 && pending.detached)
+            require(state.schemaVersion >= 6 && pending.detached)
             require(decision.intendedHeadId == pending.id &&
                 (pending.repairMetadata?.runId == null || decision.intendedRunId == pending.repairMetadata.runId))
             require(decision.intendedRunStatus == RepairRunStatus.FULLY_ACCEPTED.takeIf { decision.intendedRunId != null })
@@ -6459,6 +6771,24 @@ private fun validateRecordedInvocationBinding(
     }
     require(binding.assessmentStatus == expectedAssessment) {
         "repair ACP assessment status disagrees with graph state: $attemptId"
+    }
+    if (schemaVersion >= 7 && binding.intentPath != null) {
+        require(binding.intentPath == "reports/repair-revisions/$attemptId.acp-intent.json" &&
+            binding.intentSha256?.matches(REPAIR_BLOB_DIGEST) == true &&
+            binding.turnId?.let(::isCanonicalAgentTurnId) == true) {
+            "schema-7 repair invocation is missing its pre-dispatch identity: $attemptId"
+        }
+        if (expectedAssessment in setOf(RepairAgentAssessmentStatus.ACCEPTED, RepairAgentAssessmentStatus.PROVISIONAL)) {
+            require(binding.assessmentPath == "reports/repair-revisions/$attemptId.acp-assessment.json" &&
+                binding.assessmentSha256?.matches(REPAIR_BLOB_DIGEST) == true) {
+                "finalized schema-7 repair is missing its workflow assessment: $attemptId"
+            }
+        }
+    } else if (schemaVersion >= 7) {
+        require(binding.intentSha256 == null && binding.turnId == null && binding.assessmentPath == null &&
+            binding.assessmentSha256 == null) {
+            "legacy schema-6 repair invocation has partial schema-7 provenance: $attemptId"
+        }
     }
     if (expectedAssessment == RepairAgentAssessmentStatus.ACCEPTED) {
         require(binding.receiptReleaseComplete && binding.terminalOutcome == "returned-completed") {
@@ -6647,7 +6977,7 @@ internal fun compareCapturedRepairHistoryProjection(
         val text = decodeUtf8Strict(historyPayload, "captured history projection")
         UniqueJsonObjectKeyValidator(text).validate()
         val root = Json.parseToJsonElement(text) as? JsonObject ?: error("history root type")
-        version = root["schemaVersion"]?.let { historyInteger(it).also { value -> require(value in 1..3) }.toInt() } ?: 1
+        version = root["schemaVersion"]?.let { historyInteger(it).also { value -> require(value in 1..4) }.toInt() } ?: 1
         val wireVersion = requireNotNull(version)
         val rootFields = setOf("regressionInputs", "iterations") +
             (if (wireVersion >= 2) setOf("schemaVersion") else emptySet()) +
@@ -6711,7 +7041,7 @@ internal fun compareCapturedRepairHistoryProjection(
         val rendered = renderRepairHistoryProjection(iterations, inputs, requestedBudget.maximumProjectionBytes, wireVersion, runs)
         if (!rendered.toByteArray(Charsets.UTF_8).contentEquals(historyPayload)) throw HistoryProjectionEncodingRefusal()
         completeEncoding = true
-        historySame(wireVersion == minOf(state.schemaVersion, 3), RepairHistoryProjectionReason.VERSION)
+        historySame(wireVersion == minOf(state.schemaVersion, 4), RepairHistoryProjectionReason.VERSION)
         historySame(inputs.size == state.retainedRegressionInputs.size, RepairHistoryProjectionReason.CORPUS)
         inputs.zip(state.retainedRegressionInputs).forEach { (actual, expected) ->
             historySame(actual.id == expected.id && actual.args == expected.args && actual.stdin.contentEquals(expected.stdin),
@@ -6828,12 +7158,18 @@ private fun historyIteration(value: JsonElement, version: Int, budget: RepairRes
     val invocation = if (version >= 2 && row.getValue("agentInvocation") !== JsonNull) {
         val item = historyObject(row.getValue("agentInvocation"))
         historyFields(item, setOf("receiptPath", "receiptSha256", "receiptSchemaVersion", "requestSha256", "resultChangesSha256",
-            "terminalOutcome", "receiptReleaseComplete", "assessmentStatus"), version)
+            "terminalOutcome", "receiptReleaseComplete", "assessmentStatus") +
+            (if (version >= 4) setOf("intentPath", "intentSha256", "turnId", "assessmentPath", "assessmentSha256") else emptySet()), version)
         val schema = historyInteger(item.getValue("receiptSchemaVersion")); require(schema in 1..Int.MAX_VALUE.toLong())
         RepairAgentInvocationBinding(historyString(item.getValue("receiptPath")), historyString(item.getValue("receiptSha256")), schema.toInt(),
             historyString(item.getValue("requestSha256")), historyString(item.getValue("resultChangesSha256")),
             historyString(item.getValue("terminalOutcome")), historyBoolean(item.getValue("receiptReleaseComplete")),
-            RepairAgentAssessmentStatus.valueOf(historyString(item.getValue("assessmentStatus")).uppercase()))
+            RepairAgentAssessmentStatus.valueOf(historyString(item.getValue("assessmentStatus")).uppercase()),
+            if (version >= 4) historyNullableString(item.getValue("intentPath")) else null,
+            if (version >= 4) historyNullableString(item.getValue("intentSha256")) else null,
+            if (version >= 4) historyNullableString(item.getValue("turnId")) else null,
+            if (version >= 4) historyNullableString(item.getValue("assessmentPath")) else null,
+            if (version >= 4) historyNullableString(item.getValue("assessmentSha256")) else null)
     } else null
     return RepairIteration(index.toInt(), historyString(row.getValue("failureKind")), historyString(row.getValue("prompt")),
         historyString(row.getValue("summary")), parsedPatches, retained.map(::historyString),
@@ -6858,7 +7194,9 @@ private fun recordedHistoryCapture(
     fun invocation(value: RepairAgentInvocationBinding?) = value?.let {
         RepairRecordedInvocation(it.receiptSha256, it.requestSha256, it.resultChangesSha256, it.assessmentStatus,
             artifact(it.receiptPath), it.receiptSchemaVersion, recordedRepairTerminal(it.terminalOutcome),
-            recordedRepairTerminalSha256(it.terminalOutcome), it.receiptReleaseComplete)
+            recordedRepairTerminalSha256(it.terminalOutcome), it.receiptReleaseComplete,
+            it.turnId, it.intentSha256, it.intentPath?.let(::artifact),
+            it.assessmentSha256, it.assessmentPath?.let(::artifact))
     }
     fun evidence(kind: String?, path: String?) = if (kind == null && path == null) null else
         RepairRecordedEvidence(recordedRepairEvidenceKind(kind), path?.let(::artifact))
@@ -6980,7 +7318,7 @@ private fun acceptedStateFromDecision(
     decision: RepairAcceptanceDecision,
 ): RevisionGraphState {
     val node = requireNotNull(decision.committedNode)
-    require(source.schemaVersion == 6 && source.pending?.acceptanceDecision == decision)
+    require(source.schemaVersion >= 6 && source.pending?.acceptanceDecision == decision)
     validateSchema6DecisionNode(requireNotNull(source.pending), decision)
     require(source.nodes.none { it.id == node.id } && node.status == ModuleRevisionStatus.ACCEPTED &&
         node.sourceRevisionSha256 == decision.proof.sourceRevisionSha256)
@@ -7241,7 +7579,7 @@ private fun restorePendingPreimagesBeforeIndex(
     )
     val persistedPending = loaded.pending ?: return
     if (persistedPending.acceptanceDecision != null) {
-        require(loaded.schemaVersion == 6 && persistedPending.detached)
+        require(loaded.schemaVersion >= 6 && persistedPending.detached)
         val decision = persistedPending.acceptanceDecision
         // Validate the complete committed graph, proof, run transition, and candidate blobs
         // before the first source exchange. A malformed decision must never mutate source and
@@ -7282,7 +7620,7 @@ private fun restorePendingPreimagesBeforeIndex(
         faultInjector?.hit(ModuleRevisionFaultPoint.AfterRecoveredAcceptancePersist)
         return
     }
-    if (loaded.schemaVersion == 6 && persistedPending.detached) {
+    if (loaded.schemaVersion >= 6 && persistedPending.detached) {
         // In schema 6 a detached candidate is staged privately until the durable decision.
         // The install marker is therefore the recovery authority boundary: if it is absent or
         // says installation may have started, this path must not guess or invoke legacy restore.
@@ -7530,7 +7868,7 @@ private fun recoverUndecidedSchema6BeforeIndex(
     faultInjector: ModuleRevisionFaultInjector?,
     graphAuthority: Any,
 ) {
-    require(source.schemaVersion == 6 && persistedPending.detached && persistedPending.acceptanceDecision == null)
+    require(source.schemaVersion >= 6 && persistedPending.detached && persistedPending.acceptanceDecision == null)
     val durableRollback = requireNotNull(persistedPending.rollbackRecord) {
         "schema-6 undecided recovery is missing its durable no-install authority"
     }
@@ -8887,20 +9225,32 @@ private fun RevisionRepairMetadata.toJson(schemaVersion: Int): String = buildStr
     append(",\"regressionCorpusSha256\":")
         .append(regressionCorpusSha256?.let { "\"${it.jsonEscape()}\"" } ?: "null")
     if (schemaVersion >= 2) {
-        append(",\"agentInvocation\":").append(agentInvocation?.toGraphJson() ?: "null")
+        append(",\"agentInvocation\":").append(agentInvocation?.toGraphJson(schemaVersion) ?: "null")
         append(",\"publicationMode\":\"").append(publicationMode.name.lowercase()).append('"')
     }
     if (schemaVersion >= 3) append(",\"runId\":").append(runId?.let { "\"$it\"" } ?: "null")
+    if (schemaVersion >= 7) append(",\"turnIntent\":").append(turnIntent?.toGraphJson() ?: "null")
     append('}')
 }
 
-private fun RepairAgentInvocationBinding.toGraphJson(): String =
-    "{\"receiptPath\":\"${receiptPath.jsonEscape()}\",\"receiptSha256\":\"$receiptSha256\"," +
-        "\"receiptSchemaVersion\":$receiptSchemaVersion,\"requestSha256\":\"$requestSha256\"," +
-        "\"resultChangesSha256\":\"$resultChangesSha256\"," +
-        "\"terminalOutcome\":\"${terminalOutcome.jsonEscape()}\"," +
-        "\"receiptReleaseComplete\":$receiptReleaseComplete," +
-        "\"assessmentStatus\":\"${assessmentStatus.name.lowercase()}\"}"
+private fun RepairAgentTurnIntentBinding.toGraphJson(): String =
+    "{\"intentPath\":\"${intentPath.jsonEscape()}\",\"intentSha256\":\"$intentSha256\",\"turnId\":\"$turnId\"}"
+
+private fun RepairAgentInvocationBinding.toGraphJson(schemaVersion: Int): String = buildString {
+    append("{\"receiptPath\":\"").append(receiptPath.jsonEscape()).append("\",\"receiptSha256\":\"").append(receiptSha256).append('\"')
+    append(",\"receiptSchemaVersion\":").append(receiptSchemaVersion).append(",\"requestSha256\":\"").append(requestSha256).append('\"')
+    append(",\"resultChangesSha256\":\"").append(resultChangesSha256).append('\"')
+    append(",\"terminalOutcome\":\"").append(terminalOutcome.jsonEscape()).append('\"')
+    append(",\"receiptReleaseComplete\":").append(receiptReleaseComplete)
+    if (schemaVersion >= 7) {
+        append(",\"intentPath\":").append(intentPath?.let { "\"${it.jsonEscape()}\"" } ?: "null")
+        append(",\"intentSha256\":").append(intentSha256?.let { "\"$it\"" } ?: "null")
+        append(",\"turnId\":").append(turnId?.let { "\"$it\"" } ?: "null")
+        append(",\"assessmentPath\":").append(assessmentPath?.let { "\"${it.jsonEscape()}\"" } ?: "null")
+        append(",\"assessmentSha256\":").append(assessmentSha256?.let { "\"$it\"" } ?: "null")
+    }
+    append(",\"assessmentStatus\":\"").append(assessmentStatus.name.lowercase()).append("\"}")
+}
 
 private fun List<ProcessInput>.toGraphJson(): String = joinToString(prefix = "[", postfix = "]") { input ->
     "{\"id\":\"${input.id.jsonEscape()}\",\"args\":${input.args.jsonArray()}," +
@@ -9414,7 +9764,7 @@ private fun parseGraph(payload: String): RevisionGraphState {
     val root = Json.parseToJsonElement(payload).jsonObject
     val schemaVersion = root["schemaVersion"]?.jsonPrimitive?.intOrNull
         ?: error("repair revision graph is missing schemaVersion")
-    require(schemaVersion in 1..6) { "unsupported repair revision graph schema" }
+    require(schemaVersion in 1..7) { "unsupported repair revision graph schema" }
     val budget = root.getValue("budget").jsonObject.let { value ->
         RepairResourceBudget(
             maximumIndexedModules = value.requiredInt("maximumIndexedModules"),
@@ -9697,12 +10047,27 @@ private fun parseRepairMetadata(element: JsonElement, schemaVersion: Int): Revis
         } else {
             null
         },
+        turnIntent = if (schemaVersion >= 7) {
+            value["turnIntent"]?.takeUnless { it is JsonNull }?.let(::parseTurnIntentBinding)
+        } else null,
         publicationMode = if (schemaVersion >= 2) {
             RepairPublicationMode.valueOf(value.requiredString("publicationMode").uppercase())
         } else {
             RepairPublicationMode.TEST_ONLY_NON_RELEASE
         },
         runId = if (schemaVersion >= 3) value.optionalString("runId") else null,
+    )
+}
+
+private fun parseTurnIntentBinding(element: JsonElement): RepairAgentTurnIntentBinding {
+    val value = element.jsonObject
+    require(value.keys == setOf("intentPath", "intentSha256", "turnId")) {
+        "repair ACP turn intent binding has missing or extra fields"
+    }
+    return RepairAgentTurnIntentBinding(
+        intentPath = value.requiredString("intentPath"),
+        intentSha256 = value.requiredString("intentSha256"),
+        turnId = value.requiredString("turnId"),
     )
 }
 
@@ -9716,6 +10081,11 @@ private fun parseAgentInvocationBinding(element: JsonElement): RepairAgentInvoca
         resultChangesSha256 = value.requiredString("resultChangesSha256"),
         terminalOutcome = value.requiredString("terminalOutcome"),
         receiptReleaseComplete = value.getValue("receiptReleaseComplete").jsonPrimitive.content.toBooleanStrict(),
+        intentPath = value.optionalString("intentPath"),
+        intentSha256 = value.optionalString("intentSha256"),
+        turnId = value.optionalString("turnId"),
+        assessmentPath = value.optionalString("assessmentPath"),
+        assessmentSha256 = value.optionalString("assessmentSha256"),
         assessmentStatus = RepairAgentAssessmentStatus.valueOf(
             value.requiredString("assessmentStatus").uppercase(),
         ),
