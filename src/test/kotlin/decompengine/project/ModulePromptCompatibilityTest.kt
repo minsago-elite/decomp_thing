@@ -643,13 +643,14 @@ class ModulePromptCompatibilityTest {
         val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
         Files.createDirectories(scratch)
         val output = Files.createTempDirectory(scratch, "fallback-budget-binding-")
+        val project = output.resolve("source-tree")
         try {
             val reconstructor = BoundedLlmModuleReconstructor(
                 AgentHarness { _, _ -> error("must not execute") },
                 maximumContextCharacters = 4_096,
                 harnessProvenanceDescriptor = "archive-fallback-budget-fixture",
             )
-            val (project, manifest) = generateTransactionalProject(
+            val (_, manifest) = generateTransactionalProject(
                 output, model(), profile, reconstructor, observation(8_192),
             )
             val source = manifest.files.single { ProjectFileRole.MODULE_IMPLEMENTATION in it.roles }
@@ -729,8 +730,9 @@ class ModulePromptCompatibilityTest {
         val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
         Files.createDirectories(scratch)
         val output = Files.createTempDirectory(scratch, "all-fallback-confidence-")
+        val project = output.resolve("source-tree")
         try {
-            val (project, generated) = generateTransactionalProject(
+            val (_, generated) = generateTransactionalProject(
                 output, model(), profile,
                 BoundedLlmModuleReconstructor(
                     AgentHarness { _, _ -> error("must not execute") }, maximumContextCharacters = 4_096,
@@ -910,14 +912,15 @@ class ModulePromptCompatibilityTest {
             assertEquals(PublicationResult.PUBLISHED, workspace.publish(
                 setOf("source-tree", ".decomp-agent-sessions"),
                 buildStage = { stage ->
-                    manifest = SourceTreeGenerator.generate(
+                    manifest = SourceTreeGenerator.generateWithCompilerFeedback(
                         model.copy(inputSha256 = workspace.inputSha256),
                         stage.resolve("source-tree"),
+                        hostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
                         profile = profile,
                         reconstructor = reconstructor,
                         observedBehavior = observedBehavior,
                         publicationLock = workspace.publicationLock,
-                    )
+                    ).manifest
                 },
             ))
             output.resolve("source-tree") to requireNotNull(manifest)

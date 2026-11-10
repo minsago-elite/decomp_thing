@@ -763,12 +763,14 @@ class AgentExecutionEvidenceTest {
                 val outcome = ReconstructionOutputWorkspace.open(output, input).use { workspace ->
                     workspace.publish(setOf("source-tree", ".decomp-agent-sessions"), buildStage = { stage ->
                         try {
-                            SourceTreeGenerator.generate(
+                            SourceTreeGenerator.generateWithCompilerFeedback(
                                 evidenceModel().copy(inputSha256 = workspace.inputSha256),
                                 stage.resolve("source-tree"),
+                                hostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
                                 reconstructor = reconstructor,
+                                profile = GeneratedCMakeReconstructionProfile.descriptor,
                                 publicationLock = workspace.publicationLock,
-                            )
+                            ).manifest
                         } catch (failure: ModuleReconstructionInterruptedException) {
                             receipt = stage.resolve("source-tree/reports/agent-executions/parse.json").readText()
                             throw failure
@@ -1135,14 +1137,15 @@ class AgentExecutionEvidenceTest {
             assertEquals(PublicationResult.PUBLISHED, workspace.publish(
                 setOf("source-tree", ".decomp-agent-sessions"),
                 buildStage = { stage ->
-                    manifest = SourceTreeGenerator.generate(
+                    manifest = SourceTreeGenerator.generateWithCompilerFeedback(
                         model.copy(inputSha256 = workspace.inputSha256),
                         stage.resolve("source-tree"),
+                        hostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
                         reconstructor = reconstructor,
                         observedBehavior = observedBehavior,
                         profile = profile,
                         publicationLock = workspace.publicationLock,
-                    )
+                    ).manifest
                 },
             ))
             output.resolve("source-tree") to requireNotNull(manifest)

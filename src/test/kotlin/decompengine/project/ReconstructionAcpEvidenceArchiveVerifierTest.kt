@@ -558,11 +558,39 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
         )
 
         assertFailsWith<ModuleReconstructionRevisionRejectedException> {
-            generateTransactionalAgentProject(
-                project.parent, model, GeneratedCMakeReconstructionProfile.descriptor,
-                BoundedLlmModuleReconstructor(harness, harnessProvenanceDescriptor = harness.factoryProvenance.stableDescriptor),
-                "new module evidence",
-            )
+            val output = project.parent
+            val input = output.resolveSibling("${output.fileName}.input")
+                .also { Files.write(it, byteArrayOf(8, 6, 7, 5)) }
+            ReconstructionOutputWorkspace.open(output, input).use { workspace ->
+                var rejection: ModuleReconstructionRevisionRejectedException? = null
+                val result = workspace.publish(
+                    setOf("source-tree", ".decomp-agent-sessions"),
+                    buildStage = { stage ->
+                        val stagedProject = stage.resolve("source-tree")
+                        copyTree(project, stagedProject)
+                        try {
+                            SourceTreeGenerator.generateWithCompilerFeedback(
+                                model.copy(inputSha256 = workspace.inputSha256),
+                                stagedProject,
+                                hostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
+                                reconstructor = BoundedLlmModuleReconstructor(
+                                    harness,
+                                    harnessProvenanceDescriptor = harness.factoryProvenance.stableDescriptor,
+                                ),
+                                observedBehavior = "new module evidence",
+                                profile = GeneratedCMakeReconstructionProfile.descriptor,
+                                publicationLock = workspace.publicationLock,
+                            )
+                        } catch (failure: ModuleReconstructionRevisionRejectedException) {
+                            // Publish the restored accepted tree plus its attempt receipt, then
+                            // surface the same rejection after the transaction is durable.
+                            rejection = failure
+                        }
+                    },
+                )
+                assertEquals(PublicationResult.PUBLISHED, result)
+                throw requireNotNull(rejection) { "the revision rejection branch was not reached" }
+            }
         }
 
         preservedPaths.forEach { assertEquals(before.getValue(it), project.resolve(it).readText(), it) }
