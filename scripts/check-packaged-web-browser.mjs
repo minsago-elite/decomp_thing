@@ -54,23 +54,29 @@ function identifyQualificationSource() {
   const driverCommit = process.env.GITHUB_SHA ?? checkedOutCommit;
   assert.equal(driverCommit, checkedOutCommit, 'GITHUB_SHA must identify the checked-out qualification source');
   const treeSha = gitText(['rev-parse', `${driverCommit}^{tree}`]);
-  const status = gitText(['status', '--porcelain=v1', '--untracked-files=all', '--', 'scripts']);
-  assert.equal(status, '', 'qualification scripts must match the checked-out source tree');
+  const status = gitText(['status', '--porcelain=v1', '--untracked-files=all']);
+  assert.equal(status, '', 'the checkout must be clean before packaged qualification');
 
-  const entries = execFileSync('git', ['ls-tree', '-r', '-z', '--full-tree', driverCommit, '--', 'scripts'], {
+  const entries = execFileSync('git', ['ls-tree', '-r', '-z', '--full-tree', driverCommit], {
     cwd: repo,
     encoding: 'buffer',
-    maxBuffer: 8 * 1024 * 1024,
+    maxBuffer: 32 * 1024 * 1024,
   }).toString('utf8').split('\0').filter(Boolean).map((entry) => {
     const tab = entry.indexOf('\t');
     assert.ok(tab > 0, 'Git returned a malformed qualification source tree entry');
     const [mode, type, blob] = entry.slice(0, tab).split(' ');
     return { mode, type, blob, path: entry.slice(tab + 1) };
-  }).filter((entry) => entry.type === 'blob');
-  assert.ok(entries.length > 0, 'the checked-out source tree has no tracked qualification scripts');
-  const sourceManifest = entries
+  }).filter((entry) => entry.type === 'blob' || entry.type === 'commit');
+  assert.ok(entries.length > 0, 'the checked-out source tree has no tracked files');
+  const sortedEntries = entries.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+  const trackedManifest = sortedEntries
+    .map(({ mode, type, blob, path }) => `${mode} ${type} ${blob} ${path}\n`)
+    .join('');
+  const qualificationScripts = sortedEntries.filter((entry) => entry.path.startsWith('scripts/'));
+  assert.ok(qualificationScripts.length > 0, 'the checked-out source tree has no tracked qualification scripts');
+  const scriptManifest = qualificationScripts
     .sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0)
-    .map(({ mode, blob, path }) => `${mode} ${blob} ${path}\n`)
+    .map(({ mode, type, blob, path }) => `${mode} ${type} ${blob} ${path}\n`)
     .join('');
 
   let pullRequest = null;
@@ -94,7 +100,8 @@ function identifyQualificationSource() {
   return {
     driverCommit,
     treeSha,
-    qualificationScripts: { count: entries.length, manifestSha256: createHash('sha256').update(sourceManifest).digest('hex') },
+    trackedTree: { count: sortedEntries.length, manifestSha256: createHash('sha256').update(trackedManifest).digest('hex'), clean: true },
+    qualificationScripts: { count: qualificationScripts.length, manifestSha256: createHash('sha256').update(scriptManifest).digest('hex') },
     pullRequest,
   };
 }
