@@ -124,7 +124,14 @@ export async function qualifyGit({ fixture, makeTarget, cdp, evaluate, ready, br
     await evaluate(tab, `${button('Older commits')}.focus()`);
     await key(cdp, tab, 'Enter', 'Enter', 13, '\r');
     const loadedCount = Math.min(count + 20, fixture.repository.historyLength);
-    await ready(tab, `${historyRows}.length === ${Math.min(loadedCount, maximumRenderedHistoryRows)}`, 'next anchored history page');
+    const expectedStart = Math.max(0, loadedCount - maximumRenderedHistoryRows);
+    const expectedWindow = expectedHistoryIds.slice(expectedStart, loadedCount);
+    await ready(tab, `(() => {
+      const rows = [...${historyRows}];
+      return rows.length === ${expectedWindow.length} &&
+        rows[0]?.querySelector('code')?.title === ${JSON.stringify(expectedWindow[0])} &&
+        rows.at(-1)?.querySelector('code')?.title === ${JSON.stringify(expectedWindow.at(-1))};
+    })()`, 'next anchored history page');
     await verifyHistoryWindow(loadedCount);
     historyPages++;
   }
