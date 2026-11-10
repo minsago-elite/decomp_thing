@@ -1,6 +1,10 @@
 package decompengine.repair
 
+import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.agent.AgentStopReason
+import decompengine.agent.AgentFileChange
+import decompengine.agent.AgentFileChangeKind
+import decompengine.agent.AgentWorkspacePath
 import decompengine.project.AcpChangeAssessment
 import decompengine.project.AcpChangeObservationStatus
 import decompengine.project.AcpChangePolicyVerdict
@@ -29,8 +33,8 @@ internal object ModuleRevisionGraphProvenanceCrashProbe {
         val crashPoint = arguments[3]
         val expectationPath = Path.of(arguments[4])
         require(documentKind in setOf("intent", "receipt", "assessment", "decision"))
-        require(crashPoint in setOf("E1", "E2", "E3", "G1", "G2", "G3", "persisted", "source-exchanged", "tamper-assessment"))
-        require((documentKind == "decision") == (crashPoint in setOf("persisted", "source-exchanged", "tamper-assessment")))
+        require(crashPoint in setOf("E1", "E2", "E3", "G1", "G2", "G3", "predecision-stage", "persisted", "source-exchanged", "tamper-assessment"))
+        require((documentKind == "decision") == (crashPoint in setOf("predecision-stage", "persisted", "source-exchanged", "tamper-assessment")))
 
         var expectationId = "unassigned"
         var armed = false
@@ -71,6 +75,8 @@ internal object ModuleRevisionGraphProvenanceCrashProbe {
                 }
             }
             return when (crashPoint) {
+                "predecision-stage" -> point is ModuleRevisionFaultPoint.AfterPublicationStage &&
+                    point.path == relative && point.index == 0
                 "persisted", "tamper-assessment" -> point is ModuleRevisionFaultPoint.AfterStatePublicationDirectorySync &&
                     point.scope == "revision-state" && point.name == "graph.json" &&
                     decisionMustBePublished && decisionIsPublished()
@@ -103,13 +109,23 @@ internal object ModuleRevisionGraphProvenanceCrashProbe {
             regressionCorpusSha256 = null,
             publicationMode = RepairPublicationMode.ACP_RELEASE,
         ))
-        val attempt = graph.beginAttempt(listOf(relative), metadata)
+        val secondRelative = "src/modules/beta.c"
+        val attempt = graph.beginAttempt(listOf(relative, secondRelative), metadata)
         expectationId = attempt.id
-        val before = project.resolve(relative).readBytes()
+        val before = readWithoutAtime(project.resolve(relative))
         val candidate = before + "\n/* schema-seven child crash candidate */\n".toByteArray()
+        val secondBefore = readWithoutAtime(project.resolve(secondRelative))
+        val secondCandidate = secondBefore + "\n/* schema-seven second-file candidate */\n".toByteArray()
         val workflowId = "schema-seven-process-crash-workflow"
         val receipt = fixture.completeAcpReceiptDocument(
             project, attempt, relative, before, candidate, turnWorkflowId = workflowId,
+            additionalChanges = listOf(AgentFileChange(
+                AgentWorkspacePath("project", secondRelative),
+                AgentFileChangeKind.MODIFIED,
+                sha256(secondBefore),
+                sha256(secondCandidate),
+                secondCandidate.size.toLong(),
+            )),
         )
         val verified = verifyAcpExecutionReceiptDocument(
             receipt.json.toByteArray(Charsets.UTF_8),
@@ -135,7 +151,7 @@ internal object ModuleRevisionGraphProvenanceCrashProbe {
         if (documentKind in setOf("assessment", "decision")) {
             graph.persistAndBindAgentTurnIntent(attempt, intent)
             graph.persistAndBindAgentInvocation(attempt, receipt)
-            graph.installCandidate(attempt, mapOf(relative to candidate))
+            graph.installCandidate(attempt, mapOf(relative to candidate, secondRelative to secondCandidate))
             proof = fixture.syntheticAcceptedProof(graph, attempt)
             assessment = AcpChangeAssessment.create(
                 intent = intent,
@@ -167,6 +183,7 @@ internal object ModuleRevisionGraphProvenanceCrashProbe {
             Base64.getEncoder().encodeToString(receipt.json.toByteArray(Charsets.UTF_8)),
             assessment?.let { Base64.getEncoder().encodeToString(it.canonicalBytes()) }.orEmpty(),
             Base64.getEncoder().encodeToString(candidate),
+            Base64.getEncoder().encodeToString(secondCandidate),
         ).joinToString("\n")
         Files.writeString(expectationPath, expected)
 
@@ -189,5 +206,13 @@ internal object ModuleRevisionGraphProvenanceCrashProbe {
 
         graph.close()
         kotlin.system.exitProcess(87)
+    }
+
+    private fun readWithoutAtime(path: Path): ByteArray = LinuxFilesystemSyscalls.openRoot(path.parent).use { parent ->
+        requireNotNull(LinuxFilesystemSyscalls.openRegularFileAtOrNull(parent.fd, path.fileName.toString())).use { file ->
+            LinuxFilesystemSyscalls.openReadableWithoutAtimeFrom(file).use { readable ->
+                LinuxFilesystemSyscalls.read(readable, 1024 * 1024) { }
+            }
+        }
     }
 }

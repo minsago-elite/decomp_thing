@@ -109,6 +109,15 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
+private fun readRepairSourceWithoutAtime(path: Path): ByteArray =
+    LinuxFilesystemSyscalls.openRoot(path.parent).use { parent ->
+        requireNotNull(LinuxFilesystemSyscalls.openRegularFileAtOrNull(parent.fd, path.fileName.toString())).use { file ->
+            LinuxFilesystemSyscalls.openReadableWithoutAtimeFrom(file).use { readable ->
+                LinuxFilesystemSyscalls.read(readable, 1024 * 1024) { }
+            }
+        }
+    }
+
 class ModuleRevisionGraphTest {
     @Test
     fun `exploration snapshot copies corpus and rejects changed graph before repair preparation`() {
@@ -1369,7 +1378,8 @@ class ModuleRevisionGraphTest {
         val relative = "src/modules/alpha.c"
         val matrix = listOf("intent", "receipt", "assessment").flatMap { document ->
             listOf("E1", "E2", "E3", "G1", "G2", "G3").map { point -> document to point }
-        } + listOf("persisted", "source-exchanged", "tamper-assessment").map { "decision" to it }
+        } + listOf("predecision-stage", "persisted", "source-exchanged", "tamper-assessment")
+            .map { "decision" to it }
         val testRoot = Path.of("build/test-tmp").toAbsolutePath().normalize().also(Files::createDirectories)
 
         for ((document, point) in matrix) {
@@ -1379,7 +1389,8 @@ class ModuleRevisionGraphTest {
                 val project = generatedProject(temporaryParent = caseRoot)
                 val sourcePaths = ModuleRepairIndex.load(project, GeneratedCRepairIndexProfile).sourcePaths
                 val before = Schema6SourceInventoryWitness.capture(project, sourcePaths)
-                val original = project.resolve(relative).readBytes()
+                val original = readRepairSourceWithoutAtime(project.resolve(relative))
+                val secondOriginal = readRepairSourceWithoutAtime(project.resolve("src/modules/beta.c"))
                 val expectation = caseRoot.resolve("expected.txt")
                 val childTemp = Files.createDirectory(caseRoot.resolve("child-tmp"))
                 val log = caseRoot.resolve("child.log")
@@ -1395,12 +1406,13 @@ class ModuleRevisionGraphTest {
                     "$document/$point did not hard-halt at its boundary: ${Files.readString(log)}")
 
                 val expected = Files.readAllLines(expectation)
-                assertEquals(5, expected.size, "$document/$point expectation shape")
+                assertEquals(6, expected.size, "$document/$point expectation shape")
                 val attemptId = expected[0]
                 val intentBytes = java.util.Base64.getDecoder().decode(expected[1])
                 val receiptBytes = java.util.Base64.getDecoder().decode(expected[2])
                 val assessmentBytes = expected[3].takeIf(String::isNotEmpty)?.let(java.util.Base64.getDecoder()::decode)
                 val candidateBytes = java.util.Base64.getDecoder().decode(expected[4])
+                val secondCandidateBytes = java.util.Base64.getDecoder().decode(expected[5])
                 val revisions = project.resolve("reports/repair-revisions")
                 val evidence = when (document) {
                     "intent" -> intentBytes
@@ -1431,8 +1443,15 @@ class ModuleRevisionGraphTest {
                 val jsonBeforeRecovery = Json.parseToJsonElement(graphBeforeRecovery.toString(Charsets.UTF_8)).jsonObject
                 val pendingBeforeRecovery = jsonBeforeRecovery["pending"] as? JsonObject
                 if (document == "decision") {
-                    assertNotNull(pendingBeforeRecovery?.get("acceptanceDecision") as? JsonObject,
-                        "$document/$point must retain the decided transaction")
+                    if (point == "predecision-stage") {
+                        assertTrue(pendingBeforeRecovery?.get("acceptanceDecision") is JsonNull,
+                            "$document/$point must remain undecided")
+                        assertTrue(Files.list(revisions.resolve("publication-staging")).use { it.findAny().isPresent },
+                            "$document/$point must leave a staged predecision candidate")
+                    } else {
+                        assertNotNull(pendingBeforeRecovery?.get("acceptanceDecision") as? JsonObject,
+                            "$document/$point must retain the decided transaction")
+                    }
                 } else {
                     assertTrue(pendingBeforeRecovery?.get("acceptanceDecision") is JsonNull,
                         "$document/$point must remain undecided")
@@ -1443,6 +1462,32 @@ class ModuleRevisionGraphTest {
                         "G1", "G2" -> assertTrue(Files.exists(temporaryGraph), "$document/$point graph prefix temp")
                         "G3" -> assertTrue(Files.exists(temporaryGraph), "$document/$point displaced graph remains until cleanup")
                     }
+                }
+
+                if (document == "decision" && point == "source-exchanged") {
+                    assertContentEquals(candidateBytes, readRepairSourceWithoutAtime(project.resolve(relative)),
+                        "$document/$point first target must have exchanged before the crash")
+                    assertContentEquals(secondOriginal, readRepairSourceWithoutAtime(project.resolve("src/modules/beta.c")),
+                        "$document/$point later target must still have its original bytes")
+                    val recoveryLog = caseRoot.resolve("recovery-child.log")
+                    val recoveryChild = ProcessBuilder(
+                        Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+                        "-Djava.io.tmpdir=$caseRoot/child-tmp",
+                        "-cp", System.getProperty("java.class.path"),
+                        ModuleRevisionGraphRecoveryCrashProbe::class.java.name,
+                        project.toString(), "src/modules/beta.c",
+                    ).redirectErrorStream(true).redirectOutput(recoveryLog.toFile()).start()
+                    try {
+                        assertTrue(recoveryChild.waitFor(30, TimeUnit.SECONDS), "decision/recovery child did not terminate")
+                        assertEquals(86, recoveryChild.exitValue(),
+                            "decision/recovery did not halt during the second source exchange: ${Files.readString(recoveryLog)}")
+                    } finally {
+                        if (recoveryChild.isAlive) recoveryChild.destroyForcibly().waitFor(5, TimeUnit.SECONDS)
+                    }
+                    assertContentEquals(candidateBytes, readRepairSourceWithoutAtime(project.resolve(relative)),
+                        "decision/recovery must retain the already exchanged first target")
+                    assertContentEquals(secondCandidateBytes, readRepairSourceWithoutAtime(project.resolve("src/modules/beta.c")),
+                        "decision/recovery must expose the second exchanged target before restart")
                 }
 
                 if (document == "decision" && point == "tamper-assessment") {
@@ -1460,7 +1505,7 @@ class ModuleRevisionGraphTest {
                 } else {
                     ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { recovered ->
                         val last = recovered.snapshot.nodes.last()
-                        if (document == "decision") {
+                        if (document == "decision" && point != "predecision-stage") {
                             assertEquals(ModuleRevisionStatus.ACCEPTED, last.status, "$document/$point")
                             assertEquals(RepairRunStatus.FULLY_ACCEPTED, recovered.snapshot.runs.last().status, "$document/$point")
                             assertNull(recovered.snapshot.pendingAttemptId, "$document/$point")
@@ -1509,14 +1554,19 @@ class ModuleRevisionGraphTest {
                 }
                 val after = Schema6SourceInventoryWitness.capture(project, sourcePaths)
                 if (document == "decision") {
-                    if (point == "tamper-assessment") {
-                        assertContentEquals(original, project.resolve(relative).readBytes(), "$document/$point source remains unchanged")
+                    if (point == "predecision-stage" || point == "tamper-assessment") {
+                        assertEquals(before, after, "$document/$point must preserve exact source and metadata")
+                        assertContentEquals(original, readRepairSourceWithoutAtime(project.resolve(relative)), "$document/$point source remains unchanged")
+                        assertContentEquals(secondOriginal, readRepairSourceWithoutAtime(project.resolve("src/modules/beta.c")),
+                            "$document/$point second source remains unchanged")
                     } else {
-                        assertContentEquals(candidateBytes, project.resolve(relative).readBytes(), "$document/$point exact committed source")
+                        assertContentEquals(candidateBytes, readRepairSourceWithoutAtime(project.resolve(relative)), "$document/$point exact committed source")
+                        assertContentEquals(secondCandidateBytes, readRepairSourceWithoutAtime(project.resolve("src/modules/beta.c")),
+                            "$document/$point exact committed second source")
                     }
                 } else {
                     assertEquals(before, after, "$document/$point must preserve exact predecision source and metadata")
-                    assertContentEquals(original, project.resolve(relative).readBytes(), "$document/$point source bytes")
+                    assertContentEquals(original, readRepairSourceWithoutAtime(project.resolve(relative)), "$document/$point source bytes")
                 }
                 assertFalse(Files.exists(revisions.resolve(".graph.json.repair-atomic.tmp")), "$document/$point graph temp cleanup")
                 val stagingPresent = Files.list(revisions.resolve("publication-staging")).use { it.findAny().isPresent }
@@ -9955,22 +10005,25 @@ class ModuleRevisionGraphTest {
         after: ByteArray,
         includeModification: Boolean = true,
         turnWorkflowId: String? = null,
+        additionalChanges: List<AgentFileChange> = emptyList(),
     ): AcpExecutionReceiptDocument {
         val workspacePath = AgentWorkspacePath("project", relativePath)
         val request = AgentExecutionRequest(
             objective = "repair one module",
             workspaceRoots = listOf(AgentWorkspaceRoot("project", project)),
             accessPolicy = AgentAccessPolicy(
-                listOf(AgentPathRule(workspacePath, setOf(AgentOperation.READ_FILE, AgentOperation.WRITE_FILE))),
+                (listOf(workspacePath) + additionalChanges.map { it.path }).distinct().map { path ->
+                    AgentPathRule(path, setOf(AgentOperation.READ_FILE, AgentOperation.WRITE_FILE))
+                },
             ),
         )
-        val changes = if (includeModification) listOf(AgentFileChange(
+        val changes = (if (includeModification) listOf(AgentFileChange(
             workspacePath,
             AgentFileChangeKind.MODIFIED,
             sha256(before),
             sha256(after),
             after.size.toLong(),
-        )) else emptyList()
+        )) else emptyList()) + additionalChanges
         val implementationId = "repair-test-acp"
         val turnIdentity = turnWorkflowId?.let { workflowId ->
             val requestBinding = AgentExecutionRequestBinding.capture(request)
