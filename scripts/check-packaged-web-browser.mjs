@@ -21,6 +21,7 @@ import { PackagedBrowserCdpDiagnostics } from './packaged-browser-cdp-diagnostic
 
 // Test driver only: the application is launched with a separate Node-free PATH.
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const driverScriptPath = fileURLToPath(import.meta.url);
 const { values } = parseArgs({ options: {
   archive: { type: 'string' },
   'previous-archive': { type: 'string' },
@@ -384,9 +385,8 @@ async function runSourceTreeColdSamples(expected) {
     const workerReport = join(sampleDirectory, 'worker-report.json');
     const receiptPath = join(sampleDirectory, 'supervisor-receipt.json');
     const supervisorDiagnosticPath = join(sampleDirectory, 'supervisor-diagnostic.log');
-    const driverPath = fileURLToPath(import.meta.url);
     const supervisorPath = join(repo, 'scripts/packaged-browser-process-supervisor.py');
-    const workerArgs = [driverPath, '--archive', archive, '--chrome', chromeBinary, '--java-home', javaHome,
+    const workerArgs = [driverScriptPath, '--archive', archive, '--chrome', chromeBinary, '--java-home', javaHome,
       '--python', values.python, '--work-parent', workerWorkParent, '--mode', 'source-tree-cold-worker',
       '--profile', values.profile, '--cold-report', workerReport, '--keep-workdir'];
     if (values['no-sandbox']) workerArgs.push('--no-sandbox');
