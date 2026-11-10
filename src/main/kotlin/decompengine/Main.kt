@@ -251,16 +251,17 @@ private fun runReconstruct(args: List<String>) {
                 reconstructUsageError(e.message ?: "invalid harness configuration")
             }
             renderWorkflowProvenance(WorkflowCliCommand.RECONSTRUCT, strategy.harnessProvenance, redactor)
+            val workspace = requireNotNull(progress.publicationWorkspace) {
+                "CLI reconstruction progress must own the output workspace lease"
+            }
             val result = try {
                 ArchivalReconstructionService(
                     GhidraHeadlessProgramModelAnalyzer.bundled(), strategy.reconstructor,
                     profile = strategy.profile, progress = progress,
                 ).reconstructWithWorkspace(
                     binary,
-                    output,
-                    requireNotNull(progress.publicationWorkspace) {
-                        "CLI reconstruction progress must own the output workspace lease"
-                    },
+                    workspace.canonicalOutputDirectory,
+                    workspace,
                 )
             } catch (failure: Exception) {
                 progress.phase(AgentWorkflowPhase.FAILED)
