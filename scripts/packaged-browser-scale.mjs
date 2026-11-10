@@ -761,8 +761,9 @@ async function qualifyControls({ fixture, makeTarget, cdp, evaluate, ready, brow
   } finally { await cdp.call('Fetch.disable', {}, tab.sessionId); }
 
   // The actual field bound is 256 characters; exact-bound input issues a read,
-  // and one beyond it is rejected before reading. Also exercise the location-wide
-  // 4096-character guard independently (the padded search is invalid at 256 first).
+  // and one beyond it is rejected before reading. Exercise the location-wide
+  // 4096-character guard independently with an oversized cursor, so the search
+  // field bound cannot mask it.
   result.queryBoundary = {};
   for (const length of [256, 257]) {
     phase = `search-field-${length}`;
@@ -791,19 +792,23 @@ async function qualifyControls({ fixture, makeTarget, cdp, evaluate, ready, brow
   }
   for (const length of [QUERY_BOUND, QUERY_BOUND + 1]) {
     phase = `location-query-${length}`;
-    const search = '?search=' + 'q'.repeat(length - '?search='.length);
+    const search = '?cursor=' + 'x'.repeat(length - '?cursor='.length);
     assert.equal(search.length, length);
     await cdp.call('Page.navigate', { url: browserOrigin + '/nested/' }, tab.sessionId);
     await ready(tab, `(${rows}).length === 50`, 'dashboard before total-query boundary');
     const before = jobsReads();
     await cdp.call('Page.navigate', { url: browserOrigin + '/nested/' + search }, tab.sessionId);
-    await ready(tab, `location.search.length === ${length} && !!document.querySelector('[role="alert"]')`, `total query length ${length}`);
-    if (length === QUERY_BOUND) assert.equal(await evaluate(tab, `document.querySelector('[role="alert"]')?.textContent`),
-      'The saved filters are invalid. Reset filters to load jobs.');
-    else assert.equal(await evaluate(tab, `document.querySelector('[role="alert"]')?.textContent`),
-      'The saved filters are invalid. Reset filters to load jobs.');
-    assert.equal(jobsReads() - before, 0, `Invalid total query ${length} issued a job read`);
-    result.queryBoundary[`${length}LocationCharacters`] = { jobReads: 0, rejected: true };
+    if (length === QUERY_BOUND) {
+      await ready(tab, `location.search === '' && document.body.innerText.includes('The saved job page cannot be restored') && (${rows}).length === 50`,
+        'maximum total query is parsed and invalid cursor is bounded');
+      assert.equal(jobsReads() - before, 1, 'A total query at the location limit should fall back to one first-page read');
+      result.queryBoundary[`${length}LocationCharacters`] = { jobReads: 1, cursorRefused: true, totalQueryAccepted: true };
+    } else {
+      await ready(tab, `location.search.length === ${length} && document.querySelector('[role="alert"]')?.textContent === 'The saved filters are invalid. Reset filters to load jobs.'`,
+        'total query one character over the location limit is rejected');
+      assert.equal(jobsReads() - before, 0, 'A total query over the location limit must not issue a job read');
+      result.queryBoundary[`${length}LocationCharacters`] = { jobReads: 0, rejected: true };
+    }
   }
   assert.deepEqual(tab.exceptions, []);
   assert.ok(tab.requests.every(request => ['GET', 'HEAD'].includes(request.method)));
