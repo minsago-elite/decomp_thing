@@ -695,6 +695,126 @@ class ModuleRevisionGraphTest {
     }
 
     @Test
+    fun `startup recovers an intent when graph binding fails after immutable publication`() {
+        val project = generatedProject()
+        var armed = false
+        val graph = ModuleRevisionGraph.openForTesting(
+            project,
+            GeneratedCRepairIndexProfile,
+            faultInjector = ModuleRevisionFaultInjector { point ->
+                if (armed && point ==
+                    ModuleRevisionFaultPoint.AfterStateTemporaryDirectorySync("revision-state", "graph.json")) {
+                    throw IllegalStateException("simulated stop after intent publication")
+                }
+            },
+        )
+        val relative = "src/modules/alpha.c"
+        val corpus = graph.retainedRegressionCorpus()
+        val attempt = graph.beginAttempt(
+            listOf(relative),
+            RevisionRepairMetadata(1, "compile", "durable intent recovery", null, emptyList(), null, corpus.sha256),
+        )
+        val request = AgentExecutionRequest(
+            objective = "repair one module",
+            workspaceRoots = listOf(AgentWorkspaceRoot("project", project)),
+            accessPolicy = AgentAccessPolicy(listOf(AgentPathRule(
+                AgentWorkspacePath("project", relative),
+                setOf(AgentOperation.READ_FILE, AgentOperation.WRITE_FILE),
+            ))),
+        )
+        val workflowId = "orphaned-intent-recovery-workflow"
+        val identity = AgentTurnIdentity.create(attempt.id, request, workflowId)
+        val requestBinding = AgentExecutionRequestBinding.capture(request)
+        val parentSource = graph.snapshot.nodes.single { it.id == graph.snapshot.headId }.sourceRevisionSha256
+        val intent = decompengine.project.AgentTurnIntent.create(
+            identity,
+            workflowId,
+            attempt.id,
+            graph.snapshot.profileSha256,
+            requestBinding.accessPolicySha256,
+            parentSource,
+        )
+
+        armed = true
+        assertFailsWith<RepairAgentEvidencePersistenceException> {
+            graph.persistAndBindAgentTurnIntent(attempt, intent)
+        }
+        val intentPath = project.resolve("reports/repair-revisions/${attempt.id}.acp-intent.json")
+        assertTrue(Files.isRegularFile(intentPath))
+        assertEquals(attempt.id, graph.snapshot.pendingAttemptId)
+        graph.close()
+
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { reopened ->
+            val rejected = reopened.snapshot.nodes.last()
+            assertEquals(ModuleRevisionStatus.REJECTED, rejected.status)
+            assertTrue(rejected.recoveredAfterCrash)
+            assertEquals(intent.sha256, rejected.repairMetadata?.turnIntent?.intentSha256)
+            assertEquals(intent.turnId, rejected.repairMetadata?.turnIntent?.turnId)
+            assertNull(rejected.repairMetadata?.agentInvocation)
+            assertEquals(1, reopened.snapshot.nodes.count { it.repairMetadata?.turnIntent?.intentSha256 == intent.sha256 })
+        }
+        assertTrue(Files.isRegularFile(intentPath), "recovered intent remains part of the graph evidence inventory")
+    }
+
+    @Test
+    fun `new repair turns migrate a legacy graph before dispatch without inventing history`() {
+        val project = generatedProject()
+        val graph = ModuleRevisionGraph.openLegacyForTesting(
+            project,
+            GeneratedCRepairIndexProfile,
+            schemaVersion = 4,
+        )
+        assertEquals(4, graph.snapshot.schemaVersion)
+        graph.enableRunContract()
+        assertEquals(5, graph.snapshot.schemaVersion)
+        val historicalNodeIds = graph.snapshot.nodes.map { it.id }
+        assertTrue(graph.snapshot.nodes.all { it.repairMetadata?.turnIntent == null })
+
+        graph.enableDurableTurnProvenance()
+        assertEquals(7, graph.snapshot.schemaVersion)
+        assertEquals(historicalNodeIds, graph.snapshot.nodes.map { it.id })
+        assertTrue(graph.snapshot.nodes.all { it.repairMetadata?.turnIntent == null })
+
+        val metadata = beginSyntheticAcceptedRun(graph)
+        val relative = "src/modules/alpha.c"
+        val attempt = graph.beginAttempt(listOf(relative), metadata)
+        val request = AgentExecutionRequest(
+            objective = "repair one module",
+            workspaceRoots = listOf(AgentWorkspaceRoot("project", project)),
+            accessPolicy = AgentAccessPolicy(listOf(AgentPathRule(
+                AgentWorkspacePath("project", relative),
+                setOf(AgentOperation.READ_FILE, AgentOperation.WRITE_FILE),
+            ))),
+        )
+        val workflowId = "migrated-legacy-turn-workflow"
+        val identity = AgentTurnIdentity.create(attempt.id, request, workflowId)
+        val binding = AgentExecutionRequestBinding.capture(request)
+        val parentSource = graph.snapshot.nodes.single { it.id == graph.snapshot.headId }.sourceRevisionSha256
+        val intent = decompengine.project.AgentTurnIntent.create(
+            identity,
+            workflowId,
+            attempt.id,
+            graph.snapshot.profileSha256,
+            binding.accessPolicySha256,
+            parentSource,
+        )
+        graph.persistAndBindAgentTurnIntent(attempt, intent)
+        graph.close()
+
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { reopened ->
+            assertEquals(7, reopened.snapshot.schemaVersion)
+            assertTrue(reopened.snapshot.nodes.all { node ->
+                node.id !in historicalNodeIds || node.repairMetadata?.turnIntent == null
+            })
+            val recovered = reopened.snapshot.nodes.last()
+            assertEquals(ModuleRevisionStatus.REJECTED, recovered.status)
+            assertTrue(recovered.recoveredAfterCrash)
+            assertEquals(intent.sha256, recovered.repairMetadata?.turnIntent?.intentSha256)
+            assertEquals(intent.turnId, recovered.repairMetadata?.turnIntent?.turnId)
+        }
+    }
+
+    @Test
     fun `raw receipt persistence failure cannot be converted into a repair rejection`() {
         val project = generatedProject()
         var armed = false
@@ -1425,6 +1545,108 @@ class ModuleRevisionGraphTest {
             assertEquals(RepairRunStatus.FULLY_ACCEPTED, recovered.snapshot.runs.last().status)
         }
         assertContentEquals(candidate, target.readBytes(), "startup must preserve decided publication residue")
+    }
+
+    @Test
+    fun `schema seven recovery authenticates intent and assessment before source roll forward`() {
+        for (missingEvidence in listOf("intent", "assessment", "none")) {
+            val project = generatedProject()
+            val relative = "src/modules/alpha.c"
+            val target = project.resolve(relative)
+            val before = target.readBytes()
+            val candidate = before + "\n/* accepted provenance recovery candidate */\n".toByteArray()
+            val graph = ModuleRevisionGraph.openForTesting(
+                project,
+                GeneratedCRepairIndexProfile,
+                faultInjector = ModuleRevisionFaultInjector { point ->
+                    if (point is ModuleRevisionFaultPoint.BeforePublicationExchange &&
+                        point.phase == "schema6-roll-forward") {
+                        throw IllegalStateException("stop after durable provenance-bound decision")
+                    }
+                },
+            )
+            val metadata = beginSyntheticAcceptedRun(graph).copy(prompt = "bounded failure")
+            val attempt = graph.beginAttempt(listOf(relative), metadata)
+            val workflowId = "schema-seven-recovery-$missingEvidence"
+            val document = completeAcpReceiptDocument(
+                project, attempt, relative, before, candidate, turnWorkflowId = workflowId,
+            )
+            val verified = decompengine.project.verifyAcpExecutionReceiptDocument(
+                document.json.toByteArray(Charsets.UTF_8),
+                TRACE_REPAIR_ACP_RECEIPT_KIND,
+                TRACE_REPAIR_ACP_TASK_FIELD,
+                attempt.id,
+            )
+            val identity = requireNotNull(document.turnIdentity)
+            val intent = decompengine.project.AgentTurnIntent.create(
+                identity,
+                workflowId,
+                attempt.id,
+                graph.snapshot.profileSha256,
+                verified.accessPolicySha256,
+                graph.snapshot.nodes.single { it.id == graph.snapshot.headId }.sourceRevisionSha256,
+            )
+            graph.persistAndBindAgentTurnIntent(attempt, intent)
+            graph.persistAndBindAgentInvocation(attempt, document)
+            graph.installCandidate(attempt, mapOf(relative to candidate))
+            val proof = syntheticAcceptedProof(graph, attempt)
+            val assessment = decompengine.project.AcpChangeAssessment.create(
+                intent = intent,
+                receiptSha256 = document.sha256,
+                sessionIdSha256 = verified.sessionIdCommitmentSha256?.let {
+                    sha256("acp-session-commitment-v1:$it".toByteArray(Charsets.UTF_8))
+                },
+                changesSha256 = verified.resultChangesSha256,
+                beforeSha256 = intent.beforeSha256,
+                afterSha256 = proof.sourceRevisionSha256,
+                observation = decompengine.project.AcpChangeObservationStatus.COMPLETE,
+                protocolStopCode = null,
+                normalizedStopReason = AgentStopReason.COMPLETED,
+                policyVerdict = decompengine.project.AcpChangePolicyVerdict.ALLOW,
+                reasonCodes = emptyList(),
+                validationStatus = decompengine.project.AcpChangeValidationStatus.PASSED,
+                validationProofSha256 = listOf(proof.evidenceSha256),
+                eligibility = decompengine.project.AcpChangePublicationEligibility.VALIDATED_FOR_PUBLICATION,
+                updatesSha256 = verified.updatesSha256,
+            )
+            graph.persistAndBindAgentAssessment(attempt, assessment)
+
+            assertFailsWith<RepairAcceptancePendingException> {
+                graph.accept(attempt, RepairEvidence("valid", "provenance-bound recovery"), proof)
+            }
+            graph.close()
+            assertContentEquals(before, target.readBytes(), "the durable decision must precede source publication")
+            if (missingEvidence == "none") {
+                ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { recovered ->
+                    assertEquals(ModuleRevisionStatus.ACCEPTED, recovered.snapshot.nodes.last().status)
+                    assertEquals(intent.sha256, recovered.snapshot.nodes.last().repairMetadata?.turnIntent?.intentSha256)
+                    assertEquals(assessment.sha256, recovered.snapshot.nodes.last().repairMetadata
+                        ?.agentInvocation?.assessmentSha256)
+                }
+                assertContentEquals(candidate, target.readBytes(), "valid bound provenance permits roll-forward")
+            } else {
+                val missingPath = when (missingEvidence) {
+                    "intent" -> project.resolve("reports/repair-revisions/${attempt.id}.acp-intent.json")
+                    "assessment" -> project.resolve("reports/repair-revisions/${attempt.id}.acp-assessment.json")
+                    else -> error("unexpected evidence control")
+                }
+                assertTrue(Files.deleteIfExists(missingPath), "fixture must remove the selected bound sidecar")
+                val decisionBytes = project.resolve("reports/repair-revisions/graph.json").readBytes()
+
+                val refusal = assertFailsWith<IllegalArgumentException>("missing $missingEvidence must refuse roll-forward") {
+                    ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { }
+                }
+                assertTrue(
+                    refusal.message.orEmpty().contains("intent") ||
+                        refusal.message.orEmpty().contains("assessment") ||
+                        refusal.message.orEmpty().contains("evidence"),
+                    refusal.message,
+                )
+                assertContentEquals(before, target.readBytes(), "missing $missingEvidence must not publish candidate bytes")
+                assertContentEquals(decisionBytes, project.resolve("reports/repair-revisions/graph.json").readBytes(),
+                    "refusal must preserve the durable decision and recovery material")
+            }
+        }
     }
 
     @Test

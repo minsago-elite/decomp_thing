@@ -102,6 +102,19 @@ candidate, establish validation, or commit publication. Durable intent and
 workflow-assessment records bound to publication recovery remain the separate
 #733 acceptance boundary.
 
+Before dispatching any new captured repair turn, the workflow upgrades an
+existing non-pending schema-4, -5, or -6 repair graph to schema 7. Existing
+revision and invocation records retain null turn/assessment references and
+remain historical; the upgrade does not synthesize provenance or change their
+acceptance authority. A turn admitted after the upgrade must persist and bind
+its own intent, receipt, and assessment. A graph with pending recovery is not
+upgraded for a new dispatch.
+
+Schema-7 accepted decisions retain those provenance bindings in the committed
+node. Startup authenticates the bound intent, receipt, and validated assessment
+before exchanging any candidate source bytes; missing, cross-paired, or
+corrupt evidence leaves the durable decision and source tree untouched.
+
 ## Captured repair
 
 `CapturedRepairStagingAuthority` freezes the selected readable source bytes and

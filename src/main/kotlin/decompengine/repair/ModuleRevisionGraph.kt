@@ -2851,6 +2851,22 @@ internal class ModuleRevisionGraph private constructor(
         upgradeGraphToRollbackContract(allowPending = false)
     }
 
+    /** Upgrade before a new repair dispatch so even an imported legacy graph gets v7 turn evidence. */
+    @Synchronized
+    internal fun enableDurableTurnProvenance() = graphOperation {
+        require(state.pending == null) {
+            "durable turn provenance cannot be enabled while a repair attempt is pending"
+        }
+        upgradeGraphToRollbackContract(allowPending = false)
+        if (state.schemaVersion >= 7) return@graphOperation
+        val upgraded = state.copy(schemaVersion = 7)
+        // Existing records remain historical and unassessed. Schema 7 adds nullable turn
+        // references for them; it does not synthesize identities or assessments. New attempts
+        // admitted after this exchange use the detached schema-6 publication contract and are
+        // required to bind their own v7 intent/receipt/assessment records.
+        persist(upgraded)
+    }
+
     private fun upgradeGraphToRollbackContract(allowPending: Boolean) {
         if (state.schemaVersion >= 5) return
         require(allowPending || state.pending == null)
@@ -7577,6 +7593,114 @@ private fun validateSchema6DecisionReceipt(
     }
 }
 
+/** Authenticate schema-7 intent and assessment before a durable decision can exchange source files. */
+private fun validateSchema7DecisionEvidence(
+    store: RepairStateStore,
+    pending: PendingAttempt,
+    decision: RepairAcceptanceDecision,
+    state: RevisionGraphState,
+) {
+    if (state.schemaVersion < 7) return
+    val metadata = pending.repairMetadata ?: return
+    val intentBinding = metadata.turnIntent
+    val binding = metadata.agentInvocation
+    if (intentBinding == null && binding?.intentPath == null) return // historical schema-6 invocation
+    val invocation = requireNotNull(binding) {
+        "schema-7 recovery turn intent has no invocation receipt binding: ${pending.id}"
+    }
+
+    validateRecordedInvocationBinding(7, invocation, pending.id, RepairAgentAssessmentStatus.PENDING)
+    val expectedReceiptName = "${pending.id}.acp-receipt.json"
+    val receiptFile = store.readRevisionFile(expectedReceiptName, MAXIMUM_REPAIR_ACP_RECEIPT_BYTES)
+    require(receiptFile.sha256 == invocation.receiptSha256) {
+        "schema-7 recovery receipt digest differs from its graph binding: ${pending.id}"
+    }
+    val receipt = verifyAcpExecutionReceiptDocument(
+        receiptFile.bytes,
+        TRACE_REPAIR_ACP_RECEIPT_KIND,
+        TRACE_REPAIR_ACP_TASK_FIELD,
+        pending.id,
+    )
+    require(receipt.schemaVersion == invocation.receiptSchemaVersion &&
+        receipt.requestSha256 == invocation.requestSha256 &&
+        receipt.promptSha256 == metadata.prompt &&
+        receipt.resultChangesSha256 == invocation.resultChangesSha256 &&
+        receipt.terminalOutcome == invocation.terminalOutcome &&
+        receipt.releaseComplete == invocation.receiptReleaseComplete &&
+        invocation.resultChangesSha256 == recordedAgentChangeSetSha256(pending.candidateChanges)) {
+        "schema-7 recovery receipt is cross-paired with its pending candidate: ${pending.id}"
+    }
+
+    val turn = requireNotNull(intentBinding) { "schema-7 recovery is missing its turn intent binding: ${pending.id}" }
+    val expectedIntentName = "${pending.id}.acp-intent.json"
+    require(turn.intentPath == "reports/repair-revisions/$expectedIntentName" &&
+        invocation.intentPath == turn.intentPath && invocation.intentSha256 == turn.intentSha256 &&
+        invocation.turnId == turn.turnId) {
+        "schema-7 recovery turn intent references disagree: ${pending.id}"
+    }
+    val intentFile = store.readRevisionFile(expectedIntentName, MAXIMUM_REPAIR_INTENT_BYTES.toLong())
+    require(intentFile.sha256 == turn.intentSha256) {
+        "schema-7 recovery turn intent digest differs from its graph binding: ${pending.id}"
+    }
+    val intent = AgentTurnIntent.parse(intentFile.bytes)
+    require(intent.turnId == turn.turnId && intent.taskId == pending.id && intent.attemptId == pending.id &&
+        intent.profileSha256 == state.profileSha256 && intent.beforeSha256 == pending.parentSourceRevisionSha256 &&
+        intent.requestSha256 == receipt.requestSha256 && intent.policySha256 == receipt.accessPolicySha256 &&
+        receipt.schemaVersion == 3 && receipt.turnIdentity?.turnId == intent.turnId &&
+        receipt.turnIdentity.taskId == intent.taskId && receipt.turnIdentity.requestSha256 == intent.requestSha256) {
+        "schema-7 recovery turn intent is cross-paired with its receipt: ${pending.id}"
+    }
+
+    val assessmentName = "${pending.id}.acp-assessment.json"
+    require(binding.assessmentPath == "reports/repair-revisions/$assessmentName" &&
+        invocation.assessmentSha256 != null) {
+        "schema-7 recovery is missing its durable assessment reference: ${pending.id}"
+    }
+    val assessmentFile = store.readRevisionFile(assessmentName, MAXIMUM_REPAIR_ASSESSMENT_BYTES.toLong())
+    require(assessmentFile.sha256 == invocation.assessmentSha256) {
+        "schema-7 recovery assessment digest differs from its graph binding: ${pending.id}"
+    }
+    val assessment = AcpChangeAssessment.parse(assessmentFile.bytes)
+    val normalizedStop = receipt.terminalOutcome.takeIf { it.startsWith("returned-") }
+        ?.removePrefix("returned-")
+        ?.let { decompengine.agent.AgentStopReason.valueOf(it.uppercase().replace('-', '_')) }
+    require(assessment.turnId == intent.turnId && assessment.intentSha256 == intent.sha256 &&
+        assessment.receiptSha256 == invocation.receiptSha256 &&
+        assessment.changesSha256 == invocation.resultChangesSha256 &&
+        assessment.beforeSha256 == pending.parentSourceRevisionSha256 &&
+        assessment.afterSha256 == decision.proof.sourceRevisionSha256 &&
+        assessment.policySha256 == receipt.accessPolicySha256 &&
+        assessment.policyVerdict == decompengine.project.AcpChangePolicyVerdict.ALLOW &&
+        assessment.observation == decompengine.project.AcpChangeObservationStatus.COMPLETE &&
+        assessment.sessionIdSha256 == receipt.sessionIdCommitmentSha256?.let {
+            sha256("acp-session-commitment-v1:$it".toByteArray(Charsets.UTF_8))
+        } && assessment.updatesSha256 == receipt.updatesSha256 &&
+        assessment.normalizedStopReason == normalizedStop &&
+        assessment.normalizedStopReason == decompengine.agent.AgentStopReason.COMPLETED &&
+        assessment.eligibility == decompengine.project.AcpChangePublicationEligibility.VALIDATED_FOR_PUBLICATION &&
+        assessment.validationStatus == decompengine.project.AcpChangeValidationStatus.PASSED &&
+        assessment.validationProofSha256 == listOf(decision.proof.evidenceSha256)) {
+        "schema-7 recovery assessment is cross-paired with its receipt or acceptance proof: ${pending.id}"
+    }
+
+    val retainedMetadata = state.nodes.mapNotNull { it.repairMetadata } + metadata
+    val expectedIntentNames = retainedMetadata.flatMap { retained ->
+        listOfNotNull(retained.turnIntent?.intentPath, retained.agentInvocation?.intentPath)
+    }.map { it.substringAfterLast('/') }.toSortedSet()
+    val expectedAssessmentNames = retainedMetadata.mapNotNull { it.agentInvocation?.assessmentPath }
+        .map { it.substringAfterLast('/') }.toSortedSet()
+    val directoryLimit = repairRevisionDirectoryEntryLimit(state.budget)
+    val names = store.revisionFileNames(directoryLimit)
+    val observedIntentNames = names.filter { it.matches(Regex("revision_[A-Za-z0-9_]+\\.acp-intent\\.json")) }
+        .toSortedSet()
+    val observedAssessmentNames = names.filter {
+        it.matches(Regex("revision_[A-Za-z0-9_]+\\.acp-assessment\\.json"))
+    }.toSortedSet()
+    require(observedIntentNames == expectedIntentNames && observedAssessmentNames == expectedAssessmentNames) {
+        "schema-7 recovery turn evidence inventory differs from retained graph bindings"
+    }
+}
+
 private fun validateSchema6ReceiptBinding(
     store: RepairStateStore,
     binding: RepairAgentInvocationBinding,
@@ -7729,6 +7853,7 @@ private fun restorePendingPreimagesBeforeIndex(
         val committed = acceptedStateFromDecision(loaded, decision)
         validateGraphBeforeRecovery(committed, profile, binding, store.blobsPath, requestedBudget)
         validateSchema6DecisionReceipt(store, persistedPending, decision, loaded, requestedBudget)
+        validateSchema7DecisionEvidence(store, persistedPending, decision, loaded)
         validateSchema6DecisionModuleClassifications(
             graphAuthority = graphAuthority,
             projectRoot = projectRoot,
@@ -9289,13 +9414,13 @@ private fun PendingAttempt.toJson(schemaVersion: Int): String = buildString {
     }
     if (schemaVersion >= 6) {
         append(",\"sourceWitnessSha256\":").append(sourceWitnessSha256?.let { "\"$it\"" } ?: "null")
-        append(",\"acceptanceDecision\":").append(acceptanceDecision?.toJson() ?: "null")
+        append(",\"acceptanceDecision\":").append(acceptanceDecision?.toJson(schemaVersion) ?: "null")
         append(",\"predecisionStageFiles\":").append(predecisionStageFiles.toJson())
     }
     append('}')
 }
 
-private fun RepairAcceptanceDecision.toJson(): String = buildString {
+private fun RepairAcceptanceDecision.toJson(schemaVersion: Int): String = buildString {
     append("{\"proof\":").append(proof.toStateJson())
     append(",\"evidenceKind\":\"").append(evidenceKind.jsonEscape()).append('\"')
     append(",\"evidenceSummary\":\"").append(evidenceSummary.jsonEscape()).append('\"')
@@ -9305,7 +9430,7 @@ private fun RepairAcceptanceDecision.toJson(): String = buildString {
     append(",\"intendedRunId\":").append(intendedRunId?.let { "\"${it.jsonEscape()}\"" } ?: "null")
     append(",\"intendedRunStatus\":").append(intendedRunStatus?.name?.let { "\"$it\"" } ?: "null")
     append(",\"stagedFiles\":[").append(stagedFiles.joinToString(",") { it.toJson() }).append(']')
-    append(",\"committedNode\":").append(requireNotNull(committedNode).toJson(6))
+    append(",\"committedNode\":").append(requireNotNull(committedNode).toJson(schemaVersion))
     append(",\"committedRun\":").append(committedRun?.toJson() ?: "null")
     append('}')
 }
@@ -10017,7 +10142,8 @@ private fun parsePending(element: JsonElement, schemaVersion: Int): PendingAttem
         if (schemaVersion >= 4) value["legacyRecoveryRequired"]?.jsonPrimitive?.content?.toBooleanStrict() ?: false else false,
         if (schemaVersion >= 5) value["preimageMetadata"]?.let(::parsePreimageMetadataMap) else null,
         if (schemaVersion >= 5) value["promotionPreimageMetadata"]?.let(::parsePreimageMetadataMap) else null,
-        if (schemaVersion >= 6) value["acceptanceDecision"]?.takeUnless { it is JsonNull }?.let(::parseAcceptanceDecision) else null,
+        if (schemaVersion >= 6) value["acceptanceDecision"]?.takeUnless { it is JsonNull }
+            ?.let { parseAcceptanceDecision(it, schemaVersion) } else null,
         if (schemaVersion >= 6) value.optionalString("sourceWitnessSha256") else null,
         if (schemaVersion >= 6) value.getValue("predecisionStageFiles").jsonArray.map(::parseRepairPredecisionStage)
         else emptyList(),
@@ -10038,7 +10164,7 @@ private fun parseRepairPredecisionStage(element: JsonElement): RepairPredecision
     )
 }
 
-private fun parseAcceptanceDecision(element: JsonElement): RepairAcceptanceDecision {
+private fun parseAcceptanceDecision(element: JsonElement, schemaVersion: Int): RepairAcceptanceDecision {
     val value = element.jsonObject
     require(value.keys == setOf("proof", "evidenceKind", "evidenceSummary", "evidenceArtifact", "promotionChanges",
         "intendedHeadId", "intendedRunId", "intendedRunStatus", "stagedFiles", "committedNode", "committedRun")) {
@@ -10054,7 +10180,7 @@ private fun parseAcceptanceDecision(element: JsonElement): RepairAcceptanceDecis
         intendedRunId = value.optionalString("intendedRunId"),
         intendedRunStatus = value.optionalString("intendedRunStatus")?.let { RepairRunStatus.valueOf(it) },
         stagedFiles = value.getValue("stagedFiles").jsonArray.map(::parseRepairStagedFile),
-        committedNode = parseNode(value.getValue("committedNode"), 6),
+        committedNode = parseNode(value.getValue("committedNode"), schemaVersion),
         committedRun = value["committedRun"]?.takeUnless { it is JsonNull }?.let { parseRepairRunState(it.toString()) },
     )
 }

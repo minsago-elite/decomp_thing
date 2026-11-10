@@ -1794,9 +1794,12 @@ class TraceGuidedRepairLoop private constructor(
                 turnIdentity = { turnIdentity },
             )
         } catch (failure: Throwable) {
-            if (failure is Exception) {
+            // An evidence write may have published its immutable intent before its graph
+            // reference failed. Keep the attempt pending so startup can reconcile that
+            // intent-only crash prefix; rejecting it in-process would orphan the sidecar and
+            // make the strict evidence inventory refuse every later graph open.
+            if (failure is Exception && failure !is RepairAgentEvidencePersistenceException) {
                 abortPendingGraph(graph, attempt, failure, "agent-error")
-            } else {
             }
             throw failure
         }
@@ -2107,6 +2110,7 @@ class TraceGuidedRepairLoop private constructor(
 
     private fun prepareProjectState(graph: ModuleRevisionGraph, additions: Collection<ProcessInput>): RetainedRegressionCorpus {
         graph.enableRunContract()
+        graph.enableDurableTurnProvenance()
         val corpus = graph.retainRegressionInputs(history.retainedInputs() + additions)
         graph.synchronizeRepairHistory()
         history.adoptCanonicalProjection(graph.derivedRepairIterations(), corpus.inputs, graph.snapshot.runs)
