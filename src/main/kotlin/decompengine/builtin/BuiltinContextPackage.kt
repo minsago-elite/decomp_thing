@@ -53,6 +53,7 @@ internal object BuiltinContextAssembler {
         request: AgentExecutionRequest,
         maximumBytes: Int,
         maximumEvidenceBytes: Long,
+        maximumToolResultBytes: Int,
         canRetrieve: Boolean,
         control: BuiltinExecutionControl,
         measure: (List<ModelMessage>) -> ByteArray,
@@ -97,7 +98,9 @@ internal object BuiltinContextAssembler {
                 messages += message
                 reservedBytes += messageBytes
                 entries[index] = entries[index].copy(included = true)
-            } else if (!canRetrieve) exhausted()
+            } else if (!canRetrieve || !canReadAnyEvidencePage(input, entries[index].sha256, maximumToolResultBytes, control)) {
+                exhausted()
+            }
         }
         messages[manifestIndex] = manifest(entries, maximumBytes)
         val serialized = measure(messages)
