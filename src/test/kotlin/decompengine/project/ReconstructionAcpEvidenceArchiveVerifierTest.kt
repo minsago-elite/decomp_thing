@@ -599,13 +599,13 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
         val attemptReceipt = project.resolve("reports/modules/parse.attempt.execution.json")
         assertTrue(attemptReceipt.exists())
         assertTrue(project.resolve("reports/modules/parse.attempt.json").readText().contains("parse.attempt.execution.json"))
-        val acceptedHarness = ArchiveEvidenceHarness(accepted = true)
         generateTransactionalAgentProject(
             project.parent, model, GeneratedCMakeReconstructionProfile.descriptor,
-            BoundedLlmModuleReconstructor(acceptedHarness,
-                harnessProvenanceDescriptor = acceptedHarness.factoryProvenance.stableDescriptor),
+            BoundedLlmModuleReconstructor(harness, harnessProvenanceDescriptor = harness.factoryProvenance.stableDescriptor),
+            seedSourceTree = project,
         )
         assertFalse(attemptReceipt.exists())
+        preservedPaths.forEach { assertEquals(before.getValue(it), project.resolve(it).readText(), it) }
         MakeProjectBuilder.build(project)
         ArchivalPackager.create(project, temp.resolve("preserved.zip"))
     }
@@ -1028,6 +1028,7 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
         reconstructor: ModuleReconstructor,
         observedBehavior: String? = null,
         hostSafetyLimits: ReconstructionHostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
+        seedSourceTree: Path? = null,
     ): Pair<Path, SourceTreeManifest> {
         output.toAbsolutePath().normalize().parent?.let { Files.createDirectories(it) }
         val input = output.resolveSibling("${output.fileName}.input")
@@ -1037,6 +1038,7 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
             assertEquals(PublicationResult.PUBLISHED, workspace.publish(
                 setOf("source-tree", ".decomp-agent-sessions"),
                 buildStage = { stage ->
+                    seedSourceTree?.let { seed -> copyTree(seed, stage.resolve("source-tree")) }
                     manifest = SourceTreeGenerator.generateWithCompilerFeedback(
                         model.copy(inputSha256 = workspace.inputSha256),
                         stage.resolve("source-tree"),
