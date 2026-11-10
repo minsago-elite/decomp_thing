@@ -44,6 +44,7 @@ class RecordedRepairHistoryCliTest {
                 started.countDown()
                 withRepairRuntimeUnderPublicationLease(
                     projectDirectory = sourceTree,
+                    beforeRepairMarker = {},
                     openRuntime = { _ ->
                         runtimeOpened.incrementAndGet()
                         runtime
@@ -167,6 +168,7 @@ class RecordedRepairHistoryCliTest {
             val repair = executor.submit {
                 withRepairRuntimeUnderPublicationLease(
                     projectDirectory = sourceTree,
+                    beforeRepairMarker = {},
                     openRuntime = { _ -> projection },
                     canRetireRepairMarker = { true },
                     action = { runtime, _ -> runtime.closeAndAwaitWriterTermination() },

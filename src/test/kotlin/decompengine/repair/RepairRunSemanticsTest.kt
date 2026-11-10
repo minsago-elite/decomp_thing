@@ -53,6 +53,7 @@ class RepairRunSemanticsTest {
                 }) {
                     withRepairRuntimeUnderPublicationLease(
                         projectDirectory = project,
+                        beforeRepairMarker = {},
                         openRuntime = { _ -> fixture.loop },
                         canRetireRepairMarker = { recovered: Boolean -> recovered },
                         action = { loop, admittedProject ->
