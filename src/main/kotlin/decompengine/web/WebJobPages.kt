@@ -84,11 +84,45 @@ internal data class WebJobCollectionSeed(
     val bytes: Long,
 )
 
+private const val DIAGNOSTIC_JOB_COLLECTION_DEADLINE_PROPERTY = "decomp.web.diagnosticJobCollectionDeadlineMillis"
+private const val DASHBOARD_SEED_DISABLED_PROPERTY = "decomp.web.dashboardSeedDisabled"
+private const val DEFAULT_JOB_COLLECTION_DEADLINE_MILLIS = 5_000L
+
+/** Qualification-only override: available only to the unseeded diagnostic profile, and only shorter than production. */
+private fun configuredJobCollectionDeadlineNanos(): Long {
+    val raw = System.getProperty(DIAGNOSTIC_JOB_COLLECTION_DEADLINE_PROPERTY)
+        ?: return WebJobCollectionDeadline.DEFAULT_BUDGET_NANOS
+    require(System.getProperty(DASHBOARD_SEED_DISABLED_PROPERTY) == "true") {
+        "$DIAGNOSTIC_JOB_COLLECTION_DEADLINE_PROPERTY requires $DASHBOARD_SEED_DISABLED_PROPERTY=true"
+    }
+    require(raw.matches(Regex("[1-9][0-9]{0,3}"))) {
+        "$DIAGNOSTIC_JOB_COLLECTION_DEADLINE_PROPERTY must be a canonical decimal from 1 through 4999"
+    }
+    val millis = raw.toLong()
+    require(millis in 1 until DEFAULT_JOB_COLLECTION_DEADLINE_MILLIS) {
+        "$DIAGNOSTIC_JOB_COLLECTION_DEADLINE_PROPERTY must be less than the 5000 ms production default"
+    }
+    System.err.println("Web diagnostic job collection deadline: $millis ms (default 5000 ms, dashboard seed disabled)")
+    return millis * 1_000_000L
+}
+
 /** One admitted scan deadline, also checked by the production source between bounded read units. */
-internal class WebJobCollectionDeadline(private val started: Long, private val now: () -> Long) {
+internal class WebJobCollectionDeadline(
+    private val started: Long,
+    private val budgetNanos: Long = DEFAULT_BUDGET_NANOS,
+    private val now: () -> Long,
+) {
+    init {
+        require(budgetNanos in 1..DEFAULT_BUDGET_NANOS) { "Job collection deadline must be between 1 ns and 5 s." }
+    }
+
+    companion object {
+        const val DEFAULT_BUDGET_NANOS = 5_000_000_000L
+    }
+
     private var expired = false
     fun checkpoint() {
-        if (expired || now() - started > 5_000_000_000L) {
+        if (expired || now() - started > budgetNanos) {
             expired = true
             throw WebAccessDenied(503, "LISTING_LIMIT", "The job library exceeds this listing scan budget.")
         }
@@ -104,6 +138,7 @@ internal class WebJobPages(
     private val collectionStamp: ((Long, () -> Unit) -> WebJobCollectionStamp)? = null,
     private val collectionSeed: (() -> WebJobCollectionSeed?)? = null,
 ) {
+    private val deadlineBudgetNanos = configuredJobCollectionDeadlineNanos()
     private data class CollectionImage(val version: Long, val stamp: WebJobCollectionStamp, val rows: List<WebJobCollectionRow>, val bytes: Long)
     private data class Snapshot(val id: String, val owner: String, val query: WebJobQuery,
         val items: List<JsonObject>, val expires: Long, val bytes: Long)
@@ -119,7 +154,7 @@ internal class WebJobPages(
     @Volatile private var generation = 0L
 
     fun page(owner: String, query: WebJobQuery, cursor: String?): JsonObject =
-        pageFirst(owner, query, cursor, 0, WebJobCollectionDeadline(now(), now))
+        pageFirst(owner, query, cursor, 0, WebJobCollectionDeadline(now(), deadlineBudgetNanos, now))
 
     private fun pageFirst(owner: String, query: WebJobQuery, cursor: String?, retry: Int,
         deadline: WebJobCollectionDeadline): JsonObject {

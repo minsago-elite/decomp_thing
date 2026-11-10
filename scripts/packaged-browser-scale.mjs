@@ -223,6 +223,69 @@ export function instrumentRequests(cdp, tab, records, currentPhase = () => 'uncl
   cdp.on('Network.loadingFailed', (event) => finish(event, true), tab.sessionId);
 }
 
+/** Captures the body of one exact cursor-free dashboard response through CDP, without refetching it. */
+function captureDashboardResponseBodies(cdp, tab) {
+  const requests = new Map();
+  const apiRequests = [];
+  cdp.on('Network.requestWillBeSent', (event) => {
+    const url = new URL(event.request.url);
+    if (url.pathname.includes('/api/')) apiRequests.push({ method: event.request.method, path: url.pathname });
+    if (url.pathname !== '/nested/api/v1/jobs' || event.request.method !== 'GET' || url.searchParams.has('cursor')) return;
+    requests.set(event.requestId, { requestId: event.requestId, method: event.request.method,
+      path: url.pathname, queryKeys: [...url.searchParams.keys()].sort(), limitValues: url.searchParams.getAll('limit'),
+      startedAt: event.timestamp, status: null, completed: false });
+  }, tab.sessionId);
+  cdp.on('Network.responseReceived', (event) => {
+    const request = requests.get(event.requestId);
+    if (request) request.status = event.response.status;
+  }, tab.sessionId);
+  cdp.on('Network.loadingFinished', (event) => {
+    const request = requests.get(event.requestId);
+    if (!request) return;
+    request.latencyMs = (event.timestamp - request.startedAt) * 1000;
+    request.encodedResponseBytes = event.encodedDataLength;
+    request.bodyPromise = cdp.call('Network.getResponseBody', { requestId: event.requestId }, tab.sessionId).then((result) => {
+      const bytes = result.base64Encoded ? Buffer.from(result.body, 'base64') : Buffer.from(result.body, 'utf8');
+      request.bodyBytes = bytes.length;
+      request.bodySha256 = createHash('sha256').update(bytes).digest('hex');
+      try {
+        const envelope = JSON.parse(bytes.toString('utf8'));
+        request.apiVersion = envelope.apiVersion ?? null;
+        request.kind = envelope.kind ?? null;
+        request.errorCode = envelope.error?.code ?? null;
+        request.errorMessage = envelope.error?.message ?? null;
+      } catch {
+        request.bodyParseFailed = true;
+      }
+      request.completed = true;
+    }).catch((error) => {
+      request.bodyCaptureError = String(error?.message ?? error).slice(0, 300);
+      request.completed = true;
+    });
+  }, tab.sessionId);
+  cdp.on('Network.loadingFailed', (event) => {
+    const request = requests.get(event.requestId);
+    if (!request) return;
+    request.failed = true;
+    request.errorText = event.errorText ?? null;
+    request.completed = true;
+  }, tab.sessionId);
+  return { requests, apiRequests };
+}
+
+async function waitForDashboardResponseBody(requests, timeoutMs = 10_000) {
+  const end = Date.now() + timeoutMs;
+  while (Date.now() < end) {
+    const responses = [...requests.values()];
+    if (responses.length > 0 && responses.every((response) => response.completed)) {
+      await Promise.all(responses.map((response) => response.bodyPromise).filter(Boolean));
+      return responses;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  return [...requests.values()];
+}
+
 // Pure assertions on the metadata returned by the existing browser commands.
 export function dashboardFiltersWithSnapshot(search) {
   assert.equal(typeof search, 'string');
@@ -305,6 +368,7 @@ async function installSessionCookie(cdp, tab, browserOrigin, sessionCookie) {
 // Twenty cache-disabled tabs, each against a freshly started process and startup-observed collection image.
 async function coldLoads({ fixture, makeTarget, cdp, evaluate, ready, restartServer, onProgress, profile }) {
   const readyMs = [], firstPageMs = [], firstPageEvidence = [], records = [], startupMs = [], seedDiagnostics = [];
+  const deadlineConfigurations = [];
   const serverProcessIds = [];
   const serverPids = [];
   let peakBrowserHeapBytes = 0;
@@ -316,10 +380,15 @@ async function coldLoads({ fixture, makeTarget, cdp, evaluate, ready, restartSer
     assert.ok(activeServer.processId && !serverProcessIds.includes(activeServer.processId),
       'Cold dashboard samples must not reuse an application process');
     assert.ok(!serverPids.includes(activeServer.serverPid), 'Cold dashboard samples must use distinct application PIDs');
+    assert.deepEqual(activeServer.deadlineConfiguration, { diagnostic: false, dashboardSeedDisabled: false,
+      requestedMillis: null, effectiveMillis: 5000, productionDefaultMillis: 5000,
+      verifiedBy: 'no diagnostic JVM properties inherited; WebJobCollectionDeadline default' },
+    'Measured cold loads must use the unchanged production collection deadline');
     serverProcessIds.push(activeServer.processId);
     serverPids.push(activeServer.serverPid);
     startupMs.push(activeServer.startupMs);
     seedDiagnostics.push(activeServer.seedDiagnostic);
+    deadlineConfigurations.push(activeServer.deadlineConfiguration);
     const { browserOrigin, sessionCookie } = activeServer;
     const newest = '/nested/jobs/' + fixture.ids.at(-1);
     const tab = await makeTarget();
@@ -372,77 +441,165 @@ async function coldLoads({ fixture, makeTarget, cdp, evaluate, ready, restartSer
     await closeTab(cdp, tab);
     onProgress?.({ stage: 'cold-seeded-sample', sample: load + 1, total: COLD_LOADS,
       startupMs: [...startupMs], readyMs: readyMs.map(Math.round), firstDataPageMs: firstPageMs.map(Math.round),
-      seedDiagnostics: [...seedDiagnostics], serverPids: [...serverPids] });
+      seedDiagnostics: [...seedDiagnostics], serverPids: [...serverPids], deadlineConfigurations: [...deadlineConfigurations] });
   }
   assert.equal(new Set(serverProcessIds).size, COLD_LOADS, 'Every cold sample must use a distinct application process');
   assert.equal(new Set(serverPids).size, COLD_LOADS, 'Every cold sample must use a distinct application PID');
-  const forcedScan = { loads: 3, startupMs: [], readyMs: [], firstDataPageMs: [], responseStatuses: [],
-    overBudgetViews: [], serverPids: [], requestRecords: [] };
+  const forcedScan = { purpose: 'induced dashboard collection deadline refusal; diagnostic only, not a production-threshold measurement',
+    loads: 3, requiredRefusalSamples: 3, deadlineMillis: 1, productionDefaultMillis: 5000,
+    startupMs: [], readyMs: [], responseMs: [], responseStatuses: [], overBudgetViews: [], serverPids: [],
+    samples: [], requestRecords: [] };
   const forcedPids = new Set(serverPids);
   for (let sample = 0; sample < forcedScan.loads; sample++) {
-    activeServer = await restartServer({ forceScan: true });
-    assert.ok(!forcedPids.has(activeServer.serverPid), 'Forced-scan diagnostics must use fresh application processes');
-    forcedPids.add(activeServer.serverPid);
-    forcedScan.serverPids.push(activeServer.serverPid);
-    forcedScan.startupMs.push(activeServer.startupMs);
-    const tab = await makeTarget();
-    await applyScaleProfile(cdp, tab, profile);
-    await installSessionCookie(cdp, tab, activeServer.browserOrigin, activeServer.sessionCookie);
-    await cdp.call('Performance.enable', {}, tab.sessionId);
     const tabRecords = [];
-    instrumentRequests(cdp, tab, tabRecords, () => 'forced-scan-dashboard-load');
-    const start = performance.now();
-    await cdp.call('Page.navigate', { url: activeServer.browserOrigin + '/nested/' }, tab.sessionId);
-    await ready(tab, `((${rowsExpression})[0] === ${JSON.stringify('/nested/jobs/' + fixture.ids.at(-1))} && (${rowsExpression}).length === 50) ||
-      document.body.innerText.toLowerCase().includes('listing limit')`, `forced-scan outcome ${sample + 1}`);
-    forcedScan.readyMs.push(Math.round(performance.now() - start));
-    const page = tabRecords.find(record => record.class === '/nested/api/v1/jobs' &&
-      (record.responseStatus === 200 || record.responseStatus === 503));
-    assert.ok(page, `Forced-scan sample ${sample + 1} must observe a bounded job-page response`);
-    forcedScan.requestRecords.push(...tabRecords);
-    forcedScan.responseStatuses.push(page.responseStatus);
-    const overBudget = page.responseStatus === 503;
-    forcedScan.overBudgetViews.push(overBudget && (await evaluate(tab,
-      `document.body.innerText.includes('No partial results were returned.') && document.body.innerText.includes('Narrowing filters may help')`)) === true);
-    const timing = await evaluate(tab, `(() => {
-      const entry = performance.getEntriesByType('resource').filter(item => {
-        try { return new URL(item.name).pathname === '/nested/api/v1/jobs'; } catch { return false; }
-      }).at(-1);
-      return entry ? { requestStart: entry.requestStart, responseEnd: entry.responseEnd,
-        transferSize: entry.transferSize, encodedBodySize: entry.encodedBodySize } : null;
-    })()`);
-    assert.ok(timing && timing.requestStart > 0 && timing.responseEnd > timing.requestStart,
-      `Forced-scan first page timing is incomplete: ${JSON.stringify(timing)}`);
-    forcedScan.firstDataPageMs.push(Math.round(timing.responseEnd - timing.requestStart));
-    if (page.failed && page.responseStatus === 200 && timing.transferSize > 0) {
-      page.responseBytes = timing.transferSize;
-      page.consumedResponse = true;
+    let tab = null;
+    let capture = { requests: new Map(), apiRequests: [] };
+    const sampleEvidence = { index: sample + 1, pid: null, processId: null,
+      deadlineConfiguration: null, navigation: 'GET /nested/ with no dashboard filters',
+      requestId: null, status: null, errorCode: null, errorMessage: null, bodyBytes: null, bodySha256: null,
+      requestCount: null, requestBytes: null, responseBytes: null, responseMs: null, renderedRowCount: null, alertPresent: false,
+      listingLimitCopy: false, noPartialResultsCopy: false, narrowingGuidanceCopy: false, browserExceptions: null, passed: false, failures: [] };
+    let start = performance.now();
+    try {
+      activeServer = await restartServer({ forceScan: true });
+      sampleEvidence.pid = activeServer.serverPid;
+      sampleEvidence.processId = activeServer.processId;
+      sampleEvidence.deadlineConfiguration = activeServer.deadlineConfiguration;
+      assert.ok(Number.isSafeInteger(activeServer.serverPid) && activeServer.serverPid > 0 && !forcedPids.has(activeServer.serverPid),
+        'Forced-scan diagnostics must use fresh application processes');
+      assert.deepEqual(activeServer.deadlineConfiguration, { diagnostic: true, dashboardSeedDisabled: true,
+        requestedMillis: forcedScan.deadlineMillis, effectiveMillis: forcedScan.deadlineMillis,
+        productionDefaultMillis: forcedScan.productionDefaultMillis },
+      'Forced-scan child must use only the validated, shortened diagnostic deadline');
+      forcedPids.add(activeServer.serverPid);
+      forcedScan.serverPids.push(activeServer.serverPid);
+      forcedScan.startupMs.push(activeServer.startupMs);
+      tab = await makeTarget();
+      capture = captureDashboardResponseBodies(cdp, tab);
+      await applyScaleProfile(cdp, tab, profile);
+      await installSessionCookie(cdp, tab, activeServer.browserOrigin, activeServer.sessionCookie);
+      await cdp.call('Performance.enable', {}, tab.sessionId);
+      instrumentRequests(cdp, tab, tabRecords, () => 'forced-scan-dashboard-load');
+      start = performance.now();
+      await cdp.call('Page.navigate', { url: activeServer.browserOrigin + '/nested/' }, tab.sessionId);
+      await ready(tab, `document.querySelector('[role="alert"]') !== null`, `forced-scan refusal UI ${sample + 1}`);
+      sampleEvidence.readyMs = Math.round(performance.now() - start);
+      forcedScan.readyMs.push(sampleEvidence.readyMs);
+      const responses = await waitForDashboardResponseBody(capture.requests);
+      const response = responses.length === 1 ? responses[0] : null;
+      const page = tabRecords.filter(record => record.class === '/nested/api/v1/jobs');
+      const renderedRows = await evaluate(tab, rowsExpression);
+      const alertText = await evaluate(tab, `document.querySelector('[role="alert"]')?.innerText ?? null`);
+      sampleEvidence.requestId = response?.requestId ?? null;
+      sampleEvidence.status = response?.status ?? null;
+      sampleEvidence.errorCode = response?.errorCode ?? null;
+      sampleEvidence.errorMessage = response?.errorMessage ?? null;
+      sampleEvidence.bodyBytes = response?.bodyBytes ?? null;
+      sampleEvidence.bodySha256 = response?.bodySha256 ?? null;
+      sampleEvidence.requestCount = responses.length;
+      sampleEvidence.requestBytes = page.length === 1 ? page[0].requestBytes : null;
+      sampleEvidence.responseBytes = response?.encodedResponseBytes ?? null;
+      sampleEvidence.responseMs = Number.isFinite(response?.latencyMs) ? Math.round(response.latencyMs) : null;
+      sampleEvidence.renderedRowCount = Array.isArray(renderedRows) ? renderedRows.length : null;
+      sampleEvidence.alertPresent = typeof alertText === 'string';
+      sampleEvidence.listingLimitCopy = typeof alertText === 'string' && alertText.toLowerCase().includes('listing limit');
+      sampleEvidence.noPartialResultsCopy = typeof alertText === 'string' && alertText.includes('No partial results were returned.');
+      sampleEvidence.narrowingGuidanceCopy = typeof alertText === 'string' && alertText.includes('Narrowing filters may help');
+      sampleEvidence.browserExceptions = tab?.exceptions?.length ?? null;
+      sampleEvidence.apiRequests = capture.apiRequests;
+      sampleEvidence.timingComplete = Number.isFinite(sampleEvidence.responseMs) && sampleEvidence.responseMs >= 0 &&
+        Number.isSafeInteger(sampleEvidence.requestBytes) && Number.isSafeInteger(sampleEvidence.responseBytes);
+      sampleEvidence.passed = response?.method === 'GET' && response.path === '/nested/api/v1/jobs' &&
+        response.queryKeys.length === 1 && response.queryKeys[0] === 'limit' &&
+        response.limitValues.length === 1 && response.limitValues[0] === '50' &&
+        response.status === 503 && response.kind === 'error' &&
+        response.apiVersion === 1 && response.errorCode === 'LISTING_LIMIT' &&
+        typeof response.errorMessage === 'string' && response.errorMessage.includes('exceeds this listing scan budget') &&
+        Number.isSafeInteger(response.bodyBytes) && response.bodyBytes > 0 && /^[a-f0-9]{64}$/.test(response.bodySha256 ?? '') &&
+        page.length === 1 && page[0].responseStatus === 503 && !page[0].failed && sampleEvidence.renderedRowCount === 0 &&
+        sampleEvidence.alertPresent && sampleEvidence.listingLimitCopy && sampleEvidence.noPartialResultsCopy && sampleEvidence.narrowingGuidanceCopy &&
+        sampleEvidence.browserExceptions === 0 && sampleEvidence.timingComplete &&
+        capture.apiRequests.filter(request => request.path === '/nested/api/v1/jobs').length === 1 &&
+        capture.apiRequests.every(request => request.method === 'GET');
+      if (!sampleEvidence.passed) sampleEvidence.failures.push('response, UI, row-count, request, or timing evidence did not satisfy the induced LISTING_LIMIT refusal contract');
+    } catch (error) {
+      const observed = [...capture.requests.values()];
+      const response = observed.length === 1 ? observed[0] : null;
+      sampleEvidence.requestId = response?.requestId ?? null;
+      sampleEvidence.status = response?.status ?? null;
+      sampleEvidence.errorCode = response?.errorCode ?? null;
+      sampleEvidence.errorMessage = response?.errorMessage ?? null;
+      sampleEvidence.bodyBytes = response?.bodyBytes ?? null;
+      sampleEvidence.bodySha256 = response?.bodySha256 ?? null;
+      sampleEvidence.requestCount = observed.length;
+      sampleEvidence.requestBytes = tabRecords.find(record => record.class === '/nested/api/v1/jobs')?.requestBytes ?? null;
+      sampleEvidence.responseBytes = response?.encodedResponseBytes ?? null;
+      sampleEvidence.responseMs = Number.isFinite(response?.latencyMs) ? Math.round(response.latencyMs) : null;
+      sampleEvidence.apiRequests = capture.apiRequests;
+      sampleEvidence.responseEvidence = observed.map(({ requestId, method, path, queryKeys, limitValues, status, encodedResponseBytes,
+        bodyBytes, bodySha256, errorCode, bodyParseFailed, bodyCaptureError, failed, errorText }) => ({ requestId, method,
+        path, queryKeys, limitValues, status, encodedResponseBytes: encodedResponseBytes ?? null, bodyBytes: bodyBytes ?? null,
+        bodySha256: bodySha256 ?? null, errorCode: errorCode ?? null, bodyParseFailed: bodyParseFailed ?? false,
+        bodyCaptureError: bodyCaptureError ?? null, failed: failed ?? false, errorText: errorText ?? null }));
+      sampleEvidence.browserExceptions = tab?.exceptions?.length ?? null;
+      sampleEvidence.failure = String(error?.message ?? error).slice(0, 500);
+      sampleEvidence.failures.push('forced-scan sample collection raised an exception');
+    } finally {
+      forcedScan.requestRecords.push(...tabRecords);
+      forcedScan.responseStatuses.push(sampleEvidence.status);
+      if (Number.isFinite(sampleEvidence.responseMs)) forcedScan.responseMs.push(sampleEvidence.responseMs);
+      if (tab) {
+        try { await closeTab(cdp, tab); }
+        catch (error) {
+          sampleEvidence.passed = false;
+          sampleEvidence.failures.push(`tab teardown failed: ${String(error?.message ?? error).slice(0, 300)}`);
+        }
+      }
+      forcedScan.overBudgetViews.push(sampleEvidence.passed);
+      forcedScan.samples.push(sampleEvidence);
     }
-    assert.equal(overBudget ? forcedScan.overBudgetViews.at(-1) : page.responseStatus === 200, true,
-      `Forced-scan sample ${sample + 1} must either return rows or render the explicit bounded over-budget state`);
-    forcedScan.seedDiagnostic = activeServer.seedDiagnostic;
-    await closeTab(cdp, tab);
     onProgress?.({ stage: 'cold-forced-scan-sample', sample: sample + 1, total: forcedScan.loads,
       seeded: { startupMs: [...startupMs], readyMs: readyMs.map(Math.round), firstDataPageMs: firstPageMs.map(Math.round),
         seedDiagnostics: [...seedDiagnostics], serverPids: [...serverPids] },
-      forcedScan: { startupMs: [...forcedScan.startupMs], readyMs: [...forcedScan.readyMs],
-        firstDataPageMs: [...forcedScan.firstDataPageMs], responseStatuses: [...forcedScan.responseStatuses],
-        overBudgetViews: [...forcedScan.overBudgetViews], seedDiagnostic: forcedScan.seedDiagnostic,
-        serverPids: [...forcedScan.serverPids] } });
+      forcedScan: { deadlineMillis: forcedScan.deadlineMillis, productionDefaultMillis: forcedScan.productionDefaultMillis,
+        startupMs: [...forcedScan.startupMs], readyMs: [...forcedScan.readyMs], responseMs: [...forcedScan.responseMs],
+        responseStatuses: [...forcedScan.responseStatuses], overBudgetViews: [...forcedScan.overBudgetViews],
+        samples: [...forcedScan.samples], serverPids: [...forcedScan.serverPids] } });
   }
+  forcedScan.deadlineRefusalGate = { passed: forcedScan.samples.length === forcedScan.requiredRefusalSamples &&
+      forcedScan.samples.every(sample => sample.passed) && new Set(forcedScan.samples.map(sample => sample.pid)).size === forcedScan.requiredRefusalSamples,
+    requiredSamples: forcedScan.requiredRefusalSamples, attemptedSamples: forcedScan.samples.length,
+    passingSamples: forcedScan.samples.filter(sample => sample.passed).length,
+    requiredStatus: 503, requiredErrorCode: 'LISTING_LIMIT', requiredRows: 0,
+    diagnosticDeadlineMillis: forcedScan.deadlineMillis, productionDefaultMillis: forcedScan.productionDefaultMillis };
   forcedScan.requestBudgetGate = evaluateApiRequestBudgetGate(forcedScan.requestRecords,
     { requiredPhases: ['forced-scan-dashboard-load'] });
   const requestBudgetGate = evaluateApiRequestBudgetGate([...records, ...forcedScan.requestRecords],
     { requiredPhases: ['cold-dashboard-load', 'forced-scan-dashboard-load'] });
   delete forcedScan.requestRecords;
-  forcedScan.readyP95Ms = Math.round(percentile(forcedScan.readyMs, 0.95));
-  forcedScan.firstDataPageP95Ms = Math.round(percentile(forcedScan.firstDataPageMs, 0.95));
-  forcedScan.startupP95Ms = Math.round(percentile(forcedScan.startupMs, 0.95));
+  forcedScan.readyP95Ms = forcedScan.readyMs.length ? Math.round(percentile(forcedScan.readyMs, 0.95)) : null;
+  forcedScan.responseP95Ms = forcedScan.responseMs.length ? Math.round(percentile(forcedScan.responseMs, 0.95)) : null;
+  forcedScan.startupP95Ms = forcedScan.startupMs.length ? Math.round(percentile(forcedScan.startupMs, 0.95)) : null;
+  onProgress?.({ stage: 'forced-deadline-refusal-complete',
+    seededColdLoads: { required: COLD_LOADS, attempted: serverPids.length, passed: firstPageMs.length === COLD_LOADS,
+      readyMs: readyMs.map(Math.round), readyP95Ms: readyMs.length ? Math.round(percentile(readyMs, 0.95)) : null,
+      firstDataPageMs: firstPageMs.map(Math.round), firstDataPageP95Ms: firstPageMs.length ? Math.round(percentile(firstPageMs, 0.95)) : null,
+      firstDataPageEvidence, startupMs, seedDiagnostics, deadlineConfigurations, serverProcessIds, serverPids },
+    forcedScan, requestBudgetGate });
+  assert.equal(forcedScan.deadlineRefusalGate.passed, true,
+    `All three fresh-process forced scans must prove the existing LISTING_LIMIT refusal UI: ${JSON.stringify(forcedScan.deadlineRefusalGate)}`);
+  assert.equal(forcedScan.requestBudgetGate.passed, true,
+    `Forced deadline-refusal requests must remain within existing API request budgets: ${JSON.stringify(forcedScan.requestBudgetGate)}`);
   // Use a distinct seeded JVM whose storage image is resident but whose first
   // library request has not happened yet. This prevents the forced-scan
   // diagnostic or a completed page from inflating the memory baseline.
   activeServer = await restartServer();
   assert.ok(!forcedPids.has(activeServer.serverPid), 'The scale journey memory baseline must use a fresh seeded process');
+  assert.deepEqual(activeServer.deadlineConfiguration, { diagnostic: false, dashboardSeedDisabled: false,
+    requestedMillis: null, effectiveMillis: 5000, productionDefaultMillis: 5000,
+    verifiedBy: 'no diagnostic JVM properties inherited; WebJobCollectionDeadline default' },
+  'The memory-baseline and full-journey process must return to the unchanged production deadline');
+  forcedScan.measurementServerDeadlineConfiguration = activeServer.deadlineConfiguration;
   await new Promise(resolve => setTimeout(resolve, 2000));
   const idleRssSamples = [];
   for (let sample = 0; sample < 10; sample++) {
@@ -453,7 +610,7 @@ async function coldLoads({ fixture, makeTarget, cdp, evaluate, ready, restartSer
   return { loads: COLD_LOADS, readyMs: readyMs.map(Math.round), readyP95Ms: Math.round(percentile(readyMs, 0.95)),
     firstDataPageMs: firstPageMs.map(Math.round), firstDataPageP95Ms: Math.round(percentile(firstPageMs, 0.95)),
     firstDataPageEvidence: firstPageEvidence, peakBrowserHeapBytes,
-    startupMs, startupP95Ms: Math.round(percentile(startupMs, 0.95)), seedDiagnostics, forcedScan,
+    startupMs, startupP95Ms: Math.round(percentile(startupMs, 0.95)), seedDiagnostics, deadlineConfigurations, forcedScan,
     serverProcessIds, serverPids, warmedIdleRssBytes, idleRssSamples,
     measurementServerStartupMs: activeServer.startupMs, requests: summarizeRequests(records),
     requestBudgetGate,

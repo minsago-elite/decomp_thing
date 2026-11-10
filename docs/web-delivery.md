@@ -129,6 +129,12 @@ jobs.” recovery message; the packaged scale control verifies both the response
 and the absence of a job-list request.
 Forced-scan controls verify that an over-deadline library returns no partial rows,
 shows a bounded listing-limit error, and recommends narrowing filters.
+The packaged forced-scan browser control induces this existing refusal path with
+a diagnostic-only 1 ms collection deadline in a fresh, unseeded JVM; the override
+is rejected unless startup seeding is disabled and can never exceed the production
+5 s default. All three samples must capture the same request's 503/LISTING_LIMIT
+response body and rendered refusal UI. This proves the error contract, not natural
+exhaustion of the production deadline.
 
 | Metric | Initial acceptance budget and measurement | Fixture / owner |
 | --- | --- | --- |

@@ -559,9 +559,19 @@ async function launchApplication(installation, port = '0', frontendOrigin) {
 async function restartScaleApplication(installation, { forceScan = false } = {}) {
   await stop(application);
   const startupStarted = performance.now();
+  const inheritedJavaOptions = installation.environment.JAVA_TOOL_OPTIONS ?? '';
+  assert.doesNotMatch(inheritedJavaOptions,
+    /-Ddecomp\.web\.(?:dashboardSeedDisabled|diagnosticJobCollectionDeadlineMillis)(?:=|\s|$)/,
+    'Packaged installation must not inherit the forced-scan diagnostic configuration');
+  const diagnosticDeadlineMillis = 1;
   const environment = forceScan ? { ...installation.environment, JAVA_TOOL_OPTIONS:
-    [installation.environment.JAVA_TOOL_OPTIONS, '-Ddecomp.web.dashboardSeedDisabled=true'].filter(Boolean).join(' ') } : installation.environment;
+    [inheritedJavaOptions, '-Ddecomp.web.dashboardSeedDisabled=true',
+      `-Ddecomp.web.diagnosticJobCollectionDeadlineMillis=${diagnosticDeadlineMillis}`].filter(Boolean).join(' ') } : installation.environment;
   const freshOrigin = await launchApplication({ ...installation, environment }, '0');
+  if (forceScan) {
+    await waitFor(() => applicationError.includes(`Web diagnostic job collection deadline: ${diagnosticDeadlineMillis} ms (default 5000 ms, dashboard seed disabled)`),
+      'effective forced-scan deadline diagnostic', 5000);
+  }
   const bootstrapUrl = await waitFor(() => applicationOutput.split(/\s+/)
     .find((part) => part.startsWith(freshOrigin + '/nested/#bootstrap=')), 'fresh-process local bootstrap handoff');
   const token = new URL(bootstrapUrl).hash.slice('#bootstrap='.length);
@@ -582,9 +592,20 @@ async function restartScaleApplication(installation, { forceScan = false } = {})
     path: '/nested/', secure: false, httpOnly: true, sameSite: 'Strict' };
   sensitiveValues.push(sessionCookie.value);
   assert.ok(sessionCookie.value, 'Fresh-process session cookie is empty');
+  let deadlineConfiguration;
+  if (forceScan) {
+    const expected = new RegExp(`^Web diagnostic job collection deadline: ${diagnosticDeadlineMillis} ms \\(default 5000 ms, dashboard seed disabled\\)$`, 'm');
+    assert.match(applicationError, expected, 'Forced-scan process must report its effective diagnostic deadline configuration');
+    deadlineConfiguration = { diagnostic: true, dashboardSeedDisabled: true,
+      requestedMillis: diagnosticDeadlineMillis, effectiveMillis: diagnosticDeadlineMillis, productionDefaultMillis: 5000 };
+  } else {
+    deadlineConfiguration = { diagnostic: false, dashboardSeedDisabled: false,
+      requestedMillis: null, effectiveMillis: 5000, productionDefaultMillis: 5000,
+      verifiedBy: 'no diagnostic JVM properties inherited; WebJobCollectionDeadline default' };
+  }
   const seedDiagnostic = applicationError.match(/Web job-library startup observation: ([^\r\n]+)/)?.[1] ?? 'missing';
   return { serverPid: application.pid, processId: `${application.pid}:${freshOrigin}`, browserOrigin: freshOrigin,
-    sessionCookie, startupMs: Math.round(performance.now() - startupStarted), seedDiagnostic, forceScan };
+    sessionCookie, startupMs: Math.round(performance.now() - startupStarted), seedDiagnostic, forceScan, deadlineConfiguration };
 }
 
 async function removeOwnedWork() {
