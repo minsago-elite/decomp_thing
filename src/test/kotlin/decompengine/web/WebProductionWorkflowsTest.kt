@@ -1552,6 +1552,7 @@ class WebProductionWorkflowsTest {
             mode: WebReconstructionMode,
             progress: AgentWorkflowProgress,
             workspace: ReconstructionOutputWorkspace,
+            workflowRunId: String?,
             publicationAdmission: () -> Unit,
             onCommittedPublication: () -> Unit,
         ) {

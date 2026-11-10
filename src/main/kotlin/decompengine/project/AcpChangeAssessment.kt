@@ -159,12 +159,15 @@ class AcpChangeAssessment private constructor(
             "publication eligibility requires complete changes, allowed policy, completed validation, and proof"
         }
         require(eligibility != AcpChangePublicationEligibility.REJECTED ||
-            policyVerdict == AcpChangePolicyVerdict.REJECT || validationStatus == AcpChangeValidationStatus.FAILED) {
-            "rejected eligibility requires a rejected policy or failed validation outcome"
+            reasonCodes.isNotEmpty() && (policyVerdict == AcpChangePolicyVerdict.REJECT ||
+                validationStatus == AcpChangeValidationStatus.FAILED ||
+                validationStatus in setOf(AcpChangeValidationStatus.NOT_RUN, AcpChangeValidationStatus.INCOMPLETE))) {
+            "rejected eligibility requires a host reason and a refused or uncompleted gate"
         }
         require(eligibility != AcpChangePublicationEligibility.INTERRUPTED ||
             normalizedStopReason in setOf(AgentStopReason.CANCELLED, AgentStopReason.LIMIT_EXHAUSTED) ||
-            observation != AcpChangeObservationStatus.COMPLETE) {
+            observation != AcpChangeObservationStatus.COMPLETE ||
+            validationStatus == AcpChangeValidationStatus.INCOMPLETE) {
             "interrupted eligibility requires an interrupted stop or incomplete observation"
         }
     }

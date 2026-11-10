@@ -346,21 +346,42 @@ race resistance.
 
 ## Durable invocation provenance checkpoint for #733
 
-The captured repair workflow now has an implementation path for host-authored
-turn intents and post-validation change assessments. A repair turn writes its
-canonical intent before provider dispatch, then binds the receipt to that intent
-and the unique turn UUID. The workflow writes an immutable assessment after
-policy and validation, before acceptance, provisional recording, or rejection.
-Schema-7 graph records and schema-4 history records carry the content-addressed
-references. Recovery and the repair archive verifier re-read and authenticate
-those documents; legacy schema-6 records remain unverified and do not receive
-invented turn identities or assessments.
+The captured repair workflow and the generated-C reconstruction workflow now
+have implementation paths for host-authored turn intents and workflow
+assessments. Each writes a canonical intent before provider dispatch, then binds
+the receipt to that intent and the unique turn UUID. Each writes an immutable
+assessment after its available policy and validation checks. Repair schema-7
+graph records and schema-4 history records carry content-addressed references;
+reconstruction agent checkpoints use schema 7 and embed the referenced intent
+and assessment. Legacy repair schema-6 records and reconstruction checkpoint
+schemas 4–6 remain unassessed; no turn IDs or verdicts are synthesized for
+historical evidence.
 
 The assessment distinguishes observation completeness, observed stop reason,
 change-set digest, policy verdict, validation proof references, and workflow
 eligibility. Eligibility is not a publication decision: the existing durable
 repair publication transaction remains the only source of committed revision
 authority. Intent-only or receipt-only attempts do not claim acceptance.
+
+Reconstruction stores the append-only sidecars in the leased output root under
+`.agent-turn-evidence/<input-sha256>/<module>/<turn-uuid>/`, outside the staged
+`source-tree` and the four-member #732 publication set. This preserves
+pre-dispatch and rejected/interrupted evidence when a source generation is
+rolled back. The accepted checkpoint embeds the exact canonical intent and
+assessment bytes and names their output-root paths. Checkpoint reuse and the
+archive verifier reject malformed, duplicate-field, digest-mismatched,
+cross-paired, request/policy/session/change/update-mismatched records. Accepted
+schema-7 checkpoints also bind the assessment's validation proof digest to the
+exact compiler evidence. Interruption reports reference any persisted intent
+and assessment; an intent without a receipt remains unknown, and an assessment
+without completed validation remains ineligible. These records do not extend
+#732's rollback set, establish a publication decision, or authorize readers to
+bypass its recovery lease.
+
+The current ACP adapter exposes its normalized stop reason in the invocation
+receipt, but does not expose the raw protocol stop code. Reconstruction
+assessments therefore leave `protocolStopCode` null instead of deriving or
+inventing a wire-level value.
 
 The repair implementation checkpoint at `6cd76bd30d1bec7fad81fcad6617f51248333af3`
 passed local compilation and 242 focused tests: the assessment codec (2),
@@ -370,12 +391,26 @@ archive/history consistency, and canonical assessment parsing. They are local
 evidence only; no hosted run or independent crash-after-each-evidence-write
 campaign has qualified this commit.
 
+The reconstruction implementation passed local compilation and 133 focused
+tests across `ReconstructionAcpEvidenceArchiveVerifierTest` (20),
+`ReconstructionTurnEvidenceStoreTest` (3), `AcpChangeAssessmentTest` (2),
+`WebProductionWorkflowsTest` (45), and `SourceTreeTest` (63). Coverage includes
+pre-dispatch intent persistence, private immutable sidecars,
+interrupted/unknown assessments, schema-7 archive binding, tamper refusal, and
+legacy checkpoint compatibility. These are local tests against the current
+implementation, not hosted or independent process-crash-after-each-write
+qualification. The repair checkpoint at
+`6cd76bd30d1bec7fad81fcad6617f51248333af3` separately passed its 242 focused
+tests; that result predates the reconstruction changes and is not exact-head
+verification of the combined implementation.
+
 This remains an implementation checkpoint, not full #733 qualification or
-closure evidence. The reconstruction checkpoint/archive path is not yet bound
-to the same intent-and-assessment contract. Production repair acceptance is
+closure evidence. Current repair and reconstruction test paths do not prove all
+process-crash points around each intent/receipt/assessment write and the #732
+decision, or production-provider acceptance. Production repair acceptance is
 also blocked on the qualified validator under #236. #733, #63, #236, and #732
-remain open; do not use these source changes to claim production repair
-acceptance.
+remain open; do not use these source changes to claim production repair or
+reconstruction acceptance.
 
 This cleanup removes an unused competing policy path; it does not complete #63.
 The actual workflow contracts still need the requested shared profile-driven

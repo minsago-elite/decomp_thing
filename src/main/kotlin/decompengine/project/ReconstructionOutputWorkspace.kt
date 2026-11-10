@@ -266,11 +266,12 @@ internal class ReconstructionOutputWorkspace private constructor(
         internal const val CACHE = "input-cache"
         private val INITIAL_RECONSTRUCTION_OUTPUTS = setOf(
             "analysis", "source-tree", "source-tree.zip", "reconstruction.json", "reconstruction_progress.json",
+            ReconstructionTurnEvidenceStore.DIRECTORY,
         )
         internal val ENTRIES = listOf(
             "analysis", "source-tree", "source-tree.zip", "reconstruction.json", "reconstruction_progress.json",
             "exploration.json", ModuleObservedBehavior.FILE_NAME, "agent-progress.json", FullRunJournal.DIRECTORY,
-            ModuleCompilerFeedbackStore.DIRECTORY, ".decomp-agent-sessions",
+            ModuleCompilerFeedbackStore.DIRECTORY, ReconstructionTurnEvidenceStore.DIRECTORY, ".decomp-agent-sessions",
         )
         private val HASH = Regex("[0-9a-f]{64}")
         private val KEY = Regex("[0-9a-f]{64}|unidentified-[0-9a-f-]{36}")

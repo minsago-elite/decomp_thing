@@ -43,6 +43,7 @@ import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.util.Collections
 import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
@@ -438,8 +439,10 @@ internal class AcpExecutionReceiptDocument private constructor(
 
 internal data class VerifiedAcpExecutionReceiptDocument(
     val requestSha256: String,
+    val accessPolicySha256: String,
     val promptSha256: String,
     val resultChangesSha256: String,
+    val updatesSha256: String,
     val terminalOutcome: String,
     val releaseComplete: Boolean,
     val releaseFacts: VerifiedAcpReleaseReceiptFacts?,
@@ -470,6 +473,8 @@ internal fun verifyAcpExecutionReceiptDocument(
     }
     val requestSha256 = request.receiptString("requestSha256")
     require(requestSha256.isSha256()) { "ACP receipt request digest is invalid" }
+    val accessPolicySha256 = request.receiptString("accessPolicySha256")
+    require(accessPolicySha256.isSha256()) { "ACP receipt policy digest is invalid" }
     val promptSha256 = request.receiptString("promptSha256")
     require(promptSha256.isSha256()) { "ACP receipt workflow prompt digest is invalid" }
 
@@ -483,6 +488,7 @@ internal fun verifyAcpExecutionReceiptDocument(
         "ACP receipt lifecycle has missing, extra, or duplicate fields"
     }
     val releaseComplete = lifecycle.receiptBoolean("releaseComplete")
+    val updatesSha256 = sha256(OracleJson.canonicalBytes(root.getValue("events"), ACP_RECEIPT_BINDING_JSON_LIMITS))
     val outcome = root.receiptObject("outcome")
     require(outcome.keys == setOf("type", "result", "failure")) {
         "ACP receipt outcome has missing, extra, or duplicate fields"
@@ -578,8 +584,10 @@ internal fun verifyAcpExecutionReceiptDocument(
     }
     return VerifiedAcpExecutionReceiptDocument(
         requestSha256,
+        accessPolicySha256,
         promptSha256,
         resultChangesSha256,
+        updatesSha256,
         terminalOutcome,
         releaseComplete,
         releaseFacts,
@@ -631,6 +639,29 @@ class ReconstructionAgentExecutionEvidence private constructor(
     internal val wirePromptSha256: String? get() = document.wirePromptSha256
     internal val terminalOutcome: String get() = document.terminalOutcome
     internal val releaseComplete: Boolean get() = document.releaseComplete
+    internal val resultChangesSha256: String get() = document.resultChangesSha256
+    internal val updatesSha256: String get() = document.updatesSha256
+    internal val sessionIdCommitmentSha256: String? get() = runCatching {
+        OracleJson.parse(document.json.toByteArray(StandardCharsets.UTF_8), ACP_RECEIPT_BINDING_JSON_LIMITS)
+            .jsonObject.getValue("session").jsonObject.getValue("sessionId").jsonObject
+            .getValue("sha256").jsonPrimitive.content
+    }.getOrNull()
+    internal val normalizedStopReason: AgentStopReason? get() = runCatching {
+        val root = OracleJson.parse(document.json.toByteArray(StandardCharsets.UTF_8), ACP_RECEIPT_BINDING_JSON_LIMITS).jsonObject
+        val outcome = root.getValue("outcome").jsonObject
+        if (outcome.getValue("type").jsonPrimitive.content != "returned") null
+        else AgentStopReason.valueOf(
+            outcome.getValue("result").jsonObject.getValue("stopReason").jsonPrimitive.content.uppercase(),
+        )
+    }.getOrNull()
+    internal val resultAfterSha256: String? get() = runCatching {
+        val root = OracleJson.parse(document.json.toByteArray(StandardCharsets.UTF_8), ACP_RECEIPT_BINDING_JSON_LIMITS).jsonObject
+        val outcome = root.getValue("outcome").jsonObject
+        if (outcome.getValue("type").jsonPrimitive.content != "returned") null
+        else outcome.getValue("result").jsonObject.getValue("changes").jsonObject
+            .getValue("records").jsonArray.single().jsonObject.getValue("afterSha256")
+            .takeUnless { it is JsonNull }?.jsonPrimitive?.content
+    }.getOrNull()
 
     internal fun toReceiptJson(moduleId: String): String {
         require(moduleId == this.moduleId) { "reconstruction receipt is bound to a different module" }

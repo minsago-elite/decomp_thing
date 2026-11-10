@@ -309,6 +309,8 @@ internal object RepairAcpEvidenceArchiveVerifier {
                 },
                 parentSourceRevisionSha256 = parent.sourceRevisionSha256,
                 resultSourceRevisionSha256 = node.sourceRevisionSha256,
+                turnProvenance = if (invocation.turnId != null) CandidateTurnProvenance.ASSESSED
+                    else CandidateTurnProvenance.LEGACY_UNASSESSED,
             )
         }
         val head = requireNotNull(nodesById[graph.headId])

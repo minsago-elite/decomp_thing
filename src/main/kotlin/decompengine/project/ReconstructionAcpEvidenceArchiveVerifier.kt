@@ -18,6 +18,7 @@ import decompengine.agent.AgentAccessPolicy
 import decompengine.agent.AgentExecutionRequest
 import decompengine.agent.AgentExecutionRequestBinding
 import decompengine.agent.AgentOperation
+import decompengine.agent.AgentStopReason
 import decompengine.agent.AgentPathRule
 import decompengine.agent.AgentWorkspaceRoot
 import decompengine.agent.AgentFileChange
@@ -278,7 +279,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
                 require(source.entityIds.none(manifest.unresolvedImplementationIds::contains)) {
                     "agent-generated module is unresolved at the archive release gate: $moduleId"
                 }
-                require(checkpoint.schemaVersion in setOf(4L, 5L, 6L) &&
+                require(checkpoint.schemaVersion in setOf(4L, 5L, 6L, 7L) &&
                     checkpoint.executionEvidenceSchemaVersion == 2L &&
                     checkpoint.executionReleaseComplete == true &&
                     checkpoint.executionTerminalOutcome == "returned-completed"
@@ -329,6 +330,13 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
                 )
                 val releaseFacts = requireNotNull(verifiedReceipt.releaseFacts)
                 val exactChange = releaseFacts.changes.single()
+                val turnProvenance = if (checkpoint.schemaVersion == 7L) {
+                    verifyReconstructionTurnProvenance(
+                        checkpoint, moduleId, profile, model.inputSha256, receiptSource.path,
+                        verifiedReceipt, exactChange, evidenceBytes,
+                    )
+                    CandidateTurnProvenance.ASSESSED
+                } else CandidateTurnProvenance.LEGACY_UNASSESSED
                 acceptedContributions += VerifiedCandidateAcpContribution(
                     workflow = "reconstruction",
                     taskId = moduleId,
@@ -350,6 +358,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
                     ),
                     parentSourceRevisionSha256 = null,
                     resultSourceRevisionSha256 = null,
+                    turnProvenance = turnProvenance,
                 )
                 expectedExecutionPaths += evidencePath
             }
@@ -421,11 +430,12 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
     ): ReconstructionCheckpoint {
         val root = strictObject(bytes, CHECKPOINT_JSON_LIMITS, "module checkpoint")
         val schemaVersion = root.requiredLong("schemaVersion", "module checkpoint")
-        require(schemaVersion in setOf(4L, 5L, 6L)) {
+        require(schemaVersion in setOf(4L, 5L, 6L, 7L)) {
             "unsupported module checkpoint schema for ACP archive evidence: $moduleId"
         }
         val expectedFields = when (schemaVersion) {
             6L -> CHECKPOINT_V6_FIELDS
+            7L -> CHECKPOINT_V7_FIELDS
             5L -> CHECKPOINT_V5_FIELDS
             else -> CHECKPOINT_V4_FIELDS
         }
@@ -434,7 +444,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
             optionalV6Fields.filterIndexed { index, _ -> mask and (1 shl index) != 0 }.toSet()
         }.filter { fields -> fields.isEmpty() || "workflowOrigin" in fields }
             .map { expectedFields + it }.toSet()
-        require(root.keys == expectedFields || schemaVersion == 6L && root.keys in allowedV6Keys) {
+        require(root.keys == expectedFields || schemaVersion in setOf(6L, 7L) && root.keys in allowedV6Keys) {
             "module checkpoint has unsupported fields: $moduleId"
         }
         if (schemaVersion >= 6L) {
@@ -499,6 +509,40 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         val executionRequestSha256 = root.optionalSha256("executionRequestSha256", "module checkpoint")
         val executionTerminalOutcome = root.optionalString("executionTerminalOutcome", "module checkpoint")
         val executionReleaseComplete = root.optionalBoolean("executionReleaseComplete", "module checkpoint")
+        val turnIntentPath = if (schemaVersion >= 7L) root.requiredString("turnIntentPath", "module checkpoint") else null
+        val turnIntentSha256 = if (schemaVersion >= 7L) root.requiredSha256("turnIntentSha256", "module checkpoint") else null
+        val turnIntent = if (schemaVersion >= 7L) {
+            AgentTurnIntent.parse(OracleJson.canonicalBytes(root.getValue("turnIntent"), CHECKPOINT_JSON_LIMITS))
+        } else null
+        val turnReceiptPath = if (schemaVersion >= 7L) root.optionalString("turnReceiptPath", "module checkpoint") else null
+        val turnReceiptSha256 = if (schemaVersion >= 7L) root.optionalSha256("turnReceiptSha256", "module checkpoint") else null
+        val changeAssessmentPath = if (schemaVersion >= 7L) root.requiredString("changeAssessmentPath", "module checkpoint") else null
+        val changeAssessmentSha256 = if (schemaVersion >= 7L) root.requiredSha256("changeAssessmentSha256", "module checkpoint") else null
+        val changeAssessment = if (schemaVersion >= 7L) {
+            AcpChangeAssessment.parse(OracleJson.canonicalBytes(root.getValue("changeAssessment"), CHECKPOINT_JSON_LIMITS))
+        } else null
+        val accepted = root.requiredBoolean("accepted", "module checkpoint")
+        if (schemaVersion >= 7L) {
+            requireNormalizedProjectPath(requireNotNull(turnIntentPath), "module turn intent path")
+            turnReceiptPath?.let { requireNormalizedProjectPath(it, "module turn receipt path") }
+            requireNormalizedProjectPath(requireNotNull(changeAssessmentPath), "module change assessment path")
+            require(requireNotNull(turnIntent).sha256 == turnIntentSha256 &&
+                requireNotNull(changeAssessment).sha256 == changeAssessmentSha256) {
+                "module checkpoint turn evidence digest is invalid: $moduleId"
+            }
+            require(turnIntent.taskId == moduleId && turnIntent.profileSha256 == profile.sha256 &&
+                (if (executionEvidenceSha256 == null) executionRequestSha256 == null
+                else turnIntent.requestSha256 == executionRequestSha256) &&
+                changeAssessment.turnId == turnIntent.turnId &&
+                changeAssessment.intentSha256 == turnIntent.sha256 &&
+                changeAssessment.receiptSha256 == executionEvidenceSha256 &&
+                changeAssessment.receiptSha256 == turnReceiptSha256 &&
+                ((turnReceiptPath == null) == (turnReceiptSha256 == null)) &&
+                changeAssessment.policySha256 == turnIntent.policySha256 &&
+                accepted == (changeAssessment.eligibility == AcpChangePublicationEligibility.VALIDATED_FOR_PUBLICATION)) {
+                "module checkpoint turn evidence is cross-paired: $moduleId"
+            }
+        }
         val fields = listOf(
             executionEvidencePath,
             executionEvidenceSha256,
@@ -510,7 +554,14 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         require(fields.all { it == null } || fields.all { it != null }) {
             "module checkpoint receipt assessment binding is incomplete: $moduleId"
         }
-        val accepted = root.requiredBoolean("accepted", "module checkpoint")
+        if (schemaVersion == 7L && accepted) {
+            val assessment = requireNotNull(changeAssessment)
+            val compilation = root.getValue("compilation")
+            require(compilation !is JsonNull && assessment.validationStatus == AcpChangeValidationStatus.PASSED &&
+                assessment.validationProofSha256 == listOf(sha256(OracleJson.canonicalBytes(compilation, CHECKPOINT_JSON_LIMITS)))) {
+                "module change assessment does not bind its compilation proof: $moduleId"
+            }
+        }
         // An unresolved checkpoint may retain the size of a prompt rejected before dispatch.
         require(!accepted || promptCharacters == null || promptBudgetCharacters == null ||
             promptCharacters <= promptBudgetCharacters) {
@@ -629,6 +680,14 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
             accepted,
             root["compilation"]?.let { it !is JsonNull } == true,
             preDispatchBudgetFailure,
+            turnIntentPath,
+            turnIntentSha256,
+            turnIntent,
+            turnReceiptPath,
+            turnReceiptSha256,
+            changeAssessmentPath,
+            changeAssessmentSha256,
+            changeAssessment,
         )
     }
 
@@ -750,8 +809,10 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         ) { "checkpoint assessment is cross-paired with a different ACP invocation receipt" }
         return VerifiedAcpExecutionReceiptDocument(
             requestSha256 = requestBounds.requestSha256,
+            accessPolicySha256 = requestBounds.accessPolicySha256,
             promptSha256 = checkpoint.promptSha256,
             resultChangesSha256 = resultChanges.aggregateSha256,
+            updatesSha256 = sha256(OracleJson.canonicalBytes(root.getValue("events"), EVIDENCE_JSON_LIMITS)),
             terminalOutcome = "returned-completed",
             releaseComplete = true,
             releaseFacts = VerifiedAcpReleaseReceiptFacts(session, resultChanges.records),
@@ -815,6 +876,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         val maximumOutputTokens = request.optionalNonNegativeLong("maximumOutputTokens", "ACP receipt request")
         return ReceiptBounds(
             requestSha256,
+            accessPolicySha256,
             maximumToolCalls,
             maximumOutputBytes,
             maximumInputTokens,
@@ -829,7 +891,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
             AGENT_EXECUTION_CONTRACT_VERSION.toLong()
         ) { "ACP receipt request uses an unsupported contract" }
         val requestSha256 = request.requiredSha256("requestSha256", "ACP receipt request")
-        request.requiredSha256("accessPolicySha256", "ACP receipt request")
+        val accessPolicySha256 = request.requiredSha256("accessPolicySha256", "ACP receipt request")
         verifyTextCommitment(
             request.requiredObject("objective", "ACP receipt request"),
             "ACP objective",
@@ -860,6 +922,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         val maximumOutputTokens = request.optionalNonNegativeLong("maximumOutputTokens", "ACP receipt request")
         return ReceiptBounds(
             requestSha256,
+            accessPolicySha256,
             maximumToolCalls,
             maximumOutputBytes,
             maximumInputTokens,
@@ -1609,6 +1672,60 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
     private fun requirePayloadSize(path: String, payloadSizes: Map<String, Long>): Long =
         requireNotNull(payloadSizes[path]) { "module source is missing from the archive payload: $path" }
 
+    private fun verifyReconstructionTurnProvenance(
+        checkpoint: ReconstructionCheckpoint,
+        moduleId: String,
+        profile: ReconstructionProfile,
+        inputSha256: String,
+        sourcePath: String,
+        receipt: VerifiedAcpExecutionReceiptDocument,
+        exactChange: VerifiedAcpReceiptChange,
+        evidenceBytes: ByteArray,
+    ) {
+        val intent = requireNotNull(checkpoint.turnIntent)
+        val assessment = requireNotNull(checkpoint.changeAssessment)
+        val expectedBase = "${ReconstructionTurnEvidenceStore.DIRECTORY}/$inputSha256/$moduleId/${intent.turnId}"
+        require(checkpoint.turnIntentPath == "$expectedBase/${ReconstructionTurnEvidenceStore.INTENT_FILE}" &&
+            checkpoint.changeAssessmentPath == "$expectedBase/${ReconstructionTurnEvidenceStore.ASSESSMENT_FILE}" &&
+            checkpoint.turnReceiptPath == "$expectedBase/${ReconstructionTurnEvidenceStore.RECEIPT_FILE}") {
+            "module turn evidence path is cross-paired: $moduleId"
+        }
+        require(intent.taskId == moduleId && intent.attemptId == intent.turnId &&
+            intent.profileSha256 == profile.sha256 && intent.requestSha256 == receipt.requestSha256 &&
+            intent.policySha256 == receipt.accessPolicySha256) {
+            "module turn intent differs from its archived request: $moduleId"
+        }
+        val expectedBefore = exactChange.beforeSha256
+            ?: sha256("absent-v1:$sourcePath".toByteArray(StandardCharsets.UTF_8))
+        val events = strictObject(evidenceBytes, EVIDENCE_JSON_LIMITS, "reconstruction ACP execution receipt")
+        val expectedUpdatesSha256 = sha256(OracleJson.canonicalBytes(events.getValue("events"), EVIDENCE_JSON_LIMITS))
+        val expectedSessionSha256 = sha256(
+            "acp-session-commitment-v1:${requireNotNull(receipt.releaseFacts).session.sessionId.sha256}"
+                .toByteArray(StandardCharsets.UTF_8),
+        )
+        val expectedStop = when (receipt.terminalOutcome) {
+            "returned-completed" -> AgentStopReason.COMPLETED
+            "returned-no-changes" -> AgentStopReason.NO_CHANGES
+            else -> null
+        }
+        require(assessment.turnId == intent.turnId && assessment.intentSha256 == intent.sha256 &&
+            assessment.receiptSha256 == checkpoint.executionEvidenceSha256 &&
+            assessment.receiptSha256 == checkpoint.turnReceiptSha256 &&
+            assessment.sessionIdSha256 == expectedSessionSha256 &&
+            assessment.changesSha256 == receipt.resultChangesSha256 &&
+            assessment.beforeSha256 == intent.beforeSha256 && intent.beforeSha256 == expectedBefore &&
+            assessment.afterSha256 == exactChange.afterSha256 &&
+            assessment.observation == AcpChangeObservationStatus.COMPLETE &&
+            assessment.protocolStopCode == null && assessment.normalizedStopReason == expectedStop &&
+            assessment.policyVerdict == AcpChangePolicyVerdict.ALLOW &&
+            assessment.policySha256 == receipt.accessPolicySha256 &&
+            assessment.validationStatus == AcpChangeValidationStatus.PASSED &&
+            assessment.eligibility == AcpChangePublicationEligibility.VALIDATED_FOR_PUBLICATION &&
+            assessment.updatesSha256 == expectedUpdatesSha256) {
+            "module workflow assessment differs from its exact ACP receipt or validation: $moduleId"
+        }
+    }
+
     private fun strictObject(bytes: ByteArray, limits: StrictJsonLimits, label: String): JsonObject =
         OracleJson.parse(bytes, limits).requiredObject(label)
 
@@ -1638,6 +1755,14 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         val accepted: Boolean,
         val compilationPresent: Boolean,
         val preDispatchBudgetFailure: Boolean,
+        val turnIntentPath: String?,
+        val turnIntentSha256: String?,
+        val turnIntent: AgentTurnIntent?,
+        val turnReceiptPath: String?,
+        val turnReceiptSha256: String?,
+        val changeAssessmentPath: String?,
+        val changeAssessmentSha256: String?,
+        val changeAssessment: AcpChangeAssessment?,
     ) {
         fun hasNoExecutionEvidence(): Boolean = listOf(
             executionEvidencePath,
@@ -1671,6 +1796,7 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
 
     private data class ReceiptBounds(
         val requestSha256: String,
+        val accessPolicySha256: String,
         val maximumToolCalls: Long,
         val maximumOutputBytes: Long,
         val maximumInputTokens: Long?,
@@ -1735,6 +1861,10 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
     private val CHECKPOINT_V5_FIELDS = CHECKPOINT_V4_FIELDS + "compilation"
     private val CHECKPOINT_V6_FIELDS = CHECKPOINT_V5_FIELDS + setOf(
         "inputBinarySha256", "modelSchemaVersion", "profileSha256",
+    )
+    private val CHECKPOINT_V7_FIELDS = CHECKPOINT_V6_FIELDS + setOf(
+        "turnIntentPath", "turnIntentSha256", "turnIntent", "changeAssessmentPath",
+        "turnReceiptPath", "turnReceiptSha256", "changeAssessmentSha256", "changeAssessment", "workflowOrigin",
     )
     private val COMPILATION_FIELDS = setOf(
         "sourceSha256", "command", "outcome", "returnCode", "diagnosticsSha256", "diagnosticsBytes",

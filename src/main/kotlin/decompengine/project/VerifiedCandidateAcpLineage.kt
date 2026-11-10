@@ -2,6 +2,8 @@ package decompengine.project
 
 import java.util.Collections
 
+internal enum class CandidateTurnProvenance { LEGACY_UNASSESSED, ASSESSED }
+
 /** Exact workflow-accepted source transition authenticated from one release-complete ACP receipt. */
 internal data class VerifiedCandidateAcpChange(
     val path: String,
@@ -45,6 +47,7 @@ internal class VerifiedCandidateAcpContribution(
     changes: List<VerifiedCandidateAcpChange>,
     val parentSourceRevisionSha256: String?,
     val resultSourceRevisionSha256: String?,
+    val turnProvenance: CandidateTurnProvenance = CandidateTurnProvenance.LEGACY_UNASSESSED,
 ) {
     val changes: List<VerifiedCandidateAcpChange> = Collections.unmodifiableList(changes.toList())
 
