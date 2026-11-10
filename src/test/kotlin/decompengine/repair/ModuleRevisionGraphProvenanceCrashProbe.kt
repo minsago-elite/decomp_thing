@@ -33,8 +33,14 @@ internal object ModuleRevisionGraphProvenanceCrashProbe {
         val crashPoint = arguments[3]
         val expectationPath = Path.of(arguments[4])
         require(documentKind in setOf("intent", "receipt", "assessment", "decision"))
-        require(crashPoint in setOf("E1", "E2", "E3", "G1", "G2", "G3", "predecision-stage", "persisted", "source-exchanged", "tamper-assessment"))
-        require((documentKind == "decision") == (crashPoint in setOf("predecision-stage", "persisted", "source-exchanged", "tamper-assessment")))
+        require(crashPoint in setOf(
+            "E1", "E2", "E3", "G1", "G2", "G3", "predecision-stage", "persisted",
+            "source-exchanged", "head-persisted", "recovery-accepted-persisted", "tamper-assessment",
+        ))
+        require((documentKind == "decision") == (crashPoint in setOf(
+            "predecision-stage", "persisted", "source-exchanged", "head-persisted",
+            "recovery-accepted-persisted", "tamper-assessment",
+        )))
 
         var expectationId = "unassigned"
         var armed = false
@@ -77,11 +83,12 @@ internal object ModuleRevisionGraphProvenanceCrashProbe {
             return when (crashPoint) {
                 "predecision-stage" -> point is ModuleRevisionFaultPoint.AfterPublicationStage &&
                     point.path == relative && point.index == 0
-                "persisted", "tamper-assessment" -> point is ModuleRevisionFaultPoint.AfterStatePublicationDirectorySync &&
+                "persisted", "recovery-accepted-persisted", "tamper-assessment" -> point is ModuleRevisionFaultPoint.AfterStatePublicationDirectorySync &&
                     point.scope == "revision-state" && point.name == "graph.json" &&
                     decisionMustBePublished && decisionIsPublished()
                 "source-exchanged" -> point is ModuleRevisionFaultPoint.AfterPublicationExchange &&
                     point.phase == "schema6-roll-forward" && point.path == relative && point.index == 0
+                "head-persisted" -> point == ModuleRevisionFaultPoint.AfterHeadPersist
                 else -> false
             }
         }

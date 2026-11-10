@@ -1378,7 +1378,10 @@ class ModuleRevisionGraphTest {
         val relative = "src/modules/alpha.c"
         val matrix = listOf("intent", "receipt", "assessment").flatMap { document ->
             listOf("E1", "E2", "E3", "G1", "G2", "G3").map { point -> document to point }
-        } + listOf("predecision-stage", "persisted", "source-exchanged", "tamper-assessment")
+        } + listOf(
+            "predecision-stage", "persisted", "source-exchanged", "head-persisted",
+            "recovery-accepted-persisted", "tamper-assessment",
+        )
             .map { "decision" to it }
         val testRoot = Path.of("build/test-tmp").toAbsolutePath().normalize().also(Files::createDirectories)
 
@@ -1448,6 +1451,8 @@ class ModuleRevisionGraphTest {
                             "$document/$point must remain undecided")
                         assertTrue(Files.list(revisions.resolve("publication-staging")).use { it.findAny().isPresent },
                             "$document/$point must leave a staged predecision candidate")
+                    } else if (point == "head-persisted") {
+                        assertNull(pendingBeforeRecovery, "$document/$point must have committed the graph head")
                     } else {
                         assertNotNull(pendingBeforeRecovery?.get("acceptanceDecision") as? JsonObject,
                             "$document/$point must retain the decided transaction")
@@ -1475,7 +1480,7 @@ class ModuleRevisionGraphTest {
                         "-Djava.io.tmpdir=$caseRoot/child-tmp",
                         "-cp", System.getProperty("java.class.path"),
                         ModuleRevisionGraphRecoveryCrashProbe::class.java.name,
-                        project.toString(), "src/modules/beta.c",
+                        project.toString(), "second-source-exchange",
                     ).redirectErrorStream(true).redirectOutput(recoveryLog.toFile()).start()
                     try {
                         assertTrue(recoveryChild.waitFor(30, TimeUnit.SECONDS), "decision/recovery child did not terminate")
@@ -1488,6 +1493,28 @@ class ModuleRevisionGraphTest {
                         "decision/recovery must retain the already exchanged first target")
                     assertContentEquals(secondCandidateBytes, readRepairSourceWithoutAtime(project.resolve("src/modules/beta.c")),
                         "decision/recovery must expose the second exchanged target before restart")
+                } else if (document == "decision" && point == "recovery-accepted-persisted") {
+                    val recoveryLog = caseRoot.resolve("recovery-accepted-child.log")
+                    val recoveryChild = ProcessBuilder(
+                        Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+                        "-Djava.io.tmpdir=$caseRoot/child-tmp",
+                        "-cp", System.getProperty("java.class.path"),
+                        ModuleRevisionGraphRecoveryCrashProbe::class.java.name,
+                        project.toString(), "accepted-persisted",
+                    ).redirectErrorStream(true).redirectOutput(recoveryLog.toFile()).start()
+                    try {
+                        assertTrue(recoveryChild.waitFor(30, TimeUnit.SECONDS), "decision/recovery commit child did not terminate")
+                        assertEquals(86, recoveryChild.exitValue(),
+                            "decision/recovery did not halt after publishing recovered acceptance: ${Files.readString(recoveryLog)}")
+                    } finally {
+                        if (recoveryChild.isAlive) recoveryChild.destroyForcibly().waitFor(5, TimeUnit.SECONDS)
+                    }
+                    val recoveredGraph = Json.parseToJsonElement(Files.readString(graphPath)).jsonObject
+                    assertTrue(recoveredGraph["pending"] is JsonNull,
+                        "decision/recovery acceptance state must be committed")
+                    assertContentEquals(candidateBytes, readRepairSourceWithoutAtime(project.resolve(relative)))
+                    assertContentEquals(secondCandidateBytes,
+                        readRepairSourceWithoutAtime(project.resolve("src/modules/beta.c")))
                 }
 
                 if (document == "decision" && point == "tamper-assessment") {
