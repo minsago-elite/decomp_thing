@@ -337,11 +337,20 @@ class RepairHistorySnapshotTest {
     @Test
     fun genuinePreContractAcceptedNodeRemainsExplicitlyUnverified() {
         val root = root()
-        ModuleRevisionGraph.openLegacyForTesting(root, profile, schemaVersion = 2).use { graph ->
-            val attempt = graph.beginAttempt(listOf("code.c"))
+        ModuleRevisionGraph.open(root, profile).use { graph ->
+            startRun(graph)
+            val attempt = graph.beginAttempt(listOf("code.c"), metadata(graph))
             graph.installCandidate(attempt, mapOf("code.c" to "legacy-candidate".toByteArray()))
-            graph.accept(attempt, RepairEvidence("valid", "historical fixture"))
+            graph.accept(attempt, RepairEvidence("valid", "historical fixture"), proof(graph, attempt))
         }
+        val graphPath = root.resolve("reports/repair-revisions/graph.json")
+        val bindingPath = graphPath.parent.resolve("recovery-binding.json")
+        val bindingBefore = bindingPath.readBytes()
+        val sourceBefore = root.resolve("code.c").readBytes()
+        val legacyGraph = authoredLegacyGraphFixture(graphPath.readText(), 2)
+        graphPath.writeText(legacyGraph)
+        assertEquals(2, Json.parseToJsonElement(legacyGraph).jsonObject.getValue("schemaVersion").jsonPrimitive.int)
+        assertFalse(legacyGraph.contains("validationProof"))
         val snapshot = view(capture(root))
         assertEquals(2, snapshot.graphSchemaVersion)
         assertNull(snapshot.fullyAcceptedHead)
@@ -349,6 +358,9 @@ class RepairHistorySnapshotTest {
         assertEquals("unverified", recordedRepairAttemptLabel(snapshot.attempts.single()))
         assertEquals(snapshot.publishedHead, snapshot.attempts.single().identity)
         assertEquals(RepairRecordedQualification.RECORDED_METADATA_ONLY, snapshot.qualification)
+        assertContentEquals(legacyGraph.toByteArray(), graphPath.readBytes())
+        assertContentEquals(bindingBefore, bindingPath.readBytes())
+        assertContentEquals(sourceBefore, root.resolve("code.c").readBytes())
     }
 
     @Test

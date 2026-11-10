@@ -269,7 +269,11 @@ class RepairHistorySnapshotReaderTest {
         // A valid nonjoining pre-marker schema2 input is still consumed/revalidated, never skipped.
         val unrelatedRoot = root()
         ModuleRevisionGraph.open(unrelatedRoot, profile).close()
-        val unrelated = unrelatedRoot.resolve("reports/repair-revisions/graph.json").readBytes()
+        val unrelatedPath = unrelatedRoot.resolve("reports/repair-revisions/graph.json")
+        val unrelatedWire = authoredLegacyGraphFixture(unrelatedPath.readText(), 2)
+        unrelatedPath.writeText(unrelatedWire)
+        assertEquals(2, Json.parseToJsonElement(unrelatedWire).jsonObject.getValue("schemaVersion").jsonPrimitive.int)
+        val unrelated = unrelatedPath.readBytes()
         assertTrue(unrelated.size <= selectedBudget.maximumGraphBytes)
         path.resolve("legacy-graph-" + sha256(unrelated) + ".json").writeBytes(unrelated)
         val declaredBytes = Files.newDirectoryStream(path, "legacy-graph-*.json").use { entries -> entries.sumOf { Files.size(it) } }
@@ -649,7 +653,11 @@ class RepairHistorySnapshotReaderTest {
         // A second complete nonjoining schema2 producer input is still consumed under the SAME D.
         val other = this.root()
         ModuleRevisionGraph.open(other, profile).close()
-        val unrelated = other.resolve("reports/repair-revisions/graph.json").readBytes()
+        val unrelatedPath = other.resolve("reports/repair-revisions/graph.json")
+        val unrelatedWire = authoredLegacyGraphFixture(unrelatedPath.readText(), 2)
+        unrelatedPath.writeText(unrelatedWire)
+        assertEquals(2, Json.parseToJsonElement(unrelatedWire).jsonObject.getValue("schemaVersion").jsonPrimitive.int)
+        val unrelated = unrelatedPath.readBytes()
         revisionsPath.resolve("legacy-graph-" + sha256(unrelated) + ".json").writeBytes(unrelated)
         val declared = Files.newDirectoryStream(revisionsPath, "legacy-graph-*.json").use { it.toList() }
         assertEquals(2, declared.size)
@@ -725,7 +733,9 @@ class RepairHistorySnapshotReaderTest {
             graph.installCandidate(attempt, mapOf("code.c" to "candidate".toByteArray()))
         }
         val path = root.resolve("reports/repair-revisions/graph.json")
-        val original = path.readText()
+        val original = authoredLegacyGraphFixture(path.readText(), 2)
+        path.writeText(original)
+        assertEquals(2, Json.parseToJsonElement(original).jsonObject.getValue("schemaVersion").jsonPrimitive.int)
         val padding = (selected.maximumGraphBytes - original.toByteArray().size).toInt()
         assertTrue(padding > 0)
         path.writeText(original.replace("ROLE_BOUND_PADDING", "x".repeat("ROLE_BOUND_PADDING".length + padding)))
