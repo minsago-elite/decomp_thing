@@ -326,20 +326,32 @@ class AcpTerminalBrokerTest {
             )
             cases.forEach { (fixture, expectedTerminationReason) ->
                 val audit = AcpTerminalAuditRecorder()
-                val completion = broker(fixture, audit).use { broker ->
-                    broker.bindSession(SESSION)
-                    val terminalId = broker.create(
-                        SESSION,
-                        fixture.command,
-                        fixture.args,
-                        fixture.root.path.toString(),
-                        emptyList(),
-                        null,
-                    ).terminalId
-                    broker.observeToolCall(SESSION, terminalUpdate("tool-1", terminalId))
-                    val exited = broker.waitForExit(SESSION, terminalId)
-                    broker.release(SESSION, terminalId)
-                    exited
+                val completion = try {
+                    broker(fixture, audit).use { broker ->
+                        broker.bindSession(SESSION)
+                        val terminalId = broker.create(
+                            SESSION,
+                            fixture.command,
+                            fixture.args,
+                            fixture.root.path.toString(),
+                            emptyList(),
+                            null,
+                        ).terminalId
+                        broker.observeToolCall(SESSION, terminalUpdate("tool-1", terminalId))
+                        val exited = broker.waitForExit(SESSION, terminalId)
+                        broker.release(SESSION, terminalId)
+                        exited
+                    }
+                } catch (failure: Throwable) {
+                    // Keep the precise fixture and the broker's bounded, sanitized launch
+                    // diagnostic attached to the original refusal. CI previously retained
+                    // only the generic AcpExpectedError and could not identify the refused case.
+                    runCatching {
+                        failure.addSuppressed(TerminalFixtureAuditFailure(
+                            "fixture=${fixture.args.single()};${audit.launchFailureContext()}",
+                        ))
+                    }
+                    throw failure
                 }
                 // Remove before close so this fixture owner never repeats an already-attempted close.
                 unclosedBoundaries.remove(fixture.boundary)
