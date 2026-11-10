@@ -173,7 +173,7 @@ class AgentSessionJournal private constructor(
     @Synchronized
     fun processStarting(requestSha256: String, turnId: String?) {
         requireSessionDigest(requestSha256)
-        turnId?.let { require(runCatching { java.util.UUID.fromString(it) }.isSuccess) { "session turn id must be a UUID" } }
+        turnId?.let { require(isCanonicalAgentTurnId(it)) { "session turn id must be a canonical UUID" } }
         val updates = mutableListOf<Pair<String, JsonElement>>(
             "pendingRequestSha256" to JsonPrimitive(requestSha256),
             "cleanupVerified" to JsonPrimitive(false),
@@ -311,7 +311,7 @@ class AgentSessionJournal private constructor(
                     }
                     require(inner.getValue("schemaVersion") == JsonPrimitive(schemaVersion))
                     inner.optionalText("pendingTurnId")?.let {
-                        require(runCatching { java.util.UUID.fromString(it) }.isSuccess) { "session turn id is invalid" }
+                        require(isCanonicalAgentTurnId(it)) { "session turn id is invalid" }
                     }
                     require(inner.getValue("turns").jsonArray.size <= MAXIMUM_RECORDS && inner.getValue("decisions").jsonArray.size <= MAXIMUM_RECORDS)
                     parseFiles(inner.getValue("workspaceFiles").jsonArray)

@@ -17,7 +17,7 @@ data class AgentTurnIdentity(
     val workflowRunId: String? = null,
 ) {
     init {
-        require(runCatching { UUID.fromString(turnId) }.isSuccess) { "agent turn id must be a UUID" }
+        require(isCanonicalAgentTurnId(turnId)) { "agent turn id must be a canonical UUID" }
         require(taskId.isNotBlank() && taskId.toByteArray(Charsets.UTF_8).size <= 256) {
             "agent turn task identity is invalid"
         }
@@ -44,3 +44,6 @@ data class AgentTurnIdentity(
         )
     }
 }
+
+internal fun isCanonicalAgentTurnId(value: String): Boolean =
+    runCatching { UUID.fromString(value).toString() == value }.getOrDefault(false)
