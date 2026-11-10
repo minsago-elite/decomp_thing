@@ -177,9 +177,15 @@ class MvpPatchAcpIntegrationTest {
     }
 
     private fun assertCapturedTurn(evidence: JsonObject, taskId: String, target: String) {
-        assertEquals(2, evidence.getValue("schemaVersion").jsonPrimitive.content.toInt())
+        assertEquals(3, evidence.getValue("schemaVersion").jsonPrimitive.content.toInt())
         assertEquals("decomp-engine.mvp-patch-acp-execution-receipt", evidence.getValue("kind").jsonPrimitive.content)
         assertEquals(taskId, evidence.getValue("taskId").jsonPrimitive.content)
+        val turnIdentity = evidence.getValue("turnIdentity").jsonObject
+        assertEquals(taskId, turnIdentity.getValue("taskId").jsonPrimitive.content)
+        assertEquals(
+            evidence.getValue("request").jsonObject.getValue("requestSha256").jsonPrimitive.content,
+            turnIdentity.getValue("requestSha256").jsonPrimitive.content,
+        )
         assertEquals("acp", evidence.getValue("provider").jsonObject.getValue("id").jsonPrimitive.content)
         assertEquals("acp", evidence.getValue("factoryProvenance").jsonObject.getValue("harness").jsonPrimitive.content)
         assertTrue(evidence.getValue("lifecycle").jsonObject.getValue("releaseComplete").jsonPrimitive.content.toBoolean())
