@@ -293,6 +293,10 @@ internal class ReconstructionOutputWorkspace private constructor(
 
         /** Return null only for a clean legacy/unmanaged root; transaction residue always refuses. */
         internal fun acquireReadLeaseIfManaged(reportDirectory: Path, failFast: Boolean): AutoCloseable? {
+            // Missing report trees are ordinary for jobs that have not produced reports yet. Let
+            // the caller return its normal missing-artifact result; if existence cannot be
+            // established, toRealPath below still fails closed.
+            if (Files.notExists(reportDirectory, NOFOLLOW_LINKS)) return null
             val canonicalRoot = reportDirectory.toRealPath()
             val active = canonicalRoot.resolve(ACTIVE)
             val lock = canonicalRoot.resolve(LOCK_FILE)
