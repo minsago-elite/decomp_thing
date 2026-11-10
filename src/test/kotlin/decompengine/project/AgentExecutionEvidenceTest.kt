@@ -779,10 +779,10 @@ class AgentExecutionEvidenceTest {
                 }
                 assertEquals(PublicationResult.REJECTED, outcome)
                 assertFalse(project.exists(), name)
-                val text = requireNotNull(receipt, name)
+                val text = requireNotNull(receipt) { name }
                 assertTrue(text.contains("\"releaseComplete\": false"), name)
                 assertTrue(text.contains("\"stopReason\":\"${name}\""), name)
-                assertFalse(text.contains("typed protocol failure")) { name }
+                assertFalse(text.contains("typed protocol failure"), name)
             } else {
                 val (_, manifest) = generateTransactionalAgentProject(output, evidenceModel(), reconstructor)
                 assertTrue("fn_0000000000401000" in manifest.unresolvedImplementationIds)
@@ -795,7 +795,7 @@ class AgentExecutionEvidenceTest {
                         text.contains("\"kind\":\"protocol\""),
                     name,
                 )
-                assertFalse(text.contains("typed protocol failure")) { name }
+                assertFalse(text.contains("typed protocol failure"), name)
             }
         }
     }
