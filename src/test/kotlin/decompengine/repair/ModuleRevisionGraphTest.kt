@@ -704,6 +704,85 @@ class ModuleRevisionGraphTest {
     }
 
     @Test
+    fun `startup records interrupted assessment before recovering a schema seven receipt without assessment`() {
+        val project = generatedProject()
+        var failAssessmentPublication = false
+        val graph = ModuleRevisionGraph.openForTesting(
+            project,
+            GeneratedCRepairIndexProfile,
+            faultInjector = ModuleRevisionFaultInjector { point ->
+                if (failAssessmentPublication && point is ModuleRevisionFaultPoint.AfterStateTemporaryDirectorySync &&
+                    point.scope == "revision-invocation-evidence" && point.name.endsWith(".acp-assessment.json")
+                ) throw IllegalStateException("injected assessment publication failure")
+            },
+        )
+        val sourcePath = "src/modules/alpha.c"
+        val before = project.resolve(sourcePath).readBytes()
+        val candidate = before + "\n/* interrupted assessment failure fixture */\n".toByteArray()
+        val corpus = graph.retainedRegressionCorpus()
+        val attempt = graph.beginAttempt(
+            listOf(sourcePath),
+            RevisionRepairMetadata(1, "compile", "bounded failure", null, emptyList(), null, corpus.sha256),
+        )
+        val receipt = completeAcpReceiptDocument(
+            project, attempt, sourcePath, before, candidate, turnWorkflowId = "interrupted-assessment-recovery",
+        )
+        val verified = decompengine.project.verifyAcpExecutionReceiptDocument(
+            receipt.json.toByteArray(Charsets.UTF_8), TRACE_REPAIR_ACP_RECEIPT_KIND,
+            TRACE_REPAIR_ACP_TASK_FIELD, attempt.id,
+        )
+        val intent = decompengine.project.AgentTurnIntent.create(
+            requireNotNull(receipt.turnIdentity), "interrupted-assessment-recovery", attempt.id,
+            graph.snapshot.profileSha256, verified.accessPolicySha256,
+            graph.snapshot.nodes.single { it.id == graph.snapshot.headId }.sourceRevisionSha256,
+        )
+        graph.persistAndBindAgentTurnIntent(attempt, intent)
+        graph.persistAndBindAgentInvocation(attempt, receipt)
+        val rejected = decompengine.project.AcpChangeAssessment.create(
+            intent = intent,
+            receiptSha256 = receipt.sha256,
+            sessionIdSha256 = verified.sessionIdCommitmentSha256?.let {
+                sha256("acp-session-commitment-v1:$it".toByteArray(Charsets.UTF_8))
+            },
+            changesSha256 = verified.resultChangesSha256,
+            beforeSha256 = intent.beforeSha256,
+            afterSha256 = null,
+            observation = decompengine.project.AcpChangeObservationStatus.UNKNOWN,
+            protocolStopCode = null,
+            normalizedStopReason = AgentStopReason.COMPLETED,
+            policyVerdict = decompengine.project.AcpChangePolicyVerdict.REJECT,
+            reasonCodes = listOf("candidate-rejected"),
+            validationStatus = decompengine.project.AcpChangeValidationStatus.NOT_RUN,
+            validationProofSha256 = emptyList(),
+            eligibility = decompengine.project.AcpChangePublicationEligibility.REJECTED,
+            updatesSha256 = verified.updatesSha256,
+        )
+        failAssessmentPublication = true
+        assertFailsWith<RepairAgentEvidencePersistenceException> {
+            graph.persistAndBindAgentAssessment(attempt, rejected)
+        }
+        assertEquals(attempt.id, graph.snapshot.pendingAttemptId)
+        val assessmentPath = project.resolve("reports/repair-revisions/${attempt.id}.acp-assessment.json")
+        assertFalse(assessmentPath.exists())
+        graph.close()
+
+        ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { recovered ->
+            val node = recovered.snapshot.nodes.last()
+            assertEquals(ModuleRevisionStatus.REJECTED, node.status)
+            assertTrue(node.recoveredAfterCrash)
+            assertNull(recovered.snapshot.pendingAttemptId)
+            val binding = requireNotNull(node.repairMetadata?.agentInvocation)
+            assertEquals(RepairAgentAssessmentStatus.REJECTED, binding.assessmentStatus)
+            val assessment = decompengine.project.AcpChangeAssessment.parse(assessmentPath.readBytes())
+            assertEquals(decompengine.project.AcpChangePublicationEligibility.INTERRUPTED, assessment.eligibility)
+            assertEquals(decompengine.project.AcpChangeObservationStatus.UNKNOWN, assessment.observation)
+            assertEquals(intent.turnId, assessment.turnId)
+            assertEquals(receipt.sha256, assessment.receiptSha256)
+            assertContentEquals(before, project.resolve(sourcePath).readBytes())
+        }
+    }
+
+    @Test
     fun `startup recovers an intent when graph binding fails after immutable publication`() {
         val project = generatedProject()
         var armed = false

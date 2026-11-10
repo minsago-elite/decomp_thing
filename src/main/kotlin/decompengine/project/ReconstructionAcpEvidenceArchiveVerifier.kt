@@ -1716,7 +1716,11 @@ internal object ReconstructionAcpEvidenceArchiveVerifier {
         }
         require(intent.taskId == moduleId && intent.attemptId == intent.turnId &&
             intent.profileSha256 == profile.sha256 && intent.requestSha256 == receipt.requestSha256 &&
-            intent.policySha256 == receipt.accessPolicySha256) {
+            intent.policySha256 == receipt.accessPolicySha256 &&
+            receipt.schemaVersion >= 3 &&
+            receipt.turnIdentity?.turnId == intent.turnId &&
+            receipt.turnIdentity.taskId == intent.taskId &&
+            receipt.turnIdentity.requestSha256 == intent.requestSha256) {
             "module turn intent differs from its archived request: $moduleId"
         }
         val expectedBefore = exactChange.beforeSha256

@@ -1479,6 +1479,10 @@ class TraceGuidedRepairLoop private constructor(
     }
 
     private fun finishFailedRun(graph: ModuleRevisionGraph, failure: Exception) {
+        // A required turn-assessment write failed while the attempt is still pending. The
+        // immutable receipt and recovery authority must remain available for startup to bind a
+        // conservative INTERRUPTED assessment; finishing the run here would strand that attempt.
+        if (failure is RepairAgentEvidencePersistenceException && graph.snapshot.pendingAttemptId != null) return
         val provider = failure.suppressed.filterIsInstance<RepairValidationFailureEvidence>().singleOrNull()
         val canonical = graph.snapshot.runs.lastOrNull()
         val status = when {
@@ -1913,7 +1917,7 @@ class TraceGuidedRepairLoop private constructor(
                 }
                 val failedTurnIntent = turnIntent
                 if (executionEvidence != null && failedTurnIntent != null && graph.snapshot.schemaVersion >= 7) {
-                    runCatching {
+                    try {
                         graph.persistAndBindAgentAssessment(
                             attempt,
                             rejectedAssessment(
@@ -1923,7 +1927,15 @@ class TraceGuidedRepairLoop private constructor(
                                 failure,
                             ),
                         )
-                    }.onFailure(failure::addSuppressed)
+                    } catch (assessmentFailure: Exception) {
+                        val persistenceFailure = assessmentFailure as? RepairAgentEvidencePersistenceException
+                            ?: RepairAgentEvidencePersistenceException(
+                                "repair rejection assessment could not be persisted; attempt remains pending",
+                                assessmentFailure,
+                            )
+                        persistenceFailure.addSuppressed(failure)
+                        throw persistenceFailure
+                    }
                 }
                 abortPendingGraph(graph, attempt, failure, evidenceKind)
             } else {

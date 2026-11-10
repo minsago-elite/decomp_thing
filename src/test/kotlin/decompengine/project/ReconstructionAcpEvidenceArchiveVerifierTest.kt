@@ -39,6 +39,7 @@ import decompengine.oracle.core.OracleJson
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
+import java.util.UUID
 import java.security.MessageDigest
 import java.time.Duration
 import kotlin.io.path.createDirectories
@@ -146,6 +147,53 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
                     manifest.files.associate { it.path to sha256(tampered.resolve(it.path).readBytes()) },
                     manifest.files.associate { it.path to Files.size(tampered.resolve(it.path)) }, manifest, profile)
             }
+
+            val crossPairedOutput = temp.resolve("cross-paired-output")
+            val crossPairedProject = crossPairedOutput.resolve("source-tree")
+            copyTree(project, crossPairedProject)
+            copyTree(output.resolve(ReconstructionTurnEvidenceStore.DIRECTORY),
+                crossPairedOutput.resolve(ReconstructionTurnEvidenceStore.DIRECTORY))
+            val crossCheckpointPath = crossPairedProject.resolve(CHECKPOINT_PATH)
+            val originalCrossCheckpoint = Json.parseToJsonElement(crossCheckpointPath.readText()).jsonObject
+            val receiptRelative = originalCrossCheckpoint.getValue("turnReceiptPath").jsonPrimitive.content
+            val crossReceiptPath = crossPairedOutput.resolve(receiptRelative)
+            val newTurnId = UUID.randomUUID().toString()
+            val crossReceiptRoot = Json.parseToJsonElement(crossReceiptPath.readText()).jsonObject
+            val crossReceiptBytes = OracleJson.canonicalBytes(JsonObject(crossReceiptRoot +
+                ("turnIdentity" to JsonObject(crossReceiptRoot.getValue("turnIdentity").jsonObject +
+                    ("turnId" to JsonPrimitive(newTurnId))))))
+            Files.write(crossReceiptPath, crossReceiptBytes)
+            rewriteEvidenceAndBindings(crossPairedProject) { text ->
+                val root = Json.parseToJsonElement(text).jsonObject
+                JsonObject(root + ("turnIdentity" to JsonObject(root.getValue("turnIdentity").jsonObject +
+                    ("turnId" to JsonPrimitive(newTurnId))))).toString() + "\n"
+            }
+            val afterEvidenceRewrite = Json.parseToJsonElement(crossCheckpointPath.readText()).jsonObject
+            val newReceiptSha = sha256(crossReceiptBytes)
+            val assessmentSidecar = crossPairedOutput.resolve(
+                afterEvidenceRewrite.getValue("changeAssessmentPath").jsonPrimitive.content,
+            )
+            val assessmentObject = Json.parseToJsonElement(assessmentSidecar.readText()).jsonObject +
+                ("receiptSha256" to JsonPrimitive(newReceiptSha))
+            val assessmentBytes = OracleJson.canonicalBytes(JsonObject(assessmentObject))
+            Files.write(assessmentSidecar, assessmentBytes)
+            val reboundAssessment = JsonObject(assessmentObject)
+            rewriteCheckpointConfidenceAndManifest(crossPairedProject, JsonObject(afterEvidenceRewrite + mapOf(
+                "turnReceiptSha256" to JsonPrimitive(newReceiptSha),
+                "changeAssessment" to reboundAssessment,
+                "changeAssessmentSha256" to JsonPrimitive(sha256(assessmentBytes)),
+            )))
+            val crossManifest = SourceTreeManifestReader.read(crossPairedProject, profile)
+            val crossFailure = assertFailsWith<IllegalArgumentException> {
+                ReconstructionAcpEvidenceArchiveVerifier.verify(
+                    crossPairedProject,
+                    crossManifest.files.associate { it.path to sha256(crossPairedProject.resolve(it.path).readBytes()) },
+                    crossManifest.files.associate { it.path to Files.size(crossPairedProject.resolve(it.path)) },
+                    crossManifest,
+                    profile,
+                )
+            }
+            assertTrue(crossFailure.message.orEmpty().contains("cross-paired"), crossFailure.message)
         } finally {
             Files.walk(temp).use { paths ->
                 paths.sorted(java.util.Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
@@ -523,16 +571,22 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
                 rewriteEvidenceAndBindings(project) { text ->
                     val root = Json.parseToJsonElement(text).jsonObject
                     val request = root.getValue("request").jsonObject
-                    val identity = root.getValue("turnIdentity").jsonObject
                     JsonObject(root + mapOf(
-                        "schemaVersion" to JsonPrimitive(3),
-                        "turnIdentity" to JsonObject(identity + ("requestSha256" to JsonPrimitive(legacyBinding.requestSha256))),
+                        "schemaVersion" to JsonPrimitive(2),
                         "request" to JsonObject(request + mapOf(
                         "accessPolicySha256" to JsonPrimitive(legacyBinding.accessPolicySha256),
                         "requestSha256" to JsonPrimitive(legacyBinding.requestSha256),
                     )),
-                    )).toString() + "\n"
+                    ) - "turnIdentity").toString() + "\n"
                 }
+                val legacyReceipt = verifyAcpExecutionReceiptDocument(
+                    project.resolve(EVIDENCE_PATH).readBytes(),
+                    "decomp-engine.reconstruction-acp-execution-receipt",
+                    "moduleId",
+                    "parse",
+                )
+                assertEquals(2, legacyReceipt.schemaVersion)
+                assertEquals(null, legacyReceipt.turnIdentity)
 
                 val checkpoint = Json.parseToJsonElement(project.resolve(CHECKPOINT_PATH).readText()).jsonObject
                 val identity = checkpoint.getValue("reconstructorIdentity").jsonPrimitive.content

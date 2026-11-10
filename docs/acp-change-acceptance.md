@@ -399,6 +399,14 @@ without completed validation remains ineligible. These records do not extend
 #732's rollback set, establish a publication decision, or authorize readers to
 bypass its recovery lease.
 
+If repair recovery finds a schema-7 intent and receipt but no assessment, it
+first persists and authenticates a conservative `INTERRUPTED` assessment before
+terminalizing the attempt. If that write or its readback fails, graph opening
+fails closed and retains the pending recovery state. The focused regression
+also verifies that a candidate-rejection assessment persistence failure does
+not finalize the attempt in-process; startup recovery supplies the interrupted
+assessment instead.
+
 The current ACP adapter exposes its normalized stop reason in the invocation
 receipt, but does not expose the raw protocol stop code. Reconstruction
 assessments therefore leave `protocolStopCode` null instead of deriving or
@@ -424,6 +432,16 @@ implementation at that checkpoint, not hosted qualification. The repair checkpoi
 `6cd76bd30d1bec7fad81fcad6617f51248333af3` separately passed its 242 focused
 tests; that result predates the reconstruction changes and is not exact-head
 verification of the combined implementation.
+
+The current combined local source passed a focused Gradle run of 236 tests:
+`ReconstructionTurnEvidenceStoreTest` (6),
+`ReconstructionAcpEvidenceArchiveVerifierTest` (21), and
+`ModuleRevisionGraphTest` (209). This includes receipt admission rejection
+without consuming the immutable slot, reconstruction receipt/intent
+cross-pairing refusal, and recovery that writes an interrupted assessment
+before terminalizing a schema-7 receipt-only attempt. The run compiled the
+current implementation and tests; it is local evidence, not hosted or
+production qualification.
 
 This remains an implementation checkpoint, not full #733 qualification or
 closure evidence. The process-death matrix below covers repair evidence writes

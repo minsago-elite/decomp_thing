@@ -53,6 +53,20 @@ internal class ReconstructionTurnEvidenceStore(
         return openTurnDirectory(intent.taskId, intent.turnId, create = true).use { directory ->
             require(readFileAt(directory, INTENT_FILE, MAXIMUM_DOCUMENT_BYTES)
                 .contentEquals(intent.canonicalBytes())) { "turn receipt has no matching durable intent" }
+            val receipt = verifyAcpExecutionReceiptDocument(
+                receiptBytes,
+                RECONSTRUCTION_ACP_RECEIPT_KIND,
+                RECONSTRUCTION_ACP_TASK_FIELD,
+                intent.taskId,
+            )
+            require(receipt.schemaVersion >= 3 &&
+                receipt.requestSha256 == intent.requestSha256 &&
+                receipt.accessPolicySha256 == intent.policySha256 &&
+                receipt.turnIdentity?.turnId == intent.turnId &&
+                receipt.turnIdentity.taskId == intent.taskId &&
+                receipt.turnIdentity.requestSha256 == intent.requestSha256) {
+                "turn receipt identity or request differs from its durable intent"
+            }
             writeOnce(directory, RECEIPT_FILE, receiptBytes, MAXIMUM_RECEIPT_BYTES)
             directory.relative(RECEIPT_FILE) to sha256(receiptBytes)
         }

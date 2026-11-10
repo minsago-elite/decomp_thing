@@ -15,6 +15,11 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonObject
 
 class ReconstructionTurnEvidenceStoreTest {
     @Test
@@ -41,7 +46,7 @@ class ReconstructionTurnEvidenceStoreTest {
 
                     ReconstructionOutputWorkspace.open(root, input).use { workspace ->
                         val intent = intent(turnId, "a".repeat(64), workspace.inputSha256)
-                        val receiptBytes = "receipt-$turnId".toByteArray(Charsets.UTF_8)
+                        val receiptBytes = reconstructionTurnReceiptFixture(intent)
                         val assessment = interruptedTurnAssessment(intent)
                         val store = ReconstructionTurnEvidenceStore(workspace.publicationLock, workspace.inputSha256)
                         val directory = root.resolve(
@@ -282,7 +287,7 @@ class ReconstructionTurnEvidenceStoreTest {
                 val store = ReconstructionTurnEvidenceStore(workspace.publicationLock, workspace.inputSha256)
                 val intent = intent(UUID.randomUUID().toString(), "f".repeat(64), workspace.inputSha256)
                 store.persistIntent(intent)
-                val receiptBytes = ("{\"receipt\":\"" + "x".repeat(1024 * 1024) + "\"}\n").toByteArray()
+                val receiptBytes = reconstructionTurnReceiptFixture(intent, "x".repeat(1024 * 1024))
                 assertTrue(receiptBytes.size > 1024 * 1024)
                 val (receiptRelativePath, receiptSha256) = store.persistReceipt(intent, receiptBytes)
                 val receiptPath = root.resolve(receiptRelativePath)
@@ -311,6 +316,57 @@ class ReconstructionTurnEvidenceStoreTest {
                     Files.readAllBytes(root.resolve(".agent-turn-evidence/${workspace.inputSha256}/parse/${intent.turnId}/assessment.json")),
                 ).sha256)
                 assertFailsWith<IllegalArgumentException> { store.persistReceipt(intent, receiptBytes) }
+            }
+        } finally {
+            Files.walk(base).use { paths ->
+                paths.sorted(java.util.Comparator.reverseOrder()).forEach(Files::deleteIfExists)
+            }
+        }
+    }
+
+    @Test
+    fun `malformed and cross paired receipts do not occupy the immutable receipt slot`() {
+        val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize().also { Files.createDirectories(it) }
+        val base = Files.createTempDirectory(scratch, "turn-receipt-admission-")
+        val root = base.resolve("output")
+        val input = base.resolve("input").also { Files.writeString(it, "input") }
+        try {
+            ReconstructionOutputWorkspace.open(root, input).use { workspace ->
+                val store = ReconstructionTurnEvidenceStore(workspace.publicationLock, workspace.inputSha256)
+                val intent = intent(UUID.randomUUID().toString(), "a".repeat(64), workspace.inputSha256)
+                store.persistIntent(intent)
+                assertFailsWith<IllegalArgumentException> { store.persistReceipt(intent, byteArrayOf()) }
+                assertFailsWith<IllegalArgumentException> {
+                    store.persistReceipt(intent,
+                        "{\"schemaVersion\":3,\"schemaVersion\":3}".toByteArray(Charsets.UTF_8))
+                }
+                val otherTurn = intent(UUID.randomUUID().toString(), intent.requestSha256, workspace.inputSha256)
+                assertFailsWith<IllegalArgumentException> {
+                    store.persistReceipt(intent, reconstructionTurnReceiptFixture(otherTurn))
+                }
+                val otherRequest = intent(intent.turnId, "b".repeat(64), workspace.inputSha256)
+                assertFailsWith<IllegalArgumentException> {
+                    store.persistReceipt(intent, reconstructionTurnReceiptFixture(otherRequest))
+                }
+                val otherTask = AgentTurnIntent.create(
+                    AgentTurnIdentity(intent.turnId, "other-module", intent.requestSha256, "workflow-test"),
+                    workflowId = "reconstruction", attemptId = intent.turnId,
+                    profileSha256 = intent.profileSha256, policySha256 = intent.policySha256,
+                    beforeSha256 = intent.beforeSha256,
+                )
+                assertFailsWith<IllegalArgumentException> {
+                    store.persistReceipt(intent, reconstructionTurnReceiptFixture(otherTask))
+                }
+
+                val valid = reconstructionTurnReceiptFixture(intent)
+                val (path, digest) = store.persistReceipt(intent, valid)
+                assertEquals(digest, sha256(Files.readAllBytes(root.resolve(path))))
+                assertEquals(intent.turnId, verifyAcpExecutionReceiptDocument(
+                    valid,
+                    "decomp-engine.reconstruction-acp-execution-receipt",
+                    "moduleId",
+                    intent.taskId,
+                ).turnIdentity?.turnId)
             }
         } finally {
             Files.walk(base).use { paths ->
@@ -351,6 +407,73 @@ private fun interruptedTurnAssessment(intent: AgentTurnIntent): AcpChangeAssessm
     updatesSha256 = null,
 )
 
+internal fun reconstructionTurnReceiptFixture(intent: AgentTurnIntent, eventPayload: String = ""): ByteArray =
+    buildJsonObject {
+        put("schemaVersion", 3)
+        put("kind", "decomp-engine.reconstruction-acp-execution-receipt")
+        put("moduleId", intent.taskId)
+        putJsonObject("turnIdentity") {
+            put("turnId", intent.turnId)
+            put("taskId", intent.taskId)
+            put("requestSha256", intent.requestSha256)
+        }
+        putJsonObject("request") {
+            put("contractVersion", 1)
+            put("requestSha256", intent.requestSha256)
+            put("accessPolicySha256", intent.policySha256)
+            put("objective", "test")
+            put("promptSha256", "b".repeat(64))
+            put("wirePromptSha256", "c".repeat(64))
+            put("workspaceRootIds", JsonArray(emptyList()))
+            put("contextInputIds", JsonArray(emptyList()))
+            put("filesystemCapabilityEnabled", false)
+            put("terminalCapabilityEnabled", false)
+            put("maximumTurns", 1)
+            put("maximumToolCalls", 1)
+            put("maximumOutputBytes", 1)
+            put("wallClockTimeoutNanos", 1)
+            put("idleTimeoutNanos", 1)
+            put("maximumInputTokens", JsonNull)
+            put("maximumOutputTokens", JsonNull)
+        }
+        putJsonObject("provider") {
+            put("id", "acp")
+            put("evidenceSchemaVersion", 2)
+        }
+        putJsonObject("lifecycle") {
+            put("phaseReached", "request-dispatched")
+            put("cleanupDisposition", "unverified")
+            put("filesystemAuditComplete", false)
+            put("terminalAuditComplete", false)
+            put("permissionAuditComplete", false)
+            put("releaseComplete", false)
+        }
+        put("factoryProvenance", JsonNull)
+        put("protocol", JsonNull)
+        put("agent", JsonNull)
+        put("session", JsonNull)
+        putJsonObject("events") { put("payload", eventPayload) }
+        putJsonObject("outcome") {
+            put("type", "returned")
+            putJsonObject("result") {
+                put("stopReason", "completed")
+                put("summary", JsonNull)
+                putJsonObject("changes") {
+                    put("observedCount", 0)
+                    put("retainedCount", 0)
+                    put("complete", true)
+                    put("aggregateSha256", agentFileChangeSetSha256(emptyList()))
+                    put("records", JsonArray(emptyList()))
+                }
+                put("usage", JsonNull)
+            }
+            put("failure", JsonNull)
+        }
+        put("policyAudits", JsonNull)
+        put("process", JsonNull)
+        put("sandbox", JsonNull)
+    }.toString().toByteArray(Charsets.UTF_8)
+
 /** Child process used to prove that evidence publication does not rely on orderly close/finally. */
 internal object ReconstructionTurnEvidenceStoreCrashProbe {
     @JvmStatic
@@ -377,7 +500,7 @@ internal object ReconstructionTurnEvidenceStoreCrashProbe {
             }
             when (document) {
                 "intent" -> faulting.persistIntent(intent)
-                "receipt" -> faulting.persistReceipt(intent, "receipt-$turnId".toByteArray(Charsets.UTF_8))
+                "receipt" -> faulting.persistReceipt(intent, reconstructionTurnReceiptFixture(intent))
                 "assessment" -> faulting.persistAssessment(
                     intent,
                     interruptedTurnAssessment(intent),

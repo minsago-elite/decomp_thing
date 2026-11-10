@@ -7,6 +7,10 @@ import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.acp.LinuxResourceLimitException
 import decompengine.acp.permissions
 import decompengine.project.AcpExecutionReceiptDocument
+import decompengine.project.AcpChangeObservationStatus
+import decompengine.project.AcpChangePolicyVerdict
+import decompengine.project.AcpChangeValidationStatus
+import decompengine.project.AcpChangePublicationEligibility
 import decompengine.project.AgentTurnIntent
 import decompengine.project.AcpChangeAssessment
 import decompengine.project.agentFileChangeSetSha256
@@ -2420,7 +2424,44 @@ private fun recoverPersistedInvocationBinding(
     val assessmentFile = if (hasAssessment) {
         store.readRevisionFile(assessmentName, MAXIMUM_REPAIR_ASSESSMENT_BYTES.toLong())
     } else null
-    val assessedBinding = assessmentFile?.let { file ->
+    val recoveredAssessmentFile = assessmentFile ?: if (schemaVersion >= 7 && intent != null) {
+        // A process can stop after the immutable receipt is bound but before the workflow
+        // assessment is published. Do not terminalize that turn as an unassessed rejection:
+        // persist a conservative, explicitly interrupted assessment first. If this write or
+        // readback fails, graph opening fails closed and the pending recovery authority remains.
+        val interrupted = AcpChangeAssessment.create(
+            intent = intent,
+            receiptSha256 = receipt.sha256,
+            sessionIdSha256 = verified.sessionIdCommitmentSha256?.let {
+                sha256("acp-session-commitment-v1:$it".toByteArray(Charsets.UTF_8))
+            },
+            changesSha256 = verified.resultChangesSha256,
+            beforeSha256 = intent.beforeSha256,
+            afterSha256 = null,
+            observation = AcpChangeObservationStatus.UNKNOWN,
+            protocolStopCode = null,
+            normalizedStopReason = verified.terminalOutcome.takeIf { it.startsWith("returned-") }
+                ?.removePrefix("returned-")
+                ?.let { decompengine.agent.AgentStopReason.valueOf(it.uppercase().replace('-', '_')) },
+            policyVerdict = AcpChangePolicyVerdict.NOT_EVALUATED,
+            reasonCodes = listOf("workflow-interrupted-before-assessment"),
+            validationStatus = AcpChangeValidationStatus.NOT_RUN,
+            validationProofSha256 = emptyList(),
+            eligibility = AcpChangePublicationEligibility.INTERRUPTED,
+            updatesSha256 = verified.updatesSha256,
+        )
+        val bytes = interrupted.canonicalBytes()
+        require(bytes.size <= MAXIMUM_REPAIR_ASSESSMENT_BYTES) {
+            "recovered interrupted repair assessment exceeds its byte limit"
+        }
+        store.writeImmutableRevisionFile(assessmentName, bytes, MAXIMUM_REPAIR_ASSESSMENT_BYTES.toLong())
+        val written = store.readRevisionFile(assessmentName, MAXIMUM_REPAIR_ASSESSMENT_BYTES.toLong())
+        require(written.sha256 == interrupted.sha256 && written.bytes.contentEquals(bytes)) {
+            "recovered interrupted repair assessment differs from its immutable document"
+        }
+        written
+    } else null
+    val assessedBinding = recoveredAssessmentFile?.let { file ->
         val parsed = AcpChangeAssessment.parse(file.bytes)
         val intentValue = requireNotNull(intent) { "repair assessment exists without its pre-dispatch intent" }
         require(parsed.turnId == intentValue.turnId && parsed.intentSha256 == intentValue.sha256 &&
@@ -2443,7 +2484,7 @@ private fun recoverPersistedInvocationBinding(
             assessmentSha256 = file.sha256,
         )
     } ?: binding
-    if (assessmentFile == null) {
+    if (recoveredAssessmentFile == null) {
         require(oldBinding?.assessmentPath == null && oldBinding?.assessmentSha256 == null) {
             "persisted repair assessment binding has no immutable document"
         }
