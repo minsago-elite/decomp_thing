@@ -81,7 +81,7 @@ class WorkspaceSnapshotLimitsTest {
             val after = capture(request, WorkspaceSnapshotLimits())
 
             if (shouldSucceed) {
-                val change = before.diff(after, request, budget(WorkspaceSnapshotLimits())).single()
+                val change = before.diff(after, request, budget(WorkspaceSnapshotLimits())).changes.single()
                 assertEquals(AgentFileChangeKind.DELETED, change.kind)
                 assertEquals(path, change.path)
                 assertEquals(java.security.MessageDigest.getInstance("SHA-256").digest(original)
@@ -132,7 +132,7 @@ class WorkspaceSnapshotLimitsTest {
             if (case.refusedPath != null) {
                 assertMutationRefused(before, after, request, case.refusedPath)
             } else {
-                val changes = before.diff(after, request, budget(WorkspaceSnapshotLimits())).associateBy { it.path }
+                val changes = before.diff(after, request, budget(WorkspaceSnapshotLimits())).changes.associateBy { it.path }
                 assertEquals(setOf(sourcePath, destinationPath), changes.keys)
                 assertEquals(AgentFileChangeKind.DELETED, changes.getValue(sourcePath).kind)
                 assertEquals(AgentFileChangeKind.CREATED, changes.getValue(destinationPath).kind)
@@ -160,7 +160,7 @@ class WorkspaceSnapshotLimitsTest {
                 val prefix = ByteArray(65_536 - split) { 'x'.code.toByte() }
                 Files.write(file, prefix + sequence)
                 val change = before.diff(capture(request, WorkspaceSnapshotLimits()), request,
-                    budget(WorkspaceSnapshotLimits())).single()
+                    budget(WorkspaceSnapshotLimits())).changes.single()
                 assertEquals(AgentFileChangeKind.MODIFIED, change.kind)
                 assertEquals(path, change.path)
             }
@@ -203,7 +203,7 @@ class WorkspaceSnapshotLimitsTest {
         val before = capture(request, WorkspaceSnapshotLimits())
         Files.write(file, byteArrayOf(0xc0.toByte(), 0xaf.toByte()))
         val change = before.diff(capture(request, WorkspaceSnapshotLimits()), request,
-            budget(WorkspaceSnapshotLimits())).single()
+            budget(WorkspaceSnapshotLimits())).changes.single()
         assertEquals(AgentFileChangeKind.MODIFIED, change.kind)
     }
 
