@@ -202,7 +202,7 @@ class AgentSessionJournal private constructor(
     fun finishTurn(receipt: AgentExecutionReceipt, cleanupVerified: Boolean) {
         val requestSha256 = receipt.requestBinding.requestSha256
         require(state.optionalText("pendingRequestSha256") == requestSha256) { "session receipt belongs to another request" }
-        state.optionalText("pendingTurnId")?.let { pendingTurnId ->
+        if (state.getValue("schemaVersion").jsonPrimitive.int == 2) state.optionalText("pendingTurnId")?.let { pendingTurnId ->
             require(receipt.turnIdentity?.turnId == pendingTurnId) { "session receipt belongs to another turn" }
         }
         val returned = (receipt.outcome as? AgentExecutionOutcome.Returned)?.result
@@ -310,7 +310,7 @@ class AgentSessionJournal private constructor(
                         "session journal commitment mismatch"
                     }
                     require(inner.getValue("schemaVersion") == JsonPrimitive(schemaVersion))
-                    inner.optionalText("pendingTurnId")?.let {
+                    if (schemaVersion == 2) inner.optionalText("pendingTurnId")?.let {
                         require(isCanonicalAgentTurnId(it)) { "session turn id is invalid" }
                     }
                     require(inner.getValue("turns").jsonArray.size <= MAXIMUM_RECORDS && inner.getValue("decisions").jsonArray.size <= MAXIMUM_RECORDS)
