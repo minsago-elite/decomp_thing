@@ -48,9 +48,6 @@ internal class ReconstructionOutputWorkspace private constructor(
 ) : AutoCloseable {
     private var closed = false
 
-    /** Canonical output root admitted by this workspace lease. */
-    internal val canonicalRoot: Path get() = root
-
     /** Capability for later publication steps; it is valid only while this workspace is open. */
     internal val publicationLock: ReconstructionPublicationLock get() = ownership
 

@@ -934,8 +934,12 @@ class ArchivalReconstructionService(
         if (Thread.interrupted()) throw InterruptedException("archival reconstruction cancelled")
         // Canonicalize the caller's supplied root before comparing it with the lease. This
         // accepts symlinked ancestors while still rejecting a caller path unrelated to the
-        // workspace that owns publication.
-        val admittedOutputDir = if (workspace == null) outputDir else outputDir.toRealPath()
+        // workspace that owns publication. Preserve the established refusal for an absent path.
+        val admittedOutputDir = if (workspace == null) outputDir else try {
+            outputDir.toRealPath()
+        } catch (failure: java.io.IOException) {
+            throw IllegalArgumentException("archival output directory must be the workspace's canonical root", failure)
+        }
         val selectedReconstructor = reconstructor ?: adapter.defaultReconstructor()
         val publicationRequirement = selectedReconstructor.publicationRequirement()
         require(publicationRequirement != ReconstructionPublicationRequirement.TRANSACTIONAL || workspace != null) {
