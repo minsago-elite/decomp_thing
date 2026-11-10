@@ -426,12 +426,11 @@ tests; that result predates the reconstruction changes and is not exact-head
 verification of the combined implementation.
 
 This remains an implementation checkpoint, not full #733 qualification or
-closure evidence. Current repair and reconstruction test paths do not prove all
-process-crash points around each intent/receipt/assessment write and the #732
-decision, or production-provider acceptance. Production repair acceptance is
-also blocked on the qualified validator under #236. #733, #63, #236, and #732
-remain open; do not use these source changes to claim production repair or
-reconstruction acceptance.
+closure evidence. The process-death matrix below covers repair evidence writes
+and graph binding, but does not qualify production-provider acceptance.
+Production repair acceptance is also blocked on the qualified validator under
+#236. #733, #63, #236, and #732 remain open; do not use these source changes to
+claim production repair or reconstruction acceptance.
 
 This cleanup removes an unused competing policy path; it does not complete #63.
 The actual workflow contracts still need the requested shared profile-driven
@@ -461,3 +460,9 @@ Final ordinary snapshot diff failures retain the ACP session reference and the `
 `ReconstructionTurnEvidenceStoreTest.hard process death during each turn evidence write leaves a restartable prefix` passed locally. It launches 12 child JVMs: intent, receipt, and assessment publication each halt with `Runtime.halt(86)` at all four store checkpoints (directory opened, before temporary link, immediately after final-name publication, and before readback). The parent reopens the same workspace and verifies either that the target document is absent and can be written, or that the exact canonical bytes are visible and a second immutable write refuses. Prerequisite intent bytes are also checked for receipt and assessment attempts. The test terminates each child without running `finally` or orderly descriptor cleanup.
 
 This is process-death evidence for the reconstruction evidence store only. It does not prove power-loss durability, every end-to-end workflow crash boundary, repair graph recovery, or crashes around the #732 publication decision. Exact-head hosted qualification, those remaining decision/recovery cases, and production-validator evidence from #236 are still required.
+
+## Repair turn-evidence process-death matrix — 2026-11-11
+
+`ModuleRevisionGraphTest.process death at every turn evidence write and graph bind recovers authenticated prefixes` passed locally. It launched 21 child JVMs and used `Runtime.halt(86)` to exercise intent, receipt, and assessment publication at the temporary-file sync, final-name exchange, final-directory sync, and the three following graph-binding write points. For each prefix, the parent checked the exact document bytes and temporary/final-name state before reopening, then checked recovered binding state, source bytes and metadata, and temporary/staging cleanup. The decision cases halted after its durable graph write and after the first source exchange; recovery completed the committed candidate. A tampered assessment after the durable decision was refused before source exchange, with graph and staging recovery state retained.
+
+These are process-death tests on the local filesystem, not power-loss tests. They cover the schema-7 repair graph and its evidence sidecars, not the end-to-end repair workflow with a live provider, every rollback/cleanup failure, the independent #732 reconstruction publication journal, or production validation under #236. The injected decision crash is specifically after the decision has been durably written; a pre-decision staging crash and repeated interruption during recovery remain separate qualification cases. The prior local repair result at `6cd76bd30d1bec7fad81fcad6617f51248333af3` predates this matrix and is not exact-head hosted evidence.

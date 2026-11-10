@@ -2798,6 +2798,7 @@ internal class ModuleRevisionGraph private constructor(
 
     init {
         validateLoadedState()
+        stateStore.cleanupRevisionEvidenceTemporaries(repairRevisionDirectoryEntryLimit(state.budget))
         synchronized(this) { bindPendingOrphanTurnIntentForRecovery() }
         cleanupUnreferencedValidationArtifacts()
         cleanupSourceTemporaries(state.pending)

@@ -1365,6 +1365,177 @@ class ModuleRevisionGraphTest {
     }
 
     @Test
+    fun `process death at every turn evidence write and graph bind recovers authenticated prefixes`() {
+        val relative = "src/modules/alpha.c"
+        val matrix = listOf("intent", "receipt", "assessment").flatMap { document ->
+            listOf("E1", "E2", "E3", "G1", "G2", "G3").map { point -> document to point }
+        } + listOf("persisted", "source-exchanged", "tamper-assessment").map { "decision" to it }
+        val testRoot = Path.of("build/test-tmp").toAbsolutePath().normalize().also(Files::createDirectories)
+
+        for ((document, point) in matrix) {
+            val caseRoot = Files.createTempDirectory(testRoot, "repair-turn-crash-")
+            var child: Process? = null
+            try {
+                val project = generatedProject(temporaryParent = caseRoot)
+                val sourcePaths = ModuleRepairIndex.load(project, GeneratedCRepairIndexProfile).sourcePaths
+                val before = Schema6SourceInventoryWitness.capture(project, sourcePaths)
+                val original = project.resolve(relative).readBytes()
+                val expectation = caseRoot.resolve("expected.txt")
+                val childTemp = Files.createDirectory(caseRoot.resolve("child-tmp"))
+                val log = caseRoot.resolve("child.log")
+                child = ProcessBuilder(
+                    Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+                    "-Djava.io.tmpdir=$childTemp",
+                    "-cp", System.getProperty("java.class.path"),
+                    ModuleRevisionGraphProvenanceCrashProbe::class.java.name,
+                    project.toString(), relative, document, point, expectation.toString(),
+                ).redirectErrorStream(true).redirectOutput(log.toFile()).start()
+                assertTrue(child.waitFor(30, TimeUnit.SECONDS), "$document/$point child did not terminate")
+                assertEquals(86, child.exitValue(),
+                    "$document/$point did not hard-halt at its boundary: ${Files.readString(log)}")
+
+                val expected = Files.readAllLines(expectation)
+                assertEquals(5, expected.size, "$document/$point expectation shape")
+                val attemptId = expected[0]
+                val intentBytes = java.util.Base64.getDecoder().decode(expected[1])
+                val receiptBytes = java.util.Base64.getDecoder().decode(expected[2])
+                val assessmentBytes = expected[3].takeIf(String::isNotEmpty)?.let(java.util.Base64.getDecoder()::decode)
+                val candidateBytes = java.util.Base64.getDecoder().decode(expected[4])
+                val revisions = project.resolve("reports/repair-revisions")
+                val evidence = when (document) {
+                    "intent" -> intentBytes
+                    "receipt" -> receiptBytes
+                    "assessment" -> requireNotNull(assessmentBytes)
+                    "decision" -> null
+                    else -> error("unknown document $document")
+                }
+                if (evidence != null) {
+                    val suffix = when (document) {
+                        "intent" -> "intent"
+                        "receipt" -> "receipt"
+                        else -> "assessment"
+                    }
+                    val finalPath = revisions.resolve("$attemptId.acp-$suffix.json")
+                    val temporaryPath = revisions.resolve(".$attemptId.acp-$suffix.json.repair-atomic.tmp")
+                    if (point == "E1") {
+                        assertFalse(Files.exists(finalPath), "$document/$point must not expose the final name")
+                        assertContentEquals(evidence, Files.readAllBytes(temporaryPath), "$document/$point temp bytes")
+                    } else {
+                        assertContentEquals(evidence, Files.readAllBytes(finalPath), "$document/$point final bytes")
+                        assertFalse(Files.exists(temporaryPath), "$document/$point must have exchanged its temp")
+                    }
+                }
+
+                val graphPath = revisions.resolve("graph.json")
+                val graphBeforeRecovery = Files.readAllBytes(graphPath)
+                val jsonBeforeRecovery = Json.parseToJsonElement(graphBeforeRecovery.toString(Charsets.UTF_8)).jsonObject
+                val pendingBeforeRecovery = jsonBeforeRecovery["pending"] as? JsonObject
+                if (document == "decision") {
+                    assertNotNull(pendingBeforeRecovery?.get("acceptanceDecision") as? JsonObject,
+                        "$document/$point must retain the decided transaction")
+                } else {
+                    assertTrue(pendingBeforeRecovery?.get("acceptanceDecision") is JsonNull,
+                        "$document/$point must remain undecided")
+                }
+                if (point.startsWith("G")) {
+                    val temporaryGraph = revisions.resolve(".graph.json.repair-atomic.tmp")
+                    when (point) {
+                        "G1", "G2" -> assertTrue(Files.exists(temporaryGraph), "$document/$point graph prefix temp")
+                        "G3" -> assertTrue(Files.exists(temporaryGraph), "$document/$point displaced graph remains until cleanup")
+                    }
+                }
+
+                if (document == "decision" && point == "tamper-assessment") {
+                    val assessmentPath = revisions.resolve("$attemptId.acp-assessment.json")
+                    val tampered = Files.readAllBytes(assessmentPath).also { require(it.isNotEmpty()) }
+                    tampered[tampered.lastIndex] = if (tampered.last() == '\n'.code.toByte()) ' '.code.toByte()
+                        else '\n'.code.toByte()
+                    Files.write(assessmentPath, tampered)
+                    val refusal = runCatching { ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { } }
+                    assertTrue(refusal.isFailure, "$document/$point tampered decision evidence must refuse recovery")
+                    assertContentEquals(graphBeforeRecovery, Files.readAllBytes(graphPath),
+                        "$document/$point refusal must retain the decided graph bytes")
+                    assertTrue(Files.list(revisions.resolve("publication-staging")).use { it.findAny().isPresent },
+                        "$document/$point refusal must retain recovery stage")
+                } else {
+                    ModuleRevisionGraph.open(project, GeneratedCRepairIndexProfile).use { recovered ->
+                        val last = recovered.snapshot.nodes.last()
+                        if (document == "decision") {
+                            assertEquals(ModuleRevisionStatus.ACCEPTED, last.status, "$document/$point")
+                            assertEquals(RepairRunStatus.FULLY_ACCEPTED, recovered.snapshot.runs.last().status, "$document/$point")
+                            assertNull(recovered.snapshot.pendingAttemptId, "$document/$point")
+                            val binding = requireNotNull(last.repairMetadata?.agentInvocation)
+                            assertEquals(RepairAgentAssessmentStatus.ACCEPTED, binding.assessmentStatus)
+                            assertEquals("reports/repair-revisions/${last.id}.acp-receipt.json", binding.receiptPath)
+                            assertEquals(sha256(receiptBytes), binding.receiptSha256)
+                            assertEquals("reports/repair-revisions/${last.id}.acp-intent.json", binding.intentPath)
+                            assertEquals(sha256(intentBytes), binding.intentSha256)
+                            assertEquals("reports/repair-revisions/${last.id}.acp-assessment.json", binding.assessmentPath)
+                            assertEquals(sha256(requireNotNull(assessmentBytes)), binding.assessmentSha256)
+                            assertContentEquals(intentBytes, Files.readAllBytes(revisions.resolve("${last.id}.acp-intent.json")))
+                            assertContentEquals(receiptBytes, Files.readAllBytes(project.resolve(binding.receiptPath)))
+                            assertContentEquals(requireNotNull(assessmentBytes),
+                                Files.readAllBytes(project.resolve(requireNotNull(binding.assessmentPath))))
+                        } else {
+                            assertEquals(ModuleRevisionStatus.REJECTED, last.status, "$document/$point")
+                            assertTrue(last.recoveredAfterCrash, "$document/$point")
+                            assertNull(recovered.snapshot.pendingAttemptId, "$document/$point")
+                            val metadata = requireNotNull(last.repairMetadata)
+                            if (document == "intent" && point == "E1") {
+                                assertNull(metadata.turnIntent, "$document/$point unpublished intent is not promoted")
+                                assertNull(metadata.agentInvocation, "$document/$point")
+                            } else {
+                                val intentBinding = requireNotNull(metadata.turnIntent) { "$document/$point intent binding" }
+                                assertEquals("reports/repair-revisions/${last.id}.acp-intent.json", intentBinding.intentPath)
+                                assertEquals(sha256(intentBytes), intentBinding.intentSha256)
+                            }
+                            if (document == "intent" || (document == "receipt" && point == "E1")) {
+                                assertNull(metadata.agentInvocation, "$document/$point")
+                            } else {
+                                val binding = requireNotNull(metadata.agentInvocation) { "$document/$point receipt binding" }
+                                assertEquals(RepairAgentAssessmentStatus.REJECTED, binding.assessmentStatus)
+                                assertEquals("reports/repair-revisions/${last.id}.acp-receipt.json", binding.receiptPath)
+                                assertEquals(sha256(receiptBytes), binding.receiptSha256)
+                                assertEquals("reports/repair-revisions/${last.id}.acp-intent.json", binding.intentPath)
+                                assertEquals(sha256(intentBytes), binding.intentSha256)
+                                assertEquals(metadata.turnIntent?.turnId, binding.turnId)
+                                if (document == "assessment" && point != "E1") {
+                                    assertEquals("reports/repair-revisions/${last.id}.acp-assessment.json", binding.assessmentPath)
+                                    assertEquals(sha256(requireNotNull(assessmentBytes)), binding.assessmentSha256)
+                                }
+                            }
+                        }
+                    }
+                }
+                val after = Schema6SourceInventoryWitness.capture(project, sourcePaths)
+                if (document == "decision") {
+                    if (point == "tamper-assessment") {
+                        assertContentEquals(original, project.resolve(relative).readBytes(), "$document/$point source remains unchanged")
+                    } else {
+                        assertContentEquals(candidateBytes, project.resolve(relative).readBytes(), "$document/$point exact committed source")
+                    }
+                } else {
+                    assertEquals(before, after, "$document/$point must preserve exact predecision source and metadata")
+                    assertContentEquals(original, project.resolve(relative).readBytes(), "$document/$point source bytes")
+                }
+                assertFalse(Files.exists(revisions.resolve(".graph.json.repair-atomic.tmp")), "$document/$point graph temp cleanup")
+                val stagingPresent = Files.list(revisions.resolve("publication-staging")).use { it.findAny().isPresent }
+                if (document == "decision" && point == "tamper-assessment") {
+                    assertTrue(stagingPresent, "$document/$point must retain recovery staging")
+                } else {
+                    assertFalse(stagingPresent, "$document/$point staging cleanup")
+                }
+                assertFalse(Files.list(revisions).use { stream ->
+                    stream.anyMatch { it.fileName.toString().matches(Regex("\\.revision_[A-Za-z0-9_]+\\.acp-(?:receipt|intent|assessment)\\.json\\.repair-atomic\\.tmp")) }
+                }, "$document/$point evidence temp cleanup")
+            } finally {
+                if (child?.isAlive == true) child.destroyForcibly().waitFor(5, TimeUnit.SECONDS)
+                Files.walk(caseRoot).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach(Files::deleteIfExists) }
+            }
+        }
+    }
+
+    @Test
     fun `undecided schema six recovery refuses a staged inode replacement before cleanup`() {
         val project = generatedProject()
         val paths = listOf("src/modules/alpha.c", "src/modules/beta.c")
@@ -9585,7 +9756,7 @@ class ModuleRevisionGraphTest {
     }
 
     /** Synthetic proof material for graph-mechanics tests; this is not provider qualification. */
-    private fun beginSyntheticAcceptedRun(
+    internal fun beginSyntheticAcceptedRun(
         graph: ModuleRevisionGraph,
         mode: RepairPublicationMode = RepairPublicationMode.TEST_ONLY_NON_RELEASE,
         template: RevisionRepairMetadata? = null,
@@ -9616,7 +9787,7 @@ class ModuleRevisionGraphTest {
         )
     }
 
-    private fun syntheticAcceptedProof(graph: ModuleRevisionGraph, attempt: ModuleRevisionAttempt): RepairValidationProof {
+    internal fun syntheticAcceptedProof(graph: ModuleRevisionGraph, attempt: ModuleRevisionAttempt): RepairValidationProof {
         val snapshot = graph.snapshot
         val corpus = graph.retainedRegressionCorpus()
         val sources = graph.candidateSources(attempt)
