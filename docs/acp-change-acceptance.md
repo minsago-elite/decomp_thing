@@ -362,12 +362,20 @@ eligibility. Eligibility is not a publication decision: the existing durable
 repair publication transaction remains the only source of committed revision
 authority. Intent-only or receipt-only attempts do not claim acceptance.
 
-This is an implementation checkpoint, not qualification or closure evidence.
-The reconstruction checkpoint/archive path is not yet bound to the same
-intent-and-assessment contract. No exact-head test or hosted run currently
-qualifies the repair changes, crash points around the new evidence writes,
-legacy compatibility, or archive round trips. #733, #63, #236, and #732 remain
-open; do not use these source changes to claim production repair acceptance.
+The repair implementation checkpoint at `6cd76bd30d1bec7fad81fcad6617f51248333af3`
+passed local compilation and 242 focused tests: the assessment codec (2),
+repair graph (199), repair history reader (35), and ACP repair integration (6).
+These tests cover repair intent/receipt/assessment binding, graph recovery,
+archive/history consistency, and canonical assessment parsing. They are local
+evidence only; no hosted run or independent crash-after-each-evidence-write
+campaign has qualified this commit.
+
+This remains an implementation checkpoint, not full #733 qualification or
+closure evidence. The reconstruction checkpoint/archive path is not yet bound
+to the same intent-and-assessment contract. Production repair acceptance is
+also blocked on the qualified validator under #236. #733, #63, #236, and #732
+remain open; do not use these source changes to claim production repair
+acceptance.
 
 This cleanup removes an unused competing policy path; it does not complete #63.
 The actual workflow contracts still need the requested shared profile-driven
