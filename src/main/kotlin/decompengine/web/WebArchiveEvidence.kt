@@ -35,7 +35,7 @@ internal class WebArchiveEvidence(private val store: JobStore, private val sourc
     private data class ReadIdentity(val sha256: String, val identity: LinuxFileIdentity)
 
     fun read(jobId: String, expectedSha256: String? = null, reportPrefix: String = "reports"): WebArchiveSnapshot {
-        return ReconstructionOutputWorkspace.withReadLease(store.reportDirectoryForRead(jobId, reportPrefix)) {
+        return ReconstructionOutputWorkspace.withReadLeaseIfManaged(store.reportDirectoryForRead(jobId, reportPrefix)) {
             readUnderLease(jobId, expectedSha256, reportPrefix)
         }
     }

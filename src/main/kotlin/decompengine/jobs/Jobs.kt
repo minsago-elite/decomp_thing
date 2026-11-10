@@ -348,7 +348,7 @@ class JobStore internal constructor(
         // history reader's missing/unavailable result without creating directories just to lock them.
         if (!Files.isDirectory(reportPath, java.nio.file.LinkOption.NOFOLLOW_LINKS)) return capture()
         val canonical = reportDirectoryForRead(jobId, reportPrefix)
-        return decompengine.project.ReconstructionOutputWorkspace.withReadLease(canonical, capture)
+        return decompengine.project.ReconstructionOutputWorkspace.withReadLeaseIfManaged(canonical, capture)
     }
 
     internal fun readArtifact(
@@ -371,7 +371,7 @@ class JobStore internal constructor(
             }
         }
         return if (publicationRoot != null) {
-            decompengine.project.ReconstructionOutputWorkspace.withReadLease(
+            decompengine.project.ReconstructionOutputWorkspace.withReadLeaseIfManaged(
                 jobDirectory(jobId).resolve(publicationRoot), read,
             )
         } else read()

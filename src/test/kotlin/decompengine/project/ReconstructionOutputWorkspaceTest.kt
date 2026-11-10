@@ -404,7 +404,7 @@ class ReconstructionOutputWorkspaceTest {
     }
 
     @Test
-    fun `legacy umask-created lock files are normalized for readers and writers`() {
+    fun `legacy umask-created lock files remain readable without mutation and writers normalize them`() {
         val base = createTempDirectory("input-legacy-lock-mode-")
         val input = base.resolve("input").apply { writeText("input") }
         val readableRoot = base.resolve("readable")
@@ -413,7 +413,8 @@ class ReconstructionOutputWorkspaceTest {
         Files.setPosixFilePermissions(readLock, java.nio.file.attribute.PosixFilePermissions.fromString("rw-r--r--"))
 
         ReconstructionOutputWorkspace.withReadLease(readableRoot) { assertTrue(readLock.exists()) }
-        assertEquals(setOf("OWNER_READ", "OWNER_WRITE"), Files.getPosixFilePermissions(readLock).map { it.name }.toSet())
+        assertEquals(setOf("OWNER_READ", "OWNER_WRITE", "GROUP_READ", "OTHERS_READ"),
+            Files.getPosixFilePermissions(readLock).map { it.name }.toSet())
 
         val writableRoot = base.resolve("writable")
         ReconstructionOutputWorkspace.open(writableRoot, input).use { }
@@ -626,6 +627,18 @@ class ReconstructionOutputWorkspaceTest {
             assertFailsWith<IllegalStateException> {
                 workspace.publicationLock.borrow(root, workspace.inputSha256)
             }
+        }
+    }
+
+    @Test
+    fun `publication borrowing tolerates access-time-only changes while rechecking content identity`() {
+        val base = createTempDirectory("input-publication-atime-")
+        val root = base.resolve("output")
+        val input = base.resolve("input").apply { writeText("unchanged input") }
+        ReconstructionOutputWorkspace.open(root, input).use { workspace ->
+            Files.setAttribute(input, "unix:atime", java.nio.file.attribute.FileTime.fromMillis(1))
+            assertSame(workspace.publicationLock, workspace.publicationLock.borrow(root, workspace.inputSha256))
+            assertEquals(sha256(input.readBytes()), workspace.inputSha256)
         }
     }
 

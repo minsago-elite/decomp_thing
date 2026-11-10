@@ -23,7 +23,7 @@ internal fun listLegacyArtifactSummaries(context: WebReportContext, recordedRepa
 internal fun listLegacyArtifactSummaries(context: WebReportContext, recordedRepair: RepairHistoryReadResult?,
     page: RepairRecordedHistoryPage?): List<WebArtifactSummary> {
     if (!Files.isDirectory(context.reportsDirectory, NOFOLLOW_LINKS)) return emptyList()
-    return ReconstructionOutputWorkspace.withReadLease(context.reportsDirectory) {
+    return ReconstructionOutputWorkspace.withReadLeaseIfManaged(context.reportsDirectory) {
         listLegacyArtifactSummariesUnderLease(context, recordedRepair, page)
     }
 }

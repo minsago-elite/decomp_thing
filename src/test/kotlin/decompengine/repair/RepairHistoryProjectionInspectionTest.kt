@@ -118,12 +118,26 @@ class RepairHistoryProjectionInspectionTest {
     fun pendingAndHistoricalRestorationFailureRemainCanonicalWhenHistoryIsCorrupt() {
         val root = root()
         var armed = false
-        ModuleRevisionGraph.openForTesting(root, profile, faultInjector = ModuleRevisionFaultInjector { point ->
-            if (armed && point is ModuleRevisionFaultPoint.BeforePublicationExchange && point.phase == "rollback") throw RestoreFailure()
+        ModuleRevisionGraph.openLegacyForTesting(root, profile, faultInjector = ModuleRevisionFaultInjector { point ->
+            if (point is ModuleRevisionFaultPoint.AfterPublicationExchange && point.phase == "promotion") throw PromotionFailure()
+            if (point is ModuleRevisionFaultPoint.BeforeRollbackExchange && point.phase == "promotion") throw PromotionRollbackFailure()
+            if (armed && point is ModuleRevisionFaultPoint.BeforePublicationExchange && point.phase == "promotion-rollback") throw RestoreFailure()
         }).use { graph ->
             graph.enableRunContract()
-            val attempt = graph.beginAttempt(listOf("code.c"))
+            val corpus = graph.retainRegressionInputs(listOf(ProcessInput("PRIVATE-case", emptyList(), byteArrayOf())))
+            graph.beginRun(1, 60_000)
+            graph.bindOriginalBinary(sha256("reference".toByteArray()))
+            graph.bindExpectedObservations(sha256("expected".toByteArray()))
+            val attempt = graph.beginAttempt(listOf("code.c"), RevisionRepairMetadata(1, "compile", "bounded private prompt",
+                "PRIVATE-summary", corpus.inputs.map { it.id }, null, corpus.sha256,
+                publicationMode = RepairPublicationMode.TEST_ONLY_NON_RELEASE))
             graph.installCandidate(attempt, mapOf("code.c" to "candidate".toByteArray()))
+            val state = graph.snapshot
+            val proof = RepairValidationProof(repairCandidateSourceSha256(graph.candidateSources(attempt)), state.profileSha256,
+                state.indexSha256, corpus.sha256, sha256("reference".toByteArray()), sha256("rebuilt".toByteArray()),
+                sha256("runtime".toByteArray()), sha256("evidence".toByteArray()), true,
+                RepairValidationAssurance.TEST_ONLY_HOST_PROCESS)
+            assertFailsWith<PromotionFailure> { graph.accept(attempt, RepairEvidence("valid", "PRIVATE-evidence"), proof) }
             armed = true
             assertFailsWith<RestoreFailure> { graph.reject(attempt) }
         }
@@ -181,7 +195,7 @@ class RepairHistoryProjectionInspectionTest {
             root.resolve("reports/repair_history.json").writeText("PRIVATE-corrupt")
             graph.reject(second)
             val restored = readProjectRecordedRepairHistory(root)
-            assertEquals(RepairRollbackState.RESTORED_VERIFIED, restored.snapshot?.attempts?.last()?.rollback?.state)
+            assertEquals(RepairRollbackState.NOT_REQUIRED_VERIFIED, restored.snapshot?.attempts?.last()?.rollback?.state)
             assertEquals(RepairRecordedQualification.RECORDED_METADATA_ONLY, restored.snapshot?.qualification)
         }
         assertTrue(progress.isNotEmpty())
@@ -224,6 +238,8 @@ class RepairHistoryProjectionInspectionTest {
         }
     }
 
+    private class PromotionFailure : RuntimeException()
+    private class PromotionRollbackFailure : RuntimeException()
     private class RestoreFailure : RuntimeException()
     private fun root(): Path {
         val parent = Path.of("build/test-tmp").toAbsolutePath().normalize()
@@ -232,7 +248,9 @@ class RepairHistoryProjectionInspectionTest {
     }
     private fun produce(current: Boolean, accepted: Boolean, candidate: ByteArray = "candidate".toByteArray()): Capture {
         val root = root()
-        ModuleRevisionGraph.open(root, profile).use { graph ->
+        val graph = if (current) ModuleRevisionGraph.open(root, profile)
+            else ModuleRevisionGraph.openLegacyForTesting(root, profile, schemaVersion = 2)
+        graph.use {
             if (current) graph.enableRunContract()
             val corpus = graph.retainRegressionInputs(listOf(ProcessInput("PRIVATE-case", listOf("PRIVATE-arg"), "PRIVATE-stdin".toByteArray())))
             if (current) {

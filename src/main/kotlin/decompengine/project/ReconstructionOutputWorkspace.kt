@@ -294,7 +294,10 @@ internal class ReconstructionOutputWorkspace private constructor(
                     "published reconstruction workspace markers are incomplete",
                 )
             }
-            return withReadLease(reportDirectory, action)
+            // HTTP reads must not queue behind a long reconstruction. If the publication is
+            // currently being replaced, callers can render the job/progress state and report
+            // source evidence as temporarily unavailable instead of blocking the whole page.
+            return acquireReadLease(reportDirectory, failFast = true).use { action() }
         }
 
         /**
@@ -578,7 +581,7 @@ internal class ReconstructionOutputWorkspace private constructor(
         }
 
         /** Acquire a read lease for APIs that must return a path consumed synchronously later. */
-        internal fun acquireReadLease(reportDirectory: Path): AutoCloseable {
+        internal fun acquireReadLease(reportDirectory: Path, failFast: Boolean = false): AutoCloseable {
             val canonicalRoot = reportDirectory.toRealPath()
             val gate = retainGate(canonicalRoot)
             val ownerThread = Thread.currentThread()
@@ -590,7 +593,10 @@ internal class ReconstructionOutputWorkspace private constructor(
             var sharedReaderAcquired = false
             try {
                 if (inherited == null) {
-                    gateStamp = acquireReadLock(gate)
+                    gateStamp = if (failFast) gate.lock.tryReadLock() else acquireReadLock(gate)
+                    if (gateStamp == 0L) throw ReconstructionOutputReadUnavailableException(
+                        "published reconstruction workspace is currently being updated",
+                    )
                     synchronized(gate) {
                         check(gate.readHolds.put(ownerThread, ProcessGate.ReadHold(gateStamp, 1)) == null) {
                             "a read lease was concurrently registered for the same thread"
@@ -598,7 +604,7 @@ internal class ReconstructionOutputWorkspace private constructor(
                         readHoldRegistered = true
                     }
                 }
-                acquireSharedReader(gate, canonicalRoot)
+                acquireSharedReader(gate, canonicalRoot, failFast)
                 sharedReaderAcquired = true
                 validateSharedReaderAuthority(gate, canonicalRoot)
             } catch (failure: Throwable) {
@@ -654,7 +660,7 @@ internal class ReconstructionOutputWorkspace private constructor(
          * readers wait interruptibly for that transition, so cancellation cannot strand a
          * workflow behind a synchronized block while cross-process lock acquisition is blocked.
          */
-        private fun acquireSharedReader(gate: ProcessGate, root: Path) {
+        private fun acquireSharedReader(gate: ProcessGate, root: Path, failFast: Boolean) {
             val monitor = gate.sharedLockMonitor
             while (true) {
                 var opener = false
@@ -667,6 +673,10 @@ internal class ReconstructionOutputWorkspace private constructor(
                     if (!gate.sharedLockTransition) {
                         gate.sharedLockTransition = true
                         opener = true
+                    } else if (failFast) {
+                        throw ReconstructionOutputReadUnavailableException(
+                            "published reconstruction workspace is currently being updated",
+                        )
                     } else {
                         gate.sharedLockChanged.await()
                     }
@@ -678,7 +688,7 @@ internal class ReconstructionOutputWorkspace private constructor(
                 var opened: SharedFileLock? = null
                 var installed = false
                 try {
-                    opened = openSharedFileLock(root)
+                    opened = openSharedFileLock(root, failFast)
                     monitor.lock()
                     try {
                         check(gate.sharedFileLock == null && gate.sharedReaders == 0 && gate.sharedLockTransition)
@@ -789,34 +799,32 @@ internal class ReconstructionOutputWorkspace private constructor(
             if (stamp != 0L) gate.lock.unlockRead(stamp)
         }
 
-        private fun openSharedFileLock(root: Path): SharedFileLock {
+        private fun openSharedFileLock(root: Path, failFast: Boolean): SharedFileLock {
             var rootDescriptor: LinuxDescriptor? = null
             var lockDescriptor: LinuxDescriptor? = null
             var channel: FileChannel? = null
             try {
                 rootDescriptor = LinuxFilesystemSyscalls.openRoot(root)
                 lockDescriptor = LinuxFilesystemSyscalls.openRegularFileAtOrNull(rootDescriptor.fd, LOCK_FILE)
-                    ?: LinuxFilesystemSyscalls.createRegularFile(rootDescriptor.fd, LOCK_FILE, OWNER_READ_WRITE).also {
-                        LinuxFilesystemSyscalls.synchronize(rootDescriptor)
-                    }
-                channel = FileChannel.open(LinuxFilesystemSyscalls.descriptorPath(lockDescriptor), READ, WRITE)
-                // Normalized 0600 workspaces need no migration. Taking an exclusive migration
-                // lock on every read serializes independent readers across processes for the
-                // entire lifetime of the first reader's shared lease.
+                    ?: throw ReconstructionOutputReadUnavailableException(
+                        "published reconstruction workspace lock is unavailable",
+                    )
+                channel = FileChannel.open(LinuxFilesystemSyscalls.descriptorPath(lockDescriptor), READ)
                 val current = LinuxFilesystemSyscalls.identity(lockDescriptor.fd)
-                if ((current.mode and 0xfff) == OWNER_READ_WRITE) {
-                    normalizePublicationLock(rootDescriptor, lockDescriptor, channel)
-                } else {
-                    // Earlier releases created the advisory lock with the process umask (often
-                    // 0644). Normalize those workspaces while exclusively locked, then downgrade.
-                    val migrationLock = channel.lock()
-                    try { normalizePublicationLock(rootDescriptor, lockDescriptor, channel) }
-                    finally { migrationLock.release() }
+                if (!current.isRegularFile || current.linkCount != 1 || current.uid != rootDescriptor.identity.uid ||
+                    !isSafeReadPublicationLockMode(current.mode)) {
+                    throw ReconstructionOutputReadUnavailableException(
+                        "published reconstruction workspace lock is not a validated private lock",
+                    )
                 }
-                val fileLock = channel.lock(0L, Long.MAX_VALUE, true)
+                val fileLock = if (failFast) channel.tryLock(0L, Long.MAX_VALUE, true)
+                    else channel.lock(0L, Long.MAX_VALUE, true)
+                if (fileLock == null) throw ReconstructionOutputReadUnavailableException(
+                    "published reconstruction workspace is currently being updated",
+                )
                 val identity = LinuxFilesystemSyscalls.identity(lockDescriptor.fd)
                 require(identity.isRegularFile && identity.linkCount == 1 &&
-                    (identity.mode and 0xfff) == OWNER_READ_WRITE && identity.uid == rootDescriptor.identity.uid) {
+                    isSafeReadPublicationLockMode(identity.mode) && identity.uid == rootDescriptor.identity.uid) {
                     "reconstruction output lock is not an owned private regular file"
                 }
                 val shared = SharedFileLock(rootDescriptor, lockDescriptor, channel, fileLock)
@@ -966,9 +974,14 @@ internal class ReconstructionOutputWorkspace private constructor(
                 // publication journal. Charge that read against the same aggregate recovery
                 // allowance and checkpoint within the stream, not merely before opening it.
                 recoveryBudget?.publicationRecoveryBytes(inputBefore.size)
-                LinuxFilesystemSyscalls.openReadableWithoutAtimeFrom(inputDescriptor).use { inputReadable ->
+                // The admitted input may be a read-only host bind mount owned by a different
+                // UID (for example in the archival container). O_NOATIME is not available in
+                // that case. A normal read is safe here because this is an identity capture,
+                // not an atime-neutral source witness; compare all content-stability metadata
+                // except atime around the bounded descriptor read.
+                LinuxFilesystemSyscalls.openReadableFrom(inputDescriptor).use { inputReadable ->
                     require(inputReadable.identity == inputDescriptor.identity) {
-                        "reconstruction input descriptor changed while opening its metadata-neutral reader"
+                        "reconstruction input descriptor changed while opening its reader"
                     }
                     var readBytes = 0L
                     while (readBytes < inputBefore.size) {
@@ -982,7 +995,7 @@ internal class ReconstructionOutputWorkspace private constructor(
                         readBytes = Math.addExact(readBytes, bytes.size.toLong())
                     }
                 }
-                require(inputBefore == LinuxFilesystemSyscalls.fileState(inputDescriptor)) {
+                require(sameInputContentState(inputBefore, LinuxFilesystemSyscalls.fileState(inputDescriptor))) {
                     "reconstruction input changed while its workspace identity was admitted"
                 }
                 val inputSha = digest.digest().joinToString("") { "%02x".format(it) }
@@ -1043,6 +1056,20 @@ internal class ReconstructionOutputWorkspace private constructor(
 
         private const val LOCK_FILE = ".reconstruction.lock"
         private const val OWNER_READ_WRITE = 0x180 // 0600; mkdir/file modes are numeric at the syscall seam.
+
+        /** Historical umask-created locks are read-only compatible, then normalized by a writer. */
+        private fun isSafeReadPublicationLockMode(mode: Int): Boolean {
+            val permissions = mode and 0xfff
+            return (permissions and OWNER_READ_WRITE) == OWNER_READ_WRITE &&
+                (permissions and 0x5b) == 0 && (permissions and 0xe00) == 0
+        }
+
+        private fun sameInputContentState(before: LinuxFileState, after: LinuxFileState): Boolean =
+            before.identity == after.identity && before.size == after.size &&
+                before.modificationTimeSeconds == after.modificationTimeSeconds &&
+                before.modificationTimeNanoseconds == after.modificationTimeNanoseconds &&
+                before.changeTimeSeconds == after.changeTimeSeconds &&
+                before.changeTimeNanoseconds == after.changeTimeNanoseconds
 
         private fun readObject(path: Path): JsonObject? {
             if (!Files.exists(path, NOFOLLOW_LINKS)) return null

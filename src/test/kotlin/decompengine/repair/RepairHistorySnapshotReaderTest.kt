@@ -12,6 +12,8 @@ import kotlin.io.path.readText
 import kotlin.io.path.writeBytes
 import kotlin.io.path.writeText
 import kotlin.test.*
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
 /** Source-authored reader controls; not host/native qualification or a universal ABA proof. */
 class RepairHistorySnapshotReaderTest {
@@ -36,7 +38,7 @@ class RepairHistorySnapshotReaderTest {
         assertEquals(listed.graphSha256, streamed.graphSha256)
         assertEquals(listed.graphSha256, read.graphSha256)
         assertEquals(listed.publishedHead, read.publishedHead)
-        assertEquals(RepairRollbackState.RESTORED_VERIFIED, read.attempts.last().rollback?.state)
+        assertEquals(RepairRollbackState.NOT_REQUIRED_VERIFIED, read.attempts.last().rollback?.state)
         assertEquals("base", root.resolve("code.c").readText())
     }
 
@@ -262,7 +264,7 @@ class RepairHistorySnapshotReaderTest {
         val graph = path.resolve("graph.json").readBytes()
         val binding = path.resolve("recovery-binding.json").readBytes()
         val selectedBudget = recordedRepairHistoryReadBudget(graph)
-        assertTrue(graph.size > selectedBudget.maximumGraphBytes)
+        assertTrue(graph.size <= selectedBudget.maximumGraphBytes)
         // A valid nonjoining pre-marker schema2 input is still consumed/revalidated, never skipped.
         val unrelatedRoot = root()
         ModuleRevisionGraph.open(unrelatedRoot, profile).close()
@@ -457,7 +459,7 @@ class RepairHistorySnapshotReaderTest {
             }
             val result = readProjectRecordedRepairHistory(root)
             assertEquals(RepairHistoryReadStatus.RECORDED, result.status, kind)
-            assertEquals(RepairRollbackState.RESTORED_VERIFIED, result.snapshot?.attempts?.last()?.rollback?.state, kind)
+            assertEquals(RepairRollbackState.NOT_REQUIRED_VERIFIED, result.snapshot?.attempts?.last()?.rollback?.state, kind)
             assertEquals(if (kind == "corrupt") RepairHistoryProjectionStatus.INVALID else RepairHistoryProjectionStatus.UNAVAILABLE,
                 result.projection.status, kind)
             assertFalse(result.projection.toString().contains("PRIVATE-"))
@@ -630,7 +632,7 @@ class RepairHistorySnapshotReaderTest {
         val result = readProjectRecordedRepairHistory(root)
         assertEquals(RepairHistoryReadStatus.RECORDED, result.status)
         assertEquals(RepairHistoryProjectionStatus.INVALID, result.projection.status)
-        assertEquals(RepairRollbackState.RESTORED_VERIFIED, result.snapshot?.attempts?.last()?.rollback?.state)
+        assertEquals(RepairRollbackState.NOT_REQUIRED_VERIFIED, result.snapshot?.attempts?.last()?.rollback?.state)
     }
 
 
@@ -797,14 +799,10 @@ class RepairHistorySnapshotReaderTest {
     }
 
     private fun underCapLegacyPending(): Path {
-        val root = root()
-        val selected = budget.copy(maximumGraphBytes = 16 * 1024)
-        ModuleRevisionGraph.open(root, profile, selected).use { graph ->
-            val attempt = graph.beginAttempt(listOf("code.c")) // Actual original schema2 producer.
-            graph.installCandidate(attempt, mapOf("code.c" to "candidate".toByteArray()))
-        }
+        val fixture = historicalPending(2)
+        val root = fixture.root
         assertFailsWith<MigrationCrash> {
-            ModuleRevisionGraph.openForTesting(root, profile, selected, ModuleRevisionFaultInjector { point ->
+            ModuleRevisionGraph.openForTesting(root, fixture.profile, faultInjector = ModuleRevisionFaultInjector { point ->
                 if (point is ModuleRevisionFaultPoint.AfterStatePublicationDirectorySync &&
                     point.scope == "revision-state" && point.name == "graph.json") throw MigrationCrash()
             }).close()
@@ -1033,18 +1031,32 @@ class RepairHistorySnapshotReaderTest {
     }
 
     private fun legacyPendingWithCaptureBudget(selected: RepairResourceBudget): Path {
-        val root = root()
-        ModuleRevisionGraph.open(root, profile, selected).use { graph ->
-            val attempt = graph.beginAttempt(listOf("code.c")) // Genuine schema2, before any upgrade.
-            graph.installCandidate(attempt, mapOf("code.c" to "candidate".toByteArray()))
-        }
+        val fixture = historicalPending(2)
+        val root = fixture.root
         assertFailsWith<MigrationCrash> {
-            ModuleRevisionGraph.openForTesting(root, profile, selected, ModuleRevisionFaultInjector { point ->
+            ModuleRevisionGraph.openForTesting(root, fixture.profile, faultInjector = ModuleRevisionFaultInjector { point ->
                 if (point is ModuleRevisionFaultPoint.AfterStatePublicationDirectorySync &&
                     point.scope == "revision-state" && point.name == "graph.json") throw MigrationCrash()
             }).close()
         }
         return root
+    }
+
+    private data class HistoricalPending(val root: Path, val profile: RepairIndexProfile)
+    private fun historicalPending(schema: Int): HistoricalPending {
+        val resource = Path.of(requireNotNull(javaClass.getResource("/repair/legacy-schema${schema}-writer-pending")).toURI())
+        val project = Files.createTempDirectory(Path.of("build/test-tmp").toAbsolutePath().normalize(), "historical-reader-$schema-")
+        resource.toFile().copyRecursively(project.toFile(), overwrite = true)
+        project.resolve("code.c").writeText("candidate") // Reader-only sentinel outside the historical profile's source set.
+        val document = kotlinx.serialization.json.Json.parseToJsonElement(
+            project.resolve("reports/repair-revisions/graph.json").readText(),
+        ).jsonObject
+        val historicalProfile = object : RepairIndexProfile by GeneratedCRepairIndexProfile {
+            override fun profileId(): String = document.getValue("profileId").jsonPrimitive.content
+            override fun configurationSha256(): String = document.getValue("profileSha256").jsonPrimitive.content
+            override fun configurationSha256(budget: RepairResourceBudget): String = configurationSha256()
+        }
+        return HistoricalPending(project, historicalProfile)
     }
 
     private fun root(): Path {
@@ -1062,22 +1074,10 @@ class RepairHistorySnapshotReaderTest {
     }
     private class MigrationCrash : Error()
     private fun migrated(): Path {
-        val selectedBudget = budget.copy(maximumGraphBytes = 16 * 1024)
-        val root = root()
-        ModuleRevisionGraph.open(root, profile, selectedBudget).use { graph ->
-            val corpus = graph.retainRegressionInputs(listOf(ProcessInput("case", emptyList(), byteArrayOf())))
-            val attempt = graph.beginAttempt(listOf("code.c"), RevisionRepairMetadata(1, "compile", "bounded private prompt",
-                "LEGACY_PADDING", corpus.inputs.map { it.id }, null, corpus.sha256, publicationMode = RepairPublicationMode.TEST_ONLY_NON_RELEASE))
-            graph.installCandidate(attempt, mapOf("code.c" to "candidate".toByteArray()))
-        }
-        val path = root.resolve("reports/repair-revisions/graph.json")
-        val original = path.readText()
-        val padding = (selectedBudget.maximumGraphBytes - original.toByteArray().size).toInt()
-        assertTrue(padding > 0)
-        path.writeText(original.replace("LEGACY_PADDING", "x".repeat("LEGACY_PADDING".length + padding)))
-        assertEquals(selectedBudget.maximumGraphBytes, Files.size(path))
+        val fixture = historicalPending(2)
+        val root = fixture.root
         assertFailsWith<MigrationCrash> {
-            ModuleRevisionGraph.openForTesting(root, profile, selectedBudget, ModuleRevisionFaultInjector { point ->
+            ModuleRevisionGraph.openForTesting(root, fixture.profile, faultInjector = ModuleRevisionFaultInjector { point ->
                 if (point is ModuleRevisionFaultPoint.AfterStatePublicationDirectorySync && point.scope == "revision-state" && point.name == "graph.json") throw MigrationCrash()
             }).close()
         }

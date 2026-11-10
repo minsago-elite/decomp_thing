@@ -7,6 +7,7 @@ import java.nio.channels.FileLock
 import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.Path
+import java.security.MessageDigest
 
 /**
  * Proof that a reconstruction workspace owns the canonical output directory.
@@ -78,7 +79,7 @@ internal sealed class ReconstructionPublicationLock private constructor(
         val before = LinuxFilesystemSyscalls.fileState(inputDescriptor)
         val observed = sha256Descriptor(inputDescriptor)
         val after = LinuxFilesystemSyscalls.fileState(inputDescriptor)
-        check(before == after && observed == inputSha256) {
+        check(sameContentState(before, after) && observed == inputSha256) {
             "reconstruction input bytes changed during the workspace lease"
         }
         return this
@@ -165,8 +166,36 @@ internal sealed class ReconstructionPublicationLock private constructor(
     }
 
     private fun sha256Descriptor(descriptor: LinuxDescriptor): String {
-        return LinuxFilesystemSyscalls.sha256WithoutAtime(descriptor, Long.MAX_VALUE)
+        // Inputs can be read-only host bind mounts owned by the runner rather than this
+        // container's worker UID. O_NOATIME then fails with EPERM. This is an input identity
+        // recheck, not an atime-neutral source witness, so use an ordinary pinned-descriptor
+        // read and prove identity, size, mtime, and ctime remained stable around hashing.
+        val before = LinuxFilesystemSyscalls.fileState(descriptor)
+        val digest = MessageDigest.getInstance("SHA-256")
+        LinuxFilesystemSyscalls.openReadableFrom(descriptor).use { readable ->
+            require(readable.identity == descriptor.identity) { "reconstruction input reader changed identity" }
+            val buffer = ByteArray(64 * 1024)
+            var total = 0L
+            while (true) {
+                val bytes = LinuxFilesystemSyscalls.readWithoutAtime(readable, buffer.size)
+                if (bytes.isEmpty()) break
+                total = Math.addExact(total, bytes.size.toLong())
+                require(total <= before.size) { "reconstruction input grew while hashing" }
+                digest.update(bytes)
+            }
+            require(total == before.size) { "reconstruction input shrank while hashing" }
+        }
+        val after = LinuxFilesystemSyscalls.fileState(descriptor)
+        check(sameContentState(before, after)) { "reconstruction input changed while hashing" }
+        return digest.digest().joinToString("") { "%02x".format(it) }
     }
+
+    private fun sameContentState(before: decompengine.acp.LinuxFileState, after: decompengine.acp.LinuxFileState): Boolean =
+        before.identity == after.identity && before.size == after.size &&
+            before.modificationTimeSeconds == after.modificationTimeSeconds &&
+            before.modificationTimeNanoseconds == after.modificationTimeNanoseconds &&
+            before.changeTimeSeconds == after.changeTimeSeconds &&
+            before.changeTimeNanoseconds == after.changeTimeNanoseconds
 
     companion object {
         /** Called only by ReconstructionOutputWorkspace.openInternal after acquiring its lock. */

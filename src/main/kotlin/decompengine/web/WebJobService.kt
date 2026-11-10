@@ -1023,7 +1023,7 @@ class WebJobService(
         val candidate = attempt.candidate?.takeIf { it.revisionId == revisionId && attempt.endedAt != null } ?: unavailable()
         val directory = try { store.runReportsDirectory(jobId, runId).resolve("source-tree") } catch (_: Exception) { unavailable() }
         val readLease = try {
-            decompengine.project.ReconstructionOutputWorkspace.acquireReadLease(directory.parent)
+            decompengine.project.ReconstructionOutputWorkspace.acquireReadLease(directory.parent, failFast = true)
         } catch (_: Exception) { unavailable() }
         try {
         if (!java.nio.file.Files.isDirectory(directory, java.nio.file.LinkOption.NOFOLLOW_LINKS)) unavailable()
@@ -2112,11 +2112,11 @@ class WebJobService(
                     )
                 }
                 synchronized(this@WebJobService) {
-                    // A returned successful outcome is authoritative: adapters return it only after
-                    // their work (including durable reconstruction publication) has completed.
-                    // Shutdown can race the following attempt-record write, but must not erase that
-                    // already-committed result or leave the installed candidate unrecorded.
-                    finish(transition, preserveCompletedOutcome = outcome is DurableWebWorkflowOutcome.Completed)
+                    // Only an authoritative publication callback may win a shutdown race. An
+                    // adapter's returned Completed value is not itself proof that durable bytes
+                    // were committed; test adapters and future adapters can return early.
+                    finish(transition, preserveCompletedOutcome =
+                        terminal && outcome is DurableWebWorkflowOutcome.Completed)
                 }
                 // Still owned: no new attempt can supersede this one while its acceptance is verified.
                 publishAcceptance(job, adapter, attempt.runId, context.reportsDirectory)?.let { accepted ->

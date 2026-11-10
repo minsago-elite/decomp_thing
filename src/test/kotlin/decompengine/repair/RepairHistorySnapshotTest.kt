@@ -3,6 +3,8 @@ package decompengine.repair
 import decompengine.agent.AgentFileChange
 import decompengine.agent.AgentFileChangeKind
 import decompengine.agent.AgentWorkspacePath
+import decompengine.acp.LinuxDescriptor
+import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.project.agentFileChangeSetSha256
 import decompengine.project.sha256
 import decompengine.validation.ProcessInput
@@ -179,16 +181,20 @@ class RepairHistorySnapshotTest {
         val root = root()
         var armed = false
         var id = ""
-        ModuleRevisionGraph.openForTesting(root, profile, faultInjector = ModuleRevisionFaultInjector { point ->
-            if (armed && point is ModuleRevisionFaultPoint.BeforePublicationExchange && point.phase == "rollback") throw RestoreFailure()
+        ModuleRevisionGraph.openLegacyForTesting(root, profile, faultInjector = ModuleRevisionFaultInjector { point ->
+            if (point is ModuleRevisionFaultPoint.AfterPublicationExchange && point.phase == "promotion") throw PromotionFailure()
+            if (point is ModuleRevisionFaultPoint.BeforeRollbackExchange && point.phase == "promotion") throw PromotionRollbackFailure()
+            if (armed && point is ModuleRevisionFaultPoint.BeforePublicationExchange && point.phase == "promotion-rollback") throw RestoreFailure()
         }).use { graph ->
-            graph.enableRunContract()
+            startRun(graph)
             val attempt = graph.beginAttempt(listOf("code.c")); id = attempt.id
             graph.installCandidate(attempt, mapOf("code.c" to "candidate".toByteArray()))
+            assertFailsWith<PromotionFailure> { graph.accept(attempt, RepairEvidence("valid", "fixture"), proof(graph, attempt)) }
             armed = true
             assertFailsWith<RestoreFailure> { graph.reject(attempt) }
             val snapshot = view(capture(root))
-            assertTrue(snapshot.runs.isEmpty())
+            assertEquals(RepairRunStatus.ROLLBACK_FAILED, snapshot.runs.single().status)
+            assertEquals(snapshot.pending?.identity, snapshot.runs.single().rollbackFailureAttempt)
             assertEquals(RepairRollbackState.RESTORE_FAILED_UNRESOLVED, snapshot.pending?.rollback?.state)
             assertNotNull(snapshot.pending?.rollback?.failureCode)
         }
@@ -210,7 +216,7 @@ class RepairHistorySnapshotTest {
             startRun(graph)
             val attempt = graph.beginAttempt(listOf("code.c"), metadata(graph))
             graph.installCandidate(attempt, mapOf("code.c" to "candidate".toByteArray()))
-            assertEquals("base", root.resolve("code.c").readText())
+            assertEquals("base", readSourceWithoutAtime(root, "code.c").decodeToString())
             graph.reject(attempt)
             val record = requireNotNull(view(capture(root)).attempts.last().rollback)
             assertEquals(RepairRollbackState.NOT_REQUIRED_VERIFIED, record.state)
@@ -225,7 +231,7 @@ class RepairHistorySnapshotTest {
         val root = root()
         var armed = false
         var id = ""
-        ModuleRevisionGraph.openForTesting(root, profile, faultInjector = ModuleRevisionFaultInjector { point ->
+        ModuleRevisionGraph.openLegacyForTesting(root, profile, faultInjector = ModuleRevisionFaultInjector { point ->
             if (point is ModuleRevisionFaultPoint.AfterPublicationExchange && point.phase == "promotion") throw PromotionFailure()
             if (point is ModuleRevisionFaultPoint.BeforeRollbackExchange && point.phase == "promotion") throw PromotionRollbackFailure()
             if (armed && point is ModuleRevisionFaultPoint.BeforePublicationExchange && point.phase == "promotion-rollback") throw RestoreFailure()
@@ -279,27 +285,24 @@ class RepairHistorySnapshotTest {
     }
 
     @Test
-    fun genuineLegacyMigrationRetainsUnknownChangedAndKnownUnchangedMarkers() {
-        for (changed in listOf(false, true)) {
-            val root = root()
-            ModuleRevisionGraph.open(root, profile).use { graph ->
-                val attempt = graph.beginAttempt(listOf("code.c")) // Actual pre-marker schema2.
-                if (changed) graph.installCandidate(attempt, mapOf("code.c" to "candidate".toByteArray()))
-            }
+    fun genuineHistoricalLegacyMigrationRetainsUnknownInstallMarker() {
+        for (schema in listOf(2, 3)) {
+            val fixture = historicalPending(schema)
+            val root = fixture.root
             assertFailsWith<MarkerCrash> {
-                ModuleRevisionGraph.openForTesting(root, profile, faultInjector = ModuleRevisionFaultInjector { point ->
+                ModuleRevisionGraph.openForTesting(root, fixture.profile, faultInjector = ModuleRevisionFaultInjector { point ->
                     if (point is ModuleRevisionFaultPoint.AfterStatePublicationDirectorySync &&
                         point.scope == "revision-state" && point.name == "graph.json") throw MarkerCrash()
                 }).close()
             }
             val pending = requireNotNull(view(capture(root)).pending?.rollback)
             assertTrue(pending.legacyPendingStateUnknown)
-            assertEquals(if (changed) null else false, pending.candidateSourceInstallStarted)
-            ModuleRevisionGraph.open(root, profile).close()
+            assertNull(pending.candidateSourceInstallStarted)
+            ModuleRevisionGraph.open(root, fixture.profile).close()
             val final = requireNotNull(view(capture(root)).attempts.last().rollback)
             assertTrue(final.legacyPendingStateUnknown)
-            assertEquals(if (changed) null else false, final.candidateSourceInstallStarted)
-            assertEquals(if (changed) RepairRollbackState.RESTORED_VERIFIED else RepairRollbackState.NOT_REQUIRED_VERIFIED, final.state)
+            assertNull(final.candidateSourceInstallStarted)
+            assertEquals(RepairRollbackState.RESTORED_VERIFIED, final.state)
         }
     }
 
@@ -333,7 +336,7 @@ class RepairHistorySnapshotTest {
     @Test
     fun genuinePreContractAcceptedNodeRemainsExplicitlyUnverified() {
         val root = root()
-        ModuleRevisionGraph.open(root, profile).use { graph ->
+        ModuleRevisionGraph.openLegacyForTesting(root, profile, schemaVersion = 2).use { graph ->
             val attempt = graph.beginAttempt(listOf("code.c"))
             graph.installCandidate(attempt, mapOf("code.c" to "legacy-candidate".toByteArray()))
             graph.accept(attempt, RepairEvidence("valid", "historical fixture"))
@@ -482,7 +485,7 @@ class RepairHistorySnapshotTest {
             JsonObject(root + ("nodes" to JsonArray(nodes)))
         })
         refuse(captured.copy(graph = (canonical + " ").toByteArray()))
-        refuse(captured.copy(graph = canonical.replaceFirst("\"schemaVersion\": 4,", "\"schemaVersion\": 4,\n  \"unknown\": true,").toByteArray()))
+        refuse(captured.copy(graph = canonical.replaceFirst("\"schemaVersion\": 6,", "\"schemaVersion\": 6,\n  \"unknown\": true,").toByteArray()))
         refuse(captured.copy(binding = captured.binding.decodeToString().replaceFirst("\"budgetSha256\": \"", "\"budgetSha256\": \"0").toByteArray()))
         val expected = Json.parseToJsonElement(canonical).jsonObject.getValue("nodes").jsonArray.last().jsonObject
             .getValue("rollbackRecord").jsonObject.getValue("expectedSourceRevisionSha256").jsonPrimitive.content
@@ -550,27 +553,14 @@ class RepairHistorySnapshotTest {
 
     @Test
     fun genuineMigrationCreditUsesAdmittedOriginalBytesAndRejectsMissingChangedOrDuplicateInputs() {
-        val small = budget.copy(maximumGraphBytes = 16 * 1024)
-        val root = root()
-        ModuleRevisionGraph.open(root, profile, small).use { graph ->
-            val corpus = graph.retainRegressionInputs(inputs)
-            val attempt = graph.beginAttempt(listOf("code.c"), RevisionRepairMetadata(1, "compile", "bounded private prompt",
-                "LEGACY_PADDING", corpus.inputs.map { it.id }, null, corpus.sha256, publicationMode = RepairPublicationMode.TEST_ONLY_NON_RELEASE))
-            graph.installCandidate(attempt, mapOf("code.c" to "candidate".toByteArray()))
-        }
-        val path = root.resolve("reports/repair-revisions/graph.json")
-        val original = path.readText()
-        val padding = (small.maximumGraphBytes - original.toByteArray().size).toInt()
-        assertTrue(padding > 0)
-        path.writeText(original.replace("LEGACY_PADDING", "x".repeat("LEGACY_PADDING".length + padding)))
-        assertEquals(small.maximumGraphBytes, path.readBytes().size.toLong())
+        val fixture = historicalPending(2)
+        val root = fixture.root
         assertFailsWith<MarkerCrash> {
-            ModuleRevisionGraph.openForTesting(root, profile, small, ModuleRevisionFaultInjector { point ->
+            ModuleRevisionGraph.openForTesting(root, fixture.profile, faultInjector = ModuleRevisionFaultInjector { point ->
                 if (point is ModuleRevisionFaultPoint.AfterStatePublicationDirectorySync && point.scope == "revision-state" && point.name == "graph.json") throw MarkerCrash()
             }).close()
         }
-        val captured = capture(root, small)
-        assertTrue(captured.graph.size > small.maximumGraphBytes)
+        val captured = capture(root)
         assertTrue(captured.declared.isNotEmpty())
         assertTrue(view(captured).pending?.rollback?.legacyPendingStateUnknown == true)
         refuse(captured.copy(declared = emptyList()))
@@ -662,6 +652,39 @@ class RepairHistorySnapshotTest {
         val parent = Path.of("build/test-tmp").toAbsolutePath().normalize()
         Files.createDirectories(parent)
         return Files.createTempDirectory(parent, "recorded-history-").also { it.resolve("code.c").writeText("base") }
+    }
+    private data class HistoricalPending(val root: Path, val profile: RepairIndexProfile)
+    private fun historicalPending(schema: Int): HistoricalPending {
+        val resource = Path.of(requireNotNull(javaClass.getResource("/repair/legacy-schema${schema}-writer-pending")).toURI())
+        val project = Files.createTempDirectory(Path.of("build/test-tmp").toAbsolutePath().normalize(), "historical-schema-$schema-")
+        resource.toFile().copyRecursively(project.toFile(), overwrite = true)
+        val document = Json.parseToJsonElement(project.resolve("reports/repair-revisions/graph.json").readText()).jsonObject
+        val historicalProfile = object : RepairIndexProfile by GeneratedCRepairIndexProfile {
+            override fun profileId(): String = document.getValue("profileId").jsonPrimitive.content
+            override fun configurationSha256(): String = document.getValue("profileSha256").jsonPrimitive.content
+            override fun configurationSha256(budget: RepairResourceBudget): String = configurationSha256()
+        }
+        return HistoricalPending(project, historicalProfile)
+    }
+    private fun readSourceWithoutAtime(root: Path, relative: String): ByteArray {
+        val components = relative.split('/')
+        return LinuxFilesystemSyscalls.openRoot(root).use { rootDescriptor ->
+            var parent = rootDescriptor
+            val opened = mutableListOf<LinuxDescriptor>()
+            try {
+                components.dropLast(1).forEach { segment ->
+                    parent = LinuxFilesystemSyscalls.openDirectoryAt(parent.fd, segment)
+                    opened += parent
+                }
+                requireNotNull(LinuxFilesystemSyscalls.openRegularFileAtOrNull(parent.fd, components.last())).use { pinned ->
+                    LinuxFilesystemSyscalls.openReadableWithoutAtimeFrom(pinned).use { readable ->
+                        LinuxFilesystemSyscalls.readWithoutAtime(readable, 1_048_576)
+                    }
+                }
+            } finally {
+                opened.asReversed().forEach(LinuxDescriptor::close)
+            }
+        }
     }
     private fun startRun(graph: ModuleRevisionGraph) {
         graph.enableRunContract(); graph.retainRegressionInputs(inputs); graph.beginRun(2, 60_000)

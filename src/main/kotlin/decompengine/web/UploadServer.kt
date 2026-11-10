@@ -891,7 +891,7 @@ class UploadServer(
         val view = jobs.presentation(jobId)
         val query = parseRecordedRepairHistoryQuery(exchange.requestURI.rawQuery)
         val reports = query.runId?.let { jobs.reportContext(jobId, it) } ?: view.reports
-        val captured = jobs.withRunSourceReadLease(jobId, reports.runId) {
+        val captured = try { jobs.withRunSourceReadLease(jobId, reports.runId) {
             val recorded = jobs.readRecordedRepairHistory(jobId, reports.runId)
             val page = try {
                 decompengine.repair.recordedRepairHistoryPage(recorded, query.selection, MAXIMUM_VISIBLE_RECORDED_REPAIR_ATTEMPTS)
@@ -914,6 +914,16 @@ class UploadServer(
                 readLegacyJsonReport(jobId, reports, LegacyJsonReport.EXPLORATION), repairHistory,
                 readLegacyJsonReport(jobId, reports, LegacyJsonReport.RECONSTRUCTION_PROGRESS), artifacts,
                 repairEvidenceStates?.first, repairEvidenceStates?.second, recordedView)
+        } } catch (_: decompengine.project.ReconstructionOutputReadUnavailableException) {
+            // Publication owns this source generation right now. Keep the job page and durable
+            // state responsive while withholding report files until a consistent snapshot can
+            // be acquired. Do not perform fallback report reads outside the failed lease.
+            JobPageCapture.Ready(source = null, sourceUnavailable = true,
+                progress = null,
+                exploration = null,
+                repairHistory = null,
+                reconstructionProgress = null,
+                artifacts = null, repairEvidenceStates = null, repairReceiptBindingStates = null, recordedView = null)
         }
         if (captured is JobPageCapture.SelectionFailure) {
             exchange.sendHtml(captured.status, renderErrorPage(captured.status, "History selection unavailable", captured.message))

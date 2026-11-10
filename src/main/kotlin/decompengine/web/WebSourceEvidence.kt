@@ -39,7 +39,7 @@ internal class WebSourceEvidence(
     }
 
     fun read(jobId: String, reportPrefix: String = "reports"): WebSourceSnapshot {
-        return ReconstructionOutputWorkspace.withReadLease(store.reportDirectoryForRead(jobId, reportPrefix)) {
+        return ReconstructionOutputWorkspace.withReadLeaseIfManaged(store.reportDirectoryForRead(jobId, reportPrefix)) {
             readUnderLease(jobId, reportPrefix)
         }
     }

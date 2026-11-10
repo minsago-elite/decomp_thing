@@ -159,7 +159,7 @@ class UploadServerTest {
     }
 
     @Test
-    fun `page read lease waits through a paused publication and captures one generation`() {
+    fun `page read lease refuses a paused publication and captures the next generation`() {
         val root = createTempDirectory("web-page-read-lease-")
         val service = WebJobService(decompengine.jobs.JobStore(root), JobAnalyzer { _, _ -> }, JobReconstructor { _, _ -> },
             executor = Executor { command -> command.run() })
@@ -187,30 +187,61 @@ class UploadServerTest {
                 }
             }
             assertTrue(writerEntered.await(5, java.util.concurrent.TimeUnit.SECONDS), "writer did not pause inside publication")
-            val readerStarted = java.util.concurrent.CountDownLatch(1)
-            val readerThread = java.util.concurrent.atomic.AtomicReference<Thread>()
-            val reader = executor.submit(java.util.concurrent.Callable {
-                readerThread.set(Thread.currentThread())
-                readerStarted.countDown()
-                service.withRunSourceReadLease(job.id, null) {
-                    reports.resolve("reconstruction.json").toFile().readText() to reports.resolve("source-tree.zip").toFile().readText()
-                }
-            })
             // The writer owns the exclusive publication lease while its stage is incomplete.
-            assertTrue(readerStarted.await(5, java.util.concurrent.TimeUnit.SECONDS))
-            val waitDeadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5)
-            while (!reader.isDone && readerThread.get()?.state != Thread.State.WAITING &&
-                readerThread.get()?.state != Thread.State.TIMED_WAITING && System.nanoTime() < waitDeadline) {
-                Thread.yield()
+            // An HTTP page must stay responsive and omit this snapshot instead of waiting.
+            assertFailsWith<decompengine.project.ReconstructionOutputReadUnavailableException> {
+                service.withRunSourceReadLease(job.id, null) {
+                    reports.resolve("reconstruction.json").toFile().readText() to
+                        reports.resolve("source-tree.zip").toFile().readText()
+                }
             }
-            assertFalse(reader.isDone, "page capture crossed a paused publication")
             continueWriter.countDown()
             writer.get(5, java.util.concurrent.TimeUnit.SECONDS)
-            assertEquals("new-generation" to "new-generation", reader.get(5, java.util.concurrent.TimeUnit.SECONDS))
+            assertEquals("new-generation" to "new-generation", service.withRunSourceReadLease(job.id, null) {
+                reports.resolve("reconstruction.json").toFile().readText() to reports.resolve("source-tree.zip").toFile().readText()
+            })
         } finally {
             continueWriter.countDown()
             executor.shutdownNow()
             service.close()
+        }
+    }
+
+    @Test
+    fun `job page stays responsive and omits report evidence during publication`() = withServer { server, root ->
+        val id = uploadedJobId(server)
+        val job = decompengine.jobs.JobStore(root).get(id)
+        val reports = root.resolve(id).resolve("reports").createDirectories()
+        reports.resolve("reconstruction.json").writeText("old-generation")
+        reports.resolve("source-tree.zip").writeText("old-generation")
+        val writerEntered = java.util.concurrent.CountDownLatch(1)
+        val continueWriter = java.util.concurrent.CountDownLatch(1)
+        val executor = java.util.concurrent.Executors.newFixedThreadPool(2)
+        try {
+            val writer = executor.submit {
+                decompengine.project.ReconstructionOutputWorkspace.open(reports, job.binaryPath).use { workspace ->
+                    workspace.publish(setOf("reconstruction.json", "source-tree.zip"), { stage ->
+                        stage.resolve("reconstruction.json").writeText("new-generation")
+                        stage.resolve("source-tree.zip").writeText("new-generation")
+                        writerEntered.countDown()
+                        check(continueWriter.await(5, java.util.concurrent.TimeUnit.SECONDS))
+                    })
+                }
+            }
+            assertTrue(writerEntered.await(5, java.util.concurrent.TimeUnit.SECONDS), "writer did not pause inside publication")
+            val response = executor.submit<Response> { request(server, "GET", "/jobs/$id") }
+                .get(3, java.util.concurrent.TimeUnit.SECONDS)
+            assertEquals(200, response.status)
+            assertTrue(response.body.decodeToString().contains("Source-tree evidence is unavailable"))
+            continueWriter.countDown()
+            writer.get(5, java.util.concurrent.TimeUnit.SECONDS)
+            val complete = request(server, "GET", "/jobs/$id")
+            assertEquals(200, complete.status)
+            assertTrue(reports.resolve("reconstruction.json").readText() == "new-generation")
+            assertTrue(reports.resolve("source-tree.zip").readText() == "new-generation")
+        } finally {
+            continueWriter.countDown()
+            executor.shutdownNow()
         }
     }
 

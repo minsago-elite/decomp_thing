@@ -151,9 +151,10 @@ class ModulePromptCompatibilityTest {
         val temp = Files.createTempDirectory(scratch, "oversized-observation-preservation-")
         try {
             for (profile in ReconstructionProfiles.builtIn) {
-                val project = temp.resolve(profile.id)
-                val accepted = SourceTreeGenerator.generate(model(), project, profile = profile,
-                    reconstructor = EvidenceModuleReconstructor(true))
+                val output = temp.resolve(profile.id)
+                val (project, accepted) = generateTransactionalProject(
+                    output, model(), profile, EvidenceModuleReconstructor(true),
+                )
                 assertTrue(accepted.unresolvedImplementationIds.isEmpty())
                 val rejected = ModuleReconstructor { request ->
                     EvidenceModuleReconstructor(true).reconstruct(request).let { candidate ->
@@ -181,11 +182,11 @@ class ModulePromptCompatibilityTest {
                     oversizedSelectedObservation(multibyte = true),
                 )
                 for ((index, observed) in observations.withIndex()) {
-                    for (target in listOf(project, temp.resolve("${profile.id}-fresh-$index"))) {
+                    for (targetOutput in listOf(output, temp.resolve("${profile.id}-fresh-$index"))) {
+                        val target = targetOutput.resolve("source-tree")
                         val existed = Files.exists(target)
                         val failure = assertFailsWith<IllegalArgumentException> {
-                            SourceTreeGenerator.generate(model(), target, profile = profile,
-                                reconstructor = reconstructor, observedBehavior = observed)
+                            generateTransactionalProject(targetOutput, model(), profile, reconstructor, observed)
                         }
                         assertTrue(failure.message.orEmpty().contains("retained prompt input bound"))
                         assertEquals(existed, Files.exists(target))
@@ -210,11 +211,11 @@ class ModulePromptCompatibilityTest {
             val observation = retainedObservation(MAXIMUM_RETAINED_MODULE_OBSERVATION_BYTES, multibyte = true)
             assertEquals(MAXIMUM_RETAINED_MODULE_OBSERVATION_BYTES, observation.toByteArray(Charsets.UTF_8).size)
             for (profile in ReconstructionProfiles.builtIn) {
-                val project = temp.resolve(profile.id)
-                val manifest = SourceTreeGenerator.generate(model(), project, profile = profile,
-                    reconstructor = BoundedLlmModuleReconstructor(
+                val output = temp.resolve(profile.id)
+                val (project, manifest) = generateTransactionalProject(output, model(), profile,
+                    BoundedLlmModuleReconstructor(
                         AgentHarness { _, _ -> error("must not dispatch") }, maximumContextCharacters = 4_096),
-                    observedBehavior = observation)
+                    observation)
                 assertEquals(listOf("fn_alpha"), manifest.unresolvedImplementationIds)
                 val checkpointPath = project.resolve(profile.layout.declaration("module-evidence")
                     .materialize(mapOf("module" to "alpha")))
@@ -253,14 +254,13 @@ class ModulePromptCompatibilityTest {
             val observed = requireNotNull(ReconstructionExplorationInput.read(observationsDirectory, maximumCharacters = 4096))
             assertTrue(observed.toByteArray().size in (MAXIMUM_RETAINED_MODULE_OBSERVATION_BYTES + 1)..ModuleObservedBehavior.MAXIMUM_BYTES)
             for (profile in ReconstructionProfiles.builtIn) {
-                val project = temp.resolve(profile.id)
+                val output = temp.resolve(profile.id)
                 var dispatches = 0
                 val reconstructor = BoundedLlmModuleReconstructor(AgentHarness { _, _ ->
                     dispatches++
                     error("module budget fallback must not dispatch")
                 }, maximumContextCharacters = 4096)
-                val manifest = SourceTreeGenerator.generate(model, project, profile = profile,
-                    reconstructor = reconstructor, observedBehavior = observed)
+                val (project, manifest) = generateTransactionalProject(output, model, profile, reconstructor, observed)
                 assertEquals(model.functions.map { it.id }.sorted(), manifest.unresolvedImplementationIds.sorted())
                 assertEquals(0, dispatches)
                 val plan = DeterministicModulePlanner(layout = profile.layout).plan(model)
@@ -301,10 +301,9 @@ class ModulePromptCompatibilityTest {
                         for ((name, rawWrapper) in listOf("canonical" to retained, "escaped" to escaped)) {
                             val rawMisuse = temp.resolve("${profile.id}-raw-wrapper-$name")
                             assertFailsWith<IllegalArgumentException> {
-                                SourceTreeGenerator.generate(model, rawMisuse, profile = profile,
-                                    reconstructor = reconstructor, observedBehavior = rawWrapper)
+                                generateTransactionalProject(rawMisuse, model, profile, reconstructor, rawWrapper)
                             }
-                            assertFalse(Files.exists(rawMisuse))
+                            assertFalse(Files.exists(rawMisuse.resolve("source-tree")))
                         }
                     }
                 }
@@ -328,10 +327,9 @@ class ModulePromptCompatibilityTest {
         try {
             for (profile in ReconstructionProfiles.builtIn) {
                 val observed = retainedObservation(MAXIMUM_RETAINED_MODULE_OBSERVATION_BYTES + 1, multibyte = true)
-                val project = temp.resolve(profile.id)
-                val manifest = SourceTreeGenerator.generate(model(), project, profile = profile,
-                    reconstructor = BoundedLlmModuleReconstructor(AgentHarness { _, _ -> error("must not dispatch") },
-                        maximumContextCharacters = 4096), observedBehavior = observed)
+                val (project, manifest) = generateTransactionalProject(temp.resolve(profile.id), model(), profile,
+                    BoundedLlmModuleReconstructor(AgentHarness { _, _ -> error("must not dispatch") },
+                        maximumContextCharacters = 4096), observed)
                 assertEquals(listOf("fn_alpha"), manifest.unresolvedImplementationIds)
                 val checkpoint = Json.parseToJsonElement(project.resolve(profile.layout.declaration("module-evidence")
                     .materialize(mapOf("module" to "alpha"))).readText()).jsonObject
@@ -353,13 +351,12 @@ class ModulePromptCompatibilityTest {
         for (base in ReconstructionProfiles.builtIn) {
             val profile = base
             val qualificationRoot = createTempDirectory("profile-module-budget-")
-            val project = Files.createDirectory(qualificationRoot.resolve("project"))
+            val output = Files.createDirectory(qualificationRoot.resolve("project"))
             val reconstructor = BoundedLlmModuleReconstructor(
                 AgentHarness { _, _ -> error("must not execute") }, maximumContextCharacters = 4_096,
             )
-            val manifest = SourceTreeGenerator.generate(
-                model(), project, profile = profile, reconstructor = reconstructor,
-                observedBehavior = observation(4_096),
+            val (project, manifest) = generateTransactionalProject(
+                output, model(), profile, reconstructor, observation(4_096),
             )
             assertEquals(listOf("fn_alpha"), manifest.unresolvedImplementationIds)
             val module = DeterministicModulePlanner(layout = profile.layout).plan(model()).modules.single()
@@ -426,12 +423,11 @@ class ModulePromptCompatibilityTest {
                             declaration.pathTemplate.replace(Regex("^reports/"), "evidence/"),
                             declaration.roles, declaration.contentKind)
                     }), base.budgets, base.adapterConfiguration)
-                val project = temp.resolve(profile.id)
-                Files.createDirectories(project)
-                val manifest = SourceTreeGenerator.generate(model(), project, profile = profile,
-                    reconstructor = BoundedLlmModuleReconstructor(
+                val output = temp.resolve(profile.id)
+                val (project, manifest) = generateTransactionalProject(output, model(), profile,
+                    BoundedLlmModuleReconstructor(
                         AgentHarness { _, _ -> error("must not execute") }, maximumContextCharacters = 4_096),
-                    observedBehavior = observation(4_096))
+                    observation(4_096))
                 assertFalse(Files.exists(project.resolve("reports")))
                 val limits = ArchivalBundleLimits(maximumEntries = manifest.files.size + 1)
                 assertEquals(listOf("fn_alpha"),
@@ -462,12 +458,11 @@ class ModulePromptCompatibilityTest {
                             declaration.pathTemplate.replace(Regex("^reports/"), "evidence/"),
                             declaration.roles, declaration.contentKind)
                     }), base.budgets, base.adapterConfiguration)
-                val project = temp.resolve(profile.id)
-                Files.createDirectories(project)
-                val manifest = SourceTreeGenerator.generate(model(), project, profile = profile,
-                    reconstructor = BoundedLlmModuleReconstructor(
+                val output = temp.resolve(profile.id)
+                val (project, manifest) = generateTransactionalProject(output, model(), profile,
+                    BoundedLlmModuleReconstructor(
                         AgentHarness { _, _ -> error("must not execute") }, maximumContextCharacters = 4_096),
-                    observedBehavior = observation(4_096))
+                    observation(4_096))
                 Files.createDirectory(project.resolve("reports"))
                 assertEquals(listOf("fn_alpha"), ArchivalProjectAuditor.audit(project, profile).unresolvedEntityIds)
                 val priorAudit = project.resolve("reports/archival_audit.json").readText()
@@ -647,16 +642,15 @@ class ModulePromptCompatibilityTest {
         val profile = withBudget(GeneratedCMakeReconstructionProfile.descriptor, 8_192)
         val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
         Files.createDirectories(scratch)
-        val project = Files.createTempDirectory(scratch, "fallback-budget-binding-")
+        val output = Files.createTempDirectory(scratch, "fallback-budget-binding-")
         try {
             val reconstructor = BoundedLlmModuleReconstructor(
                 AgentHarness { _, _ -> error("must not execute") },
                 maximumContextCharacters = 4_096,
                 harnessProvenanceDescriptor = "archive-fallback-budget-fixture",
             )
-            val manifest = SourceTreeGenerator.generate(
-                model(), project, profile = profile, reconstructor = reconstructor,
-                observedBehavior = observation(8_192),
+            val (project, manifest) = generateTransactionalProject(
+                output, model(), profile, reconstructor, observation(8_192),
             )
             val source = manifest.files.single { ProjectFileRole.MODULE_IMPLEMENTATION in it.roles }
             val module = DeterministicModulePlanner(layout = profile.layout).plan(model()).modules.single()
@@ -734,14 +728,14 @@ class ModulePromptCompatibilityTest {
         val profile = GeneratedCMakeReconstructionProfile.descriptor
         val scratch = Path.of("build/test-tmp").toAbsolutePath().normalize()
         Files.createDirectories(scratch)
-        val project = Files.createTempDirectory(scratch, "all-fallback-confidence-")
+        val output = Files.createTempDirectory(scratch, "all-fallback-confidence-")
         try {
-            val generated = SourceTreeGenerator.generate(
-                model(), project, profile = profile,
-                reconstructor = BoundedLlmModuleReconstructor(
+            val (project, generated) = generateTransactionalProject(
+                output, model(), profile,
+                BoundedLlmModuleReconstructor(
                     AgentHarness { _, _ -> error("must not execute") }, maximumContextCharacters = 4_096,
                 ),
-                observedBehavior = observation(4_096),
+                observation(4_096),
             )
             assertEquals(listOf("fn_alpha"), generated.unresolvedImplementationIds)
             val module = DeterministicModulePlanner(layout = profile.layout).plan(model()).modules.single()
@@ -838,11 +832,11 @@ class ModulePromptCompatibilityTest {
     @Test
     fun `dispatched harness exception cannot impersonate the prompt boundary`() {
         val profile = withBudget(GeneratedCMakeReconstructionProfile.descriptor, 120000)
-        val project = createTempDirectory("forged-harness-budget-")
+        val output = createTempDirectory("forged-harness-budget-")
         val reconstructor = BoundedLlmModuleReconstructor(AgentHarness { _, _ ->
             throw ModuleContextBudgetExceededException("alpha", 120001, 120000, "a".repeat(64))
         }, maximumContextCharacters = 120000)
-        SourceTreeGenerator.generate(model(), project, profile = profile, reconstructor = reconstructor)
+        val (project, _) = generateTransactionalProject(output, model(), profile, reconstructor)
         val module = DeterministicModulePlanner(layout = profile.layout).plan(model()).modules.single()
         val checkpoint = Json.parseToJsonElement(project.resolve(
             profile.layout.declaration("module-evidence").materialize(mapOf("module" to module.id)),
@@ -857,9 +851,9 @@ class ModulePromptCompatibilityTest {
     @Test
     fun `archive evidence gate accepts authenticated repair of an undispatched fallback`() {
         val profile = withBudget(GeneratedCMakeReconstructionProfile.descriptor, 1)
-        val project = createTempDirectory("repaired-budget-fallback-")
+        val output = createTempDirectory("repaired-budget-fallback-")
         val reconstructor = BoundedLlmModuleReconstructor(AgentHarness { _, _ -> error("must not execute") })
-        val manifest = SourceTreeGenerator.generate(model(), project, profile = profile, reconstructor = reconstructor)
+        val (project, manifest) = generateTransactionalProject(output, model(), profile, reconstructor)
         val source = manifest.files.single { ProjectFileRole.MODULE_IMPLEMENTATION in it.roles }
         val sourcePath = project.resolve(source.path)
         val originalBytes = sourcePath.readBytes()
@@ -899,6 +893,35 @@ class ModulePromptCompatibilityTest {
         assertTrue(ReconstructionAcpEvidenceArchiveVerifier.verify(
             project, payloadSha256, payloadSizes, repairedManifest, profile, lineage,
         ).isEmpty())
+    }
+
+    /** Build agent fixtures through the lease-owned stage with the workspace's admitted digest. */
+    private fun generateTransactionalProject(
+        output: Path,
+        model: RecoveredProgramModel,
+        profile: ReconstructionProfile,
+        reconstructor: ModuleReconstructor,
+        observedBehavior: String? = null,
+    ): Pair<Path, SourceTreeManifest> {
+        val input = output.resolveSibling("${output.fileName}.input")
+        Files.write(input, byteArrayOf(5, 1, 4))
+        return ReconstructionOutputWorkspace.open(output, input).use { workspace ->
+            var manifest: SourceTreeManifest? = null
+            assertEquals(PublicationResult.PUBLISHED, workspace.publish(
+                setOf("source-tree", ".decomp-agent-sessions"),
+                buildStage = { stage ->
+                    manifest = SourceTreeGenerator.generate(
+                        model.copy(inputSha256 = workspace.inputSha256),
+                        stage.resolve("source-tree"),
+                        profile = profile,
+                        reconstructor = reconstructor,
+                        observedBehavior = observedBehavior,
+                        publicationLock = workspace.publicationLock,
+                    )
+                },
+            ))
+            output.resolve("source-tree") to requireNotNull(manifest)
+        }
     }
 
     private fun assertUnrepairedAgentAuditRejected(project: Path, profile: ReconstructionProfile) {
