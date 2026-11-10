@@ -584,7 +584,7 @@ async function coldLoads({ fixture, makeTarget, cdp, evaluate, ready, restartSer
     seededColdLoads: { required: COLD_LOADS, attempted: serverPids.length, passed: firstPageMs.length === COLD_LOADS,
       readyMs: readyMs.map(Math.round), readyP95Ms: readyMs.length ? Math.round(percentile(readyMs, 0.95)) : null,
       firstDataPageMs: firstPageMs.map(Math.round), firstDataPageP95Ms: firstPageMs.length ? Math.round(percentile(firstPageMs, 0.95)) : null,
-      firstDataPageEvidence, startupMs, seedDiagnostics, deadlineConfigurations, serverProcessIds, serverPids },
+      firstDataPageEvidence: firstPageEvidence, startupMs, seedDiagnostics, deadlineConfigurations, serverProcessIds, serverPids },
     forcedScan, requestBudgetGate });
   assert.equal(forcedScan.deadlineRefusalGate.passed, true,
     `All three fresh-process forced scans must prove the existing LISTING_LIMIT refusal UI: ${JSON.stringify(forcedScan.deadlineRefusalGate)}`);
