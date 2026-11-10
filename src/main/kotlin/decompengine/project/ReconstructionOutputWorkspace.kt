@@ -361,8 +361,14 @@ internal class ReconstructionOutputWorkspace private constructor(
             action: (Path) -> T,
         ): T {
             val project = resolveProjectAuthority(projectDirectory)
-            if (project.fileName?.toString() != "source-tree") return action(project)
-            val reports = project.parent ?: return action(project)
+            if (project.fileName?.toString() != "source-tree") {
+                beforeRepairMarker(project)
+                return action(project)
+            }
+            val reports = project.parent ?: run {
+                beforeRepairMarker(project)
+                return action(project)
+            }
             val hasActiveMarker = Files.exists(reports.resolve(ACTIVE), NOFOLLOW_LINKS)
             val hasLockMarker = Files.exists(reports.resolve(LOCK_FILE), NOFOLLOW_LINKS)
             if (!hasActiveMarker && !hasLockMarker) {
