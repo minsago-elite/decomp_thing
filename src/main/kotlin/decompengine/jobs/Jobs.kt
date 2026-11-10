@@ -335,8 +335,8 @@ class JobStore internal constructor(
     internal fun readRecordedRepairHistory(
         jobId: String,
         runId: String?,
-        cancel: () -> Unit = {},
         failFast: Boolean = false,
+        cancel: () -> Unit = {},
     ): RepairHistoryReadResult {
         if (!jobId.matches(Regex("[a-f0-9]{32}")) ||
             (runId != null && !runId.matches(Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}")))) {

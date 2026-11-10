@@ -1077,7 +1077,7 @@ class WebJobService(
             owner.withAttemptSnapshot(jobId, runId) { attempt ->
                 val bytes = try {
                     store.readArtifact(jobId, "$artifactPrefix/${decompengine.jobs.AgentProgressJournal.FILE_NAME}",
-                        decompengine.jobs.AgentProgressJournal.MAXIMUM_READ_BYTES.toLong()).bytes
+                        decompengine.jobs.AgentProgressJournal.MAXIMUM_READ_BYTES.toLong(), failFast = true).bytes
                 } catch (_: Exception) {
                     throw WebJobServiceException("PROGRESS_UNAVAILABLE",
                         "The retained progress journal is unavailable. Missing data does not establish an empty history.")
