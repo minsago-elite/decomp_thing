@@ -58,11 +58,12 @@ internal fun canReadAnyEvidencePage(
             character == '"' || character == '\\' -> 2
             character == '\b' || character == '\t' || character == '\n' || character == '\u000c' || character == '\r' -> 2
             character < ' ' -> 6
-            character.isHighSurrogate() && index + 1 < content.length && content[index + 1].isLowSurrogate() -> {
+            character.isHighSurrogate() -> {
+                if (index + 1 >= content.length || !content[index + 1].isLowSurrogate()) return false
                 index++
                 12
             }
-            character.isSurrogate() -> 6
+            character.isLowSurrogate() -> return false
             character.code < 0x80 -> 1
             character.code < 0x800 -> 2
             else -> 3
