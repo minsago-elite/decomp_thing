@@ -3,6 +3,7 @@ package decompengine.repair
 import decompengine.acp.LinuxDescriptor
 import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.project.sha256
+import decompengine.project.GeneratedCRepairIndexProfile
 import decompengine.validation.ProcessInput
 import java.lang.reflect.InvocationTargetException
 import java.nio.file.Files

@@ -6,6 +6,7 @@ import decompengine.agent.AgentWorkspacePath
 import decompengine.acp.LinuxDescriptor
 import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.project.agentFileChangeSetSha256
+import decompengine.project.GeneratedCRepairIndexProfile
 import decompengine.project.sha256
 import decompengine.validation.ProcessInput
 import java.lang.reflect.InvocationTargetException
