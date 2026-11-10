@@ -344,6 +344,31 @@ race resistance.
 
 ## Remaining scope of #63
 
+## Durable invocation provenance checkpoint for #733
+
+The captured repair workflow now has an implementation path for host-authored
+turn intents and post-validation change assessments. A repair turn writes its
+canonical intent before provider dispatch, then binds the receipt to that intent
+and the unique turn UUID. The workflow writes an immutable assessment after
+policy and validation, before acceptance, provisional recording, or rejection.
+Schema-7 graph records and schema-4 history records carry the content-addressed
+references. Recovery and the repair archive verifier re-read and authenticate
+those documents; legacy schema-6 records remain unverified and do not receive
+invented turn identities or assessments.
+
+The assessment distinguishes observation completeness, observed stop reason,
+change-set digest, policy verdict, validation proof references, and workflow
+eligibility. Eligibility is not a publication decision: the existing durable
+repair publication transaction remains the only source of committed revision
+authority. Intent-only or receipt-only attempts do not claim acceptance.
+
+This is an implementation checkpoint, not qualification or closure evidence.
+The reconstruction checkpoint/archive path is not yet bound to the same
+intent-and-assessment contract. No exact-head test or hosted run currently
+qualifies the repair changes, crash points around the new evidence writes,
+legacy compatibility, or archive round trips. #733, #63, #236, and #732 remain
+open; do not use these source changes to claim production repair acceptance.
+
 This cleanup removes an unused competing policy path; it does not complete #63.
 The actual workflow contracts still need the requested shared profile-driven
 acceptance coverage, including an explicit supported-operation matrix and

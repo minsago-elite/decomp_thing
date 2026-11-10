@@ -3555,15 +3555,15 @@ internal class ModuleRevisionGraph private constructor(
         val pending = requirePending(attempt)
         val metadata = requireNotNull(pending.repairMetadata) { "repair attempt has no iteration metadata" }
         require(metadata.agentInvocation == null) { "repair attempt already has invocation evidence" }
-        val intentBinding = requireNotNull(metadata.turnIntent) {
-            "repair invocation cannot be persisted without its pre-dispatch turn intent"
+        val intentBinding = metadata.turnIntent
+        if (state.schemaVersion >= 7) {
+            requireNotNull(intentBinding) { "repair invocation cannot be persisted without its pre-dispatch turn intent" }
+            require(document.requestSha256 == AgentTurnIntent.parse(
+                stateStore.readRevisionFile(
+                    "${pending.id}.acp-intent.json", MAXIMUM_REPAIR_INTENT_BYTES.toLong(),
+                ).bytes,
+            ).requestSha256) { "repair ACP receipt request differs from its pre-dispatch intent" }
         }
-        require(intentBinding.intentSha256.isNotBlank())
-        require(document.requestSha256 == AgentTurnIntent.parse(
-            stateStore.readRevisionFile(
-                "${pending.id}.acp-intent.json", MAXIMUM_REPAIR_INTENT_BYTES.toLong(),
-            ).bytes,
-        ).requestSha256) { "repair ACP receipt request differs from its pre-dispatch intent" }
         val fileName = "${pending.id}.acp-receipt.json"
         val receiptPath = "reports/repair-revisions/$fileName"
         val bytes = document.json.toByteArray(Charsets.UTF_8)
@@ -3604,9 +3604,9 @@ internal class ModuleRevisionGraph private constructor(
             terminalOutcome = document.terminalOutcome,
             receiptReleaseComplete = document.releaseComplete,
             assessmentStatus = RepairAgentAssessmentStatus.PENDING,
-            intentPath = intentBinding.intentPath,
-            intentSha256 = intentBinding.intentSha256,
-            turnId = intentBinding.turnId,
+            intentPath = intentBinding?.intentPath,
+            intentSha256 = intentBinding?.intentSha256,
+            turnId = intentBinding?.turnId,
         )
         val boundState = state.copy(
             pending = pending.copy(
