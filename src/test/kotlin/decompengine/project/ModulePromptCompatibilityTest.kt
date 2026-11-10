@@ -574,7 +574,7 @@ class ModulePromptCompatibilityTest {
             assertTrue(failure.message.orEmpty().contains("agent-generated module is not accepted"), failure.message)
             assertEquals(priorAudit, project.resolve("reports/archival_audit.json").readText())
         } finally {
-            Files.walk(project).use { paths ->
+            Files.walk(output).use { paths ->
                 paths.sorted(java.util.Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
             }
         }
@@ -604,7 +604,7 @@ class ModulePromptCompatibilityTest {
             assertTrue(failure.message.orEmpty().contains("checkpoint is absent from the source manifest"))
             assertFalse(Files.exists(project.resolve("reports/archival_audit.json")))
         } finally {
-            Files.walk(project).use { paths ->
+            Files.walk(output).use { paths ->
                 paths.sorted(java.util.Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
             }
         }
@@ -718,7 +718,7 @@ class ModulePromptCompatibilityTest {
                     "$name failed at the wrong gate: ${failure.message}")
             }
         } finally {
-            Files.walk(project).use { paths ->
+            Files.walk(output).use { paths ->
                 paths.sorted(java.util.Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
             }
         }
@@ -773,7 +773,7 @@ class ModulePromptCompatibilityTest {
             }
             assertTrue(failure.message.orEmpty().contains("confidence unresolvedImplementationIds differs"))
         } finally {
-            Files.walk(project).use { paths ->
+            Files.walk(output).use { paths ->
                 paths.sorted(java.util.Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
             }
         }
@@ -905,6 +905,7 @@ class ModulePromptCompatibilityTest {
         reconstructor: ModuleReconstructor,
         observedBehavior: String? = null,
     ): Pair<Path, SourceTreeManifest> {
+        output.toAbsolutePath().normalize().parent?.let { Files.createDirectories(it) }
         val input = output.resolveSibling("${output.fileName}.input")
         Files.write(input, byteArrayOf(5, 1, 4))
         return ReconstructionOutputWorkspace.open(output, input).use { workspace ->
@@ -918,7 +919,7 @@ class ModulePromptCompatibilityTest {
                         hostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
                         profile = profile,
                         reconstructor = reconstructor,
-                        observedBehavior = observedBehavior,
+                        observedBehavior = bindModuleObservationFixtureToInput(observedBehavior, workspace.inputSha256),
                         publicationLock = workspace.publicationLock,
                     ).manifest
                 },
@@ -939,7 +940,9 @@ class ModulePromptCompatibilityTest {
         }
     }
 
-    private fun model() = RecoveredProgramModel(inputSha256 = "a".repeat(64), functions = listOf(
+    private val transactionalInputSha256 by lazy { sha256(byteArrayOf(5, 1, 4)) }
+
+    private fun model() = RecoveredProgramModel(inputSha256 = transactionalInputSha256, functions = listOf(
         RecoveredFunction("fn_alpha", "alpha_run", 0x1000UL, "int alpha_run(void)",
             "int alpha_run(void) { return 7; }"),
     ))

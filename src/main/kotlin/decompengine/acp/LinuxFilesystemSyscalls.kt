@@ -654,6 +654,14 @@ internal object LinuxFilesystemSyscalls {
         "open authorized filesystem entry for metadata-neutral reading",
     )
 
+    /** Prefer atime-neutral input hashing while still supporting read-only files owned by another UID. */
+    fun openReadableWithoutAtimeOrFallbackFrom(authorized: LinuxDescriptor): LinuxDescriptor = try {
+        openReadableWithoutAtimeFrom(authorized)
+    } catch (failure: LinuxSyscallException) {
+        if (failure.errno != EPERM) throw failure
+        openReadableFrom(authorized)
+    }
+
     /** Reopens an authenticated regular file for writes without resolving its mutable name again. */
     fun reopenWritable(authorized: LinuxDescriptor): LinuxDescriptor = reopenRegularFile(
         authorized,

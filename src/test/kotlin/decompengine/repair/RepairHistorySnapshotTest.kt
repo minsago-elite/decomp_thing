@@ -139,7 +139,7 @@ class RepairHistorySnapshotTest {
     fun actualPendingAndOrdinaryRestorationRetainCompleteRecords() {
         val root = root()
         val progress = mutableListOf<Captured>()
-        ModuleRevisionGraph.openForTesting(root, profile, faultInjector = ModuleRevisionFaultInjector { point ->
+        ModuleRevisionGraph.openLegacyForTesting(root, profile, faultInjector = ModuleRevisionFaultInjector { point ->
             if (point is ModuleRevisionFaultPoint.AfterStatePublicationDirectorySync &&
                 point.scope == "revision-state" && point.name == "graph.json") {
                 val captured = capture(root)
@@ -188,7 +188,7 @@ class RepairHistorySnapshotTest {
             if (armed && point is ModuleRevisionFaultPoint.BeforePublicationExchange && point.phase == "promotion-rollback") throw RestoreFailure()
         }).use { graph ->
             startRun(graph)
-            val attempt = graph.beginAttempt(listOf("code.c")); id = attempt.id
+            val attempt = graph.beginAttempt(listOf("code.c"), metadata(graph)); id = attempt.id
             graph.installCandidate(attempt, mapOf("code.c" to "candidate".toByteArray()))
             assertFailsWith<PromotionFailure> { graph.accept(attempt, RepairEvidence("valid", "fixture"), proof(graph, attempt)) }
             armed = true
@@ -492,7 +492,12 @@ class RepairHistorySnapshotTest {
             .getValue("rollbackRecord").jsonObject.getValue("expectedSourceRevisionSha256").jsonPrimitive.content
         val replacement = "0".repeat(64)
         refuse(captured.copy(graph = canonical.replace("\"expectedSourceRevisionSha256\":\"$expected\"", "\"expectedSourceRevisionSha256\":\"$replacement\"").toByteArray()))
-        refuse(captured.copy(graph = canonical.replace("\"candidateSourceInstallStarted\":true", "\"candidateSourceInstallStarted\":false").toByteArray()))
+        val changedInstallStarted = canonical.replace(
+            "\"candidateSourceInstallStarted\":false",
+            "\"candidateSourceInstallStarted\":true",
+        )
+        assertNotEquals(canonical, changedInstallStarted)
+        refuse(captured.copy(graph = changedInstallStarted.toByteArray()))
         refuse(captured.copy(graph = canonical.replace("\"observedSourceRevisionSha256\":\"$expected\"", "\"observedSourceRevisionSha256\":null").toByteArray()))
         assertFailsWith<RepairHistorySnapshotRefusal> { recordedRepairHistorySnapshot(captured.graph, captured.binding, budget.copy(maximumGraphBytes = 1024)) }
     }

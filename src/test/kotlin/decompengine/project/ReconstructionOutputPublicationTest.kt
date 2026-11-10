@@ -411,6 +411,8 @@ class ReconstructionOutputPublicationTest {
         var sourceReader: java.util.concurrent.Future<String>? = null
         var sessionReader: java.util.concurrent.Future<String>? = null
         var injected = false
+        var readersStartedWhileReplacing = false
+        var readersWaitedForPublication = false
         try {
             ReconstructionOutputWorkspace.openWithParentSyncForTest(reports, input) { directory ->
                 if (!injected && directory == reports && !reports.resolve("source-tree").exists() &&
@@ -427,9 +429,8 @@ class ReconstructionOutputPublicationTest {
                         store.readArtifact(job.id, "reports/.decomp-agent-sessions/session.json", 1024)
                             .bytes.toString(Charsets.UTF_8)
                     }
-                    assertTrue(readerStarted.await(2, TimeUnit.SECONDS))
-                    assertFalse(requireNotNull(sourceReader).isDone, "source artifact reader must wait during member replacement")
-                    assertFalse(requireNotNull(sessionReader).isDone, "session artifact reader must wait during member replacement")
+                    readersStartedWhileReplacing = readerStarted.await(2, TimeUnit.SECONDS)
+                    readersWaitedForPublication = !requireNotNull(sourceReader).isDone && !requireNotNull(sessionReader).isDone
                 }
                 sync(directory)
             }.use { workspace ->
@@ -447,6 +448,8 @@ class ReconstructionOutputPublicationTest {
                 assertEquals(PublicationResult.PUBLISHED, result)
             }
             assertTrue(injected, "the normal artifact read must start while live members are replaced")
+            assertTrue(readersStartedWhileReplacing, "both artifact readers must start inside the replacement window")
+            assertTrue(readersWaitedForPublication, "artifact readers must remain leased until publication completes")
             assertEquals("new-archive", requireNotNull(sourceReader).get(5, TimeUnit.SECONDS))
             assertEquals("new-session", requireNotNull(sessionReader).get(5, TimeUnit.SECONDS))
         } finally {

@@ -166,13 +166,11 @@ internal sealed class ReconstructionPublicationLock private constructor(
     }
 
     private fun sha256Descriptor(descriptor: LinuxDescriptor): String {
-        // Inputs can be read-only host bind mounts owned by the runner rather than this
-        // container's worker UID. O_NOATIME then fails with EPERM. This is an input identity
-        // recheck, not an atime-neutral source witness, so use an ordinary pinned-descriptor
-        // read and prove identity, size, mtime, and ctime remained stable around hashing.
+        // Preserve atime when the host permits O_NOATIME, while still supporting read-only host
+        // bind mounts owned by another UID through the syscall helper's EPERM-only fallback.
         val before = LinuxFilesystemSyscalls.fileState(descriptor)
         val digest = MessageDigest.getInstance("SHA-256")
-        LinuxFilesystemSyscalls.openReadableFrom(descriptor).use { readable ->
+        LinuxFilesystemSyscalls.openReadableWithoutAtimeOrFallbackFrom(descriptor).use { readable ->
             require(readable.identity == descriptor.identity) { "reconstruction input reader changed identity" }
             val buffer = ByteArray(64 * 1024)
             var total = 0L

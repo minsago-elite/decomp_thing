@@ -760,24 +760,25 @@ class AgentExecutionEvidenceTest {
             if (name in setOf("cancelled", "limit-exhausted")) {
                 var receipt: String? = null
                 val input = output.resolveSibling("${output.fileName}.input").also { Files.write(it, byteArrayOf(7, 3, 2)) }
-                val outcome = ReconstructionOutputWorkspace.open(output, input).use { workspace ->
-                    workspace.publish(setOf("source-tree", ".decomp-agent-sessions"), buildStage = { stage ->
-                        try {
-                            SourceTreeGenerator.generateWithCompilerFeedback(
-                                evidenceModel().copy(inputSha256 = workspace.inputSha256),
-                                stage.resolve("source-tree"),
-                                hostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
-                                reconstructor = reconstructor,
-                                profile = GeneratedCMakeReconstructionProfile.descriptor,
-                                publicationLock = workspace.publicationLock,
-                            ).manifest
-                        } catch (failure: ModuleReconstructionInterruptedException) {
-                            receipt = stage.resolve("source-tree/reports/agent-executions/parse.json").readText()
-                            throw failure
-                        }
-                    })
+                assertFailsWith<ModuleReconstructionInterruptedException> {
+                    ReconstructionOutputWorkspace.open(output, input).use { workspace ->
+                        workspace.publish(setOf("source-tree", ".decomp-agent-sessions"), buildStage = { stage ->
+                            try {
+                                SourceTreeGenerator.generateWithCompilerFeedback(
+                                    evidenceModel().copy(inputSha256 = workspace.inputSha256),
+                                    stage.resolve("source-tree"),
+                                    hostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
+                                    reconstructor = reconstructor,
+                                    profile = GeneratedCMakeReconstructionProfile.descriptor,
+                                    publicationLock = workspace.publicationLock,
+                                ).manifest
+                            } catch (failure: ModuleReconstructionInterruptedException) {
+                                receipt = stage.resolve("source-tree/reports/agent-executions/parse.json").readText()
+                                throw failure
+                            }
+                        })
+                    }
                 }
-                assertEquals(PublicationResult.REJECTED, outcome)
                 assertFalse(project.exists(), name)
                 val text = requireNotNull(receipt) { name }
                 assertTrue(text.contains("\"releaseComplete\": false"), name)

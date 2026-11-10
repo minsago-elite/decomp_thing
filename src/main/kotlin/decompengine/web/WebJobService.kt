@@ -1023,7 +1023,9 @@ class WebJobService(
         val candidate = attempt.candidate?.takeIf { it.revisionId == revisionId && attempt.endedAt != null } ?: unavailable()
         val directory = try { store.runReportsDirectory(jobId, runId).resolve("source-tree") } catch (_: Exception) { unavailable() }
         val readLease = try {
-            decompengine.project.ReconstructionOutputWorkspace.acquireReadLease(directory.parent, failFast = true)
+            decompengine.project.ReconstructionOutputWorkspace.acquireReadLeaseIfManaged(
+                directory.parent, failFast = true,
+            )
         } catch (_: Exception) { unavailable() }
         try {
         if (!java.nio.file.Files.isDirectory(directory, java.nio.file.LinkOption.NOFOLLOW_LINKS)) unavailable()
@@ -1035,7 +1037,7 @@ class WebJobService(
             it.readLease = readLease
         }
         } catch (failure: Throwable) {
-            try { readLease.close() } catch (closing: Throwable) { if (failure !== closing) failure.addSuppressed(closing) }
+            try { readLease?.close() } catch (closing: Throwable) { if (failure !== closing) failure.addSuppressed(closing) }
             throw failure
         }
     }

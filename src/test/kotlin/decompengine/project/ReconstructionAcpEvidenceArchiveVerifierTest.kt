@@ -81,7 +81,7 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
             assertTrue(observation.toByteArray().size > MAXIMUM_RETAINED_MODULE_OBSERVATION_BYTES)
             val (project, manifest) = generateTransactionalAgentProject(
                 output,
-                RecoveredProgramModel(inputSha256 = "a".repeat(64), functions = listOf(
+                RecoveredProgramModel(inputSha256 = transactionalInputSha256, functions = listOf(
                     RecoveredFunction("fn_0000000000401000", "parse_input", 0x401000UL, "int parse_input(void)"))),
                 profile,
                 BoundedLlmModuleReconstructor(harness, maximumContextCharacters = 600_000,
@@ -247,7 +247,7 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
                 val output = temp.resolve(profile.id)
                 val mismatchedWire = "0".repeat(64)
                 val harness = ArchiveEvidenceHarness(accepted = true, wirePromptOverride = mismatchedWire)
-                val model = RecoveredProgramModel(inputSha256 = "a".repeat(64), functions = listOf(
+                val model = RecoveredProgramModel(inputSha256 = transactionalInputSha256, functions = listOf(
                     RecoveredFunction("fn_0000000000401000", "parse_input", 0x401000UL, "int parse_input(void)")))
                 val (project, manifest) = generateTransactionalAgentProject(output, model, profile,
                     BoundedLlmModuleReconstructor(harness,
@@ -296,9 +296,9 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
         val temp = Files.createTempDirectory(scratch, "v4-wire-prompt-replay-")
         try {
             for (profile in ReconstructionProfiles.builtIn) {
-                val project = temp.resolve(profile.id)
+                val output = temp.resolve(profile.id)
                 val harness = ArchiveEvidenceHarness(accepted = true)
-                createAgentProject(project, accepted = true, profile = profile, harness = harness)
+                val project = createAgentProject(output, accepted = true, profile = profile, harness = harness)
                 val receipt = Json.parseToJsonElement(project.resolve(EVIDENCE_PATH).readText()).jsonObject
                 val originalRequest = receipt.getValue("request").jsonObject
                 val actualWireSha256 = sha256(renderAgentPrompt(
@@ -400,9 +400,9 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
         val temp = Files.createTempDirectory(scratch, "reconstructor-v4-policy-replay-")
         try {
             for (profile in ReconstructionProfiles.builtIn) {
-                val project = temp.resolve(profile.id)
+                val output = temp.resolve(profile.id)
                 val harness = ArchiveEvidenceHarness(accepted = true)
-                createAgentProject(project, accepted = true, profile = profile, harness = harness)
+                val project = createAgentProject(output, accepted = true, profile = profile, harness = harness)
 
                 val currentRequest = harness.executedRequest
                 val legacyRequest = AgentExecutionRequest(
@@ -549,11 +549,13 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
     fun `rejected ACP revision retains its receipt and restores accepted release evidence`() {
         val temp = createTempDirectory("acp-rejected-revision-")
         val project = createAgentProject(temp.resolve("project"), accepted = true)
+        val acceptedSeed = temp.resolve("accepted-source-seed")
+        copyTree(project, acceptedSeed)
         val preservedPaths = listOf(SOURCE_PATH, CHECKPOINT_PATH, EVIDENCE_PATH)
         val before = preservedPaths.associateWith { project.resolve(it).readText() }
         val harness = ArchiveEvidenceHarness(accepted = false)
         val model = RecoveredProgramModel(
-            inputSha256 = "a".repeat(64),
+            inputSha256 = transactionalInputSha256,
             functions = listOf(RecoveredFunction("fn_0000000000401000", "parse_input", 0x401000UL, "int parse_input(void)")),
         )
 
@@ -567,7 +569,7 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
                     setOf("source-tree", ".decomp-agent-sessions"),
                     buildStage = { stage ->
                         val stagedProject = stage.resolve("source-tree")
-                        copyTree(project, stagedProject)
+                        copyTree(acceptedSeed, stagedProject)
                         try {
                             SourceTreeGenerator.generateWithCompilerFeedback(
                                 model.copy(inputSha256 = workspace.inputSha256),
@@ -723,7 +725,7 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
             val profile = GeneratedCMakeReconstructionProfile.descriptor
             val (baseline, manifest) = generateTransactionalAgentProject(
                 baselineOutput,
-                RecoveredProgramModel(inputSha256 = "a".repeat(64), functions = listOf(
+                RecoveredProgramModel(inputSha256 = transactionalInputSha256, functions = listOf(
                     RecoveredFunction("fn_0000000000401000", "parse_input", 0x401000UL,
                         "int parse_input(void)", "/* ${"context".repeat(2_000)} */"))),
                 profile,
@@ -786,7 +788,7 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
             val (project, _) = generateTransactionalAgentProject(
                 output,
                 RecoveredProgramModel(
-                    inputSha256 = "a".repeat(64),
+                    inputSha256 = transactionalInputSha256,
                     functions = listOf(RecoveredFunction(
                         "fn_0000000000401000", "parse_input", 0x401000UL, "int parse_input(void)",
                         "/* ${"context".repeat(2_000)} */",
@@ -828,7 +830,7 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
         try {
             val output = temp.resolve("project")
             val profile = GeneratedCMakeReconstructionProfile.descriptor
-            val model = RecoveredProgramModel(inputSha256 = "a".repeat(64), functions = listOf(
+            val model = RecoveredProgramModel(inputSha256 = transactionalInputSha256, functions = listOf(
                 RecoveredFunction("fn_0000000000401000", "parse_input", 0x401000UL,
                     "int parse_input(void)", "/* ${"context".repeat(2_000)} */"),
             ))
@@ -892,7 +894,7 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
                 val (project, manifest) = generateTransactionalAgentProject(
                     output,
                     RecoveredProgramModel(
-                        inputSha256 = "a".repeat(64),
+                        inputSha256 = transactionalInputSha256,
                         functions = listOf(
                             RecoveredFunction("fn_0000000000401000", "parse_input", 0x401000UL,
                                 "int parse_input(void)", if (withAccepted) null else oversizedEvidence),
@@ -979,11 +981,13 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
     }
 
     private fun attributedObservation(stdoutHex: String, cases: Int = 1): String =
-        ModuleObservedBehavior.envelope("a".repeat(64), (0 until cases).map { index ->
+        ModuleObservedBehavior.envelope(transactionalInputSha256, (0 until cases).map { index ->
             ModuleObservedCase("case-$index",
                 ModuleObservationAttribution(listOf("fn_0000000000401000"), "b".repeat(64)),
                 emptyList(), "", 0, stdoutHex, "")
         }).toString()
+
+    private val transactionalInputSha256 by lazy { sha256(byteArrayOf(8, 6, 7, 5)) }
 
     private fun createAgentProject(
         output: Path,
@@ -994,7 +998,7 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
         val (project, _) = generateTransactionalAgentProject(
             output,
             RecoveredProgramModel(
-                inputSha256 = "a".repeat(64),
+                inputSha256 = transactionalInputSha256,
                 functions = listOf(
                     RecoveredFunction(
                         "fn_0000000000401000",
@@ -1023,6 +1027,7 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
         observedBehavior: String? = null,
         hostSafetyLimits: ReconstructionHostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
     ): Pair<Path, SourceTreeManifest> {
+        output.toAbsolutePath().normalize().parent?.let { Files.createDirectories(it) }
         val input = output.resolveSibling("${output.fileName}.input")
         Files.write(input, byteArrayOf(8, 6, 7, 5))
         return ReconstructionOutputWorkspace.open(output, input).use { workspace ->
@@ -1035,7 +1040,7 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
                         stage.resolve("source-tree"),
                         hostSafetyLimits = hostSafetyLimits,
                         reconstructor = reconstructor,
-                        observedBehavior = observedBehavior,
+                        observedBehavior = bindModuleObservationFixtureToInput(observedBehavior, workspace.inputSha256),
                         profile = profile,
                         publicationLock = workspace.publicationLock,
                     ).manifest

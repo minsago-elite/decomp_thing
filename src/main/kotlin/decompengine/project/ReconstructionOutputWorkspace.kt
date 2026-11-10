@@ -279,12 +279,29 @@ internal class ReconstructionOutputWorkspace private constructor(
             acquireReadLease(reportDirectory).use { action() }
 
         /** Apply the lease only to directories that are explicitly managed as publication roots. */
-        internal fun <T> withReadLeaseIfManaged(reportDirectory: Path, action: () -> T): T {
-            val active = reportDirectory.resolve(ACTIVE)
-            val lock = reportDirectory.resolve(LOCK_FILE)
+        internal fun <T> withReadLeaseIfManaged(reportDirectory: Path, action: () -> T): T =
+            withReadLeaseIfManaged(reportDirectory, failFast = true, action = action)
+
+        internal fun <T> withReadLeaseIfManaged(
+            reportDirectory: Path,
+            failFast: Boolean,
+            action: () -> T,
+        ): T {
+            val lease = acquireReadLeaseIfManaged(reportDirectory, failFast) ?: return action()
+            return lease.use { action() }
+        }
+
+        /** Return null only for a clean legacy/unmanaged root; transaction residue always refuses. */
+        internal fun acquireReadLeaseIfManaged(reportDirectory: Path, failFast: Boolean): AutoCloseable? {
+            val canonicalRoot = reportDirectory.toRealPath()
+            val active = canonicalRoot.resolve(ACTIVE)
+            val lock = canonicalRoot.resolve(LOCK_FILE)
             val hasActive = Files.exists(active, NOFOLLOW_LINKS)
             val hasLock = Files.exists(lock, NOFOLLOW_LINKS)
-            if (!hasActive && !hasLock) return action()
+            if (!hasActive && !hasLock) {
+                requireReadablePublicationState(canonicalRoot)
+                return null
+            }
             // A lock-only root is a legacy/inactive workspace: retain the lock protocol if one
             // was already created, but do not require an active-input marker until activation.
             // If the active marker exists, the lock must be present and both names must be safe.
@@ -295,10 +312,7 @@ internal class ReconstructionOutputWorkspace private constructor(
                     "published reconstruction workspace markers are incomplete",
                 )
             }
-            // HTTP reads must not queue behind a long reconstruction. If the publication is
-            // currently being replaced, callers can render the job/progress state and report
-            // source evidence as temporarily unavailable instead of blocking the whole page.
-            return acquireReadLease(reportDirectory, failFast = true).use { action() }
+            return acquireReadLease(canonicalRoot, failFast)
         }
 
         /**
@@ -315,7 +329,10 @@ internal class ReconstructionOutputWorkspace private constructor(
             val reports = project.parent ?: return action(project)
             val hasActiveMarker = Files.exists(reports.resolve(ACTIVE), NOFOLLOW_LINKS)
             val hasLockMarker = Files.exists(reports.resolve(LOCK_FILE), NOFOLLOW_LINKS)
-            if (!hasActiveMarker && !hasLockMarker) return action(project)
+            if (!hasActiveMarker && !hasLockMarker) {
+                requireReadablePublicationState(reports)
+                return action(project)
+            }
             if (!Files.isRegularFile(reports.resolve(ACTIVE), NOFOLLOW_LINKS) ||
                 !Files.isRegularFile(reports.resolve(LOCK_FILE), NOFOLLOW_LINKS)) {
                 throw ReconstructionOutputReadUnavailableException(
@@ -336,7 +353,10 @@ internal class ReconstructionOutputWorkspace private constructor(
             val reports = project.parent ?: return action(project)
             val hasActiveMarker = Files.exists(reports.resolve(ACTIVE), NOFOLLOW_LINKS)
             val hasLockMarker = Files.exists(reports.resolve(LOCK_FILE), NOFOLLOW_LINKS)
-            if (!hasActiveMarker && !hasLockMarker) return action(project)
+            if (!hasActiveMarker && !hasLockMarker) {
+                requireReadablePublicationState(reports)
+                return action(project)
+            }
             if (!Files.isRegularFile(reports.resolve(ACTIVE), NOFOLLOW_LINKS) ||
                 !Files.isRegularFile(reports.resolve(LOCK_FILE), NOFOLLOW_LINKS)) {
                 throw ReconstructionOutputReadUnavailableException(
@@ -975,12 +995,10 @@ internal class ReconstructionOutputWorkspace private constructor(
                 // publication journal. Charge that read against the same aggregate recovery
                 // allowance and checkpoint within the stream, not merely before opening it.
                 recoveryBudget?.publicationRecoveryBytes(inputBefore.size)
-                // The admitted input may be a read-only host bind mount owned by a different
-                // UID (for example in the archival container). O_NOATIME is not available in
-                // that case. A normal read is safe here because this is an identity capture,
-                // not an atime-neutral source witness; compare all content-stability metadata
-                // except atime around the bounded descriptor read.
-                LinuxFilesystemSyscalls.openReadableFrom(inputDescriptor).use { inputReadable ->
+                // Preserve atime when O_NOATIME is permitted. Read-only host bind mounts owned
+                // by another UID fall back only on EPERM to an ordinary pinned-descriptor read;
+                // compare content-stability metadata independently of atime either way.
+                LinuxFilesystemSyscalls.openReadableWithoutAtimeOrFallbackFrom(inputDescriptor).use { inputReadable ->
                     require(inputReadable.identity == inputDescriptor.identity) {
                         "reconstruction input descriptor changed while opening its reader"
                     }

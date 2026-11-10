@@ -63,10 +63,31 @@ class HistoricalModulePromptReplayTest {
                 val plan = DeterministicModulePlanner(layout = profile.layout).plan(model)
                 val module = plan.modules.single()
                 val observation = "historical authored observation"
-                SourceTreeGenerator.generate(model, project, profile = profile,
-                    reconstructor = BoundedLlmModuleReconstructor(AgentHarness { _, _ -> error("must not dispatch") }),
-                    observedBehavior = observation)
-                val inputs = ProfileModulePromptInputs(model, plan, profile)
+                val output = temp.resolve("publication-${profile.id}")
+                val input = temp.resolve("${profile.id}.input")
+                Files.write(input, byteArrayOf(3, 1, 4, 1, 5))
+                var admittedModel = model
+                ReconstructionOutputWorkspace.open(output, input).use { workspace ->
+                    admittedModel = model.copy(inputSha256 = workspace.inputSha256)
+                    assertEquals(PublicationResult.PUBLISHED, workspace.publish(
+                        setOf("source-tree", ".decomp-agent-sessions"),
+                        buildStage = { stage ->
+                            SourceTreeGenerator.generateWithCompilerFeedback(
+                                admittedModel,
+                                stage.resolve("source-tree"),
+                                hostSafetyLimits = ReconstructionHostSafetyLimits.DEFAULT,
+                                profile = profile,
+                                reconstructor = BoundedLlmModuleReconstructor(
+                                    AgentHarness { _, _ -> error("must not dispatch") },
+                                ),
+                                observedBehavior = observation,
+                                publicationLock = workspace.publicationLock,
+                            )
+                        },
+                    ))
+                }
+                val project = output.resolve("source-tree")
+                val inputs = ProfileModulePromptInputs(admittedModel, plan, profile)
                 val request = inputs.request(module.id, project, observation)
                 val prompt = modulePromptEvidence(request, legacy = true).text
                 val promptHash = sha256(prompt.toByteArray())

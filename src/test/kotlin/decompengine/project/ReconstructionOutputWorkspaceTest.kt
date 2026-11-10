@@ -636,7 +636,7 @@ class ReconstructionOutputWorkspaceTest {
         val root = base.resolve("output")
         val input = base.resolve("input").apply { writeText("unchanged input") }
         ReconstructionOutputWorkspace.open(root, input).use { workspace ->
-            Files.setAttribute(input, "unix:atime", java.nio.file.attribute.FileTime.fromMillis(1))
+            Files.setAttribute(input, "basic:lastAccessTime", java.nio.file.attribute.FileTime.fromMillis(1))
             assertSame(workspace.publicationLock, workspace.publicationLock.borrow(root, workspace.inputSha256))
             assertEquals(sha256(input.readBytes()), workspace.inputSha256)
         }
