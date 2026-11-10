@@ -72,6 +72,10 @@ public final class SecureRepairRuntime {
         AcpHarnessSelection harnessSelection = AcpHarnessFactory.INSTANCE.fromEnvironment(
             effectiveEnvironment
         );
+        // Some compatibility selections defer their environment checks until the harness is
+        // constructed. Complete those checks here so a CLI preflight callback can reject before
+        // the publication workspace persists its repair-in-progress marker.
+        harnessSelection.validateConfiguration();
         RegisteredProfile profile = new RegisteredProfile(
             resolved.id(),
             resolved.indexProfile()
