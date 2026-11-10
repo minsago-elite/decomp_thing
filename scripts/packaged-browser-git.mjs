@@ -104,19 +104,33 @@ export async function qualifyGit({ fixture, makeTarget, cdp, evaluate, ready, br
   await key(cdp, tab, 'Enter', 'Enter', 13, '\r');
   await ready(tab, `document.body.innerText.includes('Branch main') && document.body.innerText.includes('fixture: history 1000')`, 'imported repository status and history');
   const historyRows = `document.querySelectorAll('ol[aria-label="History"] li')`;
+  const maximumRenderedHistoryRows = 500;
+  const expectedHistoryIds = fixture.repository.git('local', ['rev-list', 'main']).stdout.trim().split('\n');
+  assert.equal(expectedHistoryIds.length, fixture.repository.historyLength, 'The fixture history length must match its Git source');
   assert.equal(await evaluate(tab, `${historyRows}.length`), 20, 'History must start with one bounded page');
+  const observedHistoryIds = new Set();
+  const verifyHistoryWindow = async loadedCount => {
+    const renderedIds = await evaluate(tab, `[...${historyRows}].map(row => row.querySelector('code').title)`);
+    const expectedStart = Math.max(0, loadedCount - maximumRenderedHistoryRows);
+    assert.deepEqual(renderedIds, expectedHistoryIds.slice(expectedStart, loadedCount),
+      `The rendered history window must match source commits ${expectedStart} through ${loadedCount - 1}`);
+    for (const id of renderedIds) observedHistoryIds.add(id);
+    assert.equal(observedHistoryIds.size, loadedCount, 'History paging must expose every loaded commit without gaps or duplicates');
+  };
+  await verifyHistoryWindow(20);
   const historyStart = tab.requests.length;
   let historyPages = 1;
   for (let count = 20; count < fixture.repository.historyLength; count += 20) {
     await evaluate(tab, `${button('Older commits')}.focus()`);
     await key(cdp, tab, 'Enter', 'Enter', 13, '\r');
-    await ready(tab, `${historyRows}.length === ${Math.min(count + 20, fixture.repository.historyLength)}`, 'next anchored history page');
+    const loadedCount = Math.min(count + 20, fixture.repository.historyLength);
+    await ready(tab, `${historyRows}.length === ${Math.min(loadedCount, maximumRenderedHistoryRows)}`, 'next anchored history page');
+    await verifyHistoryWindow(loadedCount);
     historyPages++;
   }
-  const historyIds = await evaluate(tab, `[...${historyRows}].map(row => row.querySelector('code').title)`);
-  assert.equal(new Set(historyIds).size, fixture.repository.historyLength, 'History repeats a commit');
-  assert.deepEqual(historyIds, fixture.repository.git('local', ['rev-list', 'main']).stdout.trim().split('\n'),
-    'Every displayed history page must match the admitted repository, in order');
+  const historyIds = [...observedHistoryIds];
+  assert.equal(historyIds.length, fixture.repository.historyLength, 'Every history commit must be observed across bounded windows');
+  assert.deepEqual(historyIds, expectedHistoryIds, 'Every displayed history window must match the admitted repository, in order');
   assert.equal(historyIds[0], fixture.repository.commits.local);
   assert.equal(historyIds.at(-1), fixture.repository.commits.base);
   assert.equal(await evaluate(tab, `!!${button('Older commits')}`), false, 'Exhausted history must not offer another page');
