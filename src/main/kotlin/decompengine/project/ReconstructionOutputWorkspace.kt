@@ -298,25 +298,60 @@ internal class ReconstructionOutputWorkspace private constructor(
             // established, toRealPath below still fails closed.
             if (Files.notExists(reportDirectory, NOFOLLOW_LINKS)) return null
             val canonicalRoot = reportDirectory.toRealPath()
-            val active = canonicalRoot.resolve(ACTIVE)
-            val lock = canonicalRoot.resolve(LOCK_FILE)
-            val hasActive = Files.exists(active, NOFOLLOW_LINKS)
-            val hasLock = Files.exists(lock, NOFOLLOW_LINKS)
-            if (!hasActive && !hasLock) {
-                requireReadablePublicationState(canonicalRoot)
-                return null
-            }
-            // A lock-only root is a legacy/inactive workspace: retain the lock protocol if one
-            // was already created, but do not require an active-input marker until activation.
-            // If the active marker exists, the lock must be present and both names must be safe.
-            if ((hasActive && !hasLock) ||
-                (hasActive && (!Files.isRegularFile(active, NOFOLLOW_LINKS) || Files.isSymbolicLink(active))) ||
-                (hasLock && (!Files.isRegularFile(lock, NOFOLLOW_LINKS) || Files.isSymbolicLink(lock)))) {
-                throw ReconstructionOutputReadUnavailableException(
-                    "published reconstruction workspace markers are incomplete",
-                )
-            }
+            acquireUnmanagedProcessReadGate(canonicalRoot, failFast)?.let { return it }
+            // Managed roots are now classified without allowing a concurrent first activation to
+            // slip between the marker check and the file-backed lease acquisition.
             return acquireReadLease(canonicalRoot, failFast)
+        }
+
+        /** Protect legacy work for this process until the root is either read or upgraded. */
+        private fun acquireUnmanagedProcessReadGate(reportDirectory: Path, failFast: Boolean): AutoCloseable? {
+            if (Files.notExists(reportDirectory, NOFOLLOW_LINKS)) return null
+            val canonicalRoot = reportDirectory.toRealPath()
+            // A markerless legacy root still participates in the process-local gate. Otherwise a
+            // first writer can create the lock and move the legacy entries while this reader is
+            // already using the supposedly unmanaged tree. Keep this provisional read stamp for
+            // the whole action when the root is genuinely unmanaged. If it is managed, release
+            // the stamp and acquire the ordinary file-backed lease before allowing the action.
+            val gate = retainGate(canonicalRoot)
+            var gateStamp = 0L
+            var gateRetained = true
+            try {
+                gateStamp = if (failFast) gate.lock.tryReadLock() else acquireReadLock(gate)
+                if (gateStamp == 0L) throw ReconstructionOutputReadUnavailableException(
+                    "published reconstruction workspace is currently being updated",
+                )
+                val active = canonicalRoot.resolve(ACTIVE)
+                val lock = canonicalRoot.resolve(LOCK_FILE)
+                val hasActive = Files.exists(active, NOFOLLOW_LINKS)
+                val hasLock = Files.exists(lock, NOFOLLOW_LINKS)
+                if (!hasActive && !hasLock) {
+                    requireReadablePublicationState(canonicalRoot)
+                    val stamp = gateStamp
+                    gateStamp = 0L
+                    gateRetained = false
+                    val closed = AtomicBoolean()
+                    return AutoCloseable {
+                        if (closed.compareAndSet(false, true)) {
+                            try { gate.lock.unlockRead(stamp) } finally { releaseGate(gate) }
+                        }
+                    }
+                }
+                // A lock-only root is a legacy/inactive workspace: retain the lock protocol if one
+                // was already created, but do not require an active-input marker until activation.
+                // If the active marker exists, the lock must be present and both names must be safe.
+                if ((hasActive && !hasLock) ||
+                    (hasActive && (!Files.isRegularFile(active, NOFOLLOW_LINKS) || Files.isSymbolicLink(active))) ||
+                    (hasLock && (!Files.isRegularFile(lock, NOFOLLOW_LINKS) || Files.isSymbolicLink(lock)))) {
+                    throw ReconstructionOutputReadUnavailableException(
+                        "published reconstruction workspace markers are incomplete",
+                    )
+                }
+                return null
+            } finally {
+                if (gateStamp != 0L) gate.lock.unlockRead(gateStamp)
+                if (gateRetained) releaseGate(gate)
+            }
         }
 
         /**
@@ -331,19 +366,7 @@ internal class ReconstructionOutputWorkspace private constructor(
             // lexical basename first would let that read bypass the publication lease.
             if (project.fileName?.toString() != "source-tree") return action(project)
             val reports = project.parent ?: return action(project)
-            val hasActiveMarker = Files.exists(reports.resolve(ACTIVE), NOFOLLOW_LINKS)
-            val hasLockMarker = Files.exists(reports.resolve(LOCK_FILE), NOFOLLOW_LINKS)
-            if (!hasActiveMarker && !hasLockMarker) {
-                requireReadablePublicationState(reports)
-                return action(project)
-            }
-            if (!Files.isRegularFile(reports.resolve(ACTIVE), NOFOLLOW_LINKS) ||
-                !Files.isRegularFile(reports.resolve(LOCK_FILE), NOFOLLOW_LINKS)) {
-                throw ReconstructionOutputReadUnavailableException(
-                    "published reconstruction workspace markers are incomplete",
-                )
-            }
-            return withReadLease(reports) { action(project) }
+            return withReadLeaseIfManaged(reports, failFast = false) { action(project) }
         }
 
         /** Hold an exclusive publication lease while a CLI repair mutates a published project. */
@@ -369,13 +392,25 @@ internal class ReconstructionOutputWorkspace private constructor(
                 beforeRepairMarker(project)
                 return action(project)
             }
+            // Classify under the process gate. A markerless legacy root must remain protected
+            // from first activation for the complete mutation; a managed root drops this read
+            // lease and proceeds to the exclusive publication lease below.
+            val classificationLease = acquireUnmanagedProcessReadGate(reports, failFast = false)
             val hasActiveMarker = Files.exists(reports.resolve(ACTIVE), NOFOLLOW_LINKS)
             val hasLockMarker = Files.exists(reports.resolve(LOCK_FILE), NOFOLLOW_LINKS)
             if (!hasActiveMarker && !hasLockMarker) {
-                requireReadablePublicationState(reports)
-                beforeRepairMarker(project)
-                return action(project)
+                if (classificationLease == null) {
+                    requireReadablePublicationState(reports)
+                    beforeRepairMarker(project)
+                    return action(project)
+                }
+                return classificationLease.use {
+                    requireReadablePublicationState(reports)
+                    beforeRepairMarker(project)
+                    action(project)
+                }
             }
+            classificationLease?.close()
             if (!Files.isRegularFile(reports.resolve(ACTIVE), NOFOLLOW_LINKS) ||
                 !Files.isRegularFile(reports.resolve(LOCK_FILE), NOFOLLOW_LINKS)) {
                 throw ReconstructionOutputReadUnavailableException(
@@ -971,6 +1006,12 @@ internal class ReconstructionOutputWorkspace private constructor(
             require(Files.isDirectory(root, NOFOLLOW_LINKS)) { "reconstruction output must be an ordinary directory" }
             val canonicalRoot = root.toRealPath()
             val canonicalInput = input.toRealPath()
+            require(ENTRIES.none { entry ->
+                val movable = canonicalRoot.resolve(entry).normalize()
+                canonicalInput == movable || canonicalInput.startsWith(movable)
+            }) {
+                "reconstruction input must not be inside a movable output member"
+            }
             val attributes = Files.readAttributes(canonicalRoot, BasicFileAttributes::class.java, NOFOLLOW_LINKS)
             val key = root.fileSystem to (attributes.fileKey() ?: root.toRealPath())
             synchronized(OWNERS) { if (!OWNERS.add(key)) throw ReconstructionOutputBusyException() }

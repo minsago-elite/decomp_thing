@@ -9,6 +9,7 @@ import java.nio.file.StandardOpenOption.READ
 import java.util.concurrent.Executors
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 import decompengine.testing.recoveryMatrixTempDirectory as createTempDirectory
 import decompengine.testing.RecoveryMatrixEvidence
 import decompengine.jobs.WorkflowStartupRecoveryBudget
@@ -21,6 +22,61 @@ import kotlin.test.*
 
 @ExtendWith(RecoveryMatrixEvidence::class)
 class ReconstructionOutputWorkspaceTest {
+    @Test
+    fun `markerless legacy read holds the process gate against first activation`() {
+        val base = createTempDirectory("input-legacy-read-activation-")
+        val root = base.resolve("output").createDirectories()
+        val input = base.resolve("input").apply { writeText("input") }
+        val executor = Executors.newFixedThreadPool(2)
+        val readerEntered = CountDownLatch(1)
+        val releaseReader = CountDownLatch(1)
+        val writerStarted = CountDownLatch(1)
+        try {
+            val reader = executor.submit {
+                ReconstructionOutputWorkspace.withReadLeaseIfManaged(root) {
+                    readerEntered.countDown()
+                    check(releaseReader.await(5, TimeUnit.SECONDS))
+                }
+            }
+            assertTrue(readerEntered.await(5, TimeUnit.SECONDS))
+            val writer = executor.submit {
+                writerStarted.countDown()
+                ReconstructionOutputWorkspace.open(root, input).use { }
+            }
+            assertTrue(writerStarted.await(5, TimeUnit.SECONDS))
+            assertFailsWith<TimeoutException> { writer.get(100, TimeUnit.MILLISECONDS) }
+            assertFalse(root.resolve(".reconstruction.lock").exists(), "activation must wait before creating its lock")
+
+            releaseReader.countDown()
+            reader.get(5, TimeUnit.SECONDS)
+            writer.get(5, TimeUnit.SECONDS)
+            assertTrue(root.resolve(".reconstruction.lock").exists())
+        } finally {
+            releaseReader.countDown()
+            executor.shutdownNow()
+            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS))
+        }
+    }
+
+    @Test
+    fun `workspace admission rejects inputs beneath every relocatable entry before creating markers`() {
+        val base = createTempDirectory("input-workspace-overlap-")
+        val root = base.resolve("output").createDirectories()
+
+        for (entry in ReconstructionOutputWorkspace.ENTRIES) {
+            val member = root.resolve(entry).createDirectories()
+            val input = member.resolve("nested-input").apply { writeText(entry) }
+
+            val refusal = assertFailsWith<IllegalArgumentException> {
+                ReconstructionOutputWorkspace.open(root, input).use { }
+            }
+            assertContains(refusal.message.orEmpty(), "movable output member")
+            assertFalse(root.resolve(".reconstruction.lock").exists(), "refusal for $entry must precede lock creation")
+            assertFalse(root.resolve(ReconstructionOutputWorkspace.ACTIVE).exists())
+            assertFalse(root.resolve(ReconstructionOutputWorkspace.PUBLICATION).exists())
+        }
+    }
+
     @Test
     fun `startup publication recovery accounts input hashing before journal traversal`() {
         val base = createTempDirectory("input-publication-recovery-budget-")
