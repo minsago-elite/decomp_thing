@@ -14,7 +14,7 @@ EXPECTED = {
     "decompengine.builtin.BuiltinAgentHarnessTest": 16,
     "decompengine.builtin.BuiltinFilesystemToolsTest": 7,
     "decompengine.builtin.BuiltinCapturedContextToolsTest": 11,
-    "decompengine.builtin.BuiltinContextPackageTest": 5,
+    "decompengine.builtin.BuiltinContextPackageTest": 8,
     "decompengine.builtin.BuiltinJournalTest": 11,
     "decompengine.builtin.BuiltinCheckpointTest": 11,
     "decompengine.builtin.BuiltinCapturedResumeTest": 8,
