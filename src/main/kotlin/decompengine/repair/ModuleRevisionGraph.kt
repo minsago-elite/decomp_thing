@@ -7601,7 +7601,28 @@ private fun validateSchema7DecisionEvidence(
     state: RevisionGraphState,
 ) {
     if (state.schemaVersion < 7) return
-    val metadata = pending.repairMetadata ?: return
+    state.nodes.filter { it.status != ModuleRevisionStatus.ROOT }.forEach { node ->
+        validateSchema7RetainedNodeEvidence(store, node, state)
+    }
+
+    val pendingMetadata = pending.repairMetadata
+    val retainedMetadata = state.nodes.mapNotNull { it.repairMetadata } + listOfNotNull(pendingMetadata)
+    val expectedIntentNames = retainedMetadata.flatMap { retained ->
+        listOfNotNull(retained.turnIntent?.intentPath, retained.agentInvocation?.intentPath)
+    }.map { it.substringAfterLast('/') }.toSortedSet()
+    val expectedAssessmentNames = retainedMetadata.mapNotNull { it.agentInvocation?.assessmentPath }
+        .map { it.substringAfterLast('/') }.toSortedSet()
+    val names = store.revisionFileNames(repairRevisionDirectoryEntryLimit(state.budget))
+    val observedIntentNames = names.filter { it.matches(Regex("revision_[A-Za-z0-9_]+\\.acp-intent\\.json")) }
+        .toSortedSet()
+    val observedAssessmentNames = names.filter {
+        it.matches(Regex("revision_[A-Za-z0-9_]+\\.acp-assessment\\.json"))
+    }.toSortedSet()
+    require(observedIntentNames == expectedIntentNames && observedAssessmentNames == expectedAssessmentNames) {
+        "schema-7 recovery turn evidence inventory differs from retained graph bindings"
+    }
+
+    val metadata = pendingMetadata ?: return
     val intentBinding = metadata.turnIntent
     val binding = metadata.agentInvocation
     if (intentBinding == null && binding?.intentPath == null) return // historical schema-6 invocation
@@ -7683,21 +7704,147 @@ private fun validateSchema7DecisionEvidence(
         "schema-7 recovery assessment is cross-paired with its receipt or acceptance proof: ${pending.id}"
     }
 
-    val retainedMetadata = state.nodes.mapNotNull { it.repairMetadata } + metadata
-    val expectedIntentNames = retainedMetadata.flatMap { retained ->
-        listOfNotNull(retained.turnIntent?.intentPath, retained.agentInvocation?.intentPath)
-    }.map { it.substringAfterLast('/') }.toSortedSet()
-    val expectedAssessmentNames = retainedMetadata.mapNotNull { it.agentInvocation?.assessmentPath }
-        .map { it.substringAfterLast('/') }.toSortedSet()
-    val directoryLimit = repairRevisionDirectoryEntryLimit(state.budget)
-    val names = store.revisionFileNames(directoryLimit)
-    val observedIntentNames = names.filter { it.matches(Regex("revision_[A-Za-z0-9_]+\\.acp-intent\\.json")) }
-        .toSortedSet()
-    val observedAssessmentNames = names.filter {
-        it.matches(Regex("revision_[A-Za-z0-9_]+\\.acp-assessment\\.json"))
-    }.toSortedSet()
-    require(observedIntentNames == expectedIntentNames && observedAssessmentNames == expectedAssessmentNames) {
-        "schema-7 recovery turn evidence inventory differs from retained graph bindings"
+}
+
+/** Authenticate every already-retained v7 turn that the decision's lineage will preserve. */
+private fun validateSchema7RetainedNodeEvidence(
+    store: RepairStateStore,
+    node: ModuleRevisionNode,
+    state: RevisionGraphState,
+) {
+    if (state.schemaVersion < 7) return
+    val metadata = node.repairMetadata ?: return
+    val intentBinding = metadata.turnIntent
+    val invocation = metadata.agentInvocation
+    if (intentBinding == null && invocation?.intentPath == null) return // historical schema-6 record
+    val turn = requireNotNull(intentBinding) {
+        "schema-7 retained invocation is missing its turn intent binding: ${node.id}"
+    }
+    val intentName = "${node.id}.acp-intent.json"
+    require(turn.intentPath == "reports/repair-revisions/$intentName") {
+        "schema-7 retained turn intent path is cross-paired: ${node.id}"
+    }
+    val intentFile = store.readRevisionFile(intentName, MAXIMUM_REPAIR_INTENT_BYTES.toLong())
+    require(intentFile.sha256 == turn.intentSha256) {
+        "schema-7 retained turn intent digest differs from its graph binding: ${node.id}"
+    }
+    val intent = AgentTurnIntent.parse(intentFile.bytes)
+    val parentSourceSha256 = node.parentId?.let { parentId ->
+        state.nodes.singleOrNull { it.id == parentId }?.sourceRevisionSha256
+    }
+    require(intent.turnId == turn.turnId && intent.taskId == node.id && intent.attemptId == node.id &&
+        intent.profileSha256 == state.profileSha256 && parentSourceSha256 != null &&
+        intent.beforeSha256 == parentSourceSha256) {
+        "schema-7 retained turn intent is cross-paired with its revision: ${node.id}"
+    }
+
+    if (invocation == null) {
+        require(node.status == ModuleRevisionStatus.REJECTED && node.recoveredAfterCrash &&
+            !store.revisionFileExists("${node.id}.acp-receipt.json") &&
+            !store.revisionFileExists("${node.id}.acp-assessment.json")) {
+            "schema-7 retained intent-only turn has unexpected invocation evidence: ${node.id}"
+        }
+        return
+    }
+    val expectedAssessment = when (node.status) {
+        ModuleRevisionStatus.ACCEPTED, ModuleRevisionStatus.LEGACY_UNVERIFIED -> RepairAgentAssessmentStatus.ACCEPTED
+        ModuleRevisionStatus.PROVISIONAL -> RepairAgentAssessmentStatus.PROVISIONAL
+        ModuleRevisionStatus.REJECTED -> RepairAgentAssessmentStatus.REJECTED
+        ModuleRevisionStatus.ROOT -> error("root revision cannot retain a turn invocation")
+    }
+    validateRecordedInvocationBinding(7, invocation, node.id, expectedAssessment)
+    val receiptName = "${node.id}.acp-receipt.json"
+    val receiptFile = store.readRevisionFile(receiptName, MAXIMUM_REPAIR_ACP_RECEIPT_BYTES)
+    require(receiptFile.sha256 == invocation.receiptSha256) {
+        "schema-7 retained receipt digest differs from its graph binding: ${node.id}"
+    }
+    val receipt = verifyAcpExecutionReceiptDocument(
+        receiptFile.bytes,
+        TRACE_REPAIR_ACP_RECEIPT_KIND,
+        TRACE_REPAIR_ACP_TASK_FIELD,
+        node.id,
+    )
+    require(receipt.schemaVersion == 3 && receipt.requestSha256 == invocation.requestSha256 &&
+        receipt.promptSha256 == metadata.prompt &&
+        receipt.resultChangesSha256 == invocation.resultChangesSha256 &&
+        receipt.terminalOutcome == invocation.terminalOutcome &&
+        receipt.releaseComplete == invocation.receiptReleaseComplete &&
+        receipt.turnIdentity?.turnId == intent.turnId && receipt.turnIdentity.taskId == intent.taskId &&
+        receipt.turnIdentity.requestSha256 == intent.requestSha256 &&
+        intent.requestSha256 == receipt.requestSha256 && intent.policySha256 == receipt.accessPolicySha256) {
+        "schema-7 retained receipt is cross-paired with its turn intent: ${node.id}"
+    }
+    val assessmentName = "${node.id}.acp-assessment.json"
+    val assessmentPath = invocation.assessmentPath
+    val assessmentSha256 = invocation.assessmentSha256
+    if (assessmentPath == null && assessmentSha256 == null) {
+        require(node.status == ModuleRevisionStatus.REJECTED) {
+            "schema-7 accepted or provisional revision lacks a durable assessment: ${node.id}"
+        }
+        return
+    }
+    require(assessmentPath == "reports/repair-revisions/$assessmentName" && assessmentSha256 != null) {
+        "schema-7 retained assessment path is cross-paired: ${node.id}"
+    }
+    val assessmentFile = store.readRevisionFile(assessmentName, MAXIMUM_REPAIR_ASSESSMENT_BYTES.toLong())
+    require(assessmentFile.sha256 == assessmentSha256) {
+        "schema-7 retained assessment digest differs from its graph binding: ${node.id}"
+    }
+    val assessment = AcpChangeAssessment.parse(assessmentFile.bytes)
+    val normalizedStop = receipt.terminalOutcome.takeIf { it.startsWith("returned-") }
+        ?.removePrefix("returned-")
+        ?.let { decompengine.agent.AgentStopReason.valueOf(it.uppercase().replace('-', '_')) }
+    require(assessment.turnId == intent.turnId && assessment.intentSha256 == intent.sha256 &&
+        assessment.receiptSha256 == invocation.receiptSha256 &&
+        assessment.changesSha256 == invocation.resultChangesSha256 &&
+        assessment.beforeSha256 == parentSourceSha256 &&
+        assessment.policySha256 == receipt.accessPolicySha256 &&
+        assessment.sessionIdSha256 == receipt.sessionIdCommitmentSha256?.let {
+            sha256("acp-session-commitment-v1:$it".toByteArray(Charsets.UTF_8))
+        } && assessment.updatesSha256 == receipt.updatesSha256 &&
+        assessment.normalizedStopReason == normalizedStop) {
+        "schema-7 retained assessment is cross-paired with its turn intent or receipt: ${node.id}"
+    }
+    when (node.status) {
+        ModuleRevisionStatus.ACCEPTED, ModuleRevisionStatus.LEGACY_UNVERIFIED -> {
+            val proof = requireNotNull(node.validationProof) {
+                "schema-7 accepted revision lacks validation proof: ${node.id}"
+            }
+            require(assessment.eligibility == decompengine.project.AcpChangePublicationEligibility.VALIDATED_FOR_PUBLICATION &&
+                assessment.policyVerdict == decompengine.project.AcpChangePolicyVerdict.ALLOW &&
+                assessment.validationStatus == decompengine.project.AcpChangeValidationStatus.PASSED &&
+                assessment.afterSha256 == proof.sourceRevisionSha256 &&
+                assessment.validationProofSha256 == listOf(proof.evidenceSha256) &&
+                invocation.resultChangesSha256 == recordedAgentChangeSetSha256(node.changes)) {
+                "schema-7 accepted assessment differs from its revision proof: ${node.id}"
+            }
+        }
+        ModuleRevisionStatus.PROVISIONAL -> {
+            val proof = requireNotNull(node.validationProof) {
+                "schema-7 provisional revision lacks validation proof: ${node.id}"
+            }
+            require(assessment.eligibility == decompengine.project.AcpChangePublicationEligibility.PROVISIONAL &&
+                assessment.policyVerdict == decompengine.project.AcpChangePolicyVerdict.ALLOW &&
+                assessment.validationStatus == decompengine.project.AcpChangeValidationStatus.PASSED &&
+                assessment.afterSha256 == proof.sourceRevisionSha256 &&
+                assessment.validationProofSha256 == listOf(proof.evidenceSha256) &&
+                invocation.resultChangesSha256 == recordedAgentChangeSetSha256(node.changes)) {
+                "schema-7 provisional assessment differs from its revision proof: ${node.id}"
+            }
+        }
+        ModuleRevisionStatus.REJECTED -> {
+            val recoveredBeforeInstall = node.recoveredAfterCrash &&
+                node.rollbackRecord?.candidateSourceInstallStarted == false
+            val eligible = assessment.eligibility in setOf(
+                decompengine.project.AcpChangePublicationEligibility.REJECTED,
+                decompengine.project.AcpChangePublicationEligibility.INTERRUPTED,
+            ) || recoveredBeforeInstall && assessment.eligibility in setOf(
+                decompengine.project.AcpChangePublicationEligibility.PROVISIONAL,
+                decompengine.project.AcpChangePublicationEligibility.VALIDATED_FOR_PUBLICATION,
+            )
+            require(eligible) { "schema-7 rejected assessment has inconsistent eligibility: ${node.id}" }
+        }
+        ModuleRevisionStatus.ROOT -> error("root revision cannot retain an assessment")
     }
 }
 
