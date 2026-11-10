@@ -237,13 +237,37 @@ class AgentSessionJournalTest {
             )
             journal.finishTurn(matching, true)
         }
-        val state = Json.parseToJsonElement(Files.readString(continuation.directory.resolve("session.json"))).jsonObject
-        assertEquals(2, state.getValue("schemaVersion").jsonPrimitive.content.toInt())
-        assertEquals(turnId, state.getValue("pendingTurnId").jsonPrimitive.content)
-        assertEquals(turnId, state.getValue("turns").jsonArray.single().jsonObject.getValue("turnId").jsonPrimitive.content)
+        val firstTurnId = turnId
+        val resumedTurn = AgentTurnIdentity.create("module", request)
+        assertEquals(binding.requestSha256, resumedTurn.requestSha256)
+        assertNotEquals(firstTurnId, resumedTurn.turnId)
         AgentSessionJournal.open(continuation).use { journal ->
             journal.reconcileWorkspace(listOf(fixture.root))
             assertEquals(1, journal.completedTurns)
+            journal.processStarting(binding.requestSha256, resumedTurn.turnId)
+            assertEquals("remote-session", journal.chooseSession(identity, true))
+            journal.sessionReady("remote-session", true)
+            journal.promptStarting()
+            journal.finishTurn(
+                AgentExecutionReceipt(
+                    binding,
+                    AgentExecutionOutcome.Returned(AgentExecutionResult(AgentStopReason.COMPLETED)),
+                    turnIdentity = resumedTurn,
+                ),
+                true,
+            )
+        }
+        val state = Json.parseToJsonElement(Files.readString(continuation.directory.resolve("session.json"))).jsonObject
+        assertEquals(2, state.getValue("schemaVersion").jsonPrimitive.content.toInt())
+        assertEquals(firstTurnId, state.getValue("turns").jsonArray.first().jsonObject.getValue("turnId").jsonPrimitive.content)
+        val turns = state.getValue("turns").jsonArray.map { it.jsonObject }
+        assertEquals(2, turns.size)
+        assertEquals(resumedTurn.turnId, state.getValue("pendingTurnId").jsonPrimitive.content)
+        assertEquals(listOf(firstTurnId, resumedTurn.turnId), turns.map { it.getValue("turnId").jsonPrimitive.content })
+        assertTrue(turns.all { it.getValue("requestSha256").jsonPrimitive.content == binding.requestSha256 })
+        AgentSessionJournal.open(continuation).use { journal ->
+            journal.reconcileWorkspace(listOf(fixture.root))
+            assertEquals(2, journal.completedTurns)
         }
     }
 
