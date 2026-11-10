@@ -7178,6 +7178,31 @@ class ModuleRevisionGraphTest {
     }
 
     @Test
+    fun `ordinary pre-decision cancellation may reject a validated assessment after verified rollback`() {
+        val fixture = releaseRepairFixture(
+            schema7AgentEvidence = true,
+            cancelAfterValidatedAssessment = true,
+        )
+
+        ModuleRevisionGraph.open(fixture.project, GeneratedCRepairIndexProfile).use { graph ->
+            val rejected = graph.snapshot.nodes.last()
+            assertEquals(ModuleRevisionStatus.REJECTED, rejected.status)
+            assertFalse(rejected.recoveredAfterCrash)
+            assertEquals(RepairRollbackState.NOT_REQUIRED_VERIFIED, rejected.rollbackRecord?.state)
+            assertFalse(rejected.rollbackRecord?.candidateSourceInstallStarted ?: true)
+            val invocation = requireNotNull(rejected.repairMetadata?.agentInvocation)
+            assertEquals(RepairAgentAssessmentStatus.REJECTED, invocation.assessmentStatus)
+            val assessment = decompengine.project.AcpChangeAssessment.parse(
+                fixture.project.resolve(requireNotNull(invocation.assessmentPath)).readBytes(),
+            )
+            assertEquals(
+                decompengine.project.AcpChangePublicationEligibility.VALIDATED_FOR_PUBLICATION,
+                assessment.eligibility,
+            )
+        }
+    }
+
+    @Test
     fun `archive creation rejects a pending repair assessment`() {
         val fixture = releaseRepairFixture()
         ModuleRevisionGraph.open(fixture.project, GeneratedCRepairIndexProfile).use { graph ->
@@ -9031,6 +9056,7 @@ class ModuleRevisionGraphTest {
         intentOnlyRejectedPrefix: Boolean = false,
         provisionalAssessmentCrashPrefix: Boolean = false,
         schema7AgentEvidence: Boolean = false,
+        cancelAfterValidatedAssessment: Boolean = false,
     ): ReleaseRepairFixture {
         require(!abandonProvisional || includeProvisional)
         val project = generatedProject(undispatchedFallback, profile, temporaryParent)
@@ -9390,8 +9416,18 @@ class ModuleRevisionGraphTest {
                 )
                 graph.persistAndBindAgentAssessment(attempt, assessment)
             }
-            val accepted = graph.accept(attempt, RepairEvidence("valid", "synthetic archive fixture observations matched"), proof)
-            binding = requireNotNull(accepted.repairMetadata?.agentInvocation)
+            if (cancelAfterValidatedAssessment) {
+                assertFailsWith<IllegalStateException> {
+                    graph.accept(attempt, RepairEvidence("valid", "synthetic validated candidate"), proof) {
+                        throw IllegalStateException("synthetic cancellation after durable assessment")
+                    }
+                }
+                val rejected = graph.reject(attempt, RepairEvidence("cancelled", "pre-decision cancellation"))
+                binding = requireNotNull(rejected.repairMetadata?.agentInvocation)
+            } else {
+                val accepted = graph.accept(attempt, RepairEvidence("valid", "synthetic archive fixture observations matched"), proof)
+                binding = requireNotNull(accepted.repairMetadata?.agentInvocation)
+            }
             graph.synchronizeRepairHistory()
         }
         assertEquals(0, MakeProjectBuilder.build(project, profile = profile).returnCode)

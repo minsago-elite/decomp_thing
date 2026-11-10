@@ -911,7 +911,10 @@ internal object RepairAcpEvidenceArchiveVerifier {
                 } else if (node.status == "rejected") {
                     require(assessment.eligibility == AcpChangePublicationEligibility.REJECTED ||
                         assessment.eligibility == AcpChangePublicationEligibility.INTERRUPTED ||
-                        node.recoveredAfterCrash && node.rollbackRecord?.candidateSourceInstallStarted == false &&
+                        node.rollbackRecord?.state in setOf(
+                            "restored_after_failure", "restored_verified", "not_required_verified",
+                        ) &&
+                            node.rollbackRecord?.candidateSourceInstallStarted == false &&
                             assessment.eligibility in setOf(
                                 AcpChangePublicationEligibility.PROVISIONAL,
                                 AcpChangePublicationEligibility.VALIDATED_FOR_PUBLICATION,

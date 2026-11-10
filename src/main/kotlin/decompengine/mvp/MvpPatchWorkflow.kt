@@ -10,6 +10,7 @@ import decompengine.agent.AgentHarness
 import decompengine.agent.AgentOperation
 import decompengine.agent.AgentPathRule
 import decompengine.agent.AgentStopReason
+import decompengine.agent.AgentTurnIdentity
 import decompengine.agent.AgentWorkspacePath
 import decompengine.project.AcpExecutionOutcomeIssue
 import decompengine.project.AcpExecutionReceiptDocument
@@ -413,6 +414,7 @@ class MvpPatchWorkflow(
                 ).also { agentRequest = it }
             },
             onEvent = eventRecorder::record,
+            turnIdentity = { request -> AgentTurnIdentity.create(taskId, request) },
         )
         val executionEvidence = AcpExecutionReceiptDocument.captureOrNull(
             request = agentRequest,

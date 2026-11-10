@@ -16,6 +16,7 @@ import decompengine.agent.AgentHarness
 import decompengine.agent.AgentOperation
 import decompengine.agent.AgentPathRule
 import decompengine.agent.AgentStopReason
+import decompengine.agent.AgentTurnIdentity
 import decompengine.agent.AgentWorkspacePath
 import decompengine.agent.AgentWorkspaceRoot
 import decompengine.project.sha256
@@ -28,6 +29,57 @@ import kotlin.test.assertEquals
 import kotlin.test.assertIs
 
 class RepairStagingAuthorityReceiptTest {
+    @Test
+    fun `invocation-correlated staging preserves the workflow task identity`() {
+        val harness = object : CapturedRepairAgentHarness {
+            override fun execute(
+                request: AgentExecutionRequest,
+                onEvent: (AgentExecutionEvent) -> Unit,
+            ): AgentExecutionResult = error("receipt-aware staging must not call execute")
+
+            override fun executeCaptured(
+                request: AgentExecutionRequest,
+                initialFiles: Map<String, ByteArray>,
+                output: BoundedRepairOutput,
+                onEvent: (AgentExecutionEvent) -> Unit,
+            ): AgentExecutionResult = error("receipt-aware staging must not call executeCaptured")
+
+            override fun executeCapturedReceipt(
+                request: AgentExecutionRequest,
+                initialFiles: Map<String, ByteArray>,
+                output: BoundedRepairOutput,
+                onEvent: (AgentExecutionEvent) -> Unit,
+            ): AgentExecutionReceipt = AgentExecutionReceipt(
+                AgentExecutionRequestBinding.capture(request),
+                AgentExecutionOutcome.Returned(AgentExecutionResult(AgentStopReason.COMPLETED)),
+                TaggedProviderEvidence("task-identity"),
+            )
+        }
+        val source = "before".toByteArray()
+        var expectedIdentity: AgentTurnIdentity? = null
+        val execution = CapturedRepairStagingAuthority.executeReceipt(
+            harness = harness,
+            initialFiles = mapOf("source" to source),
+            writablePaths = setOf("source"),
+            budget = RepairResourceBudget(),
+            requestFactory = { root ->
+                AgentExecutionRequest(
+                    "captured patch",
+                    listOf(root),
+                    accessPolicy = AgentAccessPolicy(listOf(AgentPathRule(
+                        AgentWorkspacePath(root.id, "source"),
+                        setOf(AgentOperation.READ_FILE, AgentOperation.WRITE_FILE),
+                    ))),
+                )
+            },
+            onEvent = {},
+            turnIdentity = { request -> AgentTurnIdentity.create("patch-turn", request).also { expectedIdentity = it } },
+        )
+
+        assertEquals(expectedIdentity, execution.receipt.turnIdentity)
+        assertEquals("patch-turn", execution.receipt.turnIdentity?.taskId)
+    }
+
     @Test
     fun `overlapping captured invocations retain their own request outcome and provider evidence`() {
         val entered = CountDownLatch(2)

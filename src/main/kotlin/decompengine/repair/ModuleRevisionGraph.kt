@@ -5082,7 +5082,11 @@ internal class ModuleRevisionGraph private constructor(
                             decompengine.project.AcpChangePublicationEligibility.REJECTED,
                             decompengine.project.AcpChangePublicationEligibility.INTERRUPTED,
                         ) || state.nodes.singleOrNull { it.id == attemptId }?.let { rejectedNode ->
-                            rejectedNode.recoveredAfterCrash &&
+                            rejectedNode.rollbackRecord?.state in setOf(
+                                RepairRollbackState.RESTORED_AFTER_FAILURE,
+                                RepairRollbackState.RESTORED_VERIFIED,
+                                RepairRollbackState.NOT_REQUIRED_VERIFIED,
+                            ) &&
                                 rejectedNode.rollbackRecord?.candidateSourceInstallStarted == false &&
                                 assessment.eligibility in setOf(
                                     decompengine.project.AcpChangePublicationEligibility.PROVISIONAL,
@@ -7833,12 +7837,21 @@ private fun validateSchema7RetainedNodeEvidence(
             }
         }
         ModuleRevisionStatus.REJECTED -> {
-            val recoveredBeforeInstall = node.recoveredAfterCrash &&
-                node.rollbackRecord?.candidateSourceInstallStarted == false
+            // Assessment records candidate policy/validation, not the durable publication
+            // decision. Ordinary cancellation may reject after assessment persistence as long
+            // as the rollback witness proves that candidate source installation never started.
+            val restoredBeforeInstall = node.rollbackRecord?.let { rollback ->
+                rollback.state in setOf(
+                    RepairRollbackState.RESTORED_AFTER_FAILURE,
+                    RepairRollbackState.RESTORED_VERIFIED,
+                    RepairRollbackState.NOT_REQUIRED_VERIFIED,
+                ) &&
+                    rollback.candidateSourceInstallStarted == false
+            } == true
             val eligible = assessment.eligibility in setOf(
                 decompengine.project.AcpChangePublicationEligibility.REJECTED,
                 decompengine.project.AcpChangePublicationEligibility.INTERRUPTED,
-            ) || recoveredBeforeInstall && assessment.eligibility in setOf(
+            ) || restoredBeforeInstall && assessment.eligibility in setOf(
                 decompengine.project.AcpChangePublicationEligibility.PROVISIONAL,
                 decompengine.project.AcpChangePublicationEligibility.VALIDATED_FOR_PUBLICATION,
             )

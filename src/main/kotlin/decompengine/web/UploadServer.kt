@@ -1024,7 +1024,8 @@ class UploadServer(
                     require(sha256Hex(bytes) == invocation.receiptSha256)
                     val verified = verifyAcpExecutionReceiptDocument(bytes, TRACE_REPAIR_ACP_RECEIPT_KIND,
                         TRACE_REPAIR_ACP_TASK_FIELD, attempt.identity.value)
-                    require(invocation.receiptSchemaVersion == 2)
+                    require(invocation.receiptSchemaVersion in SUPPORTED_REPAIR_RECEIPT_SCHEMA_VERSIONS &&
+                        verified.schemaVersion == invocation.receiptSchemaVersion)
                     require(verified.requestSha256 == invocation.requestSha256)
                     require(verified.resultChangesSha256 == invocation.resultChangesSha256)
                     require(decompengine.repair.recordedRepairTerminalSha256(verified.terminalOutcome) == invocation.terminalSha256)
@@ -1117,7 +1118,8 @@ class UploadServer(
                     val verified = verifyAcpExecutionReceiptDocument(
                         bytes, TRACE_REPAIR_ACP_RECEIPT_KIND, TRACE_REPAIR_ACP_TASK_FIELD, receipt.attemptId,
                     )
-                    require(receipt.receiptSchemaVersion == 2)
+                    require(receipt.receiptSchemaVersion in SUPPORTED_REPAIR_RECEIPT_SCHEMA_VERSIONS &&
+                        verified.schemaVersion == receipt.receiptSchemaVersion)
                     require(verified.requestSha256 == receipt.requestSha256)
                     require(verified.resultChangesSha256 == receipt.resultChangesSha256)
                     require(verified.terminalOutcome == receipt.terminalOutcome)
@@ -1212,6 +1214,7 @@ class UploadServer(
     private companion object {
         const val MAX_ARTIFACT_BYTES = 64L * 1024 * 1024
         const val MAX_REPAIR_EVIDENCE_PRESENTATION_BYTES = 16L * 1024 * 1024
+        val SUPPORTED_REPAIR_RECEIPT_SCHEMA_VERSIONS = setOf(2, 3)
     }
 }
 

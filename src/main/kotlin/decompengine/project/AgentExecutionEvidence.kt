@@ -700,7 +700,8 @@ class ReconstructionAgentExecutionEvidence private constructor(
         val outcome = root.getValue("outcome").jsonObject
         if (outcome.getValue("type").jsonPrimitive.content != "returned") null
         else AgentStopReason.valueOf(
-            outcome.getValue("result").jsonObject.getValue("stopReason").jsonPrimitive.content.uppercase(),
+            outcome.getValue("result").jsonObject.getValue("stopReason").jsonPrimitive.content
+                .uppercase().replace('-', '_'),
         )
     }.getOrNull()
     internal val resultAfterSha256: String? get() = runCatching {

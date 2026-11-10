@@ -900,6 +900,36 @@ class AgentExecutionEvidenceTest {
         assertTrue(text.contains("\"truncationReason\": \"artifact-byte-limit\""))
     }
 
+    @Test
+    fun `reconstruction receipt normalizes hyphenated stop reasons`() {
+        val temp = createTempDirectory("acp-stop-reason-binding-")
+        val root = AgentWorkspaceRoot("root", temp)
+        val target = AgentWorkspacePath("root", "src/modules/parse.c")
+        val request = AgentExecutionRequest(
+            objective = "reconstruct",
+            workspaceRoots = listOf(root),
+            accessPolicy = AgentAccessPolicy(listOf(AgentPathRule(
+                target,
+                setOf(AgentOperation.READ_FILE, AgentOperation.WRITE_FILE),
+            ))),
+        )
+        val harness = EvidenceHarness(
+            "session-no-changes", "message", "tool", terminalStopReason = AgentStopReason.NO_CHANGES,
+        )
+        val recorder = BoundedAgentExecutionEventRecorder()
+        val receipt = harness.executeReceipt(request, recorder::record)
+        val evidence = requireNotNull(ReconstructionAgentExecutionEvidence.captureOrNull(
+            request = request,
+            moduleId = "parse",
+            promptSha256 = "a".repeat(64),
+            receipt = receipt,
+            events = recorder.receiptSnapshot(),
+        ))
+
+        assertEquals(AgentStopReason.NO_CHANGES, evidence.normalizedStopReason)
+        assertTrue(evidence.toReceiptJson("parse").contains("\"stopReason\":\"no-changes\""))
+    }
+
     private class EvidenceHarness(
         private val sessionId: String,
         private val message: String,
