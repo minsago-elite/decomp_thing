@@ -224,53 +224,109 @@ export function instrumentRequests(cdp, tab, records, currentPhase = () => 'uncl
 }
 
 /** Captures the body of one exact cursor-free dashboard response through CDP, without refetching it. */
-function captureDashboardResponseBodies(cdp, tab) {
+async function captureDashboardResponseBodies(cdp, tab, browserOrigin) {
   const requests = new Map();
   const apiRequests = [];
+  const pausedFetchRequests = new Set();
+  const captureBody = (request, body, source) => {
+    const bytes = body.base64Encoded ? Buffer.from(body.body, 'base64') : Buffer.from(body.body, 'utf8');
+    request.bodyBytes = bytes.length;
+    request.bodySha256 = createHash('sha256').update(bytes).digest('hex');
+    request.bodyCaptureSource = source;
+    try {
+      const envelope = JSON.parse(bytes.toString('utf8'));
+      request.apiVersion = envelope.apiVersion ?? null;
+      request.kind = envelope.kind ?? null;
+      request.errorCode = envelope.error?.code ?? null;
+      request.errorMessage = envelope.error?.message ?? null;
+    } catch {
+      request.bodyParseFailed = true;
+    }
+  };
+  const captureNetworkBody = (request) => {
+    if (request.bodyPromise) return request.bodyPromise;
+    request.bodyCaptureSource = 'Network.getResponseBody';
+    request.bodyPromise = cdp.call('Network.getResponseBody', { requestId: request.requestId }, tab.sessionId)
+      .then((body) => captureBody(request, body, 'Network.getResponseBody'))
+      .catch((error) => { request.bodyCaptureError = String(error?.message ?? error).slice(0, 300); });
+    return request.bodyPromise;
+  };
   cdp.on('Network.requestWillBeSent', (event) => {
     const url = new URL(event.request.url);
     if (url.pathname.includes('/api/')) apiRequests.push({ method: event.request.method, path: url.pathname });
     if (url.pathname !== '/nested/api/v1/jobs' || event.request.method !== 'GET' || url.searchParams.has('cursor')) return;
     requests.set(event.requestId, { requestId: event.requestId, method: event.request.method,
       path: url.pathname, queryKeys: [...url.searchParams.keys()].sort(), limitValues: url.searchParams.getAll('limit'),
-      startedAt: event.timestamp, status: null, completed: false });
+      startedAt: event.timestamp, status: null, completed: false, networkFailed: false, encodedDataBytes: 0 });
   }, tab.sessionId);
   cdp.on('Network.responseReceived', (event) => {
     const request = requests.get(event.requestId);
     if (request) request.status = event.response.status;
+  }, tab.sessionId);
+  cdp.on('Network.dataReceived', (event) => {
+    const request = requests.get(event.requestId);
+    if (request) request.encodedDataBytes += event.encodedDataLength ?? 0;
+  }, tab.sessionId);
+  // At response stage Fetch can preserve the exact response body even when the
+  // renderer's later cancellation is reported by Network.loadingFailed. This
+  // is the same request/response, paused before delivery; no second fetch or
+  // synthetic response is introduced.
+  cdp.on('Fetch.requestPaused', (event) => {
+    const request = event.networkId ? requests.get(event.networkId) : null;
+    if (!request || event.responseStatusCode === undefined) {
+      void cdp.call('Fetch.continueRequest', { requestId: event.requestId }, tab.sessionId).catch(() => {});
+      return;
+    }
+    request.status = event.responseStatusCode;
+    request.fetchResponseStatus = event.responseStatusCode;
+    request.fetchResponseHeaders = (event.responseHeaders ?? []).filter(header =>
+      ['content-length', 'content-encoding'].includes(header.name.toLowerCase()))
+      .map(header => ({ name: header.name.toLowerCase(), value: header.value }));
+    pausedFetchRequests.add(event.requestId);
+    request.bodyPromise = (async () => {
+      try {
+        const body = await cdp.call('Fetch.getResponseBody', { requestId: event.requestId }, tab.sessionId);
+        captureBody(request, body, 'Fetch.getResponseBody');
+      } catch (error) {
+        request.bodyCaptureError = String(error?.message ?? error).slice(0, 300);
+      } finally {
+        try { await cdp.call('Fetch.continueResponse', { requestId: event.requestId }, tab.sessionId); }
+        catch (error) { request.fetchContinueError = String(error?.message ?? error).slice(0, 300); }
+        pausedFetchRequests.delete(event.requestId);
+      }
+    })();
   }, tab.sessionId);
   cdp.on('Network.loadingFinished', (event) => {
     const request = requests.get(event.requestId);
     if (!request) return;
     request.latencyMs = (event.timestamp - request.startedAt) * 1000;
     request.encodedResponseBytes = event.encodedDataLength;
-    request.bodyPromise = cdp.call('Network.getResponseBody', { requestId: event.requestId }, tab.sessionId).then((result) => {
-      const bytes = result.base64Encoded ? Buffer.from(result.body, 'base64') : Buffer.from(result.body, 'utf8');
-      request.bodyBytes = bytes.length;
-      request.bodySha256 = createHash('sha256').update(bytes).digest('hex');
-      try {
-        const envelope = JSON.parse(bytes.toString('utf8'));
-        request.apiVersion = envelope.apiVersion ?? null;
-        request.kind = envelope.kind ?? null;
-        request.errorCode = envelope.error?.code ?? null;
-        request.errorMessage = envelope.error?.message ?? null;
-      } catch {
-        request.bodyParseFailed = true;
-      }
-      request.completed = true;
-    }).catch((error) => {
-      request.bodyCaptureError = String(error?.message ?? error).slice(0, 300);
-      request.completed = true;
-    });
+    request.networkOutcome = 'finished';
+    request.completed = true;
+    if (!request.bodyPromise) void captureNetworkBody(request);
   }, tab.sessionId);
   cdp.on('Network.loadingFailed', (event) => {
     const request = requests.get(event.requestId);
     if (!request) return;
     request.failed = true;
+    request.networkFailed = true;
     request.errorText = event.errorText ?? null;
+    request.latencyMs = (event.timestamp - request.startedAt) * 1000;
+    request.encodedResponseBytes = request.encodedDataBytes;
+    request.networkOutcome = 'failed';
     request.completed = true;
+    if (request.status !== null && !request.bodyPromise) void captureNetworkBody(request);
   }, tab.sessionId);
-  return { requests, apiRequests };
+  await cdp.call('Fetch.enable', { patterns: [{ urlPattern: `${browserOrigin}/nested/api/v1/jobs*`, requestStage: 'Response' }] }, tab.sessionId);
+  return { requests, apiRequests, async stop() {
+    const pending = [...requests.values()].map(request => request.bodyPromise).filter(Boolean);
+    await Promise.all(pending);
+    for (const requestId of pausedFetchRequests) {
+      await cdp.call('Fetch.continueResponse', { requestId }, tab.sessionId).catch(() => {});
+    }
+    pausedFetchRequests.clear();
+    await cdp.call('Fetch.disable', {}, tab.sessionId);
+  } };
 }
 
 async function waitForDashboardResponseBody(requests, timeoutMs = 10_000) {
@@ -493,7 +549,7 @@ async function coldLoads({ fixture, makeTarget, cdp, evaluate, ready, restartSer
       forcedScan.serverPids.push(activeServer.serverPid);
       forcedScan.startupMs.push(activeServer.startupMs);
       tab = await makeTarget();
-      capture = captureDashboardResponseBodies(cdp, tab);
+      capture = await captureDashboardResponseBodies(cdp, tab, activeServer.browserOrigin);
       await applyScaleProfile(cdp, tab, profile);
       await installSessionCookie(cdp, tab, activeServer.browserOrigin, activeServer.sessionCookie);
       await cdp.call('Performance.enable', {}, tab.sessionId);
@@ -514,10 +570,18 @@ async function coldLoads({ fixture, makeTarget, cdp, evaluate, ready, restartSer
       sampleEvidence.errorMessage = response?.errorMessage ?? null;
       sampleEvidence.bodyBytes = response?.bodyBytes ?? null;
       sampleEvidence.bodySha256 = response?.bodySha256 ?? null;
+      sampleEvidence.bodyCaptureSource = response?.bodyCaptureSource ?? null;
+      sampleEvidence.bodyCaptureError = response?.bodyCaptureError ?? null;
+      sampleEvidence.fetchResponseStatus = response?.fetchResponseStatus ?? null;
       sampleEvidence.requestCount = responses.length;
       sampleEvidence.requestBytes = page.length === 1 ? page[0].requestBytes : null;
       sampleEvidence.responseBytes = response?.encodedResponseBytes ?? null;
       sampleEvidence.responseMs = Number.isFinite(response?.latencyMs) ? Math.round(response.latencyMs) : null;
+      sampleEvidence.networkFailed = response?.networkFailed ?? null;
+      sampleEvidence.networkErrorText = response?.errorText ?? null;
+      sampleEvidence.cdpAbortAfterCapturedBody = response?.networkFailed === true &&
+        response?.errorText === 'net::ERR_ABORTED' && response?.bodyCaptureSource === 'Fetch.getResponseBody' &&
+        Number.isSafeInteger(response?.bodyBytes) && response.bodyBytes > 0;
       sampleEvidence.renderedRowCount = Array.isArray(renderedRows) ? renderedRows.length : null;
       sampleEvidence.alertPresent = typeof alertText === 'string';
       sampleEvidence.listingLimitCopy = typeof alertText === 'string' && alertText.toLowerCase().includes('listing limit');
@@ -526,7 +590,8 @@ async function coldLoads({ fixture, makeTarget, cdp, evaluate, ready, restartSer
       sampleEvidence.browserExceptions = tab?.exceptions?.length ?? null;
       sampleEvidence.apiRequests = capture.apiRequests;
       sampleEvidence.timingComplete = Number.isFinite(sampleEvidence.responseMs) && sampleEvidence.responseMs >= 0 &&
-        Number.isSafeInteger(sampleEvidence.requestBytes) && Number.isSafeInteger(sampleEvidence.responseBytes);
+        Number.isSafeInteger(sampleEvidence.requestBytes) && Number.isSafeInteger(sampleEvidence.responseBytes) &&
+        sampleEvidence.responseBytes > 0;
       sampleEvidence.passed = response?.method === 'GET' && response.path === '/nested/api/v1/jobs' &&
         response.queryKeys.length === 1 && response.queryKeys[0] === 'limit' &&
         response.limitValues.length === 1 && response.limitValues[0] === '50' &&
@@ -534,7 +599,10 @@ async function coldLoads({ fixture, makeTarget, cdp, evaluate, ready, restartSer
         response.apiVersion === 1 && response.errorCode === 'LISTING_LIMIT' &&
         typeof response.errorMessage === 'string' && response.errorMessage.includes('exceeds this listing scan budget') &&
         Number.isSafeInteger(response.bodyBytes) && response.bodyBytes > 0 && /^[a-f0-9]{64}$/.test(response.bodySha256 ?? '') &&
-        page.length === 1 && page[0].responseStatus === 503 && !page[0].failed && sampleEvidence.renderedRowCount === 0 &&
+        page.length === 1 && page[0].responseStatus === 503 &&
+        (!page[0].failed || (page[0].errorText === 'net::ERR_ABORTED' && sampleEvidence.cdpAbortAfterCapturedBody)) &&
+        sampleEvidence.fetchResponseStatus === 503 && sampleEvidence.bodyCaptureSource === 'Fetch.getResponseBody' &&
+        sampleEvidence.renderedRowCount === 0 &&
         sampleEvidence.alertPresent && sampleEvidence.listingLimitCopy && sampleEvidence.noPartialResultsCopy && sampleEvidence.narrowingGuidanceCopy &&
         sampleEvidence.browserExceptions === 0 && sampleEvidence.timingComplete &&
         capture.apiRequests.filter(request => request.path === '/nested/api/v1/jobs').length === 1 &&
@@ -549,16 +617,22 @@ async function coldLoads({ fixture, makeTarget, cdp, evaluate, ready, restartSer
       sampleEvidence.errorMessage = response?.errorMessage ?? null;
       sampleEvidence.bodyBytes = response?.bodyBytes ?? null;
       sampleEvidence.bodySha256 = response?.bodySha256 ?? null;
+      sampleEvidence.bodyCaptureSource = response?.bodyCaptureSource ?? null;
+      sampleEvidence.bodyCaptureError = response?.bodyCaptureError ?? null;
+      sampleEvidence.fetchResponseStatus = response?.fetchResponseStatus ?? null;
       sampleEvidence.requestCount = observed.length;
       sampleEvidence.requestBytes = tabRecords.find(record => record.class === '/nested/api/v1/jobs')?.requestBytes ?? null;
       sampleEvidence.responseBytes = response?.encodedResponseBytes ?? null;
       sampleEvidence.responseMs = Number.isFinite(response?.latencyMs) ? Math.round(response.latencyMs) : null;
+      sampleEvidence.networkFailed = response?.networkFailed ?? null;
+      sampleEvidence.networkErrorText = response?.errorText ?? null;
       sampleEvidence.apiRequests = capture.apiRequests;
       sampleEvidence.responseEvidence = observed.map(({ requestId, method, path, queryKeys, limitValues, status, encodedResponseBytes,
-        bodyBytes, bodySha256, errorCode, bodyParseFailed, bodyCaptureError, failed, errorText }) => ({ requestId, method,
+        bodyBytes, bodySha256, errorCode, bodyParseFailed, bodyCaptureError, bodyCaptureSource, fetchResponseStatus, failed, errorText }) => ({ requestId, method,
         path, queryKeys, limitValues, status, encodedResponseBytes: encodedResponseBytes ?? null, bodyBytes: bodyBytes ?? null,
         bodySha256: bodySha256 ?? null, errorCode: errorCode ?? null, bodyParseFailed: bodyParseFailed ?? false,
-        bodyCaptureError: bodyCaptureError ?? null, failed: failed ?? false, errorText: errorText ?? null }));
+        bodyCaptureError: bodyCaptureError ?? null, bodyCaptureSource: bodyCaptureSource ?? null,
+        fetchResponseStatus: fetchResponseStatus ?? null, failed: failed ?? false, errorText: errorText ?? null }));
       sampleEvidence.browserExceptions = tab?.exceptions?.length ?? null;
       sampleEvidence.failure = String(error?.message ?? error).slice(0, 500);
       sampleEvidence.failures.push('forced-scan sample collection raised an exception');
@@ -566,6 +640,30 @@ async function coldLoads({ fixture, makeTarget, cdp, evaluate, ready, restartSer
       forcedScan.requestRecords.push(...tabRecords);
       forcedScan.responseStatuses.push(sampleEvidence.status);
       if (Number.isFinite(sampleEvidence.responseMs)) forcedScan.responseMs.push(sampleEvidence.responseMs);
+      if (capture?.stop) {
+        try { await capture.stop(); }
+        catch (error) {
+          sampleEvidence.passed = false;
+          sampleEvidence.failures.push(`response capture teardown failed: ${String(error?.message ?? error).slice(0, 300)}`);
+        }
+      }
+      const retainedResponses = [...capture.requests.values()];
+      if (retainedResponses.length === 1) {
+        const response = retainedResponses[0];
+        sampleEvidence.requestId ??= response.requestId ?? null;
+        sampleEvidence.status ??= response.status ?? null;
+        sampleEvidence.errorCode ??= response.errorCode ?? null;
+        sampleEvidence.errorMessage ??= response.errorMessage ?? null;
+        sampleEvidence.bodyBytes ??= response.bodyBytes ?? null;
+        sampleEvidence.bodySha256 ??= response.bodySha256 ?? null;
+        sampleEvidence.bodyCaptureSource ??= response.bodyCaptureSource ?? null;
+        sampleEvidence.bodyCaptureError ??= response.bodyCaptureError ?? null;
+        sampleEvidence.fetchResponseStatus ??= response.fetchResponseStatus ?? null;
+        sampleEvidence.responseBytes ??= response.encodedResponseBytes ?? null;
+        sampleEvidence.responseMs ??= Number.isFinite(response.latencyMs) ? Math.round(response.latencyMs) : null;
+        sampleEvidence.networkFailed ??= response.networkFailed ?? null;
+        sampleEvidence.networkErrorText ??= response.errorText ?? null;
+      }
       if (tab) {
         try { await closeTab(cdp, tab); }
         catch (error) {
