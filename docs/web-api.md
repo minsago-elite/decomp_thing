@@ -1191,7 +1191,9 @@ In the browser, the journey:
 - uploads an inert ELF from the keyboard and follows the job page's link to the workspace;
 - imports the repository by name from the keyboard;
 - traverses all 51 bounded history pages using Enter and compares every displayed object ID, in
-  order, with the admitted repository's `rev-list main`, with no mutation requests;
+  order, with the admitted repository's `rev-list main`, with no mutation requests; the browser
+  check verifies that focus stays on **Older commits** after each nonterminal page and moves to
+  the History heading when the final continuation disappears;
 - edits the managed work tree on disk and checks that a policy-excluded `helper.o` is only counted;
 - selects and stages one file with Space and Enter, and checks that the review lists exactly that
   file;

@@ -567,7 +567,8 @@ export function GitWorkspace({ jobId, basePath, session, capabilities, pollInter
             <p>{textMessage(copy.exportDigest, { sha: commit.provenance.export.sha256 })}</p>
             <p>{commit.provenance.export.verification === 'tree-blob-ids-match' ? copy.exportVerified : copy.exportMismatch}</p>
             {commit.provenance.refNames.length > 0 && <p>{textMessage(copy.refNames, { names: commit.provenance.refNames.join(', ') })}</p>}
-            <a href={apiPath(basePath, `${base}/exports/${commit.objectId}`)} download="">{copy.downloadExport}</a>
+            <a href={apiPath(basePath, `${base}/exports/${commit.objectId}`)}
+              download={`source-${commit.objectId.slice(0, 12)}.zip`}>{copy.downloadExport}</a>
           </> : commit.provenancePending ? <p role="status">{copy.provenanceLoading}</p> : <p role="alert">{commit.provenanceError}</p>}
           <NameForm key={tagTarget} label={copy.tagName} action={copy.tagAction} disabled={!writable}
             draft={{ value: tagDraft?.target === tagTarget ? tagDraft.name : '',
