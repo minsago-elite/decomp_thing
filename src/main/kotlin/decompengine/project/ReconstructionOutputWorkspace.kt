@@ -1,6 +1,7 @@
 package decompengine.project
 
 import decompengine.acp.LinuxDescriptor
+import decompengine.acp.LinuxFileState
 import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.oracle.core.OracleJson
 import decompengine.oracle.core.StrictJsonLimits
