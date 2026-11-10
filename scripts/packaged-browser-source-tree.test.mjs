@@ -14,13 +14,20 @@ test('cancelled navigation only qualifies a dispatched successful bounded search
   assert.throws(() => sourceSearchResponsePause({ ...event, responseHeaders: [{ name: 'Content-Length', value: '1000001' }] }), /byte limit/u);
 });
 
-test('resource timing fallback accepts supplied timing records without a status field', async () => {
-  const observed = { route: 'chunk', pathname: '/assets/chunk.js', status: 200, responseBytes: null };
+test('resource timing fallback requires an exact aborted request, URL, clock and body binding', async () => {
+  const observed = { requestId: 'network-1', documentSequence: 1, route: 'chunk', pathname: '/assets/chunk.js',
+    urlKey: '/assets/chunk.js', wallStartedAt: 1_000, contentLength: 1_000,
+    status: 200, responseBytes: null, failure: 'net::ERR_ABORTED' };
   const result = await waitForCompletedRequest([observed], 'chunk', 100, async () => [{
-    route: 'chunk', pathname: '/assets/chunk.js', responseEnd: 10, transferSize: 1234, encodedBodySize: 1000,
+    route: 'chunk', pathname: '/assets/chunk.js', urlKey: '/assets/chunk.js', responseEnd: 10,
+    transferSize: 1234, encodedBodySize: 1000, startTime: 1_000, timeOrigin: 0, responseStatus: null,
   }]);
   assert.equal(result, observed);
   assert.equal(result.responseBytes, 1234);
+  assert.equal(result.responseBodyBytes, 1000);
+  assert.equal(result.resourceTimingBinding.requestId, 'network-1');
+  assert.equal(result.resourceTimingBinding.occurrenceIndex, 0);
+  assert.equal(result.resourceTimingBinding.wallClockDeltaMs, 0);
 });
 
 test('source-tree percentile uses nearest rank for deterministic measurements', () => {
