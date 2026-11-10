@@ -367,7 +367,7 @@ async function installSessionCookie(cdp, tab, browserOrigin, sessionCookie) {
 
 // Twenty cache-disabled tabs, each against a freshly started process and startup-observed collection image.
 async function coldLoads({ fixture, makeTarget, cdp, evaluate, ready, restartServer, onProgress, profile }) {
-  const readyMs = [], firstPageMs = [], firstPageEvidence = [], records = [], startupMs = [], seedDiagnostics = [];
+  const readyMs = [], firstPageMs = [], firstPageEvidence = [], records = [], startupMs = [], seedDiagnostics = [], startupObservations = [];
   const deadlineConfigurations = [];
   const serverProcessIds = [];
   const serverPids = [];
@@ -384,11 +384,22 @@ async function coldLoads({ fixture, makeTarget, cdp, evaluate, ready, restartSer
       requestedMillis: null, effectiveMillis: 5000, productionDefaultMillis: 5000,
       verifiedBy: 'no diagnostic JVM properties inherited; WebJobCollectionDeadline default' },
     'Measured cold loads must use the unchanged production collection deadline');
+    const startupObservation = activeServer.startupObservation;
+    startupObservations.push(startupObservation);
     serverProcessIds.push(activeServer.processId);
     serverPids.push(activeServer.serverPid);
     startupMs.push(activeServer.startupMs);
     seedDiagnostics.push(activeServer.seedDiagnostic);
     deadlineConfigurations.push(activeServer.deadlineConfiguration);
+    onProgress?.({ stage: 'cold-seed-observation', sample: load + 1, total: COLD_LOADS,
+      startupObservation, startupObservations: [...startupObservations], seedDiagnostics: [...seedDiagnostics],
+      startupMs: [...startupMs], readyMs: readyMs.map(Math.round), firstDataPageMs: firstPageMs.map(Math.round),
+      firstDataPageEvidence: [...firstPageEvidence],
+      serverPids: [...serverPids], deadlineConfigurations: [...deadlineConfigurations] });
+    assert.equal(startupObservation.seedStatus, 'seeded',
+      `Cold sample ${load + 1} must begin with a retained startup-seeded collection image`);
+    assert.equal(startupObservation.seedRows, fixture.ids.length,
+      `Cold sample ${load + 1} must retain every fixture row in the startup image`);
     const { browserOrigin, sessionCookie } = activeServer;
     const newest = '/nested/jobs/' + fixture.ids.at(-1);
     const tab = await makeTarget();
@@ -441,21 +452,23 @@ async function coldLoads({ fixture, makeTarget, cdp, evaluate, ready, restartSer
     await closeTab(cdp, tab);
     onProgress?.({ stage: 'cold-seeded-sample', sample: load + 1, total: COLD_LOADS,
       startupMs: [...startupMs], readyMs: readyMs.map(Math.round), firstDataPageMs: firstPageMs.map(Math.round),
-      seedDiagnostics: [...seedDiagnostics], serverPids: [...serverPids], deadlineConfigurations: [...deadlineConfigurations] });
+      firstDataPageEvidence: [...firstPageEvidence], seedDiagnostics: [...seedDiagnostics],
+      startupObservations: [...startupObservations], serverPids: [...serverPids],
+      deadlineConfigurations: [...deadlineConfigurations] });
   }
   assert.equal(new Set(serverProcessIds).size, COLD_LOADS, 'Every cold sample must use a distinct application process');
   assert.equal(new Set(serverPids).size, COLD_LOADS, 'Every cold sample must use a distinct application PID');
   const forcedScan = { purpose: 'induced dashboard collection deadline refusal; diagnostic only, not a production-threshold measurement',
     loads: 3, requiredRefusalSamples: 3, deadlineMillis: 1, productionDefaultMillis: 5000,
     startupMs: [], readyMs: [], responseMs: [], responseStatuses: [], overBudgetViews: [], serverPids: [],
-    samples: [], requestRecords: [] };
+    samples: [], startupObservations: [], requestRecords: [] };
   const forcedPids = new Set(serverPids);
   for (let sample = 0; sample < forcedScan.loads; sample++) {
     const tabRecords = [];
     let tab = null;
     let capture = { requests: new Map(), apiRequests: [] };
     const sampleEvidence = { index: sample + 1, pid: null, processId: null,
-      deadlineConfiguration: null, navigation: 'GET /nested/ with no dashboard filters',
+      deadlineConfiguration: null, startupObservation: null, navigation: 'GET /nested/ with default limit=50 and no cursor/filter',
       requestId: null, status: null, errorCode: null, errorMessage: null, bodyBytes: null, bodySha256: null,
       requestCount: null, requestBytes: null, responseBytes: null, responseMs: null, renderedRowCount: null, alertPresent: false,
       listingLimitCopy: false, noPartialResultsCopy: false, narrowingGuidanceCopy: false, browserExceptions: null, passed: false, failures: [] };
@@ -465,12 +478,17 @@ async function coldLoads({ fixture, makeTarget, cdp, evaluate, ready, restartSer
       sampleEvidence.pid = activeServer.serverPid;
       sampleEvidence.processId = activeServer.processId;
       sampleEvidence.deadlineConfiguration = activeServer.deadlineConfiguration;
+      sampleEvidence.startupObservation = activeServer.startupObservation;
       assert.ok(Number.isSafeInteger(activeServer.serverPid) && activeServer.serverPid > 0 && !forcedPids.has(activeServer.serverPid),
         'Forced-scan diagnostics must use fresh application processes');
       assert.deepEqual(activeServer.deadlineConfiguration, { diagnostic: true, dashboardSeedDisabled: true,
         requestedMillis: forcedScan.deadlineMillis, effectiveMillis: forcedScan.deadlineMillis,
         productionDefaultMillis: forcedScan.productionDefaultMillis },
       'Forced-scan child must use only the validated, shortened diagnostic deadline');
+      forcedScan.startupObservations.push(activeServer.startupObservation);
+      assert.equal(activeServer.startupObservation.seedStatus, 'disabled',
+        'Forced-scan process must attest that dashboard startup seeding was disabled');
+      assert.equal(activeServer.startupObservation.seedRows, 0, 'Disabled startup seeding must retain zero rows');
       forcedPids.add(activeServer.serverPid);
       forcedScan.serverPids.push(activeServer.serverPid);
       forcedScan.startupMs.push(activeServer.startupMs);
@@ -599,7 +617,12 @@ async function coldLoads({ fixture, makeTarget, cdp, evaluate, ready, restartSer
     requestedMillis: null, effectiveMillis: 5000, productionDefaultMillis: 5000,
     verifiedBy: 'no diagnostic JVM properties inherited; WebJobCollectionDeadline default' },
   'The memory-baseline and full-journey process must return to the unchanged production deadline');
+  assert.equal(activeServer.startupObservation.seedStatus, 'seeded',
+    'The memory-baseline process must retain the ordinary startup-seeded image');
+  assert.equal(activeServer.startupObservation.seedRows, fixture.ids.length,
+    'The memory-baseline process must retain every fixture row in the startup image');
   forcedScan.measurementServerDeadlineConfiguration = activeServer.deadlineConfiguration;
+  forcedScan.measurementServerStartupObservation = activeServer.startupObservation;
   await new Promise(resolve => setTimeout(resolve, 2000));
   const idleRssSamples = [];
   for (let sample = 0; sample < 10; sample++) {
@@ -610,7 +633,8 @@ async function coldLoads({ fixture, makeTarget, cdp, evaluate, ready, restartSer
   return { loads: COLD_LOADS, readyMs: readyMs.map(Math.round), readyP95Ms: Math.round(percentile(readyMs, 0.95)),
     firstDataPageMs: firstPageMs.map(Math.round), firstDataPageP95Ms: Math.round(percentile(firstPageMs, 0.95)),
     firstDataPageEvidence: firstPageEvidence, peakBrowserHeapBytes,
-    startupMs, startupP95Ms: Math.round(percentile(startupMs, 0.95)), seedDiagnostics, deadlineConfigurations, forcedScan,
+    startupMs, startupP95Ms: Math.round(percentile(startupMs, 0.95)), seedDiagnostics, startupObservations,
+    deadlineConfigurations, forcedScan,
     serverProcessIds, serverPids, warmedIdleRssBytes, idleRssSamples,
     measurementServerStartupMs: activeServer.startupMs, requests: summarizeRequests(records),
     requestBudgetGate,

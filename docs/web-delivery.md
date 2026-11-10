@@ -122,6 +122,21 @@ control reads the paused response body to measure its complete size. Other
 request timings, startup latency and forced-scan latency are diagnostics. The
 broader local interaction-feedback p95 and non-job API limits still require
 their own measured gate before they can be reported as qualified.
+
+Each D0 fresh-process sample also retains the service's one-line startup-seed
+observation. Its version 1 JSON contains only `seedStatus`, retained `seedRows`,
+retained `seedBytes`, and `initializationMs`; it excludes job identities, labels,
+paths, digests, exception text, and credentials. `seedStatus` is `seeded`,
+`disabled`, `ineligible`, or `no-data`. The row and byte counts describe only a
+retained dashboard image; `seedBytes` includes its retained storage-stamp charge
+and is not disk usage or JVM heap. `initializationMs` measures successful
+`WebJobService` initialization through recovery and retention-worker startup,
+captured before diagnostic output; it excludes later listener, bootstrap, and
+session readiness. A `seeded` observation proves image creation at startup, not
+that the first request later adopts it: request-time validation may discard a
+stale image. The packaged scale gate requires all 20 ordinary cold samples and
+the separate memory-baseline process to report the complete fixture image, and
+requires all three induced-deadline controls to report seeding disabled.
 Dashboard search fields accept at most 256 characters. A direct URL with an
 overlong or otherwise invalid saved filter is rejected before the jobs API read
 and shows the bounded “The saved filters are invalid. Reset filters to load

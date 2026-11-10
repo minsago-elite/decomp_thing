@@ -603,9 +603,26 @@ async function restartScaleApplication(installation, { forceScan = false } = {})
       requestedMillis: null, effectiveMillis: 5000, productionDefaultMillis: 5000,
       verifiedBy: 'no diagnostic JVM properties inherited; WebJobCollectionDeadline default' };
   }
-  const seedDiagnostic = applicationError.match(/Web job-library startup observation: ([^\r\n]+)/)?.[1] ?? 'missing';
+  const observationPrefix = 'Web job-library startup observation: ';
+  const observationLines = applicationError.split(/\r?\n/).filter((line) => line.startsWith(observationPrefix));
+  assert.equal(observationLines.length, 1, 'Fresh scale process must emit exactly one successful startup-seed observation');
+  const seedDiagnostic = observationLines[0].slice(observationPrefix.length);
+  let startupObservation;
+  try { startupObservation = JSON.parse(seedDiagnostic); }
+  catch (error) { throw new Error('Fresh scale process emitted malformed startup-seed observation JSON', { cause: error }); }
+  assert.deepEqual(Object.keys(startupObservation).sort(),
+    ['initializationMs', 'schemaVersion', 'seedBytes', 'seedRows', 'seedStatus'].sort(),
+    'Startup-seed observation must use the bounded version 1 schema');
+  assert.equal(startupObservation.schemaVersion, 1, 'Unsupported startup-seed observation schema');
+  assert.ok(['seeded', 'disabled', 'ineligible', 'no-data'].includes(startupObservation.seedStatus),
+    'Startup-seed observation has an unknown state');
+  for (const field of ['seedRows', 'seedBytes', 'initializationMs']) {
+    assert.ok(Number.isSafeInteger(startupObservation[field]) && startupObservation[field] >= 0,
+      `Startup-seed observation ${field} must be a nonnegative safe integer`);
+  }
   return { serverPid: application.pid, processId: `${application.pid}:${freshOrigin}`, browserOrigin: freshOrigin,
-    sessionCookie, startupMs: Math.round(performance.now() - startupStarted), seedDiagnostic, forceScan, deadlineConfiguration };
+    sessionCookie, startupMs: Math.round(performance.now() - startupStarted), seedDiagnostic, startupObservation,
+    forceScan, deadlineConfiguration };
 }
 
 async function removeOwnedWork() {

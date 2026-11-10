@@ -18,6 +18,8 @@ import decompengine.jobs.recoveryDisposition
 import decompengine.acp.LinuxFilesystemSyscalls
 import decompengine.acp.LinuxPathEntryMetadata
 import decompengine.oracle.core.OracleJson
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -487,14 +489,17 @@ class WebJobService(
     internal fun initializeExistingStorage(limits: decompengine.jobs.WorkflowStartupRecoveryLimits, cancellation: () -> Boolean) {
         check(!closed && active.isEmpty()) { "Storage initialization requires an idle service" }
         if (initialized) return
+        val initializationStarted = System.nanoTime()
+        val dashboardSeedDisabled = java.lang.Boolean.getBoolean("decomp.web.dashboardSeedDisabled")
+        val storageRootPresent = Files.exists(store.storageRoot, NOFOLLOW_LINKS)
         startupRecoveryLimits = limits
         fun checkCancellation() {
             if (stopping || Thread.currentThread().isInterrupted || cancellation()) throw decompengine.jobs.WorkflowStoreException(
                 "RECOVERY_CANCELLED", "Startup recovery was cancelled; preserve any already reconciled storage.", attempts != null)
         }
         checkCancellation()
-        if (Files.exists(store.storageRoot, NOFOLLOW_LINKS)) {
-            acquireAndRecover(cancellation)
+        if (storageRootPresent) {
+            acquireAndRecover(cancellation, dashboardSeedDisabled)
             // Interrupted purges resume before any request is admitted; a rename that never
             // happened is recorded as failed and its job is retained unchanged.
             deletions?.let { journal ->
@@ -510,9 +515,31 @@ class WebJobService(
         checkCancellation()
         initialized = true
         if (!stopping) retentionWorker?.start()
+        emitStartupCollectionObservation(dashboardSeedDisabled, storageRootPresent,
+            TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - initializationStarted))
     }
 
-    private fun acquireAndRecover(cancellation: () -> Boolean = { false }): WorkflowAttemptStore {
+    /** Emits only bounded startup-seed facts; it never inspects or consumes the retained seed. */
+    private fun emitStartupCollectionObservation(dashboardSeedDisabled: Boolean, storageRootPresent: Boolean, initializationMs: Long) {
+        val retainedSeed = startupCollectionSeed
+        val status = when {
+            !storageRootPresent -> "no-data"
+            dashboardSeedDisabled -> "disabled"
+            retainedSeed != null -> "seeded"
+            else -> "ineligible"
+        }
+        val observation = JsonObject(mapOf(
+            "schemaVersion" to JsonPrimitive(1),
+            "seedStatus" to JsonPrimitive(status),
+            "seedRows" to JsonPrimitive(if (status == "seeded") retainedSeed!!.rows.size else 0),
+            "seedBytes" to JsonPrimitive(if (status == "seeded") retainedSeed!!.bytes else 0L),
+            "initializationMs" to JsonPrimitive(initializationMs.coerceAtLeast(0L)),
+        ))
+        System.err.println("Web job-library startup observation: $observation")
+    }
+
+    private fun acquireAndRecover(cancellation: () -> Boolean = { false },
+        dashboardSeedDisabled: Boolean = java.lang.Boolean.getBoolean("decomp.web.dashboardSeedDisabled")): WorkflowAttemptStore {
         attempts?.let { return it }
         if (stopping || Thread.currentThread().isInterrupted || cancellation()) throw decompengine.jobs.WorkflowStoreException(
             "RECOVERY_CANCELLED", "Startup recovery was cancelled before acquiring storage.")
@@ -524,7 +551,7 @@ class WebJobService(
         var recoveryCompleted = false
         val freshSince = dashboardFreshnessClock()
         fun seedCheckpoint() { seedBudget.checkpoint() }
-        val seedBefore = if (java.lang.Boolean.getBoolean("decomp.web.dashboardSeedDisabled")) null else try {
+        val seedBefore = if (dashboardSeedDisabled) null else try {
             dashboardStorageStamp(freshSince, ::seedCheckpoint).takeIf { it.cacheable }
         } catch (_: Exception) { null }
         val seedRows = ArrayList<WebJobCollectionRow>()
