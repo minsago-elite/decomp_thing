@@ -412,15 +412,15 @@ archive/history consistency, and canonical assessment parsing. They are local
 evidence only; no hosted run or independent crash-after-each-evidence-write
 campaign has qualified this commit.
 
-The reconstruction implementation passed local compilation and 133 focused
-tests across `ReconstructionAcpEvidenceArchiveVerifierTest` (20),
+At the original reconstruction checkpoint, the implementation passed local
+compilation and 133 focused tests across
+`ReconstructionAcpEvidenceArchiveVerifierTest` (20),
 `ReconstructionTurnEvidenceStoreTest` (3), `AcpChangeAssessmentTest` (2),
 `WebProductionWorkflowsTest` (45), and `SourceTreeTest` (63). Coverage includes
 pre-dispatch intent persistence, private immutable sidecars,
 interrupted/unknown assessments, schema-7 archive binding, tamper refusal, and
 legacy checkpoint compatibility. These are local tests against the current
-implementation, not hosted or independent process-crash-after-each-write
-qualification. The repair checkpoint at
+implementation at that checkpoint, not hosted qualification. The repair checkpoint at
 `6cd76bd30d1bec7fad81fcad6617f51248333af3` separately passed its 242 focused
 tests; that result predates the reconstruction changes and is not exact-head
 verification of the combined implementation.
@@ -455,3 +455,9 @@ operation sets. Ordinary valid-edit checks at those existing boundaries remain
 the relevant regression tests for removal of the unused helper.
 
 Final ordinary snapshot diff failures retain the ACP session reference and the `final-workspace-snapshot` phase for both metadata-policy and path-operation rejection. A benign completed text-edit test injects a permission change at the final observation boundary and verifies `WORKSPACE_VIOLATION`, session correlation, verified cleanup and absent complete execution evidence. This is host fault injection; it does not establish agent metadata access or workflow rollback.
+
+## Reconstruction turn-evidence process-death matrix — 2026-11-11
+
+`ReconstructionTurnEvidenceStoreTest.hard process death during each turn evidence write leaves a restartable prefix` passed locally. It launches 12 child JVMs: intent, receipt, and assessment publication each halt with `Runtime.halt(86)` at all four store checkpoints (directory opened, before temporary link, immediately after final-name publication, and before readback). The parent reopens the same workspace and verifies either that the target document is absent and can be written, or that the exact canonical bytes are visible and a second immutable write refuses. Prerequisite intent bytes are also checked for receipt and assessment attempts. The test terminates each child without running `finally` or orderly descriptor cleanup.
+
+This is process-death evidence for the reconstruction evidence store only. It does not prove power-loss durability, every end-to-end workflow crash boundary, repair graph recovery, or crashes around the #732 publication decision. Exact-head hosted qualification, those remaining decision/recovery cases, and production-validator evidence from #236 are still required.
