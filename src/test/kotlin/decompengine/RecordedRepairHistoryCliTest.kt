@@ -103,6 +103,8 @@ class RecordedRepairHistoryCliTest {
 
         Files.delete(reports.resolve(ReconstructionOutputWorkspace.PUBLICATION))
         Files.delete(reports.resolve(".reconstruction-active-input.json"))
+        assertTrue(Files.exists(reports.resolve(".reconstruction.lock")))
+        assertFalse(Files.exists(reports.resolve(".reconstruction-active-input.json")))
         assertEquals(RepairHistoryReadStatus.UNAVAILABLE,
             readRecordedRepairHistoryUnderPublicationLease(options).status,
             "incomplete workspace markers must remain unavailable, not throw")

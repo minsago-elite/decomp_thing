@@ -599,10 +599,12 @@ class ReconstructionAcpEvidenceArchiveVerifierTest {
         val attemptReceipt = project.resolve("reports/modules/parse.attempt.execution.json")
         assertTrue(attemptReceipt.exists())
         assertTrue(project.resolve("reports/modules/parse.attempt.json").readText().contains("parse.attempt.execution.json"))
+        val restoredSeed = temp.resolve("published-source-with-attempt-receipt")
+        copyTree(project, restoredSeed)
         generateTransactionalAgentProject(
             project.parent, model, GeneratedCMakeReconstructionProfile.descriptor,
             BoundedLlmModuleReconstructor(harness, harnessProvenanceDescriptor = harness.factoryProvenance.stableDescriptor),
-            seedSourceTree = project,
+            seedSourceTree = restoredSeed,
         )
         assertFalse(attemptReceipt.exists())
         preservedPaths.forEach { assertEquals(before.getValue(it), project.resolve(it).readText(), it) }

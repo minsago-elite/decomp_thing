@@ -646,6 +646,8 @@ class RepairHistorySnapshotReaderTest {
     fun tinyDeclarationBudgetRetainsFullNamespaceAndBothPassesBeforeHistoryPublication() {
         val selected = budget.copy(maximumRevisionNodes = 32, maximumStateDirectoryEntries = 2, maximumGraphBytes = 16 * 1024)
         val root = roleBoundMigration(selected)
+        val sourceBeforeReads = root.resolve("code.c").readBytes()
+        assertEquals("base", sourceBeforeReads.decodeToString()) // installCandidate records detached changes; it does not publish them.
         val reports = root.resolve("reports")
         val revisionsPath = reports.resolve("repair-revisions")
         val graphBytes = revisionsPath.resolve("graph.json").readBytes()
@@ -721,7 +723,7 @@ class RepairHistorySnapshotReaderTest {
         }
         assertContentEquals(graphBytes, revisionsPath.resolve("graph.json").readBytes())
         assertContentEquals(bindingBytes, revisionsPath.resolve("recovery-binding.json").readBytes())
-        assertEquals("candidate", root.resolve("code.c").readText()) // Reader did NOT recover the pending source.
+        assertContentEquals(sourceBeforeReads, root.resolve("code.c").readBytes()) // History reads did not mutate source.
     }
 
     private fun roleBoundMigration(selected: RepairResourceBudget): Path {

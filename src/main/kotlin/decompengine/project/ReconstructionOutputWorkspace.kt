@@ -382,7 +382,26 @@ internal class ReconstructionOutputWorkspace private constructor(
             // lexical basename first would let that read bypass the publication lease.
             if (project.fileName?.toString() != "source-tree") return action(project)
             val reports = project.parent ?: return action(project)
-            return withReadLeaseIfManaged(reports, failFast = false) { action(project) }
+            return withReadLeaseIfManaged(reports, failFast = false) {
+                // Shared job and web readers deliberately tolerate an inactive lock-only legacy
+                // root. The CLI repair-history command has a stricter authority contract: when
+                // either workspace marker exists, both must be present as safe regular files.
+                // Check under the acquired lease so activation or recovery cannot change the
+                // marker pair between classification and the read.
+                val active = reports.resolve(ACTIVE)
+                val lock = reports.resolve(LOCK_FILE)
+                val hasActive = Files.exists(active, NOFOLLOW_LINKS)
+                val hasLock = Files.exists(lock, NOFOLLOW_LINKS)
+                if ((hasActive || hasLock) &&
+                    (!hasActive || !hasLock ||
+                        !Files.isRegularFile(active, NOFOLLOW_LINKS) || Files.isSymbolicLink(active) ||
+                        !Files.isRegularFile(lock, NOFOLLOW_LINKS) || Files.isSymbolicLink(lock))) {
+                    throw ReconstructionOutputReadUnavailableException(
+                        "published reconstruction workspace markers are incomplete",
+                    )
+                }
+                action(project)
+            }
         }
 
         /** Hold an exclusive publication lease while a CLI repair mutates a published project. */
